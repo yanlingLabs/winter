@@ -78,14 +78,14 @@ describe("KeychainSeam over SecretStore", () => {
     await store.set("openai-api-key", "sk-test");
     const presence = await credentialPresenceFrom(store);
     expect(presence.byProvider.openai).toBe("keychain");
-    expect(presence.byProvider.codex).toBeUndefined();
+    expect(presence.byProvider["codex-oauth"]).toBeUndefined();
     expect(JSON.stringify(presence)).not.toContain("sk-test");
   });
 
   test("credentialPresenceFrom reports codex only once its OAuth access token is stored", async () => {
-    await store.set(NORMA_CREDENTIAL_INVENTORY.find((s) => s.provider === "codex")!.secretName, "codex-token");
+    await store.set(NORMA_CREDENTIAL_INVENTORY.find((s) => s.provider === "codex-oauth")!.secretName, "codex-token");
     const presence = await credentialPresenceFrom(store);
-    expect(presence.byProvider.codex).toBe("keychain");
+    expect(presence.byProvider["codex-oauth"]).toBe("keychain");
     expect(presence.byProvider.openai).toBeUndefined();
     expect(presence.authByProvider).toBeUndefined(); // omitted in 8b (C-14)
   });
@@ -98,7 +98,7 @@ describe("KeychainSeam over SecretStore", () => {
   test("the inventory's contents are pinned — adding/renaming a provider is a deliberate edit to this test too", () => {
     expect(NORMA_CREDENTIAL_INVENTORY).toEqual([
       { provider: "openai", secretName: "openai-api-key", kind: "keychain" },
-      { provider: "codex", secretName: "codex-access-token", kind: "keychain" },
+      { provider: "codex-oauth", secretName: "codex-access-token", kind: "keychain" },
     ]);
   });
 
@@ -126,7 +126,7 @@ describe("KeychainSeam over SecretStore", () => {
 
   test("credentialRefFor names a known provider's ref (matching 8a's keychain:<account> locator form); unknown providers get undefined", () => {
     expect(credentialRefFor("openai")).toEqual({ kind: "keychain", account: "openai-api-key", service: keychainService() });
-    expect(credentialRefFor("codex")).toEqual({ kind: "keychain", account: "codex-access-token", service: keychainService() });
+    expect(credentialRefFor("codex-oauth")).toEqual({ kind: "keychain", account: "codex-access-token", service: keychainService() });
     expect(credentialRefFor("nope")).toBeUndefined();
   });
 });

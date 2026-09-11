@@ -50,6 +50,7 @@
       "dependencies": {
         "@norma/protocol": "workspace:*",
         "@yanlinglabs/winter-agent-sdk": "^0.0.3",
+        "@yanlinglabs/winter-provider-catalog": "0.0.3",
         "@yanlinglabs/winter-runtime-sdk": "^0.0.2",
         "unpdf": "^1.6.2",
         "zod": "^4.0.0",
