@@ -101,6 +101,75 @@ export const WINTER_OWN_TOOL_NAMES: ReadonlySet<string> = new Set(
   WINTER_DEFAULT_TOOL_DEFINITIONS.map((d) => d.builtinName ?? d.toolName),
 );
 
+/**
+ * **What a Winter child at 0.0.3 actually advertises** — `system/init.tools`, MEASURED from the
+ * built binary (`dist/winter`) driven through `query()` with `model: "winter-test/echo"` under a
+ * temp home and `NORMA_BRAND`'s names. 31 tools, verbatim and sorted as the child sent them.
+ *
+ * **This, not Norma's pair table, is what `disallowedTools` must be derived from** (review F4). The
+ * brief's instruction to build the list from `WINTER_DEFAULT_TOOL_DEFINITIONS` rests on a wrong
+ * premise — that export is only Winter's own four — and Norma's pair table is a different set
+ * again: it has rows for tools the child does NOT advertise (`LSP`, `ToolSearch`, `WebFetch`,
+ * `WebSearch`, the two MCP-resource tools) and, more importantly, MISSES three the child DOES
+ * advertise (`Monitor`, `ReportFindings`, `ScheduleWakeup`). Deriving chat's exclusions from the
+ * pair table therefore left three tools advertised to a chat model that is supposed to have no
+ * fs/shell/repo surface at all.
+ *
+ * Two measured facts worth keeping:
+ *  - **`WebFetch`/`WebSearch` are NOT advertised at 0.0.3.** They are still disallowed in every mode
+ *    (P8b-33) — belt and braces against an SDK bump that starts advertising them.
+ *  - **`advisor` is not advertised either**, though it is one of Winter's four default tools: the
+ *    host binds it, the runtime does not auto-register it.
+ *
+ * **Task 16's e2e must assert `system/init.tools` equals this list** — that is the tripwire for an
+ * SDK bump, and the reason this is exported rather than inlined.
+ */
+export const WINTER_ADVERTISED_TOOLS_0_0_3: readonly string[] = [
+  "Agent", "AskUserQuestion", "Bash", "CronCreate", "CronDelete", "CronList", "Edit",
+  "EnterPlanMode", "EnterWorktree", "ExitPlanMode", "ExitWorktree", "Glob", "Grep", "ListAgents",
+  "Monitor", "NotebookEdit", "PushNotification", "Read", "ReadNotifications", "ReportFindings",
+  "ScheduleWakeup", "SendMessage", "Skill", "TaskCreate", "TaskGet", "TaskList", "TaskOutput",
+  "TaskStop", "TaskUpdate", "Workflow", "Write",
+];
+
+/**
+ * **An explicit GATE CLASS for a Winter tool whose classification must not be inferred from its
+ * display name** (review F5, ruling).
+ *
+ * The pair table above is consumed by two surfaces with opposite failure modes: a fail-OPEN label
+ * surface (the projector's transcript rendering) and a fail-CLOSED gate. For an execute-class tool
+ * one entry cannot serve both. `Monitor` is the case: the projector lane renders it as
+ * `bash_output`, which is in `gate.ts`'s `READ_ONLY` set — so a shared `Monitor → bash_output` row
+ * would make a tool whose "command half uses the Bash permission family" a **silent allow under
+ * every policy, `plan` and `chat` included**.
+ *
+ * So classification is declared here, independently of the display mapping, and sourced from the
+ * child's OWN `permissionClass` rather than from a name:
+ *  - `Monitor` — `permissionClass: "execute"` (`descriptors/monitor.ts:49`) → gated as `bash`.
+ *  - `ReportFindings` — `permissionClass: "task"` (`descriptors/report-findings.ts:36`), "a
+ *    structured review result channel, not a scanner" → gated as `task_create`, Norma's own
+ *    READ_ONLY class for in-session bookkeeping.
+ *  - `ScheduleWakeup` — `permissionClass: "task"` (`descriptors/schedule-wakeup.ts:41`), an
+ *    in-session self-wake with its delay clamped to 60-3600s. Deliberately NOT Norma's `schedule`
+ *    (MUTATING): that is the persistent cron surface, which is `CronCreate`/`CronDelete`/`CronList`
+ *    in the pair table above, and a standing prompt-injection surface in a way a self-wake is not.
+ *
+ * The value is the NORMA name the gate should classify by — never what the card or the transcript
+ * displays, which stays `gateToolNameFor`'s answer.
+ */
+export const WINTER_TOOL_GATE_CLASS: Readonly<Record<string, string>> = {
+  Monitor: "bash",
+  ReportFindings: "task_create",
+  ScheduleWakeup: "task_create",
+};
+
+/** The name `PermissionGate.evaluate` should be asked about — the explicit gate class when one is
+ *  declared, otherwise the display name. Split from `gateToolNameFor` so an execute-class tool can
+ *  be gated correctly without its card or its transcript row being mislabelled. */
+export function gateClassFor(winterToolName: string): string {
+  return WINTER_TOOL_GATE_CLASS[winterToolName] ?? gateToolNameFor(winterToolName);
+}
+
 /** `mcp__norma__` — the prefix every daemon-owned capability tool carries under R-1 / P8b-12
  *  (`mcp__norma__<serverKey>__<tool>`, minted by Task 6-7's `capabilityToolName`). Spelled out
  *  literally rather than derived from Task 5's `NORMA_BRAND.mcpServerName`: that module lands in a

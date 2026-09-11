@@ -7,7 +7,7 @@ import type { SessionApprovalPolicy } from "../agent/gate";
 import type { Mode as SessionMode } from "../agent/tools/registry";
 import { CONTROL_PLANE_FILENAMES } from "./control-plane";
 import { providerSelectionFor, testProviderNameFor } from "./provider-selection";
-import { WINTER_NORMA_TOOL_PAIRS, WINTER_OWN_TOOL_NAMES } from "./tool-names";
+import { WINTER_ADVERTISED_TOOLS_0_0_3, WINTER_NORMA_TOOL_PAIRS, WINTER_OWN_TOOL_NAMES } from "./tool-names";
 
 /**
  * **The six Norma policies → Winter's `PermissionMode`, 1:1** (P8b-7).
@@ -60,7 +60,36 @@ export const CAPABILITY_TOOL_MODES: Readonly<Record<string, { modes: readonly Se
   "mcp__norma__office__slides": { modes: ["code", "dispatch"] },
   "mcp__norma__research__Search": { modes: ["chat", "dispatch"] },
   "mcp__norma__research__ReadPage": { modes: ["chat", "dispatch"] },
+  // P8b-33 (ruling): the SDK's own `WebSearch`/`WebFetch` are disallowed in EVERY mode — they carry
+  // neither the Exa key nor the dangerous-domain floor — and code keeps today's daemon-owned
+  // `web_fetch`/`web_search` through a new `web` capability server instead. Modes mirror today's
+  // registration: `agent/tools/web.ts:1011,1090` declare `modes: ["code"]` for both.
+  "mcp__norma__web__web_fetch": { modes: ["code"] },
+  "mcp__norma__web__web_search": { modes: ["code"] },
 };
+
+/** The SDK's own web built-ins. Disallowed in EVERY mode in 8b (P8b-33): they have no Exa key and
+ *  no dangerous-domain floor, and Norma's own floors are daemon state a built-in cannot reach.
+ *  Measured NOT to be advertised at 0.0.3 (`WINTER_ADVERTISED_TOOLS_0_0_3`) — listed anyway, so an
+ *  SDK bump that starts advertising them cannot silently widen any mode's web surface. */
+export const SDK_WEB_BUILTINS: readonly string[] = ["WebFetch", "WebSearch"];
+
+/**
+ * Anchor a rule specifier to the FILESYSTEM ROOT — see `controlPlaneDenyRules`.
+ *
+ * The grammar has three anchors and only one of them binds the way this fence needs (measured; see
+ * `controlPlaneDenyRules`' own comment): a **single leading `/`** is "relative to the rule's own
+ * settings-file directory" and is INERT for an SDK-seeded rule; a **bare** pattern anchors to cwd;
+ * **`//`** is the filesystem root.
+ *
+ * So an already-absolute path gets ONE more slash (`/h/x` → `//h/x`) and a bare pattern gets two
+ * (`**{}/.norma/x` → `//**{}/.norma/x`). Doing this by concatenating a single constant is exactly
+ * the bug this helper exists to prevent — it produced `/**{}/…`, the inert form, and the resulting
+ * rules denied nothing.
+ */
+export function fsRootAnchored(pathOrPattern: string): string {
+  return pathOrPattern.startsWith("/") ? `/${pathOrPattern}` : `//${pathOrPattern}`;
+}
 
 /**
  * **What CHAT is allowed to call**, by Winter name — the whole set, pinned as a literal.
@@ -79,20 +108,24 @@ export const CHAT_ALLOWED_WINTER_TOOLS: readonly string[] = [
 ];
 
 /**
- * The Winter built-ins CHAT excludes — every name in the pair table that chat's allowed set does
- * not contain. Derived, then pinned as a literal by the matrix test, so a new pair-table row is
- * automatically excluded from chat (fail-closed) AND the test says the list moved.
+ * The Winter built-ins CHAT excludes — **derived from what the CHILD ACTUALLY ADVERTISES**
+ * (`WINTER_ADVERTISED_TOOLS_0_0_3`, measured from the built binary) minus chat's allowed set, plus
+ * the SDK's web built-ins and Norma's own pair-table names for completeness.
  *
- * `WebSearch`/`WebFetch` are in here by construction and additionally by ruling: chat's research
- * runs through the daemon-owned `research` capability, which carries the Exa key and the
- * dangerous-domain floor (P8b-12/C-6); the SDK's own web built-ins carry neither, so a chat session
- * reaching them would be a silent floor bypass.
+ * Review F4: deriving this from Norma's pair table left `Monitor`, `ReportFindings` and
+ * `ScheduleWakeup` — all three genuinely advertised — visible to a chat model that is supposed to
+ * have no fs/shell/repo surface. The pair table is the wrong source: it has rows for tools the
+ * child does not advertise and misses ones it does.
+ *
+ * The union with the pair table is deliberate belt-and-braces: `disallowedTools` is inert for a name
+ * the child never advertises, so naming extras costs nothing, while a future SDK that starts
+ * advertising `LSP` or `ToolSearch` finds them already excluded.
  */
-export const CHAT_DISALLOWED_BUILTINS: readonly string[] = WINTER_NORMA_TOOL_PAIRS
-  .map(([winter]) => winter)
-  .filter((w) => !CHAT_ALLOWED_WINTER_TOOLS.includes(w))
-  .filter((w, i, a) => a.indexOf(w) === i)
-  .sort();
+export const CHAT_DISALLOWED_BUILTINS: readonly string[] = [...new Set([
+  ...WINTER_ADVERTISED_TOOLS_0_0_3,
+  ...WINTER_NORMA_TOOL_PAIRS.map(([winter]) => winter),
+  ...SDK_WEB_BUILTINS,
+])].filter((w) => !CHAT_ALLOWED_WINTER_TOOLS.includes(w)).sort();
 
 export interface WinterOptionsInput {
   mode: SessionMode;
@@ -142,20 +175,25 @@ export interface WinterOptionsInput {
  */
 export function buildChildEnv(input: WinterOptionsInput): Record<string, string> {
   const base = input.baseEnv ?? process.env;
-  const env: Record<string, string> = {
-    NORMA_HOME: input.home,
-    NORMA_PROFILE: input.profile ?? "",
-  };
+  const env: Record<string, string> = {};
   for (const key of ["PATH", "HOME", "TMPDIR", "LANG"] as const) {
     const v = base[key];
     if (typeof v === "string" && v !== "") env[key] = v;
   }
+  Object.assign(env, input.env);
+  // **The pinned keys are applied LAST, so they always win** (review F11). They were merged first,
+  // which let a caller-supplied `input.env.NORMA_HOME` silently override the one value CLAUDE.md's
+  // hard rule depends on — a test session would then have written a real transcript under
+  // `~/.norma`. `input.env` is for extras; the home and profile are not negotiable.
+  env.NORMA_HOME = input.home;
+  env.NORMA_PROFILE = input.profile ?? "";
   // The scripted in-process double (Norma map §11.6): selection is BY NAME, because a spawned or
   // compiled child shares no module state with the test process. Set ONLY for a `winter-test/*`
-  // model, so a real session can never accidentally carry it.
+  // model, so a real session can never accidentally carry it — and after `input.env` for the same
+  // reason as the two above.
   const testProvider = testProviderNameFor(input.model);
   if (testProvider) env.WINTER_TEST_PROVIDER = testProvider;
-  return { ...env, ...input.env };
+  return env;
 }
 
 /**
@@ -177,6 +215,23 @@ export function buildChildEnv(input: WinterOptionsInput): Record<string, string>
  * the writable-subpath allow so it carves out those exact files and nothing else. These rules are
  * the same shape: the three control-plane filenames under any `.norma` directory at any depth, plus
  * `<home>/run/**` (the socket/pid control plane, already the sole READ denial too).
+ *
+ * **EVERY rule is `//`-anchored, and that is load-bearing** (review F2, measured). In WS-07 §3.1's
+ * grammar (`permissions/paths.ts:60-78` at `v0.0.3`):
+ *  - a **single leading `/`** means "relative to the rule's own settings-file directory", and
+ *    `sourceDir` is `undefined` for every SDK-seeded rule — which makes such a rule **INERT, and
+ *    silently so**. The SDK hit this itself and left the comment at `engine.ts:1370-1375`: *"Found
+ *    by the fixture: the rule list was right and nothing was denied."*
+ *  - a **bare** pattern anchors to **cwd**, so a bare `**{}/.norma/<f>` covers only `<cwd>` and below — not
+ *    the project-INDEPENDENT surface this fence exists to enforce.
+ *  - `//` is the filesystem-root anchor and is what actually binds.
+ *
+ * Measured against the real matcher (the pinned checkout's `evaluate()` + `buildBaselineDenyRules`,
+ * the same harness `baseline-projects-deny.test.ts` uses): bare `**{}/.norma/<f>` denied an in-cwd
+ * target and did **not** deny an out-of-cwd one; a single-`/` absolute denied nothing at all; and
+ * both `//`-anchored forms denied every target. The matcher is not exported from the installed
+ * package, so `mode-matrix.test.ts` pins the anchor FORM and resolves each rule to its absolute
+ * target instead — see its own comment.
  */
 export function controlPlaneDenyRules(home: string): string[] {
   const writeTools = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
@@ -184,11 +239,11 @@ export function controlPlaneDenyRules(home: string): string[] {
     // Any project's control-plane files, at any depth — the project-INDEPENDENT invariant
     // (`controlPlaneFileTarget`'s own doc: "the agent must NEVER write ANY
     // `<any>/.norma/permissions.local.json`, whichever project owns it").
-    ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => `**/.norma/${f}`),
+    ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => fsRootAnchored(["**", ".norma", f].join("/"))),
     // The user's own global copies, whose parent is literally `<home>` rather than `<x>/.norma`.
-    ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => join(home, f)),
+    ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => fsRootAnchored(join(home, f))),
     // The daemon's control plane: sockets, pid files, the runtime state db.
-    join(home, "run", "**"),
+    fsRootAnchored([join(home, "run"), "**"].join("/")),
   ];
   return writeTools.flatMap((t) => targets.map((p) => `${t}(${p})`));
 }
@@ -213,17 +268,29 @@ export function controlPlaneDenyRules(home: string): string[] {
 export function sandboxConfigFor(home: string): SandboxSettingsConfig {
   return {
     enabled: true,
-    allowUnsandboxedCommands: false,
     filesystem: {
-      denyWrite: [
-        ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => `**/.norma/${f}`),
-        ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => join(home, f)),
-        join(home, "run", "**"),
-      ],
+      // REAL DIRECTORY PATHS, not globs (review F8). Every entry is rendered as a seatbelt
+      // **subpath** — `(deny file-write* (subpath "<canon(p)>"))`, `sandbox/profile.ts:335` — so a
+      // glob like `**/.norma/permissions.local.json` or `<home>/run/**` becomes a literal path that
+      // never exists and denies nothing. A subpath denies a real directory and everything under it,
+      // which is the only shape this consumer has.
+      //
+      // What that means for the three control-plane FILENAMES: they cannot be expressed here at all
+      // (a subpath is a directory, and denying `<x>/.norma` wholesale would take the MEMDIR with
+      // it). Winter's own profile already carries exactly those three filenames, case-folded and
+      // brand-aware (`sandbox/profile.ts:151-158`), and states that a user's own `denyWrite` cannot
+      // defeat them — that is the protection that actually holds for the bash-redirect path, and it
+      // is Winter's, not ours. Norma's contribution here is the daemon control plane.
+      denyWrite: [join(home, "run")],
       // The sole read denial Norma has ever had (CLAUDE.md: "the sole read denial is
       // `~/.norma/run`") — reads are otherwise deliberately unrestricted.
-      denyRead: [join(home, "run", "**")],
+      denyRead: [join(home, "run")],
     },
+    // `allowUnsandboxedCommands` is deliberately NOT set. It is consulted only together with
+    // `excludedCommands` (`sandbox/spawn.ts:109,122`), which this config does not set, so `false`
+    // would be a no-op — and the earlier comment calling it "the load-bearing one" was wrong:
+    // `dangerouslyDisableSandbox` wins over `excludedCommands` regardless. Norma's own floor for
+    // that is P8b-31's always-card in the bridge, which does bind.
   };
 }
 
@@ -237,8 +304,13 @@ export function disallowedToolsFor(
   const out = Object.entries(capabilityTools)
     .filter(([, v]) => !v.modes.includes(mode))
     .map(([name]) => name);
+  // P8b-33: EVERY mode disallows the SDK's own web built-ins, not just chat. Dispatch's web surface
+  // today is `Search`/`ReadPage` only (`web_fetch`/`web_search` are `modes: ["code"]`,
+  // `agent/tools/web.ts:1011,1090`), so leaving dispatch's list empty would have GIVEN dispatch the
+  // SDK's floorless web tools — which classify as `NETWORK` and therefore allow under every policy.
+  out.push(...SDK_WEB_BUILTINS);
   if (mode === "chat") out.push(...CHAT_DISALLOWED_BUILTINS);
-  return out.sort();
+  return [...new Set(out)].sort();
 }
 
 /**

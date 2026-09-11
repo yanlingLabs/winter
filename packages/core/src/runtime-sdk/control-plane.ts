@@ -98,10 +98,17 @@ export function controlPlaneFileTarget(path: string, cwd: string): { path: strin
  *
  * Applied in `canUseToolFor` BEFORE the gate and under EVERY policy — `bypass` included, and
  * `auto`/`acceptEdits` especially, since those are the modes where a Winter child's write never
- * reaches a human at all. This is the FLOOR for P8b-27: the deny rules `buildWinterOptions` passes
- * are the child's own first line, but the SDK's own semantics (surface map §5.2) say a deny rule
- * under `bypassPermissions` REACHES `canUseTool` rather than auto-denying, so the host-side check is
- * the thing that actually holds.
+ * reaches a human at all.
+ *
+ * **Why a host-side fence at all, when `buildWinterOptions` also passes deny rules?** Not because a
+ * deny rule is weak — the opposite. A matched stage-2 deny returns `decision: "deny"` outright
+ * (`permissions/evaluator.ts:1350-1364` at `v0.0.3`) and runs BEFORE the mode stage (`:1008`), so it
+ * binds under `bypassPermissions` too and **never reaches `canUseTool`**. (An earlier revision of
+ * this comment claimed the reverse; it was wrong.) The host fence exists because a deny rule only
+ * covers what its pattern covers: it is Norma's own invariant, enforced in Norma's own vocabulary,
+ * on both tool-name spellings, over every path-bearing field including `MultiEdit`'s nested
+ * `edits[]` — and it does not depend on Winter's rule grammar continuing to mean what it means
+ * today. Two independent layers over one invariant, which is the right number for a self-grant.
  *
  * `cwd` resolves a relative target the way the call itself would.
  */

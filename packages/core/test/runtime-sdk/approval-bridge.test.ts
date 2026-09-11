@@ -340,15 +340,69 @@ test("a rejecting broker denies AND withdraws — no card is ever left uncloseab
   expect(h.events[1]).toMatchObject({ approved: false, by: "broker-error" });
 });
 
-test("Winter's own circuit breakers are never overridden by a blanket allow", async () => {
-  // Under bypassPermissions the runtime routes its standing exceptions to canUseTool BECAUSE the
-  // mode cannot decide them. Answering either from the gate's allow silently overrides the child.
-  const blocked = harness({ policy: "bypass" });
-  const res = (await blocked.canUse("Write", { file_path: "/etc/hosts" }, requestCtx({ blockedPath: "/etc/hosts" })))!;
-  expect(res.behavior).toBe("deny");     // a block, not an escalation — the host cannot reverse it
-  expect(blocked.events).toEqual([]);
+// -------------------------------------------------------------------------------------------
+// Winter's own escalations (review F1 — the CORRECTED semantics).
+//
+// `blockedPath` is Winter ASKING, not Winter refusing: its one producer is the protected-write
+// standing exception (`permissions/evaluator.ts:946-953`), whose message reads "Denied: protected
+// path write requires approval (WS-07 §6.7)" and which resolves to `mustPrompt`. Treating it as an
+// unconditional deny meant a session could never edit `package.json`, a lockfile, anything under
+// `.git/`, or write to `$OUTDIR` — even with a human sitting in front of the card.
+// -------------------------------------------------------------------------------------------
 
-  // `matchedAskRule` says ASK: never a blanket allow. In CODE that is a card…
+test("a Winter-protected path is a CARD in code, never an unconditional refusal", async () => {
+  // `package.json` is in Winter's `PROTECTED_FILE_BASENAMES` (`permissions/protected.ts:154-194`).
+  for (const policy of ["ask", "auto", "accept-edits"] as SessionApprovalPolicy[]) {
+    const h = harness({ policy, cwd: "/repo" });
+    const p = h.canUse("Edit", { file_path: "/repo/package.json" }, requestCtx({ blockedPath: "/repo/package.json" }));
+    expect({ policy, events: h.events.length }).toEqual({ policy, events: 1 });
+    expect((h.events[0] as { type: string }).type).toBe("approval_requested");
+    h.approvals.resolve(SESSION, "tu1", true, "user");
+    await expect(p).resolves.toMatchObject({ behavior: "allow" });
+  }
+});
+
+test("a Winter-protected path is the P8b-7 typed deny in a session that never prompts", async () => {
+  const h = harness({ mode: "dispatch", policy: "auto", cwd: "/repo" });
+  const res = (await h.canUse("Edit", { file_path: "/repo/package.json" }, requestCtx({ blockedPath: "/repo/package.json" })))!;
+  expect(res.behavior).toBe("deny");
+  expect((res as { message: string }).message).toBe(neverPromptsMessage("Edit", "dispatch", "auto"));
+  expect(h.events).toEqual([]);
+});
+
+test("$OUTDIR is BLESSED — the gate's verdict stands, unescalated", async () => {
+  // Winter flags `<home>/outputs/<sid>` only because it carries a `.norma` segment, but Norma
+  // explicitly blessed it as agent-writable for THIS session (`sessions/outdir.ts`). Without the
+  // carve-out a dispatch session could not write its own deliverable at all.
+  const home = "/tmp/norma-home";
+  const out = `${home}/outputs/${SESSION}/report.md`;
+  for (const mode of ["code", "dispatch", "chat"] as const) {
+    const h = harness({ mode, policy: "auto", home, cwd: "/repo" });
+    const res = (await h.canUse("Write", { file_path: out }, requestCtx({ blockedPath: out })))!;
+    expect({ mode, behavior: res.behavior }).toEqual({ mode, behavior: "allow" });
+    expect(h.events).toEqual([]);
+  }
+  // …and ANOTHER session's outputs directory is not blessed for this one (the blessing is keyed by
+  // sessionId, never by the bare `~/.norma/outputs/` prefix).
+  const other = harness({ mode: "dispatch", policy: "auto", home, cwd: "/repo" });
+  const foreign = `${home}/outputs/sess-2/report.md`;
+  expect((await other.canUse("Write", { file_path: foreign }, requestCtx({ blockedPath: foreign })))!.behavior).toBe("deny");
+  // With no `home` wired the answer is the conservative one: escalate.
+  const noHome = harness({ mode: "dispatch", policy: "auto", cwd: "/repo" });
+  expect((await noHome.canUse("Write", { file_path: out }, requestCtx({ blockedPath: out })))!.behavior).toBe("deny");
+});
+
+test("an escalation NARROWS a verdict and never widens one", async () => {
+  // A gate deny stays a deny — a protected-path signal must not turn "plan mode forbids this" into
+  // a card the human can wave through.
+  const h = harness({ policy: "plan", cwd: "/repo" });
+  const res = (await h.canUse("Edit", { file_path: "/repo/package.json" }, requestCtx({ blockedPath: "/repo/package.json" })))!;
+  expect(res.behavior).toBe("deny");
+  expect((res as { message: string }).message).toContain("Blocked in plan mode");
+  expect(h.events).toEqual([]);
+});
+
+test("matchedAskRule is never a blanket allow", async () => {
   const asked = harness({ policy: "auto" });
   const p = asked.canUse("Bash", { command: "ls" }, requestCtx({
     matchedAskRule: { source: "project", toolName: "Bash", ruleContent: "ls:*" },
@@ -357,13 +411,29 @@ test("Winter's own circuit breakers are never overridden by a blanket allow", as
   asked.approvals.resolve(SESSION, "tu1", true, "user");
   await expect(p).resolves.toMatchObject({ behavior: "allow" });
 
-  // …and in a never-prompt session, the typed deny.
   const dispatch = harness({ mode: "dispatch", policy: "auto" });
   const dres = (await dispatch.canUse("Bash", { command: "ls" }, requestCtx({
     matchedAskRule: { source: "project", toolName: "Bash" },
   })))!;
   expect(dres.behavior).toBe("deny");
   expect(dispatch.events).toEqual([]);
+});
+
+test("decisionReason alone changes nothing — it is informational (logged, never acted on)", async () => {
+  const h = harness({ policy: "auto" });
+  const res = (await h.canUse("Bash", { command: "ls" }, requestCtx({ decisionReason: "some-runtime-code" })))!;
+  expect(res.behavior).toBe("allow");
+  expect(h.events).toEqual([]);
+});
+
+test("the control plane is refused independently, BEFORE any escalation can soften it", async () => {
+  // A protected-path signal on the rules store must not turn the hard deny into a card.
+  const h = harness({ policy: "bypass", cwd: "/repo" });
+  const target = "/repo/.norma/permissions.local.json";
+  const res = (await h.canUse("Edit", { file_path: target }, requestCtx({ blockedPath: target })))!;
+  expect(res.behavior).toBe("deny");
+  expect((res as { message: string }).message).toContain("the permission rules store can only be changed");
+  expect(h.events).toEqual([]);
 });
 
 test("interrupt: true only on a HUMAN denial — a machine outcome must not end the turn", async () => {
