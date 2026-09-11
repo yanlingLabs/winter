@@ -122,6 +122,77 @@ describe("daemon boot — the Winter handle", () => {
   });
 });
 
+// P8b Tasks 6-7: the capability servers, as the ROUTER received them.
+//
+// THE BLIND SPOT THIS BLOCK EXISTS TO CLOSE. `createRuntimeSdk` derives every capability server's
+// descriptors at construction — it calls `instance.listTools()` and refuses any tool whose
+// `inputSchema` is not a JSON-Schema object — and `daemon.ts` SWALLOWS that refusal (the handle
+// becomes undefined and the daemon boots with the Winter leg refusing). So a malformed capability
+// would pass every unit test in `test/capabilities/` AND leave a daemon that looks healthy. Two
+// assertions are needed together: the handle is DEFINED, and the router is actually holding the
+// server names the daemon declared.
+//
+// The names are read through the router's own per-query collision guard
+// (`assertNoCapabilityCollision`), which throws BEFORE the leg is picked and before anything is
+// spawned — so this is a real read of the router's capability record, with no child process.
+describe("daemon boot — the capability servers (Tasks 6-7)", () => {
+  /** True iff the router is holding a capability server called `name`.
+   *
+   *  The probe never spawns anything: the collision guard runs before the leg is picked, and a
+   *  NON-colliding probe dies one step later on executable resolution (the platform package is
+   *  private and not on npm — P8b-2 — and this call passes no `pathToClaudeCodeExecutable`). The
+   *  `abortController` is pre-aborted belt-and-braces, so even a machine that somehow resolved one
+   *  would end the query immediately. Only the COLLISION message counts as a yes. */
+  function holdsCapability(d: RunningDaemon, name: string): boolean {
+    const abortController = new AbortController();
+    abortController.abort();
+    try {
+      d.runtimeSdk!.sdk.query({
+        prompt: "unreachable",
+        options: { abortController, mcpServers: { [name]: { type: "sdk", name, instance: {} } } },
+      });
+      return false;
+    } catch (err) {
+      return (err as Error).message.includes("is the name of a capability server this handle forwards");
+    }
+  }
+
+  test("the declared servers reached the router, and the handle survived construction", async () => {
+    await withTempHome(async (home) => {
+      const d = await boot(home);
+      // If ANY capability declaration were malformed, `createRuntimeSdk` would have thrown
+      // `RuntimeLaunchInputError` and daemon.ts would have logged and continued with `undefined`.
+      expect(d.runtimeSdk).toBeDefined();
+      // `sessions` is unconditional; `computer` follows the boot-time `computerUse.enabled`, which
+      // is off in this temp home, so it must NOT be there.
+      expect(holdsCapability(d, "sessions")).toBe(true);
+      expect(holdsCapability(d, "computer")).toBe(false);
+      // A name the daemon never declared collides with nothing.
+      expect(holdsCapability(d, "not-a-capability")).toBe(false);
+    });
+  });
+
+  test("the computer server follows the BOOT-TIME computerUse.enabled setting", async () => {
+    await withTempHome(async (home) => {
+      writeFileSync(join(home, "settings.json"), JSON.stringify({ computerUse: { enabled: true } }));
+      const d = await boot(home);
+      expect(d.runtimeSdk).toBeDefined();
+      expect(holdsCapability(d, "computer")).toBe(true);
+    });
+  });
+
+  test("the per-call session binding is the daemon's own, and starts unbound", async () => {
+    await withTempHome(async (home) => {
+      const d = await boot(home);
+      expect(d.capabilitySessions.current()).toBeUndefined();
+      const release = d.capabilitySessions.bind({ sessionId: "s_bound", mode: "chat", cwd: home, roots: [home] });
+      expect(d.capabilitySessions.current()?.sessionId).toBe("s_bound");
+      release();
+      expect(d.capabilitySessions.current()).toBeUndefined();
+    });
+  });
+});
+
 describe("daemon shutdown — G-14's ordering, on a real daemon", () => {
   test("stop() ends the tracked session BEFORE the 8a spine closes (receipts need the store)", async () => {
     await withTempHome(async (home) => {

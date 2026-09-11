@@ -104,6 +104,7 @@ import { makeApply } from "./settings-apply";
 import { SettingsWatcher } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "./runtime-sdk/create";
+import { buildCapabilities, createCapabilitySessionBinding, type CapabilitySessionBinding } from "./capabilities";
 import { makeDaemonRoutineRunner } from "./routines/runner";
 import { makeRoutineScheduler } from "./routines/scheduler";
 import type { NewSessionEvent } from "@norma/protocol";
@@ -145,6 +146,16 @@ export interface RunningDaemon {
    * assert against the handle daemon.ts actually built, not a hand-made mirror of it.
    */
   runtimeSdk: NormaRuntimeSdk | undefined;
+  /**
+   * P8b Tasks 6-7/16: the per-call session identity every capability server reads.
+   *
+   * The router's `callTool(name, args)` carries no session and capability servers are shared across
+   * the handle (a ROUTER 0.0.3 CARRY — see `capabilities/current-session.ts`), so the session driver
+   * binds the calling session here for the duration of a turn. Exposed on the daemon because Task
+   * 16 is its only production caller and a test needs the SAME binding daemon.ts handed the
+   * capabilities, never a mirror.
+   */
+  capabilitySessions: CapabilitySessionBinding;
   /**
    * P8b Task 15: THE LIVE settings holder — the same binding the settings-watcher swaps, not a boot
    * snapshot. Reading it twice around a `settings.json` write is how a test proves a key is hot
@@ -653,6 +664,12 @@ export async function startDaemon(opts: {
   // itself, so every existing narrowed (non-null) use of `registry` inside the block is untouched.
   let sharedRegistry: ToolRegistry | null = null;
 
+  // P8b Task 6: HOISTED out of the `if (agentProvider)` gate below (its construction stays there,
+  // unchanged). The `computer` capability server's getter reads THIS holder — one
+  // `ComputerUseService`, one lease set, whichever door drives it — and `settings-apply.ts`
+  // reassigns the same binding on a hot `computerUse.enabled` toggle.
+  let computerUse: ComputerUseService | undefined;
+
   // Phase 4d-cleanup Task 2: PluginSupervisor construction + the boot-time orphan-PID sweep are
   // hoisted OUT of `if (agentProvider)` below — the ctor's own deps (runDir/socketPath/mintToken/
   // settings/logger) don't need a provider, and a daemon booted with the agent disabled (no
@@ -748,13 +765,57 @@ export async function startDaemon(opts: {
   // process's lifetime, receipts are not durable. That is the same "runtime routing degraded, boot
   // continues" posture the spine itself takes.
   let runtimeSdk: NormaRuntimeSdk | undefined;
+  // ── The daemon-owned capability servers (P8b Tasks 6-7, R-8-1) ────────────────────────────────
+  // The router owns no tool; the DAEMON owns the capability tools and hands them over here, once,
+  // for the handle's lifetime. Each server holds the SAME `ToolDefinition` objects the shared
+  // `ToolRegistry` below registers — one implementation, two doors — so a Winter child and an
+  // engine turn run the identical code with the identical schema and the identical refusals.
+  //
+  // THE HOLDER (`capabilitySessions`) IS THE PER-CALL SESSION IDENTITY. `callTool(name, args)`
+  // carries none, and capability servers are shared across every session on the handle, so Task 16's
+  // session driver binds this around each turn; unbound, every capability call is a typed refusal
+  // rather than a guess. Recorded as a ROUTER 0.0.3 CARRY — see `capabilities/current-session.ts`.
+  //
+  // `computerUse` is a LET assigned inside the gate below; these are closures, invoked at tool-call
+  // time long after boot (the `engine?.turnStartedAt` precedent this file already relies on).
+  const capabilitySessions = createCapabilitySessionBinding();
+  // Steering only, exactly as on the registry door (`registerSessionSpawnTool` below gets the same
+  // list). A daemon with no agent provider has no model catalogue and the field is a free string.
+  const spawnModelIds = agentProvider ? agentProvider.provider.models().map((m) => m.id) : [];
   try {
     runtimeSdk = await createNormaRuntimeSdk({
       home: normaHome,
       settings: () => settings, // LIVE holder, never a boot snapshot
       secrets,
       directoryStore: runtime?.directory,
-      capabilities: [], // Tasks 6-7 fill this
+      capabilities: buildCapabilities({
+        currentSession: () => capabilitySessions.current(),
+        sessions: {
+          models: [...spawnModelIds, ...deriveModelAliases(spawnModelIds)],
+          // THE SAME instances the registry door gets (`registerListSessionsTools` below): a
+          // management surface with its own hub/store would read every attached session as idle.
+          sessions: {
+            store,
+            derive: (row, sessionId, nowMs) => activityDeriver?.(row, sessionId, nowMs),
+            turnStartedAt: (sid) => engine?.turnStartedAt(sid),
+            isRunning: (sid) => engine?.isRunning(sid) ?? false,
+            interrupt: (sid) => { engine?.interrupt(sid); },
+            emit: (sid, activity) => { hub.emitActivity(sid, activity); },
+          },
+        },
+        computer: {
+          // Hot, read per call — the capability set is construction-time, so a snapshot here would
+          // make this the one setting in the daemon that needs a restart.
+          screenshotMaxDim: () => settings?.computerUse?.screenshotMaxDim,
+          // The SAME holder `EngineConfig.computerUse`'s getter reads, including after
+          // `settings-apply.ts` rebuilds the service on a hot toggle. One service, one lease set.
+          computerUse: () => computerUse,
+        },
+        // Construction-time, and deliberately so: whether the `computer` SERVER exists follows the
+        // boot setting (mirroring the gate's own guard below); the hot toggle is honoured per
+        // session through Task 9's `disallowedTools`. See `buildCapabilities`' own doc comment.
+        computerUseEnabled: settings?.computerUse?.enabled === true,
+      }),
       log: (line) => console.error(`runtime-sdk: ${line}`),
     });
   } catch (err) {
@@ -1045,7 +1106,9 @@ export async function startDaemon(opts: {
     // "full-auto CU requires explicit opt-in" — absent/false, the `computer` tool does not exist).
     // The service holds leases on the SAME `peripheral` broker (hoisted above this gate) that
     // Norma.app serves screenshot/ax-read/input-drive behind. reuses settings.peripheral.heartbeatMs.
-    let computerUse: ComputerUseService | undefined;
+    // P8b Task 6: the `let` itself is HOISTED above the Winter runtime block (it is the holder the
+    // `computer` capability server's getter reads — one service, one lease set, two doors); only
+    // the construction stays here, unchanged.
     if (settings?.computerUse?.enabled) {
       computerUse = new ComputerUseService({ broker: peripheral, heartbeatMs: settings?.peripheral?.heartbeatMs });
       // D1-T2: `deferred: ["dispatch"]` — immediate in code (unchanged), deferred only for the
@@ -1713,6 +1776,7 @@ export async function startDaemon(opts: {
     registry: sharedRegistry,
     runtimeState,
     runtimeSdk,
+    capabilitySessions,
     // The HOLDER, read through a closure — never `settings` captured by value, which would freeze
     // this at boot and make every hot-reload assertion above it a lie.
     settings: () => settings,

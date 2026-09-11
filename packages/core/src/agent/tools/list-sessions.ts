@@ -2,7 +2,7 @@ import { closeSync, openSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
-import type { ToolRegistry } from "./registry";
+import type { ToolDefinition, ToolRegistry } from "./registry";
 import type { ActivityDeriver } from "../../sessions/activity";
 import { participatesInActivity } from "../../sessions/activity";
 import { setSessionActivity, type SetActivityDeps } from "../../sessions/set-activity";
@@ -169,9 +169,17 @@ export function registerListSessionsTools(
   r: ToolRegistry,
   deps: ListSessionsDeps & ManageSessionDeps,
 ): void {
+  for (const def of listSessionsToolDefs(deps)) r.register(def);
+}
+
+/** P8b Task 6 — THE two definitions, extracted verbatim from `registerListSessionsTools`'s body so
+ *  the daemon's shared `ToolRegistry` and the `sessions` capability server
+ *  (`capabilities/sessions.ts`) drive the SAME `ToolDefinition` objects rather than two copies.
+ *  Nothing about either registration changed. */
+export function listSessionsToolDefs(deps: ListSessionsDeps & ManageSessionDeps): ToolDefinition[] {
   const now = deps.now ?? (() => Date.now());
 
-  r.register({
+  return [{
     name: LIST_SESSIONS_TOOL,
     modes: ["dispatch"],
     // dispatch-tool-deferral: `true` unconditionally (the agent_list/agent_output precedent, not a
@@ -277,9 +285,7 @@ export function registerListSessionsTools(
         : "";
       return `${header}\n${lines.join("\n")}${footer}\nManage one with manage_session (stop/background/unbackground/archive/resume); message one with send_message.`;
     },
-  });
-
-  r.register({
+  }, {
     name: MANAGE_SESSION_TOOL,
     modes: ["dispatch"],
     // dispatch-tool-deferral: see LIST_SESSIONS_TOOL's registration above — same reasoning, same
@@ -358,5 +364,5 @@ export function registerListSessionsTools(
       if (!res.ok) throw new Error(res.error);
       return `session '${sessionId}' is now ${res.activity}`;
     },
-  });
+  }];
 }
