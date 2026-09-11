@@ -68,8 +68,11 @@ describe("daemon tool census (R-T3 whole-branch review FIX 1): real registration
   let daemon: RunningDaemon | undefined;
   let home: string | undefined;
 
-  afterEach(() => {
-    daemon?.stop();
+  // AWAITED (P8b Task 5): `stop()`'s tail now closes the SessionStore too — it sits behind the
+  // Winter handle's dispose — so dropping the promise would rm the home out from under an open
+  // sqlite handle.
+  afterEach(async () => {
+    await daemon?.stop();
     daemon = undefined;
     if (home) rmSync(home, { recursive: true, force: true });
     home = undefined;
@@ -313,8 +316,11 @@ describe("task_stop deferred flag (whole-branch review FIX 3): real turns throug
   let daemon: RunningDaemon | undefined;
   let home: string | undefined;
 
-  afterEach(() => {
-    daemon?.stop();
+  // AWAITED (P8b Task 5): `stop()`'s tail now closes the SessionStore too — it sits behind the
+  // Winter handle's dispose — so dropping the promise would rm the home out from under an open
+  // sqlite handle.
+  afterEach(async () => {
+    await daemon?.stop();
     daemon = undefined;
     if (home) rmSync(home, { recursive: true, force: true });
     home = undefined;

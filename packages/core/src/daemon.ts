@@ -146,6 +146,17 @@ export interface RunningDaemon {
    */
   runtimeSdk: NormaRuntimeSdk | undefined;
   /**
+   * P8b Task 5: THE SessionStore this daemon opened — the same instance `stop()` closes.
+   *
+   * Exposed for the same reason `registry` is: `store.close()` moved onto `stop()`'s ASYNC tail
+   * (behind `runtimeSdk.dispose()`, because a draining Winter child appends its final events
+   * through it), and the only honest way to prove that ordering is to use the daemon's OWN handle
+   * from inside a tracked session's teardown — a second `SessionStore` over the same home would
+   * answer whether or not this one had been closed, which is a test that passes for the wrong
+   * reason. See `test/daemon-runtime-sdk-boot.test.ts`.
+   */
+  sessions: SessionStore;
+  /**
    * P8b Task 15: THE LIVE settings holder — the same binding the settings-watcher swaps, not a boot
    * snapshot. Reading it twice around a `settings.json` write is how a test proves a key is hot
    * without a restart, which matters most for keys whose only consumer lands in a later task
@@ -1230,6 +1241,10 @@ export async function startDaemon(opts: {
       globalAllow: (projectRoot) => projectSettings.effective(projectRoot)?.permissions?.allow ?? ["Computer"],
       normaHome,
     });
+    // P8b Task 5, deliberately: `runtimeSdk` is NOT on this config. The engine never consumes the
+    // Winter handle — P8b-13 decides the leg at `session.create` (`ipc/server.ts`, which has it) and
+    // Task 16's driver owns every session that runs on it — and this whole class is deleted in
+    // Task 17, so a field here would be churn on a dying config. See the report's F7.
     engine = new AgentEngine({
       store, hub, registry, broker: approvalBroker,
       gate: new PermissionGate(),
@@ -1713,6 +1728,7 @@ export async function startDaemon(opts: {
     registry: sharedRegistry,
     runtimeState,
     runtimeSdk,
+    sessions: store,
     // The HOLDER, read through a closure — never `settings` captured by value, which would freeze
     // this at boot and make every hot-reload assertion above it a lie.
     settings: () => settings,

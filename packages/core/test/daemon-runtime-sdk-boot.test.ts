@@ -9,7 +9,6 @@
 // No child process is spawned anywhere here — no `sdk.query()`, no real `winter` binary.
 import { afterEach, describe, expect, test } from "bun:test";
 import { buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
-import type { Query } from "@yanlinglabs/winter-agent-sdk";
 import type { RuntimeDirectoryEntry } from "@yanlinglabs/winter-runtime-sdk";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -52,8 +51,6 @@ function entryFor(sessionId: string): RuntimeDirectoryEntry {
     updatedAt: "2026-09-11T00:00:01.000Z",
   };
 }
-
-const FAKE_QUERY = {} as Query;
 
 describe("daemon boot — the Winter handle", () => {
   test("a booted daemon carries a defined handle, and it reads the SPINE's directory store", async () => {
@@ -103,9 +100,20 @@ describe("daemon boot — the Winter handle", () => {
       mkdirSync(join(home, "runtimes"), { recursive: true });
       writeFileSync(dirs.runtimeStatePath, "this is not a database");
 
-      const d = await boot(home);
+      // Both halves of step 6(b), captured from the ACTUAL operator-facing output.
+      const said: string[] = [];
+      const realError = console.error;
+      console.error = (...args: unknown[]) => { said.push(args.map(String).join(" ")); };
+      let d: RunningDaemon;
+      try { d = await boot(home); } finally { console.error = realError; }
+
       expect(existsSync(d.socketPath)).toBe(true);
-      // The reason is named — by the spine, which is what actually failed.
+      // (i) THE SPINE names the reason, because the spine is what failed…
+      expect(said.some((l) => l.startsWith("runtime-state: runtime state unavailable") && l.includes("RuntimeStateUnavailableError"))).toBe(true);
+      // …(ii) and the ROUTER says nothing, because it constructed fine. This half is the one that
+      // would catch a future change turning a degraded spine into a dead router.
+      expect(said.filter((l) => l.startsWith("runtime-sdk: winter runtime sdk unavailable"))).toEqual([]);
+
       const rt = d.runtimeState;
       expect("unavailable" in rt).toBe(true);
       expect((rt as { unavailable: Error }).unavailable).toBeInstanceOf(RuntimeStateUnavailableError);
@@ -132,27 +140,40 @@ describe("daemon shutdown — G-14's ordering, on a real daemon", () => {
       const rt = online(d);
 
       // The invariant, measured rather than spied: inside the session's own teardown — the moment a
-      // draining child would be writing its delivery receipts — the runtime store must still answer.
-      let storeAnswered: boolean | undefined;
+      // draining child would be appending its last events and writing its delivery receipts — BOTH
+      // stores `stop()` closes must still answer. Each probe uses the daemon's OWN handle: a second
+      // instance over the same home would answer whether or not the daemon's had been closed.
+      let runtimeStateAnswered: boolean | undefined;
       let directoryAnswered: boolean | undefined;
-      handle.trackQuery("s_shutdown", FAKE_QUERY, async () => {
+      let sessionStoreAnswered: boolean | undefined;
+      handle.trackQuery("s_shutdown", new AbortController(), async () => {
         await Bun.sleep(5);
         try {
           rt.db.db.query("SELECT value FROM schema_meta LIMIT 1").get();
-          storeAnswered = true;
-        } catch { storeAnswered = false; } // a closed `runtime-state.db` throws here
+          runtimeStateAnswered = true;
+        } catch { runtimeStateAnswered = false; } // a closed `runtime-state.db` throws here
         try {
           // The receipt path itself: a write through the router's directory, which is 8a's store.
           await handle.sdk.directory.record(entryFor("s_shutdown"));
           directoryAnswered = true;
         } catch { directoryAnswered = false; }
+        try {
+          // The event path: `store.close()` is the handle Task 5 MOVED onto the async tail, and a
+          // draining child appends its final `SessionEvent`s through this exact instance. A closed
+          // bun:sqlite Database throws on use, so this read is the ordering assertion.
+          d.sessions.list();
+          sessionStoreAnswered = true;
+        } catch { sessionStoreAnswered = false; }
       });
 
       const stopping = daemon?.stop();
       daemon = undefined;
       await stopping;
-      expect(storeAnswered).toBe(true);
+      expect(runtimeStateAnswered).toBe(true);
       expect(directoryAnswered).toBe(true);
+      expect(sessionStoreAnswered).toBe(true);
+      // And afterwards it really is closed — otherwise the three assertions above would be vacuous.
+      expect(() => d.sessions.list()).toThrow();
     });
   });
 
@@ -160,7 +181,7 @@ describe("daemon shutdown — G-14's ordering, on a real daemon", () => {
     await withTempHome(async (home) => {
       const d = await boot(home);
       expect(d.runtimeSdk).toBeDefined();
-      d.runtimeSdk?.trackQuery("s_grace", FAKE_QUERY, async () => { await Bun.sleep(10); });
+      d.runtimeSdk?.trackQuery("s_grace", new AbortController(), async () => { await Bun.sleep(10); });
 
       const started = Date.now();
       const stopping = daemon?.stop();

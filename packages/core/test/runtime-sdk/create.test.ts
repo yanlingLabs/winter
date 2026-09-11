@@ -4,14 +4,15 @@
 // is a pure function of settings/env/paths.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createInMemoryRuntimeDirectoryStore, type RuntimeSdk, type RuntimeSdkOptions } from "@yanlinglabs/winter-runtime-sdk";
-import type { Query } from "@yanlinglabs/winter-agent-sdk";
+import { buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { DEFAULT_DELIVERIES_DAYS, DEFAULT_NAME_LEASES_DAYS } from "../../src/runtime-state/retention";
+import { RUNTIME_SHUTDOWN_DRAIN_MS } from "../../src/runtime-state/wiring";
 import { NORMA_BRAND } from "../../src/runtime-sdk/brand";
-import { createNormaRuntimeSdk, type NormaRuntimeSdk, type NormaRuntimeSdkDeps } from "../../src/runtime-sdk/create";
+import { createNormaRuntimeSdk, SHUTDOWN_QUERY_GRACE_MS, type NormaRuntimeSdk, type NormaRuntimeSdkDeps } from "../../src/runtime-sdk/create";
 import { WinterExecutableUnavailable } from "../../src/runtime-sdk/executable";
 import { NORMA_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
 import type { Settings } from "../../src/settings";
@@ -83,10 +84,6 @@ async function build(extra: Partial<NormaRuntimeSdkDeps> = {}, grace?: number): 
   return { handle, opts: captured, disposeOrder };
 }
 
-/** A `Query` stand-in. Nothing in Task 5 touches it — `trackQuery` keys on the session id and the
- *  `end` closure — so a cast is honest here rather than a 40-member fake. */
-const FAKE_QUERY = {} as Query;
-
 describe("createNormaRuntimeSdk — the options it hands the router", () => {
   test("constructs a real handle; messaging and directory are live", async () => {
     const { handle, opts } = await build();
@@ -148,6 +145,29 @@ describe("createNormaRuntimeSdk — retention (G-12)", () => {
     settings = withRuntimes({ retention: { deliveriesDays: 90, nameLeasesDays: 14 }, migrations: { memoryKeys: false }, winterLeg: { chat: false, dispatch: false, code: false }, winterIdleTimeoutSec: 900 });
     expect(retention?.deliveries).toBe(90 * DAY_MS);
     expect(retention?.nameLeases).toBe(14 * DAY_MS);
+  });
+
+  // The assertion above is on the object THIS FILE built, which is live by construction — it would
+  // pass identically against a router that snapshotted the numbers. This one drives the REAL router:
+  // a released name lease is pruned or kept by `directory.recover()` according to the window that is
+  // live at the moment of the pass, on ONE handle that is never rebuilt.
+  test("the router itself honours a window changed after construction", async () => {
+    const store = createInMemoryRuntimeDirectoryStore();
+    const address = serializeRuntimeAddress(buildSessionAddress("s_lease"));
+    const tenDaysAgo = new Date(Date.now() - 10 * DAY_MS).toISOString();
+    await store.names.claim({ name: "alpha", address, generation: 1, claimedAt: tenDaysAgo });
+    await store.names.release("alpha", address, tenDaysAgo);
+
+    const wide = { retention: { deliveriesDays: 30, nameLeasesDays: 30 }, migrations: { memoryKeys: false }, winterLeg: { chat: false, dispatch: false, code: false }, winterIdleTimeoutSec: 900 };
+    settings = withRuntimes(wide);
+    const { handle } = await build({ directoryStore: store });
+
+    await handle.sdk.directory.recover();
+    expect(await store.names.lookup("alpha")).toHaveLength(1); // 10 days old, 30-day window: kept
+
+    settings = withRuntimes({ ...wide, retention: { deliveriesDays: 30, nameLeasesDays: 1 } });
+    await handle.sdk.directory.recover();
+    expect(await store.names.lookup("alpha")).toHaveLength(0); // same handle, narrowed window: gone
   });
 });
 
@@ -230,6 +250,18 @@ describe("spawnHookFor — P8b-1's one topology site", () => {
   });
 });
 
+describe("the shutdown budget (P8b-32)", () => {
+  // THE WHOLE POINT OF THE NUMBER. Teardown is sequential in `daemon.ts`'s `stop()` — this grace,
+  // then 8a's deletion drain — and the sum must fit inside `DaemonSupervisor.gracefulExitTimeout`
+  // (2.0 s), past which the app SIGKILLs the daemon, `lock.release()` never runs and the socket file
+  // is left on disk. Asserted so that editing EITHER constant trips a test.
+  test("300 ms, and 300 + 8a's 1500 ms drain is inside the app's 2.0 s SIGKILL grace", () => {
+    expect(SHUTDOWN_QUERY_GRACE_MS).toBe(300);
+    expect(RUNTIME_SHUTDOWN_DRAIN_MS).toBe(1_500);
+    expect(SHUTDOWN_QUERY_GRACE_MS + RUNTIME_SHUTDOWN_DRAIN_MS).toBeLessThan(2_000);
+  });
+});
+
 describe("dispose — G-14: every Query ends BEFORE the router disposes", () => {
   test("two tracked sessions are both awaited, and both finish first", async () => {
     const { handle, disposeOrder } = await build();
@@ -237,8 +269,8 @@ describe("dispose — G-14: every Query ends BEFORE the router disposes", () => 
       await Bun.sleep(20);
       disposeOrder.push(name);
     };
-    handle.trackQuery("s1", FAKE_QUERY, end("s1"));
-    handle.trackQuery("s2", FAKE_QUERY, end("s2"));
+    handle.trackQuery("s1", new AbortController(), end("s1"));
+    handle.trackQuery("s2", new AbortController(), end("s2"));
 
     await handle.dispose();
     expect(disposeOrder).toHaveLength(3);
@@ -246,31 +278,46 @@ describe("dispose — G-14: every Query ends BEFORE the router disposes", () => 
     expect(disposeOrder[2]).toBe("sdk.dispose");
   });
 
-  test("an end that never resolves is bounded by the grace, is LOGGED, and the router still disposes", async () => {
+  // G-14 is "awaits iterations with a bounded grace, ABORTS stragglers", and the abort is the half
+  // that cannot be delegated: Winter's `Query` has no `close()`, so a child that outlives this is
+  // unreachable for the rest of the process's life and then survives it.
+  test("an end that never resolves is bounded, ABORTED, and logged — and the router still disposes", async () => {
     const lines: string[] = [];
     const { handle, disposeOrder } = await build({ log: (line) => lines.push(line) }, 50);
-    handle.trackQuery("stuck", FAKE_QUERY, () => new Promise<void>(() => {}));
+    const abort = new AbortController();
+    handle.trackQuery("stuck", abort, () => new Promise<void>(() => {}));
+    expect(abort.signal.aborted).toBe(false);
+
     const started = Date.now();
     await handle.dispose();
     const elapsed = Date.now() - started;
+    expect(abort.signal.aborted).toBe(true); // the child is cancelled, not merely abandoned
     expect(disposeOrder).toEqual(["sdk.dispose"]);
     expect(elapsed).toBeGreaterThanOrEqual(45);
-    expect(elapsed).toBeLessThan(2_000); // nowhere near the real 5s budget
-    // A `stop()` that suddenly takes seconds must not be silent — it is the one thing that can push
-    // teardown past the app's SIGKILL deadline, and the operator needs the session id.
-    expect(lines).toEqual(["session stuck did not end within 50ms — disposing anyway"]);
+    expect(elapsed).toBeLessThan(1_000);
+    // A `stop()` that suddenly takes longer must not be silent — passing the grace is the one thing
+    // that can push teardown past the app's SIGKILL deadline, and the operator needs the session id.
+    expect(lines).toEqual(["session stuck did not end within 50ms — aborting it"]);
+  });
+
+  test("a session that ends inside the grace is NOT aborted", async () => {
+    const { handle } = await build({}, 50);
+    const abort = new AbortController();
+    handle.trackQuery("polite", abort, async () => { await Bun.sleep(5); });
+    await handle.dispose();
+    expect(abort.signal.aborted).toBe(false);
   });
 
   test("an end that REJECTS is a straggler, not a failure: teardown completes", async () => {
     const { handle, disposeOrder } = await build({}, 50);
-    handle.trackQuery("angry", FAKE_QUERY, () => Promise.reject(new Error("child already gone")));
+    handle.trackQuery("angry", new AbortController(), () => Promise.reject(new Error("child already gone")));
     await handle.dispose();
     expect(disposeOrder).toEqual(["sdk.dispose"]);
   });
 
   test("untrack removes a session that ended on its own — shutdown never re-ends it", async () => {
     const { handle, disposeOrder } = await build();
-    handle.trackQuery("done", FAKE_QUERY, async () => { disposeOrder.push("should-not-run"); });
+    handle.trackQuery("done", new AbortController(), async () => { disposeOrder.push("should-not-run"); });
     handle.untrack("done");
     await handle.dispose();
     expect(disposeOrder).toEqual(["sdk.dispose"]);
@@ -281,5 +328,41 @@ describe("dispose — G-14: every Query ends BEFORE the router disposes", () => 
     await handle.dispose();
     await handle.dispose();
     expect(disposeOrder).toEqual(["sdk.dispose"]);
+  });
+
+  // A LATCH WOULD NOT BE ENOUGH. A second `stop()` while the first is still draining must not
+  // return early: its caller goes straight on to close the session store and `runtime-state.db`,
+  // underneath a child that is still appending into both.
+  test("a CONCURRENT second dispose awaits the first — it never returns mid-drain", async () => {
+    const { handle, disposeOrder } = await build();
+    handle.trackQuery("slow", new AbortController(), async () => {
+      await Bun.sleep(30);
+      disposeOrder.push("slow");
+    });
+
+    const first = handle.dispose();
+    const second = handle.dispose();
+    await second;
+    // The second call did not come back before the drain finished…
+    expect(disposeOrder).toEqual(["slow", "sdk.dispose"]);
+    await first;
+    // …and the router was still disposed exactly once.
+    expect(disposeOrder.filter((s) => s === "sdk.dispose")).toHaveLength(1);
+  });
+
+  // Task 16's idle timer and resume paths run off timers that outlive `server.stop()`, so a session
+  // CAN be started after the drain. A silent no-op is the one answer that leaves a live child with
+  // nobody holding it.
+  test("trackQuery after dispose aborts the query immediately and says so", async () => {
+    const lines: string[] = [];
+    const { handle } = await build({ log: (line) => lines.push(line) });
+    await handle.dispose();
+
+    const abort = new AbortController();
+    let endCalled = false;
+    handle.trackQuery("late", abort, async () => { endCalled = true; });
+    expect(abort.signal.aborted).toBe(true);
+    expect(endCalled).toBe(false);
+    expect(lines).toEqual(["session late started during shutdown — aborting it immediately"]);
   });
 });

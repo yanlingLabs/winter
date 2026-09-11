@@ -728,7 +728,9 @@ describe("wired: session.create's mint-time sweep (session-activity-hygiene T6)"
 
 describe("wired: daemon.ts's boot sweep (session-activity-hygiene T6)", () => {
   let daemon: RunningDaemon | undefined;
-  afterEach(() => { daemon?.stop(); daemon = undefined; });
+  // AWAITED (P8b Task 5): `stop()`'s tail now closes the SessionStore too — it sits behind the
+  // Winter handle's dispose.
+  afterEach(async () => { await daemon?.stop(); daemon = undefined; });
 
   test("an old, empty, unattached session left over from a previous run is gone after the NEXT boot", async () => {
     const home = mkdtempSync(join(tmpdir(), "norma-reaper-boot-"));

@@ -74,10 +74,13 @@ describe("browser tool: the real daemon.ts wiring", () => {
   let home: string | undefined;
   let client: MiniClient | undefined;
 
-  afterEach(() => {
+  // AWAITED (P8b Task 5): `stop()`'s tail now closes the SessionStore too — it sits behind the
+  // Winter handle's dispose — so dropping the promise would rm the home out from under an open
+  // sqlite handle.
+  afterEach(async () => {
     client?.close();
     client = undefined;
-    daemon?.stop();
+    await daemon?.stop();
     daemon = undefined;
     if (home) rmSync(home, { recursive: true, force: true });
     home = undefined;

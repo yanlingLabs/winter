@@ -22,7 +22,7 @@
 //     model (re-read on every call). Both are noted at their definitions.
 import { existsSync } from "node:fs";
 import * as winter from "@yanlinglabs/winter-agent-sdk";
-import type { McpSdkServerConfigWithInstance, Query, SpawnClaudeCodeProcess } from "@yanlinglabs/winter-agent-sdk";
+import type { McpSdkServerConfigWithInstance, SpawnClaudeCodeProcess } from "@yanlinglabs/winter-agent-sdk";
 import type { AdvisorReviewer, ReviewerResolver } from "@yanlinglabs/winter-agent-sdk/tools";
 import { createRuntimeSdk as createRouterSdk } from "@yanlinglabs/winter-runtime-sdk";
 import type { RuntimeDirectoryOptions, RuntimeDirectoryStore, RuntimeSdk, RuntimeSdkOptions } from "@yanlinglabs/winter-runtime-sdk";
@@ -41,17 +41,23 @@ type RuntimeDirectoryRetention = NonNullable<RuntimeDirectoryOptions["retention"
 export type SessionMode = "code" | "dispatch" | "chat";
 
 /**
- * How long `dispose()` waits for ONE live session to end before it stops waiting for that one.
+ * How long `dispose()` waits for ONE live session to end before it aborts that one.
  *
- * ⚠️ TENSION WITH THE APP'S GRACE PERIOD, recorded rather than silently resolved: 8a's
- * `RUNTIME_SHUTDOWN_DRAIN_MS` is 1500 ms precisely because `DaemonSupervisor.gracefulExitTimeout`
- * (2.0 s, `apple/Norma/Sources/App/DaemonSupervisor.swift`) SIGKILLs the daemon after that, and a
- * teardown budgeted above it is force-killed mid-drain with the lock still on disk. 5000 ms is the
- * controller's ruling (P8b-11) and is what ships; in the ordinary case — a child that ends when its
- * prompt queue closes — this costs microseconds, and the budget is only reached by a straggler. A
- * straggler therefore pushes `stop()` past the app's grace. Overridable per call for tests.
+ * 300 ms, AND THE NUMBER IS ARITHMETIC, not taste (P8b-32). The whole of teardown has to fit inside
+ * `DaemonSupervisor.gracefulExitTimeout` — 2.0 s, `apple/Norma/Sources/App/DaemonSupervisor.swift` —
+ * after which the app SIGKILLs the daemon; a teardown that overruns is killed mid-drain, so
+ * `lock.release()` never runs, the socket file is left on disk, and the supervisor drops to
+ * `.connectOnly` on the next launch. 8a already spends 1500 ms of that budget on its own deletion
+ * drain (`RUNTIME_SHUTDOWN_DRAIN_MS`), and the two are SEQUENTIAL in `daemon.ts`'s `stop()`:
+ *
+ *     SHUTDOWN_QUERY_GRACE_MS (300) + RUNTIME_SHUTDOWN_DRAIN_MS (1500) = 1800 < 2000
+ *
+ * `create.test.ts` asserts that inequality, so the next edit to either number trips a test instead
+ * of shipping a stale socket. In the ordinary case — a child that ends when its prompt queue closes
+ * — this costs microseconds; the budget is only reached by a straggler, and a straggler is ABORTED
+ * rather than merely abandoned (G-14's "aborts stragglers"). Overridable per call for tests.
  */
-export const SHUTDOWN_QUERY_GRACE_MS = 5_000;
+export const SHUTDOWN_QUERY_GRACE_MS = 300;
 
 /** What `Options` needs to spawn a child (P8b-1). `spawnClaudeCodeProcess` is left to the SDK's
  *  `defaultSpawn` on path (a); path (b) fills it in here and nowhere else. */
@@ -106,9 +112,20 @@ export interface NormaRuntimeSdk {
    * and NEVER falls back to anything — a session on the Winter leg refuses at create instead.
    */
   spawnHookFor(mode: SessionMode): WinterSpawnHook | WinterExecutableUnavailable;
-  /** Register a live session so shutdown can end it. `end` closes the prompt queue, awaits the
-   *  iteration and aborts a straggler — it is the session's own, and it must be idempotent. */
-  trackQuery(sessionId: string, query: Query, end: () => Promise<void>): void;
+  /**
+   * Register a live session so shutdown can end it — GRACEFULLY FIRST, THEN BY FORCE.
+   *
+   * `end` is the session's own graceful teardown (close the prompt queue, await the iteration); it
+   * must be idempotent. `abort` is the session's `AbortController` — the same one its `Options`
+   * carry — and it is what makes G-14's "aborts stragglers" true rather than delegated: if `end`
+   * has not resolved when the grace expires, `dispose()` calls `abort.abort()` itself. That matters
+   * because Winter's `Query` has NO `close()`: once this process stops holding the session, nothing
+   * can reach the child again, and the cost G-14 names is a leaked child surviving the daemon.
+   *
+   * Registering after `dispose()` has run is refused (and the query aborted immediately) rather
+   * than silently recorded — an entry added to a drained map would never be ended at all.
+   */
+  trackQuery(sessionId: string, abort: AbortController, end: () => Promise<void>): void;
   /** Forget a session that ended on its own. WITHOUT THIS the map would grow for the daemon's
    *  whole lifetime and shutdown would `end()` sessions that finished hours ago. */
   untrack(sessionId: string): void;
@@ -120,7 +137,9 @@ export interface NormaRuntimeSdk {
    * `messaging.releaseHeld(receiver)` takes an address and is NOT this shape.
    */
   readonly messaging?: { releaseHeld?: () => void | Promise<void> };
-  /** G-14: end every tracked session, THEN dispose the router. Idempotent. */
+  /** G-14: end (then abort) every tracked session, THEN dispose the router. Idempotent, and a
+   *  CONCURRENT second call awaits the first rather than returning early — its caller would
+   *  otherwise close the stores a still-draining child is writing into. */
   dispose(): Promise<void>;
 }
 
@@ -177,16 +196,25 @@ function advisorFrom(deps: NormaRuntimeSdkDeps): { advisor?: NonNullable<Runtime
   return { advisor: { resolveReviewer } };
 }
 
-/** Await `end()`, but never longer than `ms`, and never fail because it did. A session that will
- *  not end must not hold the whole daemon's teardown, and a rejecting `end` is a straggler too.
+/**
+ * Await `end()`, but never longer than `ms` — and when the budget runs out, ABORT.
  *
- *  A straggler is LOGGED, because a `stop()` that suddenly takes seconds is otherwise silent and
- *  the operator has nothing to correlate it with — and because passing the grace is the one thing
- *  that can push teardown past the app's own SIGKILL deadline (see `SHUTDOWN_QUERY_GRACE_MS`). */
-function endWithin(sessionId: string, end: () => Promise<void>, ms: number, log?: (line: string) => void): Promise<void> {
+ * G-14's wording is "closes queues, awaits iterations with a bounded grace, aborts stragglers", and
+ * the abort is the half that cannot be delegated: Winter's `Query` has no `close()`, so a child
+ * that outlives this function is unreachable for the rest of the process's life and then survives
+ * it. `abort.abort()` is the session's own controller — the one its `Options` carry — so the child
+ * sees a cancelled turn and exits rather than being orphaned mid-turn.
+ *
+ * Never fails because a session misbehaved: a rejecting `end` is a straggler too, and a session
+ * that will not end must not hold the whole daemon's teardown. Both cases are LOGGED — a `stop()`
+ * that suddenly takes longer is otherwise silent, and passing the grace is the one thing that can
+ * push teardown past the app's SIGKILL deadline (see `SHUTDOWN_QUERY_GRACE_MS`).
+ */
+function endWithin(sessionId: string, abort: AbortController, end: () => Promise<void>, ms: number, log?: (line: string) => void): Promise<void> {
   return new Promise<void>((resolve) => {
     const timer = setTimeout(() => {
-      log?.(`session ${sessionId} did not end within ${ms}ms — disposing anyway`);
+      log?.(`session ${sessionId} did not end within ${ms}ms — aborting it`);
+      try { abort.abort(); } catch { /* an already-aborted controller is the outcome we wanted */ }
       resolve();
     }, ms);
     const done = (): void => { clearTimeout(timer); resolve(); };
@@ -217,14 +245,26 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
     handoff: { winterHome: deps.home },
     // G-12. `official.permissionClass` is deliberately omitted until 8c (C-14): there is no
     // official peer in 8b and it gates inbound delivery to official sessions only.
+    //
+    // CARRY FOR TASKS 13/16: `directory` carries `retention` and nothing else, so the router's own
+    // `RuntimeDirectoryRecoveryHooks` (`revalidateProcessIdentity`, `reattachSupervised`) stay
+    // unset and its `recoverDirectory` reattaches nothing. That is correct for 8b — 8a owns
+    // recovery, and its twelve steps have already run by the time this handle exists — but the day
+    // a Winter child must be re-adopted across a daemon restart (`PersistedWinterChild`, P8b-15),
+    // this is the door those hooks come through.
     messaging: { directory: { retention: retentionFrom(deps.settings) } },
     ...advisorFrom(deps),
   });
 
-  // sessionId → that session's own `end`. Keyed by session so a resumed session replaces its
-  // predecessor's entry rather than accumulating one.
-  const live = new Map<string, () => Promise<void>>();
-  let disposed = false;
+  // sessionId → that session's graceful teardown and its abort controller. Keyed by session so a
+  // resumed session replaces its predecessor's entry rather than accumulating one.
+  const live = new Map<string, { abort: AbortController; end: () => Promise<void> }>();
+  // THE IN-FLIGHT dispose, not a boolean. A bare latch would let a second `stop()` — the app's
+  // SIGTERM racing the CLI's own shutdown is a real shape — return IMMEDIATELY while the first is
+  // still draining, and its caller would then close the session store and `runtime-state.db`
+  // underneath a child that is still appending into both. That is precisely the ordering G-14
+  // exists to guarantee, so the second caller awaits the first instead.
+  let disposing: Promise<void> | undefined;
 
   return {
     sdk,
@@ -238,21 +278,32 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
       });
       return resolution.ok ? { pathToClaudeCodeExecutable: resolution.path } : resolution.error;
     },
-    trackQuery(sessionId: string, _query: Query, end: () => Promise<void>): void {
-      live.set(sessionId, end);
+    trackQuery(sessionId: string, abort: AbortController, end: () => Promise<void>): void {
+      if (disposing !== undefined) {
+        // The map has already been drained, so an entry added here would never be ended. Task 16's
+        // idle timer and resume paths run off timers that outlive `server.stop()`, so this is
+        // reachable — and a silent no-op is the one answer that leaves a live child with nobody
+        // holding it.
+        deps.log?.(`session ${sessionId} started during shutdown — aborting it immediately`);
+        try { abort.abort(); } catch { /* already aborted: the outcome we wanted */ }
+        return;
+      }
+      live.set(sessionId, { abort, end });
     },
     untrack(sessionId: string): void {
       live.delete(sessionId);
     },
-    async dispose(): Promise<void> {
-      if (disposed) return;
-      disposed = true;
-      const grace = overrides.grace ?? SHUTDOWN_QUERY_GRACE_MS;
-      const ends = [...live.entries()];
-      live.clear();
-      // ALL of them, in parallel, each under its own budget — then, and only then, the router.
-      await Promise.all(ends.map(([sessionId, end]) => endWithin(sessionId, end, grace, deps.log)));
-      await sdk.dispose();
+    dispose(): Promise<void> {
+      if (disposing !== undefined) return disposing;
+      disposing = (async () => {
+        const grace = overrides.grace ?? SHUTDOWN_QUERY_GRACE_MS;
+        const sessions = [...live.entries()];
+        live.clear();
+        // ALL of them, in parallel, each under its own budget — then, and only then, the router.
+        await Promise.all(sessions.map(([sessionId, s]) => endWithin(sessionId, s.abort, s.end, grace, deps.log)));
+        await sdk.dispose();
+      })();
+      return disposing;
     },
   };
 }
