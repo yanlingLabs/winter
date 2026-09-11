@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { Mode, ToolRegistry } from "./registry";
-import { guardAgentName, type BackgroundAgentRegistry } from "../bg-agent-registry";
+import { guardAgentName, type AgentRegistry } from "../bg-agent-registry";
 import type { BackgroundTaskRegistry } from "../bg-registry";
 
 /**
@@ -23,13 +23,14 @@ import type { BackgroundTaskRegistry } from "../bg-registry";
  * turn — the detached chain's own eventual settle-time claim (`takeForNotification`, engine.ts's
  * `notifyBgCompletion`, built for `run_in_background`'s DETACHED completions) must never persist a
  * task_notification for an agent the caller just stopped itself. Set directly on the live entry
- * object (register()'d/returned by the SAME Map) — no new BackgroundAgentRegistry method needed;
- * the entry is a live reference, not a copy.
+ * object. P8b Task 13 REPLACED that field write with `markNotified(agentId)`: the persisted
+ * registry materialises its entries from a table, so a write to the returned object would have set
+ * a flag on a copy and the notice would have re-surfaced on a later turn.
  */
 export function registerTaskStopTool(
   r: ToolRegistry,
   deps: {
-    bgAgents?: BackgroundAgentRegistry;
+    bgAgents?: AgentRegistry;
     bgRegistry?: BackgroundTaskRegistry;
     // D1-T2: widened from `boolean` to `boolean | Mode[]` (registry.ts's ToolDefinition.deferred) —
     // ONE mechanism, not two. task_stop is the tool this slice's brief specifically flagged as
@@ -71,7 +72,10 @@ export function registerTaskStopTool(
         if (!guard.ok) throw new Error(guard.error);
         if (entry.status === "running") {
           bgAgents!.stop(entry.agentId);
-          entry.notified = true;
+          // P8b Task 13: a METHOD, never a field write. `get()` on the persisted registry
+          // materialises its entry from a table, so the old `entry.notified = true` would have set a
+          // flag on a copy and let the notice re-surface on a later turn.
+          bgAgents!.markNotified(entry.agentId);
           return `stopped agent '${task_id}'`;
         }
         return `agent '${task_id}' already ${entry.status}`;

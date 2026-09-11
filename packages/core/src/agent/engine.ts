@@ -37,7 +37,7 @@ import { resolveWithinAny, isWithin, canonicalizeForWrite, resolveLeafSymlinks }
 import type { WorktreeManager } from "./worktree";
 import type { SubagentManager } from "./subagents";
 import type { AgentStore } from "./agents";
-import { guardAgentName, type AgentStatus, type BackgroundAgentRegistry, type ResumeContext } from "./bg-agent-registry";
+import { guardAgentName, type AgentRegistry, type AgentStatus, type ResumeContext } from "./bg-agent-registry";
 import type { HookResult } from "../plugins/hook-runner";
 import type { ComputerUseService } from "./computer-use";
 import { SubagentTranscripts } from "./subagent-transcript";
@@ -910,7 +910,7 @@ export interface EngineConfig {
   // `run_in_background:true` while this is unset fails as a typed error (see the bridge below)
   // rather than silently falling back to the synchronous path, so a caller never gets a "running"
   // tool_result for a detached child nothing is actually tracking.
-  bgAgents?: BackgroundAgentRegistry;
+  bgAgents?: AgentRegistry;
   // Dispatch (Phase 7): getter — daemon wires the registry after engine construction (computerUse
   // precedent: `let dispatchChildren` is declared before `new AgentEngine(...)`, this closure
   // reads it live, then daemon.ts assigns it right after construction). Absent (every test/config

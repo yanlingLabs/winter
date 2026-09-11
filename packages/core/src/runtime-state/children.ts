@@ -12,6 +12,9 @@
 // finished. `running` becomes `interrupted` only for children whose process/thread the caller has
 // PROVEN gone — the proof is the caller's (`isGone`), because only the runtime that owned the child
 // can establish it.
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import type { ResumeContext } from "../agent/bg-agent-registry";
 import type { RuntimeStateDb } from "./db";
 
 export type ChildStatus = "running" | "interrupted" | "completed" | "failed" | "stopped" | "timeout";
@@ -208,6 +211,34 @@ export class RuntimeChildren {
     return rows.map(fromRow);
   }
 
+  /**
+   * Every parent that minted this `childId` (P8b Task 13).
+   *
+   * WHY IT EXISTS AT ALL: `BackgroundAgentRegistry.get(idOrName)` accepts an id with NO session — it
+   * scanned one in-memory map. A table cannot be scanned by a key it is not indexed on without
+   * saying so, and a `get` that silently answered about somebody else's child would be the exact
+   * confusion `ChildRef` was introduced to prevent, so the answer is a LIST and the caller decides.
+   * In practice every live call site passes a session id and this is the defensive path.
+   */
+  locate(childId: string): ChildRef[] {
+    const rows = this.rs.db
+      .query(`SELECT parent_winter_session_id AS parent FROM runtime_children WHERE child_id = ? ORDER BY started_at, parent_winter_session_id`)
+      .all(childId) as Array<{ parent: string }>;
+    return rows.map((r) => ({ parent: r.parent, childId }));
+  }
+
+  /** Children carrying this display NAME, optionally within one parent. The same name in two
+   *  sessions is legal and always has been (`BackgroundAgentRegistry`'s own test says so), which is
+   *  why an unscoped lookup returns every match rather than picking one. */
+  findByName(name: string, parent?: string): PersistedWinterChild[] {
+    const where = parent === undefined ? "name = ?" : "name = ? AND parent_winter_session_id = ?";
+    const args = parent === undefined ? [name] : [name, parent];
+    const rows = this.rs.db
+      .query(`SELECT ${CHILD_COLUMNS} FROM runtime_children WHERE ${where} ORDER BY started_at, child_id`)
+      .all(...args) as ChildDbRow[];
+    return rows.map(fromRow);
+  }
+
   /** `completedAt` defaults to now for a terminal status and is left untouched otherwise — an
    *  interrupted child has not completed. Unknown (parent, childId) is a no-op. */
   setStatus(parent: string, childId: string, status: ChildStatus, completedAt?: string): void {
@@ -257,5 +288,113 @@ export class RuntimeChildren {
       }
       return { interrupted, kept };
     });
+  }
+}
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────────────────────────
+ * THE CHILD PROFILE — what `resumeContextRef` points AT (P8b Task 13).
+ *
+ * `PersistedWinterChild` is identity and outcome: who this child is, what it ran as, whether it is
+ * over. WS-16 §12's rule that every value on that row is "a locator or an effective fact" is what
+ * keeps it a row rather than a serialized closure — and it is also why the row cannot hold the
+ * `ResumeContext` itself, which is a dozen fields of agent definition, instructions and the child's
+ * own opening prompt. `resumeContextRef` is the locator; THIS is the sink it locates.
+ *
+ * WHY UNDER `runtimes/` AND NOWHERE ELSE. A profile carries `instructions` and `openingPrompt` —
+ * model-authored text, and on a resume it is replayed verbatim into a child's first turn. `runtimes/`
+ * is the one tree `daemon.ts` denies the read tools outright (alongside `run/`), so a prompt-injected
+ * turn cannot read back what a sibling child was told to do. A profile beside the session's JSONL
+ * would be readable by every `read` call in the daemon.
+ *
+ * WRITES ARE ATOMIC (temp + rename), because a torn profile is worse than an absent one: an absent
+ * one makes a child "not resumable" (which `ResumeContext`'s own doc already tells callers to handle),
+ * and a half-written one makes it resumable with half its instructions.
+ */
+export interface ChildProfile {
+  /** The child thread's id — `AgentEntry.threadId`, which has no column on the row. */
+  threadId: string;
+  /** The final result string, once the child is over. */
+  result?: string;
+  /** Whether a completion notice has already been claimed for this child (exactly-once). */
+  notified: boolean;
+  /** Everything a resume needs except the resume message and a fresh `AbortController`. */
+  resume?: ResumeContext;
+}
+
+/** The per-session memory behind `checkNameNotStale`: which agent each NAME first, successfully
+ *  reached. In-memory in `BackgroundAgentRegistry` (its own map's lifetime was the daemon's); durable
+ *  here, because the children it guards now outlive the daemon and a guard that forgot across a
+ *  restart would let a stale model reference reach the wrong child exactly once per boot. */
+export type NameReach = Record<string, string>;
+
+export class ChildProfiles {
+  /** `<home>/runtimes/children`. */
+  private readonly root: string;
+
+  constructor(home: string) {
+    this.root = join(home, "runtimes", "children");
+  }
+
+  /** The value written to `PersistedWinterChild.resumeContextRef`: a RELATIVE locator, so a home
+   *  that moves (a dev profile, a restored backup) does not orphan every child's profile. */
+  refFor(parent: string, childId: string): string {
+    return join("children", encodeURIComponent(parent), `${encodeURIComponent(childId)}.json`);
+  }
+
+  private pathFor(parent: string, childId: string): string {
+    return join(this.root, encodeURIComponent(parent), `${encodeURIComponent(childId)}.json`);
+  }
+
+  private writeAtomic(path: string, value: unknown): void {
+    mkdirSync(dirname(path), { recursive: true });
+    const tmp = `${path}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(value), "utf8");
+    renameSync(tmp, path);
+  }
+
+  /** Never throws: a profile that cannot be read is a child that is not resumable, which every
+   *  caller already handles, and is never a reason to fail the roster it belongs to. */
+  read(parent: string, childId: string): ChildProfile | undefined {
+    try {
+      return JSON.parse(readFileSync(this.pathFor(parent, childId), "utf8")) as ChildProfile;
+    } catch {
+      return undefined;
+    }
+  }
+
+  write(parent: string, childId: string, profile: ChildProfile): void {
+    this.writeAtomic(this.pathFor(parent, childId), profile);
+  }
+
+  /** Merge one or two fields without re-stating the rest. A missing profile is created from the
+   *  patch — losing a `result` because the profile had gone would be worse than an odd one. */
+  patch(parent: string, childId: string, patch: Partial<ChildProfile>): void {
+    const current = this.read(parent, childId) ?? { threadId: "", notified: false };
+    this.write(parent, childId, { ...current, ...patch });
+  }
+
+  remove(parent: string, childId: string): void {
+    try {
+      rmSync(this.pathFor(parent, childId), { force: true });
+    } catch {
+      /* a profile that will not delete is a stale file, never a failed operation */
+    }
+  }
+
+  private reachPath(parent: string): string {
+    return join(this.root, encodeURIComponent(parent), "name-reach.json");
+  }
+
+  reach(parent: string): NameReach {
+    try {
+      return JSON.parse(readFileSync(this.reachPath(parent), "utf8")) as NameReach;
+    } catch {
+      return {};
+    }
+  }
+
+  recordReach(parent: string, name: string, agentId: string): void {
+    this.writeAtomic(this.reachPath(parent), { ...this.reach(parent), [name]: agentId });
   }
 }

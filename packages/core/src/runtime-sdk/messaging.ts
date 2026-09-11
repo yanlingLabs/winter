@@ -59,12 +59,12 @@ import type {
   RuntimeSdk,
   SerializedRuntimeAddress,
 } from "@yanlinglabs/winter-runtime-sdk";
+import type { NormaRuntimeSdk } from "./create";
+import { NORMA_PEER_VERSIONS } from "./versions";
 
 /** The router's own `LiveSessionStatus`, which its barrel does not re-export (`messaging/sessions.d.ts`
  *  declares it, `index.d.ts` omits it). Same declaration, not a widening. */
 type LiveSessionStatus = ListedRuntimeObject["status"];
-import type { NormaRuntimeSdk } from "./create";
-import { NORMA_PEER_VERSIONS } from "./versions";
 
 /** What a session that has never named its runtime choice records. NOT an invention of facts: every
  *  field is a literal "not stated", and `reason` says so in the one place an operator reads it
@@ -333,4 +333,20 @@ export async function releaseAllHeld(
     }
   }
   return outcomes;
+}
+
+/**
+ * The live messaging facet for one attached session, by its BACKEND id (P8b Task 13's door).
+ *
+ * Task 13's `task_stop` reaches a child through its OWNING session's facet — "a child engine has no
+ * facet surface of its own" (surface map §9.2) — and the only registry of live facets is the one
+ * `attachWinterSession` writes into. The address construction lives here so no other module has to
+ * know that a Norma session is addressed by its backend id.
+ *
+ * The facet that comes back is the WRAPPER from `attachWinterSession`: `steerChild`/`resumeChild`
+ * reach the real `Query.messaging` untouched, and only `deliver` is re-pointed at the host queue.
+ */
+export function attachedFacetFor(runtime: Pick<NormaRuntimeSdk, "sdk">, backendSessionId: string): SessionMessagingFacet | undefined {
+  const address = serializeRuntimeAddress(buildSessionAddress(backendSessionId)) as SerializedRuntimeAddress;
+  return runtime.sdk.messaging.winterAdapter.sessions.get(address)?.messaging;
 }

@@ -71,7 +71,7 @@ import { PlanBroker } from "./agent/plans";
 import { WorktreeManager } from "./agent/worktree";
 import { AgentStore } from "./agent/agents";
 import { SubagentManager } from "./agent/subagents";
-import { BackgroundAgentRegistry } from "./agent/bg-agent-registry";
+import { BackgroundAgentRegistry, createPersistedChildren, type AgentRegistry } from "./agent/bg-agent-registry";
 import { AgentEngine, SYSTEM_PROMPT } from "./agent/engine";
 import { OutputStyleStore } from "./agent/output-styles";
 import { Dreamer } from "./agent/dreamer";
@@ -104,6 +104,8 @@ import { makeApply } from "./settings-apply";
 import { SettingsWatcher } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "./runtime-sdk/create";
+import { attachedFacetFor } from "./runtime-sdk/messaging";
+import { ChildProfiles } from "./runtime-state/children";
 import { makeDaemonRoutineRunner } from "./routines/runner";
 import { makeRoutineScheduler } from "./routines/scheduler";
 import type { NewSessionEvent } from "@norma/protocol";
@@ -928,7 +930,45 @@ export async function startDaemon(opts: {
     // (that one owns backgrounded bash processes; this one owns agent threads). Built
     // unconditionally alongside `subagents` — both are required together for the spawn bridge's
     // async branch to activate (engine.ts's EngineConfig.bgAgents doc comment).
-    const bgAgents = new BackgroundAgentRegistry();
+    //
+    // P8b Task 13 (C-12 / P8b-15): DURABLE when the 8a spine opened, in-memory when it did not.
+    //
+    // `BackgroundAgentRegistry` is one `Map`, so every daemon restart lost the whole roster — the
+    // names a model was still using, which children had finished, and every `ResumeContext` that
+    // made `resume` possible (WS-17 §8 row 6). 8a shipped `runtime_children` and its
+    // reclassification rule and wired it to nothing; `createPersistedChildren` is that wiring, and
+    // it satisfies the same `AgentRegistry` contract every consumer here already takes, so the
+    // engine's spawn bridge, `task_stop`, `agent_list`/`agent_output` and the `thread.send`/
+    // `agent.stop` RPCs are untouched.
+    //
+    // A SPINE THAT WOULD NOT OPEN FALLS BACK, never fails: children are then exactly as durable as
+    // they were before this task, which is the same "runtime routing degraded, boot continues"
+    // posture the spine itself takes.
+    //
+    // `stallTimeoutMs` is the LIVE getter, the same one `SubagentManager` reads: the progress-stall
+    // window is a setting and no setting may require a restart. The two watchdogs coexist safely
+    // while the engine lives — each is one-shot and disarmed by the first terminal transition, so
+    // whichever fires first is the only one that reports (see `arm`'s own note).
+    const bgAgents: AgentRegistry =
+      runtime === undefined
+        ? new BackgroundAgentRegistry()
+        : createPersistedChildren({
+            store: runtime.children,
+            profiles: new ChildProfiles(normaHome),
+            providerId: () => settings?.provider?.type ?? "unstated",
+            stallTimeoutMs: () => settings?.subagents?.stallTimeoutMs,
+            // The owning session's live facet — Task 16 attaches Winter sessions, and until then a
+            // stop with no local `AbortController` is recorded and nothing is asked of the child.
+            facetFor: (sessionId) => {
+              // A child's `parentWinterSessionId` is NORMA's session id; the router addresses a
+              // session by its BACKEND id (P8b Task 12), so the 8a record is the hop between them.
+              // Nothing attaches until Task 16, so this answers `undefined` today and a stop with
+              // no local controller is recorded without anything being asked of the child.
+              const backend = runtime.records.get(sessionId)?.backendSessionId;
+              return backend === undefined || runtimeSdk === undefined ? undefined : attachedFacetFor(runtimeSdk, backend);
+            },
+            log: (line) => console.error(`children: ${line}`),
+          });
     // CC-parity phase 3 (Workflows, Task B2): constructed unconditionally alongside bgAgents (same
     // "always build it, the tool/bridge itself decides whether to use it" shape spawn_agent's own
     // subagents/agents above follow) — PRODUCTION deps only: no `workerCommand` override (that's a

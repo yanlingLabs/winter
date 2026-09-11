@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { ToolRegistry } from "./registry";
-import type { BackgroundAgentRegistry } from "../bg-agent-registry";
+import type { AgentRegistry } from "../bg-agent-registry";
 import type { SessionStore } from "../../sessions/store";
 
 /**
@@ -20,7 +20,7 @@ import type { SessionStore } from "../../sessions/store";
 export function registerAgentQueryTools(
   r: ToolRegistry,
   deps: {
-    bgAgents: BackgroundAgentRegistry;
+    bgAgents: AgentRegistry;
     store: Pick<SessionStore, "read">;
     // Subagent transcript files (CC parity) — threaded through like `store`/`bgAgents` above.
     // Optional/absent (e.g. a test harness that never wires it) → agent_output simply never shows
