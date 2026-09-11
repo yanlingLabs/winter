@@ -119,8 +119,10 @@ export function assistantText(frame: AssistantFrame): string {
  *
  * `name` is the NORMA name (ruling P8b-25): the `SessionEvent` surface keeps Norma's tool
  * vocabulary because the Mac and iOS renderers key their tool rows on it and every past session in
- * `session.history` spells it that way. `renameTool` is the one translation point — see
- * `tool-names.ts`. An unmapped Winter name falls through unchanged rather than being dropped.
+ * `session.history` spells it that way. `renameTool` is the one translation point and it reads the
+ * SHARED table, `runtime-sdk/tool-names.ts` — the same one the approval bridge gates by, so the
+ * name on a card and the name in the transcript cannot drift. An unmapped Winter name falls through
+ * unchanged rather than being dropped.
  */
 export function toolCalls(frame: AssistantFrame, sessionId: string, threadId: string, renameTool: (winterName: string) => string): ProjectedEvent[] {
   const out: ProjectedEvent[] = [];

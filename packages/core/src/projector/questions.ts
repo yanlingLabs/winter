@@ -28,7 +28,9 @@
  * saying so, and `PROJECTED_EVENT_COVERAGE` marks all four variants `false` with the producer named.
  */
 
-/** The SDK's question tool, and the Norma name it is projected under (ruling P8b-25). */
+/** The SDK's question tool, and the Norma names it can be projected under. The shared table maps
+ *  `AskUserQuestion` → `ask_user` (`runtime-sdk/tool-names.ts`); `AskQuestion` is Norma's own
+ *  chat-mode question tool and is listed so a session driven under either name is recognised. */
 export const QUESTION_TOOLS: readonly string[] = ["AskUserQuestion", "AskQuestion", "ask_user"];
 
 /** True for the tool whose answers the question bridge owns. Read by `index.ts` only to log the

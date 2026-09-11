@@ -72,6 +72,25 @@ describe("projector: conversation fold (Winter 8b Task 10)", () => {
     expect(seen("BrandNewWinterTool")).toBe("BrandNewWinterTool");
   });
 
+  test("the SHARED table is the one source — where it differed from the projector's private copy, it wins", () => {
+    // The private `projector/tool-names.ts` is deleted; `renameTool` reads the policy lane's
+    // `runtime-sdk/tool-names.ts`, the same table the approval bridge gates by, so the name on a
+    // permission card and the name in the transcript cannot drift apart. Two of the private table's
+    // rows differed, and neither appears in any fixture or golden:
+    //   `Monitor`          private `bash_output` → shared has NO pair, so it falls through unchanged
+    //                      (it IS in WINTER_TOOL_GATE_CLASS as `bash`, which is a gating decision,
+    //                      not a display name).
+    //   `AskUserQuestion`  private `AskQuestion` → shared `ask_user`.
+    const { projector } = makeProjector();
+    const seen = (winter: string) => (accept(projector, assistantToolUse(`c-${winter}`, winter, {}))[0] as { name: string }).name;
+    expect(seen("Monitor")).toBe("Monitor");
+    expect(seen("AskUserQuestion")).toBe("ask_user");
+    // and the rows the two tables always agreed on are unchanged
+    expect(seen("Read")).toBe("read");
+    expect(seen("Agent")).toBe("spawn_agent");
+    expect(seen("TaskOutput")).toBe("agent_output");
+  });
+
   test("text AND tool_use in one assistant message: assistant_message first, then the tool_call", () => {
     const { projector } = makeProjector();
     const out = accept(projector, {

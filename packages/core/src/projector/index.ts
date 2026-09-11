@@ -9,7 +9,7 @@ import { classifyThrown } from "./errors";
 import { isKnownUnpersistedKind, kindOf, summarize } from "./hooks";
 import { isQuestionTool } from "./questions";
 import { projectTerminal, totalsOf, type UsageTotals } from "./terminal";
-import { normaToolNameFor } from "./tool-names";
+import { normaToolNameFor } from "../runtime-sdk/tool-names";
 import { ProjectorRefusedError } from "./types";
 import type { CheckpointStore, ProjectedBatch, ProjectedEvent, Projector, ProjectorDeps, ProjectorRefusal, ProtocolSdkMessage } from "./types";
 
@@ -27,7 +27,7 @@ export {
 export { UNPERSISTED_KINDS, isKnownUnpersistedKind, kindOf, summarize } from "./hooks";
 export { QUESTION_TOOLS, isQuestionTool } from "./questions";
 export { MAIN_THREAD, threadIdOf } from "./conversation";
-export { normaToolNameFor } from "./tool-names";
+export { normaToolNameFor } from "../runtime-sdk/tool-names";
 export { ProjectorRefusedError } from "./types";
 export type {
   CheckpointStore, Logger, ProjectedBatch, ProjectedEvent, ProjectionCursorInput, ProjectionKey,
@@ -531,10 +531,10 @@ class ProjectorImpl implements Projector {
    * call or inventing a name would corrupt the transcript and break the `callId` linkage the Mac
    * and iOS renderers fold on.
    *
-   * The table lives in `projector/tool-names.ts`, which is a PRIVATE stand-in. The canonical shared
-   * table is `runtime-sdk/tool-names.ts` and it is the POLICY LANE'S to write; this copy is
-   * switched over to it — and deleted — in the integration resume, once that module has landed. A
-   * controller-ruled deferral, not an outstanding promise from this lane.
+   * The table is `runtime-sdk/tool-names.ts` — the policy lane's canonical `WINTER_NORMA_TOOL_PAIRS`,
+   * shared with the approval bridge's `gateToolNameFor`. ONE table: the name the gate classifies by
+   * and the name the transcript records cannot drift apart, which they could while the projector
+   * carried its own copy (that private stand-in is deleted).
    */
   private renameTool(winterName: string): string {
     const norma = normaToolNameFor(winterName);
