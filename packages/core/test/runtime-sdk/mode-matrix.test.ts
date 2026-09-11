@@ -12,7 +12,11 @@ import {
   CAPABILITY_TOOL_MODES, CHAT_DISALLOWED_BUILTINS, CHAT_ALLOWED_WINTER_TOOLS,
   type WinterOptionsInput,
 } from "../../src/runtime-sdk/mode-options";
-import { gateClassFor, normaToolNameFor, winterToolNameFor, WINTER_ADVERTISED_TOOLS_0_0_3, WINTER_OWN_TOOL_NAMES, WINTER_NORMA_TOOL_PAIRS } from "../../src/runtime-sdk/tool-names";
+import {
+  gateClassFor, normaToolNameFor, winterToolNameFor,
+  WINTER_ADVERTISED_TOOLS_0_0_3, WINTER_ADVERTISED_TOOLS_0_0_3_BASE, WINTER_ADVERTISED_MCP_TOOLS_0_0_3,
+  WINTER_OWN_TOOL_NAMES, WINTER_NORMA_TOOL_PAIRS,
+} from "../../src/runtime-sdk/tool-names";
 
 type Mode = "code" | "dispatch" | "chat";
 const MODES: Mode[] = ["code", "dispatch", "chat"];
@@ -322,9 +326,10 @@ test("CHAT_DISALLOWED_BUILTINS is pinned, and covers every tool the CHILD actual
   expect(CHAT_DISALLOWED_BUILTINS).toEqual([
     "Agent", "Bash", "CronCreate", "CronDelete", "CronList", "Edit", "EnterPlanMode", "EnterWorktree",
     "ExitPlanMode", "ExitWorktree", "Glob", "Grep", "LSP", "ListMcpResourcesTool", "Monitor",
-    "NotebookEdit", "PushNotification", "Read", "ReadMcpResourceTool", "ReportFindings",
-    "ScheduleWakeup", "Skill", "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop",
-    "TaskUpdate", "ToolSearch", "WebFetch", "WebSearch", "Workflow", "Write",
+    "NotebookEdit", "PushNotification", "Read", "ReadMcpResourceDirTool", "ReadMcpResourceTool",
+    "RefreshMcpTools", "ReportFindings", "ScheduleWakeup", "Skill", "TaskCreate", "TaskGet",
+    "TaskList", "TaskOutput", "TaskStop", "TaskUpdate", "ToolSearch", "WaitForMcpServers",
+    "WebFetch", "WebSearch", "Workflow", "Write",
   ]);
   // THE invariant, stated as a set relation rather than a literal: every advertised name is either
   // chat-allowed or chat-disallowed. An SDK bump that advertises a new tool fails here.
@@ -335,16 +340,78 @@ test("CHAT_DISALLOWED_BUILTINS is pinned, and covers every tool the CHILD actual
   }
 });
 
-test("the advertised set is pinned to what the BUILT BINARY reported at 0.0.3", () => {
+test("the advertised BASE set is pinned to what the BUILT BINARY reported at 0.0.3", () => {
   // Measured: `dist/winter` driven through `query()` with `model: "winter-test/echo"` under a temp
-  // home and NORMA_BRAND's names; `system/init.tools`, verbatim. Task 16's e2e asserts the live
-  // `system/init.tools` equals this — the tripwire for an SDK bump.
-  expect(WINTER_ADVERTISED_TOOLS_0_0_3).toHaveLength(31);
-  expect([...WINTER_ADVERTISED_TOOLS_0_0_3].sort()).toEqual([...WINTER_ADVERTISED_TOOLS_0_0_3]);
+  // home and NORMA_BRAND's names; `system/init.tools`, verbatim — with NO MCP servers declared.
+  expect(WINTER_ADVERTISED_TOOLS_0_0_3_BASE).toHaveLength(31);
+  expect([...WINTER_ADVERTISED_TOOLS_0_0_3_BASE].sort()).toEqual([...WINTER_ADVERTISED_TOOLS_0_0_3_BASE]);
   // Two measured facts the exclusion logic leans on.
-  expect(WINTER_ADVERTISED_TOOLS_0_0_3).not.toContain("WebFetch");   // not advertised at 0.0.3…
-  expect(WINTER_ADVERTISED_TOOLS_0_0_3).not.toContain("WebSearch");  // …but disallowed anyway (P8b-33)
-  expect(WINTER_ADVERTISED_TOOLS_0_0_3).toContain("Monitor");
+  expect(WINTER_ADVERTISED_TOOLS_0_0_3_BASE).not.toContain("WebFetch");   // not advertised at 0.0.3…
+  expect(WINTER_ADVERTISED_TOOLS_0_0_3_BASE).not.toContain("WebSearch");  // …but disallowed anyway (P8b-33)
+  expect(WINTER_ADVERTISED_TOOLS_0_0_3_BASE).toContain("Monitor");
+  // The measurement could not see the `winter.mcp` family, because it declared no MCP servers.
+  for (const t of WINTER_ADVERTISED_MCP_TOOLS_0_0_3) expect(WINTER_ADVERTISED_TOOLS_0_0_3_BASE).not.toContain(t);
+});
+
+test("a real Norma child ALSO advertises the winter.mcp six — the union is Task 16's tripwire", () => {
+  // `winter.mcp` is DERIVED, not host-supplied: `RUNTIME_DERIVED_CAPABILITIES`
+  // (`tools/registry.ts:1264`) grants it whenever `SessionCapabilityFacts.hasMcpServers` is true —
+  // and every Norma mode declares capability servers, which ARE MCP servers. So the real host's
+  // `system/init.tools` is the UNION, and a tripwire pinned to the base alone would fail by
+  // construction — with the pressure to re-pin the list rather than re-derive chat's exclusions.
+  expect(WINTER_ADVERTISED_MCP_TOOLS_0_0_3).toEqual([
+    "ListMcpResourcesTool", "ReadMcpResourceDirTool", "ReadMcpResourceTool",
+    "RefreshMcpTools", "ToolSearch", "WaitForMcpServers",
+  ]);
+  expect(WINTER_ADVERTISED_TOOLS_0_0_3).toEqual(
+    [...new Set([...WINTER_ADVERTISED_TOOLS_0_0_3_BASE, ...WINTER_ADVERTISED_MCP_TOOLS_0_0_3])].sort(),
+  );
+  expect(WINTER_ADVERTISED_TOOLS_0_0_3).toHaveLength(37);
+  // …and all six are chat-disallowed: chat has no MCP resources beyond Norma's own capability
+  // servers, which it reaches by their `mcp__norma__*` names, never through these.
+  for (const t of WINTER_ADVERTISED_MCP_TOOLS_0_0_3) expect(CHAT_DISALLOWED_BUILTINS).toContain(t);
+});
+
+test("the winter.mcp housekeeping trio is classified read-only, so code and dispatch get it silently", () => {
+  // All three are bookkeeping over ALREADY-CONNECTED servers and none can reach a server the session
+  // has not declared. `RefreshMcpTools` says so itself: "never establishes a disconnected
+  // connection" (`descriptors/refresh-mcp-tools.ts:13`); `WaitForMcpServers` is `permissionClass:
+  // "read"` and merely blocks on a handshake.
+  expect(gateClassFor("ReadMcpResourceDirTool")).toBe("read_mcp_resource");   // NETWORK, like its sibling
+  expect(gateClassFor("RefreshMcpTools")).toBe("ToolSearch");                 // READ_ONLY
+  expect(gateClassFor("WaitForMcpServers")).toBe("ToolSearch");               // READ_ONLY
+  for (const tool of ["ReadMcpResourceDirTool", "RefreshMcpTools", "WaitForMcpServers"]) {
+    for (const mode of ["code", "dispatch"] as const) {
+      for (const policy of POLICIES) {
+        expect({ tool, mode, policy, v: new PermissionGate().evaluate(gateClassFor(tool), policy) })
+          .toEqual({ tool, mode, policy, v: "allow" });
+      }
+    }
+  }
+});
+
+test("NEW-1: the `web` capability tools strip to Norma names and keep today's NETWORK class", async () => {
+  // The sixth server key was missing, so `mcp__norma__web__web_fetch` did not strip: it took the
+  // MUTATING/external branch — a card under `ask`, a DENY under `plan` — where `web_fetch` is
+  // NETWORK today and allowed under every policy.
+  expect(normaToolNameFor("mcp__norma__web__web_fetch")).toBe("web_fetch");
+  expect(normaToolNameFor("mcp__norma__web__web_search")).toBe("web_search");
+  expect(gateClassFor("mcp__norma__web__web_fetch")).toBe("web_fetch");
+  for (const tool of ["mcp__norma__web__web_fetch", "mcp__norma__web__web_search"]) {
+    for (const policy of POLICIES) {
+      const h = harness({ mode: "code", policy });
+      const res = (await h.canUse(tool, { url: "https://example.com" }, ctx()))!;
+      expect({ tool, policy, behavior: res.behavior }).toEqual({ tool, policy, behavior: "allow" });
+      expect(h.events).toEqual([]);   // NETWORK is free at this gate, under every policy
+    }
+  }
+});
+
+test("n1: gateClassFor never returns a prototype member", () => {
+  for (const key of ["toString", "constructor", "hasOwnProperty", "__proto__"]) {
+    expect(typeof gateClassFor(key)).toBe("string");
+    expect(gateClassFor(key)).toBe(key);   // unknown ⇒ passes through ⇒ fails closed at the gate
+  }
 });
 
 // -------------------------------------------------------------------------------------------

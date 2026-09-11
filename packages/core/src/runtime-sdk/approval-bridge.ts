@@ -282,11 +282,20 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     }
 
     // (2) THE CONTROL-PLANE FENCE (P8b-27b) — before the gate, under EVERY policy, `bypass`
-    // included. The deny rules `buildWinterOptions` passes are the child's own first line, but a
-    // deny rule under `bypassPermissions` REACHES `canUseTool` rather than auto-denying (surface
-    // map §5.2), so this host-side check is the thing that actually holds. Without it a child under
-    // `auto`/`acceptEdits` — the modes where no human ever sees the write — could edit
-    // `<any>/.norma/permissions.local.json` and grant itself a standing rule.
+    // included.
+    //
+    // NOT because Winter's own deny rules are weak — the opposite. A matched stage-2 managed deny
+    // returns `decision: "deny"` OUTRIGHT (`permissions/evaluator.ts:1350-1364` at `v0.0.3`) and
+    // runs BEFORE the mode stage (`:1008`), so it binds under `bypassPermissions` too and **never
+    // reaches `canUseTool`**. (An earlier revision of this comment claimed the reverse; it was
+    // wrong, and the same wrong sentence was fixed in `control-plane.ts` first.)
+    //
+    // This fence exists to cover what Winter's rules do NOT: it is Norma's own invariant, enforced
+    // in Norma's own vocabulary, on BOTH tool-name spellings, over every path-bearing field
+    // including `MultiEdit`'s nested `edits[]` — and it does not depend on Winter's rule grammar
+    // continuing to mean what it means today (the anchor semantics that made 16 of those 28 rules
+    // inert are exactly the kind of thing that can move under an SDK bump). Two independent layers
+    // over one invariant, which is the right number for a self-grant.
     const fenced = controlPlaneTargetForCall(toolName, input, deps.cwd ?? "");
     if (fenced) {
       log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} reason=control-plane`);
@@ -369,10 +378,16 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     if (ctx.decisionReason) {
       log.info(`canUseTool: winter reason session=${deps.sessionId} tool=${toolName} code=${ctx.decisionReason.slice(0, 64)}`);
     }
-    const escalated = (ctx.blockedPath !== undefined || ctx.matchedAskRule !== undefined)
-      && !isBlessedOutputPath(deps, ctx.blockedPath ?? "");
-    if (escalated && decision === "allow") {
-      log.info(`canUseTool: escalate session=${deps.sessionId} tool=${toolName} reason=${ctx.blockedPath ? "winter-protected-path" : "winter-ask-rule"}`);
+    // TWO flags, not one (review n2). The `$OUTDIR` blessing answers the PROTECTED-PATH signal and
+    // nothing else; folding both signals into a single flag made a blessed path also suppress a
+    // co-occurring `matchedAskRule`, which reads as if the carve-out were scoped to `blockedPath`
+    // when it was not. Unreachable at `v0.0.3` (the two come from mutually exclusive stages), but
+    // the scoping should be true in the code, not only in practice.
+    const protectedPathEscalates = ctx.blockedPath !== undefined
+      && !isBlessedOutputPath(deps, ctx.blockedPath);
+    const askRuleEscalates = ctx.matchedAskRule !== undefined;
+    if (decision === "allow" && (protectedPathEscalates || askRuleEscalates)) {
+      log.info(`canUseTool: escalate session=${deps.sessionId} tool=${toolName} reason=${protectedPathEscalates ? "winter-protected-path" : "winter-ask-rule"}`);
       decision = "ask";
     }
 
