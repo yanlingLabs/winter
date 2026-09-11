@@ -7,7 +7,7 @@ import type { SessionApprovalPolicy } from "../agent/gate";
 import type { Mode as SessionMode } from "../agent/tools/registry";
 import { CONTROL_PLANE_FILENAMES } from "./control-plane";
 import { providerSelectionFor, testProviderNameFor } from "./provider-selection";
-import { WINTER_ADVERTISED_TOOLS_0_0_3, WINTER_NORMA_TOOL_PAIRS, WINTER_OWN_TOOL_NAMES } from "./tool-names";
+import { WINTER_ADVERTISED_TOOLS_0_0_4, WINTER_NORMA_TOOL_PAIRS, WINTER_OWN_TOOL_NAMES } from "./tool-names";
 
 /**
  * **The six Norma policies → Winter's `PermissionMode`, 1:1** (P8b-7).
@@ -70,7 +70,7 @@ export const CAPABILITY_TOOL_MODES: Readonly<Record<string, { modes: readonly Se
 
 /** The SDK's own web built-ins. Disallowed in EVERY mode in 8b (P8b-33): they have no Exa key and
  *  no dangerous-domain floor, and Norma's own floors are daemon state a built-in cannot reach.
- *  Measured NOT to be advertised at 0.0.3 (`WINTER_ADVERTISED_TOOLS_0_0_3`) — listed anyway, so an
+ *  Measured NOT to be advertised at 0.0.3 (`WINTER_ADVERTISED_TOOLS_0_0_4`) — listed anyway, so an
  *  SDK bump that starts advertising them cannot silently widen any mode's web surface. */
 export const SDK_WEB_BUILTINS: readonly string[] = ["WebFetch", "WebSearch"];
 
@@ -109,7 +109,7 @@ export const CHAT_ALLOWED_WINTER_TOOLS: readonly string[] = [
 
 /**
  * The Winter built-ins CHAT excludes — **derived from what the CHILD ACTUALLY ADVERTISES**
- * (`WINTER_ADVERTISED_TOOLS_0_0_3`, measured from the built binary) minus chat's allowed set, plus
+ * (`WINTER_ADVERTISED_TOOLS_0_0_4`, measured from the built binary) minus chat's allowed set, plus
  * the SDK's web built-ins and Norma's own pair-table names for completeness.
  *
  * Review F4: deriving this from Norma's pair table left `Monitor`, `ReportFindings` and
@@ -122,7 +122,7 @@ export const CHAT_ALLOWED_WINTER_TOOLS: readonly string[] = [
  * advertising `LSP` or `ToolSearch` finds them already excluded.
  */
 export const CHAT_DISALLOWED_BUILTINS: readonly string[] = [...new Set([
-  ...WINTER_ADVERTISED_TOOLS_0_0_3,
+  ...WINTER_ADVERTISED_TOOLS_0_0_4,
   ...WINTER_NORMA_TOOL_PAIRS.map(([winter]) => winter),
   ...SDK_WEB_BUILTINS,
 ])].filter((w) => !CHAT_ALLOWED_WINTER_TOOLS.includes(w)).sort();

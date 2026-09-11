@@ -14,7 +14,7 @@ import {
 } from "../../src/runtime-sdk/mode-options";
 import {
   gateClassFor, normaToolNameFor, winterToolNameFor,
-  WINTER_ADVERTISED_TOOLS_0_0_3, WINTER_ADVERTISED_TOOLS_0_0_3_BASE, WINTER_ADVERTISED_MCP_TOOLS_0_0_3,
+  WINTER_ADVERTISED_TOOLS_0_0_4, WINTER_ADVERTISED_TOOLS_0_0_4_BASE, WINTER_ADVERTISED_MCP_TOOLS_0_0_4,
   WINTER_OWN_TOOL_NAMES, WINTER_NORMA_TOOL_PAIRS,
 } from "../../src/runtime-sdk/tool-names";
 
@@ -333,7 +333,7 @@ test("CHAT_DISALLOWED_BUILTINS is pinned, and covers every tool the CHILD actual
   ]);
   // THE invariant, stated as a set relation rather than a literal: every advertised name is either
   // chat-allowed or chat-disallowed. An SDK bump that advertises a new tool fails here.
-  for (const t of WINTER_ADVERTISED_TOOLS_0_0_3) {
+  for (const t of WINTER_ADVERTISED_TOOLS_0_0_4) {
     const allowed = CHAT_ALLOWED_WINTER_TOOLS.includes(t);
     expect({ t, allowed, disallowed: CHAT_DISALLOWED_BUILTINS.includes(t) })
       .toEqual({ t, allowed, disallowed: !allowed });
@@ -343,14 +343,14 @@ test("CHAT_DISALLOWED_BUILTINS is pinned, and covers every tool the CHILD actual
 test("the advertised BASE set is pinned to what the BUILT BINARY reported at 0.0.3", () => {
   // Measured: `dist/winter` driven through `query()` with `model: "winter-test/echo"` under a temp
   // home and NORMA_BRAND's names; `system/init.tools`, verbatim — with NO MCP servers declared.
-  expect(WINTER_ADVERTISED_TOOLS_0_0_3_BASE).toHaveLength(31);
-  expect([...WINTER_ADVERTISED_TOOLS_0_0_3_BASE].sort()).toEqual([...WINTER_ADVERTISED_TOOLS_0_0_3_BASE]);
+  expect(WINTER_ADVERTISED_TOOLS_0_0_4_BASE).toHaveLength(31);
+  expect([...WINTER_ADVERTISED_TOOLS_0_0_4_BASE].sort()).toEqual([...WINTER_ADVERTISED_TOOLS_0_0_4_BASE]);
   // Two measured facts the exclusion logic leans on.
-  expect(WINTER_ADVERTISED_TOOLS_0_0_3_BASE).not.toContain("WebFetch");   // not advertised at 0.0.3…
-  expect(WINTER_ADVERTISED_TOOLS_0_0_3_BASE).not.toContain("WebSearch");  // …but disallowed anyway (P8b-33)
-  expect(WINTER_ADVERTISED_TOOLS_0_0_3_BASE).toContain("Monitor");
+  expect(WINTER_ADVERTISED_TOOLS_0_0_4_BASE).not.toContain("WebFetch");   // not advertised at 0.0.3…
+  expect(WINTER_ADVERTISED_TOOLS_0_0_4_BASE).not.toContain("WebSearch");  // …but disallowed anyway (P8b-33)
+  expect(WINTER_ADVERTISED_TOOLS_0_0_4_BASE).toContain("Monitor");
   // The measurement could not see the `winter.mcp` family, because it declared no MCP servers.
-  for (const t of WINTER_ADVERTISED_MCP_TOOLS_0_0_3) expect(WINTER_ADVERTISED_TOOLS_0_0_3_BASE).not.toContain(t);
+  for (const t of WINTER_ADVERTISED_MCP_TOOLS_0_0_4) expect(WINTER_ADVERTISED_TOOLS_0_0_4_BASE).not.toContain(t);
 });
 
 test("a real Norma child ALSO advertises the winter.mcp six — the union is Task 16's tripwire", () => {
@@ -359,17 +359,17 @@ test("a real Norma child ALSO advertises the winter.mcp six — the union is Tas
   // and every Norma mode declares capability servers, which ARE MCP servers. So the real host's
   // `system/init.tools` is the UNION, and a tripwire pinned to the base alone would fail by
   // construction — with the pressure to re-pin the list rather than re-derive chat's exclusions.
-  expect(WINTER_ADVERTISED_MCP_TOOLS_0_0_3).toEqual([
+  expect(WINTER_ADVERTISED_MCP_TOOLS_0_0_4).toEqual([
     "ListMcpResourcesTool", "ReadMcpResourceDirTool", "ReadMcpResourceTool",
     "RefreshMcpTools", "ToolSearch", "WaitForMcpServers",
   ]);
-  expect(WINTER_ADVERTISED_TOOLS_0_0_3).toEqual(
-    [...new Set([...WINTER_ADVERTISED_TOOLS_0_0_3_BASE, ...WINTER_ADVERTISED_MCP_TOOLS_0_0_3])].sort(),
+  expect(WINTER_ADVERTISED_TOOLS_0_0_4).toEqual(
+    [...new Set([...WINTER_ADVERTISED_TOOLS_0_0_4_BASE, ...WINTER_ADVERTISED_MCP_TOOLS_0_0_4])].sort(),
   );
-  expect(WINTER_ADVERTISED_TOOLS_0_0_3).toHaveLength(37);
+  expect(WINTER_ADVERTISED_TOOLS_0_0_4).toHaveLength(37);
   // …and all six are chat-disallowed: chat has no MCP resources beyond Norma's own capability
   // servers, which it reaches by their `mcp__norma__*` names, never through these.
-  for (const t of WINTER_ADVERTISED_MCP_TOOLS_0_0_3) expect(CHAT_DISALLOWED_BUILTINS).toContain(t);
+  for (const t of WINTER_ADVERTISED_MCP_TOOLS_0_0_4) expect(CHAT_DISALLOWED_BUILTINS).toContain(t);
 });
 
 test("the winter.mcp housekeeping trio is classified read-only, so code and dispatch get it silently", () => {

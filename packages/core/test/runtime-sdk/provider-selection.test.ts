@@ -41,20 +41,21 @@ test("every model Norma's default catalogue offers resolves to an inventory prov
   }
 });
 
-test("FINDING, pinned in both directions: only gpt-5.6-sol is a codex-oauth row in the pinned catalog", () => {
-  // Norma offers three models on the `codex-oauth` provider (`CODEX_MODELS`), but the pinned
-  // catalog lists only ONE of them under `codex-oauth` — `gpt-5.6-terra` and `gpt-5.6-luna` are
-  // `openai` rows there. The consequence on the Winter leg: a Codex-credentialled session asking
-  // for terra/luna is named to the `openai` provider (which that install has no key for) and the
-  // child refuses with its typed provider error, where the ENGINE leg would have run it on the
-  // Codex OAuth credential. Recorded as a finding, not smoothed over.
+test("FINDING CLOSED at winter-provider-catalog 0.0.4: all three CODEX_MODELS are now codex-oauth rows", () => {
+  // Previously (catalog 0.0.3): Norma offers three models on the `codex-oauth` provider
+  // (`CODEX_MODELS`), but the pinned catalog listed only ONE of them under `codex-oauth` —
+  // `gpt-5.6-terra` and `gpt-5.6-luna` were `openai`-only rows there. The consequence on the
+  // Winter leg: a Codex-credentialled session asking for terra/luna was named to the `openai`
+  // provider (which that install has no key for) and the child refused with its typed provider
+  // error, where the ENGINE leg would have run it on the Codex OAuth credential.
   //
-  // Pinned as an exact map so drift in EITHER direction fails: the catalog gaining the two rows,
-  // or Norma's table changing, both land here.
+  // Catalog 0.0.4 adds the missing `codex-oauth` rows for terra/luna (P8b-34's "codex terra/luna"
+  // carve-out) — the finding is closed. Pinned as an exact map so drift in EITHER direction fails:
+  // the catalog losing a row, or Norma's table changing, both land here.
   expect(Object.fromEntries(CODEX_MODELS.map((m) => [m.id, inventoryProvidersServing(m.id)]))).toEqual({
     "gpt-5.6-sol": ["openai", "codex-oauth"],
-    "gpt-5.6-terra": ["openai"],
-    "gpt-5.6-luna": ["openai"],
+    "gpt-5.6-terra": ["openai", "codex-oauth"],
+    "gpt-5.6-luna": ["openai", "codex-oauth"],
   });
   expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.6-sol");
 });
@@ -89,9 +90,14 @@ test("the credential Norma actually has decides which of six ambiguous rows wins
   expect(providerSelectionFor("gpt-5.6-sol", BOTH)?.providerId).toBe("openai");
 });
 
-test("a model only OpenAI serves routes there even on a codex-only install (the finding's live shape)", () => {
+test("terra now resolves to codex-oauth on a codex-only install (the finding's fix, catalog 0.0.4)", () => {
+  // At catalog 0.0.3 this named `openai` (no ref on this install; the child refused). Now that
+  // 0.0.4 carries a `codex-oauth` row for terra, the credential Norma actually has decides it.
   const sel = providerSelectionFor("gpt-5.6-terra", CODEX_ONLY);
-  expect(sel).toEqual({ providerId: "openai" });   // no ref — no openai credential on this install
+  expect(sel).toEqual({
+    providerId: "codex-oauth",
+    authRef: { kind: "keychain", account: "codex-access-token", service: keychainService() },
+  });
 });
 
 // -------------------------------------------------------------------------------------------

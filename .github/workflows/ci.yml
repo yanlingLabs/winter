@@ -71,7 +71,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: yanlingLabs/winter-agent-sdk
-          ref: v0.0.3
+          ref: v0.0.4
           path: .winter-agent-sdk
           fetch-depth: 0
 
@@ -100,7 +100,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: winter-v0.0.3
+          name: winter-v0.0.4
           path: dist/winter
           if-no-files-found: error
           retention-days: 7
@@ -127,7 +127,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: winter-v0.0.3
+          name: winter-v0.0.4
           path: dist
 
       - name: Make the winter binary executable

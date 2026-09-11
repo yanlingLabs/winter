@@ -124,7 +124,7 @@ export const WINTER_OWN_TOOL_NAMES: ReadonlySet<string> = new Set(
  * **Task 16's e2e must assert `system/init.tools` equals this list** — that is the tripwire for an
  * SDK bump, and the reason this is exported rather than inlined.
  */
-export const WINTER_ADVERTISED_TOOLS_0_0_3_BASE: readonly string[] = [
+export const WINTER_ADVERTISED_TOOLS_0_0_4_BASE: readonly string[] = [
   "Agent", "AskUserQuestion", "Bash", "CronCreate", "CronDelete", "CronList", "Edit",
   "EnterPlanMode", "EnterWorktree", "ExitPlanMode", "ExitWorktree", "Glob", "Grep", "ListAgents",
   "Monitor", "NotebookEdit", "PushNotification", "Read", "ReadNotifications", "ReportFindings",
@@ -148,7 +148,7 @@ export const WINTER_ADVERTISED_TOOLS_0_0_3_BASE: readonly string[] = [
  * would be to re-pin the measured list rather than re-derive chat's exclusions, which silently
  * widens chat.
  */
-export const WINTER_ADVERTISED_MCP_TOOLS_0_0_3: readonly string[] = [
+export const WINTER_ADVERTISED_MCP_TOOLS_0_0_4: readonly string[] = [
   "ListMcpResourcesTool",   // descriptors/list-mcp-resources-tool.ts:6,15,22 — permissionClass "mcp"
   "ReadMcpResourceDirTool", // descriptors/read-mcp-resource-dir-tool.ts:6,16,23 — permissionClass "mcp"
   "ReadMcpResourceTool",    // descriptors/read-mcp-resource-tool.ts:6,16,23 — permissionClass "mcp"
@@ -160,8 +160,8 @@ export const WINTER_ADVERTISED_MCP_TOOLS_0_0_3: readonly string[] = [
 /** What a Norma child actually advertises: the measured base set PLUS the `winter.mcp` family, since
  *  every Norma mode declares capability servers. **Task 16's e2e compares live `system/init.tools`
  *  against THIS union** (and against the base alone only for a deliberately server-less session). */
-export const WINTER_ADVERTISED_TOOLS_0_0_3: readonly string[] =
-  [...new Set([...WINTER_ADVERTISED_TOOLS_0_0_3_BASE, ...WINTER_ADVERTISED_MCP_TOOLS_0_0_3])].sort();
+export const WINTER_ADVERTISED_TOOLS_0_0_4: readonly string[] =
+  [...new Set([...WINTER_ADVERTISED_TOOLS_0_0_4_BASE, ...WINTER_ADVERTISED_MCP_TOOLS_0_0_4])].sort();
 
 /**
  * **An explicit GATE CLASS for a Winter tool whose classification must not be inferred from its
