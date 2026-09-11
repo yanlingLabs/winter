@@ -61,6 +61,7 @@ import type { ChildrenRpc } from "../runtime-sdk/children-rpc";
 import type { NormaRuntimeSdk } from "../runtime-sdk/create";
 import { WinterLegRefusal, type WinterSessionDrivers } from "../runtime-sdk/session-driver";
 import type { WinterSession } from "../runtime-sdk/winter-session";
+import { readWinterTasks } from "../runtime-sdk/tasks-reader";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import { resolveModelAlias } from "../agent/model-aliases";
 import type { ApprovalBroker } from "../agent/approvals";
@@ -1688,6 +1689,15 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.taskList: {
         const p = parseParams(TaskListParams, params);
+        // Winter Phase 8c (P8c-11, Task 2.3): the task graph lives in the CHILD's own in-memory
+        // store (measured against the winter-agent-sdk checkout — no file, see tasks-reader.ts's
+        // doc comment), so a Winter-leg session's task list is folded from its OWN persisted
+        // `task_updated` history rather than read from `opts.tasks` (the retired engine's
+        // in-process `TaskStore`, which no live producer writes to any more — kept as the fallback
+        // for a session not on the Winter leg, and for a bare test server with no `winter` wired).
+        if (opts.winter?.get(p.sessionId) !== undefined) {
+          return { ok: true, tasks: readWinterTasks(opts.store, p.sessionId) };
+        }
         return { ok: true, tasks: opts.tasks?.list(p.sessionId) ?? [] };
       }
       case METHODS.threadList: {

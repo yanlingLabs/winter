@@ -206,6 +206,18 @@ export const PROJECTED_EVENT_COVERAGE = {
   approval_resolved: false,
   question_asked: false,
   question_resolved: false,
+  // PLAN PRESENTATION IS THE SAME SHAPE, FOR THE SAME REASON (Winter Phase 8c, P8c-11 / Task 2.3):
+  // `ExitPlanMode` also arrives inside `canUseTool`, resolved by the BRIDGE before any frame about
+  // the call reaches the message stream — same ordering argument as approvals/questions just
+  // above, same "the projector only ever sees the ordinary tool_use/tool_result pair once this is
+  // already answered" consequence. This pair used to sit in the "fate follows the tool that
+  // raised them" bucket below (the engine's `exit_plan_mode` tool retired with no successor named);
+  // the successor is now named, so it moves up here rather than staying `true` on a promise the
+  // brief's own text made but this map's documented semantics ("does the PROJECTOR produce this")
+  // would contradict if honored literally — see `runtime-sdk/plan-bridge.ts`'s header doc comment.
+  //   producer: `runtime-sdk/plan-bridge.ts`'s `planBridgeFor(...).onExitPlanMode`.
+  plan_presented: false,
+  plan_resolved: false,
   //
   // Opaque `encrypted_content` / `itemJson`; the session JSONL is its only sink and the projector
   // has no branch that can emit it. Never flip this to `true`.
@@ -244,8 +256,6 @@ export const PROJECTED_EVENT_COVERAGE = {
   // producer vanishing). None of them is projected from a wire message; each needs its successor
   // named when the engine retires (Task 17), and that is tracked there, not here. ----
   directory_added: false, // the `ipc/server.ts:2010` half survives; the engine half does not
-  plan_presented: false,
-  plan_resolved: false,
   worktree_entered: false,
   worktree_exited: false,
   tool_review: false, // `BashReviewer` stays on the provider layer (P8b-10)
