@@ -26,7 +26,7 @@ import { openRuntimeStateDb, type RuntimeStateDb } from "./db";
 import { createSqliteRuntimeDirectoryStore } from "./directory-store";
 import { RuntimeLeases, processStartedAt, type LeaseProbe } from "./leases";
 import { backfillNativeSessions, type BackfillReport } from "./migrations/backfill";
-import { applyMemoryKeyMigration, memoryKeyRelocations, planMemoryKeyMigration } from "./migrations/memory-keys";
+import { applyMemoryKeyMigration, memoryKeyRelocations, planMemoryKeyMigration, reconcileMemoryKeyTornApplies } from "./migrations/memory-keys";
 import { RuntimeSessionRecords } from "./records";
 import { recoverRuntimeState, type RecoveryHooks, type RecoveryReport } from "./recovery";
 import { deleteSessionRuntimeState, retentionFromSettings, sweepRetention } from "./retention";
@@ -222,8 +222,13 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
     // `agent/memory-dir.ts` consults, and it is built from the very rows the re-key was committed
     // with. A daemon therefore never reads an empty memory directory because of a half-switch.
     //
-    // BUILT AT EVERY BOOT, FLAG OR NO FLAG. The map describes what SOME PAST run relocated; a home
-    // that migrated last month and has the flag off today must still find its own memory.
+    // REPAIRED AND BUILT AT EVERY BOOT, FLAG OR NO FLAG. The map describes what SOME PAST run
+    // relocated; a home that migrated last month and has the flag off today must still find its own
+    // memory. And the repair has to be unconditional for the same reason: a process lost inside the
+    // rename/commit window leaves a tree whose row is still `planned` — invisible to `rollback` and
+    // to this map — and turning the flag back off must not be what strands it.
+    const torn = reconcileMemoryKeyTornApplies({ rs, home, records });
+    if (torn.length > 0) log(`memory-key migration: completed ${torn.length} relocation(s) a previous run left half-committed`);
     let relocations = memoryKeyRelocations(rs);
 
     const markerIsSet = (): boolean =>

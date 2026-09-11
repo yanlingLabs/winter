@@ -414,6 +414,14 @@ export function planMemoryKeyMigration(deps: {
 /**
  * Settle every tree whose rename landed while its manifest commit did not — the TORN-APPLY WINDOW.
  *
+ * Exported (the `reconcileMemoryKeyTornApplies` wrapper directly above) because it is a REPAIR, not
+ * a migration: the daemon runs it at EVERY boot, flag or no flag. A user who enables the flag, loses
+ * the process inside the rename/commit window and then turns the flag back off would otherwise leave
+ * a tree at a key whose `planned` row nothing ever settles — invisible to `rollback` (which reads
+ * `moved`) and to the relocation map the live path consults. It only ever settles rows the user
+ * already opted into, and it does nothing at all — one SELECT over a table that is usually empty —
+ * when there are none.
+ *
  * `apply` renames and then commits (that order is deliberate: the other one would leave a `moved`
  * row for a directory that never went anywhere, and rollback would chase a tree that was never
  * there). A crash in between leaves the directory at the new key with its row still `planned` — and
@@ -433,6 +441,10 @@ export function planMemoryKeyMigration(deps: {
  * is then reported as `unchanged` (or `root-disagrees`, when its destination is an older algorithm's)
  * rather than planned all over again.
  */
+export function reconcileMemoryKeyTornApplies(deps: { rs: RuntimeStateDb; home: string; records?: RuntimeSessionRecords; fs?: MemoryKeyFs }): MemoryKeyMove[] {
+  return reconcileTornApplies(deps.rs, deps.home, deps.fs ?? NODE_FS, deps.records ?? new RuntimeSessionRecords(deps.rs));
+}
+
 function reconcileTornApplies(rs: RuntimeStateDb, home: string, fs: MemoryKeyFs, records: RuntimeSessionRecords): MemoryKeyMove[] {
   const rows = rs.db.query(`SELECT old_key, new_key, status FROM memory_key_manifest WHERE status = 'planned' ORDER BY old_key`).all() as ManifestRow[];
   const landed = rows.filter((r) => !fs.existsSync(projectDir(home, r.old_key)) && fs.existsSync(projectDir(home, r.new_key)));

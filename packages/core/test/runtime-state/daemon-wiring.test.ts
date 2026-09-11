@@ -8,14 +8,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { compatibilityKeys } from "@yanlinglabs/winter-agent-sdk";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import { memoryDirFor, repoRootFor, sanitizeProjectKey } from "../../src/agent/memory-dir";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import {
-  RuntimeSessionRecords, RuntimeStateUnavailableError, createSqliteRuntimeDirectoryStore, openRuntimeStateDb,
+  RuntimeSessionRecords, RuntimeStateUnavailableError, backfillNativeSessions, createSqliteRuntimeDirectoryStore, openRuntimeStateDb,
   startRuntimeState, type RuntimeStateWiring,
 } from "../../src/runtime-state";
 import { Settings } from "../../src/settings";
@@ -293,6 +293,15 @@ describe("daemon wiring — deletion and teardown", () => {
       expect(() => rt.db.db.query("SELECT COUNT(*) AS n FROM runtime_sessions").get()).toThrow();
       // Brief step 1's "no -wal growth": a clean close checkpoints, so whatever is left on disk
       // carries no un-replayed frames.
+      //
+      // THE GC IS PART OF THE ASSERTION, not a workaround for it. `Database.close()` is
+      // `sqlite3_close_v2`: with prepared statements still outstanding it leaves a ZOMBIE connection
+      // whose checkpoint-and-unlink runs only once those statements are finalized — and in Bun that
+      // happens when the `Statement` objects are collected. Without forcing that, this assertion
+      // measures GC timing rather than SQLite's close, and any test added to this file (P8b-17 added
+      // five) can flip it either way. Forcing the collection first is what makes it deterministic;
+      // the property being asserted is unchanged.
+      Bun.gc(true);
       const wal = `${dirs.runtimeStatePath}-wal`;
       expect(existsSync(wal) && statSync(wal).size > 0).toBe(false);
 
@@ -460,6 +469,40 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
       expect(manifestRows(rt)).toEqual([]);
       // NOT marked done: clearing the override later must still get a migration.
       expect(marker(rt)).toBe(null);
+    });
+  });
+
+  test("a torn apply is repaired at the next boot even with the flag turned back OFF", async () => {
+    // THE REPAIR IS NOT THE MIGRATION. A process lost between the rename and the manifest commit
+    // leaves a tree at the new key with its row still `planned` — invisible to `rollback`, which
+    // reads `moved`, and to the relocation map the live path consults. If the user then turns the
+    // flag off, nothing would ever settle it and the agent would read an empty directory forever.
+    await withTempHome(async (home) => {
+      const store = new SessionStore(home);
+      const first = seedProject(home, store, "alpha");
+      // The crash, reproduced on disk: the rename landed, the commit did not.
+      const rs0 = openRuntimeStateDb(home);
+      try {
+        backfillNativeSessions({ rs: rs0, store, home, providerId: "codex-oauth" });
+        rs0.db.run("INSERT INTO memory_key_manifest (old_key, new_key, status, planned_at, moved_at) VALUES (?, ?, 'planned', ?, NULL)",
+          [first.oldKey, first.newKey, ISO()]);
+        renameSync(join(home, "projects", first.oldKey), join(home, "projects", first.newKey));
+      } finally {
+        rs0.close();
+      }
+      store.close();
+
+      // Flag OFF at this boot, deliberately.
+      writeSettings(home, { runtimes: { migrations: { memoryKeys: false } } });
+      const rt = online(await boot(home));
+
+      expect(manifestRows(rt)).toEqual([{ old_key: first.oldKey, new_key: first.newKey, status: "moved" }]);
+      expect(rt.records.get(first.sessionId)!.memoryProjectKey).toBe(first.newKey);
+      expect(rt.relocatedMemoryKey(first.oldKey)).toBe(first.newKey);
+      expect(liveMemDir(home, rt, first.cwd)).toBe(join(home, "projects", first.newKey, "memory"));
+      expect(memoryBody(home, first.newKey)).toBe("# alpha\n");
+      // Settled, so it is rollback-able — the state this manifest exists to guarantee.
+      expect(marker(rt)).toBe(null); // and the migration itself was never run: no marker
     });
   });
 
