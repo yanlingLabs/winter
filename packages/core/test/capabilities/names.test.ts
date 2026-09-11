@@ -1,5 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { NORMA_BRAND } from "../../src/runtime-sdk/brand";
+import type { ToolDefinition } from "../../src/agent/tools/registry";
+import { browserToolDefs } from "../../src/agent/tools/browser";
+import { computerToolDefs } from "../../src/agent/tools/computer";
+import { docsToolDefs } from "../../src/agent/tools/docs";
+import { listSessionsToolDefs } from "../../src/agent/tools/list-sessions";
+import { PageCache } from "../../src/agent/tools/page-core";
+import { readPageToolDefs } from "../../src/agent/tools/read-page";
+import { searchToolDefs } from "../../src/agent/tools/search";
+import { sessionSpawnToolDefs } from "../../src/agent/tools/session-spawn";
+import { sheetsToolDefs } from "../../src/agent/tools/sheets";
+import { slidesToolDefs } from "../../src/agent/tools/slides";
+import { webToolDefs } from "../../src/agent/tools/web";
 import {
   CAPABILITY_SERVER_KEYS,
   NORMA_CAPABILITY_TOOLS,
@@ -81,6 +93,56 @@ describe("NORMA_CAPABILITY_TOOLS", () => {
   test("every declared server key is represented, and every name names a declared key", () => {
     const keysUsed = new Set(Object.keys(NORMA_CAPABILITY_TOOLS).map((n) => n.slice("mcp__norma__".length).split("__")[0]));
     expect([...keysUsed].sort()).toEqual([...CAPABILITY_SERVER_KEYS].sort());
+  });
+
+  test("m1: modes and deferral are pinned against the REAL ToolDefinitions, not against comments", () => {
+    // The table is the exposure source Task 9 derives `disallowedTools` from. Pinned against pasted
+    // literals it desyncs SILENTLY the day someone edits a tool's own `modes`. So the defs are built
+    // here — the same factories both doors use — and compared field for field.
+    const panel = { dispatch: () => ({ commandId: "c", settled: Promise.resolve({ kind: "timeout" as const, deadlineMs: 1 }) }), harnesses: () => [] };
+    const defsByKey: Record<string, readonly ToolDefinition[]> = {
+      sessions: [...sessionSpawnToolDefs(), ...listSessionsToolDefs({ store: { list: () => [], lastEventTs: () => 0, transcriptPath: () => "" } } as never)],
+      computer: computerToolDefs(),
+      browser: browserToolDefs({ tabs: () => ({ tabs: [], activeTabId: undefined }) as never, openTab: () => "t", ...panel }),
+      office: [
+        ...docsToolDefs({ ...panel, dirsOf: () => [] as never }),
+        ...sheetsToolDefs({ ...panel, dirsOf: () => [] as never }),
+        ...slidesToolDefs({ ...panel, dirsOf: () => [] as never }),
+      ],
+      research: [...searchToolDefs(), ...readPageToolDefs({ cache: new PageCache() })],
+      web: webToolDefs(),
+    };
+
+    // `computer`'s `deferred` is the ONE row that is not on the def: `computer.ts` leaves the field
+    // to its caller and `daemon.ts` passes `["dispatch"]` at the registration site. It stays a
+    // literal here, and this comment is why.
+    const DEFERRED_FROM_THE_CALL_SITE = new Set(["mcp__norma__computer__computer"]);
+
+    const t = NORMA_CAPABILITY_TOOLS as Readonly<Record<string, CapabilityToolFacts>>;
+    let checked = 0;
+    for (const [key, defs] of Object.entries(defsByKey)) {
+      for (const def of defs) {
+        const name = capabilityToolName(key, def.name);
+        const facts = t[name];
+        expect(facts, `${name} is missing from NORMA_CAPABILITY_TOOLS`).toBeDefined();
+        // `modes` absent on a def means `["code"]` (registry.ts's own documented default).
+        expect([...facts!.modes].sort()).toEqual([...(def.modes ?? ["code"])].sort());
+        if (!DEFERRED_FROM_THE_CALL_SITE.has(name)) {
+          const fromDef = def.deferred === undefined || def.deferred === false ? undefined
+            : def.deferred === true ? true
+            : [...def.deferred].sort();
+          const fromTable = facts!.deferred === undefined ? undefined
+            : facts!.deferred === true ? true
+            : [...facts!.deferred].sort();
+          expect(fromTable, `${name}'s deferred disagrees with its ToolDefinition`).toEqual(fromDef as never);
+        }
+        checked++;
+      }
+    }
+    // Every row was reached — a def that stopped being built would otherwise pass by absence.
+    expect(checked).toBe(Object.keys(NORMA_CAPABILITY_TOOLS).length);
+    // The one literal row, spelled out because it comes from `daemon.ts:registerComputerTool`.
+    expect(t["mcp__norma__computer__computer"]!.deferred).toEqual(["dispatch"]);
   });
 
   test("modes and deferral mirror today's registrations", () => {

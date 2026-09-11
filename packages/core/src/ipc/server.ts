@@ -58,6 +58,8 @@ import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory,
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { AgentEngine } from "../agent/engine";
 import type { NormaRuntimeSdk } from "../runtime-sdk/create";
+import type { CapabilitySession } from "../capabilities";
+import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
 import { resolveModelAlias } from "../agent/model-aliases";
 import type { ApprovalBroker } from "../agent/approvals";
 import type { PermissionRules } from "../agent/permission-rules";
@@ -143,6 +145,18 @@ export interface IpcServerOptions {
   // `undefined` means the router could not construct (a packaging fault; see daemon.ts's slot). A
   // Winter-leg create must then refuse with a typed error, never crash and never silently fall back.
   runtimeSdk?: NormaRuntimeSdk;
+  /**
+   * P8b Tasks 6-7 (P8b-36): build THIS session's daemon-owned capability servers.
+   *
+   * The other half of the Winter-leg session door. `callTool(name, args)` carries no session
+   * identity, so a capability server has the session BAKED IN and belongs to exactly one — which is
+   * why this is a function of a session rather than a list on the handle. Task 16's driver calls it
+   * once per session and puts the result on that session's `Options.mcpServers`; the router forwards
+   * a caller's own `mcpServers` straight to the Winter leg.
+   *
+   * `undefined` only on a daemon assembled without it (tests that inject a partial deps object).
+   */
+  buildSessionCapabilities?: (session: CapabilitySession) => readonly McpSdkServerConfigWithInstance[];
   // session-activity-hygiene T8: hands the caller THE bound activity derivation this server stamps
   // `session.list` with, once, at construction. Called exactly once, synchronously, from inside
   // startIpcServer.

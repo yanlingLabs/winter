@@ -29,9 +29,9 @@
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
 import { readPageToolDefs, type ReadPageDeps } from "../agent/tools/read-page";
 import { searchToolDefs, type SearchToolDeps } from "../agent/tools/search";
-import { capabilityServer, type CapabilitySessionDeps } from "./server";
+import { capabilityServer, type CapabilitySession } from "./server";
 
-export interface ResearchCapabilityDeps extends CapabilitySessionDeps {
+export interface ResearchCapabilityDeps {
   /** `Search`'s deps — the SAME `audit`/`secret`/`dangerousDomainsAdded` closures `daemon.ts` hands
    *  `registerSearchTool`. `secret` is `(name) => secrets.get(name)` over the daemon's single
    *  `SecretStore`; it is CALLED inside `run`, never here. */
@@ -41,14 +41,9 @@ export interface ResearchCapabilityDeps extends CapabilitySessionDeps {
   readPage: ReadPageDeps;
 }
 
-export function researchCapability(deps: ResearchCapabilityDeps): McpSdkServerConfigWithInstance {
+export function researchCapability(session: CapabilitySession, deps: ResearchCapabilityDeps): McpSdkServerConfigWithInstance {
   return capabilityServer(
-    {
-      key: "research",
-      defs: [...searchToolDefs(deps.search), ...readPageToolDefs(deps.readPage)],
-      // `modes: ["chat","dispatch"]` on both; neither carries `argsByMode`.
-      schemaMode: "dispatch",
-    },
-    deps,
+    { key: "research", defs: [...searchToolDefs(deps.search), ...readPageToolDefs(deps.readPage)] },
+    session,
   );
 }

@@ -26,16 +26,16 @@ function session(over: Partial<CapabilitySession> = {}): CapabilitySession {
 
 describe("computerCapability: the server shape", () => {
   test("is an `sdk` server named `computer` with a callable instance", () => {
-    const server = computerCapability({ currentSession: () => session(), computerUse: () => undefined });
+    const server = computerCapability(session(), { computerUse: () => undefined });
     expect(server.type).toBe("sdk");
-    expect(server.name).toBe("computer");
+    expect(server.name).toBe("norma__computer");
     expect(isWinterMcpServerInstance(server.instance)).toBe(true);
   });
 
   test("listTools advertises `computer` with the REGISTRY'S schema (rawParameters, not zod)", () => {
     const registry = new ToolRegistry();
     registerComputerTool(registry);
-    const server = computerCapability({ currentSession: () => session(), computerUse: () => undefined });
+    const server = computerCapability(session(), { computerUse: () => undefined });
     const tools = (server.instance as WinterMcpServerInstance).listTools();
     expect(tools.map((t) => t.name)).toEqual(["computer"]);
     const spec = registry.specFor("computer", undefined, "code")!;
@@ -60,8 +60,7 @@ describe("computerCapability: callTool", () => {
     });
 
     const capCu = fakeCu(result);
-    const server = computerCapability({
-      currentSession: () => session({ computerUse: capCu.service, visionCapable: true }),
+    const server = computerCapability(session({ computerUse: capCu.service, visionCapable: true }), {
       computerUse: () => undefined,
     });
     const viaCapability = await (server.instance as WinterMcpServerInstance).callTool("computer", { action: "screenshot" });
@@ -76,14 +75,14 @@ describe("computerCapability: callTool", () => {
 
   test("the daemon's service getter supplies the ComputerUseService when the session does not", async () => {
     const cu = fakeCu({ ok: true, resultJson: JSON.stringify({ text: "#0 window" }) } as CuActResult);
-    const server = computerCapability({ currentSession: () => session(), computerUse: () => cu.service });
+    const server = computerCapability(session(), { computerUse: () => cu.service });
     const res = await (server.instance as WinterMcpServerInstance).callTool("computer", { action: "ax_snapshot" });
     expect(res.isError).toBe(false);
     expect(cu.calls[0]!.cls).toBe("ax-read");
   });
 
   test("computer use turned off at runtime → the tool's own refusal, as an isError result", async () => {
-    const server = computerCapability({ currentSession: () => session(), computerUse: () => undefined });
+    const server = computerCapability(session(), { computerUse: () => undefined });
     const res = await (server.instance as WinterMcpServerInstance).callTool("computer", { action: "ax_snapshot" });
     expect(res.isError).toBe(true);
     expect((res.content[0] as { text: string }).text).toContain("computer use is not available in this session");
@@ -92,8 +91,7 @@ describe("computerCapability: callTool", () => {
   test("screenshotMaxDim is read PER CALL, so the hot setting needs no daemon restart", async () => {
     const cu = fakeCu({ ok: true, resultJson: JSON.stringify({ dataUrl: "data:image/png;base64,A", width: 100, height: 100 }) } as CuActResult);
     let maxDim: number | undefined = 800;
-    const server = computerCapability({
-      currentSession: () => session({ computerUse: cu.service, visionCapable: true }),
+    const server = computerCapability(session({ computerUse: cu.service, visionCapable: true }), {
       computerUse: () => undefined,
       screenshotMaxDim: () => maxDim,
     });
@@ -106,7 +104,7 @@ describe("computerCapability: callTool", () => {
   });
 
   test("invalid arguments and unknown tools are isError results, never throws", async () => {
-    const server = computerCapability({ currentSession: () => session(), computerUse: () => undefined });
+    const server = computerCapability(session(), { computerUse: () => undefined });
     const instance = server.instance as WinterMcpServerInstance;
     const bad = await instance.callTool("computer", { action: "teleport" });
     expect(bad.isError).toBe(true);
@@ -116,18 +114,9 @@ describe("computerCapability: callTool", () => {
     expect((unknown.content[0] as { text: string }).text).toBe("unknown tool: keyboard");
   });
 
-  test("no bound session refuses without ever reaching the service", async () => {
-    const cu = fakeCu({ ok: true, resultJson: "{}" } as CuActResult);
-    const server = computerCapability({ currentSession: () => undefined, computerUse: () => cu.service });
-    const res = await (server.instance as WinterMcpServerInstance).callTool("computer", { action: "ax_snapshot" });
-    expect(res.isError).toBe(true);
-    expect(cu.calls.length).toBe(0);
-  });
-
   test("the capability never rides ToolSearch deferral (a dispatch call is not refused)", async () => {
     const cu = fakeCu({ ok: true, resultJson: JSON.stringify({ text: "#0 window" }) } as CuActResult);
-    const server = computerCapability({
-      currentSession: () => session({ mode: "dispatch", computerUse: cu.service }),
+    const server = computerCapability(session({ mode: "dispatch", computerUse: cu.service }), {
       computerUse: () => undefined,
     });
     const res = await (server.instance as WinterMcpServerInstance).callTool("computer", { action: "ax_snapshot" });

@@ -30,7 +30,8 @@ interface Harness {
   store: SessionStore;
   registry: ToolRegistry;
   instance: WinterMcpServerInstance;
-  session: CapabilitySession | undefined;
+  session: CapabilitySession;
+  deps: { models: string[]; sessions: never };
   interrupted: string[];
   emitted: Array<{ sessionId: string; activity: unknown }>;
 }
@@ -66,12 +67,9 @@ function harness(): Harness {
   // Door 1 — the daemon's shared registry, wired exactly as `daemon.ts` wires it.
   registerSessionSpawnTool(registry, { models: MODELS });
   registerListSessionsTools(registry, sessionsDeps as never);
-  // Door 2 — the capability server, over the SAME deps.
-  const server = sessionsCapability({
-    currentSession: () => h.session,
-    models: MODELS,
-    sessions: sessionsDeps as never,
-  });
+  // Door 2 — the capability server, over the SAME deps, built FOR THIS SESSION.
+  h.deps = { models: MODELS, sessions: sessionsDeps as never };
+  const server = sessionsCapability(h.session, h.deps);
   h.instance = server.instance as WinterMcpServerInstance;
   return h;
 }
@@ -79,12 +77,14 @@ function harness(): Harness {
 describe("sessionsCapability: the server shape", () => {
   test("is an `sdk` server named `sessions` with a callable instance", () => {
     const h = harness();
-    const server = sessionsCapability({
-      currentSession: () => h.session, models: MODELS,
+    const server = sessionsCapability(h.session, {
+      models: MODELS,
       sessions: { store: h.store, derive: () => undefined, turnStartedAt: () => undefined, isRunning: () => false, interrupt: () => {}, emit: () => {} } as never,
     });
     expect(server.type).toBe("sdk");
-    expect(server.name).toBe("sessions");
+    // P8b-35: the BRAND rides the server name, so the router's `mcp__<server>__<tool>` comes out as
+    // P8b-12's literal. `wire-names.test.ts` derives that rather than asserting it.
+    expect(server.name).toBe("norma__sessions");
     // The router refuses a capability server whose instance is not duck-type callable, and the SDK
     // would forward it as wire-safe-but-inert. This is the exact predicate both use.
     expect(isWinterMcpServerInstance(server.instance)).toBe(true);
@@ -165,12 +165,13 @@ describe("sessionsCapability: callTool", () => {
     expect(viaCapability.content).toEqual([{ type: "text", text: viaRegistry.output }]);
   });
 
-  test("no bound session is a typed refusal, never a guessed identity", async () => {
+  test("the session is BAKED IN — every call is attributed to the session the server was built for", async () => {
     const h = harness();
-    h.session = undefined;
-    const res = await h.instance.callTool(LIST_SESSIONS_TOOL, {});
-    expect(res.isError).toBe(true);
-    expect(String((res.content[0] as { text: string }).text)).toContain("no Norma session is bound to this call");
+    const one = h.store.createSession("global", { cwd: h.home, mode: "code" });
+    await h.instance.callTool(MANAGE_SESSION_TOOL, { sessionId: one, action: "background" });
+    // Nothing looked a session up; there is no slot to look one up IN (P8b-36). `capabilityServer`
+    // takes a non-optional `CapabilitySession`, so "unbound" is a compile error, not a branch.
+    expect(h.emitted.map((e) => e.sessionId)).toEqual([one]);
   });
 
   test("a tool that throws is an isError result (the registry's throw→isError conversion)", async () => {

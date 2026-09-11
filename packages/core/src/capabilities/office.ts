@@ -16,14 +16,14 @@ import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-s
 import { docsToolDefs, type DocsToolDeps } from "../agent/tools/docs";
 import { sheetsToolDefs, type SheetsToolDeps } from "../agent/tools/sheets";
 import { slidesToolDefs, type SlidesToolDeps } from "../agent/tools/slides";
-import { capabilityServer, type CapabilitySessionDeps } from "./server";
+import { capabilityServer, type CapabilitySession } from "./server";
 
 /** The three tools take the identical trio; `daemon.ts` wires one set of closures to all three. */
-export interface OfficeCapabilityDeps extends CapabilitySessionDeps {
+export interface OfficeCapabilityDeps {
   office: DocsToolDeps & SheetsToolDeps & SlidesToolDeps;
 }
 
-export function officeCapability(deps: OfficeCapabilityDeps): McpSdkServerConfigWithInstance {
+export function officeCapability(session: CapabilitySession, deps: OfficeCapabilityDeps): McpSdkServerConfigWithInstance {
   return capabilityServer(
     {
       key: "office",
@@ -32,10 +32,7 @@ export function officeCapability(deps: OfficeCapabilityDeps): McpSdkServerConfig
         ...sheetsToolDefs(deps.office),
         ...slidesToolDefs(deps.office),
       ],
-      // `modes: ["code","dispatch"]` on all three; none carries `argsByMode`, so this is inert
-      // beyond naming the widest mode served.
-      schemaMode: "code",
     },
-    deps,
+    session,
   );
 }

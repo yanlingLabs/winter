@@ -16,6 +16,8 @@ import type { CapabilitySession } from "../../src/capabilities/server";
 
 const SID = "s_web";
 const KEY = "brave_test_key_do_not_leak";
+/** `web_fetch` saves its converted page here; the directory need not exist for a refused fetch. */
+const TMPDIR = "/tmp/norma-cap-web-tmp";
 
 const servers: Array<{ stop(closeActive?: boolean): void }> = [];
 afterEach(() => { for (const s of servers.splice(0)) s.stop(true); });
@@ -23,21 +25,23 @@ afterEach(() => { for (const s of servers.splice(0)) s.stop(true); });
 interface Harness {
   registry: ToolRegistry;
   instance: WinterMcpServerInstance;
-  session: CapabilitySession | undefined;
+  session: CapabilitySession;
   secretCalls: string[];
   audits: Array<Record<string, unknown>>;
 }
 
-function harness(over: { fetchFn?: typeof fetch } = {}): Harness {
+function harness(over: { fetchFn?: typeof fetch; tmpDir?: string } = {}): Harness {
   const h = { registry: new ToolRegistry(), secretCalls: [] as string[], audits: [] as Array<Record<string, unknown>> } as Harness;
-  h.session = { sessionId: SID, mode: "code", cwd: "/tmp", roots: ["/tmp"] };
+  // The session is BAKED INTO the server (P8b-36) — a test that wants a different session builds a
+  // different harness rather than reassigning this field, which the server would never see.
+  h.session = { sessionId: SID, mode: "code", cwd: "/tmp", roots: ["/tmp"], ...(over.tmpDir === undefined ? {} : { tmpDir: over.tmpDir }) };
   const deps = {
     secret: async (name: string): Promise<string | null> => { h.secretCalls.push(name); return KEY; },
     audit: (line: Record<string, unknown>) => { h.audits.push(line); },
     ...(over.fetchFn === undefined ? {} : { fetchFn: over.fetchFn }),
   };
   registerWebTools(h.registry, deps);
-  h.instance = webCapability({ currentSession: () => h.session, web: deps }).instance as WinterMcpServerInstance;
+  h.instance = webCapability(h.session, { web: deps }).instance as WinterMcpServerInstance;
   return h;
 }
 
@@ -48,9 +52,9 @@ function ctx(): ToolContext {
 describe("webCapability: the server shape", () => {
   test("is an `sdk` server named `web` carrying web_fetch and web_search", () => {
     const h = harness();
-    const server = webCapability({ currentSession: () => h.session, web: {} });
+    const server = webCapability(h.session, { web: {} });
     expect(server.type).toBe("sdk");
-    expect(server.name).toBe("web");
+    expect(server.name).toBe("norma__web");
     expect(isWinterMcpServerInstance(server.instance)).toBe(true);
     expect((server.instance as WinterMcpServerInstance).listTools().map((t) => t.name).sort())
       .toEqual(["web_fetch", "web_search"]);
@@ -114,14 +118,19 @@ describe("webCapability: the Brave key never leaves the daemon (P8b-33)", () => 
 });
 
 describe("webCapability: the SSRF floor is today's", () => {
-  test("a metadata-IP fetch is refused identically on both doors", async () => {
+  test("a metadata-IP fetch is refused identically on both doors — for the SSRF reason (M1)", async () => {
+    // ⚠️ `tmpDir` MUST be set on BOTH doors. `web_fetch` checks `ctx.tmpDir` BEFORE `ssrfGuard`, so
+    // without it both doors return "requires a session tmp directory" and the equality passes with
+    // the SSRF path never running — a vacuous proof. Asserting the REASON is what closes that.
     const url = "http://169.254.169.254/latest/meta-data/";
     const viaRegistryH = harness();
-    const viaRegistry = await viaRegistryH.registry.execute("web_fetch", { url }, ctx());
-    const viaCapabilityH = harness();
+    const viaRegistry = await viaRegistryH.registry.execute("web_fetch", { url }, { ...ctx(), tmpDir: TMPDIR });
+    const viaCapabilityH = harness({ tmpDir: TMPDIR });
     const viaCapability = await viaCapabilityH.instance.callTool("web_fetch", { url });
     expect(viaRegistry.isError).toBe(true);
     expect(viaCapability.isError).toBe(true);
+    expect(viaRegistry.output).toContain("refusing to fetch a private address");
+    expect(viaRegistry.output).not.toContain("tmpDir");
     expect(viaCapability.content).toEqual([{ type: "text", text: viaRegistry.output }]);
   });
 
@@ -129,21 +138,12 @@ describe("webCapability: the SSRF floor is today's", () => {
     // `web_fetch` saves the converted page under `ctx.tmpDir` and throws when it is unset, so a
     // `CapabilitySession` without one makes every code-mode fetch fail. Recorded as a test rather
     // than a comment because the session driver is a LATER task and this is the field it must set.
-    const h = harness();
-    const withoutTmp = await h.instance.callTool("web_fetch", { url: "https://example.com" });
-    expect(withoutTmp.isError).toBe(true);
-    expect(String((withoutTmp.content[0] as { text: string }).text)).toContain("ctx.tmpDir is unset");
-    // With one bound, the fence check is passed and the call proceeds to the network layer.
-    h.session = { ...h.session!, tmpDir: "/tmp/norma-cap-web" };
-    const withTmp = await h.instance.callTool("web_fetch", { url: "http://169.254.169.254/" });
-    expect(String((withTmp.content[0] as { text: string }).text)).not.toContain("ctx.tmpDir is unset");
+    const without = await harness().instance.callTool("web_fetch", { url: "https://example.com" });
+    expect(without.isError).toBe(true);
+    expect(String((without.content[0] as { text: string }).text)).toContain("ctx.tmpDir is unset");
+    // With one on the session, the gate is passed and the SSRF floor is what answers instead.
+    const withTmp = await harness({ tmpDir: TMPDIR }).instance.callTool("web_fetch", { url: "http://169.254.169.254/" });
+    expect(String((withTmp.content[0] as { text: string }).text)).toContain("refusing to fetch a private address");
   });
 
-  test("no bound session refuses without reading the key", async () => {
-    const h = harness({ fetchFn: (() => { throw new Error("network must not be reached"); }) as unknown as typeof fetch });
-    h.session = undefined;
-    const res = await h.instance.callTool("web_search", { query: "anything" });
-    expect(res.isError).toBe(true);
-    expect(h.secretCalls).toEqual([]);
-  });
 });

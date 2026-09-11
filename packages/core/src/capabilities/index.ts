@@ -1,13 +1,14 @@
-// `buildCapabilities` — the ONE place the daemon's capability servers are assembled, and the only
-// thing `daemon.ts` needs to know about this directory.
+// `buildCapabilitiesFor` — the ONE place the daemon's capability servers are assembled, and the
+// only thing the session driver needs to know about this directory.
 //
-// R-8-1: the router owns no tool; the DAEMON owns the capability tools and hands them to the router,
-// which forwards them into every spawned Winter child under each server's own name.
-export { capabilityToolName, NORMA_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS } from "./names";
+// R-8-1: the router owns no tool; the DAEMON owns the capability tools. P8b-36: they are built PER
+// SESSION and handed to that session's own `Options.mcpServers`, not to the handle-wide
+// construction-time `capabilities` list — see `server.ts`'s header for the measurement behind that
+// (there is no per-call session identity on `callTool`, so the identity has to be a closure).
+export { capabilityToolName, capabilityServerName, NORMA_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS } from "./names";
 export type { CapabilityServerKey, CapabilityToolFacts, NormaCapabilityToolName, SessionMode } from "./names";
-export type { CapabilitySession, CapabilitySessionDeps } from "./server";
+export type { CapabilitySession, CapabilityServerSpec } from "./server";
 export { capabilityServer } from "./server";
-export { createCapabilitySessionBinding, type CapabilitySessionBinding } from "./current-session";
 export { sessionsCapability, type SessionsCapabilityDeps } from "./sessions";
 export { computerCapability, type ComputerCapabilityDeps } from "./computer";
 export { browserCapability, type BrowserCapabilityDeps } from "./browser";
@@ -20,57 +21,58 @@ import { browserCapability, type BrowserCapabilityDeps } from "./browser";
 import { computerCapability, type ComputerCapabilityDeps } from "./computer";
 import { officeCapability, type OfficeCapabilityDeps } from "./office";
 import { researchCapability, type ResearchCapabilityDeps } from "./research";
-import { webCapability, type WebCapabilityDeps } from "./web";
-import type { CapabilitySessionDeps } from "./server";
+import type { CapabilitySession } from "./server";
 import { sessionsCapability, type SessionsCapabilityDeps } from "./sessions";
+import { webCapability, type WebCapabilityDeps } from "./web";
 
-export interface BuildCapabilitiesDeps extends CapabilitySessionDeps {
-  sessions: Omit<SessionsCapabilityDeps, keyof CapabilitySessionDeps>;
-  computer: Omit<ComputerCapabilityDeps, keyof CapabilitySessionDeps>;
-  browser: Omit<BrowserCapabilityDeps, keyof CapabilitySessionDeps>;
-  office: Omit<OfficeCapabilityDeps, keyof CapabilitySessionDeps>;
-  research: Omit<ResearchCapabilityDeps, keyof CapabilitySessionDeps>;
-  web: Omit<WebCapabilityDeps, keyof CapabilitySessionDeps>;
+/**
+ * The daemon-wide half of the wiring: the instances, stores and closures the capability tools need,
+ * built ONCE at boot and shared by every session's servers. Everything session-specific lives in the
+ * `CapabilitySession` passed alongside it.
+ */
+export interface CapabilityDeps {
+  sessions: SessionsCapabilityDeps;
+  computer: ComputerCapabilityDeps;
+  browser: BrowserCapabilityDeps;
+  office: OfficeCapabilityDeps;
+  research: ResearchCapabilityDeps;
+  web: WebCapabilityDeps;
   /**
-   * `settings.computerUse.enabled` AS READ AT BOOT — and it has to be, which is worth stating
-   * plainly because it is the one place 8b's capability set is less live than the registry's.
+   * `settings.computerUse.enabled`, read LIVE — a getter, never a boot snapshot.
    *
-   * `RuntimeSdkOptions.capabilities` is consumed at `createRuntimeSdk` time (surface map §1.7):
-   * the router derives each server's descriptors there, once. So whether the `computer` SERVER
-   * EXISTS follows the boot-time setting, mirroring `daemon.ts:1049`'s own boot guard.
-   *
-   * The hot toggle is still honoured, one layer up: Task 9 computes each session's
-   * `disallowedTools` from the LIVE setting, so turning computer use off on a running daemon makes
-   * `mcp__norma__computer__computer` disallowed for every session created afterwards, and turning
-   * it back on re-allows it — with no restart. A session already running keeps the tool list it
-   * was created with, exactly as an engine session keeps the registry it started its turn with.
-   * The residual gap is narrow and recorded: a daemon that BOOTED with computer use off has no
-   * `computer` capability server to allow, so enabling it mid-life reaches engine sessions only
-   * until the next restart. Task 15's hot-reload sweep owns closing that if it is worth closing.
+   * This is the whole hot-reload story now, and it is simply correct rather than deferred: the
+   * servers are built when a session starts, so a user who turns computer use off gets no `computer`
+   * server on the next session, and one who turns it on gets one — with no daemon restart, and with
+   * no help needed from Task 9's `disallowedTools`. (A session already running keeps the tool list
+   * it was created with, exactly as an engine session keeps the registry it started its turn with;
+   * a toggle-off additionally tears down the shared `ComputerUseService`, so an in-flight capability
+   * call fails safe with the tool's own "computer use is not available in this session".)
    */
-  computerUseEnabled: boolean;
+  computerUseEnabled(): boolean;
 }
 
 /**
- * Build the capability servers, in `CAPABILITY_SERVER_KEYS` order.
+ * Build this session's capability servers, in `CAPABILITY_SERVER_KEYS` order.
  *
- * Never throws: a malformed capability declaration is a CONSTRUCTION refusal inside the router
- * (`capabilityServerDescriptors` validates every `inputSchema` is a JSON-Schema object, even on a
- * Winter-only host), and `daemon.ts` catches that and boots with the Winter leg refusing. So the
- * daemon's boot test asserts the handle was actually built AND that the capability names arrived —
- * a silently-empty list would otherwise look exactly like success.
+ * The session is BAKED IN — each server closes over it, so `callTool` never has to ask who is
+ * calling and there is no unbound state to refuse. `CapabilitySession` is a required argument, so
+ * "no session" is a compile error rather than a runtime branch.
+ *
+ * Never throws. The router still validates whatever it is handed (`capabilityServerDescriptors`
+ * refuses any tool whose `inputSchema` is not a JSON-Schema object, even on a Winter-only host), so
+ * a malformed declaration surfaces at the query rather than here.
  */
-export function buildCapabilities(deps: BuildCapabilitiesDeps): readonly McpSdkServerConfigWithInstance[] {
-  const currentSession = (): ReturnType<CapabilitySessionDeps["currentSession"]> => deps.currentSession();
-  const servers: McpSdkServerConfigWithInstance[] = [
-    sessionsCapability({ ...deps.sessions, currentSession }),
-  ];
-  // `computer` is the ONLY conditional server — every other capability exists whenever the daemon
-  // does, exactly as its registry counterpart does (the gate below is `daemon.ts:1049`'s own).
-  if (deps.computerUseEnabled) servers.push(computerCapability({ ...deps.computer, currentSession }));
-  servers.push(browserCapability({ ...deps.browser, currentSession }));
-  servers.push(officeCapability({ ...deps.office, currentSession }));
-  servers.push(researchCapability({ ...deps.research, currentSession }));
-  servers.push(webCapability({ ...deps.web, currentSession }));
+export function buildCapabilitiesFor(
+  session: CapabilitySession,
+  deps: CapabilityDeps,
+): readonly McpSdkServerConfigWithInstance[] {
+  const servers: McpSdkServerConfigWithInstance[] = [sessionsCapability(session, deps.sessions)];
+  // `computer` is the ONLY conditional server, and the condition is now LIVE — see
+  // `computerUseEnabled` above.
+  if (deps.computerUseEnabled()) servers.push(computerCapability(session, deps.computer));
+  servers.push(browserCapability(session, deps.browser));
+  servers.push(officeCapability(session, deps.office));
+  servers.push(researchCapability(session, deps.research));
+  servers.push(webCapability(session, deps.web));
   return servers;
 }

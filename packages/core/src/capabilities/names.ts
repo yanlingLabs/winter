@@ -2,24 +2,46 @@
 // builds them.
 //
 // WHY THIS FILE EXISTS AT ALL. On the Winter leg the daemon's own tools are no longer registry
-// entries the engine dispatches; they are MCP tools on in-process servers the router forwards into
-// each spawned child (`RuntimeSdkOptions.capabilities`, surface map §1.7). A child sees them under
-// their MCP wire names — `mcp__<mcpServerName>__<server>__<tool>` — and every downstream surface
-// that has to reason about them (Task 9's per-mode `disallowedTools`, P8b-25's Norma-name table,
-// the approval gate's classification) keys on those strings. One table, built by one function, so
-// the strings can never be hand-copied apart.
+// entries the engine dispatches; they are MCP tools on in-process servers handed to the child
+// through `Options.mcpServers`. Every downstream surface that has to reason about them (Task 9's
+// per-mode `disallowedTools`, P8b-25's Norma-name table, the approval gate's classification) keys
+// on the WIRE names, so they are written down once, here.
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// THE WIRE-NAME FORM, AND ITS SOURCE (P8b-35; the C1 fix)
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+//
+// An MCP server is advertised UNDER ITS OWN NAME and its tools are named `mcp__<server>__<tool>`.
+// That is not this file's convention, it is the router's, stated in the installed
+// `winter-runtime-sdk/dist/door.d.ts` ("PER SERVER, UNDER ITS OWN NAME, so `mcp__<server>__<tool>`
+// is the same canonical name on both legs") and implemented in its `dist/index.js`:
+// `record[server.name] = server` keys the capability record, `mergedMcpServers(...)` merges it into
+// the forwarded `Options.mcpServers` under that key, and `capabilityServerDescriptor` builds
+// `{ name: server.name, tools: [{ tool: tool.name, … }] }` for the official leg.
+//
+// SO THE SERVER'S NAME CARRIES THE BRAND, NOT THE TOOL TOKEN. A server declared `"sessions"` would
+// be reached as `mcp__sessions__list_sessions` — one segment short of P8b-12's
+// `mcp__norma__sessions__list_sessions`, and short SILENTLY: Task 9's `disallowedTools` entries
+// would name tools that do not exist and therefore deny nothing (a chat session would keep
+// `computer`), and P8b-25's name table would miss, blanking tool rows in the Mac/iOS renderers.
+// Nothing in the type system or in a literal-vs-literal parity test can see that.
+//
+// P8b-35's answer: the server is NAMED `norma__<key>` (`capabilityServerName`), so the router's own
+// `mcp__<server>__<tool>` yields exactly the P8b-12 literal — the same string
+// `mcpToolName(NORMA_BRAND, "<key>__<tool>")` produces. `test/capabilities/wire-names.test.ts`
+// DERIVES each name from the declared server through the router's own path and asserts the two
+// agree, so the table can never again describe names the router does not register.
 //
 // R-1 PINS THE NAMESPACE TO `norma`, NEVER `winter`: `NORMA_BRAND.mcpServerName` is `"norma"`, and
 // the Mac/iOS renderers key tool rows on Norma's names (P8b-25). `mcpToolName` is TWO-ARG — it
-// takes the brand and the WHOLE tool token — so the `<server>__<tool>` join happens here, in the
-// caller, and is asserted against the P8b-12 literal by `test/capabilities/names.test.ts`.
+// takes the brand and the WHOLE tool token — so the `<server>__<tool>` join happens here.
 import { mcpToolName } from "@yanlinglabs/winter-agent-sdk";
 import { NORMA_BRAND } from "../runtime-sdk/brand";
 import type { SessionMode } from "../runtime-sdk/create";
 
 export type { SessionMode };
 
-/** The capability server keys, in the order `buildCapabilities` returns them.
+/** The capability server keys, in the order `buildCapabilitiesFor` returns them.
  *
  *  P8b-33 added `web` to P8b-12's five: every mode disallows the SDK's built-in WebSearch/WebFetch
  *  in 8b (no keys, no dangerous-domain floor), so code keeps the daemon-owned pair. */
@@ -37,6 +59,22 @@ export type CapabilityServerKey = (typeof CAPABILITY_SERVER_KEYS)[number];
  */
 export function capabilityToolName(serverKey: string, tool: string): string {
   return mcpToolName(NORMA_BRAND, `${serverKey}__${tool}`);
+}
+
+/**
+ * The NAME a capability server is declared with — `norma__sessions`, `norma__browser`, … (P8b-35).
+ *
+ * The router keys its capability record by `server.name`, merges the server into the forwarded
+ * `Options.mcpServers` under it, and a child names that server's tools `mcp__<server>__<tool>`. So
+ * the brand segment has to live HERE, on the server, for the wire name to come out as P8b-12's
+ * literal. Declared as `"sessions"` instead, every name in the table below would be one segment
+ * short of what the child actually sees — see this file's header for why that is silent.
+ *
+ * `norma__<key>` can never equal `brand.mcpServerName` (`"norma"`), which is the one name the
+ * router refuses for a capability server (it would shadow the standing messaging server).
+ */
+export function capabilityServerName(serverKey: string): string {
+  return `${NORMA_BRAND.mcpServerName}__${serverKey}`;
 }
 
 /**
@@ -73,8 +111,8 @@ export const NORMA_CAPABILITY_TOOLS = {
   "mcp__norma__sessions__list_sessions": { modes: ["dispatch"], deferred: true },
   "mcp__norma__sessions__manage_session": { modes: ["dispatch"], deferred: true },
   // `computer` — `modes: ["code","dispatch"]`, `deferred: ["dispatch"]` (immediate in code, loaded
-  // via ToolSearch in dispatch). Its PRESENCE additionally follows `settings.computerUse.enabled`
-  // at boot — see `buildCapabilities` in `index.ts` for why that is construction-time.
+  // via ToolSearch in dispatch). Its PRESENCE additionally follows the LIVE
+  // `settings.computerUse.enabled`, read when the session's servers are built (`index.ts`).
   "mcp__norma__computer__computer": { modes: ["code", "dispatch"], deferred: ["dispatch"] },
   // `browser` — the only capability tool eligible in all three modes. Chat sees a READ-ONLY verb
   // set, enforced INSIDE the capability (`browser.ts`'s `argsByMode`, resolved from the caller's

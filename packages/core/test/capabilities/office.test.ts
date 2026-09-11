@@ -22,7 +22,7 @@ interface Harness {
   recorded: Array<{ action: string; args?: Record<string, unknown> }>;
   registry: ToolRegistry;
   instance: WinterMcpServerInstance;
-  session: CapabilitySession | undefined;
+  session: CapabilitySession;
 }
 
 function harness(): Harness {
@@ -40,7 +40,7 @@ function harness(): Harness {
   registerDocsTool(h.registry, h.deps);
   registerSheetsTool(h.registry, h.deps);
   registerSlidesTool(h.registry, h.deps);
-  h.instance = officeCapability({ currentSession: () => h.session, office: h.deps }).instance as WinterMcpServerInstance;
+  h.instance = officeCapability(h.session, { office: h.deps }).instance as WinterMcpServerInstance;
   return h;
 }
 
@@ -51,9 +51,9 @@ function ctx(): ToolContext {
 describe("officeCapability", () => {
   test("is an `sdk` server named `office` carrying all three tools", () => {
     const h = harness();
-    const server = officeCapability({ currentSession: () => h.session, office: h.deps });
+    const server = officeCapability(h.session, { office: h.deps });
     expect(server.type).toBe("sdk");
-    expect(server.name).toBe("office");
+    expect(server.name).toBe("norma__office");
     expect(isWinterMcpServerInstance(server.instance)).toBe(true);
     expect((server.instance as WinterMcpServerInstance).listTools().map((t) => t.name).sort())
       .toEqual(["docs", "sheets", "slides"]);
@@ -97,11 +97,9 @@ describe("officeCapability", () => {
     expect(viaCapabilityH.recorded.length).toBe(0);
   });
 
-  test("no bound session refuses before anything is dispatched", async () => {
+  test("every dispatched command carries the session the server was built for", async () => {
     const h = harness();
-    h.session = undefined;
-    const res = await h.instance.callTool("sheets", { verb: "info", path: `${WORKDIR}/book.ods` });
-    expect(res.isError).toBe(true);
-    expect(h.recorded.length).toBe(0);
+    await h.instance.callTool("sheets", { verb: "info", path: `${WORKDIR}/book.ods` });
+    expect(h.recorded.length).toBe(1);
   });
 });

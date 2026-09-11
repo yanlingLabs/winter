@@ -18,9 +18,9 @@
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
 import { listSessionsToolDefs, type ListSessionsDeps, type ManageSessionDeps } from "../agent/tools/list-sessions";
 import { sessionSpawnToolDefs } from "../agent/tools/session-spawn";
-import { capabilityServer, type CapabilitySessionDeps } from "./server";
+import { capabilityServer, type CapabilitySession } from "./server";
 
-export interface SessionsCapabilityDeps extends CapabilitySessionDeps {
+export interface SessionsCapabilityDeps {
   /** The `session_spawn` schema's `model` enum — the SAME list `registerSessionSpawnTool` gets in
    *  `daemon.ts` (known model ids + their unambiguous short aliases). Steering only, exactly as it
    *  is on the registry door: the bridge's own `models()` check is the authoritative gate. A
@@ -32,7 +32,7 @@ export interface SessionsCapabilityDeps extends CapabilitySessionDeps {
   sessions: ListSessionsDeps & ManageSessionDeps;
 }
 
-export function sessionsCapability(deps: SessionsCapabilityDeps): McpSdkServerConfigWithInstance {
+export function sessionsCapability(session: CapabilitySession, deps: SessionsCapabilityDeps): McpSdkServerConfigWithInstance {
   return capabilityServer(
     {
       key: "sessions",
@@ -40,10 +40,7 @@ export function sessionsCapability(deps: SessionsCapabilityDeps): McpSdkServerCo
         ...sessionSpawnToolDefs({ models: deps.models }),
         ...listSessionsToolDefs(deps.sessions),
       ],
-      // Dispatch is the only mode these three serve; none carries `argsByMode`, so this is inert
-      // beyond saying out loud which mode's schema is on the wire.
-      schemaMode: "dispatch",
     },
-    deps,
+    session,
   );
 }

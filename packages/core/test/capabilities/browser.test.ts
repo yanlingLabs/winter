@@ -25,7 +25,7 @@ interface Harness {
   opened: Array<{ sessionId: string; kind: string; url?: string }>;
   registry: ToolRegistry;
   instance: WinterMcpServerInstance;
-  session: CapabilitySession | undefined;
+  session: CapabilitySession;
 }
 
 function harness(mode: CapabilitySession["mode"] = "code"): Harness {
@@ -44,7 +44,7 @@ function harness(mode: CapabilitySession["mode"] = "code"): Harness {
     harnesses: () => [{ clientName: "orb", role: "harness" }],
   };
   registerBrowserTool(h.registry, h.deps);
-  h.instance = browserCapability({ currentSession: () => h.session, browser: h.deps }).instance as WinterMcpServerInstance;
+  h.instance = browserCapability(h.session, { browser: h.deps }).instance as WinterMcpServerInstance;
   return h;
 }
 
@@ -55,24 +55,26 @@ function ctx(mode: CapabilitySession["mode"]): ToolContext {
 describe("browserCapability: the server shape", () => {
   test("is an `sdk` server named `browser` with a callable instance", () => {
     const h = harness();
-    const server = browserCapability({ currentSession: () => h.session, browser: h.deps });
+    const server = browserCapability(h.session, { browser: h.deps });
     expect(server.type).toBe("sdk");
-    expect(server.name).toBe("browser");
+    expect(server.name).toBe("norma__browser");
     expect(isWinterMcpServerInstance(server.instance)).toBe(true);
   });
 
-  test("listTools advertises the WIDEST schema (code), not the fail-closed chat one", () => {
-    const h = harness();
-    const [tool] = h.instance.listTools();
-    expect(tool!.name).toBe("browser");
-    expect(tool!.inputSchema["type"]).toBe("object");
-    // Byte-identical to what the registry advertises a code session.
-    const spec = h.registry.specFor("browser", undefined, "code")!;
-    expect(tool!.description).toBe(spec.description);
-    expect(tool!.inputSchema).toEqual(spec.parameters as Record<string, unknown>);
-    // And NOT the chat schema — which is the silent narrowing this guards against.
-    const chatSpec = h.registry.specFor("browser", undefined, "chat")!;
-    expect(tool!.inputSchema).not.toEqual(chatSpec.parameters as Record<string, unknown>);
+  test("listTools advertises THIS SESSION'S schema — full for code, narrow for chat (m2)", () => {
+    const code = harness("code");
+    const [codeTool] = code.instance.listTools();
+    expect(codeTool!.name).toBe("browser");
+    expect(codeTool!.inputSchema["type"]).toBe("object");
+    expect(codeTool!.description).toBe(code.registry.specFor("browser", undefined, "code")!.description);
+    expect(codeTool!.inputSchema).toEqual(code.registry.specFor("browser", undefined, "code")!.parameters as Record<string, unknown>);
+    // The chat session is shown the READ-ONLY schema — exactly what the registry shows a chat
+    // session today. A daemon-wide server had to pick one and would have advertised interact verbs
+    // to chat that its own `callTool` then refuses.
+    const chat = harness("chat");
+    const [chatTool] = chat.instance.listTools();
+    expect(chatTool!.inputSchema).toEqual(chat.registry.specFor("browser", undefined, "chat")!.parameters as Record<string, unknown>);
+    expect(chatTool!.inputSchema).not.toEqual(codeTool!.inputSchema);
   });
 });
 
@@ -109,11 +111,21 @@ describe("browserCapability: callTool", () => {
     expect(res.isError).toBe(false);
   });
 
-  test("no bound session refuses before the tool runs", async () => {
-    const h = harness();
-    h.session = undefined;
-    const res = await h.instance.callTool("browser", { verb: "open", url: "https://example.com" });
-    expect(res.isError).toBe(true);
-    expect(h.opened.length).toBe(0);
+  test("two sessions' servers are live at once and each keeps its OWN mode (P8b-36)", async () => {
+    // The bug this replaces: a daemon-wide "currently bound session" slot means a chat call landing
+    // while a code session is bound gets the FULL interact set. Here both servers exist
+    // simultaneously and the chat one still refuses, because its mode is a closure, not a lookup.
+    const code = harness("code");
+    const chat = harness("chat");
+    const [chatRes, codeRes] = await Promise.all([
+      chat.instance.callTool("browser", { verb: "click", tabId: "t1", selector: "#go" }),
+      code.instance.callTool("browser", { verb: "click", tabId: "t1", selector: "#go" }),
+    ]);
+    expect(chatRes.isError).toBe(true);
+    expect(codeRes.isError).toBe(false);
+    expect(chat.recorded.length).toBe(0);
+    expect(code.recorded.map((r) => r.action)).toEqual(["click"]);
+    // And each call was attributed to its OWN session id.
+    expect(code.opened.every((o) => o.sessionId === SID)).toBe(true);
   });
 });

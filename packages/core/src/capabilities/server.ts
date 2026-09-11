@@ -6,7 +6,7 @@
 //
 // The brief asks for the registry handler's body to be extracted into a named function both doors
 // call. This file goes one step further and shares the WHOLE `ToolDefinition` object: each tool
-// module now exports a `*ToolDefs(deps)` factory, `register*Tool` registers what it returns on the
+// module exports a `*ToolDefs(deps)` factory, `register*Tool` registers what it returns on the
 // daemon's shared `ToolRegistry`, and a capability server holds the SAME objects in a private
 // `ToolRegistry` of its own. The consequences are the point:
 //
@@ -23,34 +23,36 @@
 // server must advertise exactly its own tools and nothing a plugin happened to add.
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// THE PER-CALL SESSION — the one thing the router does not give us (ROUTER 0.0.3 CARRY)
+// P8b-36: A CAPABILITY SERVER IS BUILT **PER SESSION**, WITH THE SESSION BAKED IN
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 //
-// `WinterMcpServerInstance.callTool(name, args)` takes no session identity, and the SDK's own
-// bridge confirms it end to end: `makeSdkMcpCallHandler` invokes
-// `cfg.instance.callTool(req.tool ?? "", req.arguments ?? {})` — the `sdk_mcp_call` control request
-// carries `server`/`tool`/`arguments` and nothing else. Capability servers are SHARED across every
-// session on the handle (they are construction-time, surface map §1.7), so an in-process server has
-// no way to know which session is calling it.
+// `WinterMcpServerInstance.callTool(name, args)` carries no session identity — measured, not
+// inferred: the SDK's `makeSdkMcpCallHandler` invokes
+// `cfg.instance.callTool(req.tool ?? "", req.arguments ?? {})`, and the router's own forwarding
+// (`capabilityServerDescriptor`) does the same. The `sdk_mcp_call` control request carries
+// `server` / `tool` / `arguments` and nothing else.
 //
-// For 8b that is bound host-side: `deps.currentSession()` is a getter Task 16's session driver sets
-// around each turn. It is sound today for exactly one reason, stated so it is a known limit rather
-// than a discovered bug — ONE daemon, and at most one running turn per session, with the driver
-// setting the holder immediately before `query()` drains a prompt and clearing it after the turn's
-// `result`. A concurrent second turn in another session would read the wrong identity, which is why
-// `currentSession()` returning `undefined` is a TYPED REFUSAL here and never a default context: a
-// capability that guessed a session would write a browser tab or a screenshot lease into somebody
-// else's transcript.
+// The first cut of this file answered that with a daemon-wide "currently bound session" slot. That
+// was WRONG, and the reason is worth keeping written down: the slot is per-DAEMON, so two Winter
+// sessions running turns concurrently cross-attribute — and because `ctx.mode` comes from the same
+// slot and is what resolves `browser`'s `argsByMode`, a CHAT session's call landing while a CODE
+// session was bound would have been handed the full interact verb set. The read-only subset would
+// have been bypassed silently.
 //
-// Recorded as a ROUTER 0.0.3 CARRY: `callTool(name, args, ctx?)` with the calling session's id
-// (and, ideally, its mode) would make this exact.
+// The fix needs no router change, because 8b is Winter-leg-only (P8b-1) and the router forwards a
+// caller's own `Options.mcpServers` straight through to the Winter leg: the daemon builds the
+// capability servers FOR ONE SESSION and passes them on that session's own `Options`. Identity is a
+// closure, not a lookup; `mode` cannot be another session's; and there is no unbound state to
+// refuse — `capabilityServer(spec, session)` takes a non-optional `CapabilitySession`, so "no
+// session" is a compile error rather than a runtime branch.
 import type { McpSdkServerConfigWithInstance, WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
 import type { ComputerUseService } from "../agent/computer-use";
 import { ToolRegistry, type ToolContext, type ToolDefinition } from "../agent/tools/registry";
-import type { SessionMode } from "./names";
+import { capabilityServerName, type SessionMode } from "./names";
 
 /**
- * Everything a capability call needs to know about WHO is calling.
+ * Everything a capability call needs to know about WHO is calling. Fixed for the life of the
+ * server, because the server is built for exactly one session.
  *
  * Deliberately NOT a `ToolContext`: a `ToolContext` also carries the engine's deferral bookkeeping
  * (`builtinDeferral`, `loadedTools`, `deferThreshold`) and its tool-access sets
@@ -59,18 +61,24 @@ import type { SessionMode } from "./names";
  * first" — a rule that exists for the ENGINE's prompt budget and means nothing to a spawned Winter
  * child, which was handed the tool list up front. So the session driver supplies identity only, and
  * the `ToolContext` is BUILT here with those fields left unset.
+ *
+ * The fields are read at CALL time, so a driver that keeps one mutable session object per session
+ * (updating `signal` at each turn boundary, say) works without rebuilding the servers.
  */
 export interface CapabilitySession {
   /** Norma's own session id — what every emitted event is scoped to. */
   sessionId: string;
-  /** Resolves `argsByMode` (chat's read-only `browser` subset) exactly as the engine does. */
+  /** THIS session's mode. Resolves `argsByMode` (chat's read-only `browser` subset) exactly as the
+   *  engine does, and decides which schema `listTools()` advertises. */
   mode: SessionMode;
   cwd: string;
   /** `roots[0]` MUST be the primary cwd, as `ToolContext` documents. */
   roots: string[];
+  /** ⚠️ REQUIRED for `web_fetch`, which saves its converted page under it and THROWS when it is
+   *  unset. A driver that omits it makes every code-mode fetch fail; pinned by a test. */
   tmpDir?: string;
   outDir?: string;
-  /** The turn's abort signal — `computer`'s `wait` and every dispatched panel command honour it. */
+  /** The session's abort signal — `computer`'s `wait` and every dispatched panel command honour it. */
   signal?: AbortSignal;
   /** `ModelInfo.supportsVision` for the turn's model. `false` makes `computer` refuse a screenshot
    *  with today's message; unset means unknown and is not a block. */
@@ -94,33 +102,21 @@ export interface CapabilitySession {
    * cannot write it.
    */
   browserDomainApproved?: boolean;
-  /** The lease-holding computer-use service for this session, when one is wired. */
+  /** A per-session override of the daemon's `ComputerUseService`. Normally unset — the `computer`
+   *  capability reads the daemon's single holder instead. */
   computerUse?: ComputerUseService;
 }
 
-/** The one dependency every capability server takes: who is calling, right now. */
-export interface CapabilitySessionDeps {
-  currentSession(): CapabilitySession | undefined;
-}
-
 export interface CapabilityServerSpec {
-  /** The P8b-12 server key — `sessions`, `computer`, `browser`, `office`, `research`. Forwarded to
-   *  the Winter leg as the MCP server's OWN name (surface map §1.7). */
+  /** The P8b-12 server key — `sessions`, `computer`, `browser`, `office`, `research`, `web`. The
+   *  server's WIRE name is `capabilityServerName(key)`; see `names.ts` for why they differ. */
   key: string;
   /** THE definitions — the same objects the daemon's shared registry holds. */
   defs: readonly ToolDefinition[];
-  /**
-   * Which mode's schema `listTools()` advertises: the WIDEST mode this server serves.
-   *
-   * Only `browser` has an `argsByMode`, so for every other server this is inert — but the rule is
-   * stated per server rather than defaulted, because getting it wrong is silent. `undefined` (the
-   * registry's own fail-closed resolution) would advertise `browser`'s NARROW chat schema to a code
-   * session, which would be told it may not call a verb `callTool` in that same session would
-   * happily accept. Per-CALLER narrowing still happens at call time, from `session.mode`.
-   */
-  schemaMode: SessionMode;
   /** Extra `ToolContext` wiring this server's tools need beyond identity (e.g. `computer`'s
-   *  service). Applied on top of the identity-derived context, never under it. */
+   *  service). Applied UNDER the identity-derived fields (n1): an extras function that returned
+   *  `mode` or `sessionId` must never be able to override the session it was built for — that is
+   *  precisely how chat's read-only `browser` subset would be weakened. */
   contextExtras?(session: CapabilitySession): Partial<ToolContext>;
 }
 
@@ -132,7 +128,7 @@ function textResult(text: string, isError: boolean): { content: unknown[]; isErr
 }
 
 /**
- * Build one capability server.
+ * Build one capability server FOR ONE SESSION.
  *
  * The returned object is exactly `McpSdkServerConfigWithInstance`: `{ type: "sdk", name, instance }`.
  * `tools` is deliberately NOT set — the SDK populates the wire-safe list from `instance.listTools()`
@@ -140,7 +136,7 @@ function textResult(text: string, isError: boolean): { content: unknown[]; isErr
  */
 export function capabilityServer(
   spec: CapabilityServerSpec,
-  deps: CapabilitySessionDeps,
+  session: CapabilitySession,
 ): McpSdkServerConfigWithInstance {
   const registry = new ToolRegistry();
   for (const def of spec.defs) registry.register(def);
@@ -151,7 +147,11 @@ export function capabilityServer(
       return spec.defs.map((def) => {
         // `specFor` is the registry's own renderer — `rawParameters ?? z.toJSONSchema(...)`. Never
         // undefined here: the name was just registered and none of these defs carries a `scope`.
-        const rendered = registry.specFor(def.name, undefined, spec.schemaMode);
+        //
+        // THE MODE IS THIS SESSION'S (m2). Per-session servers make the advertised schema exact:
+        // a chat session is shown `browser`'s READ-ONLY schema, which is what the registry shows a
+        // chat session today, rather than the full one it would then be refused for using.
+        const rendered = registry.specFor(def.name, undefined, session.mode);
         if (!rendered) throw new Error(`capability ${spec.key}: ${def.name} has no spec`);
         return {
           name: rendered.name,
@@ -165,19 +165,11 @@ export function capabilityServer(
     },
 
     async callTool(name: string, args: Record<string, unknown>) {
-      // Unknown tool FIRST, and worded exactly as `ToolRegistry.execute` words it — a name this
-      // server does not serve is answerable without knowing anything about the caller.
+      // Unknown tool FIRST, and worded exactly as `ToolRegistry.execute` words it.
       if (!names.has(name)) return textResult(`unknown tool: ${name}`, true);
-      const session = deps.currentSession();
-      if (!session) {
-        // Never a guessed identity: see this file's header. A capability with no bound session
-        // would open panel tabs, take screenshots and spawn children against the wrong transcript.
-        return textResult(
-          `${name} is not available right now: no Norma session is bound to this call`,
-          true,
-        );
-      }
       const ctx: ToolContext = {
+        // Extras UNDER identity (n1) — see `contextExtras`' own doc comment.
+        ...spec.contextExtras?.(session),
         cwd: session.cwd,
         roots: session.roots,
         sessionId: session.sessionId,
@@ -189,12 +181,19 @@ export function capabilityServer(
         ...(session.attachImage === undefined ? {} : { attachImage: session.attachImage }),
         ...(session.browserDomainApproved === undefined ? {} : { browserDomainApproved: session.browserDomainApproved }),
         ...(session.computerUse === undefined ? {} : { computerUse: session.computerUse }),
-        ...spec.contextExtras?.(session),
       };
       try {
         // The registry's own execute: same validation, same wording, same truncation, same
         // throw→isError. Deferral never fires — `builtinDeferral` is unset above, on purpose.
         const outcome = await registry.execute(name, args, ctx);
+        // `outcome.fileDiff` IS DELIBERATELY DROPPED (m3), and dropping it is the faithful port.
+        // `fileDiff` is not model-visible on the registry door either: `execute` returns it beside
+        // `output`, and the ENGINE spreads it onto the emitted `tool_result` EVENT for the Mac/iOS
+        // renderers — the model only ever sees `output`. An MCP result has no event channel, so
+        // carrying it here would SHOW the model something it is not shown today. No capability tool
+        // produces one (`diff-report.ts` serves edit/write, which are class (a) and retire), and if
+        // one ever does, the diff belongs on the projector's `tool_result` (Task 11), not in this
+        // return value.
         return textResult(outcome.output, outcome.isError);
       } catch (err) {
         // `execute` already converts a tool throw; this catches the pathological rest (a def whose
@@ -205,5 +204,5 @@ export function capabilityServer(
     },
   };
 
-  return { type: "sdk", name: spec.key, instance };
+  return { type: "sdk", name: capabilityServerName(spec.key), instance };
 }

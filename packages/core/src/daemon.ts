@@ -104,7 +104,8 @@ import { makeApply } from "./settings-apply";
 import { SettingsWatcher } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "./runtime-sdk/create";
-import { buildCapabilities, createCapabilitySessionBinding, type CapabilitySessionBinding } from "./capabilities";
+import { buildCapabilitiesFor, type CapabilityDeps, type CapabilitySession } from "./capabilities";
+import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
 import { makeDaemonRoutineRunner } from "./routines/runner";
 import { makeRoutineScheduler } from "./routines/scheduler";
 import type { NewSessionEvent } from "@norma/protocol";
@@ -147,15 +148,13 @@ export interface RunningDaemon {
    */
   runtimeSdk: NormaRuntimeSdk | undefined;
   /**
-   * P8b Tasks 6-7/16: the per-call session identity every capability server reads.
+   * P8b Tasks 6-7/16 (P8b-36): this session's daemon-owned capability servers.
    *
-   * The router's `callTool(name, args)` carries no session and capability servers are shared across
-   * the handle (a ROUTER 0.0.3 CARRY — see `capabilities/current-session.ts`), so the session driver
-   * binds the calling session here for the duration of a turn. Exposed on the daemon because Task
-   * 16 is its only production caller and a test needs the SAME binding daemon.ts handed the
-   * capabilities, never a mirror.
+   * `callTool(name, args)` carries no session identity, so the identity is BAKED INTO the server —
+   * one set per session, handed to that session's own `Options.mcpServers` by the driver (Task 16).
+   * Exposed on the daemon because a test needs the SAME deps bundle daemon.ts wired, never a mirror.
    */
-  capabilitySessions: CapabilitySessionBinding;
+  buildSessionCapabilities(session: CapabilitySession): readonly McpSdkServerConfigWithInstance[];
   /**
    * P8b Task 15: THE LIVE settings holder — the same binding the settings-watcher swaps, not a boot
    * snapshot. Reading it twice around a `settings.json` write is how a test proves a key is hot
@@ -774,98 +773,110 @@ export async function startDaemon(opts: {
   // process's lifetime, receipts are not durable. That is the same "runtime routing degraded, boot
   // continues" posture the spine itself takes.
   let runtimeSdk: NormaRuntimeSdk | undefined;
-  // ── The daemon-owned capability servers (P8b Tasks 6-7, R-8-1) ────────────────────────────────
-  // The router owns no tool; the DAEMON owns the capability tools and hands them over here, once,
-  // for the handle's lifetime. Each server holds the SAME `ToolDefinition` objects the shared
-  // `ToolRegistry` below registers — one implementation, two doors — so a Winter child and an
-  // engine turn run the identical code with the identical schema and the identical refusals.
+  // ── The daemon-owned capability servers (P8b Tasks 6-7, R-8-1, P8b-36) ────────────────────────
+  // The router owns no tool; the DAEMON owns the capability tools. This bundle is the daemon-wide
+  // HALF of that wiring — the instances, stores and closures the tools need, built once and shared —
+  // and `buildCapabilitiesFor(session, …)` turns it into ONE SESSION'S six servers. Each server
+  // holds the SAME `ToolDefinition` objects the shared `ToolRegistry` below registers (one
+  // implementation, two doors), so a Winter child and an engine turn run identical code with
+  // identical schemas and identical refusals.
   //
-  // THE HOLDER (`capabilitySessions`) IS THE PER-CALL SESSION IDENTITY. `callTool(name, args)`
-  // carries none, and capability servers are shared across every session on the handle, so Task 16's
-  // session driver binds this around each turn; unbound, every capability call is a typed refusal
-  // rather than a guess. Recorded as a ROUTER 0.0.3 CARRY — see `capabilities/current-session.ts`.
+  // PER SESSION, NOT PER DAEMON (P8b-36). `callTool(name, args)` carries no session identity, so an
+  // instance shared across the handle would have to look one up — and a daemon-wide "currently
+  // bound session" slot cross-attributes the moment two Winter sessions run turns concurrently.
+  // Because `ctx.mode` comes from the same place and resolves `browser`'s read-only chat subset,
+  // that is a SECURITY bug, not only an identity one. 8b is Winter-leg-only (P8b-1) and the router
+  // forwards a caller's own `Options.mcpServers` straight through, so the session driver (Task 16)
+  // builds this session's servers and puts them on that session's own `Options` —
+  // `RuntimeSdkOptions.capabilities` stays `[]` and is reserved for the official leg.
   //
-  // `computerUse` is a LET assigned inside the gate below; these are closures, invoked at tool-call
-  // time long after boot (the `engine?.turnStartedAt` precedent this file already relies on).
-  const capabilitySessions = createCapabilitySessionBinding();
+  // `computerUse`/`researchRunner` are LETs assigned inside the gate below; these are closures,
+  // invoked at tool-call time long after boot (the `engine?.turnStartedAt` precedent this file
+  // already relies on).
+  //
   // Steering only, exactly as on the registry door (`registerSessionSpawnTool` below gets the same
   // list). A daemon with no agent provider has no model catalogue and the field is a free string.
   const spawnModelIds = agentProvider ? agentProvider.provider.models().map((m) => m.id) : [];
+  const capabilityDeps: CapabilityDeps = {
+    sessions: {
+      models: [...spawnModelIds, ...deriveModelAliases(spawnModelIds)],
+      // THE SAME instances the registry door gets (`registerListSessionsTools` below): a
+      // management surface with its own hub/store would read every attached session as idle.
+      sessions: {
+        store,
+        derive: (row, sessionId, nowMs) => activityDeriver?.(row, sessionId, nowMs),
+        turnStartedAt: (sid) => engine?.turnStartedAt(sid),
+        isRunning: (sid) => engine?.isRunning(sid) ?? false,
+        interrupt: (sid) => { engine?.interrupt(sid); },
+        emit: (sid, activity) => { hub.emitActivity(sid, activity); },
+      },
+    },
+    computer: {
+      // Hot, read per call.
+      screenshotMaxDim: () => settings?.computerUse?.screenshotMaxDim,
+      // The SAME holder `EngineConfig.computerUse`'s getter reads, including after
+      // `settings-apply.ts` rebuilds the service on a hot toggle. One service, one lease set.
+      computerUse: () => computerUse,
+    },
+    // LIVE, not a boot snapshot: the servers are built when a session starts, so toggling computer
+    // use reaches the next session with no restart and no help from Task 9's `disallowedTools`.
+    computerUseEnabled: () => settings?.computerUse?.enabled === true,
+    // THE SAME four closures `registerBrowserTool` gets below — `mintPanelTab` and
+    // `panelCommands.dispatch` are what emit `panel_tab_opened`/`panel_tab_activated`/
+    // `panel_command`, so a capability with its own would open tabs nobody can see and dispatch
+    // commands `panel.commandResult` could never answer (P8b-20).
+    browser: {
+      browser: {
+        tabs: (sid) => foldPanelTabs(store.read(sid)),
+        openTab: (p) => mintPanelTab(hub, p),
+        dispatch: (cmd) => panelCommands.dispatch(cmd),
+        harnesses: (sid) => hub.attachedHarnesses(sid),
+        dangerousDomainsAdded,
+      },
+    },
+    // The identical trio all three office tools take. `dirsOf` is `store.dirs` — never
+    // `writableRoots` — so the daemon's fence and the app-side `OfficeAgentBroker` fence agree
+    // on what "this session's working directories" means.
+    office: {
+      office: {
+        dispatch: (cmd) => panelCommands.dispatch(cmd),
+        harnesses: (sid) => hub.attachedHarnesses(sid),
+        dirsOf: (sid) => store.dirs(sid),
+      },
+    },
+    // C-6: Norma's OWN web surface for chat/dispatch. `secret` is a CLOSURE — the Exa key is
+    // read inside `run`, never here and never into `listTools()`. `dangerousDomainsAdded` is
+    // the same shared getter every other consumer takes, so the floor is one list.
+    research: {
+      search: { audit: (line) => audit.append(line), secret: (name) => secrets.get(name), dangerousDomainsAdded },
+      readPage: {
+        cache: pageCache,
+        audit: (line) => audit.append(line),
+        // The runner is assigned inside the agent gate; read LIVE at call time, exactly as
+        // `ReadPage`'s own "research is not available in this session yet" fallback expects.
+        get research() { return researchRunner; },
+        dangerousDomainsAdded,
+      },
+    },
+    // P8b-33: code's web surface, for the same reason `research` exists for chat — the SDK's
+    // built-in WebSearch/WebFetch are disallowed in every mode in 8b. Same `audit`/`secrets`
+    // instances the registry door takes; the Brave key is read inside `run`.
+    web: { web: { audit: (line) => audit.append(line), secret: (name) => secrets.get(name) } },
+  };
+  /** THE door Task 16's session driver opens: one session in, its six servers out. */
+  const buildSessionCapabilities = (session: CapabilitySession): readonly McpSdkServerConfigWithInstance[] =>
+    buildCapabilitiesFor(session, capabilityDeps);
   try {
     runtimeSdk = await createNormaRuntimeSdk({
       home: normaHome,
       settings: () => settings, // LIVE holder, never a boot snapshot
       secrets,
       directoryStore: runtime?.directory,
-      capabilities: buildCapabilities({
-        currentSession: () => capabilitySessions.current(),
-        sessions: {
-          models: [...spawnModelIds, ...deriveModelAliases(spawnModelIds)],
-          // THE SAME instances the registry door gets (`registerListSessionsTools` below): a
-          // management surface with its own hub/store would read every attached session as idle.
-          sessions: {
-            store,
-            derive: (row, sessionId, nowMs) => activityDeriver?.(row, sessionId, nowMs),
-            turnStartedAt: (sid) => engine?.turnStartedAt(sid),
-            isRunning: (sid) => engine?.isRunning(sid) ?? false,
-            interrupt: (sid) => { engine?.interrupt(sid); },
-            emit: (sid, activity) => { hub.emitActivity(sid, activity); },
-          },
-        },
-        computer: {
-          // Hot, read per call — the capability set is construction-time, so a snapshot here would
-          // make this the one setting in the daemon that needs a restart.
-          screenshotMaxDim: () => settings?.computerUse?.screenshotMaxDim,
-          // The SAME holder `EngineConfig.computerUse`'s getter reads, including after
-          // `settings-apply.ts` rebuilds the service on a hot toggle. One service, one lease set.
-          computerUse: () => computerUse,
-        },
-        // Construction-time, and deliberately so: whether the `computer` SERVER exists follows the
-        // boot setting (mirroring the gate's own guard below); the hot toggle is honoured per
-        // session through Task 9's `disallowedTools`. See `buildCapabilities`' own doc comment.
-        computerUseEnabled: settings?.computerUse?.enabled === true,
-        // THE SAME four closures `registerBrowserTool` gets below — `mintPanelTab` and
-        // `panelCommands.dispatch` are what emit `panel_tab_opened`/`panel_tab_activated`/
-        // `panel_command`, so a capability with its own would open tabs nobody can see and dispatch
-        // commands `panel.commandResult` could never answer (P8b-20).
-        browser: {
-          browser: {
-            tabs: (sid) => foldPanelTabs(store.read(sid)),
-            openTab: (p) => mintPanelTab(hub, p),
-            dispatch: (cmd) => panelCommands.dispatch(cmd),
-            harnesses: (sid) => hub.attachedHarnesses(sid),
-            dangerousDomainsAdded,
-          },
-        },
-        // The identical trio all three office tools take. `dirsOf` is `store.dirs` — never
-        // `writableRoots` — so the daemon's fence and the app-side `OfficeAgentBroker` fence agree
-        // on what "this session's working directories" means.
-        office: {
-          office: {
-            dispatch: (cmd) => panelCommands.dispatch(cmd),
-            harnesses: (sid) => hub.attachedHarnesses(sid),
-            dirsOf: (sid) => store.dirs(sid),
-          },
-        },
-        // C-6: Norma's OWN web surface for chat/dispatch. `secret` is a CLOSURE — the Exa key is
-        // read inside `run`, never here and never into `listTools()`. `dangerousDomainsAdded` is
-        // the same shared getter every other consumer takes, so the floor is one list.
-        research: {
-          search: { audit: (line) => audit.append(line), secret: (name) => secrets.get(name), dangerousDomainsAdded },
-          readPage: {
-            cache: pageCache,
-            audit: (line) => audit.append(line),
-            // The runner is assigned inside the agent gate; read LIVE at call time, exactly as
-            // `ReadPage`'s own "research is not available in this session yet" fallback expects.
-            get research() { return researchRunner; },
-            dangerousDomainsAdded,
-          },
-        },
-        // P8b-33: code's web surface, for the same reason `research` exists for chat — the SDK's
-        // built-in WebSearch/WebFetch are disallowed in every mode in 8b. Same `audit`/`secrets`
-        // instances the registry door takes; the Brave key is read inside `run`.
-        web: { web: { audit: (line) => audit.append(line), secret: (name) => secrets.get(name) } },
-      }),
+      // EMPTY ON PURPOSE (P8b-36) — this list is handle-wide and construction-time, which is
+      // exactly what a per-session capability set must not be. Norma's capability servers ride each
+      // session's own `Options.mcpServers` instead (`buildSessionCapabilities` above). The field is
+      // reserved for the official leg, which has no host in 8b.
+      capabilities: [],
       log: (line) => console.error(`runtime-sdk: ${line}`),
     });
   } catch (err) {
@@ -1818,6 +1829,8 @@ export async function startDaemon(opts: {
     // Task 16 opens a Chat session on the Winter leg through (`session.create`'s handler). Undefined
     // means the router never constructed; a Winter-leg create must then refuse with a typed error.
     runtimeSdk,
+    // P8b-36: the per-session capability door, on the same deps object as the handle above.
+    buildSessionCapabilities,
     ...opts.server,
   });
 
@@ -1828,7 +1841,7 @@ export async function startDaemon(opts: {
     registry: sharedRegistry,
     runtimeState,
     runtimeSdk,
-    capabilitySessions,
+    buildSessionCapabilities,
     // The HOLDER, read through a closure — never `settings` captured by value, which would freeze
     // this at boot and make every hot-reload assertion above it a lie.
     settings: () => settings,

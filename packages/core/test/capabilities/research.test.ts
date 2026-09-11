@@ -28,7 +28,7 @@ afterEach(() => { for (const s of servers.splice(0)) s.stop(true); });
 interface Harness {
   registry: ToolRegistry;
   instance: WinterMcpServerInstance;
-  session: CapabilitySession | undefined;
+  session: CapabilitySession;
   secretCalls: string[];
 }
 
@@ -40,11 +40,7 @@ function harness(over: { searchFetch?: typeof fetch } = {}): Harness {
   const readPageDeps = { cache: new PageCache() };
   registerSearchTool(h.registry, searchDeps);
   registerReadPageTool(h.registry, readPageDeps);
-  h.instance = researchCapability({
-    currentSession: () => h.session,
-    search: searchDeps,
-    readPage: readPageDeps,
-  }).instance as WinterMcpServerInstance;
+  h.instance = researchCapability(h.session, { search: searchDeps, readPage: readPageDeps }).instance as WinterMcpServerInstance;
   return h;
 }
 
@@ -55,11 +51,9 @@ function ctx(): ToolContext {
 describe("researchCapability: the server shape", () => {
   test("is an `sdk` server named `research` carrying Search and ReadPage", () => {
     const h = harness();
-    const server = researchCapability({
-      currentSession: () => h.session, search: {}, readPage: { cache: new PageCache() },
-    });
+    const server = researchCapability(h.session, { search: {}, readPage: { cache: new PageCache() } });
     expect(server.type).toBe("sdk");
-    expect(server.name).toBe("research");
+    expect(server.name).toBe("norma__research");
     expect(isWinterMcpServerInstance(server.instance)).toBe(true);
     expect((server.instance as WinterMcpServerInstance).listTools().map((t) => t.name).sort())
       .toEqual(["ReadPage", "Search"]);
@@ -124,6 +118,9 @@ describe("researchCapability: the SSRF / dangerous-domain floor is today's", () 
     expect(viaRegistry.isError).toBe(true);
     expect(viaCapability.isError).toBe(true);
     expect(viaCapability.content).toEqual([{ type: "text", text: viaRegistry.output }]);
+    // n4: the REASON, not just "both doors agree" — a two-door equality that agrees on the WRONG
+    // refusal (a missing tmpDir, say) would pass while proving nothing about the SSRF floor.
+    expect(viaRegistry.output).toContain("refusing to fetch a private address");
   });
 
   test("a dangerous-domain URL is refused identically on both doors", async () => {
@@ -132,10 +129,10 @@ describe("researchCapability: the SSRF / dangerous-domain floor is today's", () 
     const cache = new PageCache();
     const deps = { cache, dangerousDomainsAdded };
     registerReadPageTool(registry, deps);
-    const instance = researchCapability({
-      currentSession: () => ({ sessionId: SID, mode: "chat", cwd: "/tmp", roots: ["/tmp"] }),
-      search: {}, readPage: deps,
-    }).instance as WinterMcpServerInstance;
+    const instance = researchCapability(
+      { sessionId: SID, mode: "chat", cwd: "/tmp", roots: ["/tmp"] },
+      { search: {}, readPage: deps },
+    ).instance as WinterMcpServerInstance;
 
     const args = { pages: [{ url: "https://evil.example/x" }] };
     const viaRegistry = await registry.execute("ReadPage", args, ctx());
@@ -153,10 +150,10 @@ describe("researchCapability: the SSRF / dangerous-domain floor is today's", () 
     // this session yet" forever — with nothing failing anywhere.
     let runner: { run(): Promise<string> } | undefined;
     const readPage = { cache: new PageCache(), get research() { return runner as never; } };
-    const instance = researchCapability({
-      currentSession: () => ({ sessionId: SID, mode: "chat", cwd: "/tmp", roots: ["/tmp"] }),
-      search: {}, readPage,
-    }).instance as WinterMcpServerInstance;
+    const instance = researchCapability(
+      { sessionId: SID, mode: "chat", cwd: "/tmp", roots: ["/tmp"] },
+      { search: {}, readPage },
+    ).instance as WinterMcpServerInstance;
 
     // Before the gate opens: the tool's own "not available yet" answer.
     const before = await instance.callTool("ReadPage", { pages: [{ url: "https://example.com", query: "q" }] });
@@ -170,11 +167,4 @@ describe("researchCapability: the SSRF / dangerous-domain floor is today's", () 
     expect(String((after.content[0] as { text: string }).text)).toContain("a cited report");
   });
 
-  test("no bound session refuses without reading the key or touching the network", async () => {
-    const h = harness({ searchFetch: (() => { throw new Error("network must not be reached"); }) as unknown as typeof fetch });
-    h.session = undefined;
-    const res = await h.instance.callTool("Search", { query: "anything" });
-    expect(res.isError).toBe(true);
-    expect(h.secretCalls).toEqual([]);
-  });
 });

@@ -13,8 +13,9 @@
 //     getter over `daemon.ts`'s single `let computerUse` holder — the same holder the engine's own
 //     `computerUse: () => computerUse` getter reads, and the same one `settings-apply.ts` reassigns
 //     when the user toggles the feature at runtime.
-//  3. It never decides whether computer use is ENABLED. That is `buildCapabilities`' call (the
-//     boot-time setting) plus, per session, Task 9's `disallowedTools` — see `index.ts`.
+//  3. It never decides whether computer use is ENABLED. That is `buildCapabilitiesFor`'s call, and
+//     since the servers are built per session it reads the LIVE setting — a toggle reaches the next
+//     session with no restart and no help from Task 9's `disallowedTools`. See `index.ts`.
 //
 // The `screenshotMaxDim` setting is read through a getter for the same reason the service is: it is
 // hot (`settings.computerUse.screenshotMaxDim`), and a boot-snapshotted value would need a daemon
@@ -25,9 +26,9 @@
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
 import { computerToolDefs } from "../agent/tools/computer";
 import type { ComputerUseService } from "../agent/computer-use";
-import { capabilityServer, type CapabilitySession, type CapabilitySessionDeps } from "./server";
+import { capabilityServer, type CapabilitySession } from "./server";
 
-export interface ComputerCapabilityDeps extends CapabilitySessionDeps {
+export interface ComputerCapabilityDeps {
   /** `settings.computerUse.screenshotMaxDim`, re-read per call. */
   screenshotMaxDim?: () => number | undefined;
   /** The daemon's single `ComputerUseService` holder. `undefined` ⇒ computer use was turned off at
@@ -36,7 +37,7 @@ export interface ComputerCapabilityDeps extends CapabilitySessionDeps {
   computerUse(): ComputerUseService | undefined;
 }
 
-export function computerCapability(deps: ComputerCapabilityDeps): McpSdkServerConfigWithInstance {
+export function computerCapability(session: CapabilitySession, deps: ComputerCapabilityDeps): McpSdkServerConfigWithInstance {
   return capabilityServer(
     {
       key: "computer",
@@ -49,12 +50,11 @@ export function computerCapability(deps: ComputerCapabilityDeps): McpSdkServerCo
       // `settings.computerUse.screenshotMaxDim` edit reaches the next call with no daemon restart
       // even though the capability object itself is built once at boot.
       defs: computerToolDefs({ screenshotMaxDim: deps.screenshotMaxDim }),
-      schemaMode: "code",
-      contextExtras: (session: CapabilitySession) => {
-        const service = session.computerUse ?? deps.computerUse();
+      contextExtras: (s: CapabilitySession) => {
+        const service = s.computerUse ?? deps.computerUse();
         return service === undefined ? {} : { computerUse: service };
       },
     },
-    deps,
+    session,
   );
 }

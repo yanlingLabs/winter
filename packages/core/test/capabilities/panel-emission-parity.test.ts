@@ -116,10 +116,10 @@ describe("P8b-20: browser `open` emits the identical panel sequence on both door
     const registryOut = await registry.execute("browser", args, ctx());
 
     const viaCapabilityRec = recorder();
-    const instance = browserCapability({
-      currentSession: () => ({ sessionId: SID, mode: "code", cwd: WORKDIR, roots: [WORKDIR] }),
-      browser: browserDeps(viaCapabilityRec),
-    }).instance as WinterMcpServerInstance;
+    const instance = browserCapability(
+      { sessionId: SID, mode: "code", cwd: WORKDIR, roots: [WORKDIR] },
+      { browser: browserDeps(viaCapabilityRec) },
+    ).instance as WinterMcpServerInstance;
     const capabilityOut = await instance.callTool("browser", args);
 
     expect(registryOut.isError).toBe(false);
@@ -147,10 +147,10 @@ describe("P8b-20: browser `open` emits the identical panel sequence on both door
     await openThenClick((tool, a) => registry.execute(tool, a, ctx()), viaRegistryRec);
 
     const viaCapabilityRec = recorder();
-    const instance = browserCapability({
-      currentSession: () => ({ sessionId: SID, mode: "code", cwd: WORKDIR, roots: [WORKDIR] }),
-      browser: browserDeps(viaCapabilityRec),
-    }).instance as WinterMcpServerInstance;
+    const instance = browserCapability(
+      { sessionId: SID, mode: "code", cwd: WORKDIR, roots: [WORKDIR] },
+      { browser: browserDeps(viaCapabilityRec) },
+    ).instance as WinterMcpServerInstance;
     await openThenClick((tool, a) => instance.callTool(tool, a), viaCapabilityRec);
 
     expect(viaRegistryRec.events.map((e) => e.type))
@@ -169,10 +169,10 @@ describe("P8b-20: docs emits the identical panel sequence on both doors", () => 
     const registryOut = await registry.execute("docs", args, ctx());
 
     const viaCapabilityRec = recorder();
-    const instance = officeCapability({
-      currentSession: () => ({ sessionId: SID, mode: "code", cwd: WORKDIR, roots: [WORKDIR] }),
-      office: officeDeps(viaCapabilityRec),
-    }).instance as WinterMcpServerInstance;
+    const instance = officeCapability(
+      { sessionId: SID, mode: "code", cwd: WORKDIR, roots: [WORKDIR] },
+      { office: officeDeps(viaCapabilityRec) },
+    ).instance as WinterMcpServerInstance;
     const capabilityOut = await instance.callTool("docs", args);
 
     expect(registryOut.isError).toBe(false);

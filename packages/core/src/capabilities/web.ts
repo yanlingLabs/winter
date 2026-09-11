@@ -22,17 +22,14 @@
 // for Task 9's per-mode exposure table.
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
 import { webToolDefs, type WebToolDeps } from "../agent/tools/web";
-import { capabilityServer, type CapabilitySessionDeps } from "./server";
+import { capabilityServer, type CapabilitySession } from "./server";
 
-export interface WebCapabilityDeps extends CapabilitySessionDeps {
+export interface WebCapabilityDeps {
   /** The SAME `audit`/`secret` closures `daemon.ts` hands `registerWebTools` — one `AuditLog`, one
    *  `SecretStore`, no second handle to keep in sync. */
   web: WebToolDeps;
 }
 
-export function webCapability(deps: WebCapabilityDeps): McpSdkServerConfigWithInstance {
-  return capabilityServer(
-    { key: "web", defs: webToolDefs(deps.web), schemaMode: "code" },
-    deps,
-  );
+export function webCapability(session: CapabilitySession, deps: WebCapabilityDeps): McpSdkServerConfigWithInstance {
+  return capabilityServer({ key: "web", defs: webToolDefs(deps.web) }, session);
 }
