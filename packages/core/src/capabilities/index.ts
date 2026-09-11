@@ -15,6 +15,7 @@ export { browserCapability, type BrowserCapabilityDeps } from "./browser";
 export { officeCapability, type OfficeCapabilityDeps } from "./office";
 export { researchCapability, type ResearchCapabilityDeps } from "./research";
 export { webCapability, type WebCapabilityDeps } from "./web";
+export { lspCapability, type LspCapabilityDeps } from "./lsp";
 
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
 import { browserCapability, type BrowserCapabilityDeps } from "./browser";
@@ -24,6 +25,7 @@ import { researchCapability, type ResearchCapabilityDeps } from "./research";
 import type { CapabilitySession } from "./server";
 import { sessionsCapability, type SessionsCapabilityDeps } from "./sessions";
 import { webCapability, type WebCapabilityDeps } from "./web";
+import { lspCapability, type LspCapabilityDeps } from "./lsp";
 
 /**
  * The daemon-wide half of the wiring: the instances, stores and closures the capability tools need,
@@ -37,6 +39,8 @@ export interface CapabilityDeps {
   office: OfficeCapabilityDeps;
   research: ResearchCapabilityDeps;
   web: WebCapabilityDeps;
+  /** Fix wave (review F7): the `lsp` capability over the daemon's single `LspManager` holder. */
+  lsp: LspCapabilityDeps;
   /**
    * `settings.computerUse.enabled`, read LIVE — a getter, never a boot snapshot.
    *
@@ -96,6 +100,7 @@ export function buildCapabilitiesFor(
   servers.push(officeCapability(session, deps.office));
   servers.push(researchCapability(session, deps.research));
   servers.push(webCapability(session, deps.web));
+  servers.push(lspCapability(session, deps.lsp));
   const record: Record<string, McpSdkServerConfigWithInstance> = {};
   for (const server of servers) record[server.name] = server;
   return record;

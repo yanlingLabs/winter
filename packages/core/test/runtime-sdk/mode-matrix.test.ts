@@ -294,12 +294,15 @@ test("the per-mode capability exposure table is pinned", () => {
   // therefore allow under every policy.
   expect(disallowedToolsFor("dispatch")).toEqual([
     "WebFetch", "WebSearch",
+    // fix wave (review F7): `lsp` is code-only, as the registry door was
+    "mcp__norma__lsp__lsp",
     "mcp__norma__web__web_fetch",
     "mcp__norma__web__web_search",
   ]);
   expect(disallowedToolsFor("chat")).toEqual([...new Set([
     ...CHAT_DISALLOWED_BUILTINS,
     "mcp__norma__computer__computer",
+    "mcp__norma__lsp__lsp",
     "mcp__norma__office__docs",
     "mcp__norma__office__sheets",
     "mcp__norma__office__slides",

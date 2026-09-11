@@ -258,6 +258,9 @@ export const NORMA_CAPABILITY_SERVER_KEYS: ReadonlySet<string> = new Set([
   // `NETWORK` today and allowed under every policy including `plan`. The card would also have read
   // `mcp__norma__web__web_fetch` and lost its URL summary and "always allow" options (P8b-25).
   "sessions", "computer", "browser", "office", "research", "web",
+  // The SEVENTH key, `lsp` (fix wave, review F7): `mcp__norma__lsp__lsp` strips to `lsp`, which
+  // `gate.ts` classifies READ_ONLY — the class the registry-door tool always had.
+  "lsp",
 ]);
 
 const WINTER_TO_NORMA = new Map<string, string>(WINTER_NORMA_TOOL_PAIRS.map(([w, n]) => [w, n]));

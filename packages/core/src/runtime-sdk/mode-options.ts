@@ -75,6 +75,8 @@ export const CAPABILITY_TOOL_MODES: Readonly<Record<string, { modes: readonly Se
   // registration: `agent/tools/web.ts:1011,1090` declare `modes: ["code"]` for both.
   "mcp__norma__web__web_fetch": { modes: ["code"] },
   "mcp__norma__web__web_search": { modes: ["code"] },
+  // Fix wave (review F7): the `lsp` capability server — code-only, as the registry door was.
+  "mcp__norma__lsp__lsp": { modes: ["code"] },
 };
 
 /** The SDK's own web built-ins. Disallowed in EVERY mode in 8b (P8b-33): they have no Exa key and

@@ -65,6 +65,7 @@ function deps(): CapabilityDeps {
     office: { office: { ...panel, dirsOf: () => [] as never } },
     research: { search: {}, readPage: { cache: new PageCache() } },
     web: { web: {} },
+    lsp: { lsp: () => undefined },
   };
 }
 

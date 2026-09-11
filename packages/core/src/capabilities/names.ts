@@ -44,8 +44,10 @@ export type { SessionMode };
 /** The capability server keys, in the order `buildCapabilitiesFor` returns them.
  *
  *  P8b-33 added `web` to P8b-12's five: every mode disallows the SDK's built-in WebSearch/WebFetch
- *  in 8b (no keys, no dangerous-domain floor), so code keeps the daemon-owned pair. */
-export const CAPABILITY_SERVER_KEYS = ["sessions", "computer", "browser", "office", "research", "web"] as const;
+ *  in 8b (no keys, no dangerous-domain floor), so code keeps the daemon-owned pair. The fix wave
+ *  added `lsp` (review F7): the `lsp` tool was retired on the premise that Winter's own LSP serves
+ *  the child, and the measured 0.0.4 advertised set has none. */
+export const CAPABILITY_SERVER_KEYS = ["sessions", "computer", "browser", "office", "research", "web", "lsp"] as const;
 export type CapabilityServerKey = (typeof CAPABILITY_SERVER_KEYS)[number];
 
 /**
@@ -134,6 +136,10 @@ export const NORMA_CAPABILITY_TOOLS = {
   // session would have no web access at all. `modes: ["code"]`, `deferred: true` (registry door).
   "mcp__norma__web__web_fetch": { modes: ["code"], deferred: true },
   "mcp__norma__web__web_search": { modes: ["code"], deferred: true },
+  // `lsp` (fix wave, review F7) — the single multi-purpose language-server tool, reinstated as a
+  // capability: the 0.0.4 child advertises no `LSP` of its own. Today's registration verbatim:
+  // no `modes` on the def (⇒ `["code"]`), `deferred: true`.
+  "mcp__norma__lsp__lsp": { modes: ["code"], deferred: true },
 } as const satisfies Readonly<Record<string, CapabilityToolFacts>>;
 
 export type NormaCapabilityToolName = keyof typeof NORMA_CAPABILITY_TOOLS;

@@ -12,6 +12,7 @@ import { sessionSpawnToolDefs } from "../../src/agent/tools/session-spawn";
 import { sheetsToolDefs } from "../../src/agent/tools/sheets";
 import { slidesToolDefs } from "../../src/agent/tools/slides";
 import { webToolDefs } from "../../src/agent/tools/web";
+import { lspToolDefs } from "../../src/agent/tools/lsp";
 import {
   CAPABILITY_SERVER_KEYS,
   NORMA_CAPABILITY_TOOLS,
@@ -51,6 +52,9 @@ const CANONICAL_NAMES = [
   // P8b-33: every mode disallows the SDK's built-in web tools, so code keeps its own pair.
   "mcp__norma__web__web_fetch",
   "mcp__norma__web__web_search",
+  // Fix wave (review F7): the single multi-purpose `lsp` tool, reinstated as a capability — the
+  // 0.0.4 child advertises no `LSP` of its own.
+  "mcp__norma__lsp__lsp",
 ] as const;
 
 describe("capabilityToolName (P8b-12)", () => {
@@ -111,6 +115,7 @@ describe("NORMA_CAPABILITY_TOOLS", () => {
       ],
       research: [...searchToolDefs(), ...readPageToolDefs({ cache: new PageCache() })],
       web: webToolDefs(),
+      lsp: lspToolDefs({ lsp: () => undefined, cwdOf: () => undefined, rootsOf: () => [] }),
     };
 
     // `computer`'s `deferred` is the ONE row that is not on the def: `computer.ts` leaves the field

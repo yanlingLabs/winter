@@ -853,6 +853,9 @@ export async function startDaemon(opts: {
     // built-in WebSearch/WebFetch are disallowed in every mode in 8b. Same `audit`/`secrets`
     // instances the registry door takes; the Brave key is read inside `run`.
     web: { web: { audit: (line) => audit.append(line), secret: (name) => secrets.get(name) } },
+    // Fix wave (review F7): the `lsp` tool over the SAME `let lspManager` holder the registry
+    // door and `settings-apply.ts`'s hot `lsp.enabled` flip reassign — read per call.
+    lsp: { lsp: () => lspManager ?? undefined },
   };
   /** THE door Task 16's session driver opens: one session in, its servers out — already keyed by
    *  name, i.e. already in `Options.mcpServers` shape (the child derives each tool's wire name from
@@ -1530,7 +1533,11 @@ export async function startDaemon(opts: {
       computerInFlight: () => computerUse?.inFlight() ?? false,
       buildLspManager: (s) => new LspManager({ idleShutdownMs: s?.lsp?.idleShutdownMs }),
       registerLsp: (mgr) => {
-        lspManager = mgr;   // Task 17: the `lsp` tool retired with the engine (Winter's own LSP serves the child); the manager stays for a later capability
+        // Fix wave (review F7): the `lsp` CAPABILITY server reads this holder per call, so
+        // reassigning it IS the hot re-enable — the next `lsp` call on any session finds the new
+        // manager. (Task 17 had retired the registry-door tool on the false premise that Winter's
+        // own LSP serves the child; the 0.0.4 child advertises none.)
+        lspManager = mgr;
       },
       teardownLsp: async () => {
         registry.unregister("lsp");
