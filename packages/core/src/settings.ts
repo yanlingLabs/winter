@@ -338,16 +338,54 @@ export const Settings = z.object({
    *  `migrations.memoryKeys` is OFF until a user turns it on: WS-16 §17 phase 5 relocates a user's
    *  own memory files, and that is not a thing an upgrade does on its own initiative.
    *
-   *  IN THIS BUILD THE FLAG IS ACCEPTED AND IGNORED, deliberately: the live memory path
-   *  (`agent/memory-dir.ts`'s `memoryDirFor`) still derives today's key, so relocating the files now
-   *  would leave the agent reading an empty directory — the daemon logs one line saying so and moves
-   *  nothing. Phase 8b switches the live path and the migration on together. */
+   *  WHEN IT IS ON, THE MIGRATION RUNS (P8b-17, Task 14 — 8a's build accepted the flag and ignored
+   *  it, because the live memory path still derived today's key). Three things are worth knowing
+   *  before turning it on: a home whose `memory.directory` (above) pins the MEMDIR is DECLINED
+   *  rather than migrated — the project key decides nothing there — and a decline is not an attempt,
+   *  so clearing that override later still gets the migration with no restart; a completed
+   *  relocation is one-shot (a `schema_meta` marker), while a run that could not finish (a
+   *  destination to clear, a cwd to restore) retries at the next boot; and a relocation interrupted
+   *  between its rename and its commit is repaired at EVERY boot, flag or no flag, so turning the
+   *  flag back off can never strand a half-moved tree. See `runtime-state/migrations/memory-keys.ts`.
+   *
+   *  ── The Winter leg (8b) ──────────────────────────────────────────────────────────────────────
+   *
+   *  `winterLeg` decides, PER MODE, whether a NEW session runs on the Winter runtime or on the
+   *  legacy engine (P8b-13). All three default false, so a daemon that has never been configured
+   *  behaves exactly as it does today. A flag governs new sessions only: a session runs to
+   *  completion on the leg it was created with, which is what makes flipping one safe at any moment.
+   *
+   *  `winterExecutable` overrides the `winter` binary lookup (P8b-2's first door, ahead of
+   *  `NORMA_WINTER_EXECUTABLE`, the bundle drop and `<NORMA_HOME>/runtimes/bin/winter`).
+   *  `advisorModel` names the model the router's advisor uses. Both are plain `z.string()` on
+   *  purpose — NOT `.min(1)`: `loadSettings` THROWS on an invalid file and the daemon refuses to
+   *  start, so a user clearing a field to `""` must not be a boot failure. Blank means absent, and
+   *  the consumer is what enforces that (the same trim-is-absent convention `memory.directory` and
+   *  `memory-dir.ts` already share).
+   *
+   *  `winterIdleTimeoutSec` ends an idle Winter child (P8b-24) — the session becomes `resumable` and
+   *  its next message resumes it, so this is a memory bound, not a session lifetime. The floor is
+   *  10s rather than 1: below that, a child would be reaped between a user's own keystrokes.
+   *
+   *  THE DEFAULTS ONLY MATERIALIZE WHEN THE BLOCK IS PRESENT, because the block is `.optional()`
+   *  (see above — a defaulted block would make `runtimes` required on every settings literal in the
+   *  codebase, and `saveSettings` would start stamping today's values into every user's file). So
+   *  every consumer must answer for an ABSENT block itself, exactly as `retentionFromSettings` does:
+   *  absent means all three legs false, no executable override, no advisor model, and 900 seconds. */
   runtimes: z.object({
     retention: z.object({
       deliveriesDays: z.number().int().min(1).default(30),
       nameLeasesDays: z.number().int().min(1).default(7),
     }).prefault({}),
     migrations: z.object({ memoryKeys: z.boolean().default(false) }).prefault({}),
+    winterExecutable: z.string().optional(),
+    winterLeg: z.object({
+      chat: z.boolean().default(false),
+      dispatch: z.boolean().default(false),
+      code: z.boolean().default(false),
+    }).prefault({}),
+    advisorModel: z.string().optional(),
+    winterIdleTimeoutSec: z.number().int().min(10).default(900),
   }).optional(),
 });
 export type Settings = z.infer<typeof Settings>;

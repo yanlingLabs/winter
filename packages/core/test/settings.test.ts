@@ -678,7 +678,14 @@ describe("settings.runtimes", () => {
     expect(Settings.parse({ ...base, runtimes: {} }).runtimes).toEqual({
       retention: { deliveriesDays: 30, nameLeasesDays: 7 },
       migrations: { memoryKeys: false },
+      // P8b Task 15: the Winter-leg keys default to "behave exactly as this daemon does today".
+      winterLeg: { chat: false, dispatch: false, code: false },
+      winterIdleTimeoutSec: 900,
     });
+    // The two optional strings stay ABSENT rather than becoming "": a present-but-empty value would
+    // be a path/model the consumers have to special-case forever.
+    expect(Settings.parse({ ...base, runtimes: {} }).runtimes).not.toHaveProperty("winterExecutable");
+    expect(Settings.parse({ ...base, runtimes: {} }).runtimes).not.toHaveProperty("advisorModel");
   });
 
   test("a half-specified retention block keeps the other default", () => {
@@ -696,5 +703,56 @@ describe("settings.runtimes", () => {
     expect(() => Settings.parse({ ...base, runtimes: { retention: { nameLeasesDays: 0 } } })).toThrow();
     expect(() => Settings.parse({ ...base, runtimes: { retention: { deliveriesDays: 1.5 } } })).toThrow();
     expect(() => Settings.parse({ ...base, runtimes: { retention: { deliveriesDays: -30 } } })).toThrow();
+  });
+
+  // ── P8b Task 15: the Winter-leg keys ───────────────────────────────────────────────────────────
+  // Every one of them defaults to today's behaviour, because a daemon that has never been configured
+  // must not change what it does when this build lands.
+
+  test("every leg defaults OFF, and one leg can be turned on without disturbing the others", () => {
+    expect(Settings.parse({ ...base, runtimes: {} }).runtimes?.winterLeg).toEqual({ chat: false, dispatch: false, code: false });
+    expect(Settings.parse({ ...base, runtimes: { winterLeg: { chat: true } } }).runtimes?.winterLeg)
+      .toEqual({ chat: true, dispatch: false, code: false });
+  });
+
+  test("winterExecutable and advisorModel are absent by default and accept a plain string", () => {
+    const none = Settings.parse({ ...base, runtimes: {} }).runtimes;
+    expect(none?.winterExecutable).toBeUndefined();
+    expect(none?.advisorModel).toBeUndefined();
+    const set = Settings.parse({ ...base, runtimes: { winterExecutable: "/opt/winter/bin/winter", advisorModel: "some-model" } }).runtimes;
+    expect(set?.winterExecutable).toBe("/opt/winter/bin/winter");
+    expect(set?.advisorModel).toBe("some-model");
+  });
+
+  test("an EMPTY winterExecutable parses rather than bricking the file — loadSettings throws on invalid, and the daemon would not start", () => {
+    // Deliberately NOT `.min(1)`. A user clearing the field to "" must be a no-op the consumer
+    // treats as absent (memory-dir.ts's trim-is-absent convention), never a daemon that refuses to
+    // boot over one blank string.
+    expect(Settings.parse({ ...base, runtimes: { winterExecutable: "" } }).runtimes?.winterExecutable).toBe("");
+    expect(Settings.parse({ ...base, runtimes: { advisorModel: "" } }).runtimes?.advisorModel).toBe("");
+  });
+
+  test("winterIdleTimeoutSec defaults to 900s and refuses a value too small to survive a pause in typing", () => {
+    expect(Settings.parse({ ...base, runtimes: {} }).runtimes?.winterIdleTimeoutSec).toBe(900);
+    expect(Settings.parse({ ...base, runtimes: { winterIdleTimeoutSec: 30 } }).runtimes?.winterIdleTimeoutSec).toBe(30);
+    expect(() => Settings.parse({ ...base, runtimes: { winterIdleTimeoutSec: 9 } })).toThrow();
+    expect(() => Settings.parse({ ...base, runtimes: { winterIdleTimeoutSec: 900.5 } })).toThrow();
+  });
+
+  test("an unknown key under runtimes is STRIPPED, not rejected — the same thing the surrounding schema does", () => {
+    // Asserting today's behaviour rather than choosing one: zod v4's `z.object()` strips unknown
+    // keys, which is what lets a user's file survive a downgrade and what `loadSettings`'s own v1
+    // migration comment already relies on. A future `.strict()` here would turn every settings.json
+    // written by a NEWER Norma into a boot failure on an older one.
+    const parsed = Settings.parse({ ...base, runtimes: { winterLegg: { chat: true }, nonsense: 1 } });
+    expect(parsed.runtimes).not.toHaveProperty("winterLegg");
+    expect(parsed.runtimes).not.toHaveProperty("nonsense");
+    expect(parsed.runtimes?.winterLeg).toEqual({ chat: false, dispatch: false, code: false });
+    // And the same one level up, so this is the schema's convention rather than a local accident.
+    expect(Settings.parse({ ...base, nonsenseTopLevel: 1 } as never)).not.toHaveProperty("nonsenseTopLevel");
+  });
+
+  test("a wrongly-typed leg is rejected — a string 'true' must never read as a leg that is on", () => {
+    expect(() => Settings.parse({ ...base, runtimes: { winterLeg: { chat: "true" } } })).toThrow();
   });
 });

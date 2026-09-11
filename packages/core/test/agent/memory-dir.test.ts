@@ -6,6 +6,8 @@ import {
   repoRootFor,
   sanitizeProjectKey,
   memoryDirFor,
+  memoryDirForRecord,
+  memoryProjectKeyFor,
   globalMemoryDirFor,
   _clearRepoRootCacheForTests,
 } from "../../src/agent/memory-dir";
@@ -122,6 +124,64 @@ describe("memory-dir: memoryDirFor", () => {
     const dir = memoryDirFor(root, { normaHome });
     const exists = Bun.spawnSync(["test", "-d", dir]).exitCode === 0;
     expect(exists).toBe(false);
+  });
+});
+
+// P8b-17: the live path and WS-16 §17 phase 5 move TOGETHER. The migration relocates
+// `projects/<todaysKey>/` to the SDK's compatibility key and re-keys the session's runtime record in
+// the same transaction; everything below is what stops this file from still pointing at the empty
+// directory the tree used to occupy.
+describe("memory-dir: the relocation door (P8b-17)", () => {
+  beforeEach(() => _clearRepoRootCacheForTests());
+
+  test("relocatedKey replaces the derived key, and is asked for exactly that key", () => {
+    const normaHome = realDir();
+    const root = initRepo();
+    const todaysKey = sanitizeProjectKey(root);
+    const asked: string[] = [];
+
+    const dir = memoryDirFor(root, {
+      normaHome,
+      relocatedKey: (k) => { asked.push(k); return "compat-key-64"; },
+    });
+
+    expect(asked).toEqual([todaysKey]);
+    expect(dir).toBe(join(normaHome, "projects", "compat-key-64", "memory"));
+  });
+
+  test("a resolver that answers undefined leaves the derivation exactly as it was", () => {
+    const normaHome = realDir();
+    const root = initRepo();
+    expect(memoryDirFor(root, { normaHome, relocatedKey: () => undefined })).toBe(memoryDirFor(root, { normaHome }));
+  });
+
+  test("memoryProjectKeyFor names the same key the directory is built from", () => {
+    const normaHome = realDir();
+    const root = initRepo();
+    const opts = { normaHome, relocatedKey: (k: string) => (k === sanitizeProjectKey(root) ? "moved-here" : undefined) };
+    expect(memoryProjectKeyFor(root, opts)).toBe("moved-here");
+    expect(memoryDirFor(root, opts)).toBe(join(normaHome, "projects", memoryProjectKeyFor(root, opts), "memory"));
+  });
+
+  test("the settings override still wins over a relocation — a pinned MEMDIR is never re-keyed", () => {
+    const normaHome = realDir();
+    const override = realDir();
+    const root = initRepo();
+    expect(memoryDirFor(root, { normaHome, directory: override, relocatedKey: () => "compat-key-64" })).toBe(override);
+  });
+
+  test("memoryDirForRecord reads the record's OWN key — no derivation, no git, no relocation map", () => {
+    const normaHome = realDir();
+    // Deliberately a key no derivation from this path could produce: the record is the authority.
+    expect(memoryDirForRecord({ memoryProjectKey: "some-compat-key" }, { normaHome })).toBe(
+      join(normaHome, "projects", "some-compat-key", "memory"),
+    );
+  });
+
+  test("memoryDirForRecord honours the settings override, same as every other MEMDIR door", () => {
+    const normaHome = realDir();
+    const override = realDir();
+    expect(memoryDirForRecord({ memoryProjectKey: "some-compat-key" }, { normaHome, directory: override })).toBe(override);
   });
 });
 

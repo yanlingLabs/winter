@@ -133,6 +133,14 @@ export interface RunningDaemon {
   // routing rather than refusing to start, and nothing else in the daemon depends on it in 8a.
   // 8b's `createRuntimeSdk({ directoryStore })` consumes `directory` off this.
   runtimeState: DaemonRuntimeState;
+  /**
+   * P8b Task 15: THE LIVE settings holder — the same binding the settings-watcher swaps, not a boot
+   * snapshot. Reading it twice around a `settings.json` write is how a test proves a key is hot
+   * without a restart, which matters most for keys whose only consumer lands in a later task
+   * (`runtimes.winterLeg`, `winterExecutable`, `advisorModel`, `winterIdleTimeoutSec` are read by
+   * Tasks 5/9/16). `null` on a daemon that never loaded settings at all.
+   */
+  settings(): ReturnType<typeof loadSettings> | null;
   /** Tear the daemon down. Everything except the runtime-state drain is synchronous and has already
    *  happened when this returns; the promise (present only when the runtime spine opened) resolves
    *  once the queued §16 deletions have drained, `runtime-state.db` is closed and the lock —
@@ -378,7 +386,14 @@ export async function startDaemon(opts: {
   // takes effect on the very next cleaner pass with no daemon restart in either direction. Read
   // inside `SessionCleaner.runPass`, first thing, every pass.
   const cleanerEnabledHot = (): boolean => (settings ? cleanerEnabledFrom(settings) : true);
-  const memoryDirOf = (cwd: string): string => memoryDirFor(cwd, { normaHome, directory: settings?.memory?.directory });
+  // `relocatedKey` is P8b-17's live half: if WS-16 §17 phase 5 has relocated this project's tree to
+  // the compatibility key, this is what finds it — the same fact the session's runtime record
+  // carries, reachable from a bare cwd (memory-dir.ts's own doc). Read through the `runtime` handle
+  // on every call, never snapshotted: flipping `runtimes.migrations.memoryKeys` on a RUNNING daemon
+  // moves the trees, and the next memory read has to follow them. Absent (no runtime store, or
+  // nothing relocated) leaves the derivation exactly as it was.
+  const memoryDirOf = (cwd: string): string =>
+    memoryDirFor(cwd, { normaHome, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) });
   const memoryGlobalDirOf = (): string => globalMemoryDirFor({ normaHome, directory: settings?.memory?.directory });
   const assembler = new ContextAssembler({
     normaHome, trust: trustStore, skills: skillStore,
@@ -415,7 +430,7 @@ export async function startDaemon(opts: {
   // — so a mid-session `memory.enabled` false→true flip no longer waits for a restart either.
   if (memoryEnabledHot()) {
     try {
-      migrateMemoryStore({ normaHome, trust: trustStore, directory: settings?.memory?.directory });
+      migrateMemoryStore({ normaHome, trust: trustStore, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) });
     } catch (err) {
       console.error(`memory migration skipped: ${(err as Error).message}`);
     }
@@ -1427,7 +1442,7 @@ export async function startDaemon(opts: {
         await m?.stopAll();
       },
       // File-based memory hot-toggle (T3, design doc follow-up / task-23): the SAME boot-time call
-      // above (`migrateMemoryStore({ normaHome, trust: trustStore, directory: settings?.memory?.directory })`),
+      // above (`migrateMemoryStore({ normaHome, trust: trustStore, directory, relocatedKey })`),
       // re-run whenever `memory.enabled` flips false→true on THIS running daemon — closes T2's
       // "boot-time only" gap. `settings` here is read at the moment this closure actually RUNS
       // (fire-and-forget, deferred a tick past `apply()`'s synchronous `setLiveSettings` swap), so
@@ -1435,7 +1450,7 @@ export async function startDaemon(opts: {
       // call reflects the settings loaded at THAT time. Failures are logged by settings-apply.ts's
       // own `.catch` (this closure just re-throws/returns whatever `migrateMemoryStore` does);
       // never touches/deletes the old store either way (memory-migrate.ts's own contract).
-      migrateMemory: () => { migrateMemoryStore({ normaHome, trust: trustStore, directory: settings?.memory?.directory }); },
+      migrateMemory: () => { migrateMemoryStore({ normaHome, trust: trustStore, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) }); },
       // P8a Task 12: `runtimes.migrations.memoryKeys` flipped on a RUNNING daemon must migrate
       // without a restart (the project's standing no-restart-for-settings rule). The wiring's own
       // `schema_meta` marker is what keeps it a ONE-TIME relocation, so this is handed the new
@@ -1628,6 +1643,9 @@ export async function startDaemon(opts: {
     tokens,
     registry: sharedRegistry,
     runtimeState,
+    // The HOLDER, read through a closure — never `settings` captured by value, which would freeze
+    // this at boot and make every hot-reload assertion above it a lie.
+    settings: () => settings,
     stop() {
       // lspManager: killAllNow() FIRST delivers a synchronous SIGTERM to every warm child (the real
       // shutdown protection — mcp/pluginSupervisor's stopAll are likewise synchronous kills), since

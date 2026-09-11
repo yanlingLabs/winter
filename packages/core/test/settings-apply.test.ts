@@ -367,3 +367,113 @@ describe("makeApply", () => {
     });
   });
 });
+
+// ── P8b Task 15: the router's PLAIN-VALUE options ─────────────────────────────────────────────────
+//
+// Surface map §8.3: `createRuntimeSdk` takes `brand`, `retention` and `advisor` as VALUES at
+// construction, while the inbound-policy hooks are functions and hot by construction. Every
+// value-shaped option a setting can change therefore needs a stated answer, and this diff is where
+// those answers live. Only ONE of them is an action — the directory nudge after a retention/name
+// change; the rest reach the next session through the live settings holder and are narrated so a
+// user who flips a leg and sees their open chat unchanged can find out why.
+//
+// THE HANDLE ITSELF IS NOT IN THIS LANE (`runtimeSdk` is Task 5's, `messaging` is Task 12's), which
+// is why every hop is optional and why these tests inject a fake: proving the optional chain calls
+// through when something IS there, and does nothing when it is not, is exactly what this task can
+// prove. Whether the REAL `releaseHeld` does the right thing is the messaging lane's assertion.
+describe("makeApply: the runtime options diff (P8b Task 15)", () => {
+  const withRuntimes = (runtimes: unknown) => ({ provider: { model: "a" }, runtimes }) as any;
+
+  test("a shortened name-lease window nudges the directory — a held message must not wait for the next event", async () => {
+    const releaseHeld = mock(() => {});
+    const apply = makeApply(baseDeps({ runtimeSdk: { messaging: { releaseHeld } } }));
+    await apply(withRuntimes({ retention: { deliveriesDays: 30, nameLeasesDays: 7 } }), withRuntimes({ retention: { deliveriesDays: 30, nameLeasesDays: 1 } }));
+    await flushMicrotasks();
+    expect(releaseHeld).toHaveBeenCalledTimes(1);
+  });
+
+  test("a deliveries-window change nudges it too, and an unrelated settings change does not", async () => {
+    const releaseHeld = mock(() => {});
+    const apply = makeApply(baseDeps({ runtimeSdk: { messaging: { releaseHeld } } }));
+    await apply(withRuntimes({ retention: { deliveriesDays: 30, nameLeasesDays: 7 } }), withRuntimes({ retention: { deliveriesDays: 90, nameLeasesDays: 7 } }));
+    await flushMicrotasks();
+    expect(releaseHeld).toHaveBeenCalledTimes(1);
+
+    await apply(withRuntimes({ retention: { deliveriesDays: 90, nameLeasesDays: 7 } }), withRuntimes({ retention: { deliveriesDays: 90, nameLeasesDays: 7 }, winterLeg: { chat: true } }));
+    await flushMicrotasks();
+    expect(releaseHeld).toHaveBeenCalledTimes(1); // still one: a leg flip is not a directory event
+  });
+
+  test("no runtime handle, or a handle with no messaging: the diff is a silent no-op — never a throw", async () => {
+    const apply = makeApply(baseDeps()); // today's daemon: nothing wired
+    await expect(apply(withRuntimes({ retention: { nameLeasesDays: 7 } }), withRuntimes({ retention: { nameLeasesDays: 1 } }))).resolves.toBeUndefined();
+
+    const half = makeApply(baseDeps({ runtimeSdk: {} }));
+    await expect(half(withRuntimes({ retention: { nameLeasesDays: 7 } }), withRuntimes({ retention: { nameLeasesDays: 1 } }))).resolves.toBeUndefined();
+
+    const emptyMessaging = makeApply(baseDeps({ runtimeSdk: { messaging: {} } }));
+    await expect(emptyMessaging(withRuntimes({ retention: { nameLeasesDays: 7 } }), withRuntimes({ retention: { nameLeasesDays: 1 } }))).resolves.toBeUndefined();
+  });
+
+  test("a rejecting releaseHeld is logged, never rejects apply() or abandons the other diffs", async () => {
+    const releaseHeld = mock(() => Promise.reject(new Error("boom: releaseHeld")));
+    const registerLsp = mock(() => {});
+    const warnings: string[] = [];
+    const apply = makeApply(baseDeps({ runtimeSdk: { messaging: { releaseHeld } }, registerLsp, log: (m) => warnings.push(m) }));
+    await expect(apply(
+      { ...withRuntimes({ retention: { nameLeasesDays: 7 } }), lsp: { enabled: false } },
+      { ...withRuntimes({ retention: { nameLeasesDays: 1 } }), lsp: { enabled: true } },
+    )).resolves.toBeUndefined();
+    expect(registerLsp).toHaveBeenCalledTimes(1);
+    await flushMicrotasks();
+    expect(warnings.some((w) => w.includes("releaseHeld after a retention change failed"))).toBe(true);
+  });
+
+  test("apply() does not wait on releaseHeld — a wedged directory must not stall a settings reload", async () => {
+    let release!: () => void;
+    const releaseHeld = mock(() => new Promise<void>((r) => { release = r; }));
+    const apply = makeApply(baseDeps({ runtimeSdk: { messaging: { releaseHeld } } }));
+    const start = Date.now();
+    await apply(withRuntimes({ retention: { nameLeasesDays: 7 } }), withRuntimes({ retention: { nameLeasesDays: 1 } }));
+    expect(Date.now() - start).toBeLessThan(100);
+    await flushMicrotasks();
+    expect(releaseHeld).toHaveBeenCalledTimes(1);
+    release(); // settle it so the pending promise does not leak into the next test
+  });
+
+  test("the construction-time options say where they take effect instead of pretending to re-wire a live session", async () => {
+    const lines: string[] = [];
+    const apply = makeApply(baseDeps({ log: (m) => lines.push(m) }));
+    await apply(
+      withRuntimes({ winterLeg: { chat: false, dispatch: false, code: false }, winterExecutable: "/a/winter", advisorModel: "m1", winterIdleTimeoutSec: 900 }),
+      withRuntimes({ winterLeg: { chat: true, dispatch: false, code: false }, winterExecutable: "/b/winter", advisorModel: "m2", winterIdleTimeoutSec: 60 }),
+    );
+    expect(lines.filter((l) => l.includes("takes effect for new sessions"))).toHaveLength(4);
+    expect(lines.some((l) => l.includes("winterLeg") && l.includes("open sessions finish on the leg they were created with"))).toBe(true);
+  });
+
+  test("an absent runtimes block on both sides is not a change — a daemon that never configures this says nothing", async () => {
+    const releaseHeld = mock(() => {});
+    const lines: string[] = [];
+    const apply = makeApply(baseDeps({ runtimeSdk: { messaging: { releaseHeld } }, log: (m) => lines.push(m) }));
+    await apply({ provider: { model: "a" } } as any, { provider: { model: "b" } } as any);
+    await flushMicrotasks();
+    expect(releaseHeld).not.toHaveBeenCalled();
+    expect(lines).toEqual([]);
+  });
+
+  test("the FIRST apply after boot (prev === null) with the block present is one change, not four", async () => {
+    // `prev` is null only when the watcher has no previous snapshot. Treating that as "everything
+    // changed" would nudge the directory on a daemon where nothing has actually moved.
+    const releaseHeld = mock(() => {});
+    const lines: string[] = [];
+    const apply = makeApply(baseDeps({ runtimeSdk: { messaging: { releaseHeld } }, log: (m) => lines.push(m) }));
+    await apply(null, withRuntimes({ retention: { deliveriesDays: 30, nameLeasesDays: 7 }, winterLeg: { chat: false, dispatch: false, code: false }, winterIdleTimeoutSec: 900 }));
+    await flushMicrotasks();
+    // Retention went from "unknown" to a value, so the nudge fires once — the honest reading, and
+    // harmless (releaseHeld re-runs a delivery). The legs did NOT change (false is false), so they
+    // are silent rather than narrating a flip nobody made.
+    expect(releaseHeld).toHaveBeenCalledTimes(1);
+    expect(lines.filter((l) => l.includes("winterLeg"))).toEqual([]);
+  });
+});
