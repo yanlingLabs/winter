@@ -145,6 +145,31 @@ describe("researchCapability: the SSRF / dangerous-domain floor is today's", () 
     expect(String((viaCapability.content[0] as { text: string }).text)).toContain("evil.example");
   });
 
+  test("a `research` runner supplied by a GETTER is read at CALL time, not at construction", async () => {
+    // THE DAEMON'S OWN SHAPE, proven rather than hoped: `daemon.ts` builds this server ABOVE the
+    // `if (agentProvider)` gate, so the ephemeral research runner does not exist yet and is handed
+    // over as `get research() { return researchRunner; }`. Were `read-page.ts` to copy `deps.research`
+    // at factory scope, every Winter-leg `query` entry would answer "research is not available in
+    // this session yet" forever — with nothing failing anywhere.
+    let runner: { run(): Promise<string> } | undefined;
+    const readPage = { cache: new PageCache(), get research() { return runner as never; } };
+    const instance = researchCapability({
+      currentSession: () => ({ sessionId: SID, mode: "chat", cwd: "/tmp", roots: ["/tmp"] }),
+      search: {}, readPage,
+    }).instance as WinterMcpServerInstance;
+
+    // Before the gate opens: the tool's own "not available yet" answer.
+    const before = await instance.callTool("ReadPage", { pages: [{ url: "https://example.com", query: "q" }] });
+    expect(String((before.content[0] as { text: string }).text)).toContain("research is not available in this session yet");
+
+    // The gate opens (daemon.ts assigns `researchRunner`) — no server is rebuilt.
+    let ran = 0;
+    runner = { run: async () => { ran++; return "a cited report"; } };
+    const after = await instance.callTool("ReadPage", { pages: [{ url: "https://example.com", query: "q" }] });
+    expect(ran).toBe(1);
+    expect(String((after.content[0] as { text: string }).text)).toContain("a cited report");
+  });
+
   test("no bound session refuses without reading the key or touching the network", async () => {
     const h = harness({ searchFetch: (() => { throw new Error("network must not be reached"); }) as unknown as typeof fetch });
     h.session = undefined;

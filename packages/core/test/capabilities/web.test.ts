@@ -125,6 +125,20 @@ describe("webCapability: the SSRF floor is today's", () => {
     expect(viaCapability.content).toEqual([{ type: "text", text: viaRegistry.output }]);
   });
 
+  test("web_fetch HARD-REQUIRES the session's tmpDir — a Task 16 obligation, not an optional field", async () => {
+    // `web_fetch` saves the converted page under `ctx.tmpDir` and throws when it is unset, so a
+    // `CapabilitySession` without one makes every code-mode fetch fail. Recorded as a test rather
+    // than a comment because the session driver is a LATER task and this is the field it must set.
+    const h = harness();
+    const withoutTmp = await h.instance.callTool("web_fetch", { url: "https://example.com" });
+    expect(withoutTmp.isError).toBe(true);
+    expect(String((withoutTmp.content[0] as { text: string }).text)).toContain("ctx.tmpDir is unset");
+    // With one bound, the fence check is passed and the call proceeds to the network layer.
+    h.session = { ...h.session!, tmpDir: "/tmp/norma-cap-web" };
+    const withTmp = await h.instance.callTool("web_fetch", { url: "http://169.254.169.254/" });
+    expect(String((withTmp.content[0] as { text: string }).text)).not.toContain("ctx.tmpDir is unset");
+  });
+
   test("no bound session refuses without reading the key", async () => {
     const h = harness({ fetchFn: (() => { throw new Error("network must not be reached"); }) as unknown as typeof fetch });
     h.session = undefined;
