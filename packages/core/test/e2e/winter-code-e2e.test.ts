@@ -11,6 +11,11 @@
 //   (d) P8b-27(c): a control-plane self-grant is DENIED — a Write to `<cwd>/.norma/settings.json`
 //       (the host fence) and a Bash redirect to a path outside the session's write roots (the
 //       sandbox). This case is the gate for `winterLeg.code`.
+//   (m) fix wave (review row 3 / F11): file-based memory EXISTS on this leg — a Write by the child
+//       into the session's MEMDIR `<home>/projects/<key>/memory/` lands (the SDK 0.0.4 carve-out
+//       `isMemoryCarveOut` + Norma's fence, which never covered the MEMDIR), with no card under
+//       `auto`. Chat cannot host this case: chat disallows `Write` by design (no fs surface; its
+//       `_assistant` bucket is Dreaming's to write), so a CODE session is the only real child write.
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, type Stats } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -23,6 +28,7 @@ import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import type { RuntimeStateWiring } from "../../src/runtime-state";
 import { controlPlaneDenialMessage } from "../../src/runtime-sdk/control-plane";
 import { sessionLegOf } from "../../src/runtime-sdk/leg";
+import { memoryDirFor } from "../../src/agent/memory-dir";
 import { disallowedToolsFor } from "../../src/runtime-sdk/mode-options";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
 
@@ -225,7 +231,22 @@ describeWithWinterBinary("code on the Winter leg — the built binary through a 
     writeFileSync(rules, JSON.stringify({ before: true }));   // exists so the double's Read succeeds
     const sid = await createCode("p5checkpoint", cwd, "auto");
     await client.call(METHODS.sessionSend, { sessionId: sid, text: `write to this exact path:\n${rules}` });
-    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sid);
+    // Since fix wave F1 (`auto` → Winter `default`) the double's THIRD step — a Bash redirect into
+    // `<cwd>/.norma/` — reaches the bridge carrying Winter's protected-home `blockedPath` (any
+    // `.norma` segment, `permissions/protected.ts`), which the bridge escalates to a CARD in code
+    // (Task 9 F1: "Winter asking, not refusing"). Before F1 Winter's own classifier answered it.
+    // The card is incidental to this case (the Write denial is the subject): deny it so the turn
+    // completes. Recorded in the fix-wave report as a cross-leg divergence — the engine let a bash
+    // write into `.norma/` run silently under `auto` (only the three control-plane filenames were
+    // fenced); the Winter leg cards it.
+    const first = await client.waitFor((e) => e.sessionId === sid && (e.type === "turn_completed" || e.type === "approval_requested"));
+    if (first.type === "approval_requested") {
+      const card = first as { callId: string; toolName: string };
+      expect(card.toolName).toBe("bash");
+      expect(card.callId).toBe("p5-ckpt-bash");
+      await client.call(METHODS.approvalRespond, { sessionId: sid, callId: card.callId, approved: false });
+      await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sid);
+    }
     await Bun.sleep(50);
     const writeRes = daemon!.sessions.read(sid).find((e) => e.type === "tool_result" && (e as { callId: string }).callId === "p5-ckpt-write") as { isError: boolean; output: string } | undefined;
     expect(writeRes).toBeDefined();
@@ -252,6 +273,33 @@ describeWithWinterBinary("code on the Winter leg — the built binary through a 
     expect(existsSync(`${target}.bash`)).toBe(false);
     rmSync(cwd, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
+  }, 60_000);
+
+  test("(m) file-based memory on the Winter leg: the child's Write into `<home>/projects/<key>/memory/` LANDS, no card under `auto` (the 0.0.4 carve-out)", async () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-winter-code-memdir-")));
+    // The SAME derivation the daemon files this cwd under (`memoryKeyOf` → `memoryProjectKeyFor`;
+    // no `memory.directory` override, no relocation in this home).
+    const memdir = memoryDirFor(cwd, { normaHome: home });
+    expect(memdir.startsWith(join(home, "projects") + "/")).toBe(true);
+    expect(memdir.endsWith("/memory")).toBe(true);
+    mkdirSync(memdir, { recursive: true });
+    const note = join(memdir, "fix-wave-note.md");
+    writeFileSync(note, "BEFORE\n");   // the double Reads before it Writes (read-ladder)
+    const sid = await createCode("p5checkpoint", cwd, "auto");
+    await client.call(METHODS.sessionSend, { sessionId: sid, text: `remember this at the exact path:\n${note}` });
+    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sid, 40_000);
+    await Bun.sleep(50);
+    const log = daemon!.sessions.read(sid);
+    const writeRes = log.find((e) => e.type === "tool_result" && (e as { callId: string }).callId === "p5-ckpt-write") as { isError: boolean; output: string } | undefined;
+    expect(writeRes).toBeDefined();
+    expect(writeRes!.isError, `memory write refused: ${writeRes!.output}`).toBe(false);
+    // THE proof: the child's Write reached the MEMDIR — the SDK's protected-home check carved it
+    // out, Norma's deny rules never named it, and the gate's `auto` verdict let it through silently.
+    expect(readFileSync(note, "utf8")).toBe("AFTER\n");
+    expect(log.filter((e) => e.type === "approval_requested")).toEqual([]);
+    expect(client.events.filter((e) => e.type === "approval_requested" && e.sessionId === sid)).toEqual([]);
+    expect(log.filter((e) => e.type === "agent_error")).toEqual([]);
+    rmSync(cwd, { recursive: true, force: true });
   }, 60_000);
 
   test("(e) home isolation and zero survivors", async () => {
