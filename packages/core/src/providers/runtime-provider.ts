@@ -257,15 +257,27 @@ export function createOpenAiCompatibleRuntimeProvider(secrets: SecretStore, base
  * `auth/credential-material.ts`'s `CREDENTIAL_MATERIAL_NAMES.codexOauth` already names) — Norma has
  * no multi-account codex support, matching the pre-existing `CodexAuthStore` facade this replaces
  * as the live turn path (see this module's header for what stays).
+ *
+ * `testBackendUrl` is a TEST-ONLY seam (never passed by `manager.ts`'s production call): the codex
+ * backend has no user-configurable endpoint (it is always the real ChatGPT backend), but a test
+ * needs to point the adapter at a loopback fake instead — `resolveEndpoint` prefers
+ * `connection.baseUrl` over the adapter's own generated default when one is set, so this is the
+ * one seam that reaches it without a second, parallel construction path in the test file. When
+ * given, the token-refresh endpoint is pointed at the SAME origin's `/oauth/token` (the fake's own
+ * route) rather than the real `CODEX.tokenUrl` — a 401 in a test must refresh against the fake, not
+ * dial out.
  */
-export function createCodexOauthRuntimeProvider(secrets: SecretStore): Provider {
+export function createCodexOauthRuntimeProvider(secrets: SecretStore, testBackendUrl?: string): Provider {
   const context: ProviderContext = {
-    connection: { providerId: "codex-oauth" },
+    connection: { providerId: "codex-oauth", ...(testBackendUrl ? { baseUrl: testBackendUrl, local: true } : {}) },
     credentials: credentialStoreOverSecretStore(secrets),
     authRef: codexCredentialRef("default"),
     stallTimeoutMs: STALL_TIMEOUT_MS,
     log: () => {},
   };
-  const adapter = createCodexOauthAdapter({ descriptors: () => undefined });
+  const adapter = createCodexOauthAdapter({
+    descriptors: () => undefined,
+    ...(testBackendUrl ? { tokenUrl: `${testBackendUrl}/oauth/token` } : {}),
+  });
   return new RuntimeBackedProvider({ id: "codex-oauth", adapter, context, models: () => CODEX_MODELS });
 }
