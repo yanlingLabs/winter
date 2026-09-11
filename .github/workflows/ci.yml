@@ -140,6 +140,28 @@ jobs:
           NORMA_WINTER_REQUIRE_BINARY: "1"
         run: bun test
 
+  # P8b-9: `bun test` does not typecheck — bun strips types and runs. So core's `tsc` has been RED on
+  # `main` (nine errors in two test files) and nothing said so, which means the protocol checklist's
+  # step 4 trap (`subagent-transcript.ts`'s `satisfies Record<SessionEvent["type"], boolean>` map,
+  # whose entire job is to FAIL core's tsc when a `SessionEvent` variant is added) has been disarmed:
+  # a compile error in a project nobody compiles is not a tripwire. This job is what arms it — and
+  # what keeps arming it once the map relocates to `projector/event-coverage.ts` in Task 10.
+  typecheck-core:
+    name: typecheck · core
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck:core
+
   # The protocol package generates a JSON schema and the Swift round-trip fixtures. If a schema
   # change landed without re-running the generator, the tree is dirty here — which is exactly the
   # drift the checklist in CONTRIBUTING.md exists to prevent.
