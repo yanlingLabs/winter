@@ -259,6 +259,12 @@ export const PROJECTED_EVENT_COVERAGE = {
   worktree_entered: false,
   worktree_exited: false,
   tool_review: false, // `BashReviewer` stays on the provider layer (P8b-10)
-  notification_requested: false, // the `dispatch-children.ts:260` half survives
+  // Winter Phase 8c (P8c-11 / Task 2.4): the Winter-leg half of this event's fate is now named —
+  // `runtime-sdk/sinks.ts`'s `push_notification` sink, observing the projected `tool_call` for
+  // Winter's `PushNotification` (never a projector branch of its own, same reasoning as the
+  // approval/question/plan bridges above: this is a SINK, not the projector). The
+  // `dispatch-children.ts:260` half (a background dispatch child's own completion notice) is
+  // unrelated and still survives untouched.
+  notification_requested: false,
   task_notification: false,
 } satisfies Record<SessionEvent["type"], boolean>;
