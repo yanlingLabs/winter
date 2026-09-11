@@ -222,7 +222,9 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     expect(rec!.backendSessionId).toMatch(/^[0-9a-f-]{36}$/);
     expect(rec!.transcriptHealth).toBe("clean");
     expect(rec!.versionProvenance).toBe("recorded");
-    expect(rec!.selection.reason).toContain("winter leg");
+    // fix wave F12: the reason narrates a FACT, never a flag (the old wording named
+    // `settings.runtimes.winterLeg.chat`, which no longer decides anything)
+    expect(rec!.selection.reason).toBe("created as a chat session on the Winter leg (the only leg since Phase 8b)");
     const driver = daemon!.winter.get(sid);
     expect(driver?.state).toBe("live");
     expect(driver?.generation).toBe(1);
