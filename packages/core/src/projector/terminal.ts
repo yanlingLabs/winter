@@ -1,5 +1,6 @@
 import type { ProjectedEvent } from "./types";
 import type { ResultFrame } from "./conversation";
+import { classifyResult } from "./errors";
 
 /**
  * The terminal `result` → `turn_completed` (and, on an error, `agent_error` FIRST).
@@ -95,29 +96,12 @@ export function projectTerminal(input: TerminalInput): TerminalOutput {
 
   const events: ProjectedEvent[] = [];
   if (isError) {
-    // Part 1 maps every failed result to ONE generic class. Task 11 refines it per WS-14 §13 using
-    // `subtype`, `terminal_reason` and `api_error_status` — which is why those three ride the
-    // message here rather than being flattened into prose.
-    events.push({
-      type: "agent_error", sessionId, threadId,
-      message: errorMessage(result),
-      code: "result_error",
-    });
+    // ONE DISTINCT CODE PER CLASS (digest item 20 / WS-14 §13) — `errors.ts` reads `subtype`,
+    // `terminal_reason`, `api_error_status` and the 11-member provider taxonomy, in that order of
+    // specificity, and composes a message that can never carry opaque provider state.
+    const classified = classifyResult(result);
+    events.push({ type: "agent_error", sessionId, threadId, message: classified.message, code: classified.code });
   }
   events.push({ type: "turn_completed", sessionId, threadId, stopReason, inputTokens, outputTokens, ...contextTokens });
   return { events, totals, stopReason };
-}
-
-/**
- * The user-facing error text. `result.result` is the runtime's own message; the subtype is appended
- * only when it adds something the message does not already say. `api_refusal_explanation` and every
- * other provider-authored field is NOT read here — §4.7 marks it display-only and never to be
- * parsed, and nothing opaque may reach a log line.
- */
-function errorMessage(result: ResultFrame): string {
-  const text = typeof result.result === "string" ? result.result.trim() : "";
-  const reason = typeof result.terminal_reason === "string" ? result.terminal_reason : undefined;
-  const parts = [text.length > 0 ? text : `the turn ended with ${result.subtype}`];
-  if (reason !== undefined && !parts[0]!.includes(reason)) parts.push(`(${reason})`);
-  return parts.join(" ");
 }

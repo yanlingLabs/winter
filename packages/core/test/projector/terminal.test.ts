@@ -19,23 +19,34 @@ describe("projector: the terminal rule (Winter 8b Task 10)", () => {
     // as "either/or" reads plausibly and loses one of the two.
     const { projector } = makeProjector();
     projector.accept(init());
-    const out = projector.accept(result({ subtype: "error_during_execution", is_error: true, result: "HTTP 429: rate limited" }));
+    const out = projector.accept(result({ subtype: "error_during_execution", is_error: true, result: "a tool blew up" }));
     expect(out.map((e) => e.type)).toEqual(["agent_error", "turn_completed"]);
-    expect(out[0] as TC).toMatchObject({ message: "HTTP 429: rate limited", code: "result_error" });
+    expect(out[0] as TC).toMatchObject({ code: "tool_failure" });
     expect(out[1]).toMatchObject({ stopReason: "error" });
   });
 
-  test("an `error_*` subtype is an error even when is_error is absent", () => {
+  test("an `error_*` subtype is an error even when is_error is absent, and names its own class", () => {
     const { projector } = makeProjector();
     const out = projector.accept(result({ subtype: "error_max_turns", result: "" }));
     expect(out.map((e) => e.type)).toEqual(["agent_error", "turn_completed"]);
-    expect((out[0] as TC).message).toContain("error_max_turns");
+    expect(out[0] as TC).toMatchObject({ code: "max_turns" });
   });
 
-  test("terminal_reason is appended to the message when it adds something", () => {
-    const { projector } = makeProjector();
-    const out = projector.accept(result({ subtype: "success", is_error: true, result: "upstream failed", terminal_reason: "api_error" }));
-    expect((out[0] as TC).message).toBe("upstream failed (api_error)");
+  test("classification precedence: the provider taxonomy beats api_error_status beats terminal_reason beats subtype", () => {
+    // A fresh projector per case: a second `result` with no turn in between is a protocol
+    // violation and is dropped (see the test below), which would make every case after the first
+    // read as `undefined`.
+    const codeOf = (over: Record<string, unknown>) =>
+      (makeProjector().projector.accept(result({ is_error: true, ...over }))[0] as TC).code;
+    // taxonomy wins over a status that would say something else
+    expect(codeOf({ error: "rate_limit", api_error_status: 500, subtype: "error_max_turns" })).toBe("rate_limit");
+    // status wins over terminal_reason and subtype
+    expect(codeOf({ api_error_status: 401, terminal_reason: "api_error", subtype: "error_max_turns" })).toBe("auth");
+    // terminal_reason wins over subtype
+    expect(codeOf({ terminal_reason: "structured_output_retry_exhausted", subtype: "error_during_execution" })).toBe("structured_output_exhausted");
+    // subtype is the last structural signal before unknown_error
+    expect(codeOf({ subtype: "error_max_budget_usd" })).toBe("max_budget");
+    expect(codeOf({ subtype: "success" })).toBe("unknown_error");
   });
 
   test("an api failure landing on subtype `success` with is_error is still an error (surface map §4.8 item 3)", () => {
@@ -116,13 +127,23 @@ describe("projector: turn_completed usage (the contextTokens contract)", () => {
     expect(out[0]!.contextTokens).toBeUndefined();
   });
 
-  test("an UNPRICED row emits no modelUsage: zeros, and contextTokens omitted — nothing fabricated", () => {
-    // The measured case for every winter-test double.
-    const { projector } = makeProjector();
-    projector.accept(assistantText("hi"));
-    const out = projector.accept(result()) as TC[];
-    expect(out[0]).toMatchObject({ inputTokens: 0, outputTokens: 0 });
-    expect(out[0]!.contextTokens).toBeUndefined();
+  test("an UNPRICED row (P8b-30): required fields report 0, OPTIONAL contextTokens is OMITTED, logged ONCE", () => {
+    // The measured case for every winter-test double, and real for any row Winter cannot price.
+    // `turn_completed`'s schema makes inputTokens/outputTokens required and contextTokens optional,
+    // so the required pair reports 0 and the optional field is absent — "not known" rather than
+    // "measured, and it was nothing". Nothing is fabricated either way.
+    const { projector, debugs } = makeProjector();
+    projector.accept(init());
+    projector.accept(assistantText("one"));
+    const first = projector.accept(result()) as TC[];
+    expect(first[0]).toMatchObject({ inputTokens: 0, outputTokens: 0 });
+    expect(first[0]!.contextTokens).toBeUndefined();
+    expect(Object.keys(first[0]!)).not.toContain("contextTokens");
+
+    // ONE line per session, not one per turn: an unpriced row is a property of the model.
+    projector.accept(assistantText("two"));
+    projector.accept(result());
+    expect(debugs.filter((d) => d.includes("unpriced catalog row")).length).toBe(1);
   });
 
   test("usage that goes BACKWARDS (a ledger reset on resume) clamps to zero, never negative", () => {

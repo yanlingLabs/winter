@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionEvent } from "@norma/protocol";
-import { MAIN_THREAD } from "../../src/projector";
+import { MAIN_THREAD, PROJECTED_EVENT_COVERAGE } from "../../src/projector";
 import type { ProtocolSdkMessage } from "../../src/projector";
 import { makeProjector, run } from "./harness";
 
@@ -12,39 +12,93 @@ import { makeProjector, run } from "./harness";
  * For each scenario: `fixtures/golden/<s>.events.jsonl` is the PRODUCT CONTRACT, recorded from the
  * real `AgentEngine` by `scripts/capture-projector-goldens.ts`. `fixtures/sdk/<s>.messages.jsonl` is
  * the wire stream a Winter child emits for the same scenario (shapes measured against `dist/winter`
- * — see the Task 10 report). Driving the projector with the second must reproduce the first.
+ * — see the task report). Driving the projector with the second must reproduce the first.
  *
- * THREE SCOPING DECISIONS, each stated rather than assumed, because P8b-14's whole cost-if-wrong is
- * "a green projector that drops fields nobody compared":
+ * Task 11 widens this from "the variants part 1 owned" to **every variant in every golden**, and
+ * the widening forces the question part 1 could defer: what does "match in full" mean for an event
+ * the projector is not the producer of? Three mechanisms answer it, and between them NOTHING in any
+ * golden is unaccounted for — which is the whole of P8b-14's "a green projector that drops fields
+ * nobody compared".
  *
- *  1. `OWNED_VARIANTS` — part 1 owns the conversation spine and the terminal. `approval_*`,
- *     `question_*`, `thread_*` and `task_updated` are in the goldens and are asserted by TASK 11's
- *     run of this same test, which widens this list. Nothing is removed from the goldens to make
- *     part 1 pass.
- *  2. **Main thread only.** A child's own `assistant_message`/`assistant_delta` ride the child's
- *     threadId in the golden, and the default SDK stream does not forward subagent TEXT at all
- *     (only its tool_use/tool_result blocks — `Options.forwardSubagentText` is off). Comparing them
- *     would fail on a Task 11 concern that is really an SDK option, so part 1 compares `main`.
- *  3. `COMPARED_FIELDS` — an explicit per-variant field list. Two fields are deliberately NOT
- *     compared for equality, and both have their own dedicated assertions below instead:
- *       - token counts: the engine reports per-round figures; Winter reports a cumulative ledger
- *         delta, and `terminal.test.ts` pins that mapping exactly.
- *       - `tool_call.argsJson` / `tool_result.output` bodies: the Winter tool's argument SCHEMA is
- *         its own (`{file_path}` vs Norma's `{path}`), so byte-equality would assert a rename that
- *         is not happening. Shape and linkage are asserted; text is not.
+ *  1. `EXTERNAL_PRODUCERS` names the producer of every golden variant the projector does not make.
+ *     `coversEveryGoldenVariant` asserts the two sets cover every type present in every golden, so
+ *     a variant that quietly loses its producer when the engine retires fails HERE.
+ *  2. The ordered comparison walks the golden and the projector output TOGETHER: an external event
+ *     is taken from the golden (it is its producer's, not ours) and a projector event is compared
+ *     field by field. Both lists must exhaust together — so a projector event in the wrong PLACE
+ *     relative to the bridge's approval pair still fails, which is the ordering risk that matters.
+ *  3. The comparison runs PER THREAD. The main thread is compared in full; a child's thread is
+ *     compared in full against its own golden subsequence.
  *
- * `tool_call.name` IS compared literally, and that is the point of ruling P8b-25: the SessionEvent
- * surface keeps Norma's tool vocabulary, so the projector translates `Read` → `read`, `Agent` →
- * `spawn_agent` and so on. If that mapping regressed, this comparison is what fails — the Mac and
- * iOS tool rows key on those names and nothing else here would notice.
+ * ── TWO REAL DIVERGENCES THE COMPARISON MAKES VISIBLE RATHER THAN HIDING ────────────────────────
+ *
+ *  - **The engine emits the parent's `tool_call` for a spawn AFTER the child has finished** (its
+ *    spawn bridge runs children concurrently before the per-call loop emits the call), while the
+ *    Winter wire necessarily delivers the spawning `tool_use` BEFORE any child frame. The two
+ *    orders cannot both hold, so a single flat comparison of `code-child-spawn` is impossible; the
+ *    per-thread comparison is the strongest true statement, and this note is the honest record of
+ *    the difference.
+ *  - **A child's own text is absent from the default wire.** `Options.forwardSubagentText`
+ *    (`winter-agent-sdk/dist/options.d.ts:99`) is off unless the host sets it, so only the child's
+ *    tool_use/tool_result blocks are forwarded. Both shapes are fixtures:
+ *    `code-child-spawn` (off — the child's `assistant_message` genuinely does not arrive) and
+ *    `code-child-spawn-forwarded` (on — it does, and the golden's child subsequence matches in
+ *    full). Turning the option on is a Task 16 decision, recorded in the task report.
  */
-const OWNED_VARIANTS = new Set<SessionEvent["type"]>([
-  "user_message", "assistant_message", "assistant_delta", "tool_call", "tool_result",
-  "turn_completed", "agent_error",
-]);
+
+/** Variants the projector produces, derived from the coverage map so the two can never drift. */
+const PROJECTOR_VARIANTS = new Set(
+  (Object.entries(PROJECTED_EVENT_COVERAGE) as Array<[SessionEvent["type"], boolean]>)
+    .filter(([, produced]) => produced)
+    .map(([type]) => type),
+);
+
+/**
+ * Every other variant a golden contains, with its producer named. `user_message` is the host's push
+ * path even though the projector CAN produce one (an inbound delivery is a different fact from a
+ * pushed turn — see dedupe.ts), so it is listed here: in these scenarios the host is its producer.
+ */
+const EXTERNAL_PRODUCERS: Partial<Record<SessionEvent["type"], string>> = {
+  session_created: "sessions/store.ts's createSession",
+  harness_attached: "sessions/hub.ts's attach",
+  user_message: "the host's push path (P8b-5) — ipc/server.ts's session.send / the Winter prompt queue",
+  turn_started: "the session driver, appended beside user_message at push time (Task 16 obligation)",
+  approval_requested: "runtime-sdk/approval-bridge.ts (Task 8) — emitted from inside canUseTool",
+  approval_resolved: "runtime-sdk/approval-bridge.ts (Task 8)",
+  question_asked: "runtime-sdk/question-bridge.ts (Task 8)",
+  question_resolved: "runtime-sdk/question-bridge.ts (Task 8)",
+};
+
+/**
+ * Whose event is this, for the ordered walk?
+ *
+ * `user_message` is the subtle one: the coverage map marks it `true` because the projector CAN
+ * produce one (an inbound agent-message delivery), but in these scenarios the HOST produced it, so
+ * for the walk it is external. Reading ownership off the coverage map alone would consume a
+ * projector slot for it and shift every later comparison by one.
+ */
+const isExternalOnMain = (type: string): boolean =>
+  EXTERNAL_PRODUCERS[type as SessionEvent["type"]] !== undefined || !PROJECTOR_VARIANTS.has(type as SessionEvent["type"]);
+
+/** On a CHILD thread the turn boundaries are the driver's too — they are not on the wire, and no
+ *  per-child usage exists to put in a `turn_completed` (children.ts's own note). */
+const isExternalOnChild = (type: string): boolean =>
+  type === "turn_started" || type === "turn_completed" || isExternalOnMain(type);
 
 type Any = Record<string, unknown>;
 
+/**
+ * The compared field projection, per variant. Two things are deliberately NOT compared, each with
+ * its own dedicated assertion elsewhere:
+ *   - token counts — the engine reports per-round figures, Winter a cumulative ledger delta;
+ *     `terminal.test.ts` pins that mapping exactly.
+ *   - `tool_call.argsJson` / `tool_result.output` BODIES — the Winter tool's argument schema is its
+ *     own (`{file_path}` vs Norma's `{path}`), so byte-equality would assert a rename that is not
+ *     happening. Shape and `callId` linkage are asserted instead.
+ * `tool_call.name` and `agent_error.code` ARE compared literally: the first is ruling P8b-25 (the
+ * Mac and iOS tool rows key on Norma's names), the second is digest item 20's one-distinct-code-
+ * per-class, which `routines/runner.ts:81` consumes.
+ */
 function compare(e: Any): Any {
   const type = e.type as string;
   const threadId = e.threadId as string;
@@ -55,7 +109,9 @@ function compare(e: Any): Any {
     case "tool_call": return { type, threadId, name: e.name, argsAreAnObject: isJsonObject(e.argsJson) };
     case "tool_result": return { type, threadId, isError: e.isError === true };
     case "turn_completed": return { type, threadId, stopReason: e.stopReason };
-    case "agent_error": return { type, threadId, hasMessage: typeof e.message === "string" && (e.message as string).length > 0, hasCode: typeof e.code === "string" };
+    case "agent_error": return { type, threadId, code: e.code, hasMessage: typeof e.message === "string" && (e.message as string).length > 0 };
+    case "thread_started": return { type, threadId, parentThreadId: e.parentThreadId, agentType: e.agentType, prompt: e.prompt, description: e.description };
+    case "thread_completed": return { type, threadId, stopReason: e.stopReason };
     default: return { type, threadId };
   }
 }
@@ -70,92 +126,160 @@ const FIXTURES = join(import.meta.dir, "fixtures");
 const readJsonl = <T>(dir: string, file: string): T[] =>
   readFileSync(join(FIXTURES, dir, file), "utf8").split("\n").filter((l) => l.trim().length > 0).map((l) => JSON.parse(l) as T);
 
-/** Every scenario the capture script records. Kept as a literal so a golden that stops being
- *  replayed fails HERE rather than quietly dropping out of the proof. */
-const SCENARIOS = [
-  "chat-text-only", "code-tool-call", "code-tool-denied", "code-child-spawn",
-  "code-provider-error", "code-interrupted", "dispatch-tool-call",
-] as const;
+interface Scenario {
+  name: string;
+  golden: string;
+  mode: "code" | "dispatch" | "chat";
+  /** `Options.forwardSubagentText` — when false a child's own text never reaches the host. */
+  forwardsSubagentText?: boolean;
+}
 
-const MODE_OF: Record<string, "code" | "dispatch" | "chat"> = {
-  "chat-text-only": "chat", "dispatch-tool-call": "dispatch",
-};
+/** Every scenario replayed. A literal list so a golden that stops being replayed fails HERE rather
+ *  than quietly dropping out of the proof. */
+const SCENARIOS: readonly Scenario[] = [
+  { name: "chat-text-only", golden: "chat-text-only", mode: "chat" },
+  { name: "code-tool-call", golden: "code-tool-call", mode: "code" },
+  { name: "code-tool-denied", golden: "code-tool-denied", mode: "code" },
+  { name: "code-child-spawn", golden: "code-child-spawn", mode: "code" },
+  { name: "code-child-spawn-forwarded", golden: "code-child-spawn", mode: "code", forwardsSubagentText: true },
+  { name: "code-provider-error", golden: "code-provider-error", mode: "code" },
+  { name: "code-interrupted", golden: "code-interrupted", mode: "code" },
+  { name: "dispatch-tool-call", golden: "dispatch-tool-call", mode: "dispatch" },
+];
 
-describe("projector: golden-stream replay (P8b-14)", () => {
-  for (const scenario of SCENARIOS) {
-    test(`${scenario}: the SDK stream reproduces the engine's event sequence`, () => {
-      const golden = readJsonl<Any>("golden", `${scenario}.events.jsonl`);
-      const messages = readJsonl<ProtocolSdkMessage>("sdk", `${scenario}.messages.jsonl`);
+/** Thread ids differ by construction (the engine's child id vs the spawning tool_use id), so both
+ *  sides are canonicalized to `main` / `child-N` in first-appearance order before comparison. */
+function canonicalThreads(events: Any[]): Any[] {
+  const map = new Map<string, string>([[MAIN_THREAD, MAIN_THREAD]]);
+  return events.map((e) => {
+    const raw = e.threadId;
+    // session_created / harness_attached are SESSION-scoped and carry no threadId at all; feeding
+    // `undefined` into the map would number it as the first child and shift every real child by one.
+    if (typeof raw !== "string") return e;
+    if (!map.has(raw)) map.set(raw, `child-${map.size}`);
+    return { ...e, threadId: map.get(raw)! };
+  });
+}
 
-      const expected = golden.filter((e) => e.threadId === MAIN_THREAD && OWNED_VARIANTS.has(e.type as SessionEvent["type"]));
-      expect(expected.length).toBeGreaterThan(0); // a scenario that compares nothing proves nothing
+/**
+ * Walk the golden and the projector output together for one thread. An external event is taken from
+ * the golden (its producer is named in `EXTERNAL_PRODUCERS`); a projector event is compared. Both
+ * lists must exhaust together.
+ */
+function merged(goldenThread: Any[], projectedThread: Any[], isExternal: (e: Any) => boolean): { expected: Any[]; actual: Any[] } {
+  const expected: Any[] = [];
+  const actual: Any[] = [];
+  let i = 0;
+  for (const g of goldenThread) {
+    expected.push(compare(g));
+    if (isExternal(g)) { actual.push(compare(g)); continue; }
+    const p = projectedThread[i++];
+    actual.push(p === undefined ? { type: `<missing: expected ${g.type}>`, threadId: g.threadId } : compare(p));
+  }
+  for (const extra of projectedThread.slice(i)) actual.push(compare(extra));
+  return { expected, actual };
+}
 
-      // The HOST appends the user's turn before it pushes (P8b-5); the projector never does. The
-      // test plays that half by taking the golden's own user_message, then feeds the wire stream.
-      const hostAppends = expected.filter((e) => e.type === "user_message");
-      const { projector } = makeProjector({ mode: MODE_OF[scenario] ?? "code", sessionId: "s_test" });
-      const projected = run(projector, messages) as unknown as Any[];
+describe("projector: golden-stream replay, every variant (P8b-14)", () => {
+  test("every variant in every golden is either produced by the projector or has a NAMED producer", () => {
+    for (const s of SCENARIOS) {
+      for (const e of readJsonl<Any>("golden", `${s.golden}.events.jsonl`)) {
+        const type = e.type as SessionEvent["type"];
+        const accounted = PROJECTOR_VARIANTS.has(type) || EXTERNAL_PRODUCERS[type] !== undefined;
+        expect({ golden: s.golden, type, accounted }).toEqual({ golden: s.golden, type, accounted: true });
+      }
+    }
+  });
+
+  for (const s of SCENARIOS) {
+    test(`${s.name}: the MAIN thread reproduces the engine's sequence in full`, () => {
+      const golden = canonicalThreads(readJsonl<Any>("golden", `${s.golden}.events.jsonl`));
+      const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
+      const { projector } = makeProjector({ mode: s.mode, sessionId: "s_test" });
+      const projected = canonicalThreads(run(projector, messages) as unknown as Any[]);
 
       // The P8b-5 invariant, asserted directly: the projector re-appends NO user turn.
       expect(projected.filter((e) => e.type === "user_message")).toEqual([]);
 
-      const actual = [...hostAppends, ...projected.filter((e) => e.threadId === MAIN_THREAD && OWNED_VARIANTS.has(e.type as SessionEvent["type"]))];
-      expect(actual.map(compare)).toEqual(expected.map(compare));
+      const goldenMain = golden.filter((e) => e.threadId === MAIN_THREAD || e.threadId === undefined);
+      const projectedMain = projected.filter((e) => e.threadId === MAIN_THREAD);
+      const { expected, actual } = merged(goldenMain, projectedMain, (e) => isExternalOnMain(e.type as string));
+      expect(actual).toEqual(expected);
+    });
+
+    test(`${s.name}: every CHILD thread reproduces its own golden subsequence in full`, () => {
+      const golden = canonicalThreads(readJsonl<Any>("golden", `${s.golden}.events.jsonl`));
+      const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
+      const { projector } = makeProjector({ mode: s.mode, sessionId: "s_test" });
+      const projected = canonicalThreads(run(projector, messages) as unknown as Any[]);
+
+      const childIds = [...new Set(golden.map((e) => e.threadId as string))].filter((t) => t !== MAIN_THREAD && t !== undefined);
+      for (const child of childIds) {
+        const goldenChild = golden.filter((e) => e.threadId === child)
+          // A child's own text is on the wire only with forwardSubagentText on.
+          .filter((e) => s.forwardsSubagentText === true || (e.type !== "assistant_message" && e.type !== "assistant_delta"));
+        const projectedChild = projected.filter((e) => e.threadId === child);
+        const { expected, actual } = merged(goldenChild, projectedChild, (e) => isExternalOnChild(e.type as string));
+        expect({ child, events: actual }).toEqual({ child, events: expected });
+      }
     });
   }
 
-  test("tool rows keep NORMA names on the Winter leg (P8b-25) — no golden is compared on a renamed row", () => {
-    // Belt and braces beside the sequence comparison: the goldens speak Norma, the fixtures speak
-    // Winter, and every name the projector emits must be the Norma one.
-    for (const scenario of SCENARIOS) {
-      const messages = readJsonl<ProtocolSdkMessage>("sdk", `${scenario}.messages.jsonl`);
-      const { projector } = makeProjector();
-      const names = (run(projector, messages) as unknown as Any[]).filter((e) => e.type === "tool_call").map((e) => e.name);
-      for (const n of names) expect({ scenario, name: n, looksWinter: /^[A-Z]/.test(n as string) }).toEqual({ scenario, name: n, looksWinter: false });
+  test("tool rows keep NORMA names on the Winter leg (P8b-25)", () => {
+    for (const s of SCENARIOS) {
+      const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
+      const names = (run(makeProjector().projector, messages) as unknown as Any[]).filter((e) => e.type === "tool_call").map((e) => e.name);
+      for (const n of names) expect({ scenario: s.name, name: n, looksWinter: /^[A-Z]/.test(n as string) }).toEqual({ scenario: s.name, name: n, looksWinter: false });
     }
   });
 
-  test("every tool_result the projector produces is linked to a tool_call it already produced", () => {
-    for (const scenario of SCENARIOS) {
-      const messages = readJsonl<ProtocolSdkMessage>("sdk", `${scenario}.messages.jsonl`);
-      const { projector } = makeProjector();
-      const out = run(projector, messages) as unknown as Any[];
+  test("every tool_result is linked to a tool_call the projector already produced", () => {
+    for (const s of SCENARIOS) {
+      const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
+      const out = run(makeProjector().projector, messages) as unknown as Any[];
       const calls = new Set(out.filter((e) => e.type === "tool_call").map((e) => e.callId as string));
       for (const r of out.filter((e) => e.type === "tool_result")) {
-        expect({ scenario, callId: r.callId, linked: calls.has(r.callId as string) }).toEqual({ scenario, callId: r.callId, linked: true });
+        expect({ scenario: s.name, callId: r.callId, linked: calls.has(r.callId as string) }).toEqual({ scenario: s.name, callId: r.callId, linked: true });
       }
     }
   });
 
-  test("no scenario ever produces a variant PROJECTED_EVENT_COVERAGE marks false", async () => {
-    const { PROJECTED_EVENT_COVERAGE } = await import("../../src/projector");
-    for (const scenario of SCENARIOS) {
-      const messages = readJsonl<ProtocolSdkMessage>("sdk", `${scenario}.messages.jsonl`);
-      const { projector } = makeProjector();
-      for (const e of run(projector, messages)) {
-        expect({ scenario, type: e.type, covered: PROJECTED_EVENT_COVERAGE[e.type] }).toEqual({ scenario, type: e.type, covered: true });
+  test("every thread_completed closes a thread_started the projector already produced", () => {
+    for (const s of SCENARIOS) {
+      const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
+      const out = run(makeProjector().projector, messages) as unknown as Any[];
+      const started = new Set(out.filter((e) => e.type === "thread_started").map((e) => e.threadId as string));
+      for (const c of out.filter((e) => e.type === "thread_completed")) {
+        expect({ scenario: s.name, threadId: c.threadId, opened: started.has(c.threadId as string) }).toEqual({ scenario: s.name, threadId: c.threadId, opened: true });
       }
     }
   });
 
-  test("no scenario ever produces a reasoning_item, and no opaque provider state reaches an event", () => {
-    for (const scenario of SCENARIOS) {
-      const messages = readJsonl<ProtocolSdkMessage>("sdk", `${scenario}.messages.jsonl`);
-      const { projector } = makeProjector();
-      const out = run(projector, messages);
-      expect(out.some((e) => e.type === "reasoning_item")).toBe(false);
+  test("no scenario produces a variant PROJECTED_EVENT_COVERAGE marks false", () => {
+    for (const s of SCENARIOS) {
+      const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
+      for (const e of run(makeProjector().projector, messages)) {
+        expect({ scenario: s.name, type: e.type, covered: PROJECTED_EVENT_COVERAGE[e.type] }).toEqual({ scenario: s.name, type: e.type, covered: true });
+      }
     }
   });
 
-  test("exactly one terminal event set per turn, and it is the LAST thing the turn emits", () => {
-    for (const scenario of SCENARIOS) {
-      const messages = readJsonl<ProtocolSdkMessage>("sdk", `${scenario}.messages.jsonl`);
-      const { projector } = makeProjector();
-      const out = run(projector, messages) as unknown as Any[];
+  test("no scenario ever produces a reasoning_item", () => {
+    for (const s of SCENARIOS) {
+      const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
+      expect(run(makeProjector().projector, messages).some((e) => e.type === "reasoning_item")).toBe(false);
+    }
+  });
+
+  test("exactly one terminal set per turn, and the turn's last main-thread event is its terminal", () => {
+    for (const s of SCENARIOS) {
+      const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
+      const out = run(makeProjector().projector, messages) as unknown as Any[];
       const terminals = out.filter((e) => e.type === "turn_completed");
       const results = messages.filter((m) => (m as Any).type === "result");
-      expect({ scenario, terminals: terminals.length }).toEqual({ scenario, terminals: results.length });
-      expect({ scenario, last: out[out.length - 1]?.type }).toEqual({ scenario, last: "turn_completed" });
+      expect({ scenario: s.name, terminals: terminals.length }).toEqual({ scenario: s.name, terminals: results.length });
+      const main = out.filter((e) => e.threadId === MAIN_THREAD);
+      expect({ scenario: s.name, last: main[main.length - 1]?.type }).toEqual({ scenario: s.name, last: "turn_completed" });
     }
   });
 });

@@ -31,11 +31,12 @@ export class FakeCheckpoints implements CheckpointStore {
   }
 }
 
-export interface TestProjector { projector: Projector; checkpoints: FakeCheckpoints; warnings: string[] }
+export interface TestProjector { projector: Projector; checkpoints: FakeCheckpoints; warnings: string[]; debugs: string[] }
 
 export function makeProjector(overrides: Partial<ProjectorDeps> = {}): TestProjector {
   const checkpoints = (overrides.checkpoint as FakeCheckpoints | undefined) ?? new FakeCheckpoints();
   const warnings: string[] = [];
+  const debugs: string[] = [];
   let seq = 0;
   const projector = createProjector({
     sessionId: "s_test",
@@ -43,12 +44,12 @@ export function makeProjector(overrides: Partial<ProjectorDeps> = {}): TestProje
     nextSeq: () => ++seq,
     checkpoint: checkpoints,
     now: () => "2026-09-11T00:00:00.000Z",
-    log: { warn: (m) => { warnings.push(m); } },
+    log: { warn: (m) => { warnings.push(m); }, debug: (m) => { debugs.push(m); } },
     ...overrides,
     // `checkpoint` must be the instance we return, whatever the spread did.
     ...(overrides.checkpoint === undefined ? { checkpoint: checkpoints } : {}),
   });
-  return { projector, checkpoints, warnings };
+  return { projector, checkpoints, warnings, debugs };
 }
 
 /** Feed a whole stream and collect every produced event, in order. */

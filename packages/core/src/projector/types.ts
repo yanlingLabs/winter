@@ -43,6 +43,22 @@ export interface CheckpointStore {
   complete(key: ProjectionKey, cursor: ProjectionCursorInput, seqs: { first: number; last: number }): unknown;
 }
 
+/**
+ * A projection this projector DECLINED to make, surfaced instead of dropped (controller answer to
+ * Task 10 concern 8). Today there is one reason: `pending-elsewhere` — a mark is open for the
+ * source, so another projector holds it or one died between its append and its commit, and
+ * re-projecting could double-append. Only 8a's recovery sweep can read the product log's tail and
+ * decide, so the projector declines and says so. Task 16 surfaces these.
+ */
+export interface ProjectorRefusal {
+  reason: "pending-elsewhere";
+  sourceId: string;
+  sessionId: string;
+  winterSessionId: string;
+  generation: number;
+  at: string;
+}
+
 export interface ProjectorDeps {
   /** The NORMA session id every produced event is stamped with. */
   sessionId: string;
@@ -60,6 +76,9 @@ export interface ProjectorDeps {
   generation?: number;
   /** Recorded on the cursor row. Defaults to `"winter-agent"`. */
   runtimeKind?: RuntimeKind;
+  /** Called for every refusal, in addition to `Projector.refusals` and a warn log. A throw from
+   *  this handler is swallowed — a driver's own bookkeeping must never break the fold. */
+  onRefusal?: (refusal: ProjectorRefusal) => void;
 }
 
 export interface Projector {
@@ -79,6 +98,16 @@ export interface Projector {
    * shutdown look like a crash.
    */
   flush(): void;
+  /**
+   * ADDED in Task 11 (an addition, not a rename): the door for an exception the driver's
+   * `for await` caught. §4.8 item 3 — an error result is yielded AND THEN thrown, so a driver that
+   * does not wrap its iteration gets an unhandled rejection. It wraps, hands the error here, and
+   * gets back the terminal a turn that is still open needs (or `[]` when the turn already ended, or
+   * when the throw is the "error-result-then-throw" pair of a result already projected).
+   */
+  acceptError(err: unknown): SessionEvent[];
+  /** Every projection this projector declined, in order. Never silently empty of a real refusal. */
+  readonly refusals: readonly ProjectorRefusal[];
 }
 
 /** The event the projector produces, before `seq`/`ts` are stamped. The protocol's own

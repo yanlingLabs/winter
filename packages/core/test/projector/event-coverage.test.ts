@@ -41,12 +41,39 @@ describe("projector/event-coverage: the relocated exhaustiveness maps", () => {
     expect(PROJECTED_EVENT_COVERAGE.tool_review).not.toBe(SUBAGENT_TRANSCRIPT_INCLUDE.tool_review);
   });
 
-  test("every HISTORY_EVENT_TYPE the phone folds has a projector producer — nothing silently drops off the phone", () => {
-    // If a history type were `false` here with no other producer, the Winter leg would show the
-    // phone a hole in the transcript with every unit test green.
+  test("every HISTORY_EVENT_TYPE the phone folds has a NAMED producer on the Winter leg", () => {
+    // The obligation is that nothing the phone's transcript folds silently loses its producer when
+    // the engine retires — NOT that the projector produces all ten. Four of them belong to Task 8's
+    // bridges by construction (they must be emitted from inside `canUseTool`, before any frame
+    // about the call reaches the stream) and one to the host's push path. A history type that is
+    // `false` here AND absent from this table is the failure this test exists to catch.
+    const NON_PROJECTOR_PRODUCERS: Partial<Record<string, string>> = {
+      user_message: "the host's push path (P8b-5) — ipc/server.ts's session.send / the Winter prompt queue",
+      approval_requested: "runtime-sdk/approval-bridge.ts (Task 8), plus daemon.ts:143-213 for peripheral leases",
+      approval_resolved: "runtime-sdk/approval-bridge.ts (Task 8), plus daemon.ts:143-213",
+      question_asked: "runtime-sdk/question-bridge.ts (Task 8)",
+      question_resolved: "runtime-sdk/question-bridge.ts (Task 8)",
+    };
     for (const type of HISTORY_EVENT_TYPES) {
-      expect({ type, produced: PROJECTED_EVENT_COVERAGE[type] }).toEqual({ type, produced: true });
+      const accounted = PROJECTED_EVENT_COVERAGE[type] === true || NON_PROJECTOR_PRODUCERS[type] !== undefined;
+      expect({ type, accounted }).toEqual({ type, accounted: true });
     }
+  });
+
+  test("the four approval/question variants are the BRIDGES', not the projector's", () => {
+    // Ordering decides ownership: both asks are answered inside `canUseTool`, a callback that runs
+    // before any frame about the call reaches the message stream, and only the bridge holds the
+    // answer. Flipping any of these to `true` means two producers for one event.
+    expect(PROJECTED_EVENT_COVERAGE.approval_requested).toBe(false);
+    expect(PROJECTED_EVENT_COVERAGE.approval_resolved).toBe(false);
+    expect(PROJECTED_EVENT_COVERAGE.question_asked).toBe(false);
+    expect(PROJECTED_EVENT_COVERAGE.question_resolved).toBe(false);
+  });
+
+  test("children and the task graph are the projector's", () => {
+    expect(PROJECTED_EVENT_COVERAGE.thread_started).toBe(true);
+    expect(PROJECTED_EVENT_COVERAGE.thread_completed).toBe(true);
+    expect(PROJECTED_EVENT_COVERAGE.task_updated).toBe(true);
   });
 
   test("turn_started is false HERE and is Task 16's obligation, not a dropped event", () => {

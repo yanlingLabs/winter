@@ -168,15 +168,31 @@ export const PROJECTED_EVENT_COVERAGE = {
   // input). The ordinary path is the HOST appending `user_message` before it pushes (P8b-5), and
   // `projector/dedupe.ts` drops the echo so it is never appended twice.
   user_message: true,
-  // ---- produced by Task 11's half ----
-  approval_requested: true, // the `canUseTool` bridge (P8b-19)
-  approval_resolved: true,
-  question_asked: true, // the AskUserQuestion bridge
-  question_resolved: true,
-  thread_started: true, // child/subagent correlation via `parent_tool_use_id` (surface map §4.3)
+  // ---- produced: children and the task graph (Task 11) ----
+  //
+  // A child thread's identity is the spawning `tool_use.id`, which is also the `tool_use_id` on its
+  // completing `tool_result` — so both ends come off the wire with no registry lookup (children.ts).
+  thread_started: true,
   thread_completed: true,
-  task_updated: true, // the SDK's task/todo surface
+  // `system/task_updated` and `system/task_notification` fold into Winter's task graph mirror.
+  task_updated: true,
   // ---- never produced ----
+  //
+  // APPROVALS AND QUESTIONS ARE THE BRIDGES', NOT THE PROJECTOR'S, and the reason is ordering. Both
+  // are answered inside `canUseTool` — a CALLBACK that runs before any frame about the call reaches
+  // the message stream. `approval_requested` / `question_asked` have to appear the moment the ask is
+  // made, or nothing renders a card and nobody can answer; and only the bridge holds the answer, so
+  // the `*_resolved` half is its too. By the time the projector sees anything, the question is
+  // already answered and all that is left is an ordinary `tool_use`/`tool_result` pair, which it
+  // projects as an ordinary `tool_call`/`tool_result`. The two producers' events line up in the
+  // transcript because both key on the same `tool_use.id` as their `callId` — that shared join is
+  // the whole reason the split works. See `projector/questions.ts`.
+  //   producers: `runtime-sdk/approval-bridge.ts` + `question-bridge.ts` (Task 8), and for
+  //   peripheral leases `daemon.ts:143-213`'s `buildLeasePolicy` (a second, older producer).
+  approval_requested: false,
+  approval_resolved: false,
+  question_asked: false,
+  question_resolved: false,
   //
   // OPEN OBLIGATION FOR TASK 16 (do not let this become a silent drop): the engine emits
   // `turn_started` at the top of every turn (`engine.ts:2788`) and the Mac app reads it. The
