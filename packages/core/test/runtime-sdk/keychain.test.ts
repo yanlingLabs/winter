@@ -7,7 +7,9 @@ import { WEB_SEARCH_API_KEY_SECRET } from "../../src/agent/tools/web";
 import { FileSecretStore, type SecretStore } from "../../src/auth/secret-store";
 import { TOKEN_NAMES } from "../../src/auth/tokens";
 import { keychainService } from "../../src/profile";
-import { CODEX_SECRET_NAMES } from "../../src/providers/codex-oauth";
+import { CODEX_SECRET_NAMES, CodexAuthStore } from "../../src/providers/codex-oauth";
+import { OPENAI_API_KEY_SECRET } from "../../src/providers/manager";
+import { CREDENTIAL_MATERIAL_NAMES, writeOpenAiApiKey } from "../../src/auth/credential-material";
 import { credentialPresenceFrom, credentialRefFor, keychainSeamFromSecretStore, NORMA_CREDENTIAL_INVENTORY } from "../../src/runtime-sdk/keychain";
 
 // The real `CredentialRef` (`@yanlinglabs/winter-agent-sdk` protocol/config.d.ts:317-333) is a
@@ -16,6 +18,11 @@ import { credentialPresenceFrom, credentialRefFor, keychainSeamFromSecretStore, 
 // The kind that names a Keychain-backed secret is `{ kind: "keychain"; account: string; service?:
 // string }`; `account` is the secret name, `service` is checked against Norma's own
 // `keychainService()` by this adapter (see keychain.ts).
+//
+// HOTFIX (post-8b, 2026-09-11): the inventory's secret names moved from raw token/key strings
+// ("openai-api-key" / "codex-access-token") to JSON `CredentialMaterial` records ("openai:default"
+// / "codex-oauth:default") — see auth/credential-material.ts. `keychainSeamFromSecretStore.read`
+// now unpacks the material and hands back the BARE injectable string, never the JSON blob.
 
 let dir: string;
 let store: FileSecretStore;
@@ -38,11 +45,22 @@ class ThrowingSecretStore implements SecretStore {
 }
 
 describe("KeychainSeam over SecretStore", () => {
-  test("present → the material; absent → undefined (a NORMAL answer, never a throw)", async () => {
-    await store.set("openai-api-key", "sk-test");
+  test("present → the BARE material value (never the JSON wrapper); absent → undefined (a NORMAL answer, never a throw)", async () => {
+    await writeOpenAiApiKey(store, "sk-test");
     const seam = keychainSeamFromSecretStore(store);
-    expect(await seam.read({ kind: "keychain", account: "openai-api-key" })).toBe("sk-test");
+    expect(await seam.read({ kind: "keychain", account: CREDENTIAL_MATERIAL_NAMES.openai })).toBe("sk-test");
     expect(await seam.read({ kind: "keychain", account: "nope" })).toBeUndefined();
+  });
+
+  test("a record holding a raw non-JSON string (a pre-migration leftover) returns undefined", async () => {
+    await store.set(CREDENTIAL_MATERIAL_NAMES.openai, "sk-raw-leftover"); // not JSON — the shape the OLD inventory used to store
+    expect(await keychainSeamFromSecretStore(store).read({ kind: "keychain", account: CREDENTIAL_MATERIAL_NAMES.openai })).toBeUndefined();
+  });
+
+  test("CodexAuthStore.save() writes material the seam unpacks to the bare access token", async () => {
+    await new CodexAuthStore(store).save({ accessToken: "a", refreshToken: "r", idToken: null, accountId: null, expiresAt: 0 });
+    const seam = keychainSeamFromSecretStore(store);
+    expect(await seam.read({ kind: "keychain", account: CREDENTIAL_MATERIAL_NAMES.codexOauth })).toBe("a");
   });
 
   test("a ref the inventory does not know is refused as undefined (no arbitrary secret-name reads)", async () => {
@@ -56,38 +74,44 @@ describe("KeychainSeam over SecretStore", () => {
     expect(await seam.read({ kind: "none" })).toBeUndefined();
   });
 
-  test("a stored EMPTY secret reads as undefined, exactly like presence treats it (norma logout writes \"\" to codex secrets)", async () => {
-    await store.set("openai-api-key", "");
-    expect(await keychainSeamFromSecretStore(store).read({ kind: "keychain", account: "openai-api-key" })).toBeUndefined();
+  test("a stored EMPTY secret reads as undefined, exactly like presence treats it (norma logout writes \"\" to the codex material record)", async () => {
+    await store.set(CREDENTIAL_MATERIAL_NAMES.openai, "");
+    expect(await keychainSeamFromSecretStore(store).read({ kind: "keychain", account: CREDENTIAL_MATERIAL_NAMES.openai })).toBeUndefined();
   });
 
   test("a SecretStore.get failure never propagates — read() reports undefined, not a rejection", async () => {
     const seam = keychainSeamFromSecretStore(new ThrowingSecretStore());
-    await expect(seam.read({ kind: "keychain", account: "openai-api-key" })).resolves.toBeUndefined();
+    await expect(seam.read({ kind: "keychain", account: CREDENTIAL_MATERIAL_NAMES.openai })).resolves.toBeUndefined();
   });
 
   test("a ref.service that differs from Norma's own keychainService() is refused; unset service is accepted", async () => {
-    await store.set("openai-api-key", "sk-test");
+    await writeOpenAiApiKey(store, "sk-test");
     const seam = keychainSeamFromSecretStore(store);
-    expect(await seam.read({ kind: "keychain", account: "openai-api-key" })).toBe("sk-test");
-    expect(await seam.read({ kind: "keychain", account: "openai-api-key", service: keychainService() })).toBe("sk-test");
-    expect(await seam.read({ kind: "keychain", account: "openai-api-key", service: "com.some.other.vendor" })).toBeUndefined();
+    expect(await seam.read({ kind: "keychain", account: CREDENTIAL_MATERIAL_NAMES.openai })).toBe("sk-test");
+    expect(await seam.read({ kind: "keychain", account: CREDENTIAL_MATERIAL_NAMES.openai, service: keychainService() })).toBe("sk-test");
+    expect(await seam.read({ kind: "keychain", account: CREDENTIAL_MATERIAL_NAMES.openai, service: "com.some.other.vendor" })).toBeUndefined();
   });
 
   test("credentialPresenceFrom lists providers by KIND only — no material anywhere in the result", async () => {
-    await store.set("openai-api-key", "sk-test");
+    await writeOpenAiApiKey(store, "sk-test");
     const presence = await credentialPresenceFrom(store);
     expect(presence.byProvider.openai).toBe("keychain");
     expect(presence.byProvider["codex-oauth"]).toBeUndefined();
     expect(JSON.stringify(presence)).not.toContain("sk-test");
   });
 
-  test("credentialPresenceFrom reports codex only once its OAuth access token is stored", async () => {
-    await store.set(NORMA_CREDENTIAL_INVENTORY.find((s) => s.provider === "codex-oauth")!.secretName, "codex-token");
+  test("credentialPresenceFrom reports codex only once VALID OAuth material is stored", async () => {
+    await new CodexAuthStore(store).save({ accessToken: "at_live", refreshToken: null, idToken: null, accountId: null, expiresAt: 0 });
     const presence = await credentialPresenceFrom(store);
     expect(presence.byProvider["codex-oauth"]).toBe("keychain");
     expect(presence.byProvider.openai).toBeUndefined();
     expect(presence.authByProvider).toBeUndefined(); // omitted in 8b (C-14)
+  });
+
+  test("credentialPresenceFrom: PRESENCE IS PARSEABILITY (hotfix review r1, M1) — a raw non-JSON leftover (the OLD pre-hotfix shape) is ABSENT, never present", async () => {
+    await store.set(NORMA_CREDENTIAL_INVENTORY.find((s) => s.provider === "codex-oauth")!.secretName, "codex-token");
+    const presence = await credentialPresenceFrom(store);
+    expect(presence.byProvider["codex-oauth"]).toBeUndefined();
   });
 
   test("a SecretStore.get failure never propagates — credentialPresenceFrom treats the slot as absent", async () => {
@@ -97,8 +121,8 @@ describe("KeychainSeam over SecretStore", () => {
 
   test("the inventory's contents are pinned — adding/renaming a provider is a deliberate edit to this test too", () => {
     expect(NORMA_CREDENTIAL_INVENTORY).toEqual([
-      { provider: "openai", secretName: "openai-api-key", kind: "keychain" },
-      { provider: "codex-oauth", secretName: "codex-access-token", kind: "keychain" },
+      { provider: "openai", secretName: "openai:default", kind: "keychain" },
+      { provider: "codex-oauth", secretName: "codex-oauth:default", kind: "keychain" },
     ]);
   });
 
@@ -110,6 +134,10 @@ describe("KeychainSeam over SecretStore", () => {
       TOKEN_NAMES.remote,
       EXA_API_KEY_SECRET,
       WEB_SEARCH_API_KEY_SECRET,
+      // LEGACY raw records (hotfix): migration-source/logout-target only now, never read through
+      // this seam.
+      OPENAI_API_KEY_SECRET,
+      CODEX_SECRET_NAMES.access,
       CODEX_SECRET_NAMES.refresh,
       CODEX_SECRET_NAMES.id,
       CODEX_SECRET_NAMES.account,
@@ -125,8 +153,8 @@ describe("KeychainSeam over SecretStore", () => {
   });
 
   test("credentialRefFor names a known provider's ref (matching 8a's keychain:<account> locator form); unknown providers get undefined", () => {
-    expect(credentialRefFor("openai")).toEqual({ kind: "keychain", account: "openai-api-key", service: keychainService() });
-    expect(credentialRefFor("codex-oauth")).toEqual({ kind: "keychain", account: "codex-access-token", service: keychainService() });
+    expect(credentialRefFor("openai")).toEqual({ kind: "keychain", account: "openai:default", service: keychainService() });
+    expect(credentialRefFor("codex-oauth")).toEqual({ kind: "keychain", account: "codex-oauth:default", service: keychainService() });
     expect(credentialRefFor("nope")).toBeUndefined();
   });
 });

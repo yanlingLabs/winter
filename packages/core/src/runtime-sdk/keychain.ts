@@ -2,8 +2,7 @@ import type { CredentialRef } from "@yanlinglabs/winter-agent-sdk";
 import type { CredentialPresence, KeychainSeam } from "@yanlinglabs/winter-runtime-sdk";
 import type { SecretStore } from "../auth/secret-store";
 import { keychainService } from "../profile";
-import { CODEX_SECRET_NAMES } from "../providers/codex-oauth";
-import { OPENAI_API_KEY_SECRET } from "../providers/manager";
+import { CREDENTIAL_MATERIAL_NAMES, readCredentialMaterial } from "../auth/credential-material";
 
 /**
  * One row of the credential inventory: a provider id, the `SecretStore` name that backs it, and
@@ -28,15 +27,21 @@ export interface CredentialSlot {
  * DELIBERATELY excluded, same as the Sparkle key. Only the two provider-credential families
  * `createProvider` (`providers/manager.ts:104-113`) reads from today are IN:
  *
- *  - `openai` — `OPENAI_API_KEY_SECRET` = "openai-api-key" (`providers/manager.ts:10`), the
- *    `openai-compatible` provider type's single API key.
- *  - `codex` — `CODEX_SECRET_NAMES.access` = "codex-access-token" (`providers/codex-oauth.ts:9`),
- *    the OAuth access token that gates `CodexAuthStore.load()` (`codex-oauth.ts:28-29`: "no access
- *    token" IS "no credential"). The other four `CODEX_SECRET_NAMES` entries (refresh/id/
- *    account/expires, `codex-oauth.ts:10-13`) are refresh/session bookkeeping for that SAME OAuth
- *    credential, not a separate provider token — they stay internal to `CodexAuthStore`
- *    (`providers/codex-oauth.ts`), which reads them directly off the `SecretStore`, never through
- *    this seam. Only the access token is a `CredentialSlot` here.
+ *  - `openai` — `CREDENTIAL_MATERIAL_NAMES.openai` = "openai:default" (`auth/credential-material.ts`),
+ *    a JSON `{ kind: "api-key", key }` record — the `openai-compatible` provider type's single API
+ *    key.
+ *  - `codex-oauth` — `CREDENTIAL_MATERIAL_NAMES.codexOauth` = "codex-oauth:default", a JSON
+ *    `{ kind: "oauth", accessToken, refreshToken?, expiresAt?, accountId?, idToken? }` record.
+ *
+ * HOTFIX (post-8b, 2026-09-11): these are JSON MATERIAL records, not the raw token/key strings the
+ * inventory used to point at (`"openai-api-key"` / `"codex-access-token"`). The spawned Winter
+ * child resolves a `CredentialRef` by reading the Keychain ITSELF (`Bun.secrets.get`, never through
+ * Norma's own provider code) and `JSON.parse`s whatever it finds — a raw string fails outright
+ * ("... is not valid JSON credential material"). `auth/credential-material.ts` is the single
+ * source of truth for these records; the OLD raw names (`OPENAI_API_KEY_SECRET`,
+ * `CODEX_SECRET_NAMES.access` and its four bookkeeping siblings) are now a one-way migration
+ * source (`migrateLegacyCredentialMaterial`, run once at daemon boot) and `norma logout`'s blank
+ * target — never read through this seam, and `CodexAuthStore` no longer writes them at all.
  *
  * The list is a LITERAL array on purpose (not derived, not spread from elsewhere): adding a
  * provider here is meant to be a deliberate, reviewable edit — `keychain.test.ts` pins the exact
@@ -63,8 +68,8 @@ export interface CredentialSlot {
  * `"openai"`); they must not be cross-read.
  */
 export const NORMA_CREDENTIAL_INVENTORY: readonly CredentialSlot[] = [
-  { provider: "openai", secretName: OPENAI_API_KEY_SECRET, kind: "keychain" },
-  { provider: "codex-oauth", secretName: CODEX_SECRET_NAMES.access, kind: "keychain" },
+  { provider: "openai", secretName: CREDENTIAL_MATERIAL_NAMES.openai, kind: "keychain" },
+  { provider: "codex-oauth", secretName: CREDENTIAL_MATERIAL_NAMES.codexOauth, kind: "keychain" },
 ];
 
 /** Error code/class only — NEVER `.message`, which could embed material for some future
@@ -95,12 +100,22 @@ function describeError(err: unknown): string {
  * a pairing token, a Search/ReadPage capability key) is refused as `undefined`, identically to a
  * genuine miss — there is no arbitrary secret-name read through this seam.
  *
- * A stored-but-EMPTY secret (`norma logout` writes `""` to every Codex secret rather than deleting
- * it) reads as `undefined`, matching `credentialPresenceFrom`'s truthiness check — the two must
- * never disagree about what counts as "no material". A `SecretStore.get` FAILURE (locked/denied
- * Keychain) never propagates: it is caught, logged at `warn` with the secret NAME and an error
- * CODE/class only (never the message text), and reported as `undefined` — a missing credential at
- * spawn is a typed refusal one layer up, never a throw from the middle of a launch.
+ * HOTFIX (post-8b, 2026-09-11): the stored record is now JSON `CredentialMaterial`
+ * (`auth/credential-material.ts`), but this seam must still hand back the BARE INJECTABLE STRING,
+ * never the JSON blob — the router's official leg (`winter-runtime-sdk` `src/official/auth.ts`
+ * `fetchAuthCredentials`) takes exactly what `read()` returns and injects it verbatim as an
+ * environment variable (e.g. `ANTHROPIC_API_KEY`); a JSON object there would be a broken
+ * credential. `readCredentialMaterial` is the ONE parser (never a second one here): its result is
+ * unpacked per kind — `api-key` → `.key`, `oauth` → `.accessToken`, `bearer` → `.token` — the
+ * MATERIAL VALUE the child/router actually needs, never the wrapper. A blank record, a missing
+ * record, unparsable JSON, or an unrecognized shape all resolve to `undefined` (via
+ * `readCredentialMaterial`'s own `null`), with at most the ONE warning it already logs naming the
+ * record NAME — never a second warning here, and never the value.
+ *
+ * A `SecretStore.get` FAILURE (locked/denied Keychain) never propagates: it is caught, logged at
+ * `warn` with the secret NAME and an error CODE/class only (never the message text), and reported
+ * as `undefined` — a missing credential at spawn is a typed refusal one layer up, never a throw
+ * from the middle of a launch.
  */
 export function keychainSeamFromSecretStore(store: SecretStore): KeychainSeam {
   const known = new Set(NORMA_CREDENTIAL_INVENTORY.map((slot) => slot.secretName));
@@ -110,7 +125,20 @@ export function keychainSeamFromSecretStore(store: SecretStore): KeychainSeam {
       if (ref.service !== undefined && ref.service !== keychainService()) return undefined;
       if (!known.has(ref.account)) return undefined;
       try {
-        return (await store.get(ref.account)) || undefined;
+        const material = await readCredentialMaterial(store, ref.account);
+        if (material === null) return undefined;
+        switch (material.kind) {
+          case "api-key": return material.key;
+          case "oauth": return material.accessToken;
+          case "bearer": return material.token;
+          default: {
+            // Exhaustiveness (hotfix review r1, m3): a future `CredentialMaterial` variant that
+            // forgets to add a case here fails `typecheck:core` on this line, not silently at
+            // runtime.
+            const _never: never = material;
+            return _never;
+          }
+        }
       } catch (err) {
         console.warn(`[keychain] read failed for "${ref.account}": ${describeError(err)}`);
         return undefined;
@@ -126,8 +154,10 @@ export function keychainSeamFromSecretStore(store: SecretStore): KeychainSeam {
  *
  * The `keychain:<account>` string form of this ref (never constructed here — see 8a) is the exact
  * locator `RuntimeSessionRecord.authRef` persists (`runtime-state/records.ts:46`: "Opaque locator
- * (`keychain:openai-api-key`), never credential material"; pinned by
- * `test/runtime-state/records.test.ts:373-375`). Callers that need that string form derive it as
+ * (`keychain:openai-api-key`), never credential material" — the doc example predates this hotfix;
+ * new records persist `keychain:openai:default` / `keychain:codex-oauth:default`, still opaque);
+ * pinned by `test/runtime-state/records.test.ts:373-375` (a literal locator string, unaffected by
+ * the account-name rename). Callers that need that string form derive it as
  * ``keychain:${ref.account}`` from this function's result, rather than hand-building either form
  * separately — this function is the one place that knows both.
  */
@@ -139,14 +169,27 @@ export function credentialRefFor(provider: string): CredentialRef | undefined {
 
 /**
  * Presence-by-provider (`CredentialPresence.byProvider`), never the material: each inventory slot
- * is probed with `store.get` and, when present (non-empty — see `keychainSeamFromSecretStore`'s
- * doc comment on `norma logout`'s empty-string writes), contributes `provider → kind`.
- * `authByProvider` is omitted (C-14 — deferred to 8c). Never log the probed values; a
- * `JSON.stringify` of the result can never contain a secret because none is ever assigned into it.
+ * is probed through `readCredentialMaterial` (the SAME single `get` + parse the seam's `read()`
+ * uses) and, when it parses to real material, contributes `provider → kind`. `authByProvider` is
+ * omitted (C-14 — deferred to 8c). Never log the probed values; a `JSON.stringify` of the result
+ * can never contain a secret because none is ever assigned into it.
+ *
+ * PRESENCE IS PARSEABILITY, NOT VALIDITY (hotfix review r1, M1): a blank/missing record reads as
+ * absent exactly as before (`readCredentialMaterial` returns `null` for both), but a NON-EMPTY
+ * record that does not parse into material the child's `coerceMaterial` accepts is now ALSO
+ * absent — never "present with material the child will reject". Before this, a raw non-JSON
+ * leftover (the exact shape the OLD, pre-hotfix inventory used to store) read as present, which
+ * would have `providerSelectionFor` attach a ref the child then failed on, all the way through the
+ * SDK's ~72s retry ladder (see the error-classification finding in the hotfix report) — parsing
+ * here means that ref is never attached in the first place. This still says nothing about
+ * WORKING — an expired-but-well-formed OAuth material with a dead refresh token still reads as
+ * present and fails later, at the turn, exactly as documented above.
  *
  * A `SecretStore.get` FAILURE for one slot never propagates and never fails the whole probe: it is
  * caught, logged at `warn` with the secret NAME and an error CODE/class only (never the message
  * text), and that slot is treated as absent — exactly as if the secret were simply not stored.
+ * (A malformed-but-present record does NOT hit this catch — `readCredentialMaterial` handles that
+ * case itself, with its own single warning, and returns `null` rather than throwing.)
  */
 export async function credentialPresenceFrom(
   store: SecretStore,
@@ -154,14 +197,14 @@ export async function credentialPresenceFrom(
 ): Promise<CredentialPresence> {
   const byProvider: Record<string, CredentialRef["kind"]> = {};
   for (const slot of inventory) {
-    let value: string | null;
+    let material: Awaited<ReturnType<typeof readCredentialMaterial>>;
     try {
-      value = await store.get(slot.secretName);
+      material = await readCredentialMaterial(store, slot.secretName);
     } catch (err) {
       console.warn(`[keychain] presence probe failed for "${slot.secretName}": ${describeError(err)}`);
       continue;
     }
-    if (value) byProvider[slot.provider] = slot.kind;
+    if (material) byProvider[slot.provider] = slot.kind;
   }
   return { byProvider };
 }

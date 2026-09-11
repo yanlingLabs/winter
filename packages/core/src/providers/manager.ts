@@ -1,5 +1,7 @@
 import { statSync } from "node:fs";
 import type { SecretStore } from "../auth/secret-store";
+import { readOpenAiApiKey } from "../auth/credential-material";
+import { OPENAI_API_KEY_SECRET } from "../auth/legacy-secret-names";
 import { loadSettings, type Settings } from "../settings";
 import type { Provider } from "./types";
 import { OpenAICompatibleProvider } from "./openai-compatible";
@@ -7,7 +9,13 @@ import { CodexAuthStore, CodexOAuthProvider } from "./codex-oauth";
 import { QuotaManager, withQuota } from "./quota";
 import { CODEX_MODELS, DEFAULT_CODEX_MODEL } from "./codex-config";
 
-export const OPENAI_API_KEY_SECRET = "openai-api-key";
+/** LEGACY raw record — migration source only (`auth/credential-material.ts`'s
+ *  `readOpenAiApiKey`/`migrateLegacyCredentialMaterial`). Writers use `writeOpenAiApiKey`, which
+ *  writes ONLY the `openai:default` JSON material record the spawned Winter child reads. Defined
+ *  in the leaf `auth/legacy-secret-names.ts` (hotfix review r1, m1 — breaks the import cycle with
+ *  `auth/credential-material.ts`) and re-exported here verbatim so every existing importer of
+ *  `OPENAI_API_KEY_SECRET` from this module keeps working unchanged. */
+export { OPENAI_API_KEY_SECRET };
 
 /** What a turn actually resolves to: the model slug plus an optional reasoning-effort hint. */
 export interface LiveModelSelection {
@@ -108,7 +116,7 @@ export async function createProvider(settings: Settings, secrets: SecretStore, s
   if (providerType === "codex-oauth") {
     inner = new CodexOAuthProvider({ authStore: new CodexAuthStore(secrets) });
   } else {
-    const apiKey = await secrets.get(OPENAI_API_KEY_SECRET);
+    const apiKey = await readOpenAiApiKey(secrets);
     if (!apiKey) throw new Error("no API key stored — run: norma login --api-key");
     inner = new OpenAICompatibleProvider({ baseUrl: settings.provider.baseUrl, apiKey });
   }

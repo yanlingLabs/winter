@@ -1,30 +1,62 @@
 import type { SecretStore } from "../auth/secret-store";
+import { CREDENTIAL_MATERIAL_NAMES, readCredentialMaterial, writeCredentialMaterial } from "../auth/credential-material";
+import { CODEX_SECRET_NAMES } from "../auth/legacy-secret-names";
 import type { ModelInfo, Provider, ProviderEvent, TurnRequest } from "./types";
 import { ResponsesSseParser } from "./responses-sse";
 import { buildRequestBody, mapHttpError } from "./openai-compatible";
 import { refreshTokens, type OAuthTokens } from "./pkce";
 import { CODEX, CODEX_MODELS } from "./codex-config";
 
-export const CODEX_SECRET_NAMES = {
-  access: "codex-access-token",
-  refresh: "codex-refresh-token",
-  id: "codex-id-token",
-  account: "codex-account-id",
-  expires: "codex-expires-at",
-} as const;
+/** LEGACY raw records — a one-way migration source (`auth/credential-material.ts`'s
+ *  `migrateLegacyCredentialMaterial`) and `norma logout`'s blank target ONLY. `CodexAuthStore`
+ *  below no longer writes these; the single source of truth is the `codex-oauth:default` JSON
+ *  material record the spawned Winter child actually reads. Defined in the leaf
+ *  `auth/legacy-secret-names.ts` (hotfix review r1, m1 — breaks the import cycle with
+ *  `auth/credential-material.ts`) and re-exported here verbatim so every existing importer of
+ *  `CODEX_SECRET_NAMES` from this module keeps working unchanged. */
+export { CODEX_SECRET_NAMES };
 
+/**
+ * Facade over the `codex-oauth:default` JSON credential material record (post-8b hotfix): the
+ * spawned Winter child resolves its `CredentialRef` by reading this SAME record directly off the
+ * Keychain and `JSON.parse`-ing it, so `save`/`load` here and the child's own reads/writes (its
+ * 401-refresh writes the merged material back to the exact ref it was handed) share ONE token set.
+ * `save` no longer touches the five legacy `CODEX_SECRET_NAMES` — those are migration-source/logout
+ * only now. `load` falls back to them (read-only) when the material record is absent, so an
+ * upgrade from a pre-hotfix install keeps working until the boot-time migration (or this load
+ * itself, next save) writes the material record forward.
+ */
 export class CodexAuthStore {
   constructor(private readonly store: SecretStore) {}
 
   async save(t: OAuthTokens): Promise<void> {
-    await this.store.set(CODEX_SECRET_NAMES.access, t.accessToken);
-    if (t.refreshToken) await this.store.set(CODEX_SECRET_NAMES.refresh, t.refreshToken);
-    if (t.idToken) await this.store.set(CODEX_SECRET_NAMES.id, t.idToken);
-    if (t.accountId) await this.store.set(CODEX_SECRET_NAMES.account, t.accountId);
-    await this.store.set(CODEX_SECRET_NAMES.expires, String(t.expiresAt));
+    await writeCredentialMaterial(this.store, CREDENTIAL_MATERIAL_NAMES.codexOauth, {
+      kind: "oauth",
+      accessToken: t.accessToken,
+      ...(t.refreshToken ? { refreshToken: t.refreshToken } : {}),
+      ...(t.idToken ? { idToken: t.idToken } : {}),
+      ...(t.accountId ? { accountId: t.accountId } : {}),
+      // Hotfix review r1, n1: mirrors migrateCodexOauth's own guard — an `OAuthTokens.expiresAt`
+      // of `0` (this type's own "unknown expiry" default, e.g. after a load() with no legacy
+      // `codex-expires-at` at all) must not round-trip into the material as a literal `expiresAt:
+      // 0`, which the child would read as "expired since the epoch" rather than "unknown".
+      ...(Number.isFinite(t.expiresAt) && t.expiresAt > 0 ? { expiresAt: t.expiresAt } : {}),
+    });
   }
 
   async load(): Promise<OAuthTokens | null> {
+    const material = await readCredentialMaterial(this.store, CREDENTIAL_MATERIAL_NAMES.codexOauth);
+    if (material?.kind === "oauth") {
+      return {
+        accessToken: material.accessToken,
+        refreshToken: material.refreshToken ?? null,
+        idToken: material.idToken ?? null,
+        accountId: material.accountId ?? null,
+        expiresAt: material.expiresAt ?? 0,
+      };
+    }
+    // Read-only legacy fallback — never rewritten from here (the migration function is the only
+    // writer that promotes these into the material record).
     const accessToken = await this.store.get(CODEX_SECRET_NAMES.access);
     if (!accessToken) return null;
     return {
