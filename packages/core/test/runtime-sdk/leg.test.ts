@@ -11,32 +11,32 @@ function settingsWith(leg: Record<string, boolean>): Settings {
   return { runtimes: { winterLeg: leg } } as unknown as Settings;
 }
 
-test("an ABSENT runtimes block answers the schema's per-mode defaults (Task 17: dispatch on the Winter leg)", () => {
+test("an ABSENT runtimes block answers the schema's per-mode defaults (Task 17: dispatch and code on the Winter leg)", () => {
   expect(legForNewSession("dispatch", {} as Settings)).toBe("winter");
   expect(legForNewSession("chat", {} as Settings)).toBe("engine");
-  expect(legForNewSession("code", {} as Settings)).toBe("engine");
+  expect(legForNewSession("code", {} as Settings)).toBe("winter");
 });
 
 test("undefined settings entirely answers the same defaults", () => {
   expect(legForNewSession("dispatch", undefined)).toBe("winter");
   expect(legForNewSession("chat", undefined)).toBe("engine");
-  expect(legForNewSession("code", undefined)).toBe("engine");
+  expect(legForNewSession("code", undefined)).toBe("winter");
 });
 
-test("a runtimes block with NO winterLeg answers the schema's per-mode DEFAULTS (Task 17: dispatch is on the Winter leg; chat/code still on the engine)", () => {
+test("a runtimes block with NO winterLeg answers the schema's per-mode DEFAULTS (Task 17: dispatch and code on the Winter leg; chat still on the engine)", () => {
   // The shipped shape before any flag was written: `runtimes` exists for retention/migrations and
   // knows nothing about a leg. The answer is the ONE defaults door's (`winterOptionsFromSettings`).
   const s = { runtimes: { retention: { deliveriesDays: 30, nameLeasesDays: 7 }, migrations: { memoryKeys: false } } } as unknown as Settings;
   expect(legForNewSession("dispatch", s)).toBe("winter");
   expect(legForNewSession("chat", s)).toBe("engine");
-  expect(legForNewSession("code", s)).toBe("engine");
+  expect(legForNewSession("code", s)).toBe("winter");
   // and an absent settings object altogether answers the same
   expect(legForNewSession("dispatch", undefined)).toBe("winter");
   expect(legForNewSession("chat", null)).toBe("engine");
 });
 
 test("a winterLeg with only SOME modes leaves the others on the engine", () => {
-  const s = settingsWith({ chat: true, dispatch: false });
+  const s = settingsWith({ chat: true, dispatch: false, code: false });
   expect(legForNewSession("chat", s)).toBe("winter");
   expect(legForNewSession("dispatch", s)).toBe("engine");
   expect(legForNewSession("code", s)).toBe("engine");
@@ -54,8 +54,8 @@ test("only a literal true moves a session — a hand-edited truthy value does no
   // A user who wrote `"yes"` or `1` into settings.json must not have their sessions silently moved
   // onto a leg they did not ask for.
   for (const v of ["yes", 1, "true", {}, []] as unknown[]) {
-    expect(legForNewSession("code", settingsWith({ code: v as boolean }))).toBe("engine");
     // a default-ON leg is moved OFF by a hand-edited non-boolean too: only `true` is on
+    expect(legForNewSession("code", settingsWith({ code: v as boolean }))).toBe("engine");
     expect(legForNewSession("dispatch", settingsWith({ dispatch: v as boolean }))).toBe("engine");
   }
   expect(legForNewSession("code", settingsWith({ code: false }))).toBe("engine");

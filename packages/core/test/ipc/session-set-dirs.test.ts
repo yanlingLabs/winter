@@ -576,6 +576,9 @@ describe("session.setDirs (working-directories T3)", () => {
 
   test("REAL daemon: session.setDirs refuses normaHome itself via the engine's real grantDenied predicate", async () => {
     const home = mkdtempSync(join(tmpdir(), "norma-set-dirs-real-daemon-"));
+    // An ENGINE proof: pin the engine leg for the code session it mints (Task 17 flipped the default).
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, runtimes: { winterLeg: { code: false } } }));
     const { FakeProvider } = await import("../../src/agent/fake-provider");
     const daemon = await startDaemon({
       home,

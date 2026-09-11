@@ -394,7 +394,8 @@ export const Settings = z.object({
       chat: z.boolean().default(false),
       // Task 17 Step 1: Dispatch's e2e proof landed (`test/e2e/winter-dispatch-e2e.test.ts`).
       dispatch: z.boolean().default(true),
-      code: z.boolean().default(false),
+      // Task 17 Step 2: Code's e2e proof landed, the P8b-27(c) self-grant attempt measured DENIED.
+      code: z.boolean().default(true),
     }).prefault({}),
     advisorModel: z.string().optional(),
     winterIdleTimeoutSec: z.number().int().min(10).default(DEFAULT_WINTER_IDLE_TIMEOUT_SEC),
@@ -454,7 +455,7 @@ export function winterOptionsFromSettings(s: Settings | null | undefined): Winte
     winterLeg: {
       chat: r?.winterLeg?.chat === true,
       dispatch: r?.winterLeg?.dispatch === undefined ? true : r.winterLeg.dispatch === true,
-      code: r?.winterLeg?.code === true,
+      code: r?.winterLeg?.code === undefined ? true : r.winterLeg.code === true,   // Task 17 Step 2
     },
   };
 }

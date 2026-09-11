@@ -680,7 +680,7 @@ describe("settings.runtimes", () => {
       migrations: { memoryKeys: false },
       // P8b Task 15: the Winter-leg keys default to "behave exactly as this daemon does today" —
       // and Task 17 Step 1 flipped dispatch once its e2e proof landed.
-      winterLeg: { chat: false, dispatch: true, code: false },
+      winterLeg: { chat: false, dispatch: true, code: true },
       winterIdleTimeoutSec: 900,
     });
     // The two optional strings stay ABSENT rather than becoming "": a present-but-empty value would
@@ -711,11 +711,11 @@ describe("settings.runtimes", () => {
   // must not change what it does when this build lands.
 
   test("each leg carries its own default (Task 17: dispatch ON), and one leg can be turned on or off without disturbing the others", () => {
-    expect(Settings.parse({ ...base, runtimes: {} }).runtimes?.winterLeg).toEqual({ chat: false, dispatch: true, code: false });
+    expect(Settings.parse({ ...base, runtimes: {} }).runtimes?.winterLeg).toEqual({ chat: false, dispatch: true, code: true });
     expect(Settings.parse({ ...base, runtimes: { winterLeg: { chat: true } } }).runtimes?.winterLeg)
-      .toEqual({ chat: true, dispatch: true, code: false });
+      .toEqual({ chat: true, dispatch: true, code: true });
     expect(Settings.parse({ ...base, runtimes: { winterLeg: { dispatch: false } } }).runtimes?.winterLeg)
-      .toEqual({ chat: false, dispatch: false, code: false });
+      .toEqual({ chat: false, dispatch: false, code: true });
   });
 
   test("winterExecutable and advisorModel are absent by default and accept a plain string", () => {
@@ -750,7 +750,7 @@ describe("settings.runtimes", () => {
     const parsed = Settings.parse({ ...base, runtimes: { winterLegg: { chat: true }, nonsense: 1 } });
     expect(parsed.runtimes).not.toHaveProperty("winterLegg");
     expect(parsed.runtimes).not.toHaveProperty("nonsense");
-    expect(parsed.runtimes?.winterLeg).toEqual({ chat: false, dispatch: true, code: false });
+    expect(parsed.runtimes?.winterLeg).toEqual({ chat: false, dispatch: true, code: true });
     // And the same one level up, so this is the schema's convention rather than a local accident.
     expect(Settings.parse({ ...base, nonsenseTopLevel: 1 } as never)).not.toHaveProperty("nonsenseTopLevel");
   });
@@ -769,13 +769,13 @@ describe("winterOptionsFromSettings", () => {
   test("an absent runtimes block answers with today's behaviour, not with undefined", () => {
     expect(winterOptionsFromSettings(Settings.parse(base))).toEqual({
       idleTimeoutSec: 900,
-      winterLeg: { chat: false, dispatch: true, code: false },
+      winterLeg: { chat: false, dispatch: true, code: true },
     });
   });
 
   test("null/undefined settings answer the same way — the daemon boots with `settings = null` when the file is unusable", () => {
     expect(winterOptionsFromSettings(null)).toEqual(winterOptionsFromSettings(undefined));
-    expect(winterOptionsFromSettings(null).winterLeg).toEqual({ chat: false, dispatch: true, code: false });
+    expect(winterOptionsFromSettings(null).winterLeg).toEqual({ chat: false, dispatch: true, code: true });
     expect(winterOptionsFromSettings(null).idleTimeoutSec).toBe(900);
   });
 
@@ -792,7 +792,7 @@ describe("winterOptionsFromSettings", () => {
       winterExecutable: "/opt/winter/bin/winter",
       advisorModel: "some-model",
       idleTimeoutSec: 60,
-      winterLeg: { chat: true, dispatch: true, code: false },
+      winterLeg: { chat: true, dispatch: true, code: true },
     });
   });
 

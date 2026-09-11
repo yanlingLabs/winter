@@ -100,6 +100,10 @@ function writeSettingsFile(home: string, overrides: Record<string, unknown> = {}
       provider: { type: "codex-oauth", model: "gpt-5.4" },
       titles: { enabled: false },
       toolSearch: { enabled: false },
+      // These are ENGINE hot-reload proofs (registry re-registration): pin the engine leg for the
+      // code sessions they mint, since Task 17 flipped the Winter defaults (P8b-13 keeps the engine
+      // selectable while it exists).
+      runtimes: { winterLeg: { code: false, dispatch: false } },
       ...overrides,
     }, null, 2) + "\n",
   );
@@ -267,7 +271,7 @@ describe("hot-settings P8b: the Winter-leg keys reach the live holder with no re
 
   test("winterLeg.chat, winterExecutable, winterIdleTimeoutSec and retention all flip live on ONE daemon", async () => {
     const home = mkdtempSync(join(tmpdir(), "norma-hot-e2e-winter-"));
-    writeSettingsFile(home); // no `runtimes` block at all — the shipped default
+    writeSettingsFile(home, { runtimes: undefined })   // no block at all: the absent-block state; // no `runtimes` block at all — the shipped default
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     const fake = new FakeProvider(endTurnScript());
 
@@ -293,7 +297,7 @@ describe("hot-settings P8b: the Winter-leg keys reach the live holder with no re
     await untilSettings(daemon, "the runtimes block to reach the live holder", (s) => s?.runtimes?.winterLeg?.chat === true);
     const live = daemon.settings()!.runtimes!;
     // Task 9's `legForNewSession` reads exactly this; the helper itself is the policy lane's.
-    expect(live.winterLeg).toEqual({ chat: true, dispatch: true, code: false });
+    expect(live.winterLeg).toEqual({ chat: true, dispatch: true, code: true });   // the schema's defaults fill the absent two
     // Task 5's `spawnHookFor` resolves this; here the assertion stops at the parsed setting.
     expect(live.winterExecutable).toBe(winterBin);
     expect(live.winterIdleTimeoutSec).toBe(60);
@@ -301,7 +305,7 @@ describe("hot-settings P8b: the Winter-leg keys reach the live holder with no re
     expect(live.retention).toEqual({ deliveriesDays: 90, nameLeasesDays: 7 });
 
     // Flipping a leg back OFF is just as hot — a rollback must not need a restart either.
-    writeSettingsFile(home, { runtimes: { winterLeg: { chat: false }, winterIdleTimeoutSec: 60 } });
+    writeSettingsFile(home, { runtimes: { winterLeg: { chat: false, code: false, dispatch: false }, winterIdleTimeoutSec: 60 } });
     await untilSettings(daemon, "the chat leg to flip back off", (s) => s?.runtimes?.winterLeg?.chat === false);
 
     // The session the daemon was serving all along still works — the reload re-wired nothing it owns.
