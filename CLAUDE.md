@@ -45,6 +45,12 @@ bun src/main.ts                      # interactive TUI (Ink)
 # "Norma Dev" cannot self-spawn a daemon; start the dev daemon below FIRST or the orb shows
 # disconnected.
 NORMA_HOME=~/.norma-dev NORMA_PROFILE=dev bun src/main.ts daemon run   # dev daemon (or: norma-dev daemon run)
+# THIRD TRAP (Winter Phase 8b, until 8d's bundle drop): every session runs as a spawned `winter` child, and
+# a dev daemon resolves that binary from `settings.runtimes.winterExecutable` → `$NORMA_WINTER_EXECUTABLE` →
+# `<dirname(execPath)>/winter` → `<NORMA_HOME>/runtimes/bin/winter` — a dev run has none of the last two, so
+# build one (`bun run build:winter` → dist/winter, from the ../winter-agent-sdk checkout at the pinned tag)
+# and point the daemon at it, or EVERY session.create/session.dispatch refuses typed (winter_executable_unavailable):
+NORMA_WINTER_EXECUTABLE="$PWD/../../dist/winter" NORMA_HOME=~/.norma-dev NORMA_PROFILE=dev bun src/main.ts daemon run
 
 # Versioning — never edit versions by hand; VERSION file (#.#.### format) is canonical
 bun run version:bump                 # +0.0.001 (also --minor / --major)
@@ -79,7 +85,7 @@ Adding/changing a `SessionEvent` variant or RPC method touches, in order:
 1. `packages/protocol/src/events.ts` (or `methods.ts`) — zod schema
 2. `packages/protocol/scripts/generate.ts` — add a canonical fixture for the new variant
 3. `pnpm protocol:generate`
-4. `packages/core/src/agent/subagent-transcript.ts` — its `satisfies Record<SessionEvent["type"], boolean>` exhaustiveness map fails core's `tsc` on a new variant until updated
+4. `packages/core/src/projector/event-coverage.ts` — its `PROJECTED_EVENT_COVERAGE` map (`satisfies Record<SessionEvent["type"], boolean>`) is the ONE exhaustiveness map since the engine retired (Winter Phase 8b); it fails core's `tsc` on a new variant until updated
 
    **Adding a FIELD (not a variant) engages none of the compile-time traps above — so sweep the field's PRODUCERS BY MEANING, not by build breakage.** Every step in this checklist is keyed to something failing to compile, and nothing fails to compile when a producer simply doesn't set a new optional field. `turn_completed.contextTokens` shipped correct on the daemon while `NormaChatKit`'s `ChatEngine` remained a **live second producer** emitting the old shape — reaching the daemon's log verbatim via `sync.push`, past a consumer with no mode gate. Ask: who else *writes* this event, in either language, and does the consumer's fallback silently accept their shape? (Corollary that saved that change from being a Critical: replication is byte-verbatim, so the phone does not decode and re-encode — had it done so, the new field would have been stripped in transit and the fix would have looked like it worked.)
 5. `apple/NormaProtocol` — mirror the Swift type; round-trip test asserts the fixture count, so it fails until synced
@@ -104,7 +110,7 @@ Every session is an append-only JSONL of `SessionEvent`s (each carrying `seq`/`s
 
 ### Tool surface
 
-Tool design deliberately tracks Claude Code's shape (see `norma-vs-cc-tools.md` at repo root for the live comparison): file-based memory (a MEMDIR of markdown files written with normal write/edit — no dedicated memory tools), unrestricted reads (no path fence on read/glob/grep/ls; the sole read denial is `~/.norma/run`), out-of-root writes via an approval flow (grant denylist protects `~/.norma`), a single multi-purpose `lsp` tool plus auto-diagnostics-after-edit, multimodal `read` (images/PDF/notebooks), and subagents with no wall-clock timeout — a progress-stall watchdog instead.
+Tool design deliberately tracks Claude Code's shape (see `norma-vs-cc-tools.md` at repo root for the live comparison): file-based memory (a MEMDIR of markdown files written with normal write/edit — no dedicated memory tools), unrestricted reads (no path fence on read/glob/grep/ls; the sole read denial is `~/.norma/run`), out-of-root writes via an approval flow (grant denylist protects `~/.norma`), a single multi-purpose `lsp` tool (the `norma__lsp` capability server on the Winter leg; auto-diagnostics-after-edit was the ENGINE's post-edit hook and is a carry until the child's `Options.hooks` PostToolUse path is measured), multimodal `read` (images/PDF/notebooks), and subagents with no wall-clock timeout — a progress-stall watchdog instead.
 
 ## Hard rules
 

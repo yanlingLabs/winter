@@ -523,7 +523,21 @@ describe("hello method schemas", () => {
 // ================================================================================================
 describe("panel_command (B2 T2)", () => {
   const base = { seq: 7, sessionId: "s_abc", ts: 1781270000000 };
-  const cmd = (over: Record<string, unknown>) => ({
+
+  // P8b-9: these fixtures used to be one untyped `Record<string, unknown>` builder, which cost the
+  // block three of the nine `tsc` errors that had been sitting on `main` — `toEqual(e)` could not
+  // line the bag up against the parsed union, and `.args` did not exist on it. Two builders instead,
+  // because the block genuinely needs two things: a WELL-TYPED panel_command (so a fixture that
+  // drifts from the schema fails to compile, which is the whole point of typing a fixture) and a
+  // deliberately ill-typed bag for the refusal tests, whose subject is an event the union must NOT
+  // admit.
+  type PanelCommandEvent = Extract<SessionEvent, { type: "panel_command" }>;
+  const cmd = (over: Omit<Partial<PanelCommandEvent>, "type"> & Pick<PanelCommandEvent, "action">): PanelCommandEvent => ({
+    ...base, type: "panel_command", commandId: "cmd_1", deadlineMs: 15000, ...over,
+  });
+  /** For the refusal cases only: an event the schema is expected to REJECT cannot be typed as one
+   *  the schema accepts. */
+  const rawCmd = (over: Record<string, unknown>): Record<string, unknown> => ({
     ...base, type: "panel_command", commandId: "cmd_1", deadlineMs: 15000, ...over,
   });
 
@@ -546,7 +560,7 @@ describe("panel_command (B2 T2)", () => {
   });
 
   test("an unknown verb is refused", () => {
-    expect(() => SessionEvent.parse(cmd({ action: "eval" }))).toThrow();
+    expect(() => SessionEvent.parse(rawCmd({ action: "eval" }))).toThrow();
   });
 
   test("args round-trips as an opaque per-verb bag", () => {

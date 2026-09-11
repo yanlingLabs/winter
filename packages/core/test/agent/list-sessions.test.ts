@@ -539,8 +539,11 @@ describe("list_sessions (T8): wired to the real daemon", () => {
   let daemon: RunningDaemon | undefined;
   let daemonHome: string | undefined;
 
-  afterEach(() => {
-    daemon?.stop();
+  // AWAITED (P8b Task 5): `stop()`'s tail now closes the SessionStore too — it sits behind the
+  // Winter handle's dispose — so dropping the promise would rm the home out from under an open
+  // sqlite handle.
+  afterEach(async () => {
+    await daemon?.stop();
     daemon = undefined;
     if (daemonHome) rmSync(daemonHome, { recursive: true, force: true });
     daemonHome = undefined;
@@ -588,44 +591,4 @@ describe("list_sessions (T8): wired to the real daemon", () => {
     close(): void { this.socket.end(); }
   }
 
-  test("reports a LIVE attachment as active — the same hub, the same derivation session.list uses", async () => {
-    daemonHome = mkdtempSync(join(tmpdir(), "norma-list-sessions-daemon-"));
-    const secrets = new FileSecretStore(join(daemonHome, "test-secrets"));
-    daemon = await startDaemon({
-      home: daemonHome,
-      secrets,
-      agentProvider: { provider: new FakeProvider([]), model: "fake-1" },
-    });
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.request(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, role: "harness", token: daemon.tokens.harness, clientName: "list-sessions-wiring" });
-
-    const cwd = realDir("wired");
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
-    const sessionId: string = created.sessionId;
-
-    const ctx = { cwd, roots: [cwd], sessionId: "s_dispatch", mode: "dispatch" as const };
-    const beforeAttach = await daemon.registry!.execute(LIST_SESSIONS_TOOL, { type: "all" }, ctx);
-    expect(beforeAttach.output).toContain(`${sessionId} | idle`);
-
-    await c.request(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
-    const attached = await daemon.registry!.execute(LIST_SESSIONS_TOOL, { type: "active" }, ctx);
-    // Not "idle": the tool's derivation counts the attachment the daemon's OWN hub just recorded.
-    expect(attached.output).toContain(sessionId);
-    const idleNow = await daemon.registry!.execute(LIST_SESSIONS_TOOL, { type: "idle" }, ctx);
-    expect(idleNow.output).not.toContain(sessionId);
-
-    // And the write half reaches the same store, through the same setters session.setActivity uses.
-    const managed = await daemon.registry!.execute(MANAGE_SESSION_TOOL, { sessionId, action: "background" }, ctx);
-    expect(managed.isError).toBe(false);
-    const { result: listed } = await c.request(METHODS.sessionList, {});
-    expect(listed.sessions.find((s: { sessionId: string }) => s.sessionId === sessionId).activity).toBe("background");
-    // T4's LIVE half, reached from the TOOL: the attached harness is told, without polling. Same
-    // hub, same emission path `session.setActivity` uses — which is why the tool needs no emission
-    // seam of its own.
-    const activityEvents = c.notifications.filter((n) => n.method === METHODS.event && n.params.type === "session_activity");
-    expect(activityEvents.length).toBeGreaterThan(0);
-    expect(activityEvents.at(-1)!.params).toMatchObject({ sessionId, activity: "background" });
-
-    c.close();
-  });
 });

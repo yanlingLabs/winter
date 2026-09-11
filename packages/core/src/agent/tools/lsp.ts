@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { readFileSync, readdirSync } from "node:fs";
-import type { ToolRegistry } from "./registry";
+import type { ToolDefinition, ToolRegistry } from "./registry";
 import { resolveWithinAny } from "../paths";
 import { LspManager, languageForPath, type LspLanguage } from "../lsp/manager";
 import { LspNotSupportedError, type LspDiagnostic, type LspLocation } from "../lsp/client";
@@ -171,7 +171,12 @@ async function withNotSupported(fn: () => Promise<string>): Promise<string> {
 }
 
 export interface LspToolDeps {
-  lsp: LspManager;
+  /** The daemon's ONE `LspManager`, or a GETTER over its live holder (fix wave, review F7): the
+   *  `lsp` capability server is built per session and read per call, so `settings.lsp.enabled`
+   *  flipping off mid-session makes the NEXT call refuse ("not available") with no rebuild — the
+   *  same hot shape `computer`'s service getter has. A plain manager (the registry door, tests)
+   *  keeps working unchanged. */
+  lsp: LspManager | (() => LspManager | undefined);
   cwdOf: (sessionId: string) => string | undefined;
   rootsOf: (sessionId: string) => string[];
   tmpDirOf?: (sessionId: string) => string | undefined;
@@ -206,8 +211,16 @@ function assertRequiredParams(action: LspAction, args: { file_path?: string; lin
   }
 }
 
-export function registerLspTools(r: ToolRegistry, deps: LspToolDeps): void {
-  const { lsp, cwdOf, rootsOf, tmpDirOf } = deps;
+/** Fix wave (review F7): the ONE `lsp` definition, shared by the registry door
+ *  (`registerLspTools`) and the `lsp` capability server (`capabilities/lsp.ts`) — the same
+ *  "one implementation, two doors" shape every other capability tool takes. */
+export function lspToolDefs(deps: LspToolDeps): ToolDefinition[] {
+  const { cwdOf, rootsOf, tmpDirOf } = deps;
+  const manager = (): LspManager => {
+    const m = typeof deps.lsp === "function" ? deps.lsp() : deps.lsp;
+    if (m === undefined) throw new Error("lsp is not available in this session (settings.lsp.enabled is false)");
+    return m;
+  };
 
   // Shared prelude for every file_path-based action: fence-check `file_path` BEFORE anything else
   // touches the manager, THEN route its language (unsupported → typed error) — also before
@@ -225,7 +238,7 @@ export function registerLspTools(r: ToolRegistry, deps: LspToolDeps): void {
     return { abs, cwd, language, readRoots };
   }
 
-  r.register({
+  return [{
     name: "lsp",
     description:
       "Query the project's language server. action selects the operation: 'definition' (jump to where the symbol at " +
@@ -249,12 +262,12 @@ export function registerLspTools(r: ToolRegistry, deps: LspToolDeps): void {
         const cwd = cwdOf(sessionId);
         if (!cwd) throw new Error("no working directory for this session");
         const language = detectWorkspaceLanguage(cwd);
-        const client = await lsp.clientFor(cwd, language); // re-acquired fresh every call — see CALLER CONTRACT above
+        const client = await manager().clientFor(cwd, language); // re-acquired fresh every call — see CALLER CONTRACT above
         return withNotSupported(() => client.workspaceSymbols(symbol!));
       }
 
       const { abs, cwd, language, readRoots } = resolvePathAndLanguage(sessionId, file_path!);
-      const client = await lsp.clientFor(cwd, language);
+      const client = await manager().clientFor(cwd, language);
       const text = readFileSync(abs, "utf8"); // the client opens the doc before querying — servers only answer for open docs
 
       switch (action) {
@@ -288,5 +301,9 @@ export function registerLspTools(r: ToolRegistry, deps: LspToolDeps): void {
           throw new Error(`unhandled lsp action: ${String(action)}`);
       }
     },
-  });
+  }];
+}
+
+export function registerLspTools(r: ToolRegistry, deps: LspToolDeps): void {
+  for (const def of lspToolDefs(deps)) r.register(def);
 }

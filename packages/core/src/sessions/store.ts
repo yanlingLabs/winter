@@ -1028,7 +1028,7 @@ export class SessionStore {
 
   /** Dispatch (Phase 7): the ONE dispatch session, if it exists. session.dispatch's lookup. */
   dispatchSessionId(): string | undefined {
-    const r = this.db.query("SELECT session_id FROM sessions WHERE mode = 'dispatch' LIMIT 1").get() as { session_id: string } | null;
+    const r = this.db.query("SELECT session_id FROM sessions WHERE mode = 'dispatch' ORDER BY created_at DESC LIMIT 1").get() as { session_id: string } | null;
     return r?.session_id;
   }
 

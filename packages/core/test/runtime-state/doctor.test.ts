@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
-import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
+import { openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION, type RuntimeStateDb } from "../../src/runtime-state/db";
 import { RuntimeSessionRecords, type NewRuntimeSessionRecord } from "../../src/runtime-state/records";
 import { RuntimeChildren, type PersistedWinterChild } from "../../src/runtime-state/children";
 import { RuntimeLeases } from "../../src/runtime-state/leases";
@@ -679,6 +679,197 @@ describe("repairRuntimeState — WS-16 §15 explicit, recoverable repairs", () =
 
       expect(result.applied).toBe(false);
       expect(result.detail).toContain("s_nope");
+    });
+  });
+});
+
+// ── Fix round 2 (re-review NEW-1): an OLDER schema is not a fault ─────────────────────────────────
+describe("diagnoseRuntimeState / restore-backup — a store written by an older build of this schema", () => {
+  test("a healthy older-schema store is reported as unmigrated, never corrupt, and offers no restore", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      const id = seedProductSession(home, { cwd: home });
+      withDb(home, (_rs, records) => { records.create(newRecord(home, id)); });
+      // Exactly what every 8a-era home looks like until a newer daemon opens it read-write: a
+      // complete, healthy store whose `user_version` is simply behind this build's.
+      const db = new Database(join(home, "runtimes", "runtime-state.db"));
+      db.run("PRAGMA user_version = 1");
+      db.close();
+
+      const findings = await diagnoseRuntimeState(home);
+      expect(kinds(findings)).toContain("db-unmigrated");
+      expect(kinds(findings)).not.toContain("db-corrupt");
+      const unmigrated = findings.find((f) => f.kind === "db-unmigrated")!;
+      // NOT repairable by this tool: restoring a backup would restore the same older version, which
+      // is advice that loops. The daemon fixes it by starting.
+      expect(unmigrated.repairable).toEqual([]);
+      expect(unmigrated.detail).toContain("the next daemon boot migrates it in place");
+      // And the diagnosis CONTINUES rather than returning early — the session-level checks still ran.
+      expect(kinds(findings)).not.toContain("index-drift");
+    });
+  });
+
+  test("the daemon's own read-write open migrates that same store in place", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      const db = new Database(join(home, "runtimes", "runtime-state.db"));
+      db.run("PRAGMA user_version = 1");
+      db.close();
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        expect(rs.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION);
+        expect(rs.integrity().ok).toBe(true);
+      } finally {
+        rs.close();
+      }
+      expect(await diagnoseRuntimeState(home)).toEqual([]);
+    });
+  });
+
+  test("the byte-copy snapshot carries the store's WAL, so the tool's own probe can read it back", async () => {
+    // RE-REVIEW NEW-9. The byte-copy door runs when this build cannot OPEN the current store — a
+    // downgrade (`newer-schema`) being the healthy case. Copying the main file alone produced a
+    // snapshot that `restore-backup`'s own probe (a readonly open) refuses as "not a readable
+    // database", and the committed-but-uncheckpointed tail that lived only in the `-wal` was then
+    // deleted by the sidecar removal.
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      const id = seedProductSession(home, { cwd: home });
+      let backup = "";
+      withDb(home, (rs, records) => { records.create(newRecord(home, id)); backup = rs.backup(); });
+
+      const dest = join(home, "runtimes", "runtime-state.db");
+      // A committed row that is still only in the WAL: the connection stays open, so nothing
+      // checkpoints it, and `-wal` is where the value actually lives.
+      const live = new Database(dest);
+      try {
+        live.run("INSERT INTO schema_meta(key, value) VALUES ('wal_tail', 'TAIL')");
+        // A version this build will not open readonly — the healthy store / door-1-refuses case.
+        live.run("PRAGMA user_version = 99");
+        expect(existsSync(`${dest}-wal`)).toBe(true);
+
+        const result = await repairRuntimeState(home, { kind: "restore-backup", backupPath: backup });
+        expect(result.applied).toBe(true);
+        const snapshot = /the replaced file is at (\S+)/.exec(result.detail)?.[1];
+        expect(snapshot).toBeDefined();
+        expect(existsSync(`${snapshot!}-wal`)).toBe(true);
+
+        // The probe's own shape — a plain readonly open — and the tail is there.
+        const probe = new Database(snapshot!, { readonly: true });
+        try {
+          expect(probe.query("SELECT value FROM schema_meta WHERE key='wal_tail'").get()).toEqual({ value: "TAIL" });
+        } finally {
+          probe.close();
+        }
+        // And `restore-backup` itself gets far enough to READ it: the refusal it gives is about the
+        // snapshot's schema version, never "not a readable database".
+        const back = await repairRuntimeState(home, { kind: "restore-backup", backupPath: snapshot! });
+        expect(back.detail).not.toContain("not a readable database");
+      } finally {
+        live.close();
+      }
+    });
+  });
+
+  test("re-review NEW-10: a restore FROM a WAL-carrying backup carries the tail — the restored store reads the committed-but-uncheckpointed row", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      const id = seedProductSession(home, { cwd: home });
+      withDb(home, (_rs, records) => { records.create(newRecord(home, id)); });
+      // A WAL-carrying backup under `backups/` — the shape the byte-copy door leaves behind — whose
+      // committed tail lives ONLY in its `-wal` (the writer stays open so nothing checkpoints).
+      const dest = join(home, "runtimes", "runtime-state.db");
+      const dir = join(home, "runtimes", "backups");
+      mkdirSync(dir, { recursive: true });
+      const backup = join(dir, "wal-carrying.db");
+      copyFileSync(dest, backup);
+      const writer = new Database(backup);
+      try {
+        writer.run("PRAGMA journal_mode = WAL");
+        writer.run("INSERT INTO schema_meta(key, value) VALUES ('wal_tail', 'TAIL')");
+        expect(existsSync(`${backup}-wal`)).toBe(true);
+        const result = await repairRuntimeState(home, { kind: "restore-backup", backupPath: backup });
+        expect(result.applied).toBe(true);
+        // the source's sidecars came along...
+        expect(existsSync(`${dest}-wal`)).toBe(true);
+        // ...and the restored store READS THE TAIL — before NEW-10 the main file alone was copied,
+        // `applied: true` was reported, and this row was silently gone.
+        const restored = new Database(dest);
+        try {
+          expect(restored.query("SELECT value FROM schema_meta WHERE key='wal_tail'").get()).toEqual({ value: "TAIL" });
+        } finally { restored.close(); }
+      } finally { writer.close(); }
+    });
+  });
+
+  test("re-review NEW-11: a sidecar that cannot be snapshotted refuses with the WAL-specific wording, and leaves NO partial pre-restore file behind", async () => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      console.warn("skipped: running as root, where chmod 000 cannot close the sidecar door");
+      return;
+    }
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      const id = seedProductSession(home, { cwd: home });
+      let backup = "";
+      withDb(home, (rs, records) => { records.create(newRecord(home, id)); backup = rs.backup(); });
+      const dest = join(home, "runtimes", "runtime-state.db");
+      const backups = join(home, "runtimes", "backups");
+      const live = new Database(dest);
+      try {
+        // door 1 (`VACUUM INTO`) refuses: a version this build will not open readonly; the tail is
+        // in the `-wal`, and THAT file is the one made uncopyable
+        live.run("INSERT INTO schema_meta(key, value) VALUES ('wal_tail', 'TAIL')");
+        live.run("PRAGMA user_version = 99");
+        expect(existsSync(`${dest}-wal`)).toBe(true);
+        const before = readFileSync(dest);
+        const filesBefore = readdirSync(backups).sort();
+        chmodSync(`${dest}-wal`, 0o000);
+        try {
+          const result = await repairRuntimeState(home, { kind: "restore-backup", backupPath: backup });
+          expect(result.applied).toBe(false);
+          // the DEDICATED refusal — reachable now (it was dead code behind the generic catch)
+          expect(result.detail).toContain("write-ahead log could not be snapshotted");
+          expect(result.detail).toContain("Move the store and its -wal aside");
+        } finally { chmodSync(`${dest}-wal`, 0o600); }
+        // nothing partial: no main-only `pre-restore-*.db` (the sidecar-less file the probe refuses)
+        expect(readdirSync(backups).sort()).toEqual(filesBefore);
+        // and the store — main file AND its wal — is untouched
+        expect(readFileSync(dest)).toEqual(before);
+        expect(existsSync(`${dest}-wal`)).toBe(true);
+      } finally { live.close(); }
+    });
+  });
+
+  test("a restore whose pre-overwrite snapshot fails is ABORTED, and the store it would have overwritten is untouched", async () => {
+    // `chmod 000` does not stop root, so as root this test would assert nothing at all rather than
+    // fail — say so out loud instead of passing vacuously.
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      console.warn("skipped: running as root, where chmod 000 cannot close either snapshot door");
+      return;
+    }
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      const id = seedProductSession(home, { cwd: home });
+      let backup = "";
+      withDb(home, (rs, records) => { records.create(newRecord(home, id)); backup = rs.backup(); });
+      withDb(home, (_rs, records) => { records.create(newRecord(home, "s_after_backup")); });
+
+      const dest = join(home, "runtimes", "runtime-state.db");
+      const before = readFileSync(dest);
+      // Neither snapshot door can work: the file opens for nobody and copies for nobody.
+      chmodSync(dest, 0o000);
+      try {
+        const result = await repairRuntimeState(home, { kind: "restore-backup", backupPath: backup });
+        expect(result.applied).toBe(false);
+        expect(result.detail).toContain("could not be snapshotted first");
+        expect(result.detail).toContain("Move it aside by hand");
+      } finally {
+        chmodSync(dest, 0o600);
+      }
+      // The one irreversible repair did not run: the current store is byte-for-byte what it was.
+      expect(readFileSync(dest)).toEqual(before);
+      withDb(home, (_rs, records) => { expect(records.get("s_after_backup")).toBeDefined(); });
     });
   });
 });

@@ -1,0 +1,15 @@
+{"sessionId":"<id-1>","type":"session_created","scope":"global","mode":"code"}
+{"sessionId":"<id-1>","type":"harness_attached","clientName":"golden-observer"}
+{"sessionId":"<id-1>","type":"user_message","threadId":"main","text":"delegate the summary","clientName":"golden"}
+{"sessionId":"<id-1>","threadId":"main","type":"turn_started"}
+{"sessionId":"<id-1>","threadId":"<id-2>","type":"thread_started","parentThreadId":"main","agentType":"general-purpose","prompt":"summarise the note","description":"summarise"}
+{"sessionId":"<id-1>","threadId":"<id-2>","type":"turn_started"}
+{"sessionId":"<id-1>","threadId":"<id-2>","type":"assistant_delta","delta":"child final report"}
+{"sessionId":"<id-1>","threadId":"<id-2>","type":"assistant_message","text":"child final report"}
+{"sessionId":"<id-1>","threadId":"<id-2>","type":"turn_completed","stopReason":"end_turn","inputTokens":900,"outputTokens":20,"contextTokens":900}
+{"sessionId":"<id-1>","threadId":"<id-2>","type":"thread_completed","stopReason":"end_turn"}
+{"sessionId":"<id-1>","threadId":"main","type":"tool_call","callId":"<id-3>","name":"spawn_agent","argsJson":"{\"prompt\":\"summarise the note\",\"description\":\"summarise\",\"run_in_background\":false}"}
+{"sessionId":"<id-1>","threadId":"main","type":"tool_result","callId":"<id-3>","output":"child final report\n\nagentId: <id-2> (send_message with to: '<id-2>' to continue this agent)","isError":false}
+{"sessionId":"<id-1>","threadId":"main","type":"assistant_delta","delta":"The child reported back."}
+{"sessionId":"<id-1>","threadId":"main","type":"assistant_message","text":"The child reported back."}
+{"sessionId":"<id-1>","threadId":"main","type":"turn_completed","stopReason":"end_turn","inputTokens":3600,"outputTokens":56,"contextTokens":2000}

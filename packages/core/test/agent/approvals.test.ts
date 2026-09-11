@@ -59,7 +59,13 @@ describe("ApprovalBroker", () => {
     const b = new ApprovalBroker();
     const before = Date.now();
     void b.wait("s1", "c1", 5000);
-    const [entry] = b.list("s1");
+    const pending = b.list("s1");
+    // P8b-9: `noUncheckedIndexedAccess` is on, so a destructured element is `T | undefined` — this
+    // one assertion is what the six `'entry' is possibly undefined` errors on `main` were asking
+    // for, and it also makes the test say out loud what it is relying on (exactly one entry).
+    expect(pending).toHaveLength(1);
+    const entry = pending[0];
+    if (!entry) throw new Error("unreachable: list('s1') holds the one pending approval");
     expect(entry.callId).toBe("c1");
     expect(entry.toolName).toBe("");
     expect(entry.summary).toBe("");

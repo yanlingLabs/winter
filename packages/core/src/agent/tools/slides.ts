@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { OFFICE_DEADLINES_MS, officeCommandArgs, officeSlidesBatchArgs, officeBatchArgsTooLarge, OFFICE_BATCH_MAX_OPS, type OfficeCommandAction } from "../../panel/office-commands";
-import type { ToolRegistry } from "./registry";
+import type { ToolDefinition, ToolRegistry } from "./registry";
 import type { PanelCommandAction, PanelCommandOutcome } from "../../panel/commands";
 import type { SessionDirs } from "../../sessions/dirs";
 import { canHostPanel } from "./browser";
@@ -348,7 +348,14 @@ export interface SlidesToolDeps {
 }
 
 export function registerSlidesTool(r: ToolRegistry, deps: SlidesToolDeps): void {
-  r.register({
+  for (const def of slidesToolDefs(deps)) r.register(def);
+}
+
+/** P8b Task 7 — THE definition(s), extracted verbatim from `registerSlidesTool`'s body so the daemon's shared
+ *  `ToolRegistry` and the capability server drive the SAME `ToolDefinition` object rather than two
+ *  copies of one. Nothing about the registration changed. */
+export function slidesToolDefs(deps: SlidesToolDeps): ToolDefinition[] {
+  return [{
     name: "slides",
     description:
       "Read and edit a presentation Norma has access to (.pptx, .odp — any format the office engine "
@@ -615,5 +622,5 @@ export function registerSlidesTool(r: ToolRegistry, deps: SlidesToolDeps): void 
 
       return outcome.result ?? `slides ${a.verb} completed for ${a.path}`;
     },
-  });
+  }];
 }

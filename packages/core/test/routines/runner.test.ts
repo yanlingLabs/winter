@@ -4,17 +4,50 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
-import { makeDaemonRoutineRunner, type MinimalEngine } from "../../src/routines/runner";
+import { makeDaemonRoutineRunner, type WinterTurnRunner } from "../../src/routines/runner";
 
 function makeHome(): string {
   return mkdtempSync(join(tmpdir(), "norma-routine-runner-"));
 }
 
+/** The driver table's headless door, faked over the real hub: the driver appends the `user_message`
+ *  itself (P8b-39) and then the scripted "turn" writes what a child would have. */
+const winterOver = (hub: SessionHub, turn: (sessionId: string) => Promise<void>): WinterTurnRunner => ({
+  async runTurn(sessionId, text, clientName) {
+    hub.append(sessionId, { type: "user_message", sessionId, threadId: "main", text, clientName });
+    await turn(sessionId);
+  },
+});
+
 describe("makeDaemonRoutineRunner — runHeadless", () => {
-  test("no engine configured (agent disabled): fails cleanly, no session left dangling on the happy path", async () => {
+  test("P8b Task 17: the turn runs through the driver table (it appends the user_message itself)", async () => {
     const store = new SessionStore(makeHome());
     const hub = new SessionHub(store);
-    const runner = makeDaemonRoutineRunner({ store, hub, engine: null });
+    const seen: Array<{ sessionId: string; text: string; clientName: string }> = [];
+    const runner = makeDaemonRoutineRunner({
+      store, hub,
+      winter: {
+        async runTurn(sessionId, text, clientName) {
+          seen.push({ sessionId, text, clientName });
+          hub.append(sessionId, { type: "user_message", sessionId, threadId: "main", text, clientName });
+          hub.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: "done on winter" });
+          hub.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 1, outputTokens: 1 });
+        },
+      },
+    });
+    const result = await runner.runHeadless({ prompt: "check inbox", policy: "auto", cwd: "/tmp/proj", origin: "routine/r9" });
+    expect(result).toMatchObject({ ok: true, resultText: "done on winter" });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ text: "check inbox", clientName: "routine" });
+    const log = store.read(seen[0]!.sessionId);
+    expect(log.filter((e) => e.type === "user_message")).toHaveLength(1);   // the runner appended none of its own
+    expect(store.meta(seen[0]!.sessionId).origin).toBe("routine/r9");
+  });
+
+  test("no runtime configured (agent disabled): fails cleanly, no session left dangling on the happy path", async () => {
+    const store = new SessionStore(makeHome());
+    const hub = new SessionHub(store);
+    const runner = makeDaemonRoutineRunner({ store, hub });
 
     const result = await runner.runHeadless({ prompt: "check inbox", policy: "auto", cwd: "/tmp", origin: "routine/r1" });
     expect(result.ok).toBe(false);
@@ -26,17 +59,15 @@ describe("makeDaemonRoutineRunner — runHeadless", () => {
     const hub = new SessionHub(store);
     let sawSessionId: string | undefined;
     let sawPrompt: string | undefined;
-    const engine: MinimalEngine = {
-      async runTurn(sessionId) {
+    const winter = winterOver(hub, async (sessionId) => {
         sawSessionId = sessionId;
         const events = store.read(sessionId);
         const userMsg = events.find((e) => e.type === "user_message");
         sawPrompt = userMsg && "text" in userMsg ? userMsg.text : undefined;
         hub.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: "3 unread emails" });
         hub.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 10, outputTokens: 5 });
-      },
-    };
-    const runner = makeDaemonRoutineRunner({ store, hub, engine });
+    });
+    const runner = makeDaemonRoutineRunner({ store, hub, winter });
 
     const result = await runner.runHeadless({ prompt: "check inbox", policy: "auto", cwd: "/tmp/proj", origin: "routine/r1" });
 
@@ -67,13 +98,11 @@ describe("makeDaemonRoutineRunner — runHeadless", () => {
   test("quota error: an agent_error whose message starts with HTTP 429 maps to quotaLimited", async () => {
     const store = new SessionStore(makeHome());
     const hub = new SessionHub(store);
-    const engine: MinimalEngine = {
-      async runTurn(sessionId) {
+    const winter = winterOver(hub, async (sessionId) => {
         hub.append(sessionId, { type: "agent_error", sessionId, threadId: "main", message: "HTTP 429 — rate limited" });
         hub.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "error", inputTokens: 0, outputTokens: 0 });
-      },
-    };
-    const runner = makeDaemonRoutineRunner({ store, hub, engine });
+    });
+    const runner = makeDaemonRoutineRunner({ store, hub, winter });
 
     const result = await runner.runHeadless({ prompt: "x", policy: "auto", cwd: "/tmp", origin: "routine/r2" });
     expect(result.ok).toBe(false);
@@ -88,13 +117,11 @@ describe("makeDaemonRoutineRunner — runHeadless", () => {
   test("quota error via structured code: agent_error.code === \"rate_limit\" maps to quotaLimited even with a message that does NOT start with HTTP 429", async () => {
     const store = new SessionStore(makeHome());
     const hub = new SessionHub(store);
-    const engine: MinimalEngine = {
-      async runTurn(sessionId) {
+    const winter = winterOver(hub, async (sessionId) => {
         hub.append(sessionId, { type: "agent_error", sessionId, threadId: "main", message: "rate limited, try later", code: "rate_limit" });
         hub.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "error", inputTokens: 0, outputTokens: 0 });
-      },
-    };
-    const runner = makeDaemonRoutineRunner({ store, hub, engine });
+    });
+    const runner = makeDaemonRoutineRunner({ store, hub, winter });
 
     const result = await runner.runHeadless({ prompt: "x", policy: "auto", cwd: "/tmp", origin: "routine/r5" });
     expect(result.ok).toBe(false);
@@ -105,13 +132,11 @@ describe("makeDaemonRoutineRunner — runHeadless", () => {
   test("a non-rate_limit code (e.g. \"auth\") is NOT quotaLimited, even if the message happens to start with HTTP 429", async () => {
     const store = new SessionStore(makeHome());
     const hub = new SessionHub(store);
-    const engine: MinimalEngine = {
-      async runTurn(sessionId) {
+    const winter = winterOver(hub, async (sessionId) => {
         hub.append(sessionId, { type: "agent_error", sessionId, threadId: "main", message: "HTTP 429 — actually an auth error", code: "auth" });
         hub.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "error", inputTokens: 0, outputTokens: 0 });
-      },
-    };
-    const runner = makeDaemonRoutineRunner({ store, hub, engine });
+    });
+    const runner = makeDaemonRoutineRunner({ store, hub, winter });
 
     const result = await runner.runHeadless({ prompt: "x", policy: "auto", cwd: "/tmp", origin: "routine/r6" });
     expect(result.ok).toBe(false);
@@ -121,13 +146,11 @@ describe("makeDaemonRoutineRunner — runHeadless", () => {
   test("non-quota error: an agent_error NOT starting with HTTP 429 is a plain error (not quotaLimited)", async () => {
     const store = new SessionStore(makeHome());
     const hub = new SessionHub(store);
-    const engine: MinimalEngine = {
-      async runTurn(sessionId) {
+    const winter = winterOver(hub, async (sessionId) => {
         hub.append(sessionId, { type: "agent_error", sessionId, threadId: "main", message: "tool crashed" });
         hub.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "error", inputTokens: 0, outputTokens: 0 });
-      },
-    };
-    const runner = makeDaemonRoutineRunner({ store, hub, engine });
+    });
+    const runner = makeDaemonRoutineRunner({ store, hub, winter });
 
     const result = await runner.runHeadless({ prompt: "x", policy: "auto", cwd: "/tmp", origin: "routine/r3" });
     expect(result.ok).toBe(false);
@@ -135,14 +158,14 @@ describe("makeDaemonRoutineRunner — runHeadless", () => {
     expect(result.error).toBe("tool crashed");
   });
 
-  test("engine.runTurn throwing surfaces as a plain error result, never rejects", async () => {
+  test("winter.runTurn throwing surfaces as a plain error result, never rejects", async () => {
     const store = new SessionStore(makeHome());
     const hub = new SessionHub(store);
-    const engine: MinimalEngine = { async runTurn() { throw new Error("engine exploded"); } };
-    const runner = makeDaemonRoutineRunner({ store, hub, engine });
+    const winter = winterOver(hub, async () => { throw new Error("runtime exploded"); });
+    const runner = makeDaemonRoutineRunner({ store, hub, winter });
 
     const result = await runner.runHeadless({ prompt: "x", policy: "auto", cwd: "/tmp", origin: "routine/r4" });
     expect(result.ok).toBe(false);
-    expect(result.error).toBe("engine exploded");
+    expect(result.error).toBe("runtime exploded");
   });
 });

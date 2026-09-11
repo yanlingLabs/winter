@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom } from "../src/settings";
+import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC } from "../src/settings";
 import { DEFAULT_CODEX_MODEL } from "../src/providers/codex-config";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 
@@ -678,7 +678,15 @@ describe("settings.runtimes", () => {
     expect(Settings.parse({ ...base, runtimes: {} }).runtimes).toEqual({
       retention: { deliveriesDays: 30, nameLeasesDays: 7 },
       migrations: { memoryKeys: false },
+      // P8b Task 15: the Winter-leg keys default to "behave exactly as this daemon does today" —
+      // and Task 17 Step 1 flipped dispatch once its e2e proof landed.
+      winterLeg: { chat: true, dispatch: true, code: true },
+      winterIdleTimeoutSec: 900,
     });
+    // The two optional strings stay ABSENT rather than becoming "": a present-but-empty value would
+    // be a path/model the consumers have to special-case forever.
+    expect(Settings.parse({ ...base, runtimes: {} }).runtimes).not.toHaveProperty("winterExecutable");
+    expect(Settings.parse({ ...base, runtimes: {} }).runtimes).not.toHaveProperty("advisorModel");
   });
 
   test("a half-specified retention block keeps the other default", () => {
@@ -696,5 +704,100 @@ describe("settings.runtimes", () => {
     expect(() => Settings.parse({ ...base, runtimes: { retention: { nameLeasesDays: 0 } } })).toThrow();
     expect(() => Settings.parse({ ...base, runtimes: { retention: { deliveriesDays: 1.5 } } })).toThrow();
     expect(() => Settings.parse({ ...base, runtimes: { retention: { deliveriesDays: -30 } } })).toThrow();
+  });
+
+  // ── P8b Task 15: the Winter-leg keys ───────────────────────────────────────────────────────────
+  // Every one of them defaults to today's behaviour, because a daemon that has never been configured
+  // must not change what it does when this build lands.
+
+  test("every leg defaults ON (Task 17: the engine is retired); a written false PARSES (accepted for one release) but the door ignores it", () => {
+    expect(Settings.parse({ ...base, runtimes: {} }).runtimes?.winterLeg).toEqual({ chat: true, dispatch: true, code: true });
+    expect(Settings.parse({ ...base, runtimes: { winterLeg: { dispatch: false } } }).runtimes?.winterLeg)
+      .toEqual({ chat: true, dispatch: false, code: true });
+    expect(winterOptionsFromSettings(Settings.parse({ ...base, runtimes: { winterLeg: { dispatch: false } } })).winterLeg)
+      .toEqual({ chat: true, dispatch: true, code: true });
+  });
+
+  test("winterExecutable and advisorModel are absent by default and accept a plain string", () => {
+    const none = Settings.parse({ ...base, runtimes: {} }).runtimes;
+    expect(none?.winterExecutable).toBeUndefined();
+    expect(none?.advisorModel).toBeUndefined();
+    const set = Settings.parse({ ...base, runtimes: { winterExecutable: "/opt/winter/bin/winter", advisorModel: "some-model" } }).runtimes;
+    expect(set?.winterExecutable).toBe("/opt/winter/bin/winter");
+    expect(set?.advisorModel).toBe("some-model");
+  });
+
+  test("an EMPTY winterExecutable parses rather than bricking the file — loadSettings throws on invalid, and the daemon would not start", () => {
+    // Deliberately NOT `.min(1)`. A user clearing the field to "" must be a no-op the consumer
+    // treats as absent (memory-dir.ts's trim-is-absent convention), never a daemon that refuses to
+    // boot over one blank string.
+    expect(Settings.parse({ ...base, runtimes: { winterExecutable: "" } }).runtimes?.winterExecutable).toBe("");
+    expect(Settings.parse({ ...base, runtimes: { advisorModel: "" } }).runtimes?.advisorModel).toBe("");
+  });
+
+  test("winterIdleTimeoutSec defaults to 900s and refuses a value too small to survive a pause in typing", () => {
+    expect(Settings.parse({ ...base, runtimes: {} }).runtimes?.winterIdleTimeoutSec).toBe(900);
+    expect(Settings.parse({ ...base, runtimes: { winterIdleTimeoutSec: 30 } }).runtimes?.winterIdleTimeoutSec).toBe(30);
+    expect(() => Settings.parse({ ...base, runtimes: { winterIdleTimeoutSec: 9 } })).toThrow();
+    expect(() => Settings.parse({ ...base, runtimes: { winterIdleTimeoutSec: 900.5 } })).toThrow();
+  });
+
+  test("an unknown key under runtimes is STRIPPED, not rejected — the same thing the surrounding schema does", () => {
+    // Asserting today's behaviour rather than choosing one: zod v4's `z.object()` strips unknown
+    // keys, which is what lets a user's file survive a downgrade and what `loadSettings`'s own v1
+    // migration comment already relies on. A future `.strict()` here would turn every settings.json
+    // written by a NEWER Norma into a boot failure on an older one.
+    const parsed = Settings.parse({ ...base, runtimes: { winterLegg: { chat: true }, nonsense: 1 } });
+    expect(parsed.runtimes).not.toHaveProperty("winterLegg");
+    expect(parsed.runtimes).not.toHaveProperty("nonsense");
+    expect(parsed.runtimes?.winterLeg).toEqual({ chat: true, dispatch: true, code: true });
+    // And the same one level up, so this is the schema's convention rather than a local accident.
+    expect(Settings.parse({ ...base, nonsenseTopLevel: 1 } as never)).not.toHaveProperty("nonsenseTopLevel");
+  });
+
+  test("a wrongly-typed leg is rejected — a string 'true' must never read as a leg that is on", () => {
+    expect(() => Settings.parse({ ...base, runtimes: { winterLeg: { chat: "true" } } })).toThrow();
+  });
+});
+
+// P8b Task 15 / review r1 F4: ONE door answers for an absent block and a blank string, so three
+// lanes (Task 2's executable resolver, Task 5's create.ts, Task 9's leg + Task 16's idle timer)
+// cannot each re-derive the conventions and cannot silently forget one.
+describe("winterOptionsFromSettings", () => {
+  const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } };
+
+  test("an absent runtimes block answers with today's behaviour, not with undefined", () => {
+    expect(winterOptionsFromSettings(Settings.parse(base))).toEqual({
+      idleTimeoutSec: 900,
+      winterLeg: { chat: true, dispatch: true, code: true },
+    });
+  });
+
+  test("null/undefined settings answer the same way — the daemon boots with `settings = null` when the file is unusable", () => {
+    expect(winterOptionsFromSettings(null)).toEqual(winterOptionsFromSettings(undefined));
+    expect(winterOptionsFromSettings(null).winterLeg).toEqual({ chat: true, dispatch: true, code: true });
+    expect(winterOptionsFromSettings(null).idleTimeoutSec).toBe(900);
+  });
+
+  test("a blank or whitespace-only executable/model is ABSENT, never the empty string", () => {
+    const blank = winterOptionsFromSettings(Settings.parse({ ...base, runtimes: { winterExecutable: "   ", advisorModel: "" } }));
+    expect(blank.winterExecutable).toBeUndefined();
+    expect(blank.advisorModel).toBeUndefined();
+    expect(blank).not.toHaveProperty("winterExecutable");
+  });
+
+  test("real values come through trimmed", () => {
+    const set = winterOptionsFromSettings(Settings.parse({ ...base, runtimes: { winterExecutable: " /opt/winter/bin/winter ", advisorModel: "some-model", winterIdleTimeoutSec: 60, winterLeg: { chat: true } } }));
+    expect(set).toEqual({
+      winterExecutable: "/opt/winter/bin/winter",
+      advisorModel: "some-model",
+      idleTimeoutSec: 60,
+      winterLeg: { chat: true, dispatch: true, code: true },
+    });
+  });
+
+  test("the schema default and the absent-block answer are the same number", () => {
+    expect(Settings.parse({ ...base, runtimes: {} }).runtimes?.winterIdleTimeoutSec).toBe(DEFAULT_WINTER_IDLE_TIMEOUT_SEC);
+    expect(winterOptionsFromSettings(Settings.parse(base)).idleTimeoutSec).toBe(DEFAULT_WINTER_IDLE_TIMEOUT_SEC);
   });
 });

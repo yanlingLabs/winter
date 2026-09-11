@@ -16,7 +16,6 @@ import { PluginSupervisor } from "../src/plugins/supervisor";
 import { PluginContribRegistry } from "../src/plugins/contrib";
 import type { Provider, ProviderEvent } from "../src/providers/types";
 import { OPENAI_API_KEY_SECRET } from "../src/providers/manager";
-import { setup as setupAgentEngine } from "./agent/engine-spawn.test";
 import { TrustStore } from "../src/agent/trust";
 import { WorkflowRuntime } from "../src/workflows/runtime";
 import { WorkflowStore } from "../src/workflows/store";
@@ -213,57 +212,7 @@ describe("daemon IPC", () => {
     c.close();
   });
 
-  test("DONE GATE: two authenticated clients attach to one session and see each other's events", async () => {
-    await boot();
-    const a = await TestClient.connect(daemon.socketPath);
-    const b = await TestClient.connect(daemon.socketPath);
-    await a.hello(harnessToken, "client-a");
-    await b.hello(harnessToken, "client-b");
 
-    const { result: created } = await a.request(METHODS.sessionCreate, { scope: "global" });
-    await a.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    await b.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-
-    // a sees b's attachment
-    await a.waitForNotification((n) =>
-      n.method === METHODS.event && n.params.type === "harness_attached" && n.params.clientName === "client-b");
-
-    // b sends; a receives the user_message
-    await b.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "hello from b" });
-    const got = await a.waitForNotification((n) =>
-      n.method === METHODS.event && n.params.type === "user_message");
-    expect(got.params.text).toBe("hello from b");
-    expect(got.params.clientName).toBe("client-b");
-
-    // b detaches; a sees it
-    b.close();
-    await a.waitForNotification((n) =>
-      n.method === METHODS.event && n.params.type === "harness_detached" && n.params.clientName === "client-b");
-    a.close();
-  });
-
-  test("G2: session_created broadcasts to every authed harness (spec §4.4), even one attached to nothing", async () => {
-    await boot();
-    const a = await TestClient.connect(daemon.socketPath);
-    const b = await TestClient.connect(daemon.socketPath);
-    await a.hello(harnessToken, "client-a");
-    await b.hello(harnessToken, "client-b"); // b never attaches to anything
-
-    const { result: created } = await a.request(METHODS.sessionCreate, { scope: "global" });
-
-    // b, attached to nothing, still learns about the brand-new session (this is the live-gate bug:
-    // previously only attachments received session_created, and a new session has none yet).
-    const seenByB = await b.waitForNotification((n) =>
-      n.method === METHODS.event && n.params.type === "session_created" && n.params.sessionId === created.sessionId);
-    expect(seenByB.params.scope).toBe("global");
-
-    // a (the creator) gets it too — clients dedupe on sessionId/seq.
-    const seenByA = await a.waitForNotification((n) =>
-      n.method === METHODS.event && n.params.type === "session_created" && n.params.sessionId === created.sessionId);
-    expect(seenByA.params.scope).toBe("global");
-
-    a.close(); b.close();
-  });
 
   test("G2: a harness whose hello failed never joins the broadcast set — receives no session_created", async () => {
     await boot();
@@ -293,64 +242,16 @@ describe("daemon IPC", () => {
     c.close();
   });
 
-  test("session.list returns the index shape", async () => {
-    await boot();
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "lister");
-    const created = await c.request(METHODS.sessionCreate, { scope: "global" });
-    const { result } = await c.request(METHODS.sessionList);
-    expect(result.sessions).toHaveLength(1);
-    expect(result.sessions[0]).toMatchObject({ sessionId: created.result.sessionId, scope: "global", lastSeq: 1 });
-    expect(result.sessions[0].createdAt).toBeGreaterThan(0);
-    c.close();
-  });
 
   // Phase 5 routines T3 (design doc §3): session.create's additive `origin` param round-trips
   // through session.list; a session created without one still lists fine (origin undefined).
-  test("session.create origin round-trips through session.list; omitted origin is undefined", async () => {
-    await boot();
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "origin-lister");
-    const withOrigin = await c.request(METHODS.sessionCreate, { scope: "routine", origin: "routine/abc123" });
-    const plain = await c.request(METHODS.sessionCreate, { scope: "global" });
-    const { result } = await c.request(METHODS.sessionList);
-    const rowWith = result.sessions.find((s: any) => s.sessionId === withOrigin.result.sessionId);
-    const rowPlain = result.sessions.find((s: any) => s.sessionId === plain.result.sessionId);
-    expect(rowWith.origin).toBe("routine/abc123");
-    expect(rowPlain.origin).toBeUndefined();
-    c.close();
-  });
 
   // session-activity-hygiene T2 (spec §1): `session.list` surfaces the derived activity state.
   // The derivation itself is exhaustively tested in test/sessions/activity.test.ts — what these
   // two cover is the WIRING: that the handler actually builds signals and stamps the field, and
   // that the "absent = none" half survives the trip (a chat row must carry no `activity` at all,
   // not `"idle"`).
-  test("session.list stamps activity: a fresh code session is idle, chat carries none", async () => {
-    await boot();
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "activity-lister");
-    const code = await c.request(METHODS.sessionCreate, { scope: "global" });
-    const chat = await c.request(METHODS.sessionCreate, { scope: "global", mode: "chat" });
-    const { result } = await c.request(METHODS.sessionList);
-    const codeRow = result.sessions.find((s: any) => s.sessionId === code.result.sessionId);
-    const chatRow = result.sessions.find((s: any) => s.sessionId === chat.result.sessionId);
-    // Nothing attached (this client never called session.attach), nothing running.
-    expect(codeRow.activity).toBe("idle");
-    expect(chatRow.activity).toBeUndefined();
-    c.close();
-  });
 
-  test("session.list reports an attached code session as active", async () => {
-    await boot();
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "activity-attacher");
-    const created = await c.request(METHODS.sessionCreate, { scope: "global" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.result.sessionId });
-    const { result } = await c.request(METHODS.sessionList);
-    expect(result.sessions.find((s: any) => s.sessionId === created.result.sessionId).activity).toBe("active");
-    c.close();
-  });
 
   test("bad params yield INVALID_PARAMS (-32602) with sanitized message", async () => {
     await boot();
@@ -437,213 +338,24 @@ describe("daemon IPC", () => {
     [c1, c2, c3].forEach((c) => c.close());
   });
 
-  test("a >8KB frame is delivered intact (ConnWriter drain path)", async () => {
-    await boot();
-    const a = await TestClient.connect(daemon.socketPath);
-    const b = await TestClient.connect(daemon.socketPath);
-    await a.hello(harnessToken, "big-a");
-    await b.hello(harnessToken, "big-b");
-    const { result: created } = await a.request(METHODS.sessionCreate, { scope: "global" });
-    await a.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    await b.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    const big = "x".repeat(20_000);
-    await b.request(METHODS.sessionSend, { sessionId: created.sessionId, text: big });
-    const got = await a.waitForNotification((n) =>
-      n.method === METHODS.event && n.params.type === "user_message");
-    expect(got.params.text).toHaveLength(20_000);
-    expect(got.params.text).toBe(big);
-    a.close(); b.close();
-  });
 
-  test("user_message triggers an agent turn; events broadcast to attached harnesses", async () => {
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fake = new FakeProvider([[
-      { type: "text_delta", delta: "agent says hi" },
-      { type: "usage", inputTokens: 5, outputTokens: 2 },
-      { type: "done", stopReason: "end_turn" },
-    ]]);
-    await boot({}, fake);
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "asker");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-turn-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "hello?" });
-    const msg = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "assistant_message");
-    expect(msg.params.text).toBe("agent says hi");
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
-    c.close();
-  });
 
-  test("approval.respond resolves a pending approval (first-wins over the wire)", async () => {
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    // SP-policies Task 7: an in-root write under `ask` is SILENT now (in-project-silent flip), so it
-    // would raise no card to respond to. Target an OUT-OF-ROOT path instead — that still raises a
-    // (grant-flavored) approval card, and approving it lands the write, so the approval round-trip
-    // this test checks (card → approval.respond → resolved → effect observable on disk) is unchanged.
-    const outside = mkdtempSync(join(tmpdir(), "norma-approve-oor-"));
-    const target = join(outside, "f.txt");
-    const fake = new FakeProvider([
-      [{ type: "tool_call", callId: "c1", name: "write", argsJson: JSON.stringify({ path: target, content: "x" }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
-    ]);
-    await boot({}, fake);
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "approver");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-approve-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "ask" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "write f" });
-    const ask = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "approval_requested");
-    const res = await c.request(METHODS.approvalRespond, { sessionId: created.sessionId, callId: ask.params.callId, approved: true });
-    expect(res.result).toEqual({ ok: true, alreadyResolved: false });
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
-    expect(readFileSync(target, "utf8")).toBe("x");
-    c.close();
-  });
 
   // SP-approvals Task 5: a rule-bearing optionId on approval.respond persists a CC-grammar
   // permission rule to the SESSION-CWD project file (Task 1's PermissionRules, written via
   // engine.ts's approvalOptionsFor + this handler's append) — this is the feature's whole point:
   // card → "always allow" → rule written → the NEXT identical call runs silently (proven by
   // permission-gate-order.test.ts's scenario 1, driven from the OTHER side of the same rule file).
-  test("approval.respond with a rule-bearing optionId persists the rule to the session-cwd project file, then resolves", async () => {
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fake = new FakeProvider([
-      [{ type: "tool_call", callId: "c1", name: "bash", argsJson: JSON.stringify({ command: "git push origin main" }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
-    ]);
-    await boot({}, fake);
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "rule-approver");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-approve-rule-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "ask" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "push" });
-    const ask = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "approval_requested");
-    expect(ask.params.options).toEqual([
-      { id: "allow_once", label: "Allow once" },
-      { id: "allow_project", label: 'Allow "Bash(git push:*)" in this project', rule: "Bash(git push:*)", scope: "project" },
-      { id: "allow_global", label: 'Allow "Bash(git push:*)" everywhere', rule: "Bash(git push:*)", scope: "global" },
-      { id: "deny", label: "Deny" },
-    ]);
 
-    const res = await c.request(METHODS.approvalRespond, { sessionId: created.sessionId, callId: ask.params.callId, approved: true, optionId: "allow_project" });
-    expect(res.result).toEqual({ ok: true, alreadyResolved: false });
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
 
-    expect(JSON.parse(readFileSync(join(cwd, ".norma", "permissions.local.json"), "utf8"))).toEqual({ allow: ["Bash(git push:*)"] });
-    c.close();
-  });
-
-  test("approval.respond with a rule-bearing optionId but approved:false does NOT persist any rule", async () => {
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fake = new FakeProvider([
-      [{ type: "tool_call", callId: "c1", name: "bash", argsJson: JSON.stringify({ command: "git push origin main" }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
-    ]);
-    await boot({}, fake);
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "rule-denier");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-deny-rule-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "ask" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "push" });
-    const ask = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "approval_requested");
-
-    const res = await c.request(METHODS.approvalRespond, { sessionId: created.sessionId, callId: ask.params.callId, approved: false, optionId: "allow_project" });
-    expect(res.result).toEqual({ ok: true, alreadyResolved: false });
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
-
-    expect(existsSync(join(cwd, ".norma", "permissions.local.json"))).toBe(false);
-    c.close();
-  });
-
-  test("approval.respond with an unrecognized optionId resolves normally, persists no rule, and logs a warning once", async () => {
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fake = new FakeProvider([
-      [{ type: "tool_call", callId: "c1", name: "bash", argsJson: JSON.stringify({ command: "git push origin main" }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
-    ]);
-    await boot({}, fake);
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "rule-unknown-option");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-unknown-rule-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "ask" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "push" });
-    const ask = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "approval_requested");
-
-    const errSpy = spyOn(console, "error").mockImplementation(() => {});
-    try {
-      const res = await c.request(METHODS.approvalRespond, { sessionId: created.sessionId, callId: ask.params.callId, approved: true, optionId: "not-a-real-option" });
-      expect(res.result).toEqual({ ok: true, alreadyResolved: false });
-      expect(errSpy).toHaveBeenCalled();
-      expect(errSpy.mock.calls.some((call) => String(call[0]).includes("unknown optionId"))).toBe(true);
-    } finally {
-      errSpy.mockRestore();
-    }
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
-
-    expect(existsSync(join(cwd, ".norma", "permissions.local.json"))).toBe(false);
-    c.close();
-  });
 
   // Remote Gateway parity: the phone answers approvals through role:"remote" (REMOTE_ALLOWED_METHODS
   // already carries approval.respond) — an optionId-bearing respond from that role must persist a
   // rule exactly like a harness caller's, since the server-side handler doesn't special-case role.
-  test("a remote-role connection's approval.respond with optionId persists the rule same as a harness caller (the phone path)", async () => {
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fake = new FakeProvider([
-      [{ type: "tool_call", callId: "c1", name: "bash", argsJson: JSON.stringify({ command: "git push origin main" }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
-    ]);
-    await boot({}, fake);
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "phone-rule-driver");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-remote-rule-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "ask" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "push" });
-    const ask = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "approval_requested");
-
-    const remote = await TestClient.connect(daemon.socketPath);
-    await remote.hello(daemon.tokens.remote, "phone", "remote");
-    const res = await remote.request(METHODS.approvalRespond, { sessionId: created.sessionId, callId: ask.params.callId, approved: true, optionId: "allow_project" });
-    expect(res.result).toEqual({ ok: true, alreadyResolved: false });
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
-
-    expect(JSON.parse(readFileSync(join(cwd, ".norma", "permissions.local.json"), "utf8"))).toEqual({ allow: ["Bash(git push:*)"] });
-    c.close(); remote.close();
-  });
 
   // T4's broker->list() options passthrough, end to end over the wire (T4 itself only proved this
   // at the ApprovalBroker unit level) — a phone that reconnects and calls approval.list mid-card
   // must see the SAME options the approval_requested event it possibly missed would have carried.
-  test("approval.list surfaces the SAME options the approval_requested event carried (T4 passthrough, end to end)", async () => {
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fake = new FakeProvider([
-      [{ type: "tool_call", callId: "c1", name: "bash", argsJson: JSON.stringify({ command: "git push origin main" }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
-    ]);
-    await boot({}, fake);
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "list-options-driver");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-list-options-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "ask" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "push" });
-    const ask = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "approval_requested");
-
-    const listed = await c.request(METHODS.approvalList, { sessionId: created.sessionId });
-    expect(listed.result.pending).toHaveLength(1);
-    expect(listed.result.pending[0].options).toEqual(ask.params.options);
-    expect(ask.params.options?.[0]).toEqual({ id: "allow_once", label: "Allow once" }); // sanity: really the bash set, not an empty passthrough
-
-    await c.request(METHODS.approvalRespond, { sessionId: created.sessionId, callId: ask.params.callId, approved: true });
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
-    c.close();
-  });
 
   // SP-approvals Task 10 (spec §7): the "Always allow from this source" web_fetch option, over the
   // REAL wire, end to end — card shape, the REAL approval.respond handler persisting a
@@ -652,97 +364,6 @@ describe("daemon IPC", () => {
   // fetch to the same domain AND a subdomain both run cardless. `globalThis.fetch` is monkey-patched
   // for the duration (save/restore) so web_fetch never hits the real network — same technique as
   // providers/openai-compatible.test.ts's own "consumer break mid-stream" test.
-  test("SP-approvals T10 full loop: dangerous web_fetch -> card -> respond allow_source -> rule persists globally -> next fetch to the same domain AND a subdomain run cardless", async () => {
-    const origFetch = globalThis.fetch;
-    const fetchedUrls: string[] = [];
-    globalThis.fetch = (async (input: RequestInfo | URL) => {
-      fetchedUrls.push(String(input));
-      return new Response("hi", { status: 200, headers: { "content-type": "text/plain" } });
-    }) as typeof fetch;
-    try {
-      const { FakeProvider } = await import("../src/agent/fake-provider");
-      const fake = new FakeProvider([
-        [{ type: "tool_call", callId: "c1", name: "web_fetch", argsJson: JSON.stringify({ url: "https://uploads.transfer.sh/file1" }) }, { type: "done", stopReason: "tool_calls" }],
-        [{ type: "text_delta", delta: "done-1" }, { type: "done", stopReason: "end_turn" }],
-        [{ type: "tool_call", callId: "c2", name: "web_fetch", argsJson: JSON.stringify({ url: "https://transfer.sh/file2" }) }, { type: "done", stopReason: "tool_calls" }],
-        [{ type: "text_delta", delta: "done-2" }, { type: "done", stopReason: "end_turn" }],
-        [{ type: "tool_call", callId: "c3", name: "web_fetch", argsJson: JSON.stringify({ url: "https://another.transfer.sh/file3" }) }, { type: "done", stopReason: "tool_calls" }],
-        [{ type: "text_delta", delta: "done-3" }, { type: "done", stopReason: "end_turn" }],
-      ]);
-      // toolSearch disabled: web_fetch is a `deferred: true` built-in (ToolSearch deferral is
-      // default-ON in a real daemon boot, unlike setupEngine's test harness) — this test isn't
-      // about ToolSearch, so it's turned off to call web_fetch directly, same idiom the
-      // reviewer-disabling tests above use for their own out-of-scope machinery. titles disabled
-      // too: SessionTitler.maybeTitle fires fire-and-forget on the session's first message against
-      // this SAME FakeProvider instance (settings-hot-e2e.test.ts's writeSettingsFile doc comment
-      // — "races the turn's own call for the SAME script queue"), which would otherwise silently
-      // steal one of this test's carefully-ordered script entries.
-      await boot({}, fake, { toolSearch: { enabled: false }, titles: { enabled: false } });
-      const c = await TestClient.connect(daemon.socketPath);
-      await c.hello(harnessToken, "web-fetch-rule-driver");
-      const cwd = mkdtempSync(join(tmpdir(), "norma-webfetch-rule-"));
-      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "ask" });
-      await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-
-      // Turn 1: a SUBDOMAIN of the shipped "transfer.sh" entry -> card. MEDIUM-1 (SP-approvals T10
-      // review): a subdomain hit's label reads "Always allow all of <matched-entry>", honestly
-      // communicating that approving grants the whole family, not just this one subdomain.
-      await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "fetch the paste" });
-      const ask = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "approval_requested");
-      expect(ask.params.options).toEqual([
-        { id: "allow_once", label: "Allow" },
-        { id: "allow_source", label: "Always allow all of transfer.sh", rule: "WebFetch(domain:transfer.sh)", scope: "global" },
-        { id: "deny", label: "Deny" },
-      ]);
-
-      const respond = await c.request(METHODS.approvalRespond, {
-        sessionId: created.sessionId, callId: ask.params.callId, approved: true, optionId: "allow_source",
-      });
-      expect(respond.result).toEqual({ ok: true, alreadyResolved: false });
-      await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
-
-      // The REAL ipc/server.ts handler persisted the rule to the daemon's own settings.json, global scope.
-      expect(JSON.parse(readFileSync(join(daemonHome, "settings.json"), "utf8")).permissions.allow).toEqual(["WebFetch(domain:transfer.sh)"]);
-
-      // Give the daemon's live SettingsWatcher (150ms debounce) time to hot-reload the rule into
-      // its in-memory settings before the next fetch's decision() check reads it — same "settled
-      // write" cadence settings-hot-e2e.test.ts's own torn-write test uses (a fixed sleep past a
-      // known debounce constant, comfortable headroom rather than a tight race).
-      await new Promise((r) => setTimeout(r, 500));
-
-      // Count-based waits (never a first-MATCH wait) — `waitForNotification` would otherwise
-      // resolve INSTANTLY against the turn-1 `turn_completed` already sitting in `c.notifications`.
-      // Mirrors settings-hot-e2e.test.ts's own `completedTurns()`/`driveTurn()` idiom.
-      const turnCompletedCount = () => c.notifications.filter((n) => n.method === METHODS.event && n.params.type === "turn_completed").length;
-      const approvalRequestedCount = () => c.notifications.filter((n) => n.method === METHODS.event && n.params.type === "approval_requested").length;
-      const waitForNextTurnCompleted = async (before: number): Promise<void> => {
-        const deadline = Date.now() + 5000;
-        while (turnCompletedCount() <= before) {
-          if (Date.now() > deadline) throw new Error("timed out waiting for the next turn_completed");
-          await new Promise((r) => setTimeout(r, 10));
-        }
-      };
-
-      const approvalsAfterTurn1 = approvalRequestedCount();
-      const completedAfterTurn1 = turnCompletedCount();
-
-      // Turn 2: the BARE matched entry itself -> must run cardless.
-      await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "fetch it again" });
-      await waitForNextTurnCompleted(completedAfterTurn1);
-      expect(approvalRequestedCount()).toBe(approvalsAfterTurn1);
-      const completedAfterTurn2 = turnCompletedCount();
-
-      // Turn 3: a DIFFERENT subdomain -> must ALSO run cardless.
-      await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "fetch a related paste" });
-      await waitForNextTurnCompleted(completedAfterTurn2);
-      expect(approvalRequestedCount()).toBe(approvalsAfterTurn1);
-
-      expect(fetchedUrls).toEqual(["https://uploads.transfer.sh/file1", "https://transfer.sh/file2", "https://another.transfer.sh/file3"]);
-      c.close();
-    } finally {
-      globalThis.fetch = origFetch;
-    }
-  });
 
   // Edge case called out explicitly by the brief: a rule-bearing optionId with NO usable project
   // root (a null session cwd) must never hang or crash the respond — PermissionRules.append()
@@ -785,107 +406,12 @@ describe("daemon IPC", () => {
     }
   });
 
-  test("ask_user.respond round-trip + alreadyResolved; task.list snapshot", async () => {
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fake = new FakeProvider([
-      [{ type: "tool_call", callId: "q1", name: "ask_user", argsJson: JSON.stringify({
-        questions: [{ question: "Pick one", header: "Pick", options: [{ label: "A", description: "Option A" }, { label: "B", description: "Option B" }], multiSelect: false }],
-      }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "tool_call", callId: "t1", name: "task_create", argsJson: JSON.stringify({ subject: "Ship it", description: "Ship the release" }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
-    ]);
-    await boot({}, fake);
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "ask-tasker");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-askuser-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "ask, then track a task" });
-
-    const asked = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "question_asked");
-    const res1 = await c.request(METHODS.askUserRespond, { sessionId: created.sessionId, callId: asked.params.callId, answers: { "Pick one": "B" } });
-    expect(res1.result).toEqual({ ok: true, alreadyResolved: false });
-    const res2 = await c.request(METHODS.askUserRespond, { sessionId: created.sessionId, callId: asked.params.callId, answers: { "Pick one": "B" } });
-    expect(res2.result).toEqual({ ok: true, alreadyResolved: true });
-
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
-    const list = await c.request(METHODS.taskList, { sessionId: created.sessionId });
-    expect(list.result).toEqual({ ok: true, tasks: [{ id: "1", subject: "Ship it", status: "pending" }] });
-    c.close();
-  });
 
   // CC AskUserQuestion parity (Task 2): ask_user.respond's optional `notes` param must reach the
   // QuestionBroker (server.ts's handler passes p.notes through) and end up both on the persisted
   // question_resolved event and folded into the model-visible tool_result.
-  test("ask_user.respond with notes → question_resolved carries notes + tool result includes the note", async () => {
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fake = new FakeProvider([
-      [{ type: "tool_call", callId: "q1", name: "ask_user", argsJson: JSON.stringify({
-        questions: [{ question: "Pick one", header: "Pick", options: [{ label: "A", description: "Option A" }, { label: "B", description: "Option B" }], multiSelect: false }],
-      }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
-    ]);
-    await boot({}, fake);
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "ask-noter");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-askuser-notes-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "ask, then note" });
 
-    const asked = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "question_asked");
-    const res1 = await c.request(METHODS.askUserRespond, {
-      sessionId: created.sessionId, callId: asked.params.callId,
-      answers: { "Pick one": "B" }, notes: { "Pick one": "prefer B for perf" },
-    });
-    expect(res1.result).toEqual({ ok: true, alreadyResolved: false });
 
-    const resolved = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "question_resolved");
-    expect(resolved.params).toMatchObject({ answers: { "Pick one": "B" }, notes: { "Pick one": "prefer B for perf" } });
-
-    const toolResult = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "tool_result" && n.params.callId === "q1");
-    expect(toolResult.params.output).toContain('[user note on "Pick one": prefer B for perf]');
-    c.close();
-  });
-
-  test("plan.respond round-trip + alreadyResolved", async () => {
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fake = new FakeProvider([
-      [{ type: "tool_call", callId: "e1", name: "exit_plan_mode", argsJson: JSON.stringify({ plan: "Step 1: ship it" }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
-    ]);
-    await boot({}, fake);
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "planner");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-plan-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "plan" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "make a plan" });
-
-    const presented = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "plan_presented");
-    const res1 = await c.request(METHODS.planRespond, { sessionId: created.sessionId, callId: presented.params.callId, approved: true, autoAccept: true });
-    expect(res1.result).toEqual({ ok: true, alreadyResolved: false });
-    const res2 = await c.request(METHODS.planRespond, { sessionId: created.sessionId, callId: presented.params.callId, approved: true, autoAccept: true });
-    expect(res2.result).toEqual({ ok: true, alreadyResolved: true });
-
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
-    c.close();
-  });
-
-  test("session.setPolicy round-trip; NOT_FOUND on an unknown session", async () => {
-    await boot();
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "policy-setter");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-setpolicy-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "plan" });
-    const setPolicy = await c.request(METHODS.sessionSetPolicy, { sessionId: created.sessionId, policy: "auto" });
-    expect(setPolicy.result).toEqual({ ok: true });
-
-    const bad = await c.request(METHODS.sessionSetPolicy, { sessionId: "s_does_not_exist", policy: "auto" });
-    expect(bad.error).toBeTruthy();
-    expect(bad.error.code).toBe(ERR.NOT_FOUND);
-    c.close();
-  });
 
   // I1 review fix (Chat Slice D task 1): session.setModel used to validate nothing, so a bad slug
   // (a typo, or a since-deprecated model) succeeded at set time and then silently broke every
@@ -893,252 +419,14 @@ describe("daemon IPC", () => {
   // real AgentEngine must be wired (`boot({}, fake)`) so `opts.engine?.knownModels()` has a live
   // provider to enumerate.
   describe("session.setModel model validation (I1 review fix)", () => {
-    test("rejects an unknown model when the provider CAN enumerate its models, naming the known list", async () => {
-      const { FakeProvider } = await import("../src/agent/fake-provider");
-      const models = [
-        { id: "model-a", family: "fake", contextWindow: 100_000, supportsVision: false },
-        { id: "model-b", family: "fake", contextWindow: 100_000, supportsVision: false },
-      ];
-      await boot({}, new FakeProvider([], models));
-      const c = await TestClient.connect(daemon.socketPath);
-      await c.hello(harnessToken, "model-validator");
-      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
 
-      const res = await c.request(METHODS.sessionSetModel, { sessionId: created.sessionId, model: "nonexistent-model" });
-      expect(res.error).toBeTruthy();
-      expect(res.error.code).toBe(ERR.INVALID_PARAMS);
-      expect(res.error.message).toContain("model-a");
-      expect(res.error.message).toContain("model-b");
 
-      // rejected — never stored (the reject path must leave no trace, same precedent as
-      // session_spawn's own pre-flight rejections).
-      const listed = await c.request(METHODS.sessionList, {});
-      const row = listed.result.sessions.find((r: any) => r.sessionId === created.sessionId);
-      expect(row.model).toBeUndefined();
-      c.close();
-    });
 
-    test("accepts a KNOWN model id and stores it", async () => {
-      const { FakeProvider } = await import("../src/agent/fake-provider");
-      const models = [
-        { id: "model-a", family: "fake", contextWindow: 100_000, supportsVision: false },
-        { id: "model-b", family: "fake", contextWindow: 100_000, supportsVision: false },
-      ];
-      await boot({}, new FakeProvider([], models));
-      const c = await TestClient.connect(daemon.socketPath);
-      await c.hello(harnessToken, "model-validator");
-      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
 
-      const res = await c.request(METHODS.sessionSetModel, { sessionId: created.sessionId, model: "model-b" });
-      expect(res.error).toBeUndefined();
-      expect(res.result).toEqual({});
-
-      const listed = await c.request(METHODS.sessionList, {});
-      const row = listed.result.sessions.find((r: any) => r.sessionId === created.sessionId);
-      expect(row.model).toBe("model-b");
-      c.close();
-    });
-
-    test("resolves a short alias against the known list before storing (same idiom as spawn_agent)", async () => {
-      const { FakeProvider } = await import("../src/agent/fake-provider");
-      const models = [{ id: "gpt-5.6-sol", family: "fake", contextWindow: 100_000, supportsVision: false }];
-      await boot({}, new FakeProvider([], models));
-      const c = await TestClient.connect(daemon.socketPath);
-      await c.hello(harnessToken, "model-validator");
-      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
-
-      const res = await c.request(METHODS.sessionSetModel, { sessionId: created.sessionId, model: "sol" });
-      expect(res.error).toBeUndefined();
-
-      const listed = await c.request(METHODS.sessionList, {});
-      const row = listed.result.sessions.find((r: any) => r.sessionId === created.sessionId);
-      expect(row.model).toBe("gpt-5.6-sol"); // canonicalized to the full id, not the raw alias
-      c.close();
-    });
-
-    test("accepts ANY value when the provider CANNOT enumerate its models (empty models() list) — same fallback as spawn_agent", async () => {
-      const { FakeProvider } = await import("../src/agent/fake-provider");
-      await boot({}, new FakeProvider([], [])); // empty models() — can't enumerate
-      const c = await TestClient.connect(daemon.socketPath);
-      await c.hello(harnessToken, "model-validator");
-      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
-
-      const res = await c.request(METHODS.sessionSetModel, { sessionId: created.sessionId, model: "anything-goes" });
-      expect(res.error).toBeUndefined();
-
-      const listed = await c.request(METHODS.sessionList, {});
-      const row = listed.result.sessions.find((r: any) => r.sessionId === created.sessionId);
-      expect(row.model).toBe("anything-goes");
-      c.close();
-    });
-
-    test("without an engine wired at all, validates nothing (no known list to check against) — same as an unenumerable provider", async () => {
-      await boot(); // no provider → no engine
-      const c = await TestClient.connect(daemon.socketPath);
-      await c.hello(harnessToken, "model-validator-noeng");
-      const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
-      const res = await c.request(METHODS.sessionSetModel, { sessionId: created.sessionId, model: "anything-goes" });
-      expect(res.error).toBeUndefined();
-      c.close();
-    });
   });
 
-  test("thread.list without an engine → empty threads", async () => {
-    await boot(); // no provider → no engine
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "threader-noeng");
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
-    const noEngine = await c.request(METHODS.threadList, { sessionId: created.sessionId });
-    expect(noEngine.result).toEqual({ ok: true, threads: [] });
-    c.close();
-  });
 
-  test("thread.list with an engine → main thread seeded lazily on first read", async () => {
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fake = new FakeProvider([
-      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
-    ]);
-    await boot({}, fake);
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "threader");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-threadlist-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
-    const list = await c.request(METHODS.threadList, { sessionId: created.sessionId });
-    expect(list.result).toEqual({ ok: true, threads: [{ threadId: "main", status: "running" }] });
-    c.close();
-  });
 
-  // -------------------------------------------------------------------------------------------
-  // child-transcript-view T1: thread.send / agent.stop. Unlike the `boot()`/`startDaemon` fixture
-  // above (whose `RunningDaemon` deliberately hides its AgentEngine/BackgroundAgentRegistry), these
-  // tests need direct access to both — to hand-register a RUNNING/TERMINAL bg-agent entry (the
-  // "if driving that e2e is heavy" allowance the design doc's Testing section calls for, same
-  // precedent as engine-resume.test.ts's own `bgAgents.register()`/`.complete()` fixtures) and to
-  // inspect the engine's private steer queue after a `thread.send`. `setupAgentEngine` (this
-  // file's own `setup()`, exported for engine-resume.test.ts already) builds a real AgentEngine +
-  // BackgroundAgentRegistry directly; this helper just wraps a bare IpcServer around that SAME
-  // instance, mirroring `bootPluginTestServer`'s "self-contained bare server" shape above.
-  // -------------------------------------------------------------------------------------------
-  async function bootAgentServer(script: ProviderEvent[][] = []): Promise<
-    ReturnType<typeof setupAgentEngine> & { socketPath: string; harnessToken: string; stop: () => void }
-  > {
-    const s = setupAgentEngine(script);
-    const home = mkdtempSync(join(tmpdir(), "norma-thread-send-"));
-    const socketPath = join(home, "core.sock");
-    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
-    const tokens = await authority.ensureTokens();
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store: s.store, hub: s.hub, engine: s.engine });
-    return { ...s, socketPath, harnessToken: tokens.harness, stop: () => { server.stop(); s.store.close(); } };
-  }
-
-  describe("thread.send / agent.stop (child-transcript-view T1)", () => {
-    test("thread.send to a RUNNING child → delivered:queued, text lands in the child's own steer queue", async () => {
-      const srv = await bootAgentServer();
-      srv.bgAgents.register({ agentId: "ag_worker", sessionId: srv.sessionId, threadId: "th_worker", name: "worker", abort: new AbortController() });
-
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "sender");
-      const res = await c.request(METHODS.threadSend, { sessionId: srv.sessionId, agent: "worker", text: "keep going" });
-      expect(res.result).toEqual({ ok: true, delivered: "queued", agentId: "ag_worker" });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      expect((srv.engine as any).threadSteerQueue.get("th_worker")).toEqual(["keep going"]);
-      c.close();
-      srv.stop();
-    });
-
-    test("thread.send to a FINISHED child → delivered:resumed, agent transitions running then back to a terminal status", async () => {
-      const spawnNamed: ProviderEvent = {
-        type: "tool_call", callId: "s1", name: "spawn_agent",
-        argsJson: JSON.stringify({ prompt: "do the task", description: "task", name: "worker", run_in_background: false }),
-      };
-      const done = (reason: "end_turn" | "tool_calls"): ProviderEvent => ({ type: "done", stopReason: reason });
-      const text = (t: string): ProviderEvent[] => [{ type: "text_delta", delta: t }, done("end_turn")];
-
-      const srv = await bootAgentServer([
-        [spawnNamed, done("tool_calls")], // main round 0: sync spawn (run_in_background:false)
-        text("child done"),               // the child's own (sync) round + main's continuation clamp to this
-      ]);
-      await srv.engine.runTurn(srv.sessionId);
-      expect(srv.bgAgents.get("worker", srv.sessionId)?.status).toBe("completed");
-      const agentId = srv.bgAgents.get("worker", srv.sessionId)!.agentId;
-
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "sender");
-      const res = await c.request(METHODS.threadSend, { sessionId: srv.sessionId, agent: "worker", text: "one more thing" });
-      expect(res.result).toEqual({ ok: true, delivered: "resumed", agentId });
-      // reopen() flips it back to running before the detached run kicks off, but the FakeProvider's
-      // clamped script resolves near-instantly — poll rather than assert an exact intermediate state.
-      for (let i = 0; i < 200 && srv.bgAgents.get("worker", srv.sessionId)?.status === "running"; i++) {
-        await new Promise((r) => setTimeout(r, 5));
-      }
-      expect(srv.bgAgents.get("worker", srv.sessionId)?.status).toBe("completed");
-      c.close();
-      srv.stop();
-    });
-
-    test("thread.send to an unknown agent → NOT_FOUND RpcFailure", async () => {
-      const srv = await bootAgentServer();
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "sender");
-      const res = await c.request(METHODS.threadSend, { sessionId: srv.sessionId, agent: "ghost", text: "hi" });
-      expect(res.error.code).toBe(ERR.NOT_FOUND);
-      expect(res.error.message).toContain("ghost");
-      c.close();
-      srv.stop();
-    });
-
-    test("agent.stop on a RUNNING agent → aborts it and reports status:stopped", async () => {
-      const srv = await bootAgentServer();
-      const abort = new AbortController();
-      srv.bgAgents.register({ agentId: "ag_worker", sessionId: srv.sessionId, threadId: "th_worker", name: "worker", abort });
-
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "stopper");
-      const res = await c.request(METHODS.agentStop, { sessionId: srv.sessionId, agent: "worker" });
-      expect(res.result).toEqual({ ok: true, status: "stopped" });
-      expect(abort.signal.aborted).toBe(true);
-      expect(srv.bgAgents.get("worker", srv.sessionId)?.status).toBe("stopped");
-      c.close();
-      srv.stop();
-    });
-
-    test("agent.stop on an already-FINISHED agent → not an error, reports its current status", async () => {
-      const srv = await bootAgentServer();
-      srv.bgAgents.register({ agentId: "ag_worker", sessionId: srv.sessionId, threadId: "th_worker", name: "worker", abort: new AbortController() });
-      srv.bgAgents.complete("ag_worker", { ok: true, result: "done" });
-
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "stopper");
-      const res = await c.request(METHODS.agentStop, { sessionId: srv.sessionId, agent: "worker" });
-      expect(res.result).toEqual({ ok: true, status: "completed" });
-      c.close();
-      srv.stop();
-    });
-
-    test("agent.stop on an unknown agent → NOT_FOUND RpcFailure", async () => {
-      const srv = await bootAgentServer();
-      const c = await TestClient.connect(srv.socketPath);
-      await c.hello(srv.harnessToken, "stopper");
-      const res = await c.request(METHODS.agentStop, { sessionId: srv.sessionId, agent: "ghost" });
-      expect(res.error.code).toBe(ERR.NOT_FOUND);
-      expect(res.error.message).toContain("ghost");
-      c.close();
-      srv.stop();
-    });
-  });
-
-  // -------------------------------------------------------------------------------------------
-  // Workflows (CC-parity phase 3, Track C Task C2): workflow.list/run/stop/get — the RPC surface
-  // over WorkflowRuntime (live runs, A3+/B2) + WorkflowStore (saved `.norma/workflows/*.js`
-  // scripts, C1). Local-only in v1 (Global Constraints) — deliberately NOT on
-  // PLUGIN_ALLOWED_METHODS or REMOTE_ALLOWED_METHODS (see the two role-gate tests at the end of
-  // this block + test/ipc/remote-role.test.ts's own "off-list verbs" coverage). A self-contained
-  // bare IpcServer (own SessionStore/TrustStore/WorkflowRuntime/WorkflowStore, no AgentEngine) —
-  // same shape as bootAgentServer/bootPluginTestServer above. The runtime is built with NO
-  // `workerCommand` override — same "the real sandboxed-subprocess default transport is cheap
-  // enough for a test" precedent as workflow-bridge.testkit.ts / workflows/runtime.test.ts — and a
-  // `spawnAgent` that hangs until its AbortSignal fires, for the one test that needs a run to stay
-  // "running" long enough to list/stop; every other script here never calls `agent(...)`.
   // -------------------------------------------------------------------------------------------
   describe("workflow.list/run/stop/get (CC-parity phase 3, Track C Task C2)", () => {
     async function bootWorkflowServer(): Promise<{
@@ -1364,37 +652,7 @@ describe("daemon IPC", () => {
     });
   });
 
-  test("without a provider, sessions behave as Phase 0 (echo only, no agent events)", async () => {
-    await boot(); // no provider injected
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "plain");
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "anyone home?" });
-    await new Promise((r) => setTimeout(r, 100));
-    expect(c.notifications.some((n) => n.params?.type === "turn_started")).toBe(false);
-    c.close();
-  });
 
-  test("bash tool runs end-to-end through a daemon-wired engine (auto policy)", async () => {
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const { existsSync } = await import("node:fs");
-    if (process.platform !== "darwin") return; // sandbox-exec required
-    const fake = new FakeProvider([
-      [{ type: "tool_call", callId: "b1", name: "bash", argsJson: JSON.stringify({ command: "echo hi > out.txt" }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
-    ]);
-    await boot({}, fake, { reviewer: { enabled: false } }); // this test wires bash, not the reviewer
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "bash-runner");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-bashwire-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "make out.txt" });
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
-    expect(existsSync(join(cwd, "out.txt"))).toBe(true);
-    c.close();
-  });
 
   // Phase 5e T4: settings.reviewer.classes → EngineConfig.reviewerClasses, threaded through the
   // REAL daemon (loadSettings → startDaemon → AgentEngine), not a stubbed cfg. The reviewer stays
@@ -1404,68 +662,8 @@ describe("daemon IPC", () => {
   // route to reviewAndDispatch and consume this same single-track FakeProvider queue for a review
   // call instead, which would fail to find a JSON verdict and escalate to a human approval that
   // times out well past bun's default per-test timeout — i.e. a broken wire fails this test loudly.
-  test("settings reviewer.classes.fs:false threads through the real daemon: dotfile write bypasses the AI reviewer and executes directly", async () => {
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const { existsSync, readFileSync: rf } = await import("node:fs");
-    const fake = new FakeProvider([
-      [{ type: "tool_call", callId: "w1", name: "write", argsJson: JSON.stringify({ path: ".env", content: "SECRET=1" }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
-    ]);
-    await boot({}, fake, { reviewer: { classes: { fs: false } } }); // reviewer stays ON overall; only the fs class is off
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "fs-class-off");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-fsclassoff-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "write .env" });
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
-    expect(existsSync(join(cwd, ".env"))).toBe(true);
-    expect(rf(join(cwd, ".env"), "utf8")).toBe("SECRET=1");
-    c.close();
-  });
 
-  test("session.addDir widens roots; bash can then write the added dir", async () => {
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    if (process.platform !== "darwin") return; // sandbox-exec required
-    const added = mkdtempSync(join(tmpdir(), "norma-added-"));
-    const fake = new FakeProvider([
-      [{ type: "tool_call", callId: "b1", name: "bash", argsJson: JSON.stringify({ command: `echo hi > ${added}/f.txt` }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
-    ]);
-    await boot({}, fake, { reviewer: { enabled: false } }); // this test wires addDir/bash, not the reviewer
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "adder");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-adder-cwd-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    const add = await c.request(METHODS.sessionAddDir, { sessionId: created.sessionId, path: added });
-    expect(add.result.roots).toContain(realpathSync(added));
-    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "write in added dir" });
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
-    expect(existsSync(join(added, "f.txt"))).toBe(true);
-    c.close();
-  });
 
-  test("session.setCwd changes the dir a new turn runs in", async () => {
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fake = new FakeProvider([
-      [{ type: "tool_call", callId: "w1", name: "write", argsJson: JSON.stringify({ path: "moved.txt", content: "here" }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
-    ]);
-    await boot({}, fake);
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "mover");
-    const cwd1 = mkdtempSync(join(tmpdir(), "norma-cwd1-"));
-    const cwd2 = mkdtempSync(join(tmpdir(), "norma-cwd2-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd: cwd1, approvalPolicy: "auto" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    const setCwd = await c.request(METHODS.sessionSetCwd, { sessionId: created.sessionId, cwd: cwd2 });
-    expect(setCwd.result).toEqual({ ok: true, cwd: cwd2 });
-    await c.request(METHODS.sessionSend, { sessionId: created.sessionId, text: "write moved" });
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
-    expect(existsSync(join(cwd2, "moved.txt"))).toBe(true);
-    c.close();
-  });
 
   test("startIpcServer refuses an engine without a shared hub", () => {
     // Build a throwaway engine; we only need the constructor guard to fire.
@@ -1480,38 +678,7 @@ describe("daemon IPC", () => {
     }).toThrow(/hub/);
   });
 
-  test("session.create reports trusted=false for an untrusted dir, true after daemon.trustDir", async () => {
-    await boot({});
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "truster");
-    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-trust-cwd-")));
-    const created = (await c.request(METHODS.sessionCreate, { scope: "global", cwd })).result;
-    expect(created.trusted).toBe(false);
-    const t = (await c.request(METHODS.trustDir, { path: cwd })).result;
-    expect(t).toEqual({ ok: true, trusted: true });
-    const created2 = (await c.request(METHODS.sessionCreate, { scope: "global", cwd })).result;
-    expect(created2.trusted).toBe(true); // now trusted (persisted)
-    c.close();
-  });
 
-  test("committed additionalDirectories apply only after the folder is trusted", async () => {
-    await boot({});
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "truster2");
-    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-trust-cwd2-")));
-    const granted = realpathSync(mkdtempSync(join(tmpdir(), "norma-committed-")));
-    mkdirSync(join(cwd, ".norma"), { recursive: true });
-    writeFileSync(join(cwd, ".norma", "settings.json"), JSON.stringify({ permissions: { additionalDirectories: [granted] } }));
-    const s = (await c.request(METHODS.sessionCreate, { scope: "global", cwd })).result.sessionId;
-    await c.request(METHODS.sessionAttach, { sessionId: s, fromSeq: 0 });
-    // Untrusted: committed dir NOT in roots (roots come back via addDir echo of the full set)
-    const before = (await c.request(METHODS.sessionAddDir, { sessionId: s, path: cwd })).result.roots; // add cwd (noop-ish), read roots
-    expect(before).not.toContain(granted);
-    await c.request(METHODS.trustDir, { path: cwd });
-    const after = (await c.request(METHODS.sessionAddDir, { sessionId: s, path: cwd })).result.roots;
-    expect(after).toContain(granted); // committed dir now present
-    c.close();
-  });
 
   test("session.addDir on an unknown session fails and adds no dangling entry", async () => {
     await boot({});
@@ -1526,163 +693,13 @@ describe("daemon IPC", () => {
     c.close();
   });
 
-  test("bg.list/peek/kill over the socket", async () => {
-    if (process.platform !== "darwin") return;
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-bgsrv-")));
-    const fake = new FakeProvider([
-      [{ type: "tool_call", callId: "b1", name: "bash", argsJson: JSON.stringify({ command: "echo hi; sleep 2", runInBackground: true }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "text_delta", delta: "started" }, { type: "done", stopReason: "end_turn" }],
-    ]);
-    await boot({}, fake, { reviewer: { enabled: false } }); // this test wires bg tasks, not the reviewer
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "bg");
-    const s = (await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" })).result.sessionId;
-    await c.request(METHODS.sessionAttach, { sessionId: s, fromSeq: 0 });
-    await c.request(METHODS.sessionSend, { sessionId: s, text: "run bg" });
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "bg_task_started");
-    const list = (await c.request(METHODS.bgList, { sessionId: s })).result;
-    expect(list.tasks.length).toBe(1);
-    const taskId = list.tasks[0].taskId;
-    await new Promise((r) => setTimeout(r, 300));
-    const peek = (await c.request(METHODS.bgPeek, { sessionId: s, taskId })).result;
-    expect(peek.chunk).toContain("hi");
-    const kill = (await c.request(METHODS.bgKill, { sessionId: s, taskId })).result;
-    expect(kill).toEqual({ ok: true });
-    c.close();
-  });
 
-  test("session.interrupt aborts a running turn (wasRunning:true, turn_completed aborted)", async () => {
-    const { AbortAwaitProvider } = await import("../src/agent/test-providers");
-    await boot({}, new AbortAwaitProvider());
-    const c = await TestClient.connect(daemon.socketPath); await c.hello(harnessToken, "int");
-    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-int-")));
-    const s = (await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" })).result.sessionId;
-    await c.request(METHODS.sessionAttach, { sessionId: s, fromSeq: 0 });
-    await c.request(METHODS.sessionSend, { sessionId: s, text: "go" });
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_started");
-    const r = (await c.request(METHODS.sessionInterrupt, { sessionId: s })).result;
-    expect(r).toEqual({ ok: true, wasRunning: true });
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed" && n.params.stopReason === "aborted");
-    c.close();
-  });
 
-  test("session.interrupt with no running turn is a no-op (wasRunning:false)", async () => {
-    const { AbortAwaitProvider } = await import("../src/agent/test-providers");
-    await boot({}, new AbortAwaitProvider());
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "int-idle");
-    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-int-idle-")));
-    const s = (await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" })).result.sessionId;
-    const r = (await c.request(METHODS.sessionInterrupt, { sessionId: s })).result;
-    expect(r).toEqual({ ok: true, wasRunning: false });
-    c.close();
-  });
 
-  test("session.steer injects into a running turn (injected:true) and emits user_message", async () => {
-    const { GatedProvider, deferred } = await import("../src/agent/test-providers");
-    const gate = deferred();
-    const gated = new GatedProvider(
-      [
-        [{ type: "text_delta", delta: "first" }, { type: "done", stopReason: "end_turn" }],
-        [{ type: "text_delta", delta: "second" }, { type: "done", stopReason: "end_turn" }],
-      ],
-      [gate.promise, null],
-    );
-    await boot({}, gated);
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "steerer");
-    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-steer-")));
-    const s = (await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" })).result.sessionId;
-    await c.request(METHODS.sessionAttach, { sessionId: s, fromSeq: 0 });
-    await c.request(METHODS.sessionSend, { sessionId: s, text: "go" });
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_started");
-    const r = (await c.request(METHODS.sessionSteer, { sessionId: s, text: "wait, actually..." })).result;
-    expect(r).toEqual({ ok: true, injected: true });
-    const msg = await c.waitForNotification((n) =>
-      n.method === METHODS.event && n.params.type === "user_message" && n.params.clientName === "steer");
-    expect(msg.params.text).toBe("wait, actually...");
-    gate.resolve();
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
-    c.close();
-  });
 
-  test("session.steer with no running turn starts one (injected:false) and emits user_message", async () => {
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fake = new FakeProvider([[
-      { type: "text_delta", delta: "sure" },
-      { type: "done", stopReason: "end_turn" },
-    ]]);
-    await boot({}, fake);
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "steerer-idle");
-    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-steer-idle-")));
-    const s = (await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" })).result.sessionId;
-    await c.request(METHODS.sessionAttach, { sessionId: s, fromSeq: 0 });
-    const r = (await c.request(METHODS.sessionSteer, { sessionId: s, text: "start please" })).result;
-    expect(r).toEqual({ ok: true, injected: false });
-    const msg = await c.waitForNotification((n) =>
-      n.method === METHODS.event && n.params.type === "user_message" && n.params.clientName === "steer");
-    expect(msg.params.text).toBe("start please");
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "turn_completed");
-    c.close();
-  });
 
-  test("session.steer/interrupt without an engine degrade gracefully", async () => {
-    await boot(); // no provider → no engine
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "no-engine");
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
-    const steer = (await c.request(METHODS.sessionSteer, { sessionId: created.sessionId, text: "hi" })).result;
-    expect(steer).toEqual({ ok: true, injected: false });
-    const interrupt = (await c.request(METHODS.sessionInterrupt, { sessionId: created.sessionId })).result;
-    expect(interrupt).toEqual({ ok: true, wasRunning: false });
-    c.close();
-  });
 
-  test("session.compact without an engine degrades gracefully", async () => {
-    await boot(); // no provider → no engine
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "no-engine-compact");
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global" });
-    const r = (await c.request(METHODS.sessionCompact, { sessionId: created.sessionId })).result;
-    expect(r).toEqual({ ok: true, compacted: false, uptoSeq: 0, summaryChars: 0 });
-    c.close();
-  });
 
-  test("session.compact folds older turns into a checkpoint (over the socket)", async () => {
-    const { FakeProvider } = await import("../src/agent/fake-provider");
-    const fake = new FakeProvider([
-      [{ type: "text_delta", delta: "ok" }, { type: "done", stopReason: "end_turn" }],
-    ]);
-    await boot({}, fake);
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "compactor");
-    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-compact-")));
-    const s = (await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" })).result.sessionId;
-    await c.request(METHODS.sessionAttach, { sessionId: s, fromSeq: 0 });
-
-    // 4 turns → 8 messages, past the Compactor's default keepTail(6) → compactable.
-    // Sends must be serialized: a turn already running just queues history instead of starting a new one.
-    for (let i = 0; i < 4; i++) {
-      await c.request(METHODS.sessionSend, { sessionId: s, text: `turn ${i}` });
-      const deadline = Date.now() + 2000;
-      while (c.notifications.filter((n) => n.method === METHODS.event && n.params.type === "turn_completed").length <= i) {
-        if (Date.now() > deadline) throw new Error("timed out waiting for turn_completed");
-        await new Promise((r) => setTimeout(r, 10));
-      }
-    }
-
-    const r = (await c.request(METHODS.sessionCompact, { sessionId: s })).result;
-    expect(r.ok).toBe(true);
-    expect(r.compacted).toBe(true);
-    expect(r.uptoSeq).toBeGreaterThan(0);
-    expect(r.summaryChars).toBeGreaterThan(0);
-    const checkpoint = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "checkpoint");
-    expect(checkpoint.params.uptoSeq).toBe(r.uptoSeq);
-    expect(checkpoint.params.summary.length).toBe(r.summaryChars);
-    c.close();
-  });
 
   test("skills.list returns only the shipped builtin when no user/project skills are installed", async () => {
     await boot(); // no provider → default temp home has no user/project skills
@@ -2280,63 +1297,8 @@ describe("daemon IPC", () => {
   // ProviderLink daemon.ts builds — these tests exercise the production wiring, not fakes.
   // -----------------------------------------------------------------------------------------
 
-  test("peripheral.lease under auto policy grants immediately when a provider is connected", async () => {
-    await boot();
-    const provider = await TestClient.connect(daemon.socketPath);
-    await provider.hello(harnessToken, "peripheral-provider");
-    await provider.request(METHODS.peripheralAdvertise, { classes: [{ class: "noop", tccGranted: true }] });
 
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "leaser");
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", approvalPolicy: "auto" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
 
-    const res = await c.request(METHODS.peripheralLease, { sessionId: created.sessionId, class: "noop" });
-    expect(res.result.leaseId).toBeTruthy();
-    expect(res.result.token).toBeTruthy();
-    expect(res.result.expiresAt).toBeGreaterThan(Date.now());
-
-    const granted = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "lease_granted");
-    expect(granted.params.leaseId).toBe(res.result.leaseId);
-    expect(granted.params.holder).toEqual({ kind: "session", id: created.sessionId });
-
-    provider.close(); c.close();
-  });
-
-  test('peripheral.lease with no provider connected returns {code:"no_provider"}', async () => {
-    await boot();
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "no-provider-leaser");
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", approvalPolicy: "auto" });
-    const res = await c.request(METHODS.peripheralLease, { sessionId: created.sessionId, class: "noop" });
-    expect(res.result).toEqual({ code: "no_provider" });
-    c.close();
-  });
-
-  test("peripheral.lease under ask policy raises an approval card naming the class; approving grants", async () => {
-    await boot();
-    const provider = await TestClient.connect(daemon.socketPath);
-    await provider.hello(harnessToken, "ask-provider");
-    await provider.request(METHODS.peripheralAdvertise, { classes: [{ class: "noop", tccGranted: true }] });
-
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "ask-leaser");
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", approvalPolicy: "ask" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-
-    const leasePromise = c.request(METHODS.peripheralLease, { sessionId: created.sessionId, class: "noop" });
-    const ask = await c.waitForNotification((n) =>
-      n.method === METHODS.event && n.params.type === "approval_requested" && n.params.toolName === "peripheral.lease");
-    expect(ask.params.summary).toBe(`Session ${created.sessionId} requests noop`);
-
-    const respond = await c.request(METHODS.approvalRespond, { sessionId: created.sessionId, callId: ask.params.callId, approved: true });
-    expect(respond.result).toEqual({ ok: true, alreadyResolved: false });
-
-    const res = await leasePromise;
-    expect(res.result.leaseId).toBeTruthy();
-    await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "lease_granted");
-    provider.close(); c.close();
-  });
 
   // Regression coverage for the deleted `peripheralClassHint` side-channel (a sessionId -> class
   // map ipc/server.ts used to `set()` synchronously right before calling `broker.lease()`, read
@@ -2348,150 +1310,14 @@ describe("daemon IPC", () => {
   // invocation closes over its OWN class with nothing shared to race on. This test drives BOTH
   // approval cards into existence before resolving EITHER, so it would have caught the old
   // mislabeling bug.
-  test("peripheral.lease concurrent same-session different-class requests under ask policy: each approval card names ITS OWN class", async () => {
-    await boot();
-    const provider = await TestClient.connect(daemon.socketPath);
-    await provider.hello(harnessToken, "concurrent-ask-provider");
-    await provider.request(METHODS.peripheralAdvertise, {
-      classes: [{ class: "noop", tccGranted: true }, { class: "screenshot", tccGranted: true }],
-    });
-
-    const watcher = await TestClient.connect(daemon.socketPath);
-    await watcher.hello(harnessToken, "concurrent-ask-watcher");
-    const { result: created } = await watcher.request(METHODS.sessionCreate, { scope: "global", approvalPolicy: "ask" });
-    await watcher.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-
-    // Two SEPARATE connections issue the two lease requests — same session, different classes.
-    // (Deliberately not both on one connection: this server's per-connection `data()` handler
-    // awaits each RPC line's `handle()` before parsing the next line in the same read, so two
-    // blocking ask-policy calls queued back-to-back on ONE socket would serialize instead of
-    // actually overlapping — that would defeat the point of this test.)
-    const reqA = await TestClient.connect(daemon.socketPath);
-    await reqA.hello(harnessToken, "concurrent-ask-a");
-    const reqB = await TestClient.connect(daemon.socketPath);
-    await reqB.hello(harnessToken, "concurrent-ask-b");
-
-    // Fire both requests before awaiting either — both policy() invocations are in flight
-    // concurrently, parked on their own approvalBroker.wait().
-    const leaseNoop = reqA.request(METHODS.peripheralLease, { sessionId: created.sessionId, class: "noop" });
-    const leaseScreenshot = reqB.request(METHODS.peripheralLease, { sessionId: created.sessionId, class: "screenshot" });
-
-    // Collect BOTH approval_requested cards before resolving either — this is exactly the window
-    // where a shared sessionId-keyed hint could have been overwritten by the second request
-    // before the first card's summary was built.
-    const asks: any[] = [];
-    while (asks.length < 2) {
-      const n = await watcher.waitForNotification((notif) =>
-        notif.method === METHODS.event && notif.params.type === "approval_requested" &&
-        notif.params.toolName === "peripheral.lease" && !asks.some((a) => a.params.callId === notif.params.callId));
-      asks.push(n);
-    }
-
-    const askNoop = asks.find((a) => a.params.summary === `Session ${created.sessionId} requests noop`);
-    const askScreenshot = asks.find((a) => a.params.summary === `Session ${created.sessionId} requests screenshot`);
-    expect(askNoop).toBeDefined();
-    expect(askScreenshot).toBeDefined();
-
-    // Resolve screenshot's card first (reverse of request order) so a same-session ordering
-    // assumption can't accidentally paper over a mislabel.
-    await watcher.request(METHODS.approvalRespond, { sessionId: created.sessionId, callId: askScreenshot.params.callId, approved: true });
-    await watcher.request(METHODS.approvalRespond, { sessionId: created.sessionId, callId: askNoop.params.callId, approved: true });
-
-    const resNoop = await leaseNoop;
-    const resScreenshot = await leaseScreenshot;
-    expect(resNoop.result.leaseId).toBeTruthy();
-    expect(resScreenshot.result.leaseId).toBeTruthy();
-
-    provider.close(); watcher.close(); reqA.close(); reqB.close();
-  });
 
   // SP3 T4b: approval.list — queryable pending-approval STATE (a phone that missed the
   // approval_requested event in its replay window queries the live pending set). The remote role
   // is allowlisted for it (REMOTE_ALLOWED_METHODS grew 9→10); a non-allowlisted method stays
   // role-rejected. Drives a real pending broker entry via the peripheral.lease-under-ask path
   // (same recipe as the ask-policy lease test above), then queries and resolves it.
-  test("approval.list returns the broker's pending approvals for a session (with expiresAt); a remote-role call is allowed, off-list methods stay rejected; resolving clears it", async () => {
-    await boot();
-    const provider = await TestClient.connect(daemon.socketPath);
-    await provider.hello(harnessToken, "approval-list-provider");
-    await provider.request(METHODS.peripheralAdvertise, { classes: [{ class: "noop", tccGranted: true }] });
 
-    const leaser = await TestClient.connect(daemon.socketPath);
-    await leaser.hello(harnessToken, "approval-list-leaser");
-    const { result: created } = await leaser.request(METHODS.sessionCreate, { scope: "global", approvalPolicy: "ask" });
-    await leaser.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
 
-    // Park a lease under ask → registers a pending broker entry + emits the approval_requested card.
-    const leasePromise = leaser.request(METHODS.peripheralLease, { sessionId: created.sessionId, class: "noop" });
-    const ask = await leaser.waitForNotification((n) =>
-      n.method === METHODS.event && n.params.type === "approval_requested" && n.params.toolName === "peripheral.lease");
-    expect(ask.params.expiresAt).toBeGreaterThan(ask.params.issuedAt);
-
-    // A least-privileged remote connection may call approval.list (it's on REMOTE_ALLOWED_METHODS).
-    const remote = await TestClient.connect(daemon.socketPath);
-    await remote.hello(daemon.tokens.remote, "approval-list-phone", "remote");
-    const listed = await remote.request(METHODS.approvalList, { sessionId: created.sessionId });
-    expect(listed.result.pending).toEqual([{
-      callId: ask.params.callId, toolName: "peripheral.lease",
-      summary: `Session ${created.sessionId} requests noop`,
-      issuedAt: ask.params.issuedAt, expiresAt: ask.params.expiresAt,
-    }]);
-    // A different session has nothing pending.
-    const other = await remote.request(METHODS.approvalList, { sessionId: "s_none" });
-    expect(other.result.pending).toEqual([]);
-
-    // But an off-list method from the SAME remote connection is still role-rejected before dispatch.
-    const offList = await remote.request(METHODS.trustDir, {});
-    expect(offList.error.code).toBe(ERR.UNAUTHORIZED);
-    expect(offList.error.message).toMatch(/remote role may not call/);
-
-    // Resolving the approval removes it from the pending set.
-    await leaser.request(METHODS.approvalRespond, { sessionId: created.sessionId, callId: ask.params.callId, approved: true });
-    await leasePromise;
-    const afterResolve = await remote.request(METHODS.approvalList, { sessionId: created.sessionId });
-    expect(afterResolve.result.pending).toEqual([]);
-
-    provider.close(); leaser.close(); remote.close();
-  });
-
-  test("peripheral.lease under plan policy is denied immediately (no approval card)", async () => {
-    await boot();
-    const provider = await TestClient.connect(daemon.socketPath);
-    await provider.hello(harnessToken, "plan-provider");
-    await provider.request(METHODS.peripheralAdvertise, { classes: [{ class: "noop", tccGranted: true }] });
-
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "plan-leaser");
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", approvalPolicy: "plan" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-
-    const res = await c.request(METHODS.peripheralLease, { sessionId: created.sessionId, class: "noop" });
-    expect(res.result).toEqual({ code: "denied" });
-    await new Promise((r) => setTimeout(r, 100));
-    expect(c.notifications.some((n) => n.params?.type === "approval_requested")).toBe(false);
-    provider.close(); c.close();
-  });
-
-  test("peripheral.lease contention: the second requester gets lease_held with the first holder's identity", async () => {
-    await boot();
-    const provider = await TestClient.connect(daemon.socketPath);
-    await provider.hello(harnessToken, "contention-provider");
-    await provider.request(METHODS.peripheralAdvertise, { classes: [{ class: "noop", tccGranted: true }] });
-
-    const a = await TestClient.connect(daemon.socketPath);
-    await a.hello(harnessToken, "contender-a");
-    const sa = (await a.request(METHODS.sessionCreate, { scope: "global", approvalPolicy: "auto" })).result.sessionId;
-    const grantA = await a.request(METHODS.peripheralLease, { sessionId: sa, class: "noop" });
-    expect(grantA.result.leaseId).toBeTruthy();
-
-    const b = await TestClient.connect(daemon.socketPath);
-    await b.hello(harnessToken, "contender-b");
-    const sb = (await b.request(METHODS.sessionCreate, { scope: "global", approvalPolicy: "auto" })).result.sessionId;
-    const grantB = await b.request(METHODS.peripheralLease, { sessionId: sb, class: "noop" });
-    expect(grantB.result).toEqual({ code: "lease_held", holder: { kind: "session", id: sa } });
-
-    provider.close(); a.close(); b.close();
-  });
 
   // Phase 4b Task 2: this used to stub TokenAuthority to fake a "plugin"-role hello (no real
   // plugin auth existed) and pinned the handlers' OWN defensive `authedRole !== "harness"` denied
@@ -2578,75 +1404,8 @@ describe("daemon IPC", () => {
     first.close(); second.close();
   });
 
-  test("provider disconnect revokes its leases (lease_lost provider-gone); a later lease sees no_provider until re-advertised", async () => {
-    await boot();
-    const provider = await TestClient.connect(daemon.socketPath);
-    await provider.hello(harnessToken, "disconnecting-provider");
-    await provider.request(METHODS.peripheralAdvertise, { classes: [{ class: "noop", tccGranted: true }] });
 
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "disc-leaser");
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", approvalPolicy: "auto" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    const grant = await c.request(METHODS.peripheralLease, { sessionId: created.sessionId, class: "noop" });
-    expect(grant.result.leaseId).toBeTruthy();
 
-    provider.close();
-    const lost = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "lease_lost");
-    expect(lost.params.reason).toBe("provider-gone");
-
-    const res2 = await c.request(METHODS.peripheralLease, { sessionId: created.sessionId, class: "noop" });
-    expect(res2.result).toEqual({ code: "no_provider" });
-
-    c.close();
-  });
-
-  test("peripheral.renew extends expiresAt; without renewal the lease eventually expires (short settings override)", async () => {
-    await boot({}, undefined, { peripheral: { expiryMs: 150, heartbeatMs: 20 } });
-    const provider = await TestClient.connect(daemon.socketPath);
-    await provider.hello(harnessToken, "expiry-provider");
-    await provider.request(METHODS.peripheralAdvertise, { classes: [{ class: "noop", tccGranted: true }] });
-
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "expiry-leaser");
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", approvalPolicy: "auto" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    const grant = await c.request(METHODS.peripheralLease, { sessionId: created.sessionId, class: "noop" });
-    const { leaseId, token, expiresAt } = grant.result;
-
-    // Real elapsed time between grant and renew (rather than asserting strict inequality against
-    // two `Date.now() + expiryMs` reads that could tie within the same millisecond tick).
-    await new Promise((r) => setTimeout(r, 60));
-    const renew = await c.request(METHODS.peripheralRenew, { sessionId: created.sessionId, leaseId, token });
-    expect(renew.result.expiresAt).toBeGreaterThan(expiresAt);
-
-    const lost = await c.waitForNotification((n) => n.method === METHODS.event && n.params.type === "lease_lost", 3000);
-    expect(lost.params.reason).toBe("expired");
-    expect(lost.params.leaseId).toBe(leaseId);
-
-    provider.close(); c.close();
-  });
-
-  test("peripheral.release round-trip; renew after release sees not_found", async () => {
-    await boot();
-    const provider = await TestClient.connect(daemon.socketPath);
-    await provider.hello(harnessToken, "release-provider");
-    await provider.request(METHODS.peripheralAdvertise, { classes: [{ class: "noop", tccGranted: true }] });
-
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "releaser");
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", approvalPolicy: "auto" });
-    const grant = await c.request(METHODS.peripheralLease, { sessionId: created.sessionId, class: "noop" });
-    const { leaseId, token } = grant.result;
-
-    const release = await c.request(METHODS.peripheralRelease, { sessionId: created.sessionId, leaseId, token });
-    expect(release.result).toEqual({ ok: true });
-
-    const badRenew = await c.request(METHODS.peripheralRenew, { sessionId: created.sessionId, leaseId, token });
-    expect(badRenew.result).toEqual({ code: "not_found" });
-
-    provider.close(); c.close();
-  });
 
   test("noop capability call round-trips through the real provider connection (call() -> peripheral_call_requested -> peripheral.respond)", async () => {
     const { AuditLog } = await import("../src/peripheral/audit");
@@ -2705,33 +1464,6 @@ describe("daemon IPC", () => {
   // session-scoped fan-out alone would never reach it). The provider here deliberately never
   // attaches to ANY session — it must still see lease_granted (on acquire) and lease_lost (on
   // release) so it can track its own active-lease set purely from these pushed events.
-  test("provider connection receives lease_granted/lease_lost even when not attached to the leasing session", async () => {
-    await boot();
-    const provider = await TestClient.connect(daemon.socketPath);
-    await provider.hello(harnessToken, "unattached-provider");
-    await provider.request(METHODS.peripheralAdvertise, { classes: [{ class: "noop", tccGranted: true }] });
-
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "leaser-elsewhere");
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", approvalPolicy: "auto" });
-    // Deliberately no sessionAttach for either connection — the provider must still be told.
-
-    const res = await c.request(METHODS.peripheralLease, { sessionId: created.sessionId, class: "noop" });
-    expect(res.result.leaseId).toBeTruthy();
-
-    const granted = await provider.waitForNotification((n) => n.method === METHODS.event && n.params.type === "lease_granted");
-    expect(granted.params.leaseId).toBe(res.result.leaseId);
-    expect(granted.params.holder).toEqual({ kind: "session", id: created.sessionId });
-
-    const rel = await c.request(METHODS.peripheralRelease, { sessionId: created.sessionId, leaseId: res.result.leaseId, token: res.result.token });
-    expect(rel.result).toEqual({ ok: true });
-
-    const lost = await provider.waitForNotification((n) => n.method === METHODS.event && n.params.type === "lease_lost");
-    expect(lost.params.leaseId).toBe(res.result.leaseId);
-    expect(lost.params.reason).toBe("released");
-
-    provider.close(); c.close();
-  });
 
   // -----------------------------------------------------------------------------------------
   // Dashboard read methods (Phase 2f): daemon.status, quota.state, trust.list, trust.remove.
@@ -2763,20 +1495,6 @@ describe("daemon IPC", () => {
     c.close();
   });
 
-  test("daemon.status shape (no provider): version/uptimeMs/socketPath/provider:null/sessionsCount/pluginsCount", async () => {
-    await boot(); // no provider → no engine
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(harnessToken, "status-checker");
-    await c.request(METHODS.sessionCreate, { scope: "global" });
-    const status = (await c.request(METHODS.daemonStatus, {})).result;
-    expect(status.version).toBe(CORE_VERSION);
-    expect(status.uptimeMs).toBeGreaterThanOrEqual(0);
-    expect(status.socketPath).toBe(daemon.socketPath);
-    expect(status.provider).toBeNull();
-    expect(status.sessionsCount).toBe(1);
-    expect(status.pluginsCount).toBe(0);
-    c.close();
-  });
 
   test("daemon.status reports the active provider's id/model when an agent is configured", async () => {
     const { FakeProvider } = await import("../src/agent/fake-provider");

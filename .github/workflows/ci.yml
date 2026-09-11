@@ -26,16 +26,11 @@ jobs:
         include:
           - package: protocol
             args: ""
-          - package: core
-            args: ""
           - package: plugin-sdk
             args: ""
-          # cli runs its non-TUI tests only. `test/tui/**` renders the Ink transcript through
-          # ink-testing-library and has ~30 pre-existing failures on main (they fail locally too,
-          # not just here). Widen this back to a bare `bun test` the moment that suite is fixed —
-          # everything under test/*.ts is genuinely green and worth gating on today.
-          - package: cli
-            args: "test/*.ts"
+          # cli moved to its own `test-cli` job below (Winter Phase 8b fix wave 2): its NormaClient
+          # round-trips create sessions, and every session is a spawned `winter` child now, so the
+          # job needs the built binary exactly as `test-core` does.
     steps:
       - uses: actions/checkout@v4
 
@@ -49,6 +44,181 @@ jobs:
       - name: Test
         working-directory: packages/${{ matrix.package }}
         run: bun test ${{ matrix.args }}
+
+  # P8b-2: build the `winter` runtime binary the daemon spawns, FROM THE PINNED TAG.
+  #
+  # Not a dependency resolution against a sibling `src` (the shape the router just retired) and not
+  # an npm install either: the platform package that would carry a prebuilt binary is `private` and
+  # is not published, so the only honest way to get the exact peer this daemon is pinned to is to
+  # check that tag out and compile it. `build-winter.ts` refuses any other commit.
+  #
+  # `bun-version` is PINNED, not `latest`: the SDK's `build-runtime.ts` compiles with
+  # `bun build --compile`, so the bun on the runner is part of the artifact. A floating `latest`
+  # would make a pinned-tag build vary with whenever the job happened to run.
+  winter-binary:
+    name: build winter (pinned tag)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # actions/checkout paths must live INSIDE the workspace, so the SDK lands in a dot-dir here
+      # rather than beside the repo. Public repository — no token. `fetch-depth: 0` because
+      # build-winter.ts proves the checkout with `git tag --points-at HEAD`, which needs the tag
+      # objects present locally.
+      - uses: actions/checkout@v4
+        with:
+          repository: yanlingLabs/winter-agent-sdk
+          ref: v0.0.4
+          path: .winter-agent-sdk
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      # This repo's own install: build-winter.ts reads REQUIRED_WINTER_AGENT_SDK out of
+      # packages/core/src/runtime-sdk/versions.ts, which imports SDK_VERSION from the npm package.
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # The SDK checkout is pnpm-managed (never `bun install` there — it rewrites the manifest).
+      - name: Install the SDK checkout's dependencies
+        working-directory: .winter-agent-sdk
+        run: pnpm install --frozen-lockfile
+
+      - name: Build dist/winter
+        env:
+          NORMA_WINTER_SDK_CHECKOUT: ${{ github.workspace }}/.winter-agent-sdk
+        run: bun run build:winter
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: winter-v0.0.4
+          path: dist/winter
+          if-no-files-found: error
+          retention-days: 7
+
+  # core is split OUT of the matrix above rather than given `needs:` on it, so the other three
+  # entries stay independent of the winter build: a broken/slow SDK checkout must not hold up the
+  # protocol, plugin-sdk and cli suites (a matrix-level `needs` would gate all four).
+  #
+  # NORMA_WINTER_REQUIRE_BINARY=1 is the point of the download: without it, every test that needs a
+  # real `winter` child SKIPS, and CI would go green by proving nothing.
+  test-core:
+    name: test · core
+    runs-on: macos-latest
+    needs: winter-binary
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: winter-v0.0.4
+          path: dist
+
+      - name: Make the winter binary executable
+        run: chmod +x dist/winter
+
+      - name: Test
+        working-directory: packages/core
+        env:
+          NORMA_WINTER_EXECUTABLE: ${{ github.workspace }}/dist/winter
+          NORMA_WINTER_REQUIRE_BINARY: "1"
+        run: bun test
+
+  # cli's non-TUI tests (`test/*.ts` only — `test/tui/**` renders the Ink transcript through
+  # ink-testing-library and has ~30 pre-existing failures on main; widen back to a bare `bun test`
+  # the moment that suite is fixed). Split out of the matrix for the same reason core is: the
+  # NormaClient round-trips create sessions, every session is a spawned `winter` child (P8b-2: no
+  # binary ⇒ a typed refusal, never a fallback), so the job downloads the built binary and REQUIRES
+  # it — without `NORMA_WINTER_REQUIRE_BINARY=1` those tests would skip and CI would go green by
+  # proving nothing. protocol and plugin-sdk stay independent of the winter build.
+  test-cli:
+    name: test · cli
+    runs-on: macos-latest
+    needs: winter-binary
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: winter-v0.0.4
+          path: dist
+
+      - name: Make the winter binary executable
+        run: chmod +x dist/winter
+
+      - name: Test
+        working-directory: packages/cli
+        env:
+          NORMA_WINTER_EXECUTABLE: ${{ github.workspace }}/dist/winter
+          NORMA_WINTER_REQUIRE_BINARY: "1"
+        run: bun test test/*.ts
+
+  # P8b-9: `bun test` does not typecheck — bun strips types and runs. So `tsc` had been RED on `main`
+  # and nothing said so, which means the protocol checklist's step 4 trap
+  # (`subagent-transcript.ts`'s `satisfies Record<SessionEvent["type"], boolean>` map, whose entire
+  # job is to FAIL core's tsc when a `SessionEvent` variant is added) had been disarmed: a compile
+  # error in a project nobody compiles is not a tripwire. These two jobs arm it — and keep arming it
+  # once the map relocates to `projector/event-coverage.ts` in Task 10.
+  #
+  # SCOPE, precisely (review F-3): `tsc -p packages/core` covers `packages/core/{src,test}` ONLY. Six
+  # of the nine errors this batch fixed were there; the other three were in
+  # `packages/protocol/test/events.test.ts`, which core's program never sees — hence the second job
+  # below. STILL UNCHECKED by any job: `packages/cli` and the repo-root `scripts/` (no tsconfig
+  # covers either), so a type error in the compiled-route CLI or in a build script surfaces only at
+  # runtime. Recorded as a carry, not fixed here.
+  typecheck-core:
+    name: typecheck · core
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck:core
+
+  # The other half of P8b-9's nine: `packages/protocol/{src,test,scripts}`. Without this, the three
+  # errors fixed in `test/events.test.ts` can rot back in tomorrow, in a file this batch had to fix.
+  typecheck-protocol:
+    name: typecheck · protocol
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck:protocol
 
   # The protocol package generates a JSON schema and the Swift round-trip fixtures. If a schema
   # change landed without re-running the generator, the tree is dirty here — which is exactly the

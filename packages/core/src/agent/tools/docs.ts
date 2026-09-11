@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { OFFICE_DEADLINES_MS, officeCommandArgs, type OfficeCommandAction } from "../../panel/office-commands";
-import type { ToolRegistry } from "./registry";
+import type { ToolDefinition, ToolRegistry } from "./registry";
 import type { PanelCommandAction, PanelCommandOutcome } from "../../panel/commands";
 import type { SessionDirs } from "../../sessions/dirs";
 import { canHostPanel } from "./browser";
@@ -363,7 +363,14 @@ export interface DocsToolDeps {
 }
 
 export function registerDocsTool(r: ToolRegistry, deps: DocsToolDeps): void {
-  r.register({
+  for (const def of docsToolDefs(deps)) r.register(def);
+}
+
+/** P8b Task 7 — THE definition(s), extracted verbatim from `registerDocsTool`'s body so the daemon's shared
+ *  `ToolRegistry` and the capability server drive the SAME `ToolDefinition` object rather than two
+ *  copies of one. Nothing about the registration changed. */
+export function docsToolDefs(deps: DocsToolDeps): ToolDefinition[] {
+  return [{
     name: "docs",
     description:
       "Read and edit a text document Norma has access to (.odt, .docx — any format the office engine "
@@ -656,5 +663,5 @@ export function registerDocsTool(r: ToolRegistry, deps: DocsToolDeps): void {
 
       return outcome.result ?? `docs ${a.verb} completed for ${a.path}`;
     },
-  });
+  }];
 }

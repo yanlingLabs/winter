@@ -100,6 +100,10 @@ function writeSettingsFile(home: string, overrides: Record<string, unknown> = {}
       provider: { type: "codex-oauth", model: "gpt-5.4" },
       titles: { enabled: false },
       toolSearch: { enabled: false },
+      // These are ENGINE hot-reload proofs (registry re-registration): pin the engine leg for the
+      // code sessions they mint, since Task 17 flipped the Winter defaults (P8b-13 keeps the engine
+      // selectable while it exists).
+      runtimes: { winterLeg: { code: false, dispatch: false } },
       ...overrides,
     }, null, 2) + "\n",
   );
@@ -126,115 +130,82 @@ function endTurnScript(): ProviderEvent[][] {
   ]];
 }
 
-describe("hot-settings T5b e2e: SettingsWatcher wired into a running daemon", () => {
+// Task 17: the T5b engine-registry re-registration proofs (computer/lsp tools into the engine's
+// registry, a torn write mid-turn) retired with the engine; the hot re-registration WRITER itself
+// (`makeApply` → `registerComputer`) is pinned by test/settings-apply.test.ts.
+
+describe("hot-settings P8b: the Winter-leg keys reach the live holder with no restart", () => {
   let daemon: RunningDaemon | undefined;
 
-  afterEach(() => daemon?.stop());
+  // CLEARED, not just stopped: a later test that throws before its own `startDaemon` lands would
+  // otherwise stop this already-stopped handle a second time.
+  afterEach(async () => { const stopping = daemon?.stop(); daemon = undefined; await stopping; });
 
-  test("flipping computerUse.enabled registers the computer tool live, no restart", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-hot-e2e-cu-"));
-    writeSettingsFile(home, { computerUse: { enabled: false } });
+  /** Polls the live holder past the watcher's debounce (150ms) + fs.watch latency — never a bare
+   *  fixed sleep. Fails loudly with what it was waiting for rather than timing out anonymously. */
+  async function untilSettings(d: RunningDaemon, what: string, ok: (s: ReturnType<RunningDaemon["settings"]>) => boolean): Promise<void> {
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      if (ok(d.settings())) return;
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}; live settings.runtimes = ${JSON.stringify(d.settings()?.runtimes)}`);
+      await sleep(25);
+    }
+  }
+
+  test("winterLeg.chat, winterExecutable, winterIdleTimeoutSec and retention all flip live on ONE daemon", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-hot-e2e-winter-"));
+    writeSettingsFile(home, { runtimes: undefined })   // no block at all: the absent-block state; // no `runtimes` block at all — the shipped default
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     const fake = new FakeProvider(endTurnScript());
 
     daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
     const daemonRef = daemon; // captured ONCE — never reassigned, never a second startDaemon() call
 
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(daemon.tokens.harness, "e2e-cu");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-hot-e2e-cu-cwd-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
+    // An absent block is the default state every consumer must answer for itself.
+    expect(daemon.settings()?.runtimes).toBeUndefined();
 
-    await driveTurn(c, created.sessionId, "hello");
-    expect(fake.requests.length).toBeGreaterThanOrEqual(1);
-    expect(fake.requests[0]!.tools?.map((t) => t.name)).not.toContain("computer");
+    // The `winter` binary the setting points at: a real file, so Task 2's resolver would accept it.
+    const winterBin = join(mkdtempSync(join(tmpdir(), "norma-hot-e2e-winter-bin-")), "winter");
+    writeFileSync(winterBin, "#!/bin/sh\nexit 0\n");
 
-    // Rewrite settings.json — the SAME daemon (same fs.watch handle, same registry/engine) must
-    // pick this up with no restart.
-    writeSettingsFile(home, { computerUse: { enabled: true } });
+    writeSettingsFile(home, {
+      runtimes: {
+        winterLeg: { chat: true },
+        winterExecutable: winterBin,
+        winterIdleTimeoutSec: 60,
+        retention: { deliveriesDays: 90 },
+      },
+    });
 
-    // Condition-based poll (never a bare fixed sleep): drive a turn, check the LATEST captured
-    // request's tools, retry until the debounce+apply has landed or ~5s elapses.
-    let sawComputer = false;
-    const deadline = Date.now() + 5000;
-    while (Date.now() < deadline) {
-      await driveTurn(c, created.sessionId, "poll");
-      const latest = fake.requests[fake.requests.length - 1];
-      if (latest?.tools?.some((t) => t.name === "computer")) { sawComputer = true; break; }
-      await sleep(100);
-    }
-    expect(sawComputer).toBe(true);
+    await untilSettings(daemon, "the runtimes block to reach the live holder", (s) => s?.runtimes?.winterLeg?.chat === true);
+    const live = daemon.settings()!.runtimes!;
+    // Task 9's `legForNewSession` reads exactly this; the helper itself is the policy lane's.
+    expect(live.winterLeg).toEqual({ chat: true, dispatch: true, code: true });   // the schema's defaults fill the absent two
+    // Task 5's `spawnHookFor` resolves this; here the assertion stops at the parsed setting.
+    expect(live.winterExecutable).toBe(winterBin);
+    expect(live.winterIdleTimeoutSec).toBe(60);
+    // Retention: the one key whose consumer IS live today (the hourly sweep reads it per pass).
+    expect(live.retention).toEqual({ deliveriesDays: 90, nameLeasesDays: 7 });
 
-    // No-restart proof: still the exact same RunningDaemon object/socket this test started with.
+    // Flipping a leg back OFF is just as hot — a rollback must not need a restart either.
+    writeSettingsFile(home, { runtimes: { winterLeg: { chat: false, code: false, dispatch: false }, winterIdleTimeoutSec: 60 } });
+    await untilSettings(daemon, "the chat leg to flip back off", (s) => s?.runtimes?.winterLeg?.chat === false);
+
+    // Task 17: no engine turn to drive — the reload re-wired nothing the daemon owns (pinned below).
+
+    // No-restart proof: the same RunningDaemon object and the same socket this test started with.
     expect(daemon).toBe(daemonRef);
     expect(daemon.socketPath).toBe(daemonRef.socketPath);
-
-    c.close();
   });
 
-  test("a torn settings.json write does not crash the daemon", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-hot-e2e-torn-"));
-    writeSettingsFile(home); // computerUse absent → disabled
+  test("advisorModel reaches the live holder too — Task 5's create.ts reads it there", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-hot-e2e-advisor-"));
+    writeSettingsFile(home);
     const secrets = new FileSecretStore(join(home, "test-secrets"));
-    const fake = new FakeProvider(endTurnScript());
+    daemon = await startDaemon({ home, secrets, agentProvider: { provider: new FakeProvider(endTurnScript()), model: "fake-1" } });
 
-    daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(daemon.tokens.harness, "e2e-torn");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-hot-e2e-torn-cwd-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-
-    await driveTurn(c, created.sessionId, "hello");
-    const before = fake.requests[fake.requests.length - 1]!.tools?.map((t) => t.name).sort();
-
-    // Torn write: invalid JSON. The watcher's reload must log-and-keep-last-good, never crash the
-    // process or the fs.watch handle.
-    writeFileSync(join(home, "settings.json"), "{ not valid json ][");
-
-    // Wait past the debounce (default 150ms) before proving the daemon is still alive.
-    await sleep(400);
-
-    // The daemon must still be responsive: a turn started AFTER the torn write completes normally.
-    await driveTurn(c, created.sessionId, "still alive?");
-    const after = fake.requests[fake.requests.length - 1]!.tools?.map((t) => t.name).sort();
-    expect(after).toEqual(before); // tool set unchanged by the torn write
-
-    c.close();
-  });
-
-  test("LSP disable: writing lsp.enabled:false unregisters the lsp tool live", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-hot-e2e-lsp-"));
-    writeSettingsFile(home); // lsp absent → default ON
-    const secrets = new FileSecretStore(join(home, "test-secrets"));
-    const fake = new FakeProvider(endTurnScript());
-
-    daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(daemon.tokens.harness, "e2e-lsp");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-hot-e2e-lsp-cwd-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-
-    await driveTurn(c, created.sessionId, "hello");
-    expect(fake.requests[0]!.tools?.map((t) => t.name)).toContain("lsp");
-
-    writeSettingsFile(home, { lsp: { enabled: false } });
-
-    let lspGone = false;
-    const deadline = Date.now() + 5000;
-    while (Date.now() < deadline) {
-      await driveTurn(c, created.sessionId, "poll");
-      const names = fake.requests[fake.requests.length - 1]!.tools?.map((t) => t.name) ?? [];
-      if (!names.includes("lsp")) {
-        lspGone = true;
-        break;
-      }
-      await sleep(100);
-    }
-    expect(lspGone).toBe(true);
-
-    c.close();
+    expect(daemon.settings()?.runtimes?.advisorModel).toBeUndefined();
+    writeSettingsFile(home, { runtimes: { advisorModel: "some-advisor-model" } });
+    await untilSettings(daemon, "advisorModel to reach the live holder", (s) => s?.runtimes?.advisorModel === "some-advisor-model");
   });
 });

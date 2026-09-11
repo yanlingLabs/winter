@@ -116,6 +116,10 @@ export const PermissionsSettings = z.object({
   }).optional(),
 });
 
+/** The default `runtimes.winterIdleTimeoutSec`, spelled once so the schema and the absent-block
+ *  answer cannot drift (the same pairing `retention.ts` keeps for its two windows). */
+export const DEFAULT_WINTER_IDLE_TIMEOUT_SEC = 900;
+
 export const Settings = z.object({
   schemaVersion: z.literal(2),
   provider: ProviderSettings,
@@ -338,16 +342,64 @@ export const Settings = z.object({
    *  `migrations.memoryKeys` is OFF until a user turns it on: WS-16 §17 phase 5 relocates a user's
    *  own memory files, and that is not a thing an upgrade does on its own initiative.
    *
-   *  IN THIS BUILD THE FLAG IS ACCEPTED AND IGNORED, deliberately: the live memory path
-   *  (`agent/memory-dir.ts`'s `memoryDirFor`) still derives today's key, so relocating the files now
-   *  would leave the agent reading an empty directory — the daemon logs one line saying so and moves
-   *  nothing. Phase 8b switches the live path and the migration on together. */
+   *  WHEN IT IS ON, THE MIGRATION RUNS (P8b-17, Task 14 — 8a's build accepted the flag and ignored
+   *  it, because the live memory path still derived today's key). Three things are worth knowing
+   *  before turning it on: a home whose `memory.directory` (above) pins the MEMDIR is DECLINED
+   *  rather than migrated — the project key decides nothing there — and a decline is not an attempt,
+   *  so clearing that override later still gets the migration with no restart; a completed
+   *  relocation is one-shot (a `schema_meta` marker), while a run that could not finish (a
+   *  destination to clear, a cwd to restore) retries at the next boot; and a relocation interrupted
+   *  between its rename and its commit is repaired at EVERY boot, flag or no flag, so turning the
+   *  flag back off can never strand a half-moved tree. See `runtime-state/migrations/memory-keys.ts`.
+   *
+   *  ── The Winter leg (8b) ──────────────────────────────────────────────────────────────────────
+   *
+   *  `winterLeg` DECIDED, per mode, whether a NEW session ran on the Winter runtime or on the
+   *  legacy engine (P8b-13) while both existed. Task 17 retired the engine: every mode runs on the
+   *  Winter leg, the keys are accepted for one release and a `false` is logged and ignored
+   *  (`winterLegDisabledKeys` below names them for the log). A flag governs new sessions only: a session runs to
+   *  completion on the leg it was created with, which is what makes flipping one safe at any moment.
+   *
+   *  `winterExecutable` overrides the `winter` binary lookup (P8b-2's first door, ahead of
+   *  `NORMA_WINTER_EXECUTABLE`, the bundle drop and `<NORMA_HOME>/runtimes/bin/winter`).
+   *  `advisorModel` names the model the router's advisor uses. Both are plain `z.string()` on
+   *  purpose — NOT `.min(1)` — because an invalid `settings.json` costs the WHOLE FILE: boot
+   *  degrades to `settings = null` and the agent is disabled (`daemon.ts`'s load catch), and a hot
+   *  edit is discarded entirely by the watcher ("settings reload failed, keeping previous"). One
+   *  blank string must not be able to do that. Blank therefore means absent, and
+   *  `winterOptionsFromSettings` below is the door that says so once for every consumer.
+   *  (`winterIdleTimeoutSec`'s floor CAN invalidate the file the same way — that is the deliberate
+   *  shape the retention windows already have, and the brief mandates it; it is stated here so the
+   *  asymmetry reads as a decision rather than an oversight.)
+   *
+   *  `winterIdleTimeoutSec` ends an idle Winter child (P8b-24) — the session becomes `resumable` and
+   *  its next message resumes it, so this is a memory bound, not a session lifetime. The floor is
+   *  10s rather than 1: below that, a child would be reaped between a user's own keystrokes.
+   *
+   *  THE DEFAULTS ONLY MATERIALIZE WHEN THE BLOCK IS PRESENT, because the block is `.optional()`
+   *  (see above — a defaulted block would make `runtimes` required on every settings literal in the
+   *  codebase, and `saveSettings` would start stamping today's values into every user's file). So
+   *  an absent block has to be answered for, and `winterOptionsFromSettings` below is the ONE place
+   *  that does it — the same shape `retentionFromSettings` has for the windows. Read that door
+   *  rather than the raw block, or three lanes each re-derive "absent means all legs false" and
+   *  "blank means absent", and nothing fails to compile when one of them forgets. */
   runtimes: z.object({
     retention: z.object({
       deliveriesDays: z.number().int().min(1).default(30),
       nameLeasesDays: z.number().int().min(1).default(7),
     }).prefault({}),
     migrations: z.object({ memoryKeys: z.boolean().default(false) }).prefault({}),
+    winterExecutable: z.string().optional(),
+    // Task 17 Step 4: the engine is retired — every mode runs on the Winter leg. The block stays
+    // ACCEPTED for one release (the `migrations.memoryKeys` pattern): a `false` is read, logged
+    // ("the engine leg no longer exists; ignored") and ignored by `winterOptionsFromSettings`.
+    winterLeg: z.object({
+      chat: z.boolean().default(true),
+      dispatch: z.boolean().default(true),
+      code: z.boolean().default(true),
+    }).prefault({}),
+    advisorModel: z.string().optional(),
+    winterIdleTimeoutSec: z.number().int().min(10).default(DEFAULT_WINTER_IDLE_TIMEOUT_SEC),
   }).optional(),
 });
 export type Settings = z.infer<typeof Settings>;
@@ -358,6 +410,59 @@ export type Settings = z.infer<typeof Settings>;
  *  settings-reader (daemon.ts, re-reads settings.json per call, mtime-cached — same pattern as
  *  providers/manager.ts's `liveModel`) and this file's own tests exercise the SAME decision. */
 export const hooksEnabledFrom = (s: Settings): boolean => s.hooks?.enabled !== false;
+
+/** What the Winter leg actually runs with, for a home whose `runtimes` block may not exist at all. */
+export interface WinterOptions {
+  /** Absent when unset OR blank — never `""`. See `winterOptionsFromSettings`. */
+  winterExecutable?: string;
+  advisorModel?: string;
+  idleTimeoutSec: number;
+  winterLeg: { chat: boolean; dispatch: boolean; code: boolean };
+}
+
+/**
+ * THE DOOR EVERY WINTER-LEG CONSUMER READS (`resolveWinterExecutable`, `createNormaRuntimeSdk`,
+ * `legForNewSession`, the idle timer), and the reason it exists rather than three lanes each
+ * reaching into `settings.runtimes`.
+ *
+ * It answers the two conventions the raw block cannot:
+ *
+ *   AN ABSENT BLOCK IS NOT UNKNOWN. `runtimes` is `.optional()` (a defaulted block would make it
+ *   required on every settings literal in this codebase and would have `saveSettings` stamp today's
+ *   values into every user's file), so zod's per-key defaults never materialize for a home that has
+ *   never configured it. Absent means all three legs OFF and 900 seconds — stated here, once.
+ *
+ *   BLANK MEANS ABSENT. `winterExecutable: ""` is a user clearing the field, not a path to an
+ *   executable at the filesystem root; `advisorModel: ""` is not a model id. Both are trimmed to
+ *   `undefined` so no consumer has to remember (the same rule `memory.directory` follows in
+ *   `memory-dir.ts`), and neither can invalidate the whole settings file the way a `.min(1)` would.
+ *
+ * Deliberately total: it takes `null`/`undefined` settings, because the daemon boots with
+ * `settings = null` when `settings.json` is missing or invalid and every getter here must still
+ * answer.
+ */
+/** The `winterLeg` keys a settings file sets to `false` — accepted, logged, ignored (Task 17). */
+export function winterLegDisabledKeys(s: Settings | null | undefined): string[] {
+  const leg = s?.runtimes?.winterLeg;
+  if (leg === undefined) return [];
+  return (["chat", "dispatch", "code"] as const).filter((m) => leg[m] === false);
+}
+
+export function winterOptionsFromSettings(s: Settings | null | undefined): WinterOptions {
+  const r = s?.runtimes;
+  const blankIsAbsent = (v: string | undefined): string | undefined => {
+    const trimmed = v?.trim();
+    return trimmed ? trimmed : undefined;
+  };
+  return {
+    ...(blankIsAbsent(r?.winterExecutable) === undefined ? {} : { winterExecutable: blankIsAbsent(r?.winterExecutable)! }),
+    ...(blankIsAbsent(r?.advisorModel) === undefined ? {} : { advisorModel: blankIsAbsent(r?.advisorModel)! }),
+    idleTimeoutSec: r?.winterIdleTimeoutSec ?? DEFAULT_WINTER_IDLE_TIMEOUT_SEC,
+    // Task 17 Step 4: the engine leg no longer exists. Every mode answers `true` whatever the block
+    // says; a written `false` is reported by `settings-apply.ts` and by the boot log, never obeyed.
+    winterLeg: { chat: true, dispatch: true, code: true },
+  };
+}
 
 /** Same default-ON shape as `hooksEnabledFrom` above: absent block, absent field, or `true` all
  *  mean file-based memory is on; only an explicit `false` turns it off. The single place this

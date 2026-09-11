@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { resolveNormaHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, resolveNormaProfile } from "@norma/core";
+import { resolveNormaHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, resolveNormaProfile } from "@norma/core";
 import type { Settings } from "@norma/core";
 import { METHODS, type ApprovalPolicy, type Task } from "@norma/protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
@@ -1102,6 +1102,24 @@ if (import.meta.main) {
   if (process.argv.includes("__workflow-worker")) {
     runWorkflowSubprocess();
     await new Promise(() => {});   // entry drives itself to process.exit(); block everything below
+  }
+
+  // Compiled-artifact probe (P8b-18): proves runtime-state.db is created/migrated INSIDE the
+  // compiled binary with an injected FileSecretStore — never the Keychain, never a real home.
+  // Reached only by scripts/verify-runtime-state-compiled.ts. NORMA_HOME must be set to a temp dir
+  // by the caller; the probe refuses without it. Static, and importing from the `@norma/core`
+  // barrel exactly like `runWorkflowSubprocess` above — that is the import shape that survives
+  // `bun build --compile` (a dynamic import keyed on a string does not resolve in $bunfs).
+  //
+  // POSITIONAL, not `argv.includes` (review F-11): `includes` matches the token anywhere, so
+  // `norma -p "__runtime-state-probe"` would boot the probe instead of running the prompt. `argv[2]`
+  // is the first user argument in BOTH the dev (`bun main.ts …`) and compiled ($bunfs) shapes —
+  // the same index the CLI's own `process.argv.slice(2)` routing assumes below. The pre-existing
+  // `__workflow-worker` branch above keeps its `includes` shape; it is not this batch's to change.
+  if (process.argv[2] === "__runtime-state-probe") {
+    const result = await runRuntimeStateProbe({ home: process.env.NORMA_HOME });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.exit(result.ok ? 0 : 1);
   }
 
   const argv = process.argv.slice(2);

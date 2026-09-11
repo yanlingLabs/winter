@@ -1,0 +1,5 @@
+{"sessionId":"<id-1>","type":"session_created","scope":"global","mode":"code"}
+{"sessionId":"<id-1>","type":"harness_attached","clientName":"golden-observer"}
+{"sessionId":"<id-1>","type":"user_message","threadId":"main","text":"start something long","clientName":"golden"}
+{"sessionId":"<id-1>","threadId":"main","type":"turn_started"}
+{"sessionId":"<id-1>","threadId":"main","type":"turn_completed","stopReason":"aborted","inputTokens":0,"outputTokens":0,"contextTokens":0}

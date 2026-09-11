@@ -308,7 +308,7 @@ describe("regex shapes in the HTML-scanning paths (structural tripwire)", () => 
     expect(FILES.length).toBeGreaterThan(10);
     // The recursion really did widen the scope past the tools directory (review Minor 7): `engine.ts`
     // sits one level up and used to be invisible to this gate.
-    expect(FILES).toContain("engine.ts");
+    expect(FILES).toContain("tools/page-core.ts");   // Task 17: engine.ts retired; a surviving HTML-scanning file anchors the walk
     expect(FILES.filter((f) => !f.startsWith("tools/")).length).toBeGreaterThan(5);
     // page-core.ts is down to exactly three live regexes now that its duplicate of the anchor open
     // pattern is gone (`/<\/a>/gi`, `/\n+/g`, `/\r\n/g`); web.ts has many.

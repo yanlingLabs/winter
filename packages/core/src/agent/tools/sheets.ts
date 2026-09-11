@@ -2,7 +2,7 @@ import { z } from "zod";
 import { realpathSync } from "node:fs";
 import { resolveLeafSymlinks, canonicalizeForWrite } from "../paths";
 import { OFFICE_DEADLINES_MS, officeCommandArgs, officeSheetsSetArgs, officeSheetsBatchArgs, officeBatchArgsTooLarge, OFFICE_BATCH_MAX_OPS, type OfficeCommandAction } from "../../panel/office-commands";
-import type { ToolRegistry } from "./registry";
+import type { ToolDefinition, ToolRegistry } from "./registry";
 import type { PanelCommandAction, PanelCommandOutcome } from "../../panel/commands";
 import type { SessionDirs } from "../../sessions/dirs";
 import { canHostPanel } from "./browser";
@@ -452,7 +452,14 @@ export interface SheetsToolDeps {
 }
 
 export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void {
-  r.register({
+  for (const def of sheetsToolDefs(deps)) r.register(def);
+}
+
+/** P8b Task 7 — THE definition(s), extracted verbatim from `registerSheetsTool`'s body so the daemon's shared
+ *  `ToolRegistry` and the capability server drive the SAME `ToolDefinition` object rather than two
+ *  copies of one. Nothing about the registration changed. */
+export function sheetsToolDefs(deps: SheetsToolDeps): ToolDefinition[] {
+  return [{
     name: "sheets",
     description:
       "Read and edit a spreadsheet Norma has access to (.xlsx, .ods, .xlsm — any format the office "
@@ -766,5 +773,5 @@ export function registerSheetsTool(r: ToolRegistry, deps: SheetsToolDeps): void 
 
       return outcome.result ?? `sheets ${a.verb} completed for ${a.path}`;
     },
-  });
+  }];
 }

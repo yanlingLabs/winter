@@ -12,6 +12,12 @@ DerivedData/
 # Brainstorming mockups
 .superpowers/
 
+# The winter-agent-sdk checkout CI clones beside the workspace to BUILD the pinned-tag `winter`
+# binary (P8b-2, .github/workflows/ci.yml's `winter-binary` job; actions/checkout paths must live
+# inside the workspace, hence a dot-dir here rather than `../`). The binary itself lands in
+# `dist/`, already ignored above. Never committed — it is a build input, fetched at the pinned tag.
+.winter-agent-sdk/
+
 # Build artifacts
 dist/
 *.tsbuildinfo
