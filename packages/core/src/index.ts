@@ -10,6 +10,10 @@ export {
   type Settings,
 } from "./settings";
 export { runWorkflowSubprocess } from "./workflows/subprocess-entry";
+// P8b-18: reached only by the CLI's static `__runtime-state-probe` argv route, which imports it
+// from THIS barrel — the same shape `runWorkflowSubprocess` above uses, and the only shape that
+// survives `bun build --compile` (a dynamic import keyed on a string does not resolve in $bunfs).
+export { runRuntimeStateProbe, type RuntimeStateProbeResult } from "./probe";
 export { WorkflowRuntime, type WorkflowRuntimeDeps, type WorkflowRuntimeEvent, type WorkflowLaunch } from "./workflows/runtime";
 export { WorkflowStore, type ResolvedWorkflow } from "./workflows/store";
 export {
