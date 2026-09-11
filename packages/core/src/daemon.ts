@@ -5,6 +5,7 @@ import { bootstrapNormaDir, resolveNormaHome } from "./norma-dir";
 import { acquireLock, type Lock } from "./lock";
 import { TokenAuthority } from "./auth/tokens";
 import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
+import { migrateLegacyCredentialMaterial } from "./auth/credential-material";
 import { SessionStore } from "./sessions/store";
 import { SessionHub } from "./sessions/hub";
 import { reapEmptySessions } from "./sessions/reaper";
@@ -586,6 +587,17 @@ export async function startDaemon(opts: {
   // an independent feature (spec §A1). An unused, empty broker behaves identically to the
   // previous `null` for approval.respond (nothing pending either way).
   const approvalBroker = new ApprovalBroker();
+
+  // Hotfix (credential material, P8b): boot-time, idempotent, one-way — promotes the legacy raw
+  // openai-api-key / codex-access-token(+4) records into the JSON material records the spawned
+  // Winter child actually reads (auth/credential-material.ts). Unconditional and BEFORE
+  // createProvider below (even when `settings` is absent, and regardless of whether
+  // `opts.agentProvider` was injected) — this `secrets` store is the daemon's own real one
+  // (`KeychainSecretStore` in production, whatever a test injected) every time this function
+  // boots, so there is never a reason to skip it. Never throws (see the module's own doc comment);
+  // status words only in the log line, never a value.
+  const credentialMigration = await migrateLegacyCredentialMaterial(secrets);
+  console.log(`credentials: openai ${credentialMigration.openai}, codex-oauth ${credentialMigration.codexOauth}`);
 
   let agentProvider = opts.agentProvider;
   let quota: QuotaManager | undefined;
