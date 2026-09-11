@@ -21,24 +21,24 @@ const SID = "s_browser";
 
 interface Harness {
   deps: BrowserToolDeps;
-  recorded: Array<{ action: string; tabId?: string; url?: string }>;
+  recorded: Array<{ sessionId: string; action: string; tabId?: string; url?: string }>;
   opened: Array<{ sessionId: string; kind: string; url?: string }>;
   registry: ToolRegistry;
   instance: WinterMcpServerInstance;
   session: CapabilitySession;
 }
 
-function harness(mode: CapabilitySession["mode"] = "code"): Harness {
+function harness(mode: CapabilitySession["mode"] = "code", sessionId: string = SID): Harness {
   const recorded: Harness["recorded"] = [];
   const opened: Harness["opened"] = [];
   const tabs: PanelTabState = { tabs: [{ tabId: "t1", kind: "web", url: "https://example.com" }], activeTabId: "t1" } as PanelTabState;
   const h = { recorded, opened, registry: new ToolRegistry() } as Harness;
-  h.session = { sessionId: SID, mode, cwd: "/tmp", roots: ["/tmp"] };
+  h.session = { sessionId, mode, cwd: "/tmp", roots: ["/tmp"] };
   h.deps = {
     tabs: () => tabs,
     openTab: (p) => { opened.push({ sessionId: p.sessionId, kind: p.kind, url: p.url }); return `tab_${opened.length}`; },
     dispatch: (cmd) => {
-      recorded.push({ action: cmd.action, tabId: cmd.tabId, url: cmd.url });
+      recorded.push({ sessionId: cmd.sessionId, action: cmd.action, tabId: cmd.tabId, url: cmd.url });
       return { commandId: `pcmd_${recorded.length}`, settled: Promise.resolve<PanelCommandOutcome>({ kind: "result", ok: true, result: "did it" }) };
     },
     harnesses: () => [{ clientName: "orb", role: "harness" }],
@@ -115,8 +115,8 @@ describe("browserCapability: callTool", () => {
     // The bug this replaces: a daemon-wide "currently bound session" slot means a chat call landing
     // while a code session is bound gets the FULL interact set. Here both servers exist
     // simultaneously and the chat one still refuses, because its mode is a closure, not a lookup.
-    const code = harness("code");
-    const chat = harness("chat");
+    const code = harness("code", "s_code_session");
+    const chat = harness("chat", "s_chat_session");
     const [chatRes, codeRes] = await Promise.all([
       chat.instance.callTool("browser", { verb: "click", tabId: "t1", selector: "#go" }),
       code.instance.callTool("browser", { verb: "click", tabId: "t1", selector: "#go" }),
@@ -125,7 +125,12 @@ describe("browserCapability: callTool", () => {
     expect(codeRes.isError).toBe(false);
     expect(chat.recorded.length).toBe(0);
     expect(code.recorded.map((r) => r.action)).toEqual(["click"]);
-    // And each call was attributed to its OWN session id.
-    expect(code.opened.every((o) => o.sessionId === SID)).toBe(true);
+    // Each call was attributed to its OWN session id (N4 — this used to assert `.every()` over an
+    // empty array, which is vacuously true). A real `open` too, so the MINT path is covered.
+    expect(code.recorded.map((r) => r.sessionId)).toEqual(["s_code_session"]);
+    await code.instance.callTool("browser", { verb: "open", url: "https://example.com" });
+    await chat.instance.callTool("browser", { verb: "open", url: "https://example.com" });
+    expect(code.opened.map((o) => o.sessionId)).toEqual(["s_code_session"]);
+    expect(chat.opened.map((o) => o.sessionId)).toEqual(["s_chat_session"]);
   });
 });

@@ -1,9 +1,15 @@
 // The `sessions` capability server (P8b-12) — dispatch's orchestration and fleet-management
 // surface: `session_spawn`, `list_sessions`, `manage_session`.
 //
-// All three are `modes: ["dispatch"]` today and stay that way (`NORMA_CAPABILITY_TOOLS`); the
-// capability set itself is construction-time and mode-blind, so what keeps them out of a code or
-// chat session is Task 9's per-mode `disallowedTools`, not this file.
+// All three are `modes: ["dispatch"]` today and stay that way (`NORMA_CAPABILITY_TOOLS`), and since
+// P8b-36 made the session — and therefore its mode — part of the server, that is ENFORCED HERE
+// rather than delegated: `capabilityServer` filters the defs by the session's mode (P8b-37), so a
+// chat or code session's `sessions` server advertises nothing and serves nothing. Task 9's per-mode
+// `disallowedTools` remains the other half, belt and braces.
+//
+// THAT MATTERS MOST FOR `manage_session`, which can background, archive or interrupt any session by
+// id. Delegating its scoping to a STRING list was the arrangement C1 showed can be silently wrong:
+// a `disallowedTools` entry that does not match the name the child registered denies nothing.
 //
 // ⚠️ `session_spawn` IS A PLACEHOLDER ON BOTH DOORS, and that is the honest port rather than an
 // oversight. On the engine the real work is a BRIDGE: `engine.ts`'s per-round loop intercepts

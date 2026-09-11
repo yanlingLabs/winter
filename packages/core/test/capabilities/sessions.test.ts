@@ -165,13 +165,19 @@ describe("sessionsCapability: callTool", () => {
     expect(viaCapability.content).toEqual([{ type: "text", text: viaRegistry.output }]);
   });
 
-  test("the session is BAKED IN — every call is attributed to the session the server was built for", async () => {
+  test("manage_session acts on the session its ARGUMENT names, never on the caller's own", async () => {
+    // Named for what it actually proves (N4). The `sessions` tools take no `ToolContext` at all —
+    // `run(args)` — so the server's baked session is deliberately NOT an input here: a coordinator
+    // manages OTHER sessions, and it must not be able to act on itself by omission. The baked
+    // identity is proved where it is observable (computer.test.ts asserts `ctx.sessionId` reaching
+    // the service; office/browser assert it on the dispatched command).
     const h = harness();
-    const one = h.store.createSession("global", { cwd: h.home, mode: "code" });
-    await h.instance.callTool(MANAGE_SESSION_TOOL, { sessionId: one, action: "background" });
-    // Nothing looked a session up; there is no slot to look one up IN (P8b-36). `capabilityServer`
-    // takes a non-optional `CapabilitySession`, so "unbound" is a compile error, not a branch.
-    expect(h.emitted.map((e) => e.sessionId)).toEqual([one]);
+    const target = h.store.createSession("global", { cwd: h.home, mode: "code" });
+    await h.instance.callTool(MANAGE_SESSION_TOOL, { sessionId: target, action: "background" });
+    expect(h.emitted.map((e) => e.sessionId)).toEqual([target]);
+    // The server's own session — the dispatch coordinator — was never touched.
+    expect(h.session.sessionId).toBe("s_dispatch");
+    expect(h.emitted.some((e) => e.sessionId === "s_dispatch")).toBe(false);
   });
 
   test("a tool that throws is an isError result (the registry's throw→isError conversion)", async () => {

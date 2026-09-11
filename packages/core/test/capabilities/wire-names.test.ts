@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { isWinterMcpServerInstance, type McpSdkServerConfigWithInstance, type WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
+import { isWinterMcpServerInstance, type McpSdkServerConfigWithInstance, type Options, type WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,8 +8,9 @@ import { PageCache } from "../../src/agent/tools/page-core";
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "../../src/runtime-sdk/create";
 import {
   CAPABILITY_SERVER_KEYS, NORMA_CAPABILITY_TOOLS,
-  buildCapabilitiesFor, capabilityServerName, capabilityToolName,
-  type CapabilityDeps, type CapabilitySession,
+  assertNoCapabilityCollision, buildCapabilitiesFor, capabilityServerName, capabilityToolName,
+  CapabilityNameCollisionError,
+  type CapabilityDeps, type CapabilityServerRecord, type CapabilitySession,
 } from "../../src/capabilities";
 
 /**
@@ -67,29 +68,72 @@ function deps(): CapabilityDeps {
   };
 }
 
-function servers(): readonly McpSdkServerConfigWithInstance[] {
-  return buildCapabilitiesFor(SESSION, deps());
+function serversFor(mode: CapabilitySession["mode"]): CapabilityServerRecord {
+  return buildCapabilitiesFor({ ...SESSION, mode }, deps());
+}
+
+/**
+ * THE LAST HOP (N1). P8b-36 hands the servers to the child through `Options.mcpServers`, and on that
+ * path the wire name comes from the RECORD KEY, not from the config's `name` field:
+ * `toWireMcpServers` iterates `Object.entries(servers)` and keys its output by that key, and
+ * `makeSdkMcpCallHandler` dispatches `sdk_mcp_call` by `mcpServers[req.server]` — the key again.
+ * This walks an `Options` object the way the SDK does, so the derivation covers the path 8b actually
+ * takes rather than only the router's `capabilities` path.
+ */
+function wireNamesFromOptions(options: Pick<Options, "mcpServers">): string[] {
+  const out: string[] = [];
+  for (const [key, cfg] of Object.entries(options.mcpServers ?? {})) {
+    if (cfg.type !== "sdk" || !isWinterMcpServerInstance(cfg.instance)) continue;
+    // `toWireMcpServers` sends `tools: cfg.instance.listTools()` under this KEY; the child names
+    // each of them `mcp__<key>__<tool>`.
+    for (const tool of cfg.instance.listTools()) out.push(`mcp__${key}__${tool.name}`);
+  }
+  return out;
 }
 
 describe("P8b-35: the wire name a child sees is the name the table carries", () => {
   test("every server/tool pair derives to exactly its NORMA_CAPABILITY_TOOLS key", () => {
-    const derived: string[] = [];
-    for (const key of CAPABILITY_SERVER_KEYS) {
-      const server = servers().find((s) => s.name === capabilityServerName(key));
-      expect(server, `no capability server was built for key "${key}"`).toBeDefined();
-      for (const tool of (server!.instance as WinterMcpServerInstance).listTools()) {
-        // THE DERIVATION — the router's `mcp__<server>__<tool>`, built from the server object it is
-        // handed, with nothing pasted. This is the assertion that fails if the brand segment is not
-        // on the server's name.
-        const wire = `mcp__${server!.name}__${tool.name}`;
-        expect(wire).toBe(capabilityToolName(key, tool.name));
-        expect(NORMA_CAPABILITY_TOOLS, `${wire} is not in the table`).toHaveProperty(wire);
-        derived.push(wire);
+    const derived = new Set<string>();
+    // Across ALL THREE MODES, because P8b-37 now filters each server's tools by the session's mode —
+    // no single session sees every tool, and the table describes the union.
+    for (const mode of ["code", "dispatch", "chat"] as const) {
+      const record = serversFor(mode);
+      for (const key of CAPABILITY_SERVER_KEYS) {
+        const server = record[capabilityServerName(key)];
+        expect(server, `no capability server was built for key "${key}" in ${mode}`).toBeDefined();
+        for (const tool of (server!.instance as WinterMcpServerInstance).listTools()) {
+          // THE DERIVATION — the router's `mcp__<server>__<tool>`, built from the server object it is
+          // handed, with nothing pasted. This is the assertion that fails if the brand segment is
+          // not on the server's name.
+          const wire = `mcp__${server!.name}__${tool.name}`;
+          expect(wire).toBe(capabilityToolName(key, tool.name));
+          expect(NORMA_CAPABILITY_TOOLS, `${wire} is not in the table`).toHaveProperty(wire);
+          derived.add(wire);
+        }
       }
     }
-    // And nothing in the table names a tool no server actually serves — a stale row would be a
+    // And nothing in the table names a tool no session ever serves — a stale row would be a
     // `disallowedTools` entry that denies nothing, which is the same silent failure in reverse.
-    expect(derived.sort()).toEqual(Object.keys(NORMA_CAPABILITY_TOOLS).sort());
+    expect([...derived].sort()).toEqual(Object.keys(NORMA_CAPABILITY_TOOLS).sort());
+  });
+
+  test("N1: the same names come out of the `Options.mcpServers` path, walked as the SDK walks it", () => {
+    const derived = new Set<string>();
+    for (const mode of ["code", "dispatch", "chat"] as const) {
+      // The record IS `Options.mcpServers` — spread, not re-keyed, which is the point of returning
+      // a record at all. A driver that re-keyed it would show up right here.
+      for (const wire of wireNamesFromOptions({ mcpServers: { ...serversFor(mode) } })) {
+        expect(NORMA_CAPABILITY_TOOLS, `${wire} is not in the table`).toHaveProperty(wire);
+        derived.add(wire);
+      }
+    }
+    expect([...derived].sort()).toEqual(Object.keys(NORMA_CAPABILITY_TOOLS).sort());
+  });
+
+  test("N1: every record KEY equals its config's own name — mis-keying is unrepresentable", () => {
+    const record = serversFor("code");
+    for (const [key, cfg] of Object.entries(record)) expect(key).toBe(cfg.name);
+    expect(Object.keys(record).sort()).toEqual(CAPABILITY_SERVER_KEYS.map(capabilityServerName).sort());
   });
 
   test("the server name carries the brand, and can never shadow the standing messaging server", () => {
@@ -107,6 +151,32 @@ describe("P8b-35: the wire name a child sees is the name the table carries", () 
     for (const key of CAPABILITY_SERVER_KEYS) {
       expect(`mcp__${key}__x`).not.toBe(capabilityToolName(key, "x"));
     }
+  });
+});
+
+describe("N2: assertNoCapabilityCollision — the guard the router no longer runs for us", () => {
+  test("a caller's server colliding with a daemon-owned name is REFUSED, naming it", () => {
+    const owned = serversFor("code");
+    const plugin = { "norma__browser": { type: "sdk" as const, name: "norma__browser", instance: {} } };
+    expect(() => assertNoCapabilityCollision(plugin, owned)).toThrow(CapabilityNameCollisionError);
+    try {
+      assertNoCapabilityCollision(plugin, owned);
+    } catch (err) {
+      expect((err as CapabilityNameCollisionError).server).toBe("norma__browser");
+      expect((err as { code?: string }).code).toBe("capability_name_collision");
+    }
+  });
+
+  test("non-colliding servers, an empty record and `undefined` all pass", () => {
+    const owned = serversFor("code");
+    expect(() => assertNoCapabilityCollision({ "some-plugin": {} }, owned)).not.toThrow();
+    expect(() => assertNoCapabilityCollision({}, owned)).not.toThrow();
+    expect(() => assertNoCapabilityCollision(undefined, owned)).not.toThrow();
+  });
+
+  test("it accepts a bare name list as well as the record", () => {
+    expect(() => assertNoCapabilityCollision({ "norma__web": {} }, ["norma__web"])).toThrow(CapabilityNameCollisionError);
+    expect(() => assertNoCapabilityCollision({ "norma__web": {} }, ["norma__browser"])).not.toThrow();
   });
 });
 
@@ -139,7 +209,7 @@ describe("P8b-35: the REAL router accepts these servers and keys them by their o
     // `capabilityServerDescriptors` runs at CONSTRUCTION even on a Winter-only host: it calls every
     // `instance.listTools()` and refuses any tool whose `inputSchema` is not a JSON-Schema object.
     // Constructing without a throw IS that proof.
-    const built = servers();
+    const built = Object.values(serversFor("code"));
     expect(built.length).toBe(CAPABILITY_SERVER_KEYS.length);
     for (const s of built) expect(isWinterMcpServerInstance(s.instance)).toBe(true);
     const h = await handle(built);
@@ -147,7 +217,7 @@ describe("P8b-35: the REAL router accepts these servers and keys them by their o
   });
 
   test("the router keys each capability by `server.name` — the input to the wire name", async () => {
-    const h = await handle(servers());
+    const h = await handle(Object.values(serversFor("code")));
     for (const key of CAPABILITY_SERVER_KEYS) {
       expect(routerHolds(h, capabilityServerName(key)), `${capabilityServerName(key)} is not in the router's record`).toBe(true);
       // The bare key is NOT what the router holds — which is exactly why it must not be the name.

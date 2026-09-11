@@ -48,7 +48,7 @@
 import type { McpSdkServerConfigWithInstance, WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
 import type { ComputerUseService } from "../agent/computer-use";
 import { ToolRegistry, type ToolContext, type ToolDefinition } from "../agent/tools/registry";
-import { capabilityServerName, type SessionMode } from "./names";
+import { NORMA_CAPABILITY_TOOLS, capabilityServerName, capabilityToolName, type SessionMode } from "./names";
 
 /**
  * Everything a capability call needs to know about WHO is calling. Fixed for the life of the
@@ -111,13 +111,45 @@ export interface CapabilityServerSpec {
   /** The P8b-12 server key — `sessions`, `computer`, `browser`, `office`, `research`, `web`. The
    *  server's WIRE name is `capabilityServerName(key)`; see `names.ts` for why they differ. */
   key: string;
-  /** THE definitions — the same objects the daemon's shared registry holds. */
+  /** THE definitions — the same objects the daemon's shared registry holds. Filtered to this
+   *  session's mode before anything is advertised or executed; see `modesFor` below. */
   defs: readonly ToolDefinition[];
   /** Extra `ToolContext` wiring this server's tools need beyond identity (e.g. `computer`'s
    *  service). Applied UNDER the identity-derived fields (n1): an extras function that returned
    *  `mode` or `sessionId` must never be able to override the session it was built for — that is
    *  precisely how chat's read-only `browser` subset would be weakened. */
   contextExtras?(session: CapabilitySession): Partial<ToolContext>;
+}
+
+/**
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ * P8b-37 — MODE SCOPING IS STRUCTURAL HERE, not only a string list in Task 9
+ * ════════════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * P8b-12 assigned mode scoping to Task 9's per-mode `disallowedTools`, and that ruling's premise was
+ * a capability set that was construction-time and MODE-BLIND. P8b-36 retired that premise: the
+ * session — and therefore its mode — is now baked into every server. So the filter is one line, and
+ * it is worth having as belt and braces for a reason C1 demonstrated: a `disallowedTools` entry is a
+ * STRING, and a string that does not match the name the child actually registered denies nothing,
+ * silently. A structural filter cannot miss.
+ *
+ * Without it, a chat session's `sessions` server would advertise AND execute `manage_session` —
+ * which can background, archive or interrupt any session by id — and its `web` server would serve
+ * `web_fetch`/`web_search`, neither of which chat is ever offered today. `ToolRegistry.execute` does
+ * NOT enforce `modes` (mode there resolves `argsFor` and deferral only; the engine's mode gate is
+ * `namesForMode`, which runs at ADVERTISEMENT time), so nothing downstream would have caught it.
+ *
+ * The source of truth is `NORMA_CAPABILITY_TOOLS`, deliberately: it is the same table Task 9 derives
+ * `CAPABILITY_TOOL_MODES` from, so the two gates cannot disagree — and `names.test.ts` pins every
+ * row of it against the real `ToolDefinition`s, so the table cannot drift from the tools either.
+ * A tool absent from the table falls back to the registry's own documented default (`["code"]`),
+ * which is the restrictive answer; `wire-names.test.ts` proves the absent case is unreachable.
+ */
+function modesFor(serverKey: string, def: ToolDefinition): readonly SessionMode[] {
+  const facts = (NORMA_CAPABILITY_TOOLS as Readonly<Record<string, { modes: readonly SessionMode[] }>>)[
+    capabilityToolName(serverKey, def.name)
+  ];
+  return facts?.modes ?? (def.modes as readonly SessionMode[] | undefined) ?? ["code"];
 }
 
 /** `{ content: [{ type: "text", text }], isError }` — the registry's `ToolOutcome` → MCP mapping,
@@ -138,13 +170,17 @@ export function capabilityServer(
   spec: CapabilityServerSpec,
   session: CapabilitySession,
 ): McpSdkServerConfigWithInstance {
+  // P8b-37: THIS SESSION'S tools, and only those. Everything below — the private registry, the
+  // advertised list, and the name set `callTool` answers for — is built from the filtered set, so a
+  // tool this mode is not offered is indistinguishable from one that does not exist.
+  const defs = spec.defs.filter((def) => modesFor(spec.key, def).includes(session.mode));
   const registry = new ToolRegistry();
-  for (const def of spec.defs) registry.register(def);
-  const names = new Set(spec.defs.map((d) => d.name));
+  for (const def of defs) registry.register(def);
+  const names = new Set(defs.map((d) => d.name));
 
   const instance: WinterMcpServerInstance = {
     listTools() {
-      return spec.defs.map((def) => {
+      return defs.map((def) => {
         // `specFor` is the registry's own renderer — `rawParameters ?? z.toJSONSchema(...)`. Never
         // undefined here: the name was just registered and none of these defs carries a `scope`.
         //
@@ -165,7 +201,9 @@ export function capabilityServer(
     },
 
     async callTool(name: string, args: Record<string, unknown>) {
-      // Unknown tool FIRST, and worded exactly as `ToolRegistry.execute` words it.
+      // Unknown tool FIRST, and worded exactly as `ToolRegistry.execute` words it. A tool filtered
+      // out by mode (P8b-37) lands here too, and that is the right answer: to this session it does
+      // not exist, which is exactly what the registry door tells a mode that was never offered it.
       if (!names.has(name)) return textResult(`unknown tool: ${name}`, true);
       const ctx: ToolContext = {
         // Extras UNDER identity (n1) — see `contextExtras`' own doc comment.

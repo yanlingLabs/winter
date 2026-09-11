@@ -104,7 +104,7 @@ import { makeApply } from "./settings-apply";
 import { SettingsWatcher } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "./runtime-sdk/create";
-import { buildCapabilitiesFor, type CapabilityDeps, type CapabilitySession } from "./capabilities";
+import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord, type CapabilitySession } from "./capabilities";
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
 import { makeDaemonRoutineRunner } from "./routines/runner";
 import { makeRoutineScheduler } from "./routines/scheduler";
@@ -152,9 +152,10 @@ export interface RunningDaemon {
    *
    * `callTool(name, args)` carries no session identity, so the identity is BAKED INTO the server —
    * one set per session, handed to that session's own `Options.mcpServers` by the driver (Task 16).
+   * Already KEYED BY NAME, because the child derives each tool's wire name from the record key.
    * Exposed on the daemon because a test needs the SAME deps bundle daemon.ts wired, never a mirror.
    */
-  buildSessionCapabilities(session: CapabilitySession): readonly McpSdkServerConfigWithInstance[];
+  buildSessionCapabilities(session: CapabilitySession): CapabilityServerRecord;
   /**
    * P8b Task 15: THE LIVE settings holder — the same binding the settings-watcher swaps, not a boot
    * snapshot. Reading it twice around a `settings.json` write is how a test proves a key is hot
@@ -863,8 +864,10 @@ export async function startDaemon(opts: {
     // instances the registry door takes; the Brave key is read inside `run`.
     web: { web: { audit: (line) => audit.append(line), secret: (name) => secrets.get(name) } },
   };
-  /** THE door Task 16's session driver opens: one session in, its six servers out. */
-  const buildSessionCapabilities = (session: CapabilitySession): readonly McpSdkServerConfigWithInstance[] =>
+  /** THE door Task 16's session driver opens: one session in, its servers out — already keyed by
+   *  name, i.e. already in `Options.mcpServers` shape (the child derives each tool's wire name from
+   *  that key, so the keying must not be the driver's to get wrong). */
+  const buildSessionCapabilities = (session: CapabilitySession): CapabilityServerRecord =>
     buildCapabilitiesFor(session, capabilityDeps);
   try {
     runtimeSdk = await createNormaRuntimeSdk({

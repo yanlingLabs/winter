@@ -19,19 +19,19 @@ const WORKDIR = "/repo";
 
 interface Harness {
   deps: DocsToolDeps;
-  recorded: Array<{ action: string; args?: Record<string, unknown> }>;
+  recorded: Array<{ sessionId: string; action: string; args?: Record<string, unknown> }>;
   registry: ToolRegistry;
   instance: WinterMcpServerInstance;
   session: CapabilitySession;
 }
 
-function harness(): Harness {
+function harness(sessionId: string = SID): Harness {
   const recorded: Harness["recorded"] = [];
   const h = { recorded, registry: new ToolRegistry() } as Harness;
-  h.session = { sessionId: SID, mode: "code", cwd: WORKDIR, roots: [WORKDIR] };
+  h.session = { sessionId, mode: "code", cwd: WORKDIR, roots: [WORKDIR] };
   h.deps = {
     dispatch: (cmd) => {
-      recorded.push({ action: cmd.action, args: cmd.args });
+      recorded.push({ sessionId: cmd.sessionId, action: cmd.action, args: cmd.args });
       return { commandId: `pcmd_${recorded.length}`, settled: Promise.resolve<PanelCommandOutcome>({ kind: "result", ok: true, result: "did it" }) };
     },
     harnesses: () => [{ clientName: "orb", role: "harness" }],
@@ -97,9 +97,14 @@ describe("officeCapability", () => {
     expect(viaCapabilityH.recorded.length).toBe(0);
   });
 
-  test("every dispatched command carries the session the server was built for", async () => {
-    const h = harness();
-    await h.instance.callTool("sheets", { verb: "info", path: `${WORKDIR}/book.ods` });
-    expect(h.recorded.length).toBe(1);
+  test("every dispatched command carries the session the server was BUILT FOR (N4)", async () => {
+    // The identity is a closure, not a lookup, so the id on the wire is the one this server was
+    // constructed with — proved by building two servers with DIFFERENT ids and calling both.
+    const one = harness("s_office_one");
+    const two = harness("s_office_two");
+    await one.instance.callTool("sheets", { verb: "info", path: `${WORKDIR}/book.ods` });
+    await two.instance.callTool("docs", { verb: "info", path: `${WORKDIR}/notes.odt` });
+    expect(one.recorded.map((r) => r.sessionId)).toEqual(["s_office_one"]);
+    expect(two.recorded.map((r) => r.sessionId)).toEqual(["s_office_two"]);
   });
 });

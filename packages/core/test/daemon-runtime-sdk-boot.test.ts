@@ -168,11 +168,15 @@ describe("daemon boot — the capability servers (Tasks 6-7, P8b-36)", () => {
     await withTempHome(async (home) => {
       const d = await boot(home);
       const servers = d.buildSessionCapabilities(session());
-      // Computer use is off in this temp home, so five servers — not six.
-      expect(servers.map((s) => s.name)).toEqual([
+      // KEYED BY NAME — the record IS `Options.mcpServers`' shape, and the child derives each tool's
+      // wire name from the key, so the key set is the thing to assert. Computer use is off in this
+      // temp home, so five servers, not six.
+      expect(Object.keys(servers)).toEqual([
         "norma__sessions", "norma__browser", "norma__office", "norma__research", "norma__web",
       ]);
-      for (const s of servers) {
+      for (const [key, s] of Object.entries(servers)) {
+        // The invariant N1 exists to make unrepresentable: key === the config's own name.
+        expect(key).toBe(s.name);
         expect(s.type).toBe("sdk");
         // Wire-safe is not enough: an instance the router cannot call is completely inert.
         expect(isWinterMcpServerInstance(s.instance)).toBe(true);
@@ -188,7 +192,7 @@ describe("daemon boot — the capability servers (Tasks 6-7, P8b-36)", () => {
     await withTempHome(async (home) => {
       writeFileSync(join(home, "settings.json"), JSON.stringify({ computerUse: { enabled: true } }));
       const d = await boot(home);
-      expect(d.buildSessionCapabilities(session()).map((s) => s.name)).toContain("norma__computer");
+      expect(Object.keys(d.buildSessionCapabilities(session()))).toContain("norma__computer");
     });
   });
 
@@ -197,8 +201,8 @@ describe("daemon boot — the capability servers (Tasks 6-7, P8b-36)", () => {
       const d = await boot(home);
       const code = d.buildSessionCapabilities(session({ sessionId: "s_code", mode: "code" }));
       const chat = d.buildSessionCapabilities(session({ sessionId: "s_chat", mode: "chat" }));
-      const browserOf = (servers: readonly { name: string; instance: unknown }[]): WinterMcpServerInstance =>
-        servers.find((s) => s.name === "norma__browser")!.instance as WinterMcpServerInstance;
+      const browserOf = (servers: Readonly<Record<string, { instance: unknown }>>): WinterMcpServerInstance =>
+        servers["norma__browser"]!.instance as WinterMcpServerInstance;
       // Both alive at once; the chat one advertises the READ-ONLY browser schema, the code one the
       // full schema. Nothing is shared between them.
       const codeSchema = JSON.stringify(browserOf(code).listTools()[0]!.inputSchema);

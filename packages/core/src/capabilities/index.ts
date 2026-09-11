@@ -52,20 +52,42 @@ export interface CapabilityDeps {
 }
 
 /**
- * Build this session's capability servers, in `CAPABILITY_SERVER_KEYS` order.
+ * A session's capability servers, in the EXACT shape `Options.mcpServers` takes — keyed by each
+ * server's own name.
+ *
+ * ⚠️ THE KEY IS THE WIRE NAME (N1). On the path P8b-36 chose, the child derives a tool's name from
+ * the RECORD KEY, not from the config's `name` field: the SDK's `toWireMcpServers` iterates
+ * `Object.entries(servers)` and keys its output by that key, and `makeSdkMcpCallHandler` dispatches
+ * incoming `sdk_mcp_call`s by `mcpServers[req.server]` — the key again. A driver that keyed this
+ * record by anything other than `server.name` would silently re-open C1: every tool would be
+ * registered under a name nothing else in the daemon knows, with every test in this batch green.
+ *
+ * Returning a keyed RECORD rather than an array is what makes that unrepresentable — there is no
+ * mis-keying step left for Task 16 to get wrong, because there is no keying step at all.
+ */
+export type CapabilityServerRecord = Readonly<Record<string, McpSdkServerConfigWithInstance>>;
+
+/**
+ * Build this session's capability servers, ready to spread into `Options.mcpServers`.
  *
  * The session is BAKED IN — each server closes over it, so `callTool` never has to ask who is
  * calling and there is no unbound state to refuse. `CapabilitySession` is a required argument, so
- * "no session" is a compile error rather than a runtime branch.
+ * "no session" is a compile error rather than a runtime branch. Each server additionally serves only
+ * the tools this session's MODE is offered (P8b-37, `server.ts`).
+ *
+ * A server whose tool set is empty for this mode is KEPT, advertising nothing. Two reasons: the
+ * record's key set then depends only on `CAPABILITY_SERVER_KEYS` and the computer-use setting, which
+ * is one less thing for Task 16 and the tests to special-case; and a zero-tool MCP server is inert
+ * on the wire. Omitting them instead is a one-line change if it is ever ruled the other way.
  *
  * Never throws. The router still validates whatever it is handed (`capabilityServerDescriptors`
- * refuses any tool whose `inputSchema` is not a JSON-Schema object, even on a Winter-only host), so
- * a malformed declaration surfaces at the query rather than here.
+ * refuses any tool whose `inputSchema` is not a JSON-Schema object), so a malformed declaration
+ * surfaces at the query rather than here.
  */
 export function buildCapabilitiesFor(
   session: CapabilitySession,
   deps: CapabilityDeps,
-): readonly McpSdkServerConfigWithInstance[] {
+): CapabilityServerRecord {
   const servers: McpSdkServerConfigWithInstance[] = [sessionsCapability(session, deps.sessions)];
   // `computer` is the ONLY conditional server, and the condition is now LIVE — see
   // `computerUseEnabled` above.
@@ -74,5 +96,49 @@ export function buildCapabilitiesFor(
   servers.push(officeCapability(session, deps.office));
   servers.push(researchCapability(session, deps.research));
   servers.push(webCapability(session, deps.web));
-  return servers;
+  const record: Record<string, McpSdkServerConfigWithInstance> = {};
+  for (const server of servers) record[server.name] = server;
+  return record;
+}
+
+/**
+ * The router's capability-name collision guard, re-provided for the path that no longer has it (N2).
+ *
+ * `assertNoCapabilityCollision` inside the router only runs when the HANDLE carries capabilities,
+ * and P8b-36 moved Norma's to each session's own `Options.mcpServers` with the handle's list empty.
+ * So the router no longer refuses a same-named server appearing beside a capability — and a
+ * settings- or plugin-contributed MCP server called `norma__browser` merged into the same record
+ * would silently shadow the daemon-owned one, or be shadowed by it, depending on spread order.
+ * Either way the model would be handed a `browser` that is not Norma's, under Norma's name.
+ *
+ * Task 16 calls this whenever it merges ANY other server into the session's record. It throws
+ * rather than dropping: a collision is a configuration fault with two plausible intents and no safe
+ * default, exactly as the router judged it.
+ */
+export class CapabilityNameCollisionError extends Error {
+  readonly code = "capability_name_collision" as const;
+  /** The colliding server name — always one of the daemon-owned `norma__<key>` names. */
+  readonly server: string;
+  constructor(server: string) {
+    super(
+      `\`${server}\` is the name of a daemon-owned capability server for this session, and the ` +
+      `caller's own \`mcpServers\` already carries it — one of the two would silently not be ` +
+      `registered, so the door refuses rather than choose for you`,
+    );
+    this.name = "CapabilityNameCollisionError";
+    this.server = server;
+  }
+}
+
+export function assertNoCapabilityCollision(
+  mcpServers: Readonly<Record<string, unknown>> | undefined,
+  ownedNames: Iterable<string> | CapabilityServerRecord,
+): void {
+  if (mcpServers === undefined) return;
+  const owned = typeof (ownedNames as Iterable<string>)[Symbol.iterator] === "function"
+    ? (ownedNames as Iterable<string>)
+    : Object.keys(ownedNames as CapabilityServerRecord);
+  for (const name of owned) {
+    if (Object.hasOwn(mcpServers, name)) throw new CapabilityNameCollisionError(name);
+  }
 }
