@@ -129,6 +129,31 @@ const compose = (code: AgentErrorCode, detail?: string): ClassifiedError => ({
 });
 
 /**
+ * Hotfix (credential material, P8b): a `CredentialResolutionError("malformed")` thrown by the
+ * child's `winter-agent-sdk` `packages/runtime/src/provider/keychain-store.ts` (a stored Keychain
+ * record that does not `JSON.parse` into material its `coerceMaterial()` accepts) is not a
+ * `ProviderError`, so it falls through `provider-runtime/src/errors.ts`'s `normalizeThrown` to the
+ * generic `{ code: "network", retryable: true }` branch, then reaches this daemon as
+ * `terminal_reason: "api_error"` / `api_error_status: null` with the raw thrown text riding
+ * `result.result` — structurally IDENTICAL to any other pre-request resolution failure (e.g. "model
+ * ... is not in provider ...'s catalog", `conformance/goldens/p6-resolution-failure.trace.json`).
+ * There is no structured field that tells these apart; the child's own fixed wording is the only
+ * discriminator available, so this matches it rather than leaving every credential failure to read
+ * as `server` ("the provider is unavailable or overloaded" — wrong: retrying changes nothing, the
+ * record is deterministically malformed). A wording change in a future SDK bump makes the match
+ * silently stop firing (caught by this module's own unit test, not a runtime assertion) and the
+ * failure reverts to `server` — still accurate, just less specific, never a throw.
+ */
+const CREDENTIAL_RESOLUTION_MARKERS = [
+  "is not valid JSON credential material",
+  "is not a recognized credential material shape",
+];
+
+function isCredentialResolutionFailure(raw: unknown): boolean {
+  return typeof raw === "string" && CREDENTIAL_RESOLUTION_MARKERS.some((marker) => raw.includes(marker));
+}
+
+/**
  * Classify a terminal `result` that is an error.
  *
  * Precedence, most specific first: the provider taxonomy (a named class), then `api_error_status`
@@ -152,7 +177,14 @@ export function classifyResult(result: ResultFrame): ClassifiedError {
   // no overflow member. The class is implemented and tested against a synthetic frame so the code
   // is distinct and has a home the day a signal appears; it is NOT claimed to be reachable today.
   if (reason === "context_overflow") return compose("context_overflow", detail);
-  if (reason === "api_error") return compose("server", detail);
+  if (reason === "api_error") {
+    // A credential-resolution failure specifically (see the marker doc comment above) is an `auth`
+    // problem, not a `server` one — checked BEFORE the generic api_error fallback, never instead of
+    // it, so every other pre-request resolution failure (an unknown model, say) keeps reading as
+    // `server` exactly as it does today.
+    if (isCredentialResolutionFailure(result.result)) return compose("auth", detail);
+    return compose("server", detail);
+  }
 
   const bySubtype = typeof result.subtype === "string" ? SUBTYPE_CODE[result.subtype] : undefined;
   if (bySubtype !== undefined) return compose(bySubtype, detail);

@@ -167,3 +167,60 @@ describe("projector/errors: the thrown-error door (surface map §4.8 item 3)", (
     expect(warnings.join(" ")).toContain("no turn running");
   });
 });
+
+/**
+ * Hotfix (credential material, P8b): a `CredentialResolutionError("malformed")` thrown by the
+ * child's keychain-store.ts has NO structured discriminator on the wire — it reaches this daemon as
+ * `terminal_reason: "api_error"` / `api_error_status: null`, structurally identical to any other
+ * pre-request resolution failure (see the conformance golden `p6-resolution-failure.trace.json`,
+ * which is exactly this shape for an unknown-model failure). The ONLY way to tell a credential
+ * failure apart is the child's own fixed wording in `result.result` — this pins that match, and pins
+ * that an unrelated `api_error` (no marker present) keeps reading as `server`, unchanged.
+ */
+describe("projector/errors: a credential-resolution api_error classifies as auth, not server", () => {
+  test('the exact live bug — "...is not valid JSON credential material" → auth, not server', () => {
+    const classified = classifyResult(res({
+      is_error: true,
+      terminal_reason: "api_error",
+      api_error_status: null,
+      result: "provider request failed (network): the keychain record for keychain:com.norma.core.dev/codex-access-token is not valid JSON credential material",
+    }));
+    expect(classified.code).toBe("auth");
+    expect(classified.message).toBe(
+      "the provider rejected these credentials: provider request failed (network): the keychain record for keychain:com.norma.core.dev/codex-access-token is not valid JSON credential material",
+    );
+  });
+
+  test('"...is not a recognized credential material shape" → auth', () => {
+    const classified = classifyResult(res({
+      is_error: true,
+      terminal_reason: "api_error",
+      api_error_status: null,
+      result: "the keychain record for keychain:com.norma.core.dev/openai:default is not a recognized credential material shape",
+    }));
+    expect(classified.code).toBe("auth");
+  });
+
+  test("an api_error with NEITHER marker stays server — an unknown model, not a credential problem", () => {
+    const classified = classifyResult(res({
+      is_error: true,
+      terminal_reason: "api_error",
+      api_error_status: null,
+      result: 'model "definitely-not-a-model-t10" is not in provider "anthropic"\'s catalog (its live catalog is authoritative, so absence is definitive)',
+    }));
+    expect(classified.code).toBe("server");
+  });
+
+  test("api_error_status (a real HTTP status) still wins over the credential marker — precedence unchanged", () => {
+    // A credential failure never carries a real HTTP status (no request was ever made), but this
+    // pins that IF one ever did, the structural HTTP class still takes precedence, exactly like
+    // every other api_error case.
+    const classified = classifyResult(res({
+      is_error: true,
+      terminal_reason: "api_error",
+      api_error_status: 500,
+      result: "... is not valid JSON credential material",
+    }));
+    expect(classified.code).toBe("server"); // codeForHttpStatus(500), not the marker match
+  });
+});
