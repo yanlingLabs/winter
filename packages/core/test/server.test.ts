@@ -2977,7 +2977,9 @@ describe("provider.configure RPC (BYOK T1)", () => {
     // Hotfix (credential material, P8b): the RPC now writes the JSON material record the spawned
     // Winter child reads (openai:default), not the legacy raw openai-api-key string.
     expect(await readOpenAiApiKey(srv.secrets)).toBe("sk-test-123");
-    expect(await srv.secrets.get(OPENAI_API_KEY_SECRET)).toBeNull();
+    // Review r1 m4: the legacy raw record is BLANKED (not left null) after a successful material write, so a
+    // rotated key is never left live under the old name; blank reads as absent everywhere (presence, migration).
+    expect(await srv.secrets.get(OPENAI_API_KEY_SECRET)).toBe("");
 
     const settings = JSON.parse(readFileSync(srv.settingsPath, "utf8"));
     expect(settings.provider).toEqual({ type: "openai-compatible", baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini" });
