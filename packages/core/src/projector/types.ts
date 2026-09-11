@@ -154,9 +154,30 @@ export interface Projector {
    * recorded tooluse run) was indistinguishable from a duplicate terminal, so its `turn_completed`
    * was dropped and the client's spinner hung forever with every unit test green.
    *
-   * It returns the `turn_started` the host appends beside its `user_message` — the seam Task 16
-   * uses, so `turn_started` has a producer on the Winter leg instead of an open obligation. It also
-   * records the pushed text in the echo window, which is what makes `dedupe.ts` reachable at all.
+   * It returns the `turn_started` the host appends beside its `user_message` — **the host appends
+   * THAT event and never synthesizes one of its own**, because two producers would write two rows
+   * per turn into the session JSONL and, since `SUBAGENT_TRANSCRIPT_INCLUDE.turn_started` is
+   * `true`, into every child's model-greppable transcript as well. It also records the pushed text
+   * in the echo window, which is what makes `dedupe.ts` reachable at all.
+   *
+   * ── A MID-TURN STEER IS NOT A NEW BEGUN TURN ────────────────────────────────────────────────
+   *
+   * `session.send` and `session.steer` are both pushes into the same host-owned queue (P8b-5), but
+   * they differ in exactly the way this door cares about: `send` starts a turn, while `steer` joins
+   * the turn already running (the child drains it at its next round top). So the rule stays "ONE
+   * `result` per begun turn", and **a steer must not call `beginTurn`** — under the current
+   * understanding it produces no terminal of its own, and an extra `beginTurn` would leave
+   * `openTurns` permanently >= 1, silently weakening the guard so a stray or duplicate `result` is
+   * projected instead of dropped. It would also put a mid-turn `turn_started` in the log, which the
+   * engine never emits.
+   *
+   * **THIS IS NOT MEASURED, AND IT IS A TASK 16 MEASUREMENT OBLIGATION.** Task 10's recording
+   * deliberately gated its second envelope on the first `result` "so the turns stay separable", so
+   * it says nothing about a mid-turn push. Drive a `steer` against the built binary and COUNT the
+   * `result`s: if a steered-in message terminates on its own, the driver must call `beginTurn` for
+   * the steer too — otherwise that terminal is dropped by the `openTurns === 0 && !sawFrame` guard
+   * whenever the steer produced no frames first, which is the same defect this door was added to
+   * fix, on the steer path.
    */
   beginTurn(input: { text: string; at?: string }): ProjectedBatch;
   /** Fold one wire message into zero or more `SessionEvent`s, in emission order. */

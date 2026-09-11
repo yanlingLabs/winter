@@ -87,8 +87,12 @@ export function asInitFrame(m: ProtocolSdkMessage): InitFrame | undefined {
  * **CROSS-LANE CONTRACT (n9, review r2):** that id is also how Task 13's `PersistedWinterChild` and
  * Task 16's `Query.messaging.steerChild`/`resumeChild` must address the same child. The projector
  * opens a thread with the spawning `tool_use.id`; anything addressing that child by another id is
- * talking about a different thread as far as the session log is concerned. The integration test
- * asserts the two agree.
+ * talking about a different thread as far as the session log is concerned.
+ *
+ * **Nothing asserts that agreement today** — the two sides are in different lanes and neither can
+ * see the other. Keeping the two id choices in step is an OBLIGATION on the integration-time
+ * tripwire the controller is adding, not a fact this file may claim. Until that tripwire exists,
+ * the only thing holding the contract is this comment and the matching one in `children.ts`.
  */
 export function threadIdOf(frame: { parent_tool_use_id?: string | null }): string {
   const parent = frame.parent_tool_use_id;

@@ -529,8 +529,12 @@ class ProjectorImpl implements Projector {
    * Winter's tool name → Norma's (ruling P8b-25). An unknown name passes through unchanged and is
    * logged once: a tool row with an unfamiliar label is a cosmetic surprise, whereas dropping the
    * call or inventing a name would corrupt the transcript and break the `callId` linkage the Mac
-   * and iOS renderers fold on. The table is `projector/tool-names.ts` TODAY and moves to the
-   * policy lane's canonical `runtime-sdk/tool-names.ts` in Task 11.
+   * and iOS renderers fold on.
+   *
+   * The table lives in `projector/tool-names.ts`, which is a PRIVATE stand-in. The canonical shared
+   * table is `runtime-sdk/tool-names.ts` and it is the POLICY LANE'S to write; this copy is
+   * switched over to it — and deleted — in the integration resume, once that module has landed. A
+   * controller-ruled deferral, not an outstanding promise from this lane.
    */
   private renameTool(winterName: string): string {
     const norma = normaToolNameFor(winterName);

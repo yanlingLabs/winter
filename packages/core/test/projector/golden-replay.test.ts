@@ -40,10 +40,20 @@ import { accept, beginTurn, makeProjector, run } from "./harness";
  *    the difference.
  *  - **A child's own text is absent from the default wire.** `Options.forwardSubagentText`
  *    (`winter-agent-sdk/dist/options.d.ts:99`) is off unless the host sets it, so only the child's
- *    tool_use/tool_result blocks are forwarded. Both shapes are fixtures:
- *    `code-child-spawn` (off — the child's `assistant_message` genuinely does not arrive) and
- *    `code-child-spawn-forwarded` (on — it does, and the golden's child subsequence matches in
- *    full). Turning the option on is a Task 16 decision, recorded in the task report.
+ *    tool_use/tool_result blocks are forwarded — which is why the engine golden's child
+ *    `assistant_message` has no counterpart in `code-child-spawn`. That half IS measured.
+ *
+ *    The other half is not. **`code-child-spawn-forwarded` is AUTHORED** (`provenance: "authored"`
+ *    on its scenario record): the real-child measurement ran with default options, so no recording
+ *    exists with the flag on. This test therefore asserts only the conditional — IF a child's own
+ *    text arrives carrying `parent_tool_use_id` in the §4.3 shape, the projector folds it onto that
+ *    child's threadId — and never that it does arrive. **What a real-child measurement with
+ *    `forwardSubagentText: true` must confirm:** that the child's text arrives as `assistant`
+ *    (and `stream_event`) frames carrying `parent_tool_use_id` at all; that the id is the spawning
+ *    `tool_use.id` and not some other child identifier; and whether the forwarded text also
+ *    duplicates into the parent's own `tool_result`, which would double it in the transcript.
+ *    That measurement is the deferred `describeWithWinterBinary`-gated test's job, alongside the
+ *    `stream_event` gap. Turning the option on at all is a Task 16 decision.
  */
 
 /** Variants the projector produces, derived from the coverage map so the two can never drift. */
