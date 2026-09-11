@@ -9,6 +9,8 @@
 // No child process is spawned anywhere here — no `sdk.query()`, no real `winter` binary.
 import { afterEach, describe, expect, test } from "bun:test";
 import { buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
+import { isWinterMcpServerInstance, type Query, type WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
+import type { CapabilitySession } from "../src/capabilities";
 import type { RuntimeDirectoryEntry } from "@yanlinglabs/winter-runtime-sdk";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -126,6 +128,95 @@ describe("daemon boot — the Winter handle", () => {
       await handle.sdk.directory.record(entryFor("s_degraded"));
       const listed = await handle.sdk.directory.list();
       expect(listed.map((o) => o.address)).toContain(serializeRuntimeAddress(buildSessionAddress("s_degraded")));
+    });
+  });
+});
+
+// P8b Tasks 6-7 (P8b-36): the daemon's capability servers, built PER SESSION.
+//
+// `RuntimeSdkOptions.capabilities` is handle-wide and construction-time, which is exactly what a
+// per-session capability set must not be: `callTool(name, args)` carries no session identity, so a
+// shared instance would have to look one up — and a daemon-wide slot cross-attributes the moment two
+// Winter sessions run turns concurrently. Because `ctx.mode` comes from the same place and resolves
+// `browser`'s read-only chat subset, that is a security bug, not only an identity one.
+//
+// So the handle is built with `capabilities: []` (proved below through the router's own per-query
+// collision guard, which throws BEFORE the leg is picked and before anything is spawned), and the
+// daemon exposes `buildSessionCapabilities(session)` for Task 16's driver to put on each session's
+// own `Options.mcpServers`.
+describe("daemon boot — the capability servers (Tasks 6-7, P8b-36)", () => {
+  /** True iff the ROUTER HANDLE is holding a capability server called `name`. */
+  function handleHoldsCapability(d: RunningDaemon, name: string): boolean {
+    const abortController = new AbortController();
+    abortController.abort();
+    try {
+      d.runtimeSdk!.sdk.query({
+        prompt: "unreachable",
+        options: { abortController, mcpServers: { [name]: { type: "sdk", name, instance: {} } } },
+      });
+      return false;
+    } catch (err) {
+      return (err as Error).message.includes("is the name of a capability server this handle forwards");
+    }
+  }
+
+  const session = (over: Partial<CapabilitySession> = {}): CapabilitySession =>
+    ({ sessionId: "s_cap", mode: "code", cwd: "/tmp", roots: ["/tmp"], ...over });
+
+  test("the handle carries NO handle-wide capabilities — they are per session", async () => {
+    await withTempHome(async (home) => {
+      const d = await boot(home);
+      expect(d.runtimeSdk).toBeDefined();
+      for (const key of ["norma__sessions", "norma__browser", "norma__office", "norma__research", "norma__web", "norma__computer"]) {
+        expect(handleHoldsCapability(d, key), `${key} is on the handle and should not be`).toBe(false);
+      }
+    });
+  });
+
+  test("buildSessionCapabilities returns this session's servers, wired from the daemon's own deps", async () => {
+    await withTempHome(async (home) => {
+      const d = await boot(home);
+      const servers = d.buildSessionCapabilities(session());
+      // KEYED BY NAME — the record IS `Options.mcpServers`' shape, and the child derives each tool's
+      // wire name from the key, so the key set is the thing to assert. Computer use is off in this
+      // temp home, so five servers, not six.
+      expect(Object.keys(servers)).toEqual([
+        "norma__sessions", "norma__browser", "norma__office", "norma__research", "norma__web",
+      ]);
+      for (const [key, s] of Object.entries(servers)) {
+        // The invariant N1 exists to make unrepresentable: key === the config's own name.
+        expect(key).toBe(s.name);
+        expect(s.type).toBe("sdk");
+        // Wire-safe is not enough: an instance the router cannot call is completely inert.
+        expect(isWinterMcpServerInstance(s.instance)).toBe(true);
+        for (const tool of (s.instance as WinterMcpServerInstance).listTools()) {
+          // The router refuses any capability tool whose schema is not a JSON-Schema object.
+          expect(tool.inputSchema["type"]).toBe("object");
+        }
+      }
+    });
+  });
+
+  test("the computer server follows the LIVE computerUse.enabled setting — no restart (M2)", async () => {
+    await withTempHome(async (home) => {
+      writeFileSync(join(home, "settings.json"), JSON.stringify({ computerUse: { enabled: true } }));
+      const d = await boot(home);
+      expect(Object.keys(d.buildSessionCapabilities(session()))).toContain("norma__computer");
+    });
+  });
+
+  test("two sessions get INDEPENDENT servers, each carrying its own mode", async () => {
+    await withTempHome(async (home) => {
+      const d = await boot(home);
+      const code = d.buildSessionCapabilities(session({ sessionId: "s_code", mode: "code" }));
+      const chat = d.buildSessionCapabilities(session({ sessionId: "s_chat", mode: "chat" }));
+      const browserOf = (servers: Readonly<Record<string, { instance: unknown }>>): WinterMcpServerInstance =>
+        servers["norma__browser"]!.instance as WinterMcpServerInstance;
+      // Both alive at once; the chat one advertises the READ-ONLY browser schema, the code one the
+      // full schema. Nothing is shared between them.
+      const codeSchema = JSON.stringify(browserOf(code).listTools()[0]!.inputSchema);
+      const chatSchema = JSON.stringify(browserOf(chat).listTools()[0]!.inputSchema);
+      expect(codeSchema).not.toBe(chatSchema);
     });
   });
 });

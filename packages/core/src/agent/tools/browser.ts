@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { PanelOpenTabParams, PANEL_COMMAND_ARGS_MAX_JSON_BYTES } from "@norma/protocol";
-import type { ToolRegistry } from "./registry";
+import type { ToolDefinition, ToolRegistry } from "./registry";
 import type { PanelCommandAction, PanelCommandOutcome } from "../../panel/commands";
 import type { PanelTabState } from "../../panel/store";
 import type { PanelTabMint } from "../../panel/open-tab";
@@ -691,7 +691,14 @@ function seconds(ms: number): string {
 // ================================================================================================
 
 export function registerBrowserTool(r: ToolRegistry, deps: BrowserToolDeps): void {
-  r.register({
+  for (const def of browserToolDefs(deps)) r.register(def);
+}
+
+/** P8b Task 7 — THE definition(s), extracted verbatim from `registerBrowserTool`'s body so the daemon's shared
+ *  `ToolRegistry` and the capability server drive the SAME `ToolDefinition` object rather than two
+ *  copies of one. Nothing about the registration changed. */
+export function browserToolDefs(deps: BrowserToolDeps): ToolDefinition[] {
+  return [{
     name: "browser",
     description:
       "Drive the user's real browser — the tabs in Norma's side panel, in the user's own logged-in "
@@ -943,7 +950,7 @@ export function registerBrowserTool(r: ToolRegistry, deps: BrowserToolDeps): voi
 
       return outcome.result ?? `browser ${a.verb} completed in tab ${tabId}`;
     },
-  });
+  }];
 }
 
 // ================================================================================================
