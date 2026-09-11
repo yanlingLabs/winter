@@ -1219,7 +1219,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           try {
             await opts.winter!.create(sessionId);
           } catch (err) {
+            // The row AND its runtime rows: `create` may have persisted the record (with its backend
+            // uuid) before the child refused to start, and a record for a session that no longer
+            // exists is parked by every later recovery and counted by `norma doctor` forever —
+            // retention never removes it, only a session deletion does. Same hook the reaper fires.
             try { opts.store.deleteSession(sessionId); } catch { /* the row is gone or undeletable; the refusal still stands */ }
+            try { opts.onSessionDeleted?.(sessionId); } catch { /* best effort; the refusal still stands */ }
             rpcFromWinterRefusal(err);
           }
         } else {
@@ -1435,19 +1440,21 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // and is resumed here — takes its own path. The attachment check mirrors `hub.send`'s own
         // (same message, same plain Error → INTERNAL), and the driver appends the `user_message`
         // under this client's name exactly as `hub.send` would, then begins the turn (P8b-5).
-        {
+        if (opts.winter !== undefined && (opts.winter.get(p.sessionId) !== undefined || opts.winter.legOf(p.sessionId) === "winter")) {
+          // The attachment check FIRST (the same condition and message `hub.send` throws for), so a
+          // client attached elsewhere can never trigger a resume-spawn that is then refused.
+          if (hub.attachedSession(socket.data.hubClient) !== p.sessionId) {
+            throw new Error(`client ${socket.data.clientName} not attached to ${p.sessionId}`);
+          }
           const winterSession = await ensureWinterSession(p.sessionId);
           if (winterSession !== undefined) {
-            if (hub.attachedSession(socket.data.hubClient) !== p.sessionId) {
-              throw new Error(`client ${socket.data.clientName} not attached to ${p.sessionId}`);
-            }
             try {
               const sent = await winterSession.send(p.text, socket.data.clientName);
               return { seq: sent.seq };
             } catch (err) { rpcFromWinterRefusal(err); }
           }
-          refuseIfPredatesWinterLeg(p.sessionId);
         }
+        refuseIfPredatesWinterLeg(p.sessionId);
         const seq = hub.send(socket.data.hubClient, p.sessionId, p.text);
         // Fire-and-forget: the response returns immediately and turn events stream separately.
         // If a turn is already running, this message just lands in history for the next turn
