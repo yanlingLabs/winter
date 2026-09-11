@@ -450,6 +450,30 @@ describe("startWinterSession — one incarnation", () => {
     expect(h.session.state).toBe("resumable");
   });
 
+  test("Task 17 (P8b-15): a spawned child is relayed to the roster — started on thread_started, progress per child frame, completed from the spawning call's tool_result", async () => {
+    const calls: string[] = [];
+    const h = harness({ children: {
+      started: (c) => { calls.push(`started:${c.threadId}:${c.agentType}`); },
+      progress: (id) => { calls.push(`progress:${id}`); },
+      completed: (id, stop) => { calls.push(`completed:${id}:${stop}`); },
+    } });
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("spawn one", "cli");
+    h.q().emit({ type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_kid_1", name: "Agent", input: { prompt: "do it", description: "worker" } }] } });
+    await h.settled();
+    expect(calls).toEqual(["started:toolu_kid_1:general-purpose"]);
+    // the child's own frame, stamped with the spawning id
+    h.q().emit({ type: "assistant", parent_tool_use_id: "toolu_kid_1", message: { content: [{ type: "text", text: "child says hi" }] } });
+    await h.settled();
+    expect(calls.filter((c) => c.startsWith("progress:toolu_kid_1")).length).toBeGreaterThan(0);
+    h.q().emit({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "toolu_kid_1", content: "child finished" }] } });
+    await h.settled();
+    expect(calls.at(-1)).toBe("completed:toolu_kid_1:end_turn");
+    expect(seen(h, "thread_started")).toHaveLength(1);
+    expect(seen(h, "thread_completed")).toHaveLength(1);
+  });
+
   test("compact is a typed refusal; setModel reaches a live child and is a no-op while resumable", async () => {
     const h = harness();
     await expect(h.session.compact()).rejects.toMatchObject({ code: "not_supported_on_winter_leg" });

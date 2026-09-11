@@ -293,7 +293,7 @@ describe("hot-settings P8b: the Winter-leg keys reach the live holder with no re
     await untilSettings(daemon, "the runtimes block to reach the live holder", (s) => s?.runtimes?.winterLeg?.chat === true);
     const live = daemon.settings()!.runtimes!;
     // Task 9's `legForNewSession` reads exactly this; the helper itself is the policy lane's.
-    expect(live.winterLeg).toEqual({ chat: true, dispatch: false, code: false });
+    expect(live.winterLeg).toEqual({ chat: true, dispatch: true, code: false });
     // Task 5's `spawnHookFor` resolves this; here the assertion stops at the parsed setting.
     expect(live.winterExecutable).toBe(winterBin);
     expect(live.winterIdleTimeoutSec).toBe(60);

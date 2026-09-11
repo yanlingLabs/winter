@@ -355,8 +355,9 @@ export const Settings = z.object({
    *  ── The Winter leg (8b) ──────────────────────────────────────────────────────────────────────
    *
    *  `winterLeg` decides, PER MODE, whether a NEW session runs on the Winter runtime or on the
-   *  legacy engine (P8b-13). All three default false, so a daemon that has never been configured
-   *  behaves exactly as it does today. A flag governs new sessions only: a session runs to
+   *  legacy engine (P8b-13). Each flips to `true` as its mode's e2e proof lands (Task 16: chat;
+   *  Task 17: dispatch, then code) — `winterOptionsFromSettings` below carries the SAME defaults
+   *  for an absent block. A flag governs new sessions only: a session runs to
    *  completion on the leg it was created with, which is what makes flipping one safe at any moment.
    *
    *  `winterExecutable` overrides the `winter` binary lookup (P8b-2's first door, ahead of
@@ -391,7 +392,8 @@ export const Settings = z.object({
     winterExecutable: z.string().optional(),
     winterLeg: z.object({
       chat: z.boolean().default(false),
-      dispatch: z.boolean().default(false),
+      // Task 17 Step 1: Dispatch's e2e proof landed (`test/e2e/winter-dispatch-e2e.test.ts`).
+      dispatch: z.boolean().default(true),
       code: z.boolean().default(false),
     }).prefault({}),
     advisorModel: z.string().optional(),
@@ -447,10 +449,12 @@ export function winterOptionsFromSettings(s: Settings | null | undefined): Winte
     ...(blankIsAbsent(r?.winterExecutable) === undefined ? {} : { winterExecutable: blankIsAbsent(r?.winterExecutable)! }),
     ...(blankIsAbsent(r?.advisorModel) === undefined ? {} : { advisorModel: blankIsAbsent(r?.advisorModel)! }),
     idleTimeoutSec: r?.winterIdleTimeoutSec ?? DEFAULT_WINTER_IDLE_TIMEOUT_SEC,
+    // Only a LITERAL boolean counts (a hand-edited truthy value never moves a session); an absent
+    // field answers the schema's default for that mode. Dispatch: Task 17 Step 1.
     winterLeg: {
-      chat: r?.winterLeg?.chat ?? false,
-      dispatch: r?.winterLeg?.dispatch ?? false,
-      code: r?.winterLeg?.code ?? false,
+      chat: r?.winterLeg?.chat === true,
+      dispatch: r?.winterLeg?.dispatch === undefined ? true : r.winterLeg.dispatch === true,
+      code: r?.winterLeg?.code === true,
     },
   };
 }

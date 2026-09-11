@@ -11,6 +11,42 @@ function makeHome(): string {
 }
 
 describe("makeDaemonRoutineRunner — runHeadless", () => {
+  test("P8b Task 17: with winterLeg.code on, the turn runs through the driver table (it appends the user_message itself); no engine is needed", async () => {
+    const store = new SessionStore(makeHome());
+    const hub = new SessionHub(store);
+    const seen: Array<{ sessionId: string; text: string; clientName: string }> = [];
+    const runner = makeDaemonRoutineRunner({
+      store, hub, engine: null,
+      winter: {
+        legForNewSession: () => "winter",
+        async runTurn(sessionId, text, clientName) {
+          seen.push({ sessionId, text, clientName });
+          hub.append(sessionId, { type: "user_message", sessionId, threadId: "main", text, clientName });
+          hub.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: "done on winter" });
+          hub.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 1, outputTokens: 1 });
+        },
+      },
+    });
+    const result = await runner.runHeadless({ prompt: "check inbox", policy: "auto", cwd: "/tmp/proj", origin: "routine/r9" });
+    expect(result).toMatchObject({ ok: true, resultText: "done on winter" });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ text: "check inbox", clientName: "routine" });
+    const log = store.read(seen[0]!.sessionId);
+    expect(log.filter((e) => e.type === "user_message")).toHaveLength(1);   // the runner appended none of its own
+    expect(store.meta(seen[0]!.sessionId).origin).toBe("routine/r9");
+  });
+
+  test("P8b Task 17: with winterLeg.code off the engine path is byte-identical (the runner appends the user_message)", async () => {
+    const store = new SessionStore(makeHome());
+    const hub = new SessionHub(store);
+    let ran = 0;
+    const engine: MinimalEngine = { async runTurn(sessionId) { ran++; hub.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 1, outputTokens: 1 }); } };
+    const runner = makeDaemonRoutineRunner({ store, hub, engine, winter: { legForNewSession: () => "engine", runTurn: async () => { throw new Error("never"); } } });
+    const result = await runner.runHeadless({ prompt: "p", policy: "auto", cwd: "/tmp/proj", origin: "routine/r10" });
+    expect(result.ok).toBe(true);
+    expect(ran).toBe(1);
+  });
+
   test("no engine configured (agent disabled): fails cleanly, no session left dangling on the happy path", async () => {
     const store = new SessionStore(makeHome());
     const hub = new SessionHub(store);

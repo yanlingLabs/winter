@@ -957,6 +957,56 @@ export async function startDaemon(opts: {
   // `runtimes.winterLeg` flag false it answers "engine" for every new session and the engine
   // path is byte-identical to today. The drivers it starts are tracked on `runtimeSdk`
   // (`trackQuery`), so `stop()`'s `dispose()` ends them inside the shutdown budget.
+  // P8b Task 17: HOISTED above the `if (agentProvider)` gate — the Winter leg's drivers (below)
+  // persist their children through this roster too, on a daemon with or without an engine.
+  // Async spawn (4h-ii-a): tracks DETACHED (`run_in_background:true`) child threads — see
+  // bg-agent-registry.ts's own doc comment for why this is separate from `bgRegistry` above
+  // (that one owns backgrounded bash processes; this one owns agent threads). Built
+  // unconditionally alongside `subagents` — both are required together for the spawn bridge's
+  // async branch to activate (engine.ts's EngineConfig.bgAgents doc comment).
+  //
+  // P8b Task 13 (C-12 / P8b-15): DURABLE when the 8a spine opened, in-memory when it did not.
+  //
+  // `BackgroundAgentRegistry` is one `Map`, so every daemon restart lost the whole roster — the
+  // names a model was still using, which children had finished, and every `ResumeContext` that
+  // made `resume` possible (WS-17 §8 row 6). 8a shipped `runtime_children` and its
+  // reclassification rule and wired it to nothing; `createPersistedChildren` is that wiring, and
+  // it satisfies the same `AgentRegistry` contract every consumer here already takes, so the
+  // engine's spawn bridge, `task_stop`, `agent_list`/`agent_output` and the `thread.send`/
+  // `agent.stop` RPCs are untouched.
+  //
+  // A SPINE THAT WOULD NOT OPEN FALLS BACK, never fails: children are then exactly as durable as
+  // they were before this task, which is the same "runtime routing degraded, boot continues"
+  // posture the spine itself takes.
+  //
+  // ⚠️ NO `stallTimeoutMs` HERE, DELIBERATELY (fix round 1, F1). `SubagentManager` already owns a
+  // RESETTABLE progress window for every engine child, and its controller is folded into the
+  // child's run signal on both spawn paths — so arming a second timer over the same children is a
+  // second KILLER, not a second safety net. Worse, while nothing in production reset it, it was a
+  // 600 s WALL CLOCK, which is exactly what CLAUDE.md's tool surface and the standing "subagents:
+  // no timeout" rule forbid. The registry's window is opt-in (see `stallTimeoutMs`'s own note) and
+  // Task 17 turns it on for Winter children when `SubagentManager` retires with the engine. The
+  // engine DOES feed `progress()` here and now (engine.ts's three child sites), so the window is a
+  // progress window the moment it is armed rather than an API nobody calls.
+  const bgAgents: AgentRegistry =
+    runtime === undefined
+      ? new BackgroundAgentRegistry()
+      : createPersistedChildren({
+          store: runtime.children,
+          profiles: runtime.profiles,
+          providerId: () => settings?.provider?.type ?? "unstated",
+          // The owning session's live facet — Task 16 attaches Winter sessions, and until then a
+          // stop with no local `AbortController` is recorded and nothing is asked of the child.
+          facetFor: (sessionId) => {
+            // A child's `parentWinterSessionId` is NORMA's session id; the router addresses a
+            // session by its BACKEND id (P8b Task 12), so the 8a record is the hop between them.
+            // Nothing attaches until Task 16, so this answers `undefined` today and a stop with
+            // no local controller is recorded without anything being asked of the child.
+            const backend = runtime.records.get(sessionId)?.backendSessionId;
+            return backend === undefined || runtimeSdk === undefined ? undefined : attachedFacetFor(runtimeSdk, backend);
+          },
+          log: (line) => console.error(`children: ${line}`),
+        });
   const winterDrivers: WinterSessionDrivers = createWinterSessionDrivers({
     home: normaHome,
     profile: process.env.NORMA_PROFILE,
@@ -979,6 +1029,8 @@ export async function startDaemon(opts: {
     // Norma's persona per mode, the `_assistant` bucket, the output style — so a Winter-leg session
     // speaks as Norma.
     assembler,
+    // Task 17 (P8b-15): Winter children land in the SAME persisted roster the engine's did.
+    children: bgAgents,
     log: (line) => console.error(`winter-leg: ${line}`),
   });
   /** A deleted session takes its Winter child (bounded `end()`, out of the table) AND its runtime
@@ -1126,54 +1178,6 @@ export async function startDaemon(opts: {
       timeoutMs: () => settings?.subagents?.timeoutMs,
       stallTimeoutMs: () => settings?.subagents?.stallTimeoutMs,
     });
-    // Async spawn (4h-ii-a): tracks DETACHED (`run_in_background:true`) child threads — see
-    // bg-agent-registry.ts's own doc comment for why this is separate from `bgRegistry` above
-    // (that one owns backgrounded bash processes; this one owns agent threads). Built
-    // unconditionally alongside `subagents` — both are required together for the spawn bridge's
-    // async branch to activate (engine.ts's EngineConfig.bgAgents doc comment).
-    //
-    // P8b Task 13 (C-12 / P8b-15): DURABLE when the 8a spine opened, in-memory when it did not.
-    //
-    // `BackgroundAgentRegistry` is one `Map`, so every daemon restart lost the whole roster — the
-    // names a model was still using, which children had finished, and every `ResumeContext` that
-    // made `resume` possible (WS-17 §8 row 6). 8a shipped `runtime_children` and its
-    // reclassification rule and wired it to nothing; `createPersistedChildren` is that wiring, and
-    // it satisfies the same `AgentRegistry` contract every consumer here already takes, so the
-    // engine's spawn bridge, `task_stop`, `agent_list`/`agent_output` and the `thread.send`/
-    // `agent.stop` RPCs are untouched.
-    //
-    // A SPINE THAT WOULD NOT OPEN FALLS BACK, never fails: children are then exactly as durable as
-    // they were before this task, which is the same "runtime routing degraded, boot continues"
-    // posture the spine itself takes.
-    //
-    // ⚠️ NO `stallTimeoutMs` HERE, DELIBERATELY (fix round 1, F1). `SubagentManager` already owns a
-    // RESETTABLE progress window for every engine child, and its controller is folded into the
-    // child's run signal on both spawn paths — so arming a second timer over the same children is a
-    // second KILLER, not a second safety net. Worse, while nothing in production reset it, it was a
-    // 600 s WALL CLOCK, which is exactly what CLAUDE.md's tool surface and the standing "subagents:
-    // no timeout" rule forbid. The registry's window is opt-in (see `stallTimeoutMs`'s own note) and
-    // Task 17 turns it on for Winter children when `SubagentManager` retires with the engine. The
-    // engine DOES feed `progress()` here and now (engine.ts's three child sites), so the window is a
-    // progress window the moment it is armed rather than an API nobody calls.
-    const bgAgents: AgentRegistry =
-      runtime === undefined
-        ? new BackgroundAgentRegistry()
-        : createPersistedChildren({
-            store: runtime.children,
-            profiles: runtime.profiles,
-            providerId: () => settings?.provider?.type ?? "unstated",
-            // The owning session's live facet — Task 16 attaches Winter sessions, and until then a
-            // stop with no local `AbortController` is recorded and nothing is asked of the child.
-            facetFor: (sessionId) => {
-              // A child's `parentWinterSessionId` is NORMA's session id; the router addresses a
-              // session by its BACKEND id (P8b Task 12), so the 8a record is the hop between them.
-              // Nothing attaches until Task 16, so this answers `undefined` today and a stop with
-              // no local controller is recorded without anything being asked of the child.
-              const backend = runtime.records.get(sessionId)?.backendSessionId;
-              return backend === undefined || runtimeSdk === undefined ? undefined : attachedFacetFor(runtimeSdk, backend);
-            },
-            log: (line) => console.error(`children: ${line}`),
-          });
     // CC-parity phase 3 (Workflows, Task B2): constructed unconditionally alongside bgAgents (same
     // "always build it, the tool/bridge itself decides whether to use it" shape spawn_agent's own
     // subagents/agents above follow) — PRODUCTION deps only: no `workerCommand` override (that's a
@@ -1711,7 +1715,8 @@ export async function startDaemon(opts: {
       store,
       dir: () => assistantMemoryDirFor({ normaHome }),
       enabled: memoryEnabledHot,
-      activeTurnCount: () => engine?.activeTurnCount() ?? 1, // no engine yet -> treat as busy
+      // P8b Task 17: a Winter-leg turn in flight is activity too (the drivers' host-side count).
+      activeTurnCount: () => (engine?.activeTurnCount() ?? 1) + winterDrivers.list().filter((d) => d.turnRunning).length, // no engine yet -> treat as busy
       // session-activity-hygiene T7 (spec §3): the cleaner rides THIS scheduler slot. Constructed
       // here (not at the top of the file) for the same reason the Dreamer is: it needs a provider,
       // and the signals it derives activity from (`engine`, `hub`) are only final by this point.
@@ -1819,7 +1824,9 @@ export async function startDaemon(opts: {
   // T2 leaves it exactly as it already was — same shape `subagents.maxConcurrent`/`worktrees.baseRef`
   // above were just converted TO).
   const routinesAudit = new RoutineAuditLog(join(normaHome, "routines-audit.jsonl"));
-  const routineRunner = makeDaemonRoutineRunner({ store, hub, engine });
+  // P8b Task 17: a routine fires as a NEW code session, so it runs on whichever leg
+  // `winterLeg.code` names — through the driver table when that is the Winter leg.
+  const routineRunner = makeDaemonRoutineRunner({ store, hub, engine, winter: winterDrivers });
   const routineScheduler = makeRoutineScheduler({
     store: routineStore,
     runner: routineRunner,

@@ -1343,9 +1343,25 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // no await between), so two concurrent RPCs cannot both create.
         const existing = opts.store.dispatchSessionId();
         if (existing) return { sessionId: existing, created: false };
+        // P8b Task 17: the singleton is minted on the leg `settings.runtimes.winterLeg.dispatch`
+        // names (P8b-13) — the same transaction `session.create` runs: refuse typed BEFORE the row
+        // exists, persist the record + start the child after it, roll the row back on a refusal.
+        const leg = opts.winter?.legForNewSession("dispatch") ?? "engine";
+        if (leg === "winter") { try { opts.winter!.assertAvailable("dispatch"); } catch (err) { rpcFromWinterRefusal(err); } }
         const sessionId = opts.store.createSession("global", {
           cwd: homedir(), approvalPolicy: "auto", origin: "dispatch", mode: "dispatch",
         });
+        if (leg === "winter") {
+          try {
+            await opts.winter!.create(sessionId);
+          } catch (err) {
+            try { opts.store.deleteSession(sessionId); } catch { /* the row is gone or undeletable; the refusal still stands */ }
+            try { opts.onSessionDeleted?.(sessionId); } catch { /* best effort; the refusal still stands */ }
+            rpcFromWinterRefusal(err);
+          }
+        } else {
+          opts.winter?.recordEngineCreation(sessionId);
+        }
         return { sessionId, created: true };
       }
       case METHODS.sessionAttach: {

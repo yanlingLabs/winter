@@ -174,7 +174,19 @@ export interface WinterSessionDeps {
   endGraceMs?: number;
   /** The idle timer's clock (a test hands in a fake it fires by hand). Default: `setTimeout`, unref'd. */
   timers?: WinterTimers;
+  /** Task 17 (P8b-15): the persisted child roster. The projector opens a child thread with the
+   *  spawning `tool_use.id` (`thread_started`), the child's own frames follow on that thread, and
+   *  the spawning call's `tool_result` closes it (`thread_completed`); the driver relays the three
+   *  moments so `runtime_children` and the progress watchdog see every Winter child. */
+  children?: WinterChildrenSink;
   log?: (line: string) => void;
+}
+
+export interface WinterChildrenSink {
+  started(child: { threadId: string; agentType: string; prompt: string; description?: string }): void;
+  /** A frame on the child's thread — the resettable progress window's feed (no wall clock). */
+  progress(threadId: string): void;
+  completed(threadId: string, stopReason: string): void;
 }
 
 export interface WinterTimers {
@@ -260,6 +272,10 @@ export interface WinterSession {
    *  call it implicitly). Rejects with the options thunk's typed refusal when the child cannot be
    *  spawned, and with `WinterSessionEnded` when the session can never run again. */
   open(): Promise<void>;
+  /** Resolves when no turn is in flight on the current incarnation (at once while idle, resumable
+   *  or ended; when the incarnation ends with a turn open, at that end). A headless caller's
+   *  "run one turn" = `send` then `idle`. */
+  idle(): Promise<void>;
 }
 
 /** A driver operation the Winter leg cannot perform. Carried to the RPC layer as `data.code`. */
@@ -327,6 +343,7 @@ class WinterSessionImpl implements WinterSession {
   private endedReason: string | undefined;
   /** The open() in flight, so two concurrent sends resume ONE child, not two. */
   private opening: Promise<void> | undefined;
+  private idleWaiters: Array<() => void> = [];
 
   constructor(private readonly deps: WinterSessionDeps) {
     this.sessionId = deps.sessionId;
@@ -418,6 +435,15 @@ class WinterSessionImpl implements WinterSession {
 
   compact(): Promise<never> {
     return Promise.reject(new WinterLegUnsupported("session.compact"));
+  }
+
+  idle(): Promise<void> {
+    if (this.inFlight === 0 || this.stateValue !== "live") return Promise.resolve();
+    return new Promise((resolve) => { this.idleWaiters.push(resolve); });
+  }
+
+  private settleIdle(): void {
+    for (const w of this.idleWaiters.splice(0)) w();
   }
 
   async setModel(model?: string): Promise<void> {
@@ -571,6 +597,7 @@ class WinterSessionImpl implements WinterSession {
       // A held text never pushed is still owed — its `user_message` is in the log with no turn, and
       // the next `open()` re-reads it from there (P8b-39).
       this.inFlight = 0;
+      this.settleIdle();
       try { this.deps.records?.endGeneration(this.sessionId, inc.generation, ended ?? (this.ending ? "ended" : "exited")); } catch { /* the db may be closed at shutdown */ }
       this.recordState(ended === "ended" ? "failed" : "exited");
       if (this.inc === inc) this.inc = undefined;
@@ -592,6 +619,7 @@ class WinterSessionImpl implements WinterSession {
       this.recordState("idle");
       inc.attachment?.refresh();
       this.armIdleTimer();
+      this.settleIdle();
     }
   }
 
@@ -617,9 +645,32 @@ class WinterSessionImpl implements WinterSession {
   }
 
   private emit(batch: ProjectedBatch): void {
-    for (const e of batch.persist) this.safeAppend(e);
+    for (const e of batch.persist) {
+      this.safeAppend(e);
+      this.relayChild(e);
+    }
     for (const e of batch.broadcast) {
       try { this.deps.broadcast(e); } catch (err) { this.log(`broadcast failed for ${this.sessionId}: ${err instanceof Error ? err.name : "unknown"}`); }
+    }
+  }
+
+  /** The child roster's three moments, read off the persisted events (never thrown out of the iteration). */
+  private relayChild(e: NewSessionEvent): void {
+    const sink = this.deps.children;
+    if (sink === undefined) return;
+    const threadId = (e as { threadId?: string }).threadId;
+    if (threadId === undefined || threadId === MAIN_THREAD) return;
+    try {
+      if (e.type === "thread_started") {
+        const t = e as { threadId: string; agentType: string; prompt: string; description?: string };
+        sink.started({ threadId: t.threadId, agentType: t.agentType, prompt: t.prompt, ...(t.description === undefined ? {} : { description: t.description }) });
+      } else if (e.type === "thread_completed") {
+        sink.completed(threadId, (e as { stopReason: string }).stopReason);
+      } else {
+        sink.progress(threadId);
+      }
+    } catch (err) {
+      this.log(`child roster relay failed for ${this.sessionId} (${e.type}): ${err instanceof Error ? err.name : "unknown"}`);
     }
   }
 

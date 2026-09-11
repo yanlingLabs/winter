@@ -61,8 +61,10 @@ import { providerSelectionFor } from "./provider-selection";
 import { normaSessions } from "./sessions";
 import { NORMA_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
+import { DISPATCH_EFFORT, DISPATCH_MODEL } from "../agent/dispatch-config";
+import type { AgentRegistry } from "../agent/bg-agent-registry";
 import type { ContextAssembler } from "../agent/context";
-import { startWinterSession, unconsumedUserMessages, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
+import { startWinterSession, unconsumedUserMessages, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
 
 export type WinterLegRefusalCode =
   | "winter_executable_unavailable"   // P8b-2: no `winter` binary resolves (setting → env → bundle → home)
@@ -112,6 +114,11 @@ export interface WinterLegDeps {
    *  composed per incarnation (hot: NORMA.md, memory, the output style are re-read on resume).
    *  Absent (a harness without one) ⇒ no `systemPrompt` and the child runs Winter's own. */
   assembler?: Pick<ContextAssembler, "assemble">;
+  /** Task 17 (P8b-15): the persisted child roster (`createPersistedChildren` over 8a's
+   *  `runtime_children`). A Winter child is registered under the spawning `tool_use.id` with NO
+   *  local abort (its process is the session's), fed `progress()` on every frame of its thread, and
+   *  completed from the spawning call's `tool_result`. */
+  children?: AgentRegistry;
   /** Any OTHER MCP servers merged into a session's record (settings/plugin servers). None in 8b;
    *  the seam exists so the collision guard has something to guard. */
   extraMcpServers?: (session: CapabilitySession) => Record<string, unknown>;
@@ -136,6 +143,9 @@ export interface WinterSessionDrivers {
   recordEngineCreation(sessionId: string): void;
   /** The live driver, if any. */
   get(sessionId: string): WinterSession | undefined;
+  /** One HEADLESS turn (routines, the -p path): the session's driver (created for a session that
+   *  has no record yet, resumed otherwise), `send`, then wait until nothing is in flight. */
+  runTurn(sessionId: string, text: string, clientName: string): Promise<void>;
   /** A live driver, or a resumed one when the record says "winter"; undefined ⇒ the engine's. */
   ensure(sessionId: string): Promise<WinterSession | undefined>;
   /** The session was DELETED (the reaper, the cleaner): end its child (bounded) and forget the
@@ -177,6 +187,22 @@ export function sessionPermissionClassFor(deps: {
     } catch {
       return "unknown";
     }
+  };
+}
+
+/** The driver's three child moments → the persisted roster's doors. `agentId` = `threadId` = the
+ *  spawning `tool_use.id` (the cross-lane contract `capability-parity.test.ts` pins). No `name`:
+ *  Winter children are addressed by id, and two children may share a description. */
+function childrenSinkFor(registry: AgentRegistry, sessionId: string, log: (line: string) => void): WinterChildrenSink {
+  return {
+    started(child) {
+      const res = registry.register({ agentId: child.threadId, sessionId, threadId: child.threadId });
+      if (!res.ok) log(`child ${child.threadId} of ${sessionId} not registered: ${res.error}`);
+    },
+    progress(threadId) { registry.progress(threadId); },
+    completed(threadId, stopReason) {
+      registry.complete(threadId, { ok: stopReason === "end_turn", result: "" });
+    },
   };
 }
 
@@ -257,7 +283,14 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const hook = runtime.spawnHookFor(mode);
       if (hook instanceof Error) throw new WinterLegRefusal("winter_executable_unavailable", hook.message);
       const credentials = await credentialPresenceFrom(deps.secrets);
-      const selection = providerSelectionFor(live.model, credentials);
+      // `resolveSel`, the engine's own resolution: dispatch runs its FIXED PIN (`DISPATCH_MODEL` at
+      // `DISPATCH_EFFORT`; `session.setModel`/`setEffort` refuse a dispatch target, so a stored
+      // override can only come from a harness that wrote the store directly — a test's door to
+      // the `winter-test/*` doubles); every other mode is the per-session override, else the
+      // daemon's configured provider model.
+      const model = mode === "dispatch" ? (live.model ?? DISPATCH_MODEL) : (live.model ?? settings?.provider?.model);
+      const effort = mode === "dispatch" ? sdkEffortOf(live.effort ?? DISPATCH_EFFORT) : sdkEffortOf(live.effort);
+      const selection = providerSelectionFor(model, credentials);
       // P8b-30: a BYO `openai-compatible` endpoint travels as the provider's connection, or the
       // catalog's `openai` row would route it to api.openai.com.
       const connection: ProviderConnectionConfig | undefined =
@@ -298,9 +331,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         home,
         profile: deps.profile,
         cwd,
-        model: live.model,
+        model,
         credentials,
-        effort: sdkEffortOf(live.effort),
+        effort,
         ...(systemPrompt === undefined ? {} : { systemPrompt }),
         spawn: hook,
         canUseTool,
@@ -346,6 +379,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       },
       records,
       hasTranscript,
+      ...(deps.children === undefined ? {} : { children: childrenSinkFor(deps.children, sessionId, log) }),
       // P8b-39: the session log is the durable queue — what `open()` re-pushes is read from it.
       unconsumed: () => unconsumedUserMessages(deps.store.read(sessionId)),
       idleTimeoutMs: deps.idleTimeoutMs ?? (() => winterOptionsFromSettings(deps.settings()).idleTimeoutSec * 1000),
@@ -502,6 +536,11 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       if (live !== undefined) return live;
       if (sessionLegOf(recordOf(sessionId)) !== "winter") return undefined;
       return resume(sessionId);   // synchronous up to `drivers.set` — see the invariant above
+    },
+    async runTurn(sessionId, text, clientName) {
+      const session = drivers.get(sessionId) ?? (sessionLegOf(recordOf(sessionId)) === "winter" ? await resume(sessionId) : await create(sessionId));
+      await session.send(text, clientName);
+      await session.idle();
     },
     async evict(sessionId) {
       const session = drivers.get(sessionId);

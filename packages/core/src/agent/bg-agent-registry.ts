@@ -86,7 +86,10 @@ export interface RegisterInput {
   sessionId: string;
   threadId: string;
   name?: string;
-  abort: AbortController;
+  /** The local controller for a child THIS process runs. Absent for a Winter child (Task 17): the
+   *  child belongs to its session's `winter` process, so `stop()` asks through the owning session's
+   *  messaging facet (`steerChild`) instead of aborting anything locally. */
+  abort?: AbortController;
   resume?: ResumeContext;
 }
 
@@ -224,7 +227,7 @@ export class BackgroundAgentRegistry implements AgentRegistry {
       status: "running",
       startedAt: Date.now(),
       notified: false,
-      abort: e.abort,
+      abort: e.abort ?? new AbortController(),
       resume: e.resume,
     });
     return { ok: true };
@@ -600,7 +603,7 @@ export function createPersistedChildren(deps: PersistedChildrenDeps): AgentRegis
           }),
         undefined,
       );
-      aborts.set(e.agentId, e.abort);
+      if (e.abort !== undefined) aborts.set(e.agentId, e.abort);
       parentOf.set(e.agentId, e.sessionId);
       arm(e.sessionId, e.agentId);
       return { ok: true };
