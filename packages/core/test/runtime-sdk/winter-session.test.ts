@@ -674,7 +674,76 @@ describe("startWinterSession — resume", () => {
     expect(unconsumedUserMessages(h.events)).toEqual([]);
   });
 
-  test("unconsumedUserMessages: FIFO over main-thread user_message/turn_started; the projector's pass-through and child threads are not debts", () => {
+  test("P8b-40 (re-review N1): a steer's turn_started pairs with ITS OWN message — a resume after `send A (runs) → send B (held) → steer S → interrupt` re-pushes exactly B, never S", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    await h.session.send("B", "cli");     // held
+    await h.session.steer("S", "cli");    // pushes now: its turn_started lands after B's user_message
+    expect(h.q().pushed).toEqual(["A", "S"]);
+    expect(h.types()).toEqual(["user_message", "turn_started", "user_message", "user_message", "turn_started"]);
+    expect(unconsumedUserMessages(h.events)).toEqual(["B"]);
+    await h.session.interrupt();          // ends A's turn; S's is still open on the wire
+    h.q().emit(result());                 // S's own result (P8b-38)
+    await h.settled();
+    await h.session.end();
+    // the restart: a fresh driver over the same log
+    const restarted = harness({ append: (e: NewSessionEvent) => { const st = { ...e, seq: h.events.length + 1, ts: Date.now() } as SessionEvent; h.events.push(st); return st; }, unconsumed: () => unconsumedUserMessages(h.events) });
+    await restarted.session.open();
+    restarted.q().emit(init(restarted.q().options));
+    await restarted.settled();
+    expect(restarted.q().pushed).toEqual(["B"]);
+    expect(restarted.session.pendingSends).toEqual([]);
+  });
+
+  test("P8b-40: a DELIVERY mid-hold pairs with its own message too, and the held send stays owed", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.settled();
+    await h.session.send("A", "cli");
+    await h.session.send("B", "cli");
+    h.attachments[0]!.session.push("<agent-message>D</agent-message>");
+    await h.settled();
+    expect(h.q().pushed).toEqual(["A", "<agent-message>D</agent-message>"]);
+    expect(unconsumedUserMessages(h.events)).toEqual(["B"]);
+  });
+
+  test("P8b-40: the crash window — a message PUSHED whose turn_started never got appended is re-pushed on resume (the persisted contract is the pair)", () => {
+    const ev = (type: string, extra: Record<string, unknown> = {}): SessionEvent => ({ type, sessionId: "s", threadId: "main", seq: 0, ts: 0, ...extra } as unknown as SessionEvent);
+    // A ran to completion; B was appended and pushed, then the process died before `turn_started`
+    expect(unconsumedUserMessages([
+      ev("user_message", { text: "A", clientName: "cli" }), ev("turn_started"), ev("turn_completed", { stopReason: "end_turn" }),
+      ev("user_message", { text: "B", clientName: "cli" }),
+    ])).toEqual(["B"]);
+  });
+
+  test("re-review N2: a delivery inside end()'s window (the idle timeout) is HELD — no append, no push, no orphan turn — and runs on the next open", async () => {
+    const h = harness({ idleTimeoutMs: 50 });
+    await h.session.open();
+    h.q().ignoreClose = true;             // the child lingers through the grace: the window is real
+    h.q().emit(init(h.q().options));
+    await h.settled();
+    const sink = h.attachments[0]!.session.push;
+    const before = h.events.length;
+    h.timers.fire();                      // idle → end(): the queue closes NOW, state is still live
+    expect(h.session.state).toBe("live");
+    expect(h.q().promptClosed).toBe(false);
+    await Bun.sleep(1);
+    expect(h.q().promptClosed).toBe(true);
+    expect(() => sink("<agent-message>late</agent-message>")).not.toThrow();
+    expect(h.session.heldDeliveries).toEqual(["<agent-message>late</agent-message>"]);
+    expect(h.events.length).toBe(before);
+    await h.session.done;
+    expect(h.session.state).toBe("resumable");
+    expect(h.q().pushed).toEqual([]);
+    await h.session.send("x", "cli");
+    expect(h.q().pushed).toEqual(["<agent-message>late</agent-message>"]);
+    expect(h.session.pendingSends).toEqual(["x"]);
+  });
+
+  test("unconsumedUserMessages: adjacency pairing over main-thread user_message/turn_started; the projector's pass-through and child threads are not debts", () => {
     const ev = (type: string, extra: Record<string, unknown> = {}): SessionEvent => ({ type, sessionId: "s", threadId: "main", seq: 0, ts: 0, ...extra } as unknown as SessionEvent);
     expect(unconsumedUserMessages([])).toEqual([]);
     expect(unconsumedUserMessages([ev("user_message", { text: "A", clientName: "cli" }), ev("turn_started")])).toEqual([]);

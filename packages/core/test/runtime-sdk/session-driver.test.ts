@@ -22,7 +22,7 @@ import { NORMA_BRAND } from "../../src/runtime-sdk/brand";
 import type { NormaRuntimeSdk } from "../../src/runtime-sdk/create";
 import { createWinterSessionDrivers, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
 import { NORMA_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
-import { openRuntimeStateDb, ProjectionCheckpoints, RuntimeSessionRecords } from "../../src/runtime-state";
+import { backfillNativeSessions, openRuntimeStateDb, ProjectionCheckpoints, RuntimeSessionRecords } from "../../src/runtime-state";
 import { SessionHub } from "../../src/sessions/hub";
 import { SessionStore } from "../../src/sessions/store";
 import type { Settings } from "../../src/settings";
@@ -165,6 +165,24 @@ describe("createWinterSessionDrivers — the table", () => {
       expect(t.drivers.get(sid)).toBeUndefined();
       expect(t.drivers.list()).toEqual([]);
       await t.drivers.evict("s_never");   // unknown: a no-op, never throws
+    } finally { t.close(); }
+  });
+
+  test("re-review N3: a live-created engine-leg record and 8a's boot backfill agree on transcriptProjectKey/backendRoot for a cwd-less session", () => {
+    const t = table({ settings: () => ({ runtimes: { winterLeg: { chat: false, dispatch: false, code: false } } } as unknown as Settings) });
+    try {
+      const live = t.store.createSession("t", { mode: "chat" });
+      t.drivers.recordEngineCreation(live);
+      const backfilled = t.store.createSession("t", { mode: "chat" });
+      const rs = openRuntimeStateDb(t.home);
+      try { backfillNativeSessions({ rs, store: t.store, home: t.home, providerId: "unstated" }); } finally { rs.close(); }
+      const a = t.records.get(live)!;
+      const b = t.records.get(backfilled)!;
+      expect(a.backendSessionId).toBeUndefined();
+      expect(b.backendSessionId).toBeUndefined();
+      expect(a.transcriptProjectKey).toBe(b.transcriptProjectKey);
+      expect(a.backendRoot).toBe(b.backendRoot);
+      expect(a.tempProjectKey).toBe(b.tempProjectKey);
     } finally { t.close(); }
   });
 

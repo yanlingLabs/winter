@@ -214,10 +214,12 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     }
   };
 
-  /** ONE fallback for a cwd-less session on BOTH legs (its per-session temp dir, the CC-parity
-   *  $TMPDIR), so `transcriptProjectKey`/`memoryProjectKey` never differ by leg. (8a's boot
-   *  backfill falls back to `home` for the records it creates — a Task 17 alignment.) */
-  const cwdOf = (sessionId: string, cwd: string | null | undefined): string => cwd ?? deps.tmpDirOf(sessionId);
+  /** The Winter leg's fallback for a cwd-less session: its per-session temp dir (the CC-parity
+   *  $TMPDIR — the directory the child actually runs in, so its transcript key names it). The
+   *  ENGINE-leg record uses 8a's boot backfill's own fallback instead (`migrations/backfill.ts`,
+   *  `home`) — the two producers of an engine-leg record must agree on `transcriptProjectKey`/
+   *  `backendRoot` (re-review N3), and the backfill's shape is the surviving truth. */
+  const winterCwdOf = (sessionId: string, cwd: string | null | undefined): string => cwd ?? deps.tmpDirOf(sessionId);
 
   /** The facts every incarnation of a session needs, assembled once per driver. */
   const assemble = (sessionId: string, backendSessionId: string): WinterSession => {
@@ -226,7 +228,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     const checkpoints = deps.checkpoints!;
     const meta = deps.store.meta(sessionId);
     const mode = modeOf(meta.mode);
-    const cwd = cwdOf(sessionId, meta.cwd);
+    const cwd = winterCwdOf(sessionId, meta.cwd);
     const home = deps.home;
 
     const canUseTool = canUseToolFor({
@@ -376,7 +378,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     assertSpine();
     const records = deps.records!;
     const settings = deps.settings();
-    const cwd = cwdOf(sessionId, meta.cwd);
+    const cwd = winterCwdOf(sessionId, meta.cwd);
     const backendSessionId = randomUUID();
     const transcriptKey = transcriptProjectKey(cwd);
     const credentials = await credentialPresenceFrom(deps.secrets);
@@ -432,7 +434,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const meta = deps.store.meta(sessionId);
       const mode = modeOf(meta.mode);
       const settings = deps.settings();
-      const cwd = cwdOf(sessionId, meta.cwd);
+      const cwd = meta.cwd ?? deps.home;   // = `migrations/backfill.ts`'s own fallback (N3)
       const transcriptKey = transcriptProjectKey(cwd);
       const providerId = settings?.provider?.type ?? "unstated";
       const authFamily: RuntimeSelection["authFamily"] = providerId === "openai-compatible" ? "api-key" : "custom";

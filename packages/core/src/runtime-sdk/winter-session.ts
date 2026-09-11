@@ -188,11 +188,22 @@ const REAL_TIMERS: WinterTimers = {
 };
 
 /**
- * P8b-39 — the log as the durable queue. Every host-appended main-thread `user_message` is a text
- * the host owes the child; every main-thread `turn_started` is one it has pushed (the projector's
- * `beginTurn` is the ONLY producer, and the driver calls it exactly once per push, at the push).
- * FIFO-matching the two leaves the texts still owed, in order. The projector's own pass-through
- * `user_message` (`clientName: "winter"`, a `user` frame the host never pushed) is not a debt.
+ * P8b-39 / P8b-40 — the log as the durable queue. Every host-appended main-thread `user_message` is
+ * a text the host owes the child; every main-thread `turn_started` is one it has pushed (the
+ * projector's `beginTurn` is the ONLY producer, and the driver calls it exactly once per push, at
+ * the push — `beginAndPush` appends the `turn_started` RIGHT AFTER the message it runs, except for
+ * a held send released later, whose `turn_started` lands after younger messages).
+ *
+ * PAIRING IS BY ADJACENCY, NEVER FIFO (P8b-40): a `turn_started` pairs with the NEAREST PRECEDING
+ * unpaired `user_message`. A steer or a delivery pushes immediately while an older send is still
+ * held, so its `turn_started` must claim ITS OWN message, not the oldest debt — a FIFO scan would
+ * re-push the text that already ran and silently drop the held one (Task 16 re-review N1). A
+ * message is owed iff no `turn_started` pairs with it; the owed texts come back in log order.
+ *
+ * A push whose `turn_started` never got appended (a crash between the push and the append) is
+ * therefore RE-PUSHED on resume: the persisted contract is the pair, and a push without its half
+ * never reached it. The projector's own pass-through `user_message` (`clientName: "winter"`, a
+ * `user` frame the host never pushed) is not a debt.
  */
 export function unconsumedUserMessages(events: readonly SessionEvent[]): string[] {
   const owed: string[] = [];
@@ -202,7 +213,7 @@ export function unconsumedUserMessages(events: readonly SessionEvent[]): string[
       if ((e as { clientName?: string }).clientName === PROJECTOR_PASSTHROUGH_CLIENT) continue;
       owed.push((e as { text: string }).text);
     } else if (e.type === "turn_started") {
-      owed.shift();
+      owed.pop();   // the nearest preceding unpaired message is this turn's
     }
   }
   return owed;
@@ -375,10 +386,12 @@ class WinterSessionImpl implements WinterSession {
       this.log(`a delivery reached ${this.sessionId} after it ended — dropped`);
       return;
     }
-    if (this.stateValue !== "live" || this.inc === undefined) {
+    if (this.stateValue !== "live" || this.inc === undefined || this.ending || this.inc.queue.closed) {
       // P8b-24: a delivery that reached the sink was already receipted by the router; holding it
       // host-side (rather than throwing, which the wrapper would report as `delivery_uncertain`)
-      // is what avoids a re-delivery. Pushed first on resume.
+      // is what avoids a re-delivery. Pushed first on resume. The ENDING window counts too (re-review
+      // N2): the queue is already closed while the state is still `live`, and a push would throw
+      // out of the sink after an orphan `user_message`/`turn_started` pair had been appended.
       this.held.push(text);
       return;
     }
@@ -483,6 +496,7 @@ class WinterSessionImpl implements WinterSession {
       inc.done = this.run(inc);
       this.lastDone = inc.done;
       // Replay (P8b-39): what the LOG says is still owed, in its order — the first is pushed now
+      // (`deps.unconsumed` reads the whole session log: O(log) per RESUME, never per push) —
       // (its `turn_started` appended now, the only one it will ever get), the rest wait one per
       // `result` (P8b-5). The in-memory list is only a cache of the same facts and is discarded.
       const cached = this.pending.splice(0);
@@ -613,6 +627,10 @@ class WinterSessionImpl implements WinterSession {
     try { this.deps.append(e); } catch (err) {
       // A closed store at shutdown, or a session deleted underneath a draining child. The frame is
       // lost to the product log and the log line says so; the driver never throws for it.
+      // ⚠️ With the log as the queue (P8b-39/40) a LOST `turn_started` is not only a rendering gap:
+      // its `user_message` stays unpaired, so the next resume re-pushes a text the child already
+      // ran — one duplicated turn. Narrow (a store that fails mid-turn) and deliberately left as
+      // the lesser cost; do not widen this swallow.
       this.log(`append failed for ${this.sessionId} (${e.type}): ${err instanceof Error ? err.name : "unknown"}`);
     }
   }
