@@ -83,6 +83,7 @@ class TestClient {
 }
 
 const REAL_HOMES = [join(homedir(), ".norma"), join(homedir(), ".norma-dev")];
+const MCP_FIXTURE = join(import.meta.dir, "../agent/mcp/fake-mcp-server.ts");
 function walkHome(dir: string, describe: (rel: string, st: Stats) => string): string {
   if (!existsSync(dir)) return `${dir}: absent`;
   const lines: string[] = [];
@@ -122,6 +123,10 @@ describeWithWinterBinary("code on the Winter leg — the built binary through a 
       schemaVersion: 2,
       provider: { type: "openai-compatible", model: "winter-test/tooluse", baseUrl: "http://127.0.0.1:9/v1" },
       computerUse: { enabled: true },
+      // fix wave (review row 7): a configured user MCP server — the repo's fake stdio server — must
+      // reach the child (case (n)). The daemon's own McpManager starts a copy for the shared
+      // registry too; the child spawns its own from the forwarded config.
+      mcpServers: { fake: { command: "bun", args: ["run", MCP_FIXTURE] } },
       runtimes: { winterExecutable: bin, winterLeg: { code: true }, winterIdleTimeoutSec: 10 },
     }, null, 2));
   };
@@ -301,6 +306,32 @@ describeWithWinterBinary("code on the Winter leg — the built binary through a 
     expect(log.filter((e) => e.type === "agent_error")).toEqual([]);
     rmSync(cwd, { recursive: true, force: true });
   }, 60_000);
+
+  test("(n) a configured user MCP server (settings.mcpServers) reaches the child: THE CHILD spawns the forwarded stdio server", async () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-winter-code-mcp-")));
+    const before = new Set(winterChildren(bin));
+    const sid = await createCode("echo", cwd, "auto");
+    const driver = daemon!.winter.get(sid)!;
+    const t0 = Date.now();
+    while (driver.init === undefined && Date.now() - t0 < 15_000) await Bun.sleep(20);
+    expect(driver.init).toBeDefined();
+    // the daemon-owned capability servers are advertised at init as before (no shadowing)
+    expect(driver.init!.tools).toContain("mcp__norma__computer__computer");
+    // MEASURED: a stdio server's tools are NOT in `system/init.tools` — the child connects
+    // process-transport servers asynchronously after init (`WaitForMcpServers`/`RefreshMcpTools`
+    // are advertised for exactly that), so the observable fact is the SPAWN: a `bun run
+    // fake-mcp-server.ts` whose PARENT is this session's winter child (the daemon's own McpManager
+    // copy has the test process as its parent, so the parent pid is what tells them apart).
+    const winterPid = winterChildren(bin).find((p) => !before.has(p));
+    expect(winterPid).toBeDefined();
+    const spawnedByChild = (): string[] =>
+      Bun.spawnSync(["pgrep", "-P", winterPid!, "-f", "fake-mcp-server"]).stdout.toString().trim().split("\n").filter(Boolean);
+    const t1 = Date.now();
+    while (spawnedByChild().length === 0 && Date.now() - t1 < 10_000) await Bun.sleep(50);
+    expect(spawnedByChild().length).toBeGreaterThanOrEqual(1);
+    await driver.end();
+    rmSync(cwd, { recursive: true, force: true });
+  }, 40_000);
 
   test("(e) home isolation and zero survivors", async () => {
     client.close();

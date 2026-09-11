@@ -70,6 +70,7 @@ import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "./runtime-sdk/create";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
+import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
 import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord, type CapabilitySession } from "./capabilities";
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
 import { makeDaemonRoutineRunner } from "./routines/runner";
@@ -1010,6 +1011,10 @@ export async function startDaemon(opts: {
     ...(bgAgents === undefined ? {} : { children: bgAgents }),
     onTurnSettled: (sid) => { signals.onTurnSettled?.(sid); },
     ...(titler === undefined ? {} : { titler }),
+    // Fix wave (review row 7): the user's `settings.mcpServers` and a TRUSTED project's `.mcp.json`
+    // reach the child as stdio configs under the registry's own keys (`mcp__<key>__<tool>`). Read
+    // LIVE per incarnation from the same holder and the same `TrustStore` the McpManager consults.
+    extraMcpServers: (session) => configuredMcpServersFor({ settings, cwd: session.cwd, trusted: (dir) => trustStore.isTrusted(dir) }),
     log: (line) => console.error(`winter-leg: ${line}`),
   });
   /** A deleted session takes its Winter child (bounded `end()`, out of the table) AND its runtime

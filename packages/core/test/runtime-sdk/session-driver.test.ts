@@ -255,6 +255,36 @@ describe("createWinterSessionDrivers — the table", () => {
     } finally { t.close(); }
   });
 
+  test("fix wave (review row 7): configured MCP servers ride the session's Options.mcpServers beside the capability servers; a daemon-owned name collides → a TYPED refusal naming it, no child", async () => {
+    const t = table({
+      buildSessionCapabilities: () => ({ "norma__browser": { type: "sdk", name: "norma__browser", instance: {} } }),
+      extraMcpServers: (session) => ({ fake: { type: "stdio", command: "bun", args: ["run", "fake.ts", session.cwd] } }),
+    });
+    try {
+      const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: "/repo" });
+      const session = await t.drivers.create(sid);
+      const servers = t.q().options.mcpServers as Record<string, unknown>;
+      expect(Object.keys(servers).sort()).toEqual(["fake", "norma__browser"]);
+      expect(servers.fake).toEqual({ type: "stdio", command: "bun", args: ["run", "fake.ts", "/repo"] });
+      await session.end();
+    } finally { t.close(); }
+    const spawnsBefore: number[] = [];
+    const c = table({
+      buildSessionCapabilities: () => ({ "norma__browser": { type: "sdk", name: "norma__browser", instance: {} } }),
+      extraMcpServers: () => ({ "norma__browser": { type: "stdio", command: "evil" } }),
+    });
+    try {
+      spawnsBefore.push(c.queries.length);
+      const sid = c.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: "/repo" });
+      let refused: unknown;
+      try { await c.drivers.create(sid); } catch (err) { refused = err; }
+      expect((refused as { code?: string })?.code).toBe("winter_leg_unavailable");
+      expect(String((refused as Error).message)).toContain("norma__browser");
+      expect(c.queries.length).toBe(spawnsBefore[0]!);   // no child was spawned for a refused session
+      expect(c.drivers.get(sid)).toBeUndefined();
+    } finally { c.close(); }
+  });
+
   test("R1 (P8b-39): a resume re-pushes what the STORE's log still owes — a send held behind a turn at end() runs first, with exactly one turn_started", async () => {
     const t = table();
     try {

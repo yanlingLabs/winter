@@ -36,7 +36,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { classifyPermissionMode } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { PermissionClassLabel } from "@yanlinglabs/winter-agent-sdk/messaging";
-import type { EffortLevel, ProviderConnectionConfig } from "@yanlinglabs/winter-agent-sdk";
+import type { EffortLevel, McpServerConfig, ProviderConnectionConfig } from "@yanlinglabs/winter-agent-sdk";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import type { RuntimeDirectoryEntry, RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
@@ -132,9 +132,13 @@ export interface WinterLegDeps {
    * titling). `maybeTitle` dedupes itself (store title guard + in-flight set) and never throws.
    */
   titler?: { maybeTitle(sessionId: string): Promise<void> };
-  /** Any OTHER MCP servers merged into a session's record (settings/plugin servers). None in 8b;
-   *  the seam exists so the collision guard has something to guard. */
-  extraMcpServers?: (session: CapabilitySession) => Record<string, unknown>;
+  /** Any OTHER MCP servers merged into a session's record. Fix wave (review row 7): the daemon
+   *  fills this with Norma's CONFIGURED servers — `settings.mcpServers` + a trusted project's
+   *  `.mcp.json` — as SDK stdio configs (`runtime-sdk/external-mcp.ts`), read live per incarnation.
+   *  Plugin-contributed tools (`tool.register`) are NOT here: they are registry entries, not server
+   *  configs, and stay the `norma__external` capability carry. A key colliding with a daemon-owned
+   *  `norma__<key>` server refuses the session typed (`assertNoCapabilityCollision`). */
+  extraMcpServers?: (session: CapabilitySession) => Record<string, McpServerConfig>;
   log?: (line: string) => void;
   /** Test seams. */
   idleTimeoutMs?: () => number;
@@ -342,10 +346,14 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         outDir: deps.outDirOf(sessionId), extraDirs, effort: live.effort,
       });
       // P8b-36 obligation: any other server merged into the same record must not shadow a
-      // daemon-owned one. Nothing else is merged in 8b; the guard runs regardless so the day
-      // something is, the collision is loud.
+      // daemon-owned one. Since the fix wave the configured user/project MCP servers ARE merged
+      // here, so the guard is live: a `settings.mcpServers` key spelled `norma__browser` refuses
+      // this session TYPED (the message names the server) rather than handing the model a
+      // `browser` that is not Norma's under Norma's name. The user fixes the key; settings are hot.
       const extra = deps.extraMcpServers?.(capSession) ?? {};
-      assertNoCapabilityCollision(extra, capabilities);
+      try { assertNoCapabilityCollision(extra, capabilities); } catch (err) {
+        throw new WinterLegRefusal("winter_leg_unavailable", err instanceof Error ? err.message : String(err));
+      }
       return buildWinterOptions({
         mode,
         policy: live.approvalPolicy,
