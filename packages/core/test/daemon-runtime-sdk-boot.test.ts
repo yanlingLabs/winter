@@ -179,9 +179,10 @@ describe("daemon boot — the capability servers (Tasks 6-7, P8b-36)", () => {
       const servers = d.buildSessionCapabilities(session());
       // KEYED BY NAME — the record IS `Options.mcpServers`' shape, and the child derives each tool's
       // wire name from the key, so the key set is the thing to assert. Computer use is off in this
-      // temp home, so five servers, not six.
+      // temp home, so six servers, not seven.
       expect(Object.keys(servers)).toEqual([
         "norma__sessions", "norma__browser", "norma__office", "norma__research", "norma__web",
+        "norma__lsp",   // fix wave F7: the `lsp` capability server
       ]);
       for (const [key, s] of Object.entries(servers)) {
         // The invariant N1 exists to make unrepresentable: key === the config's own name.
