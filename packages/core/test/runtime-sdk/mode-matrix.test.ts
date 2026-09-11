@@ -170,7 +170,12 @@ test("the control-plane deny rules cover the four write tools × the control-pla
     expect(deny).toContain(`${tool}(//h/permissions.local.json)`);
     expect(deny).toContain(`${tool}(//h/run/**)`);
   }
-  expect(deny).toHaveLength(4 * 7);
+  // Task 17: + the engine's read-tool denials, carried: Read/Glob/Grep × { run/**, runtimes/** }
+  for (const tool of ["Read", "Glob", "Grep"]) {
+    expect(deny).toContain(`${tool}(//h/run/**)`);
+    expect(deny).toContain(`${tool}(//h/runtimes/**)`);
+  }
+  expect(deny).toHaveLength(4 * 7 + 3 * 2);
 });
 
 /**
@@ -208,7 +213,8 @@ test("every deny rule is //-anchored, and resolves to the fence target it names"
     expect(specs.has(`/${join(home, f)}`)).toBe(true);             // the user's own global copies
   }
   expect(specs.has(`/${join(home, "run")}/**`)).toBe(true);        // the daemon control plane
-  expect(specs.size).toBe(7);
+  expect(specs.has(`/${join(home, "runtimes")}/**`)).toBe(true);   // the runtime store (reads; Task 17)
+  expect(specs.size).toBe(8);
   // The two inert forms must never reappear.
   for (const s of specs) {
     expect({ s, singleSlashAbsolute: /^\/[^/]/.test(s) }).toEqual({ s, singleSlashAbsolute: false });
@@ -234,7 +240,7 @@ test("the Bash sandbox names real DIRECTORIES, because its consumer renders seat
   expect(sb.enabled).toBe(true);
   expect(sb.filesystem!.denyWrite).toEqual(["/h/run"]);
   // CLAUDE.md: "the sole read denial is ~/.norma/run" — reads are otherwise unrestricted.
-  expect(sb.filesystem!.denyRead).toEqual(["/h/run"]);
+  expect(sb.filesystem!.denyRead).toEqual(["/h/run", "/h/runtimes"]);   // Task 17: runtimes/ is model-denied (8a)
   for (const p of [...sb.filesystem!.denyWrite!, ...sb.filesystem!.denyRead!]) {
     expect({ p, glob: p.includes("*") }).toEqual({ p, glob: false });
   }

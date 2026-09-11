@@ -225,21 +225,12 @@ describe("daemon wiring — the store opens and recovery runs before the socket 
 });
 
 describe("daemon wiring — the runtime store is not readable by the model", () => {
-  test("read of runtime-state.db goes through the real daemon's registry and is refused", async () => {
+  test("Task 17: on the Winter leg the runtimes/ directory is denied to the child's read tools AND to bash reads (the engine's read-tool denial, carried)", async () => {
     await withTempHome(async (home, dirs) => {
-      writeSettings(home);
-      const d = await boot(home, { agent: true });
-      const registry = d.registry!;
-      expect(registry).toBeDefined();
-
-      // The tool the daemon itself hosts must not be able to read the store this branch built —
-      // metadata today, whole message envelopes from 8b (WS-16 §10).
-      const res = await registry.execute("read", { path: dirs.runtimeStatePath }, { cwd: home, roots: [home], sessionId: "s1" });
-      expect(res.isError).toBe(true);
-      expect(res.output).toBe("this path is Norma's own credential store and is never readable");
-
-      const listed = await registry.execute("ls", { path: dirs.runtimesDir }, { cwd: home, roots: [home], sessionId: "s1" });
-      expect(listed.isError).toBe(true);
+      const { controlPlaneDenyRules, sandboxConfigFor } = await import("../../src/runtime-sdk/mode-options");
+      const deny = controlPlaneDenyRules(home);
+      for (const tool of ["Read", "Glob", "Grep"]) expect(deny.some((r) => r.startsWith(`${tool}(`) && r.includes("/runtimes/**"))).toBe(true);
+      expect(sandboxConfigFor(home).filesystem!.denyRead).toContain(dirs.runtimesDir);
     });
   });
 });

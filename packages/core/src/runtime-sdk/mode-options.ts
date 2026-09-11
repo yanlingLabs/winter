@@ -269,7 +269,11 @@ export function controlPlaneDenyRules(home: string): string[] {
     // The daemon's control plane: sockets, pid files, the runtime state db.
     fsRootAnchored([join(home, "run"), "**"].join("/")),
   ];
-  return writeTools.flatMap((t) => targets.map((p) => `${t}(${p})`));
+  // Task 17: the engine's read tool denied `<home>/run` and `<home>/runtimes` (the runtime store,
+  // 8a's model-denied directory); the Winter leg's read-class tools carry the same two denials.
+  const readTools = ["Read", "Glob", "Grep"];
+  const readTargets = [fsRootAnchored([join(home, "run"), "**"].join("/")), fsRootAnchored([join(home, "runtimes"), "**"].join("/"))];
+  return [...writeTools.flatMap((t) => targets.map((p) => `${t}(${p})`)), ...readTools.flatMap((t) => readTargets.map((p) => `${t}(${p})`))];
 }
 
 /**
@@ -308,7 +312,9 @@ export function sandboxConfigFor(home: string): SandboxSettingsConfig {
       denyWrite: [join(home, "run")],
       // The sole read denial Norma has ever had (CLAUDE.md: "the sole read denial is
       // `~/.norma/run`") — reads are otherwise deliberately unrestricted.
-      denyRead: [join(home, "run")],
+      // …plus `runtimes/` (8a: the runtime store is never model-readable — the engine's read tool
+      // carried this denial; on the Winter leg the sandbox and the Read/Glob/Grep deny rules do).
+      denyRead: [join(home, "run"), join(home, "runtimes")],
     },
     // `allowUnsandboxedCommands` is deliberately NOT set. It is consulted only together with
     // `excludedCommands` (`sandbox/spawn.ts:109,122`), which this config does not set, so `false`
