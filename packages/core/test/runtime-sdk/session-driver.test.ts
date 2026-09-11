@@ -15,6 +15,8 @@ import type { Options, Query } from "@yanlinglabs/winter-agent-sdk";
 import * as winter from "@yanlinglabs/winter-agent-sdk";
 import { createInMemoryRuntimeDirectoryStore, createRuntimeSdk } from "@yanlinglabs/winter-runtime-sdk";
 import { ApprovalBroker } from "../../src/agent/approvals";
+import { FakeProvider } from "../../src/agent/fake-provider";
+import { SessionTitler, TITLE_INSTRUCTION } from "../../src/agent/titles";
 import { PermissionGate } from "../../src/agent/gate";
 import { QuestionBroker } from "../../src/agent/questions";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -192,6 +194,64 @@ describe("createWinterSessionDrivers — the table", () => {
       expect(t.drivers.legOf("s_any")).toBeUndefined();
       expect(await t.drivers.ensure("s_any")).toBeUndefined();
       expect(t.logs.some((l) => l.includes("unreadable"))).toBe(true);
+    } finally { t.close(); }
+  });
+
+  test("fix wave (review row 4): the titler is fired after the main thread's turn_completed — once per completed turn, never before the result, never on an error terminal", async () => {
+    const titled: string[] = [];
+    const t = table({ titler: { maybeTitle: async (sid) => { titled.push(sid); } } });
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      await session.send("hello", "cli");
+      t.q().emit({ type: "assistant", message: { content: [{ type: "text", text: "hi" }] } });
+      await Bun.sleep(10);
+      expect(titled).toEqual([]);   // nothing until the turn has completed
+      t.q().emit(result());
+      await Bun.sleep(10);
+      expect(titled).toEqual([sid]);
+      expect(t.store.read(sid).filter((e) => e.type === "turn_completed")).toHaveLength(1);
+      // the second turn fires it again — `maybeTitle` is what dedupes (store title guard), exactly
+      // as the engine fired it at every depth-0 completion
+      await session.send("again", "cli");
+      t.q().emit(result());
+      await Bun.sleep(10);
+      expect(titled).toEqual([sid, sid]);
+      // an ERROR terminal does not: the child dies mid-turn → turn_completed(error) + agent_error
+      await session.send("boom", "cli");
+      t.q().fail(Object.assign(new Error("child crashed"), { name: "Error" }));
+      await session.done;
+      expect(t.store.read(sid).filter((e) => e.type === "turn_completed").map((e) => (e as { stopReason: string }).stopReason)).toEqual(["end_turn", "end_turn", "error"]);
+      expect(titled).toEqual([sid, sid]);
+    } finally { t.close(); }
+  });
+
+  test("fix wave (review row 4): the REAL SessionTitler over the existing FakeProvider double titles a Winter-leg session once, on Norma's own provider layer (P8b-10)", async () => {
+    const provider = new FakeProvider([[{ type: "text_delta", delta: "Greeting the daemon" }, { type: "done", stopReason: "end_turn" }]]);
+    let titler!: SessionTitler;
+    const t = table({ titler: { maybeTitle: (sid) => titler.maybeTitle(sid) } });
+    titler = new SessionTitler({ provider: { provider, model: "fake-1" }, store: t.store, hub: t.hub });
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      await session.send("hello there", "cli");
+      t.q().emit({ type: "assistant", message: { content: [{ type: "text", text: "hi from winter" }] } });
+      t.q().emit(result());
+      await Bun.sleep(30);
+      // ONE provider call, on Norma's provider layer, with the title instruction and the turn's pair
+      expect(provider.requests).toHaveLength(1);
+      expect(provider.requests[0]!.instructions).toBe(TITLE_INSTRUCTION);
+      const content = JSON.stringify(provider.requests[0]!.input[0]);
+      expect(content).toContain("hello there");
+      expect(content).toContain("hi from winter");
+      expect(t.store.getTitle(sid)).toBe("Greeting the daemon");
+      expect(t.store.read(sid).filter((e) => e.type === "session_titled")).toHaveLength(1);
+      // a second completed turn never re-titles (the store's title guard)
+      await session.send("more", "cli");
+      t.q().emit(result());
+      await Bun.sleep(30);
+      expect(provider.requests).toHaveLength(1);
+      await session.end();
     } finally { t.close(); }
   });
 

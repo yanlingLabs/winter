@@ -28,6 +28,7 @@ import { PageCache } from "./agent/tools/page-core";
 import { createResearchRunner } from "./agent/research";
 import { registerComputerTool } from "./agent/tools/computer";
 import { ComputerUseService } from "./agent/computer-use";
+import { SessionTitler } from "./agent/titles";
 import { McpManager } from "./agent/mcp/manager";
 import { notifyHeadless } from "./agent/notify-fallback";
 import { LspManager } from "./agent/lsp/manager";
@@ -974,6 +975,15 @@ export async function startDaemon(opts: {
           },
           log: (line) => console.error(`children: ${line}`),
         });
+  // Fix wave (review row 4): session titles on the Winter leg. The titler stays on Norma's OWN
+  // provider layer (P8b-10 — never `sdk.query()`), so it needs `agentProvider`; a no-provider
+  // daemon simply titles nothing, as before. `titles.enabled` is read LIVE at every fire (the
+  // engine-era wiring was a boot snapshot; no setting may need a restart), `titles.model` stays the
+  // boot snapshot it always was (it names WHICH model titles, not whether titling is on).
+  const sessionTitler = agentProvider === null ? undefined : new SessionTitler({ provider: agentProvider, store, hub, model: settings?.titles?.model });
+  const titler = sessionTitler === undefined ? undefined : {
+    maybeTitle: (sid: string): Promise<void> => (settings?.titles?.enabled === false ? Promise.resolve() : sessionTitler.maybeTitle(sid)),
+  };
   const winterDrivers: WinterSessionDrivers = createWinterSessionDrivers({
     home: normaHome,
     profile: process.env.NORMA_PROFILE,
@@ -999,6 +1009,7 @@ export async function startDaemon(opts: {
     // Task 17 (P8b-15): Winter children land in the persisted roster (absent when the spine is offline).
     ...(bgAgents === undefined ? {} : { children: bgAgents }),
     onTurnSettled: (sid) => { signals.onTurnSettled?.(sid); },
+    ...(titler === undefined ? {} : { titler }),
     log: (line) => console.error(`winter-leg: ${line}`),
   });
   /** A deleted session takes its Winter child (bounded `end()`, out of the table) AND its runtime

@@ -123,6 +123,15 @@ export interface WinterLegDeps {
   children?: AgentRegistry;
   /** The activity enforcement's post-turn re-check (`enforcement.onTurnSettled(sessionId)`). */
   onTurnSettled?: (sessionId: string) => void;
+  /**
+   * Fix wave (review row 4): Norma's `SessionTitler` — P8b-10 keeps it on Norma's OWN provider
+   * layer (never `sdk.query()`). Fired fire-and-forget after every MAIN-thread `turn_completed`
+   * that is not an error terminal, which is exactly where the engine fired it (`engine.ts`'s two
+   * depth-0 completion sites: `void this.cfg.titler.maybeTitle(sessionId)` right after the
+   * `turn_completed` emit; never on the error paths — an errored first turn has nothing worth
+   * titling). `maybeTitle` dedupes itself (store title guard + in-flight set) and never throws.
+   */
+  titler?: { maybeTitle(sessionId: string): Promise<void> };
   /** Any OTHER MCP servers merged into a session's record (settings/plugin servers). None in 8b;
    *  the seam exists so the collision guard has something to guard. */
   extraMcpServers?: (session: CapabilitySession) => Record<string, unknown>;
@@ -278,6 +287,16 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     const append = (event: Parameters<SessionHub["append"]>[1]) => {
       const stamped = deps.hub.append(sessionId, event);
       claimedInBatch = 0;
+      // The engine's titling moment, reproduced at the ONE place every persisted Winter-leg event
+      // passes: after the main thread's `turn_completed` is in the log (so `maybeTitle`'s read of
+      // the first user/assistant pair sees a complete turn). Never on an error terminal.
+      if (deps.titler !== undefined && event.type === "turn_completed") {
+        const threadId = (event as { threadId?: string }).threadId;
+        const stop = (event as { stopReason?: string }).stopReason;
+        if ((threadId === undefined || threadId === "main") && stop !== "error") {
+          try { void deps.titler.maybeTitle(sessionId); } catch { /* maybeTitle never throws by contract; belt only */ }
+        }
+      }
       return stamped;
     };
 
