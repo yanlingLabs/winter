@@ -45,6 +45,12 @@ bun src/main.ts                      # interactive TUI (Ink)
 # "Norma Dev" cannot self-spawn a daemon; start the dev daemon below FIRST or the orb shows
 # disconnected.
 NORMA_HOME=~/.norma-dev NORMA_PROFILE=dev bun src/main.ts daemon run   # dev daemon (or: norma-dev daemon run)
+# THIRD TRAP (Winter Phase 8b, until 8d's bundle drop): every session runs as a spawned `winter` child, and
+# a dev daemon resolves that binary from `settings.runtimes.winterExecutable` → `$NORMA_WINTER_EXECUTABLE` →
+# `<dirname(execPath)>/winter` → `<NORMA_HOME>/runtimes/bin/winter` — a dev run has none of the last two, so
+# build one (`bun run build:winter` → dist/winter, from the ../winter-agent-sdk checkout at the pinned tag)
+# and point the daemon at it, or EVERY session.create/session.dispatch refuses typed (winter_executable_unavailable):
+NORMA_WINTER_EXECUTABLE="$PWD/../../dist/winter" NORMA_HOME=~/.norma-dev NORMA_PROFILE=dev bun src/main.ts daemon run
 
 # Versioning — never edit versions by hand; VERSION file (#.#.### format) is canonical
 bun run version:bump                 # +0.0.001 (also --minor / --major)
@@ -104,7 +110,7 @@ Every session is an append-only JSONL of `SessionEvent`s (each carrying `seq`/`s
 
 ### Tool surface
 
-Tool design deliberately tracks Claude Code's shape (see `norma-vs-cc-tools.md` at repo root for the live comparison): file-based memory (a MEMDIR of markdown files written with normal write/edit — no dedicated memory tools), unrestricted reads (no path fence on read/glob/grep/ls; the sole read denial is `~/.norma/run`), out-of-root writes via an approval flow (grant denylist protects `~/.norma`), a single multi-purpose `lsp` tool plus auto-diagnostics-after-edit, multimodal `read` (images/PDF/notebooks), and subagents with no wall-clock timeout — a progress-stall watchdog instead.
+Tool design deliberately tracks Claude Code's shape (see `norma-vs-cc-tools.md` at repo root for the live comparison): file-based memory (a MEMDIR of markdown files written with normal write/edit — no dedicated memory tools), unrestricted reads (no path fence on read/glob/grep/ls; the sole read denial is `~/.norma/run`), out-of-root writes via an approval flow (grant denylist protects `~/.norma`), a single multi-purpose `lsp` tool (the `norma__lsp` capability server on the Winter leg; auto-diagnostics-after-edit was the ENGINE's post-edit hook and is a carry until the child's `Options.hooks` PostToolUse path is measured), multimodal `read` (images/PDF/notebooks), and subagents with no wall-clock timeout — a progress-stall watchdog instead.
 
 ## Hard rules
 
