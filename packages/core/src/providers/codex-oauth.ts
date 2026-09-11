@@ -1,5 +1,6 @@
 import type { SecretStore } from "../auth/secret-store";
 import { CREDENTIAL_MATERIAL_NAMES, readCredentialMaterial, writeCredentialMaterial } from "../auth/credential-material";
+import { CODEX_SECRET_NAMES } from "../auth/legacy-secret-names";
 import type { ModelInfo, Provider, ProviderEvent, TurnRequest } from "./types";
 import { ResponsesSseParser } from "./responses-sse";
 import { buildRequestBody, mapHttpError } from "./openai-compatible";
@@ -9,14 +10,11 @@ import { CODEX, CODEX_MODELS } from "./codex-config";
 /** LEGACY raw records — a one-way migration source (`auth/credential-material.ts`'s
  *  `migrateLegacyCredentialMaterial`) and `norma logout`'s blank target ONLY. `CodexAuthStore`
  *  below no longer writes these; the single source of truth is the `codex-oauth:default` JSON
- *  material record the spawned Winter child actually reads. */
-export const CODEX_SECRET_NAMES = {
-  access: "codex-access-token",
-  refresh: "codex-refresh-token",
-  id: "codex-id-token",
-  account: "codex-account-id",
-  expires: "codex-expires-at",
-} as const;
+ *  material record the spawned Winter child actually reads. Defined in the leaf
+ *  `auth/legacy-secret-names.ts` (hotfix review r1, m1 — breaks the import cycle with
+ *  `auth/credential-material.ts`) and re-exported here verbatim so every existing importer of
+ *  `CODEX_SECRET_NAMES` from this module keeps working unchanged. */
+export { CODEX_SECRET_NAMES };
 
 /**
  * Facade over the `codex-oauth:default` JSON credential material record (post-8b hotfix): the
@@ -38,7 +36,11 @@ export class CodexAuthStore {
       ...(t.refreshToken ? { refreshToken: t.refreshToken } : {}),
       ...(t.idToken ? { idToken: t.idToken } : {}),
       ...(t.accountId ? { accountId: t.accountId } : {}),
-      expiresAt: t.expiresAt,
+      // Hotfix review r1, n1: mirrors migrateCodexOauth's own guard — an `OAuthTokens.expiresAt`
+      // of `0` (this type's own "unknown expiry" default, e.g. after a load() with no legacy
+      // `codex-expires-at` at all) must not round-trip into the material as a literal `expiresAt:
+      // 0`, which the child would read as "expired since the epoch" rather than "unknown".
+      ...(Number.isFinite(t.expiresAt) && t.expiresAt > 0 ? { expiresAt: t.expiresAt } : {}),
     });
   }
 

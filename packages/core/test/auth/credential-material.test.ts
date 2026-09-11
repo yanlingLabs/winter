@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore, type SecretStore } from "../../src/auth/secret-store";
@@ -52,6 +53,15 @@ function coerceMaterial(value: unknown): CredentialMaterial | undefined {
 }
 
 describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
+  test("tripwire (hotfix review r1, m2): the installed winter-agent-sdk is the version the coerceMaterial mirror above was copied from — re-diff it on a bump", () => {
+    // the coerceMaterial mirror above was copied from this version — re-diff it on a bump
+    const req = createRequire(import.meta.url);
+    const pkgPath = req.resolve("@yanlinglabs/winter-agent-sdk/package.json");
+    const pkg = require(pkgPath) as { version: string };
+    expect(pkg.version).toBe("0.0.4");
+  });
+
+
   test("CodexAuthStore.save() writes codex-oauth:default as JSON the child's parser accepts, with every field present", async () => {
     const s = store();
     await new CodexAuthStore(s).save({
@@ -81,6 +91,14 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     await clearCredentialMaterial(s, CREDENTIAL_MATERIAL_NAMES.openai);
     expect(await s.get(CREDENTIAL_MATERIAL_NAMES.openai)).toBe("");
     expect(await readCredentialMaterial(s, CREDENTIAL_MATERIAL_NAMES.openai)).toBeNull();
+  });
+
+  test("writeOpenAiApiKey blanks the legacy raw record so a rotated key is never left live under the old name (hotfix review r1, m4)", async () => {
+    const s = store();
+    await s.set(OPENAI_API_KEY_SECRET, "sk-old-stale");
+    await writeOpenAiApiKey(s, "sk-new");
+    expect(await s.get(OPENAI_API_KEY_SECRET)).toBe("");
+    expect(await readOpenAiApiKey(s)).toBe("sk-new");
   });
 });
 
@@ -204,6 +222,18 @@ describe("CodexAuthStore.load()", () => {
     for (const name of Object.values(CODEX_SECRET_NAMES)) {
       expect(await s.get(name)).toBeNull();
     }
+  });
+
+  test("a load→save round-trip of tokens with no expiry does not persist expiresAt: 0 (hotfix review r1, n1)", async () => {
+    const s = store();
+    await writeCredentialMaterial(s, CREDENTIAL_MATERIAL_NAMES.codexOauth, { kind: "oauth", accessToken: "at_m" }); // no expiresAt stored
+    const authStore = new CodexAuthStore(s);
+    const loaded = await authStore.load();
+    expect(loaded?.expiresAt).toBe(0); // OAuthTokens' own "unknown expiry" default (load()'s `?? 0`)
+    await authStore.save(loaded!);
+    const material = await readCredentialMaterial(s, CREDENTIAL_MATERIAL_NAMES.codexOauth);
+    expect(material).toEqual({ kind: "oauth", accessToken: "at_m" });
+    expect(Object.prototype.hasOwnProperty.call(material, "expiresAt")).toBe(false);
   });
 });
 

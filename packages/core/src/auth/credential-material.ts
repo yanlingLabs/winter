@@ -1,6 +1,5 @@
 import type { SecretStore } from "./secret-store";
-import { OPENAI_API_KEY_SECRET } from "../providers/manager";
-import { CODEX_SECRET_NAMES } from "../providers/codex-oauth";
+import { OPENAI_API_KEY_SECRET, CODEX_SECRET_NAMES } from "./legacy-secret-names";
 
 /**
  * Hotfix (post-8b, 2026-09-11): the spawned `winter` child resolves a `CredentialRef { kind:
@@ -131,9 +130,19 @@ export async function readOpenAiApiKey(store: SecretStore): Promise<string | nul
   return legacy || null;
 }
 
-/** Writes the material record ONLY — Norma stops writing the legacy raw `openai-api-key`. */
+/**
+ * Writes the material record, then blanks the legacy raw `openai-api-key` (hotfix review r1, m4)
+ * so a ROTATED key is never left live under the old name — a install that somehow still reads the
+ * legacy record (a pre-hotfix binary, a stray direct read) must see the new key was rotated, not
+ * the stale one. The blank happens AFTER the material write succeeds (never before: if the write
+ * throws, the legacy value — however stale — is left intact rather than the account ending up with
+ * no key stored anywhere). This does not need its own migration path: `migrateLegacyCredentialMaterial`'s
+ * "material present -> never overwritten" rule already means the now-blank legacy value is simply
+ * ignored on the next boot.
+ */
 export async function writeOpenAiApiKey(store: SecretStore, key: string): Promise<void> {
   await writeCredentialMaterial(store, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key });
+  await store.set(OPENAI_API_KEY_SECRET, "");
 }
 
 export interface CredentialMigrationReport {

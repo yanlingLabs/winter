@@ -100,12 +100,18 @@ describe("KeychainSeam over SecretStore", () => {
     expect(JSON.stringify(presence)).not.toContain("sk-test");
   });
 
-  test("credentialPresenceFrom reports codex only once its OAuth material is stored", async () => {
-    await store.set(NORMA_CREDENTIAL_INVENTORY.find((s) => s.provider === "codex-oauth")!.secretName, "codex-token");
+  test("credentialPresenceFrom reports codex only once VALID OAuth material is stored", async () => {
+    await new CodexAuthStore(store).save({ accessToken: "at_live", refreshToken: null, idToken: null, accountId: null, expiresAt: 0 });
     const presence = await credentialPresenceFrom(store);
     expect(presence.byProvider["codex-oauth"]).toBe("keychain");
     expect(presence.byProvider.openai).toBeUndefined();
     expect(presence.authByProvider).toBeUndefined(); // omitted in 8b (C-14)
+  });
+
+  test("credentialPresenceFrom: PRESENCE IS PARSEABILITY (hotfix review r1, M1) — a raw non-JSON leftover (the OLD pre-hotfix shape) is ABSENT, never present", async () => {
+    await store.set(NORMA_CREDENTIAL_INVENTORY.find((s) => s.provider === "codex-oauth")!.secretName, "codex-token");
+    const presence = await credentialPresenceFrom(store);
+    expect(presence.byProvider["codex-oauth"]).toBeUndefined();
   });
 
   test("a SecretStore.get failure never propagates — credentialPresenceFrom treats the slot as absent", async () => {

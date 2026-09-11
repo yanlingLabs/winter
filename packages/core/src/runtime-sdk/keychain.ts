@@ -131,6 +131,13 @@ export function keychainSeamFromSecretStore(store: SecretStore): KeychainSeam {
           case "api-key": return material.key;
           case "oauth": return material.accessToken;
           case "bearer": return material.token;
+          default: {
+            // Exhaustiveness (hotfix review r1, m3): a future `CredentialMaterial` variant that
+            // forgets to add a case here fails `typecheck:core` on this line, not silently at
+            // runtime.
+            const _never: never = material;
+            return _never;
+          }
         }
       } catch (err) {
         console.warn(`[keychain] read failed for "${ref.account}": ${describeError(err)}`);
@@ -162,14 +169,27 @@ export function credentialRefFor(provider: string): CredentialRef | undefined {
 
 /**
  * Presence-by-provider (`CredentialPresence.byProvider`), never the material: each inventory slot
- * is probed with `store.get` and, when present (non-empty — see `keychainSeamFromSecretStore`'s
- * doc comment on `norma logout`'s empty-string writes), contributes `provider → kind`.
- * `authByProvider` is omitted (C-14 — deferred to 8c). Never log the probed values; a
- * `JSON.stringify` of the result can never contain a secret because none is ever assigned into it.
+ * is probed through `readCredentialMaterial` (the SAME single `get` + parse the seam's `read()`
+ * uses) and, when it parses to real material, contributes `provider → kind`. `authByProvider` is
+ * omitted (C-14 — deferred to 8c). Never log the probed values; a `JSON.stringify` of the result
+ * can never contain a secret because none is ever assigned into it.
+ *
+ * PRESENCE IS PARSEABILITY, NOT VALIDITY (hotfix review r1, M1): a blank/missing record reads as
+ * absent exactly as before (`readCredentialMaterial` returns `null` for both), but a NON-EMPTY
+ * record that does not parse into material the child's `coerceMaterial` accepts is now ALSO
+ * absent — never "present with material the child will reject". Before this, a raw non-JSON
+ * leftover (the exact shape the OLD, pre-hotfix inventory used to store) read as present, which
+ * would have `providerSelectionFor` attach a ref the child then failed on, all the way through the
+ * SDK's ~72s retry ladder (see the error-classification finding in the hotfix report) — parsing
+ * here means that ref is never attached in the first place. This still says nothing about
+ * WORKING — an expired-but-well-formed OAuth material with a dead refresh token still reads as
+ * present and fails later, at the turn, exactly as documented above.
  *
  * A `SecretStore.get` FAILURE for one slot never propagates and never fails the whole probe: it is
  * caught, logged at `warn` with the secret NAME and an error CODE/class only (never the message
  * text), and that slot is treated as absent — exactly as if the secret were simply not stored.
+ * (A malformed-but-present record does NOT hit this catch — `readCredentialMaterial` handles that
+ * case itself, with its own single warning, and returns `null` rather than throwing.)
  */
 export async function credentialPresenceFrom(
   store: SecretStore,
@@ -177,14 +197,14 @@ export async function credentialPresenceFrom(
 ): Promise<CredentialPresence> {
   const byProvider: Record<string, CredentialRef["kind"]> = {};
   for (const slot of inventory) {
-    let value: string | null;
+    let material: Awaited<ReturnType<typeof readCredentialMaterial>>;
     try {
-      value = await store.get(slot.secretName);
+      material = await readCredentialMaterial(store, slot.secretName);
     } catch (err) {
       console.warn(`[keychain] presence probe failed for "${slot.secretName}": ${describeError(err)}`);
       continue;
     }
-    if (value) byProvider[slot.provider] = slot.kind;
+    if (material) byProvider[slot.provider] = slot.kind;
   }
   return { byProvider };
 }
