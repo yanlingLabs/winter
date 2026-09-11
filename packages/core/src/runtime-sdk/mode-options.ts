@@ -10,9 +10,18 @@ import { providerSelectionFor, testProviderNameFor } from "./provider-selection"
 import { WINTER_ADVERTISED_TOOLS_0_0_4, WINTER_NORMA_TOOL_PAIRS, WINTER_OWN_TOOL_NAMES } from "./tool-names";
 
 /**
- * **The six Norma policies → Winter's `PermissionMode`, 1:1** (P8b-7).
+ * **The six Norma policies → Winter's `PermissionMode`** (P8b-7, AMENDED by the whole-branch
+ * review's F1).
  *
- * The only mapping that is not a rename is `ask → "default"` (surface map §5.2).
+ * Two mappings are not renames. `ask → "default"` (surface map §5.2), and **`auto → "default"`**:
+ * Norma's `auto` means "the HOST gate decides everything without a card" (`gate.evaluate`'s own
+ * `auto` column — allow MUTATING, deny nothing a card would have asked about), and Winter's `auto`
+ * mode means something else entirely — its MODEL-BACKED classifier runs ahead of `canUseTool`, a
+ * model call per tool use Norma never configured, and with an ineligible model or a test double it
+ * FAILS CLOSED ("Blocked by classifier") before the gate is ever asked. Dispatch is created with
+ * `approvalPolicy: "auto"`, so `auto → auto` put the shipped default behind that classifier. Under
+ * `"default"` every call reaches `canUseTool`, where the gate's `auto` verdict is the live policy —
+ * which is what `auto` has always meant on the engine. The mode-matrix test pins both.
  *
  * **The seventh value.** `gate.ts`'s `SessionApprovalPolicy` has a seventh member, `"chat"`, and
  * `ipc/server.ts:1096` persists it on EVERY chat session — so it reaches this function in
@@ -31,7 +40,7 @@ export function permissionModeFor(policy: SessionApprovalPolicy): PermissionMode
     case "dont-ask": return "dontAsk";
     case "ask": return "default";
     case "accept-edits": return "acceptEdits";
-    case "auto": return "auto";
+    case "auto": return "default";   // the gate decides, never Winter's classifier (review F1)
     case "bypass": return "bypassPermissions";
     case "chat": return "default";
   }

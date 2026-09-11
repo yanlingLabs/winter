@@ -191,9 +191,12 @@ describeWithWinterBinary("dispatch on the Winter leg — the built binary throug
 
     await switchDouble("winter-test/tooluse");
     await client.call(METHODS.sessionAttach, { sessionId: sid, fromSeq: 0 });
-    // (1) under `auto` (Winter's `auto` permission mode): the unclassified call is blocked before
-    // the bridge is asked — by Winter's own classifier, which fails closed with no model to
-    // classify — and NO card exists on either side
+    // (1) under `auto` — the SHIPPED dispatch policy, which is Winter's `default` mode since P8b-7
+    // was amended (review F1): the unclassified call reaches THE BRIDGE, whose gate fails closed to
+    // "ask" for an unclassified tool under every policy, and the dispatch session never prompts —
+    // so the tool_result is P8b-7's own deny text and NO card exists on either side. (Before F1
+    // this half passed for the wrong reason: Winter's `auto` mode ran its model-backed classifier
+    // ahead of the bridge and blocked the call itself — "Blocked by classifier".)
     await client.call(METHODS.sessionSend, { sessionId: sid, text: "use the tool" });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sid);
     await Bun.sleep(100);
@@ -204,7 +207,8 @@ describeWithWinterBinary("dispatch on the Winter leg — the built binary throug
     expect(call.name).toBe("test_tool");
     expect(res.callId).toBe(call.callId);
     expect(res.isError).toBe(true);
-    expect(res.output.length).toBeGreaterThan(0);
+    expect(res.output).toContain(neverPromptsMessage("test_tool", "dispatch", "auto"));
+    expect(res.output).not.toContain("classifier");
     // (2) under `ask` (Winter's `default` mode, the bridge's door): P8b-7's own deny message — the
     // dispatch session never prompts — and still no card anywhere. The `tooluse` double scripts ONE
     // tool round per child process, so the child is reopened (the policy is re-read from the store
@@ -229,12 +233,11 @@ describeWithWinterBinary("dispatch on the Winter leg — the built binary throug
 
   test("(b) the subagent double spawns a child → thread_started/thread_completed + a PersistedWinterChild row that survives a simulated restart; the singleton resumes", async () => {
     await switchDouble("winter-test/subagent");
-    // Under `auto` (Winter's `auto` mode) the spawn is classified by Winter's OWN classifier, which
-    // has no model behind a test double and fails closed ("Blocked by classifier") — so the spawn
-    // round runs under `ask` (Winter's `default` mode): the bridge asks Norma's gate, which allows
-    // `spawn_agent` in dispatch. (Concern recorded in the report: under `auto`, Winter's classifier
-    // precedes Norma's gate on the Winter leg.)
-    await client.call(METHODS.sessionSetPolicy, { sessionId: sid, policy: "ask" });
+    // Under `auto` — the SHIPPED dispatch policy (the singleton is minted with it and (a) restored
+    // it). Since review F1 (`auto → default`) the spawn reaches THE BRIDGE, whose gate allows
+    // `spawn_agent` silently in dispatch; before F1 this round had to run under `ask` because
+    // Winter's own classifier blocked the `Agent` call under its `auto` mode.
+    expect(daemon!.sessions.meta(sid).approvalPolicy).toBe("auto");
     const evCount = client.events.length;
     await client.call(METHODS.sessionSend, { sessionId: sid, text: "run the subagent" });
     await client.waitFor((e) => client.events.indexOf(e) >= evCount && e.type === "turn_completed" && e.sessionId === sid);
@@ -257,7 +260,7 @@ describeWithWinterBinary("dispatch on the Winter leg — the built binary throug
     expect(row!.completedAt).toBeDefined();
     expect(rt.children.list(sid)).toHaveLength(1);
     const driver = daemon!.winter.get(sid)!;
-    expect(driver.generation).toBe(4);   // minted (1), tooluse under auto (2), tooluse under ask (3), subagent (4)
+    expect(driver.generation).toBe(4);   // minted (1), tooluse under auto (2), tooluse under ask (3), subagent under auto (4)
 
     // the simulated restart
     const pids = winterChildren(bin);

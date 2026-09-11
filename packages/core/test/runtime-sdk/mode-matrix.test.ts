@@ -6,6 +6,7 @@ import type { NewSessionEvent } from "@norma/protocol";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
 import { PermissionGate, type SessionApprovalPolicy } from "../../src/agent/gate";
+import { classifyPermissionMode } from "@yanlinglabs/winter-agent-sdk/messaging";
 import { canUseToolFor, neverPromptsMessage, type BridgeLogger } from "../../src/runtime-sdk/approval-bridge";
 import {
   buildWinterOptions, permissionModeFor, disallowedToolsFor,
@@ -28,15 +29,28 @@ const NO_CREDS: CredentialPresence = { byProvider: {} };
 // permissionModeFor — the P8b-7 1:1 table
 // -------------------------------------------------------------------------------------------
 
-test("the six policies map 1:1 onto Winter's PermissionMode", () => {
+test("the six policies map onto Winter's PermissionMode — auto → default (P8b-7 amended, review F1)", () => {
   expect(Object.fromEntries(POLICIES.map((p) => [p, permissionModeFor(p)]))).toEqual({
     plan: "plan",
     "dont-ask": "dontAsk",
     ask: "default",
     "accept-edits": "acceptEdits",
-    auto: "auto",
+    // NEVER Winter's `auto`: that mode runs Winter's model-backed classifier AHEAD of `canUseTool`
+    // (fail-closed with a double, a model call per tool use in production). Norma's `auto` is the
+    // host gate's silent verdict, which only `"default"` routes to.
+    auto: "default",
     bypass: "bypassPermissions",
   } satisfies Record<string, PermissionMode>);
+  expect(permissionModeFor("auto")).not.toBe("auto");
+});
+
+test("review F1: the messaging class of an `auto` session is derived from `default`, i.e. `prompts` — never Winter's `auto`", () => {
+  // `sessionPermissionClassFor` (session-driver.ts) reads the stored policy and classifies
+  // `permissionModeFor(policy)`; with `auto → default` an `auto` session is a `prompts` receiver,
+  // exactly like an `ask` one. Pinned through the SDK's own classifier so the two stay one predicate.
+  expect(classifyPermissionMode(permissionModeFor("auto"), { bypassAvailable: false })).toBe("prompts");
+  expect(classifyPermissionMode(permissionModeFor("ask"), { bypassAvailable: false })).toBe(classifyPermissionMode(permissionModeFor("auto"), { bypassAvailable: false }));
+  expect(classifyPermissionMode(permissionModeFor("bypass"), { bypassAvailable: true })).toBe("bypasses");
 });
 
 test("the internal seventh policy maps to default, NOT dontAsk", () => {
