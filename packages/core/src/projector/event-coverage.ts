@@ -145,15 +145,15 @@ export const SUBAGENT_TRANSCRIPT_INCLUDE = {
  * opaque provider state whose only sink is the session JSONL — the projector has no branch that
  * can emit it, and none may ever be added).
  *
- * This map is NOT decorative: `test/projector/event-coverage.test.ts` asserts the one direction
- * that can be checked cheaply — every variant the projector actually emits across the golden
- * scenarios is `true` here. The reverse direction (a `true` with no branch yet) is legitimate
- * while Task 11's half of the projector is unwritten.
+ * "Produce" means ANY door of the projector — `accept`, `beginTurn` or `acceptError` — not just
+ * `accept`. `turn_started` is the row that makes the distinction matter: only `beginTurn` emits it,
+ * and a map scoped to `accept` alone would call it `false` and invite the host to synthesize a
+ * second one.
  *
- * The 8b task split: Task 10 (this commit) owns `assistant_message`, `assistant_delta`,
- * `tool_call`, `tool_result`, `turn_completed` and the generic `agent_error`; Task 11 owns the
- * approval/question bridges, the child (`thread_*`) rows, `task_updated`, and the per-class
- * refinement of `agent_error`.
+ * This map is NOT decorative: `test/projector/event-coverage.test.ts` asserts the direction that can
+ * be checked cheaply — every variant the projector actually emits across the golden scenarios is
+ * `true` here — and `golden-replay.test.ts` now compares `beginTurn`'s batch rather than dropping
+ * it, so a duplicate `turn_started` fails a test instead of reaching the session log.
  */
 export const PROJECTED_EVENT_COVERAGE = {
   // ---- produced: the conversation spine (Task 10) ----
@@ -176,6 +176,19 @@ export const PROJECTED_EVENT_COVERAGE = {
   thread_completed: true,
   // `system/task_updated` and `system/task_notification` fold into Winter's task graph mirror.
   task_updated: true,
+  // ---- produced: the turn boundary the HOST opens ----
+  //
+  // PRODUCER: `beginTurn` (`index.ts`), not `accept`. The host calls `beginTurn` when it pushes a
+  // user turn — after appending its own `user_message` (P8b-5) — and the batch that comes back
+  // carries this event.
+  //
+  // **TASK 16's OBLIGATION IS THEREFORE "APPEND WHAT `beginTurn` RETURNS", NEVER "SYNTHESIZE YOUR
+  // OWN".** A driver that did both would write TWO `turn_started` rows per turn into the session
+  // JSONL — persisted, replayed, and (since `SUBAGENT_TRANSCRIPT_INCLUDE.turn_started` is `true`)
+  // copied into every child's model-greppable transcript. This row said `false` for one review
+  // cycle while `beginTurn` produced it, which is exactly how that would have happened.
+  turn_started: true,
+  //
   // ---- never produced ----
   //
   // APPROVALS AND QUESTIONS ARE THE BRIDGES', NOT THE PROJECTOR'S, and the reason is ordering. Both
@@ -194,13 +207,6 @@ export const PROJECTED_EVENT_COVERAGE = {
   question_asked: false,
   question_resolved: false,
   //
-  // OPEN OBLIGATION FOR TASK 16 (do not let this become a silent drop): the engine emits
-  // `turn_started` at the top of every turn (`engine.ts:2788`) and the Mac app reads it. The
-  // projector cannot produce it — the earliest frame it sees for a turn is already the model's
-  // answer — so on the Winter leg the HOST must append `turn_started` at push time, next to the
-  // `user_message` it already appends (P8b-5). It is `false` here because the projector is not its
-  // producer, NOT because the event goes away.
-  turn_started: false,
   // Opaque `encrypted_content` / `itemJson`; the session JSONL is its only sink and the projector
   // has no branch that can emit it. Never flip this to `true`.
   reasoning_item: false,

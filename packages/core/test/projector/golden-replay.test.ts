@@ -62,7 +62,6 @@ const EXTERNAL_PRODUCERS: Partial<Record<SessionEvent["type"], string>> = {
   session_created: "sessions/store.ts's createSession",
   harness_attached: "sessions/hub.ts's attach",
   user_message: "the host's push path (P8b-5) — ipc/server.ts's session.send / the Winter prompt queue",
-  turn_started: "the session driver, appended beside user_message at push time (Task 16 obligation)",
   approval_requested: "runtime-sdk/approval-bridge.ts (Task 8) — emitted from inside canUseTool",
   approval_resolved: "runtime-sdk/approval-bridge.ts (Task 8)",
   question_asked: "runtime-sdk/question-bridge.ts (Task 8)",
@@ -132,8 +131,22 @@ interface Scenario {
   mode: "code" | "dispatch" | "chat";
   /** `Options.forwardSubagentText` — when false a child's own text never reaches the host. */
   forwardsSubagentText?: boolean;
-  /** How many user turns the HOST pushed (M1's `beginTurn`). Default 1. */
-  turns?: number;
+  /**
+   * The message indices a user turn is pushed BEFORE — the host's real push points, so a
+   * multi-turn scenario's second `turn_started` lands where the driver would actually put it
+   * instead of being bunched at the top. Default: one push before the first message.
+   */
+  pushAt?: readonly number[];
+  /**
+   * Is the wire fixture MEASURED against the real `dist/winter` child, or AUTHORED from the pinned
+   * shapes? (m4, review r2.) Never assert an authored shape as fact: `code-child-spawn-forwarded`
+   * and every `stream_event` line are authored, because no recording exists with
+   * `forwardSubagentText: true` and no `winter-test/*` double streams. Both are targets of the
+   * deferred `describeWithWinterBinary`-gated real-child test.
+   */
+  provenance: "measured" | "authored" | "measured-shapes";
+  /** Why, when it is not fully measured — printed by the disclosure test. */
+  provenanceNote?: string;
   /**
    * ── CROSS-LEG DIVERGENCES, DISCLOSED (M4, review r1) ────────────────────────────────────────
    *
@@ -156,21 +169,46 @@ interface Scenario {
 /** Every scenario replayed. A literal list so a golden that stops being replayed fails HERE rather
  *  than quietly dropping out of the proof. */
 const SCENARIOS: readonly Scenario[] = [
-  { name: "chat-text-only", golden: "chat-text-only", mode: "chat" },
-  { name: "code-tool-call", golden: "code-tool-call", mode: "code" },
   {
-    name: "code-tool-denied", golden: "code-tool-denied", mode: "code", turns: 2,
+    name: "chat-text-only", golden: "chat-text-only", mode: "chat", provenance: "measured-shapes",
+    provenanceNote: "every frame shape is measured; the `stream_event` lines are AUTHORED from frames.ts:361-369 — no `winter-test/*` double streams, even with includePartialMessages:true",
+  },
+  {
+    name: "code-tool-call", golden: "code-tool-call", mode: "code", provenance: "measured-shapes",
+    provenanceNote: "shapes measured; `stream_event` authored (see chat-text-only)",
+  },
+  {
+    name: "code-tool-denied", golden: "code-tool-denied", mode: "code", pushAt: [0, 6],
+    provenance: "measured",
+    provenanceNote: "byte-for-byte the recorded winter-test/tooluse stream, retargeted to Write",
     documentedAdditions: [
       { type: "assistant_message", note: "THE WINTER CHILD KEEPS TALKING AFTER A DENIAL. Norma's engine ends the turn on a deny (its tool_result says \"Stop here and wait\"), so the golden's last events are tool_result(isError) -> turn_completed; the recorded child answered `tool round done` and only then terminated. A real cross-leg behavioural difference, surfaced here rather than fixture-shaped away. Whether it survives is Task 9's permission-message question." },
       { type: "agent_error", note: "the recording's SECOND pushed envelope terminated `error_during_execution` (the scripted double ran out of turns). Its class is `tool_failure`." },
+      { type: "turn_started", occurrence: "last", note: "the SECOND push's own turn_started — `beginTurn` produces it (never the driver), and the one-turn golden has one." },
       { type: "turn_completed", occurrence: "last", note: "that second envelope's own terminal — two pushes, two terminals (the M1 contract), where the one-turn golden has one. The LAST one is the addition: turn 1's own `end_turn` terminal is the golden's." },
     ],
   },
-  { name: "code-child-spawn", golden: "code-child-spawn", mode: "code" },
-  { name: "code-child-spawn-forwarded", golden: "code-child-spawn", mode: "code", forwardsSubagentText: true },
-  { name: "code-provider-error", golden: "code-provider-error", mode: "code" },
-  { name: "code-interrupted", golden: "code-interrupted", mode: "code" },
-  { name: "dispatch-tool-call", golden: "dispatch-tool-call", mode: "dispatch" },
+  {
+    name: "code-child-spawn", golden: "code-child-spawn", mode: "code", provenance: "measured-shapes",
+    provenanceNote: "shapes measured; `stream_event` authored (see chat-text-only)",
+  },
+  {
+    name: "code-child-spawn-forwarded", golden: "code-child-spawn", mode: "code", forwardsSubagentText: true,
+    provenance: "authored",
+    provenanceNote: "AUTHORED, NOT MEASURED (m4, review r2): the real-child measurement ran with default options, so NO recording exists with `forwardSubagentText: true`. The child's forwarded text here is authored from the §4.3 shape. Nothing in this lane may claim as fact that a child's own text does arrive with the option on — only that IF it arrives in this shape, the projector folds it onto the child's threadId. A target of the deferred describeWithWinterBinary-gated test.",
+  },
+  {
+    name: "code-provider-error", golden: "code-provider-error", mode: "code", provenance: "measured-shapes",
+    provenanceNote: "the terminal is §4.8's measured api-failure shape (success + is_error + terminal_reason + api_error_status)",
+  },
+  {
+    name: "code-interrupted", golden: "code-interrupted", mode: "code", provenance: "measured-shapes",
+    provenanceNote: "the interrupted result shape is read out of dist/winter itself, not guessed",
+  },
+  {
+    name: "dispatch-tool-call", golden: "dispatch-tool-call", mode: "dispatch", provenance: "measured-shapes",
+    provenanceNote: "shapes measured; `stream_event` authored (see chat-text-only)",
+  },
 ];
 
 /** Thread ids differ by construction (the engine's child id vs the spawning tool_use id), so both
@@ -222,7 +260,7 @@ describe("projector: golden-stream replay, every variant (P8b-14)", () => {
       const golden = canonicalThreads(readJsonl<Any>("golden", `${s.golden}.events.jsonl`));
       const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
       const { projector } = makeProjector({ mode: s.mode, sessionId: "s_test" });
-      const projected = canonicalThreads(run(projector, messages, { turns: s.turns ?? 1 }) as unknown as Any[]);
+      const projected = canonicalThreads(run(projector, messages, { pushAt: s.pushAt ?? [0] }) as unknown as Any[]);
 
       // The P8b-5 invariant, asserted directly: the projector re-appends NO user turn.
       expect(projected.filter((e) => e.type === "user_message")).toEqual([]);
@@ -247,7 +285,7 @@ describe("projector: golden-stream replay, every variant (P8b-14)", () => {
       const golden = canonicalThreads(readJsonl<Any>("golden", `${s.golden}.events.jsonl`));
       const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
       const { projector } = makeProjector({ mode: s.mode, sessionId: "s_test" });
-      const projected = canonicalThreads(run(projector, messages, { turns: s.turns ?? 1 }) as unknown as Any[]);
+      const projected = canonicalThreads(run(projector, messages, { pushAt: s.pushAt ?? [0] }) as unknown as Any[]);
 
       const childIds = [...new Set(golden.map((e) => e.threadId as string))].filter((t) => t !== MAIN_THREAD && t !== undefined);
       for (const child of childIds) {
@@ -264,7 +302,7 @@ describe("projector: golden-stream replay, every variant (P8b-14)", () => {
   test("tool rows keep NORMA names on the Winter leg (P8b-25)", () => {
     for (const s of SCENARIOS) {
       const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
-      const names = (run(makeProjector().projector, messages, { turns: s.turns ?? 1 }) as unknown as Any[]).filter((e) => e.type === "tool_call").map((e) => e.name);
+      const names = (run(makeProjector().projector, messages, { pushAt: s.pushAt ?? [0] }) as unknown as Any[]).filter((e) => e.type === "tool_call").map((e) => e.name);
       for (const n of names) expect({ scenario: s.name, name: n, looksWinter: /^[A-Z]/.test(n as string) }).toEqual({ scenario: s.name, name: n, looksWinter: false });
     }
   });
@@ -272,7 +310,7 @@ describe("projector: golden-stream replay, every variant (P8b-14)", () => {
   test("every tool_result is linked to a tool_call the projector already produced", () => {
     for (const s of SCENARIOS) {
       const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
-      const out = run(makeProjector().projector, messages, { turns: s.turns ?? 1 }) as unknown as Any[];
+      const out = run(makeProjector().projector, messages, { pushAt: s.pushAt ?? [0] }) as unknown as Any[];
       const calls = new Set(out.filter((e) => e.type === "tool_call").map((e) => e.callId as string));
       for (const r of out.filter((e) => e.type === "tool_result")) {
         expect({ scenario: s.name, callId: r.callId, linked: calls.has(r.callId as string) }).toEqual({ scenario: s.name, callId: r.callId, linked: true });
@@ -283,7 +321,7 @@ describe("projector: golden-stream replay, every variant (P8b-14)", () => {
   test("every thread_completed closes a thread_started the projector already produced", () => {
     for (const s of SCENARIOS) {
       const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
-      const out = run(makeProjector().projector, messages, { turns: s.turns ?? 1 }) as unknown as Any[];
+      const out = run(makeProjector().projector, messages, { pushAt: s.pushAt ?? [0] }) as unknown as Any[];
       const started = new Set(out.filter((e) => e.type === "thread_started").map((e) => e.threadId as string));
       for (const c of out.filter((e) => e.type === "thread_completed")) {
         expect({ scenario: s.name, threadId: c.threadId, opened: started.has(c.threadId as string) }).toEqual({ scenario: s.name, threadId: c.threadId, opened: true });
@@ -294,9 +332,51 @@ describe("projector: golden-stream replay, every variant (P8b-14)", () => {
   test("no scenario produces a variant PROJECTED_EVENT_COVERAGE marks false", () => {
     for (const s of SCENARIOS) {
       const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
-      for (const e of run(makeProjector().projector, messages, { turns: s.turns ?? 1 })) {
+      for (const e of run(makeProjector().projector, messages, { pushAt: s.pushAt ?? [0] })) {
         expect({ scenario: s.name, type: e.type, covered: PROJECTED_EVENT_COVERAGE[e.type] }).toEqual({ scenario: s.name, type: e.type, covered: true });
       }
+    }
+  });
+
+  test("AUTHORED fixtures are declared as such — an authored shape is never asserted as fact (m4)", () => {
+    // The report applied this discipline to `stream_event` and skipped it for the forwarded-child
+    // fixture, which is an inconsistency in disclosure rather than craft. Every scenario now carries
+    // its provenance, and anything not fully measured says why.
+    for (const s of SCENARIOS) {
+      expect({ scenario: s.name, declared: s.provenance !== undefined }).toEqual({ scenario: s.name, declared: true });
+      if (s.provenance !== "measured") {
+        expect({ scenario: s.name, explained: (s.provenanceNote ?? "").length > 0 }).toEqual({ scenario: s.name, explained: true });
+      }
+    }
+    const forwarded = SCENARIOS.find((s) => s.name === "code-child-spawn-forwarded")!;
+    expect(forwarded.provenance).toBe("authored");
+  });
+
+  test("`already-committed` WARNS and names the cause — silence on the resume path was the defect (n5)", () => {
+    // M2's whole point: a resume that forgot to bump `generation` replays into committed marks and
+    // projects nothing. A future refactor must not be able to put this back to debug with every
+    // test green.
+    const messages = readJsonl<ProtocolSdkMessage>("sdk", "code-tool-call.messages.jsonl");
+    const first = makeProjector();
+    run(first.projector, messages, { pushAt: [0] });
+    const second = makeProjector({ checkpoint: first.checkpoints });
+    run(second.projector, messages, { pushAt: [0] });
+    expect(second.warnings.join(" ")).toContain("did not bump");
+  });
+
+  test("task_updated parses against the protocol schema too — the one produced variant no golden covers (n6)", () => {
+    const { projector } = makeProjector();
+    const frames = [
+      { type: "system", subtype: "task_started", task_id: "t1", description: "write the report", uuid: "u", session_id: "be-1" },
+      { type: "system", subtype: "task_updated", task_id: "t1", patch: { status: "failed", error: "the tool exited 1" }, uuid: "u", session_id: "be-1" },
+      { type: "system", subtype: "task_notification", task_id: "t1", status: "stopped", summary: "cancelled", output_file: "/tmp/x", uuid: "u", session_id: "be-1" },
+    ];
+    const produced = frames.flatMap((f) => accept(projector, f as never));
+    expect(produced.map((e) => e.type)).toEqual(["task_updated", "task_updated"]);
+    for (const e of produced) {
+      const parsed = SessionEvent.safeParse(e);
+      expect({ type: e.type, ok: parsed.success, issues: parsed.success ? [] : parsed.error.issues.map((i) => i.path.join(".")) })
+        .toEqual({ type: e.type, ok: true, issues: [] });
     }
   });
 
@@ -306,7 +386,7 @@ describe("projector: golden-stream replay, every variant (P8b-14)", () => {
     for (const s of SCENARIOS) {
       const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
       const { projector } = makeProjector({ mode: s.mode });
-      const events = [...beginTurn(projector, "a pushed turn"), ...run(projector, messages, { turns: s.turns ?? 1 })];
+      const events = run(projector, messages, { pushAt: s.pushAt ?? [0] });
       for (const e of events) {
         const parsed = SessionEvent.safeParse(e);
         expect({ scenario: s.name, type: e.type, ok: parsed.success, issues: parsed.success ? [] : parsed.error.issues.map((i) => i.path.join(".")) })
@@ -318,19 +398,19 @@ describe("projector: golden-stream replay, every variant (P8b-14)", () => {
   test("no scenario ever produces a reasoning_item", () => {
     for (const s of SCENARIOS) {
       const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
-      expect(run(makeProjector().projector, messages, { turns: s.turns ?? 1 }).some((e) => e.type === "reasoning_item")).toBe(false);
+      expect(run(makeProjector().projector, messages, { pushAt: s.pushAt ?? [0] }).some((e) => e.type === "reasoning_item")).toBe(false);
     }
   });
 
   test("exactly one terminal set per turn, and the turn's last main-thread event is its terminal", () => {
     for (const s of SCENARIOS) {
       const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
-      const out = run(makeProjector().projector, messages, { turns: s.turns ?? 1 }) as unknown as Any[];
+      const out = run(makeProjector().projector, messages, { pushAt: s.pushAt ?? [0] }) as unknown as Any[];
       // One terminal per BEGUN turn (M1). The wire's `result` count and the push count agree on a
       // well-behaved stream, which is the invariant worth asserting.
       const terminals = out.filter((e) => e.type === "turn_completed");
       const results = messages.filter((m) => (m as Any).type === "result");
-      expect({ scenario: s.name, terminals: terminals.length, pushes: s.turns ?? 1 })
+      expect({ scenario: s.name, terminals: terminals.length, pushes: (s.pushAt ?? [0]).length })
         .toEqual({ scenario: s.name, terminals: results.length, pushes: results.length });
       const main = out.filter((e) => e.threadId === MAIN_THREAD);
       expect({ scenario: s.name, last: main[main.length - 1]?.type }).toEqual({ scenario: s.name, last: "turn_completed" });

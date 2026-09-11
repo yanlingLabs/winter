@@ -35,7 +35,10 @@ export type {
 } from "./types";
 
 /**
- * ── THE SDK → SessionEvent PROJECTOR, part 1: conversation + terminal + idempotency ─────────────
+ * ── THE SDK → SessionEvent PROJECTOR ────────────────────────────────────────────────────────────
+ *
+ * Conversation, terminal and idempotency (Task 10); children, the task graph, error classes and the
+ * observed-never-persisted families (Task 11).
  *
  * One projector per live Winter session. It is driven by the host's `for await (const m of query)`
  * loop: every wire message goes through `accept`, and whatever comes back is appended (or, for a
@@ -153,8 +156,28 @@ class ProjectorImpl implements Projector {
    * pushed text in the echo window (the only thing that makes `dedupe.ts` reachable), and returns
    * the `turn_started` the host appends beside its own `user_message`.
    *
-   * It does NOT return a `user_message`: the host appends that itself (P8b-5), and a projector that
-   * also produced one would double-append the user's turn.
+   * It does NOT return a `user_message`: the host appends that itself (P8b-5). It DOES return the
+   * `turn_started`, and the host appends THAT event rather than one of its own — see
+   * `PROJECTED_EVENT_COVERAGE.turn_started` for what two producers would cost.
+   *
+   * ── A MID-TURN STEER IS NOT A NEW BEGUN TURN ────────────────────────────────────────────────
+   *
+   * `session.send` and `session.steer` are both pushes into the same host-owned queue (P8b-5), but
+   * they differ in exactly the way this door cares about: `send` starts a turn, while `steer` joins
+   * the turn already running (the child drains it at its next round top). So the rule stays "ONE
+   * `result` per begun turn", and **a steer must not call `beginTurn`** — under the current
+   * understanding it produces no terminal of its own, and an extra `beginTurn` would leave
+   * `openTurns` permanently ≥ 1, silently weakening the guard so a stray or duplicate `result` is
+   * projected instead of dropped. It would also put a mid-turn `turn_started` in the log, which the
+   * engine never emits.
+   *
+   * **THIS IS NOT MEASURED, AND IT IS A TASK 16 MEASUREMENT OBLIGATION.** Task 10's recording
+   * deliberately gated its second envelope on the first `result` "so the turns stay separable", so
+   * it says nothing about a mid-turn push. Drive a `steer` against the built binary and COUNT the
+   * `result`s: if a steered-in message terminates on its own, the driver must call `beginTurn` for
+   * the steer too — otherwise that terminal is dropped by the `openTurns === 0 && !sawFrame` guard
+   * whenever the steer produced no frames first, which is the same defect this door was added to
+   * fix, on the steer path.
    */
   beginTurn(input: { text: string; at?: string }): ProjectedBatch {
     this.commitPending();
@@ -352,8 +375,17 @@ class ProjectorImpl implements Projector {
       const patch = typeof m.patch === "object" && m.patch !== null ? (m.patch as Record<string, unknown>) : {};
       return this.claimed(`tk:${taskId}:${this.messageIndex}`, () => {
         const ev = applyTaskPatch(this.tasks, taskId, patch, this.deps.sessionId);
+        // A patch of only run-bookkeeping (`total_paused_ms`, `end_time`) says nothing Norma's
+        // `task_updated` can express. Logged rather than dropped in silence (n8, review r2).
+        if (ev === undefined) this.logSkipped(msg);
         return ev === undefined ? [] : [ev];
       });
+    }
+    if (kind === "system/task_progress") {
+      // A deliberate skip, not an unknown: progress carries usage and a description the patches
+      // already say. Logged through the same allowlisted door as every other observed family.
+      this.logSkipped(msg);
+      return EMPTY_BATCH();
     }
     if (kind === "system/task_notification") {
       // A background task's own terminal. Its three statuses are a SUBSET of the patch vocabulary
@@ -361,7 +393,7 @@ class ProjectorImpl implements Projector {
       // — mapped here rather than widening children.ts's table with a value `patch.status` can
       // never hold.
       const status = m.status === "stopped" ? "killed" : typeof m.status === "string" ? m.status : undefined;
-      if (status === undefined) return EMPTY_BATCH();
+      if (status === undefined) { this.logSkipped(msg); return EMPTY_BATCH(); }
       return this.claimed(`tk:${taskId}:${this.messageIndex}`, () => {
         const ev = applyTaskPatch(this.tasks, taskId, { status, ...(typeof m.summary === "string" ? { description: m.summary } : {}) }, this.deps.sessionId);
         return ev === undefined ? [] : [ev];
@@ -469,9 +501,16 @@ class ProjectorImpl implements Projector {
    * warned. Task 16 surfaces it; 8a's recovery sweep (`pending()` + `resolvePending`, the only code
    * that can read the product log's tail) is what resolves it.
    *
-   * It is a returned marker rather than a thrown `ProjectorRefusedError` deliberately: throwing out
-   * of `accept` would abort the driver's iteration over the rest of a turn that is otherwise fine,
-   * turning a bookkeeping conflict into a dead session.
+   * **IT THROWS `ProjectorRefusedError`.** The refusal is also appended to `refusals` and handed to
+   * `deps.onRefusal`, but the throw is the contract: a returned empty array is indistinguishable
+   * from "this message produced nothing", which is how a mis-wire stays invisible in the one
+   * component whose whole job is not to lose events.
+   *
+   * **SO THE DRIVER (Task 16) WRAPS `accept` IN A try/catch.** An uncaught `ProjectorRefusedError`
+   * ends the `for await` mid-turn. The ordering that prevents it arising at all is the driver's
+   * too: run 8a's recovery sweep (`pending()` + `resolvePending`) BEFORE constructing a projector
+   * for a session. A driver that would rather degrade than fail may catch this and continue; what
+   * it may not do is never find out.
    */
   private refuse(sourceId: string): never {
     const refusal: ProjectorRefusal = {

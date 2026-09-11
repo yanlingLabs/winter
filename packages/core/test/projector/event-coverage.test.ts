@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { HISTORY_EVENT_TYPES } from "../../src/sessions/history";
 import { PROJECTED_EVENT_COVERAGE, SUBAGENT_TRANSCRIPT_INCLUDE } from "../../src/projector";
+import { accept, assistantText, init, makeProjector, result } from "./harness";
 
 /**
  * The relocation's guard (C-5 / ruling P8b-9). The `satisfies Record<SessionEvent["type"], boolean>`
@@ -76,12 +77,24 @@ describe("projector/event-coverage: the relocated exhaustiveness maps", () => {
     expect(PROJECTED_EVENT_COVERAGE.task_updated).toBe(true);
   });
 
-  test("turn_started is false HERE and is Task 16's obligation, not a dropped event", () => {
-    // The projector cannot observe a push, so the host appends `turn_started` beside the
-    // `user_message` it already appends (P8b-5). Recorded as a test so the obligation cannot be
-    // read as "the Mac stopped needing it".
-    expect(PROJECTED_EVENT_COVERAGE.turn_started).toBe(false);
+  test("turn_started IS produced — by `beginTurn`, which is why the host must never synthesize one", () => {
+    // This row said `false` for a review cycle while `beginTurn` produced exactly this event. Two
+    // producers would write two rows per turn into the session JSONL — and since the transcript map
+    // includes `turn_started`, into every child's model-greppable transcript as well.
+    expect(PROJECTED_EVENT_COVERAGE.turn_started).toBe(true);
     expect(SUBAGENT_TRANSCRIPT_INCLUDE.turn_started).toBe(true);
+  });
+
+  test("`produce` means ANY door — a turn yields exactly ONE persisted turn_started", () => {
+    const { projector } = makeProjector();
+    const opened = projector.beginTurn({ text: "say hello" });
+    expect(opened.persist.map((e) => e.type)).toEqual(["turn_started"]);
+    expect(opened.broadcast).toEqual([]);
+    // and no frame path emits a second one
+    const rest = [
+      accept(projector, init()), accept(projector, assistantText("hi")), accept(projector, result()),
+    ].flat();
+    expect(rest.filter((e) => e.type === "turn_started")).toEqual([]);
   });
 
   test("every panel_*, workflow_*, bg_task_* and plugin/peripheral transient stays off the projector", () => {

@@ -79,10 +79,16 @@ export function asInitFrame(m: ProtocolSdkMessage): InitFrame | undefined {
  * `SDKPermissionDeniedMessage`. A main-thread frame carries an explicit `null` (on `stream_event`)
  * or omits it entirely (on `assistant`/`user`, measured), and both mean "main".
  *
- * Part 1 uses the parent tool-use id itself AS the threadId. That is provisional and Task 11
- * replaces it with the child registry's own id once `thread_started` has a producer — until then it
- * is a stable, collision-free correlator, which is all the conversation fold needs. The golden
- * replay compares only `threadId === "main"` for exactly this reason.
+ * The parent tool-use id IS the threadId — a decision Task 11 kept rather than replaced, for the
+ * reasons in `children.ts`: it is stable for the life of the child, unique by construction (a model
+ * never reuses a tool_use id), and it is the same id the child's completing `tool_result` carries,
+ * so both ends of the thread come off the wire with no registry lookup.
+ *
+ * **CROSS-LANE CONTRACT (n9, review r2):** that id is also how Task 13's `PersistedWinterChild` and
+ * Task 16's `Query.messaging.steerChild`/`resumeChild` must address the same child. The projector
+ * opens a thread with the spawning `tool_use.id`; anything addressing that child by another id is
+ * talking about a different thread as far as the session log is concerned. The integration test
+ * asserts the two agree.
  */
 export function threadIdOf(frame: { parent_tool_use_id?: string | null }): string {
   const parent = frame.parent_tool_use_id;

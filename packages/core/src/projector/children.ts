@@ -32,7 +32,15 @@ import type { ProjectedEvent } from "./types";
  *       the same, PLUS the child's `assistant_message` (and `assistant_delta`) on its threadId,
  *       which `conversation.ts` already produces for any frame carrying `parent_tool_use_id`.
  *
- * Both shapes are in the fixtures. **Task 16 obligation, recorded here and in the task report:** the
+ * Both shapes are in the fixtures — but only the DEFAULT one is measured. **The
+ * `code-child-spawn-forwarded` fixture is AUTHORED from the §4.3 shape** (m4, review r2): the
+ * real-child measurement ran with default options, so no recording exists with
+ * `forwardSubagentText: true`, and nothing here may claim as fact that a child's own text does
+ * arrive with the option on — only that IF it arrives in that shape, it folds onto the child's
+ * threadId. It is a target of the deferred `describeWithWinterBinary`-gated real-child test,
+ * alongside the `stream_event` gap.
+ *
+ * **Task 16 obligation, recorded here and in the task report:** the
  * engine's golden carries the child's own `assistant_message`, so leaving `forwardSubagentText` off
  * makes child transcripts thinner on the Winter leg than they are today. Turning it on is a
  * one-field decision in `buildWinterOptions`, and it is a decision, not an oversight — it doubles

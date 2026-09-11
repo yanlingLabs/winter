@@ -63,13 +63,30 @@ export const accept = (p: Projector, m: ProtocolSdkMessage): SessionEvent[] => f
 export const acceptError = (p: Projector, err: unknown): SessionEvent[] => flat(p.acceptError(err));
 export const beginTurn = (p: Projector, text: string): SessionEvent[] => flat(p.beginTurn({ text }));
 
-/** Feed a whole stream and collect every produced event, in order. `turns` is how many user turns
- *  the HOST pushed (M1's `beginTurn` door); the default single push is what every one-turn scenario
- *  needs, and the `turn_started` it returns is dropped here — the replay test asserts it. */
-export function run(projector: Projector, messages: ProtocolSdkMessage[], opts: { turns?: number } = {}): SessionEvent[] {
+/**
+ * Feed a whole stream and collect every produced event, in order — **including what `beginTurn`
+ * returns** (M1, review r2).
+ *
+ * Dropping `beginTurn`'s batch is what let the coverage map claim for a whole review cycle that the
+ * projector cannot produce `turn_started` while `beginTurn` produced exactly that: no test could
+ * see it, so a driver told to synthesize its own would have written two rows per turn with
+ * everything green. Keeping it means a duplicate `turn_started` now fails the replay.
+ *
+ * `pushAt` is the message indices a user turn is pushed BEFORE. The default is NO push, because
+ * most unit tests drive frames directly and open their turn (when they need one) with an explicit
+ * `beginTurn`; the replay passes the scenario's real push points, so a multi-turn scenario
+ * interleaves its pushes where the host actually makes them rather than issuing them all up front
+ * and misplacing the second `turn_started`.
+ */
+export function run(projector: Projector, messages: ProtocolSdkMessage[], opts: { pushAt?: readonly number[] } = {}): SessionEvent[] {
+  const pushAt = opts.pushAt ?? [];
   const out: SessionEvent[] = [];
-  for (let i = 0; i < (opts.turns ?? 0); i++) projector.beginTurn({ text: `turn ${i + 1}` });
-  for (const m of messages) out.push(...accept(projector, m));
+  let pushes = 0;
+  for (let i = 0; i < messages.length; i++) {
+    for (const at of pushAt) if (at === i) out.push(...beginTurn(projector, `turn ${++pushes}`));
+    out.push(...accept(projector, messages[i]!));
+  }
+  for (const at of pushAt) if (at >= messages.length) out.push(...beginTurn(projector, `turn ${++pushes}`));
   projector.flush();
   return out;
 }

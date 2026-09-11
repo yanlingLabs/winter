@@ -2,8 +2,9 @@
  * ── TEMPORARY, PRIVATE TO `projector/` — controller ruling P8b-25 ───────────────────────────────
  *
  * **The policy lane owns the canonical shared table at `runtime-sdk/tool-names.ts`. This module is
- * a stand-in until that lands: in Task 11 (after this lane rebases onto integration) the projector
- * switches its import to that module and THIS FILE IS DELETED.** Do not add a second consumer.
+ * a stand-in until that lands: once this lane rebases onto integration the projector switches its
+ * import to that module and THIS FILE IS DELETED.** The switch is a controller-ruled deferral to a
+ * later resume, not an outstanding promise from this one. Do not add a second consumer.
  *
  * ── WHY THE MAPPING EXISTS AT ALL ───────────────────────────────────────────────────────────────
  *

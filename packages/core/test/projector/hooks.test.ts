@@ -77,9 +77,19 @@ describe("projector/hooks: observed, never persisted", () => {
     expect(kindOf(msg({ nope: 1 }))).toBe("<untyped>");
   });
 
-  test("every kind this daemon deliberately does not persist is in the allowlist, and vice versa", () => {
+  test("every kind this daemon deliberately does not persist is in the allowlist", () => {
     for (const [kind] of unpersisted) expect({ kind, known: isKnownUnpersistedKind(kind) }).toEqual({ kind, known: true });
-    expect(UNPERSISTED_KINDS.length).toBe(unpersisted.length);
+  });
+
+  test("the TASK frames the projector handles on purpose are known kinds, not `unrecognised` (n8)", () => {
+    // `task_started` is CONSUMED (it seeds the row a later patch takes its subject from) and
+    // `task_progress` is a deliberate skip. Missing from the allowlist, their once-per-kind line
+    // read "unrecognised wire message" — the daemon log claiming the projector had never heard of
+    // frames it handles deliberately, which is the one signal that line exists to give.
+    for (const kind of ["system/task_started", "system/task_progress", "system/task_updated", "system/task_notification"]) {
+      expect({ kind, known: isKnownUnpersistedKind(kind) }).toEqual({ kind, known: true });
+    }
+    expect(UNPERSISTED_KINDS.length).toBe(unpersisted.length + 4);
   });
 
   test("the coverage map gains NOTHING from these families — no variant was invented for them (P8b-21)", () => {
@@ -88,7 +98,7 @@ describe("projector/hooks: observed, never persisted", () => {
     const produced = Object.entries(PROJECTED_EVENT_COVERAGE).filter(([, v]) => v === true).map(([k]) => k).sort();
     expect(produced).toEqual([
       "agent_error", "assistant_delta", "assistant_message", "task_updated", "thread_completed",
-      "thread_started", "tool_call", "tool_result", "turn_completed", "user_message",
+      "thread_started", "tool_call", "tool_result", "turn_completed", "turn_started", "user_message",
     ]);
   });
 });

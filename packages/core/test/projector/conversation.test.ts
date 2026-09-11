@@ -228,8 +228,10 @@ describe("projector: conversation fold (Winter 8b Task 10)", () => {
 
   test("a full text-only turn: init, deltas, final message, result", () => {
     const { projector } = makeProjector();
-    const out = run(projector, [init(), textDelta("Hello"), textDelta(", world."), assistantText("Hello, world."), result()], { turns: 1 });
-    expect(out.map((e) => e.type)).toEqual(["assistant_delta", "assistant_delta", "assistant_message", "turn_completed"]);
+    const out = run(projector, [init(), textDelta("Hello"), textDelta(", world."), assistantText("Hello, world."), result()], { pushAt: [0] });
+    // `turn_started` leads because `run` now KEEPS what `beginTurn` returns (M1, review r2) — the
+    // host appends that event rather than making its own.
+    expect(out.map((e) => e.type)).toEqual(["turn_started", "assistant_delta", "assistant_delta", "assistant_message", "turn_completed"]);
     expect(projector.turnRunning).toBe(false);
     expect(projector.lastResultAt).toBe("2026-09-11T00:00:00.000Z");
   });

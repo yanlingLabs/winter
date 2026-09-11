@@ -49,6 +49,15 @@ const LOGGABLE_FIELDS: Readonly<Record<string, readonly string[]>> = {
   "system/permission_denied": ["tool_name", "decision_reason_type"],
   "system/local_command_output": [],
   "system/background_tasks_changed": [],
+  // Task frames the projector HANDLES on purpose (n8, review r2). `task_started` is CONSUMED — it
+  // seeds the row a later patch carries a subject from — and `task_progress` is a deliberate skip.
+  // Without them here the once-per-kind line read "unrecognised wire message", i.e. the daemon log
+  // claimed the projector had never heard of frames it handles deliberately, which is the one
+  // signal that line exists to give.
+  "system/task_started": ["description", "task_type", "subagent_type"],
+  "system/task_progress": ["description"],
+  "system/task_notification": ["status"],
+  "system/task_updated": [],
 };
 
 /** `type` or `type/subtype` — the key the tables above and the once-per-kind log dedupe use. */
