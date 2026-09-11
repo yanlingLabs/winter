@@ -6,8 +6,12 @@
 // facade + dispatch-loop call sites, re-expressed as SDK `HookCallback`s:
 //
 //   1. Plugin manifest hooks (`plugins/hook-runner.ts` + `hook-registry.ts`'s `HookFacade`) — a
-//      `PreToolUse` group with no matcher (fires for every tool) that can DENY, and a
-//      `PostToolUse` group (also unmatched) that only observes.
+//      `PreToolUse` group with no matcher (fires for every tool) that can DENY, a `PostToolUse`
+//      group (also unmatched) that observes every COMPLETED call, and a `PostToolUseFailure` group
+//      (review r1 MAJOR 2) that observes every FAILED one — the SDK routes failures to a separate
+//      event rather than `PostToolUse` with `is_error` set, and the retired engine's own
+//      `firePostTool` ran on both. Every `HookFacade.runFor` call here is wrapped so a throwing
+//      facade (review r1 MAJOR 1) degrades to "no verdict" rather than propagating into the child.
 //   2. The bash-safety reviewer (`agent/reviewer.ts`'s `BashReviewer`) — a `PreToolUse` group
 //      matched on `"Bash"`, gated to Norma's `auto` policy exactly as the retired engine gated it
 //      (`meta.approvalPolicy === "auto" && reviewerReady`, engine.ts:4547-4548): the reviewer is a
@@ -45,7 +49,7 @@
 import { readFileSync, statSync } from "node:fs";
 import type {
   HookCallback, HookCallbackMatcher, HookJSONOutput, Options,
-  PostToolUseHookInput, PreToolUseHookInput,
+  PostToolUseFailureHookInput, PostToolUseHookInput, PreToolUseHookInput,
 } from "@yanlinglabs/winter-agent-sdk";
 import type { FileDiffSummary } from "@norma/protocol";
 import { BashReviewer, bashLooksSafe } from "../agent/reviewer";
@@ -125,6 +129,23 @@ function deny(reason: string): HookJSONOutput {
   return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } };
 }
 
+function ask(reason: string): HookJSONOutput {
+  return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask", permissionDecisionReason: reason } };
+}
+
+/** Review r1 MAJOR 1: `deps.hookFacade.runFor(...)` is a call into another subsystem (a plugin's
+ *  own process, over its RPC) and must never be allowed to kill a hook callback outright — an
+ *  uncaught throw here would propagate out of the `HookCallback` itself, which the wrapper's own
+ *  `makeHookHandler` turns into a transport-level `hook_threw` failure rather than a clean
+ *  allow/deny (`index.js`'s own `console.error("winter: hook callback threw ...")` path) — the
+ *  WRONG failure mode for what is supposed to be an F2 fail-open observer/gate. Every call site
+ *  below wraps its `runFor` in this so a facade crash degrades to "no plugin verdict" instead of
+ *  wedging or erroring the tool call. Logs the error NAME only (never a message that could carry a
+ *  plugin's own output) — matches this file's existing "never print a secret value" discipline. */
+function logFacadeThrow(where: string, err: unknown): void {
+  console.error(`hooks: ${where} threw: ${err instanceof Error ? err.name : String(err)}`);
+}
+
 function additionalContext(text: string): HookJSONOutput {
   return { hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: text } };
 }
@@ -134,20 +155,28 @@ function additionalContext(text: string): HookJSONOutput {
 /** `PreToolUse`, no matcher (every tool) — mirrors the retired engine's "Site 2" pre-tool fire:
  *  runs every plugin's `pre-tool` hook in registry order and, on the FIRST `blocked` verdict,
  *  denies with the same message shape `hookBlockOutcome` used (`engine.ts:1986-1988`). Fail-open
- *  for `error`/`timeout`/non-blocked `ok` — those are simply not `blocked`, no extra code needed. */
+ *  for `error`/`timeout`/non-blocked `ok` — those are simply not `blocked`, no extra code needed.
+ *  Review r1 MAJOR 1: a THROWING facade (a bug in a plugin hook's own process bridge, not a
+ *  `blocked`/`error`/`timeout` `HookResult` — those are already handled data, not exceptions) is
+ *  caught and treated the same as "no verdict" — never denies, never propagates into the child. */
 function pluginPreToolUseHook(deps: SessionHooksDeps): HookCallback {
   return async (input, _toolUseID, { signal }) => {
     if (!deps.hookFacade) return allow();
     const pre = input as PreToolUseHookInput;
-    const results = await deps.hookFacade.runFor(
-      "pre-tool",
-      { toolName: pre.tool_name, argsJson: safeJson(pre.tool_input), threadId: pre.agent_id ?? "main" },
-      pre.session_id,
-      signal,
-    );
-    const blocked = results.find((r) => r.result.status === "blocked");
-    if (!blocked) return allow();
-    return deny(`blocked by plugin hook ${blocked.pluginId}: ${blocked.result.reason ?? "no reason given"}`);
+    try {
+      const results = await deps.hookFacade.runFor(
+        "pre-tool",
+        { toolName: pre.tool_name, argsJson: safeJson(pre.tool_input), threadId: pre.agent_id ?? "main" },
+        pre.session_id,
+        signal,
+      );
+      const blocked = results.find((r) => r.result.status === "blocked");
+      if (!blocked) return allow();
+      return deny(`blocked by plugin hook ${blocked.pluginId}: ${blocked.result.reason ?? "no reason given"}`);
+    } catch (err) {
+      logFacadeThrow("the plugin pre-tool hook facade", err);
+      return allow();
+    }
   };
 }
 
@@ -155,17 +184,50 @@ function pluginPreToolUseHook(deps: SessionHooksDeps): HookCallback {
  *  entirely for a call the PreToolUse group already denied — Winter never runs the tool in that
  *  case, so `PostToolUse` never fires for it either (unlike the retired engine, which had to track
  *  `blockedCallIds` itself because ONE dispatch loop handled both ends; the SDK's own event
- *  ordering makes that bookkeeping unnecessary here). */
+ *  ordering makes that bookkeeping unnecessary here). Fires only for a call that COMPLETED — a
+ *  failed call routes to `PostToolUseFailure` instead (below), which is why `isError` is always
+ *  `false` here (mirrors the retired engine's `firePostTool`, which only ever saw one branch or the
+ *  other per call, never both). Review r1 MAJOR 1: a throwing facade is caught, never propagated. */
 function pluginPostToolUseHook(deps: SessionHooksDeps): HookCallback {
   return async (input, _toolUseID, { signal }) => {
     if (!deps.hookFacade) return allow();
     const post = input as PostToolUseHookInput;
-    await deps.hookFacade.runFor(
-      "post-tool",
-      { toolName: post.tool_name, argsJson: safeJson(post.tool_input), output: safeJson(post.tool_response), isError: false, threadId: post.agent_id ?? "main" },
-      post.session_id,
-      signal,
-    );
+    try {
+      await deps.hookFacade.runFor(
+        "post-tool",
+        { toolName: post.tool_name, argsJson: safeJson(post.tool_input), output: safeJson(post.tool_response), isError: false, threadId: post.agent_id ?? "main" },
+        post.session_id,
+        signal,
+      );
+    } catch (err) {
+      logFacadeThrow("the plugin post-tool hook facade", err);
+    }
+    return allow();
+  };
+}
+
+/** `PostToolUseFailure`, no matcher — review r1 MAJOR 2: the retired engine's `firePostTool` ran
+ *  on EVERY completed call with the real `isError` (`engine.ts:1972-1988`'s own doc: "observe a
+ *  completed call's outcome (both success and isError)"). The SDK routes a failed call to this
+ *  SEPARATE event rather than `PostToolUse` with `is_error` set — `sessionHooksFor` previously
+ *  registered no handler for it at all, so a plugin's post-tool hook silently never saw a failed
+ *  call. `isError: true` and `output` built from the failure's own `error` string (falling back to
+ *  the whole input if it is ever absent/malformed) restore that parity. Same never-throw guard as
+ *  the success path. */
+function pluginPostToolUseFailureHook(deps: SessionHooksDeps): HookCallback {
+  return async (input, _toolUseID, { signal }) => {
+    if (!deps.hookFacade) return allow();
+    const post = input as PostToolUseFailureHookInput;
+    try {
+      await deps.hookFacade.runFor(
+        "post-tool",
+        { toolName: post.tool_name, argsJson: safeJson(post.tool_input), output: safeJson(post.error ?? post), isError: true, threadId: post.agent_id ?? "main" },
+        post.session_id,
+        signal,
+      );
+    } catch (err) {
+      logFacadeThrow("the plugin post-tool-failure hook facade", err);
+    }
     return allow();
   };
 }
@@ -175,9 +237,18 @@ function pluginPostToolUseHook(deps: SessionHooksDeps): HookCallback {
 /** `PreToolUse`, matched on `"Bash"` — the reviewer is the auto-policy GATE (see this file's own
  *  header and `deps.policy`'s doc comment). `bashLooksSafe` bypasses the review call entirely for
  *  an obviously-safe command (no shell metacharacters, read-only argv0, or an allow-listed entry) —
- *  identical to the retired engine's own bypass. A reviewer that throws (timeout, malformed
- *  verdict, aborted) denies with today's exact wording (`engine.ts:4553`) rather than silently
- *  allowing an unreviewable command through. */
+ *  identical to the retired engine's own bypass. A DEFINITE `unsafe` VERDICT still denies, with the
+ *  reviewer's own reason. A reviewer that THROWS (timeout, malformed verdict, aborted — i.e. no
+ *  verdict was ever reached, not a verdict of "unsafe") is a different case (review r1 Minor): it
+ *  escalates with `permissionDecision: "ask"` — `PreToolUseHookSpecificOutput.permissionDecision`
+ *  is typed `HookPermissionDecision = "allow" | "ask" | "deny" | "defer"` in the installed SDK
+ *  (`permissions/types.d.ts`), so "ask" is wire-expressible — the same "let a human decide" answer
+ *  the retired engine's `ask`/`accept-edits` branch gave via a card
+ *  (`engine.ts:4564-4572`: "reviewer, when ready, ANNOTATES the card's reason rather than gating").
+ *  **Unmeasured**: whether Winter's approval bridge actually surfaces an `ask` PreToolUse decision
+ *  as a card on THIS leg (vs. e.g. auto-denying an ask it cannot route) is not yet proven against a
+ *  real child — carry: measure `ask` end-to-end (a real approval_requested reaching the phone/CLI)
+ *  before relying on it as the sole safety net for a reviewer outage. */
 function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
   return async (input, _toolUseID, { signal }) => {
     if (!deps.reviewer) return allow();
@@ -194,7 +265,8 @@ function bashReviewerHook(deps: SessionHooksDeps): HookCallback {
       if (verdict.verdict === "unsafe") return deny(verdict.reason || "the safety reviewer judged this command unsafe");
       return allow();
     } catch {
-      return deny("reviewer unavailable — manual approval required");
+      // carry: measure `ask` end-to-end against a real child before trusting it as the sole net.
+      return ask("reviewer unavailable — escalating for manual approval");
     }
   };
 }
@@ -230,6 +302,10 @@ function fileDiffPreToolUseHook(deps: SessionHooksDeps, pending: Map<string, Pen
       try {
         const st = statSync(abs);
         if (st.size > DIFF_PATCH_MAX_BYTES) return allow(); // too large to snapshot — no pending entry, no diff
+        // Nit (review r1): inherited gap, not new here — this bounds SIZE only. A binary file under
+        // the cap is still read as "utf8" and diffed as text (same as the retired engine's
+        // `diff-report.ts`/`fs-write.ts` never special-cased binary content either); a genuinely
+        // binary target just produces a noisy/garbled patch rather than a wrong one.
         before = readFileSync(abs, "utf8");
       } catch {
         before = ""; // missing/unreadable → "" (new-file Write, or a target that never resolves)
@@ -323,6 +399,11 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
     if (hooks.length > 0) postToolUse.push({ matcher: tool, hooks });
   }
 
-  const winter: Options["hooks"] = { PreToolUse: preToolUse, PostToolUse: postToolUse };
+  // Review r1 MAJOR 2: the failure twin of the unmatched PostToolUse plugin-observation group —
+  // see `pluginPostToolUseFailureHook`'s own doc comment for why this is a SEPARATE SDK event
+  // rather than a second branch of `PostToolUse`.
+  const postToolUseFailure: HookCallbackMatcher[] = [{ hooks: [pluginPostToolUseFailureHook(deps)] }];
+
+  const winter: Options["hooks"] = { PreToolUse: preToolUse, PostToolUse: postToolUse, PostToolUseFailure: postToolUseFailure };
   return { winter, official: undefined };
 }
