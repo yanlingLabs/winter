@@ -140,6 +140,23 @@ export interface ProjectedBatch {
   persist: SessionEvent[];
   /** Hand these to `hub.broadcastTransient`. NEVER append them. */
   broadcast: SessionEvent[];
+  /**
+   * Winter Phase 8c (P8c-11 / Task 2.2): a SIDE EFFECT for the driver to apply, distinct from both
+   * sinks above — it names neither a `SessionEvent` to persist nor one to broadcast, it is an
+   * instruction to the 8a runtime record. Chosen over a `records` hook on `ProjectorDeps` (the
+   * brief's other option) because the projector already returns everything else it produces
+   * through this ONE batch type, and a side-channel callback would be a second door for the exact
+   * same "this call produced something the caller must act on" fact `refusals`/`onRefusal` already
+   * models — see this field's producer, `asMirrorErrorFrame`, in `conversation.ts`.
+   *
+   * Set ONLY by a mirror-error frame on the official stream; absent on every ordinary batch. The
+   * driver applies it via `runtime-state/records.ts`'s `setTranscriptHealth(winterSessionId,
+   * "repair-required")` — the SAME call `recovery.ts`'s step-6 handoff check makes for the
+   * out-of-band version of the same fact (WS-16 §13's "mirror row"). Wiring that call is the
+   * driver's job (session-driver.ts, lane 1/controller), not the projector's: the projector never
+   * touches `runtime-state` directly (see `CheckpointStore`'s own doc comment on why).
+   */
+  transcriptHealth?: "repair-required";
 }
 
 export interface Projector {
