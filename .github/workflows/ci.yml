@@ -130,11 +130,21 @@ jobs:
       - name: Make the winter binary executable
         run: chmod +x dist/winter
 
+      # P8c-9: the official leg's real-runtime proofs (`describeWithClaudeRuntime`) must not
+      # silently skip in CI — `bun install` resolves the optional platform package for macOS
+      # runners on its own (verified: no extra registry config needed), and this step fails loudly
+      # BEFORE the test run if that resolution somehow did not happen, rather than the run quietly
+      # skipping every official-leg test and going green on nothing.
+      - name: Verify the official runtime platform package installed
+        working-directory: packages/core
+        run: test -f node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude || (echo "the @anthropic-ai/claude-agent-sdk-darwin-arm64 optional dependency did not install" && exit 1)
+
       - name: Test
         working-directory: packages/core
         env:
           NORMA_WINTER_EXECUTABLE: ${{ github.workspace }}/dist/winter
           NORMA_WINTER_REQUIRE_BINARY: "1"
+          NORMA_CLAUDE_REQUIRE_RUNTIME: "1"
         run: bun test
 
   # cli's non-TUI tests (`test/*.ts` only — `test/tui/**` renders the Ink transcript through

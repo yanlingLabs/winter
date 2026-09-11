@@ -24,8 +24,8 @@ import { existsSync } from "node:fs";
 import * as winter from "@yanlinglabs/winter-agent-sdk";
 import type { McpSdkServerConfigWithInstance, SpawnClaudeCodeProcess } from "@yanlinglabs/winter-agent-sdk";
 import type { AdvisorReviewer, ReviewerResolver } from "@yanlinglabs/winter-agent-sdk/tools";
-import { createRuntimeSdk as createRouterSdk } from "@yanlinglabs/winter-runtime-sdk";
-import type { OfficialSdkModule, RuntimeDirectoryEntry, RuntimeDirectoryOptions, RuntimeDirectoryStore, RuntimeSdk, RuntimeSdkOptions } from "@yanlinglabs/winter-runtime-sdk";
+import { createRuntimeSdk as createRouterSdk, D14_CLAUDE_OAUTH_APPROVED_DEFAULT, isSelectionRefusal, selectionVersionsFrom, selectRuntime, SelectionRefusedError } from "@yanlinglabs/winter-runtime-sdk";
+import type { OfficialSdkModule, RuntimeDirectoryEntry, RuntimeDirectoryOptions, RuntimeDirectoryStore, RuntimeSdk, RuntimeSdkOptions, RuntimeSelection, SelectionRefusal } from "@yanlinglabs/winter-runtime-sdk";
 import type { PermissionClassLabel } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { SecretStore } from "../auth/secret-store";
 import { retentionFromSettings } from "../runtime-state/retention";
@@ -33,7 +33,8 @@ import { winterOptionsFromSettings, type Settings } from "../settings";
 import { NORMA_BRAND } from "./brand";
 import { resolveWinterExecutable, type WinterExecutableUnavailable } from "./executable";
 import { resolveClaudeExecutable, ClaudeExecutableUnavailable } from "./official-executable";
-import { keychainSeamFromSecretStore } from "./keychain";
+import { credentialPresenceFrom, keychainSeamFromSecretStore } from "./keychain";
+import { familyListingFromCatalog } from "./provider-selection";
 import { releaseAllHeld } from "./messaging";
 import { NORMA_PEER_VERSIONS } from "./versions";
 
@@ -178,6 +179,15 @@ export interface NormaRuntimeSdk {
    * than throwing; a session on the official leg refuses at create instead.
    */
   claudeExecutableFor(): { path: string } | ClaudeExecutableUnavailable;
+  /**
+   * P8c-12: decides the leg for a NEW session (or reviews a resumed one's `persisted` record,
+   * which the router returns BY IDENTITY — "the persisted selection wins", never re-decided).
+   * Builds `SelectionInput` from the pinned catalog (`familyListingFromCatalog`, no live query
+   * needed), this process's credential presence and whether the official peer resolved. Never
+   * throws — the router's own `SelectionRefusedError` is unwrapped into the `SelectionRefusal`
+   * value its own `refusal` field carries.
+   */
+  selectRuntimeFor(input: { mode: SessionMode; model?: string; persisted?: RuntimeSelection }): Promise<RuntimeSelection | SelectionRefusal>;
   /**
    * Register a live session so shutdown can end it — GRACEFULLY FIRST, THEN BY FORCE.
    *
@@ -395,6 +405,25 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
         exists: (p) => existsSync(p),
       });
       return resolution instanceof ClaudeExecutableUnavailable ? resolution : { path: resolution.path };
+    },
+    async selectRuntimeFor(input: { mode: SessionMode; model?: string; persisted?: RuntimeSelection }): Promise<RuntimeSelection | SelectionRefusal> {
+      const credentials = await credentialPresenceFrom(deps.secrets);
+      try {
+        return selectRuntime({
+          mode: input.mode,
+          requested: { ...(input.model === undefined ? {} : { model: input.model }) },
+          families: familyListingFromCatalog(),
+          credentials,
+          hasClaudePeer: officialModule !== undefined,
+          claudeOauthApproved: D14_CLAUDE_OAUTH_APPROVED_DEFAULT,
+          ...(input.persisted === undefined ? {} : { persisted: input.persisted }),
+          versions: selectionVersionsFrom(sdk.versions),
+        });
+      } catch (err) {
+        if (err instanceof SelectionRefusedError) return err.refusal;
+        if (typeof err === "object" && err !== null && isSelectionRefusal(err)) return err;
+        throw err;
+      }
     },
     trackQuery(sessionId: string, abort: AbortController, end: () => Promise<void>): void {
       if (disposing !== undefined) {

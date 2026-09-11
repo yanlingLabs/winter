@@ -1731,9 +1731,20 @@ if (import.meta.main) {
     break;
   }
   case "login": {
-    const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, writeOpenAiApiKey, WEB_SEARCH_API_KEY_SECRET, EXA_API_KEY_SECRET, profileDisplayName } = await import("@norma/core");
+    const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, writeOpenAiApiKey, writeAnthropicApiKey, WEB_SEARCH_API_KEY_SECRET, EXA_API_KEY_SECRET, profileDisplayName } = await import("@norma/core");
     console.log(`${AQUA}${profileDisplayName()} login${RESET}`);
     const secrets = new KeychainSecretStore();
+    // P8c-10: the official leg's own credential — same shape as --api-key below (prefix check,
+    // the invisible-char guard, Keychain-only), keyed under the anthropic row's own name.
+    if (process.argv.includes("--anthropic-key")) {
+      const key = (await readSecret("Paste your Anthropic API key: ")).trim();
+      if (!key.startsWith("sk-ant-")) { console.error("that does not look like an Anthropic API key"); process.exit(1); }
+      const invisibleWarning = invisibleKeyCharWarning(key);
+      if (invisibleWarning) { console.error(invisibleWarning); process.exit(1); }
+      await writeAnthropicApiKey(secrets, key);
+      console.log(`${AQUA}Anthropic API key stored in Keychain${RESET} — the official leg is ready to use on Code sessions`);
+      break;
+    }
     if (process.argv.includes("--api-key")) {
       const key = (await readSecret("Paste your OpenAI API key: ")).trim();
       if (!key.startsWith("sk-")) { console.error("that does not look like an API key"); process.exit(1); }
@@ -1793,8 +1804,15 @@ if (import.meta.main) {
     break;
   }
   case "logout": {
-    const { KeychainSecretStore, CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, clearCredentialMaterial } = await import("@norma/core");
+    const { KeychainSecretStore, CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, clearCredentialMaterial, ANTHROPIC_CREDENTIAL_SECRET_NAME } = await import("@norma/core");
     const secrets = new KeychainSecretStore();
+    // P8c-10: `--anthropic` clears ONLY the official leg's own credential — Codex sign-out
+    // (the bare command, unchanged) must not touch it, and this flag must not touch Codex's.
+    if (process.argv.includes("--anthropic")) {
+      await clearCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME);
+      console.log("anthropic API key cleared");
+      break;
+    }
     // Phase 1a simplification: SecretStore gains delete() in 1b — empty value de-authorizes everywhere today.
     for (const name of Object.values(CODEX_SECRET_NAMES)) {
       await secrets.set(name, "");
@@ -2067,7 +2085,7 @@ if (import.meta.main) {
   routines [list] | routines create "<spec>" [--policy auto|plan] -- <prompt>
     | routines delete <id> | routines enable <id> | routines disable <id>       manage scheduled routines
   memory [list] [--project] | show <name> [--project] | rm <name> [--project]  manage saved memory facts
-  login [--api-key] [--web-search-key] [--exa-key] | logout | provider | provider-smoke [--prompt <text>]
+  login [--api-key] [--anthropic-key] [--web-search-key] [--exa-key] | logout [--anthropic] | provider | provider-smoke [--prompt <text>]
   init                                            generate/update NORMA.md by surveying the project
   -p "<prompt>" [--auto|--plan] [--trust|--no-trust]   headless agent turn (asks for tool approval unless --auto/--plan)`);
   }

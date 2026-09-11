@@ -2,7 +2,7 @@ import type { CredentialRef } from "@yanlinglabs/winter-agent-sdk";
 import type { CredentialPresence, KeychainSeam } from "@yanlinglabs/winter-runtime-sdk";
 import type { SecretStore } from "../auth/secret-store";
 import { keychainService } from "../profile";
-import { CREDENTIAL_MATERIAL_NAMES, readCredentialMaterial } from "../auth/credential-material";
+import { CREDENTIAL_MATERIAL_NAMES, readCredentialMaterial, writeCredentialMaterial } from "../auth/credential-material";
 
 /**
  * One row of the credential inventory: a provider id, the `SecretStore` name that backs it, and
@@ -78,6 +78,13 @@ export interface CredentialSlot {
  * this name.
  */
 export const ANTHROPIC_CREDENTIAL_SECRET_NAME = "anthropic:default";
+
+/** `norma login --anthropic-key` (`cli/main.ts`) — the SAME `{kind:"api-key", key}` material shape
+ *  `writeOpenAiApiKey` writes, under the anthropic row's own name. No legacy raw-key record exists
+ *  for this provider (it is new in 8c), so there is no blank-the-legacy-name step to mirror. */
+export async function writeAnthropicApiKey(store: SecretStore, key: string): Promise<void> {
+  await writeCredentialMaterial(store, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key });
+}
 
 export const NORMA_CREDENTIAL_INVENTORY: readonly CredentialSlot[] = [
   { provider: "openai", secretName: CREDENTIAL_MATERIAL_NAMES.openai, kind: "keychain" },

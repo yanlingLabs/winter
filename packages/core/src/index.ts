@@ -41,6 +41,8 @@ export {
   type CredentialMaterial, type ApiKeyMaterial, type OauthMaterial, type BearerMaterial, type CredentialMigrationReport,
 } from "./auth/credential-material";
 export { runLoginFlow } from "./providers/pkce";
+// P8c-10: `norma login --anthropic-key` (cli/main.ts) writes through this door.
+export { writeAnthropicApiKey, ANTHROPIC_CREDENTIAL_SECRET_NAME } from "./runtime-sdk/keychain";
 export { CODEX, CODEX_MODELS, DEFAULT_CODEX_MODEL } from "./providers/codex-config";
 // WS-16 §15's `norma doctor` runs IN-PROCESS against NORMA_HOME — no RPC, because the whole point
 // is to work when the daemon does not — so the CLI reaches these two through the package barrel.
