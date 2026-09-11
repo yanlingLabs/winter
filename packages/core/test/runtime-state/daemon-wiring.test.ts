@@ -175,6 +175,11 @@ describe("daemon wiring — the store opens and recovery runs before the socket 
       // its own copy and is untouched here.
       expect(parked?.backendSessionId).toBeUndefined();
       expect(parked?.status).toBe("unavailable");
+      // ⚠️ THE ORDER, NOT THE END STATE (round 2). Asserting the effects after `boot()` returns
+      // leaves the whole recovery block free to migrate BELOW `startIpcServer` and stay green,
+      // which is the drift this test exists to pin. The sweep stamps `updatedAt` itself, so the
+      // sibling test's technique applies verbatim: the park is older than the socket.
+      expect(new Date(parked!.updatedAt).getTime()).toBeLessThanOrEqual(statSync(dirs.socketPath).ctimeMs);
     });
   });
 

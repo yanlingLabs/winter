@@ -117,6 +117,9 @@ export interface WinterSessionAttachment {
    *  router's own push path does, and it is where P8b-24's `unavailable` (a `resumable` session)
    *  is reported from. */
   status?: () => LiveSessionStatus;
+  /** Where a failed directory write is reported. `detach()` returns void and must never throw, so a
+   *  park that rejects has nowhere else to be heard (round 2, N-new-2). */
+  log?: (line: string) => void;
 }
 
 export interface WinterSessionAttachHandle {
@@ -259,6 +262,7 @@ export function attachWinterSession(runtime: NormaRuntimeSdk, session: WinterSes
 
   /** F2: flipped synchronously by `detach()`, read by the wrapper's `deliver`. */
   let parking = false;
+  const log = session.log ?? ((): void => {});
 
   const handle: AttachedWinterSession = {
     messaging: bridgedFacet(session.query.messaging, session.push, owner, liveStatusOf, () => parking),
@@ -328,9 +332,17 @@ export function attachWinterSession(runtime: NormaRuntimeSdk, session: WinterSes
       // go. A delivery in the window meets a typed `unavailable`; none of them meets a spawn.
       parking = true;
       const park = (): Promise<void> => runtime.sdk.directory.record(entry(false));
+      // ⚠️ AND A PARK THAT FAILS KEEPS THE HANDLE (round 2, N-new-2). Releasing it on the rejection
+      // path would land in exactly the state this whole ordering exists to prevent: a row saying
+      // `running`, WITH a `backendSessionId`, and nothing attached — i.e. cold-resumable. Holding
+      // the handle instead leaves the row wrong but UNREACHABLE, because the `parking` latch above
+      // refuses every delivery for the rest of this handle's life. A leaked registry entry for a
+      // session that is over is a bounded cost; an untracked `winter` process is not.
       chain = chain.then(park, park).then(
         () => { detachHandle(); },
-        () => { detachHandle(); },
+        (error: unknown) => {
+          log(`could not park ${address} (${error instanceof Error ? error.name : "unknown"}) — the handle stays registered so nothing can cold-resume it`);
+        },
       );
     },
   };
@@ -421,6 +433,13 @@ export async function parkRecoveredSessions(
   try {
     const attached = new Set(runtime.sdk.messaging.winterAdapter.sessions.addresses());
     for (const entry of await runtime.sdk.directory.list()) {
+      // ⚠️ SCOPE CARRY (round 2, N-new-4): `session` rows only, which is COMPLETE as shipped —
+      // nothing in `packages/core/src` records an `objectKind: "agent"` directory row yet. It stops
+      // being complete the moment Task 16/17 starts recording children: the router's `childDelivery`
+      // routes an `agent` row whose `transport` is `winter-session` into the SAME
+      // `deliverIntoSession`/`coldResume` door, so a child row left behind by a crashed daemon would
+      // reopen the restart door one row kind over. Widen this predicate in the same change that
+      // starts writing those rows.
       if (entry.runtimeKind !== "winter-agent" || entry.objectKind !== "session") continue;
       if (attached.has(entry.address)) continue;
       // A row with no backend id has no resume source, which is the ONLY thing this sweep removes —
@@ -431,7 +450,11 @@ export async function parkRecoveredSessions(
       try {
         await runtime.sdk.directory.record({
           ...rest,
-          status: "unavailable",
+          // `archived` is the ONE status the router refuses before `coldResume`, and the one
+          // `isResolvableFrom` excludes — so re-stamping such a row `unavailable` would silently
+          // un-archive it for name resolution and soften its refusal text. Nothing in this daemon
+          // records an archived directory row today; this is a forward guard (round 2, N-new-3).
+          status: entry.status === "archived" ? "archived" : "unavailable",
           capabilities: { message: false, resume: false, notifyWhenIdle: false, reply: false },
           updatedAt: new Date().toISOString(),
         });

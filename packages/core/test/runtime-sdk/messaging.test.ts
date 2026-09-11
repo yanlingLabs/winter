@@ -417,6 +417,45 @@ describe("detach never opens a cold-resume window (fix round 1, F2)", () => {
     expect(spawned).toHaveLength(0);
   });
 
+  test("a park that REJECTS keeps the handle registered, so the row is wrong but unreachable", async () => {
+    // Round 2 (N-new-2). Releasing the handle on the park's failure path lands in exactly the state
+    // the ordering exists to prevent: a row saying `running`, WITH a `backendSessionId`, and nothing
+    // attached — i.e. cold-resumable. Holding it keeps the `parking` latch in front of every
+    // delivery instead.
+    const store = createInMemoryRuntimeDirectoryStore();
+    const { runtime, spawned } = harness(store, "prompts");
+    const a = fakeSession("be_pf_a");
+    const b = fakeSession("be_pf_b");
+    const lines: string[] = [];
+
+    const attachedA = attachWinterSession(runtime, { sessionId: "s_a", backendSessionId: a.backendSessionId, query: a.query, push: (t) => a.pushed.push(t), displayName: "sender" });
+    const attachedB = attachWinterSession(runtime, {
+      sessionId: "s_b", backendSessionId: b.backendSessionId, query: b.query,
+      push: (t) => b.pushed.push(t), displayName: "doomed", log: (l) => lines.push(l),
+    });
+    await attachedA.ready;
+    await attachedB.ready;
+
+    // The store stops accepting writes the way a closed handle does.
+    store.upsert = async () => { throw new Error("db is gone"); };
+
+    attachedB.detach();
+    await attachedB.ready.catch(() => {});
+    expect(lines.join("\n")).toContain("the handle stays registered so nothing can cold-resume it");
+
+    // The row still says `running` with its backend id — the park never landed — but the handle is
+    // still there, so the router never reaches `coldResume`, and the latch answers every delivery.
+    const stale = await runtime.sdk.directory.get(addr(b.backendSessionId));
+    expect(stale?.backendSessionId).toBe(b.backendSessionId);
+    expect(runtime.sdk.messaging.winterAdapter.sessions.get(addr(b.backendSessionId))).toBeDefined();
+
+    const outcome = await runtime.sdk.messaging.send({ from: buildSessionAddress(a.backendSessionId), to: addr(b.backendSessionId), body: "after a failed park", originToolCallId: "toolu_pf" });
+    expect(outcome.status).toBe("unavailable");
+    expect((outcome as { reason: string }).reason).toContain("is ending");
+    expect(b.pushed).toHaveLength(0);
+    expect(spawned).toHaveLength(0);
+  });
+
   test("a session with no `status()` is recorded `idle`, so both handle shapes answer the same", async () => {
     // F6: the router computes `handle.status?.() ?? entry.status` for a push-only handle. A row
     // stamped `"running"` at attach and never refreshed made that shape answer `queued` where the
@@ -484,6 +523,34 @@ describe("parkRecoveredSessions (fix round 1, F3)", () => {
     expect(outcome.status).toBe("unavailable");
     expect((outcome as { reason: string }).reason).toContain("no backend session id");
     expect(spawned).toHaveLength(0);
+  });
+
+  test("an ARCHIVED row is never un-archived by the sweep", async () => {
+    // Round 2 (N-new-3). `archived` is the ONE status the router refuses before `coldResume` and the
+    // one `isResolvableFrom` excludes, so re-stamping it `unavailable` would silently make the row
+    // name-resolvable again and soften its refusal. A forward guard: nothing records an archived
+    // directory row today.
+    const store = createInMemoryRuntimeDirectoryStore();
+    const { runtime } = harness(store, "prompts");
+    await store.upsert({
+      address: addr("be_archived"),
+      parsed: buildSessionAddress("be_archived"),
+      runtimeKind: "winter-agent", objectKind: "session", transport: "winter-session",
+      displayName: "archived", status: "archived", mode: "code", generation: 1,
+      selection: {
+        runtimeKind: "winter-agent", providerId: "unstated", modelRef: "unstated/unstated", family: "unstated",
+        authFamily: "custom", sdkVersion: NORMA_PEER_VERSIONS.winterAgentSdk, reason: "test", decidedAt: new Date().toISOString(),
+      },
+      backendSessionId: "be_archived",
+      capabilities: { message: true, resume: true, notifyWhenIdle: true, reply: true },
+      updatedAt: new Date().toISOString(),
+    });
+
+    expect(await parkRecoveredSessions(runtime)).toBe(1);
+    const swept = await runtime.sdk.directory.get(addr("be_archived"));
+    // The resume source is gone — that is what the sweep is for — and the status is untouched.
+    expect(swept?.backendSessionId).toBeUndefined();
+    expect(swept?.status).toBe("archived");
   });
 
   test("an ATTACHED session is left alone, and a second sweep is a no-op", async () => {
