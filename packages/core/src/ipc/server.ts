@@ -1695,7 +1695,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // `task_updated` history rather than read from `opts.tasks` (the retired engine's
         // in-process `TaskStore`, which no live producer writes to any more — kept as the fallback
         // for a session not on the Winter leg, and for a bare test server with no `winter` wired).
-        if (opts.winter?.get(p.sessionId) !== undefined) {
+        //
+        // review r1 (Major): `opts.winter?.get(id)` alone only sees a LIVE child — an idle/resumed
+        // Winter-leg session (no driver running right now) fell through to the retired, empty
+        // TaskStore path. Same shape as `session.compact`/`session.interrupt`'s own leg check just
+        // above: a RECORDED "winter" leg (`legOf`) reads the folded history too, live driver or
+        // not; only an engine-era session (or no `winter` at all) takes the legacy fallback.
+        if (opts.winter?.get(p.sessionId) !== undefined || opts.winter?.legOf(p.sessionId) === "winter") {
           return { ok: true, tasks: readWinterTasks(opts.store, p.sessionId) };
         }
         return { ok: true, tasks: opts.tasks?.list(p.sessionId) ?? [] };

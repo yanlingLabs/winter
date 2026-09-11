@@ -185,6 +185,11 @@ export function sinksFor(deps: SinksDeps): Sinks {
    *  addresses the CHILD's id, never Norma's) can resolve the row to remove. Not scoped per
    *  session: Winter mints these with `randomUUID()`, which is unique enough on its own, and a
    *  `CronDelete` carries no session-scoping information beyond the id it was handed. */
+  // carry: never pruned — an entry only leaves via a matching CronDelete. Bounded by the number of
+  // routines ever mirrored in this daemon process's lifetime, not by session count or time; fine
+  // at today's scale, but a long-lived daemon with many one-off schedule creates and few deletes
+  // would grow this unboundedly. Revisit alongside the durable-dedupe carry (sinks.ts's own header
+  // doc comment) if that ever matters in practice.
   const winterToNormaRoutineId = new Map<string, string>();
 
   function fireNotification(sessionId: string, threadId: string, message: string): void {

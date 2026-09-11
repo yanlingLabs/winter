@@ -224,6 +224,10 @@ class ProjectorImpl implements Projector {
     // the batch carries besides the two event sinks. `sanitizeDetail` is the same opaque-marker
     // filter `errors.ts` uses for `agent_error.message`: a mirror failure can in principle name a
     // provider payload, and this log line is not the session JSONL.
+    // No `claimed`/checkpoint guard here (review r1, minor): the flag this sets is idempotent —
+    // re-marking an already `"repair-required"` record a second time on a replay changes nothing
+    // — and the wire shape itself is provisional (see `asMirrorErrorFrame`'s doc comment). Revisit
+    // once the real recorded shape lands, in case it turns out NOT idempotent to re-apply.
     const mirrorError = asMirrorErrorFrame(msg);
     if (mirrorError !== undefined) {
       this.deps.log.warn?.("[projector] the official leg reported a mirror error — this session's transcript health is repair-required", {
