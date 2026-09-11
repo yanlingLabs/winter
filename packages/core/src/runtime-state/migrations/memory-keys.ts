@@ -45,6 +45,33 @@
 //   target-exists     the destination directory is already occupied by something else.
 //
 // A refusal costs a re-run. Guessing costs somebody's notes.
+//
+// ── P8b-17: THE FOUR PRECONDITIONS THAT LET THIS RUN AT ALL ───────────────────────────────────────
+// 8a shipped this file behind a flag that REFUSED (wiring.ts). 8b turns it on, and only because all
+// four of its preconditions now hold:
+//
+//  1. THE MANIFEST IS DERIVED AGAINST THE 64-CHAR KEY. SDK 0.0.3 capped `transcriptProjectKey` (and
+//     therefore `compatibilityKeys(...).memoryProjectKey`) at `TRANSCRIPT_PROJECT_KEY_MAX_LENGTH`
+//     = 64 — prefix + `-` + a base-36 hash OF THE ORIGINAL PATH. Any plan built under 0.0.2 named a
+//     different destination for every root whose sanitized path overflowed, so a `planned` row is
+//     never trusted as a destination: `plan` re-derives and REWRITES it (the `ON CONFLICT ... DO
+//     UPDATE` below), and a row whose rename already landed somewhere this run would no longer
+//     choose is reconciled against ITS OWN recorded destination rather than dropped (see
+//     `reconcileTornApplies`) — otherwise a tree moved by an older build would sit at a key nothing
+//     could name.
+//  2. THE LIVE PATH FOLLOWS. `agent/memory-dir.ts` reads the record's key — `memoryDirForRecord`
+//     directly, and `memoryDirFor`'s cwd-keyed callers through `relocatedKey`, which the daemon
+//     wires to `memoryKeyRelocations` (this file). A move and the lookup that finds it afterwards
+//     commit as one fact.
+//  3. A HOME THAT PINS ITS MEMDIR IS DECLINED WHOLE. `settings.memory.directory` REPLACES the
+//     computed path entirely (memory-dir.ts), so relocating the key would move a tree nothing reads
+//     and leave the pinned directory untouched: pointless motion on a user's own writing. Such a
+//     home plans nothing — no manifest rows, no marker (see `MemoryKeyPlan.declined`).
+//  4. THE WHOLE PROJECT TREE MOVES, NOT JUST `memory/`. `<home>/projects/<key>/` also holds the
+//     compatibility layout's `<uuid>.jsonl`, `subagents/`, `tool-results/` and `workflows/scripts/`
+//     (surface map §6.6). The unit of relocation here is therefore the PROJECT DIRECTORY — one
+//     `rename` of `projects/<oldKey>` — never a `memory/`-only move that would split one project's
+//     state across two keys.
 import { compatibilityKeys } from "@yanlinglabs/winter-agent-sdk";
 import { existsSync, readdirSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -59,6 +86,23 @@ import { RuntimeSessionRecords } from "../records";
  *  a migration that renamed one of these would silently detach memory from the only code that
  *  reads it. */
 export const RESERVED_PROJECT_KEYS: readonly string[] = Object.freeze(["_global", "_assistant"]);
+
+/**
+ * The four filesystem calls this migration makes, as an injectable seam.
+ *
+ * ONLY REASON IT EXISTS: a torn apply — the process dying between the `rename` and the manifest
+ * commit — is the one failure this whole manifest is built to survive, and it cannot be reproduced
+ * by arranging files, only by making the rename land and the commit not. A test injects a `fs` whose
+ * `renameSync` throws AFTER doing the real rename; production passes nothing and gets `node:fs`.
+ */
+export interface MemoryKeyFs {
+  existsSync(path: string): boolean;
+  renameSync(from: string, to: string): void;
+  statSync(path: string): { isDirectory(): boolean };
+  readdirSync(path: string, options: { withFileTypes: true }): Array<{ name: string; isDirectory(): boolean }>;
+}
+
+const NODE_FS: MemoryKeyFs = { existsSync, renameSync, statSync, readdirSync };
 
 export type MemoryKeyCollisionReason = "many-old-keys" | "old-key-fans-out" | "target-exists";
 
@@ -113,6 +157,17 @@ export interface MemoryKeyPlan {
    *  nothing looks — and each carries the reason, because the three have different remedies:
    *  restore or re-clone the cwd, or accept that the record is orphaned. */
   unresolved: UnresolvedRecord[];
+  /** Trees whose rename landed in an earlier run but whose manifest commit did not — found by this
+   *  plan and settled by it (the rows are now `moved` and the records re-keyed), so `rollback` can
+   *  reach them. Reported because "the previous run died mid-apply" is something an operator should
+   *  read, not infer. Optional so a hand-built plan stays a valid `MemoryKeyPlan`. */
+  reconciled?: MemoryKeyMove[];
+  /** Set when the whole home is DECLINED rather than planned — nothing was written to the manifest
+   *  and nothing will move. `memory-directory-override`: `settings.memory.directory` pins the MEMDIR
+   *  to one path for every project, so the project key decides nothing and re-keying it would move a
+   *  tree no live read consults (P8b-17 precondition 3). Clearing the setting re-enables the
+   *  migration — which is why a declined run must never set the one-shot marker. */
+  declined?: "memory-directory-override";
 }
 
 /** `apply` refused: the mapping is ambiguous, and nothing was moved. */
@@ -175,9 +230,9 @@ function manifestRow(rs: RuntimeStateDb, oldKey: string): { new_key: string; sta
 }
 
 /** An EXISTING directory — `existsSync` alone would accept a file sitting at that path. */
-function isDirectory(path: string): boolean {
+function isDirectory(fs: MemoryKeyFs, path: string): boolean {
   try {
-    return statSync(path).isDirectory();
+    return fs.statSync(path).isDirectory();
   } catch {
     return false;
   }
@@ -194,9 +249,34 @@ const projectDir = (home: string, key: string): string => join(projectsDir(home)
  * already-`moved` row is never reset back to `planned`: that row is the only evidence of where a
  * directory came from, and losing it would strand the tree with no way back.
  */
-export function planMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string; records: RuntimeSessionRecords; store: SessionStore }): MemoryKeyPlan {
+export function planMemoryKeyMigration(deps: {
+  rs: RuntimeStateDb;
+  home: string;
+  records: RuntimeSessionRecords;
+  store: SessionStore;
+  /** `settings.memory.directory`, verbatim. Set (and not whitespace) declines the whole home —
+   *  P8b-17 precondition 3. Passed rather than read from settings so this file keeps knowing
+   *  nothing about the zod shape, the same convention `memory-dir.ts` follows. */
+  memoryDirectory?: string;
+  fs?: MemoryKeyFs;
+}): MemoryKeyPlan {
   const { rs, home, store } = deps;
-  const plan: MemoryKeyPlan = { moves: [], collisions: [], preserved: [...RESERVED_PROJECT_KEYS], unreferenced: [], unchanged: [], unresolved: [] };
+  const fs = deps.fs ?? NODE_FS;
+  const plan: MemoryKeyPlan = { moves: [], collisions: [], preserved: [...RESERVED_PROJECT_KEYS], unreferenced: [], unchanged: [], unresolved: [], reconciled: [] };
+
+  // PRECONDITION 3, AND IT IS CHECKED BEFORE A SINGLE ROW IS WRITTEN. A pinned MEMDIR makes the
+  // project key inert for every live read (`memoryDirFor` returns the override before it computes a
+  // key at all), so a relocation here would move a user's tree for no reader's benefit. Declined
+  // whole, and deliberately WITHOUT a manifest row: a `planned` row is a promise to move something.
+  if (deps.memoryDirectory !== undefined && deps.memoryDirectory.trim() !== "") {
+    plan.declined = "memory-directory-override";
+    return plan;
+  }
+
+  // FIRST, before anything is derived from a record: a previous run may have died between its rename
+  // and its commit, and the records it left behind still name the old key. Settling those here is
+  // what lets the sweep below read records that agree with the disk.
+  plan.reconciled = reconcileTornApplies(rs, home, fs, deps.records);
 
   // `compatibilityKeys` spawns `git` and, unlike Norma's own `repoRootFor`, memoises nothing — so a
   // migration over hundreds of records would be hundreds of subprocesses. One `Map` per plan call
@@ -232,7 +312,7 @@ export function planMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string;
       continue;
     }
     // See the header: a cwd that is gone silently degrades the destination to a per-cwd key.
-    if (!isDirectory(cwd)) {
+    if (!isDirectory(fs, cwd)) {
       plan.unresolved.push({ winterSessionId: record.winterSessionId, reason: "cwd-missing" });
       continue;
     }
@@ -289,24 +369,16 @@ export function planMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string;
     if (oldKeys.length > 1) plan.collisions.push({ newKey, oldKeys: [...oldKeys].sort(), reason: "many-old-keys" });
   }
 
-  // Rows whose rename landed but whose manifest commit did not — see `reconcile` below.
-  const reconcile: MemoryKeyMove[] = [];
-
   for (const [newKey, oldKeys] of byNewKey) {
     if (oldKeys.length > 1) continue;
     const oldKey = oldKeys[0]!;
-    const sourceExists = existsSync(projectDir(home, oldKey));
-    const targetExists = existsSync(projectDir(home, newKey));
-    // Source gone AND target present is not a conflict — the tree is already where it belongs. It
-    // is, however, the TORN-APPLY WINDOW: `apply` renames and then commits, so a crash between the
-    // two leaves exactly this shape with the manifest row still `planned`. Left alone, that row
-    // would stay `planned` forever — `rollback` only reads `moved`, so the tree would have no
-    // recorded way back, which is the one state this manifest exists to prevent. So the row is
-    // reconciled here instead: the rename landed, and the manifest is made to say so.
-    if (!sourceExists) {
-      if (targetExists) reconcile.push({ oldKey, newKey });
-      continue;
-    }
+    const sourceExists = fs.existsSync(projectDir(home, oldKey));
+    const targetExists = fs.existsSync(projectDir(home, newKey));
+    // Source gone is neither a conflict nor a move: either the tree already reached a destination —
+    // the TORN-APPLY WINDOW, settled below by `reconcileTornApplies` against the row's OWN recorded
+    // destination, which after an SDK key change is not necessarily the one THIS run derives
+    // (precondition 1) — or this project has no tree on disk at all yet.
+    if (!sourceExists) continue;
     if (targetExists) {
       plan.collisions.push({ newKey, oldKeys: [oldKey], reason: "target-exists" });
       continue;
@@ -317,15 +389,14 @@ export function planMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string;
   plan.moves.sort((a, b) => a.oldKey.localeCompare(b.oldKey));
   plan.unchanged.sort();
 
-  if (existsSync(projectsDir(home))) {
-    plan.unreferenced = readdirSync(projectsDir(home), { withFileTypes: true })
+  if (fs.existsSync(projectsDir(home))) {
+    plan.unreferenced = fs.readdirSync(projectsDir(home), { withFileTypes: true })
       .filter((e) => e.isDirectory() && !RESERVED_PROJECT_KEYS.includes(e.name) && !referenced.has(e.name))
       .map((e) => e.name)
       .sort();
   }
 
   const at = new Date().toISOString();
-  const records = deps.records;
   rs.transaction(() => {
     for (const move of plan.moves) {
       rs.db.run(
@@ -335,22 +406,69 @@ export function planMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string;
         [move.oldKey, move.newKey, at],
       );
     }
-    // Keyed on `new_key` as well: a row is only reconciled when the manifest agrees about WHERE the
-    // tree went. A `planned` row naming some other destination is a different, unresolved move, and
-    // marking it `moved` would send a later rollback after the wrong directory.
-    for (const move of reconcile) {
+  }, { mode: "immediate" });
+
+  return plan;
+}
+
+/**
+ * Settle every tree whose rename landed while its manifest commit did not — the TORN-APPLY WINDOW.
+ *
+ * `apply` renames and then commits (that order is deliberate: the other one would leave a `moved`
+ * row for a directory that never went anywhere, and rollback would chase a tree that was never
+ * there). A crash in between leaves the directory at the new key with its row still `planned` — and
+ * left alone, that row stays `planned` forever: `rollback` only reads `moved`, so the tree would
+ * have no recorded way back, which is the one state this manifest exists to prevent.
+ *
+ * DRIVEN BY THE MANIFEST ROWS, NOT BY THIS RUN'S PLAN, and that is precondition 1 in force. A row's
+ * `new_key` is where the tree ACTUALLY went; the destination this run derives can differ (SDK 0.0.3
+ * caps the key at 64 characters, so an 0.0.2-era row names a different directory for any overflowing
+ * root). Matching on the plan's pairs would leave such a tree unreferenced by anything — source gone,
+ * this run's destination empty, the row `planned` forever. Matching on the row finds it.
+ *
+ * A `planned` row is only ever written for a source directory that EXISTED at plan time, so "source
+ * gone, destination present" cannot be a project that never had a tree.
+ *
+ * Runs BEFORE the plan's own record sweep so the sweep sees the re-keyed records: a settled project
+ * is then reported as `unchanged` (or `root-disagrees`, when its destination is an older algorithm's)
+ * rather than planned all over again.
+ */
+function reconcileTornApplies(rs: RuntimeStateDb, home: string, fs: MemoryKeyFs, records: RuntimeSessionRecords): MemoryKeyMove[] {
+  const rows = rs.db.query(`SELECT old_key, new_key, status FROM memory_key_manifest WHERE status = 'planned' ORDER BY old_key`).all() as ManifestRow[];
+  const landed = rows.filter((r) => !fs.existsSync(projectDir(home, r.old_key)) && fs.existsSync(projectDir(home, r.new_key)));
+  if (landed.length === 0) return [];
+  const at = new Date().toISOString();
+  const settled: MemoryKeyMove[] = [];
+  rs.transaction(() => {
+    for (const row of landed) {
       const changed = rs.db.run(
         `UPDATE memory_key_manifest SET status = 'moved', moved_at = ? WHERE old_key = ? AND new_key = ? AND status = 'planned'`,
-        [at, move.oldKey, move.newKey],
+        [at, row.old_key, row.new_key],
       ).changes;
       // The record follows the directory here too. Without it the manifest would say `moved` while
       // the record still named the old key, and a later rollback would move the tree back under a
       // key its own record had already stopped agreeing with.
-      if (changed > 0) records.rekeyMemoryProjectKey(move.oldKey, move.newKey);
+      if (changed > 0) {
+        records.rekeyMemoryProjectKey(row.old_key, row.new_key);
+        settled.push({ oldKey: row.old_key, newKey: row.new_key });
+      }
     }
   }, { mode: "immediate" });
+  return settled;
+}
 
-  return plan;
+/**
+ * The `old_key -> new_key` map of every relocation this home has actually performed.
+ *
+ * THE LIVE PATH'S HALF OF P8b-17. `agent/memory-dir.ts` is keyed by cwd and derives today's key; a
+ * migrated project's tree is not there any more. This is the door that says where it went — read
+ * from the same rows the re-key was committed with, so the answer is the record's own key by
+ * construction, and a rollback (which sets `rolled-back`) removes it from this map in the same
+ * transaction that puts the tree back.
+ */
+export function memoryKeyRelocations(rs: RuntimeStateDb): Map<string, string> {
+  const rows = rs.db.query(`SELECT old_key, new_key FROM memory_key_manifest WHERE status = 'moved'`).all() as Array<{ old_key: string; new_key: string }>;
+  return new Map(rows.map((r) => [r.old_key, r.new_key]));
 }
 
 /**
@@ -369,9 +487,10 @@ export function planMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string;
  * Re-passing the SAME in-memory plan is handled by the pre-check instead: a pair whose row already
  * reads `moved` is skipped as done, and any other stale state refuses before a rename can happen.
  */
-export function applyMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string }, plan: MemoryKeyPlan): { moved: number } {
+export function applyMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string; fs?: MemoryKeyFs }, plan: MemoryKeyPlan): { moved: number } {
   if (plan.collisions.length > 0) throw new MemoryKeyCollisionError(plan.collisions);
   const { rs, home } = deps;
+  const fs = deps.fs ?? NODE_FS;
   // Constructed from the handle we already hold rather than taken as a dependency: `runtime_sessions`
   // belongs to `RuntimeSessionRecords`, so the record-side write goes through its owner instead of a
   // raw UPDATE from a migration, and the pinned `{ rs, home }` signature is left alone.
@@ -401,12 +520,15 @@ export function applyMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string
     if (alreadyDone.has(move.oldKey)) continue; // idempotent: this pair is already recorded as moved
     const source = projectDir(home, move.oldKey);
     const target = projectDir(home, move.newKey);
-    if (existsSync(source)) {
+    if (fs.existsSync(source)) {
       // Re-checked under the same call rather than trusted from plan time: `rename` onto an
       // existing directory is the one outcome that could destroy memory.
-      if (existsSync(target)) throw new MemoryKeyCollisionError([{ newKey: move.newKey, oldKeys: [move.oldKey], reason: "target-exists" }]);
-      renameSync(source, target);
-    } else if (!existsSync(target)) {
+      if (fs.existsSync(target)) throw new MemoryKeyCollisionError([{ newKey: move.newKey, oldKeys: [move.oldKey], reason: "target-exists" }]);
+      // THE WHOLE PROJECT DIRECTORY, in one rename: `memory/` and every compatibility-layout sibling
+      // (`<uuid>.jsonl`, `subagents/`, `tool-results/`, `workflows/scripts/`) relink together, and
+      // atomically — precondition 4. A `memory/`-only move would split one project across two keys.
+      fs.renameSync(source, target);
+    } else if (!fs.existsSync(target)) {
       continue; // Nothing at either end: nothing to record.
     }
     // ONE TRANSACTION for the manifest row AND every record that named the old key: the directory
@@ -439,8 +561,9 @@ export function applyMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string
  * and left completely alone — every other tree is still restored. Throwing mid-loop would leave some
  * trees back and some forward with nothing saying which.
  */
-export function rollbackMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string }): { rolledBack: number; failures: MemoryKeyRollbackFailure[] } {
+export function rollbackMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: string; fs?: MemoryKeyFs }): { rolledBack: number; failures: MemoryKeyRollbackFailure[] } {
   const { rs, home } = deps;
+  const fs = deps.fs ?? NODE_FS;
   const records = new RuntimeSessionRecords(rs);
   const rows = rs.db.query(`SELECT old_key, new_key, status FROM memory_key_manifest WHERE status = 'moved' ORDER BY old_key`).all() as ManifestRow[];
   const failures: MemoryKeyRollbackFailure[] = [];
@@ -448,19 +571,19 @@ export function rollbackMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: str
   for (const row of rows) {
     const source = projectDir(home, row.new_key);
     const target = projectDir(home, row.old_key);
-    if (existsSync(source)) {
+    if (fs.existsSync(source)) {
       // A rollback is an undo under pressure. One blocked tree must not deny every other tree its
       // restore — and it must not throw halfway through either, which would leave some trees back
       // and some forward with no report of which. So it is COLLECTED, and this row is left entirely
       // alone: directory, record and manifest all stay `moved`, ready to retry once the obstruction
       // is cleared. (`apply` refuses up front instead, because a move can still be declined; by the
       // time rollback runs the trees have already been moved.)
-      if (existsSync(target)) {
+      if (fs.existsSync(target)) {
         failures.push({ oldKey: row.old_key, newKey: row.new_key, reason: "target-exists" });
         continue;
       }
-      renameSync(source, target);
-    } else if (!existsSync(target)) {
+      fs.renameSync(source, target);
+    } else if (!fs.existsSync(target)) {
       continue;
     }
     rs.transaction(() => {

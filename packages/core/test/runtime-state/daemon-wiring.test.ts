@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { FakeProvider } from "../../src/agent/fake-provider";
-import { repoRootFor, sanitizeProjectKey } from "../../src/agent/memory-dir";
+import { memoryDirFor, repoRootFor, sanitizeProjectKey } from "../../src/agent/memory-dir";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import {
   RuntimeSessionRecords, RuntimeStateUnavailableError, createSqliteRuntimeDirectoryStore, openRuntimeStateDb,
@@ -56,6 +56,15 @@ const SETTINGS_BASE = { schemaVersion: 2, provider: { type: "codex-oauth", model
  *  migration and the assertion would be about the migration, not about the key under test. */
 function writeSettings(home: string, extra: Record<string, unknown> = {}): void {
   writeFileSync(join(home, "settings.json"), JSON.stringify({ ...SETTINGS_BASE, ...extra }, null, 2));
+}
+
+/** The manifest, and the one-shot marker: the two durable facts §17 phase 5 leaves behind. */
+function manifestRows(rt: RuntimeStateWiring): Array<{ old_key: string; new_key: string; status: string }> {
+  return rt.db.db.query("SELECT old_key, new_key, status FROM memory_key_manifest ORDER BY old_key").all() as
+    Array<{ old_key: string; new_key: string; status: string }>;
+}
+function marker(rt: RuntimeStateWiring): unknown {
+  return rt.db.db.query("SELECT value FROM schema_meta WHERE key = 'memory_keys_migrated'").get();
 }
 
 /** Backdate a session's `created_at` past the reaper's 10-minute grace, through the index's own
@@ -313,13 +322,14 @@ describe("daemon wiring — a corrupt store costs runtime routing and nothing el
   });
 });
 
-// §17 phase 5 is REFUSED in this build (review r1, Important 2): the live memory path
-// (`memoryDirFor`) still derives today's key, so relocating a user's memory now would leave the
-// agent reading an empty directory — one-way, with no CLI rollback. The plan/apply code and its unit
-// tests stay (they are 8b's); what this build must do is say so and move nothing.
-describe("daemon wiring — the memory-key migration is refused in this build", () => {
+// §17 phase 5 RUNS in this build (P8b-17). 8a shipped the flag refusing because the live memory path
+// still derived today's key; all four preconditions now hold, and the two halves commit together —
+// the trees move, the records follow, and `relocatedMemoryKey` is what `daemon.ts` threads into
+// `memoryDirFor` so the very next memory read finds them. These tests boot a REAL daemon, because
+// the thing under test is the wiring, not the migration (its own unit tests cover that).
+describe("daemon wiring — the memory-key migration runs behind its flag", () => {
   /** A session whose memory tree sits under TODAY's key, so the migration has something to move. */
-  function seedProject(home: string, store: SessionStore, name: string): { sessionId: string; oldKey: string; newKey: string } {
+  function seedProject(home: string, store: SessionStore, name: string): { sessionId: string; cwd: string; oldKey: string; newKey: string } {
     const cwd = join(home, "work", name);
     mkdirSync(cwd, { recursive: true });
     const sessionId = store.createSession("work", { cwd });
@@ -327,7 +337,7 @@ describe("daemon wiring — the memory-key migration is refused in this build", 
     const oldKey = sanitizeProjectKey(repoRootFor(cwd));
     mkdirSync(join(home, "projects", oldKey, "memory"), { recursive: true });
     writeFileSync(join(home, "projects", oldKey, "memory", "MEMORY.md"), `# ${name}\n`);
-    return { sessionId, oldKey, newKey: compatibilityKeys(cwd).memoryProjectKey };
+    return { sessionId, cwd, oldKey, newKey: compatibilityKeys(cwd).memoryProjectKey };
   }
 
   const memoryBody = (home: string, key: string): string | undefined => {
@@ -335,7 +345,12 @@ describe("daemon wiring — the memory-key migration is refused in this build", 
     return existsSync(path) ? readFileSync(path, "utf8") : undefined;
   };
 
-  test("booting with the flag ON moves nothing, plans nothing, and marks nothing", async () => {
+  /** What the daemon's own MEMDIR resolution answers for a cwd, wired exactly as `daemon.ts` wires
+   *  it — the whole point of P8b-17 is that this follows the migration. */
+  const liveMemDir = (home: string, rt: RuntimeStateWiring, cwd: string): string =>
+    memoryDirFor(cwd, { normaHome: home, relocatedKey: (k) => rt.relocatedMemoryKey(k) });
+
+  test("booting with the flag ON relocates the tree, re-keys the record, and the live path follows it", async () => {
     await withTempHome(async (home) => {
       writeSettings(home, { runtimes: { migrations: { memoryKeys: true } } });
       const store = new SessionStore(home);
@@ -344,16 +359,54 @@ describe("daemon wiring — the memory-key migration is refused in this build", 
 
       const rt = online(await boot(home));
 
-      expect(memoryBody(home, first.oldKey)).toBeDefined(); // the user's memory is where it was
-      expect(memoryBody(home, first.newKey)).toBeUndefined();
-      expect(rt.records.get(first.sessionId)!.memoryProjectKey).toBe(first.oldKey);
-      // Not even a PLAN: a `planned` manifest row is a promise to move something.
-      expect(rt.db.db.query("SELECT COUNT(*) AS n FROM memory_key_manifest").get()).toEqual({ n: 0 });
-      expect(rt.db.db.query("SELECT value FROM schema_meta WHERE key = 'memory_keys_migrated'").get()).toBe(null);
+      // The tree moved, whole and byte-identical, and NOTHING is left at the old key.
+      expect(memoryBody(home, first.oldKey)).toBeUndefined();
+      expect(memoryBody(home, first.newKey)).toBe("# alpha\n");
+      expect(rt.records.get(first.sessionId)!.memoryProjectKey).toBe(first.newKey);
+      expect(manifestRows(rt)).toEqual([{ old_key: first.oldKey, new_key: first.newKey, status: "moved" }]);
+
+      // THE HALF-SWITCH THAT MUST NOT EXIST: the daemon's own memory lookup resolves to where the
+      // tree now is, so the agent never reads an empty directory and never starts a second MEMORY.md.
+      expect(liveMemDir(home, rt, first.cwd)).toBe(join(home, "projects", first.newKey, "memory"));
+      expect(readFileSync(join(liveMemDir(home, rt, first.cwd), "MEMORY.md"), "utf8")).toBe("# alpha\n");
+
+      // One-shot: nothing left to do, so the marker is written and a later boot re-plans nothing.
+      expect(marker(rt)).not.toBe(null);
     });
   });
 
-  test("flipping the flag on a running daemon says so exactly once; flipping it back says nothing", async () => {
+  test("a home that already migrated does not re-plan or re-narrate at the next boot", async () => {
+    await withTempHome(async (home) => {
+      writeSettings(home, { runtimes: { migrations: { memoryKeys: true } } });
+      const store = new SessionStore(home);
+      const first = seedProject(home, store, "alpha");
+      store.close();
+
+      const firstBoot = await boot(home);
+      expect(online(firstBoot).records.get(first.sessionId)!.memoryProjectKey).toBe(first.newKey);
+      await firstBoot.stop();
+      daemon = undefined;
+
+      const lines: string[] = [];
+      const store2 = new SessionStore(home);
+      const live = Settings.parse({ ...SETTINGS_BASE, runtimes: { migrations: { memoryKeys: true } } });
+      const state = await startRuntimeState({ home, store: store2, settings: () => live, log: (l) => lines.push(l) });
+      const rt = "unavailable" in state ? undefined : state;
+      try {
+        expect(rt).toBeDefined();
+        expect(lines.some((l) => l.includes("memory-key migration"))).toBe(false);
+        // The relocation is still known — it is read from the manifest at every boot, not from the
+        // run that performed it, so the live path keeps finding the tree forever.
+        expect(rt!.relocatedMemoryKey(first.oldKey)).toBe(first.newKey);
+        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(home, "projects", first.newKey, "memory"));
+      } finally {
+        await rt?.close();
+        store2.close();
+      }
+    });
+  });
+
+  test("flipping the flag on a RUNNING daemon migrates immediately, and only once", async () => {
     await withTempHome(async (home) => {
       const store = new SessionStore(home);
       const first = seedProject(home, store, "alpha");
@@ -365,23 +418,48 @@ describe("daemon wiring — the memory-key migration is refused in this build", 
       const rt = "unavailable" in state ? undefined : state;
       try {
         expect(rt).toBeDefined();
-        const quiet = lines.length; // whatever boot said; the flag was off, so it said nothing about it
+        // Flag off: nothing is planned, nothing is said, and the live path is the plain derivation.
+        expect(lines.some((l) => l.includes("memory-key"))).toBe(false);
+        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(home, "projects", first.oldKey, "memory"));
+        const quiet = lines.length;
 
         live = settingsWith(true);
-        rt!.applySettings(live); // the settings-watcher's diff path
-        expect(lines.slice(quiet)).toHaveLength(1);
-        expect(lines[quiet]).toContain("not enabled in this build");
+        rt!.applySettings(live); // the settings-watcher's diff path — no restart anywhere
+        expect(lines.slice(quiet).filter((l) => l.includes("memory-key migration"))).toHaveLength(1);
+        expect(memoryBody(home, first.newKey)).toBe("# alpha\n");
+        expect(rt!.records.get(first.sessionId)!.memoryProjectKey).toBe(first.newKey);
+        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(home, "projects", first.newKey, "memory"));
 
+        // Every later settings change re-enters this path; it must not re-plan a finished migration.
+        const after = lines.length;
+        rt!.applySettings(settingsWith(true));
         live = settingsWith(false);
         rt!.applySettings(live);
-        expect(lines).toHaveLength(quiet + 1); // an off flag is not an event
-
-        expect(memoryBody(home, first.oldKey)).toBeDefined();
-        expect(rt!.db.db.query("SELECT COUNT(*) AS n FROM memory_key_manifest").get()).toEqual({ n: 0 });
+        expect(lines).toHaveLength(after);
       } finally {
         await rt?.close();
         store.close();
       }
+    });
+  });
+
+  test("a home that pins settings.memory.directory is declined — nothing moves, and no marker forecloses it", async () => {
+    await withTempHome(async (home) => {
+      const pinned = join(home, "my-memdir");
+      mkdirSync(pinned, { recursive: true });
+      writeSettings(home, { memory: { directory: pinned }, runtimes: { migrations: { memoryKeys: true } } });
+      const store = new SessionStore(home);
+      const first = seedProject(home, store, "alpha");
+      store.close();
+
+      const rt = online(await boot(home));
+
+      expect(memoryBody(home, first.oldKey)).toBe("# alpha\n"); // the user's tree, exactly where it was
+      expect(memoryBody(home, first.newKey)).toBeUndefined();
+      expect(rt.records.get(first.sessionId)!.memoryProjectKey).toBe(first.oldKey);
+      expect(manifestRows(rt)).toEqual([]);
+      // NOT marked done: clearing the override later must still get a migration.
+      expect(marker(rt)).toBe(null);
     });
   });
 });

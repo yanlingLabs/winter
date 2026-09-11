@@ -94,6 +94,22 @@ export interface MemoryDirOptions {
    *  setting) — no further per-project nesting under it. Empty/whitespace-only is treated as
    *  absent (a settings.json with `"directory": ""` must not resolve to `normaHome` itself). */
   directory?: string;
+  /**
+   * P8b-17 — THE LIVE PATH AND THE MIGRATION MOVE TOGETHER.
+   *
+   * WS-16 §17 phase 5 (`runtime-state/migrations/memory-keys.ts`) relocates a project's tree from
+   * the key this file derives to the SDK's compatibility key, and re-keys the runtime record in the
+   * same transaction. Every call site here is keyed by a **cwd**, not by a session, so it cannot ask
+   * a record what its key is — it asks this resolver instead, which the daemon wires to the
+   * migration's own manifest (the `old_key -> new_key` map the re-key was committed with). Same
+   * answer as reading `RuntimeSessionRecord.memoryProjectKey`, reachable from a bare cwd.
+   *
+   * Absent (or answering `undefined`) means "nothing was relocated for this project" — the
+   * derivation stands, which is every home that never turned the flag on. A relocation that IS
+   * recorded must be honoured here or the agent reads an empty directory at the old key and starts a
+   * fresh `MEMORY.md` beside the user's own — the precise failure 8a refused the flag to avoid.
+   */
+  relocatedKey?: (todaysKey: string) => string | undefined;
 }
 
 /** Shared override-resolution: `memoryDirFor` and `globalMemoryDirFor` both replace their
@@ -115,8 +131,36 @@ function resolveOverride(opts: MemoryDirOptions): string | null {
 export function memoryDirFor(cwd: string, opts: MemoryDirOptions): string {
   const override = resolveOverride(opts);
   if (override) return override;
-  const key = sanitizeProjectKey(repoRootFor(cwd));
-  return join(opts.normaHome, "projects", key, "memory");
+  return join(opts.normaHome, "projects", memoryProjectKeyFor(cwd, opts), "memory");
+}
+
+/**
+ * The project key a cwd's memory is filed under RIGHT NOW: today's derivation, unless the
+ * memory-key migration has relocated that project, in which case the key it was relocated to.
+ *
+ * Exported because the migration's own reporting and the daemon both need to name the same key this
+ * path resolves — there is exactly one derivation of a memory location in this codebase, and this
+ * is it.
+ */
+export function memoryProjectKeyFor(cwd: string, opts: MemoryDirOptions): string {
+  const today = sanitizeProjectKey(repoRootFor(cwd));
+  return opts.relocatedKey?.(today) ?? today;
+}
+
+/**
+ * The memory directory for a session whose RUNTIME RECORD is in hand (P8b-17's "`memoryDirFor` onto
+ * the record's key"). The record IS the authority — `applyMemoryKeyMigration` re-keys it in the same
+ * transaction that marks the manifest row `moved`, and `rollbackMemoryKeyMigration` puts it back —
+ * so this returns the OLD key's directory before a migration and the NEW key's after it, with no
+ * derivation, no git spawn and no relocation map in between.
+ *
+ * The `settings.memory.directory` override still wins, exactly as it does for the cwd-keyed path:
+ * a home that pins its MEMDIR is never re-keyed at all (the migration declines such homes outright).
+ */
+export function memoryDirForRecord(record: { memoryProjectKey: string }, opts: MemoryDirOptions): string {
+  const override = resolveOverride(opts);
+  if (override) return override;
+  return join(opts.normaHome, "projects", record.memoryProjectKey, "memory");
 }
 
 /**

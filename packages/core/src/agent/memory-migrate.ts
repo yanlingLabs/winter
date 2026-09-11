@@ -33,6 +33,11 @@ export interface MigrateMemoryDeps {
   /** `settings.memory.directory` override — same value `daemon.ts` threads into `memoryDirFor`/
    *  `globalMemoryDirFor` for every other MEMDIR consumer. */
   directory?: string;
+  /** P8b-17's relocation lookup, threaded for the SAME reason every other MEMDIR consumer gets it:
+   *  this importer writes into `memoryDirFor(trustedDir, …)`, and in a home whose §17 phase 5
+   *  migration has run, the pre-migration key is a directory nothing reads any more. Absent in every
+   *  home that never migrated, which is the default. */
+  relocatedKey?: MemoryDirOptions["relocatedKey"];
 }
 
 export interface MigrateSourceResult {
@@ -109,7 +114,7 @@ function migrateOneDir(sourceDir: string, targetDir: string): MigrateSourceResul
 }
 
 export function migrateMemoryStore(deps: MigrateMemoryDeps): MigrateMemoryResult {
-  const dirOpts: MemoryDirOptions = { normaHome: deps.normaHome, directory: deps.directory };
+  const dirOpts: MemoryDirOptions = { normaHome: deps.normaHome, directory: deps.directory, relocatedKey: deps.relocatedKey };
   const sources: MigrateSourceResult[] = [];
 
   const userSource = join(deps.normaHome, "memory");
