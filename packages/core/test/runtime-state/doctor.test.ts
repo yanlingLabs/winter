@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import { openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION, type RuntimeStateDb } from "../../src/runtime-state/db";
@@ -769,6 +769,75 @@ describe("diagnoseRuntimeState / restore-backup — a store written by an older 
       } finally {
         live.close();
       }
+    });
+  });
+
+  test("re-review NEW-10: a restore FROM a WAL-carrying backup carries the tail — the restored store reads the committed-but-uncheckpointed row", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      const id = seedProductSession(home, { cwd: home });
+      withDb(home, (_rs, records) => { records.create(newRecord(home, id)); });
+      // A WAL-carrying backup under `backups/` — the shape the byte-copy door leaves behind — whose
+      // committed tail lives ONLY in its `-wal` (the writer stays open so nothing checkpoints).
+      const dest = join(home, "runtimes", "runtime-state.db");
+      const dir = join(home, "runtimes", "backups");
+      mkdirSync(dir, { recursive: true });
+      const backup = join(dir, "wal-carrying.db");
+      copyFileSync(dest, backup);
+      const writer = new Database(backup);
+      try {
+        writer.run("PRAGMA journal_mode = WAL");
+        writer.run("INSERT INTO schema_meta(key, value) VALUES ('wal_tail', 'TAIL')");
+        expect(existsSync(`${backup}-wal`)).toBe(true);
+        const result = await repairRuntimeState(home, { kind: "restore-backup", backupPath: backup });
+        expect(result.applied).toBe(true);
+        // the source's sidecars came along...
+        expect(existsSync(`${dest}-wal`)).toBe(true);
+        // ...and the restored store READS THE TAIL — before NEW-10 the main file alone was copied,
+        // `applied: true` was reported, and this row was silently gone.
+        const restored = new Database(dest);
+        try {
+          expect(restored.query("SELECT value FROM schema_meta WHERE key='wal_tail'").get()).toEqual({ value: "TAIL" });
+        } finally { restored.close(); }
+      } finally { writer.close(); }
+    });
+  });
+
+  test("re-review NEW-11: a sidecar that cannot be snapshotted refuses with the WAL-specific wording, and leaves NO partial pre-restore file behind", async () => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      console.warn("skipped: running as root, where chmod 000 cannot close the sidecar door");
+      return;
+    }
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      const id = seedProductSession(home, { cwd: home });
+      let backup = "";
+      withDb(home, (rs, records) => { records.create(newRecord(home, id)); backup = rs.backup(); });
+      const dest = join(home, "runtimes", "runtime-state.db");
+      const backups = join(home, "runtimes", "backups");
+      const live = new Database(dest);
+      try {
+        // door 1 (`VACUUM INTO`) refuses: a version this build will not open readonly; the tail is
+        // in the `-wal`, and THAT file is the one made uncopyable
+        live.run("INSERT INTO schema_meta(key, value) VALUES ('wal_tail', 'TAIL')");
+        live.run("PRAGMA user_version = 99");
+        expect(existsSync(`${dest}-wal`)).toBe(true);
+        const before = readFileSync(dest);
+        const filesBefore = readdirSync(backups).sort();
+        chmodSync(`${dest}-wal`, 0o000);
+        try {
+          const result = await repairRuntimeState(home, { kind: "restore-backup", backupPath: backup });
+          expect(result.applied).toBe(false);
+          // the DEDICATED refusal — reachable now (it was dead code behind the generic catch)
+          expect(result.detail).toContain("write-ahead log could not be snapshotted");
+          expect(result.detail).toContain("Move the store and its -wal aside");
+        } finally { chmodSync(`${dest}-wal`, 0o600); }
+        // nothing partial: no main-only `pre-restore-*.db` (the sidecar-less file the probe refuses)
+        expect(readdirSync(backups).sort()).toEqual(filesBefore);
+        // and the store — main file AND its wal — is untouched
+        expect(readFileSync(dest)).toEqual(before);
+        expect(existsSync(`${dest}-wal`)).toBe(true);
+      } finally { live.close(); }
     });
   });
 

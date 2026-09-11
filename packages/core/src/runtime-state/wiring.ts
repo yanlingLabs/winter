@@ -247,7 +247,7 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
     // a home that never migrated.
     let relocations = new Map<string, string>();
     try {
-      const torn = reconcileMemoryKeyManifest({ rs, home, records, fs: deps.memoryKeyFs });
+      const torn = reconcileMemoryKeyManifest({ rs, home, records, fs: deps.memoryKeyFs, log });
       if (torn.length > 0) log(`memory-key migration: completed ${torn.length} relocation(s) a previous run left half-committed`);
       relocations = memoryKeyRelocations(rs);
     } catch (e) {

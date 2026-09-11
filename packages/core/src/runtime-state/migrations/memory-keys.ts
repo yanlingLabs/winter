@@ -454,7 +454,7 @@ export function planMemoryKeyMigration(deps: {
     }
     (wanted.get(oldKey) ?? wanted.set(oldKey, new Set()).get(oldKey)!).add(newKey);
     (recordsFor.get(oldKey) ?? recordsFor.set(oldKey, new Set()).get(oldKey)!).add(record.winterSessionId);
-    cwdFor.set(`${oldKey} ${newKey}`, cwd);
+    cwdFor.set(`${oldKey}\0${newKey}`, cwd);
   }
 
   // One old key with more than one destination: unresolvable, and reported against every
@@ -494,7 +494,7 @@ export function planMemoryKeyMigration(deps: {
       plan.collisions.push({ newKey, oldKeys: [oldKey], reason: "target-exists", entries: colliding });
       continue;
     }
-    const cwd = cwdFor.get(`${oldKey} ${newKey}`);
+    const cwd = cwdFor.get(`${oldKey}\0${newKey}`);
     plan.moves.push({ oldKey, newKey, ...(cwd === undefined ? {} : { cwd }), entries });
   }
   // FINISH WHAT THE MANIFEST ALREADY PROMISED, even when the records can no longer ask for it.
@@ -593,11 +593,11 @@ export function planMemoryKeyMigration(deps: {
  * is then reported as `unchanged` (or `root-disagrees`, when its destination is an older algorithm's)
  * rather than planned all over again.
  */
-export function reconcileMemoryKeyManifest(deps: { rs: RuntimeStateDb; home: string; records?: RuntimeSessionRecords; fs?: MemoryKeyFs }): MemoryKeyMove[] {
-  return reconcileManifest(deps.rs, deps.home, deps.fs ?? NODE_FS, deps.records ?? new RuntimeSessionRecords(deps.rs));
+export function reconcileMemoryKeyManifest(deps: { rs: RuntimeStateDb; home: string; records?: RuntimeSessionRecords; fs?: MemoryKeyFs; log?: (line: string) => void }): MemoryKeyMove[] {
+  return reconcileManifest(deps.rs, deps.home, deps.fs ?? NODE_FS, deps.records ?? new RuntimeSessionRecords(deps.rs), deps.log);
 }
 
-function reconcileManifest(rs: RuntimeStateDb, home: string, fs: MemoryKeyFs, records: RuntimeSessionRecords): MemoryKeyMove[] {
+function reconcileManifest(rs: RuntimeStateDb, home: string, fs: MemoryKeyFs, records: RuntimeSessionRecords, log?: (line: string) => void): MemoryKeyMove[] {
   // FIRST, THE UNDOS IN FLIGHT (re-review NEW-8). An `undoing` row is a rename-back this process —
   // or a previous one — declared and may not have finished. It is settled BEFORE the forward pass
   // below, because an undo that completes puts the entry back at the source, which is exactly what
@@ -605,8 +605,12 @@ function reconcileManifest(rs: RuntimeStateDb, home: string, fs: MemoryKeyFs, re
   //
   // THIS IS THE ONE PLACE THE REPAIR MOVES A FILE, and it moves only entries a row says are in
   // flight, only between the two keys that row names, and only into a name that is free.
+  // NARRATED (re-review NEW-13): this is the one operation the repair performs on somebody's files,
+  // and a completed undo used to contribute nothing to the return value — a directory under the
+  // user's `projects/` was renamed at boot with no line in the log. Each rename-back says so.
   for (const row of rs.db.query(`SELECT old_key, entry, new_key, status, record_ids FROM memory_key_manifest WHERE status = 'undoing' ORDER BY old_key, entry`).all() as ManifestRow[]) {
-    finishUndo(rs, records, fs, home, row.old_key, row.new_key, row.entry);
+    const outcome = finishUndo(rs, records, fs, home, row.old_key, row.new_key, row.entry);
+    if (outcome === "renamed-back") log?.(`memory-key repair: finished an undo a previous run left in flight — moved projects/${row.new_key}/${row.entry} back to projects/${row.old_key}/${row.entry}`);
   }
 
   const rows = (rs.db.query(`SELECT old_key, entry, new_key, status, record_ids FROM memory_key_manifest WHERE status = 'planned' ORDER BY old_key, entry`).all() as ManifestRow[])
@@ -621,7 +625,7 @@ function reconcileManifest(rs: RuntimeStateDb, home: string, fs: MemoryKeyFs, re
         [at, row.old_key, row.entry, row.new_key],
       ).changes;
       if (changed === 0) continue;
-      const key = `${row.old_key} ${row.new_key}`;
+      const key = `${row.old_key}\0${row.new_key}`;
       const move = settled.get(key) ?? { oldKey: row.old_key, newKey: row.new_key, entries: [] as string[] };
       (move.entries as string[]).push(row.entry);
       settled.set(key, move);
@@ -837,10 +841,11 @@ function finishUndo(
   oldKey: string,
   newKey: string,
   entry: string,
-): void {
+): "renamed-back" | "settled" | "left-undoing" {
   const back = entryPath(home, oldKey, entry);
   const at = entryPath(home, newKey, entry);
   let settled: "planned" | "moved" | undefined;
+  let renamed = false;
   try {
     if (fs.existsSync(back)) {
       // Already home — either this call's rename landed and its commit did not, or a hand-undo.
@@ -848,6 +853,7 @@ function finishUndo(
     } else if (fs.existsSync(at)) {
       fs.mkdirSync(projectDir(home, oldKey), { recursive: true });
       fs.renameSync(at, back);
+      renamed = true;
       settled = "planned";
     } else {
       // At neither end: the entry is gone. `planned` is the honest resting state — `apply` moves
@@ -855,7 +861,7 @@ function finishUndo(
       settled = "planned";
     }
   } catch {
-    return; // left `undoing`: the next boot's repair tries again rather than recording a guess
+    return "left-undoing"; // the next boot's repair tries again rather than recording a guess
   }
   // BOTH ends occupied is the one shape the undo cannot complete: something re-took the old name
   // while the entry sat at the new key. The row goes back to `moved`, which is where the entry
@@ -868,6 +874,7 @@ function finishUndo(
     }
     syncRecordKey(rs, records, oldKey);
   }, { mode: "immediate" });
+  return renamed ? "renamed-back" : "settled";
 }
 
 /**

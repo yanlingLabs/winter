@@ -688,22 +688,31 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
         mkdirSync(dir, { recursive: true });
         snapshot = join(dir, `pre-restore-${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}.db`);
         copyFileSync(dest, snapshot);
-        // THE SIDECARS COME WITH IT (re-review NEW-9). A byte copy of a WAL-mode database without
-        // its `-wal`/`-shm` cannot be opened read-only at all — which is exactly how the probe above
-        // inspects a candidate — so the snapshot this repair names in its own success message was a
-        // file the operator could not feed back through `--repair restore-backup`. And any committed
-        // but un-checkpointed tail lived ONLY in that `-wal`, which the sidecar removal below then
-        // deleted. Copying them beside the snapshot makes it both restorable and complete.
-        sidecarsCaptured = false;
-        for (const suffix of ["-wal", "-shm"]) {
-          if (existsSync(`${dest}${suffix}`)) copyFileSync(`${dest}${suffix}`, `${snapshot}${suffix}`);
-        }
-        sidecarsCaptured = true;
       } catch (e) {
         return {
           applied: false,
           detail: `refusing to overwrite ${dest}: it could not be snapshotted first (${e instanceof Error ? e.name : "unknown"}). Move it aside by hand and re-run.`,
         };
+      }
+      // THE SIDECARS COME WITH IT (re-review NEW-9). A byte copy of a WAL-mode database without
+      // its `-wal`/`-shm` cannot be opened read-only at all — which is exactly how the probe above
+      // inspects a candidate — so the snapshot this repair names in its own success message was a
+      // file the operator could not feed back through `--repair restore-backup`. And any committed
+      // but un-checkpointed tail lived ONLY in that `-wal`, which the sidecar removal below then
+      // deleted. Copying them beside the snapshot makes it both restorable and complete.
+      //
+      // ITS OWN TRY (re-review NEW-11): a sidecar that cannot be copied is a different refusal from
+      // a main file that cannot be — the WAL-specific wording below is what the operator needs —
+      // and it must not leave a main-only `pre-restore-*.db` behind, which is precisely the
+      // sidecar-less file the probe refuses. So the partial snapshot is removed before refusing.
+      try {
+        for (const suffix of ["-wal", "-shm"]) {
+          if (existsSync(`${dest}${suffix}`)) copyFileSync(`${dest}${suffix}`, `${snapshot}${suffix}`);
+        }
+      } catch {
+        sidecarsCaptured = false;
+        for (const suffix of ["", "-wal", "-shm"]) rmSync(`${snapshot}${suffix}`, { force: true });
+        snapshot = undefined;
       }
     }
   }
@@ -725,6 +734,15 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
   }
   for (const path of [`${dest}-wal`, `${dest}-shm`]) rmSync(path, { force: true });
   copyFileSync(real, dest);
+  // AND THE SOURCE'S OWN SIDECARS COME ALONG (re-review NEW-10). A byte-copy snapshot — the exact
+  // file the success message below names for the reverse gesture — carries its committed tail in
+  // `${real}-wal`; copying the main file alone restored the checkpointed PREFIX and reported
+  // success. The `-shm` is a rebuildable index, copied so the restored pair opens exactly as the
+  // source did; SQLite recovers a stale one. `VACUUM INTO` backups carry no sidecars and copy
+  // nothing here.
+  for (const suffix of ["-wal", "-shm"]) {
+    if (existsSync(`${real}${suffix}`)) copyFileSync(`${real}${suffix}`, `${dest}${suffix}`);
+  }
   return {
     applied: true,
     detail: `restored ${dest} from ${backupPath} (${statSync(dest).size} bytes); ${snapshot ? `the replaced file is at ${snapshot}` : "there was no file to replace"}`,

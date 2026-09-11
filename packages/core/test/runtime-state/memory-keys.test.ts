@@ -1483,9 +1483,19 @@ describe("memory-key migration — a torn UNDO", () => {
         expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.oldKey);
 
         // THE NEXT BOOT finishes it: the entry comes home, the row is `planned` again, and the
-        // project is exactly where it started — the invariant the undo exists to keep.
-        expect(reconcileMemoryKeyManifest({ rs, home, records })).toEqual([]);
+        // project is exactly where it started — the invariant the undo exists to keep. And it SAYS
+        // so (re-review NEW-13): the one operation the repair performs on somebody's files is never
+        // the one it does not mention — one line per rename-back, naming both ends.
+        const lines: string[] = [];
+        expect(reconcileMemoryKeyManifest({ rs, home, records, log: (l) => { lines.push(l); } })).toEqual([]);
+        expect(lines).toEqual([
+          `memory-key repair: finished an undo a previous run left in flight — moved projects/${a.newKey}/0f2a1c00-0000-4000-8000-000000000000.jsonl back to projects/${a.oldKey}/0f2a1c00-0000-4000-8000-000000000000.jsonl`,
+        ]);
         expect(manifestEntries(rs).map((r) => r.status)).toEqual(["planned", "planned"]);
+        // a second repair has nothing to move and says nothing (idempotent, and silent when idle)
+        const again: string[] = [];
+        expect(reconcileMemoryKeyManifest({ rs, home, records, log: (l) => { again.push(l); } })).toEqual([]);
+        expect(again).toEqual([]);
         expect(snapshotTree(join(home, "projects", a.oldKey))).toEqual(before);
         expect(memoryDirFor(a.cwd, { normaHome: home, relocatedKey: (k) => memoryKeyRelocations(rs).get(k) }))
           .toBe(join(home, "projects", a.oldKey, "memory"));
