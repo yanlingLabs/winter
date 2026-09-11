@@ -18,6 +18,7 @@ export { webCapability, type WebCapabilityDeps } from "./web";
 export { lspCapability, type LspCapabilityDeps } from "./lsp";
 
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
+import { NORMA_BRAND } from "../runtime-sdk/brand";
 import { browserCapability, type BrowserCapabilityDeps } from "./browser";
 import { computerCapability, type ComputerCapabilityDeps } from "./computer";
 import { officeCapability, type OfficeCapabilityDeps } from "./office";
@@ -122,13 +123,17 @@ export function buildCapabilitiesFor(
  */
 export class CapabilityNameCollisionError extends Error {
   readonly code = "capability_name_collision" as const;
-  /** The colliding server name — always one of the daemon-owned `norma__<key>` names. */
+  /** The colliding server name — a daemon-owned `norma__<key>` name, or the brand name itself. */
   readonly server: string;
-  constructor(server: string) {
+  constructor(server: string, reason: "owned" | "brand" = "owned") {
     super(
-      `\`${server}\` is the name of a daemon-owned capability server for this session, and the ` +
-      `caller's own \`mcpServers\` already carries it — one of the two would silently not be ` +
-      `registered, so the door refuses rather than choose for you`,
+      reason === "brand"
+        ? `\`${server}\` is Norma's own MCP namespace (the brand's \`mcpServerName\`): a server keyed ` +
+          `by it would mint \`mcp__${server}__<tool>\` names that Norma maps back onto its OWN tool ` +
+          `classes and names — so the door refuses the key rather than let a foreign server borrow them`
+        : `\`${server}\` is the name of a daemon-owned capability server for this session, and the ` +
+          `caller's own \`mcpServers\` already carries it — one of the two would silently not be ` +
+          `registered, so the door refuses rather than choose for you`,
     );
     this.name = "CapabilityNameCollisionError";
     this.server = server;
@@ -140,6 +145,14 @@ export function assertNoCapabilityCollision(
   ownedNames: Iterable<string> | CapabilityServerRecord,
 ): void {
   if (mcpServers === undefined) return;
+  // Fix-wave re-review N-1: the BRAND NAME is refused too. A configured server keyed exactly
+  // `norma` (`NORMA_BRAND.mcpServerName`) registers its tools as `mcp__norma__<tool>`; a tool it
+  // names `web__web_fetch` or `lsp__lsp` is then the identical string `tool-names.ts`'s
+  // `normaToolNameFor` strips to Norma's OWN `web_fetch`/`lsp` — Norma's gate class (NETWORK /
+  // READ_ONLY, silent under every policy including `plan`) and Norma's name on the card and the
+  // Mac's tool rows, for a tool that is not Norma's. The router refuses that name for a capability
+  // server for the same reason; this guard is the one door the configured servers pass.
+  if (Object.hasOwn(mcpServers, NORMA_BRAND.mcpServerName)) throw new CapabilityNameCollisionError(NORMA_BRAND.mcpServerName, "brand");
   const owned = typeof (ownedNames as Iterable<string>)[Symbol.iterator] === "function"
     ? (ownedNames as Iterable<string>)
     : Object.keys(ownedNames as CapabilityServerRecord);

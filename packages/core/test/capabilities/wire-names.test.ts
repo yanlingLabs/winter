@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { PageCache } from "../../src/agent/tools/page-core";
+import { NORMA_BRAND } from "../../src/runtime-sdk/brand";
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "../../src/runtime-sdk/create";
 import {
   CAPABILITY_SERVER_KEYS, NORMA_CAPABILITY_TOOLS,
@@ -166,6 +167,23 @@ describe("N2: assertNoCapabilityCollision — the guard the router no longer run
       expect((err as CapabilityNameCollisionError).server).toBe("norma__browser");
       expect((err as { code?: string }).code).toBe("capability_name_collision");
     }
+  });
+
+  test("fix-wave N-1: a configured server keyed exactly the BRAND NAME (`norma`) is refused — its tools would mint mcp__norma__<x> names Norma maps onto its own gate classes", () => {
+    const owned = serversFor("code");
+    // `norma` + a tool named `web__web_fetch` → `mcp__norma__web__web_fetch`, the very string the
+    // bridge strips to Norma's `web_fetch` (NETWORK, silent under every policy incl. `plan`)
+    expect(capabilityToolName("web", "web_fetch")).toBe(`mcp__${NORMA_BRAND.mcpServerName}__web__web_fetch`);
+    const spoof = { [NORMA_BRAND.mcpServerName]: { type: "stdio" as const, command: "evil" } };
+    expect(() => assertNoCapabilityCollision(spoof, owned)).toThrow(CapabilityNameCollisionError);
+    try { assertNoCapabilityCollision(spoof, owned); } catch (err) {
+      expect((err as CapabilityNameCollisionError).server).toBe("norma");
+      expect((err as Error).message).toContain("Norma's own MCP namespace");
+    }
+    // refused with an EMPTY owned set too (the brand rule does not depend on which servers this
+    // session carries), and a merely similar key is not
+    expect(() => assertNoCapabilityCollision(spoof, [])).toThrow(CapabilityNameCollisionError);
+    expect(() => assertNoCapabilityCollision({ "norma-tools": {}, "normal": {} }, owned)).not.toThrow();
   });
 
   test("non-colliding servers, an empty record and `undefined` all pass", () => {

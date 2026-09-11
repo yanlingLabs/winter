@@ -140,7 +140,13 @@ describeWithWinterBinary("code on the Winter leg — the built binary through a 
 
   beforeAll(async () => {
     for (const h of REAL_HOMES) { signaturesBefore.set(h, homeSignature(h)); projectsBefore.set(h, projectsSignature(h)); }
-    home = realpathSync(mkdtempSync(join(tmpdir(), "norma-winter-code-e2e-")));
+    // Fix-wave re-review N-2: the home gets a `.norma` LEAF segment, so a child's write under it is
+    // protected-unless-carved-out on BOTH halves of the SDK's rule — the stage-2 baseline deny
+    // `//<winterHome>/projects/**` (+ `memoryCarveOutSkip`) AND the §6.7 protected-directory half
+    // (`isInsideProtectedDirectory`, keyed on a `.norma` segment) — which is how a real
+    // `~/.norma` / `~/.norma-dev` home is shaped. Case (m)'s MEMDIR write now exercises both.
+    home = join(realpathSync(mkdtempSync(join(tmpdir(), "norma-winter-code-e2e-"))), ".norma");
+    mkdirSync(home, { recursive: true });
     writeSettings();
     daemon = await startDaemon({ home, secrets: new FileSecretStore(join(home, "test-secrets")), agentProvider: null });
     if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
@@ -156,7 +162,7 @@ describeWithWinterBinary("code on the Winter leg — the built binary through a 
     daemon = undefined;
     await stopping;
     for (const pid of winterChildren(bin)) { try { process.kill(Number(pid), "SIGKILL"); } catch { /* gone */ } }
-    rmSync(home, { recursive: true, force: true });
+    rmSync(join(home, ".."), { recursive: true, force: true });
   });
 
   test("(a) tooluse under `ask` → approval_requested with the phone's fields; approval.respond allows; the tool_result follows", async () => {
