@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-export const RUNTIME_STATE_SCHEMA_VERSION = 1;
+export const RUNTIME_STATE_SCHEMA_VERSION = 2;
 
 export class RuntimeStateUnavailableError extends Error {
   constructor(public readonly path: string, public readonly reason: "missing" | "corrupt" | "newer-schema" | "unmigrated", cause?: unknown) {
@@ -65,6 +65,33 @@ const MIGRATIONS: ReadonlyArray<{ version: number; up: (db: Database) => void }>
     db.run(`CREATE INDEX name_leases_name ON name_leases(name)`);
     db.run(`CREATE TABLE memory_key_manifest (old_key TEXT PRIMARY KEY, new_key TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('planned','moved','rolled-back')), planned_at TEXT NOT NULL, moved_at TEXT)`);
     db.run(`INSERT INTO schema_meta(key, value) VALUES ('created_at', strftime('%Y-%m-%dT%H:%M:%fZ','now'))`);
+  } },
+  // Schema v2 (P8b-29): the memory-key manifest becomes PER ENTRY.
+  //
+  // WHY THE SHAPE HAD TO CHANGE. `<home>/projects/<key>/` is not Norma's alone — it is also where
+  // the Winter SDK writes transcripts, and for the common "session opened at the repo root" case the
+  // transcript key and the compatibility memory key are the SAME string. So the destination of a
+  // §17 phase 5 relocation routinely EXISTS already on any home that has run a Winter session, and a
+  // whole-directory rename could only refuse there — permanently, and for every other project in
+  // that home along with it. Moving entry by entry into an existing directory is what makes the two
+  // layouts share one key; a row per entry is what lets rollback put back exactly the entries THIS
+  // migration moved and nothing the SDK created beside them.
+  //
+  // THE v1 ROWS. 8a shipped the migration REFUSED, so no released build ever wrote one; a row can
+  // only exist on a pre-P8b-29 build of this very branch, where it described a whole-tree move whose
+  // destination did not previously exist. Such a row is carried forward as the `memory` entry — the
+  // one entry the live MEMDIR path resolves and the one a rollback most needs to restore — rather
+  // than dropped, because dropping it would strand a relocated tree with no recorded way back.
+  { version: 2, up: (db) => {
+    db.run(`ALTER TABLE memory_key_manifest RENAME TO memory_key_manifest_v1`);
+    db.run(`CREATE TABLE memory_key_manifest (
+      old_key TEXT NOT NULL, entry TEXT NOT NULL, new_key TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('planned','moved','rolled-back')),
+      planned_at TEXT NOT NULL, moved_at TEXT,
+      PRIMARY KEY (old_key, entry))`);
+    db.run(`INSERT INTO memory_key_manifest (old_key, entry, new_key, status, planned_at, moved_at)
+            SELECT old_key, 'memory', new_key, status, planned_at, moved_at FROM memory_key_manifest_v1`);
+    db.run(`DROP TABLE memory_key_manifest_v1`);
   } },
 ];
 

@@ -26,7 +26,7 @@ import { openRuntimeStateDb, type RuntimeStateDb } from "./db";
 import { createSqliteRuntimeDirectoryStore } from "./directory-store";
 import { RuntimeLeases, processStartedAt, type LeaseProbe } from "./leases";
 import { backfillNativeSessions, type BackfillReport } from "./migrations/backfill";
-import { applyMemoryKeyMigration, memoryKeyRelocations, planMemoryKeyMigration, reconcileMemoryKeyTornApplies } from "./migrations/memory-keys";
+import { applyMemoryKeyMigration, memoryKeyRelocations, planMemoryKeyMigration, reconcileMemoryKeyTornApplies, type MemoryKeyFs } from "./migrations/memory-keys";
 import { RuntimeSessionRecords } from "./records";
 import { recoverRuntimeState, type RecoveryHooks, type RecoveryReport } from "./recovery";
 import { deleteSessionRuntimeState, retentionFromSettings, sweepRetention } from "./retention";
@@ -66,6 +66,10 @@ export interface DaemonRuntimeStateDeps {
   /** Recovery's own test seams (`RecoveryDeps`): the 8b/8c step hooks, step 4's process probe and
    *  step 8's scan root, whose default is a REAL path on the developer's machine. */
   recovery?: { hooks?: RecoveryHooks; probe?: LeaseProbe; tempScanRoot?: string };
+  /** §17 phase 5's filesystem seam (`MemoryKeyFs`). Injectable for ONE reason: the two failures this
+   *  wiring has to survive — a repair that throws, and an apply that throws after a committed move —
+   *  are both mid-`rename` failures, and a test cannot produce either by arranging files. */
+  memoryKeyFs?: MemoryKeyFs;
 }
 
 /** The runtime spine, open and recovered. 8b's `createRuntimeSdk({ directoryStore })` consumes
@@ -225,43 +229,59 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
     // REPAIRED AND BUILT AT EVERY BOOT, FLAG OR NO FLAG. The map describes what SOME PAST run
     // relocated; a home that migrated last month and has the flag off today must still find its own
     // memory. And the repair has to be unconditional for the same reason: a process lost inside the
-    // rename/commit window leaves a tree whose row is still `planned` — invisible to `rollback` and
-    // to this map — and turning the flag back off must not be what strands it.
-    const torn = reconcileMemoryKeyTornApplies({ rs, home, records });
-    if (torn.length > 0) log(`memory-key migration: completed ${torn.length} relocation(s) a previous run left half-committed`);
-    let relocations = memoryKeyRelocations(rs);
+    // rename/commit window leaves entries whose rows are still `planned` — invisible to `rollback`
+    // and to this map — and turning the flag back off must not be what strands them.
+    //
+    // WRAPPED LIKE THE BACKFILL ABOVE IT, and for the identical reason (review r1, M-2): since this
+    // runs on EVERY boot of EVERY home — including the overwhelming majority that never enabled the
+    // flag and have an empty manifest — it is the one statement here that every user pays for. A
+    // throw would fall to the outer catch, close the handle and cost the whole runtime spine for a
+    // repair that had nothing to repair. The map defaults to empty, which is the honest answer when
+    // the manifest could not be read: the live path then derives today's key, exactly as it does on
+    // a home that never migrated.
+    let relocations = new Map<string, string>();
+    try {
+      const torn = reconcileMemoryKeyTornApplies({ rs, home, records, fs: deps.memoryKeyFs });
+      if (torn.length > 0) log(`memory-key migration: completed ${torn.length} relocation(s) a previous run left half-committed`);
+      relocations = memoryKeyRelocations(rs);
+    } catch (e) {
+      log(`memory-key repair failed (it retries at the next boot): ${errName(e)}`);
+    }
 
     const markerIsSet = (): boolean =>
       rs.db.query("SELECT value FROM schema_meta WHERE key = ?").get(MEMORY_KEYS_MIGRATED_MARKER) != null;
 
-    /** ONE ATTEMPT PER PROCESS. `settings-apply.ts` calls `applySettings` on EVERY settings change,
-     *  and a plan is a filesystem sweep plus a git spawn per distinct cwd — re-running it because a
-     *  user edited an unrelated key would be pure cost, and re-narrating an outcome they have
-     *  already read is noise. A run that could not finish (a collision to clear, a cwd to restore)
-     *  says so and retries at the NEXT BOOT, which is also when the obstruction is most likely to
-     *  have been fixed. */
-    let attempted = false;
-    /** A DECLINE IS NOT AN ATTEMPT (see below): it costs nothing to re-check, so clearing
-     *  `memory.directory` on a running daemon still gets the migration — no restart, per the hard
-     *  rule. Only the narration is suppressed, or every unrelated settings edit would repeat it. */
+    /** A DECLINE IS NOT AN ATTEMPT: it costs nothing to re-check, so clearing `memory.directory` on
+     *  a running daemon still gets the migration — no restart, per the hard rule. Only the narration
+     *  is suppressed, or every unrelated settings edit would repeat it. */
     let declineLogged = false;
+    /** Refusals are re-logged ONCE PER BOOT (P8b-29). A refused project is a fact about the user's
+     *  disk that they have to act on, so it must be said — but `applySettings` runs on every
+     *  settings change, and repeating the same list on each of them is how a line stops being read. */
+    let refusalsLogged = false;
 
     /**
      * Answer `runtimes.migrations.memoryKeys`. Called at boot AND from `settings-apply.ts`'s diff
      * path, so a user who flips the flag on a running daemon gets the migration immediately rather
      * than at the next restart. A flag left off says nothing at all. NEVER THROWS — a migration that
      * cannot run costs the relocation and nothing else; the daemon is already serving.
+     *
+     * NO ONE-ATTEMPT-PER-PROCESS RULE (P8b-29, replacing review nit N-3). A project now refuses on
+     * its own and the manifest records the state per entry, so re-running is idempotent and the
+     * obstruction a user just cleared is picked up on their NEXT SETTINGS CHANGE rather than only on
+     * a restart. The cost of a re-plan (a directory sweep plus a git spawn per distinct cwd) is paid
+     * only while the flag is on AND the migration is unfinished — the marker short-circuits the
+     * moment there is nothing left to do.
      */
     const runMemoryKeyMigration = (settings: Settings | null): void => {
       if (closing) return;
       if (settings?.runtimes?.migrations?.memoryKeys !== true) return;
       if (markerIsSet()) return; // a home that DID migrate must not start narrating about it again
-      if (attempted) return;
       try {
-        const plan = planMemoryKeyMigration({ rs, home, records, store, memoryDirectory: settings?.memory?.directory });
-        // Declined, NOT done: no marker and no `attempted`, so clearing `memory.directory` on THIS
-        // running daemon still gets a migration. The decline costs one string check — it refuses
-        // before the plan touches the disk — so re-entering it on every settings change is free.
+        const plan = planMemoryKeyMigration({ rs, home, records, store, memoryDirectory: settings?.memory?.directory, fs: deps.memoryKeyFs });
+        // Declined, NOT done: no marker, so clearing `memory.directory` on THIS running daemon still
+        // gets a migration. The decline refuses before the plan touches the disk or spawns git, so
+        // re-entering it on every settings change is free.
         if (plan.declined === "memory-directory-override") {
           if (!declineLogged) {
             declineLogged = true;
@@ -269,22 +289,32 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
           }
           return;
         }
-        attempted = true;
         if (plan.reconciled && plan.reconciled.length > 0) {
           log(`memory-key migration: completed ${plan.reconciled.length} relocation(s) a previous run left half-committed`);
         }
-        const { moved } = applyMemoryKeyMigration({ rs, home }, plan);
-        relocations = memoryKeyRelocations(rs);
-        if (moved > 0 || plan.collisions.length > 0 || plan.unresolved.length > 0) {
+        const { moved, movedEntries, refused } = applyMemoryKeyMigration({ rs, home, fs: deps.memoryKeyFs }, plan);
+        // Everything that refused THIS RUN: the projects the plan found blocked, plus any that
+        // became blocked between plan and apply. Each refused itself alone; the rest are relocated.
+        const refusals = [...plan.collisions, ...refused];
+        if (moved > 0 || refusals.length > 0 || plan.unresolved.length > 0) {
           log(
-            `memory-key migration: ${moved} project(s) relocated, ${plan.collisions.length} refused, ${plan.unresolved.length} skipped, ${plan.unchanged.length} already current`,
+            `memory-key migration: ${moved} project(s) relocated (${movedEntries} entr(ies)), ${refusals.length} refused, ${plan.unresolved.length} skipped, ${plan.unchanged.length} already current`,
           );
         }
-        for (const c of plan.collisions) log(`memory-key migration refused ${c.oldKeys.join(", ")} → ${c.newKey}: ${c.reason}`);
-        // THE MARKER MEANS "NOTHING LEFT TO DO", not "we ran once". A collision is an obstruction the
+        if (refusals.length > 0 && !refusalsLogged) {
+          refusalsLogged = true;
+          for (const c of refusals) {
+            log(
+              `memory-key migration refused ${c.oldKeys.join(", ")} → ${c.newKey}: ${c.reason}` +
+                (c.entries && c.entries.length > 0 ? ` (${c.entries.join(", ")})` : "") +
+                `; clear it and change a setting or reboot to retry`,
+            );
+          }
+        }
+        // THE MARKER MEANS "NOTHING LEFT TO DO", not "we ran once". A refusal is an obstruction the
         // operator can clear, and an `unresolved` record's cwd can come back — both deserve another
-        // boot's attempt, and marking now would deny them one forever.
-        if (plan.collisions.length === 0 && plan.unresolved.length === 0) {
+        // attempt, and marking now would deny them one forever.
+        if (refusals.length === 0 && plan.unresolved.length === 0) {
           rs.db.run("INSERT INTO schema_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [
             MEMORY_KEYS_MIGRATED_MARKER,
             new Date().toISOString(),
@@ -294,11 +324,15 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
         // The migration refuses rather than half-moves (its own header), so a throw here means
         // nothing was left torn that the next boot's plan cannot settle. The TYPE only: a message
         // could quote a path out of somebody's home.
-        //
-        // AND IT COUNTS AS THE ATTEMPT, which is what the log line promises: a store that throws
-        // will throw again, so retrying on every settings edit would repeat this line forever.
-        attempted = true;
-        log(`memory-key migration failed (it retries at the next boot): ${errName(e)}`);
+        log(`memory-key migration failed (it retries at the next change or boot): ${errName(e)}`);
+      } finally {
+        // UNCONDITIONALLY, and this is the half-switch guard (review r1, M-1). `apply` commits PER
+        // ENTRY and `plan` commits its reconciliations before apply is even called, so a throw from a
+        // later entry leaves the manifest and the records correctly saying `old → new` while this
+        // in-process map still does not — and for the rest of the daemon's life the live MEMDIR path
+        // would resolve a directory that is no longer there and start a second `MEMORY.md` beside the
+        // user's own. Rebuilt here, the map always describes what is actually committed.
+        relocations = memoryKeyRelocations(rs);
       }
     };
     runMemoryKeyMigration(deps.settings());
