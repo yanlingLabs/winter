@@ -25,16 +25,26 @@ import * as winter from "@yanlinglabs/winter-agent-sdk";
 import type { McpSdkServerConfigWithInstance, SpawnClaudeCodeProcess } from "@yanlinglabs/winter-agent-sdk";
 import type { AdvisorReviewer, ReviewerResolver } from "@yanlinglabs/winter-agent-sdk/tools";
 import { createRuntimeSdk as createRouterSdk } from "@yanlinglabs/winter-runtime-sdk";
-import type { RuntimeDirectoryEntry, RuntimeDirectoryOptions, RuntimeDirectoryStore, RuntimeSdk, RuntimeSdkOptions } from "@yanlinglabs/winter-runtime-sdk";
+import type { OfficialSdkModule, RuntimeDirectoryEntry, RuntimeDirectoryOptions, RuntimeDirectoryStore, RuntimeSdk, RuntimeSdkOptions } from "@yanlinglabs/winter-runtime-sdk";
 import type { PermissionClassLabel } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { SecretStore } from "../auth/secret-store";
 import { retentionFromSettings } from "../runtime-state/retention";
 import { winterOptionsFromSettings, type Settings } from "../settings";
 import { NORMA_BRAND } from "./brand";
 import { resolveWinterExecutable, type WinterExecutableUnavailable } from "./executable";
+import { resolveClaudeExecutable, ClaudeExecutableUnavailable } from "./official-executable";
 import { keychainSeamFromSecretStore } from "./keychain";
 import { releaseAllHeld } from "./messaging";
 import { NORMA_PEER_VERSIONS } from "./versions";
+
+/**
+ * P8c-1's own alias for the peer this daemon injects at `RuntimeSdkPeers.claude` — the router's own
+ * `OfficialSdkModule` (its published barrel re-exports it via `seams/index.ts`'s wildcard; see
+ * `versions.ts`'s header for why the SAME duck-typed shape is what a compiled `$bunfs` binary can
+ * still see). Named locally so callers of `officialPeer()` need not reach into the router package
+ * for a type that exists only to describe an injected module.
+ */
+export type OfficialPeer = OfficialSdkModule;
 
 /** `RuntimeDirectoryRetention` is not on the router's barrel; this is the same type. */
 type RuntimeDirectoryRetention = NonNullable<RuntimeDirectoryOptions["retention"]>;
@@ -118,6 +128,31 @@ export interface NormaRuntimeSdkOverrides {
   /** Test seam for the router factory — a spy wraps it to capture the `RuntimeSdkOptions` this
    *  file builds while still returning a REAL `RuntimeSdk`. */
   createRuntimeSdk?: (opts: RuntimeSdkOptions) => RuntimeSdk;
+  /** Test seam for the official peer's import — a Winter-only test never pays for
+   *  `@anthropic-ai/claude-agent-sdk` to load, and a peer-present test can hand in a fake module
+   *  shaped like `OfficialSdkModule` without a real platform binary anywhere on disk. Defaults to
+   *  `import("@anthropic-ai/claude-agent-sdk")`. */
+  officialPeer?: () => Promise<OfficialPeer | undefined>;
+}
+
+/**
+ * P8c-1: the lazy, memoized official peer.
+ *
+ * RESOLVED ONCE, BEFORE `createRuntimeSdk` — the router needs `peers.claude` AT CONSTRUCTION (its
+ * own `hasClaudePeer`/version-matrix checks read it there), so "lazy" here means "resolved on the
+ * daemon's own boot path rather than baked into a compiled artifact's import graph", not "deferred
+ * past this function's own async body" (`createNormaRuntimeSdk` is already async — Task 1.1's own
+ * note). A FAILED import (the optional platform package genuinely absent, or `@anthropic-ai/sdk` /
+ * `@modelcontextprotocol/sdk` / `zod` peer mismatch) is logged ONCE, here, and answered as
+ * `undefined` — a Winter-only daemon process is a normal outcome, never a crash.
+ */
+async function resolveOfficialPeer(load: () => Promise<unknown>, log?: (line: string) => void): Promise<OfficialPeer | undefined> {
+  try {
+    return (await load()) as OfficialPeer;
+  } catch (err) {
+    log?.(`the official peer (@anthropic-ai/claude-agent-sdk) did not load — the official leg is unavailable on this daemon process: ${err instanceof Error ? err.name : "unknown"}`);
+    return undefined;
+  }
 }
 
 export interface NormaRuntimeSdk {
@@ -131,6 +166,18 @@ export interface NormaRuntimeSdk {
    * and NEVER falls back to anything — a session on the Winter leg refuses at create instead.
    */
   spawnHookFor(mode: SessionMode): WinterSpawnHook | WinterExecutableUnavailable;
+  /**
+   * P8c-1: the official peer this handle was constructed with — `undefined` on a Winter-only
+   * daemon process. ALREADY RESOLVED (this call never imports anything); the `Promise` return is
+   * the API shape the Interfaces block fixes, not a live import each time.
+   */
+  officialPeer(): Promise<OfficialPeer | undefined>;
+  /**
+   * P8c-3: THE ONE SITE for the official leg's executable ladder, re-resolved on EVERY call — same
+   * hot-settings posture as `spawnHookFor`. Returns the typed `ClaudeExecutableUnavailable` rather
+   * than throwing; a session on the official leg refuses at create instead.
+   */
+  claudeExecutableFor(): { path: string } | ClaudeExecutableUnavailable;
   /**
    * Register a live session so shutdown can end it — GRACEFULLY FIRST, THEN BY FORCE.
    *
@@ -232,33 +279,62 @@ function endWithin(sessionId: string, abort: AbortController, end: () => Promise
 
 export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides: NormaRuntimeSdkOverrides = {}): Promise<NormaRuntimeSdk> {
   const factory = overrides.createRuntimeSdk ?? createRouterSdk;
+  // P8c-1: resolved BEFORE the factory call — the router reads `peers.claude`/`hasClaudePeer` at
+  // construction, so the import has to have already settled by the time `factory(...)` runs. This
+  // function is already async (the note every 8b doc comment above makes), so nothing here changes
+  // the daemon's own boot shape.
+  const officialModule = await resolveOfficialPeer(overrides.officialPeer ?? (() => import("@anthropic-ai/claude-agent-sdk")), deps.log);
+  const claudeExecutableResolution = resolveClaudeExecutable({
+    setting: winterOptionsFromSettings(deps.settings()).claudeExecutable,
+    env: process.env,
+    execPath: process.execPath,
+    exists: (p) => existsSync(p),
+  });
   const sdk = factory({
-    // A Winter-only host: no `claude` peer in 8b (P8b-4). The namespace is injected as an
-    // INSTANCE — the router never imports either SDK by name.
-    peers: { winter },
+    // A `claude` peer is injected ONLY when the import actually resolved (P8c-1) — the namespace is
+    // injected as an INSTANCE, same as `winter`; the router never imports either SDK by name.
+    peers: { winter, ...(officialModule === undefined ? {} : { claude: officialModule }) },
     // P8b-4: host-declared, and the ONLY probe that answers inside a compiled `$bunfs` binary.
+    // `NORMA_PEER_VERSIONS.claudeAgentSdk` is present only when the peer resolved (`versions.ts`).
     peerVersions: NORMA_PEER_VERSIONS,
     // Required even though the Winter leg resolves its own credentials runtime-side (surface map
     // §1.3): the field has no `?`, and the official leg is the only caller.
     keychain: keychainSeamFromSecretStore(deps.secrets),
     // R-1. Resolved once here, through the injected peer's own `resolveBrand`.
     brand: NORMA_BRAND,
+    // P8c-3: the ladder's answer AT CONSTRUCTION TIME. Omitted (never a bare "claude") when it does
+    // not resolve — the door then refuses ONLY a session that selects the official leg
+    // (`claude_executable_unavailable`), and every Winter session proceeds unaffected. A later
+    // `runtimes.claudeExecutable` edit takes effect for new sessions through `claudeExecutableFor()`
+    // above; this constructor-time value is what the router itself launches with today.
+    ...(claudeExecutableResolution instanceof ClaudeExecutableUnavailable ? {} : { vendoredOfficialRuntime: claudeExecutableResolution.path }),
     // 8a's durable store when the spine opened; the router's in-memory default when it did not.
     directoryStore: deps.directoryStore,
     capabilities: deps.capabilities,
     // §1.6: this is what fills `SeamContext.winterHome`, so the barrier and every later seam
     // resolve under the daemon's OWN home. Without it they fall back to
     // `resolveWinterHome(undefined, brand)` — which is `~/.norma` for a daemon booted on a temp
-    // home with no `NORMA_HOME` in its environment, i.e. every test. `participants` is 8c's.
+    // home with no `NORMA_HOME` in its environment, i.e. every test. `participants` is 8c's Task
+    // 1.3/lane 4 concern; this handle passes none yet.
     handoff: { winterHome: deps.home },
-    // G-12. `official.permissionClass` is deliberately omitted until 8c (C-14): there is no
-    // official peer in 8b and it gates inbound delivery to official sessions only. The WINTER
-    // adapter's `permissionClass` (Task 12) is the OTHER half of that fail-closed rule — see
-    // `sessionPermissionClass` above for why it is a seam rather than a guess.
+    // P8c-1/P8c-2: the official branch's deployment-wide policy. `remoteConfig: "deny"` is R-7b-11's
+    // own default (a session's own child never fetches remote feature configuration); `claudeOauth`
+    // is left at the router's own default gate (D14/P8c-2: the official leg ships Code-only,
+    // API-key auth, with Claude OAuth closed) — Norma states the auth-family gate at SELECTION time
+    // (`claudeOauthApproved: false` on every `SelectionInput`, Task 1.3) rather than here twice.
+    // `permissionMode: "default"` is the DEPLOYMENT floor a session with no other policy gets; a
+    // live session's own `runtime.official.options.permissionMode` (Task 1.2) overrides it per the
+    // P8b-7 map, and `bypassPermissions` is refused by the router itself either way.
+    official: { env: { remoteConfig: "deny" }, permissionMode: "default" },
+    // G-12. The WINTER adapter's `permissionClass` (Task 12) fails inbound delivery closed without
+    // it; the OFFICIAL adapter has the identical fail-closed rule (the router's own messaging
+    // README), so P8c-1 sets both from the SAME classifier — a message addressed to a session this
+    // process holds no live facet for is classified by the record's policy, never by which leg the
+    // record happens to be on.
     //
     // CARRY FOR TASKS 13/16: `directory` carries `retention` and nothing else, so the router's own
     // `RuntimeDirectoryRecoveryHooks` (`revalidateProcessIdentity`, `reattachSupervised`) stay
-    // unset and its `recoverDirectory` reattaches nothing. That is correct for 8b — 8a owns
+    // unset and its `recoverDirectory` reattaches nothing. That is correct for 8b/8c — 8a owns
     // recovery, and its twelve steps have already run by the time this handle exists — but the day
     // a Winter child must be re-adopted across a daemon restart (`PersistedWinterChild`, P8b-15),
     // this is the door those hooks come through.
@@ -266,7 +342,12 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
       directory: { retention: retentionFrom(deps.settings) },
       ...(deps.sessionPermissionClass === undefined
         ? {}
-        : { messaging: { winter: { permissionClass: deps.sessionPermissionClass } } }),
+        : {
+            messaging: {
+              winter: { permissionClass: deps.sessionPermissionClass },
+              official: { permissionClass: deps.sessionPermissionClass },
+            },
+          }),
     },
     ...advisorFrom(deps),
   });
@@ -300,6 +381,20 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
         exists: (p) => existsSync(p),
       });
       return resolution.ok ? { pathToClaudeCodeExecutable: resolution.path } : resolution.error;
+    },
+    officialPeer(): Promise<OfficialPeer | undefined> {
+      // Already resolved above; this is the accessor's own contract (a `Promise`, never a live
+      // re-import) — see `officialModule`'s own doc comment.
+      return Promise.resolve(officialModule);
+    },
+    claudeExecutableFor(): { path: string } | ClaudeExecutableUnavailable {
+      const resolution = resolveClaudeExecutable({
+        setting: winterOptionsFromSettings(deps.settings()).claudeExecutable,
+        env: process.env,
+        execPath: process.execPath,
+        exists: (p) => existsSync(p),
+      });
+      return resolution instanceof ClaudeExecutableUnavailable ? resolution : { path: resolution.path };
     },
     trackQuery(sessionId: string, abort: AbortController, end: () => Promise<void>): void {
       if (disposing !== undefined) {

@@ -390,6 +390,10 @@ export const Settings = z.object({
     }).prefault({}),
     migrations: z.object({ memoryKeys: z.boolean().default(false) }).prefault({}),
     winterExecutable: z.string().optional(),
+    // P8c-3: the same blank-is-absent, restart-free ladder rung as `winterExecutable` above, for the
+    // official leg's `claude` executable (`official-executable.ts`'s `resolveClaudeExecutable`,
+    // ahead of env `NORMA_CLAUDE_EXECUTABLE`, the 8d bundle drop and the dev-only package door).
+    claudeExecutable: z.string().optional(),
     // Task 17 Step 4: the engine is retired — every mode runs on the Winter leg. The block stays
     // ACCEPTED for one release (the `migrations.memoryKeys` pattern): a `false` is read, logged
     // ("the engine leg no longer exists; ignored") and ignored by `winterOptionsFromSettings`.
@@ -415,6 +419,9 @@ export const hooksEnabledFrom = (s: Settings): boolean => s.hooks?.enabled !== f
 export interface WinterOptions {
   /** Absent when unset OR blank — never `""`. See `winterOptionsFromSettings`. */
   winterExecutable?: string;
+  /** P8c-3's own rung, same blank-is-absent rule. Read only by the official leg's ladder — inert on
+   *  a Winter-only session. */
+  claudeExecutable?: string;
   advisorModel?: string;
   idleTimeoutSec: number;
   winterLeg: { chat: boolean; dispatch: boolean; code: boolean };
@@ -456,6 +463,7 @@ export function winterOptionsFromSettings(s: Settings | null | undefined): Winte
   };
   return {
     ...(blankIsAbsent(r?.winterExecutable) === undefined ? {} : { winterExecutable: blankIsAbsent(r?.winterExecutable)! }),
+    ...(blankIsAbsent(r?.claudeExecutable) === undefined ? {} : { claudeExecutable: blankIsAbsent(r?.claudeExecutable)! }),
     ...(blankIsAbsent(r?.advisorModel) === undefined ? {} : { advisorModel: blankIsAbsent(r?.advisorModel)! }),
     idleTimeoutSec: r?.winterIdleTimeoutSec ?? DEFAULT_WINTER_IDLE_TIMEOUT_SEC,
     // Task 17 Step 4: the engine leg no longer exists. Every mode answers `true` whatever the block

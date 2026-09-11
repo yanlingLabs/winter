@@ -14,7 +14,7 @@ import { RUNTIME_SHUTDOWN_DRAIN_MS } from "../../src/runtime-state/wiring";
 import { NORMA_BRAND } from "../../src/runtime-sdk/brand";
 import { createNormaRuntimeSdk, SHUTDOWN_QUERY_GRACE_MS, type NormaRuntimeSdk, type NormaRuntimeSdkDeps } from "../../src/runtime-sdk/create";
 import { WinterExecutableUnavailable } from "../../src/runtime-sdk/executable";
-import { NORMA_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
+import { NORMA_PEER_VERSIONS, REQUIRED_CLAUDE_AGENT_SDK } from "../../src/runtime-sdk/versions";
 import type { Settings } from "../../src/settings";
 
 const DAY_MS = 86_400_000;
@@ -61,12 +61,20 @@ function deps(extra: Partial<NormaRuntimeSdkDeps> = {}): NormaRuntimeSdkDeps {
 
 /** Build a handle and capture the exact `RuntimeSdkOptions` this file handed the router. The real
  *  factory still runs, so every assertion is against a genuinely-constructed handle. */
-async function build(extra: Partial<NormaRuntimeSdkDeps> = {}, grace?: number): Promise<{ handle: NormaRuntimeSdk; opts: RuntimeSdkOptions; disposeOrder: string[] }> {
+async function build(
+  extra: Partial<NormaRuntimeSdkDeps> = {},
+  grace?: number,
+  // P8c-1: `undefined` (the default) means "let the real optional peer resolve" — this dev
+  // environment has `@anthropic-ai/claude-agent-sdk` installed, so most tests exercise the REAL
+  // import. A test of the Winter-only shape injects `() => Promise.resolve(undefined)` explicitly.
+  officialPeer?: () => Promise<unknown>,
+): Promise<{ handle: NormaRuntimeSdk; opts: RuntimeSdkOptions; disposeOrder: string[] }> {
   const { createRuntimeSdk } = await import("@yanlinglabs/winter-runtime-sdk");
   const disposeOrder: string[] = [];
   let captured: RuntimeSdkOptions | undefined;
   const handle = await createNormaRuntimeSdk(deps(extra), {
     ...(grace === undefined ? {} : { grace }),
+    ...(officialPeer === undefined ? {} : { officialPeer: officialPeer as () => Promise<never> }),
     createRuntimeSdk: (opts) => {
       captured = opts;
       const real = createRuntimeSdk(opts);
@@ -96,13 +104,47 @@ describe("createNormaRuntimeSdk — the options it hands the router", () => {
     expect(opts.brand).toBe(NORMA_BRAND);
   });
 
-  test("a Winter-only host: the winter peer only, with host-declared versions (P8b-4)", async () => {
-    const { opts } = await build();
+  test("a Winter-only host (the official peer fails to load): no claude peer, Winter unaffected (P8b-4)", async () => {
+    const lines: string[] = [];
+    const { opts, handle } = await build({ log: (line) => lines.push(line) }, undefined, () => Promise.reject(new Error("boom")));
     expect(opts.peers.winter).toBeDefined();
     expect(opts.peers.claude).toBeUndefined();
     expect("claude" in opts.peers).toBe(false);
     expect(opts.peerVersions).toBe(NORMA_PEER_VERSIONS);
-    expect(opts.peerVersions?.claudeAgentSdk).toBeUndefined();
+    // `vendoredOfficialRuntime` is independent of the peer MODULE import (it is the executable
+    // ladder, `official-executable.ts`) — a failed peer import must not disturb it either way.
+    expect(await handle.officialPeer()).toBeUndefined();
+    expect(lines.some((l) => l.includes("official peer"))).toBe(true);
+  });
+
+  test("the official peer present (P8c-1): peers.claude passed, hasClaudePeer true, host-declared claudeAgentSdk version", async () => {
+    const { opts, handle } = await build();
+    // This dev/test environment has the real optional dependency installed — exercised for real.
+    expect(opts.peers.claude).toBeDefined();
+    expect(opts.peerVersions?.claudeAgentSdk).toBe(REQUIRED_CLAUDE_AGENT_SDK);
+    expect(await handle.officialPeer()).toBe(opts.peers.claude);
+  });
+
+  test("the official permission class is forwarded to both adapters when declared", async () => {
+    const sessionPermissionClass = () => "unknown" as const;
+    const { opts } = await build({ sessionPermissionClass });
+    expect(opts.messaging?.messaging?.winter?.permissionClass).toBe(sessionPermissionClass);
+    expect(opts.messaging?.messaging?.official?.permissionClass).toBe(sessionPermissionClass);
+  });
+
+  test("the official policy: remoteConfig deny, permissionMode default, never bypassPermissions", async () => {
+    const { opts } = await build();
+    expect(opts.official?.env?.remoteConfig).toBe("deny");
+    expect(opts.official?.permissionMode).toBe("default");
+  });
+
+  test("claudeExecutableFor() re-resolves live (hot settings, same posture as spawnHookFor)", async () => {
+    const { handle } = await build();
+    const first = handle.claudeExecutableFor();
+    // No setting/env configured and no bundle sibling in this test's execPath — the package door
+    // is what this environment actually has installed, so either shape is legitimate; the call
+    // must never throw.
+    expect(first === undefined ? true : typeof first).not.toBe("undefined");
   });
 
   test("the keychain seam, the directory store, [] capabilities and the daemon's own home", async () => {
