@@ -60,6 +60,15 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         // the dispatch-singleton invariant (see events.ts's SessionCreatedEvent doc comment).
         // Additive/optional — pure Codable synthesis, no Discriminator/decode/encode changes.
         public let mode: String?
+        // Winter Phase 8c (P8c-5): the runtime annotation — same additive-optional shape as `mode`
+        // above, so no Discriminator/decode/encode change here either. `runtimeKind` is a closed
+        // TS enum (`"claude-agent" | "winter-agent"`) but mirrored as `String?` like every other
+        // enum-ish protocol field on this side (see e.g. `mode` itself) rather than a new Swift
+        // enum type — the value is read/displayed, never switched on, on this leg of the phone/Mac
+        // client today.
+        public let runtimeKind: String?
+        public let providerId: String?
+        public let modelRef: String?
     }
 
     public struct HarnessAttached: Codable, Equatable, Sendable {

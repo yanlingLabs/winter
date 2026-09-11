@@ -3,5 +3,8 @@
   "sessionId": "s_fixture",
   "ts": 1781270000000,
   "type": "session_created",
-  "scope": "global"
+  "scope": "global",
+  "runtimeKind": "winter-agent",
+  "providerId": "openai",
+  "modelRef": "gpt-5.6-sol"
 }

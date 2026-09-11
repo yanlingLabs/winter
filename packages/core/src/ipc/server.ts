@@ -1245,7 +1245,19 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (opts.winter !== undefined) {
           try { opts.winter.assertAvailable(p.mode ?? "code"); } catch (err) { rpcFromWinterRefusal(err); }
         }
-        const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy, origin: p.origin, mode: p.mode, model, effort: p.effort });
+        // Winter Phase 8c (P8c-5): `runtimeKind` is knowable HERE and only here — `opts.winter`
+        // (this daemon's one runtime-sdk facade, pre-8c-lane1-merge scope) is defined precisely
+        // when a session runs the Winter leg; the 8a runtime record `winter.create()` mints just
+        // below does not exist yet, so this is the ONE fact this call site can honestly stamp on
+        // the seq-1 event. `modelRef` rides the ALREADY-RESOLVED `model` local (set above, before
+        // the effort check) — never the caller's raw, possibly-aliased `p.model`. `providerId` has
+        // no producer in this phase (see store.ts's doc comment on the parameter) and is
+        // deliberately omitted, not set to a guess.
+        const sessionId = opts.store.createSession(p.scope, {
+          cwd, approvalPolicy, origin: p.origin, mode: p.mode, model, effort: p.effort,
+          ...(opts.winter !== undefined ? { runtimeKind: "winter-agent" as const } : {}),
+          ...(model !== undefined ? { modelRef: model } : {}),
+        });
         // THE CREATION TRANSACTION (WS-16 §6, P8b-14): the record allocates the backend uuid and
         // the child is started; a failure there ROLLS THE ROW BACK (it was never announced to any
         // client — the `session_created` broadcast is below) and the typed refusal is the reply.
@@ -1382,8 +1394,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // refuse typed BEFORE the row exists, persist the record + start the child after it, roll
         // the row back on a refusal. (`winter` is undefined only on a bare test server.)
         if (opts.winter !== undefined) { try { opts.winter.assertAvailable("dispatch"); } catch (err) { rpcFromWinterRefusal(err); } }
+        // Winter Phase 8c (P8c-5): same reasoning as session.create above — `runtimeKind` is
+        // knowable here (opts.winter's presence) and nowhere later in this transaction; dispatch
+        // takes no model param, so `modelRef` stays unset (the dispatch singleton always uses the
+        // live/boot default model).
         const sessionId = opts.store.createSession("global", {
           cwd: homedir(), approvalPolicy: "auto", origin: "dispatch", mode: "dispatch",
+          ...(opts.winter !== undefined ? { runtimeKind: "winter-agent" as const } : {}),
         });
         if (opts.winter !== undefined) {
           try {
