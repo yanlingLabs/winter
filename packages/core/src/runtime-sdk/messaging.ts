@@ -220,6 +220,13 @@ function bridgedFacet(
       if (parking()) {
         return unavailable(message.messageId, false, `${owner.winterSessionId} is ending; its input stream is closing and nothing was delivered`);
       }
+      // READ BEFORE THE PUSH (P8b Task 16, measured on a real child): the push itself starts a
+      // turn on the receiving session — its driver counts the pushed text as in flight the moment
+      // it lands — so a status read afterwards always says "running" and every delivery would be
+      // reported `queued`. The outcome describes whether the text is read NOW or behind a turn that
+      // was already running, which is the status BEFORE it arrived. A push-only handle's row status
+      // is a snapshot and reads the same either way.
+      const wasRunning = status() === "running";
       try {
         push(renderAttributedTurn(message, owner));
       } catch (error) {
@@ -229,9 +236,9 @@ function bridgedFacet(
         // 16's `WinterSession`, which holds while `resumable` rather than throwing.)
         return deliveryUncertain(message.messageId, `the input-stream push failed: ${error instanceof Error ? error.message : String(error)}`);
       }
-      // `liveOutcome`, the router's own: a turn is already running, so the pushed text is QUEUED
+      // `liveOutcome`, the router's own: a turn was already running, so the pushed text is QUEUED
       // behind it rather than being read now.
-      return status() === "running" ? queued(message.messageId) : delivered(message.messageId);
+      return wasRunning ? queued(message.messageId) : delivered(message.messageId);
     },
   };
 }

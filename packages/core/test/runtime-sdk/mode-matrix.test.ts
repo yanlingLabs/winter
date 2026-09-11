@@ -711,3 +711,39 @@ test("P8b-27b: the fence does NOT touch the MEMDIR, $OUTDIR, ordinary files, or 
     expect({ tool, behavior: res.behavior }).toEqual({ tool, behavior: "allow" });
   }
 });
+
+// -------------------------------------------------------------------------------------------
+// P8b Task 16 — the inputs the session driver adds to the builder
+// -------------------------------------------------------------------------------------------
+
+test("Task 16: forwardSubagentText is ON (ledger:93 — the dispatch golden carries a child's own text)", () => {
+  expect(buildWinterOptions(optionsInput()).forwardSubagentText).toBe(true);
+});
+
+test("Task 16 / P8b-36: `capabilities` is spread into mcpServers under its OWN keys — never re-keyed; absent ⇒ no mcpServers", () => {
+  const caps = {
+    "norma__browser": { type: "sdk", name: "norma__browser", instance: { listTools: () => [], callTool: async () => ({ content: [] }) } },
+    "norma__research": { type: "sdk", name: "norma__research", instance: { listTools: () => [], callTool: async () => ({ content: [] }) } },
+  } as never;
+  const o = buildWinterOptions(optionsInput({ capabilities: caps }));
+  expect(Object.keys(o.mcpServers ?? {}).sort()).toEqual(["norma__browser", "norma__research"]);
+  expect(o.mcpServers!["norma__browser"]).toBe((caps as Record<string, unknown>)["norma__browser"] as never);
+  expect(buildWinterOptions(optionsInput()).mcpServers).toBeUndefined();
+});
+
+test("Task 16 / P8b-30: a BYO `connection` rides provider.connection; without a selected provider it is dropped", () => {
+  const connection = { baseUrl: "http://127.0.0.1:9/v1", endpointOrigin: "user" as const };
+  const withProvider = buildWinterOptions(optionsInput({ model: "gpt-5.6-sol", credentials: { byProvider: { openai: "keychain" } }, connection }));
+  expect(withProvider.provider).toEqual({ providerId: "openai", authRef: expect.objectContaining({ kind: "keychain" }), connection });
+  // a `winter-test/*` model names no provider, so there is nothing to attach a connection to
+  expect(buildWinterOptions(optionsInput({ model: "winter-test/echo", connection })).provider).toBeUndefined();
+});
+
+test("Task 16 / P8b-24: `resume` names the transcript through Options.resume and OMITS sessionId; a fresh start is the reverse", () => {
+  const resumed = buildWinterOptions(optionsInput({ resume: true }));
+  expect(resumed.resume).toBe("11111111-2222-3333-4444-555555555555");
+  expect(resumed.sessionId).toBeUndefined();
+  const fresh = buildWinterOptions(optionsInput({ resume: false }));
+  expect(fresh.sessionId).toBe("11111111-2222-3333-4444-555555555555");
+  expect(fresh.resume).toBeUndefined();
+});
