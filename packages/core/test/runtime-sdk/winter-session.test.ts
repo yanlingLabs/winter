@@ -17,6 +17,13 @@ import {
 import { PROJECTOR_PASSTHROUGH_CLIENT } from "../../src/projector/index";
 import type { WinterSessionAttachment } from "../../src/runtime-sdk/messaging";
 import { FakeCheckpoints } from "../projector/harness";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createPersistedChildren } from "../../src/agent/bg-agent-registry";
+import { openRuntimeStateDb } from "../../src/runtime-state/db";
+import { ChildProfiles, RuntimeChildren } from "../../src/runtime-state/children";
+import { childrenSinkFor } from "../../src/runtime-sdk/session-driver";
 
 // ── the fake wire ────────────────────────────────────────────────────────────────────────────────
 
@@ -472,6 +479,74 @@ describe("startWinterSession — one incarnation", () => {
     expect(calls.at(-1)).toBe("completed:toolu_kid_1:end_turn");
     expect(seen(h, "thread_started")).toHaveLength(1);
     expect(seen(h, "thread_completed")).toHaveLength(1);
+  });
+
+  test("fix wave (review F10): a child's TRANSIENT frames (assistant_delta) feed the roster's progress too — a streaming child with no tool call is progress, not a stall", async () => {
+    const calls: string[] = [];
+    const h = harness({ children: {
+      started: (c) => { calls.push(`started:${c.threadId}`); },
+      progress: (id) => { calls.push(`progress:${id}`); },
+      completed: (id, stop) => { calls.push(`completed:${id}:${stop}`); },
+    } });
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("spawn one", "cli");
+    h.q().emit({ type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_kid_2", name: "Agent", input: { prompt: "stream", description: "streamer" } }] } });
+    await h.settled();
+    expect(calls).toEqual(["started:toolu_kid_2"]);
+    // three text deltas on the CHILD's thread: broadcast (never persisted), each one progress
+    for (const text of ["a", "b", "c"]) {
+      h.q().emit({ type: "stream_event", parent_tool_use_id: "toolu_kid_2", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }, uuid: `u-${text}`, session_id: "be-x" });
+    }
+    await h.settled();
+    expect(h.broadcasts.filter((e) => e.type === "assistant_delta" && (e as { threadId?: string }).threadId === "toolu_kid_2")).toHaveLength(3);
+    expect(seen(h, "assistant_delta")).toHaveLength(0);   // still transient
+    expect(calls.filter((c) => c === "progress:toolu_kid_2")).toHaveLength(3);
+    // a MAIN-thread delta is not a child's progress
+    h.q().emit({ type: "stream_event", parent_tool_use_id: null, event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "main" } }, uuid: "u-main", session_id: "be-x" });
+    await h.settled();
+    expect(calls.filter((c) => c.startsWith("progress:")).length).toBe(3);
+  });
+
+  test("fix wave (review F10), through the REAL persisted roster with fake timers: deltas re-arm the stall window, so a child streaming past ten windows is never stopped", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-winter-stall-"));
+    const rs = openRuntimeStateDb(home);
+    let next = 1;
+    const pending = new Map<number, { fn: () => void; ms: number }>();
+    const clock = {
+      timers: { set(fn: () => void, ms: number): unknown { const id = next++; pending.set(id, { fn, ms }); return id; }, clear(handle: unknown): void { pending.delete(handle as number); } },
+      ids: (): number[] => [...pending.keys()],
+      fireAll(): void { for (const [id, p] of [...pending]) { pending.delete(id); p.fn(); } },
+    };
+    try {
+      const registry = createPersistedChildren({ store: new RuntimeChildren(rs), profiles: new ChildProfiles(home), providerId: () => "openai", timers: clock.timers, stallTimeoutMs: () => 1000 });
+      const h = harness({ children: childrenSinkFor(registry, "s_x", () => {}) });
+      await h.session.open();
+      h.q().emit(init(h.q().options));
+      await h.session.send("spawn one", "cli");
+      h.q().emit({ type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_kid_3", name: "Agent", input: { prompt: "stream", description: "streamer" } }] } });
+      await h.settled();
+      expect(registry.get("toolu_kid_3", "s_x")?.status).toBe("running");
+      expect(clock.ids()).toHaveLength(1);   // armed at registration
+      let previous = clock.ids()[0]!;
+      for (let window = 0; window < 10; window += 1) {
+        // the whole window elapses with NOTHING persisted for this child — only a delta arrives
+        h.q().emit({ type: "stream_event", parent_tool_use_id: "toolu_kid_3", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: `chunk ${window}` } }, uuid: `u-${window}`, session_id: "be-x" });
+        await h.settled();
+        const armed = clock.ids();
+        expect(armed).toHaveLength(1);           // cleared and re-armed, never stacked
+        expect(armed[0]).not.toBe(previous);     // a NEW timer: the window genuinely restarted
+        previous = armed[0]!;
+      }
+      expect(registry.get("toolu_kid_3", "s_x")?.status).toBe("running");
+      // and when the stream really does go quiet, the window fires and the child is stopped
+      clock.fireAll();
+      expect(registry.get("toolu_kid_3", "s_x")?.status).toBe("timeout");
+      await h.session.end();
+    } finally {
+      rs.close();
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test("compact is a typed refusal; setModel reaches a live child and is a no-op while resumable", async () => {

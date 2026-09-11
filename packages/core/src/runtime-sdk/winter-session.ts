@@ -659,10 +659,16 @@ class WinterSessionImpl implements WinterSession {
     }
     for (const e of batch.broadcast) {
       try { this.deps.broadcast(e); } catch (err) { this.log(`broadcast failed for ${this.sessionId}: ${err instanceof Error ? err.name : "unknown"}`); }
+      // Fix wave (review F10): a TRANSIENT frame on a child's thread — an `assistant_delta` — is
+      // progress too. The roster's stall window was reset only by PERSISTED child events, so a
+      // child streaming a long answer with no tool call past the window was killed as "stalled";
+      // the engine's window was reset by every provider frame. Deltas feed it now.
+      this.relayChild(e);
     }
   }
 
-  /** The child roster's three moments, read off the persisted events (never thrown out of the iteration). */
+  /** The child roster's three moments, read off the persisted events — and `progress` off the
+   *  broadcast ones too (never thrown out of the iteration). */
   private relayChild(e: NewSessionEvent): void {
     const sink = this.deps.children;
     if (sink === undefined) return;

@@ -206,7 +206,7 @@ export function sessionPermissionClassFor(deps: {
 /** The driver's three child moments → the persisted roster's doors. `agentId` = `threadId` = the
  *  spawning `tool_use.id` (the cross-lane contract `capability-parity.test.ts` pins). No `name`:
  *  Winter children are addressed by id, and two children may share a description. */
-function childrenSinkFor(registry: AgentRegistry, sessionId: string, log: (line: string) => void): WinterChildrenSink {
+export function childrenSinkFor(registry: AgentRegistry, sessionId: string, log: (line: string) => void): WinterChildrenSink {
   return {
     started(child) {
       const res = registry.register({ agentId: child.threadId, sessionId, threadId: child.threadId });
