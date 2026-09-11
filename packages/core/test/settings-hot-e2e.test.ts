@@ -238,3 +238,92 @@ describe("hot-settings T5b e2e: SettingsWatcher wired into a running daemon", ()
     c.close();
   });
 });
+
+// ── P8b Task 15: the Winter-leg settings, hot on a RUNNING daemon ────────────────────────────────
+//
+// The hard rule is that no setting may ever require a daemon restart, and these four keys are the
+// awkward case for it: their consumers land in LATER tasks (Task 5's `spawnHookFor`/`create.ts`,
+// Task 9's `legForNewSession`, Task 16's idle timer), so there is no tool appearing or disappearing
+// to observe the way the computerUse/lsp tests above do. What CAN be observed today is the thing all
+// of those consumers read — the live settings holder the watcher swaps — so that is what these
+// assert, through `daemon.settings()`, on one `startDaemon` that is never re-created.
+describe("hot-settings P8b: the Winter-leg keys reach the live holder with no restart", () => {
+  let daemon: RunningDaemon | undefined;
+
+  afterEach(() => daemon?.stop());
+
+  /** Polls the live holder past the watcher's debounce (150ms) + fs.watch latency — never a bare
+   *  fixed sleep. Fails loudly with what it was waiting for rather than timing out anonymously. */
+  async function untilSettings(d: RunningDaemon, what: string, ok: (s: ReturnType<RunningDaemon["settings"]>) => boolean): Promise<void> {
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      if (ok(d.settings())) return;
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}; live settings.runtimes = ${JSON.stringify(d.settings()?.runtimes)}`);
+      await sleep(25);
+    }
+  }
+
+  test("winterLeg.chat, winterExecutable, winterIdleTimeoutSec and retention all flip live on ONE daemon", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-hot-e2e-winter-"));
+    writeSettingsFile(home); // no `runtimes` block at all — the shipped default
+    const secrets = new FileSecretStore(join(home, "test-secrets"));
+    const fake = new FakeProvider(endTurnScript());
+
+    daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
+    const daemonRef = daemon; // captured ONCE — never reassigned, never a second startDaemon() call
+
+    // An absent block is the default state every consumer must answer for itself.
+    expect(daemon.settings()?.runtimes).toBeUndefined();
+
+    // The `winter` binary the setting points at: a real file, so Task 2's resolver would accept it.
+    const winterBin = join(mkdtempSync(join(tmpdir(), "norma-hot-e2e-winter-bin-")), "winter");
+    writeFileSync(winterBin, "#!/bin/sh\nexit 0\n");
+
+    writeSettingsFile(home, {
+      runtimes: {
+        winterLeg: { chat: true },
+        winterExecutable: winterBin,
+        winterIdleTimeoutSec: 60,
+        retention: { deliveriesDays: 90 },
+      },
+    });
+
+    await untilSettings(daemon, "the runtimes block to reach the live holder", (s) => s?.runtimes?.winterLeg?.chat === true);
+    const live = daemon.settings()!.runtimes!;
+    // Task 9's `legForNewSession` reads exactly this; the helper itself is the policy lane's.
+    expect(live.winterLeg).toEqual({ chat: true, dispatch: false, code: false });
+    // Task 5's `spawnHookFor` resolves this; here the assertion stops at the parsed setting.
+    expect(live.winterExecutable).toBe(winterBin);
+    expect(live.winterIdleTimeoutSec).toBe(60);
+    // Retention: the one key whose consumer IS live today (the hourly sweep reads it per pass).
+    expect(live.retention).toEqual({ deliveriesDays: 90, nameLeasesDays: 7 });
+
+    // Flipping a leg back OFF is just as hot — a rollback must not need a restart either.
+    writeSettingsFile(home, { runtimes: { winterLeg: { chat: false }, winterIdleTimeoutSec: 60 } });
+    await untilSettings(daemon, "the chat leg to flip back off", (s) => s?.runtimes?.winterLeg?.chat === false);
+
+    // The session the daemon was serving all along still works — the reload re-wired nothing it owns.
+    const c = await TestClient.connect(daemon.socketPath);
+    await c.hello(daemon.tokens.harness, "e2e-winter");
+    const cwd = mkdtempSync(join(tmpdir(), "norma-hot-e2e-winter-cwd-"));
+    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
+    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
+    await driveTurn(c, created.sessionId, "still alive?");
+
+    // No-restart proof: the same RunningDaemon object and the same socket this test started with.
+    expect(daemon).toBe(daemonRef);
+    expect(daemon.socketPath).toBe(daemonRef.socketPath);
+    c.close();
+  });
+
+  test("advisorModel reaches the live holder too — Task 5's create.ts reads it there", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-hot-e2e-advisor-"));
+    writeSettingsFile(home);
+    const secrets = new FileSecretStore(join(home, "test-secrets"));
+    daemon = await startDaemon({ home, secrets, agentProvider: { provider: new FakeProvider(endTurnScript()), model: "fake-1" } });
+
+    expect(daemon.settings()?.runtimes?.advisorModel).toBeUndefined();
+    writeSettingsFile(home, { runtimes: { advisorModel: "some-advisor-model" } });
+    await untilSettings(daemon, "advisorModel to reach the live holder", (s) => s?.runtimes?.advisorModel === "some-advisor-model");
+  });
+});

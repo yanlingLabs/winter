@@ -133,6 +133,14 @@ export interface RunningDaemon {
   // routing rather than refusing to start, and nothing else in the daemon depends on it in 8a.
   // 8b's `createRuntimeSdk({ directoryStore })` consumes `directory` off this.
   runtimeState: DaemonRuntimeState;
+  /**
+   * P8b Task 15: THE LIVE settings holder — the same binding the settings-watcher swaps, not a boot
+   * snapshot. Reading it twice around a `settings.json` write is how a test proves a key is hot
+   * without a restart, which matters most for keys whose only consumer lands in a later task
+   * (`runtimes.winterLeg`, `winterExecutable`, `advisorModel`, `winterIdleTimeoutSec` are read by
+   * Tasks 5/9/16). `null` on a daemon that never loaded settings at all.
+   */
+  settings(): ReturnType<typeof loadSettings> | null;
   /** Tear the daemon down. Everything except the runtime-state drain is synchronous and has already
    *  happened when this returns; the promise (present only when the runtime spine opened) resolves
    *  once the queued §16 deletions have drained, `runtime-state.db` is closed and the lock —
@@ -1635,6 +1643,9 @@ export async function startDaemon(opts: {
     tokens,
     registry: sharedRegistry,
     runtimeState,
+    // The HOLDER, read through a closure — never `settings` captured by value, which would freeze
+    // this at boot and make every hot-reload assertion above it a lie.
+    settings: () => settings,
     stop() {
       // lspManager: killAllNow() FIRST delivers a synchronous SIGTERM to every warm child (the real
       // shutdown protection — mcp/pluginSupervisor's stopAll are likewise synchronous kills), since
