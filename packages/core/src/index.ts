@@ -47,26 +47,13 @@ export {
   type RepairOp,
   type RepairResult,
 } from "./runtime-state/doctor";
-export { AgentEngine, type EngineConfig } from "./agent/engine";
 export { FakeProvider } from "./agent/fake-provider";
 export { ToolRegistry, type ToolDefinition, type ToolContext, type ToolOutcome } from "./agent/tools/registry";
-export { registerReadTools, type ReadToolsConfig } from "./agent/tools/fs-read";
-export { registerWriteTools } from "./agent/tools/fs-write";
-export { registerNotebookTool } from "./agent/tools/notebook";
-export { registerBashTool } from "./agent/tools/bash";
-export { registerBackgroundTools } from "./agent/tools/background";
 export { registerWebTools, WEB_SEARCH_API_KEY_SECRET, type WebToolDeps } from "./agent/tools/web";
 export { registerSearchTool, EXA_API_KEY_SECRET, type SearchToolDeps } from "./agent/tools/search";
 export { registerReadPageTool, type ReadPageDeps, type ResearchRunner, type ResearchQuery } from "./agent/tools/read-page";
-export { registerToolSearchTool } from "./agent/tools/toolsearch";
-export { registerAskUserTool } from "./agent/tools/ask-user";
-export { registerAskQuestionTool } from "./agent/tools/ask-question";
-export { registerPlanTool } from "./agent/tools/plan";
-export { registerWorkflowTool } from "./agent/tools/workflow";
-export { registerPushNotificationTool } from "./agent/tools/push-notification";
 export { notifyHeadless, type OsascriptSpawnFn } from "./agent/notify-fallback";
 export { TaskStore } from "./agent/task-store";
-export { registerTaskTools } from "./agent/tools/tasks";
 export { buildSeatbeltProfile, sandboxAvailable } from "./agent/sandbox";
 export { PermissionGate, type GateDecision, type SessionApprovalPolicy } from "./agent/gate";
 export { ApprovalBroker, type ApprovalOutcome } from "./agent/approvals";
@@ -95,11 +82,9 @@ export {
   memoryProjectKeyFor,
   type MemoryDirOptions,
 } from "./agent/memory-dir";
-export { AgentStore, GENERAL_OVERLAY, type ResolvedAgent, type AgentMeta } from "./agent/agents";
 export { PluginStore, PluginManifest, type PluginInfo } from "./agent/plugins";
 export { BackgroundTaskRegistry, type BgDeps } from "./agent/bg-registry";
 export { Compactor, SUMMARIZE_INSTRUCTION } from "./agent/compactor";
 export { bashLooksSafe, BashReviewer, REVIEW_INSTRUCTION, type ReviewVerdict } from "./agent/reviewer";
 export { McpManager, type McpServerStatus, type McpServerConfig } from "./agent/mcp/manager";
 export { WorktreeManager, type ActiveWorktree } from "./agent/worktree";
-export { SubagentManager, type SubagentResult } from "./agent/subagents";

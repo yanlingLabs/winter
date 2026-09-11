@@ -3,6 +3,10 @@ import type { Provider, TurnInputItem } from "../providers/types";
 import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";
 
+/** Task 17: moved here from the retired engine (its context-overflow trigger fraction) — the codex
+ *  model-drift test pins the catalogue against it. */
+export const DEFAULT_COMPACT_THRESHOLD_FRAC = 0.75;
+
 export const SUMMARIZE_INSTRUCTION =
   "You are compacting a conversation so it can continue with less context. " +
   "Summarize the messages below. " +

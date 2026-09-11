@@ -1,7 +1,7 @@
 // P8b Task 17 Step 1 — DISPATCH ON THE WINTER LEG, end to end, on the BUILT binary.
 //
-// A real `startDaemon` in a temp home whose settings carry NO `winterLeg` block (so what runs is the
-// schema's DEFAULT — dispatch on, chat/code off), a real NDJSON client, the real `winter` child
+// A real `startDaemon` in a temp home whose settings carry NO `winterLeg` block (the engine is
+// retired: every mode is the Winter leg), a real NDJSON client, the real `winter` child
 // `NORMA_WINTER_EXECUTABLE` names (skipped when unset; required under NORMA_WINTER_REQUIRE_BINARY=1).
 // Every model is a `winter-test/<double>`; nothing reaches the network.
 //
@@ -170,8 +170,8 @@ describeWithWinterBinary("dispatch on the Winter leg — the built binary throug
 
   test("(a) session.dispatch mints the singleton on the Winter leg BY DEFAULT; the card-free pin: an unclassified tool under auto → a never-prompts tool_result, no approval_requested", async () => {
     expect(daemon!.winter.legForNewSession("dispatch")).toBe("winter");
-    expect(daemon!.winter.legForNewSession("chat")).toBe("engine");
-    expect(daemon!.winter.legForNewSession("code")).toBe("engine");
+    expect(daemon!.winter.legForNewSession("chat")).toBe("winter");   // Task 17 Step 4: every mode
+    expect(daemon!.winter.legForNewSession("code")).toBe("winter");
     const before = winterChildren(bin);
     const minted = await client.call<{ sessionId: string; created: boolean }>(METHODS.sessionDispatch, {});
     expect(minted.created).toBe(true);

@@ -119,6 +119,8 @@ export interface WinterLegDeps {
    *  local abort (its process is the session's), fed `progress()` on every frame of its thread, and
    *  completed from the spawning call's `tool_result`. */
   children?: AgentRegistry;
+  /** The activity enforcement's post-turn re-check (`enforcement.onTurnSettled(sessionId)`). */
+  onTurnSettled?: (sessionId: string) => void;
   /** Any OTHER MCP servers merged into a session's record (settings/plugin servers). None in 8b;
    *  the seam exists so the collision guard has something to guard. */
   extraMcpServers?: (session: CapabilitySession) => Record<string, unknown>;
@@ -380,6 +382,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       records,
       hasTranscript,
       ...(deps.children === undefined ? {} : { children: childrenSinkFor(deps.children, sessionId, log) }),
+      ...(deps.onTurnSettled === undefined ? {} : { onTurnSettled: () => deps.onTurnSettled!(sessionId) }),
       // P8b-39: the session log is the durable queue — what `open()` re-pushes is read from it.
       unconsumed: () => unconsumedUserMessages(deps.store.read(sessionId)),
       idleTimeoutMs: deps.idleTimeoutMs ?? (() => winterOptionsFromSettings(deps.settings()).idleTimeoutSec * 1000),

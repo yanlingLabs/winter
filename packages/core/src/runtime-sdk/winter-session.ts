@@ -179,6 +179,8 @@ export interface WinterSessionDeps {
    *  the spawning call's `tool_result` closes it (`thread_completed`); the driver relays the three
    *  moments so `runtime_children` and the progress watchdog see every Winter child. */
   children?: WinterChildrenSink;
+  /** Fired when the incarnation goes idle after a turn (the activity enforcement's re-check hook). */
+  onTurnSettled?: () => void;
   log?: (line: string) => void;
 }
 
@@ -246,6 +248,8 @@ export interface WinterSession {
   readonly init: WinterInitFacts | undefined;
   /** A host-side fact: pushes minus results, for the current incarnation. */
   readonly turnRunning: boolean;
+  /** When the running turn's first push happened (epoch ms); undefined while idle. */
+  readonly turnStartedAt: number | undefined;
   /** Resolves when the CURRENT incarnation's iteration has returned (and its teardown ran).
    *  Already resolved while `resumable`/`ended`. */
   readonly done: Promise<void>;
@@ -344,6 +348,7 @@ class WinterSessionImpl implements WinterSession {
   /** The open() in flight, so two concurrent sends resume ONE child, not two. */
   private opening: Promise<void> | undefined;
   private idleWaiters: Array<() => void> = [];
+  private turnStart: number | undefined;
 
   constructor(private readonly deps: WinterSessionDeps) {
     this.sessionId = deps.sessionId;
@@ -358,6 +363,7 @@ class WinterSessionImpl implements WinterSession {
   get query(): Query | undefined { return this.inc?.query; }
   get init(): WinterInitFacts | undefined { return this.initFacts; }
   get turnRunning(): boolean { return this.inFlight > 0; }
+  get turnStartedAt(): number | undefined { return this.inFlight > 0 ? this.turnStart : undefined; }
   get done(): Promise<void> { return this.inc?.done ?? this.lastDone; }
   get pendingSends(): readonly string[] { return this.pending; }
   get heldDeliveries(): readonly string[] { return this.held; }
@@ -444,6 +450,7 @@ class WinterSessionImpl implements WinterSession {
 
   private settleIdle(): void {
     for (const w of this.idleWaiters.splice(0)) w();
+    try { this.deps.onTurnSettled?.(); } catch (err) { this.log(`turn-settled hook failed for ${this.sessionId}: ${err instanceof Error ? err.name : "unknown"}`); }
   }
 
   async setModel(model?: string): Promise<void> {
@@ -634,6 +641,7 @@ class WinterSessionImpl implements WinterSession {
   private push(text: string, inc: Incarnation | undefined = this.inc): void {
     if (inc === undefined) throw new Error(`no live winter incarnation for ${this.sessionId}`);
     inc.queue.push(text);
+    if (this.inFlight === 0) this.turnStart = Date.now();
     this.inFlight++;
     this.clearIdleTimer();
     this.recordState("running");

@@ -1,6 +1,6 @@
 // P8b Task 16 — CHAT ON THE WINTER LEG, end to end, on the BUILT binary.
 //
-// A real `startDaemon` in a temp home with `runtimes.winterLeg.chat = true`, a real NDJSON client
+// A real `startDaemon` in a temp home (every mode is the Winter leg since Task 17), a real NDJSON client
 // on its socket, and the real `winter` child `NORMA_WINTER_EXECUTABLE` names (the helper SKIPS this
 // whole file when it is unset, and FAILS when `NORMA_WINTER_REQUIRE_BINARY=1`). Every model is a
 // `winter-test/<double>` — nothing reaches the network.
@@ -18,8 +18,8 @@
 //   (i) P8b-39: a send held behind a running turn survives a daemon RESTART through the log — the
 //       resumed child runs it first, with exactly one turn_started, before the new text
 //   (j) P8b-39: a send held behind an INTERRUPTED turn is not auto-run; the next send runs it first
-//   (f) flag OFF (flipped hot) → the engine path; the record has no backend id (leg: engine)
-//   (g) send to that engine-era record with the flag back on → session_predates_winter_leg
+//   (f) a pre-8b session row (no record) is backfilled at boot as an engine-era record (no backend id)
+//   (g) send/steer to that engine-era record → session_predates_winter_leg (P8b-22)
 //   (tripwires) chat's init.tools = exactly the allowed built-ins ∪ chat's capability tools; a
 //       code-shaped child advertises BASE ∪ MCP ∪ its capability tools minus the ToolSearch/
 //       WaitForMcpServers half `toolSearchEnabled` excludes
@@ -473,35 +473,30 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     await driver.end();
   }, 60_000);
 
-  // (f)/(g) need the flag OFF and then ON again. The settings watcher is built only when an engine
-  // exists (daemon.ts's `if (agentProvider)` gate), so on this no-provider daemon a hot flip cannot
-  // land — each case boots its OWN daemon over the SAME home, which is also the truer scenario for
-  // P8b-22: a session created before the flag, met again by a daemon that has it on.
+  // (f)/(g): P8b-22 after the engine's retirement (Task 17). An ENGINE-ERA session is one with NO
+  // runtime record — a pre-8b row that the boot backfill describes as engine-shaped (no backend
+  // id). Such a session is created here directly in the store while the daemon is down, met again
+  // by the next boot's backfill, and then refused typed on send/steer.
   let engineSid: string;
-  test("(f) with the flag OFF, session.create takes the engine path: a record with NO backend id (leg: engine)", async () => {
+  test("(f) a pre-8b session row (no record) is backfilled at boot as an ENGINE-era record: no backend id (leg: engine)", async () => {
     await stopDaemon();
-    writeSettings(false);
+    const { SessionStore } = await import("../../src/sessions/store");
+    const bare = new SessionStore(home);
+    try { engineSid = bare.createSession("e2e", { mode: "chat" }); } finally { bare.close(); }
     await bootDaemon();
-    expect(daemon!.settings()?.runtimes?.winterLeg?.chat).toBe(false);
-    const created = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "chat", model: "winter-test/echo" });
-    engineSid = created.sessionId;
     expect(daemon!.winter.get(engineSid)).toBeUndefined();
-    expect(winterChildren(bin)).toEqual([]);   // no child was spawned for an engine-leg create
+    expect(winterChildren(bin)).toEqual([]);   // nothing spawned for a backfilled row
     const rec = record(engineSid);
     expect(rec).toBeDefined();
     expect(sessionLegOf(rec)).toBe("engine");
     expect(rec!.backendSessionId).toBeUndefined();
     expect(rec!.transcriptHealth).toBe("unsupported");
     expect(rec!.versionProvenance).toBe("legacy-unknown");
-    expect(rec!.selection.reason).toContain("engine leg");
-    // the Winter-leg records from the first daemon survived that boot's recovery intact
+    // the Winter-leg records from the earlier boots survived this boot's recovery intact
     expect(rt.records.list().filter((r) => sessionLegOf(r) === "winter").length).toBeGreaterThan(0);
   }, 30_000);
 
-  test("(g) with the flag back ON (a restart), session.send to that engine-era record → session_predates_winter_leg; history stays readable", async () => {
-    await stopDaemon();
-    writeSettings(true);
-    await bootDaemon();
+  test("(g) session.send/steer to that engine-era record → session_predates_winter_leg; history stays readable", async () => {
     expect(sessionLegOf(record(engineSid))).toBe("engine");
     await client.call(METHODS.sessionAttach, { sessionId: engineSid, fromSeq: 0 });
     const refused = await client.request(METHODS.sessionSend, { sessionId: engineSid, text: "hello?" });

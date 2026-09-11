@@ -6,7 +6,6 @@ import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type Wr
 import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
-import { DispatchChildren } from "../../src/agent/dispatch-children";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { ACTIVE_DEMOTION_MS, activityFor, type Activity, type ActivityRow } from "../../src/sessions/activity";
@@ -689,23 +688,4 @@ describe("wired into the IPC server (session-activity-hygiene T5)", () => {
 });
 
 describe("dispatch-spawned children default to background (session-activity-hygiene T5)", () => {
-  test("a dispatch child is backgrounded at creation — it runs unattended by construction", () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-activity-dispatch-"));
-    const store = new SessionStore(home);
-    const hub = new SessionHub(store);
-    const registry = new DispatchChildren({
-      store, hub,
-      runTurn: async () => {},
-      isRunning: () => false,
-      interrupt: () => {},
-    });
-    const dispatchId = store.createSession("global", { mode: "dispatch" });
-    const childId = registry.spawnChild({ dispatchSessionId: dispatchId, dir: "/tmp/a", prompt: "do work", title: "Task A" });
-
-    expect(store.meta(childId).backgrounded).toBe(true);
-    // A dispatch child is an ordinary CODE session, so the flag actually means something on it —
-    // and it means the one true thing: nobody is going to attach to this.
-    expect(store.meta(childId).mode).toBe("code");
-    store.close();
-  });
 });

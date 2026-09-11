@@ -56,7 +56,8 @@ import type { PanelCommandRegistry } from "../panel/commands";
 import { readStoredDiff } from "../diffs/store";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory, effortsForModel } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
-import type { AgentEngine } from "../agent/engine";
+import type { ModelInfo } from "../providers/types";
+import type { ChildrenRpc } from "../runtime-sdk/children-rpc";
 import type { NormaRuntimeSdk } from "../runtime-sdk/create";
 import { WinterLegRefusal, type WinterSessionDrivers } from "../runtime-sdk/session-driver";
 import type { WinterSession } from "../runtime-sdk/winter-session";
@@ -114,6 +115,20 @@ interface ConnState {
   // SUCCESSFUL results only (a thrown RpcFailure is never stored), so a retry after a transient
   // failure still re-attempts.
   seenCommands: Map<string, unknown>;
+}
+
+/** The engine's public surface the IPC layer still reads after the retirement (Task 17). */
+export interface EngineSignals {
+  isRunning(sessionId: string): boolean;
+  hasBackgroundWork(sessionId: string): boolean;
+  interrupt(sessionId: string): { wasRunning: boolean };
+  activeTurnCount(): number;
+  knownModels(): ModelInfo[];
+  /** `session.setDirs`'s control-plane predicate (the engine's `grantDeniedPrefixes`). */
+  isGrantDenied(dir: string): boolean;
+  /** `thread.list`: main first, then the session's children. */
+  threadsFor(sessionId: string): Array<{ threadId: string; parentThreadId?: string; agentType?: string; status: "running" | "completed"; stopReason?: string }>;
+  onTurnSettled?: (sessionId: string) => void;
 }
 
 export interface IpcServerOptions {
@@ -187,7 +202,12 @@ export interface IpcServerOptions {
   // of a third hand-assembled copy that would quietly disagree in exactly those two windows.
   // Optional: every server built without it (all existing tests) is byte-identical.
   onActivityDeriver?: (derive: ActivityDeriver) => void;
-  engine?: AgentEngine | null;
+  /** P8b Task 17: the engine is gone; what remains is the ACTIVITY the handlers read (turn running,
+   *  background work, the model catalogue) — served by the daemon over the Winter driver table and
+   *  the persisted child roster. */
+  engine?: EngineSignals | null;
+  /** `thread.send` / `agent.stop` over Winter children (`runtime-sdk/children-rpc.ts`). */
+  agents?: ChildrenRpc;
   broker?: ApprovalBroker | null;
   // SP-approvals Task 5: the CC-grammar allow-rules store (Task 1) — daemon.ts hoists ONE instance
   // shared with the engine's own ask-policy rule-consult path, so `approval.respond`'s optionId-
@@ -617,7 +637,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    *  a session is the engine's, byte-identically. Task 17 (the engine's retirement) makes it the
    *  answer for every engine-era record. */
   function refuseIfPredatesWinterLeg(sessionId: string): void {
-    if (opts.winter === undefined || opts.engine) return;
+    if (opts.winter === undefined) return;
     if (opts.winter.legOf(sessionId) !== "engine") return;
     let mode: "code" | "dispatch" | "chat" = "code";
     try { const m = opts.store.meta(sessionId).mode; if (m === "chat" || m === "dispatch") mode = m; } catch { return; }
@@ -1342,7 +1362,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // Get-or-create is atomic here: the lookup+create sequence is synchronous (bun:sqlite,
         // no await between), so two concurrent RPCs cannot both create.
         const existing = opts.store.dispatchSessionId();
-        if (existing) return { sessionId: existing, created: false };
+        // P8b-22 (Task 17): an ENGINE-ERA singleton can never run again (no Winter transcript), so
+        // it is left as history and a NEW singleton is minted on the Winter leg — `dispatchSessionId`
+        // answers the newest dispatch row, so the re-mint happens once.
+        if (existing && (opts.winter === undefined || opts.winter.legOf(existing) !== "engine")) return { sessionId: existing, created: false };
         // P8b Task 17: the singleton is minted on the leg `settings.runtimes.winterLeg.dispatch`
         // names (P8b-13) — the same transaction `session.create` runs: refuse typed BEFORE the row
         // exists, persist the record + start the child after it, roll the row back on a refusal.
@@ -1471,13 +1494,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           }
         }
         refuseIfPredatesWinterLeg(p.sessionId);
+        // No Winter driver and no refusal: a server built without the driver table (a bare test
+        // server). The message lands in the log, exactly as it always has on a no-engine daemon.
         const seq = hub.send(socket.data.hubClient, p.sessionId, p.text);
-        // Fire-and-forget: the response returns immediately and turn events stream separately.
-        // If a turn is already running, this message just lands in history for the next turn
-        // (full mid-turn steering is deferred).
-        if (opts.engine && !opts.engine.isRunning(p.sessionId)) {
-          opts.engine.runTurn(p.sessionId).catch((e) => console.error("turn failed:", e));
-        }
         return { seq };
       }
       case METHODS.sessionSteer: {
@@ -1492,8 +1511,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           }
           refuseIfPredatesWinterLeg(p.sessionId);
         }
-        if (!opts.engine) return { ok: true, injected: false };
-        return { ok: true, ...opts.engine.steer(p.sessionId, p.text) };
+        return { ok: true, injected: false };
       }
       case METHODS.sessionInterrupt: {
         const p = parseParams(SessionInterruptParams, params);
@@ -1515,8 +1533,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (opts.winter?.get(p.sessionId) !== undefined || opts.winter?.legOf(p.sessionId) === "winter") {
           throw new RpcFailure(ERR.INVALID_PARAMS, "session.compact is not supported on the Winter leg (the child compacts on its own; SDK 0.0.4 carry)", { code: "not_supported_on_winter_leg" });
         }
-        if (!opts.engine) return { ok: true, compacted: false, uptoSeq: 0, summaryChars: 0 };
-        return { ok: true, ...(await opts.engine.compact(p.sessionId)) };
+        return { ok: true, compacted: false, uptoSeq: 0, summaryChars: 0 };
       }
       case METHODS.skillsList: {
         const p = parseParams(SkillsListParams, params);
@@ -1661,15 +1678,15 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // ---------------------------------------------------------------------------------------
       case METHODS.threadSend: {
         const p = parseParams(ThreadSendParams, params);
-        if (!opts.engine) throw new RpcFailure(ERR.INTERNAL, "background agents are not available on this server (no engine configured)");
-        const result = await opts.engine.sendToAgent(p.sessionId, p.agent, p.text);
+        if (!opts.agents) throw new RpcFailure(ERR.INTERNAL, "background agents are not available on this server (no child roster configured)");
+        const result = await opts.agents.send(p.sessionId, p.agent, p.text);
         if (!result.ok) throw new RpcFailure(result.kind === "not_found" ? ERR.NOT_FOUND : ERR.INVALID_PARAMS, result.error);
         return { ok: true, delivered: result.delivered, agentId: result.agentId };
       }
       case METHODS.agentStop: {
         const p = parseParams(AgentStopParams, params);
-        if (!opts.engine) throw new RpcFailure(ERR.INTERNAL, "background agents are not available on this server (no engine configured)");
-        const result = opts.engine.stopAgent(p.sessionId, p.agent);
+        if (!opts.agents) throw new RpcFailure(ERR.INTERNAL, "background agents are not available on this server (no child roster configured)");
+        const result = opts.agents.stop(p.sessionId, p.agent);
         if (!result.ok) throw new RpcFailure(ERR.NOT_FOUND, result.error);
         return { ok: true, status: result.status };
       }

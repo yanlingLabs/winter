@@ -354,10 +354,10 @@ export const Settings = z.object({
    *
    *  ── The Winter leg (8b) ──────────────────────────────────────────────────────────────────────
    *
-   *  `winterLeg` decides, PER MODE, whether a NEW session runs on the Winter runtime or on the
-   *  legacy engine (P8b-13). Each flips to `true` as its mode's e2e proof lands (Task 16: chat;
-   *  Task 17: dispatch, then code) — `winterOptionsFromSettings` below carries the SAME defaults
-   *  for an absent block. A flag governs new sessions only: a session runs to
+   *  `winterLeg` DECIDED, per mode, whether a NEW session ran on the Winter runtime or on the
+   *  legacy engine (P8b-13) while both existed. Task 17 retired the engine: every mode runs on the
+   *  Winter leg, the keys are accepted for one release and a `false` is logged and ignored
+   *  (`winterLegDisabledKeys` below names them for the log). A flag governs new sessions only: a session runs to
    *  completion on the leg it was created with, which is what makes flipping one safe at any moment.
    *
    *  `winterExecutable` overrides the `winter` binary lookup (P8b-2's first door, ahead of
@@ -390,11 +390,12 @@ export const Settings = z.object({
     }).prefault({}),
     migrations: z.object({ memoryKeys: z.boolean().default(false) }).prefault({}),
     winterExecutable: z.string().optional(),
+    // Task 17 Step 4: the engine is retired — every mode runs on the Winter leg. The block stays
+    // ACCEPTED for one release (the `migrations.memoryKeys` pattern): a `false` is read, logged
+    // ("the engine leg no longer exists; ignored") and ignored by `winterOptionsFromSettings`.
     winterLeg: z.object({
-      chat: z.boolean().default(false),
-      // Task 17 Step 1: Dispatch's e2e proof landed (`test/e2e/winter-dispatch-e2e.test.ts`).
+      chat: z.boolean().default(true),
       dispatch: z.boolean().default(true),
-      // Task 17 Step 2: Code's e2e proof landed, the P8b-27(c) self-grant attempt measured DENIED.
       code: z.boolean().default(true),
     }).prefault({}),
     advisorModel: z.string().optional(),
@@ -440,6 +441,13 @@ export interface WinterOptions {
  * `settings = null` when `settings.json` is missing or invalid and every getter here must still
  * answer.
  */
+/** The `winterLeg` keys a settings file sets to `false` — accepted, logged, ignored (Task 17). */
+export function winterLegDisabledKeys(s: Settings | null | undefined): string[] {
+  const leg = s?.runtimes?.winterLeg;
+  if (leg === undefined) return [];
+  return (["chat", "dispatch", "code"] as const).filter((m) => leg[m] === false);
+}
+
 export function winterOptionsFromSettings(s: Settings | null | undefined): WinterOptions {
   const r = s?.runtimes;
   const blankIsAbsent = (v: string | undefined): string | undefined => {
@@ -450,13 +458,9 @@ export function winterOptionsFromSettings(s: Settings | null | undefined): Winte
     ...(blankIsAbsent(r?.winterExecutable) === undefined ? {} : { winterExecutable: blankIsAbsent(r?.winterExecutable)! }),
     ...(blankIsAbsent(r?.advisorModel) === undefined ? {} : { advisorModel: blankIsAbsent(r?.advisorModel)! }),
     idleTimeoutSec: r?.winterIdleTimeoutSec ?? DEFAULT_WINTER_IDLE_TIMEOUT_SEC,
-    // Only a LITERAL boolean counts (a hand-edited truthy value never moves a session); an absent
-    // field answers the schema's default for that mode. Dispatch: Task 17 Step 1.
-    winterLeg: {
-      chat: r?.winterLeg?.chat === true,
-      dispatch: r?.winterLeg?.dispatch === undefined ? true : r.winterLeg.dispatch === true,
-      code: r?.winterLeg?.code === undefined ? true : r.winterLeg.code === true,   // Task 17 Step 2
-    },
+    // Task 17 Step 4: the engine leg no longer exists. Every mode answers `true` whatever the block
+    // says; a written `false` is reported by `settings-apply.ts` and by the boot log, never obeyed.
+    winterLeg: { chat: true, dispatch: true, code: true },
   };
 }
 

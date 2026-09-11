@@ -10,8 +10,8 @@ export type SessionLeg = "engine" | "winter";
  *  imported, because the zod block does not carry `winterLeg` yet and this lane must not edit the
  *  settings schema (Task 15 owns it). When Task 15 lands, this cast becomes redundant but stays
  *  correct — the field names are pinned by the Interfaces block on both sides. */
-/** Reads the ONE defaults door (`winterOptionsFromSettings`), so an ABSENT `runtimes` block and an
- *  absent field answer the per-mode default the schema declares — never a hard-coded `false`. */
+/** Task 17: the engine is retired — the answer is `winter` for every mode. The signature and the
+ *  door stay so a settings file's (ignored) `false` is read through the one place that reports it. */
 export function legForNewSession(mode: SessionMode, settings: Settings | null | undefined): SessionLeg {
   return winterOptionsFromSettings(settings).winterLeg[mode] ? "winter" : "engine";
 }

@@ -12,7 +12,7 @@ import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom } from "./settings";
+import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterLegDisabledKeys } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
@@ -20,66 +20,30 @@ import { createProvider } from "./providers/manager";
 import type { Provider } from "./providers/types";
 import { QuotaManager } from "./providers/quota";
 import { ToolRegistry } from "./agent/tools/registry";
-import { registerReadTools } from "./agent/tools/fs-read";
-import { registerWriteTools } from "./agent/tools/fs-write";
-import { registerBashTool } from "./agent/tools/bash";
-import { registerBackgroundTools } from "./agent/tools/background";
-import { registerSkillTools } from "./agent/tools/skill";
-import { registerToolSearchTool } from "./agent/tools/toolsearch";
-import { registerAskUserTool } from "./agent/tools/ask-user";
-import { registerAskQuestionTool } from "./agent/tools/ask-question";
-import { registerTaskTools } from "./agent/tools/tasks";
-import { registerPlanTool } from "./agent/tools/plan";
-import { registerWorkflowTool } from "./agent/tools/workflow";
 import { WorkflowRuntime } from "./workflows/runtime";
 import { WorkflowStore } from "./workflows/store";
-import { registerNotebookTool } from "./agent/tools/notebook";
-import { registerWorktreeTools } from "./agent/tools/worktree";
-import { registerSpawnAgentTool } from "./agent/tools/spawn";
-import { registerSessionSpawnTool } from "./agent/tools/session-spawn";
-import { registerListSessionsTools } from "./agent/tools/list-sessions";
-import { DispatchChildren } from "./agent/dispatch-children";
-import { registerSendMessageTool } from "./agent/tools/send-message";
-import { registerTaskStopTool } from "./agent/tools/task-stop";
-import { registerAgentQueryTools } from "./agent/tools/agent-query";
-import { registerSkillWriteTool } from "./agent/tools/skill-write";
 import { MemoryStore } from "./agent/memory";
-import { registerScheduleTool } from "./agent/tools/schedule";
-import { registerWebTools } from "./agent/tools/web";
-import { registerSearchTool } from "./agent/tools/search";
-import { registerReadPageTool, type ResearchRunner } from "./agent/tools/read-page";
-import { registerBrowserTool } from "./agent/tools/browser";
-import { registerSheetsTool } from "./agent/tools/sheets";
-import { registerSlidesTool } from "./agent/tools/slides";
-import { registerDocsTool } from "./agent/tools/docs";
+import type { ResearchRunner } from "./agent/tools/read-page";
 import { PageCache } from "./agent/tools/page-core";
 import { createResearchRunner } from "./agent/research";
 import { registerComputerTool } from "./agent/tools/computer";
 import { ComputerUseService } from "./agent/computer-use";
 import { McpManager } from "./agent/mcp/manager";
-import { registerMcpResourceTools } from "./agent/tools/mcp-resources";
-import { registerPushNotificationTool } from "./agent/tools/push-notification";
 import { notifyHeadless } from "./agent/notify-fallback";
-import { registerLspTools } from "./agent/tools/lsp";
 import { LspManager } from "./agent/lsp/manager";
 import { PermissionGate, type SessionApprovalPolicy } from "./agent/gate";
 import { PermissionRules } from "./agent/permission-rules";
 import { ApprovalBroker } from "./agent/approvals";
 import { QuestionBroker } from "./agent/questions";
-import { TaskStore } from "./agent/task-store";
-import { PlanBroker } from "./agent/plans";
-import { WorktreeManager } from "./agent/worktree";
-import { AgentStore } from "./agent/agents";
-import { SubagentManager } from "./agent/subagents";
-import { BackgroundAgentRegistry, createPersistedChildren, type AgentRegistry } from "./agent/bg-agent-registry";
-import { AgentEngine, SYSTEM_PROMPT } from "./agent/engine";
+import { createPersistedChildren, type AgentRegistry } from "./agent/bg-agent-registry";
+import { createChildrenRpc } from "./runtime-sdk/children-rpc";
+import type { EngineSignals } from "./ipc/server";
+import { realpathSync as realpathForGrant } from "node:fs";
+import { resolve as resolveForGrant, sep as pathSep } from "node:path";
 import { OutputStyleStore } from "./agent/output-styles";
 import { Dreamer } from "./agent/dreamer";
 import { SessionCleaner } from "./sessions/cleaner";
 import { deriveModelAliases } from "./agent/model-aliases";
-import { BashReviewer } from "./agent/reviewer";
-import { SessionTitler } from "./agent/titles";
-import { Compactor } from "./agent/compactor";
 import { SessionDirectories } from "./agent/dirs";
 import { TrustStore } from "./agent/trust";
 import { ContextAssembler } from "./agent/context";
@@ -89,8 +53,7 @@ import { sessionTmpDir } from "./agent/session-tmp";
 import { PluginStore, pluginMcpEligible, pluginSpawnEligible, hookRegistryPlugins } from "./agent/plugins";
 import { PluginSupervisor } from "./plugins/supervisor";
 import { PluginContribRegistry } from "./plugins/contrib";
-import { HookRegistry, HookFacade } from "./plugins/hook-registry";
-import { HookRunner } from "./plugins/hook-runner";
+import { HookRegistry } from "./plugins/hook-registry";
 import { AuditLog } from "./peripheral/audit";
 import { PeripheralBroker, type PeripheralClass } from "./peripheral/broker";
 import { ProviderLink } from "./peripheral/provider-link";
@@ -322,6 +285,9 @@ export async function startDaemon(opts: {
   let settings: ReturnType<typeof loadSettings> | null;
   try {
     settings = loadSettings(dirs.settingsPath);
+    // Task 17: the engine leg no longer exists — a `winterLeg.<mode>: false` is accepted for one
+    // release, reported here (and by settings-apply on a hot edit), never obeyed.
+    for (const key of winterLegDisabledKeys(settings)) console.error(`settings: runtimes.winterLeg.${key} = false — the engine leg no longer exists; ignored`);
   } catch (err) {
     console.error(`settings unavailable, agent disabled: ${(err as Error).message}`);
     settings = null;
@@ -647,7 +613,6 @@ export async function startDaemon(opts: {
   // fall back to an inert manager that just reports the zero/ok defaults.
   quota ??= new QuotaManager();
 
-  let engine: AgentEngine | null = null;
   // SP-approvals Task 5: hoisted alongside `engine` — same "declared null/undefined above, assigned
   // inside the gate" shape as `dreamer`/`mcp`/etc below. PermissionRules itself needs no provider
   // (only settings + normaHome), but has always been constructed inside the `if (agentProvider)`
@@ -680,8 +645,6 @@ export async function startDaemon(opts: {
   // pending answers `{ ok: true, alreadyResolved: true }`, which is exactly the handler's old
   // no-broker fallback.
   const questions = new QuestionBroker();
-  let taskStore: TaskStore | null = null;
-  let plans: PlanBroker | null = null;
   // ipc/server.ts (Phase 4b Task 4) needs the SAME ToolRegistry instance the engine executes tool
   // calls against, to register/unregister `plugin__<id>__<tool>` tools — but startIpcServer() is
   // called OUTSIDE the `if (agentProvider)` block below, where the registry is constructed.
@@ -831,9 +794,9 @@ export async function startDaemon(opts: {
       sessions: {
         store,
         derive: (row, sessionId, nowMs) => activityDeriver?.(row, sessionId, nowMs),
-        turnStartedAt: (sid) => engine?.turnStartedAt(sid),
-        isRunning: (sid) => engine?.isRunning(sid) ?? false,
-        interrupt: (sid) => { engine?.interrupt(sid); },
+        turnStartedAt: (sid) => winterDrivers.get(sid)?.turnStartedAt,
+        isRunning: (sid) => winterDrivers.get(sid)?.turnRunning ?? false,
+        interrupt: (sid) => { void winterDrivers.get(sid)?.interrupt(); },
         emit: (sid, activity) => { hub.emitActivity(sid, activity); },
       },
     },
@@ -988,10 +951,14 @@ export async function startDaemon(opts: {
   // Task 17 turns it on for Winter children when `SubagentManager` retires with the engine. The
   // engine DOES feed `progress()` here and now (engine.ts's three child sites), so the window is a
   // progress window the moment it is armed rather than an API nobody calls.
-  const bgAgents: AgentRegistry =
+  // Task 17: the roster's progress watchdog is ARMED here — `SubagentManager` retired with the
+  // engine, so this is the only window over a Winter child (progress-fed by the driver, no wall
+  // clock; `settings.subagents.stallTimeoutMs` hot, undefined = 600 s, null/0 = off).
+  const bgAgents: AgentRegistry | undefined =
     runtime === undefined
-      ? new BackgroundAgentRegistry()
+      ? undefined
       : createPersistedChildren({
+          stallTimeoutMs: () => settings?.subagents?.stallTimeoutMs,
           store: runtime.children,
           profiles: runtime.profiles,
           providerId: () => settings?.provider?.type ?? "unstated",
@@ -1029,8 +996,9 @@ export async function startDaemon(opts: {
     // Norma's persona per mode, the `_assistant` bucket, the output style — so a Winter-leg session
     // speaks as Norma.
     assembler,
-    // Task 17 (P8b-15): Winter children land in the SAME persisted roster the engine's did.
-    children: bgAgents,
+    // Task 17 (P8b-15): Winter children land in the persisted roster (absent when the spine is offline).
+    ...(bgAgents === undefined ? {} : { children: bgAgents }),
+    onTurnSettled: (sid) => { signals.onTurnSettled?.(sid); },
     log: (line) => console.error(`winter-leg: ${line}`),
   });
   /** A deleted session takes its Winter child (bounded `end()`, out of the table) AND its runtime
@@ -1041,6 +1009,33 @@ export async function startDaemon(opts: {
     void winterDrivers.evict(sessionId);
     runtime?.onSessionDeleted(sessionId);
   };
+  /** Task 17: what the engine used to answer, over the driver table + the child roster. */
+  const grantDeniedPrefixes = [normaHome];
+  const signals: EngineSignals = {
+    isRunning: (sid) => winterDrivers.get(sid)?.turnRunning ?? false,
+    hasBackgroundWork: (sid) => (bgAgents?.list(sid) ?? []).some((a) => a.status === "running"),
+    interrupt: (sid) => { const d = winterDrivers.get(sid); if (d === undefined || !d.turnRunning) return { wasRunning: false }; void d.interrupt(); return { wasRunning: true }; },
+    activeTurnCount: () => winterDrivers.list().filter((d) => d.turnRunning).length,
+    knownModels: () => agentProvider?.provider.models() ?? [],
+    // engine.ts's `grantDenied`, verbatim: at/under a prefix, or an ANCESTOR of one (fence
+    // containment is subtree-based; granting an ancestor of ~/.norma/run would open the control plane).
+    isGrantDenied: (dir) => {
+      for (const p of grantDeniedPrefixes) {
+        let cp: string;
+        try { cp = realpathForGrant(p); } catch { cp = resolveForGrant(p); }
+        if (dir === cp || dir.startsWith(cp + pathSep) || cp.startsWith(dir + pathSep)) return true;
+      }
+      return false;
+    },
+    threadsFor: (sid) => [
+      { threadId: "main", status: winterDrivers.get(sid)?.turnRunning ? "running" : "completed" },
+      ...(bgAgents?.list(sid) ?? []).map((a) => ({ threadId: a.threadId, parentThreadId: "main", status: a.status === "running" ? "running" as const : "completed" as const, ...(a.status === "running" ? {} : { stopReason: a.status }) })),
+    ],
+  };
+  const childrenRpc = createChildrenRpc({
+    registry: () => bgAgents,
+    facetFor: (sid) => { const backend = runtime?.records.get(sid)?.backendSessionId; return backend === undefined || runtimeSdk === undefined ? undefined : attachedFacetFor(runtimeSdk, backend); },
+  });
 
   if (agentProvider) {
     const registry = new ToolRegistry();
@@ -1062,25 +1057,9 @@ export async function startDaemon(opts: {
     // 8b lands (`global_messages`/`held_messages` carry whole envelopes), plus 8c's staged
     // credentials. A model that could `read` the db file could read all of it around every seam this
     // branch built. `norma doctor` is a separate CLI process and is unaffected by this denial.
-    registerReadTools(registry, { deniedPrefixes: [dirs.runDir, dirs.runtimesDir] });
-    registerWriteTools(registry);
-    registerBashTool(registry, { bgRegistry }); // D1-T2: bash is never deferred in code — bash.ts's own `deferred: ["dispatch"]` only rides ToolSearch deferral for the dispatch coordinator; its background-poll tool below (bash_output; task_stop, below, is the sole way to kill one) is unaffected
-    registerBackgroundTools(registry, { bgRegistry }, { deferred: true });
-    registerSkillTools(registry, { skills: skillStore });
-    registerToolSearchTool(registry);
-    taskStore = new TaskStore();
-    registerAskUserTool(registry);
-    registerAskQuestionTool(registry);
-    registerTaskTools(registry, { tasks: taskStore });
-    plans = new PlanBroker();
-    registerPlanTool(registry, { deferred: true });
-    registerNotebookTool(registry, { deferred: true });
-    registerPushNotificationTool(registry); // task-30: deferred:true is baked into the tool's own registration
     // hot-settings T2: getter over the live `settings` holder (was a boot-captured value) — a
     // later task's watcher reassigns `settings` in place; this closure re-reads it on the NEXT
     // enter_worktree/spawn isolation call, no WorktreeManager reconstruction needed.
-    const worktrees = new WorktreeManager({ baseRef: () => settings?.worktree?.baseRef });
-    registerWorktreeTools(registry, { deferred: true });
     // 4g Task 5: web_fetch — Norma's ONLY sanctioned network egress (bash's sandbox denies network
     // by design). Shares the SAME `audit` appender instance as peripheral/hardware below (hoisted
     // above this gate for exactly this reason) — every call (success, ssrf-refusal, http error,
@@ -1088,14 +1067,12 @@ export async function startDaemon(opts: {
     // 4g Task 6: web_search's Brave API key rides the SAME `secrets` store (KeychainSecretStore,
     // built at the top of startDaemon) `norma login --web-search-key` writes into — one
     // SecretStore instance, one Keychain, no separate store to keep in sync.
-    registerWebTools(registry, { audit: (line) => audit.append(line), secret: (name) => secrets.get(name) });
     // B1-T5: Search — chat's Exa-backed one-call web search (results + page excerpts in a single
     // request). Same `audit`/`secrets` instances as registerWebTools just above; its own keychain
     // secret (EXA_API_KEY_SECRET) is `norma login --exa-key`'s write target, never web_search's.
     // Critical 1 fix (whole-branch review): `dangerousDomainsAdded` — the same shared getter every
     // other consumer of the effective dangerous-domain list uses below — so a Search result whose
     // url matches it is withheld before the model ever sees it (never a silent drop; see search.ts).
-    registerSearchTool(registry, { audit: (line) => audit.append(line), secret: (name) => secrets.get(name), dangerousDomainsAdded });
     // B2-T2: ReadPage — chat's (and, per user decision, dispatch's) batched page-reading tool.
     // ONE PageCache instance per daemon, constructed here and shared: Task 3's ephemeral research
     // runner hands the SAME instance to its FetchPage-only sub-agent, so a report's own citations
@@ -1117,7 +1094,6 @@ export async function startDaemon(opts: {
     // rationale and read-page.ts/research.ts for where the check actually fires.
     const research = createResearchRunner({ provider: agentProvider.provider, cache: pageCache, audit: (line) => audit.append(line), dangerousDomainsAdded });
     researchRunner = research; // the holder the `research` capability server reads (P8b Task 7)
-    registerReadPageTool(registry, { cache: pageCache, audit: (line) => audit.append(line), research, dangerousDomainsAdded });
     // B2 Task 4: the agent's browser. Four narrow deps, each the SAME thing the equivalent RPC uses —
     // `tabs` is the fold `panel.list` serves, `openTab` is the function `panel.openTab`'s handler
     // runs, `dispatch` is the one pending-command registry `panel.commandResult` resolves against,
@@ -1125,13 +1101,6 @@ export async function startDaemon(opts: {
     // the panel; that is what keeps an agent-driven tab indistinguishable from a user-driven one.
     // `dangerousDomainsAdded` is the SAME shared getter ReadPage/Search/research already take (spec
     // §7: the dangerous-domains list is shared).
-    registerBrowserTool(registry, {
-      tabs: (sid) => foldPanelTabs(store.read(sid)),
-      openTab: (p) => mintPanelTab(hub, p),
-      dispatch: (cmd) => panelCommands.dispatch(cmd),
-      harnesses: (sid) => hub.attachedHarnesses(sid),
-      dangerousDomainsAdded,
-    });
     // office-agent-tools T3: sheets — the same `panelCommands`/`hub` doors as `browser` above, plus
     // ONE more: `dirsOf`. `store.dirs(sid)` — never `writableRoots`/`ctx.roots` — is deliberate: it
     // is the EXACT function `session.list`'s own handler calls to populate the wire `dirs` field the
@@ -1141,43 +1110,19 @@ export async function startDaemon(opts: {
     // directories" means — `writableRoots` is a WIDER set (folds in `Edit(<path>)`-declared dirs and
     // any dirGrant-adopted directory), which would let this tool accept a path the app-side broker
     // was always going to refuse anyway.
-    registerSheetsTool(registry, {
-      dispatch: (cmd) => panelCommands.dispatch(cmd),
-      harnesses: (sid) => hub.attachedHarnesses(sid),
-      dirsOf: (sid) => store.dirs(sid),
-    });
     // office-agent-tools T6 — `slides`, the identical deps shape as `sheets` immediately above (same
     // `dirsOf` sourcing rationale: `store.dirs(sid)`, never `writableRoots`, so the daemon's fence
     // agrees with the app-side broker's independent one on what "this session's working directories"
     // means — see the comment on the `sheets` registration above for the fuller reasoning, not
     // repeated here).
-    registerSlidesTool(registry, {
-      dispatch: (cmd) => panelCommands.dispatch(cmd),
-      harnesses: (sid) => hub.attachedHarnesses(sid),
-      dirsOf: (sid) => store.dirs(sid),
-    });
     // office-agent-tools T7 — `docs`, the identical deps shape as `sheets`/`slides` above and for
     // the identical reasons (see the `sheets` registration's own comment).
-    registerDocsTool(registry, {
-      dispatch: (cmd) => panelCommands.dispatch(cmd),
-      harnesses: (sid) => hub.attachedHarnesses(sid),
-      dirsOf: (sid) => store.dirs(sid),
-    });
-    const agents = new AgentStore({
-      normaHome, trust: trustStore, baseInstructions: SYSTEM_PROMPT,
-      plugins: { disabled: settings?.plugins?.disabled ?? [] },
-    });
     // hot-settings T2: getters over the live `settings` holder (was a boot-captured value) — a
     // later task's watcher reassigns `settings` in place; these closures re-read it on the NEXT
     // acquire()/run(), no SubagentManager reconstruction needed. No-timeout task (user rule
     // 2026-07-12): `timeoutMs` absent from settings → NO wall clock (the manager has no default
     // one anymore); `stallTimeoutMs` absent → the manager's own 600s progress-stall default.
     // Both hot — a settings edit applies to the very next subagent run, no daemon restart.
-    const subagents = new SubagentManager({
-      maxConcurrent: () => settings?.subagents?.maxConcurrent,
-      timeoutMs: () => settings?.subagents?.timeoutMs,
-      stallTimeoutMs: () => settings?.subagents?.stallTimeoutMs,
-    });
     // CC-parity phase 3 (Workflows, Task B2): constructed unconditionally alongside bgAgents (same
     // "always build it, the tool/bridge itself decides whether to use it" shape spawn_agent's own
     // subagents/agents above follow) — PRODUCTION deps only: no `workerCommand` override (that's a
@@ -1211,16 +1156,36 @@ export async function startDaemon(opts: {
             hub.append(sid, { type: "workflow_failed", sessionId: sid, threadId: "main", runId: ev.runId, error: ev.error });
             break;
         }
-        if (ev.type === "completed" || ev.type === "failed") engine?.notifyWorkflowCompletion(sid, ev.runId);
+        // Task 17: the engine's `notifyWorkflowCompletion` pinned a notice into the parent's next
+        // turn; the `Workflow` tool is not served to a Winter child yet (carry), so there is no
+        // parent turn to notify — the completion event above is the record.
       },
-      spawnAgent: (sid, prompt, o, signal) => engine!.runWorkflowAgent(sid, prompt, o, signal),
+      // Task 17: a workflow's `agent()` is a Winter CODE child session with a fixed prompt, run to
+      // its first idle through the driver table; the result is its last assistant text.
+      spawnAgent: async (sid, prompt, o, signal) => {
+        const parent = store.meta(sid);
+        const childId = store.createSession("global", { cwd: parent.cwd ?? undefined, approvalPolicy: parent.approvalPolicy, origin: "workflow-child", mode: "code", parentSessionId: sid, ...(o?.model === undefined ? {} : { model: o.model }) });
+        const onAbort = (): void => { void winterDrivers.get(childId)?.end(); };
+        signal.addEventListener("abort", onAbort, { once: true });
+        try {
+          await winterDrivers.runTurn(childId, prompt, "workflow");
+        } catch (err) {
+          return { ok: false, result: err instanceof Error ? err.message : String(err) };
+        } finally {
+          signal.removeEventListener("abort", onAbort);
+          void winterDrivers.get(childId)?.end();
+        }
+        const log = store.read(childId);
+        const last = [...log].reverse().find((e) => e.type === "assistant_message" && (e as { threadId?: string }).threadId === "main") as { text: string } | undefined;
+        const failed = log.some((e) => e.type === "agent_error") || signal.aborted;
+        return { ok: !failed, result: last?.text ?? "" };
+      },
       runsDir: join(normaHome, "workflows-runs"),
     });
     // Deferred (rides ToolSearch like worktree/notebook/plan/schedule above) — a specialized
     // orchestration primitive, not needed in every turn. Session-type/settings gating (Task B3/B4,
     // per workflowsEnabled/keywordTriggerEnabled below) is layered on top of this later; B2 only
     // wires the tool + its launch bridge.
-    registerWorkflowTool(registry, { deferred: true });
     // `agentProvider` is already narrowed non-null here (we're inside `if (agentProvider)`), and
     // its `.provider` is the SAME provider instance the engine's spawn bridge calls .models() on
     // to validate a spawn_agent model override (4e gate F9) — so this list is exactly what the
@@ -1231,15 +1196,12 @@ export async function startDaemon(opts: {
     // replacing them, so the enum/description offer both spellings; engine.ts's own
     // resolveModelAlias (the spawn bridge's runtime gate) uses the identical uniqueness rule, so an
     // alias offered here is always one the bridge will actually accept.
-    const knownModelIds = agentProvider.provider.models().map((m) => m.id);
-    registerSpawnAgentTool(registry, { models: [...knownModelIds, ...deriveModelAliases(knownModelIds)] });
     // Dispatch (Phase 7) Task 4: session_spawn — registered unconditionally alongside spawn_agent
     // (both live on the SAME shared `registry`; engine.ts's SESSION_SPAWN_TOOL exclusion is what
     // actually keeps it out of a code session's tool list — registering it here doesn't by itself
     // make it code-visible). SAME models list as spawn_agent (full ids + their unambiguous short
     // aliases) so the bridge's alias resolution (engine.ts) always accepts whatever this tool's own
     // schema enum advertised.
-    registerSessionSpawnTool(registry, { models: [...knownModelIds, ...deriveModelAliases(knownModelIds)] });
     // session-activity-hygiene T8: dispatch's MANAGEMENT surface over the session lifecycle —
     // `list_sessions` (read) and `manage_session` (stop/background/archive/resume). Both declare
     // `modes: ["dispatch"]` in their own file (the per-mode registry's single declaration site), so
@@ -1255,23 +1217,11 @@ export async function startDaemon(opts: {
     // `startIpcServer` into `activityDeriver` below: a management listing that derived state its own
     // way would disagree with the session list in exactly the two windows that matter most (the
     // post-turn grace and the >24h demotion), because those two signals live only in that scope.
-    registerListSessionsTools(registry, {
-      store,
-      derive: (row, sessionId, nowMs) => activityDeriver?.(row, sessionId, nowMs),
-      turnStartedAt: (sid) => engine?.turnStartedAt(sid),
-      isRunning: (sid) => engine?.isRunning(sid) ?? false,
-      // The EXISTING abort path, verbatim — the same `engine.interrupt` `session.interrupt` and T5's
-      // last-detach enforcement call, so a turn the coordinator stops ends exactly as a user's ESC
-      // ends it (`turn_completed(aborted)`, resumable).
-      interrupt: (sid) => { engine?.interrupt(sid); },
-      emit: (sid, activity) => { hub.emitActivity(sid, activity); },
-    });
     // 4h-ii-b Task 4 (CC SendMessage): registered alongside spawn_agent (only when subagents are
     // available) so the MAIN thread can address a subagent by agentId/name — a running one gets the
     // message at its next step, a finished one is resumed with it. Like spawn_agent it's an engine
     // bridge; this DEF is what the model sees, the engine intercepts the call (see engine.ts's
     // sendMessageCalls bridge). Excluded from every child's tool set (depth-0 only).
-    registerSendMessageTool(registry);
     // 4h-ii-c Task 2 (CC TaskStop): registered alongside spawn_agent/send_message — the SAME
     // `bgAgents`/`bgRegistry` instances the engine cfg gets below, so a stop here is visible to
     // the engine's own pin/completion-reminder bookkeeping. Unlike spawn_agent/send_message this
@@ -1292,7 +1242,6 @@ export async function startDaemon(opts: {
     // further down (before `new AgentEngine(...)`) — safe (same later-assigned-closure shape as
     // `engine?.transcriptPathFor` a few lines below): this closure is only ever INVOKED at a real
     // task_stop call, long after boot finishes assigning it.
-    registerTaskStopTool(registry, { bgAgents, bgRegistry, deferred: ["code", "dispatch"], dispatch: { stopChild: (caller, id) => dispatchChildren?.stopChild(caller, id) } });
     // phase 5a Task 1: agent_list/agent_output — the read-only "collect your subagents"
     // counterpart to spawn_agent/send_message/task_stop above, same bgAgents instance so what
     // they report is exactly what the engine's own pin/completion bookkeeping sees. `deferred:
@@ -1303,7 +1252,6 @@ export async function startDaemon(opts: {
     // closure is only ever INVOKED at tool-call time (well after boot completes), by which point
     // it's set. Mirrors `cwdOf`/`rootsOf`/`tmpDirOf`'s own lazy-closure-over-a-later-assigned-const
     // shape used for registerLspTools above.
-    registerAgentQueryTools(registry, { bgAgents, store, transcriptPathFor: (sid, tid) => engine?.transcriptPathFor(sid, tid) });
     // T1 (file-based memory, design doc `2026-07-15-file-based-memory-design.md`) DELETES the
     // memory_read/memory_write/memory_delete tools that used to register here (phase 5b Task 2) —
     // CC parity: no dedicated memory tools, plain write/edit/read/glob/grep over the per-project
@@ -1314,7 +1262,6 @@ export async function startDaemon(opts: {
     // reads from — one store, so a skill written here is immediately loadable via Skill with no
     // second handle to keep in sync. ALWAYS_ASK-gated (gate.ts): a card under BOTH ask and auto,
     // and excluded from every child's tool set (engine.ts childExcludeTools).
-    registerSkillWriteTool(registry, { skills: skillStore });
     // Computer use (Phase 5 CU): opt-in via settings.computerUse.enabled (the strongest reading of
     // "full-auto CU requires explicit opt-in" — absent/false, the `computer` tool does not exist).
     // The service holds leases on the SAME `peripheral` broker (hoisted above this gate) that
@@ -1332,7 +1279,6 @@ export async function startDaemon(opts: {
     // `routineStore` instance the scheduler (below, past this gate's close) fires against —
     // `routineStore` is hoisted above this gate for exactly this sharing (see its own doc comment).
     // Deferred like worktree/notebook/plan above — a specialized tool, not needed in every turn.
-    registerScheduleTool(registry, { routines: routineStore }, { deferred: true });
     // Phase 5f Task 3, consolidated into the single `lsp` tool by lsp-consolidation T2 (design doc
     // `2026-07-15-lsp-consolidation-design.md`): ONE LspManager for the whole daemon (mirrors the
     // ONE-MemoryStore/ONE-McpManager precedent above), reaped on shutdown below.
@@ -1364,7 +1310,6 @@ export async function startDaemon(opts: {
       writeDiff(normaHome, sid, diffId, header, patch);
     if (lspCfg?.enabled !== false) {
       lspManager = new LspManager({ idleShutdownMs: lspCfg?.idleShutdownMs });
-      registerLspTools(registry, { lsp: lspManager, cwdOf, rootsOf, tmpDirOf });
     }
     mcp = new McpManager({ registry, trust: trustStore, log: (m) => console.error(m) });
     // MCP resources (CC parity: ListMcpResourcesTool/ReadMcpResourceTool) — registered
@@ -1373,7 +1318,6 @@ export async function startDaemon(opts: {
     // exists across every later startAll/ensureProject/startPlugins call this `mcp` instance ever
     // makes. Deferred like schedule/notebook_edit/worktree above — specialized, not needed most
     // turns.
-    registerMcpResourceTools(registry, { mcp }, { deferred: true });
     await mcp.startAll(settings?.mcpServers ?? {});
     // Plugin MCP servers start only with explicit settings consent (mcpEnabled = enabled &&
     // !disabled); a plugin's skills are always live (SkillStore above), but its MCP/manifest
@@ -1421,7 +1365,6 @@ export async function startDaemon(opts: {
     // `onCircuitOpen` was wired before `registry` existed).
     pluginSupervisor.startAll(spawnablePlugins);
 
-    const compactor = new Compactor({ provider: agentProvider, store, hub });
     // hot-settings T2 review: ALWAYS constructed, never gated on the boot-time reviewer.enabled.
     // The BashReviewer constructor is inert (stores provider/model/timeoutMs refs only — no I/O,
     // spawns nothing; review() is what does work, and it's only ever reached through the engine's
@@ -1431,12 +1374,7 @@ export async function startDaemon(opts: {
     // there's a reviewer object to run) — a restart-required toggle, which the "no restart
     // anywhere" rule forbids. `reviewer.model` stays a boot snapshot (out of T2's scope — it
     // picks WHICH model the reviewer would use, not whether reviewing is on).
-    const reviewerCfg = settings?.reviewer;
-    const reviewer = new BashReviewer({ provider: agentProvider, model: reviewerCfg?.model });
     // Default ON: the titler is built unless settings.titles.enabled is explicitly false.
-    const titlesCfg = settings?.titles;
-    const titler =
-      titlesCfg?.enabled === false ? undefined : new SessionTitler({ provider: agentProvider, store, hub, model: titlesCfg?.model });
     // Plugin hooks runtime (Phase 4f Task 2): the engine-facing `cfg.hooks` facade. `hookRegistry`
     // is the SAME instance ipc/server.ts's plugin-lifecycle RPCs rebuild in place (passed through
     // startIpcServer's opts below), so a `plugin.enable`/`disable` hot-apply is visible to the
@@ -1473,23 +1411,11 @@ export async function startDaemon(opts: {
       const s = projectSettings.effective(projectRootOf(cwd));
       return s ? lspAutoDiagnosticsEnabledFrom(s) : true;
     };
-    const hookFacade = new HookFacade({
-      registry: hookRegistry,
-      runner: new HookRunner(),
-      hooksEnabled: hooksEnabledHot,
-      // Task 9: resolves a session's cwd for the per-project `hooksEnabled` read above, for every
-      // event whose `extra` doesn't already carry one (only session-start's does). Same
-      // `store.meta(sid).cwd` source `cwdOf` (lsp wiring, above) already reads unguarded — a hook
-      // only ever fires for a session already created in `store`, so `meta`'s unknown-session throw
-      // is not a live path here, matching `cwdOf`'s own precedent.
-      cwdForSession: (sid) => store.meta(sid).cwd ?? null,
-    });
     // Dispatch (Phase 7) Task 4: declared BEFORE `engine` is constructed (computerUse precedent —
     // see EngineConfig.dispatch's own doc comment, engine.ts) so the `dispatch: () =>
     // dispatchChildren` getter below closes over this SAME binding; assigned right after
     // `new AgentEngine(...)` returns, since DispatchChildren.spawnChild needs `engine.runTurn`/
     // `engine.isRunning`, which don't exist until the engine itself does.
-    let dispatchChildren: DispatchChildren | undefined;
     // SP-approvals Task 5: constructed here (a statement, not an inline object-literal value) and
     // assigned to the OUTER `permissionRules` binding declared above the `if (agentProvider)` gate
     // — startIpcServer's opts (below, built AFTER this gate closes) need this EXACT instance so
@@ -1510,184 +1436,6 @@ export async function startDaemon(opts: {
     // Winter handle — P8b-13 decides the leg at `session.create` (`ipc/server.ts`, which has it) and
     // Task 16's driver owns every session that runs on it — and this whole class is deleted in
     // Task 17, so a field here would be churn on a dying config. See the report's F7.
-    engine = new AgentEngine({
-      store, hub, registry, broker: approvalBroker,
-      gate: new PermissionGate(),
-      // SP-approvals Task 3: the CC-grammar allow-rules store (Task 1) — plain instance, not a
-      // getter (mirrors `gate` just above): PermissionRules is already "hot" internally (its own
-      // mtime-cached project-rules-file read, re-checked on every decision()/rulesFor() call), and
-      // `globalAllow` is the live-settings thunk that makes the GLOBAL side hot too — this reads
-      // `settings` (the SAME reassignable holder every other hot-settings getter in this file
-      // closes over) fresh on every call, so a settings.json edit to `permissions.allow` applies
-      // with no daemon restart, exactly like reviewerAllow/reviewerEnabled below.
-      //
-      // THE `["Computer"]` DEFAULT LIVES IN THIS GETTER FALLBACK, deliberately NOT inside
-      // PermissionRules itself (see that class's own doc comment, "Spec deviation"): CC parity
-      // wants a fresh session's `computer` tool calls pre-approved out of the box, but the default
-      // must be overridable — an explicit `"permissions": { "allow": [] }` in settings.json
-      // disables it outright (the `?? ["Computer"]` fallback only fires when the key is ABSENT,
-      // never when it's present-but-empty), while an absent `permissions` block (or an absent
-      // `allow` key within it) gets the default. normaHome is the SAME control-plane path passed
-      // to `grantDeniedPrefixes` below — PermissionRules uses it only to refuse writing a
-      // project-scoped rule file inside Norma's own home (append()'s control-plane guard), never
-      // to read/write settings.json's global rules itself (that's what the globalAllow thunk +
-      // this class's OWN read-modify-write in append(scope:"global") are for).
-      permissionRules,
-      // SP-approvals Task 10 (spec §7): the user-added half of web_fetch's dangerous-domain floor
-      // — same live-getter shape as `globalAllow` just above, so an edit to
-      // `permissions.dangerousDomains.added` applies with no daemon restart. Absent block/field
-      // both resolve to `undefined`, which engine.ts's `?? []` treats as "no user additions" — the
-      // shipped list alone still applies.
-      // Task 7: now resolved per-project through the SAME `projectSettings` instance `globalAllow`
-      // uses above — `cwd` is the calling session's cwd (engine.ts's webFetchGate passes its own
-      // param straight through); `effective(cwd ?? null)` degrades to `settings` verbatim for a
-      // null/untrusted/overlay-less cwd, so this reads byte-identically to the pre-Task-7 getter
-      // whenever no project overlay applies. Critical 1 fix (whole-branch review): now literally the
-      // SAME `dangerousDomainsAdded` const ReadPage/the research runner/Search are wired with above
-      // (hoisted near `projectRootOf`), rather than a second inline lambda re-deriving the identical
-      // read — one getter, every consumer of the effective dangerous-domain list.
-      dangerousDomainsAdded,
-      dirs: sessionDirs,
-      // write-permission-flow F2: the out-of-root write/edit grant flow must never silently grant
-      // any part of Norma's OWN home directory. This is BROADER than the READ denylist above
-      // (which locks only `dirs.runDir` — the rest of normaHome stays readable by design) on
-      // purpose: a GRANT is strictly higher-risk than a read — it opens the directory to WRITE,
-      // and because bash's seatbelt shares the session's write roots, to bash too. normaHome holds
-      // the control plane (run/: IPC socket, lock, plugin PID files) AND Norma's managed internal
-      // state (sessions/, logs/, plugins/, and crucially projects/<key>/memory — the per-project
-      // MEMDIR). The MEMDIR is the load-bearing case: when memory is ENABLED it's already a session
-      // BASE root (sessionDirs above), so a write there is in-root and never reaches the grant flow
-      // — but when memory is DISABLED it is deliberately NOT a root, and without this an auto-policy
-      // write could silently re-grant it, quietly defeating the memory-disable gate (and writing
-      // into ~/.norma). The agent never has a legitimate need to be *granted* write access to
-      // Norma's own home — its legitimate MEMDIR access comes from memory being enabled (a base
-      // root), not from a grant. Realpath-hardened in engine.ts's grantDenied, bidirectional
-      // (an ancestor of normaHome is refused too — see grantDenied's doc comment).
-      grantDeniedPrefixes: [normaHome],
-      provider: agentProvider,
-      assembler,
-      compactor,
-      mcp: mcp ?? undefined,
-      questions: questions ?? undefined,
-      tasks: taskStore ?? undefined,
-      plans: plans ?? undefined,
-      setPolicy: (sid, pol) => store.setApprovalPolicy(sid, pol),
-      worktrees,
-      bgRegistry,
-      agents,
-      subagents,
-      bgAgents,
-      // 4h-i Task 3: undefined (settings.subagents.maxDepth unset) → engine.ts's runThread
-      // defaults it to 5 itself (`subagentMaxDepth?.() ?? 5`) — mirrors the maxConcurrent line
-      // above, which leans on SubagentManager's own internal default the same way. hot-settings
-      // T2: getter over the live `settings` holder, not the boot-captured value — see
-      // `worktrees`/`subagents` above for the same shape.
-      subagentMaxDepth: () => settings?.subagents?.maxDepth,
-      reviewer,
-      // hot-settings T2: these three read the LIVE `settings` holder directly (NOT the
-      // boot-captured `reviewerCfg` above, which only decides whether the BashReviewer object
-      // itself gets constructed — that decision stays a one-time boot snapshot, out of T2's
-      // scope). A later task's watcher reassigns `settings` in place; engine.ts calls each getter
-      // fresh per read site, so a reviewer.enabled/allow/classes edit applies with no engine
-      // reconstruction.
-      // Task 8 (CC project-folder-mechanics): now resolved per-project through the SAME
-      // `projectSettings` instance `dangerousDomainsAdded`/`globalAllow` above use — `cwd` is the
-      // calling session's cwd (engine.ts's dispatch-loop/runThread locals, threaded straight
-      // through); `effective(cwd ?? null)` degrades to `settings` verbatim for a
-      // null/untrusted/overlay-less cwd, so this reads byte-identically to the pre-Task-8 getter
-      // whenever no project overlay applies. The reviewer OBJECT itself (`reviewer` just above)
-      // stays a single boot-constructed instance shared by every project — only whether it's
-      // CONSULTED for a given cwd is per-project (mirrors the doc comment on `reviewerCfg`/
-      // `lspAutoDiagnosticsHot`: which reviewer model to use is a boot snapshot; whether reviewing
-      // runs at all is hot, and now project-scoped too).
-      reviewerEnabled: (cwd) => projectSettings.effective(projectRootOf(cwd))?.reviewer?.enabled,
-      reviewerAllow: (cwd) => projectSettings.effective(projectRootOf(cwd))?.reviewer?.allow ?? [],
-      // Phase 5e T4: raw pass-through — engine.ts's reviewClassEnabled already treats an absent
-      // object/key as enabled, and reviewerEnabled:false already short-circuits before this is
-      // ever consulted (see its own doc comment), so no extra defaulting belongs here.
-      reviewerClasses: (cwd) => projectSettings.effective(projectRootOf(cwd))?.reviewer?.classes,
-      titler,
-      // hot-settings T5a/T5b: EngineConfig.computerUse is a getter (engine.ts) over the SAME `let
-      // computerUse` holder assigned at boot above (~line 423) — T5b (below, after this engine is
-      // constructed) builds the apply callbacks that reassign that holder (registerComputer sets
-      // it, teardownComputer clears it) as settings.json changes, so this closure — unchanged since
-      // T5a — now resolves LIVE: a hot enable/disable is visible on this session's NEXT tool ctx
-      // with no engine reconstruction.
-      computerUse: () => computerUse,
-      // lsp-consolidation T3: mirrors `computerUse`'s own getter-over-a-hot-rebuilt-holder shape —
-      // `lspManager` is the SAME `let` binding registerLsp/teardownLsp (settings-apply.ts, below)
-      // reassign on an `lsp.enabled` hot flip, so this resolves live: a disable is invisible to a
-      // NEW tool call the instant teardownLsp clears the holder, no engine reconstruction. `??
-      // undefined` just normalizes the `LspManager | null` holder to EngineConfig's `| undefined`
-      // field type (the getter itself, not the holder, is what's optional on EngineConfig).
-      lsp: () => lspManager ?? undefined,
-      autoDiagnosticsEnabled: lspAutoDiagnosticsHot,
-      // Task 8 (CC project-folder-mechanics): each sub-getter now resolves through the SAME
-      // `projectSettings` instance the reviewer getters above use — `cwd` is engine.ts's
-      // toolSearchEnabled/Threshold/DeferExternals param, threaded from every one of their own
-      // call sites (buildInstructionsFull, runThread, executeCall). `effective(cwd ?? null)`
-      // degrades to `settings` verbatim for a null/untrusted/overlay-less cwd, so this reads
-      // byte-identically to the pre-Task-8 getters whenever no project overlay applies — the
-      // deferThreshold env fallback is UNCHANGED, still consulted whenever the resolved effective
-      // settings (global or project-merged) don't set one.
-      toolSearch: {
-        enabled: (cwd) => projectSettings.effective(projectRootOf(cwd))?.toolSearch?.enabled,
-        deferThreshold: (cwd) => projectSettings.effective(projectRootOf(cwd))?.toolSearch?.deferThreshold ?? Number(process.env.NORMA_TOOLSEARCH_THRESHOLD ?? 12),
-        deferExternals: (cwd) => projectSettings.effective(projectRootOf(cwd))?.toolSearch?.deferExternals,
-      },
-      // CC-parity phase 3 (Workflows, Track B Task B1): same per-project/hot shape as
-      // reviewerEnabled/toolSearch above — `workflowsEnabledFrom`/`keywordTriggerEnabledFrom`
-      // (settings.ts) already bake in the default-ON (`!== false`) semantics, so these resolve to a
-      // definite boolean (fail-open `true` when neither a project overlay nor global settings.json
-      // exist yet, mirroring hooksEnabledHot/lspAutoDiagnosticsHot's own null-settings fallback
-      // above). workflowsEnabled is consumed by B3's per-session Workflow tool gating;
-      // keywordTriggerEnabled is consumed by B4's `/ultracode` keyword trigger (engine.ts).
-      workflowsEnabled: (cwd?: string) => (projectSettings.effective(projectRootOf(cwd)) ?? settings) ? workflowsEnabledFrom(projectSettings.effective(projectRootOf(cwd)) ?? settings!) : true,
-      // Task B4 fix: this getter originally had NO equivalent null-guard (unlike workflowsEnabled
-      // just above), so a genuinely-null `settings` (malformed settings.json at boot, or a test
-      // that injects `agentProvider` directly — the exact scenario hooksEnabledHot/
-      // lspAutoDiagnosticsHot's own doc comments call out) would throw at
-      // `keywordTriggerEnabledFrom(... ?? settings!)` instead of failing open. B4 is the first real
-      // consumer of this getter, so harden it now to the SAME null-guarded shape as workflowsEnabled
-      // (fails open to `true`, matching hooksEnabledHot/lspAutoDiagnosticsHot's own precedent).
-      keywordTriggerEnabled: (cwd?: string) => (projectSettings.effective(projectRootOf(cwd)) ?? settings) ? keywordTriggerEnabledFrom(projectSettings.effective(projectRootOf(cwd)) ?? settings!) : true,
-      // Task B2: the runtime the Workflow tool bridge (engine.ts) launches/awaits against —
-      // constructed above, right alongside bgAgents (see its own doc comment there for why
-      // `spawnAgent`/`onEvent` safely close over `engine` before this very assignment completes).
-      workflows: workflowRuntime,
-      hooks: hookFacade,
-      // Subagent transcript files (CC parity): the SAME session-tmp-dir accessor registerLspTools
-      // above already gets — sessionTmpDir-backed, so a subagent's transcript lands right next to
-      // whatever else this session's tools already write there (web_fetch's saved pages, bg-task
-      // output), inside the SAME sandbox-readable root.
-      tmpDirOf,
-      // working-directories T4: bash's $OUTDIR splice + explicit seatbelt-writable union
-      // (tools/bash.ts) — see `outDirOf`'s own local doc comment above.
-      outDirOf,
-      // diff-tabs Task 6: see `persistDiff`'s own local doc comment above.
-      persistDiff,
-      // working-directories T4 fix round 1: the SAME memoryDirOf/memoryEnabledHot closures
-      // `sessionDirs` above already uses to fold the MEMDIR into the session's write roots —
-      // exposed to the fs-reviewer's `fsWriteIsUnusual` call (engine.ts) so it treats the MEMDIR
-      // as always-silent (spec §2) without re-deriving the path a second way. `undefined` when
-      // memory is disabled, matching `sessionDirs`'s own gate exactly.
-      memDirOf: (cwd: string) => (memoryEnabledHot() ? memoryDirOf(cwd) : undefined),
-      // working-directories T6: the SAME exemption for a workdir-less session, which has no `cwd`
-      // to key `memDirOf` off — mirrors `sessionDirs`'s own `!primary` branch above (the
-      // `assistantMemoryDirFor`/`memoryEnabledHot()` pair), not a second computation.
-      assistantMemDirOf: () => (memoryEnabledHot() ? assistantMemoryDirFor({ normaHome }) : undefined),
-      // task-30 (push-notification track): the real osascript-shelling implementation — the
-      // engine's `notify` bridge only calls this when hub.attachedCount(sessionId) === 0 at
-      // emission time (see engine.ts's executeCall). Boot-constant (no settings gate — v1 keeps
-      // this always-on, matching the task's "keep it simple" design).
-      notifyFallback: notifyHeadless,
-      dispatch: () => dispatchChildren,
-      // Dispatch (Phase 7) Task 5: both getters — same live-closure-over-`dispatchChildren` shape
-      // as `dispatch` just above, so a call before `dispatchChildren` is assigned (can't happen:
-      // no turn runs before construction finishes) would just no-op via `?.`.
-      onTurnEnd: (sid) => dispatchChildren?.onTurnEnd(sid),
-      dispatchRoster: (sid) => dispatchChildren?.rosterFor(sid),
-    });
     // Dispatch (Phase 7) Task 4: constructed AFTER `engine` exists — its `runTurn`/`isRunning`
     // deps close over `engine!` (non-null: this whole block only runs once `engine` is assigned
     // just above, mirroring `registerAgentQueryTools`' own `engine?.transcriptPathFor` lazy-closure
@@ -1697,13 +1445,6 @@ export async function startDaemon(opts: {
     // Task 5 adds `interrupt` (engine.interrupt, the SAME mechanism task_stop already uses for bg
     // agents) — stopChild's dep — and, once constructed, `start()`: rebuilds the child set from
     // the store (daemon-restart recovery) and subscribes to the hub's observer fan-out.
-    dispatchChildren = new DispatchChildren({
-      store, hub,
-      runTurn: (sid) => engine!.runTurn(sid),
-      isRunning: (sid) => engine!.isRunning(sid),
-      interrupt: (sid) => { engine!.interrupt(sid); },
-    });
-    dispatchChildren.start();
 
     // Dreaming (Phase 7b): background memory synthesis for the dispatch session. Hardcoded
     // model/cadence per spec; memory.enabled (hot) is the only switch. Constructed here, AFTER
@@ -1716,7 +1457,7 @@ export async function startDaemon(opts: {
       dir: () => assistantMemoryDirFor({ normaHome }),
       enabled: memoryEnabledHot,
       // P8b Task 17: a Winter-leg turn in flight is activity too (the drivers' host-side count).
-      activeTurnCount: () => (engine?.activeTurnCount() ?? 1) + winterDrivers.list().filter((d) => d.turnRunning).length, // no engine yet -> treat as busy
+      activeTurnCount: () => signals.activeTurnCount(),
       // session-activity-hygiene T7 (spec §3): the cleaner rides THIS scheduler slot. Constructed
       // here (not at the top of the file) for the same reason the Dreamer is: it needs a provider,
       // and the signals it derives activity from (`engine`, `hub`) are only final by this point.
@@ -1734,8 +1475,8 @@ export async function startDaemon(opts: {
         provider: agentProvider,
         store,
         attachedCount: (sid) => hub.attachedCount(sid),
-        turnRunning: (sid) => engine?.isRunning(sid) ?? false,
-        bgWork: (sid) => engine?.hasBackgroundWork(sid) ?? false,
+        turnRunning: (sid) => signals.isRunning(sid),
+        bgWork: (sid) => signals.hasBackgroundWork(sid),
         home: normaHome,
         enabled: cleanerEnabledHot,
         // P8a Task 12: the second sanctioned deletion path takes runtime state with it too, exactly
@@ -1773,8 +1514,7 @@ export async function startDaemon(opts: {
       computerInFlight: () => computerUse?.inFlight() ?? false,
       buildLspManager: (s) => new LspManager({ idleShutdownMs: s?.lsp?.idleShutdownMs }),
       registerLsp: (mgr) => {
-        lspManager = mgr;
-        registerLspTools(registry, { lsp: mgr, cwdOf, rootsOf, tmpDirOf }); // SAME session-meta sources as the boot registration above
+        lspManager = mgr;   // Task 17: the `lsp` tool retired with the engine (Winter's own LSP serves the child); the manager stays for a later capability
       },
       teardownLsp: async () => {
         registry.unregister("lsp");
@@ -1826,7 +1566,7 @@ export async function startDaemon(opts: {
   const routinesAudit = new RoutineAuditLog(join(normaHome, "routines-audit.jsonl"));
   // P8b Task 17: a routine fires as a NEW code session, so it runs on whichever leg
   // `winterLeg.code` names — through the driver table when that is the Winter leg.
-  const routineRunner = makeDaemonRoutineRunner({ store, hub, engine, winter: winterDrivers });
+  const routineRunner = makeDaemonRoutineRunner({ store, hub, engine: null, winter: winterDrivers });
   const routineScheduler = makeRoutineScheduler({
     store: routineStore,
     runner: routineRunner,
@@ -1890,7 +1630,8 @@ export async function startDaemon(opts: {
     tokens: authority,
     store,
     hub,
-    engine,
+    engine: signals,
+    agents: childrenRpc,
     // session-activity-hygiene T8: fills the `activityDeriver` holder above with THE derivation the
     // server stamps `session.list` with, so dispatch's `list_sessions` answers with the same state
     // this daemon serves everywhere else — including the two signals (post-turn grace, >24h
@@ -1945,8 +1686,8 @@ export async function startDaemon(opts: {
     // restart, even on a no-provider daemon where the facade itself was never built.
     hooks: hookRegistry,
     questions: questions ?? undefined,
-    tasks: taskStore ?? undefined,
-    plans: plans ?? undefined,
+    tasks: undefined,
+    plans: undefined,
     peripheral,
     providerLink,
     hardware,

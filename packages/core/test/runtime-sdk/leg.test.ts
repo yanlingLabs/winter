@@ -1,64 +1,38 @@
-import { test, expect } from "bun:test";
-import type { Settings } from "../../src/settings";
+// P8b Task 17 Step 4 — the engine is retired: `legForNewSession` answers `winter` for every mode,
+// whatever `settings.runtimes.winterLeg` says. The block is ACCEPTED for one release (the
+// `migrations.memoryKeys` pattern): a written `false` is reported (`winterLegDisabledKeys`) by
+// settings-apply and the boot log, never obeyed.
+import { expect, test } from "bun:test";
 import { legForNewSession } from "../../src/runtime-sdk/leg";
+import { winterLegDisabledKeys, winterOptionsFromSettings, type Settings } from "../../src/settings";
 
 const MODES = ["code", "dispatch", "chat"] as const;
-
-/** Task 15 has not added `winterLeg` to the zod block yet, so a settings literal carrying one is
- *  structurally wider than the inferred `Settings` type — exactly the shape `legForNewSession`
- *  reads through. */
-function settingsWith(leg: Record<string, boolean>): Settings {
+function settingsWith(leg: Partial<Record<"code" | "dispatch" | "chat", boolean>>): Settings {
   return { runtimes: { winterLeg: leg } } as unknown as Settings;
 }
 
-test("an ABSENT runtimes block answers the schema's per-mode defaults (Task 17: dispatch and code on the Winter leg)", () => {
-  expect(legForNewSession("dispatch", {} as Settings)).toBe("winter");
-  expect(legForNewSession("chat", {} as Settings)).toBe("engine");
-  expect(legForNewSession("code", {} as Settings)).toBe("winter");
+test("every mode is on the Winter leg with no settings at all", () => {
+  for (const m of MODES) expect(legForNewSession(m, undefined)).toBe("winter");
+  for (const m of MODES) expect(legForNewSession(m, null)).toBe("winter");
+  for (const m of MODES) expect(legForNewSession(m, {} as Settings)).toBe("winter");
 });
 
-test("undefined settings entirely answers the same defaults", () => {
-  expect(legForNewSession("dispatch", undefined)).toBe("winter");
-  expect(legForNewSession("chat", undefined)).toBe("engine");
-  expect(legForNewSession("code", undefined)).toBe("winter");
-});
-
-test("a runtimes block with NO winterLeg answers the schema's per-mode DEFAULTS (Task 17: dispatch and code on the Winter leg; chat still on the engine)", () => {
-  // The shipped shape before any flag was written: `runtimes` exists for retention/migrations and
-  // knows nothing about a leg. The answer is the ONE defaults door's (`winterOptionsFromSettings`).
+test("a runtimes block with NO winterLeg: every mode on the Winter leg", () => {
   const s = { runtimes: { retention: { deliveriesDays: 30, nameLeasesDays: 7 }, migrations: { memoryKeys: false } } } as unknown as Settings;
-  expect(legForNewSession("dispatch", s)).toBe("winter");
-  expect(legForNewSession("chat", s)).toBe("engine");
-  expect(legForNewSession("code", s)).toBe("winter");
-  // and an absent settings object altogether answers the same
-  expect(legForNewSession("dispatch", undefined)).toBe("winter");
-  expect(legForNewSession("chat", null)).toBe("engine");
+  for (const m of MODES) expect(legForNewSession(m, s)).toBe("winter");
 });
 
-test("a winterLeg with only SOME modes leaves the others on the engine", () => {
-  const s = settingsWith({ chat: true, dispatch: false, code: false });
-  expect(legForNewSession("chat", s)).toBe("winter");
-  expect(legForNewSession("dispatch", s)).toBe("engine");
-  expect(legForNewSession("code", s)).toBe("engine");
-});
-
-test("each mode's flag is read independently", () => {
-  expect(legForNewSession("code", settingsWith({ code: true, chat: false, dispatch: false }))).toBe("winter");
-  expect(legForNewSession("chat", settingsWith({ code: true, chat: false, dispatch: false }))).toBe("engine");
-  expect(legForNewSession("dispatch", settingsWith({ code: true, chat: false, dispatch: false }))).toBe("engine");
-  const all = settingsWith({ code: true, dispatch: true, chat: true });
-  for (const m of MODES) expect(legForNewSession(m, all)).toBe("winter");
-});
-
-test("only a literal true moves a session — a hand-edited truthy value does not", () => {
-  // A user who wrote `"yes"` or `1` into settings.json must not have their sessions silently moved
-  // onto a leg they did not ask for.
-  for (const v of ["yes", 1, "true", {}, []] as unknown[]) {
-    // a default-ON leg is moved OFF by a hand-edited non-boolean too: only `true` is on
-    expect(legForNewSession("code", settingsWith({ code: v as boolean }))).toBe("engine");
-    expect(legForNewSession("dispatch", settingsWith({ dispatch: v as boolean }))).toBe("engine");
+test("a written `false` (or any hand-edited value) is IGNORED — the engine leg no longer exists", () => {
+  for (const v of [false, "yes", 1, "true", {}, []] as unknown[]) {
+    for (const m of MODES) expect(legForNewSession(m, settingsWith({ [m]: v as boolean }))).toBe("winter");
   }
-  expect(legForNewSession("code", settingsWith({ code: false }))).toBe("engine");
-  expect(legForNewSession("code", settingsWith({ code: true }))).toBe("winter");
-  expect(legForNewSession("dispatch", settingsWith({ dispatch: false }))).toBe("engine");
+  expect(winterOptionsFromSettings(settingsWith({ chat: false, code: false })).winterLeg).toEqual({ chat: true, dispatch: true, code: true });
+});
+
+test("winterLegDisabledKeys names exactly the keys a file sets to false — what the logs report", () => {
+  expect(winterLegDisabledKeys(undefined)).toEqual([]);
+  expect(winterLegDisabledKeys({} as Settings)).toEqual([]);
+  expect(winterLegDisabledKeys(settingsWith({ chat: true }))).toEqual([]);
+  expect(winterLegDisabledKeys(settingsWith({ chat: false, code: false }))).toEqual(["chat", "code"]);
+  expect(winterLegDisabledKeys(settingsWith({ dispatch: false }))).toEqual(["dispatch"]);
 });

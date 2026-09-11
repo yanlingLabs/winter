@@ -454,8 +454,9 @@ describe("makeApply: the runtime options diff (P8b Task 15)", () => {
       withRuntimes({ winterLeg: { chat: false, dispatch: false, code: false }, winterExecutable: "/a/winter", advisorModel: "m1", winterIdleTimeoutSec: 900 }),
       withRuntimes({ winterLeg: { chat: true, dispatch: false, code: false }, winterExecutable: "/b/winter", advisorModel: "m2", winterIdleTimeoutSec: 60 }),
     );
-    expect(lines.filter((l) => l.includes("takes effect for new sessions"))).toHaveLength(4);
-    expect(lines.some((l) => l.includes("winterLeg") && l.includes("open sessions finish on the leg they were created with"))).toBe(true);
+    expect(lines.filter((l) => l.includes("takes effect for new sessions"))).toHaveLength(3);   // Task 17: winterLeg no longer re-wires anything
+    // Task 17: a `false` is accepted and reported as ignored — the engine leg no longer exists
+    expect(lines.some((l) => l.includes("winterLeg") && l.includes("the engine leg no longer exists; ignored"))).toBe(true);
   });
 
   test("an absent runtimes block on both sides is not a change — a daemon that never configures this says nothing", async () => {
@@ -522,7 +523,7 @@ describe("makeApply: the runtime options diff (P8b Task 15)", () => {
     await apply(Settings.parse(BASE_SETTINGS), Settings.parse({ ...BASE_SETTINGS, runtimes: { winterLeg: { chat: true }, retention: { nameLeasesDays: 1 } } }));
     await flushMicrotasks();
     expect(releaseHeld).toHaveBeenCalledTimes(1);
-    expect(lines.filter((l) => l.includes("winterLeg"))).toHaveLength(1);
+    expect(lines.filter((l) => l.includes("winterLeg"))).toHaveLength(0);   // Task 17: nothing to report when no key is false
     expect(lines.filter((l) => l.includes("winterIdleTimeoutSec"))).toEqual([]); // unchanged at 900
   });
 

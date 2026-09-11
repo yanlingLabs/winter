@@ -1,5 +1,5 @@
 import type { Settings } from "./settings";
-import { memoryEnabledFrom, winterOptionsFromSettings } from "./settings";
+import { memoryEnabledFrom, winterLegDisabledKeys, winterOptionsFromSettings } from "./settings";
 import { retentionFromSettings } from "./runtime-state/retention";
 import type { ToolRegistry } from "./agent/tools/registry";
 import type { ComputerUseService } from "./agent/computer-use";
@@ -216,9 +216,10 @@ export function makeApply(deps: SettingsApplyDeps): (prev: Settings | null, next
     // line that matters. The retention nudge above is different: it is an action, not a message, and
     // a directory that has just learned its windows is exactly when it should re-run a held delivery.
     if (prev === null) return;
-    if (before.winterLeg.chat !== after.winterLeg.chat || before.winterLeg.dispatch !== after.winterLeg.dispatch || before.winterLeg.code !== after.winterLeg.code) {
-      log("runtimes.winterLeg changed — it takes effect for new sessions; open sessions finish on the leg they were created with");
-    }
+    // Task 17: the engine leg no longer exists. The keys are accepted for one release; a `false`
+    // is reported here (and at boot) and never obeyed.
+    const disabled = winterLegDisabledKeys(next);
+    if (disabled.length > 0) log(`runtimes.winterLeg.{${disabled.join(",")}} = false: the engine leg no longer exists; ignored (every session runs on the Winter leg)`);
     if (before.winterExecutable !== after.winterExecutable) log("runtimes.winterExecutable changed — it takes effect for new sessions");
     if (before.advisorModel !== after.advisorModel) log("runtimes.advisorModel changed — it takes effect for new sessions");
     if (before.idleTimeoutSec !== after.idleTimeoutSec) log("runtimes.winterIdleTimeoutSec changed — it takes effect for new sessions");

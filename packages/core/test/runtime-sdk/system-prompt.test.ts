@@ -1,34 +1,26 @@
-// P8b Task 17 Step 0(a) — NORMA'S VOICE ON THE WINTER LEG, pinned byte-for-byte per mode against the
-// ENGINE'S OWN composed instructions (a real `AgentEngine` turn over the fake provider, which records
-// the `instructions` it was handed). The two sides share the one `ContextAssembler`; what is under
-// test is `winterSystemPromptFor`'s argument mapping (engine.ts `turn()`'s `assemble({...})` call).
-//
-// The engine here runs with no ToolSearch config and under `auto`, so `buildInstructionsFull` adds
-// nothing (no deferred index, no plan paragraph, no /ultracode reminder) and the comparison is
-// EQUALITY, not prefix — see system-prompt.ts's header for why those three appendices are not
-// ported.
+// P8b Task 17 Step 0(a) — NORMA'S VOICE ON THE WINTER LEG, pinned byte-for-byte per mode against
+// the engine's `assemble({...})` mapping. Until Step 4 this file ran a REAL `AgentEngine` turn over
+// the fake provider and compared its recorded `instructions` (equality, not prefix — the engine ran
+// with no ToolSearch config under `auto`, so `buildInstructionsFull` added nothing); the engine is
+// retired now, so the expected side is the engine's `turn()` call to the assembler, argument by
+// argument (`engineAssemble` below — the literal that `git show 4c8319ba:packages/core/src/agent/
+// engine.ts` `turn()` passed), over the SAME `ContextAssembler`.
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ApprovalBroker } from "../../src/agent/approvals";
-import { Compactor } from "../../src/agent/compactor";
+import { CHAT_SYSTEM_PROMPT } from "../../src/agent/chat-prompt";
 import { ContextAssembler } from "../../src/agent/context";
-import { SessionDirectories } from "../../src/agent/dirs";
-import { AgentEngine } from "../../src/agent/engine";
-import { FakeProvider } from "../../src/agent/fake-provider";
-import { PermissionGate } from "../../src/agent/gate";
+import { DISPATCH_SYSTEM_PROMPT } from "../../src/agent/dispatch-prompt";
 import type { ResolvedStyle } from "../../src/agent/output-styles";
+import { sessionTmpDir } from "../../src/agent/session-tmp";
 import { SkillStore } from "../../src/agent/skills";
-import { ToolRegistry } from "../../src/agent/tools/registry";
 import { TrustStore } from "../../src/agent/trust";
-import type { ProviderEvent } from "../../src/providers/types";
+import { clientEffortEligible, isClientEffort } from "../../src/settings";
 import { buildWinterOptions } from "../../src/runtime-sdk/mode-options";
 import { winterSystemPromptFor } from "../../src/runtime-sdk/system-prompt";
 import { SessionHub } from "../../src/sessions/hub";
 import { SessionStore } from "../../src/sessions/store";
-
-const reply: ProviderEvent[] = [{ type: "text_delta", delta: "ok" }, { type: "usage", inputTokens: 1, outputTokens: 1 }, { type: "done", stopReason: "end_turn" }];
 
 function world(style?: ResolvedStyle) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), "norma-winter-voice-")));
@@ -49,22 +41,35 @@ function world(style?: ResolvedStyle) {
   return { home, cwd, assembler, store, hub };
 }
 
-/** One real engine turn; returns the instructions the provider was handed. */
-async function engineInstructions(w: ReturnType<typeof world>, session: { mode?: "code" | "dispatch" | "chat"; origin?: string; cwd?: string; effort?: string }): Promise<string> {
-  const provider = new FakeProvider([reply]);
-  const engine = new AgentEngine({
-    store: w.store, hub: w.hub, registry: new ToolRegistry(), broker: new ApprovalBroker(), gate: new PermissionGate(),
-    provider: { provider, model: "fake-1" },
-    dirs: new SessionDirectories(() => (session.cwd === undefined ? [] : [session.cwd])),
-    assembler: w.assembler,
-    compactor: new Compactor({ provider: { provider, model: "fake-1" }, store: w.store, hub: w.hub }),
+
+
+/** engine.ts `turn()` (at 4c8319ba) → `this.cfg.assembler.assemble({...})`, verbatim in meaning. */
+function engineAssemble(assembler: ContextAssembler, meta: { mode?: "code" | "dispatch" | "chat"; origin?: string; cwd?: string; effort?: string }, sessionId: string): string {
+  const isDispatch = meta.mode === "dispatch";
+  const isChat = meta.mode === "chat";
+  const primary = meta.cwd;                                  // `primaryDir`: the cwd column, else dirs[0] (none here)
+  const cwd = primary ?? sessionTmpDir(sessionId);
+  const ultra = isClientEffort(meta.effort) && clientEffortEligible(meta.mode);   // `resolveSel(meta).ultra`
+  const skillToolOffered = isDispatch ? false : isChat ? false : true;            // `registry.namesForMode(...).has("Skill")`: never for chat/dispatch
+  return assembler.assemble({
+    cwd,
+    loadedSkills: [],
+    basePromptOverride: isDispatch ? DISPATCH_SYSTEM_PROMPT : isChat ? CHAT_SYSTEM_PROMPT : undefined,
+    memoryBucket: isDispatch || isChat ? "assistant" : "project",
+    skipOutputStyle: meta.origin === "dispatch-child",
+    ultraDelegation: ultra,
+    skillToolOffered,
+    outDir: undefined,
+    workdirLess: primary === undefined,
+    extraDirs: primary === undefined ? [] : [],
   });
-  const sessionId = w.store.createSession("global", { approvalPolicy: "auto", ...session });
-  w.hub.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: "hello", clientName: "test" });
-  await engine.runTurn(sessionId);
-  return provider.requests[0]!.instructions ?? "";
 }
 
+/** The engine's composed instructions for a session shaped like `session`. */
+function engineInstructions(w: ReturnType<typeof world>, session: { mode?: "code" | "dispatch" | "chat"; origin?: string; cwd?: string; effort?: string }): string {
+  const sessionId = w.store.createSession("global", { approvalPolicy: "auto", ...session });
+  return engineAssemble(w.assembler, session, sessionId);
+}
 describe("winterSystemPromptFor — the engine's composed instructions, per mode", () => {
   test("chat: Norma's chat persona + the _assistant bucket, byte-identical to the engine's turn", async () => {
     const w = world();
@@ -76,7 +81,6 @@ describe("winterSystemPromptFor — the engine's composed instructions, per mode
     expect(ours).toBe(engine);
     // and a chat session WITHOUT a cwd (a phone-created one after SP3.4 gets homedir; a harness one may not)
     const bare = await engineInstructions(w, { mode: "chat" });
-    const { sessionTmpDir } = await import("../../src/agent/session-tmp");
     const sid = w.store.list().find((r) => r.cwd === undefined && r.mode === "chat")!.sessionId;
     expect(winterSystemPromptFor(w.assembler, { mode: "chat", primary: undefined, cwd: sessionTmpDir(sid) })).toBe(bare);
   });
@@ -98,19 +102,10 @@ describe("winterSystemPromptFor — the engine's composed instructions, per mode
 
   test("code, workdir-less: the session-tmp cwd and the workdir-less lines", async () => {
     const w = world();
-    const store = w.store;
-    const provider = new FakeProvider([reply]);
-    const engine = new AgentEngine({
-      store, hub: w.hub, registry: new ToolRegistry(), broker: new ApprovalBroker(), gate: new PermissionGate(),
-      provider: { provider, model: "fake-1" }, dirs: new SessionDirectories(() => []), assembler: w.assembler,
-      compactor: new Compactor({ provider: { provider, model: "fake-1" }, store, hub: w.hub }),
-    });
-    const sessionId = store.createSession("global", { approvalPolicy: "auto" });
-    w.hub.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: "hello", clientName: "test" });
-    await engine.runTurn(sessionId);
-    const { sessionTmpDir } = await import("../../src/agent/session-tmp");
+    const sessionId = w.store.createSession("global", { approvalPolicy: "auto" });
+    const engine = engineAssemble(w.assembler, {}, sessionId);
     const ours = winterSystemPromptFor(w.assembler, { mode: "code", primary: undefined, cwd: sessionTmpDir(sessionId) });
-    expect(ours).toBe(provider.requests[0]!.instructions ?? "");
+    expect(ours).toBe(engine);
   });
 
   test("a dispatch CHILD (origin dispatch-child, mode code) skips the output style; a plain code session gets it; chat/dispatch never do", async () => {

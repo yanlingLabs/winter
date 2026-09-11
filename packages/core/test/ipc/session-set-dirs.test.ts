@@ -574,32 +574,4 @@ describe("session.setDirs (working-directories T3)", () => {
   // proves session.setDirs reaches the actual dirGrant predicate, not a plausible-looking fake.
   // -------------------------------------------------------------------------------------------
 
-  test("REAL daemon: session.setDirs refuses normaHome itself via the engine's real grantDenied predicate", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-set-dirs-real-daemon-"));
-    // An ENGINE proof: pin the engine leg for the code session it mints (Task 17 flipped the default).
-    const { writeFileSync } = await import("node:fs");
-    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, runtimes: { winterLeg: { code: false } } }));
-    const { FakeProvider } = await import("../../src/agent/fake-provider");
-    const daemon = await startDaemon({
-      home,
-      secrets: new FileSecretStore(join(home, "secrets")),
-      agentProvider: { provider: new FakeProvider([]), model: "fake-1" },
-    });
-    stop = daemon.stop;
-
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(daemon.tokens.harness, "dirs-setter-real");
-    const created = await c.request(METHODS.sessionCreate, { scope: "global" });
-    const sessionId = created.result.sessionId;
-
-    // `normaHome` (== `home`, verbatim — bootstrapNormaDir returns the input path unchanged) is
-    // itself one of `grantDeniedPrefixes` (daemon.ts) — the SAME control-plane denylist the
-    // out-of-root write/edit grant flow refuses. A FAKE engine could not prove this; only a real
-    // `AgentEngine` constructed by `startDaemon` actually consults `grantDeniedPrefixes`.
-    const res = await c.request(METHODS.sessionSetDirs, { sessionId, op: "setPrimary", path: home });
-    expect(res.error).toBeTruthy();
-    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
-    expect(res.error.message).toBe(DIR_DENIED_REFUSAL);
-    c.close();
-  });
 });

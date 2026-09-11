@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { CODEX, CODEX_MODELS, CODEX_MODELS_VERIFIED } from "../../src/providers/codex-config";
-import { DEFAULT_COMPACT_THRESHOLD_FRAC } from "../../src/agent/engine";
+import { DEFAULT_COMPACT_THRESHOLD_FRAC } from "../../src/agent/compactor";
 import { KeychainSecretStore } from "../../src/auth/secret-store";
 import { keychainService } from "../../src/profile";
 import { CodexAuthStore } from "../../src/providers/codex-oauth";

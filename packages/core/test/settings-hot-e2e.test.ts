@@ -130,127 +130,10 @@ function endTurnScript(): ProviderEvent[][] {
   ]];
 }
 
-describe("hot-settings T5b e2e: SettingsWatcher wired into a running daemon", () => {
-  let daemon: RunningDaemon | undefined;
+// Task 17: the T5b engine-registry re-registration proofs (computer/lsp tools into the engine's
+// registry, a torn write mid-turn) retired with the engine; the hot re-registration WRITER itself
+// (`makeApply` → `registerComputer`) is pinned by test/settings-apply.test.ts.
 
-  afterEach(() => daemon?.stop());
-
-  test("flipping computerUse.enabled registers the computer tool live, no restart", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-hot-e2e-cu-"));
-    writeSettingsFile(home, { computerUse: { enabled: false } });
-    const secrets = new FileSecretStore(join(home, "test-secrets"));
-    const fake = new FakeProvider(endTurnScript());
-
-    daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
-    const daemonRef = daemon; // captured ONCE — never reassigned, never a second startDaemon() call
-
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(daemon.tokens.harness, "e2e-cu");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-hot-e2e-cu-cwd-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-
-    await driveTurn(c, created.sessionId, "hello");
-    expect(fake.requests.length).toBeGreaterThanOrEqual(1);
-    expect(fake.requests[0]!.tools?.map((t) => t.name)).not.toContain("computer");
-
-    // Rewrite settings.json — the SAME daemon (same fs.watch handle, same registry/engine) must
-    // pick this up with no restart.
-    writeSettingsFile(home, { computerUse: { enabled: true } });
-
-    // Condition-based poll (never a bare fixed sleep): drive a turn, check the LATEST captured
-    // request's tools, retry until the debounce+apply has landed or ~5s elapses.
-    let sawComputer = false;
-    const deadline = Date.now() + 5000;
-    while (Date.now() < deadline) {
-      await driveTurn(c, created.sessionId, "poll");
-      const latest = fake.requests[fake.requests.length - 1];
-      if (latest?.tools?.some((t) => t.name === "computer")) { sawComputer = true; break; }
-      await sleep(100);
-    }
-    expect(sawComputer).toBe(true);
-
-    // No-restart proof: still the exact same RunningDaemon object/socket this test started with.
-    expect(daemon).toBe(daemonRef);
-    expect(daemon.socketPath).toBe(daemonRef.socketPath);
-
-    c.close();
-  });
-
-  test("a torn settings.json write does not crash the daemon", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-hot-e2e-torn-"));
-    writeSettingsFile(home); // computerUse absent → disabled
-    const secrets = new FileSecretStore(join(home, "test-secrets"));
-    const fake = new FakeProvider(endTurnScript());
-
-    daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(daemon.tokens.harness, "e2e-torn");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-hot-e2e-torn-cwd-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-
-    await driveTurn(c, created.sessionId, "hello");
-    const before = fake.requests[fake.requests.length - 1]!.tools?.map((t) => t.name).sort();
-
-    // Torn write: invalid JSON. The watcher's reload must log-and-keep-last-good, never crash the
-    // process or the fs.watch handle.
-    writeFileSync(join(home, "settings.json"), "{ not valid json ][");
-
-    // Wait past the debounce (default 150ms) before proving the daemon is still alive.
-    await sleep(400);
-
-    // The daemon must still be responsive: a turn started AFTER the torn write completes normally.
-    await driveTurn(c, created.sessionId, "still alive?");
-    const after = fake.requests[fake.requests.length - 1]!.tools?.map((t) => t.name).sort();
-    expect(after).toEqual(before); // tool set unchanged by the torn write
-
-    c.close();
-  });
-
-  test("LSP disable: writing lsp.enabled:false unregisters the lsp tool live", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-hot-e2e-lsp-"));
-    writeSettingsFile(home); // lsp absent → default ON
-    const secrets = new FileSecretStore(join(home, "test-secrets"));
-    const fake = new FakeProvider(endTurnScript());
-
-    daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(daemon.tokens.harness, "e2e-lsp");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-hot-e2e-lsp-cwd-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-
-    await driveTurn(c, created.sessionId, "hello");
-    expect(fake.requests[0]!.tools?.map((t) => t.name)).toContain("lsp");
-
-    writeSettingsFile(home, { lsp: { enabled: false } });
-
-    let lspGone = false;
-    const deadline = Date.now() + 5000;
-    while (Date.now() < deadline) {
-      await driveTurn(c, created.sessionId, "poll");
-      const names = fake.requests[fake.requests.length - 1]!.tools?.map((t) => t.name) ?? [];
-      if (!names.includes("lsp")) {
-        lspGone = true;
-        break;
-      }
-      await sleep(100);
-    }
-    expect(lspGone).toBe(true);
-
-    c.close();
-  });
-});
-
-// ── P8b Task 15: the Winter-leg settings, hot on a RUNNING daemon ────────────────────────────────
-//
-// The hard rule is that no setting may ever require a daemon restart, and these four keys are the
-// awkward case for it: their consumers land in LATER tasks (Task 5's `spawnHookFor`/`create.ts`,
-// Task 9's `legForNewSession`, Task 16's idle timer), so there is no tool appearing or disappearing
-// to observe the way the computerUse/lsp tests above do. What CAN be observed today is the thing all
-// of those consumers read — the live settings holder the watcher swaps — so that is what these
-// assert, through `daemon.settings()`, on one `startDaemon` that is never re-created.
 describe("hot-settings P8b: the Winter-leg keys reach the live holder with no restart", () => {
   let daemon: RunningDaemon | undefined;
 
@@ -308,18 +191,11 @@ describe("hot-settings P8b: the Winter-leg keys reach the live holder with no re
     writeSettingsFile(home, { runtimes: { winterLeg: { chat: false, code: false, dispatch: false }, winterIdleTimeoutSec: 60 } });
     await untilSettings(daemon, "the chat leg to flip back off", (s) => s?.runtimes?.winterLeg?.chat === false);
 
-    // The session the daemon was serving all along still works — the reload re-wired nothing it owns.
-    const c = await TestClient.connect(daemon.socketPath);
-    await c.hello(daemon.tokens.harness, "e2e-winter");
-    const cwd = mkdtempSync(join(tmpdir(), "norma-hot-e2e-winter-cwd-"));
-    const { result: created } = await c.request(METHODS.sessionCreate, { scope: "global", cwd, approvalPolicy: "auto" });
-    await c.request(METHODS.sessionAttach, { sessionId: created.sessionId, fromSeq: 0 });
-    await driveTurn(c, created.sessionId, "still alive?");
+    // Task 17: no engine turn to drive — the reload re-wired nothing the daemon owns (pinned below).
 
     // No-restart proof: the same RunningDaemon object and the same socket this test started with.
     expect(daemon).toBe(daemonRef);
     expect(daemon.socketPath).toBe(daemonRef.socketPath);
-    c.close();
   });
 
   test("advisorModel reaches the live holder too — Task 5's create.ts reads it there", async () => {
