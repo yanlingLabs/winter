@@ -70,6 +70,8 @@ export type WinterLegRefusalCode =
   | "winter_executable_unavailable"   // P8b-2: no `winter` binary resolves (setting → env → bundle → home)
   | "winter_leg_unavailable"          // the router handle or the runtime spine did not construct
   | "session_predates_winter_leg"     // P8b-22: the record has no Winter transcript to resume
+  // `session_unrecorded` (fix wave F2) is minted by `ipc/server.ts` directly — a session with NO
+  // record at all (phone-owned, `createSynced`) never reaches the table's own refusals.
   | "winter_session_ended"            // the driver said the store refused it for good
   | "not_supported_on_winter_leg";    // `session.compact` (SDK 0.0.4 carry)
 

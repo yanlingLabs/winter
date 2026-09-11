@@ -631,17 +631,34 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     try { return await opts.winter.ensure(sessionId); } catch (err) { rpcFromWinterRefusal(err); }
   }
 
-  /** P8b-22: a session whose record has NO Winter transcript, on a daemon that has no engine to
-   *  serve it, gets a typed refusal — never a crash, never a silent new transcript. While the
-   *  engine lives (Task 16) and the flag for the session's mode is off, this is unreachable: such
-   *  a session is the engine's, byte-identically. Task 17 (the engine's retirement) makes it the
-   *  answer for every engine-era record. */
+  /** P8b-22: a session that CANNOT run on the Winter leg gets a typed refusal — never a crash,
+   *  never a silent new transcript, and (fix wave F2) never silence. Two shapes, two codes:
+   *
+   *   - `session_predates_winter_leg` — the record exists and has no Winter transcript (an
+   *     engine-era session backfilled by 8a's boot sweep). History stays readable.
+   *   - `session_unrecorded` — the session has NO runtime record at all on a daemon whose driver
+   *     table exists. In production that is a PHONE-OWNED session: `sync.push` materialises it
+   *     through `store.createSynced` and 8a's backfill deliberately never records phone-minted ids
+   *     (`runtime-state/migrations/backfill.ts`), so nothing can resume it here. Before F2 such a
+   *     `session.send` fell through to `hub.send`: the text landed in the log and NOTHING ran —
+   *     worse than either outcome P8b-22 forbids. Real Mac-side continuation of a phone session
+   *     needs the phone's turns in a child transcript (8c transcript import). A records store that
+   *     will not answer lands here too (`legOf` is undefined then, logged by the table) — a typed
+   *     refusal rather than a silent no-op is the right answer for that case as well.
+   *
+   *  Unreachable on a server built without the driver table (a bare test server), where `hub.send`
+   *  stays the answer exactly as before 8b. */
   function refuseIfPredatesWinterLeg(sessionId: string): void {
     if (opts.winter === undefined) return;
-    if (opts.winter.legOf(sessionId) !== "engine") return;
-    let mode: "code" | "dispatch" | "chat" = "code";
-    try { const m = opts.store.meta(sessionId).mode; if (m === "chat" || m === "dispatch") mode = m; } catch { return; }
-    if (opts.winter.legForNewSession(mode) !== "winter") return;
+    const leg = opts.winter.legOf(sessionId);
+    if (leg === undefined) {
+      throw new RpcFailure(
+        ERR.INVALID_PARAMS,
+        "this session has no runtime record on this daemon (a phone-owned session replicated by sync.push, or a record the runtime store could not read); it cannot be continued from here — start a new session",
+        { code: "session_unrecorded" },
+      );
+    }
+    if (leg !== "engine") return;
     throw new RpcFailure(ERR.INVALID_PARAMS, "this session predates the Winter leg; start a new session", { code: "session_predates_winter_leg" });
   }
 
@@ -1494,8 +1511,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           }
         }
         refuseIfPredatesWinterLeg(p.sessionId);
-        // No Winter driver and no refusal: a server built without the driver table (a bare test
-        // server). The message lands in the log, exactly as it always has on a no-engine daemon.
+        // No driver table at all (a bare test server): the message lands in the log, exactly as it
+        // always has on a no-engine daemon. With a table present every path above either ran the
+        // turn or refused typed — this line is never a production no-op (fix wave F2).
         const seq = hub.send(socket.data.hubClient, p.sessionId, p.text);
         return { seq };
       }
