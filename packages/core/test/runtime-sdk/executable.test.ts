@@ -27,4 +27,24 @@ describe("resolveWinterExecutable (P8b-2 ladder)", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.tried).toEqual(["/bundle/Contents/MacOS/winter", "/tmp/h/runtimes/bin/winter"]);
   });
+
+  // Review F-8: two ladder behaviours the brief's five tests left unpinned.
+
+  test("a whitespace-only setting or env value is treated as UNSET, not as a missing path", () => {
+    // Both spellings of "configured with nothing": a blank `winterExecutable` in settings.json and
+    // an exported-but-empty env var. Neither may become the authoritative-and-missing failure —
+    // they fall through to the implicit locations like the absent values they are.
+    const r = resolveWinterExecutable({ ...base, setting: "   ", env: { NORMA_WINTER_EXECUTABLE: "\t\n" }, exists: exists(["/bundle/Contents/MacOS/winter"]) });
+    expect(r).toEqual({ ok: true, path: "/bundle/Contents/MacOS/winter", source: "bundle" });
+  });
+
+  test("an ENV path that does not exist is the failure too — not just the setting branch", () => {
+    const r = resolveWinterExecutable({ ...base, env: { NORMA_WINTER_EXECUTABLE: "/gone/winter" }, exists: exists(["/bundle/Contents/MacOS/winter", "/tmp/h/runtimes/bin/winter"]) });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toBeInstanceOf(WinterExecutableUnavailable);
+      // Only the path the user named — the two implicit locations were never probed.
+      expect(r.error.tried).toEqual(["/gone/winter"]);
+    }
+  });
 });

@@ -1110,7 +1110,13 @@ if (import.meta.main) {
   // by the caller; the probe refuses without it. Static, and importing from the `@norma/core`
   // barrel exactly like `runWorkflowSubprocess` above — that is the import shape that survives
   // `bun build --compile` (a dynamic import keyed on a string does not resolve in $bunfs).
-  if (process.argv.includes("__runtime-state-probe")) {
+  //
+  // POSITIONAL, not `argv.includes` (review F-11): `includes` matches the token anywhere, so
+  // `norma -p "__runtime-state-probe"` would boot the probe instead of running the prompt. `argv[2]`
+  // is the first user argument in BOTH the dev (`bun main.ts …`) and compiled ($bunfs) shapes —
+  // the same index the CLI's own `process.argv.slice(2)` routing assumes below. The pre-existing
+  // `__workflow-worker` branch above keeps its `includes` shape; it is not this batch's to change.
+  if (process.argv[2] === "__runtime-state-probe") {
     const result = await runRuntimeStateProbe({ home: process.env.NORMA_HOME });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     process.exit(result.ok ? 0 : 1);

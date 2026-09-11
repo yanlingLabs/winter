@@ -39,10 +39,21 @@ function fixtureRepo(): Fixture {
 }
 
 describe("checkoutIsAtTag (P8b-2 pinned-peer gate)", () => {
-  test("HEAD exactly at the tag → ok, and `describe` is the tag", () => {
+  test("HEAD exactly at the tag → ok, and `found` is the tag", () => {
     const { dir, git } = fixtureRepo();
     git("tag", "v0.0.3");
-    expect(checkoutIsAtTag(dir, "v0.0.3")).toEqual({ ok: true, describe: "v0.0.3" });
+    expect(checkoutIsAtTag(dir, "v0.0.3")).toEqual({ ok: true, found: "v0.0.3" });
+  });
+
+  // Review F-4: the reason this is MEMBERSHIP and not `git describe --tags --exact-match`, which
+  // prints one of several tags and would refuse a correct checkout for naming the wrong one.
+  test("HEAD carrying the pinned tag AND another → still ok", () => {
+    const { dir, git } = fixtureRepo();
+    git("tag", "v0.0.3");
+    git("tag", "v-something-kit4");
+    const r = checkoutIsAtTag(dir, "v0.0.3");
+    expect(r.ok).toBe(true);
+    expect(r.found).toContain("v0.0.3");
   });
 
   test("HEAD at a DIFFERENT tag → refused, and the refusal names what it actually found", () => {
@@ -50,7 +61,7 @@ describe("checkoutIsAtTag (P8b-2 pinned-peer gate)", () => {
     git("tag", "v0.0.2");
     const r = checkoutIsAtTag(dir, "v0.0.3");
     expect(r.ok).toBe(false);
-    expect(r.describe).toBe("v0.0.2");
+    expect(r.found).toBe("v0.0.2");
   });
 
   test("HEAD one commit PAST the tag → refused (the tag existing is not enough)", () => {
@@ -59,14 +70,14 @@ describe("checkoutIsAtTag (P8b-2 pinned-peer gate)", () => {
     commit("b.txt", "two\n");
     const r = checkoutIsAtTag(dir, "v0.0.3");
     expect(r.ok).toBe(false);
-    expect(r.describe).not.toBe("v0.0.3");
+    expect(r.found).toBe("");
   });
 
   test("no tag at all → refused, never a throw", () => {
     const { dir } = fixtureRepo();
     const r = checkoutIsAtTag(dir, "v0.0.3");
     expect(r.ok).toBe(false);
-    expect(typeof r.describe).toBe("string");
+    expect(r.found).toBe("");
   });
 
   test("a path that is not a git checkout → refused, never a throw", () => {

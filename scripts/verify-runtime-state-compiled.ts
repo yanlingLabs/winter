@@ -13,14 +13,16 @@
  *      the same invocation verify-workflow-compiled.ts uses, and the same reason for the `--filter`:
  *      `compile:core` is defined only in packages/cli/package.json).
  *   2. `mkdtemp` a throwaway NORMA_HOME.
- *   3. Take a signature of the user's REAL homes (`~/.norma`, `~/.norma-dev`) BEFORE the run.
+ *   3. Take a signature of the user's REAL homes (`~/.norma`, `~/.norma-dev`) BEFORE the run —
+ *      WHAT EXISTS there, never when it was written (see `homeSignature`).
  *   4. `spawn(dist/norma-core, ["__runtime-state-probe"], { env: { NORMA_HOME: tmp, ... } })` —
  *      the static argv route in packages/cli/src/main.ts, beside `__workflow-worker`.
  *   5. Parse the one JSON line it prints; assert `ok`, `online`, `userVersion` ===
  *      RUNTIME_STATE_SCHEMA_VERSION, and that `dbPath` is inside the temp home.
  *   6. Re-take the real-home signature and assert it is UNCHANGED — a probe that quietly fell back
  *      to `resolveNormaHome()` would otherwise pass every other assertion here.
- *   7. `rm -rf` the temp home.
+ *   7. `rm -rf` the temp home — in a `finally`, on the failure paths too (the tokens the probe
+ *      minted live in there).
  *
  * Standalone — never part of the `bun test` sweep (it runs a full compile). Run it as:
  *
@@ -31,6 +33,7 @@
  * model of this script: the daemon it boots is a REAL daemon, with a real socket and a real lock.
  */
 
+import { Database } from "bun:sqlite";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -50,35 +53,66 @@ const REAL_HOMES = [join(homedir(), ".norma"), join(homedir(), ".norma-dev")];
 
 function log(line: string): void { console.log(line); }
 
+/** A refusal from one of this script's own checks, as opposed to a crash. Carrying it as an
+ *  exception rather than a `process.exit` is what lets `main`'s `finally` run (review F-1): the
+ *  temp home holds the daemon tokens the probe minted, and it must not survive a failed run. */
+class ProofFailure extends Error {
+  constructor(message: string) { super(message); this.name = "ProofFailure"; }
+}
+
 function fail(message: string): never {
-  console.error(`\nRESULT: FAIL — ${message}`);
-  process.exit(1);
+  throw new ProofFailure(message);
 }
 
 /**
- * A signature of a real home, scoped to what this probe could possibly disturb.
+ * A signature of a real home: what EXISTS there, and nothing about when it was written.
  *
- * DELIBERATELY NOT A WHOLE-TREE WALK. The user's live daemon appends to `sessions/` and `logs/`
- * continuously, so a recursive mtime signature over the whole home would fail for reasons that have
- * nothing to do with this script — a flake generator dressed as a safety check. What a misdirected
- * probe would actually do is create the home, add a top-level entry, or create/migrate
- * `runtimes/runtime-state.db`. So: the home's own mtime, its direct children's NAMES, and a full
- * recursive stat of `runtimes/` — the subtree the probe writes.
+ * NO MTIMES, NO SIZES, DELIBERATELY (review F-2). The only thing this check exists to catch is a
+ * probe that resolved a real home instead of reading `NORMA_HOME` — and such a probe would CREATE
+ * the home, add entries, or create `runtimes/runtime-state.db`, all of which are visible in a name
+ * list. Metadata is not: the user's live daemon churns `runtime-state.db-wal`/`-shm` and appends to
+ * session logs on every write, so a size/mtime signature would fail for reasons that have nothing to
+ * do with this script — and it would fail precisely during the pre-tag gate, when a dev daemon is up.
+ * A false FAIL there is worse than useless; it trains people to ignore the check.
+ *
+ * `runtime-state.db`'s `user_version` is compared as well where the file exists, because a probe
+ * that migrated a real home would move it without adding a single name.
  */
 function homeSignature(dir: string): string {
   if (!existsSync(dir)) return `${dir}: absent`;
-  const parts: string[] = [`${dir}: mtime=${statSync(dir).mtimeMs}`];
-  parts.push(`children=${readdirSync(dir).sort().join(",")}`);
+  const names: string[] = [];
   const walk = (p: string, rel: string): void => {
-    let st;
-    try { st = statSync(p); } catch { parts.push(`${rel}: unreadable`); return; }
-    parts.push(`${rel}: ${st.isDirectory() ? "dir" : `file size=${st.size}`} mtime=${st.mtimeMs}`);
-    if (!st.isDirectory()) return;
-    for (const name of readdirSync(p).sort()) walk(join(p, name), `${rel}/${name}`);
+    let entries: string[];
+    try { entries = readdirSync(p).sort(); } catch { names.push(`${rel}/ <unreadable>`); return; }
+    for (const name of entries) {
+      const child = join(p, name);
+      const childRel = rel ? `${rel}/${name}` : name;
+      let isDir: boolean;
+      try { isDir = statSync(child).isDirectory(); } catch { names.push(`${childRel} <unreadable>`); continue; }
+      names.push(isDir ? `${childRel}/` : childRel);
+      if (isDir) walk(child, childRel);
+    }
   };
-  const runtimes = join(dir, "runtimes");
-  if (existsSync(runtimes)) walk(runtimes, "runtimes"); else parts.push("runtimes: absent");
-  return parts.join("\n");
+  walk(dir, "");
+  return `${dir}: present\n${names.join("\n")}\nruntime-state.db user_version=${readUserVersion(join(dir, "runtimes", "runtime-state.db"))}`;
+}
+
+/** `PRAGMA user_version` of a database file, or a stable placeholder. READ-ONLY and wrapped: this is
+ *  pointed at the USER'S live database, and a readonly open can legitimately fail (a WAL file whose
+ *  `-shm` cannot be created). "unreadable" on both sides of the comparison is still a valid, equal
+ *  signature — the name list above is what carries the assertion in that case. */
+function readUserVersion(dbPath: string): string {
+  if (!existsSync(dbPath)) return "absent";
+  try {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      return String(db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? "null");
+    } finally {
+      db.close();
+    }
+  } catch {
+    return "unreadable";
+  }
 }
 
 async function main(): Promise<void> {
@@ -121,7 +155,13 @@ async function main(): Promise<void> {
       // A DELIBERATELY NARROW env: PATH and HOME only, plus the temp home. Inheriting process.env
       // would drag this shell's NORMA_HOME/NORMA_PROFILE in and could point a real daemon boot at a
       // real home — the one thing this script must never do.
-      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir(), NORMA_HOME: tmpHome, NORMA_PROFILE: "test" },
+      // `NORMA_PROFILE: "dev"` is a REAL profile (review F-10): `resolveNormaProfile` maps everything
+      // but "dev" to "dist", so a made-up literal like "test" silently runs as the distribution
+      // profile and reads as an isolation it does not provide. The isolation here comes from the
+      // injected `FileSecretStore` and the temp `NORMA_HOME`, not from the profile — the profile
+      // only picks a Keychain service name (never reached) and the CLI's launchd label (not on this
+      // path).
+      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir(), NORMA_HOME: tmpHome, NORMA_PROFILE: "dev" },
     });
     let stdout = "";
     let stderr = "";
@@ -177,7 +217,7 @@ async function main(): Promise<void> {
       ["runtime-state.db exists on disk in the temp home", existsSync(join(tmpHome, "runtimes", "runtime-state.db"))],
       ["the probe used a FileSecretStore, never the Keychain (tokens landed under the temp home)", existsSync(join(tmpHome, "probe-secrets"))],
       ["probe exited 0", exitCode === 0],
-      ...untouched.map(([dir, ok]) => [`${dir} is byte-for-byte unchanged`, ok] as [string, boolean]),
+      ...untouched.map(([dir, ok]) => [`${dir}: same files, same runtime-state.db user_version`, ok] as [string, boolean]),
     ];
 
     log("\n--- Assertions ---");
@@ -203,13 +243,20 @@ async function main(): Promise<void> {
       "the user's real homes untouched. The 8a carry is discharged on the shipped artifact."
     );
   } finally {
+    // Runs on EVERY path now, failures included (review F-1): the temp home holds
+    // `probe-secrets/{harness,admin,remote}-token`, and a failed proof must not leave them on disk.
     rmSync(tmpHome, { recursive: true, force: true });
     log(`\n(cleanup) removed ${tmpHome}`);
   }
-  process.exit(0);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// The ONLY place this script exits non-zero. `fail()` throws instead of exiting so that `main`'s
+// `finally` gets to run first — a `process.exit` inside the try would skip it and leak the temp home.
+main().then(
+  () => process.exit(0),
+  (err: unknown) => {
+    if (err instanceof ProofFailure) console.error(`\nRESULT: FAIL — ${err.message}`);
+    else console.error(err);
+    process.exit(1);
+  },
+);

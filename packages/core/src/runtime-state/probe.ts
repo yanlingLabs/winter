@@ -19,9 +19,9 @@
 // `__runtime-state-probe` argv route in `packages/cli/src/main.ts` (beside `__workflow-worker`).
 import { Database } from "bun:sqlite";
 import { join } from "node:path";
-import { FileSecretStore } from "./auth/secret-store";
-import { startDaemon } from "./daemon";
-import { runtimeStateOnline } from "./runtime-state/wiring";
+import { FileSecretStore } from "../auth/secret-store";
+import { startDaemon } from "../daemon";
+import { runtimeStateOnline } from "./wiring";
 
 export type RuntimeStateProbeResult =
   | { ok: true; home: string; dbPath: string; userVersion: number; online: true }
