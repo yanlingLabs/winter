@@ -6,19 +6,37 @@ import { join } from "node:path";
 import { startDaemon, FileSecretStore, FakeProvider, MemoryStore, type RunningDaemon } from "@norma/core";
 import { NormaClient } from "../src/client";
 import { encodeLine, METHODS, PROTOCOL_VERSION } from "@norma/protocol";
+import { WINTER_BIN, testWithWinterBinary as sessionTest } from "./helpers/winter-binary";
+
+// Fix wave 2 (CLI, Winter Phase 8b): every `session.create` spawns a `winter` child, so the tests
+// below that CREATE a session run as `sessionTest` — `test` when `NORMA_WINTER_EXECUTABLE` names a
+// built binary, `test.skip` otherwise (a FAIL at import under `NORMA_WINTER_REQUIRE_BINARY=1`, CI).
+// Tests a bare daemon can serve (status, trust, plugins, routines, memory, skills) stay plain `test`.
+//
+// The settings seed points every session at the in-process `winter-test/echo` double (selected by
+// name inside the spawned child; nothing reaches the network) and names the binary for the daemon's
+// own resolution (`settings.runtimes.winterExecutable`, the first stop in P8b-2's chain — the env var
+// is the second, so either alone would do). Titles are off: the seed's `openai-compatible` provider
+// has no key and its endpoint is a closed port, and a titler call against it is pure noise.
+const WINTER_SEED = (): Record<string, unknown> => ({
+  schemaVersion: 2,
+  provider: { type: "openai-compatible", model: "winter-test/echo", baseUrl: "http://127.0.0.1:9/v1" },
+  titles: { enabled: false },
+  ...(WINTER_BIN ? { runtimes: { winterExecutable: WINTER_BIN, winterIdleTimeoutSec: 10 } } : {}),
+});
 
 describe("NormaClient", () => {
   let daemon: RunningDaemon;
   afterEach(() => daemon?.stop());
 
-  // `provider` left `undefined` (the default) preserves the pre-existing behavior of every
-  // caller below: daemon.ts auto-detects from real settings/secrets, which is a no-op on a fresh
-  // tmpdir `home` almost everywhere EXCEPT this may pick up real host-machine credentials in some
-  // dev environments. Pass explicit `null` (Task 6 tests) to force a deterministic no-provider
-  // daemon regardless of host state.
+  // `provider` left `undefined` (the default) makes daemon.ts auto-detect from the seeded settings
+  // (an `openai-compatible` provider with no key — the daemon runs with the agent's model layer
+  // disabled, which is fine: on the Winter leg the CHILD talks to the model, and the seed names the
+  // `winter-test/echo` double for it). Pass explicit `null` (Task 6 tests) to force a deterministic
+  // no-provider daemon regardless of host state; the seed still names the child's double.
   async function boot(provider?: FakeProvider | null, settingsOverrides?: Record<string, unknown>): Promise<string> {
     const home = mkdtempSync(join(tmpdir(), "norma-cli-"));
-    if (settingsOverrides) writeFileSync(join(home, "settings.json"), JSON.stringify(settingsOverrides));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ ...WINTER_SEED(), ...(settingsOverrides ?? {}) }));
     daemon = await startDaemon({
       home,
       secrets: new FileSecretStore(join(home, "test-secrets")),
@@ -27,7 +45,7 @@ describe("NormaClient", () => {
     return home;
   }
 
-  test("connect + hello + create + attach + send + receive own event", async () => {
+  sessionTest("connect + hello + create + attach + send + receive own event", async () => {
     await boot();
     const events: any[] = [];
     const client = await NormaClient.connect({
@@ -51,7 +69,7 @@ describe("NormaClient", () => {
     })).rejects.toThrow(/invalid token/);
   });
 
-  test("client can add a directory and receive directory_added", async () => {
+  sessionTest("client can add a directory and receive directory_added", async () => {
     await boot();
     const events: any[] = [];
     const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cli", onEvent: (e) => events.push(e) });
@@ -70,7 +88,7 @@ describe("NormaClient", () => {
   // server.test.ts) — this just pins the CLIENT's own round-trip (request + zod-validated
   // result), same "unknown agent -> clear rejection" shape client.test.ts already exercises for
   // other RPCs above (no bg-agent fixture is reachable through this file's plain `startDaemon`).
-  test("sendToThread/agentStop against an unknown agent reject with a clear error (client-side round-trip)", async () => {
+  sessionTest("sendToThread/agentStop against an unknown agent reject with a clear error (client-side round-trip)", async () => {
     await boot();
     const client = await NormaClient.connect({
       socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cli", onEvent: () => {},
@@ -82,7 +100,7 @@ describe("NormaClient", () => {
     client.close();
   });
 
-  test("createSession returns trusted; trustDir makes a later create trusted", async () => {
+  sessionTest("createSession returns trusted; trustDir makes a later create trusted", async () => {
     await boot();
     const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "t", onEvent: () => {} });
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-cli-trust-")));
@@ -94,7 +112,7 @@ describe("NormaClient", () => {
     client.close();
   });
 
-  test("bg client methods round-trip", async () => {
+  sessionTest("bg client methods round-trip", async () => {
     if (process.platform !== "darwin") { return; }
     await boot();
     const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "bg", onEvent: () => {} });
@@ -105,7 +123,7 @@ describe("NormaClient", () => {
     client.close();
   });
 
-  test("steer/interrupt client methods round-trip", async () => {
+  sessionTest("steer/interrupt client methods round-trip", async () => {
     await boot();
     const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "si", onEvent: () => {} });
     const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "norma-si-")), approvalPolicy: "auto" });
@@ -116,11 +134,14 @@ describe("NormaClient", () => {
     client.close();
   });
 
-  test("compact client method round-trip (no engine → nothing to compact)", async () => {
+  // Re-scoped (fix wave 2): on the Winter leg `session.compact` is a TYPED refusal
+  // (`not_supported_on_winter_leg`, SDK 0.0.4 carry) — the engine's `compacted: false` no-op is gone
+  // with the engine. The client-side round-trip is the rejection reaching the caller intact.
+  sessionTest("compact client method round-trip (the Winter leg refuses typed: not supported on this leg)", async () => {
     await boot();
     const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cc", onEvent: () => {} });
     const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "norma-cc-")), approvalPolicy: "auto" });
-    expect(await client.compact(sessionId)).toEqual({ compacted: false, uptoSeq: 0, summaryChars: 0 });
+    await expect(client.compact(sessionId)).rejects.toThrow(/not supported on the Winter leg/);
     client.close();
   });
 
@@ -144,34 +165,21 @@ describe("NormaClient", () => {
     client.close();
   });
 
-  test("askUserRespond + taskList client methods round-trip", async () => {
-    const fake = new FakeProvider([
-      [{ type: "tool_call", callId: "q1", name: "ask_user", argsJson: JSON.stringify({
-        questions: [{ question: "Pick one", header: "Pick", options: [{ label: "A", description: "Option A" }, { label: "B", description: "Option B" }], multiSelect: false }],
-      }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "tool_call", callId: "t1", name: "task_create", argsJson: JSON.stringify({ subject: "Ship it", description: "Ship the release" }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
-    ]);
-    await boot(fake);
-    const events: any[] = [];
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "aq", onEvent: (e) => events.push(e) });
+  // Re-scoped (fix wave 2): this test scripted the ENGINE's `ask_user`/`task_create` tools through a
+  // `FakeProvider`, which is not the session's model on the Winter leg (the child's `AskUserQuestion`
+  // reaches the same broker through the question bridge — core's `question-bridge.test.ts` and the
+  // chat e2e prove that path; no `winter-test/*` double calls it). What the CLIENT owns is the
+  // round-trip: `askUserRespond` against the daemon's broker with nothing pending answers the
+  // documented `{ ok: true, alreadyResolved: true }`, and `taskList` on the Winter leg answers the
+  // empty list (the child owns tasks — the recorded 8c carry), both through the validated schemas.
+  sessionTest("askUserRespond + taskList client methods round-trip (nothing pending; the child owns tasks on the Winter leg)", async () => {
+    await boot(null);
+    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "aq", onEvent: () => {} });
     const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "norma-aq-")), approvalPolicy: "auto" });
-    await client.attach(sessionId);
-    await client.send(sessionId, "ask, then track a task");
-
-    // wait for the question_asked event
-    for (let i = 0; i < 50 && !events.some((e) => e.type === "question_asked"); i++) await new Promise((r) => setTimeout(r, 10));
-    const asked = events.find((e) => e.type === "question_asked");
-    expect(asked).toBeTruthy();
-
-    const first = await client.askUserRespond({ sessionId, callId: asked.callId, answers: { "Pick one": "B" } });
-    expect(first).toEqual({ ok: true, alreadyResolved: false });
-    const second = await client.askUserRespond({ sessionId, callId: asked.callId, answers: { "Pick one": "B" } });
-    expect(second).toEqual({ ok: true, alreadyResolved: true });
-
-    for (let i = 0; i < 50 && !events.some((e) => e.type === "turn_completed"); i++) await new Promise((r) => setTimeout(r, 10));
+    const answered = await client.askUserRespond({ sessionId, callId: "q-never-asked", answers: { "Pick one": "B" } });
+    expect(answered).toEqual({ ok: true, alreadyResolved: true });
     const list = await client.taskList({ sessionId });
-    expect(list).toEqual({ ok: true, tasks: [{ id: "1", subject: "Ship it", status: "pending" }] });
+    expect(list).toEqual({ ok: true, tasks: [] });
     client.close();
   });
 
@@ -179,44 +187,32 @@ describe("NormaClient", () => {
   // optional `notes` map over the wire — the protocol/core sides already have their own T1/T2
   // tests, but nothing else exercises client.ts's (hand-written, non-generated) param type, which
   // is what main.ts's new note prompt calls through.
-  test("askUserRespond forwards optional notes, mirrored onto the persisted question_resolved event", async () => {
-    const fake = new FakeProvider([
-      [{ type: "tool_call", callId: "q1", name: "ask_user", argsJson: JSON.stringify({
-        questions: [{ question: "Pick one", header: "Pick", options: [{ label: "A", description: "Option A" }, { label: "B", description: "Option B" }], multiSelect: false }],
-      }) }, { type: "done", stopReason: "tool_calls" }],
-      [{ type: "text_delta", delta: "done" }, { type: "done", stopReason: "end_turn" }],
-    ]);
-    await boot(fake);
-    const events: any[] = [];
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "aqn", onEvent: (e) => events.push(e) });
+  // Re-scoped (fix wave 2), same reason as above: the `notes` map is proven to be ACCEPTED on the
+  // wire (client.ts's hand-written param type → the daemon's `AskUserRespondParams` — an unknown
+  // key would be a typed INVALID_PARAMS, not `ok`); the persisted-event mirror is core's own
+  // `question-bridge.test.ts` on the Winter leg.
+  sessionTest("askUserRespond forwards optional notes on the wire (accepted by the daemon's param schema)", async () => {
+    await boot(null);
+    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "aqn", onEvent: () => {} });
     const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "norma-aqn-")), approvalPolicy: "auto" });
-    await client.attach(sessionId);
-    await client.send(sessionId, "ask");
-
-    for (let i = 0; i < 50 && !events.some((e) => e.type === "question_asked"); i++) await new Promise((r) => setTimeout(r, 10));
-    const asked = events.find((e) => e.type === "question_asked");
-    expect(asked).toBeTruthy();
-
     const result = await client.askUserRespond({
-      sessionId, callId: asked.callId, answers: { "Pick one": "B" }, notes: { "Pick one": "went with B because it's simpler" },
+      sessionId, callId: "q-never-asked", answers: { "Pick one": "B" }, notes: { "Pick one": "went with B because it's simpler" },
     });
-    expect(result).toEqual({ ok: true, alreadyResolved: false });
-
-    for (let i = 0; i < 50 && !events.some((e) => e.type === "question_resolved"); i++) await new Promise((r) => setTimeout(r, 10));
-    const resolved = events.find((e) => e.type === "question_resolved");
-    expect(resolved.notes).toEqual({ "Pick one": "went with B because it's simpler" });
+    expect(result).toEqual({ ok: true, alreadyResolved: true });
     client.close();
   });
 
-  test("threadList client method round-trip (main thread seeded lazily on first read)", async () => {
+  // Re-pinned (fix wave 2): the Winter leg's `threadsFor` reports the main thread `running` only
+  // while a turn is in flight — a freshly created session is idle, so `completed`.
+  sessionTest("threadList client method round-trip (main thread reported from the driver; idle ⇒ completed)", async () => {
     await boot();
     const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "th", onEvent: () => {} });
     const { sessionId } = await client.createSession("global");
-    expect(await client.threadList({ sessionId })).toEqual({ ok: true, threads: [{ threadId: "main", status: "running" }] });
+    expect(await client.threadList({ sessionId })).toEqual({ ok: true, threads: [{ threadId: "main", status: "completed" }] });
     client.close();
   });
 
-  test("daemonStatus client method round-trip (no provider configured)", async () => {
+  sessionTest("daemonStatus client method round-trip (no provider configured)", async () => {
     await boot(null);
     const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "ds", onEvent: () => {} });
     const before = await client.daemonStatus();
@@ -353,7 +349,7 @@ describe("NormaClient", () => {
     client.close();
   });
 
-  test("init prompt reaches the session (canned NORMA.md-generation prompt)", async () => {
+  sessionTest("init prompt reaches the session (canned NORMA.md-generation prompt)", async () => {
     const { INIT_PROMPT } = await import("../src/main");
     expect(INIT_PROMPT).toMatch(/NORMA\.md/i);
     await boot();
@@ -367,7 +363,7 @@ describe("NormaClient", () => {
     client.close();
   });
 
-  test("resume continues an existing session (no new session)", async () => {
+  sessionTest("resume continues an existing session (no new session)", async () => {
     await boot();
     const c1 = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "a", onEvent: () => {} });
     const { sessionId } = await c1.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "r-")), approvalPolicy: "auto" });
@@ -393,7 +389,7 @@ describe("NormaClient", () => {
   // This is a LIVE round-trip on purpose: a schema unit test would pass the day the daemon stopped
   // populating the field, and a daemon-side test would pass the day the schema stopped declaring it.
   // Only both ends at once prove the value survives.
-  test("session.list round-trips `cwd` through the client's schema validation (T9)", async () => {
+  sessionTest("session.list round-trips `cwd` through the client's schema validation (T9)", async () => {
     await boot();
     const client = await NormaClient.connect({
       socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cli-cwd", onEvent: () => {},
@@ -420,7 +416,7 @@ describe("NormaClient", () => {
   // Read AFTER a real `session.setPolicy` as well as at create time, because the field's whole
   // purpose is to report what the setter wrote — a row that only ever echoed the creation argument
   // would satisfy a create-only assertion while telling a picker nothing it did not already know.
-  test("session.list round-trips `approvalPolicy` through the client's schema validation (mac-chat-parity T4)", async () => {
+  sessionTest("session.list round-trips `approvalPolicy` through the client's schema validation (mac-chat-parity T4)", async () => {
     await boot();
     const client = await NormaClient.connect({
       socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cli-policy", onEvent: () => {},
@@ -457,7 +453,7 @@ describe("NormaClient", () => {
   // write, which changes `dirs[0].path` without ever touching the stored `cwd` column
   // (`setDirsRaw`'s own contract) — proving `session.list`'s `cwd` is populated FROM `dirs` at read
   // time, not trusted from that now-stale column.
-  test("session.list round-trips `dirs` through the client's schema validation, cwd kept an alias (working-directories T3)", async () => {
+  sessionTest("session.list round-trips `dirs` through the client's schema validation, cwd kept an alias (working-directories T3)", async () => {
     const home = await boot();
     const client = await NormaClient.connect({
       socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cli-dirs", onEvent: () => {},
