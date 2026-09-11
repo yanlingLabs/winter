@@ -107,6 +107,10 @@ export interface RuntimeStateWiring {
    * must change with them, in the same breath.
    */
   relocatedMemoryKey(todaysKey: string): string | undefined;
+  /** True when the relocation map above could not be rebuilt from the manifest and may therefore be
+   *  behind it. The spine stays ONLINE either way (re-review NEW-2): a stale map resolves memory the
+   *  way it did a moment ago, which is survivable, while an offline spine costs every feature. */
+  memoryKeyMapStale(): boolean;
   /** Stops the sweep timer, drains the queued deletions (bounded), and closes the database. Called
    *  from the daemon's teardown AFTER the ipc server has stopped — see daemon.ts's `stop()`. */
   close(timeoutMs?: number): Promise<void>;
@@ -240,11 +244,16 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
     // the manifest could not be read: the live path then derives today's key, exactly as it does on
     // a home that never migrated.
     let relocations = new Map<string, string>();
+    /** The map could not be rebuilt after a change, so it may not describe the newest committed
+     *  relocation. Surfaced rather than swallowed: a stale map is a live-memory-path concern, and
+     *  `norma doctor` / a bug report should be able to say so. */
+    let relocationsStale = false;
     try {
       const torn = reconcileMemoryKeyTornApplies({ rs, home, records, fs: deps.memoryKeyFs });
       if (torn.length > 0) log(`memory-key migration: completed ${torn.length} relocation(s) a previous run left half-committed`);
       relocations = memoryKeyRelocations(rs);
     } catch (e) {
+      relocationsStale = true;
       log(`memory-key repair failed (it retries at the next boot): ${errName(e)}`);
     }
 
@@ -332,7 +341,21 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
         // in-process map still does not — and for the rest of the daemon's life the live MEMDIR path
         // would resolve a directory that is no longer there and start a second `MEMORY.md` beside the
         // user's own. Rebuilt here, the map always describes what is actually committed.
-        relocations = memoryKeyRelocations(rs);
+        //
+        // AND GUARDED, because a `finally` sits OUTSIDE the catch above it: an unguarded throw here
+        // escapes `runMemoryKeyMigration` — whose contract two lines up is "never throws" — and at
+        // boot lands in `startRuntimeState`'s outer catch, which closes the handle and costs the
+        // whole runtime spine (re-review NEW-2, the same failure class M-2 was raised about). The
+        // conditions that make the migration throw are exactly the ones that would make this
+        // `SELECT` throw too. On failure the PREVIOUS map is kept — stale, but never wrong about a
+        // relocation that has not happened — and the spine says so rather than going offline.
+        try {
+          relocations = memoryKeyRelocations(rs);
+          relocationsStale = false;
+        } catch (e) {
+          relocationsStale = true;
+          log(`memory-key map could not be rebuilt; the live memory path is using the last known map: ${errName(e)}`);
+        }
       }
     };
     runMemoryKeyMigration(deps.settings());
@@ -390,6 +413,7 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
       deletionsSettled: () => deletions,
       applySettings: runMemoryKeyMigration,
       relocatedMemoryKey: (todaysKey: string) => relocations.get(todaysKey),
+      memoryKeyMapStale: () => relocationsStale,
       /**
        * Stop the sweep, DRAIN the queued deletions, then close the database.
        *

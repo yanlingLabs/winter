@@ -5,7 +5,7 @@ import { join, relative } from "node:path";
 import { memoryDirFor, memoryDirForRecord, repoRootFor, sanitizeProjectKey, _clearRepoRootCacheForTests } from "../../src/agent/memory-dir";
 import {
   MemoryKeyNotPlannedError, RuntimeSessionRecords, applyMemoryKeyMigration,
-  backfillNativeSessions, memoryKeyRelocations, openRuntimeStateDb, planMemoryKeyMigration, reconcileMemoryKeyTornApplies, rollbackMemoryKeyMigration,
+  RUNTIME_STATE_SCHEMA_VERSION, backfillNativeSessions, memoryKeyRelocations, openRuntimeStateDb, planMemoryKeyMigration, reconcileMemoryKeyTornApplies, rollbackMemoryKeyMigration,
   type MemoryKeyFs, type RuntimeStateDb,
 } from "../../src/runtime-state";
 import { SessionStore } from "../../src/sessions/store";
@@ -1283,7 +1283,7 @@ describe("memory-key migration — a home that was migrated by a schema-v1 build
 
       const rs = openRuntimeStateDb(home);
       try {
-        expect(rs.schemaVersion()).toBe(2);
+        expect(rs.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION);
         const records = new RuntimeSessionRecords(rs);
         // The row came across as the `memory` entry, and the per-entry repair settles it: source
         // entry gone, destination entry present.
@@ -1295,6 +1295,129 @@ describe("memory-key migration — a home that was migrated by a schema-v1 build
         // And it is rollback-able, which is the whole reason the row was carried forward.
         expect(rollbackMemoryKeyMigration({ rs, home })).toEqual({ rolledBack: 1, failures: [] });
         expect(readFileSync(join(home, "projects", a.oldKey, "memory", "MEMORY.md"), "utf8")).toBe("alpha");
+      } finally {
+        rs.close();
+      }
+    });
+  });
+});
+
+// ── Fix round 2: which RECORDS a move owns, and what a race-window refusal leaves behind ─────────
+describe("memory-key migration — record scoping and the race window", () => {
+  /** A record filed AT the compatibility key from birth — what a Winter session's own record is
+   *  (Task 16), and the thing a blanket by-key re-key would drag around. */
+  function seedNativeAtDestination(home: string, store: SessionStore, key: string): string {
+    const cwd = workdir(home, `native-${key.slice(-8)}`);
+    const sessionId = store.createSession("work", { cwd });
+    const rs = openRuntimeStateDb(home);
+    try {
+      backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+      rs.db.run("UPDATE runtime_sessions SET memory_project_key = ? WHERE winter_session_id = ?", [key, sessionId]);
+    } finally {
+      rs.close();
+    }
+    return sessionId;
+  }
+
+  test("a half-moved project never drags a record that was natively at the destination key", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+      // A `<uuid>.jsonl` sorts BEFORE "memory", so the project is genuinely half-moved (its `memory`
+      // entry still at the old key) at the moment the first entry commits.
+      writeFileSync(join(home, "projects", a.oldKey, "0f2a1c00-0000-4000-8000-000000000000.jsonl"), "{}\n");
+      const native = seedNativeAtDestination(home, store, a.newKey);
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        const plan = planMemoryKeyMigration({ rs, home, records, store });
+        expect(plan.moves[0]!.entries).toEqual(["0f2a1c00-0000-4000-8000-000000000000.jsonl", "memory"]);
+
+        // Stop after the FIRST entry: the project is half-moved and `syncRecordKey` runs with
+        // `pairRelocated` still false — the branch that used to re-key by key.
+        let renames = 0;
+        const tornOnSecond: MemoryKeyFs = {
+          existsSync, statSync, readdirSync: (p, o) => readdirSync(p, o),
+          mkdirSync: (p, o) => { mkdirSync(p, o); }, rmdirSync: (p) => { rmdirSync(p); },
+          renameSync: (from, to) => { if (++renames === 2) throw new Error("simulated crash mid-project"); renameSync(from, to); },
+        };
+        expect(() => applyMemoryKeyMigration({ rs, home, fs: tornOnSecond }, plan)).toThrow("simulated crash");
+
+        // The record that was always at the destination is exactly where it was.
+        expect(records.get(native)!.memoryProjectKey).toBe(a.newKey);
+        // And the migration's own record has not moved forward yet — its `memory` entry has not.
+        expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.oldKey);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("a rollback puts back only the records this migration moved", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+      {
+        const rs0 = openRuntimeStateDb(home);
+        try { backfillNativeSessions({ rs: rs0, store, home, providerId: "codex-oauth" }); } finally { rs0.close(); }
+      }
+      const native = seedNativeAtDestination(home, store, a.newKey);
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        applyMemoryKeyMigration({ rs, home }, planMemoryKeyMigration({ rs, home, records, store }));
+        expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.newKey);
+        expect(records.get(native)!.memoryProjectKey).toBe(a.newKey);
+
+        expect(rollbackMemoryKeyMigration({ rs, home })).toEqual({ rolledBack: 1, failures: [] });
+        // The migrated record goes back; the one that was born at the destination STAYS there — the
+        // blanket `rekey(newKey → oldKey)` used to file it under a key it had never lived at, for good.
+        expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.oldKey);
+        expect(records.get(native)!.memoryProjectKey).toBe(a.newKey);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("a refusal in the race window leaves the project where it started — nothing split across two keys", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+      writeFileSync(join(home, "projects", a.oldKey, "0f2a1c00-0000-4000-8000-000000000000.jsonl"), "{}\n");
+      const before = snapshotTree(join(home, "projects", a.oldKey));
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        const plan = planMemoryKeyMigration({ rs, home, records, store });
+
+        // Something occupies the SECOND entry's destination between the first rename and the second
+        // — the window the batch pre-check cannot see.
+        let renames = 0;
+        const racy: MemoryKeyFs = {
+          statSync, readdirSync: (p, o) => readdirSync(p, o),
+          mkdirSync: (p, o) => { mkdirSync(p, o); }, rmdirSync: (p) => { rmdirSync(p); },
+          renameSync: (from, to) => { renameSync(from, to); if (++renames === 1) mkdirSync(join(home, "projects", a.newKey, "memory"), { recursive: true }); },
+          existsSync,
+        };
+        const result = applyMemoryKeyMigration({ rs, home, fs: racy }, plan);
+        expect(result.refused).toEqual([{ newKey: a.newKey, oldKeys: [a.oldKey], reason: "target-exists", entries: ["memory"] }]);
+        expect(result.moved).toBe(0);
+        expect(result.movedEntries).toBe(0);
+
+        // Everything of the user's is back under the old key, and every row is `planned` again.
+        expect(snapshotTree(join(home, "projects", a.oldKey))).toEqual(before);
+        expect(manifestEntries(rs).map((r) => r.status)).toEqual(["planned", "planned"]);
+        expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.oldKey);
+        expect(memoryKeyRelocations(rs).size).toBe(0);
       } finally {
         rs.close();
       }

@@ -251,17 +251,32 @@ export interface MemoryKeyRollbackFailure {
   reason: "target-exists";
 }
 
-interface ManifestRow { old_key: string; entry: string; new_key: string; status: string }
+interface ManifestRow { old_key: string; entry: string; new_key: string; status: string; record_ids: string }
+
+/** The records a pair was derived from, as the manifest stored them. Tolerant of anything that is
+ *  not a JSON array of strings: a row that cannot say whose records it owns owns none. */
+function recordIdsOf(rows: ManifestRow[]): string[] {
+  const out = new Set<string>();
+  for (const row of rows) {
+    try {
+      const parsed: unknown = JSON.parse(row.record_ids ?? "[]");
+      if (Array.isArray(parsed)) for (const id of parsed) if (typeof id === "string") out.add(id);
+    } catch {
+      /* a malformed row owns no records — never a reason to re-key by key instead */
+    }
+  }
+  return [...out];
+}
 
 /** Every manifest row for one old key, in entry order. Read by the old key ALONE rather than by the
  *  whole pair, so a row that names a DIFFERENT destination is visible as what it is — a disagreement
  *  to report — instead of looking like no row at all. */
 function manifestRowsFor(rs: RuntimeStateDb, oldKey: string): ManifestRow[] {
-  return rs.db.query(`SELECT old_key, entry, new_key, status FROM memory_key_manifest WHERE old_key = ? ORDER BY entry`).all(oldKey) as ManifestRow[];
+  return rs.db.query(`SELECT old_key, entry, new_key, status, record_ids FROM memory_key_manifest WHERE old_key = ? ORDER BY entry`).all(oldKey) as ManifestRow[];
 }
 
 function allManifestRows(rs: RuntimeStateDb): ManifestRow[] {
-  return rs.db.query(`SELECT old_key, entry, new_key, status FROM memory_key_manifest ORDER BY old_key, entry`).all() as ManifestRow[];
+  return rs.db.query(`SELECT old_key, entry, new_key, status, record_ids FROM memory_key_manifest ORDER BY old_key, entry`).all() as ManifestRow[];
 }
 
 /**
@@ -311,8 +326,23 @@ function syncRecordKey(rs: RuntimeStateDb, records: RuntimeSessionRecords, oldKe
   if (rows.length === 0) return;
   const newKey = rows[0]!.new_key;
   if (rows.some((r) => r.new_key !== newKey)) return; // a corrupt pair: report nothing, move nothing
-  if (pairRelocated(rows)) records.rekeyMemoryProjectKey(oldKey, newKey);
-  else records.rekeyMemoryProjectKey(newKey, oldKey);
+  const ids = recordIdsOf(rows);
+  const relocated = pairRelocated(rows);
+  // BY EXPLICIT RECORD IDS, captured at plan time (re-review NEW-3). The by-key form re-keys EVERY
+  // record sitting at a key, which is right for a directory rename seen from the directory's side
+  // and wrong seen from this migration's: a Winter session files its record AT the compatibility key
+  // from birth, so the reverse direction below would drag those records to the old key every time a
+  // multi-entry project is half-moved (entries apply in sorted order, and a `<uuid>.jsonl` sorts
+  // before `memory`), and a rollback would file them there for good.
+  if (ids.length > 0) {
+    records.setMemoryProjectKeyFor(ids, relocated ? newKey : oldKey);
+    return;
+  }
+  // A row with no ids is one carried up from schema v1/v2, which predate this column. FORWARD ONLY:
+  // completing a relocation the disk already performed is what keeps a torn v1-era move readable,
+  // while the reverse direction is the one that could capture somebody else's record — and there is
+  // nothing to put back that this manifest can prove it moved.
+  if (relocated) records.rekeyMemoryProjectKey(oldKey, newKey);
 }
 
 /**
@@ -368,6 +398,9 @@ export function planMemoryKeyMigration(deps: {
   // The distinct (oldKey → newKey) pairs the records ask for, in a stable order, plus the cwd each
   // destination was derived from.
   const wanted = new Map<string, Set<string>>();
+  /** Which records asked for each old key — stored on the manifest rows so `syncRecordKey` can move
+   *  exactly these and nothing that merely happens to sit at the same key (re-review NEW-3). */
+  const recordsFor = new Map<string, Set<string>>();
   const cwdFor = new Map<string, string>();
   const referenced = new Set<string>();
   for (const record of deps.records.list()) {
@@ -420,6 +453,7 @@ export function planMemoryKeyMigration(deps: {
       continue;
     }
     (wanted.get(oldKey) ?? wanted.set(oldKey, new Set()).get(oldKey)!).add(newKey);
+    (recordsFor.get(oldKey) ?? recordsFor.set(oldKey, new Set()).get(oldKey)!).add(record.winterSessionId);
     cwdFor.set(`${oldKey} ${newKey}`, cwd);
   }
 
@@ -503,12 +537,25 @@ export function planMemoryKeyMigration(deps: {
   rs.transaction(() => {
     for (const move of plan.moves) {
       for (const entry of move.entries ?? []) {
-        rs.db.run(
-          `INSERT INTO memory_key_manifest (old_key, entry, new_key, status, planned_at, moved_at) VALUES (?, ?, ?, 'planned', ?, NULL)
-           ON CONFLICT(old_key, entry) DO UPDATE SET new_key = excluded.new_key, status = 'planned', planned_at = excluded.planned_at, moved_at = NULL
-           WHERE memory_key_manifest.status <> 'moved'`,
-          [move.oldKey, entry, move.newKey, at],
-        );
+        // `record_ids` is written only when THIS run derived the pair from records. A move planned
+        // from the manifest ledger alone (the torn-apply remainder) keeps whatever the row already
+        // holds — overwriting it with `[]` would throw away the only record scoping that exists.
+        const ids = recordsFor.get(move.oldKey);
+        if (ids && ids.size > 0) {
+          rs.db.run(
+            `INSERT INTO memory_key_manifest (old_key, entry, new_key, status, planned_at, moved_at, record_ids) VALUES (?, ?, ?, 'planned', ?, NULL, ?)
+             ON CONFLICT(old_key, entry) DO UPDATE SET new_key = excluded.new_key, status = 'planned', planned_at = excluded.planned_at, moved_at = NULL, record_ids = excluded.record_ids
+             WHERE memory_key_manifest.status <> 'moved'`,
+            [move.oldKey, entry, move.newKey, at, JSON.stringify([...ids].sort())],
+          );
+        } else {
+          rs.db.run(
+            `INSERT INTO memory_key_manifest (old_key, entry, new_key, status, planned_at, moved_at) VALUES (?, ?, ?, 'planned', ?, NULL)
+             ON CONFLICT(old_key, entry) DO UPDATE SET new_key = excluded.new_key, status = 'planned', planned_at = excluded.planned_at, moved_at = NULL
+             WHERE memory_key_manifest.status <> 'moved'`,
+            [move.oldKey, entry, move.newKey, at],
+          );
+        }
       }
     }
   }, { mode: "immediate" });
@@ -620,11 +667,14 @@ export function memoryKeyRelocations(rs: RuntimeStateDb): Map<string, string> {
  * `planMemoryKeyMigration` — not this function — that repairs it: a resumed run always re-plans
  * first, and by then the source entry is gone. See `reconcileTornApplies`.
  *
- * A COLLISION REFUSES ITS OWN PROJECT AND NOTHING ELSE. Every entry is checked against the
- * destination BEFORE the first rename of that project, so a refused project moves nothing at all
- * (a project's state never splits across two keys), and the run continues with the others. The
- * refusals come back as data rather than as an exception, because they are facts about the user's
- * disk that the next run can find again — not caller bugs.
+ * A COLLISION REFUSES ITS OWN PROJECT AND NOTHING ELSE, and a refused project moves nothing at all —
+ * a project's state never splits across two keys. Every entry is checked against the destination
+ * BEFORE the first rename, which settles the ordinary case; an entry that appears DURING the pass
+ * (the race window) is caught by the re-check immediately before each rename, and the entries this
+ * pass already moved are put back (`undoEntries`) so the claim above holds there too. The run
+ * continues with the other projects either way. The refusals come back as data rather than as an
+ * exception, because they are facts about the user's disk that the next run can find again — not
+ * caller bugs.
  *
  * Re-passing the SAME in-memory plan is handled by the manifest pre-check: an entry whose row
  * already reads `moved` is skipped as done, and any other stale state refuses before a rename can
@@ -678,16 +728,24 @@ export function applyMemoryKeyMigration(
       continue;
     }
     fs.mkdirSync(projectDir(home, move.newKey), { recursive: true });
-    let movedHere = 0;
+    const done: string[] = [];
     for (const entry of present) {
-      // The immediate-before-the-rename re-check. Cheap, and it turns a race into an ENOENT-shaped
-      // refusal instead of a silent replacement.
+      // The immediate-before-the-rename re-check. Cheap, and it turns a race into a refusal instead
+      // of a silent replacement.
       if (fs.existsSync(entryPath(home, move.newKey, entry))) {
+        // AND THE PROJECT GOES BACK TO WHERE IT STARTED (re-review NEW-5). "A refused project moves
+        // nothing at all" was true of the batch check above and not of this one: breaking here left
+        // the earlier entries at the new key, i.e. exactly the split across two keys the rule exists
+        // to prevent. The entries this pass moved are put back, their rows returned to `planned`,
+        // and the record scoping re-synced — so the state is byte-for-byte what the operator will
+        // find after they clear the obstruction and re-run.
+        undoEntries(rs, records, fs, home, move, done);
         refused.push({ newKey: move.newKey, oldKeys: [move.oldKey], reason: "target-exists", entries: [entry] });
+        done.length = 0;
         break;
       }
       fs.renameSync(entryPath(home, move.oldKey, entry), entryPath(home, move.newKey, entry));
-      movedHere += 1;
+      done.push(entry);
       // ONE TRANSACTION for this entry's row AND the records that named the old key: the entry has
       // already moved, so a commit that landed only half of this would leave records pointing at a
       // path that no longer exists (a memory read would then find nothing, silently) or a manifest
@@ -701,12 +759,49 @@ export function applyMemoryKeyMigration(
       }, { mode: "immediate" });
     }
     pruneEmptySource(fs, home, move.oldKey);
-    if (movedHere > 0) {
+    if (done.length > 0) {
       moved += 1;
-      movedEntries += movedHere;
+      movedEntries += done.length;
     }
   }
   return { moved, movedEntries, refused };
+}
+
+/**
+ * Put back the entries THIS pass just moved, for a project that then hit a race-window refusal.
+ *
+ * Only ever called with entries whose rename and row-commit both landed moments earlier in this same
+ * loop, so the reverse rename cannot collide with anything: the source name was ours and is still
+ * free. Best-effort per entry all the same — an entry that will not come back is left where it is
+ * with its row still `moved`, which is the truth, and the next plan finishes the project from the
+ * ledger rather than pretending the undo was total.
+ */
+function undoEntries(
+  rs: RuntimeStateDb,
+  records: RuntimeSessionRecords,
+  fs: MemoryKeyFs,
+  home: string,
+  move: MemoryKeyMove,
+  entries: readonly string[],
+): void {
+  for (const entry of entries) {
+    const back = entryPath(home, move.oldKey, entry);
+    const at = entryPath(home, move.newKey, entry);
+    try {
+      if (!fs.existsSync(at) || fs.existsSync(back)) continue;
+      fs.mkdirSync(projectDir(home, move.oldKey), { recursive: true });
+      fs.renameSync(at, back);
+    } catch {
+      continue; // left `moved`, which is what the disk says
+    }
+    rs.transaction(() => {
+      rs.db.run(
+        `UPDATE memory_key_manifest SET status = 'planned', moved_at = NULL WHERE old_key = ? AND entry = ? AND new_key = ? AND status = 'moved'`,
+        [move.oldKey, entry, move.newKey],
+      );
+      syncRecordKey(rs, records, move.oldKey);
+    }, { mode: "immediate" });
+  }
 }
 
 /**

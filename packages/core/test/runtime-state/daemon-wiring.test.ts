@@ -639,6 +639,45 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
     });
   });
 
+  test("a relocation map that cannot be rebuilt keeps the LAST map and the spine online — it never escapes as a throw", async () => {
+    // RE-REVIEW NEW-2. The `finally` that rebuilds the map sits OUTSIDE the catch above it, so an
+    // unguarded throw there escapes `runMemoryKeyMigration` — whose contract is "never throws" — and
+    // at boot lands in `startRuntimeState`'s outer catch, which closes the handle and costs the whole
+    // runtime spine. That is the very failure class M-2 was raised about, reintroduced by M-1's fix.
+    await withTempHome(async (home) => {
+      const store = new SessionStore(home);
+      const first = seedProject(home, store, "alpha");
+      const lines: string[] = [];
+      const settingsWith = (memoryKeys: boolean) => Settings.parse({ ...SETTINGS_BASE, runtimes: { migrations: { memoryKeys } } });
+      let live = settingsWith(false);
+
+      const state = await startRuntimeState({ home, store, settings: () => live, log: (l) => lines.push(l) });
+      const rt = "unavailable" in state ? undefined : state;
+      try {
+        expect(rt).toBeDefined();
+        expect(rt!.memoryKeyMapStale()).toBe(false);
+
+        // The manifest goes away under the running daemon: every read of it now throws, including
+        // the plan AND the map rebuild in the `finally`.
+        rt!.db.db.run("DROP TABLE memory_key_manifest");
+
+        live = settingsWith(true);
+        expect(() => rt!.applySettings(live)).not.toThrow();   // the contract, asserted directly
+
+        expect(lines.some((l) => l.includes("memory-key migration failed"))).toBe(true);
+        expect(lines.some((l) => l.includes("memory-key map could not be rebuilt"))).toBe(true);
+        expect(rt!.memoryKeyMapStale()).toBe(true);
+        // The last known map is KEPT (nothing had been relocated, so it is empty) and the live path
+        // still answers — stale beats wrong, and both beat an offline spine.
+        expect(rt!.relocatedMemoryKey(first.oldKey)).toBeUndefined();
+        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(home, "projects", first.oldKey, "memory"));
+      } finally {
+        await rt?.close();
+        store.close();
+      }
+    });
+  });
+
   test("clearing settings.memory.directory on a RUNNING daemon un-declines the migration — no restart", async () => {
     await withTempHome(async (home) => {
       const pinned = join(home, "my-memdir");
