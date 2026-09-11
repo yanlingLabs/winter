@@ -6,17 +6,26 @@ import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
 import { openRoutineStore, type RoutineStore } from "../../src/routines/store";
 import { makeRoutineScheduler } from "../../src/routines/scheduler";
-import { makeDaemonRoutineRunner, type MinimalEngine } from "../../src/routines/runner";
+import { makeDaemonRoutineRunner, type WinterTurnRunner } from "../../src/routines/runner";
 import { RoutineAuditLog } from "../../src/routines/audit";
+
+/** The driver table's headless door, faked over the real hub: the driver appends the `user_message`
+ *  itself (P8b-39) and then the scripted "turn" writes what a child would have. */
+const winterOver = (hub: SessionHub, turn: (sessionId: string) => Promise<void>): WinterTurnRunner => ({
+  async runTurn(sessionId, text, clientName) {
+    hub.append(sessionId, { type: "user_message", sessionId, threadId: "main", text, clientName });
+    await turn(sessionId);
+  },
+});
 
 // =================================================================================================
 // Phase 5 routines T5 — THE PHASE GATE ("a routine fires headless on schedule") + the quota-defer
 // e2e. Unlike scheduler.test.ts (fake RoutineRunner) and runner.test.ts (real SessionStore/Hub +
-// fake MinimalEngine, but the scheduler itself is never involved), this file wires ALL THREE real
+// fake WinterTurnRunner, but the scheduler itself is never involved), this file wires ALL THREE real
 // pieces together — the real RoutineStore (temp sqlite), the real makeRoutineScheduler, and the
 // real makeDaemonRoutineRunner against a real SessionStore/SessionHub (temp sqlite + jsonl logs) —
-// with only the engine (the LLM/provider turn loop) stubbed, exactly the "fake provider/engine
-// seam" the brief calls for. This is the closest thing to the live daemon wiring that a unit test
+// with only the Winter driver table's headless door (the child's turn) stubbed, exactly the "fake
+// provider/engine seam" the brief calls for. This is the closest thing to the live daemon wiring that a unit test
 // can exercise without standing up startDaemon()/a real provider.
 // =================================================================================================
 
@@ -55,7 +64,7 @@ interface RealHarness {
 }
 
 /** Assembles the real store+hub+routine-store+audit trio (mirrors exactly what daemon.ts
- *  constructs), leaving only the MinimalEngine to be supplied per-test. */
+ *  constructs), leaving only the WinterTurnRunner to be supplied per-test. */
 function buildHarness(): RealHarness {
   const sessionsHome = makeHome("norma-e2e-routines-sessions-");
   const sessionStore = new SessionStore(sessionsHome);
@@ -77,17 +86,15 @@ describe("Phase 5 routines — e2e: THE PHASE GATE (a routine fires headless on 
     const h = buildHarness();
     let firedSessionId: string | undefined;
     let sawPrompt: string | undefined;
-    const engine: MinimalEngine = {
-      async runTurn(sessionId) {
+    const winter = winterOver(h.hub, async (sessionId) => {
         firedSessionId = sessionId;
         const events = h.sessionStore.read(sessionId);
         const userMsg = events.find((e) => e.type === "user_message");
         sawPrompt = userMsg && "text" in userMsg ? userMsg.text : undefined;
         h.hub.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: "3 unread emails" });
         h.hub.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 12, outputTokens: 6 });
-      },
-    };
-    const runner = makeDaemonRoutineRunner({ store: h.sessionStore, hub: h.hub, engine });
+    });
+    const runner = makeDaemonRoutineRunner({ store: h.sessionStore, hub: h.hub, winter });
 
     const routine = h.routineStore.create({ spec: "every 2s", prompt: "check inbox", policy: "auto", cwd: "/tmp/routine-e2e" });
     let now = routine.nextRunAt + 10; // already due
@@ -127,13 +134,11 @@ describe("Phase 5 routines — e2e: THE PHASE GATE (a routine fires headless on 
 
   test("start(): the SAME real wiring fires on an actual (tiny) schedule via start(), not a manually-driven tick() — condition-polled, no fixed sleep as the only sync", async () => {
     const h = buildHarness();
-    const engine: MinimalEngine = {
-      async runTurn(sessionId) {
+    const winter = winterOver(h.hub, async (sessionId) => {
         h.hub.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: "pong" });
         h.hub.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 1, outputTokens: 1 });
-      },
-    };
-    const runner = makeDaemonRoutineRunner({ store: h.sessionStore, hub: h.hub, engine });
+    });
+    const runner = makeDaemonRoutineRunner({ store: h.sessionStore, hub: h.hub, winter });
 
     // `every 1s`, real wall clock (no `now` override) — nextRunAt is ~1s in the future at
     // creation time, so start()'s own tiny tick interval (well under 1s) is what actually
@@ -165,8 +170,7 @@ describe("Phase 5 routines — e2e: quota-defer", () => {
   test("a quota-shaped agent_error (code: \"rate_limit\") defers the routine (deferAttempts=1, nextRunAt = now+30min, lastResult 'deferred: quota', audit defer line); a later successful fire resets attempts", async () => {
     const h = buildHarness();
     let mode: "quota" | "success" = "quota";
-    const engine: MinimalEngine = {
-      async runTurn(sessionId) {
+    const winter = winterOver(h.hub, async (sessionId) => {
         if (mode === "quota") {
           h.hub.append(sessionId, { type: "agent_error", sessionId, threadId: "main", message: "rate limited, try later", code: "rate_limit" });
           h.hub.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "error", inputTokens: 0, outputTokens: 0 });
@@ -174,9 +178,8 @@ describe("Phase 5 routines — e2e: quota-defer", () => {
           h.hub.append(sessionId, { type: "assistant_message", sessionId, threadId: "main", text: "back online" });
           h.hub.append(sessionId, { type: "turn_completed", sessionId, threadId: "main", stopReason: "end_turn", inputTokens: 4, outputTokens: 2 });
         }
-      },
-    };
-    const runner = makeDaemonRoutineRunner({ store: h.sessionStore, hub: h.hub, engine });
+    });
+    const runner = makeDaemonRoutineRunner({ store: h.sessionStore, hub: h.hub, winter });
 
     const routine = h.routineStore.create({ spec: "every 30m", prompt: "poll status", policy: "auto", cwd: "/tmp/routine-e2e-3" });
     let now = routine.nextRunAt + 10;

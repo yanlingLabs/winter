@@ -178,15 +178,15 @@ export interface IpcServerOptions {
   /**
    * P8b Task 16: THE driver table (`runtime-sdk/session-driver.ts`) — the Winter leg's whole door.
    *
-   * `session.create` asks it which leg a NEW session goes on (P8b-13, `legForNewSession` off the
-   * LIVE settings) and, on the Winter leg, runs the creation transaction through it; every later
-   * `session.send`/`steer`/`interrupt`/`compact`/`setModel` asks it for the session's live driver
-   * first and takes the engine path — byte-identical to today — when there is none. A record that
-   * says "winter" with no live driver (a daemon restart, an idle timeout) is RESUMED here.
+   * `session.create`/`session.dispatch` run the creation transaction through it (every mode is
+   * the Winter leg since Task 17); every later `session.send`/`steer`/`interrupt`/`compact`/
+   * `setModel` asks it for the session's live driver first. A record that says "winter" with no
+   * live driver (a daemon restart, an idle timeout) is RESUMED here; an engine-ERA record or a
+   * record-less session is a typed refusal (`session_predates_winter_leg` / `session_unrecorded`).
    *
-   * `undefined` on a server built without one (every pre-8b test): the engine path is the only
-   * path, exactly as before this task. With every `runtimes.winterLeg` flag false the table
-   * answers "engine" for every new session and the handlers below are unchanged in effect.
+   * `undefined` on a server built without one (a bare test server): no session can run a turn —
+   * `session.send` lands the message in the log and nothing else, exactly as a no-engine daemon
+   * always behaved.
    */
   winter?: WinterSessionDrivers;
   // session-activity-hygiene T8: hands the caller THE bound activity derivation this server stamps
@@ -1237,22 +1237,19 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // unlike `sync.push`'s ingress: there is no irreplaceable log riding along here, so the
         // caller can simply be told.
         if (p.effort !== undefined) assertEffortSelectable(p.effort, model ?? opts.liveModel?.() ?? "", p.mode);
-        // P8b-13 (Task 16): THE LEG DECISION, for a NEW session only, off the LIVE settings — and
-        // BEFORE the product row is minted, so a Winter-leg refusal (P8b-2: no `winter` binary
-        // resolves; the router handle or the runtime spine did not construct) costs nothing but
-        // this reply and NEVER falls back to the engine. With every flag false this is "engine"
-        // and the handler below is unchanged.
-        const leg = opts.winter?.legForNewSession(p.mode ?? "code") ?? "engine";
-        if (leg === "winter") {
-          try { opts.winter!.assertAvailable(p.mode ?? "code"); } catch (err) { rpcFromWinterRefusal(err); }
+        // P8b-2 / Task 17: the availability check runs BEFORE the product row is minted, so a
+        // Winter-leg refusal (no `winter` binary resolves; the router handle or the runtime spine
+        // did not construct) costs nothing but this reply — and NEVER falls back to anything.
+        // `winter` is undefined only on a bare test server, where the row is minted and no child
+        // exists (fix wave F9 retired the engine-leg branch that used to sit here).
+        if (opts.winter !== undefined) {
+          try { opts.winter.assertAvailable(p.mode ?? "code"); } catch (err) { rpcFromWinterRefusal(err); }
         }
         const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy, origin: p.origin, mode: p.mode, model, effort: p.effort });
-        // THE CREATION TRANSACTION (WS-16 §6, P8b-14): both legs persist a `RuntimeSessionRecord`.
-        // On the Winter leg the record allocates the backend uuid and the child is started; a
-        // failure there ROLLS THE ROW BACK (it was never announced to any client — the
-        // `session_created` broadcast is below) and the typed refusal is the reply. On the engine
-        // leg the record is the backfill's honest shape (no Winter transcript) and best-effort.
-        if (leg === "winter") {
+        // THE CREATION TRANSACTION (WS-16 §6, P8b-14): the record allocates the backend uuid and
+        // the child is started; a failure there ROLLS THE ROW BACK (it was never announced to any
+        // client — the `session_created` broadcast is below) and the typed refusal is the reply.
+        if (opts.winter !== undefined) {
           try {
             await opts.winter!.create(sessionId);
           } catch (err) {
@@ -1264,8 +1261,6 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             try { opts.onSessionDeleted?.(sessionId); } catch { /* best effort; the refusal still stands */ }
             rpcFromWinterRefusal(err);
           }
-        } else {
-          opts.winter?.recordEngineCreation(sessionId);
         }
         const trusted = cwd ? (opts.trust?.isTrusted(cwd) ?? false) : false;
         // Broadcast the session_created event to every authed harness (not just attachments —
@@ -1383,24 +1378,21 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // it is left as history and a NEW singleton is minted on the Winter leg — `dispatchSessionId`
         // answers the newest dispatch row, so the re-mint happens once.
         if (existing && (opts.winter === undefined || opts.winter.legOf(existing) !== "engine")) return { sessionId: existing, created: false };
-        // P8b Task 17: the singleton is minted on the leg `settings.runtimes.winterLeg.dispatch`
-        // names (P8b-13) — the same transaction `session.create` runs: refuse typed BEFORE the row
-        // exists, persist the record + start the child after it, roll the row back on a refusal.
-        const leg = opts.winter?.legForNewSession("dispatch") ?? "engine";
-        if (leg === "winter") { try { opts.winter!.assertAvailable("dispatch"); } catch (err) { rpcFromWinterRefusal(err); } }
+        // P8b Task 17: the singleton is minted through the same transaction `session.create` runs:
+        // refuse typed BEFORE the row exists, persist the record + start the child after it, roll
+        // the row back on a refusal. (`winter` is undefined only on a bare test server.)
+        if (opts.winter !== undefined) { try { opts.winter.assertAvailable("dispatch"); } catch (err) { rpcFromWinterRefusal(err); } }
         const sessionId = opts.store.createSession("global", {
           cwd: homedir(), approvalPolicy: "auto", origin: "dispatch", mode: "dispatch",
         });
-        if (leg === "winter") {
+        if (opts.winter !== undefined) {
           try {
-            await opts.winter!.create(sessionId);
+            await opts.winter.create(sessionId);
           } catch (err) {
             try { opts.store.deleteSession(sessionId); } catch { /* the row is gone or undeletable; the refusal still stands */ }
             try { opts.onSessionDeleted?.(sessionId); } catch { /* best effort; the refusal still stands */ }
             rpcFromWinterRefusal(err);
           }
-        } else {
-          opts.winter?.recordEngineCreation(sessionId);
         }
         return { sessionId, created: true };
       }

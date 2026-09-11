@@ -4,8 +4,8 @@
 // What only the table can prove:
 //   n7  two RPCs racing a resume after a restart open ONE child (no `await` before `drivers.set`);
 //   m5  a deleted session's driver is ended and evicted;
-//   m6  a records store that will not answer costs the log line only — `legOf`/`ensure` take the
-//       engine path, never throw;
+//   m6  a records store that will not answer costs the log line only — `legOf` answers undefined
+//       and `ensure` undefined, never a throw (the IPC layer then refuses typed, fix wave F2);
 //   R1  the store's own log is what a resume re-pushes (`unconsumed` over `store.read`).
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -170,25 +170,7 @@ describe("createWinterSessionDrivers — the table", () => {
     } finally { t.close(); }
   });
 
-  test("re-review N3: a live-created engine-leg record and 8a's boot backfill agree on transcriptProjectKey/backendRoot for a cwd-less session", () => {
-    const t = table({ settings: () => ({ runtimes: { winterLeg: { chat: false, dispatch: false, code: false } } } as unknown as Settings) });
-    try {
-      const live = t.store.createSession("t", { mode: "chat" });
-      t.drivers.recordEngineCreation(live);
-      const backfilled = t.store.createSession("t", { mode: "chat" });
-      const rs = openRuntimeStateDb(t.home);
-      try { backfillNativeSessions({ rs, store: t.store, home: t.home, providerId: "unstated" }); } finally { rs.close(); }
-      const a = t.records.get(live)!;
-      const b = t.records.get(backfilled)!;
-      expect(a.backendSessionId).toBeUndefined();
-      expect(b.backendSessionId).toBeUndefined();
-      expect(a.transcriptProjectKey).toBe(b.transcriptProjectKey);
-      expect(a.backendRoot).toBe(b.backendRoot);
-      expect(a.tempProjectKey).toBe(b.tempProjectKey);
-    } finally { t.close(); }
-  });
-
-  test("m6: a records store that throws makes `legOf` undefined and `ensure` the engine's — logged, never thrown", async () => {
+  test("m6: a records store that throws makes `legOf` undefined and `ensure` undefined — logged, never thrown", async () => {
     const t = table({ records: { get: () => { throw new Error("db closed"); } } as unknown as RuntimeSessionRecords });
     try {
       expect(t.drivers.legOf("s_any")).toBeUndefined();

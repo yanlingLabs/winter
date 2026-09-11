@@ -29,7 +29,7 @@ import type { RuntimeDirectoryEntry, RuntimeDirectoryOptions, RuntimeDirectorySt
 import type { PermissionClassLabel } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { SecretStore } from "../auth/secret-store";
 import { retentionFromSettings } from "../runtime-state/retention";
-import type { Settings } from "../settings";
+import { winterOptionsFromSettings, type Settings } from "../settings";
 import { NORMA_BRAND } from "./brand";
 import { resolveWinterExecutable, type WinterExecutableUnavailable } from "./executable";
 import { keychainSeamFromSecretStore } from "./keychain";
@@ -165,21 +165,6 @@ export interface NormaRuntimeSdk {
 }
 
 /**
- * TEMPORARY — the ONE door this file reads the `runtimes` block through.
- *
- * Task 15's `settings.ts` will export `winterOptionsFromSettings(settings)` in a pending fix round;
- * when it lands, delete this helper and call that. Until then the optional chains live here and
- * nowhere else. Blank-is-absent is the convention the whole block shares (`settings.ts`'s own doc:
- * the keys are plain `z.string()` so that clearing a field is never a boot failure).
- */
-function winterOptionsFrom(s: Settings | null | undefined): { winterExecutable?: string; advisorModel?: string } {
-  return {
-    winterExecutable: s?.runtimes?.winterExecutable?.trim() || undefined,
-    advisorModel: s?.runtimes?.advisorModel?.trim() || undefined,
-  };
-}
-
-/**
  * G-12 / P8b-11: retention is passed EXPLICITLY, from the same `retentionFromSettings` door 8a's
  * own sweep reads (absent block ⇒ the shipped 30/7 days).
  *
@@ -207,10 +192,12 @@ function retentionFrom(settings: () => Settings | null | undefined): RuntimeDire
  * inert on a Winter-only host (see `advisorReviewer` above).
  */
 function advisorFrom(deps: NormaRuntimeSdkDeps): { advisor?: NonNullable<RuntimeSdkOptions["advisor"]> } {
-  const model = winterOptionsFrom(deps.settings()).advisorModel;
+  // `winterOptionsFromSettings` is THE door every Winter-leg consumer reads the `runtimes` block
+  // through (fix wave F3 retired this file's own temporary copy of it).
+  const model = winterOptionsFromSettings(deps.settings()).advisorModel;
   if (model === undefined) return {};
   const resolveReviewer: ReviewerResolver = () => {
-    const live = winterOptionsFrom(deps.settings()).advisorModel ?? model;
+    const live = winterOptionsFromSettings(deps.settings()).advisorModel ?? model;
     const provider = deps.advisorReviewer?.(live);
     return provider === undefined ? undefined : { provider, model: live };
   };
@@ -306,7 +293,7 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
     },
     spawnHookFor(_mode: SessionMode): WinterSpawnHook | WinterExecutableUnavailable {
       const resolution = resolveWinterExecutable({
-        setting: winterOptionsFrom(deps.settings()).winterExecutable,
+        setting: winterOptionsFromSettings(deps.settings()).winterExecutable,
         env: process.env,
         execPath: process.execPath,
         home: deps.home,

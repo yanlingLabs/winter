@@ -56,7 +56,6 @@ function recordlessTable(legOf: (sid: string) => "winter" | "engine" | undefined
     legOf,
     assertAvailable: () => {},
     create: async () => never(),
-    recordEngineCreation: () => {},
     get: () => undefined,
     runTurn: async () => never(),
     ensure: async () => undefined,

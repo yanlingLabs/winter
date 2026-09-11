@@ -2,26 +2,23 @@
 // assembled before a `winter` child can run it.
 //
 // `ipc/server.ts` routes by asking this table (see `WinterSessionDrivers`): a live driver wins; a
-// record that says "winter" with no live driver is resumed here; anything else is the engine's,
-// exactly as today. The table is built once in `daemon.ts` (after the runtime spine has recovered
-// and the router handle has run its directory recovery — a projector is never constructed before
-// that sweep) and shared with the IPC layer through `IpcServerOptions.winter`.
+// record that says "winter" with no live driver is resumed here; an ENGINE-ERA record (no Winter
+// transcript) and a record-less session are typed refusals in the IPC layer (P8b-22 / fix wave
+// F2) — since Task 17 there is no engine to fall back to. The table is built once in `daemon.ts`
+// (after the runtime spine has recovered and the router handle has run its directory recovery — a
+// projector is never constructed before that sweep) and shared with the IPC layer through
+// `IpcServerOptions.winter`.
 //
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// THE CREATION TRANSACTION (WS-16 §6, P8b-13, P8b-14) — both legs, one record
+// THE CREATION TRANSACTION (WS-16 §6, P8b-14) — one record per session
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 //
-// `session.create` decides the leg with `legForNewSession(mode, settings())` and then persists ONE
-// `RuntimeSessionRecord` on either leg (P8b-14: "both paths allocate and persist the same
-// RuntimeSessionRecord"). The two records differ in exactly the facts that differ:
-//
-//   winter   `backendSessionId` = a fresh uuid (the child's transcript name — `Options.sessionId`
-//            on the first incarnation, `Options.resume` afterwards); `transcriptHealth: "clean"`;
-//            `versionProvenance: "recorded"` with the SDK/catalog versions this daemon pins;
-//            `selection.reason` names the flag that put it here.
-//   engine   the backfill's honest shape: NO backend id (there is no Winter transcript),
-//            `transcriptHealth: "unsupported"`, `versionProvenance: "legacy-unknown"`,
-//            `selection.reason` names the flag that kept it here.
+// `session.create` persists ONE `RuntimeSessionRecord` with `backendSessionId` = a fresh uuid (the
+// child's transcript name — `Options.sessionId` on the first incarnation, `Options.resume`
+// afterwards), `transcriptHealth: "clean"`, `versionProvenance: "recorded"` with the SDK/catalog
+// versions this daemon pins. (Task 16's dual-run also wrote a backfill-shaped ENGINE record for
+// engine-leg creates; fix wave F9 deleted that half with the engine — 8a's boot backfill is now the
+// only producer of a record without a backend id, for pre-8b rows.)
 //
 // There is no `leg` column (Task 16 finding); `sessionLegOf(record)` reads the leg off
 // `backendSessionId`, which is the same fact P8b-22's refusal needs ("a record whose Winter
@@ -156,14 +153,13 @@ export interface WinterSessionDrivers {
   /** The Winter half of the creation transaction, for a session row that already exists: persist
    *  the record (fresh backend uuid), start the driver, register it. Throws `WinterLegRefusal`. */
   create(sessionId: string): Promise<WinterSession>;
-  /** The engine half of P8b-14's dual-run: persist the backfill-shaped record. Best effort. */
-  recordEngineCreation(sessionId: string): void;
   /** The live driver, if any. */
   get(sessionId: string): WinterSession | undefined;
   /** One HEADLESS turn (routines, the -p path): the session's driver (created for a session that
    *  has no record yet, resumed otherwise), `send`, then wait until nothing is in flight. */
   runTurn(sessionId: string, text: string, clientName: string): Promise<void>;
-  /** A live driver, or a resumed one when the record says "winter"; undefined ⇒ the engine's. */
+  /** A live driver, or a resumed one when the record says "winter"; undefined ⇒ no Winter
+   *  transcript to resume (an engine-era or record-less session — the IPC layer refuses typed). */
   ensure(sessionId: string): Promise<WinterSession | undefined>;
   /** The session was DELETED (the reaper, the cleaner): end its child (bounded) and forget the
    *  driver — a live child never outlives its session (the reaper's 600 s grace is shorter than
@@ -236,7 +232,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
 
   /** The spine half of `assertAvailable`: the handle and 8a's repositories exist. */
   const assertSpine = (): void => {
-    if (deps.runtime === undefined) throw new WinterLegRefusal("winter_leg_unavailable", "the Winter runtime handle did not construct on this daemon; the Winter leg refuses (every mode still runs on the engine)");
+    if (deps.runtime === undefined) throw new WinterLegRefusal("winter_leg_unavailable", "the Winter runtime handle did not construct on this daemon (a packaging fault — see the boot log); sessions cannot be created until it does");
     if (deps.records === undefined || deps.checkpoints === undefined) throw new WinterLegRefusal("winter_leg_unavailable", "runtime-state is offline on this daemon; the Winter leg needs its records and checkpoints");
   };
 
@@ -246,22 +242,20 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     if (hook instanceof Error) throw new WinterLegRefusal("winter_executable_unavailable", hook.message);
   };
 
-  /** The 8a record, read WITHOUT letting a store failure out: on the engine paths (`legOf`,
-   *  `ensure`, every `session.*` handler of an engine session while the table is present) a
-   *  records store that will not answer must cost the log line only, never the RPC — the engine
-   *  path is the answer, exactly as if the table were absent. */
+  /** The 8a record, read WITHOUT letting a store failure out of `legOf`/`ensure`: a records store
+   *  that will not answer costs the log line here and a TYPED refusal in the IPC layer
+   *  (`session_unrecorded`, fix wave F2) — never a throw out of the table. */
   const recordOf = (sessionId: string): RuntimeSessionRecord | undefined => {
     try { return deps.records?.get(sessionId); } catch (err) {
-      log(`runtime record for ${sessionId} unreadable (${err instanceof Error ? err.name : "unknown"}) — treated as engine-leg`);
+      log(`runtime record for ${sessionId} unreadable (${err instanceof Error ? err.name : "unknown"}) — treated as unrecorded`);
       return undefined;
     }
   };
 
   /** The Winter leg's fallback for a cwd-less session: its per-session temp dir (the CC-parity
-   *  $TMPDIR — the directory the child actually runs in, so its transcript key names it). The
-   *  ENGINE-leg record uses 8a's boot backfill's own fallback instead (`migrations/backfill.ts`,
-   *  `home`) — the two producers of an engine-leg record must agree on `transcriptProjectKey`/
-   *  `backendRoot` (re-review N3), and the backfill's shape is the surviving truth. */
+   *  $TMPDIR — the directory the child actually runs in, so its transcript key names it). 8a's
+   *  boot backfill uses `home` for a pre-8b row instead (`migrations/backfill.ts`) — that shape
+   *  is the surviving truth for engine-ERA records, which nothing here writes any more. */
   const winterCwdOf = (sessionId: string, cwd: string | null | undefined): string => cwd ?? deps.tmpDirOf(sessionId);
 
   /** The facts every incarnation of a session needs, assembled once per driver. */
@@ -422,16 +416,18 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     return session;
   };
 
-  const selectionFor = (mode: SessionMode, leg: SessionLeg, model: string | undefined, providerId: string, authFamily: RuntimeSelection["authFamily"]): RuntimeSelection => ({
+  /** `selection.reason` is what `norma doctor` and the app render for "why is this session on that
+   *  runtime" — it narrates a FACT, never a flag: since Task 17 the Winter leg is the only leg
+   *  (fix wave F12 retired the "settings.runtimes.winterLeg.<mode> is on" wording, which named a
+   *  setting that no longer decides anything). */
+  const selectionFor = (mode: SessionMode, model: string | undefined, providerId: string, authFamily: RuntimeSelection["authFamily"]): RuntimeSelection => ({
     runtimeKind: "winter-agent",
     providerId,
     modelRef: model ?? "unknown",
-    family: leg === "winter" ? "winter" : "legacy",
+    family: "winter",
     authFamily,
-    sdkVersion: leg === "winter" ? sdkVersion : "unknown",
-    reason: leg === "winter"
-      ? `created on the winter leg (settings.runtimes.winterLeg.${mode} is on)`
-      : `created on the engine leg (settings.runtimes.winterLeg.${mode} is off)`,
+    sdkVersion,
+    reason: `created as a ${mode} session on the Winter leg (the only leg since Phase 8b)`,
     decidedAt: new Date().toISOString(),
   });
 
@@ -475,7 +471,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         providerCatalogVersion: catalogVersion(),
         providerAdapterVersion: "unstated",
         capabilities: ["message", "resume"],
-        selection: selectionFor(mode, "winter", meta.model, providerId, authFamily),
+        selection: selectionFor(mode, meta.model, providerId, authFamily),
       });
       records.transition(sessionId, "ready");
     } catch (err) {
@@ -490,41 +486,6 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       throw new WinterLegRefusal("winter_leg_unavailable", `the winter child for ${sessionId} could not be started (${err instanceof Error ? err.name : "unknown"})`);
     }
     return session;
-  };
-
-  const recordEngineCreation = (sessionId: string): void => {
-    const records = deps.records;
-    if (records === undefined) return;
-    try {
-      if (records.get(sessionId) !== undefined) return;
-      const meta = deps.store.meta(sessionId);
-      const mode = modeOf(meta.mode);
-      const settings = deps.settings();
-      const cwd = meta.cwd ?? deps.home;   // = `migrations/backfill.ts`'s own fallback (N3)
-      const transcriptKey = transcriptProjectKey(cwd);
-      const providerId = settings?.provider?.type ?? "unstated";
-      const authFamily: RuntimeSelection["authFamily"] = providerId === "openai-compatible" ? "api-key" : "custom";
-      records.create({
-        winterSessionId: sessionId,
-        runtimeKind: "winter-agent",
-        providerId,
-        modelRef: meta.model ?? "unknown",
-        backendRoot: join(deps.home, "projects", transcriptKey),
-        transcriptProjectKey: transcriptKey,
-        memoryProjectKey: deps.memoryKeyOf(cwd),
-        tempProjectKey: transcriptKey,
-        transcriptDialect: "claude-code-jsonl",
-        transcriptHealth: "unsupported",
-        compatibilityLevel: "conversation",
-        conformanceCorpusVersion: "legacy",
-        versionProvenance: "legacy-unknown",
-        capabilities: ["import-conversation"],
-        selection: selectionFor(mode, "engine", meta.model, providerId, authFamily),
-      });
-      records.transition(sessionId, "ready");
-    } catch (err) {
-      log(`engine-leg record for ${sessionId} not written (${err instanceof Error ? err.name : "unknown"}) — the boot backfill catches it up`);
-    }
   };
 
   /**
@@ -561,7 +522,6 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     legOf: (sessionId) => sessionLegOf(recordOf(sessionId)),
     assertAvailable,
     create,
-    recordEngineCreation,
     get: (sessionId) => drivers.get(sessionId),
     async ensure(sessionId) {
       const live = drivers.get(sessionId);

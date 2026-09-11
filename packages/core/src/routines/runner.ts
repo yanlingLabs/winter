@@ -2,14 +2,6 @@ import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";
 import type { RoutineRunner } from "./scheduler";
 
-/** The slice of AgentEngine's public surface runHeadless actually needs — a plain duck-typed
- *  interface (not `import type { AgentEngine } ...`) so this module's own unit tests can stub it
- *  with a few lines instead of standing up a real engine + provider + tool registry. daemon.ts
- *  passes its real AgentEngine instance straight through (it structurally satisfies this). */
-export interface MinimalEngine {
-  runTurn(sessionId: string): Promise<void>;
-}
-
 // Every rate-limit ProviderEvent (providers/openai-compatible.ts's mapHttpError, shared by both
 // the openai-compatible and codex-oauth providers — see providers/quota.ts's withQuota) carries
 // `code: "rate_limit"` and a message starting with this exact prefix. Phase 5 routines T3 threads
@@ -49,10 +41,10 @@ const QUOTA_ERROR_PREFIX = "HTTP 429";
  *  delegate's result should instruct the model to wait for it — i.e. have the model pass
  *  `run_in_background: false` on that spawn_agent call — rather than this runner special-casing
  *  routine-origin sessions to a different spawn default. */
-/** The slice of Task 16's driver table a headless turn needs (P8b-13: the leg is the flag's for a
- *  NEW session, and a routine session is a new CODE session every fire). */
+/** The slice of Task 16's driver table a headless turn needs: a routine session is a new CODE
+ *  session on the Winter leg every fire (the only leg since Task 17; fix wave F9 removed the
+ *  runner's engine branch with it). */
 export interface WinterTurnRunner {
-  legForNewSession(mode: "code"): "engine" | "winter";
   /** Create the session's driver, `send` the prompt (the driver appends the `user_message`), wait
    *  until nothing is in flight. Rejects with the leg's typed refusal. */
   runTurn(sessionId: string, text: string, clientName: string): Promise<void>;
@@ -61,26 +53,20 @@ export interface WinterTurnRunner {
 export function makeDaemonRoutineRunner(deps: {
   store: SessionStore;
   hub: SessionHub;
-  engine: MinimalEngine | null;
-  /** P8b Task 17: absent ⇒ the engine path only (every pre-8b caller). */
+  /** The driver table. `undefined` (a daemon whose Winter handle never constructed has one anyway;
+   *  this is a harness without one) ⇒ every fire fails cleanly, as "agent disabled" always did. */
   winter?: WinterTurnRunner;
 }): RoutineRunner {
   return {
     async runHeadless(opts): Promise<{ ok: boolean; quotaLimited?: boolean; resultText?: string; error?: string }> {
-      const onWinter = deps.winter?.legForNewSession("code") === "winter";
-      if (!onWinter && !deps.engine) return { ok: false, error: "agent disabled: no provider configured" };
+      if (!deps.winter) return { ok: false, error: "agent disabled: no runtime available" };
 
       const sessionId = deps.store.createSession("routine", { cwd: opts.cwd, approvalPolicy: opts.policy, origin: opts.origin });
       deps.hub.append(sessionId, { type: "session_titled", sessionId, threadId: "main", title: opts.origin });
 
       try {
-        if (onWinter) {
-          // The driver appends the `user_message` itself (P8b-39: the log is its queue).
-          await deps.winter!.runTurn(sessionId, opts.prompt, "routine");
-        } else {
-          deps.hub.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: opts.prompt, clientName: "routine" });
-          await deps.engine!.runTurn(sessionId);
-        }
+        // The driver appends the `user_message` itself (P8b-39: the log is its queue).
+        await deps.winter.runTurn(sessionId, opts.prompt, "routine");
       } catch (err) {
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }

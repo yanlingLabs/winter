@@ -107,8 +107,9 @@ export interface RunningDaemon {
    * P8b Task 5: THE ONE Winter runtime handle — the router `createRuntimeSdk` built, the spawn
    * hook every Winter session's `Options` takes its executable from, and the tracked-query registry
    * shutdown drains. `undefined` when the router could not construct (a packaging fault: a peer
-   * version mismatch, an invalid brand, a malformed capability declaration), in which case the
-   * Winter leg refuses at session create and every mode still runs on the engine.
+   * version mismatch, an invalid brand, a malformed capability declaration), in which case EVERY
+   * `session.create`/`session.dispatch` refuses typed (`winter_leg_unavailable`) — there is no
+   * engine leg to fall back to since Task 17.
    *
    * Exposed here for the same reason `runtimeState` is: a test that boots a REAL daemon needs to
    * assert against the handle daemon.ts actually built, not a hand-made mirror of it.
@@ -881,7 +882,7 @@ export async function startDaemon(opts: {
     });
   } catch (err) {
     const code = (err as { code?: string })?.code ?? (err as Error)?.constructor?.name ?? "unknown";
-    console.error(`runtime-sdk: winter runtime sdk unavailable (${code}) — the Winter leg will refuse; every mode still runs on the engine`);
+    console.error(`runtime-sdk: winter runtime sdk unavailable (${code}) — every session.create/session.dispatch will refuse typed (winter_leg_unavailable); there is no engine leg`);
     runtimeSdk = undefined;
   }
 
@@ -921,9 +922,8 @@ export async function startDaemon(opts: {
   // Built HERE, after §13's recovery (`startRuntimeState` above) and the router's own directory
   // recovery + `parkRecoveredSessions` (just above): a projector is never constructed before that
   // sweep has run, and nothing below can construct one before `startIpcServer` hands a client a
-  // socket. `ipc/server.ts` routes every `session.*` method through this table; with every
-  // `runtimes.winterLeg` flag false it answers "engine" for every new session and the engine
-  // path is byte-identical to today. The drivers it starts are tracked on `runtimeSdk`
+  // socket. `ipc/server.ts` routes every `session.*` method through this table — every mode is
+  // the Winter leg since Task 17. The drivers it starts are tracked on `runtimeSdk`
   // (`trackQuery`), so `stop()`'s `dispose()` ends them inside the shutdown budget.
   // P8b Task 17: HOISTED above the `if (agentProvider)` gate — the Winter leg's drivers (below)
   // persist their children through this roster too, on a daemon with or without an engine.
@@ -1587,9 +1587,9 @@ export async function startDaemon(opts: {
   // T2 leaves it exactly as it already was — same shape `subagents.maxConcurrent`/`worktrees.baseRef`
   // above were just converted TO).
   const routinesAudit = new RoutineAuditLog(join(normaHome, "routines-audit.jsonl"));
-  // P8b Task 17: a routine fires as a NEW code session, so it runs on whichever leg
-  // `winterLeg.code` names — through the driver table when that is the Winter leg.
-  const routineRunner = makeDaemonRoutineRunner({ store, hub, engine: null, winter: winterDrivers });
+  // P8b Task 17: a routine fires as a NEW code session through the driver table (fix wave F9: the
+  // runner's engine branch is gone with the engine).
+  const routineRunner = makeDaemonRoutineRunner({ store, hub, winter: winterDrivers });
   const routineScheduler = makeRoutineScheduler({
     store: routineStore,
     runner: routineRunner,

@@ -1,17 +1,16 @@
 import { winterOptionsFromSettings, type Settings } from "../settings";
 import type { Mode as SessionMode } from "../agent/tools/registry";
 
-/** Which engine a session runs on. Recorded at CREATION and never re-read: P8b-13's flag governs
- *  NEW sessions only, so a session runs to completion on the leg it was born on even if the setting
- *  flips mid-flight. */
+/** Which leg a session's RECORD describes. `"winter"` = it has (or will have) a Winter transcript
+ *  and can be resumed; `"engine"` = an engine-ERA record — a pre-8b row 8a's boot backfill wrote
+ *  with no backend id — which nothing can run any more (P8b-22's typed refusal). No new record is
+ *  ever written with the `engine` shape since the retirement; the value survives as the name of
+ *  that history. */
 export type SessionLeg = "engine" | "winter";
 
-/** The shape Task 15 adds under `settings.runtimes`. Declared structurally here rather than
- *  imported, because the zod block does not carry `winterLeg` yet and this lane must not edit the
- *  settings schema (Task 15 owns it). When Task 15 lands, this cast becomes redundant but stays
- *  correct — the field names are pinned by the Interfaces block on both sides. */
 /** Task 17: the engine is retired — the answer is `winter` for every mode. The signature and the
- *  door stay so a settings file's (ignored) `false` is read through the one place that reports it. */
+ *  door stay so a settings file's (ignored) `winterLeg.<mode>: false` is read through the ONE
+ *  place that reports it (`winterOptionsFromSettings`; the flag is accepted for one release). */
 export function legForNewSession(mode: SessionMode, settings: Settings | null | undefined): SessionLeg {
   return winterOptionsFromSettings(settings).winterLeg[mode] ? "winter" : "engine";
 }
