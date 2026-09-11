@@ -22,7 +22,13 @@ export type OauthMaterial = {
   accountId?: string;
   idToken?: string;
 };
-export type CredentialMaterial = ApiKeyMaterial | OauthMaterial;
+/** A bearer credential (Console OAuth, or an approved gateway) — Norma does not write this kind
+ *  today (no inventory row uses it), but the seam (`runtime-sdk/keychain.ts`) must still be able to
+ *  EXTRACT one correctly for the day a `console-oauth`-family row is added, per the router's
+ *  `fetchAuthCredentials` contract (`winter-runtime-sdk` `src/official/auth.ts`), which injects the
+ *  seam's returned string verbatim as an env var. */
+export type BearerMaterial = { kind: "bearer"; token: string };
+export type CredentialMaterial = ApiKeyMaterial | OauthMaterial | BearerMaterial;
 
 /**
  * The Keychain item names `NORMA_CREDENTIAL_INVENTORY` (`runtime-sdk/keychain.ts`) points the
@@ -42,14 +48,16 @@ function describeError(err: unknown): string {
   return typeof err;
 }
 
-/** The material `kind`s the child's `coerceMaterial` recognizes. `bearer`/`aws`/`gcp-*` are in the
- *  child's own set but have no arm below — Norma never writes or reads them, so they fall through
- *  to `undefined` (malformed) exactly like an unrecognized kind, matching the child's own refusal
- *  for a shape it does not expect from Norma's inventory. */
+/** The material `kind`s the child's `coerceMaterial` recognizes. `aws`/`gcp-*` are in the child's
+ *  own set but have no arm below — Norma never writes or reads them, so they fall through to
+ *  `undefined` (malformed) exactly like an unrecognized kind, matching the child's own refusal for
+ *  a shape it does not expect from Norma's inventory. `bearer` DOES have an arm (see `BearerMaterial`
+ *  above) even though no inventory row writes one today, so the seam can extract it correctly the
+ *  day one does. */
 const MATERIAL_KINDS = new Set(["api-key", "bearer", "oauth", "aws", "gcp-service-account", "gcp-access-token"]);
 
-/** Structural check mirroring the child's `coerceMaterial` (api-key + oauth arms — the only two
- *  Norma ever writes). Never throws; an unrecognized shape is `undefined`. */
+/** Structural check mirroring the child's `coerceMaterial` (api-key + oauth + bearer arms). Never
+ *  throws; an unrecognized shape is `undefined`. */
 function coerceMaterial(value: unknown): CredentialMaterial | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const v = value as Record<string, unknown>;
@@ -68,8 +76,10 @@ function coerceMaterial(value: unknown): CredentialMaterial | undefined {
             ...(typeof v.idToken === "string" ? { idToken: v.idToken } : {}),
           }
         : undefined;
+    case "bearer":
+      return typeof v.token === "string" ? { kind: "bearer", token: v.token } : undefined;
     default:
-      return undefined; // bearer / aws / gcp — Norma never writes these
+      return undefined; // aws / gcp — Norma never writes or reads these
   }
 }
 

@@ -68,7 +68,7 @@ test("a present credential is NAMED as a keychain ref; the material is never rea
   const sel = providerSelectionFor("gpt-5.6-sol", CODEX_ONLY);
   expect(sel).toEqual({
     providerId: "codex-oauth",
-    authRef: { kind: "keychain", account: "codex-access-token", service: keychainService() },
+    authRef: { kind: "keychain", account: "codex-oauth:default", service: keychainService() },
   });
   // A locator, never material: nothing in the selection can carry a secret because none is read.
   expect(JSON.stringify(sel)).not.toContain("sk-");
@@ -96,7 +96,7 @@ test("terra now resolves to codex-oauth on a codex-only install (the finding's f
   const sel = providerSelectionFor("gpt-5.6-terra", CODEX_ONLY);
   expect(sel).toEqual({
     providerId: "codex-oauth",
-    authRef: { kind: "keychain", account: "codex-access-token", service: keychainService() },
+    authRef: { kind: "keychain", account: "codex-oauth:default", service: keychainService() },
   });
 });
 
@@ -121,7 +121,7 @@ test("no model names no provider", () => {
 test("a fully-qualified <providerId>/<model> key is taken at its word, with its ref when we have one", () => {
   expect(providerSelectionFor("codex-oauth/gpt-5.6-sol", CODEX_ONLY)).toEqual({
     providerId: "codex-oauth",
-    authRef: { kind: "keychain", account: "codex-access-token", service: keychainService() },
+    authRef: { kind: "keychain", account: "codex-oauth:default", service: keychainService() },
   });
   expect(providerSelectionFor("openai/gpt-4o", NONE)).toEqual({ providerId: "openai" });
   // A qualified key for a provider Norma has no inventory row for still names it — the child owns

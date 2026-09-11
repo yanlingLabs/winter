@@ -38,7 +38,7 @@ export {
   readCredentialMaterial, writeCredentialMaterial, clearCredentialMaterial,
   readOpenAiApiKey, writeOpenAiApiKey,
   migrateLegacyCredentialMaterial,
-  type CredentialMaterial, type ApiKeyMaterial, type OauthMaterial, type CredentialMigrationReport,
+  type CredentialMaterial, type ApiKeyMaterial, type OauthMaterial, type BearerMaterial, type CredentialMigrationReport,
 } from "./auth/credential-material";
 export { runLoginFlow } from "./providers/pkce";
 export { CODEX, CODEX_MODELS, DEFAULT_CODEX_MODEL } from "./providers/codex-config";
