@@ -101,6 +101,133 @@ export const WINTER_OWN_TOOL_NAMES: ReadonlySet<string> = new Set(
   WINTER_DEFAULT_TOOL_DEFINITIONS.map((d) => d.builtinName ?? d.toolName),
 );
 
+/**
+ * **What a Winter child at 0.0.3 actually advertises** — `system/init.tools`, MEASURED from the
+ * built binary (`dist/winter`) driven through `query()` with `model: "winter-test/echo"` under a
+ * temp home and `NORMA_BRAND`'s names. 31 tools, verbatim and sorted as the child sent them.
+ *
+ * **This, not Norma's pair table, is what `disallowedTools` must be derived from** (review F4). The
+ * brief's instruction to build the list from `WINTER_DEFAULT_TOOL_DEFINITIONS` rests on a wrong
+ * premise — that export is only Winter's own four — and Norma's pair table is a different set
+ * again: it has rows for tools the child does NOT advertise (`LSP`, `ToolSearch`, `WebFetch`,
+ * `WebSearch`, the two MCP-resource tools) and, more importantly, MISSES three the child DOES
+ * advertise (`Monitor`, `ReportFindings`, `ScheduleWakeup`). Deriving chat's exclusions from the
+ * pair table therefore left three tools advertised to a chat model that is supposed to have no
+ * fs/shell/repo surface at all.
+ *
+ * Two measured facts worth keeping:
+ *  - **`WebFetch`/`WebSearch` are NOT advertised at 0.0.3.** They are still disallowed in every mode
+ *    (P8b-33) — belt and braces against an SDK bump that starts advertising them.
+ *  - **`advisor` is not advertised either**, though it is one of Winter's four default tools: the
+ *    host binds it, the runtime does not auto-register it.
+ *
+ * **Task 16's e2e must assert `system/init.tools` equals this list** — that is the tripwire for an
+ * SDK bump, and the reason this is exported rather than inlined.
+ */
+export const WINTER_ADVERTISED_TOOLS_0_0_3_BASE: readonly string[] = [
+  "Agent", "AskUserQuestion", "Bash", "CronCreate", "CronDelete", "CronList", "Edit",
+  "EnterPlanMode", "EnterWorktree", "ExitPlanMode", "ExitWorktree", "Glob", "Grep", "ListAgents",
+  "Monitor", "NotebookEdit", "PushNotification", "Read", "ReadNotifications", "ReportFindings",
+  "ScheduleWakeup", "SendMessage", "Skill", "TaskCreate", "TaskGet", "TaskList", "TaskOutput",
+  "TaskStop", "TaskUpdate", "Workflow", "Write",
+];
+
+/**
+ * **The six more tools a child advertises as soon as the session declares ANY MCP server** — which
+ * every Norma mode will, because the capability servers ARE MCP servers.
+ *
+ * `winter.mcp` is a DERIVED capability, not a host-supplied one: `RUNTIME_DERIVED_CAPABILITIES`
+ * (`tools/registry.ts:1264`) grants it whenever `SessionCapabilityFacts.hasMcpServers` is true —
+ * *"Gated ALSO on the session declaring at least one MCP server"*. Every descriptor below carries
+ * `capabilityRequirements: ["winter.mcp"]` and `exposure: "eager"`, so all six appear in
+ * `system/init.tools` the moment that fact flips.
+ *
+ * The measurement above was taken with NO MCP servers, so it could not see them. Listing them here
+ * rather than re-pinning the base list keeps the two facts separable — and pre-empts the trap the
+ * re-review named: Task 16's tripwire would fail by construction on the real host, and the pressure
+ * would be to re-pin the measured list rather than re-derive chat's exclusions, which silently
+ * widens chat.
+ */
+export const WINTER_ADVERTISED_MCP_TOOLS_0_0_3: readonly string[] = [
+  "ListMcpResourcesTool",   // descriptors/list-mcp-resources-tool.ts:6,15,22 — permissionClass "mcp"
+  "ReadMcpResourceDirTool", // descriptors/read-mcp-resource-dir-tool.ts:6,16,23 — permissionClass "mcp"
+  "ReadMcpResourceTool",    // descriptors/read-mcp-resource-tool.ts:6,16,23 — permissionClass "mcp"
+  "RefreshMcpTools",        // descriptors/refresh-mcp-tools.ts:6,15,22 — permissionClass "mcp"
+  "ToolSearch",             // descriptors/tool-search.ts:7,22,36 — permissionClass "read"
+  "WaitForMcpServers",      // descriptors/wait-for-mcp-servers.ts:15,24,26 — permissionClass "read"
+];
+
+/** What a Norma child actually advertises: the measured base set PLUS the `winter.mcp` family, since
+ *  every Norma mode declares capability servers. **Task 16's e2e compares live `system/init.tools`
+ *  against THIS union** (and against the base alone only for a deliberately server-less session). */
+export const WINTER_ADVERTISED_TOOLS_0_0_3: readonly string[] =
+  [...new Set([...WINTER_ADVERTISED_TOOLS_0_0_3_BASE, ...WINTER_ADVERTISED_MCP_TOOLS_0_0_3])].sort();
+
+/**
+ * **An explicit GATE CLASS for a Winter tool whose classification must not be inferred from its
+ * display name** (review F5, ruling).
+ *
+ * The pair table above is consumed by two surfaces with opposite failure modes: a fail-OPEN label
+ * surface (the projector's transcript rendering) and a fail-CLOSED gate. For an execute-class tool
+ * one entry cannot serve both. `Monitor` is the case: the projector lane renders it as
+ * `bash_output`, which is in `gate.ts`'s `READ_ONLY` set — so a shared `Monitor → bash_output` row
+ * would make a tool whose "command half uses the Bash permission family" a **silent allow under
+ * every policy, `plan` and `chat` included**.
+ *
+ * So classification is declared here, independently of the display mapping, and sourced from the
+ * child's OWN `permissionClass` rather than from a name:
+ *  - `Monitor` — `permissionClass: "execute"` (`descriptors/monitor.ts:49`) → gated as `bash`.
+ *  - `ReportFindings` — `permissionClass: "task"` (`descriptors/report-findings.ts:36`), "a
+ *    structured review result channel, not a scanner" → gated as `task_create`, Norma's own
+ *    READ_ONLY class for in-session bookkeeping.
+ *  - `ScheduleWakeup` — `permissionClass: "task"` (`descriptors/schedule-wakeup.ts:41`), an
+ *    in-session self-wake with its delay clamped to 60-3600s. Deliberately NOT Norma's `schedule`
+ *    (MUTATING): that is the persistent cron surface, which is `CronCreate`/`CronDelete`/`CronList`
+ *    in the pair table above, and a standing prompt-injection surface in a way a self-wake is not.
+ *
+ * The value is the NORMA name the gate should classify by — never what the card or the transcript
+ * displays, which stays `gateToolNameFor`'s answer.
+ */
+export const WINTER_TOOL_GATE_CLASS: ReadonlyMap<string, string> = new Map([
+  ["Monitor", "bash"],
+  ["ReportFindings", "task_create"],
+  ["ScheduleWakeup", "task_create"],
+  // --- the `winter.mcp` housekeeping trio the pair table has no row for ------------------------
+  // All three are read-only bookkeeping over ALREADY-CONNECTED MCP servers, and none of them can
+  // reach a server the session has not already declared. Classified as `list_mcp_resources` /
+  // `ToolSearch`, which are Norma's own `NETWORK` and `READ_ONLY` classes for exactly that work, so
+  // code and dispatch get them silently while chat — which has no MCP resources beyond Norma's own
+  // capability servers — keeps them in its disallow set.
+  //
+  //  - `ReadMcpResourceDirTool` — "Direct children of a directory resource."
+  //    (`descriptors/read-mcp-resource-dir-tool.ts:14`). The same family as `ReadMcpResourceTool`,
+  //    so it takes the same Norma name the pair table already gives that one.
+  ["ReadMcpResourceDirTool", "read_mcp_resource"],
+  //  - `RefreshMcpTools` — "Re-queries connected servers' tool lists; **never establishes a
+  //    disconnected connection**" (`descriptors/refresh-mcp-tools.ts:13`). Purely a re-read of the
+  //    in-memory tool index, which is what Norma's own `ToolSearch` does.
+  ["RefreshMcpTools", "ToolSearch"],
+  //  - `WaitForMcpServers` — "Waits for connected MCP servers to finish handshaking"
+  //    (`descriptors/wait-for-mcp-servers.ts:22`), and its own `permissionClass` is `"read"`. It
+  //    blocks and returns; it mutates nothing.
+  ["WaitForMcpServers", "ToolSearch"],
+]);
+
+/**
+ * The name `PermissionGate.evaluate` should be asked about — the explicit gate class when one is
+ * declared, otherwise the display name. Split from `gateToolNameFor` so an execute-class tool can be
+ * gated correctly without its card or its transcript row being mislabelled.
+ *
+ * A `Map`, not an object literal (review n1): an object lookup walks the prototype chain, so
+ * `gateClassFor("toString")` returned a FUNCTION rather than a string. That was fail-closed in
+ * effect (a non-string is in none of the gate's Sets → unclassified → `ask` → deny in
+ * chat/dispatch/plan) and no Winter tool is named that — but every other lookup in this module is a
+ * `Map`/`Set`, and this one has no business being the exception.
+ */
+export function gateClassFor(winterToolName: string): string {
+  return WINTER_TOOL_GATE_CLASS.get(winterToolName) ?? gateToolNameFor(winterToolName);
+}
+
 /** `mcp__norma__` — the prefix every daemon-owned capability tool carries under R-1 / P8b-12
  *  (`mcp__norma__<serverKey>__<tool>`, minted by Task 6-7's `capabilityToolName`). Spelled out
  *  literally rather than derived from Task 5's `NORMA_BRAND.mcpServerName`: that module lands in a
@@ -124,7 +251,13 @@ export const NORMA_CAPABILITY_TOOL_PREFIX = "mcp__norma__";
  * land in another lane, and the integration parity test diffs them.
  */
 export const NORMA_CAPABILITY_SERVER_KEYS: ReadonlySet<string> = new Set([
-  "sessions", "computer", "browser", "office", "research",
+  // The SIXTH key, `web`, arrived with P8b-33's rows in `CAPABILITY_TOOL_MODES` and was missing here
+  // (review NEW-1). The cost was not cosmetic: `mcp__norma__web__web_fetch` did not strip, so
+  // `isExternalToolName` claimed it and it took the MUTATING/external branch — a CARD under
+  // `ask`/`accept-edits` and a DENY under `plan`/`dont-ask`, where `web_fetch`/`web_search` are
+  // `NETWORK` today and allowed under every policy including `plan`. The card would also have read
+  // `mcp__norma__web__web_fetch` and lost its URL summary and "always allow" options (P8b-25).
+  "sessions", "computer", "browser", "office", "research", "web",
 ]);
 
 const WINTER_TO_NORMA = new Map<string, string>(WINTER_NORMA_TOOL_PAIRS.map(([w, n]) => [w, n]));

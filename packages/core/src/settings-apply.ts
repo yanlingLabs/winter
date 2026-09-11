@@ -1,5 +1,6 @@
 import type { Settings } from "./settings";
-import { memoryEnabledFrom } from "./settings";
+import { memoryEnabledFrom, winterOptionsFromSettings } from "./settings";
+import { retentionFromSettings } from "./runtime-state/retention";
 import type { ToolRegistry } from "./agent/tools/registry";
 import type { ComputerUseService } from "./agent/computer-use";
 import type { LspManager } from "./agent/lsp/manager";
@@ -185,12 +186,19 @@ export function makeApply(deps: SettingsApplyDeps): (prev: Settings | null, next
    * awaited — no caller on this path depends on a delivery having landed.
    */
   function applyRuntimeOptionsDiff(prev: Settings | null, next: Settings): void {
-    const before = prev?.runtimes;
-    const after = next.runtimes;
-    const retentionChanged =
-      before?.retention?.deliveriesDays !== after?.retention?.deliveriesDays ||
-      before?.retention?.nameLeasesDays !== after?.retention?.nameLeasesDays;
-    if (retentionChanged) {
+    // EFFECTIVE VALUES, NEVER THE RAW BLOCK (review r1, F1). `runtimes` is `.optional()`, so an
+    // ABSENT block is not "unknown" — the schema defines it as all legs off, 900 seconds, 30/7
+    // retention. Diffing `prev?.runtimes` against `next.runtimes` therefore reads the block simply
+    // APPEARING (a user turning on `migrations.memoryKeys` for the first time, say) as a change of
+    // every key inside it: three narrated flips nobody made, plus a directory nudge. Narration is
+    // this hook's entire product — a line that lies about a flip trains a reader to ignore the line
+    // that matters — so both sides go through the doors that answer for an absent block.
+    const beforeRetention = retentionFromSettings(prev ?? undefined);
+    const afterRetention = retentionFromSettings(next);
+    const before = winterOptionsFromSettings(prev);
+    const after = winterOptionsFromSettings(next);
+
+    if (beforeRetention.deliveriesMs !== afterRetention.deliveriesMs || beforeRetention.nameLeasesMs !== afterRetention.nameLeasesMs) {
       // OPTIONAL AT EVERY HOP: the handle is Task 5's and `messaging` is Task 12's, so on today's
       // daemon this resolves to `undefined` and does nothing. It is written now because the settings
       // change and the thing that has to hear about it belong together, not because it is reachable.
@@ -201,20 +209,19 @@ export function makeApply(deps: SettingsApplyDeps): (prev: Settings | null, next
           .catch((err) => log(`releaseHeld after a retention change failed (best-effort): ${errMsg(err)}`));
       }
     }
-    // NO NARRATION ON THE FIRST APPLY (`prev === null`, a daemon that booted with no settings at
-    // all). "It takes effect for new sessions" is a message about sessions that predate the change,
-    // and at that point there are none — saying it anyway would train a reader to ignore the line
-    // that matters. The retention nudge above is different: it is an action, not a message, and a
-    // directory that has just learned its windows is exactly when it should re-run a held delivery.
+
+    // NO NARRATION ON THE FIRST APPLY (`prev === null`, a daemon that booted with no usable settings
+    // at all). "It takes effect for new sessions" is a message about sessions that predate the
+    // change, and at that point there are none — saying it anyway would train a reader to ignore the
+    // line that matters. The retention nudge above is different: it is an action, not a message, and
+    // a directory that has just learned its windows is exactly when it should re-run a held delivery.
     if (prev === null) return;
-    const legChanged =
-      before?.winterLeg?.chat !== after?.winterLeg?.chat ||
-      before?.winterLeg?.dispatch !== after?.winterLeg?.dispatch ||
-      before?.winterLeg?.code !== after?.winterLeg?.code;
-    if (legChanged) log("settings-apply: runtimes.winterLeg changed — it takes effect for new sessions; open sessions finish on the leg they were created with");
-    if (before?.winterExecutable !== after?.winterExecutable) log("settings-apply: runtimes.winterExecutable changed — it takes effect for new sessions");
-    if (before?.advisorModel !== after?.advisorModel) log("settings-apply: runtimes.advisorModel changed — it takes effect for new sessions");
-    if (before?.winterIdleTimeoutSec !== after?.winterIdleTimeoutSec) log("settings-apply: runtimes.winterIdleTimeoutSec changed — it takes effect for new sessions");
+    if (before.winterLeg.chat !== after.winterLeg.chat || before.winterLeg.dispatch !== after.winterLeg.dispatch || before.winterLeg.code !== after.winterLeg.code) {
+      log("runtimes.winterLeg changed — it takes effect for new sessions; open sessions finish on the leg they were created with");
+    }
+    if (before.winterExecutable !== after.winterExecutable) log("runtimes.winterExecutable changed — it takes effect for new sessions");
+    if (before.advisorModel !== after.advisorModel) log("runtimes.advisorModel changed — it takes effect for new sessions");
+    if (before.idleTimeoutSec !== after.idleTimeoutSec) log("runtimes.winterIdleTimeoutSec changed — it takes effect for new sessions");
   }
 
   return async function apply(prev: Settings | null, next: Settings): Promise<void> {

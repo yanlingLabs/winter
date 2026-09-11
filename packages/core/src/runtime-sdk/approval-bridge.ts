@@ -1,3 +1,4 @@
+import { resolve, sep } from "node:path";
 import type { CanUseTool, PermissionResult, PermissionUpdate } from "@yanlinglabs/winter-agent-sdk";
 import type { ApprovalOption, NewSessionEvent } from "@norma/protocol";
 import { ApprovalBroker, approvalCardSummary, approvalOptionsFor } from "../agent/approvals";
@@ -5,8 +6,9 @@ import type { QuestionBroker } from "../agent/questions";
 import type { PermissionGate, SessionApprovalPolicy } from "../agent/gate";
 import { parseRule } from "../agent/permission-rules";
 import type { Mode as SessionMode } from "../agent/tools/registry";
-import { gateToolNameFor, WINTER_OWN_TOOL_NAMES } from "./tool-names";
+import { gateClassFor, gateToolNameFor, WINTER_OWN_TOOL_NAMES } from "./tool-names";
 import { controlPlaneTargetForCall, controlPlaneDenialMessage } from "./control-plane";
+import { outdirPath } from "../sessions/outdir";
 import { askUserQuestionBridge, ASK_USER_QUESTION_TOOL } from "./question-bridge";
 import { consoleBridgeLogger, NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
 
@@ -55,6 +57,10 @@ export interface CanUseToolDeps {
    *  value this bridge reads: a dispatch child is an ordinary CODE session whose cards are mirrored
    *  into the dispatch stream, so P8b-26's never-prompt rule must catch it too. */
   origin?: string;
+  /** NORMA_HOME. Used ONLY to recognise this session's own `$OUTDIR` as a blessed write target
+   *  (see `isBlessedOutputPath`); absent means every Winter escalation is escalated, the
+   *  conservative answer. */
+  home?: string;
   /** The session's working directory, used to resolve a RELATIVE write target in the control-plane
    *  fence. An absent/empty cwd resolves relative paths against `/`, which is the conservative
    *  reading (a relative target then cannot accidentally miss a real `.norma` parent). */
@@ -105,6 +111,31 @@ function deniedByPolicyMessage(policy: SessionApprovalPolicy): string {
  */
 export function neverPromptsMessage(toolName: string, mode: string, policy: SessionApprovalPolicy): string {
   return `${toolName} requires approval and this ${mode} session never prompts (policy ${policy})`;
+}
+
+/**
+ * Is `blockedPath` this session's OWN `$OUTDIR`, `<home>/outputs/<sessionId>`?
+ *
+ * Winter's protected-write check flags it only because it carries a `.norma` segment
+ * (`permissions/protected.ts:154-194` matches `brand.homeDirName`), but Norma blessed that exact
+ * directory as agent-writable for this session and folded it into the session's own write fence
+ * (`sessions/outdir.ts`). The blessing is keyed by sessionId, never by the bare `~/.norma/outputs/`
+ * prefix, so one session can never reach another's — and that is preserved here by building the
+ * prefix from `deps.sessionId`.
+ *
+ * `false` whenever `home` is not wired (the conservative answer: escalate), and for any path that is
+ * not under this session's own outputs directory.
+ */
+export function isBlessedOutputPath(deps: { home?: string; sessionId: string }, blockedPath: string): boolean {
+  if (!deps.home || !blockedPath) return false;
+  let prefix: string;
+  try {
+    prefix = outdirPath(deps.home, deps.sessionId);   // throws on a sessionId that is not a safe segment
+  } catch {
+    return false;
+  }
+  const p = resolve(blockedPath);
+  return p === prefix || p.startsWith(prefix + sep);
 }
 
 /** A `bash` call asking for a full sandbox escape (`dangerouslyDisableSandbox: true`). Takes the
@@ -251,11 +282,20 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     }
 
     // (2) THE CONTROL-PLANE FENCE (P8b-27b) — before the gate, under EVERY policy, `bypass`
-    // included. The deny rules `buildWinterOptions` passes are the child's own first line, but a
-    // deny rule under `bypassPermissions` REACHES `canUseTool` rather than auto-denying (surface
-    // map §5.2), so this host-side check is the thing that actually holds. Without it a child under
-    // `auto`/`acceptEdits` — the modes where no human ever sees the write — could edit
-    // `<any>/.norma/permissions.local.json` and grant itself a standing rule.
+    // included.
+    //
+    // NOT because Winter's own deny rules are weak — the opposite. A matched stage-2 managed deny
+    // returns `decision: "deny"` OUTRIGHT (`permissions/evaluator.ts:1350-1364` at `v0.0.3`) and
+    // runs BEFORE the mode stage (`:1008`), so it binds under `bypassPermissions` too and **never
+    // reaches `canUseTool`**. (An earlier revision of this comment claimed the reverse; it was
+    // wrong, and the same wrong sentence was fixed in `control-plane.ts` first.)
+    //
+    // This fence exists to cover what Winter's rules do NOT: it is Norma's own invariant, enforced
+    // in Norma's own vocabulary, on BOTH tool-name spellings, over every path-bearing field
+    // including `MultiEdit`'s nested `edits[]` — and it does not depend on Winter's rule grammar
+    // continuing to mean what it means today (the anchor semantics that made 16 of those 28 rules
+    // inert are exactly the kind of thing that can move under an SDK bump). Two independent layers
+    // over one invariant, which is the right number for a self-grant.
     const fenced = controlPlaneTargetForCall(toolName, input, deps.cwd ?? "");
     if (fenced) {
       log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} reason=control-plane`);
@@ -276,8 +316,14 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     }
 
     const policy = policyNow();
+    // TWO names, deliberately (review F5). `gateToolName` is what the CARD and the EVENT say — the
+    // display name. `classificationName` is what the GATE is asked about, which for a tool with an
+    // explicit gate class is a different Norma name entirely: `Monitor` displays as itself but is
+    // classified as `bash`, because its command half uses the Bash permission family and a
+    // display-derived `bash_output` would be a silent allow under every policy.
     const gateToolName = gateToolNameFor(toolName);
-    let decision = deps.gate.evaluate(gateToolName, policy);
+    const classificationName = gateClassFor(toolName);
+    let decision = deps.gate.evaluate(classificationName, policy);
 
     // (5) engine.ts:4341 — dont-ask declines everything it would otherwise card, with no prompt.
     if (decision === "ask" && policy === "dont-ask") decision = "deny";
@@ -298,35 +344,52 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     // keeps running it silently. `!unsandboxedRuleAllowed` has no analogue here: the bridge performs
     // no rules-store read at all, so a standing `BashUnsandboxed(...)` rule does NOT pre-clear an
     // escape on this leg — strictly more conservative than today, and recorded as such.
-    if (decision === "allow" && policy !== "bypass" && isUnsandboxedBashEscape(gateToolName, input)) {
+    if (decision === "allow" && policy !== "bypass" && isUnsandboxedBashEscape(classificationName, input)) {
       decision = "ask";
     }
 
-    // (5c) WINTER'S OWN CIRCUIT BREAKERS must never be overridden by a blanket allow. Checked
-    // BEFORE the verdict is acted on — placing it after the `allow` return would make it dead code,
-    // which is the whole failure mode it exists to prevent.
+    // (5c) WINTER'S OWN ESCALATIONS must never be answered by a blanket allow — and must never be
+    // turned into a refusal either. Checked BEFORE the verdict is acted on; placing this after the
+    // `allow` return would make it dead code, which is the failure mode it exists to prevent.
     //
-    // Under `bypassPermissions` the runtime routes its standing exceptions to `canUseTool` precisely
-    // BECAUSE the mode cannot decide them — a protected-write block arrives carrying `blockedPath`,
-    // and a rule that says "ask" arrives as `matchedAskRule`. Answering either from the gate's
-    // `allow` silently overrides a decision the child already made.
+    // **`blockedPath` is Winter asking, not Winter refusing** (review F1 — the correction). Its one
+    // producer in the pinned runtime is the protected-write standing exception
+    // (`permissions/evaluator.ts:946-953`), whose message reads *"Denied: protected path write
+    // requires approval (WS-07 §6.7)"* and which resolves to `mustPrompt` — i.e. *route this to the
+    // human*. Treating it as an unconditional deny meant a session could never edit `package.json`,
+    // a lockfile, anything under `.git/`, or **write to `$OUTDIR`** — even with a human sitting in
+    // front of the card. So it gets exactly the `matchedAskRule` treatment: escalate to `"ask"`.
     //
-    //  - `blockedPath` → Winter BLOCKED this write. A typed deny, under every policy: it is not an
-    //    escalation to a human, it is a refusal the host has no standing to reverse.
-    //  - `matchedAskRule` → Winter says ASK. Never a blanket allow: escalated to `"ask"`, which in
-    //    code raises the card and in dispatch/chat becomes the never-prompt deny below — fail-closed
-    //    in both directions, and still answerable where there is a human. A gate `deny` stays a
-    //    deny: an ask-rule may never WIDEN a verdict.
+    //  - `blockedPath` / `matchedAskRule` → an `allow` becomes `"ask"`: a card in code, the
+    //    never-prompt deny in dispatch/chat. A gate `deny` STAYS a deny — an escalation may never
+    //    WIDEN a verdict, only narrow it.
+    //  - the ONE exception is `$OUTDIR`, `<home>/outputs/<sessionId>`: a path Winter's protected
+    //    check flags only because it contains a `.norma` segment, and which Norma has explicitly
+    //    blessed as agent-writable for this session (`sessions/outdir.ts` — "a blessed,
+    //    agent-writable exception under `~/.norma`", folded into the session's own write fence).
+    //    The host DOES have standing there, so the gate's verdict stands unescalated. Without this a
+    //    dispatch session could not write its own deliverable at all.
+    //  - the control plane is NOT reached by any of this: `controlPlaneTargetForCall` above already
+    //    returned a hard deny for it, independently and under every policy.
     //
-    // `decisionReason` is deliberately NOT acted on. It is a free-form string attached to decisions
-    // of every kind, its vocabulary lives in the private runtime, and treating its mere presence as
-    // a block would card or deny calls the child was happy with. Carried in the record, flagged in
-    // the report, and left to a later phase that can read the vocabulary.
-    if (ctx.blockedPath) {
-      log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} reason=winter-blocked-path`);
-      return { behavior: "deny", message: `${gateToolName} was blocked by the runtime's own protected-path check.` };
+    // `decisionReason` is deliberately NOT acted on — informational only, logged. It is a free-form
+    // string attached to decisions of every kind, its vocabulary lives in the private runtime, and
+    // treating its mere presence as a block would card or deny calls the child was happy with.
+    if (ctx.decisionReason) {
+      log.info(`canUseTool: winter reason session=${deps.sessionId} tool=${toolName} code=${ctx.decisionReason.slice(0, 64)}`);
     }
-    if (ctx.matchedAskRule && decision === "allow") decision = "ask";
+    // TWO flags, not one (review n2). The `$OUTDIR` blessing answers the PROTECTED-PATH signal and
+    // nothing else; folding both signals into a single flag made a blessed path also suppress a
+    // co-occurring `matchedAskRule`, which reads as if the carve-out were scoped to `blockedPath`
+    // when it was not. Unreachable at `v0.0.3` (the two come from mutually exclusive stages), but
+    // the scoping should be true in the code, not only in practice.
+    const protectedPathEscalates = ctx.blockedPath !== undefined
+      && !isBlessedOutputPath(deps, ctx.blockedPath);
+    const askRuleEscalates = ctx.matchedAskRule !== undefined;
+    if (decision === "allow" && (protectedPathEscalates || askRuleEscalates)) {
+      log.info(`canUseTool: escalate session=${deps.sessionId} tool=${toolName} reason=${protectedPathEscalates ? "winter-protected-path" : "winter-ask-rule"}`);
+      decision = "ask";
+    }
 
     // A POLICY deny is not a user rejection — today it is a plain `isError` tool result and the
     // turn continues (only `deniedByHuman` ends it, engine.ts:5876-5882). `decisionClassification`
@@ -471,7 +534,7 @@ async function raiseCard(
     deps.approvals.resolve(sessionId, callId, false, "emit-failure");
     await waiting;
     env.log.error(`canUseTool: failed to emit approval_requested session=${sessionId} call=${callId}: ${(err as Error).message}`);
-    return { behavior: "deny", message: ` was not run — this session could not raise an approval request.` };
+    return { behavior: "deny", message: `${gateToolName} was not run — this session could not raise an approval request.` };
   }
 
   // Abort withdraws the card: the broker is settled with `approved:false`, which makes the
@@ -553,11 +616,6 @@ async function raiseCard(
     ...(updatedPermissions ? { updatedPermissions } : {}),
     decisionClassification: updatedPermissions ? "user_permanent" : "user_temporary",
   };
-}
-
-function firstNonEmpty(...vals: (string | undefined)[]): string | undefined {
-  for (const v of vals) if (typeof v === "string" && v.trim() !== "") return v;
-  return undefined;
 }
 
 /** `JSON.stringify` that can never throw on a cyclic/unserializable input — the card composers take

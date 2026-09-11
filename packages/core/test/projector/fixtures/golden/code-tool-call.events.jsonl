@@ -1,0 +1,9 @@
+{"sessionId":"<id-1>","type":"session_created","scope":"global","mode":"code"}
+{"sessionId":"<id-1>","type":"harness_attached","clientName":"golden-observer"}
+{"sessionId":"<id-1>","type":"user_message","threadId":"main","text":"read note.txt","clientName":"golden"}
+{"sessionId":"<id-1>","threadId":"main","type":"turn_started"}
+{"sessionId":"<id-1>","threadId":"main","type":"tool_call","callId":"<id-2>","name":"read","argsJson":"{\"path\":\"note.txt\"}"}
+{"sessionId":"<id-1>","threadId":"main","type":"tool_result","callId":"<id-2>","output":"hello from the golden fixture\n","isError":false}
+{"sessionId":"<id-1>","threadId":"main","type":"assistant_delta","delta":"The note says hello."}
+{"sessionId":"<id-1>","threadId":"main","type":"assistant_message","text":"The note says hello."}
+{"sessionId":"<id-1>","threadId":"main","type":"turn_completed","stopReason":"end_turn","inputTokens":3300,"outputTokens":37,"contextTokens":1800}

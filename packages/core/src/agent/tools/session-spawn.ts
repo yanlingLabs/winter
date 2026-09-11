@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ToolRegistry } from "./registry";
+import type { ToolDefinition, ToolRegistry } from "./registry";
 
 /** Dispatch (Phase 7) Task 4: session_spawn — the coordinator's delegation tool. Registered with a
  *  placeholder run(): the engine BRIDGE intercepts session_spawn calls in a dispatch session's
@@ -14,12 +14,20 @@ import type { ToolRegistry } from "./registry";
  *  spawn.ts's own `model` field, see its doc comment) — the bridge's own models() check (with
  *  resolveModelAlias) is the authoritative runtime gate. */
 export function registerSessionSpawnTool(r: ToolRegistry, opts: { models?: string[] } = {}): void {
+  for (const def of sessionSpawnToolDefs(opts)) r.register(def);
+}
+
+/** P8b Task 6 — THE definitions, extracted verbatim from `registerSessionSpawnTool`'s body so the
+ *  daemon's shared `ToolRegistry` and the `sessions` capability server (`capabilities/sessions.ts`)
+ *  drive the SAME `ToolDefinition` object rather than two copies of one. Nothing about the
+ *  registration changed; the `register*` wrapper above is the only caller that existed before. */
+export function sessionSpawnToolDefs(opts: { models?: string[] } = {}): ToolDefinition[] {
   const hasModels = !!opts.models && opts.models.length > 0;
   const modelField = hasModels ? z.enum(opts.models as [string, ...string[]]).optional() : z.string().optional();
   const modelClause = hasModels
     ? `model: optional override, one of: ${opts.models!.join(", ")} (omit to inherit the default model)`
     : "model: optional model override";
-  r.register({
+  return [{
     name: "session_spawn",
     // R-T2: dispatch's own orchestration verb — was DISPATCH_ALLOW_TOOLS's literal membership,
     // now the single declaration site.
@@ -50,5 +58,5 @@ export function registerSessionSpawnTool(r: ToolRegistry, opts: { models?: strin
     run() {
       return "session_spawn is only available in the dispatch session.";
     },
-  });
+  }];
 }

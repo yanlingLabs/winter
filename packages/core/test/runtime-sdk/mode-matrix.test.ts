@@ -1,4 +1,5 @@
 import { test, expect } from "bun:test";
+import { join } from "node:path";
 import type { CanUseTool, PermissionMode } from "@yanlinglabs/winter-agent-sdk";
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import type { NewSessionEvent } from "@norma/protocol";
@@ -11,7 +12,11 @@ import {
   CAPABILITY_TOOL_MODES, CHAT_DISALLOWED_BUILTINS, CHAT_ALLOWED_WINTER_TOOLS,
   type WinterOptionsInput,
 } from "../../src/runtime-sdk/mode-options";
-import { normaToolNameFor, winterToolNameFor, WINTER_OWN_TOOL_NAMES, WINTER_NORMA_TOOL_PAIRS } from "../../src/runtime-sdk/tool-names";
+import {
+  gateClassFor, normaToolNameFor, winterToolNameFor,
+  WINTER_ADVERTISED_TOOLS_0_0_3, WINTER_ADVERTISED_TOOLS_0_0_3_BASE, WINTER_ADVERTISED_MCP_TOOLS_0_0_3,
+  WINTER_OWN_TOOL_NAMES, WINTER_NORMA_TOOL_PAIRS,
+} from "../../src/runtime-sdk/tool-names";
 
 type Mode = "code" | "dispatch" | "chat";
 const MODES: Mode[] = ["code", "dispatch", "chat"];
@@ -159,13 +164,56 @@ test("optional passthroughs appear only when given", () => {
 test("the control-plane deny rules cover the four write tools × the control-plane surface", () => {
   const deny = buildWinterOptions(optionsInput({ home: "/h" })).permissions!.deny!;
   for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit"]) {
-    expect(deny).toContain(`${tool}(**/.norma/permissions.local.json)`);
-    expect(deny).toContain(`${tool}(**/.norma/settings.json)`);
-    expect(deny).toContain(`${tool}(**/.norma/settings.local.json)`);
-    expect(deny).toContain(`${tool}(/h/permissions.local.json)`);
-    expect(deny).toContain(`${tool}(/h/run/**)`);
+    expect(deny).toContain(`${tool}(//**/.norma/permissions.local.json)`);
+    expect(deny).toContain(`${tool}(//**/.norma/settings.json)`);
+    expect(deny).toContain(`${tool}(//**/.norma/settings.local.json)`);
+    expect(deny).toContain(`${tool}(//h/permissions.local.json)`);
+    expect(deny).toContain(`${tool}(//h/run/**)`);
   }
   expect(deny).toHaveLength(4 * 7);
+});
+
+/**
+ * **Every rule must be FILESYSTEM-ROOT anchored** (review F2) — the review's finding was that 16 of
+ * the 28 rules could never fire and the other 12 only covered the session's own cwd subtree.
+ *
+ * In WS-07 §3.1's grammar (`permissions/paths.ts:60-78` at `v0.0.3`) a single leading `/` means
+ * "relative to the rule's own settings-file directory", which is `undefined` for an SDK-seeded rule
+ * and makes such a rule INERT — silently. A bare pattern anchors to cwd. Only `//` binds absolutely.
+ *
+ * The matcher is NOT exported from the installed package (checked: the barrel has no `evaluate` or
+ * rule-matching export), so this pins the anchor FORM and resolves each rule to its absolute target.
+ * The live proof was run separately against the pinned checkout's own `evaluate()` — the same
+ * harness `baseline-projects-deny.test.ts` uses — feeding it EXACTLY these strings:
+ *
+ *   bypassPermissions/default/auto × { in-cwd rules store, OUT-of-cwd rules store, out-of-cwd
+ *   settings.local, home settings.json, home permissions.local, home run/core.sock } → RULE-DENY in
+ *   all 18; MEMDIR and $OUTDIR NOT denied in any. The pre-fix forms denied only the in-cwd target
+ *   and nothing at all from the four `join(home, …)` rules.
+ */
+test("every deny rule is //-anchored, and resolves to the fence target it names", () => {
+  const home = "/Users/x/.norma";
+  const deny = buildWinterOptions(optionsInput({ home })).permissions!.deny!;
+  for (const rule of deny) {
+    const spec = rule.slice(rule.indexOf("(") + 1, -1);
+    // The three anchors: `//` binds to the filesystem root; a single `/` is inert; bare is cwd.
+    expect({ rule, anchored: spec.startsWith("//") }).toEqual({ rule, anchored: true });
+    const target = spec.slice(1);                     // drop ONE slash → the absolute path/pattern
+    expect({ rule, absolute: target.startsWith("/") }).toEqual({ rule, absolute: true });
+  }
+  // …and each rule resolves to exactly the fence target it is supposed to name.
+  const specs = new Set(deny.map((r) => r.slice(r.indexOf("(") + 1, -1)));
+  for (const f of ["permissions.local.json", "settings.json", "settings.local.json"]) {
+    expect(specs.has(`//**/.norma/${f}`)).toBe(true);              // project-INDEPENDENT, any depth
+    expect(specs.has(`/${join(home, f)}`)).toBe(true);             // the user's own global copies
+  }
+  expect(specs.has(`/${join(home, "run")}/**`)).toBe(true);        // the daemon control plane
+  expect(specs.size).toBe(7);
+  // The two inert forms must never reappear.
+  for (const s of specs) {
+    expect({ s, singleSlashAbsolute: /^\/[^/]/.test(s) }).toEqual({ s, singleSlashAbsolute: false });
+    expect({ s, bare: !s.startsWith("/") }).toEqual({ s, bare: false });
+  }
 });
 
 test("the deny rules do NOT fence the MEMDIR or $OUTDIR — both are agent-writable BY DESIGN", () => {
@@ -178,16 +226,22 @@ test("the deny rules do NOT fence the MEMDIR or $OUTDIR — both are agent-writa
   expect(deny.some((r) => r.includes("outputs"))).toBe(false);
 });
 
-test("the Bash sandbox denies the same surface and cannot be opted out of", () => {
+test("the Bash sandbox names real DIRECTORIES, because its consumer renders seatbelt subpaths", () => {
+  // Review F8: `filesystem.denyWrite` entries become `(deny file-write* (subpath "<canon(p)>"))`
+  // (`sandbox/profile.ts:335`), so a glob like `**/.norma/permissions.local.json` or `/h/run/**`
+  // becomes a literal path that never exists and denies nothing.
   const sb = buildWinterOptions(optionsInput({ home: "/h" })).sandbox!;
   expect(sb.enabled).toBe(true);
-  // With this true a command opts out of the fence entirely — `dangerouslyDisableSandbox` without
-  // the approval card the engine puts in front of it.
-  expect(sb.allowUnsandboxedCommands).toBe(false);
-  expect(sb.filesystem!.denyWrite).toContain("**/.norma/permissions.local.json");
-  expect(sb.filesystem!.denyWrite).toContain("/h/run/**");
+  expect(sb.filesystem!.denyWrite).toEqual(["/h/run"]);
   // CLAUDE.md: "the sole read denial is ~/.norma/run" — reads are otherwise unrestricted.
-  expect(sb.filesystem!.denyRead).toEqual(["/h/run/**"]);
+  expect(sb.filesystem!.denyRead).toEqual(["/h/run"]);
+  for (const p of [...sb.filesystem!.denyWrite!, ...sb.filesystem!.denyRead!]) {
+    expect({ p, glob: p.includes("*") }).toEqual({ p, glob: false });
+  }
+  // `allowUnsandboxedCommands` is NOT set: it is consulted only together with `excludedCommands`
+  // (`sandbox/spawn.ts:109,122`), which this config does not set, so `false` would be a no-op.
+  expect(sb.allowUnsandboxedCommands).toBeUndefined();
+  expect(sb.excludedCommands).toBeUndefined();
 });
 
 // -------------------------------------------------------------------------------------------
@@ -207,14 +261,23 @@ test("every capability tool is either exposed to a mode or in that mode's disall
 
 test("the per-mode capability exposure table is pinned", () => {
   expect(disallowedToolsFor("code")).toEqual([
+    "WebFetch", "WebSearch",
     "mcp__norma__research__ReadPage",
     "mcp__norma__research__Search",
     "mcp__norma__sessions__list_sessions",
     "mcp__norma__sessions__manage_session",
     "mcp__norma__sessions__session_spawn",
   ]);
-  expect(disallowedToolsFor("dispatch")).toEqual([]);
-  expect(disallowedToolsFor("chat")).toEqual([
+  // P8b-33 / review F6: dispatch is no longer empty. Norma's own `web_fetch`/`web_search` are
+  // `modes: ["code"]`, so dispatch's web surface today is `Search`/`ReadPage` only — leaving the
+  // list empty GAVE dispatch the SDK's floorless web built-ins, which classify as NETWORK and
+  // therefore allow under every policy.
+  expect(disallowedToolsFor("dispatch")).toEqual([
+    "WebFetch", "WebSearch",
+    "mcp__norma__web__web_fetch",
+    "mcp__norma__web__web_search",
+  ]);
+  expect(disallowedToolsFor("chat")).toEqual([...new Set([
     ...CHAT_DISALLOWED_BUILTINS,
     "mcp__norma__computer__computer",
     "mcp__norma__office__docs",
@@ -223,7 +286,19 @@ test("the per-mode capability exposure table is pinned", () => {
     "mcp__norma__sessions__list_sessions",
     "mcp__norma__sessions__manage_session",
     "mcp__norma__sessions__session_spawn",
-  ].sort());
+    "mcp__norma__web__web_fetch",
+    "mcp__norma__web__web_search",
+  ])].sort());
+});
+
+test("P8b-33: EVERY mode disallows the SDK's own web built-ins", () => {
+  for (const mode of MODES) {
+    expect(disallowedToolsFor(mode)).toContain("WebFetch");
+    expect(disallowedToolsFor(mode)).toContain("WebSearch");
+  }
+  // …and code keeps today's daemon-owned pair through the new `web` capability server.
+  expect(disallowedToolsFor("code")).not.toContain("mcp__norma__web__web_fetch");
+  expect(disallowedToolsFor("code")).not.toContain("mcp__norma__web__web_search");
 });
 
 test("chat excludes the SDK's own web built-ins and every code-only built-in", () => {
@@ -244,13 +319,99 @@ test("chat's allowed set is exactly AskUserQuestion plus Winter's own four", () 
   for (const t of CHAT_ALLOWED_WINTER_TOOLS) expect(disallowedToolsFor("chat")).not.toContain(t);
 });
 
-test("CHAT_DISALLOWED_BUILTINS is pinned — a new pair-table row is excluded from chat automatically", () => {
+test("CHAT_DISALLOWED_BUILTINS is pinned, and covers every tool the CHILD actually advertises", () => {
+  // Review F4: the previous list was derived from Norma's pair table, which MISSES three tools the
+  // child genuinely advertises — `Monitor`, `ReportFindings`, `ScheduleWakeup` — so all three were
+  // visible to a chat model that is supposed to have no fs/shell/repo surface.
   expect(CHAT_DISALLOWED_BUILTINS).toEqual([
     "Agent", "Bash", "CronCreate", "CronDelete", "CronList", "Edit", "EnterPlanMode", "EnterWorktree",
-    "ExitPlanMode", "ExitWorktree", "Glob", "Grep", "LSP", "ListMcpResourcesTool", "NotebookEdit",
-    "PushNotification", "Read", "ReadMcpResourceTool", "Skill", "TaskCreate", "TaskGet", "TaskList",
-    "TaskOutput", "TaskStop", "TaskUpdate", "ToolSearch", "WebFetch", "WebSearch", "Workflow", "Write",
+    "ExitPlanMode", "ExitWorktree", "Glob", "Grep", "LSP", "ListMcpResourcesTool", "Monitor",
+    "NotebookEdit", "PushNotification", "Read", "ReadMcpResourceDirTool", "ReadMcpResourceTool",
+    "RefreshMcpTools", "ReportFindings", "ScheduleWakeup", "Skill", "TaskCreate", "TaskGet",
+    "TaskList", "TaskOutput", "TaskStop", "TaskUpdate", "ToolSearch", "WaitForMcpServers",
+    "WebFetch", "WebSearch", "Workflow", "Write",
   ]);
+  // THE invariant, stated as a set relation rather than a literal: every advertised name is either
+  // chat-allowed or chat-disallowed. An SDK bump that advertises a new tool fails here.
+  for (const t of WINTER_ADVERTISED_TOOLS_0_0_3) {
+    const allowed = CHAT_ALLOWED_WINTER_TOOLS.includes(t);
+    expect({ t, allowed, disallowed: CHAT_DISALLOWED_BUILTINS.includes(t) })
+      .toEqual({ t, allowed, disallowed: !allowed });
+  }
+});
+
+test("the advertised BASE set is pinned to what the BUILT BINARY reported at 0.0.3", () => {
+  // Measured: `dist/winter` driven through `query()` with `model: "winter-test/echo"` under a temp
+  // home and NORMA_BRAND's names; `system/init.tools`, verbatim — with NO MCP servers declared.
+  expect(WINTER_ADVERTISED_TOOLS_0_0_3_BASE).toHaveLength(31);
+  expect([...WINTER_ADVERTISED_TOOLS_0_0_3_BASE].sort()).toEqual([...WINTER_ADVERTISED_TOOLS_0_0_3_BASE]);
+  // Two measured facts the exclusion logic leans on.
+  expect(WINTER_ADVERTISED_TOOLS_0_0_3_BASE).not.toContain("WebFetch");   // not advertised at 0.0.3…
+  expect(WINTER_ADVERTISED_TOOLS_0_0_3_BASE).not.toContain("WebSearch");  // …but disallowed anyway (P8b-33)
+  expect(WINTER_ADVERTISED_TOOLS_0_0_3_BASE).toContain("Monitor");
+  // The measurement could not see the `winter.mcp` family, because it declared no MCP servers.
+  for (const t of WINTER_ADVERTISED_MCP_TOOLS_0_0_3) expect(WINTER_ADVERTISED_TOOLS_0_0_3_BASE).not.toContain(t);
+});
+
+test("a real Norma child ALSO advertises the winter.mcp six — the union is Task 16's tripwire", () => {
+  // `winter.mcp` is DERIVED, not host-supplied: `RUNTIME_DERIVED_CAPABILITIES`
+  // (`tools/registry.ts:1264`) grants it whenever `SessionCapabilityFacts.hasMcpServers` is true —
+  // and every Norma mode declares capability servers, which ARE MCP servers. So the real host's
+  // `system/init.tools` is the UNION, and a tripwire pinned to the base alone would fail by
+  // construction — with the pressure to re-pin the list rather than re-derive chat's exclusions.
+  expect(WINTER_ADVERTISED_MCP_TOOLS_0_0_3).toEqual([
+    "ListMcpResourcesTool", "ReadMcpResourceDirTool", "ReadMcpResourceTool",
+    "RefreshMcpTools", "ToolSearch", "WaitForMcpServers",
+  ]);
+  expect(WINTER_ADVERTISED_TOOLS_0_0_3).toEqual(
+    [...new Set([...WINTER_ADVERTISED_TOOLS_0_0_3_BASE, ...WINTER_ADVERTISED_MCP_TOOLS_0_0_3])].sort(),
+  );
+  expect(WINTER_ADVERTISED_TOOLS_0_0_3).toHaveLength(37);
+  // …and all six are chat-disallowed: chat has no MCP resources beyond Norma's own capability
+  // servers, which it reaches by their `mcp__norma__*` names, never through these.
+  for (const t of WINTER_ADVERTISED_MCP_TOOLS_0_0_3) expect(CHAT_DISALLOWED_BUILTINS).toContain(t);
+});
+
+test("the winter.mcp housekeeping trio is classified read-only, so code and dispatch get it silently", () => {
+  // All three are bookkeeping over ALREADY-CONNECTED servers and none can reach a server the session
+  // has not declared. `RefreshMcpTools` says so itself: "never establishes a disconnected
+  // connection" (`descriptors/refresh-mcp-tools.ts:13`); `WaitForMcpServers` is `permissionClass:
+  // "read"` and merely blocks on a handshake.
+  expect(gateClassFor("ReadMcpResourceDirTool")).toBe("read_mcp_resource");   // NETWORK, like its sibling
+  expect(gateClassFor("RefreshMcpTools")).toBe("ToolSearch");                 // READ_ONLY
+  expect(gateClassFor("WaitForMcpServers")).toBe("ToolSearch");               // READ_ONLY
+  for (const tool of ["ReadMcpResourceDirTool", "RefreshMcpTools", "WaitForMcpServers"]) {
+    for (const mode of ["code", "dispatch"] as const) {
+      for (const policy of POLICIES) {
+        expect({ tool, mode, policy, v: new PermissionGate().evaluate(gateClassFor(tool), policy) })
+          .toEqual({ tool, mode, policy, v: "allow" });
+      }
+    }
+  }
+});
+
+test("NEW-1: the `web` capability tools strip to Norma names and keep today's NETWORK class", async () => {
+  // The sixth server key was missing, so `mcp__norma__web__web_fetch` did not strip: it took the
+  // MUTATING/external branch — a card under `ask`, a DENY under `plan` — where `web_fetch` is
+  // NETWORK today and allowed under every policy.
+  expect(normaToolNameFor("mcp__norma__web__web_fetch")).toBe("web_fetch");
+  expect(normaToolNameFor("mcp__norma__web__web_search")).toBe("web_search");
+  expect(gateClassFor("mcp__norma__web__web_fetch")).toBe("web_fetch");
+  for (const tool of ["mcp__norma__web__web_fetch", "mcp__norma__web__web_search"]) {
+    for (const policy of POLICIES) {
+      const h = harness({ mode: "code", policy });
+      const res = (await h.canUse(tool, { url: "https://example.com" }, ctx()))!;
+      expect({ tool, policy, behavior: res.behavior }).toEqual({ tool, policy, behavior: "allow" });
+      expect(h.events).toEqual([]);   // NETWORK is free at this gate, under every policy
+    }
+  }
+});
+
+test("n1: gateClassFor never returns a prototype member", () => {
+  for (const key of ["toString", "constructor", "hasOwnProperty", "__proto__"]) {
+    expect(typeof gateClassFor(key)).toBe("string");
+    expect(gateClassFor(key)).toBe(key);   // unknown ⇒ passes through ⇒ fails closed at the gate
+  }
 });
 
 // -------------------------------------------------------------------------------------------
@@ -445,6 +606,60 @@ test("P8b-31: a PLAIN bash call under auto is still silent — the floor is argu
   const res = (await h.canUse("Bash", { command: "ls" }, ctx()))!;
   expect(res.behavior).toBe("allow");
   expect(h.events).toEqual([]);
+});
+
+// -------------------------------------------------------------------------------------------
+// F5 — an execute-class tool is gated by its CLASS, never by its display name
+// -------------------------------------------------------------------------------------------
+
+test("Monitor is gated as bash, not as its display name — chat and plan deny it", async () => {
+  // `descriptors/monitor.ts:49` — `permissionClass: "execute"`, "Command half uses the Bash
+  // permission family". The projector renders it as `bash_output`, which is in `gate.ts`'s
+  // READ_ONLY set — so a SHARED `Monitor → bash_output` row would make a command-running tool a
+  // silent allow under every policy, `plan` and `chat` included. Classification is declared
+  // separately from the display mapping for exactly this reason.
+  expect(gateClassFor("Monitor")).toBe("bash");
+  expect(normaToolNameFor("Monitor")).toBeUndefined();   // no display row — it renders as itself
+
+  for (const [mode, policy] of [["chat", "chat"], ["code", "plan"]] as const) {
+    const h = harness({ mode, policy });
+    const res = (await h.canUse("Monitor", { command: "tail -f x" }, ctx()))!;
+    expect({ mode, policy, behavior: res.behavior }).toEqual({ mode, policy, behavior: "deny" });
+  }
+  // …and under `ask` in code it CARDS, exactly as bash does.
+  const asked = harness({ mode: "code", policy: "ask" });
+  void asked.canUse("Monitor", { command: "tail -f x" }, ctx());
+  expect(asked.events).toHaveLength(1);
+  asked.approvals.resolve("s1", (asked.events[0] as { callId: string }).callId, false, "cleanup");
+});
+
+test("the two task-class advertised tools are classified from the child's own permissionClass", () => {
+  // `report-findings.ts:36` and `schedule-wakeup.ts:41` both declare `permissionClass: "task"`.
+  // `ScheduleWakeup` is deliberately NOT Norma's `schedule` (MUTATING): that is the persistent cron
+  // surface — `CronCreate`/`CronDelete`/`CronList` — while this is an in-session self-wake with its
+  // delay clamped to 60-3600s.
+  expect(gateClassFor("ReportFindings")).toBe("task_create");
+  expect(gateClassFor("ScheduleWakeup")).toBe("task_create");
+  expect(gateClassFor("CronCreate")).toBe("schedule");
+  // A tool with no explicit class falls back to the display mapping, which falls back to itself.
+  expect(gateClassFor("Bash")).toBe("bash");
+  expect(gateClassFor("SomeFutureTool")).toBe("SomeFutureTool");
+});
+
+test("F11: the pinned NORMA_HOME/NORMA_PROFILE are applied AFTER input.env, so they always win", () => {
+  // They were merged FIRST, which let a caller-supplied `input.env.NORMA_HOME` silently override the
+  // one value CLAUDE.md's hard rule depends on — a test session would then have written a real
+  // transcript under ~/.norma.
+  const o = buildWinterOptions(optionsInput({
+    home: "/tmp/pinned", profile: "dev",
+    env: { NORMA_HOME: "/Users/real/.norma", NORMA_PROFILE: "prod", EXTRA: "kept" },
+  }));
+  expect(o.env!.NORMA_HOME).toBe("/tmp/pinned");
+  expect(o.env!.NORMA_PROFILE).toBe("dev");
+  expect(o.env!.EXTRA).toBe("kept");
+  // The test-provider selector is pinned after `input.env` for the same reason.
+  const t = buildWinterOptions(optionsInput({ model: "winter-test/echo", env: { WINTER_TEST_PROVIDER: "hijack" } }));
+  expect(t.env!.WINTER_TEST_PROVIDER).toBe("echo");
 });
 
 // -------------------------------------------------------------------------------------------

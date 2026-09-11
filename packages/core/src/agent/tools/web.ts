@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ToolRegistry } from "./registry";
+import type { ToolDefinition, ToolRegistry } from "./registry";
 
 const MAX_FETCH_BYTES = 5 * 1024 * 1024; // hard cap on bytes READ off the wire (streamed — see readCapped)
 const PREVIEW_BYTES = 8192;
@@ -992,7 +992,18 @@ export interface WebToolDeps {
 }
 
 export function registerWebTools(r: ToolRegistry, deps: WebToolDeps = {}): void {
-  r.register({
+  for (const def of webToolDefs(deps)) r.register(def);
+}
+
+/** P8b Task 7 (ruling P8b-33) — THE two definitions, extracted verbatim from `registerWebTools`'s
+ *  body so the daemon's shared `ToolRegistry` and the `web` capability server drive the SAME
+ *  `ToolDefinition` objects rather than two copies. Nothing about either registration changed.
+ *
+ *  WHY `web` IS A CAPABILITY SERVER AT ALL: every mode disallows the SDK's built-in
+ *  `WebSearch`/`WebFetch` in 8b — they carry neither Norma's Brave/Exa keys nor its dangerous-domain
+ *  floor — so code keeps these two, daemon-owned, over MCP. */
+export function webToolDefs(deps: WebToolDeps = {}): ToolDefinition[] {
+  return [{
     name: "web_fetch",
     description:
       "Fetch a URL (http/https) and return a preview of its readable text content. Norma's only network-capable tool — bash has no network. The full converted page is saved to a file (its path is in the result) — use read/grep/spawn_agent on that file for anything beyond the preview. Fetch is read-only GET.",
@@ -1075,9 +1086,7 @@ export function registerWebTools(r: ToolRegistry, deps: WebToolDeps = {}): void 
         });
       }
     },
-  });
-
-  r.register({
+  }, {
     name: "web_search",
     description:
       "Search the web (Brave Search) and return a numbered list of results (title, url, description). Norma's only search tool — pair with web_fetch to read a result's full page. Requires a stored Brave Search API key (norma login --web-search-key).",
@@ -1159,5 +1168,5 @@ export function registerWebTools(r: ToolRegistry, deps: WebToolDeps = {}): void 
         deps.audit?.({ kind: "network", tool: "web_search", query, outcome });
       }
     },
-  });
+  }];
 }

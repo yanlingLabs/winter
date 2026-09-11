@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom } from "../src/settings";
+import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC } from "../src/settings";
 import { DEFAULT_CODEX_MODEL } from "../src/providers/codex-config";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 
@@ -754,5 +754,47 @@ describe("settings.runtimes", () => {
 
   test("a wrongly-typed leg is rejected — a string 'true' must never read as a leg that is on", () => {
     expect(() => Settings.parse({ ...base, runtimes: { winterLeg: { chat: "true" } } })).toThrow();
+  });
+});
+
+// P8b Task 15 / review r1 F4: ONE door answers for an absent block and a blank string, so three
+// lanes (Task 2's executable resolver, Task 5's create.ts, Task 9's leg + Task 16's idle timer)
+// cannot each re-derive the conventions and cannot silently forget one.
+describe("winterOptionsFromSettings", () => {
+  const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } };
+
+  test("an absent runtimes block answers with today's behaviour, not with undefined", () => {
+    expect(winterOptionsFromSettings(Settings.parse(base))).toEqual({
+      idleTimeoutSec: 900,
+      winterLeg: { chat: false, dispatch: false, code: false },
+    });
+  });
+
+  test("null/undefined settings answer the same way — the daemon boots with `settings = null` when the file is unusable", () => {
+    expect(winterOptionsFromSettings(null)).toEqual(winterOptionsFromSettings(undefined));
+    expect(winterOptionsFromSettings(null).winterLeg).toEqual({ chat: false, dispatch: false, code: false });
+    expect(winterOptionsFromSettings(null).idleTimeoutSec).toBe(900);
+  });
+
+  test("a blank or whitespace-only executable/model is ABSENT, never the empty string", () => {
+    const blank = winterOptionsFromSettings(Settings.parse({ ...base, runtimes: { winterExecutable: "   ", advisorModel: "" } }));
+    expect(blank.winterExecutable).toBeUndefined();
+    expect(blank.advisorModel).toBeUndefined();
+    expect(blank).not.toHaveProperty("winterExecutable");
+  });
+
+  test("real values come through trimmed", () => {
+    const set = winterOptionsFromSettings(Settings.parse({ ...base, runtimes: { winterExecutable: " /opt/winter/bin/winter ", advisorModel: "some-model", winterIdleTimeoutSec: 60, winterLeg: { chat: true } } }));
+    expect(set).toEqual({
+      winterExecutable: "/opt/winter/bin/winter",
+      advisorModel: "some-model",
+      idleTimeoutSec: 60,
+      winterLeg: { chat: true, dispatch: false, code: false },
+    });
+  });
+
+  test("the schema default and the absent-block answer are the same number", () => {
+    expect(Settings.parse({ ...base, runtimes: {} }).runtimes?.winterIdleTimeoutSec).toBe(DEFAULT_WINTER_IDLE_TIMEOUT_SEC);
+    expect(winterOptionsFromSettings(Settings.parse(base)).idleTimeoutSec).toBe(DEFAULT_WINTER_IDLE_TIMEOUT_SEC);
   });
 });

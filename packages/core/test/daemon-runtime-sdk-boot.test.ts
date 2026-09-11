@@ -9,7 +9,8 @@
 // No child process is spawned anywhere here — no `sdk.query()`, no real `winter` binary.
 import { afterEach, describe, expect, test } from "bun:test";
 import { buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
-import type { Query } from "@yanlinglabs/winter-agent-sdk";
+import { isWinterMcpServerInstance, type Query, type WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
+import type { CapabilitySession } from "../src/capabilities";
 import type { RuntimeDirectoryEntry } from "@yanlinglabs/winter-runtime-sdk";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -52,8 +53,6 @@ function entryFor(sessionId: string): RuntimeDirectoryEntry {
     updatedAt: "2026-09-11T00:00:01.000Z",
   };
 }
-
-const FAKE_QUERY = {} as Query;
 
 describe("daemon boot — the Winter handle", () => {
   test("a booted daemon carries a defined handle, and it reads the SPINE's directory store", async () => {
@@ -103,9 +102,20 @@ describe("daemon boot — the Winter handle", () => {
       mkdirSync(join(home, "runtimes"), { recursive: true });
       writeFileSync(dirs.runtimeStatePath, "this is not a database");
 
-      const d = await boot(home);
+      // Both halves of step 6(b), captured from the ACTUAL operator-facing output.
+      const said: string[] = [];
+      const realError = console.error;
+      console.error = (...args: unknown[]) => { said.push(args.map(String).join(" ")); };
+      let d: RunningDaemon;
+      try { d = await boot(home); } finally { console.error = realError; }
+
       expect(existsSync(d.socketPath)).toBe(true);
-      // The reason is named — by the spine, which is what actually failed.
+      // (i) THE SPINE names the reason, because the spine is what failed…
+      expect(said.some((l) => l.startsWith("runtime-state: runtime state unavailable") && l.includes("RuntimeStateUnavailableError"))).toBe(true);
+      // …(ii) and the ROUTER says nothing, because it constructed fine. This half is the one that
+      // would catch a future change turning a degraded spine into a dead router.
+      expect(said.filter((l) => l.startsWith("runtime-sdk: winter runtime sdk unavailable"))).toEqual([]);
+
       const rt = d.runtimeState;
       expect("unavailable" in rt).toBe(true);
       expect((rt as { unavailable: Error }).unavailable).toBeInstanceOf(RuntimeStateUnavailableError);
@@ -122,6 +132,95 @@ describe("daemon boot — the Winter handle", () => {
   });
 });
 
+// P8b Tasks 6-7 (P8b-36): the daemon's capability servers, built PER SESSION.
+//
+// `RuntimeSdkOptions.capabilities` is handle-wide and construction-time, which is exactly what a
+// per-session capability set must not be: `callTool(name, args)` carries no session identity, so a
+// shared instance would have to look one up — and a daemon-wide slot cross-attributes the moment two
+// Winter sessions run turns concurrently. Because `ctx.mode` comes from the same place and resolves
+// `browser`'s read-only chat subset, that is a security bug, not only an identity one.
+//
+// So the handle is built with `capabilities: []` (proved below through the router's own per-query
+// collision guard, which throws BEFORE the leg is picked and before anything is spawned), and the
+// daemon exposes `buildSessionCapabilities(session)` for Task 16's driver to put on each session's
+// own `Options.mcpServers`.
+describe("daemon boot — the capability servers (Tasks 6-7, P8b-36)", () => {
+  /** True iff the ROUTER HANDLE is holding a capability server called `name`. */
+  function handleHoldsCapability(d: RunningDaemon, name: string): boolean {
+    const abortController = new AbortController();
+    abortController.abort();
+    try {
+      d.runtimeSdk!.sdk.query({
+        prompt: "unreachable",
+        options: { abortController, mcpServers: { [name]: { type: "sdk", name, instance: {} } } },
+      });
+      return false;
+    } catch (err) {
+      return (err as Error).message.includes("is the name of a capability server this handle forwards");
+    }
+  }
+
+  const session = (over: Partial<CapabilitySession> = {}): CapabilitySession =>
+    ({ sessionId: "s_cap", mode: "code", cwd: "/tmp", roots: ["/tmp"], ...over });
+
+  test("the handle carries NO handle-wide capabilities — they are per session", async () => {
+    await withTempHome(async (home) => {
+      const d = await boot(home);
+      expect(d.runtimeSdk).toBeDefined();
+      for (const key of ["norma__sessions", "norma__browser", "norma__office", "norma__research", "norma__web", "norma__computer"]) {
+        expect(handleHoldsCapability(d, key), `${key} is on the handle and should not be`).toBe(false);
+      }
+    });
+  });
+
+  test("buildSessionCapabilities returns this session's servers, wired from the daemon's own deps", async () => {
+    await withTempHome(async (home) => {
+      const d = await boot(home);
+      const servers = d.buildSessionCapabilities(session());
+      // KEYED BY NAME — the record IS `Options.mcpServers`' shape, and the child derives each tool's
+      // wire name from the key, so the key set is the thing to assert. Computer use is off in this
+      // temp home, so five servers, not six.
+      expect(Object.keys(servers)).toEqual([
+        "norma__sessions", "norma__browser", "norma__office", "norma__research", "norma__web",
+      ]);
+      for (const [key, s] of Object.entries(servers)) {
+        // The invariant N1 exists to make unrepresentable: key === the config's own name.
+        expect(key).toBe(s.name);
+        expect(s.type).toBe("sdk");
+        // Wire-safe is not enough: an instance the router cannot call is completely inert.
+        expect(isWinterMcpServerInstance(s.instance)).toBe(true);
+        for (const tool of (s.instance as WinterMcpServerInstance).listTools()) {
+          // The router refuses any capability tool whose schema is not a JSON-Schema object.
+          expect(tool.inputSchema["type"]).toBe("object");
+        }
+      }
+    });
+  });
+
+  test("the computer server follows the LIVE computerUse.enabled setting — no restart (M2)", async () => {
+    await withTempHome(async (home) => {
+      writeFileSync(join(home, "settings.json"), JSON.stringify({ computerUse: { enabled: true } }));
+      const d = await boot(home);
+      expect(Object.keys(d.buildSessionCapabilities(session()))).toContain("norma__computer");
+    });
+  });
+
+  test("two sessions get INDEPENDENT servers, each carrying its own mode", async () => {
+    await withTempHome(async (home) => {
+      const d = await boot(home);
+      const code = d.buildSessionCapabilities(session({ sessionId: "s_code", mode: "code" }));
+      const chat = d.buildSessionCapabilities(session({ sessionId: "s_chat", mode: "chat" }));
+      const browserOf = (servers: Readonly<Record<string, { instance: unknown }>>): WinterMcpServerInstance =>
+        servers["norma__browser"]!.instance as WinterMcpServerInstance;
+      // Both alive at once; the chat one advertises the READ-ONLY browser schema, the code one the
+      // full schema. Nothing is shared between them.
+      const codeSchema = JSON.stringify(browserOf(code).listTools()[0]!.inputSchema);
+      const chatSchema = JSON.stringify(browserOf(chat).listTools()[0]!.inputSchema);
+      expect(codeSchema).not.toBe(chatSchema);
+    });
+  });
+});
+
 describe("daemon shutdown — G-14's ordering, on a real daemon", () => {
   test("stop() ends the tracked session BEFORE the 8a spine closes (receipts need the store)", async () => {
     await withTempHome(async (home) => {
@@ -132,27 +231,40 @@ describe("daemon shutdown — G-14's ordering, on a real daemon", () => {
       const rt = online(d);
 
       // The invariant, measured rather than spied: inside the session's own teardown — the moment a
-      // draining child would be writing its delivery receipts — the runtime store must still answer.
-      let storeAnswered: boolean | undefined;
+      // draining child would be appending its last events and writing its delivery receipts — BOTH
+      // stores `stop()` closes must still answer. Each probe uses the daemon's OWN handle: a second
+      // instance over the same home would answer whether or not the daemon's had been closed.
+      let runtimeStateAnswered: boolean | undefined;
       let directoryAnswered: boolean | undefined;
-      handle.trackQuery("s_shutdown", FAKE_QUERY, async () => {
+      let sessionStoreAnswered: boolean | undefined;
+      handle.trackQuery("s_shutdown", new AbortController(), async () => {
         await Bun.sleep(5);
         try {
           rt.db.db.query("SELECT value FROM schema_meta LIMIT 1").get();
-          storeAnswered = true;
-        } catch { storeAnswered = false; } // a closed `runtime-state.db` throws here
+          runtimeStateAnswered = true;
+        } catch { runtimeStateAnswered = false; } // a closed `runtime-state.db` throws here
         try {
           // The receipt path itself: a write through the router's directory, which is 8a's store.
           await handle.sdk.directory.record(entryFor("s_shutdown"));
           directoryAnswered = true;
         } catch { directoryAnswered = false; }
+        try {
+          // The event path: `store.close()` is the handle Task 5 MOVED onto the async tail, and a
+          // draining child appends its final `SessionEvent`s through this exact instance. A closed
+          // bun:sqlite Database throws on use, so this read is the ordering assertion.
+          d.sessions.list();
+          sessionStoreAnswered = true;
+        } catch { sessionStoreAnswered = false; }
       });
 
       const stopping = daemon?.stop();
       daemon = undefined;
       await stopping;
-      expect(storeAnswered).toBe(true);
+      expect(runtimeStateAnswered).toBe(true);
       expect(directoryAnswered).toBe(true);
+      expect(sessionStoreAnswered).toBe(true);
+      // And afterwards it really is closed — otherwise the three assertions above would be vacuous.
+      expect(() => d.sessions.list()).toThrow();
     });
   });
 
@@ -160,7 +272,7 @@ describe("daemon shutdown — G-14's ordering, on a real daemon", () => {
     await withTempHome(async (home) => {
       const d = await boot(home);
       expect(d.runtimeSdk).toBeDefined();
-      d.runtimeSdk?.trackQuery("s_grace", FAKE_QUERY, async () => { await Bun.sleep(10); });
+      d.runtimeSdk?.trackQuery("s_grace", new AbortController(), async () => { await Bun.sleep(10); });
 
       const started = Date.now();
       const stopping = daemon?.stop();

@@ -1,0 +1,9 @@
+{"sessionId":"<id-1>","type":"session_created","scope":"global","mode":"code"}
+{"sessionId":"<id-1>","type":"harness_attached","clientName":"golden-observer"}
+{"sessionId":"<id-1>","type":"user_message","threadId":"main","text":"write to /etc/nope.txt","clientName":"golden"}
+{"sessionId":"<id-1>","threadId":"main","type":"turn_started"}
+{"sessionId":"<id-1>","threadId":"main","type":"tool_call","callId":"<id-2>","name":"write","argsJson":"{\"path\":\"/etc/nope.txt\",\"content\":\"x\"}"}
+{"sessionId":"<id-1>","threadId":"main","type":"approval_requested","callId":"<id-2>","toolName":"write","summary":"write /etc/nope.txt — outside your project; allow writes in /private/etc for this request? It does not add a working directory unless you choose to add it below.","issuedAt":"<ms>","expiresAt":"<ms>","options":[{"id":"allow_once","label":"Allow once"},{"id":"allow_add_dir","label":"Allow and add as working directory"},{"id":"allow_project","label":"Always allow edits in /private/etc","rule":"Edit(/private/etc)","scope":"project"},{"id":"deny","label":"Deny"}]}
+{"sessionId":"<id-1>","threadId":"main","type":"approval_resolved","callId":"<id-2>","approved":false,"by":"golden"}
+{"sessionId":"<id-1>","threadId":"main","type":"tool_result","callId":"<id-2>","output":"The user denied this write action — it was NOT run. Stop here and wait for the user to tell you how to proceed. Do not retry it, rephrase it, or attempt a workaround; the user will give further instructions.","isError":true}
+{"sessionId":"<id-1>","threadId":"main","type":"turn_completed","stopReason":"end_turn","inputTokens":1500,"outputTokens":30,"contextTokens":1500}

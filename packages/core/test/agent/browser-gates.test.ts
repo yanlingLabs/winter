@@ -157,9 +157,12 @@ describe("b2-t7 gate walk: the composed command channel (daemon → panel_comman
   let home: string | undefined;
   const clients: GateClient[] = [];
 
-  afterEach(() => {
+  // AWAITED (P8b Task 5): `stop()`'s tail now closes the SessionStore too — it sits behind the
+  // Winter handle's dispose — so dropping the promise would rm the home out from under an open
+  // sqlite handle.
+  afterEach(async () => {
     for (const c of clients.splice(0)) c.close();
-    daemon?.stop();
+    await daemon?.stop();
     daemon = undefined;
     if (home) rmSync(home, { recursive: true, force: true });
     home = undefined;

@@ -9,14 +9,14 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { compatibilityKeys } from "@yanlinglabs/winter-agent-sdk";
 import { buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import { memoryDirFor, repoRootFor, sanitizeProjectKey } from "../../src/agent/memory-dir";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import {
-  RuntimeSessionRecords, RuntimeStateUnavailableError, backfillNativeSessions, createSqliteRuntimeDirectoryStore, openRuntimeStateDb,
+  RUNTIME_STATE_SCHEMA_VERSION, RuntimeSessionRecords, type MemoryKeyFs, RuntimeStateUnavailableError, backfillNativeSessions, createSqliteRuntimeDirectoryStore, openRuntimeStateDb,
   startRuntimeState, type RuntimeStateWiring,
 } from "../../src/runtime-state";
 import { Settings } from "../../src/settings";
@@ -60,9 +60,9 @@ function writeSettings(home: string, extra: Record<string, unknown> = {}): void 
 }
 
 /** The manifest, and the one-shot marker: the two durable facts §17 phase 5 leaves behind. */
-function manifestRows(rt: RuntimeStateWiring): Array<{ old_key: string; new_key: string; status: string }> {
-  return rt.db.db.query("SELECT old_key, new_key, status FROM memory_key_manifest ORDER BY old_key").all() as
-    Array<{ old_key: string; new_key: string; status: string }>;
+function manifestRows(rt: RuntimeStateWiring): Array<{ old_key: string; entry: string; new_key: string; status: string }> {
+  return rt.db.db.query("SELECT old_key, entry, new_key, status FROM memory_key_manifest ORDER BY old_key, entry").all() as
+    Array<{ old_key: string; entry: string; new_key: string; status: string }>;
 }
 function marker(rt: RuntimeStateWiring): unknown {
   return rt.db.db.query("SELECT value FROM schema_meta WHERE key = 'memory_keys_migrated'").get();
@@ -105,13 +105,13 @@ const receipted = (messageId: string, agoMs: number) => ({
 }) as never;
 
 describe("daemon wiring — the store opens and recovery runs before the socket exists", () => {
-  test("runtime-state.db is created at schema 1 and the boot recovery finished before the socket did", async () => {
+  test("runtime-state.db is created at the current schema and the boot recovery finished before the socket did", async () => {
     await withTempHome(async (home, dirs) => {
       const d = await boot(home);
       const rt = online(d);
 
       expect(existsSync(dirs.runtimeStatePath)).toBe(true);
-      expect(rt.db.schemaVersion()).toBe(1);
+      expect(rt.db.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION);
       expect(rt.lastRecovery.ok).toBe(true);
       expect(rt.lastRecovery.steps).toHaveLength(12);
       // The boot path does NOT re-scan every session log: `SessionStore`'s constructor already ran
@@ -359,9 +359,16 @@ describe("daemon wiring — deletion and teardown", () => {
       // `sqlite3_close_v2`: with prepared statements still outstanding it leaves a ZOMBIE connection
       // whose checkpoint-and-unlink runs only once those statements are finalized — and in Bun that
       // happens when the `Statement` objects are collected. Without forcing that, this assertion
-      // measures GC timing rather than SQLite's close, and any test added to this file (P8b-17 added
-      // five) can flip it either way. Forcing the collection first is what makes it deterministic;
-      // the property being asserted is unchanged.
+      // measures GC timing rather than SQLite's close, and any test added to this file can flip it
+      // either way.
+      //
+      // SO THE PROPERTY ASSERTED IS NOW "after close AND A FULL COLLECTION, no un-replayed frames" —
+      // slightly weaker than "a clean close checkpoints", and worth saying rather than glossing.
+      // That the forced collection is what makes it pass is itself the evidence that no live
+      // reference leaked (a still-REACHABLE statement leaves the WAL un-checkpointed through a GC);
+      // only finalization was deferred. Harmless in production: the daemon exits right after
+      // `stop()`, and an un-checkpointed WAL is replayed on the next open — which this same test
+      // asserts by reopening and checking `integrity().ok`.
       Bun.gc(true);
       const wal = `${dirs.runtimeStatePath}-wal`;
       expect(existsSync(wal) && statSync(wal).size > 0).toBe(false);
@@ -369,7 +376,7 @@ describe("daemon wiring — deletion and teardown", () => {
       const reopened = openRuntimeStateDb(dirs.home);
       try {
         expect(reopened.integrity().ok).toBe(true);
-        expect(reopened.schemaVersion()).toBe(1);
+        expect(reopened.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION);
       } finally {
         reopened.close();
       }
@@ -433,7 +440,7 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
       expect(memoryBody(home, first.oldKey)).toBeUndefined();
       expect(memoryBody(home, first.newKey)).toBe("# alpha\n");
       expect(rt.records.get(first.sessionId)!.memoryProjectKey).toBe(first.newKey);
-      expect(manifestRows(rt)).toEqual([{ old_key: first.oldKey, new_key: first.newKey, status: "moved" }]);
+      expect(manifestRows(rt)).toEqual([{ old_key: first.oldKey, entry: "memory", new_key: first.newKey, status: "moved" }]);
 
       // THE HALF-SWITCH THAT MUST NOT EXIST: the daemon's own memory lookup resolves to where the
       // tree now is, so the agent never reads an empty directory and never starts a second MEMORY.md.
@@ -545,9 +552,10 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
       const rs0 = openRuntimeStateDb(home);
       try {
         backfillNativeSessions({ rs: rs0, store, home, providerId: "codex-oauth" });
-        rs0.db.run("INSERT INTO memory_key_manifest (old_key, new_key, status, planned_at, moved_at) VALUES (?, ?, 'planned', ?, NULL)",
+        rs0.db.run("INSERT INTO memory_key_manifest (old_key, entry, new_key, status, planned_at, moved_at) VALUES (?, 'memory', ?, 'planned', ?, NULL)",
           [first.oldKey, first.newKey, ISO()]);
-        renameSync(join(home, "projects", first.oldKey), join(home, "projects", first.newKey));
+        mkdirSync(join(home, "projects", first.newKey), { recursive: true });
+        renameSync(join(home, "projects", first.oldKey, "memory"), join(home, "projects", first.newKey, "memory"));
       } finally {
         rs0.close();
       }
@@ -557,13 +565,216 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
       writeSettings(home, { runtimes: { migrations: { memoryKeys: false } } });
       const rt = online(await boot(home));
 
-      expect(manifestRows(rt)).toEqual([{ old_key: first.oldKey, new_key: first.newKey, status: "moved" }]);
+      expect(manifestRows(rt)).toEqual([{ old_key: first.oldKey, entry: "memory", new_key: first.newKey, status: "moved" }]);
       expect(rt.records.get(first.sessionId)!.memoryProjectKey).toBe(first.newKey);
       expect(rt.relocatedMemoryKey(first.oldKey)).toBe(first.newKey);
       expect(liveMemDir(home, rt, first.cwd)).toBe(join(home, "projects", first.newKey, "memory"));
       expect(memoryBody(home, first.newKey)).toBe("# alpha\n");
       // Settled, so it is rollback-able — the state this manifest exists to guarantee.
       expect(marker(rt)).toBe(null); // and the migration itself was never run: no marker
+    });
+  });
+
+  test("a refused project is retried on the next SETTINGS CHANGE once the obstruction is cleared — no restart", async () => {
+    // P8b-29 replaced the one-attempt-per-process rule: a project refuses on its own, the manifest
+    // records the state per entry, and re-running is idempotent — so the user who clears a collision
+    // gets their migration at the next settings change rather than only at the next boot.
+    await withTempHome(async (home) => {
+      const store = new SessionStore(home);
+      const blocked = seedProject(home, store, "blocked");
+      const fine = seedProject(home, store, "fine");
+      mkdirSync(join(home, "projects", blocked.newKey, "memory"), { recursive: true });
+      writeFileSync(join(home, "projects", blocked.newKey, "memory", "MEMORY.md"), "someone else's");
+      const lines: string[] = [];
+      const live = Settings.parse({ ...SETTINGS_BASE, runtimes: { migrations: { memoryKeys: true } } });
+
+      const state = await startRuntimeState({ home, store, settings: () => live, log: (l) => lines.push(l) });
+      const rt = "unavailable" in state ? undefined : state;
+      try {
+        expect(rt).toBeDefined();
+        // One project migrated, one refused — and the refusal is NAMED, once.
+        expect(memoryBody(home, fine.newKey)).toBe("# fine\n");
+        expect(memoryBody(home, blocked.oldKey)).toBe("# blocked\n");
+        expect(lines.filter((l) => l.startsWith("memory-key migration refused"))).toHaveLength(1);
+        expect(marker(rt!)).toBe(null); // nothing is marked done while something is still refused
+
+        // An unrelated settings change must not repeat the refusal list.
+        rt!.applySettings(live);
+        expect(lines.filter((l) => l.startsWith("memory-key migration refused"))).toHaveLength(1);
+
+        // The user clears the obstruction and touches settings: no restart, and it completes.
+        rmSync(join(home, "projects", blocked.newKey, "memory"), { recursive: true, force: true });
+        rt!.applySettings(live);
+        expect(memoryBody(home, blocked.newKey)).toBe("# blocked\n");
+        expect(rt!.records.get(blocked.sessionId)!.memoryProjectKey).toBe(blocked.newKey);
+        expect(liveMemDir(home, rt!, blocked.cwd)).toBe(join(home, "projects", blocked.newKey, "memory"));
+        expect(marker(rt!)).not.toBe(null);
+      } finally {
+        await rt?.close();
+        store.close();
+      }
+    });
+  });
+
+  test("an apply that throws after a committed move still leaves the live map describing what IS committed", async () => {
+    // REVIEW r1, M-1. `apply` commits per entry, so a throw from a LATER entry leaves the manifest
+    // and the records correctly saying `old -> new` while the in-process map does not — and the live
+    // MEMDIR path would then resolve a directory that is no longer there and start a second
+    // MEMORY.md beside the user's own. The rebuild is in a `finally` for exactly this.
+    await withTempHome(async (home) => {
+      const store = new SessionStore(home);
+      const first = seedProject(home, store, "alpha");
+      const second = seedProject(home, store, "beta");
+      const live = Settings.parse({ ...SETTINGS_BASE, runtimes: { migrations: { memoryKeys: true } } });
+      const lines: string[] = [];
+
+      // The second project's rename explodes AFTER the first one's has been committed.
+      let renames = 0;
+      const throwsOnSecond: MemoryKeyFs = {
+        existsSync, statSync, readdirSync: (p, o) => readdirSync(p, o),
+        mkdirSync: (p, o) => { mkdirSync(p, o); }, rmdirSync: (p) => { rmdirSync(p); },
+        renameSync: (from, to) => { if (++renames === 2) throw new Error("EACCES: simulated"); renameSync(from, to); },
+      };
+      const state = await startRuntimeState({
+        home, store, settings: () => live, log: (l) => lines.push(l),
+        memoryKeyFs: throwsOnSecond,
+      });
+      const rt = "unavailable" in state ? undefined : state;
+      try {
+        expect(rt).toBeDefined();
+        expect(lines.some((l) => l.includes("memory-key migration failed"))).toBe(true);
+        // One of the two committed. Whichever it was, the live map and the manifest agree about it,
+        // and the daemon's own MEMDIR lookup resolves where the tree actually is.
+        const committed = manifestRows(rt!).filter((r) => r.status === "moved");
+        expect(committed).toHaveLength(1);
+        const moved = [first, second].find((p) => p.oldKey === committed[0]!.old_key)!;
+        expect(rt!.relocatedMemoryKey(moved.oldKey)).toBe(moved.newKey);
+        expect(liveMemDir(home, rt!, moved.cwd)).toBe(join(home, "projects", moved.newKey, "memory"));
+        expect(existsSync(join(liveMemDir(home, rt!, moved.cwd), "MEMORY.md"))).toBe(true);
+      } finally {
+        await rt?.close();
+        store.close();
+      }
+    });
+  });
+
+  test("a boot repair that throws costs the repair and nothing else — the spine is still online", async () => {
+    // REVIEW r1, M-2. The repair runs on EVERY boot of EVERY home, including the overwhelming
+    // majority with an empty manifest, so it is the one new statement every user pays for. Unwrapped,
+    // a throw there would fall to the outer catch and cost the whole runtime spine.
+    await withTempHome(async (home) => {
+      const store = new SessionStore(home);
+      const first = seedProject(home, store, "alpha");
+      // An outstanding `planned` row, so the repair has something to look at — with an empty
+      // manifest it never touches the filesystem at all and there is nothing to fail.
+      const rs0 = openRuntimeStateDb(home);
+      try {
+        rs0.db.run("INSERT INTO memory_key_manifest (old_key, entry, new_key, status, planned_at, moved_at) VALUES (?, 'memory', ?, 'planned', ?, NULL)",
+          [first.oldKey, first.newKey, ISO()]);
+      } finally {
+        rs0.close();
+      }
+      const lines: string[] = [];
+      const explodes: MemoryKeyFs = {
+        existsSync: () => { throw new Error("EIO: simulated"); },
+        statSync, readdirSync: (p, o) => readdirSync(p, o),
+        mkdirSync: (p, o) => { mkdirSync(p, o); }, rmdirSync: (p) => { rmdirSync(p); },
+        renameSync: (f, t) => { renameSync(f, t); },
+      };
+      const state = await startRuntimeState({
+        home, store, settings: () => Settings.parse(SETTINGS_BASE), log: (l) => lines.push(l),
+        memoryKeyFs: explodes,
+      });
+      const rt = "unavailable" in state ? undefined : state;
+      try {
+        expect(rt).toBeDefined();                       // the spine is ONLINE
+        expect(rt!.lastRecovery.ok).toBe(true);         // and fully recovered
+        expect(lines.some((l) => l.includes("memory-key repair failed"))).toBe(true);
+        // With the manifest unreadable the map is empty, which is the honest answer: the live path
+        // derives today's key, exactly as on a home that never migrated.
+        expect(rt!.relocatedMemoryKey("anything")).toBeUndefined();
+      } finally {
+        await rt?.close();
+        store.close();
+      }
+    });
+  });
+
+  test("the migration NEVER throws, and a table it reads being gone costs the relocation and nothing else", async () => {
+    // RE-REVIEW NEW-7. `markerIsSet()` is a bare SELECT over `schema_meta`; sitting one line above
+    // the `try` it was the single statement by which `runMemoryKeyMigration` could still throw —
+    // and at boot that lands in `startRuntimeState`'s outer catch, which closes the handle and costs
+    // the WHOLE runtime spine for a migration that had nothing to migrate. Both doors are asserted:
+    // the hot path (which `settings-apply.ts` happens to wrap) and the boot path (which does not).
+    await withTempHome(async (home) => {
+      const store = new SessionStore(home);
+      const first = seedProject(home, store, "alpha");
+      const lines: string[] = [];
+      const settingsWith = (memoryKeys: boolean) => Settings.parse({ ...SETTINGS_BASE, runtimes: { migrations: { memoryKeys } } });
+      let live = settingsWith(false);
+
+      const state = await startRuntimeState({ home, store, settings: () => live, log: (l) => lines.push(l) });
+      const rt = "unavailable" in state ? undefined : state;
+      try {
+        expect(rt).toBeDefined();
+        // The table the marker check reads goes away under the running daemon.
+        rt!.db.db.run("DROP TABLE schema_meta");
+
+        live = settingsWith(true);
+        expect(() => rt!.applySettings(live)).not.toThrow();   // the contract, asserted on the statement that broke it
+        expect(lines.some((l) => l.includes("memory-key migration failed"))).toBe(true);
+        // The map is untouched and the live path still answers.
+        expect(rt!.relocatedMemoryKey(first.oldKey)).toBeUndefined();
+        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(home, "projects", first.oldKey, "memory"));
+      } finally {
+        await rt?.close();
+      }
+
+      // AND AT BOOT, where nothing wraps the call: the spine must come up anyway.
+      const bootLines: string[] = [];
+      const booted = await startRuntimeState({ home, store, settings: () => settingsWith(true), log: (l) => bootLines.push(l) });
+      const rt2 = "unavailable" in booted ? undefined : booted;
+      try {
+        expect(rt2).toBeDefined();                       // NOT `{ unavailable }`
+        expect(rt2!.lastRecovery.ok).toBe(true);
+        expect(bootLines.some((l) => l.includes("memory-key migration failed"))).toBe(true);
+        expect(bootLines.some((l) => l.includes("runtime state could not be wired"))).toBe(false);
+      } finally {
+        await rt2?.close();
+        store.close();
+      }
+    });
+  });
+
+  test("a relocation map that cannot be rebuilt keeps the LAST map and the spine online", async () => {
+    // RE-REVIEW NEW-2's other half: the `finally` that rebuilds the map sits OUTSIDE the catch, so an
+    // unguarded throw there escapes the same way.
+    await withTempHome(async (home) => {
+      const store = new SessionStore(home);
+      const first = seedProject(home, store, "alpha");
+      const lines: string[] = [];
+      const settingsWith = (memoryKeys: boolean) => Settings.parse({ ...SETTINGS_BASE, runtimes: { migrations: { memoryKeys } } });
+      let live = settingsWith(false);
+
+      const state = await startRuntimeState({ home, store, settings: () => live, log: (l) => lines.push(l) });
+      const rt = "unavailable" in state ? undefined : state;
+      try {
+        expect(rt).toBeDefined();
+        rt!.db.db.run("DROP TABLE memory_key_manifest");
+
+        live = settingsWith(true);
+        expect(() => rt!.applySettings(live)).not.toThrow();
+        expect(lines.some((l) => l.includes("memory-key migration failed"))).toBe(true);
+        expect(lines.some((l) => l.includes("memory-key map could not be rebuilt"))).toBe(true);
+        // The last known map is KEPT (nothing had been relocated, so it is empty) and the live path
+        // still answers — the alternative, an offline spine, answers `undefined` for every key too
+        // AND costs every other runtime feature.
+        expect(rt!.relocatedMemoryKey(first.oldKey)).toBeUndefined();
+        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(home, "projects", first.oldKey, "memory"));
+      } finally {
+        await rt?.close();
+        store.close();
+      }
     });
   });
 

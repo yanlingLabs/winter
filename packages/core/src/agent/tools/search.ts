@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ToolRegistry } from "./registry";
+import type { ToolDefinition, ToolRegistry } from "./registry";
 import { checkDangerousDomain } from "./page-core";
 
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -60,7 +60,14 @@ function isValidExaResults(value: unknown): value is Array<{ title?: string; url
  * web_search + web_fetch (Brave has no equivalent single-call contents option).
  */
 export function registerSearchTool(r: ToolRegistry, deps: SearchToolDeps = {}): void {
-  r.register({
+  for (const def of searchToolDefs(deps)) r.register(def);
+}
+
+/** P8b Task 7 — THE definition(s), extracted verbatim from `registerSearchTool`'s body so the daemon's shared
+ *  `ToolRegistry` and the capability server drive the SAME `ToolDefinition` object rather than two
+ *  copies of one. Nothing about the registration changed. */
+export function searchToolDefs(deps: SearchToolDeps = {}): ToolDefinition[] {
+  return [{
     name: "Search",
     description:
       "Search the web and get back results WITH an excerpt of each page, in a single fast call. Use it freely whenever a fact might be newer than you are, or when the user asks about something current. Cite the URL when you use what it returns. Requires a stored Exa API key (norma login --exa-key).",
@@ -207,5 +214,5 @@ export function registerSearchTool(r: ToolRegistry, deps: SearchToolDeps = {}): 
         deps.audit?.({ kind: "network", tool: "Search", query, outcome });
       }
     },
-  });
+  }];
 }

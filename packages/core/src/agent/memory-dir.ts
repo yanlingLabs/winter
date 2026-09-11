@@ -156,6 +156,11 @@ export function memoryProjectKeyFor(cwd: string, opts: MemoryDirOptions): string
  *
  * The `settings.memory.directory` override still wins, exactly as it does for the cwd-keyed path:
  * a home that pins its MEMDIR is never re-keyed at all (the migration declines such homes outright).
+ *
+ * NO PRODUCTION CALLER YET, DELIBERATELY (review r1, M-3): every live MEMDIR read today is keyed by
+ * a cwd and reaches the same answer through `relocatedKey`, which the daemon wires to the migration's
+ * manifest — the same rows the record's re-key commits with. This is the record-keyed door for the
+ * caller that HAS a record in hand, which Task 16 decides for the Winter session path.
  */
 export function memoryDirForRecord(record: { memoryProjectKey: string }, opts: MemoryDirOptions): string {
   const override = resolveOverride(opts);

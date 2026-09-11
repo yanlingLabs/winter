@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ToolRegistry } from "./registry";
+import type { ToolDefinition, ToolRegistry } from "./registry";
 import { fetchCleanPage, renderLines, PageCache, PageCoreError, checkDangerousDomain, dangerousDomainRefusal } from "./page-core";
 
 /**
@@ -219,7 +219,14 @@ async function runResearch(entry: PageRequestT, deps: ReadPageDeps, signal: Abor
 }
 
 export function registerReadPageTool(r: ToolRegistry, deps: ReadPageDeps): void {
-  r.register({
+  for (const def of readPageToolDefs(deps)) r.register(def);
+}
+
+/** P8b Task 7 — THE definition(s), extracted verbatim from `registerReadPageTool`'s body so the daemon's shared
+ *  `ToolRegistry` and the capability server drive the SAME `ToolDefinition` object rather than two
+ *  copies of one. Nothing about the registration changed. */
+export function readPageToolDefs(deps: ReadPageDeps): ToolDefinition[] {
+  return [{
     name: "ReadPage",
     description:
       "Read one or more web pages as clean, line-numbered markdown, each followed by a 'Links:' tail listing that page's outbound links. " +
@@ -255,5 +262,5 @@ export function registerReadPageTool(r: ToolRegistry, deps: ReadPageDeps): void 
       if (!anyOk) throw new Error(combined);
       return combined;
     },
-  });
+  }];
 }

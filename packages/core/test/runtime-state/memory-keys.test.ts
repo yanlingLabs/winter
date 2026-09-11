@@ -1,15 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { TRANSCRIPT_PROJECT_KEY_MAX_LENGTH, compatibilityKeys, isVendorCompliantProjectKey } from "@yanlinglabs/winter-agent-sdk";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { memoryDirFor, memoryDirForRecord, repoRootFor, sanitizeProjectKey, _clearRepoRootCacheForTests } from "../../src/agent/memory-dir";
 import {
-  MemoryKeyCollisionError, MemoryKeyNotPlannedError, RuntimeSessionRecords, applyMemoryKeyMigration,
-  backfillNativeSessions, memoryKeyRelocations, openRuntimeStateDb, planMemoryKeyMigration, rollbackMemoryKeyMigration,
+  MemoryKeyNotPlannedError, RuntimeSessionRecords, applyMemoryKeyMigration,
+  RUNTIME_STATE_SCHEMA_VERSION, backfillNativeSessions, memoryKeyRelocations, openRuntimeStateDb, planMemoryKeyMigration, reconcileMemoryKeyManifest, rollbackMemoryKeyMigration,
   type MemoryKeyFs, type RuntimeStateDb,
 } from "../../src/runtime-state";
 import { SessionStore } from "../../src/sessions/store";
-import { withTempHome } from "./support";
+import { ISO, withTempHome } from "./support";
 
 /** Today's memory key for a cwd — the exact composition `agent/memory-dir.ts`'s `memoryDirFor` uses. */
 const oldKeyFor = (cwd: string): string => sanitizeProjectKey(repoRootFor(cwd));
@@ -50,13 +50,16 @@ function seedProject(home: string, store: SessionStore, name: string, body: stri
   return { sessionId, cwd, oldKey: seedMemory(home, cwd, body), newKey: newKeyFor(cwd) };
 }
 
-/** Every file under `root`, as `relative path -> contents`. The byte-identity witness for rollback. */
+/** Every file AND directory under `root`, as `relative path -> contents` (a directory maps to the
+ *  sentinel `<dir>`). The byte-identity witness for rollback — directories included, so a tree that
+ *  lost an EMPTY directory on the way out and back does not compare equal to one that kept it
+ *  (review r1, N-2). */
 function snapshotTree(root: string): Record<string, string> {
   const out: Record<string, string> = {};
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       const p = join(dir, entry.name);
-      if (entry.isDirectory()) walk(p);
+      if (entry.isDirectory()) { out[relative(root, p)] = "<dir>"; walk(p); }
       else out[relative(root, p)] = readFileSync(p, "utf8");
     }
   };
@@ -65,8 +68,15 @@ function snapshotTree(root: string): Record<string, string> {
 }
 
 function manifest(rs: RuntimeStateDb): Array<{ old_key: string; new_key: string; status: string }> {
-  return rs.db.query("SELECT old_key, new_key, status FROM memory_key_manifest ORDER BY old_key").all() as
+  return rs.db.query("SELECT old_key, new_key, status FROM memory_key_manifest ORDER BY old_key, entry").all() as
     Array<{ old_key: string; new_key: string; status: string }>;
+}
+
+/** The manifest AS IT IS SHAPED SINCE P8b-29 — one row per moved ENTRY, which is what makes a
+ *  merge into the SDK's own project directory reversible. */
+function manifestEntries(rs: RuntimeStateDb): Array<{ old_key: string; entry: string; new_key: string; status: string }> {
+  return rs.db.query("SELECT old_key, entry, new_key, status FROM memory_key_manifest ORDER BY old_key, entry").all() as
+    Array<{ old_key: string; entry: string; new_key: string; status: string }>;
 }
 
 /**
@@ -228,7 +238,7 @@ describe("planMemoryKeyMigration", () => {
         const plan = planMemoryKeyMigration({ rs, home, records, store });
         expect(plan.moves).toEqual([]);
         expect(plan.unresolved.map((u) => u.reason)).toEqual(["cwd-missing"]);
-        expect(applyMemoryKeyMigration({ rs, home }, plan)).toEqual({ moved: 0 });
+        expect(applyMemoryKeyMigration({ rs, home }, plan)).toEqual({ moved: 0, movedEntries: 0, refused: [] });
         // The tree stays exactly where the live lookup will look for it once the cwd comes back.
         expect(existsSync(join(home, "projects", oldKey, "memory"))).toBe(true);
       } finally {
@@ -314,7 +324,7 @@ describe("applyMemoryKeyMigration", () => {
         expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.oldKey);
 
         const plan = planMemoryKeyMigration({ rs, home, records, store });
-        expect(applyMemoryKeyMigration({ rs, home }, plan)).toEqual({ moved: 2 });
+        expect(applyMemoryKeyMigration({ rs, home }, plan)).toEqual({ moved: 2, movedEntries: 2, refused: [] });
 
         expect(existsSync(join(home, "projects", a.oldKey))).toBe(false);
         expect(existsSync(join(home, "projects", b.oldKey))).toBe(false);
@@ -398,7 +408,7 @@ describe("applyMemoryKeyMigration", () => {
         expect(plan.moves.map((m) => m.oldKey)).toEqual([a.oldKey]);
 
         // The healthy project migrates; the corrupt one is left exactly as it was found.
-        expect(applyMemoryKeyMigration({ rs, home }, plan)).toEqual({ moved: 1 });
+        expect(applyMemoryKeyMigration({ rs, home }, plan)).toEqual({ moved: 1, movedEntries: 1, refused: [] });
         expect(readFileSync(join(home, "projects", a.newKey, "memory", "MEMORY.md"), "utf8")).toBe("alpha");
         expect(readFileSync(join(home, "projects", b.oldKey, "memory", "MEMORY.md"), "utf8")).toBe("beta");
         expect(records.get(b.sessionId)!.memoryProjectKey).toBe("impostor-old");
@@ -439,7 +449,10 @@ describe("applyMemoryKeyMigration", () => {
     });
   });
 
-  test("a destination directory that already exists is refused, never renamed onto", async () => {
+  test("a destination ENTRY that already exists is refused, never renamed onto", async () => {
+    // P8b-29: the destination DIRECTORY existing is not a collision (it is where the SDK writes this
+    // repo's transcripts). An entry of the SAME NAME at both ends is — `rename` onto an existing
+    // file replaces it silently, which is the one outcome that could destroy somebody's memory.
     await withTempHome(async (home) => {
       _clearRepoRootCacheForTests();
       const store = new SessionStore(home);
@@ -454,11 +467,14 @@ describe("applyMemoryKeyMigration", () => {
         const before = snapshotTree(join(home, "projects"));
 
         const plan = planMemoryKeyMigration({ rs, home, records, store });
-        expect(plan.collisions.map((c) => c.reason)).toEqual(["target-exists"]);
+        expect(plan.collisions).toEqual([{ newKey: a.newKey, oldKeys: [a.oldKey], reason: "target-exists", entries: ["memory"] }]);
         expect(plan.moves).toEqual([]);
-        expect(() => applyMemoryKeyMigration({ rs, home }, plan)).toThrow(MemoryKeyCollisionError);
+        // The refusal is DATA, not an exception: it is a fact about the user's disk that the next
+        // run can find again, and it must not stop any other project from migrating.
+        expect(applyMemoryKeyMigration({ rs, home }, plan)).toEqual({ moved: 0, movedEntries: 0, refused: [] });
         expect(snapshotTree(join(home, "projects"))).toEqual(before);
         expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.oldKey);
+        expect(manifest(rs)).toEqual([]); // a refused project promises nothing
       } finally {
         rs.close();
       }
@@ -644,11 +660,9 @@ describe("applyMemoryKeyMigration", () => {
     });
   });
 
-  test("a retry after a mid-apply collision reports the collision, not the already-moved row", async () => {
-    // A collision thrown mid-loop leaves earlier moves applied. The operator clears the obstruction
-    // and re-runs the same plan — and must be told what is still wrong, not handed a refusal about
-    // the row that already succeeded. A `moved` row for the SAME pair is work already done, so it is
-    // skipped; only a row in another state, or one naming a different destination, refuses.
+  test("a collision appearing between plan and apply refuses THAT project only — the other one still migrates", async () => {
+    // P8b-29's whole point. The obstruction is b's; a must not pay for it, and the operator must be
+    // told what is still wrong rather than handed a complaint about the move that succeeded.
     await withTempHome(async (home) => {
       _clearRepoRootCacheForTests();
       const store = new SessionStore(home);
@@ -661,22 +675,24 @@ describe("applyMemoryKeyMigration", () => {
         const plan = planMemoryKeyMigration({ rs, home, records, store });
         expect(plan.moves.map((m) => m.oldKey)).toEqual([a.oldKey, b.oldKey]);
 
-        // Something occupies b's destination between plan and apply: a moves, then b refuses.
+        // Something occupies b's destination entry between plan and apply: a moves, b refuses.
         mkdirSync(join(home, "projects", b.newKey, "memory"), { recursive: true });
-        expect(() => applyMemoryKeyMigration({ rs, home }, plan)).toThrow(MemoryKeyCollisionError);
+        const first = applyMemoryKeyMigration({ rs, home }, plan);
+        expect(first.moved).toBe(1);
+        expect(first.refused).toEqual([{ newKey: b.newKey, oldKeys: [b.oldKey], reason: "target-exists", entries: ["memory"] }]);
+        expect(readFileSync(join(home, "projects", a.newKey, "memory", "MEMORY.md"), "utf8")).toBe("alpha");
+        expect(readFileSync(join(home, "projects", b.oldKey, "memory", "MEMORY.md"), "utf8")).toBe("beta");
         expect(manifest(rs).find((r) => r.old_key === a.oldKey)!.status).toBe("moved");
         expect(manifest(rs).find((r) => r.old_key === b.oldKey)!.status).toBe("planned");
 
-        // The retry names the ACTIONABLE problem — b's occupied destination — rather than a's
-        // already-`moved` row.
-        let caught: unknown;
-        try { applyMemoryKeyMigration({ rs, home }, plan); } catch (e) { caught = e; }
-        expect(caught).toBeInstanceOf(MemoryKeyCollisionError);
-        expect((caught as MemoryKeyCollisionError).collisions[0]!.oldKeys).toEqual([b.oldKey]);
+        // The retry names the ACTIONABLE problem — b's occupied destination — and never re-reports
+        // a's already-`moved` row.
+        const retry = applyMemoryKeyMigration({ rs, home }, plan);
+        expect(retry).toEqual({ moved: 0, movedEntries: 0, refused: [{ newKey: b.newKey, oldKeys: [b.oldKey], reason: "target-exists", entries: ["memory"] }] });
 
         // Obstruction cleared: the retry finishes the job and does not redo a's move.
         rmSync(join(home, "projects", b.newKey), { recursive: true, force: true });
-        expect(applyMemoryKeyMigration({ rs, home }, plan)).toEqual({ moved: 1 });
+        expect(applyMemoryKeyMigration({ rs, home }, plan)).toEqual({ moved: 1, movedEntries: 1, refused: [] });
         expect(readFileSync(join(home, "projects", a.newKey, "memory", "MEMORY.md"), "utf8")).toBe("alpha");
         expect(readFileSync(join(home, "projects", b.newKey, "memory", "MEMORY.md"), "utf8")).toBe("beta");
         expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.newKey);
@@ -703,7 +719,7 @@ describe("applyMemoryKeyMigration", () => {
         const second = planMemoryKeyMigration({ rs, home, records, store });
         expect(second.moves.length).toBe(1);
         expect(manifest(rs).map((r) => r.status)).toEqual(["planned"]);
-        expect(applyMemoryKeyMigration({ rs, home }, second)).toEqual({ moved: 1 });
+        expect(applyMemoryKeyMigration({ rs, home }, second)).toEqual({ moved: 1, movedEntries: 1, refused: [] });
         expect(readFileSync(join(home, "projects", a.newKey, "memory", "MEMORY.md"), "utf8")).toBe("alpha");
         expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.newKey);
       } finally {
@@ -779,9 +795,9 @@ describe("memory-key migration — P8b-17's preconditions", () => {
         backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
         const plan = planMemoryKeyMigration({ rs, home, records, store });
 
-        expect(plan.moves).toEqual([{ oldKey: a.oldKey, newKey: a.newKey, cwd: a.cwd }]);
+        expect(plan.moves).toEqual([{ oldKey: a.oldKey, newKey: a.newKey, cwd: a.cwd, entries: ["memory"] }]);
         expect(manifest(rs)).toEqual([{ old_key: a.oldKey, new_key: a.newKey, status: "planned" }]);
-        expect(applyMemoryKeyMigration({ rs, home }, plan)).toEqual({ moved: 1 });
+        expect(applyMemoryKeyMigration({ rs, home }, plan)).toEqual({ moved: 1, movedEntries: 1, refused: [] });
         expect(readFileSync(join(home, "projects", a.newKey, "memory", "MEMORY.md"), "utf8")).toBe("alpha");
       } finally {
         rs.close();
@@ -803,10 +819,10 @@ describe("memory-key migration — P8b-17's preconditions", () => {
         rs.db.run("UPDATE memory_key_manifest SET new_key = ? WHERE old_key = ?", [`${a.oldKey}-uncapped`, a.oldKey]);
 
         const again = planMemoryKeyMigration({ rs, home, records, store });
-        expect(again.moves).toEqual([{ oldKey: a.oldKey, newKey: a.newKey, cwd: a.cwd }]);
+        expect(again.moves).toEqual([{ oldKey: a.oldKey, newKey: a.newKey, cwd: a.cwd, entries: ["memory"] }]);
         expect(manifest(rs)).toEqual([{ old_key: a.oldKey, new_key: a.newKey, status: "planned" }]);
         // And `apply` acts on the rewritten row, not the stale one.
-        expect(applyMemoryKeyMigration({ rs, home }, again)).toEqual({ moved: 1 });
+        expect(applyMemoryKeyMigration({ rs, home }, again)).toEqual({ moved: 1, movedEntries: 1, refused: [] });
         expect(existsSync(join(home, "projects", `${a.oldKey}-uncapped`))).toBe(false);
       } finally {
         rs.close();
@@ -868,7 +884,7 @@ describe("memory-key migration — P8b-17's preconditions", () => {
         expect(plan.moves).toEqual([]);
         // Not even a `planned` row: a row is a promise to move something.
         expect(manifest(rs)).toEqual([]);
-        expect(applyMemoryKeyMigration({ rs, home }, plan)).toEqual({ moved: 0 });
+        expect(applyMemoryKeyMigration({ rs, home }, plan)).toEqual({ moved: 0, movedEntries: 0, refused: [] });
         expect(snapshotTree(join(home, "projects"))).toEqual(before);
         expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.oldKey);
 
@@ -889,7 +905,9 @@ describe("memory-key migration — P8b-17's preconditions", () => {
       const a = seedProject(home, store, OVERFLOWING, "alpha");
       seedProjectTreeSiblings(home, a.oldKey);
       const before = snapshotTree(join(home, "projects", a.oldKey));
-      expect(Object.keys(before).length).toBe(6); // memory/MEMORY.md, memory/notes/one.md + the four siblings
+      // 6 files (memory/MEMORY.md, memory/notes/one.md + the four siblings) and the 6 directories
+      // holding them — `snapshotTree` records both, so an empty directory lost in transit shows up.
+      expect(Object.keys(before).length).toBe(12);
 
       const rs = openRuntimeStateDb(home);
       try {
@@ -917,6 +935,8 @@ describe("memory-key migration — a torn apply", () => {
       existsSync,
       statSync,
       readdirSync: (p, o) => readdirSync(p, o),
+      mkdirSync: (p, o) => { mkdirSync(p, o); },
+      rmdirSync: (p) => { rmdirSync(p); },
       renameSync: (from, to) => { renameSync(from, to); throw new Error("simulated crash between the rename and the manifest commit"); },
     };
   }
@@ -943,7 +963,7 @@ describe("memory-key migration — a torn apply", () => {
         // THE NEXT BOOT: `plan` runs first and settles it — the row is `moved`, the record follows,
         // and the live lookup finds the tree where it actually is.
         const resumed = planMemoryKeyMigration({ rs, home, records, store });
-        expect(resumed.reconciled).toEqual([{ oldKey: a.oldKey, newKey: a.newKey }]);
+        expect(resumed.reconciled).toEqual([{ oldKey: a.oldKey, newKey: a.newKey, entries: ["memory"] }]);
         expect(resumed.moves).toEqual([]);
         expect(resumed.collisions).toEqual([]);
         expect(manifest(rs).map((r) => r.status)).toEqual(["moved"]);
@@ -984,7 +1004,7 @@ describe("memory-key migration — a torn apply", () => {
         renameSync(join(home, "projects", a.oldKey), join(home, "projects", legacyKey));
 
         const resumed = planMemoryKeyMigration({ rs, home, records, store });
-        expect(resumed.reconciled).toEqual([{ oldKey: a.oldKey, newKey: legacyKey }]);
+        expect(resumed.reconciled).toEqual([{ oldKey: a.oldKey, newKey: legacyKey, entries: ["memory"] }]);
         expect(manifest(rs)).toEqual([{ old_key: a.oldKey, new_key: legacyKey, status: "moved" }]);
         expect(records.get(a.sessionId)!.memoryProjectKey).toBe(legacyKey);
         // Reported, not moved again: the record's key no longer matches its own derivation, which is
@@ -1007,7 +1027,7 @@ describe("memory-key migration — a torn apply", () => {
       _clearRepoRootCacheForTests();
       const store = new SessionStore(home);
       const a = seedProject(home, store, "torn-early", "alpha");
-      const before = snapshotTree(join(home, "projects"));
+      const before = { [a.oldKey]: snapshotTree(join(home, "projects", a.oldKey)) };
 
       const rs = openRuntimeStateDb(home);
       try {
@@ -1016,6 +1036,7 @@ describe("memory-key migration — a torn apply", () => {
         const plan = planMemoryKeyMigration({ rs, home, records, store });
         const neverRenames: MemoryKeyFs = {
           existsSync, statSync, readdirSync: (p, o) => readdirSync(p, o),
+          mkdirSync: (p, o) => { mkdirSync(p, o); }, rmdirSync: (p) => { rmdirSync(p); },
           renameSync: () => { throw new Error("simulated crash before the rename"); },
         };
         expect(() => applyMemoryKeyMigration({ rs, home, fs: neverRenames }, plan)).toThrow("before the rename");
@@ -1023,9 +1044,512 @@ describe("memory-key migration — a torn apply", () => {
         // Nothing moved, so the next plan simply plans it again — no reconciliation, no phantom row.
         const resumed = planMemoryKeyMigration({ rs, home, records, store });
         expect(resumed.reconciled).toEqual([]);
-        expect(resumed.moves).toEqual([{ oldKey: a.oldKey, newKey: a.newKey, cwd: a.cwd }]);
+        expect(resumed.moves).toEqual([{ oldKey: a.oldKey, newKey: a.newKey, cwd: a.cwd, entries: ["memory"] }]);
+        // The user's tree is untouched. The ONE mark the failed attempt leaves is an empty
+        // destination directory — `apply` creates it before the first rename, and the retry below
+        // moves into it. Nothing of the user's is in it, and no entry is recorded as moved.
+        expect(snapshotTree(join(home, "projects", a.oldKey))).toEqual(before[a.oldKey] as never);
+        expect(readdirSync(join(home, "projects", a.newKey))).toEqual([]);
+        expect(applyMemoryKeyMigration({ rs, home }, resumed)).toEqual({ moved: 1, movedEntries: 1, refused: [] });
+      } finally {
+        rs.close();
+      }
+    });
+  });
+});
+
+// ── P8b-29: the destination is SHARED with the Winter SDK, so the move is per ENTRY ──────────────
+//
+// `<home>/projects/<key>/` is not Norma's alone: it is where the SDK writes this repo's transcripts,
+// and for a session opened at the repo root the transcript key and the compatibility memory key are
+// the same string. A whole-directory rename could therefore only ever refuse on a home that has run
+// a Winter session — permanently, and taking every other project in that home with it.
+describe("memory-key migration — merging into the SDK's own project directory", () => {
+  /** What the SDK leaves in `projects/<transcriptKey>/`: a transcript, its subagents, its tool
+   *  results. None of it is Norma's to move, and none of it is in the way. */
+  function seedSdkTranscripts(home: string, key: string): void {
+    mkdirSync(join(home, "projects", key, "subagents"), { recursive: true });
+    writeFileSync(join(home, "projects", key, "3f2a1c00-0000-4000-8000-000000000000.jsonl"), "{\"type\":\"user\"}\n");
+    writeFileSync(join(home, "projects", key, "subagents", "agent-1.jsonl"), "{\"type\":\"assistant\"}\n");
+  }
+
+  test("memory merges INTO the pre-existing destination, and the SDK's transcripts are untouched", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+      seedSdkTranscripts(home, a.newKey);
+      const sdkBefore = snapshotTree(join(home, "projects", a.newKey));
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+
+        const plan = planMemoryKeyMigration({ rs, home, records, store });
+        // The destination DIRECTORY existing is not a collision — only a shared entry name would be.
+        expect(plan.collisions).toEqual([]);
+        expect(plan.moves).toEqual([{ oldKey: a.oldKey, newKey: a.newKey, cwd: a.cwd, entries: ["memory"] }]);
+        expect(applyMemoryKeyMigration({ rs, home }, plan)).toEqual({ moved: 1, movedEntries: 1, refused: [] });
+
+        // Norma's memory arrived beside the SDK's files; not one of the SDK's files moved or changed.
+        expect(readFileSync(join(home, "projects", a.newKey, "memory", "MEMORY.md"), "utf8")).toBe("alpha");
+        for (const [path, body] of Object.entries(sdkBefore)) {
+          expect(snapshotTree(join(home, "projects", a.newKey))[path]).toBe(body);
+        }
+        // The emptied source is gone rather than left as a key nothing files anything under.
+        expect(existsSync(join(home, "projects", a.oldKey))).toBe(false);
+        expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.newKey);
+        expect(manifestEntries(rs)).toEqual([{ old_key: a.oldKey, entry: "memory", new_key: a.newKey, status: "moved" }]);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("rollback after a merge takes back ONLY what this migration moved", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+      seedSdkTranscripts(home, a.newKey);
+      const before = snapshotTree(join(home, "projects"));
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        applyMemoryKeyMigration({ rs, home }, planMemoryKeyMigration({ rs, home, records, store }));
+
+        expect(rollbackMemoryKeyMigration({ rs, home })).toEqual({ rolledBack: 1, failures: [] });
+        // Byte-identical AND structurally identical: the memory tree is back under the old key, the
+        // SDK's transcript directory is exactly as it was, and nothing was dragged with it.
         expect(snapshotTree(join(home, "projects"))).toEqual(before);
-        expect(applyMemoryKeyMigration({ rs, home }, resumed)).toEqual({ moved: 1 });
+        expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.oldKey);
+        expect(manifestEntries(rs).map((r) => r.status)).toEqual(["rolled-back"]);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("a project with several entries and a destination that already holds a DIFFERENT one merges all of them", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+      mkdirSync(join(home, "projects", a.oldKey, "workflows", "scripts"), { recursive: true });
+      writeFileSync(join(home, "projects", a.oldKey, "workflows", "scripts", "plan.js"), "// script");
+      seedSdkTranscripts(home, a.newKey);
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        const plan = planMemoryKeyMigration({ rs, home, records, store });
+        expect(plan.moves[0]!.entries).toEqual(["memory", "workflows"]);
+        expect(applyMemoryKeyMigration({ rs, home }, plan)).toEqual({ moved: 1, movedEntries: 2, refused: [] });
+
+        expect(readFileSync(join(home, "projects", a.newKey, "workflows", "scripts", "plan.js"), "utf8")).toBe("// script");
+        expect(readFileSync(join(home, "projects", a.newKey, "subagents", "agent-1.jsonl"), "utf8")).toBe("{\"type\":\"assistant\"}\n");
+        expect(manifestEntries(rs).map((r) => r.entry)).toEqual(["memory", "workflows"]);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("one project's entry collision never costs another project its migration", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const blocked = seedProject(home, store, "blocked", "blocked-memory");
+      const fine = seedProject(home, store, "fine", "fine-memory");
+      // Something already sits at `blocked`'s destination under the SAME entry name.
+      mkdirSync(join(home, "projects", blocked.newKey, "memory"), { recursive: true });
+      writeFileSync(join(home, "projects", blocked.newKey, "memory", "MEMORY.md"), "someone else's");
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        const plan = planMemoryKeyMigration({ rs, home, records, store });
+
+        expect(plan.collisions).toEqual([{ newKey: blocked.newKey, oldKeys: [blocked.oldKey], reason: "target-exists", entries: ["memory"] }]);
+        expect(plan.moves.map((m) => m.oldKey)).toEqual([fine.oldKey]);
+        expect(applyMemoryKeyMigration({ rs, home }, plan)).toEqual({ moved: 1, movedEntries: 1, refused: [] });
+
+        // The healthy project is relocated; the blocked one is exactly as it was found, in every store.
+        expect(readFileSync(join(home, "projects", fine.newKey, "memory", "MEMORY.md"), "utf8")).toBe("fine-memory");
+        expect(readFileSync(join(home, "projects", blocked.oldKey, "memory", "MEMORY.md"), "utf8")).toBe("blocked-memory");
+        expect(readFileSync(join(home, "projects", blocked.newKey, "memory", "MEMORY.md"), "utf8")).toBe("someone else's");
+        expect(records.get(blocked.sessionId)!.memoryProjectKey).toBe(blocked.oldKey);
+        expect(memoryKeyRelocations(rs).get(blocked.oldKey)).toBeUndefined();
+        expect(memoryKeyRelocations(rs).get(fine.oldKey)).toBe(fine.newKey);
+
+        // CLEARED AND RE-PLANNED: no restart, no manual manifest surgery — the refusal left nothing
+        // behind to undo.
+        rmSync(join(home, "projects", blocked.newKey, "memory"), { recursive: true, force: true });
+        const second = planMemoryKeyMigration({ rs, home, records, store });
+        expect(second.collisions).toEqual([]);
+        expect(applyMemoryKeyMigration({ rs, home }, second)).toEqual({ moved: 1, movedEntries: 1, refused: [] });
+        expect(readFileSync(join(home, "projects", blocked.newKey, "memory", "MEMORY.md"), "utf8")).toBe("blocked-memory");
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("a torn apply part-way through a multi-entry project is repaired per row, and the live path follows the MEMORY entry", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+      mkdirSync(join(home, "projects", a.oldKey, "workflows"), { recursive: true });
+      writeFileSync(join(home, "projects", a.oldKey, "workflows", "plan.js"), "// script");
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        const plan = planMemoryKeyMigration({ rs, home, records, store });
+        expect(plan.moves[0]!.entries).toEqual(["memory", "workflows"]);
+
+        // The crash: the FIRST entry's rename lands, then the process dies before its commit.
+        let renames = 0;
+        const tornOnFirst: MemoryKeyFs = {
+          existsSync, statSync, readdirSync: (p, o) => readdirSync(p, o),
+          mkdirSync: (p, o) => { mkdirSync(p, o); }, rmdirSync: (p) => { rmdirSync(p); },
+          renameSync: (from, to) => { renameSync(from, to); if (++renames === 1) throw new Error("simulated crash mid-project"); },
+        };
+        expect(() => applyMemoryKeyMigration({ rs, home, fs: tornOnFirst }, plan)).toThrow("simulated crash");
+        expect(manifestEntries(rs).map((r) => r.status)).toEqual(["planned", "planned"]);
+
+        // The next boot's repair settles the entry that landed, per row, and leaves the other alone.
+        const resumed = planMemoryKeyMigration({ rs, home, records, store });
+        expect(resumed.reconciled).toEqual([{ oldKey: a.oldKey, newKey: a.newKey, entries: ["memory"] }]);
+        expect(manifestEntries(rs).map((r) => [r.entry, r.status])).toEqual([["memory", "moved"], ["workflows", "planned"]]);
+        // THE LIVE PATH FOLLOWS `memory`, not the whole set: it is what `memoryDirFor` resolves, and
+        // in this half-moved window it is the difference between the agent finding its own
+        // MEMORY.md and starting a second one.
+        expect(memoryDirFor(a.cwd, { normaHome: home, relocatedKey: (k) => memoryKeyRelocations(rs).get(k) }))
+          .toBe(join(home, "projects", a.newKey, "memory"));
+        expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.newKey);
+
+        // And the run finishes the rest without redoing the part that landed — planned from the
+        // MANIFEST, since the re-keyed record can no longer ask for this pair at all.
+        expect(resumed.moves).toEqual([{ oldKey: a.oldKey, newKey: a.newKey, entries: ["workflows"] }]);
+        expect(applyMemoryKeyMigration({ rs, home }, resumed)).toEqual({ moved: 1, movedEntries: 1, refused: [] });
+        expect(readFileSync(join(home, "projects", a.newKey, "workflows", "plan.js"), "utf8")).toBe("// script");
+        expect(existsSync(join(home, "projects", a.oldKey))).toBe(false);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+});
+
+describe("memory-key migration — a home that was migrated by a schema-v1 build", () => {
+  /** Take a fully-built v2 database back to v1's manifest shape and version, so the next open runs
+   *  the real migration over real data. Cheaper and more faithful than hand-writing all seventeen v1
+   *  tables: everything else in the file is exactly what this build creates. */
+  function downgradeManifestToV1(home: string, rows: Array<{ old_key: string; new_key: string; status: string }>): void {
+    const rs = openRuntimeStateDb(home);
+    try {
+      rs.db.run("DROP TABLE memory_key_manifest");
+      rs.db.run(`CREATE TABLE memory_key_manifest (old_key TEXT PRIMARY KEY, new_key TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('planned','moved','rolled-back')), planned_at TEXT NOT NULL, moved_at TEXT)`);
+      for (const r of rows) {
+        rs.db.run("INSERT INTO memory_key_manifest (old_key, new_key, status, planned_at, moved_at) VALUES (?, ?, ?, ?, NULL)", [r.old_key, r.new_key, r.status, ISO()]);
+      }
+      rs.db.run("PRAGMA user_version = 1");
+    } finally {
+      rs.close();
+    }
+  }
+
+  test("a torn apply left by a v1 build is still repaired after the schema migration, and the live path finds the tree", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "v1-torn", "alpha");
+      {
+        const rs = openRuntimeStateDb(home);
+        try { backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" }); } finally { rs.close(); }
+      }
+      // The v1 world: one row for the whole tree, `planned`, and the whole directory already renamed
+      // — the exact state a v1 build's crash between its rename and its commit would leave.
+      downgradeManifestToV1(home, [{ old_key: a.oldKey, new_key: a.newKey, status: "planned" }]);
+      renameSync(join(home, "projects", a.oldKey), join(home, "projects", a.newKey));
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        expect(rs.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION);
+        const records = new RuntimeSessionRecords(rs);
+        // The row came across as the `memory` entry, and the per-entry repair settles it: source
+        // entry gone, destination entry present.
+        expect(reconcileMemoryKeyManifest({ rs, home, records })).toEqual([{ oldKey: a.oldKey, newKey: a.newKey, entries: ["memory"] }]);
+        expect(manifestEntries(rs)).toEqual([{ old_key: a.oldKey, entry: "memory", new_key: a.newKey, status: "moved" }]);
+        expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.newKey);
+        expect(memoryDirFor(a.cwd, { normaHome: home, relocatedKey: (k) => memoryKeyRelocations(rs).get(k) }))
+          .toBe(join(home, "projects", a.newKey, "memory"));
+        // And it is rollback-able, which is the whole reason the row was carried forward.
+        expect(rollbackMemoryKeyMigration({ rs, home })).toEqual({ rolledBack: 1, failures: [] });
+        expect(readFileSync(join(home, "projects", a.oldKey, "memory", "MEMORY.md"), "utf8")).toBe("alpha");
+      } finally {
+        rs.close();
+      }
+    });
+  });
+});
+
+// ── Fix round 2: which RECORDS a move owns, and what a race-window refusal leaves behind ─────────
+describe("memory-key migration — record scoping and the race window", () => {
+  /** A record filed AT the compatibility key from birth — what a Winter session's own record is
+   *  (Task 16), and the thing a blanket by-key re-key would drag around. */
+  function seedNativeAtDestination(home: string, store: SessionStore, key: string): string {
+    const cwd = workdir(home, `native-${key.slice(-8)}`);
+    const sessionId = store.createSession("work", { cwd });
+    const rs = openRuntimeStateDb(home);
+    try {
+      backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+      rs.db.run("UPDATE runtime_sessions SET memory_project_key = ? WHERE winter_session_id = ?", [key, sessionId]);
+    } finally {
+      rs.close();
+    }
+    return sessionId;
+  }
+
+  test("a half-moved project never drags a record that was natively at the destination key", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+      // A `<uuid>.jsonl` sorts BEFORE "memory", so the project is genuinely half-moved (its `memory`
+      // entry still at the old key) at the moment the first entry commits.
+      writeFileSync(join(home, "projects", a.oldKey, "0f2a1c00-0000-4000-8000-000000000000.jsonl"), "{}\n");
+      const native = seedNativeAtDestination(home, store, a.newKey);
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        const plan = planMemoryKeyMigration({ rs, home, records, store });
+        expect(plan.moves[0]!.entries).toEqual(["0f2a1c00-0000-4000-8000-000000000000.jsonl", "memory"]);
+
+        // Stop after the FIRST entry: the project is half-moved and `syncRecordKey` runs with
+        // `pairRelocated` still false — the branch that used to re-key by key.
+        let renames = 0;
+        const tornOnSecond: MemoryKeyFs = {
+          existsSync, statSync, readdirSync: (p, o) => readdirSync(p, o),
+          mkdirSync: (p, o) => { mkdirSync(p, o); }, rmdirSync: (p) => { rmdirSync(p); },
+          renameSync: (from, to) => { if (++renames === 2) throw new Error("simulated crash mid-project"); renameSync(from, to); },
+        };
+        expect(() => applyMemoryKeyMigration({ rs, home, fs: tornOnSecond }, plan)).toThrow("simulated crash");
+
+        // The record that was always at the destination is exactly where it was.
+        expect(records.get(native)!.memoryProjectKey).toBe(a.newKey);
+        // And the migration's own record has not moved forward yet — its `memory` entry has not.
+        expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.oldKey);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("a rollback puts back only the records this migration moved", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+      {
+        const rs0 = openRuntimeStateDb(home);
+        try { backfillNativeSessions({ rs: rs0, store, home, providerId: "codex-oauth" }); } finally { rs0.close(); }
+      }
+      const native = seedNativeAtDestination(home, store, a.newKey);
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        applyMemoryKeyMigration({ rs, home }, planMemoryKeyMigration({ rs, home, records, store }));
+        expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.newKey);
+        expect(records.get(native)!.memoryProjectKey).toBe(a.newKey);
+
+        expect(rollbackMemoryKeyMigration({ rs, home })).toEqual({ rolledBack: 1, failures: [] });
+        // The migrated record goes back; the one that was born at the destination STAYS there — the
+        // blanket `rekey(newKey → oldKey)` used to file it under a key it had never lived at, for good.
+        expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.oldKey);
+        expect(records.get(native)!.memoryProjectKey).toBe(a.newKey);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("a refusal in the race window leaves the project where it started — nothing split across two keys", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+      writeFileSync(join(home, "projects", a.oldKey, "0f2a1c00-0000-4000-8000-000000000000.jsonl"), "{}\n");
+      const before = snapshotTree(join(home, "projects", a.oldKey));
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        const plan = planMemoryKeyMigration({ rs, home, records, store });
+
+        // Something occupies the SECOND entry's destination between the first rename and the second
+        // — the window the batch pre-check cannot see.
+        let renames = 0;
+        const racy: MemoryKeyFs = {
+          statSync, readdirSync: (p, o) => readdirSync(p, o),
+          mkdirSync: (p, o) => { mkdirSync(p, o); }, rmdirSync: (p) => { rmdirSync(p); },
+          renameSync: (from, to) => { renameSync(from, to); if (++renames === 1) mkdirSync(join(home, "projects", a.newKey, "memory"), { recursive: true }); },
+          existsSync,
+        };
+        const result = applyMemoryKeyMigration({ rs, home, fs: racy }, plan);
+        expect(result.refused).toEqual([{ newKey: a.newKey, oldKeys: [a.oldKey], reason: "target-exists", entries: ["memory"] }]);
+        expect(result.moved).toBe(0);
+        expect(result.movedEntries).toBe(0);
+
+        // Everything of the user's is back under the old key, and every row is `planned` again.
+        expect(snapshotTree(join(home, "projects", a.oldKey))).toEqual(before);
+        expect(manifestEntries(rs).map((r) => r.status)).toEqual(["planned", "planned"]);
+        expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.oldKey);
+        expect(memoryKeyRelocations(rs).size).toBe(0);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+});
+
+// ── Fix round 3 (re-review NEW-8): the undo is a recorded, repairable operation ──────────────────
+//
+// `apply` puts back the entries it had already renamed when a collision appears mid-pass, so a
+// refused project moves nothing at all. That undo is a rename-then-commit pair exactly as the move
+// is, and its torn window is the mirror image — the entry back at the OLD key with a row still
+// saying `moved`, which nothing read. An `undoing` row is what the boot repair can finish.
+describe("memory-key migration — a torn UNDO", () => {
+  /** A project with two entries, the second of which will collide mid-pass. */
+  function twoEntryProject(home: string, store: SessionStore, name: string) {
+    const p = seedProject(home, store, name, "alpha");
+    writeFileSync(join(home, "projects", p.oldKey, "0f2a1c00-0000-4000-8000-000000000000.jsonl"), "{}\n");
+    return p;
+  }
+
+  test("a crash mid-undo leaves an `undoing` row, and the next boot finishes the undo", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = twoEntryProject(home, store, "a");
+      const before = snapshotTree(join(home, "projects", a.oldKey));
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        const plan = planMemoryKeyMigration({ rs, home, records, store });
+        expect(plan.moves[0]!.entries).toEqual(["0f2a1c00-0000-4000-8000-000000000000.jsonl", "memory"]);
+
+        // The first entry moves; the second's destination appears; the UNDO of the first then dies
+        // between its declaration and its rename-back.
+        let renames = 0;
+        const dieMidUndo: MemoryKeyFs = {
+          existsSync, statSync, readdirSync: (p, o) => readdirSync(p, o),
+          mkdirSync: (p, o) => { mkdirSync(p, o); }, rmdirSync: (p) => { rmdirSync(p); },
+          renameSync: (from, to) => {
+            if (renames === 1) throw new Error("simulated crash mid-undo");   // the rename-BACK
+            renameSync(from, to);
+            renames += 1;
+            if (renames === 1) mkdirSync(join(home, "projects", a.newKey, "memory"), { recursive: true });
+          },
+        };
+        // NOT A THROW: a rename-back that fails is a recorded state, not a fatal one — `finishUndo`
+        // leaves the row `undoing` for the next boot rather than guessing, and the collision is still
+        // reported as the refusal it is.
+        const result = applyMemoryKeyMigration({ rs, home, fs: dieMidUndo }, plan);
+        expect(result.moved).toBe(0);
+        expect(result.refused).toEqual([{ newKey: a.newKey, oldKeys: [a.oldKey], reason: "target-exists", entries: ["memory"] }]);
+
+        // The declared-but-unfinished state: the row says `undoing`, the entry is still at the new
+        // key, and — crucially — the live map does NOT claim the project is relocated.
+        expect(manifestEntries(rs).map((r) => [r.entry, r.status])).toEqual([
+          ["0f2a1c00-0000-4000-8000-000000000000.jsonl", "undoing"],
+          ["memory", "planned"],
+        ]);
+        expect(memoryKeyRelocations(rs).size).toBe(0);
+        expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.oldKey);
+
+        // THE NEXT BOOT finishes it: the entry comes home, the row is `planned` again, and the
+        // project is exactly where it started — the invariant the undo exists to keep.
+        expect(reconcileMemoryKeyManifest({ rs, home, records })).toEqual([]);
+        expect(manifestEntries(rs).map((r) => r.status)).toEqual(["planned", "planned"]);
+        expect(snapshotTree(join(home, "projects", a.oldKey))).toEqual(before);
+        expect(memoryDirFor(a.cwd, { normaHome: home, relocatedKey: (k) => memoryKeyRelocations(rs).get(k) }))
+          .toBe(join(home, "projects", a.oldKey, "memory"));
+
+        // And the project migrates normally once the obstruction is cleared — no row is skipped
+        // forever, and nothing needed a hand.
+        rmSync(join(home, "projects", a.newKey, "memory"), { recursive: true, force: true });
+        const second = planMemoryKeyMigration({ rs, home, records, store });
+        expect(applyMemoryKeyMigration({ rs, home }, second)).toEqual({ moved: 1, movedEntries: 2, refused: [] });
+        expect(readFileSync(join(home, "projects", a.newKey, "memory", "MEMORY.md"), "utf8")).toBe("alpha");
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("an undo whose old name has been re-taken settles as `moved` — the row describes the disk, never an intention", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        applyMemoryKeyMigration({ rs, home }, planMemoryKeyMigration({ rs, home, records, store }));
+        // Hand-forge the torn-undo shape, then re-occupy the old name before the repair runs.
+        rs.db.run("UPDATE memory_key_manifest SET status = 'undoing' WHERE entry = 'memory'");
+        mkdirSync(join(home, "projects", a.oldKey, "memory"), { recursive: true });
+        writeFileSync(join(home, "projects", a.oldKey, "memory", "MEMORY.md"), "someone else's");
+
+        reconcileMemoryKeyManifest({ rs, home, records });
+        // Both ends occupied: the undo cannot complete, so the row goes back to the truth.
+        expect(manifestEntries(rs).map((r) => r.status)).toEqual(["moved"]);
+        expect(memoryKeyRelocations(rs).get(a.oldKey)).toBe(a.newKey);
+        expect(readFileSync(join(home, "projects", a.newKey, "memory", "MEMORY.md"), "utf8")).toBe("alpha");
+        expect(readFileSync(join(home, "projects", a.oldKey, "memory", "MEMORY.md"), "utf8")).toBe("someone else's");
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("a leftover `undoing` row never denies another project its migration", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+      const b = seedProject(home, store, "b", "beta");
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        const plan = planMemoryKeyMigration({ rs, home, records, store });
+        // A row the repair could not settle (both ends of a's entry occupied, say) must not turn
+        // apply's stale-row pre-check into a refusal for everybody — the NEW-4(b) shape.
+        rs.db.run("UPDATE memory_key_manifest SET status = 'undoing' WHERE old_key = ?", [a.oldKey]);
+
+        const result = applyMemoryKeyMigration({ rs, home }, plan);
+        expect(result.moved).toBe(1);
+        expect(readFileSync(join(home, "projects", b.newKey, "memory", "MEMORY.md"), "utf8")).toBe("beta");
+        expect(readFileSync(join(home, "projects", a.oldKey, "memory", "MEMORY.md"), "utf8")).toBe("alpha");
       } finally {
         rs.close();
       }

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Mode, ToolRegistry } from "./registry";
+import type { Mode, ToolDefinition, ToolRegistry } from "./registry";
 import type { PeripheralClass } from "../../peripheral/broker";
 
 /**
@@ -205,14 +205,33 @@ function formatResult(a: ComputerArgsT, resultJson: string, attachImage?: (u: st
 
 export function registerComputerTool(
   r: ToolRegistry,
+  deps: ComputerToolDeps = {},
+): void {
+  for (const def of computerToolDefs(deps)) r.register(def);
+}
+
+/** What `computer` needs at REGISTRATION time (everything else rides `ToolContext`).
+ *
+ *  `screenshotMaxDim` accepts a GETTER as well as a number (P8b Task 6). `daemon.ts`'s registry
+ *  door passes the plain number and re-registers the tool when the setting changes — which the
+ *  `computer` CAPABILITY server cannot do, because the router's capability set is construction-time
+ *  (surface map §1.7) and a boot-snapshotted value would make this one setting the only one in the
+ *  daemon needing a restart. Resolved inside `run`, so both doors read the live value. */
+export interface ComputerToolDeps { screenshotMaxDim?: number | (() => number | undefined); deferred?: boolean | Mode[] }
+
+/** P8b Task 6 — THE definition, extracted verbatim from `registerComputerTool`'s body so the
+ *  daemon's shared `ToolRegistry` and the `computer` capability server
+ *  (`capabilities/computer.ts`) drive the SAME `ToolDefinition` object rather than two copies.
+ *  Nothing about the registration changed. */
+export function computerToolDefs(
   // D1-T2: `deferred` widened from `boolean` to `boolean | Mode[]` (registry.ts's
   // ToolDefinition.deferred) — same ONE-mechanism reconciliation as task_stop's identical
   // registration-time flag (see task-stop.ts's own doc comment). daemon.ts's two registration call
   // sites now pass `deferred: ["dispatch"]`: immediate in code, deferred only in dispatch.
-  deps: { screenshotMaxDim?: number; deferred?: boolean | Mode[] } = {},
-): void {
+  deps: ComputerToolDeps = {},
+): ToolDefinition[] {
   const { screenshotMaxDim, deferred } = deps;
-  r.register({
+  return [{
     name: "computer",
     description:
       "Control this Mac: read the accessibility tree (ax_snapshot), take a screenshot (or zoom into a region), click/drag/type/press keys/scroll, and wait for the UI to settle. " +
@@ -237,10 +256,11 @@ export function registerComputerTool(
         throw new Error("screenshots need a vision-capable model; use action 'ax_snapshot' to read the screen instead");
       }
       const cls = classFor(a.action);
-      const payload = JSON.stringify(buildPayload(a, screenshotMaxDim));
+      const maxDim = typeof screenshotMaxDim === "function" ? screenshotMaxDim() : screenshotMaxDim;
+      const payload = JSON.stringify(buildPayload(a, maxDim));
       const res = await ctx.computerUse.act(ctx.sessionId, cls, payload);
       if (!res.ok) throw new Error(res.message);
       return formatResult(a, res.resultJson, ctx.attachImage);
     },
-  });
+  }];
 }

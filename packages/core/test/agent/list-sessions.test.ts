@@ -539,8 +539,11 @@ describe("list_sessions (T8): wired to the real daemon", () => {
   let daemon: RunningDaemon | undefined;
   let daemonHome: string | undefined;
 
-  afterEach(() => {
-    daemon?.stop();
+  // AWAITED (P8b Task 5): `stop()`'s tail now closes the SessionStore too — it sits behind the
+  // Winter handle's dispose — so dropping the promise would rm the home out from under an open
+  // sqlite handle.
+  afterEach(async () => {
+    await daemon?.stop();
     daemon = undefined;
     if (daemonHome) rmSync(daemonHome, { recursive: true, force: true });
     daemonHome = undefined;
