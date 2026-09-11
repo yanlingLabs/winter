@@ -103,6 +103,7 @@ import { RoutineAuditLog } from "./routines/audit";
 import { makeApply } from "./settings-apply";
 import { SettingsWatcher } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
+import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "./runtime-sdk/create";
 import { makeDaemonRoutineRunner } from "./routines/runner";
 import { makeRoutineScheduler } from "./routines/scheduler";
 import type { NewSessionEvent } from "@norma/protocol";
@@ -133,6 +134,17 @@ export interface RunningDaemon {
   // routing rather than refusing to start, and nothing else in the daemon depends on it in 8a.
   // 8b's `createRuntimeSdk({ directoryStore })` consumes `directory` off this.
   runtimeState: DaemonRuntimeState;
+  /**
+   * P8b Task 5: THE ONE Winter runtime handle — the router `createRuntimeSdk` built, the spawn
+   * hook every Winter session's `Options` takes its executable from, and the tracked-query registry
+   * shutdown drains. `undefined` when the router could not construct (a packaging fault: a peer
+   * version mismatch, an invalid brand, a malformed capability declaration), in which case the
+   * Winter leg refuses at session create and every mode still runs on the engine.
+   *
+   * Exposed here for the same reason `runtimeState` is: a test that boots a REAL daemon needs to
+   * assert against the handle daemon.ts actually built, not a hand-made mirror of it.
+   */
+  runtimeSdk: NormaRuntimeSdk | undefined;
   /**
    * P8b Task 15: THE LIVE settings holder — the same binding the settings-watcher swaps, not a boot
    * snapshot. Reading it twice around a `settings.json` write is how a test proves a key is hot
@@ -702,6 +714,39 @@ export async function startDaemon(opts: {
   // sqlite handles to the same file) — see the "Scheduled routines" block below, which reuses this
   // SAME `routineStore` rather than calling `openRoutineStore` a second time.
   const routineStore = openRoutineStore(join(normaHome, "routines.db"));
+
+  // ── The Winter runtime handle (P8b Task 5) ────────────────────────────────────────────────────
+  // THE ONE `createRuntimeSdk` for this daemon. It slots here because it needs everything above it
+  // — the settings holder (its retention and advisor options are settings-derived), the secrets
+  // store (the keychain seam) and the runtime spine's directory store — and because the capability
+  // servers that will fill `capabilities` (Tasks 6-7) are built in the block below.
+  //
+  // A ROUTER THAT CANNOT CONSTRUCT NEVER STOPS THE DAEMON. `createRuntimeSdk` throws typed refusals
+  // for a peer-version mismatch, an invalid brand and a malformed capability declaration (surface
+  // map §1.10) — every one of them a packaging fault, not a user fault. In this task the engine
+  // still serves every mode, so the cost of an undefined handle is the Winter leg alone: a session
+  // created on it refuses with a typed error at create. Only the error's CODE/class is logged; the
+  // message can carry paths and option contents.
+  //
+  // `directoryStore` is 8a's SQLite store when the spine opened, and undefined when it did not — in
+  // which case the router falls back to its own in-memory directory: messaging works for this
+  // process's lifetime, receipts are not durable. That is the same "runtime routing degraded, boot
+  // continues" posture the spine itself takes.
+  let runtimeSdk: NormaRuntimeSdk | undefined;
+  try {
+    runtimeSdk = await createNormaRuntimeSdk({
+      home: normaHome,
+      settings: () => settings, // LIVE holder, never a boot snapshot
+      secrets,
+      directoryStore: runtime?.directory,
+      capabilities: [], // Tasks 6-7 fill this
+      log: (line) => console.error(`runtime-sdk: ${line}`),
+    });
+  } catch (err) {
+    const code = (err as { code?: string })?.code ?? (err as Error)?.constructor?.name ?? "unknown";
+    console.error(`runtime-sdk: winter runtime sdk unavailable (${code}) — the Winter leg will refuse; every mode still runs on the engine`);
+    runtimeSdk = undefined;
+  }
 
   if (agentProvider) {
     const registry = new ToolRegistry();
@@ -1456,6 +1501,11 @@ export async function startDaemon(opts: {
       // `schema_meta` marker is what keeps it a ONE-TIME relocation, so this is handed the new
       // settings unconditionally rather than diffed here.
       applyRuntimeMigrations: (next) => runtime?.applySettings(next),
+      // P8b Task 5: the handle, so `settings-apply`'s `runtimeSdk?.messaging?.releaseHeld` hop is
+      // WIRED rather than waiting on a later task to remember it. `messaging` is Task 12's member
+      // and is undefined until then, so the call is a typed no-op today — but a retention widening
+      // on a running daemon reaches it the moment that task fills it in.
+      runtimeSdk,
       log: (msg) => console.error(`settings-apply: ${msg}`),
     });
     settingsWatcher = new SettingsWatcher({
@@ -1634,6 +1684,10 @@ export async function startDaemon(opts: {
     // P8a Task 12: the mint-time reaper inside this server deletes sessions too — same hook, same
     // reach as the boot sweep above (WS-16 §16).
     onSessionDeleted: runtime?.onSessionDeleted,
+    // P8b Task 5: the Winter handle, on the deps object the IPC layer receives — this is the door
+    // Task 16 opens a Chat session on the Winter leg through (`session.create`'s handler). Undefined
+    // means the router never constructed; a Winter-leg create must then refuse with a typed error.
+    runtimeSdk,
     ...opts.server,
   });
 
@@ -1643,6 +1697,7 @@ export async function startDaemon(opts: {
     tokens,
     registry: sharedRegistry,
     runtimeState,
+    runtimeSdk,
     // The HOLDER, read through a closure — never `settings` captured by value, which would freeze
     // this at boot and make every hot-reload assertion above it a lie.
     settings: () => settings,
@@ -1669,9 +1724,27 @@ export async function startDaemon(opts: {
       // file — happens strictly after the handle is closed. AWAIT IT in any path that then calls
       // `process.exit` (daemon.ts's own SIGTERM handler below, and cli/src/main.ts's `daemon run`),
       // or the process dies mid-drain with the lock still on disk.
-      store.close();
-      if (!runtime) { lock.release(); return; }
-      return runtime.close().then(() => lock.release(), () => lock.release());
+      // P8b Task 5 (G-14) — AND IT IS PART OF THE SAME ORDER. Every live Winter session ends BEFORE
+      // the router disposes (that ordering is inside `runtimeSdk.dispose()`), and the whole of it
+      // happens BEFORE `store.close()` and `runtime.close()` below: a child draining its last turn
+      // appends its final events into the session store and writes delivery receipts into
+      // `runtime-state.db`, and a store closed underneath it loses exactly the evidence WS-15 §6.4
+      // needs to tell `delivered` from `delivery_uncertain`. The router's own `dispose()` is only a
+      // use-after-shutdown latch (surface map §1.11) — it kills nothing, which is why the host does.
+      //
+      // The failure of one session's teardown is not the daemon's: `dispose()` bounds each `end()`
+      // and swallows rejections, and this `.catch` is the belt for anything it did not.
+      const winterDone = runtimeSdk === undefined
+        ? undefined
+        : runtimeSdk.dispose().catch((err: unknown) => { console.error(`runtime-sdk: dispose failed: ${(err as Error)?.name ?? "unknown"}`); });
+      const closeRest = (): void | Promise<void> => {
+        store.close();
+        if (!runtime) { lock.release(); return; }
+        return runtime.close().then(() => lock.release(), () => lock.release());
+      };
+      // Synchronous when there is no Winter handle — `stop()`'s existing contract for every pre-8b
+      // caller is unchanged (everything but the runtime drain has already happened on return).
+      return winterDone === undefined ? closeRest() : winterDone.then(closeRest);
     },
   };
 }

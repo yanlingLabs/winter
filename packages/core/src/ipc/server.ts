@@ -57,6 +57,7 @@ import { readStoredDiff } from "../diffs/store";
 import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory, effortsForModel } from "./sync";
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { AgentEngine } from "../agent/engine";
+import type { NormaRuntimeSdk } from "../runtime-sdk/create";
 import { resolveModelAlias } from "../agent/model-aliases";
 import type { ApprovalBroker } from "../agent/approvals";
 import type { PermissionRules } from "../agent/permission-rules";
@@ -131,6 +132,17 @@ export interface IpcServerOptions {
   // daemon whose runtime store would not open (there are no rows to remove), and in every test that
   // constructs a server without one.
   onSessionDeleted?: (sessionId: string) => void;
+  // P8b Task 5: THE Winter runtime handle (`runtime-sdk/create.ts`), built once in daemon.ts.
+  //
+  // It arrives here because `session.create` is where the leg is decided (P8b-13: a session runs to
+  // completion on the leg it was created with), and a Winter-leg create needs the handle's
+  // `spawnHookFor(mode)` and its `sdk.query()`. NOTHING IN THIS FILE READS IT YET — Task 16 is what
+  // opens the first Chat session on it — but the wiring is deliberate rather than deferred, so that
+  // task is a change to one handler instead of a change to the daemon's whole construction.
+  //
+  // `undefined` means the router could not construct (a packaging fault; see daemon.ts's slot). A
+  // Winter-leg create must then refuse with a typed error, never crash and never silently fall back.
+  runtimeSdk?: NormaRuntimeSdk;
   // session-activity-hygiene T8: hands the caller THE bound activity derivation this server stamps
   // `session.list` with, once, at construction. Called exactly once, synchronously, from inside
   // startIpcServer.
