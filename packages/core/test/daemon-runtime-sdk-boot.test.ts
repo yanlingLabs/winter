@@ -163,9 +163,11 @@ describe("daemon boot — the capability servers (Tasks 6-7)", () => {
       // If ANY capability declaration were malformed, `createRuntimeSdk` would have thrown
       // `RuntimeLaunchInputError` and daemon.ts would have logged and continued with `undefined`.
       expect(d.runtimeSdk).toBeDefined();
-      // `sessions` is unconditional; `computer` follows the boot-time `computerUse.enabled`, which
-      // is off in this temp home, so it must NOT be there.
-      expect(holdsCapability(d, "sessions")).toBe(true);
+      // Five of the six are unconditional; `computer` follows the boot-time `computerUse.enabled`,
+      // which is off in this temp home, so it must NOT be there.
+      for (const key of ["sessions", "browser", "office", "research", "web"]) {
+        expect(holdsCapability(d, key), `${key} did not reach the router`).toBe(true);
+      }
       expect(holdsCapability(d, "computer")).toBe(false);
       // A name the daemon never declared collides with nothing.
       expect(holdsCapability(d, "not-a-capability")).toBe(false);

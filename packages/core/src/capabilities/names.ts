@@ -19,8 +19,11 @@ import type { SessionMode } from "../runtime-sdk/create";
 
 export type { SessionMode };
 
-/** The five capability server keys (P8b-12), in the order `buildCapabilities` returns them. */
-export const CAPABILITY_SERVER_KEYS = ["sessions", "computer", "browser", "office", "research"] as const;
+/** The capability server keys, in the order `buildCapabilities` returns them.
+ *
+ *  P8b-33 added `web` to P8b-12's five: every mode disallows the SDK's built-in WebSearch/WebFetch
+ *  in 8b (no keys, no dangerous-domain floor), so code keeps the daemon-owned pair. */
+export const CAPABILITY_SERVER_KEYS = ["sessions", "computer", "browser", "office", "research", "web"] as const;
 export type CapabilityServerKey = (typeof CAPABILITY_SERVER_KEYS)[number];
 
 /**
@@ -73,6 +76,26 @@ export const NORMA_CAPABILITY_TOOLS = {
   // via ToolSearch in dispatch). Its PRESENCE additionally follows `settings.computerUse.enabled`
   // at boot — see `buildCapabilities` in `index.ts` for why that is construction-time.
   "mcp__norma__computer__computer": { modes: ["code", "dispatch"], deferred: ["dispatch"] },
+  // `browser` — the only capability tool eligible in all three modes. Chat sees a READ-ONLY verb
+  // set, enforced INSIDE the capability (`browser.ts`'s `argsByMode`, resolved from the caller's
+  // mode), because a construction-time capability set cannot express a per-ACTION subset and a
+  // whole-tool `disallowedTools` entry would take the read verbs away too.
+  "mcp__norma__browser__browser": { modes: ["code", "dispatch", "chat"], deferred: ["code", "dispatch"] },
+  // `office` — the three LibreOffice-bridge tools, `modes: ["code","dispatch"]`, never deferred.
+  "mcp__norma__office__docs": { modes: ["code", "dispatch"] },
+  "mcp__norma__office__sheets": { modes: ["code", "dispatch"] },
+  "mcp__norma__office__slides": { modes: ["code", "dispatch"] },
+  // `research` (C-6) — Norma's OWN web surface for chat and dispatch, not the SDK's
+  // WebSearch/WebFetch: these two carry the Exa key and the dangerous-domain floor (Norma map §5.1
+  // trap (ii)). Never deferred — `search.ts`'s own note explains why chat's small toolset should
+  // not pay a ToolSearch round trip for them.
+  "mcp__norma__research__Search": { modes: ["chat", "dispatch"] },
+  "mcp__norma__research__ReadPage": { modes: ["chat", "dispatch"] },
+  // `web` (P8b-33) — CODE's web surface, for the same reason `research` exists for chat: the SDK's
+  // built-in WebSearch/WebFetch are disallowed in every mode in 8b, so without these two a code
+  // session would have no web access at all. `modes: ["code"]`, `deferred: true` (registry door).
+  "mcp__norma__web__web_fetch": { modes: ["code"], deferred: true },
+  "mcp__norma__web__web_search": { modes: ["code"], deferred: true },
 } as const satisfies Readonly<Record<string, CapabilityToolFacts>>;
 
 export type NormaCapabilityToolName = keyof typeof NORMA_CAPABILITY_TOOLS;

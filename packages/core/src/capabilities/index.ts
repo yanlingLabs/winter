@@ -10,15 +10,27 @@ export { capabilityServer } from "./server";
 export { createCapabilitySessionBinding, type CapabilitySessionBinding } from "./current-session";
 export { sessionsCapability, type SessionsCapabilityDeps } from "./sessions";
 export { computerCapability, type ComputerCapabilityDeps } from "./computer";
+export { browserCapability, type BrowserCapabilityDeps } from "./browser";
+export { officeCapability, type OfficeCapabilityDeps } from "./office";
+export { researchCapability, type ResearchCapabilityDeps } from "./research";
+export { webCapability, type WebCapabilityDeps } from "./web";
 
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
+import { browserCapability, type BrowserCapabilityDeps } from "./browser";
 import { computerCapability, type ComputerCapabilityDeps } from "./computer";
+import { officeCapability, type OfficeCapabilityDeps } from "./office";
+import { researchCapability, type ResearchCapabilityDeps } from "./research";
+import { webCapability, type WebCapabilityDeps } from "./web";
 import type { CapabilitySessionDeps } from "./server";
 import { sessionsCapability, type SessionsCapabilityDeps } from "./sessions";
 
 export interface BuildCapabilitiesDeps extends CapabilitySessionDeps {
   sessions: Omit<SessionsCapabilityDeps, keyof CapabilitySessionDeps>;
   computer: Omit<ComputerCapabilityDeps, keyof CapabilitySessionDeps>;
+  browser: Omit<BrowserCapabilityDeps, keyof CapabilitySessionDeps>;
+  office: Omit<OfficeCapabilityDeps, keyof CapabilitySessionDeps>;
+  research: Omit<ResearchCapabilityDeps, keyof CapabilitySessionDeps>;
+  web: Omit<WebCapabilityDeps, keyof CapabilitySessionDeps>;
   /**
    * `settings.computerUse.enabled` AS READ AT BOOT — and it has to be, which is worth stating
    * plainly because it is the one place 8b's capability set is less live than the registry's.
@@ -53,6 +65,12 @@ export function buildCapabilities(deps: BuildCapabilitiesDeps): readonly McpSdkS
   const servers: McpSdkServerConfigWithInstance[] = [
     sessionsCapability({ ...deps.sessions, currentSession }),
   ];
+  // `computer` is the ONLY conditional server — every other capability exists whenever the daemon
+  // does, exactly as its registry counterpart does (the gate below is `daemon.ts:1049`'s own).
   if (deps.computerUseEnabled) servers.push(computerCapability({ ...deps.computer, currentSession }));
+  servers.push(browserCapability({ ...deps.browser, currentSession }));
+  servers.push(officeCapability({ ...deps.office, currentSession }));
+  servers.push(researchCapability({ ...deps.research, currentSession }));
+  servers.push(webCapability({ ...deps.web, currentSession }));
   return servers;
 }

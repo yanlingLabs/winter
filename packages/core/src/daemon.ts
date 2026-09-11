@@ -47,7 +47,7 @@ import { MemoryStore } from "./agent/memory";
 import { registerScheduleTool } from "./agent/tools/schedule";
 import { registerWebTools } from "./agent/tools/web";
 import { registerSearchTool } from "./agent/tools/search";
-import { registerReadPageTool } from "./agent/tools/read-page";
+import { registerReadPageTool, type ResearchRunner } from "./agent/tools/read-page";
 import { registerBrowserTool } from "./agent/tools/browser";
 import { registerSheetsTool } from "./agent/tools/sheets";
 import { registerSlidesTool } from "./agent/tools/slides";
@@ -670,6 +670,15 @@ export async function startDaemon(opts: {
   // reassigns the same binding on a hot `computerUse.enabled` toggle.
   let computerUse: ComputerUseService | undefined;
 
+  // P8b Task 7: HOISTED for the same reason `computerUse` is — the `research` capability server is
+  // built above the `if (agentProvider)` gate and must hand `ReadPage` the SAME `PageCache` the
+  // registry door and the ephemeral research runner share (a second cache would make a report's own
+  // citations miss on the follow-up read). `PageCache` has no dependencies, so the construction
+  // itself moves; the runner still needs `agentProvider.provider` and so stays a holder assigned
+  // inside the gate, read through a closure at tool-call time.
+  const pageCache = new PageCache();
+  let researchRunner: ResearchRunner | undefined;
+
   // Phase 4d-cleanup Task 2: PluginSupervisor construction + the boot-time orphan-PID sweep are
   // hoisted OUT of `if (agentProvider)` below — the ctor's own deps (runDir/socketPath/mintToken/
   // settings/logger) don't need a provider, and a daemon booted with the agent disabled (no
@@ -815,6 +824,47 @@ export async function startDaemon(opts: {
         // boot setting (mirroring the gate's own guard below); the hot toggle is honoured per
         // session through Task 9's `disallowedTools`. See `buildCapabilities`' own doc comment.
         computerUseEnabled: settings?.computerUse?.enabled === true,
+        // THE SAME four closures `registerBrowserTool` gets below — `mintPanelTab` and
+        // `panelCommands.dispatch` are what emit `panel_tab_opened`/`panel_tab_activated`/
+        // `panel_command`, so a capability with its own would open tabs nobody can see and dispatch
+        // commands `panel.commandResult` could never answer (P8b-20).
+        browser: {
+          browser: {
+            tabs: (sid) => foldPanelTabs(store.read(sid)),
+            openTab: (p) => mintPanelTab(hub, p),
+            dispatch: (cmd) => panelCommands.dispatch(cmd),
+            harnesses: (sid) => hub.attachedHarnesses(sid),
+            dangerousDomainsAdded,
+          },
+        },
+        // The identical trio all three office tools take. `dirsOf` is `store.dirs` — never
+        // `writableRoots` — so the daemon's fence and the app-side `OfficeAgentBroker` fence agree
+        // on what "this session's working directories" means.
+        office: {
+          office: {
+            dispatch: (cmd) => panelCommands.dispatch(cmd),
+            harnesses: (sid) => hub.attachedHarnesses(sid),
+            dirsOf: (sid) => store.dirs(sid),
+          },
+        },
+        // C-6: Norma's OWN web surface for chat/dispatch. `secret` is a CLOSURE — the Exa key is
+        // read inside `run`, never here and never into `listTools()`. `dangerousDomainsAdded` is
+        // the same shared getter every other consumer takes, so the floor is one list.
+        research: {
+          search: { audit: (line) => audit.append(line), secret: (name) => secrets.get(name), dangerousDomainsAdded },
+          readPage: {
+            cache: pageCache,
+            audit: (line) => audit.append(line),
+            // The runner is assigned inside the agent gate; read LIVE at call time, exactly as
+            // `ReadPage`'s own "research is not available in this session yet" fallback expects.
+            get research() { return researchRunner; },
+            dangerousDomainsAdded,
+          },
+        },
+        // P8b-33: code's web surface, for the same reason `research` exists for chat — the SDK's
+        // built-in WebSearch/WebFetch are disallowed in every mode in 8b. Same `audit`/`secrets`
+        // instances the registry door takes; the Brave key is read inside `run`.
+        web: { web: { audit: (line) => audit.append(line), secret: (name) => secrets.get(name) } },
       }),
       log: (line) => console.error(`runtime-sdk: ${line}`),
     });
@@ -883,7 +933,8 @@ export async function startDaemon(opts: {
     // ONE PageCache instance per daemon, constructed here and shared: Task 3's ephemeral research
     // runner hands the SAME instance to its FetchPage-only sub-agent, so a report's own citations
     // resolve from the identical cache a follow-up ReadPage(lineStart/lineEnd) call would hit.
-    const pageCache = new PageCache();
+    // (`pageCache` itself is HOISTED above the Winter runtime block — P8b Task 7 — so the `research`
+    // capability server shares this exact instance; nothing else about this wiring changed.)
     // B2-T3: the ephemeral research sub-agent — FetchPage-only, cited reports. Reuses the SAME
     // Provider instance (`agentProvider.provider`) the main engine turns use — this whole `if` is
     // already gated on agentProvider being present, so `research` is constructed unconditionally
@@ -898,6 +949,7 @@ export async function startDaemon(opts: {
     // web_fetch (code mode, unchanged). See page-core.ts's `checkDangerousDomain` for the full
     // rationale and read-page.ts/research.ts for where the check actually fires.
     const research = createResearchRunner({ provider: agentProvider.provider, cache: pageCache, audit: (line) => audit.append(line), dangerousDomainsAdded });
+    researchRunner = research; // the holder the `research` capability server reads (P8b Task 7)
     registerReadPageTool(registry, { cache: pageCache, audit: (line) => audit.append(line), research, dangerousDomainsAdded });
     // B2 Task 4: the agent's browser. Four narrow deps, each the SAME thing the equivalent RPC uses —
     // `tabs` is the fold `panel.list` serves, `openTab` is the function `panel.openTab`'s handler

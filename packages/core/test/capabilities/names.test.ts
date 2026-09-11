@@ -17,12 +17,28 @@ import {
  * silently produce `mcp__norma__list_sessions` instead.
  */
 
-/** WS-06 §5's names for the servers Task 6 builds, spelled out. */
-const TASK_6_NAMES = [
+/** WS-06 §5's names for the five P8b-12 servers, plus the C-6 amendment (`Search`/`ReadPage` under
+ *  `research`) and ruling P8b-33's sixth server (`web`). Spelled out, never derived. */
+const CANONICAL_NAMES = [
+  // WS-06 §5 `mcp__winter__sessions` → R-1 re-brands the namespace, C-6 splits the three verbs out.
   "mcp__norma__sessions__session_spawn",
   "mcp__norma__sessions__list_sessions",
   "mcp__norma__sessions__manage_session",
+  // WS-06 §5 `mcp__winter__computer`.
   "mcp__norma__computer__computer",
+  // WS-06 §5 `mcp__winter__browser`.
+  "mcp__norma__browser__browser",
+  // WS-06 §5 `mcp__winter__docs` / `sheets` / `slides`, folded onto ONE `office` server (P8b-12).
+  "mcp__norma__office__docs",
+  "mcp__norma__office__sheets",
+  "mcp__norma__office__slides",
+  // C-6 AMENDMENT to WS-06 §5: Search/ReadPage are daemon-owned capability tools (they carry the
+  // Exa key and the dangerous-domain floor), NOT the SDK's WebSearch/WebFetch.
+  "mcp__norma__research__Search",
+  "mcp__norma__research__ReadPage",
+  // P8b-33: every mode disallows the SDK's built-in web tools, so code keeps its own pair.
+  "mcp__norma__web__web_fetch",
+  "mcp__norma__web__web_search",
 ] as const;
 
 describe("capabilityToolName (P8b-12)", () => {
@@ -58,8 +74,13 @@ describe("NORMA_CAPABILITY_TOOLS", () => {
     }
   });
 
-  test("carries exactly Task 6's four names so far", () => {
-    expect(Object.keys(NORMA_CAPABILITY_TOOLS).sort()).toEqual([...TASK_6_NAMES].sort());
+  test("carries exactly the canonical names — no more, no fewer", () => {
+    expect(Object.keys(NORMA_CAPABILITY_TOOLS).sort()).toEqual([...CANONICAL_NAMES].sort());
+  });
+
+  test("every declared server key is represented, and every name names a declared key", () => {
+    const keysUsed = new Set(Object.keys(NORMA_CAPABILITY_TOOLS).map((n) => n.slice("mcp__norma__".length).split("__")[0]));
+    expect([...keysUsed].sort()).toEqual([...CAPABILITY_SERVER_KEYS].sort());
   });
 
   test("modes and deferral mirror today's registrations", () => {
@@ -70,6 +91,18 @@ describe("NORMA_CAPABILITY_TOOLS", () => {
     expect(t["mcp__norma__sessions__manage_session"]).toEqual({ modes: ["dispatch"], deferred: true });
     // computer.ts declares `modes: ["code","dispatch"]`; daemon.ts passes `deferred: ["dispatch"]`.
     expect(t["mcp__norma__computer__computer"]).toEqual({ modes: ["code", "dispatch"], deferred: ["dispatch"] });
+    // browser.ts: `modes: ["code","dispatch","chat"]`, `deferred: ["code","dispatch"]`.
+    expect(t["mcp__norma__browser__browser"]).toEqual({ modes: ["code", "dispatch", "chat"], deferred: ["code", "dispatch"] });
+    // docs/sheets/slides.ts: `modes: ["code","dispatch"]`, no deferral.
+    for (const tool of ["docs", "sheets", "slides"]) {
+      expect(t[`mcp__norma__office__${tool}`]).toEqual({ modes: ["code", "dispatch"] });
+    }
+    // search.ts / read-page.ts: `modes: ["chat","dispatch"]`, deliberately NOT deferred.
+    expect(t["mcp__norma__research__Search"]).toEqual({ modes: ["chat", "dispatch"] });
+    expect(t["mcp__norma__research__ReadPage"]).toEqual({ modes: ["chat", "dispatch"] });
+    // web.ts: `modes: ["code"]`, `deferred: true` on both.
+    expect(t["mcp__norma__web__web_fetch"]).toEqual({ modes: ["code"], deferred: true });
+    expect(t["mcp__norma__web__web_search"]).toEqual({ modes: ["code"], deferred: true });
   });
 
   test("is a plain data table Task 9 can diff (no functions, no getters)", () => {
