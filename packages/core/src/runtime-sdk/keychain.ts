@@ -48,17 +48,23 @@ export interface CredentialSlot {
  * (`codex-oauth.ts`'s refresh is purely 401-reactive; `expiresAt` is stored but never consulted for
  * a cheaper local check). The child/provider layer is what decides validity, never this inventory.
  *
- * PROVIDER-ID CAVEAT: `provider` here (`"openai"` / `"codex"`) is a THIRD vocabulary in this
- * package, not a second. 8a already persists `RuntimeSessionRecord.providerId` =
- * `settings.provider.type` = `"openai-compatible" | "codex-oauth"` (`runtime-state/
- * migrations/backfill.ts:44`) — that is the provider TYPE axis, distinct from both this inventory's
- * ids and the pinned provider CATALOG's ids that Task 9 routes `CredentialPresence.byProvider`
- * against. Do not look presence up by the 8a record's `providerId` string — Task 9 aligns this
- * inventory's ids to the catalog's; until then the two axes must not be cross-read.
+ * PROVIDER IDS ARE THE PINNED CATALOG'S (Task 9, ruling 9 — this is the alignment Task 4's own
+ * caveat said was owed). `CredentialPresence.byProvider` is keyed by the ids the router and the
+ * child resolve models against, so they must be `@yanlinglabs/winter-provider-catalog`'s
+ * `WinterProviderDescriptor.id` values verbatim — `"openai"` and `"codex-oauth"`, both present in
+ * the pinned 0.0.3 catalog (`keychain.test.ts` pins that as a tripwire, so a catalog bump that
+ * renamed either row fails here rather than silently un-routing every session).
+ *
+ * `"codex"` was Task 4's spelling and is GONE: the catalog's row is `codex-oauth`, which is also
+ * exactly what 8a already persists as `RuntimeSessionRecord.providerId` for that provider
+ * (`settings.provider.type`, `runtime-state/migrations/backfill.ts:44`) — so aligning to the
+ * catalog collapsed two of the three vocabularies into one for the Codex case. The OpenAI case
+ * still has two spellings (`settings.provider.type` is `"openai-compatible"`, the catalog id is
+ * `"openai"`); they must not be cross-read.
  */
 export const NORMA_CREDENTIAL_INVENTORY: readonly CredentialSlot[] = [
   { provider: "openai", secretName: OPENAI_API_KEY_SECRET, kind: "keychain" },
-  { provider: "codex", secretName: CODEX_SECRET_NAMES.access, kind: "keychain" },
+  { provider: "codex-oauth", secretName: CODEX_SECRET_NAMES.access, kind: "keychain" },
 ];
 
 /** Error code/class only — NEVER `.message`, which could embed material for some future

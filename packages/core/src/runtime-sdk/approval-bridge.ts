@@ -5,7 +5,8 @@ import type { QuestionBroker } from "../agent/questions";
 import type { PermissionGate, SessionApprovalPolicy } from "../agent/gate";
 import { parseRule } from "../agent/permission-rules";
 import type { Mode as SessionMode } from "../agent/tools/registry";
-import { gateToolNameFor } from "./tool-names";
+import { gateToolNameFor, WINTER_OWN_TOOL_NAMES } from "./tool-names";
+import { controlPlaneTargetForCall, controlPlaneDenialMessage } from "./control-plane";
 import { askUserQuestionBridge, ASK_USER_QUESTION_TOOL } from "./question-bridge";
 import { consoleBridgeLogger, NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
 
@@ -50,6 +51,14 @@ export interface CanUseToolDeps {
    *  producer of these same two event variants. */
   threadId?: string;
   mode: SessionMode;
+  /** `SessionMeta.origin` (`sessions/store.ts:70`, a bare `string`). `"dispatch-child"` is the one
+   *  value this bridge reads: a dispatch child is an ordinary CODE session whose cards are mirrored
+   *  into the dispatch stream, so P8b-26's never-prompt rule must catch it too. */
+  origin?: string;
+  /** The session's working directory, used to resolve a RELATIVE write target in the control-plane
+   *  fence. An absent/empty cwd resolves relative paths against `/`, which is the conservative
+   *  reading (a relative target then cannot accidentally miss a real `.norma` parent). */
+  cwd?: string;
   /** Seven-valued (`gate.ts`'s `SessionApprovalPolicy`), not the six-valued wire `ApprovalPolicy`:
    *  `ipc/server.ts`'s create-time chat coercion persists the internal `"chat"` policy, and P8b-7
    *  makes that coercion the ONLY guard once the engine's turn-time re-assertion retires. A
@@ -94,7 +103,7 @@ function deniedByPolicyMessage(policy: SessionApprovalPolicy): string {
  *
  * CODE mode is untouched and prompts exactly as it does today.
  */
-export function neverPromptsMessage(toolName: string, mode: SessionMode, policy: SessionApprovalPolicy): string {
+export function neverPromptsMessage(toolName: string, mode: string, policy: SessionApprovalPolicy): string {
   return `${toolName} requires approval and this ${mode} session never prompts (policy ${policy})`;
 }
 
@@ -230,7 +239,27 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
       return await askQuestion(ctx.toolUseID, input, ctx);
     }
 
-    // (2) Already aborted: deny without touching the broker or the event stream.
+    // (2) THE CONTROL-PLANE FENCE (P8b-27b) — before the gate, under EVERY policy, `bypass`
+    // included. The deny rules `buildWinterOptions` passes are the child's own first line, but a
+    // deny rule under `bypassPermissions` REACHES `canUseTool` rather than auto-denying (surface
+    // map §5.2), so this host-side check is the thing that actually holds. Without it a child under
+    // `auto`/`acceptEdits` — the modes where no human ever sees the write — could edit
+    // `<any>/.norma/permissions.local.json` and grant itself a standing rule.
+    const fenced = controlPlaneTargetForCall(toolName, input, deps.cwd ?? "");
+    if (fenced) {
+      log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} reason=control-plane`);
+      return { behavior: "deny", message: controlPlaneDenialMessage(toolName, fenced.path) };
+    }
+
+    // (3) Winter's OWN four default tools are allowed silently in every mode (P8b-28). Checked
+    // after the fence (they name no paths, so this is ordering hygiene, not a hole) and before the
+    // gate, because two of the four — `ReadNotifications`, `advisor` — have no Norma name at all
+    // and would otherwise fail closed to a card in code and a deny in dispatch/chat.
+    if (WINTER_OWN_TOOL_NAMES.has(toolName)) {
+      return { behavior: "allow", updatedInput: input };
+    }
+
+    // (4) Already aborted: deny without touching the broker or the event stream.
     if (ctx.signal.aborted) {
       return { behavior: "deny", message: `${toolName} was not run — the turn was aborted before the approval could be raised.` };
     }
@@ -239,8 +268,28 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     const gateToolName = gateToolNameFor(toolName);
     let decision = deps.gate.evaluate(gateToolName, policy);
 
-    // (4) engine.ts:4341 — dont-ask declines everything it would otherwise card, with no prompt.
+    // (5) engine.ts:4341 — dont-ask declines everything it would otherwise card, with no prompt.
     if (decision === "ask" && policy === "dont-ask") decision = "deny";
+
+    // (5b) P8b-31 — THE SANDBOX-ESCAPE FLOOR. `engine.ts:4518`'s branch condition is
+    //   `call.name === "bash" && bashEscalation.dangerouslyDisableSandbox
+    //    && !unsandboxedRuleAllowed && meta.approvalPolicy !== "bypass"`
+    // and its own comment enumerates the disposition: plan denied it (the deny branch), dont-ask
+    // denied it (the ask→deny flip above), bypass ran it silently (the branch guard), and
+    // auto/ask/accept-edits all CARD. The gate cannot see arguments, so it returns a flat `allow`
+    // for `bash` under `auto` — which on the Winter leg would run a FULL SANDBOX ESCAPE with no
+    // human in the loop, in code and dispatch alike. Re-asserted here because the bridge is the
+    // only place left that can: Winter surfaces exactly this call at `canUseTool` in every mode.
+    //
+    // Placed AFTER the dont-ask flip so plan/dont-ask keep their denies, and gated on
+    // `decision === "allow"` + `policy !== "bypass"` so it reproduces the engine's condition
+    // exactly — `ask`/`accept-edits` already resolve to `"ask"` and are untouched, and `bypass`
+    // keeps running it silently. `!unsandboxedRuleAllowed` has no analogue here: the bridge performs
+    // no rules-store read at all, so a standing `BashUnsandboxed(...)` rule does NOT pre-clear an
+    // escape on this leg — strictly more conservative than today, and recorded as such.
+    if (decision === "allow" && policy !== "bypass" && isUnsandboxedBashEscape(gateToolName, input)) {
+      decision = "ask";
+    }
 
     // A POLICY deny is not a user rejection — today it is a plain `isError` tool result and the
     // turn continues (only `deniedByHuman` ends it, engine.ts:5876-5882). `decisionClassification`
@@ -255,14 +304,46 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
       return { behavior: "allow", updatedInput: input };
     }
 
-    // (5) "ask" — and dispatch/chat never prompt (P8b-7).
-    if (deps.mode !== "code") {
-      log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} policy=${policy} reason=never-prompts mode=${deps.mode}`);
-      return { behavior: "deny", message: neverPromptsMessage(toolName, deps.mode, policy) };
+    // (6) "ask" — and a session that never prompts denies instead (P8b-7 / P8b-26).
+    const never = neverPromptsAs(deps);
+    if (never) {
+      log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} policy=${policy} reason=never-prompts mode=${deps.mode} origin=${deps.origin ?? "none"}`);
+      return { behavior: "deny", message: neverPromptsMessage(toolName, never, policy) };
     }
 
     return await raiseCard(deps, { log, now, threadId, policy }, toolName, gateToolName, input, ctx);
   };
+}
+
+/**
+ * **Does this session ever raise an approval card?** (P8b-26.)
+ *
+ * Returns the word the refusal names itself with, or `undefined` when the session DOES prompt.
+ *
+ * Two disjoint reasons, and the second is the one P8b-7 was actually written about. A dispatch
+ * session's own turns run in `mode: "dispatch"` — but the work is done by its CHILDREN, which
+ * `agent/dispatch-children.ts` spawns as ordinary CODE sessions (Norma map §2.3: "they are ordinary
+ * Code sessions") distinguished only by `meta.origin === "dispatch-child"`, and whose cards are
+ * MIRRORED into the dispatch stream. Keying only on `mode` would therefore have left exactly the
+ * cards the ruling names still prompting, in a code-mode session nobody is watching.
+ *
+ * The returned word is what `<mode>` reads as in the message. A dispatch child is `mode: "code"`,
+ * so naming it "this code session never prompts" would be simply false — it is a dispatch child,
+ * and the message says so.
+ */
+/** A `bash` call asking for a full sandbox escape (`dangerouslyDisableSandbox: true`). Takes the
+ *  NORMA tool name — the escape arg is Norma's own, and the Winter built-in that carries it arrives
+ *  as `Bash`. Exported so the matrix test can pin the predicate as well as the verdict. */
+export function isUnsandboxedBashEscape(gateToolName: string, input: unknown): boolean {
+  if (gateToolName !== "bash") return false;
+  if (typeof input !== "object" || input === null) return false;
+  return (input as Record<string, unknown>).dangerouslyDisableSandbox === true;
+}
+
+export function neverPromptsAs(deps: { mode: SessionMode; origin?: string }): string | undefined {
+  if (deps.origin === "dispatch-child") return "dispatch";
+  if (deps.mode !== "code") return deps.mode;
+  return undefined;
 }
 
 async function raiseCard(
@@ -370,8 +451,15 @@ async function raiseCard(
     // signal the runtime may act on, so mislabelling a machine outcome as a rejection risks
     // turn-ending behaviour on a case today's engine simply reports as an `isError` tool result.
     const machine = by === "timeout" || by === "aborted" || by === "superseded" || by === "emit-failure" || by === "unknown";
+    // `interrupt: true` on a HUMAN denial only (`PermissionResult`'s deny arm,
+    // `permissions/types.d.ts:64`). Today an explicit human "no" ENDS the turn
+    // (`engine.ts:5876-5882`), and the comment there states the reason: without it the model
+    // re-submits the same command and the AI reviewer re-approves it in-turn with no second human
+    // confirmation — "a real gate bypass". A machine outcome must NOT interrupt: nobody refused, so
+    // ending the turn would turn a timeout into a dead session.
     return {
       behavior: "deny",
+      ...(machine ? {} : { interrupt: true as const }),
       message: by === "timeout"
         ? `${toolName} was not run — nobody answered the approval request.`
         : by === "aborted"
