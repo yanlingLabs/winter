@@ -3489,7 +3489,13 @@ export class AgentEngine {
                 // No-timeout task: every provider event this child streams resets its stall
                 // window (runThread's ONE chokepoint) — this is the bg path's ONLY default
                 // clock now, see the run() opts note just below.
-                onProgress: progress,
+                //
+                // P8b Task 13 fix r1 (F1): the ROSTER is told too. `SubagentManager` owns the
+                // abort for engine children and always will until Task 17 retires it, but the
+                // persisted registry's own window must be a PROGRESS window rather than a wall
+                // clock the day it is armed — and an API nothing calls is indistinguishable from
+                // one that resets. This is where production feeds it.
+                onProgress: () => { progress(); this.cfg.bgAgents?.progress(childId); },
               });
             }, {
               reentrant: opts.depth > 0,
@@ -3676,7 +3682,9 @@ export class AgentEngine {
                 rootsOverride: isolatedWorktree ? [isolatedWorktree.dir] : undefined,
                 // No-timeout task: every provider event this child streams resets its stall
                 // window — see runThread's ONE chokepoint and subagents.ts's own header.
-                onProgress: progress,
+                // P8b Task 13 fix r1 (F1): and the roster's, when this child was registered in it
+                // (`progress` on an id the registry does not know is a no-op).
+                onProgress: () => { progress(); this.cfg.bgAgents?.progress(childId); },
               });
             }, { reentrant: opts.depth > 0 });
             // task-16 (Stalled roster verb): see the bg `.then` handler's identical comment above.
@@ -5057,7 +5065,9 @@ export class AgentEngine {
       allowTools: rc.allowTools ? new Set(rc.allowTools) : undefined,
       maxTurns: rc.maxTurns,
       rootsOverride: rc.roots,
-      onProgress: progress,
+      // P8b Task 13 fix r1 (F1): the resumed child feeds the roster's window too — a resume re-arms
+      // it (`reopen`), so a resumed child that never reported progress would be the same wall clock.
+      onProgress: () => { progress(); this.cfg.bgAgents?.progress(entry.agentId); },
     });
 
     // D6 — same sync/bg fork the fresh path uses; `reentrant` keys off the RESUMING thread's depth

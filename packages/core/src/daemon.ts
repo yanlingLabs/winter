@@ -104,8 +104,7 @@ import { makeApply } from "./settings-apply";
 import { SettingsWatcher } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "./runtime-sdk/create";
-import { attachedFacetFor } from "./runtime-sdk/messaging";
-import { ChildProfiles } from "./runtime-state/children";
+import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { makeDaemonRoutineRunner } from "./routines/runner";
 import { makeRoutineScheduler } from "./routines/scheduler";
 import type { NewSessionEvent } from "@norma/protocol";
@@ -781,9 +780,16 @@ export async function startDaemon(opts: {
   if (runtimeSdk !== undefined) {
     try {
       const recovered = await runtimeSdk.sdk.directory.recover();
+      // F3 (fix round 1): recovery marks a crash-left row `unavailable` but KEEPS its
+      // `backendSessionId`, and the router's only refusal before a cold resume is `archived` — so
+      // every session from the last boot would still be resumable from inside a delivery, by a
+      // spawn this daemon never tracked. Nothing is attached at this point in boot by construction,
+      // so the sweep parks them all. A Norma session is resumed by its DRIVER from the 8a record
+      // (which keeps its own backend id), never by the messaging layer.
+      const parked = await parkRecoveredSessions(runtimeSdk, (line) => console.error(`runtime-sdk: ${line}`));
       console.error(
         `runtime-sdk: directory recovery — ${recovered.entriesLoaded} entr(ies), ${recovered.staleMarked} stale, ` +
-          `${recovered.cursorsRestored} cursor(s), ${recovered.heldMessagesFound} held`,
+          `${recovered.cursorsRestored} cursor(s), ${recovered.heldMessagesFound} held, ${parked} parked`,
       );
     } catch (err) {
       console.error(`runtime-sdk: directory recovery failed (${(err as Error)?.name ?? "unknown"}) — messaging starts without it`);
@@ -945,18 +951,22 @@ export async function startDaemon(opts: {
     // they were before this task, which is the same "runtime routing degraded, boot continues"
     // posture the spine itself takes.
     //
-    // `stallTimeoutMs` is the LIVE getter, the same one `SubagentManager` reads: the progress-stall
-    // window is a setting and no setting may require a restart. The two watchdogs coexist safely
-    // while the engine lives — each is one-shot and disarmed by the first terminal transition, so
-    // whichever fires first is the only one that reports (see `arm`'s own note).
+    // ⚠️ NO `stallTimeoutMs` HERE, DELIBERATELY (fix round 1, F1). `SubagentManager` already owns a
+    // RESETTABLE progress window for every engine child, and its controller is folded into the
+    // child's run signal on both spawn paths — so arming a second timer over the same children is a
+    // second KILLER, not a second safety net. Worse, while nothing in production reset it, it was a
+    // 600 s WALL CLOCK, which is exactly what CLAUDE.md's tool surface and the standing "subagents:
+    // no timeout" rule forbid. The registry's window is opt-in (see `stallTimeoutMs`'s own note) and
+    // Task 17 turns it on for Winter children when `SubagentManager` retires with the engine. The
+    // engine DOES feed `progress()` here and now (engine.ts's three child sites), so the window is a
+    // progress window the moment it is armed rather than an API nobody calls.
     const bgAgents: AgentRegistry =
       runtime === undefined
         ? new BackgroundAgentRegistry()
         : createPersistedChildren({
             store: runtime.children,
-            profiles: new ChildProfiles(normaHome),
+            profiles: runtime.profiles,
             providerId: () => settings?.provider?.type ?? "unstated",
-            stallTimeoutMs: () => settings?.subagents?.stallTimeoutMs,
             // The owning session's live facet — Task 16 attaches Winter sessions, and until then a
             // stop with no local `AbortController` is recorded and nothing is asked of the child.
             facetFor: (sessionId) => {

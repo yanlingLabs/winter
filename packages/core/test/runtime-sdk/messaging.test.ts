@@ -18,7 +18,7 @@ import * as winter from "@yanlinglabs/winter-agent-sdk";
 import { createInMemoryRuntimeDirectoryStore, createRuntimeSdk } from "@yanlinglabs/winter-runtime-sdk";
 import type { RuntimeDirectoryStore, RuntimeSdk, SerializedRuntimeAddress } from "@yanlinglabs/winter-runtime-sdk";
 import { NORMA_BRAND } from "../../src/runtime-sdk/brand";
-import { attachWinterSession, releaseAllHeld, renderAttributedTurn } from "../../src/runtime-sdk/messaging";
+import { attachWinterSession, parkRecoveredSessions, releaseAllHeld, renderAttributedTurn } from "../../src/runtime-sdk/messaging";
 import type { NormaRuntimeSdk } from "../../src/runtime-sdk/create";
 import { NORMA_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
 
@@ -96,9 +96,16 @@ function harness(
   runtime: NormaRuntimeSdk;
   sdk: RuntimeSdk;
   store: RuntimeDirectoryStore;
+  /** Every `winter.query(...)` the router attempted. Must stay empty in every test here. */
+  spawned: unknown[];
 } {
+  const spawned: unknown[] = [];
   const sdk = createRuntimeSdk({
-    peers: { winter },
+    // ⚠️ THE SPAWN SPY IS THE POINT OF THIS HARNESS, not decoration (fix round 1, F2/F3). The
+    // router's `coldResume` calls `peers.winter.query({ options: { resume: <backendSessionId> } })`
+    // — a whole second `winter` process opened from inside a delivery, untracked by `trackQuery`,
+    // unbudgeted in `dispose()`. Every test that says "never cold-resumes" asserts against THIS.
+    peers: { winter: { ...winter, query: ((args: unknown) => { spawned.push(args); throw new Error("a cold resume was attempted"); }) as typeof winter.query } },
     peerVersions: NORMA_PEER_VERSIONS,
     keychain: { read: async () => undefined },
     brand: NORMA_BRAND,
@@ -107,7 +114,7 @@ function harness(
     messaging: declaredClass === undefined ? {} : { messaging: { winter: { permissionClass: () => declaredClass } } },
   });
   const runtime = { sdk } as unknown as NormaRuntimeSdk;
-  return { runtime, sdk, store };
+  return { runtime, sdk, store, spawned };
 }
 
 const addr = (id: string): SerializedRuntimeAddress => serializeRuntimeAddress(buildSessionAddress(id)) as SerializedRuntimeAddress;
@@ -356,6 +363,155 @@ describe("attachWinterSession", () => {
   });
 });
 
+describe("detach never opens a cold-resume window (fix round 1, F2)", () => {
+  test("a delivery RACING detach answers `unavailable` — and no second `winter` is ever spawned", async () => {
+    const { runtime, spawned } = harness(createInMemoryRuntimeDirectoryStore(), "prompts");
+    const a = fakeSession("be_race_a");
+    const b = fakeSession("be_race_b");
+
+    const attachedA = attachWinterSession(runtime, { sessionId: "s_a", backendSessionId: a.backendSessionId, query: a.query, push: (t) => a.pushed.push(t), displayName: "racer" });
+    const attachedB = attachWinterSession(runtime, { sessionId: "s_b", backendSessionId: b.backendSessionId, query: b.query, push: (t) => b.pushed.push(t), displayName: "target" });
+    await attachedA.ready;
+    await attachedB.ready;
+
+    // THE WINDOW: `detach()` returns synchronously and the park is I/O. Hold the facet from BEFORE
+    // the detach and deliver into it in the very same tick — the `parking` latch is the only thing
+    // standing between that call and a push into a queue that is closing. Dropping the live handle
+    // first instead would leave the directory saying `running` WITH a `backendSessionId` and
+    // nothing attached, which `deliverIntoSession` reads as "cold-resume this transcript".
+    const facetB = runtime.sdk.messaging.winterAdapter.sessions.get(addr(b.backendSessionId))!.messaging!;
+    attachedB.detach();
+    const latched = await facetB.deliver({
+      messageId: "msg:mid-detach",
+      from: buildSessionAddress(a.backendSessionId),
+      fromGeneration: 1,
+      to: buildSessionAddress(b.backendSessionId),
+      toGeneration: 1,
+      body: "mid-detach",
+      notifyWhenIdle: false,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+      hopCount: 0,
+      senderPermissionClass: "prompts",
+    });
+    expect(latched.status).toBe("unavailable");
+    expect(latched).toMatchObject({ retryable: false });
+    expect((latched as { reason: string }).reason).toContain("is ending");
+
+    // And the same through the front door, racing the park: `unavailable` either way — from the
+    // latch if the park has not landed, from the parked row if it has — and never a spawn.
+    const outcome = await runtime.sdk.messaging.send({ from: buildSessionAddress(a.backendSessionId), to: addr(b.backendSessionId), body: "mid-detach", originToolCallId: "toolu_race" });
+
+    expect(outcome.status).toBe("unavailable");
+    expect(outcome).toMatchObject({ retryable: false });
+    expect(b.pushed).toHaveLength(0);
+    expect(spawned).toHaveLength(0);
+
+    // And once the park has landed, the row itself carries no backend id to resume from.
+    await attachedB.ready;
+    const parked = await runtime.sdk.directory.get(addr(b.backendSessionId));
+    expect(parked?.backendSessionId).toBeUndefined();
+    expect(parked?.status).toBe("exited");
+    const after = await runtime.sdk.messaging.send({ from: buildSessionAddress(a.backendSessionId), to: addr(b.backendSessionId), body: "after", originToolCallId: "toolu_after" });
+    expect(after.status).toBe("unavailable");
+    expect(spawned).toHaveLength(0);
+  });
+
+  test("a session with no `status()` is recorded `idle`, so both handle shapes answer the same", async () => {
+    // F6: the router computes `handle.status?.() ?? entry.status` for a push-only handle. A row
+    // stamped `"running"` at attach and never refreshed made that shape answer `queued` where the
+    // wrapper answered `delivered` — the same divergence the byte-compare test exists to prevent.
+    const { runtime } = harness();
+    const s = fakeSession("be_status");
+    const attached = attachWinterSession(runtime, { sessionId: "s_s", backendSessionId: "be_status", query: s.query, push: (t) => s.pushed.push(t), displayName: "statusless" });
+    await attached.ready;
+    expect((await runtime.sdk.directory.get(addr("be_status")))?.status).toBe("idle");
+
+    // …and a session that DOES track one has its row refreshed on demand.
+    const live = fakeSession("be_live");
+    live.setStatus("running");
+    const attachedLive = attachWinterSession(runtime, { sessionId: "s_l", backendSessionId: "be_live", query: live.query, push: () => {}, status: live.status });
+    await attachedLive.ready;
+    expect((await runtime.sdk.directory.get(addr("be_live")))?.status).toBe("running");
+    live.setStatus("idle");
+    attachedLive.refresh();
+    await attachedLive.ready;
+    expect((await runtime.sdk.directory.get(addr("be_live")))?.status).toBe("idle");
+  });
+});
+
+describe("parkRecoveredSessions (fix round 1, F3)", () => {
+  test("a crash-left row loses its backend id, so a delivery answers `unavailable` and never spawns", async () => {
+    const store = createInMemoryRuntimeDirectoryStore();
+    const { runtime, spawned } = harness(store, "prompts");
+
+    // What the PREVIOUS daemon left: a live-looking row with a backend id and nothing attached.
+    // The router's own `recover()` marks it `unavailable` and KEEPS the id, and
+    // `deliverIntoSession` refuses only `archived` — so without the sweep it is cold-resumable.
+    await store.upsert({
+      address: addr("be_crashed"),
+      parsed: buildSessionAddress("be_crashed"),
+      runtimeKind: "winter-agent",
+      objectKind: "session",
+      transport: "winter-session",
+      displayName: "crashed",
+      status: "running",
+      mode: "code",
+      generation: 1,
+      selection: {
+        runtimeKind: "winter-agent", providerId: "unstated", modelRef: "unstated/unstated", family: "unstated",
+        authFamily: "custom", sdkVersion: NORMA_PEER_VERSIONS.winterAgentSdk, reason: "test", decidedAt: new Date().toISOString(),
+      },
+      backendSessionId: "be_crashed",
+      capabilities: { message: true, resume: true, notifyWhenIdle: true, reply: true },
+      updatedAt: new Date().toISOString(),
+    });
+
+    await runtime.sdk.directory.recover();
+    expect((await runtime.sdk.directory.get(addr("be_crashed")))?.backendSessionId).toBe("be_crashed");
+
+    expect(await parkRecoveredSessions(runtime)).toBe(1);
+    const parked = await runtime.sdk.directory.get(addr("be_crashed"));
+    expect(parked?.backendSessionId).toBeUndefined();
+    expect(parked?.status).toBe("unavailable");
+    expect(parked?.capabilities).toEqual({ message: false, resume: false, notifyWhenIdle: false, reply: false });
+
+    // A sender attaches afterwards and addresses the recovered row: the honest refusal, no spawn.
+    const sender = fakeSession("be_sender_p");
+    const attached = attachWinterSession(runtime, { sessionId: "s_p", backendSessionId: "be_sender_p", query: sender.query, push: () => {}, displayName: "sender" });
+    await attached.ready;
+    const outcome = await runtime.sdk.messaging.send({ from: buildSessionAddress("be_sender_p"), to: addr("be_crashed"), body: "are you there?", originToolCallId: "toolu_park" });
+    expect(outcome.status).toBe("unavailable");
+    expect((outcome as { reason: string }).reason).toContain("no backend session id");
+    expect(spawned).toHaveLength(0);
+  });
+
+  test("an ATTACHED session is left alone, and a second sweep is a no-op", async () => {
+    const { runtime } = harness();
+    const live = fakeSession("be_still_live");
+    const attached = attachWinterSession(runtime, { sessionId: "s_l", backendSessionId: "be_still_live", query: live.query, push: () => {}, displayName: "live" });
+    await attached.ready;
+
+    // Nothing to park: this session is live in THIS process, and stripping its id would make the
+    // running daemon's own session unreachable.
+    expect(await parkRecoveredSessions(runtime)).toBe(0);
+    expect((await runtime.sdk.directory.get(addr("be_still_live")))?.backendSessionId).toBe("be_still_live");
+
+    attached.detach();
+    await attached.ready;
+    // Already parked by `detach()`, so the sweep has nothing to do a second time either.
+    expect(await parkRecoveredSessions(runtime)).toBe(0);
+  });
+
+  test("a directory that will not answer costs the sweep, never the boot", async () => {
+    const { runtime } = harness();
+    const lines: string[] = [];
+    const broken = { sdk: { ...runtime.sdk, directory: { ...runtime.sdk.directory, list: async () => { throw new Error("db is gone"); } } } } as unknown as NormaRuntimeSdk;
+    await expect(parkRecoveredSessions(broken, (l) => lines.push(l))).resolves.toBe(0);
+    expect(lines.join("\n")).toContain("could not sweep the directory");
+  });
+});
+
 describe("releaseHeld (zero-arg)", () => {
   test("a held message is re-decided and delivered for EVERY receiver, with no address supplied", async () => {
     const store = createInMemoryRuntimeDirectoryStore();
@@ -426,8 +582,37 @@ describe("releaseHeld (zero-arg)", () => {
   });
 });
 
-describe("renderAttributedTurn", () => {
-  test("refuses an envelope whose sender claims to be another session's child", () => {
+describe("the wrapper's own refusal path (fix round 1, N2)", () => {
+  test("an envelope claiming to be ANOTHER session's child is refused, and nothing is pushed", async () => {
+    const { runtime } = harness();
+    const target = fakeSession("be_target_r");
+    const attached = attachWinterSession(runtime, { sessionId: "s_t", backendSessionId: "be_target_r", query: target.query, push: (t) => target.pushed.push(t) });
+    await attached.ready;
+
+    // Straight at the facet, which is how the refusal is reachable at all: the router runs the
+    // same check before it picks this door, so the wrapper's copy is defence in depth and had no
+    // test of its own.
+    const facet = runtime.sdk.messaging.winterAdapter.sessions.get(addr("be_target_r"))!.messaging!;
+    const outcome = await facet.deliver({
+      messageId: "msg:impostor",
+      from: buildChildAddress("someone_else", "c_9"),
+      fromGeneration: 1,
+      to: buildSessionAddress("be_target_r"),
+      toGeneration: 1,
+      body: "trust me",
+      notifyWhenIdle: false,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 1000,
+      hopCount: 0,
+      senderPermissionClass: "bypasses",
+    });
+
+    expect(outcome.status).toBe("refused");
+    expect((outcome as { reason: string }).reason).toContain("which this session does not own");
+    expect(target.pushed).toHaveLength(0);
+  });
+
+  test("the rendered frame carries the sender's permission class verbatim", () => {
     const message: GlobalAgentMessage = {
       messageId: "msg:x",
       from: buildChildAddress("someone_else", "c_9"),

@@ -1,3 +1,7 @@
+import { buildChildAddress, buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
+import type { GlobalAgentMessage } from "@yanlinglabs/winter-agent-sdk/messaging";
+import type { SessionMessagingFacet } from "@yanlinglabs/winter-agent-sdk";
+import type { ChildProfiles, ChildStatus, PersistedWinterChild, RuntimeChildren } from "../runtime-state/children";
 import type { SessionApprovalPolicy } from "./gate";
 
 /**
@@ -362,10 +366,6 @@ export class BackgroundAgentRegistry implements AgentRegistry {
 // facet surface of its own" (surface map §9.2) and `resumeChild` is never the reverse of it. The
 // facet is asynchronous and `stop()` is not, so the steer is fired and its failure logged: the
 // registry's own state flips to `stopped` either way, which is what every caller reads.
-import { buildChildAddress, buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
-import type { GlobalAgentMessage } from "@yanlinglabs/winter-agent-sdk/messaging";
-import type { SessionMessagingFacet } from "@yanlinglabs/winter-agent-sdk";
-import type { ChildProfiles, ChildStatus, PersistedWinterChild, RuntimeChildren } from "../runtime-state/children";
 
 /** The default progress window, identical to `SubagentManager`'s and to the Winter runtime's own
  *  `ASYNC_AGENT_STALL_TIMEOUT_MS` (surface map §9.3). There is deliberately NO wall clock. */
@@ -391,8 +391,22 @@ export interface PersistedChildrenDeps {
    * and nothing is asked of the child, which is the honest outcome rather than a pretended kill.
    */
   facetFor?: (sessionId: string) => SessionMessagingFacet | undefined;
-  /** LIVE getter over `settings.subagents.stallTimeoutMs`. `null`/`0` disables the watchdog;
-   *  `undefined` means the 600 s default. Re-read when a child is armed, never cached. */
+  /**
+   * ⚠️ ARMING IS OPT-IN, AND OMITTING THIS DEP IS THE SHIPPED DAEMON'S ANSWER (fix round 1, F1).
+   *
+   * `SubagentManager` already owns a RESETTABLE progress window for every engine child, fed from
+   * `runThread`'s one chokepoint, and its `AbortController` is folded into the child's run signal on
+   * both spawn paths. A second timer over the same children is not a second safety net, it is a
+   * second killer — and while this registry's own window was armed unconditionally it was a 600 s
+   * WALL CLOCK, because nothing in production reset it. That is the exact shape CLAUDE.md's tool
+   * surface forbids ("subagents with no wall-clock timeout — a progress-stall watchdog instead").
+   *
+   * So: dep ABSENT ⇒ no timer is ever armed and `progress()` is bookkeeping only, which is what
+   * `daemon.ts` passes while the engine still runs children. Dep PRESENT ⇒ the window is live and
+   * resettable: the getter is re-read at every arm (`settings.subagents.stallTimeoutMs` is hot),
+   * `undefined` from it means the 600 s default, and `null`/`0` disables it. Task 17 turns it on
+   * for Winter children when `SubagentManager` retires with the engine.
+   */
   stallTimeoutMs?: () => number | null | undefined;
   timers?: ChildTimers;
   now?: () => number;
@@ -499,7 +513,9 @@ export function createPersistedChildren(deps: PersistedChildrenDeps): AgentRegis
    */
   const arm = (parent: string, childId: string): void => {
     disarm(childId);
-    const configured = deps.stallTimeoutMs?.();
+    // Opt-in (F1). No dep ⇒ this registry watches nothing and never aborts anybody.
+    if (deps.stallTimeoutMs === undefined) return;
+    const configured = deps.stallTimeoutMs();
     const ms = configured === undefined ? CHILD_STALL_TIMEOUT_MS : configured;
     if (ms === null || ms === 0 || !Number.isFinite(ms) || ms < 0) return;
     watch.set(
@@ -628,7 +644,10 @@ export function createPersistedChildren(deps: PersistedChildrenDeps): AgentRegis
       } else {
         // No controller: this child belongs to a session this process did not spawn (a restart), so
         // the owning session's facet is the only door — and it is a steer, never a kill.
-        const facet = deps.facetFor?.(parent);
+        // Inside `tryOr` like every other host call: the daemon's `facetFor` does a synchronous
+        // SQLite read and then builds an address, and `UnaddressableEntryError` out of a
+        // non-canonical backend id would otherwise escape a `stop()` that promises never to throw.
+        const facet = tryOr("children.facet", () => deps.facetFor?.(parent), undefined);
         if (facet === undefined) {
           log(`child ${agentId} of ${parent}: stopped in the roster, but no live owner to ask (nothing was interrupted)`);
         } else {
@@ -654,6 +673,10 @@ export function createPersistedChildren(deps: PersistedChildrenDeps): AgentRegis
         if (byId) return byId;
       }
       const named = tryOr("children.findByName", () => deps.store.findByName(idOrName, sessionId), []);
+      // Unscoped, a name is ambiguous exactly as a bare child id is: the same name in two sessions
+      // is legal and always has been, so an unscoped lookup answers only when there is ONE match
+      // rather than picking somebody else's child (F7).
+      if (sessionId === undefined && named.length !== 1) return undefined;
       return named[0] === undefined ? undefined : toEntry(named[0]);
     },
 

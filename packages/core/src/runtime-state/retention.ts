@@ -17,7 +17,7 @@
 // record is metadata ABOUT an execution; destroying it must never destroy what was executed.
 import { parseRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { GlobalAgentMessage, RuntimeDirectoryStore, SerializedRuntimeAddress } from "@yanlinglabs/winter-runtime-sdk";
-import type { RuntimeChildren } from "./children";
+import type { ChildProfiles, RuntimeChildren } from "./children";
 import type { RuntimeStateDb } from "./db";
 import type { RuntimeLeases } from "./leases";
 import { IllegalStateTransitionError, type RuntimeSessionRecords } from "./records";
@@ -75,6 +75,9 @@ export interface DeleteSessionRuntimeStateDeps {
   leases: RuntimeLeases;
   children: RuntimeChildren;
   directory: RuntimeDirectoryStore;
+  /** The child PROFILES those rows point at (P8b Task 13 fix r1, F4). Optional so a caller that has
+   *  no home — every pre-8b test of this door — is unchanged; `wiring.ts` always passes one. */
+  profiles?: ChildProfiles;
 }
 
 /** Does this address belong to the session — either as the session itself, or as one of its
@@ -121,7 +124,7 @@ export async function deleteSessionRuntimeState(
   deps: DeleteSessionRuntimeStateDeps,
   winterSessionId: string,
 ): Promise<{ removed: string[]; retainedUnreceipted: string[] }> {
-  const { rs, records, leases, children, directory } = deps;
+  const { rs, records, leases, children, directory, profiles } = deps;
   const removed: string[] = [];
   /** Message ids step 6 deliberately did not delete — see the note above. */
   const retainedUnreceipted: string[] = [];
@@ -157,6 +160,15 @@ export async function deleteSessionRuntimeState(
   const childRows = children.list(winterSessionId);
   rs.db.run("DELETE FROM runtime_children WHERE parent_winter_session_id = ?", [winterSessionId]);
   touched("runtime_children", childRows.length);
+  //    …and the CHILD PROFILES those rows pointed at (P8b Task 13 fix r1, F4). `resumeContextRef` is
+  //    a locator, so deleting the row alone leaves the thing it located — one JSON file per child
+  //    ever spawned, carrying that child's `instructions` and `openingPrompt` — under a home the
+  //    user believes they emptied. Best-effort by construction (`removeParent` never throws): a
+  //    stale file must not fail a deletion whose database half already committed.
+  if (profiles !== undefined) {
+    profiles.removeParent(winterSessionId);
+    touched("child_profiles", childRows.length);
+  }
 
   // 4. Directory entries, cursors and idle subscriptions for `session:<id>` and `agent:<id>:*`.
   for (const entry of await directory.load()) {

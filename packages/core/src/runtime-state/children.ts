@@ -197,6 +197,7 @@ export class RuntimeChildren {
     return row ? fromRow(row) : undefined;
   }
 
+  /** See `findByName` for what `ORDER BY started_at, child_id` does and does not guarantee (N5). */
   list(parent: string, filter: { status?: ChildStatus | ChildStatus[] } = {}): PersistedWinterChild[] {
     const values: string[] = [parent];
     let where = "parent_winter_session_id = ?";
@@ -229,7 +230,13 @@ export class RuntimeChildren {
 
   /** Children carrying this display NAME, optionally within one parent. The same name in two
    *  sessions is legal and always has been (`BackgroundAgentRegistry`'s own test says so), which is
-   *  why an unscoped lookup returns every match rather than picking one. */
+   *  why an unscoped lookup returns every match rather than picking one.
+   *
+   *  ORDER IS `started_at` (ISO, millisecond resolution) with `child_id` as an ALPHABETICAL
+   *  tie-break — near-enough registration order, not a guarantee of it: two children registered in
+   *  the same millisecond come back in id order, which for `b1` before `a2` is the reverse of how
+   *  they were made. Honest ordering would need a monotonic sequence column on the 8a table; no
+   *  caller depends on the distinction today (N5). */
   findByName(name: string, parent?: string): PersistedWinterChild[] {
     const where = parent === undefined ? "name = ?" : "name = ? AND parent_winter_session_id = ?";
     const args = parent === undefined ? [name] : [name, parent];
@@ -379,6 +386,23 @@ export class ChildProfiles {
       rmSync(this.pathFor(parent, childId), { force: true });
     } catch {
       /* a profile that will not delete is a stale file, never a failed operation */
+    }
+  }
+
+  /**
+   * Every profile a session ever wrote, plus its name-reach memory (fix round 1, F4).
+   *
+   * ⚠️ A RETENTION SWEEP THAT PRUNES THE ROW AND LEAVES THE PROMPT IS THE WRONG HALF. `runtime_children`
+   * rows are deleted with the session (`retention.ts` step 3), but the profiles hold the child's
+   * `instructions` and its `openingPrompt` — the very content the row was kept free of — so without
+   * this the deletion leaves one JSON file per child ever spawned, forever, under a home the user
+   * believes they emptied.
+   */
+  removeParent(parent: string): void {
+    try {
+      rmSync(join(this.root, encodeURIComponent(parent)), { recursive: true, force: true });
+    } catch {
+      /* same: a directory that will not delete is a stale tree, never a failed deletion */
     }
   }
 

@@ -8,6 +8,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { compatibilityKeys } from "@yanlinglabs/winter-agent-sdk";
+import { buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -119,6 +120,61 @@ describe("daemon wiring — the store opens and recovery runs before the socket 
       // The ordering claim, measured rather than asserted by construction: the socket did not exist
       // until after recovery had finished.
       expect(new Date(rt.lastRecovery.finishedAt).getTime()).toBeLessThanOrEqual(statSync(dirs.socketPath).ctimeMs);
+    });
+  });
+
+  // P8b Task 12 fix round 1 (F8): the DIRECTORY half of the same ordering claim. The router handle
+  // is built after §13's twelve steps (a recorded plan conflict — see the Task 12 report), so
+  // `directory.recover()` runs from the runtime-sdk construction site instead. Nothing in the
+  // recovery report says when that happened, and the previous round proved only the HOOK. This
+  // proves the daemon: both directory effects are already on disk by the time the socket exists.
+  test("the directory is recovered AND its crash-left rows parked before the socket exists", async () => {
+    await withTempHome(async (home, dirs) => {
+      // What the previous daemon left behind, written before this one boots: a delivery claimed and
+      // never receipted (§6.4 step 5's whole evidence), and a live-looking session row carrying the
+      // `backendSessionId` the router would cold-resume from.
+      const seed = openRuntimeStateDb(home);
+      const seedDirectory = createSqliteRuntimeDirectoryStore(seed);
+      const envelope = {
+        messageId: "msg:be_prev:toolu_crash",
+        from: buildSessionAddress("be_prev"), fromGeneration: 1,
+        to: buildSessionAddress("be_other"), toGeneration: 1,
+        body: "did this arrive?", notifyWhenIdle: false,
+        createdAt: Date.now(), expiresAt: Date.now() + 600_000, hopCount: 0,
+        senderPermissionClass: "prompts" as const,
+      };
+      await seedDirectory.deliveries.put({ messageId: envelope.messageId, message: envelope, toGeneration: 1, claimedBy: "winter-agent", updatedAt: ISO() });
+      await seedDirectory.upsert({
+        address: serializeRuntimeAddress(buildSessionAddress("be_prev")),
+        parsed: buildSessionAddress("be_prev"),
+        runtimeKind: "winter-agent", objectKind: "session", transport: "winter-session",
+        displayName: "previous", status: "running", mode: "code", generation: 1,
+        selection: {
+          runtimeKind: "winter-agent", providerId: "codex-oauth", modelRef: "openai/gpt-5.4", family: "openai",
+          authFamily: "console-oauth", sdkVersion: "0.0.3", reason: "test", decidedAt: ISO(),
+        },
+        backendSessionId: "be_prev",
+        capabilities: { message: true, resume: true, notifyWhenIdle: true, reply: true },
+        updatedAt: ISO(),
+      });
+      seed.close();
+
+      const d = await boot(home);
+      const rt = online(d);
+      const directory = rt.directory;
+
+      // The socket exists, so a client could already be asking this daemon about a session — and
+      // BOTH effects are already durable.
+      expect(existsSync(dirs.socketPath)).toBe(true);
+      expect((await directory.deliveries.get(envelope.messageId))?.outcome?.status).toBe("delivery_uncertain");
+      expect(await directory.deliveries.claimedWithoutReceipt()).toHaveLength(0);
+
+      const parked = (await directory.load()).find((e) => e.address === serializeRuntimeAddress(buildSessionAddress("be_prev")));
+      // F3: no `backendSessionId` survives, so no delivery can cold-resume a session this daemon
+      // never attached. A Norma session is resumed by its DRIVER, from the 8a record — which keeps
+      // its own copy and is untouched here.
+      expect(parked?.backendSessionId).toBeUndefined();
+      expect(parked?.status).toBe("unavailable");
     });
   });
 

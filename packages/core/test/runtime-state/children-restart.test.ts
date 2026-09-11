@@ -21,6 +21,8 @@ import {
 } from "../../src/agent/bg-agent-registry";
 import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
 import { ChildProfiles, RuntimeChildren } from "../../src/runtime-state/children";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { withTempHome } from "./support";
 
 const RESUME: ResumeContext = {
@@ -398,15 +400,34 @@ describe("createPersistedChildren — never throws (the contract the Map had for
   });
 });
 
-describe("createPersistedChildren — the progress-stall watchdog", () => {
-  test("no wall clock; a child with no progress for the window is stopped as `timeout`", async () => {
+describe("createPersistedChildren — the progress-stall watchdog (fix round 1, F1)", () => {
+  test("THE SHIPPED DAEMON'S SHAPE: with no `stallTimeoutMs` dep, nothing is ever armed", async () => {
     await withHome((h) => {
       const clock = fakeTimers();
       const abort = new AbortController();
+      // `daemon.ts` passes no `stallTimeoutMs` while the engine runs children: `SubagentManager`
+      // already owns a resettable window for them and its controller is folded into their run
+      // signal, so a second timer here would be a second KILLER — and, unreset, a 600 s WALL CLOCK,
+      // which is exactly what CLAUDE.md's tool surface and "subagents: no timeout" forbid.
       const reg = h.registry({ timers: clock.timers });
       reg.register(input({ abort }));
 
-      // Armed at the shipped default, which is `SubagentManager`'s and the Winter runtime's.
+      expect(clock.armed()).toEqual([]);
+      clock.fireAll();
+      expect(reg.get("a1", "s1")?.status).toBe("running");
+      expect(abort.signal.aborted).toBe(false);
+    });
+  });
+
+  test("a child with NO progress is stopped as `timeout` once the window is armed", async () => {
+    await withHome((h) => {
+      const clock = fakeTimers();
+      const abort = new AbortController();
+      const reg = h.registry({ timers: clock.timers, stallTimeoutMs: () => undefined });
+      reg.register(input({ abort }));
+
+      // `undefined` from the getter means the shipped default, which is `SubagentManager`'s and the
+      // Winter runtime's own `ASYNC_AGENT_STALL_TIMEOUT_MS`.
       expect(clock.armed()).toEqual([{ ms: CHILD_STALL_TIMEOUT_MS }]);
       clock.fireAll();
 
@@ -416,23 +437,40 @@ describe("createPersistedChildren — the progress-stall watchdog", () => {
     });
   });
 
-  test("progress() RE-ARMS it — that is the whole difference from a wall clock", async () => {
+  test("a child that KEEPS reporting progress is never aborted, however long it runs", async () => {
     await withHome((h) => {
       const clock = fakeTimers();
-      const reg = h.registry({ timers: clock.timers });
+      const abort = new AbortController();
+      const reg = h.registry({ timers: clock.timers, stallTimeoutMs: () => undefined });
+      reg.register(input({ abort }));
+
+      // Ten full windows of fake time — an hour and forty minutes of wall clock — each one ended by
+      // a progress report before it could fire. A wall clock kills this child; a progress window
+      // does not, and that difference is the whole user-facing rule.
+      let previous = clock.ids()[0]!;
+      for (let window = 0; window < 10; window += 1) {
+        reg.progress("a1");
+        const armed = clock.ids();
+        expect(armed).toHaveLength(1); // cleared and re-armed, never stacked
+        expect(armed[0]).not.toBe(previous); // a NEW timer: the window genuinely restarted
+        previous = armed[0]!;
+      }
+      expect(reg.get("a1", "s1")?.status).toBe("running");
+      expect(abort.signal.aborted).toBe(false);
+
+      // And when it finally does go quiet, it is stopped.
+      clock.fireAll();
+      expect(reg.get("a1", "s1")?.status).toBe("timeout");
+      expect(abort.signal.aborted).toBe(true);
+    });
+  });
+
+  test("a terminal transition disarms, so a finished child is never reported stalled", async () => {
+    await withHome((h) => {
+      const clock = fakeTimers();
+      const reg = h.registry({ timers: clock.timers, stallTimeoutMs: () => undefined });
       reg.register(input());
-      const first = clock.ids();
-      expect(first).toHaveLength(1);
-      reg.progress("a1");
-      const second = clock.ids();
-      // A NEW timer (the window restarted) and still exactly one (the old one was cleared, not
-      // stacked) — the two halves of "resettable progress window", neither provable without ids.
-      expect(second).toHaveLength(1);
-      expect(second[0]).not.toBe(first[0]!);
       reg.complete("a1", { ok: true, result: "finished in time" });
-      // Terminal disarms — and this is also why the watchdog can run BESIDE SubagentManager's
-      // while the engine lives: whichever fires first makes the child terminal, and the other's
-      // `complete()` is then a no-op.
       expect(clock.armed()).toEqual([]);
       clock.fireAll();
       expect(reg.get("a1", "s1")?.status).toBe("completed");
@@ -453,6 +491,59 @@ describe("createPersistedChildren — the progress-stall watchdog", () => {
       // Disabled means disabled: nothing fires, and the child stays running.
       clock.fireAll();
       expect(reg.get("a1", "s1")?.status).toBe("running");
+    });
+  });
+});
+
+describe("createPersistedChildren — fix round 1 residues", () => {
+  test("F7: an unscoped NAME lookup never answers about an arbitrary parent's child", async () => {
+    await withHome((h) => {
+      const reg = h.registry();
+      reg.register(input({ name: "twin" }));
+      reg.register(input({ agentId: "b1", sessionId: "s2", name: "twin" }));
+      // Two sessions may legally use one name, so unscoped it is ambiguous — exactly as a bare
+      // child id minted by two parents is.
+      expect(reg.get("twin")).toBeUndefined();
+      expect(reg.get("twin", "s1")?.agentId).toBe("a1");
+      expect(reg.get("twin", "s2")?.agentId).toBe("b1");
+    });
+  });
+
+  test("F5: a `facetFor` that THROWS does not escape stop() — the never-throws contract holds", async () => {
+    await withHome((h) => {
+      const lines: string[] = [];
+      const store = new RuntimeChildren(h.rs);
+      const profiles = new ChildProfiles(h.home);
+      createPersistedChildren({ store, profiles, providerId: () => "openai" }).register(input());
+      // A restarted registry (no local controller) whose host door throws the way the daemon's real
+      // one can: `records.get` on a closed handle, or `UnaddressableEntryError` on a bad backend id.
+      const restarted = createPersistedChildren({
+        store, profiles, providerId: () => "openai",
+        facetFor: () => { throw new Error("UnaddressableEntryError"); },
+        log: (l) => lines.push(l),
+      });
+      expect(() => restarted.stop("a1")).not.toThrow();
+      expect(restarted.get("a1", "s1")?.status).toBe("stopped");
+      expect(lines.join("\n")).toContain("children.facet failed");
+    });
+  });
+
+  test("F4: deleting a session's runtime state deletes the child PROFILES, not only the rows", async () => {
+    await withHome(async (h) => {
+      const reg = h.registry();
+      reg.register(input({ resume: RESUME }));
+      expect(h.profiles.read("s1", "a1")?.resume).toEqual(RESUME);
+      expect(existsSync(join(h.home, "runtimes", "children", "s1", "a1.json"))).toBe(true);
+
+      h.profiles.removeParent("s1");
+
+      // The prompt is gone with the row — a sweep that pruned one and left the other would leave
+      // `instructions`/`openingPrompt` on disk under a home the user believes they emptied.
+      expect(h.profiles.read("s1", "a1")).toBeUndefined();
+      expect(existsSync(join(h.home, "runtimes", "children", "s1"))).toBe(false);
+      // And it is best-effort: a second removal, or one for a parent that never existed, is a no-op.
+      expect(() => h.profiles.removeParent("s1")).not.toThrow();
+      expect(() => h.profiles.removeParent("never-existed")).not.toThrow();
     });
   });
 });

@@ -44,6 +44,7 @@ import {
   buildSessionAddress,
   delivered,
   deliveryUncertain,
+  unavailable,
   escapeAttributionAttribute,
   escapeAttributionText,
   queued,
@@ -119,6 +120,8 @@ export interface WinterSessionAttachment {
 }
 
 export interface WinterSessionAttachHandle {
+  /** Re-record the directory row from the session's live status (F6). */
+  refresh(): void;
   /** Remove the live handle and park the directory row `exited`. NEVER `forget()` — the row is what
    *  lets WS-10 §11 rule 5 answer "that name referred to something that has gone" instead of "no
    *  such agent", and the released lease is the only memory of it. Idempotent. */
@@ -186,7 +189,13 @@ function bridgedFacet(
   facet: SessionMessagingFacet,
   push: (text: string) => void,
   owner: { winterSessionId: string },
-  status?: () => LiveSessionStatus,
+  /** The LIVE status, already defaulted — see `liveStatusOf`. Both handle shapes must read the same
+   *  answer or they disagree about the same delivery (F6). */
+  status: () => LiveSessionStatus,
+  /** Set SYNCHRONOUSLY by `detach()`, cleared never. While it is true the handle is still attached
+   *  (so the router cannot cold-resume) but the session is going away, so a delivery is refused
+   *  rather than pushed into a queue that is about to close (F2). */
+  parking: () => boolean,
 ): SessionMessagingFacet {
   return {
     listReachable: () => facet.listReachable(),
@@ -202,6 +211,12 @@ function bridgedFacet(
       // refusal here means something reached the facet another way.
       const refusal = unattributableReason(message, owner);
       if (refusal !== undefined) return refused(message.messageId, refusal);
+      // F2: `detach()` has been called and the row has not been parked yet. The handle is still
+      // registered ON PURPOSE — dropping it here is what would let the router's `coldResume` open a
+      // second `winter` process on this transcript — so the refusal happens at the door instead.
+      if (parking()) {
+        return unavailable(message.messageId, false, `${owner.winterSessionId} is ending; its input stream is closing and nothing was delivered`);
+      }
       try {
         push(renderAttributedTurn(message, owner));
       } catch (error) {
@@ -213,7 +228,7 @@ function bridgedFacet(
       }
       // `liveOutcome`, the router's own: a turn is already running, so the pushed text is QUEUED
       // behind it rather than being read now.
-      return status?.() === "running" ? queued(message.messageId) : delivered(message.messageId);
+      return status() === "running" ? queued(message.messageId) : delivered(message.messageId);
     },
   };
 }
@@ -231,9 +246,23 @@ export function attachWinterSession(runtime: NormaRuntimeSdk, session: WinterSes
   const generation = session.generation ?? 1;
   const owner = { winterSessionId: session.backendSessionId };
 
+  /**
+   * The ONE status both handle shapes read (F6).
+   *
+   * The router computes `handle.status?.() ?? entry.status` for a push-only handle, so a row stamped
+   * `"running"` at attach and never refreshed made a push-only handle answer `queued` where the
+   * wrapper answered `delivered` — the same class of divergence the byte-compare test exists to
+   * prevent, one field over. `"idle"` is the honest default for a session that has not said: a
+   * turn is not running, so the pushed text is read next rather than queued behind one.
+   */
+  const liveStatusOf = (): LiveSessionStatus => session.status?.() ?? "idle";
+
+  /** F2: flipped synchronously by `detach()`, read by the wrapper's `deliver`. */
+  let parking = false;
+
   const handle: AttachedWinterSession = {
-    messaging: bridgedFacet(session.query.messaging, session.push, owner, session.status),
-    ...(session.status === undefined ? {} : { status: session.status }),
+    messaging: bridgedFacet(session.query.messaging, session.push, owner, liveStatusOf, () => parking),
+    status: liveStatusOf,
   };
 
   const entry = (live: boolean): RuntimeDirectoryEntry => ({
@@ -246,7 +275,9 @@ export function attachWinterSession(runtime: NormaRuntimeSdk, session: WinterSes
     transport: "winter-session",
     ...(session.displayName === undefined ? {} : { displayName: session.displayName }),
     ...(session.title === undefined ? {} : { title: session.title }),
-    status: live ? "running" : "exited",
+    // F6: the row mirrors the live answer, so `listReachable` does not report every attached
+    // session as "running" forever and the two handle shapes never disagree.
+    status: live ? liveStatusOf() : "exited",
     mode: session.mode ?? "code",
     ...(session.cwd === undefined ? {} : { cwd: session.cwd }),
     generation,
@@ -269,8 +300,10 @@ export function attachWinterSession(runtime: NormaRuntimeSdk, session: WinterSes
   // messaging error a Winter-only host can still hit (surface map §8.5). It is raised out of
   // `ready`, never swallowed: a session recorded under an address nothing can resolve would be
   // listed and unreachable, which is precisely what that class exists to prevent.
-  let chain: Promise<void> = runtime.sdk.directory.record(entry(true));
+  // The live handle FIRST — a map write that cannot fail — then the durable row, which is I/O
+  // (N1: the code now reads in the order its own explanation gives).
   const detachHandle = runtime.sdk.messaging.attachWinterSession(address, handle);
+  let chain: Promise<void> = runtime.sdk.directory.record(entry(true));
 
   let detached = false;
   return {
@@ -278,15 +311,26 @@ export function attachWinterSession(runtime: NormaRuntimeSdk, session: WinterSes
     get ready(): Promise<void> {
       return chain;
     },
+    /** Re-record the row from the session's LIVE status (F6). Task 16 calls it at every state
+     *  change; the row is the only thing a push-only handle and `listReachable` can read. */
+    refresh(): void {
+      if (detached) return;
+      chain = chain.then(() => runtime.sdk.directory.record(entry(true)), () => runtime.sdk.directory.record(entry(true)));
+    },
     detach(): void {
       if (detached) return;
       detached = true;
-      detachHandle();
-      // Chained, not raced: the park must not overtake the row it parks. A failed park is logged by
-      // the caller through `ready`, never thrown at a `detach()` that returns void.
-      chain = chain.then(
-        () => runtime.sdk.directory.record(entry(false)),
-        () => runtime.sdk.directory.record(entry(false)),
+      // ⚠️ ORDER IS THE WHOLE FIX (F2). Dropping the live handle first leaves a window in which the
+      // directory still says `running` WITH a `backendSessionId` and no handle answers — and the
+      // router's `deliverIntoSession` reads exactly that as "cold-resume this transcript", spawning
+      // a second `winter` process the daemon never tracked. So: latch `parking` synchronously (the
+      // wrapper refuses from this instruction onward), park the row, and only then let the handle
+      // go. A delivery in the window meets a typed `unavailable`; none of them meets a spawn.
+      parking = true;
+      const park = (): Promise<void> => runtime.sdk.directory.record(entry(false));
+      chain = chain.then(park, park).then(
+        () => { detachHandle(); },
+        () => { detachHandle(); },
       );
     },
   };
@@ -349,4 +393,55 @@ export async function releaseAllHeld(
 export function attachedFacetFor(runtime: Pick<NormaRuntimeSdk, "sdk">, backendSessionId: string): SessionMessagingFacet | undefined {
   const address = serializeRuntimeAddress(buildSessionAddress(backendSessionId)) as SerializedRuntimeAddress;
   return runtime.sdk.messaging.winterAdapter.sessions.get(address)?.messaging;
+}
+
+/**
+ * Park every session row the previous daemon left behind (fix round 1, F3).
+ *
+ * ⚠️ WHY `directory.recover()` IS NOT ENOUGH ON ITS OWN. The router's recovery marks a previously
+ * live row `status: "unavailable"` and KEEPS its `backendSessionId`, and `deliverIntoSession`
+ * refuses only `"archived"` — so every session row from the last boot stays cold-resumable from
+ * inside a delivery. Today nothing actually spawns, because Norma supplies no `resumeOptions` and
+ * the SDK cannot resolve a `winter` executable without being handed one. That is safety by accident
+ * of an unresolvable binary, which is the same shape CLAUDE.md calls out for `reasoning_item` ("an
+ * accident of a missing protocol variant, not policy"). This makes it policy.
+ *
+ * A Norma session is resumed by its DRIVER, from the 8a `runtime_sessions` record — which keeps its
+ * own `backendSessionId` and is untouched here — on the next `send`/`steer` (P8b-24). The directory
+ * row's copy exists only to let the router resume behind the daemon's back, so a row this process
+ * has not attached does not get one.
+ *
+ * Never throws: a directory that will not answer costs the sweep, never the boot.
+ */
+export async function parkRecoveredSessions(
+  runtime: Pick<NormaRuntimeSdk, "sdk">,
+  log?: (line: string) => void,
+): Promise<number> {
+  let parked = 0;
+  try {
+    const attached = new Set(runtime.sdk.messaging.winterAdapter.sessions.addresses());
+    for (const entry of await runtime.sdk.directory.list()) {
+      if (entry.runtimeKind !== "winter-agent" || entry.objectKind !== "session") continue;
+      if (attached.has(entry.address)) continue;
+      // A row with no backend id has no resume source, which is the ONLY thing this sweep removes —
+      // so it is already parked, whatever its status says (`detach()` leaves `exited`, this sweep
+      // leaves `unavailable`, and neither should overwrite the other's account of what happened).
+      if (entry.backendSessionId === undefined) continue;
+      const { backendSessionId: _dropped, ...rest } = entry;
+      try {
+        await runtime.sdk.directory.record({
+          ...rest,
+          status: "unavailable",
+          capabilities: { message: false, resume: false, notifyWhenIdle: false, reply: false },
+          updatedAt: new Date().toISOString(),
+        });
+        parked += 1;
+      } catch (error) {
+        log?.(`could not park ${entry.address} (${error instanceof Error ? error.name : "unknown"})`);
+      }
+    }
+  } catch (error) {
+    log?.(`could not sweep the directory for unattached sessions (${error instanceof Error ? error.name : "unknown"})`);
+  }
+  return parked;
 }

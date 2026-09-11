@@ -21,7 +21,7 @@ import type { RuntimeDirectoryStore } from "@yanlinglabs/winter-runtime-sdk";
 import type { SessionStore } from "../sessions/store";
 import type { Settings } from "../settings";
 import { ProjectionCheckpoints } from "./checkpoints";
-import { RuntimeChildren } from "./children";
+import { ChildProfiles, RuntimeChildren } from "./children";
 import { openRuntimeStateDb, type RuntimeStateDb } from "./db";
 import { createSqliteRuntimeDirectoryStore } from "./directory-store";
 import { RuntimeLeases, processStartedAt, type LeaseProbe } from "./leases";
@@ -77,6 +77,9 @@ export interface RuntimeStateWiring {
   checkpoints: ProjectionCheckpoints;
   leases: RuntimeLeases;
   children: RuntimeChildren;
+  /** The child-profile sink beside `children` — one instance, so the daemon's registry and the
+   *  retention sweep can never point at two different roots (F4). */
+  profiles: ChildProfiles;
   /** The twelve-step report from THIS boot. `ok` means every step completed, not that every session
    *  was healthy — read `corrupt` for that (recovery.ts's own header). */
   lastRecovery: RecoveryReport;
@@ -160,6 +163,9 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
     const self = { pid: process.pid, startedAt: processStartedAt(process.pid) };
     const leases = new RuntimeLeases(rs, self);
     const children = new RuntimeChildren(rs);
+    // P8b Task 13 fix r1 (F4): the sink `PersistedWinterChild.resumeContextRef` locates. Held here
+    // so a session deletion removes the child PROMPTS along with the child rows.
+    const profiles = new ChildProfiles(home);
     const checkpoints = new ProjectionCheckpoints(rs);
     const directory = createSqliteRuntimeDirectoryStore(rs);
 
@@ -335,7 +341,7 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
       deletions = deletions.then(async () => {
         if (dbClosed) return; // the bounded drain gave up on us — the handle is gone
         try {
-          const { removed, retainedUnreceipted } = await deleteSessionRuntimeState({ rs, records, leases, children, directory }, sessionId);
+          const { removed, retainedUnreceipted } = await deleteSessionRuntimeState({ rs, records, leases, children, directory, profiles }, sessionId);
           if (removed.length > 0) log(`runtime state deleted for ${sessionId}: ${removed.join(", ")}`);
           // The delete stopped short ON PURPOSE: those rows are somebody else's `delivery_uncertain`
           // evidence (WS-15 §6.4), and an audit that did not say so would read as a missed delete.
@@ -349,7 +355,7 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
     };
 
     return {
-      db: rs, records, directory, checkpoints, leases, children,
+      db: rs, records, directory, checkpoints, leases, children, profiles,
       lastRecovery, lastBackfill,
       sweepNow,
       onSessionDeleted,

@@ -4,7 +4,7 @@ import type { DeliveryRecord, GlobalAgentMessage, RuntimeDirectoryEntry, Runtime
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  ProjectionCheckpoints, RuntimeChildren, RuntimeLeases, RuntimeSessionRecords, archiveSession,
+  ChildProfiles, ProjectionCheckpoints, RuntimeChildren, RuntimeLeases, RuntimeSessionRecords, archiveSession,
   createSqliteRuntimeDirectoryStore, deleteSessionRuntimeState, openRuntimeStateDb, retentionFromSettings,
   sweepRetention, type RuntimeStateDb,
 } from "../../src/runtime-state";
@@ -172,6 +172,38 @@ describe("sweepRetention", () => {
 });
 
 describe("deleteSessionRuntimeState", () => {
+  // P8b Task 13 fix round 1 (F4): the child ROWS were deleted and the profiles they located were
+  // not. `resumeContextRef` is a locator, so that left one JSON file per child ever spawned —
+  // carrying that child's `instructions` and `openingPrompt`, the very content the row is kept free
+  // of — under a home the user believes they emptied.
+  test("deletes the child PROFILES the rows pointed at, and only this session's", async () => {
+    await withTempHome(async (home) => {
+      const rs = openRuntimeStateDb(home);
+      try {
+        const store = createSqliteRuntimeDirectoryStore(rs);
+        const records = new RuntimeSessionRecords(rs);
+        const leases = new RuntimeLeases(rs, { pid: process.pid, startedAt: "2026-01-01T00:00:00.000Z" });
+        const children = new RuntimeChildren(rs);
+        const profiles = new ChildProfiles(home);
+        await seedSession(rs, store, "s_doomed");
+        await seedSession(rs, store, "s_sibling");
+        profiles.write("s_doomed", "c1", { threadId: "t1", notified: false, resume: { cwd: "/r", approvalPolicy: "auto", instructions: "the doomed child's instructions", openingPrompt: "do the thing", depth: 0, loaded: [], excludeTools: [] } });
+        profiles.write("s_sibling", "c1", { threadId: "t1", notified: false });
+        profiles.recordReach("s_doomed", "worker", "c1");
+
+        const { removed } = await deleteSessionRuntimeState({ rs, records, leases, children, directory: store, profiles }, "s_doomed");
+
+        expect(removed).toContain("child_profiles");
+        expect(existsSync(join(home, "runtimes", "children", "s_doomed"))).toBe(false);
+        // The sibling's profile — and its own name-reach memory — are untouched.
+        expect(profiles.read("s_sibling", "c1")?.threadId).toBe("t1");
+        expect(existsSync(join(home, "runtimes", "children", "s_sibling"))).toBe(true);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
   test("removes every row for the session and nothing for a sibling", async () => {
     await withTempHome(async (home) => {
       const rs = openRuntimeStateDb(home);

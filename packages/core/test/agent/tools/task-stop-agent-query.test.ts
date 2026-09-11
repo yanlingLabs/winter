@@ -107,10 +107,7 @@ describe("task_stop over the persisted roster", () => {
     });
   });
 
-});
-
-describe("task_stop after a restart", () => {
-  test("no local controller → a steer through the OWNING session's facet, never a kill", async () => {
+  test("after a restart there is no local controller → a steer through the OWNING session's facet, never a kill", async () => {
     await withTempHome(async (home) => {
       const rs = openRuntimeStateDb(home);
       try {
@@ -142,7 +139,7 @@ describe("task_stop after a restart", () => {
     });
   });
 
-  test("no live owner at all: the roster records the stop and says nothing was interrupted", async () => {
+  test("after a restart with no live owner at all: the roster records the stop and says nothing was interrupted", async () => {
     await withTempHome(async (home) => {
       const rs = openRuntimeStateDb(home);
       try {
