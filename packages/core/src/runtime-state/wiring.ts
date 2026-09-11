@@ -294,6 +294,10 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
         // The migration refuses rather than half-moves (its own header), so a throw here means
         // nothing was left torn that the next boot's plan cannot settle. The TYPE only: a message
         // could quote a path out of somebody's home.
+        //
+        // AND IT COUNTS AS THE ATTEMPT, which is what the log line promises: a store that throws
+        // will throw again, so retrying on every settings edit would repeat this line forever.
+        attempted = true;
         log(`memory-key migration failed (it retries at the next boot): ${errName(e)}`);
       }
     };
