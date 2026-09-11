@@ -105,7 +105,15 @@ describe("KeychainSeam over SecretStore", () => {
     const presence = await credentialPresenceFrom(store);
     expect(presence.byProvider["codex-oauth"]).toBe("keychain");
     expect(presence.byProvider.openai).toBeUndefined();
-    expect(presence.authByProvider).toBeUndefined(); // omitted in 8b (C-14)
+    // P8c-10: authByProvider is now filled for every present provider this file has a family for.
+    expect(presence.authByProvider).toEqual({ "codex-oauth": { authFamily: "custom" } });
+  });
+
+  test("credentialPresenceFrom: authByProvider (P8c-10) — openai and anthropic are api-key, codex-oauth is custom", async () => {
+    await writeOpenAiApiKey(store, "sk-test");
+    await store.set(NORMA_CREDENTIAL_INVENTORY.find((s) => s.provider === "anthropic")!.secretName, JSON.stringify({ kind: "api-key", key: "sk-ant-test" }));
+    const presence = await credentialPresenceFrom(store);
+    expect(presence.authByProvider).toEqual({ openai: { authFamily: "api-key" }, anthropic: { authFamily: "api-key" } });
   });
 
   test("credentialPresenceFrom: PRESENCE IS PARSEABILITY (hotfix review r1, M1) — a raw non-JSON leftover (the OLD pre-hotfix shape) is ABSENT, never present", async () => {
@@ -123,6 +131,7 @@ describe("KeychainSeam over SecretStore", () => {
     expect(NORMA_CREDENTIAL_INVENTORY).toEqual([
       { provider: "openai", secretName: "openai:default", kind: "keychain" },
       { provider: "codex-oauth", secretName: "codex-oauth:default", kind: "keychain" },
+      { provider: "anthropic", secretName: "anthropic:default", kind: "keychain" },
     ]);
   });
 

@@ -67,9 +67,22 @@ export interface CredentialSlot {
  * still has two spellings (`settings.provider.type` is `"openai-compatible"`, the catalog id is
  * `"openai"`); they must not be cross-read.
  */
+/**
+ * P8c-10: the anthropic row, added for the official leg's `api-key` auth family.
+ *
+ * `"anthropic:default"` is a LOCAL literal rather than a `CREDENTIAL_MATERIAL_NAMES` member —
+ * `auth/credential-material.ts` is not a lane-1-owned file this phase (it is not named in the
+ * 8c lane map at all), and `readCredentialMaterial`/`writeCredentialMaterial` both take an
+ * arbitrary secret NAME (never keyed off that constant internally), so nothing requires editing it
+ * to add a third provider row here. `norma login --anthropic-key` (`cli/main.ts`) writes exactly
+ * this name.
+ */
+export const ANTHROPIC_CREDENTIAL_SECRET_NAME = "anthropic:default";
+
 export const NORMA_CREDENTIAL_INVENTORY: readonly CredentialSlot[] = [
   { provider: "openai", secretName: CREDENTIAL_MATERIAL_NAMES.openai, kind: "keychain" },
   { provider: "codex-oauth", secretName: CREDENTIAL_MATERIAL_NAMES.codexOauth, kind: "keychain" },
+  { provider: "anthropic", secretName: ANTHROPIC_CREDENTIAL_SECRET_NAME, kind: "keychain" },
 ];
 
 /** Error code/class only — NEVER `.message`, which could embed material for some future
@@ -191,11 +204,24 @@ export function credentialRefFor(provider: string): CredentialRef | undefined {
  * (A malformed-but-present record does NOT hit this catch — `readCredentialMaterial` handles that
  * case itself, with its own single warning, and returns `null` rather than throwing.)
  */
+/**
+ * P8c-10: which `SelectionAuthFamily` each inventory provider's credential belongs to (WS-14 §12's
+ * own table, C-14). `openai`/`anthropic` are both a bare API key; `codex-oauth` is Norma's own
+ * OAuth material shape, which the router's selector treats as `"custom"` (never `"claude-oauth"` —
+ * that family is reserved for the Anthropic subscription login this daemon does not have, D14).
+ */
+const PROVIDER_AUTH_FAMILY: Readonly<Record<string, "api-key" | "custom">> = {
+  openai: "api-key",
+  anthropic: "api-key",
+  "codex-oauth": "custom",
+};
+
 export async function credentialPresenceFrom(
   store: SecretStore,
   inventory: readonly CredentialSlot[] = NORMA_CREDENTIAL_INVENTORY,
 ): Promise<CredentialPresence> {
   const byProvider: Record<string, CredentialRef["kind"]> = {};
+  const authByProvider: Record<string, { authFamily: "api-key" | "custom" }> = {};
   for (const slot of inventory) {
     let material: Awaited<ReturnType<typeof readCredentialMaterial>>;
     try {
@@ -204,7 +230,11 @@ export async function credentialPresenceFrom(
       console.warn(`[keychain] presence probe failed for "${slot.secretName}": ${describeError(err)}`);
       continue;
     }
-    if (material) byProvider[slot.provider] = slot.kind;
+    if (material) {
+      byProvider[slot.provider] = slot.kind;
+      const authFamily = PROVIDER_AUTH_FAMILY[slot.provider];
+      if (authFamily !== undefined) authByProvider[slot.provider] = { authFamily };
+    }
   }
-  return { byProvider };
+  return { byProvider, ...(Object.keys(authByProvider).length === 0 ? {} : { authByProvider }) };
 }
