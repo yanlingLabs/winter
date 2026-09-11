@@ -115,6 +115,16 @@ test("a bridge-provided description wins over Norma's composed summary (digest i
   await pending;
 });
 
+test("title/displayName never shadow the composed summary — the human must see the command", async () => {
+  const h = harness();
+  // `displayName`/`title` are plausibly the TOOL's names, populated on every request; if either won,
+  // every card would read "Bash" instead of the command being approved.
+  const pending = h.canUse("Bash", { command: "rm -rf x" }, requestCtx({ displayName: "Bash", title: "Bash command" }));
+  expect((h.events[0] as { summary: string }).summary).toBe("bash rm -rf x");
+  h.approvals.resolve(SESSION, "tu1", true, "user");
+  await pending;
+});
+
 test("Winter's suggestions become the card's rule options, session-scoped on the way back", async () => {
   const suggestions: PermissionUpdate[] = [
     { type: "addRules", rules: [{ toolName: "Bash", ruleContent: "git status:*" }], behavior: "allow", destination: "projectSettings" },
@@ -130,6 +140,11 @@ test("Winter's suggestions become the card's rule options, session-scoped on the
   // answer must not be able to change the session's mode or write a deny rule.
   expect(approvalOptionsFromSuggestions([{ type: "setMode", mode: "plan", destination: "session" }])).toBeUndefined();
   expect(approvalOptionsFromSuggestions(undefined)).toBeUndefined();
+  // A rule Norma's own grammar cannot parse is never offered — choosing it would append inert
+  // litter to the user's rules file under a label promising it silences future calls.
+  expect(approvalOptionsFromSuggestions([
+    { type: "addRules", rules: [{ toolName: "NotARealNormaRuleTool", ruleContent: "x" }], behavior: "allow", destination: "projectSettings" },
+  ])).toBeUndefined();
 });
 
 // -------------------------------------------------------------------------------------------
@@ -245,7 +260,9 @@ test("a broker that answers null/undefined denies — never a silent allow", asy
     const h = harness({ approvals: stub });
     const res = (await h.canUse("Bash", { command: "x" }, requestCtx()))!;
     expect(res.behavior).toBe("deny");
-    expect((res as { message: string }).message).toContain("NOT run");
+    // …and it says so honestly: nobody refused, the broker simply answered with nothing.
+    expect((res as { message: string }).message).toBe("Bash was not run — the approval request could not be completed. Nobody refused it.");
+    expect((res as { decisionClassification?: string }).decisionClassification).toBeUndefined();
   }
 });
 
@@ -268,8 +285,12 @@ test("a re-request for the same toolUseID supersedes the stale wait rather than 
   expect(h.approvals.list(SESSION)).toHaveLength(1);
   const second = h.canUse("Bash", { command: "a" }, requestCtx({ requestId: "r2" }));
 
-  // The first promise SETTLES (denied) instead of hanging forever behind an overwritten Map entry.
-  await expect(first).resolves.toMatchObject({ behavior: "deny" });
+  // The first promise SETTLES (denied) instead of hanging forever behind an overwritten Map entry —
+  // and it must NOT tell the model the user refused, which nobody did.
+  const firstRes = (await first)!;
+  expect(firstRes.behavior).toBe("deny");
+  expect((firstRes as { message: string }).message).toContain("Nobody refused it");
+  expect((firstRes as { decisionClassification?: string }).decisionClassification).toBeUndefined();
   expect(h.approvals.list(SESSION)).toHaveLength(1);
   h.approvals.resolve(SESSION, "tu1", true, "user");
   await expect(second).resolves.toMatchObject({ behavior: "allow" });
@@ -386,6 +407,30 @@ for (const row of MATRIX) {
     }
   });
 }
+
+test("only an actual human refusal is classified user_reject", async () => {
+  // A policy deny is not a user rejection: today it is a plain isError tool result and the turn
+  // continues. Claiming `user_reject` risks the runtime ending the turn on plan mode's first Bash.
+  const plan = (await harness({ policy: "plan" }).canUse("Bash", {}, requestCtx()))!;
+  expect((plan as { decisionClassification?: string }).decisionClassification).toBeUndefined();
+  const dispatch = (await harness({ mode: "dispatch", policy: "ask" }).canUse("Bash", {}, requestCtx()))!;
+  expect((dispatch as { decisionClassification?: string }).decisionClassification).toBeUndefined();
+
+  // A timeout/abort is "nobody answered", not a refusal…
+  const ac = new AbortController();
+  const aborted = harness();
+  const p = aborted.canUse("Bash", {}, requestCtx({ controller: ac }));
+  ac.abort();
+  expect(((await p)! as { decisionClassification?: string }).decisionClassification).toBeUndefined();
+
+  // …but a human "no" is.
+  const human = harness();
+  const hp = human.canUse("Bash", {}, requestCtx());
+  human.approvals.resolve(SESSION, "tu1", false, "phone");
+  const res = (await hp)!;
+  expect((res as { decisionClassification?: string }).decisionClassification).toBe("user_reject");
+  expect((res as { message: string }).message).toContain("The user denied this Bash action");
+});
 
 test("the divergence message is exactly the ruling's wording", () => {
   expect(neverPromptsMessage("Workflow", "dispatch", "auto"))

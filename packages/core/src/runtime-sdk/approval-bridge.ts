@@ -3,6 +3,7 @@ import type { ApprovalOption, NewSessionEvent } from "@norma/protocol";
 import { ApprovalBroker, approvalCardSummary, approvalOptionsFor } from "../agent/approvals";
 import type { QuestionBroker } from "../agent/questions";
 import type { PermissionGate, SessionApprovalPolicy } from "../agent/gate";
+import { parseRule } from "../agent/permission-rules";
 import type { Mode as SessionMode } from "../agent/tools/registry";
 import { gateToolNameFor } from "./tool-names";
 import { askUserQuestionBridge, ASK_USER_QUESTION_TOOL } from "./question-bridge";
@@ -139,6 +140,13 @@ const MAX_SUGGESTED_OPTIONS = 4;
  * `destination` picks the scope Norma's rules store will write: `projectSettings`/`localSettings`
  * → `"project"`, `userSettings` → `"global"`. `session`/`cliArg` have no durable Norma equivalent,
  * so those suggestions are dropped rather than being silently persisted to disk.
+ *
+ * **Every minted rule is round-tripped through the rules store's own `parseRule` first.** Choosing
+ * a rule-bearing option makes `approval.respond` APPEND that literal string to
+ * `<root>/.norma/permissions.local.json`; a rule in a grammar Norma cannot parse would be written,
+ * warned about once, and thereafter ignored — inert litter in the user's rules file, offered under
+ * a label promising it would silence future calls. Winter's rule vocabulary is Norma's (both are
+ * CC's), so this filter is a guard against drift, not a translation layer.
  */
 export function approvalOptionsFromSuggestions(suggestions: readonly PermissionUpdate[] | undefined): ApprovalOption[] | undefined {
   if (!suggestions?.length) return undefined;
@@ -152,6 +160,7 @@ export function approvalOptionsFromSuggestions(suggestions: readonly PermissionU
     if (!scope) continue;
     for (const r of s.rules) {
       const rule = r.ruleContent ? `${r.toolName}(${r.ruleContent})` : r.toolName;
+      if (parseRule(rule) === null) continue;   // never offer a rule the store cannot honour
       const key = `${scope}:${rule}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -233,9 +242,14 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     // (4) engine.ts:4341 — dont-ask declines everything it would otherwise card, with no prompt.
     if (decision === "ask" && policy === "dont-ask") decision = "deny";
 
+    // A POLICY deny is not a user rejection — today it is a plain `isError` tool result and the
+    // turn continues (only `deniedByHuman` ends it, engine.ts:5876-5882). `decisionClassification`
+    // is deliberately omitted on both policy paths: claiming `user_reject` for "plan mode forbids
+    // this" would, if the runtime treats that class as turn-ending, kill a planning turn on the
+    // model's first `Bash` attempt.
     if (decision === "deny") {
       log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} policy=${policy} reason=gate`);
-      return { behavior: "deny", message: deniedByPolicyMessage(policy), decisionClassification: "user_reject" };
+      return { behavior: "deny", message: deniedByPolicyMessage(policy) };
     }
     if (decision === "allow") {
       return { behavior: "allow", updatedInput: input };
@@ -244,7 +258,7 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     // (5) "ask" — and dispatch/chat never prompt (P8b-7).
     if (deps.mode !== "code") {
       log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} policy=${policy} reason=never-prompts mode=${deps.mode}`);
-      return { behavior: "deny", message: neverPromptsMessage(toolName, deps.mode, policy), decisionClassification: "user_reject" };
+      return { behavior: "deny", message: neverPromptsMessage(toolName, deps.mode, policy) };
     }
 
     return await raiseCard(deps, { log, now, threadId, policy }, toolName, gateToolName, input, ctx);
@@ -277,9 +291,18 @@ async function raiseCard(
   }
 
   const argsJson = safeArgsJson(input);
-  // Digest item 46: a bridge-provided description/title is the PREFERRED card text and a host must
-  // not reconstruct a weaker summary from the tool name — so Norma's own composer is the FALLBACK.
-  const summary = firstNonEmpty(ctx.description, ctx.title, ctx.displayName)
+  // Digest item 46: a bridge-provided description is the PREFERRED card text and a host must not
+  // reconstruct a weaker summary from the tool name — so Norma's own composer is the FALLBACK.
+  //
+  // **`title` and `displayName` are deliberately NOT consulted.** Their per-call semantics cannot
+  // be confirmed from the installed `.d.ts` (the descriptors live in the private runtime package),
+  // and the likely reading is that they are the TOOL's names — per-tool, not per-call ("Bash",
+  // "Bash command"). If either is populated on every request, using it would shadow
+  // `approvalCardSummary` on EVERY card: the human would read "Bash" where today they read
+  // "bash rm -rf x", i.e. approving a command they were never shown. `description` is the only one
+  // of the three whose name promises per-call text. Revisit in Task 9/16 once the runtime's
+  // population of `title`/`displayName` is observed on a live child.
+  const summary = firstNonEmpty(ctx.description)
     ?? approvalCardSummary({ name: gateToolName, argsJson });
   const options = approvalOptionsFromSuggestions(ctx.suggestions)
     ?? approvalOptionsFor({ name: gateToolName, argsJson });
@@ -342,14 +365,23 @@ async function raiseCard(
 
   if (!approved) {
     env.log.info(`canUseTool: resolved deny session=${sessionId} call=${callId} by=${by}`);
+    // `user_reject` is claimed ONLY for an actual human answer. A timeout, an abort, a supersede or
+    // an emit failure is "nobody answered", not "the user refused" — and the classification is a
+    // signal the runtime may act on, so mislabelling a machine outcome as a rejection risks
+    // turn-ending behaviour on a case today's engine simply reports as an `isError` tool result.
+    const machine = by === "timeout" || by === "aborted" || by === "superseded" || by === "emit-failure" || by === "unknown";
     return {
       behavior: "deny",
       message: by === "timeout"
         ? `${toolName} was not run — nobody answered the approval request.`
         : by === "aborted"
         ? `${toolName} was not run — the turn was aborted while the approval was pending.`
+        : by === "superseded"
+        ? `${toolName} approval was re-requested under a newer policy; this request is void. Nobody refused it.`
+        : by === "emit-failure" || by === "unknown"
+        ? `${toolName} was not run — the approval request could not be completed. Nobody refused it.`
         : `The user denied this ${toolName} action — it was NOT run. Stop here and wait for the user to tell you how to proceed. Do not retry it, rephrase it, or attempt a workaround; the user will give further instructions.`,
-      decisionClassification: "user_reject",
+      ...(machine ? {} : { decisionClassification: "user_reject" as const }),
     };
   }
 

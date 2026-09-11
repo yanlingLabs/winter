@@ -111,6 +111,23 @@ test("notes ride the resolution event and fold into §5.6's own annotations fiel
   expect(h.events[1]).toMatchObject({ notes: { "Which database?": "keep it simple" } });
 });
 
+test("the model's own annotations survive the notes merge", async () => {
+  const h = bridge();
+  const { ctx } = signalOf();
+  const withAnnotations = { ...INPUT, annotations: { "Which database?": { preview: "schema.sql" }, "Other?": { notes: "kept" } } };
+  const pending = h.ask("tu-q1", withAnnotations, ctx);
+  h.questions.respond(SESSION, "tu-q1", { "Which database?": "SQLite" }, "phone", { "Which database?": "keep it simple" });
+
+  await expect(pending).resolves.toMatchObject({
+    updatedInput: {
+      annotations: {
+        "Which database?": { preview: "schema.sql", notes: "keep it simple" },  // merged, not replaced
+        "Other?": { notes: "kept" },                                            // untouched
+      },
+    },
+  });
+});
+
 test("multiSelect defaults to false and an absent header stays an absent KEY", async () => {
   const h = bridge();
   const { ctx } = signalOf();

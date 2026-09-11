@@ -143,25 +143,35 @@ export function askUserQuestionBridge(
     // deny, never a silent allow with an unanswered question in the input.
     if (Object.keys(answers).length === 0) {
       log?.info(`AskUserQuestion: deny session=${sessionId} call=${callId} by=${by}`);
+      // No `decisionClassification`: nobody answered, which is not the same thing as a user
+      // rejecting the call (see the approval bridge's own note on the same distinction).
       return {
         behavior: "deny",
         message: by === "aborted"
           ? `${ASK_USER_QUESTION_TOOL} was not answered — the turn was aborted while the question was pending.`
           : `${ASK_USER_QUESTION_TOOL} was not answered — no response was given.`,
-        decisionClassification: "user_reject",
       };
     }
 
     log?.info(`AskUserQuestion: answered session=${sessionId} call=${callId} by=${by} count=${Object.keys(answers).length}`);
     // `annotations` is §5.6's own home for per-question free text, keyed by question text exactly
-    // like `answers` — so the broker's `notes` fold in there rather than inventing a field.
+    // like `answers` — so the broker's `notes` fold in there rather than inventing a field. MERGED
+    // over whatever the model already sent (it may have supplied its own `preview` annotations):
+    // a wholesale replacement would silently drop the model's half of the field.
+    const priorInput = (input ?? {}) as Record<string, unknown>;
+    const priorAnnotations = (typeof priorInput.annotations === "object" && priorInput.annotations !== null)
+      ? priorInput.annotations as Record<string, Record<string, unknown>>
+      : undefined;
     const annotations = notes
-      ? Object.fromEntries(Object.entries(notes).map(([q, n]) => [q, { notes: n }]))
+      ? {
+          ...priorAnnotations,
+          ...Object.fromEntries(Object.entries(notes).map(([q, n]) => [q, { ...priorAnnotations?.[q], notes: n }])),
+        }
       : undefined;
     return {
       behavior: "allow",
       updatedInput: {
-        ...(input as Record<string, unknown>),
+        ...priorInput,
         answers,
         ...(annotations ? { annotations } : {}),
       },
