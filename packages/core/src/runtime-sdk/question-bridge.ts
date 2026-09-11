@@ -75,6 +75,9 @@ export function askUserQuestionBridge(
 ): (toolUseID: string, input: unknown, ctx: { signal: AbortSignal; agentID?: string }) => Promise<PermissionResult> {
   const threadId = deps.threadId ?? "main";
   const log = deps.log;
+  /** `callId` → how many stale invocations must SKIP their own `question_resolved` emit, because
+   *  the superseding one already emitted it in the right order. */
+  const supersededEmits = new Map<string, number>();
 
   return async (toolUseID, input, ctx): Promise<PermissionResult> => {
     const { sessionId } = deps;
@@ -106,6 +109,24 @@ export function askUserQuestionBridge(
       multiSelect: q.multiSelect ?? false,
     }));
 
+    // Supersede guard — the same defect the approval side guards, and the same ordering rule.
+    //
+    // `QuestionBroker.wait` does `pending.set(k, …)`, so a second `AskUserQuestion` for the SAME
+    // `toolUseID` would overwrite the entry: the first promise never settles and its ~24.8-day
+    // timer leaks. `respond` is already a safe no-op when nothing is pending (it reports
+    // `alreadyResolved: true`), so it doubles as the "was one pending?" question — no `pendingMeta`
+    // equivalent is needed.
+    //
+    // The WITHDRAWAL is emitted HERE, synchronously, before this invocation's own `question_asked`
+    // — not from the stale invocation's microtask continuation, which would arrive AFTER the
+    // replacement question and dismiss the live card (clients resolve pending cards by `callId`
+    // alone). The stale invocation skips its own emit through the suppression count.
+    if (!deps.questions.respond(sessionId, callId, {}, "superseded").alreadyResolved) {
+      supersededEmits.set(callId, (supersededEmits.get(callId) ?? 0) + 1);
+      log?.info(`AskUserQuestion: superseding a pending question session=${sessionId} call=${callId}`);
+      deps.emit({ type: "question_resolved", sessionId, threadId, callId, answers: {}, by: "superseded" });
+    }
+
     // Wait-before-emit, for the same reason the engine and `buildLeasePolicy` do it: the broadcast
     // is synchronous, so a watcher that answers on sight would race an unregistered wait.
     const waiting = deps.questions.wait(sessionId, callId, NO_PARK_TIMEOUT_MS);
@@ -133,11 +154,20 @@ export function askUserQuestionBridge(
     const notes = answered && "notes" in answered ? answered.notes : undefined;
     const by = answered && typeof answered.by === "string" ? answered.by : "timeout";
 
-    deps.emit({
-      type: "question_resolved", sessionId, threadId, callId,
-      answers, by,
-      ...(notes ? { notes } : {}),
-    });
+    // A stale invocation whose question was already withdrawn by the SUPERSEDING one must not emit
+    // a second `question_resolved` — the withdrawal went out in the right order above, and a
+    // duplicate arriving here (after the replacement question) would dismiss the live card.
+    const suppressions = supersededEmits.get(callId) ?? 0;
+    if (by === "superseded" && suppressions > 0) {
+      if (suppressions > 1) supersededEmits.set(callId, suppressions - 1);
+      else supersededEmits.delete(callId);
+    } else {
+      deps.emit({
+        type: "question_resolved", sessionId, threadId, callId,
+        answers, by,
+        ...(notes ? { notes } : {}),
+      });
+    }
 
     // Fail closed: no answers (timeout, abort, emit-failure, or a genuinely empty response) is a
     // deny, never a silent allow with an unanswered question in the input.

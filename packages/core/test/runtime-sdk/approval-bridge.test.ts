@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CanUseTool, PermissionUpdate } from "@yanlinglabs/winter-agent-sdk";
 import { ApprovalRequestedEvent, ApprovalResolvedEvent, type NewSessionEvent } from "@norma/protocol";
-import { ApprovalBroker } from "../../src/agent/approvals";
+import { ApprovalBroker, approvalCardSummary, approvalOptionsFor } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
 import { PermissionGate, type SessionApprovalPolicy } from "../../src/agent/gate";
 import { PermissionRules } from "../../src/agent/permission-rules";
@@ -79,23 +79,28 @@ test("approval_requested carries exactly the fields the engine emits today", asy
 
   const issuedAt = FIXED_NOW;
   const expiresAt = FIXED_NOW + NO_PARK_TIMEOUT_MS;
+  // Review n2: the summary/options are BUILT from the producers rather than hand-copied. That is
+  // not a tautology — `card-composer-drift.test.ts` pins those producers against `engine.ts`'s own
+  // copies by source-body equality, so this expectation is chained to the engine's text and an
+  // engine-side edit before Task 17 fails there.
+  const argsJson = JSON.stringify(input);
   const expected = {
     type: "approval_requested",
     sessionId: SESSION,
     threadId: "main",
     callId: "tu1",
     toolName: "bash",
-    summary: "bash rm -rf x",
+    summary: approvalCardSummary({ name: "bash", argsJson }),
     issuedAt,
     expiresAt,
     reviewerReason: undefined,          // the engine's literal sets this; the plain ask card omits it
-    options: [
-      { id: "allow_once", label: "Allow once" },
-      { id: "allow_project", label: 'Allow "Bash(rm:*)" in this project', rule: "Bash(rm:*)", scope: "project" },
-      { id: "allow_global", label: 'Allow "Bash(rm:*)" everywhere', rule: "Bash(rm:*)", scope: "global" },
-      { id: "deny", label: "Deny" },
-    ],
+    options: approvalOptionsFor({ name: "bash", argsJson }),
   };
+  // …and the composed text is what a human actually reads, spelled out once so a silent change to
+  // BOTH copies still shows up here.
+  expect(expected.summary).toBe("bash rm -rf x");
+  expect(expected.options?.map((o) => o.id)).toEqual(["allow_once", "allow_project", "allow_global", "deny"]);
+  expect(expected.options?.[1]).toEqual({ id: "allow_project", label: 'Allow "Bash(rm:*)" in this project', rule: "Bash(rm:*)", scope: "project" });
 
   // The FULL field set, not a subset.
   expect(definedKeys(ev)).toEqual(definedKeys(expected));
@@ -107,19 +112,15 @@ test("approval_requested carries exactly the fields the engine emits today", asy
   await pending;
 });
 
-test("a bridge-provided description wins over Norma's composed summary (digest item 46)", async () => {
+test("title/displayName/description never shadow the composed summary — the human must see the command", async () => {
   const h = harness();
-  const pending = h.canUse("Bash", { command: "ls" }, requestCtx({ description: "List the repo root" }));
-  expect((h.events[0] as { summary: string }).summary).toBe("List the repo root");
-  h.approvals.resolve(SESSION, "tu1", true, "user");
-  await pending;
-});
-
-test("title/displayName never shadow the composed summary — the human must see the command", async () => {
-  const h = harness();
-  // `displayName`/`title` are plausibly the TOOL's names, populated on every request; if either won,
-  // every card would read "Bash" instead of the command being approved.
-  const pending = h.canUse("Bash", { command: "rm -rf x" }, requestCtx({ displayName: "Bash", title: "Bash command" }));
+  // The pinned runtime (v0.0.3 `permissions/prompt-stage.ts:38-42`) says all three are "NOT part of
+  // this wire payload at all" and need a tool registry it does not have — so they are never
+  // populated today, and when a later SDK populates them they will be the TOOL's text, not the
+  // CALL's. If any of them won, every card would read "Bash" instead of the command being approved.
+  const pending = h.canUse("Bash", { command: "rm -rf x" }, requestCtx({
+    displayName: "Bash", title: "Bash command", description: "Run a shell command",
+  }));
   expect((h.events[0] as { summary: string }).summary).toBe("bash rm -rf x");
   h.approvals.resolve(SESSION, "tu1", true, "user");
   await pending;
@@ -261,7 +262,7 @@ test("a broker that answers null/undefined denies — never a silent allow", asy
     const res = (await h.canUse("Bash", { command: "x" }, requestCtx()))!;
     expect(res.behavior).toBe("deny");
     // …and it says so honestly: nobody refused, the broker simply answered with nothing.
-    expect((res as { message: string }).message).toBe("Bash was not run — the approval request could not be completed. Nobody refused it.");
+    expect((res as { message: string }).message).toBe("bash was not run — the approval request could not be completed. Nobody refused it.");
     expect((res as { decisionClassification?: string }).decisionClassification).toBeUndefined();
   }
 });
@@ -294,6 +295,102 @@ test("a re-request for the same toolUseID supersedes the stale wait rather than 
   expect(h.approvals.list(SESSION)).toHaveLength(1);
   h.approvals.resolve(SESSION, "tu1", true, "user");
   await expect(second).resolves.toMatchObject({ behavior: "allow" });
+});
+
+test("the superseded card's WITHDRAWAL is emitted BEFORE the replacement request", async () => {
+  // Review M1. Clients resolve pending cards by `callId` alone (`SessionModel.swift`'s
+  // `resolvePending(s, callId:)`), so a withdrawal that lands after the replacement removes the
+  // LIVE card — and with no park timeout the child then waits ~24.8 days on a card nobody can
+  // answer, strictly worse than the orphaned timer the guard was written for.
+  const h = harness();
+  const first = h.canUse("Bash", { command: "a" }, requestCtx({ requestId: "r1" }));
+  const second = h.canUse("Bash", { command: "a" }, requestCtx({ requestId: "r2" }));
+
+  // The ORDER, not just the values.
+  expect(h.events.map((e) => [(e as { type: string }).type, (e as { by?: string }).by ?? null])).toEqual([
+    ["approval_requested", null],
+    ["approval_resolved", "superseded"],
+    ["approval_requested", null],
+  ]);
+  // Every event is for the same callId — which is exactly why the order is the whole defect.
+  expect(new Set(h.events.map((e) => (e as { callId: string }).callId))).toEqual(new Set(["tu1"]));
+
+  await first;
+  // …and the stale invocation does NOT emit a second, out-of-order withdrawal when it resumes.
+  expect(h.events).toHaveLength(3);
+
+  h.approvals.resolve(SESSION, "tu1", true, "user");
+  await second;
+  expect(h.events.map((e) => (e as { type: string }).type)).toEqual([
+    "approval_requested", "approval_resolved", "approval_requested", "approval_resolved",
+  ]);
+});
+
+test("a rejecting broker denies AND withdraws — no card is ever left uncloseable", async () => {
+  const stub = {
+    wait: () => Promise.reject(new Error("broker exploded")),
+    resolve: () => ({ ok: true as const, alreadyResolved: false }),
+    pendingMeta: () => undefined,
+    list: () => [],
+  } as unknown as ApprovalBroker;
+  const h = harness({ approvals: stub });
+  const res = (await h.canUse("Bash", { command: "x" }, requestCtx()))!;
+  expect(res.behavior).toBe("deny");
+  expect(h.events.map((e) => (e as { type: string }).type)).toEqual(["approval_requested", "approval_resolved"]);
+  expect(h.events[1]).toMatchObject({ approved: false, by: "broker-error" });
+});
+
+test("Winter's own circuit breakers are never overridden by a blanket allow", async () => {
+  // Under bypassPermissions the runtime routes its standing exceptions to canUseTool BECAUSE the
+  // mode cannot decide them. Answering either from the gate's allow silently overrides the child.
+  const blocked = harness({ policy: "bypass" });
+  const res = (await blocked.canUse("Write", { file_path: "/etc/hosts" }, requestCtx({ blockedPath: "/etc/hosts" })))!;
+  expect(res.behavior).toBe("deny");     // a block, not an escalation — the host cannot reverse it
+  expect(blocked.events).toEqual([]);
+
+  // `matchedAskRule` says ASK: never a blanket allow. In CODE that is a card…
+  const asked = harness({ policy: "auto" });
+  const p = asked.canUse("Bash", { command: "ls" }, requestCtx({
+    matchedAskRule: { source: "project", toolName: "Bash", ruleContent: "ls:*" },
+  }));
+  expect(asked.events).toHaveLength(1);
+  asked.approvals.resolve(SESSION, "tu1", true, "user");
+  await expect(p).resolves.toMatchObject({ behavior: "allow" });
+
+  // …and in a never-prompt session, the typed deny.
+  const dispatch = harness({ mode: "dispatch", policy: "auto" });
+  const dres = (await dispatch.canUse("Bash", { command: "ls" }, requestCtx({
+    matchedAskRule: { source: "project", toolName: "Bash" },
+  })))!;
+  expect(dres.behavior).toBe("deny");
+  expect(dispatch.events).toEqual([]);
+});
+
+test("interrupt: true only on a HUMAN denial — a machine outcome must not end the turn", async () => {
+  // `engine.ts:5876-5882`: an explicit human "no" ends the turn, to stop the model re-submitting
+  // the same command for the reviewer to re-approve in-turn ("a real gate bypass").
+  const human = harness();
+  const hp = human.canUse("Bash", {}, requestCtx());
+  human.approvals.resolve(SESSION, "tu1", false, "phone");
+  expect(((await hp)! as { interrupt?: boolean }).interrupt).toBe(true);
+
+  const timeout = harness();
+  const tp = timeout.canUse("Bash", {}, requestCtx());
+  timeout.approvals.resolve(SESSION, "tu1", false, "timeout");
+  expect(((await tp)! as { interrupt?: boolean }).interrupt).toBeUndefined();
+
+  // A policy deny is not a refusal either.
+  const plan = (await harness({ policy: "plan" }).canUse("Bash", {}, requestCtx()))!;
+  expect((plan as { interrupt?: boolean }).interrupt).toBeUndefined();
+});
+
+test("the human-denial text names the tool the way the ENGINE does (P8b-25)", async () => {
+  const h = harness();
+  const p = h.canUse("Bash", { command: "x" }, requestCtx());
+  h.approvals.resolve(SESSION, "tu1", false, "phone");
+  expect(((await p)! as { message: string }).message).toBe(
+    "The user denied this bash action — it was NOT run. Stop here and wait for the user to tell you how to proceed. Do not retry it, rephrase it, or attempt a workaround; the user will give further instructions.",
+  );
 });
 
 // -------------------------------------------------------------------------------------------
@@ -429,7 +526,7 @@ test("only an actual human refusal is classified user_reject", async () => {
   human.approvals.resolve(SESSION, "tu1", false, "phone");
   const res = (await hp)!;
   expect((res as { decisionClassification?: string }).decisionClassification).toBe("user_reject");
-  expect((res as { message: string }).message).toContain("The user denied this Bash action");
+  expect((res as { message: string }).message).toContain("The user denied this bash action");
 });
 
 test("the divergence message is exactly the ruling's wording", () => {

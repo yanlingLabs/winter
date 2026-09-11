@@ -264,6 +264,54 @@ test("with agentID set, the question still surfaces on the parent session's stre
   await expect(pending).resolves.toMatchObject({ behavior: "allow" });
 });
 
+test("a re-asked question supersedes the stale wait, and the withdrawal lands BEFORE the replacement", async () => {
+  // Review m2 + M1's ordering rule. `QuestionBroker.wait` overwrites its Map entry, so without the
+  // guard the first promise never settles and its ~24.8-day timer leaks; and a withdrawal emitted
+  // from the stale invocation's continuation would arrive AFTER the replacement question and
+  // dismiss the live card (clients resolve pending cards by `callId` alone).
+  const h = bridge();
+  const { ctx } = signalOf();
+  const first = h.ask("tu-q1", INPUT, ctx);
+  const second = h.ask("tu-q1", INPUT, ctx);
+
+  expect(h.events.map((e) => [(e as { type: string }).type, (e as { by?: string }).by ?? null])).toEqual([
+    ["question_asked", null],
+    ["question_resolved", "superseded"],
+    ["question_asked", null],
+  ]);
+  expect(new Set(h.events.map((e) => (e as { callId: string }).callId))).toEqual(new Set(["tu-q1"]));
+
+  // The first promise SETTLES — denied, because nobody answered it — and emits nothing more.
+  await expect(first).resolves.toMatchObject({ behavior: "deny" });
+  expect(h.events).toHaveLength(3);
+
+  h.questions.respond(SESSION, "tu-q1", { "Which database?": "SQLite" }, "phone");
+  await expect(second).resolves.toMatchObject({ behavior: "allow" });
+  expect(h.events).toHaveLength(4);
+});
+
+test("AskUserQuestion reaches a human under dont-ask — a deliberate descriptor divergence", async () => {
+  // Winter's own descriptor says AskUserQuestion is "denied under `dontAsk`". Norma's `ask_user` is
+  // READ_ONLY and therefore ALLOWED under `dont-ask` today, and the bridge routes the tool to the
+  // question broker before any policy is consulted — so on this leg the human is still asked.
+  // Recorded and pinned rather than silently inherited: `dont-ask` means "don't ask me to approve
+  // actions", not "don't ask me questions".
+  const events: NewSessionEvent[] = [];
+  const questions = new QuestionBroker();
+  const canUse: CanUseTool = canUseToolFor({
+    sessionId: SESSION, mode: "code", policy: "dont-ask",
+    approvals: new ApprovalBroker(), questions, gate: new PermissionGate(),
+    emit: (e) => { events.push(e); }, log: silent, now: () => FIXED_NOW,
+  });
+  const p = canUse(ASK_USER_QUESTION_TOOL, INPUT, {
+    signal: new AbortController().signal, toolUseID: "tu-da", requestId: "r",
+  } as Parameters<CanUseTool>[2]);
+  expect(events).toHaveLength(1);
+  expect((events[0] as { type: string }).type).toBe("question_asked");
+  questions.respond(SESSION, "tu-da", { "Which database?": "Postgres" }, "phone");
+  await expect(p).resolves.toMatchObject({ behavior: "allow" });
+});
+
 test("the hard-coded §5.6 schema accepts the documented shape", () => {
   expect(AskUserQuestionInput.safeParse({
     questions: [

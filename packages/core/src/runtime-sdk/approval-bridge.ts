@@ -107,6 +107,15 @@ export function neverPromptsMessage(toolName: string, mode: string, policy: Sess
   return `${toolName} requires approval and this ${mode} session never prompts (policy ${policy})`;
 }
 
+/** A `bash` call asking for a full sandbox escape (`dangerouslyDisableSandbox: true`). Takes the
+ *  NORMA tool name — the escape arg is Norma's own, and the Winter built-in that carries it arrives
+ *  as `Bash`. Exported so the matrix test can pin the predicate as well as the verdict. */
+export function isUnsandboxedBashEscape(gateToolName: string, input: unknown): boolean {
+  if (gateToolName !== "bash") return false;
+  if (typeof input !== "object" || input === null) return false;
+  return (input as Record<string, unknown>).dangerouslyDisableSandbox === true;
+}
+
 /** Splits a Norma/CC rule string (`Bash(git push:*)`, `Edit(/foo)`, bare `WebFetch`) back into the
  *  `PermissionRuleValue` halves Winter's `PermissionUpdate` wants. */
 function ruleValueFor(rule: string): { toolName: string; ruleContent?: string } {
@@ -223,6 +232,8 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
   const threadId = deps.threadId ?? "main";
   const policyNow = (): SessionApprovalPolicy =>
     typeof deps.policy === "function" ? deps.policy() : deps.policy;
+  // Per-callId suppression counts for the supersede path — see `raiseCard`'s supersede branch.
+  const state: BridgeState = { supersededEmits: new Map() };
 
   const askQuestion = askUserQuestionBridge({
     sessionId: deps.sessionId,
@@ -291,6 +302,32 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
       decision = "ask";
     }
 
+    // (5c) WINTER'S OWN CIRCUIT BREAKERS must never be overridden by a blanket allow. Checked
+    // BEFORE the verdict is acted on — placing it after the `allow` return would make it dead code,
+    // which is the whole failure mode it exists to prevent.
+    //
+    // Under `bypassPermissions` the runtime routes its standing exceptions to `canUseTool` precisely
+    // BECAUSE the mode cannot decide them — a protected-write block arrives carrying `blockedPath`,
+    // and a rule that says "ask" arrives as `matchedAskRule`. Answering either from the gate's
+    // `allow` silently overrides a decision the child already made.
+    //
+    //  - `blockedPath` → Winter BLOCKED this write. A typed deny, under every policy: it is not an
+    //    escalation to a human, it is a refusal the host has no standing to reverse.
+    //  - `matchedAskRule` → Winter says ASK. Never a blanket allow: escalated to `"ask"`, which in
+    //    code raises the card and in dispatch/chat becomes the never-prompt deny below — fail-closed
+    //    in both directions, and still answerable where there is a human. A gate `deny` stays a
+    //    deny: an ask-rule may never WIDEN a verdict.
+    //
+    // `decisionReason` is deliberately NOT acted on. It is a free-form string attached to decisions
+    // of every kind, its vocabulary lives in the private runtime, and treating its mere presence as
+    // a block would card or deny calls the child was happy with. Carried in the record, flagged in
+    // the report, and left to a later phase that can read the vocabulary.
+    if (ctx.blockedPath) {
+      log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} reason=winter-blocked-path`);
+      return { behavior: "deny", message: `${gateToolName} was blocked by the runtime's own protected-path check.` };
+    }
+    if (ctx.matchedAskRule && decision === "allow") decision = "ask";
+
     // A POLICY deny is not a user rejection — today it is a plain `isError` tool result and the
     // turn continues (only `deniedByHuman` ends it, engine.ts:5876-5882). `decisionClassification`
     // is deliberately omitted on both policy paths: claiming `user_reject` for "plan mode forbids
@@ -308,11 +345,20 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     const never = neverPromptsAs(deps);
     if (never) {
       log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} policy=${policy} reason=never-prompts mode=${deps.mode} origin=${deps.origin ?? "none"}`);
+      // Named as the MODEL called it: this message is a tool result the model reads, and naming a
+      // tool it did not call would be confusing. The EVENT surface uses the Norma name (P8b-25).
       return { behavior: "deny", message: neverPromptsMessage(toolName, never, policy) };
     }
 
-    return await raiseCard(deps, { log, now, threadId, policy }, toolName, gateToolName, input, ctx);
+    return await raiseCard(deps, { log, now, threadId, policy, state }, toolName, gateToolName, input, ctx);
   };
+}
+
+/** Per-`canUseToolFor` mutable state. Only the supersede path needs any. */
+interface BridgeState {
+  /** `callId` → how many stale invocations must SKIP their own `approval_resolved` emit, because
+   *  the superseding invocation already emitted it synchronously and in the right order. */
+  supersededEmits: Map<string, number>;
 }
 
 /**
@@ -331,15 +377,6 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
  * so naming it "this code session never prompts" would be simply false — it is a dispatch child,
  * and the message says so.
  */
-/** A `bash` call asking for a full sandbox escape (`dangerouslyDisableSandbox: true`). Takes the
- *  NORMA tool name — the escape arg is Norma's own, and the Winter built-in that carries it arrives
- *  as `Bash`. Exported so the matrix test can pin the predicate as well as the verdict. */
-export function isUnsandboxedBashEscape(gateToolName: string, input: unknown): boolean {
-  if (gateToolName !== "bash") return false;
-  if (typeof input !== "object" || input === null) return false;
-  return (input as Record<string, unknown>).dangerouslyDisableSandbox === true;
-}
-
 export function neverPromptsAs(deps: { mode: SessionMode; origin?: string }): string | undefined {
   if (deps.origin === "dispatch-child") return "dispatch";
   if (deps.mode !== "code") return deps.mode;
@@ -348,7 +385,7 @@ export function neverPromptsAs(deps: { mode: SessionMode; origin?: string }): st
 
 async function raiseCard(
   deps: CanUseToolDeps,
-  env: { log: BridgeLogger; now: () => number; threadId: string; policy: SessionApprovalPolicy },
+  env: { log: BridgeLogger; now: () => number; threadId: string; policy: SessionApprovalPolicy; state: BridgeState },
   toolName: string,
   gateToolName: string,
   input: Record<string, unknown>,
@@ -366,25 +403,40 @@ async function raiseCard(
   // otherwise orphan the first promise inside the broker's Map — `wait()` overwrites the entry,
   // and the overwritten `resolve` is never called and its timer never cleared. That is a leak, not
   // a fail-closed outcome, so the stale one is explicitly settled first.
+  //
+  // **THE ORDERING IS LOAD-BEARING, and it is why the emit happens HERE rather than in the stale
+  // invocation.** `resolve()` settles the stale promise, but that invocation's own
+  // `approval_resolved` would be emitted from a MICROTASK continuation — i.e. after this invocation
+  // has already synchronously emitted the replacement `approval_requested` for the SAME `callId`.
+  // Every client resolves pending cards by `callId` alone (`SessionModel.swift`'s
+  // `resolvePending(s, callId:)`), so the stale resolution would dismiss the LIVE card, and with no
+  // park timeout the child would then wait ~24.8 days on a card nobody can answer — strictly worse
+  // than the orphaned timer this guard was written for. Emitting the withdrawal here, before the
+  // new request, makes the order structural rather than a matter of scheduling; the stale
+  // invocation skips its own emit via the suppression count.
   if (deps.approvals.pendingMeta(sessionId, callId)) {
     env.log.info(`canUseTool: superseding a pending approval session=${sessionId} call=${callId}`);
+    env.state.supersededEmits.set(callId, (env.state.supersededEmits.get(callId) ?? 0) + 1);
     deps.approvals.resolve(sessionId, callId, false, "superseded");
+    deps.emit({ type: "approval_resolved", sessionId, threadId: env.threadId, callId, approved: false, by: "superseded" });
   }
 
   const argsJson = safeArgsJson(input);
-  // Digest item 46: a bridge-provided description is the PREFERRED card text and a host must not
-  // reconstruct a weaker summary from the tool name — so Norma's own composer is the FALLBACK.
+  // **`approvalCardSummary` is the ONLY source of card text.** `ctx.title`, `ctx.displayName` and
+  // `ctx.description` are all deliberately ignored.
   //
-  // **`title` and `displayName` are deliberately NOT consulted.** Their per-call semantics cannot
-  // be confirmed from the installed `.d.ts` (the descriptors live in the private runtime package),
-  // and the likely reading is that they are the TOOL's names — per-tool, not per-call ("Bash",
-  // "Bash command"). If either is populated on every request, using it would shadow
-  // `approvalCardSummary` on EVERY card: the human would read "Bash" where today they read
-  // "bash rm -rf x", i.e. approving a command they were never shown. `description` is the only one
-  // of the three whose name promises per-call text. Revisit in Task 9/16 once the runtime's
-  // population of `title`/`displayName` is observed on a live child.
-  const summary = firstNonEmpty(ctx.description)
-    ?? approvalCardSummary({ name: gateToolName, argsJson });
+  // Digest item 46 says a bridge-provided description is the PREFERRED text and a host "MUST NOT
+  // reconstruct a weaker summary from `toolName`" — but the pinned runtime settles what these three
+  // actually are, and it is not per-call text. At `v0.0.3`,
+  // `packages/runtime/src/permissions/prompt-stage.ts:38-42` states they are "NOT part of this wire
+  // payload at all — title/displayName/description need a tool registry (WS-06, P3) this runtime
+  // doesn't have yet". So today they are never populated, and when a later SDK does populate them
+  // from that registry they will be the TOOL's text, not the CALL's. Preferring any of them would
+  // then shadow the composer on EVERY card: the human would read "Bash" where they read
+  // "bash rm -rf x" today — approving a command they were never shown.
+  //
+  // Revisit only when a per-call semantic is observed on a live child, never on the field name.
+  const summary = approvalCardSummary({ name: gateToolName, argsJson });
   const options = approvalOptionsFromSuggestions(ctx.suggestions)
     ?? approvalOptionsFor({ name: gateToolName, argsJson });
 
@@ -419,7 +471,7 @@ async function raiseCard(
     deps.approvals.resolve(sessionId, callId, false, "emit-failure");
     await waiting;
     env.log.error(`canUseTool: failed to emit approval_requested session=${sessionId} call=${callId}: ${(err as Error).message}`);
-    return { behavior: "deny", message: `${toolName} was not run — this session could not raise an approval request.` };
+    return { behavior: "deny", message: ` was not run — this session could not raise an approval request.` };
   }
 
   // Abort withdraws the card: the broker is settled with `approved:false`, which makes the
@@ -432,6 +484,15 @@ async function raiseCard(
   let res: Awaited<typeof waiting> | null | undefined;
   try {
     res = await waiting;
+  } catch (err) {
+    // A REJECTING broker. Unreachable with the real one (`wait` only ever resolves), but this is a
+    // boundary whose entire job is "never leave a pending card": letting the rejection propagate
+    // would fail closed for the MODEL (the runtime converts a throw to a typed deny) while leaving
+    // the phone's card and `approval.list` entry uncleared forever. Settle, withdraw, then deny.
+    deps.approvals.resolve(sessionId, callId, false, "broker-error");
+    deps.emit({ type: "approval_resolved", sessionId, threadId: env.threadId, callId, approved: false, by: "broker-error" });
+    env.log.error(`canUseTool: approval broker rejected session=${sessionId} call=${callId}: ${(err as Error).message}`);
+    return { behavior: "deny", message: `${gateToolName} was not run — the approval request could not be completed. Nobody refused it.` };
   } finally {
     ctx.signal.removeEventListener("abort", onAbort);
   }
@@ -442,7 +503,17 @@ async function raiseCard(
   const by = (res && typeof res === "object" && typeof res.by === "string" && res.by) || "unknown";
   const optionId = res && typeof res === "object" ? res.optionId : undefined;
 
-  deps.emit({ type: "approval_resolved", sessionId, threadId: env.threadId, callId, approved, by });
+  // A stale invocation whose card was already withdrawn by the SUPERSEDING one must not emit a
+  // second `approval_resolved` — the withdrawal was emitted in the right order up in the supersede
+  // branch, and a duplicate arriving here (after the replacement request) would dismiss the live
+  // card, which is the whole defect that ordering fixes.
+  const suppressions = env.state.supersededEmits.get(callId) ?? 0;
+  if (by === "superseded" && suppressions > 0) {
+    if (suppressions > 1) env.state.supersededEmits.set(callId, suppressions - 1);
+    else env.state.supersededEmits.delete(callId);
+  } else {
+    deps.emit({ type: "approval_resolved", sessionId, threadId: env.threadId, callId, approved, by });
+  }
 
   if (!approved) {
     env.log.info(`canUseTool: resolved deny session=${sessionId} call=${callId} by=${by}`);
@@ -461,14 +532,14 @@ async function raiseCard(
       behavior: "deny",
       ...(machine ? {} : { interrupt: true as const }),
       message: by === "timeout"
-        ? `${toolName} was not run — nobody answered the approval request.`
+        ? `${gateToolName} was not run — nobody answered the approval request.`
         : by === "aborted"
-        ? `${toolName} was not run — the turn was aborted while the approval was pending.`
+        ? `${gateToolName} was not run — the turn was aborted while the approval was pending.`
         : by === "superseded"
-        ? `${toolName} approval was re-requested under a newer policy; this request is void. Nobody refused it.`
+        ? `${gateToolName} approval was re-requested under a newer policy; this request is void. Nobody refused it.`
         : by === "emit-failure" || by === "unknown"
-        ? `${toolName} was not run — the approval request could not be completed. Nobody refused it.`
-        : `The user denied this ${toolName} action — it was NOT run. Stop here and wait for the user to tell you how to proceed. Do not retry it, rephrase it, or attempt a workaround; the user will give further instructions.`,
+        ? `${gateToolName} was not run — the approval request could not be completed. Nobody refused it.`
+        : `The user denied this ${gateToolName} action — it was NOT run. Stop here and wait for the user to tell you how to proceed. Do not retry it, rephrase it, or attempt a workaround; the user will give further instructions.`,
       ...(machine ? {} : { decisionClassification: "user_reject" as const }),
     };
   }
