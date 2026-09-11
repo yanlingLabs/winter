@@ -33,19 +33,15 @@ import { makeProjector, run } from "./harness";
  *         its own (`{file_path}` vs Norma's `{path}`), so byte-equality would assert a rename that
  *         is not happening. Shape and linkage are asserted; text is not.
  *
- * `TOOL_NAME_EQUIVALENCE` makes the one genuine product change VISIBLE rather than hidden: on the
- * Winter leg a tool row's `name` is the SDK's name. Anything not in this map must match literally.
+ * `tool_call.name` IS compared literally, and that is the point of ruling P8b-25: the SessionEvent
+ * surface keeps Norma's tool vocabulary, so the projector translates `Read` → `read`, `Agent` →
+ * `spawn_agent` and so on. If that mapping regressed, this comparison is what fails — the Mac and
+ * iOS tool rows key on those names and nothing else here would notice.
  */
 const OWNED_VARIANTS = new Set<SessionEvent["type"]>([
   "user_message", "assistant_message", "assistant_delta", "tool_call", "tool_result",
   "turn_completed", "agent_error",
 ]);
-
-const TOOL_NAME_EQUIVALENCE: Record<string, string> = {
-  read: "Read",
-  write: "Write",
-  spawn_agent: "Agent",
-};
 
 type Any = Record<string, unknown>;
 
@@ -56,7 +52,7 @@ function compare(e: Any): Any {
     case "user_message": return { type, threadId, text: e.text };
     case "assistant_message": return { type, threadId, text: e.text };
     case "assistant_delta": return { type, threadId, delta: e.delta };
-    case "tool_call": return { type, threadId, name: TOOL_NAME_EQUIVALENCE[e.name as string] ?? e.name, argsAreAnObject: isJsonObject(e.argsJson) };
+    case "tool_call": return { type, threadId, name: e.name, argsAreAnObject: isJsonObject(e.argsJson) };
     case "tool_result": return { type, threadId, isError: e.isError === true };
     case "turn_completed": return { type, threadId, stopReason: e.stopReason };
     case "agent_error": return { type, threadId, hasMessage: typeof e.message === "string" && (e.message as string).length > 0, hasCode: typeof e.code === "string" };
@@ -107,6 +103,17 @@ describe("projector: golden-stream replay (P8b-14)", () => {
       expect(actual.map(compare)).toEqual(expected.map(compare));
     });
   }
+
+  test("tool rows keep NORMA names on the Winter leg (P8b-25) — no golden is compared on a renamed row", () => {
+    // Belt and braces beside the sequence comparison: the goldens speak Norma, the fixtures speak
+    // Winter, and every name the projector emits must be the Norma one.
+    for (const scenario of SCENARIOS) {
+      const messages = readJsonl<ProtocolSdkMessage>("sdk", `${scenario}.messages.jsonl`);
+      const { projector } = makeProjector();
+      const names = (run(projector, messages) as unknown as Any[]).filter((e) => e.type === "tool_call").map((e) => e.name);
+      for (const n of names) expect({ scenario, name: n, looksWinter: /^[A-Z]/.test(n as string) }).toEqual({ scenario, name: n, looksWinter: false });
+    }
+  });
 
   test("every tool_result the projector produces is linked to a tool_call it already produced", () => {
     for (const scenario of SCENARIOS) {

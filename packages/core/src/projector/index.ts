@@ -5,12 +5,14 @@ import {
 } from "./conversation";
 import { createEchoWindow, type EchoWindow } from "./dedupe";
 import { projectTerminal, type UsageTotals } from "./terminal";
+import { normaToolNameFor } from "./tool-names";
 import type { CheckpointStore, ProjectedEvent, Projector, ProjectorDeps, ProtocolSdkMessage } from "./types";
 
 export { PROJECTED_EVENT_COVERAGE, SUBAGENT_TRANSCRIPT_INCLUDE } from "./event-coverage";
 export { createEchoWindow, ECHO_WINDOW, type EchoWindow } from "./dedupe";
 export { projectTerminal, totalsOf, type UsageTotals } from "./terminal";
 export { MAIN_THREAD, threadIdOf } from "./conversation";
+export { normaToolNameFor } from "./tool-names";
 export type {
   CheckpointStore, Logger, ProjectedEvent, ProjectionCursorInput, ProjectionKey, Projector,
   ProjectorDeps, ProtocolSdkMessage, SessionMode,
@@ -90,6 +92,8 @@ class ProjectorImpl implements Projector {
   private resultAt: string | undefined;
   /** One log line per unknown wire `type`, not one per message. */
   private readonly loggedTypes = new Set<string>();
+  /** One log line per unmapped tool name, not one per call. */
+  private readonly loggedToolNames = new Set<string>();
 
   constructor(private readonly deps: ProjectorDeps) {
     this.checkpoint = deps.checkpoint;
@@ -163,7 +167,7 @@ class ProjectorImpl implements Projector {
         const out: ProjectedEvent[] = [];
         const text = assistantText(assistant);
         if (text.length > 0) out.push({ type: "assistant_message", sessionId: this.deps.sessionId, threadId, text });
-        out.push(...toolCalls(assistant, this.deps.sessionId, threadId));
+        out.push(...toolCalls(assistant, this.deps.sessionId, threadId, (n) => this.renameTool(n)));
         return out;
       });
     }
@@ -230,6 +234,25 @@ class ProjectorImpl implements Projector {
   }
 
   flush(): void { this.commitPending(); }
+
+  /**
+   * Winter's tool name → Norma's (ruling P8b-25). An unknown name passes through unchanged and is
+   * logged once: a tool row with an unfamiliar label is a cosmetic surprise, whereas dropping the
+   * call or inventing a name would corrupt the transcript and break the `callId` linkage the Mac
+   * and iOS renderers fold on. The table is `projector/tool-names.ts` TODAY and moves to the
+   * policy lane's canonical `runtime-sdk/tool-names.ts` in Task 11.
+   */
+  private renameTool(winterName: string): string {
+    const norma = normaToolNameFor(winterName);
+    if (norma !== undefined) return norma;
+    if (!this.loggedToolNames.has(winterName)) {
+      this.loggedToolNames.add(winterName);
+      this.deps.log.debug?.("[projector] no Norma name for a Winter tool — passing it through", {
+        sessionId: this.deps.sessionId, tool: winterName,
+      });
+    }
+    return winterName;
+  }
 
   /** Commit the previous message's mark — by now the caller has had its chance to append. */
   private commitPending(): void {

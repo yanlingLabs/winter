@@ -102,17 +102,24 @@ export function assistantText(frame: AssistantFrame): string {
     .join("");
 }
 
-/** One `tool_call` per `tool_use` block. `callId` = the block's `id`, which is the SAME id the
- *  matching `tool_result` block carries as `tool_use_id` — the linkage the Mac/phone transcripts
- *  fold on, and the projector's idempotency source id. */
-export function toolCalls(frame: AssistantFrame, sessionId: string, threadId: string): ProjectedEvent[] {
+/**
+ * One `tool_call` per `tool_use` block. `callId` = the block's `id`, which is the SAME id the
+ * matching `tool_result` block carries as `tool_use_id` — the linkage the Mac/phone transcripts
+ * fold on, and the projector's idempotency source id.
+ *
+ * `name` is the NORMA name (ruling P8b-25): the `SessionEvent` surface keeps Norma's tool
+ * vocabulary because the Mac and iOS renderers key their tool rows on it and every past session in
+ * `session.history` spells it that way. `renameTool` is the one translation point — see
+ * `tool-names.ts`. An unmapped Winter name falls through unchanged rather than being dropped.
+ */
+export function toolCalls(frame: AssistantFrame, sessionId: string, threadId: string, renameTool: (winterName: string) => string): ProjectedEvent[] {
   const out: ProjectedEvent[] = [];
   for (const b of frame.message.content) {
     if (b.type !== "tool_use") continue;
     const callId = str(b.id);
     const name = str(b.name);
     if (callId === undefined || callId.length === 0 || name === undefined || name.length === 0) continue;
-    out.push({ type: "tool_call", sessionId, threadId, callId, name, argsJson: JSON.stringify(b.input ?? {}) });
+    out.push({ type: "tool_call", sessionId, threadId, callId, name: renameTool(name), argsJson: JSON.stringify(b.input ?? {}) });
   }
   return out;
 }
