@@ -727,7 +727,58 @@ describe("diagnoseRuntimeState / restore-backup — a store written by an older 
     });
   });
 
+  test("the byte-copy snapshot carries the store's WAL, so the tool's own probe can read it back", async () => {
+    // RE-REVIEW NEW-9. The byte-copy door runs when this build cannot OPEN the current store — a
+    // downgrade (`newer-schema`) being the healthy case. Copying the main file alone produced a
+    // snapshot that `restore-backup`'s own probe (a readonly open) refuses as "not a readable
+    // database", and the committed-but-uncheckpointed tail that lived only in the `-wal` was then
+    // deleted by the sidecar removal.
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      const id = seedProductSession(home, { cwd: home });
+      let backup = "";
+      withDb(home, (rs, records) => { records.create(newRecord(home, id)); backup = rs.backup(); });
+
+      const dest = join(home, "runtimes", "runtime-state.db");
+      // A committed row that is still only in the WAL: the connection stays open, so nothing
+      // checkpoints it, and `-wal` is where the value actually lives.
+      const live = new Database(dest);
+      try {
+        live.run("INSERT INTO schema_meta(key, value) VALUES ('wal_tail', 'TAIL')");
+        // A version this build will not open readonly — the healthy store / door-1-refuses case.
+        live.run("PRAGMA user_version = 99");
+        expect(existsSync(`${dest}-wal`)).toBe(true);
+
+        const result = await repairRuntimeState(home, { kind: "restore-backup", backupPath: backup });
+        expect(result.applied).toBe(true);
+        const snapshot = /the replaced file is at (\S+)/.exec(result.detail)?.[1];
+        expect(snapshot).toBeDefined();
+        expect(existsSync(`${snapshot!}-wal`)).toBe(true);
+
+        // The probe's own shape — a plain readonly open — and the tail is there.
+        const probe = new Database(snapshot!, { readonly: true });
+        try {
+          expect(probe.query("SELECT value FROM schema_meta WHERE key='wal_tail'").get()).toEqual({ value: "TAIL" });
+        } finally {
+          probe.close();
+        }
+        // And `restore-backup` itself gets far enough to READ it: the refusal it gives is about the
+        // snapshot's schema version, never "not a readable database".
+        const back = await repairRuntimeState(home, { kind: "restore-backup", backupPath: snapshot! });
+        expect(back.detail).not.toContain("not a readable database");
+      } finally {
+        live.close();
+      }
+    });
+  });
+
   test("a restore whose pre-overwrite snapshot fails is ABORTED, and the store it would have overwritten is untouched", async () => {
+    // `chmod 000` does not stop root, so as root this test would assert nothing at all rather than
+    // fail — say so out loud instead of passing vacuously.
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      console.warn("skipped: running as root, where chmod 000 cannot close either snapshot door");
+      return;
+    }
     await withTempHome(async (home) => {
       withDb(home, () => {});
       const id = seedProductSession(home, { cwd: home });

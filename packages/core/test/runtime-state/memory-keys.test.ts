@@ -5,7 +5,7 @@ import { join, relative } from "node:path";
 import { memoryDirFor, memoryDirForRecord, repoRootFor, sanitizeProjectKey, _clearRepoRootCacheForTests } from "../../src/agent/memory-dir";
 import {
   MemoryKeyNotPlannedError, RuntimeSessionRecords, applyMemoryKeyMigration,
-  RUNTIME_STATE_SCHEMA_VERSION, backfillNativeSessions, memoryKeyRelocations, openRuntimeStateDb, planMemoryKeyMigration, reconcileMemoryKeyTornApplies, rollbackMemoryKeyMigration,
+  RUNTIME_STATE_SCHEMA_VERSION, backfillNativeSessions, memoryKeyRelocations, openRuntimeStateDb, planMemoryKeyMigration, reconcileMemoryKeyManifest, rollbackMemoryKeyMigration,
   type MemoryKeyFs, type RuntimeStateDb,
 } from "../../src/runtime-state";
 import { SessionStore } from "../../src/sessions/store";
@@ -1287,7 +1287,7 @@ describe("memory-key migration — a home that was migrated by a schema-v1 build
         const records = new RuntimeSessionRecords(rs);
         // The row came across as the `memory` entry, and the per-entry repair settles it: source
         // entry gone, destination entry present.
-        expect(reconcileMemoryKeyTornApplies({ rs, home, records })).toEqual([{ oldKey: a.oldKey, newKey: a.newKey, entries: ["memory"] }]);
+        expect(reconcileMemoryKeyManifest({ rs, home, records })).toEqual([{ oldKey: a.oldKey, newKey: a.newKey, entries: ["memory"] }]);
         expect(manifestEntries(rs)).toEqual([{ old_key: a.oldKey, entry: "memory", new_key: a.newKey, status: "moved" }]);
         expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.newKey);
         expect(memoryDirFor(a.cwd, { normaHome: home, relocatedKey: (k) => memoryKeyRelocations(rs).get(k) }))
@@ -1418,6 +1418,138 @@ describe("memory-key migration — record scoping and the race window", () => {
         expect(manifestEntries(rs).map((r) => r.status)).toEqual(["planned", "planned"]);
         expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.oldKey);
         expect(memoryKeyRelocations(rs).size).toBe(0);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+});
+
+// ── Fix round 3 (re-review NEW-8): the undo is a recorded, repairable operation ──────────────────
+//
+// `apply` puts back the entries it had already renamed when a collision appears mid-pass, so a
+// refused project moves nothing at all. That undo is a rename-then-commit pair exactly as the move
+// is, and its torn window is the mirror image — the entry back at the OLD key with a row still
+// saying `moved`, which nothing read. An `undoing` row is what the boot repair can finish.
+describe("memory-key migration — a torn UNDO", () => {
+  /** A project with two entries, the second of which will collide mid-pass. */
+  function twoEntryProject(home: string, store: SessionStore, name: string) {
+    const p = seedProject(home, store, name, "alpha");
+    writeFileSync(join(home, "projects", p.oldKey, "0f2a1c00-0000-4000-8000-000000000000.jsonl"), "{}\n");
+    return p;
+  }
+
+  test("a crash mid-undo leaves an `undoing` row, and the next boot finishes the undo", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = twoEntryProject(home, store, "a");
+      const before = snapshotTree(join(home, "projects", a.oldKey));
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        const plan = planMemoryKeyMigration({ rs, home, records, store });
+        expect(plan.moves[0]!.entries).toEqual(["0f2a1c00-0000-4000-8000-000000000000.jsonl", "memory"]);
+
+        // The first entry moves; the second's destination appears; the UNDO of the first then dies
+        // between its declaration and its rename-back.
+        let renames = 0;
+        const dieMidUndo: MemoryKeyFs = {
+          existsSync, statSync, readdirSync: (p, o) => readdirSync(p, o),
+          mkdirSync: (p, o) => { mkdirSync(p, o); }, rmdirSync: (p) => { rmdirSync(p); },
+          renameSync: (from, to) => {
+            if (renames === 1) throw new Error("simulated crash mid-undo");   // the rename-BACK
+            renameSync(from, to);
+            renames += 1;
+            if (renames === 1) mkdirSync(join(home, "projects", a.newKey, "memory"), { recursive: true });
+          },
+        };
+        // NOT A THROW: a rename-back that fails is a recorded state, not a fatal one — `finishUndo`
+        // leaves the row `undoing` for the next boot rather than guessing, and the collision is still
+        // reported as the refusal it is.
+        const result = applyMemoryKeyMigration({ rs, home, fs: dieMidUndo }, plan);
+        expect(result.moved).toBe(0);
+        expect(result.refused).toEqual([{ newKey: a.newKey, oldKeys: [a.oldKey], reason: "target-exists", entries: ["memory"] }]);
+
+        // The declared-but-unfinished state: the row says `undoing`, the entry is still at the new
+        // key, and — crucially — the live map does NOT claim the project is relocated.
+        expect(manifestEntries(rs).map((r) => [r.entry, r.status])).toEqual([
+          ["0f2a1c00-0000-4000-8000-000000000000.jsonl", "undoing"],
+          ["memory", "planned"],
+        ]);
+        expect(memoryKeyRelocations(rs).size).toBe(0);
+        expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.oldKey);
+
+        // THE NEXT BOOT finishes it: the entry comes home, the row is `planned` again, and the
+        // project is exactly where it started — the invariant the undo exists to keep.
+        expect(reconcileMemoryKeyManifest({ rs, home, records })).toEqual([]);
+        expect(manifestEntries(rs).map((r) => r.status)).toEqual(["planned", "planned"]);
+        expect(snapshotTree(join(home, "projects", a.oldKey))).toEqual(before);
+        expect(memoryDirFor(a.cwd, { normaHome: home, relocatedKey: (k) => memoryKeyRelocations(rs).get(k) }))
+          .toBe(join(home, "projects", a.oldKey, "memory"));
+
+        // And the project migrates normally once the obstruction is cleared — no row is skipped
+        // forever, and nothing needed a hand.
+        rmSync(join(home, "projects", a.newKey, "memory"), { recursive: true, force: true });
+        const second = planMemoryKeyMigration({ rs, home, records, store });
+        expect(applyMemoryKeyMigration({ rs, home }, second)).toEqual({ moved: 1, movedEntries: 2, refused: [] });
+        expect(readFileSync(join(home, "projects", a.newKey, "memory", "MEMORY.md"), "utf8")).toBe("alpha");
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("an undo whose old name has been re-taken settles as `moved` — the row describes the disk, never an intention", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        applyMemoryKeyMigration({ rs, home }, planMemoryKeyMigration({ rs, home, records, store }));
+        // Hand-forge the torn-undo shape, then re-occupy the old name before the repair runs.
+        rs.db.run("UPDATE memory_key_manifest SET status = 'undoing' WHERE entry = 'memory'");
+        mkdirSync(join(home, "projects", a.oldKey, "memory"), { recursive: true });
+        writeFileSync(join(home, "projects", a.oldKey, "memory", "MEMORY.md"), "someone else's");
+
+        reconcileMemoryKeyManifest({ rs, home, records });
+        // Both ends occupied: the undo cannot complete, so the row goes back to the truth.
+        expect(manifestEntries(rs).map((r) => r.status)).toEqual(["moved"]);
+        expect(memoryKeyRelocations(rs).get(a.oldKey)).toBe(a.newKey);
+        expect(readFileSync(join(home, "projects", a.newKey, "memory", "MEMORY.md"), "utf8")).toBe("alpha");
+        expect(readFileSync(join(home, "projects", a.oldKey, "memory", "MEMORY.md"), "utf8")).toBe("someone else's");
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("a leftover `undoing` row never denies another project its migration", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+      const b = seedProject(home, store, "b", "beta");
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        const plan = planMemoryKeyMigration({ rs, home, records, store });
+        // A row the repair could not settle (both ends of a's entry occupied, say) must not turn
+        // apply's stale-row pre-check into a refusal for everybody — the NEW-4(b) shape.
+        rs.db.run("UPDATE memory_key_manifest SET status = 'undoing' WHERE old_key = ?", [a.oldKey]);
+
+        const result = applyMemoryKeyMigration({ rs, home }, plan);
+        expect(result.moved).toBe(1);
+        expect(readFileSync(join(home, "projects", b.newKey, "memory", "MEMORY.md"), "utf8")).toBe("beta");
+        expect(readFileSync(join(home, "projects", a.oldKey, "memory", "MEMORY.md"), "utf8")).toBe("alpha");
       } finally {
         rs.close();
       }

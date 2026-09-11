@@ -26,7 +26,7 @@ import { openRuntimeStateDb, type RuntimeStateDb } from "./db";
 import { createSqliteRuntimeDirectoryStore } from "./directory-store";
 import { RuntimeLeases, processStartedAt, type LeaseProbe } from "./leases";
 import { backfillNativeSessions, type BackfillReport } from "./migrations/backfill";
-import { applyMemoryKeyMigration, memoryKeyRelocations, planMemoryKeyMigration, reconcileMemoryKeyTornApplies, type MemoryKeyFs } from "./migrations/memory-keys";
+import { applyMemoryKeyMigration, memoryKeyRelocations, planMemoryKeyMigration, reconcileMemoryKeyManifest, type MemoryKeyFs } from "./migrations/memory-keys";
 import { RuntimeSessionRecords } from "./records";
 import { recoverRuntimeState, type RecoveryHooks, type RecoveryReport } from "./recovery";
 import { deleteSessionRuntimeState, retentionFromSettings, sweepRetention } from "./retention";
@@ -107,10 +107,6 @@ export interface RuntimeStateWiring {
    * must change with them, in the same breath.
    */
   relocatedMemoryKey(todaysKey: string): string | undefined;
-  /** True when the relocation map above could not be rebuilt from the manifest and may therefore be
-   *  behind it. The spine stays ONLINE either way (re-review NEW-2): a stale map resolves memory the
-   *  way it did a moment ago, which is survivable, while an offline spine costs every feature. */
-  memoryKeyMapStale(): boolean;
   /** Stops the sweep timer, drains the queued deletions (bounded), and closes the database. Called
    *  from the daemon's teardown AFTER the ipc server has stopped — see daemon.ts's `stop()`. */
   close(timeoutMs?: number): Promise<void>;
@@ -244,16 +240,11 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
     // the manifest could not be read: the live path then derives today's key, exactly as it does on
     // a home that never migrated.
     let relocations = new Map<string, string>();
-    /** The map could not be rebuilt after a change, so it may not describe the newest committed
-     *  relocation. Surfaced rather than swallowed: a stale map is a live-memory-path concern, and
-     *  `norma doctor` / a bug report should be able to say so. */
-    let relocationsStale = false;
     try {
-      const torn = reconcileMemoryKeyTornApplies({ rs, home, records, fs: deps.memoryKeyFs });
+      const torn = reconcileMemoryKeyManifest({ rs, home, records, fs: deps.memoryKeyFs });
       if (torn.length > 0) log(`memory-key migration: completed ${torn.length} relocation(s) a previous run left half-committed`);
       relocations = memoryKeyRelocations(rs);
     } catch (e) {
-      relocationsStale = true;
       log(`memory-key repair failed (it retries at the next boot): ${errName(e)}`);
     }
 
@@ -285,8 +276,13 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
     const runMemoryKeyMigration = (settings: Settings | null): void => {
       if (closing) return;
       if (settings?.runtimes?.migrations?.memoryKeys !== true) return;
-      if (markerIsSet()) return; // a home that DID migrate must not start narrating about it again
       try {
+        // INSIDE THE GUARD, every statement of it (re-review NEW-7). `markerIsSet` is a bare SELECT
+        // over `schema_meta`, and sitting one line above the `try` it was the single path by which
+        // this function could still throw — at boot, straight into `startRuntimeState`'s outer catch,
+        // which closes the handle and costs the WHOLE runtime spine for a migration that had nothing
+        // to migrate. The contract in the docstring is only a contract if nothing is outside this.
+        if (markerIsSet()) return; // a home that DID migrate must not start narrating about it again
         const plan = planMemoryKeyMigration({ rs, home, records, store, memoryDirectory: settings?.memory?.directory, fs: deps.memoryKeyFs });
         // Declined, NOT done: no marker, so clearing `memory.directory` on THIS running daemon still
         // gets a migration. The decline refuses before the plan touches the disk or spawns git, so
@@ -347,13 +343,18 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
         // boot lands in `startRuntimeState`'s outer catch, which closes the handle and costs the
         // whole runtime spine (re-review NEW-2, the same failure class M-2 was raised about). The
         // conditions that make the migration throw are exactly the ones that would make this
-        // `SELECT` throw too. On failure the PREVIOUS map is kept — stale, but never wrong about a
-        // relocation that has not happened — and the spine says so rather than going offline.
+        // `SELECT` throw too.
+        //
+        // ON FAILURE THE PREVIOUS MAP IS KEPT, AND THAT IS A TRADE, NOT A SAVE. A rebuild that fails
+        // BEFORE anything committed leaves a map that is simply still correct; one that fails AFTER
+        // entries committed leaves a map that is wrong about a relocation that HAS happened — M-1's
+        // harm, reached the other way round. It is still the better of the two available answers: the
+        // alternative is an offline spine, which answers `undefined` for every key and therefore has
+        // exactly the same effect on the memory path plus the loss of every other runtime feature.
+        // The manifest is untouched either way, so the next boot rebuilds from the truth.
         try {
           relocations = memoryKeyRelocations(rs);
-          relocationsStale = false;
         } catch (e) {
-          relocationsStale = true;
           log(`memory-key map could not be rebuilt; the live memory path is using the last known map: ${errName(e)}`);
         }
       }
@@ -413,7 +414,6 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
       deletionsSettled: () => deletions,
       applySettings: runMemoryKeyMigration,
       relocatedMemoryKey: (todaysKey: string) => relocations.get(todaysKey),
-      memoryKeyMapStale: () => relocationsStale,
       /**
        * Stop the sweep, DRAIN the queued deletions, then close the database.
        *

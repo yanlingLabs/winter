@@ -639,11 +639,12 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
     });
   });
 
-  test("a relocation map that cannot be rebuilt keeps the LAST map and the spine online — it never escapes as a throw", async () => {
-    // RE-REVIEW NEW-2. The `finally` that rebuilds the map sits OUTSIDE the catch above it, so an
-    // unguarded throw there escapes `runMemoryKeyMigration` — whose contract is "never throws" — and
-    // at boot lands in `startRuntimeState`'s outer catch, which closes the handle and costs the whole
-    // runtime spine. That is the very failure class M-2 was raised about, reintroduced by M-1's fix.
+  test("the migration NEVER throws, and a table it reads being gone costs the relocation and nothing else", async () => {
+    // RE-REVIEW NEW-7. `markerIsSet()` is a bare SELECT over `schema_meta`; sitting one line above
+    // the `try` it was the single statement by which `runMemoryKeyMigration` could still throw —
+    // and at boot that lands in `startRuntimeState`'s outer catch, which closes the handle and costs
+    // the WHOLE runtime spine for a migration that had nothing to migrate. Both doors are asserted:
+    // the hot path (which `settings-apply.ts` happens to wrap) and the boot path (which does not).
     await withTempHome(async (home) => {
       const store = new SessionStore(home);
       const first = seedProject(home, store, "alpha");
@@ -655,20 +656,58 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
       const rt = "unavailable" in state ? undefined : state;
       try {
         expect(rt).toBeDefined();
-        expect(rt!.memoryKeyMapStale()).toBe(false);
+        // The table the marker check reads goes away under the running daemon.
+        rt!.db.db.run("DROP TABLE schema_meta");
 
-        // The manifest goes away under the running daemon: every read of it now throws, including
-        // the plan AND the map rebuild in the `finally`.
+        live = settingsWith(true);
+        expect(() => rt!.applySettings(live)).not.toThrow();   // the contract, asserted on the statement that broke it
+        expect(lines.some((l) => l.includes("memory-key migration failed"))).toBe(true);
+        // The map is untouched and the live path still answers.
+        expect(rt!.relocatedMemoryKey(first.oldKey)).toBeUndefined();
+        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(home, "projects", first.oldKey, "memory"));
+      } finally {
+        await rt?.close();
+      }
+
+      // AND AT BOOT, where nothing wraps the call: the spine must come up anyway.
+      const bootLines: string[] = [];
+      const booted = await startRuntimeState({ home, store, settings: () => settingsWith(true), log: (l) => bootLines.push(l) });
+      const rt2 = "unavailable" in booted ? undefined : booted;
+      try {
+        expect(rt2).toBeDefined();                       // NOT `{ unavailable }`
+        expect(rt2!.lastRecovery.ok).toBe(true);
+        expect(bootLines.some((l) => l.includes("memory-key migration failed"))).toBe(true);
+        expect(bootLines.some((l) => l.includes("runtime state could not be wired"))).toBe(false);
+      } finally {
+        await rt2?.close();
+        store.close();
+      }
+    });
+  });
+
+  test("a relocation map that cannot be rebuilt keeps the LAST map and the spine online", async () => {
+    // RE-REVIEW NEW-2's other half: the `finally` that rebuilds the map sits OUTSIDE the catch, so an
+    // unguarded throw there escapes the same way.
+    await withTempHome(async (home) => {
+      const store = new SessionStore(home);
+      const first = seedProject(home, store, "alpha");
+      const lines: string[] = [];
+      const settingsWith = (memoryKeys: boolean) => Settings.parse({ ...SETTINGS_BASE, runtimes: { migrations: { memoryKeys } } });
+      let live = settingsWith(false);
+
+      const state = await startRuntimeState({ home, store, settings: () => live, log: (l) => lines.push(l) });
+      const rt = "unavailable" in state ? undefined : state;
+      try {
+        expect(rt).toBeDefined();
         rt!.db.db.run("DROP TABLE memory_key_manifest");
 
         live = settingsWith(true);
-        expect(() => rt!.applySettings(live)).not.toThrow();   // the contract, asserted directly
-
+        expect(() => rt!.applySettings(live)).not.toThrow();
         expect(lines.some((l) => l.includes("memory-key migration failed"))).toBe(true);
         expect(lines.some((l) => l.includes("memory-key map could not be rebuilt"))).toBe(true);
-        expect(rt!.memoryKeyMapStale()).toBe(true);
         // The last known map is KEPT (nothing had been relocated, so it is empty) and the live path
-        // still answers — stale beats wrong, and both beat an offline spine.
+        // still answers — the alternative, an offline spine, answers `undefined` for every key too
+        // AND costs every other runtime feature.
         expect(rt!.relocatedMemoryKey(first.oldKey)).toBeUndefined();
         expect(liveMemDir(home, rt!, first.cwd)).toBe(join(home, "projects", first.oldKey, "memory"));
       } finally {

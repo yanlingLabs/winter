@@ -57,7 +57,7 @@
 //     never trusted as a destination: `plan` re-derives and REWRITES it (the `ON CONFLICT ... DO
 //     UPDATE` below), and a row whose rename already landed somewhere this run would no longer
 //     choose is reconciled against ITS OWN recorded destination rather than dropped (see
-//     `reconcileTornApplies`) — otherwise an entry moved by an older build would sit at a key nothing
+//     `reconcileManifest`) — otherwise an entry moved by an older build would sit at a key nothing
 //     could name.
 //  2. THE LIVE PATH FOLLOWS. `agent/memory-dir.ts` reads the record's key — `memoryDirForRecord`
 //     directly, and `memoryDirFor`'s cwd-keyed callers through `relocatedKey`, which the daemon
@@ -380,7 +380,7 @@ export function planMemoryKeyMigration(deps: {
   // FIRST, before anything is derived from a record: a previous run may have died between a rename
   // and its commit, and the records it left behind still name the old key. Settling those here is
   // what lets the sweep below read records that agree with the disk.
-  plan.reconciled = reconcileTornApplies(rs, home, fs, deps.records);
+  plan.reconciled = reconcileManifest(rs, home, fs, deps.records);
 
   // `compatibilityKeys` spawns `git` and, unlike Norma's own `repoRootFor`, memoises nothing — so a
   // migration over hundreds of records would be hundreds of subprocesses. One `Map` per plan call
@@ -482,7 +482,7 @@ export function planMemoryKeyMigration(deps: {
     const oldKey = oldKeys[0]!;
     const entries = entriesUnder(fs, home, oldKey);
     // Nothing at the source is neither a conflict nor a move: either the entries already reached
-    // their destination (the TORN-APPLY WINDOW, settled above by `reconcileTornApplies` against each
+    // their destination (the TORN-APPLY WINDOW, settled above by `reconcileManifest` against each
     // row's OWN recorded destination, which after an SDK key change is not necessarily the one THIS
     // run derives — precondition 1), or this project has nothing on disk yet.
     if (entries.length === 0) continue;
@@ -499,13 +499,13 @@ export function planMemoryKeyMigration(deps: {
   }
   // FINISH WHAT THE MANIFEST ALREADY PROMISED, even when the records can no longer ask for it.
   //
-  // A torn apply part-way through a multi-entry project is settled per ROW (`reconcileTornApplies`),
+  // A torn apply part-way through a multi-entry project is settled per ROW (`reconcileManifest`),
   // which re-keys the record the moment `memory` lands — and from then on the record derives
   // `oldKey === newKey` and the sweep above reports it as `unchanged`. The entries that had not
   // moved yet would be orphaned at the old key with `planned` rows nothing ever acts on. The
   // manifest is the promise ledger, so an outstanding promise is planned from the ledger itself.
   const promised = new Map<string, string>();
-  for (const row of rs.db.query(`SELECT old_key, entry, new_key, status FROM memory_key_manifest WHERE status = 'planned'`).all() as ManifestRow[]) {
+  for (const row of rs.db.query(`SELECT old_key, entry, new_key, status, record_ids FROM memory_key_manifest WHERE status = 'planned'`).all() as ManifestRow[]) {
     promised.set(row.old_key, row.new_key);
   }
   for (const [oldKey, newKey] of promised) {
@@ -572,7 +572,7 @@ export function planMemoryKeyMigration(deps: {
  * that row stays `planned` forever: `rollback` only reads `moved`, so it would have no recorded way
  * back, which is the one state this manifest exists to prevent.
  *
- * Exported (the `reconcileMemoryKeyTornApplies` wrapper below) because it is a REPAIR, not a
+ * Exported (the `reconcileMemoryKeyManifest` wrapper below) because it is a REPAIR, not a
  * migration: the daemon runs it at EVERY boot, flag or no flag. A user who enables the flag, loses
  * the process inside that window and then turns the flag back off would otherwise leave entries at a
  * key whose `planned` rows nothing ever settles — invisible to `rollback` and to the relocation map
@@ -593,12 +593,23 @@ export function planMemoryKeyMigration(deps: {
  * is then reported as `unchanged` (or `root-disagrees`, when its destination is an older algorithm's)
  * rather than planned all over again.
  */
-export function reconcileMemoryKeyTornApplies(deps: { rs: RuntimeStateDb; home: string; records?: RuntimeSessionRecords; fs?: MemoryKeyFs }): MemoryKeyMove[] {
-  return reconcileTornApplies(deps.rs, deps.home, deps.fs ?? NODE_FS, deps.records ?? new RuntimeSessionRecords(deps.rs));
+export function reconcileMemoryKeyManifest(deps: { rs: RuntimeStateDb; home: string; records?: RuntimeSessionRecords; fs?: MemoryKeyFs }): MemoryKeyMove[] {
+  return reconcileManifest(deps.rs, deps.home, deps.fs ?? NODE_FS, deps.records ?? new RuntimeSessionRecords(deps.rs));
 }
 
-function reconcileTornApplies(rs: RuntimeStateDb, home: string, fs: MemoryKeyFs, records: RuntimeSessionRecords): MemoryKeyMove[] {
-  const rows = (rs.db.query(`SELECT old_key, entry, new_key, status FROM memory_key_manifest WHERE status = 'planned' ORDER BY old_key, entry`).all() as ManifestRow[])
+function reconcileManifest(rs: RuntimeStateDb, home: string, fs: MemoryKeyFs, records: RuntimeSessionRecords): MemoryKeyMove[] {
+  // FIRST, THE UNDOS IN FLIGHT (re-review NEW-8). An `undoing` row is a rename-back this process —
+  // or a previous one — declared and may not have finished. It is settled BEFORE the forward pass
+  // below, because an undo that completes puts the entry back at the source, which is exactly what
+  // the forward predicate must not then read as "already moved".
+  //
+  // THIS IS THE ONE PLACE THE REPAIR MOVES A FILE, and it moves only entries a row says are in
+  // flight, only between the two keys that row names, and only into a name that is free.
+  for (const row of rs.db.query(`SELECT old_key, entry, new_key, status, record_ids FROM memory_key_manifest WHERE status = 'undoing' ORDER BY old_key, entry`).all() as ManifestRow[]) {
+    finishUndo(rs, records, fs, home, row.old_key, row.new_key, row.entry);
+  }
+
+  const rows = (rs.db.query(`SELECT old_key, entry, new_key, status, record_ids FROM memory_key_manifest WHERE status = 'planned' ORDER BY old_key, entry`).all() as ManifestRow[])
     .filter((r) => !fs.existsSync(entryPath(home, r.old_key, r.entry)) && fs.existsSync(entryPath(home, r.new_key, r.entry)));
   if (rows.length === 0) return [];
   const at = new Date().toISOString();
@@ -665,7 +676,7 @@ export function memoryKeyRelocations(rs: RuntimeStateDb): Map<string, string> {
  *
  * A crash in that window leaves the entry moved with its row still `planned`, and it is
  * `planMemoryKeyMigration` — not this function — that repairs it: a resumed run always re-plans
- * first, and by then the source entry is gone. See `reconcileTornApplies`.
+ * first, and by then the source entry is gone. See `reconcileManifest`.
  *
  * A COLLISION REFUSES ITS OWN PROJECT AND NOTHING ELSE, and a refused project moves nothing at all —
  * a project's state never splits across two keys. Every entry is checked against the destination
@@ -700,9 +711,12 @@ export function applyMemoryKeyMigration(
     if (rows.length === 0) throw new MemoryKeyNotPlannedError(move.oldKey, move.newKey, undefined);
     const disagreeing = rows.find((r) => r.new_key !== move.newKey);
     if (disagreeing) throw new MemoryKeyNotPlannedError(move.oldKey, move.newKey, disagreeing.status, disagreeing.new_key);
-    // A row already `moved` is work this plan already did — not a refusal. Anything that is neither
-    // `planned` nor `moved` (a `rolled-back` row, say) is a stale plan and still refuses.
-    const stale = rows.find((r) => r.status !== "planned" && r.status !== "moved");
+    // A row already `moved` is work this plan already did — not a refusal, and neither is an
+    // `undoing` row (an undo the repair could not finish): the `present` filter below moves only
+    // `planned` entries, so such a row asks for nothing, and throwing over it would let ONE leftover
+    // row deny every other project its migration on every retry. Anything else — a `rolled-back`
+    // row, say — is a stale plan and still refuses.
+    const stale = rows.find((r) => r.status !== "planned" && r.status !== "moved" && r.status !== "undoing");
     if (stale) throw new MemoryKeyNotPlannedError(move.oldKey, move.newKey, stale.status, stale.new_key);
   }
 
@@ -784,24 +798,76 @@ function undoEntries(
   move: MemoryKeyMove,
   entries: readonly string[],
 ): void {
-  for (const entry of entries) {
-    const back = entryPath(home, move.oldKey, entry);
-    const at = entryPath(home, move.newKey, entry);
-    try {
-      if (!fs.existsSync(at) || fs.existsSync(back)) continue;
-      fs.mkdirSync(projectDir(home, move.oldKey), { recursive: true });
-      fs.renameSync(at, back);
-    } catch {
-      continue; // left `moved`, which is what the disk says
-    }
-    rs.transaction(() => {
+  if (entries.length === 0) return;
+  // DECLARED BEFORE A SINGLE RENAME-BACK (re-review NEW-8). The undo is a rename-then-commit pair
+  // exactly as the move is, and its torn window is the move's mirror image: the entry back at the
+  // OLD key with a row still saying `moved`. Nothing read that shape — the boot repair looks at
+  // `planned` rows, and `plan`/`apply` both skip `moved` ones — so the entry stayed stranded under a
+  // row that lied about it, and when the entry was `memory` the live map kept pointing at a
+  // directory that had moved away (M-1's harm, through a new door). An `undoing` row says "these
+  // entries are in flight, in this direction", which is a state the boot repair can finish.
+  //
+  // The records follow HERE rather than after the renames: `undoing` is not `moved`, so
+  // `pairRelocated` is already false inside this transaction and `syncRecordKey` files them at the
+  // old key — where the entries are going. A crash mid-undo then leaves records and the (finished)
+  // repair agreeing, rather than a window where the map says relocated and the tree is not.
+  rs.transaction(() => {
+    for (const entry of entries) {
       rs.db.run(
-        `UPDATE memory_key_manifest SET status = 'planned', moved_at = NULL WHERE old_key = ? AND entry = ? AND new_key = ? AND status = 'moved'`,
+        `UPDATE memory_key_manifest SET status = 'undoing' WHERE old_key = ? AND entry = ? AND new_key = ? AND status = 'moved'`,
         [move.oldKey, entry, move.newKey],
       );
-      syncRecordKey(rs, records, move.oldKey);
-    }, { mode: "immediate" });
+    }
+    syncRecordKey(rs, records, move.oldKey);
+  }, { mode: "immediate" });
+
+  for (const entry of entries) finishUndo(rs, records, fs, home, move.oldKey, move.newKey, entry);
+}
+
+/**
+ * Carry ONE `undoing` entry to rest — from `undoEntries` immediately, or from the boot repair after
+ * a crash in between. Idempotent by construction: every branch is decided by where the entry
+ * actually IS, never by how it got there.
+ */
+function finishUndo(
+  rs: RuntimeStateDb,
+  records: RuntimeSessionRecords,
+  fs: MemoryKeyFs,
+  home: string,
+  oldKey: string,
+  newKey: string,
+  entry: string,
+): void {
+  const back = entryPath(home, oldKey, entry);
+  const at = entryPath(home, newKey, entry);
+  let settled: "planned" | "moved" | undefined;
+  try {
+    if (fs.existsSync(back)) {
+      // Already home — either this call's rename landed and its commit did not, or a hand-undo.
+      settled = fs.existsSync(at) ? "moved" : "planned";
+    } else if (fs.existsSync(at)) {
+      fs.mkdirSync(projectDir(home, oldKey), { recursive: true });
+      fs.renameSync(at, back);
+      settled = "planned";
+    } else {
+      // At neither end: the entry is gone. `planned` is the honest resting state — `apply` moves
+      // only entries that exist at the source, so this row asks for nothing until one reappears.
+      settled = "planned";
+    }
+  } catch {
+    return; // left `undoing`: the next boot's repair tries again rather than recording a guess
   }
+  // BOTH ends occupied is the one shape the undo cannot complete: something re-took the old name
+  // while the entry sat at the new key. The row goes back to `moved`, which is where the entry
+  // really is, so the live map and the records describe the disk rather than an intention.
+  rs.transaction(() => {
+    if (settled === "moved") {
+      rs.db.run(`UPDATE memory_key_manifest SET status = 'moved' WHERE old_key = ? AND entry = ? AND new_key = ? AND status = 'undoing'`, [oldKey, entry, newKey]);
+    } else {
+      rs.db.run(`UPDATE memory_key_manifest SET status = 'planned', moved_at = NULL WHERE old_key = ? AND entry = ? AND new_key = ? AND status = 'undoing'`, [oldKey, entry, newKey]);
+    }
+    syncRecordKey(rs, records, oldKey);
+  }, { mode: "immediate" });
 }
 
 /**
@@ -824,7 +890,7 @@ export function rollbackMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: str
   const { rs, home } = deps;
   const fs = deps.fs ?? NODE_FS;
   const records = new RuntimeSessionRecords(rs);
-  const rows = rs.db.query(`SELECT old_key, entry, new_key, status FROM memory_key_manifest WHERE status = 'moved' ORDER BY old_key, entry`).all() as ManifestRow[];
+  const rows = rs.db.query(`SELECT old_key, entry, new_key, status, record_ids FROM memory_key_manifest WHERE status = 'moved' ORDER BY old_key, entry`).all() as ManifestRow[];
   const failures: MemoryKeyRollbackFailure[] = [];
   const touched = new Set<string>();
   let rolledBack = 0;

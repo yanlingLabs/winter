@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-export const RUNTIME_STATE_SCHEMA_VERSION = 3;
+export const RUNTIME_STATE_SCHEMA_VERSION = 4;
 
 export class RuntimeStateUnavailableError extends Error {
   constructor(public readonly path: string, public readonly reason: "missing" | "corrupt" | "newer-schema" | "unmigrated", cause?: unknown) {
@@ -107,6 +107,27 @@ const MIGRATIONS: ReadonlyArray<{ version: number; up: (db: Database) => void }>
   // one remaining by-key fallback is scoped to.
   { version: 3, up: (db) => {
     db.run(`ALTER TABLE memory_key_manifest ADD COLUMN record_ids TEXT NOT NULL DEFAULT '[]'`);
+  } },
+  // Schema v4 (re-review NEW-8): `undoing`, the state that makes an UNDO repairable.
+  //
+  // A refused project must move nothing at all, so `apply` puts back the entries it had already
+  // renamed when a collision appears mid-pass. That undo is itself a rename-then-commit pair, and
+  // its torn window is the MIRROR of the apply window: the entry back at the old key with a row
+  // still saying `moved`. Nothing read that shape — the boot repair looks at `planned` rows, `plan`
+  // and `apply` both skip `moved` ones — so the entry was stranded under a row that lied about it,
+  // and if the entry was `memory` the live MEMDIR map kept pointing at a directory that had moved
+  // away. A row therefore declares the undo BEFORE the first rename-back, and the boot repair
+  // finishes it. `CHECK` constraints cannot be altered in place, so the table is recreated.
+  { version: 4, up: (db) => {
+    db.run(`ALTER TABLE memory_key_manifest RENAME TO memory_key_manifest_v3`);
+    db.run(`CREATE TABLE memory_key_manifest (
+      old_key TEXT NOT NULL, entry TEXT NOT NULL, new_key TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('planned','moved','rolled-back','undoing')),
+      planned_at TEXT NOT NULL, moved_at TEXT, record_ids TEXT NOT NULL DEFAULT '[]',
+      PRIMARY KEY (old_key, entry))`);
+    db.run(`INSERT INTO memory_key_manifest (old_key, entry, new_key, status, planned_at, moved_at, record_ids)
+            SELECT old_key, entry, new_key, status, planned_at, moved_at, record_ids FROM memory_key_manifest_v3`);
+    db.run(`DROP TABLE memory_key_manifest_v3`);
   } },
 ];
 
