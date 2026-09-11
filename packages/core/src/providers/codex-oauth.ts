@@ -1,10 +1,15 @@
 import type { SecretStore } from "../auth/secret-store";
+import { CREDENTIAL_MATERIAL_NAMES, readCredentialMaterial, writeCredentialMaterial } from "../auth/credential-material";
 import type { ModelInfo, Provider, ProviderEvent, TurnRequest } from "./types";
 import { ResponsesSseParser } from "./responses-sse";
 import { buildRequestBody, mapHttpError } from "./openai-compatible";
 import { refreshTokens, type OAuthTokens } from "./pkce";
 import { CODEX, CODEX_MODELS } from "./codex-config";
 
+/** LEGACY raw records — a one-way migration source (`auth/credential-material.ts`'s
+ *  `migrateLegacyCredentialMaterial`) and `norma logout`'s blank target ONLY. `CodexAuthStore`
+ *  below no longer writes these; the single source of truth is the `codex-oauth:default` JSON
+ *  material record the spawned Winter child actually reads. */
 export const CODEX_SECRET_NAMES = {
   access: "codex-access-token",
   refresh: "codex-refresh-token",
@@ -13,18 +18,43 @@ export const CODEX_SECRET_NAMES = {
   expires: "codex-expires-at",
 } as const;
 
+/**
+ * Facade over the `codex-oauth:default` JSON credential material record (post-8b hotfix): the
+ * spawned Winter child resolves its `CredentialRef` by reading this SAME record directly off the
+ * Keychain and `JSON.parse`-ing it, so `save`/`load` here and the child's own reads/writes (its
+ * 401-refresh writes the merged material back to the exact ref it was handed) share ONE token set.
+ * `save` no longer touches the five legacy `CODEX_SECRET_NAMES` — those are migration-source/logout
+ * only now. `load` falls back to them (read-only) when the material record is absent, so an
+ * upgrade from a pre-hotfix install keeps working until the boot-time migration (or this load
+ * itself, next save) writes the material record forward.
+ */
 export class CodexAuthStore {
   constructor(private readonly store: SecretStore) {}
 
   async save(t: OAuthTokens): Promise<void> {
-    await this.store.set(CODEX_SECRET_NAMES.access, t.accessToken);
-    if (t.refreshToken) await this.store.set(CODEX_SECRET_NAMES.refresh, t.refreshToken);
-    if (t.idToken) await this.store.set(CODEX_SECRET_NAMES.id, t.idToken);
-    if (t.accountId) await this.store.set(CODEX_SECRET_NAMES.account, t.accountId);
-    await this.store.set(CODEX_SECRET_NAMES.expires, String(t.expiresAt));
+    await writeCredentialMaterial(this.store, CREDENTIAL_MATERIAL_NAMES.codexOauth, {
+      kind: "oauth",
+      accessToken: t.accessToken,
+      ...(t.refreshToken ? { refreshToken: t.refreshToken } : {}),
+      ...(t.idToken ? { idToken: t.idToken } : {}),
+      ...(t.accountId ? { accountId: t.accountId } : {}),
+      expiresAt: t.expiresAt,
+    });
   }
 
   async load(): Promise<OAuthTokens | null> {
+    const material = await readCredentialMaterial(this.store, CREDENTIAL_MATERIAL_NAMES.codexOauth);
+    if (material?.kind === "oauth") {
+      return {
+        accessToken: material.accessToken,
+        refreshToken: material.refreshToken ?? null,
+        idToken: material.idToken ?? null,
+        accountId: material.accountId ?? null,
+        expiresAt: material.expiresAt ?? 0,
+      };
+    }
+    // Read-only legacy fallback — never rewritten from here (the migration function is the only
+    // writer that promotes these into the material record).
     const accessToken = await this.store.get(CODEX_SECRET_NAMES.access);
     if (!accessToken) return null;
     return {

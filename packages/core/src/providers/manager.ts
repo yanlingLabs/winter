@@ -1,5 +1,6 @@
 import { statSync } from "node:fs";
 import type { SecretStore } from "../auth/secret-store";
+import { readOpenAiApiKey } from "../auth/credential-material";
 import { loadSettings, type Settings } from "../settings";
 import type { Provider } from "./types";
 import { OpenAICompatibleProvider } from "./openai-compatible";
@@ -7,6 +8,9 @@ import { CodexAuthStore, CodexOAuthProvider } from "./codex-oauth";
 import { QuotaManager, withQuota } from "./quota";
 import { CODEX_MODELS, DEFAULT_CODEX_MODEL } from "./codex-config";
 
+/** LEGACY raw record — migration source only (`auth/credential-material.ts`'s
+ *  `readOpenAiApiKey`/`migrateLegacyCredentialMaterial`). Writers use `writeOpenAiApiKey`, which
+ *  writes ONLY the `openai:default` JSON material record the spawned Winter child reads. */
 export const OPENAI_API_KEY_SECRET = "openai-api-key";
 
 /** What a turn actually resolves to: the model slug plus an optional reasoning-effort hint. */
@@ -108,7 +112,7 @@ export async function createProvider(settings: Settings, secrets: SecretStore, s
   if (providerType === "codex-oauth") {
     inner = new CodexOAuthProvider({ authStore: new CodexAuthStore(secrets) });
   } else {
-    const apiKey = await secrets.get(OPENAI_API_KEY_SECRET);
+    const apiKey = await readOpenAiApiKey(secrets);
     if (!apiKey) throw new Error("no API key stored — run: norma login --api-key");
     inner = new OpenAICompatibleProvider({ baseUrl: settings.provider.baseUrl, apiKey });
   }
