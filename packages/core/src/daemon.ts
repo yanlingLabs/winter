@@ -763,6 +763,31 @@ export async function startDaemon(opts: {
     runtimeSdk = undefined;
   }
 
+  // ── §13 step 10, run from here because the handle does not exist where the step does ──────────
+  //
+  // WS-15 §6.4's directory recovery — mark previously-live handles unavailable, restore cursors,
+  // reconcile every CLAIMED-BUT-UNRECEIPTED delivery as `delivery_uncertain`, prune what retention
+  // says is past its horizon — belongs inside `recoverRuntimeState`'s step 10, and that is where
+  // its hook lives (`RecoveryHooks.recoverDirectory`, exercised by
+  // `test/runtime-state/recovery-messaging.test.ts`). It cannot be supplied from THIS boot, because
+  // the two constructions are circular: `startRuntimeState` (≈300 lines above) opens the directory
+  // store that `createRuntimeSdk` needs, and runs §13 before it returns. Task 12 therefore runs the
+  // step here — still before `startIpcServer`, so no client has been able to ask this daemon about
+  // a session — and the ordering is a recorded plan conflict for the controller, not a fix invented
+  // in a lane. Nothing else in boot depends on the result; a failure costs the reconciliation and
+  // the daemon starts.
+  if (runtimeSdk !== undefined) {
+    try {
+      const recovered = await runtimeSdk.sdk.directory.recover();
+      console.error(
+        `runtime-sdk: directory recovery — ${recovered.entriesLoaded} entr(ies), ${recovered.staleMarked} stale, ` +
+          `${recovered.cursorsRestored} cursor(s), ${recovered.heldMessagesFound} held`,
+      );
+    } catch (err) {
+      console.error(`runtime-sdk: directory recovery failed (${(err as Error)?.name ?? "unknown"}) — messaging starts without it`);
+    }
+  }
+
   if (agentProvider) {
     const registry = new ToolRegistry();
     sharedRegistry = registry;

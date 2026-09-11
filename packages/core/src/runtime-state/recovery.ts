@@ -514,7 +514,14 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
         idleSubscriptions: count("SELECT COUNT(*) AS n FROM idle_subscriptions"),
       };
       if (!hooks.recoverDirectory) {
-        finishStep(10, "skipped", { ...detail, reason: "8b" });
+        // ⚠️ P8b Task 12, AND THE HONEST REASON. The hook is `sdk.directory.recover()`, and the
+        // router handle is constructed in `daemon.ts` AFTER this sweep — it needs the directory
+        // store this sweep's own `startRuntimeState` opened, and its `capabilities` come from the
+        // tool-registry block later still. So on a real boot this step runs from the runtime-sdk
+        // construction site instead, and the ORDERING is a recorded plan conflict rather than a
+        // silent no-op: see the Task 12 report. A caller that CAN supply the hook (every test, and
+        // any future two-phase boot) takes the branch below and the whole step happens here.
+        finishStep(10, "skipped", { ...detail, reason: "the router handle is built after §13; recovery runs at runtime-sdk construction" });
       } else {
         try {
           await hooks.recoverDirectory();

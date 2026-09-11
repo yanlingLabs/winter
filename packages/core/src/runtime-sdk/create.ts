@@ -25,13 +25,15 @@ import * as winter from "@yanlinglabs/winter-agent-sdk";
 import type { McpSdkServerConfigWithInstance, Query, SpawnClaudeCodeProcess } from "@yanlinglabs/winter-agent-sdk";
 import type { AdvisorReviewer, ReviewerResolver } from "@yanlinglabs/winter-agent-sdk/tools";
 import { createRuntimeSdk as createRouterSdk } from "@yanlinglabs/winter-runtime-sdk";
-import type { RuntimeDirectoryOptions, RuntimeDirectoryStore, RuntimeSdk, RuntimeSdkOptions } from "@yanlinglabs/winter-runtime-sdk";
+import type { RuntimeDirectoryEntry, RuntimeDirectoryOptions, RuntimeDirectoryStore, RuntimeSdk, RuntimeSdkOptions } from "@yanlinglabs/winter-runtime-sdk";
+import type { PermissionClassLabel } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { SecretStore } from "../auth/secret-store";
 import { retentionFromSettings } from "../runtime-state/retention";
 import type { Settings } from "../settings";
 import { NORMA_BRAND } from "./brand";
 import { resolveWinterExecutable, type WinterExecutableUnavailable } from "./executable";
 import { keychainSeamFromSecretStore } from "./keychain";
+import { releaseAllHeld } from "./messaging";
 import { NORMA_PEER_VERSIONS } from "./versions";
 
 /** `RuntimeDirectoryRetention` is not on the router's barrel; this is the same type. */
@@ -84,6 +86,23 @@ export interface NormaRuntimeSdkDeps {
    * ordinary "no reviewer resolvable" tool error and never a throw.
    */
   advisorReviewer?: (model: string) => AdvisorReviewer;
+  /**
+   * WS-10 §13's inbound class for a session this process holds NO live facet for (Task 12).
+   *
+   * ⚠️ WITHOUT IT EVERY UNATTACHED RECEIVER HOLDS ITS MAIL, FOREVER. The router's `receiverClass`
+   * asks the attached handle's facet first; with no handle and no declaration it answers `unknown`,
+   * and since the router's D2 an unknown class FAILS CLOSED — the message is held rather than
+   * delivered under a guessed class. That is correct for a live session whose class this process
+   * genuinely cannot read, and wrong for a session Norma itself launched and then parked: its
+   * approval policy is a fact the daemon has.
+   *
+   * UNWIRED IN TASK 12 ON PURPOSE: the per-session policy lives with the session driver, which is
+   * Task 16's. Nothing regresses in the meantime because nothing attaches yet. Task 16 fills this
+   * from `permissionModeFor(policy)` → `classifyPermissionMode`, and `test/runtime-sdk/messaging.test.ts`
+   * already pins both branches (declared ⇒ a parked session answers `unavailable`; undeclared ⇒ it
+   * holds).
+   */
+  sessionPermissionClass?: (entry: RuntimeDirectoryEntry) => PermissionClassLabel | Promise<PermissionClassLabel>;
   log?: (line: string) => void;
 }
 
@@ -114,12 +133,14 @@ export interface NormaRuntimeSdk {
   untrack(sessionId: string): void;
   /**
    * The ONE messaging fact `settings-apply.ts` needs (a retention change can free a name a sender
-   * is holding a message for). Task 12 (`runtime-sdk/messaging.ts`) fills this in; until then the
-   * hop is a typed no-op and `daemon.ts` already passes the handle, so that task is one line here.
-   * Whatever Task 12 widens this to must keep a zero-argument `releaseHeld` — the router's own
-   * `messaging.releaseHeld(receiver)` takes an address and is NOT this shape.
+   * is holding a message for).
+   *
+   * ZERO-ARGUMENT, and that is the whole point: the router's own `messaging.releaseHeld(receiver)`
+   * takes ONE address, and a settings change has no receiver — it changes the answer for all of
+   * them. Task 12 fills this with `releaseAllHeld` (`runtime-sdk/messaging.ts`), which iterates the
+   * durable mailbox's receivers unioned with this process's live sessions.
    */
-  readonly messaging?: { releaseHeld?: () => void | Promise<void> };
+  readonly messaging: { releaseHeld: () => Promise<void> };
   /** G-14: end every tracked session, THEN dispose the router. Idempotent. */
   dispose(): Promise<void>;
 }
@@ -216,8 +237,15 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
     // home with no `NORMA_HOME` in its environment, i.e. every test. `participants` is 8c's.
     handoff: { winterHome: deps.home },
     // G-12. `official.permissionClass` is deliberately omitted until 8c (C-14): there is no
-    // official peer in 8b and it gates inbound delivery to official sessions only.
-    messaging: { directory: { retention: retentionFrom(deps.settings) } },
+    // official peer in 8b and it gates inbound delivery to official sessions only. The WINTER
+    // adapter's `permissionClass` (Task 12) is the OTHER half of that fail-closed rule — see
+    // `sessionPermissionClass` above for why it is a seam rather than a guess.
+    messaging: {
+      directory: { retention: retentionFrom(deps.settings) },
+      ...(deps.sessionPermissionClass === undefined
+        ? {}
+        : { messaging: { winter: { permissionClass: deps.sessionPermissionClass } } }),
+    },
     ...advisorFrom(deps),
   });
 
@@ -228,6 +256,14 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
 
   return {
     sdk,
+    // Task 12. `deps.directoryStore` is 8a's SQLite store when the spine opened and undefined when
+    // it did not — in which case the sweep is this process's live sessions alone, which is the same
+    // "degraded, never dead" posture the rest of this file takes.
+    messaging: {
+      releaseHeld: async (): Promise<void> => {
+        await releaseAllHeld(sdk, deps.directoryStore, deps.log);
+      },
+    },
     spawnHookFor(_mode: SessionMode): WinterSpawnHook | WinterExecutableUnavailable {
       const resolution = resolveWinterExecutable({
         setting: winterOptionsFrom(deps.settings()).winterExecutable,
