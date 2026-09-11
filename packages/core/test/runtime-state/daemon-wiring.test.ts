@@ -462,4 +462,40 @@ describe("daemon wiring — the memory-key migration runs behind its flag", () =
       expect(marker(rt)).toBe(null);
     });
   });
+
+  test("clearing settings.memory.directory on a RUNNING daemon un-declines the migration — no restart", async () => {
+    await withTempHome(async (home) => {
+      const pinned = join(home, "my-memdir");
+      mkdirSync(pinned, { recursive: true });
+      const store = new SessionStore(home);
+      const first = seedProject(home, store, "alpha");
+      const lines: string[] = [];
+      const settingsWith = (directory?: string) =>
+        Settings.parse({ ...SETTINGS_BASE, ...(directory === undefined ? {} : { memory: { directory } }), runtimes: { migrations: { memoryKeys: true } } });
+      let live = settingsWith(pinned);
+
+      const state = await startRuntimeState({ home, store, settings: () => live, log: (l) => lines.push(l) });
+      const rt = "unavailable" in state ? undefined : state;
+      try {
+        expect(rt).toBeDefined();
+        expect(memoryBody(home, first.oldKey)).toBe("# alpha\n");
+        expect(lines.filter((l) => l.includes("declined"))).toHaveLength(1);
+
+        // An unrelated settings edit re-enters this path: the decline must not narrate again.
+        rt!.applySettings(settingsWith(pinned));
+        expect(lines.filter((l) => l.includes("declined"))).toHaveLength(1);
+
+        // The user clears the override. A decline is not an attempt, so this is answered LIVE.
+        live = settingsWith(undefined);
+        rt!.applySettings(live);
+        expect(memoryBody(home, first.newKey)).toBe("# alpha\n");
+        expect(rt!.records.get(first.sessionId)!.memoryProjectKey).toBe(first.newKey);
+        expect(liveMemDir(home, rt!, first.cwd)).toBe(join(home, "projects", first.newKey, "memory"));
+        expect(marker(rt!)).not.toBe(null);
+      } finally {
+        await rt?.close();
+        store.close();
+      }
+    });
+  });
 });

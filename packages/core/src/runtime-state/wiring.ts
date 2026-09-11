@@ -236,6 +236,10 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
      *  says so and retries at the NEXT BOOT, which is also when the obstruction is most likely to
      *  have been fixed. */
     let attempted = false;
+    /** A DECLINE IS NOT AN ATTEMPT (see below): it costs nothing to re-check, so clearing
+     *  `memory.directory` on a running daemon still gets the migration — no restart, per the hard
+     *  rule. Only the narration is suppressed, or every unrelated settings edit would repeat it. */
+    let declineLogged = false;
 
     /**
      * Answer `runtimes.migrations.memoryKeys`. Called at boot AND from `settings-apply.ts`'s diff
@@ -248,14 +252,19 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
       if (settings?.runtimes?.migrations?.memoryKeys !== true) return;
       if (markerIsSet()) return; // a home that DID migrate must not start narrating about it again
       if (attempted) return;
-      attempted = true;
       try {
         const plan = planMemoryKeyMigration({ rs, home, records, store, memoryDirectory: settings?.memory?.directory });
-        // Declined, NOT done: no marker, so clearing `memory.directory` later still gets a migration.
+        // Declined, NOT done: no marker and no `attempted`, so clearing `memory.directory` on THIS
+        // running daemon still gets a migration. The decline costs one string check — it refuses
+        // before the plan touches the disk — so re-entering it on every settings change is free.
         if (plan.declined === "memory-directory-override") {
-          log("memory-key migration declined: settings.memory.directory pins this home's MEMDIR, so the project key decides nothing (clear it to migrate)");
+          if (!declineLogged) {
+            declineLogged = true;
+            log("memory-key migration declined: settings.memory.directory pins this home's MEMDIR, so the project key decides nothing (clear it to migrate)");
+          }
           return;
         }
+        attempted = true;
         if (plan.reconciled && plan.reconciled.length > 0) {
           log(`memory-key migration: completed ${plan.reconciled.length} relocation(s) a previous run left half-committed`);
         }

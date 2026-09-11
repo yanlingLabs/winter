@@ -87,6 +87,8 @@ export {
   repoRootFor,
   sanitizeProjectKey,
   memoryDirFor,
+  memoryDirForRecord,
+  memoryProjectKeyFor,
   type MemoryDirOptions,
 } from "./agent/memory-dir";
 export { AgentStore, GENERAL_OVERLAY, type ResolvedAgent, type AgentMeta } from "./agent/agents";
