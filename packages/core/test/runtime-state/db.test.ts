@@ -10,10 +10,10 @@ const homes: string[] = [];
 const home = () => { const h = mkdtempSync(join(tmpdir(), "norma-8a-")); homes.push(h); bootstrapNormaDir(h); return h; };
 afterEach(() => { for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true }); });
 
-const V1_TABLES = ["directory_cursors", "directory_entries", "global_message_receipts", "global_messages", "held_messages", "idle_subscriptions", "memory_key_manifest", "name_leases", "projection_applied", "runtime_children", "runtime_generations", "runtime_handoffs", "runtime_projection_cursors", "runtime_recovery_attempts", "runtime_sessions", "schema_meta", "transcript_dialects"].sort();
+const CURRENT_TABLES = ["directory_cursors", "directory_entries", "global_message_receipts", "global_messages", "held_messages", "idle_subscriptions", "memory_key_manifest", "name_leases", "projection_applied", "runtime_children", "runtime_generations", "runtime_handoffs", "runtime_projection_cursors", "runtime_recovery_attempts", "runtime_sessions", "schema_meta", "transcript_dialects"].sort();
 
 describe("runtime-state.db", () => {
-  test("opens, migrates to schema v1, and reports integrity", () => {
+  test("opens, migrates to the current schema, and reports integrity", () => {
     const h = home();
     const rs = openRuntimeStateDb(h);
     expect(rs.path).toBe(join(h, "runtimes", "runtime-state.db"));
@@ -22,13 +22,71 @@ describe("runtime-state.db", () => {
     expect(report.ok).toBe(true);
     // Fix round 1, minor (c): exact set equality (sorted) rather than 17 separate `toContain`
     // checks — a stray extra table would previously pass unnoticed.
-    expect([...report.tables].sort()).toEqual(V1_TABLES);
+    expect([...report.tables].sort()).toEqual(CURRENT_TABLES);
     expect(rs.db.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
     rs.close();
   });
+  // P8b-29: schema v2 re-shapes `memory_key_manifest` to one row per moved ENTRY, because the
+  // destination directory is shared with the Winter SDK's transcripts and only an entry-level move
+  // can merge into it reversibly. A v1 file must migrate IN PLACE, and the one thing a v1 row can
+  // carry forward — where a tree went — must survive, or a relocated tree would lose its way back.
+  describe("the v1 -> v2 memory-key manifest migration", () => {
+    /** A schema-v1 database, written exactly as 8a's build would have left it. */
+    function writeV1(h: string, rows: Array<{ old_key: string; new_key: string; status: string }> = []): string {
+      const path = join(h, "runtimes", "runtime-state.db");
+      const db = new Database(path, { create: true });
+      db.run("PRAGMA journal_mode = WAL");
+      db.run(`CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+      db.run(`CREATE TABLE memory_key_manifest (old_key TEXT PRIMARY KEY, new_key TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('planned','moved','rolled-back')), planned_at TEXT NOT NULL, moved_at TEXT)`);
+      for (const r of rows) db.run("INSERT INTO memory_key_manifest (old_key, new_key, status, planned_at, moved_at) VALUES (?, ?, ?, ?, NULL)", [r.old_key, r.new_key, r.status, "2026-09-01T00:00:00.000Z"]);
+      db.run("PRAGMA user_version = 1");
+      db.close();
+      return path;
+    }
+
+    test("a v1 file opens, migrates in place, and keeps every other table's data", () => {
+      const h = home();
+      writeV1(h);
+      const first = new Database(join(h, "runtimes", "runtime-state.db"));
+      first.run("INSERT INTO schema_meta(key, value) VALUES ('probe', 'kept')");
+      first.close();
+
+      const rs = openRuntimeStateDb(h);
+      try {
+        expect(rs.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION);
+        expect(rs.integrity().ok).toBe(true);
+        expect(rs.db.query("SELECT value FROM schema_meta WHERE key='probe'").get()).toEqual({ value: "kept" });
+        // The new shape: one row per entry, keyed by the pair.
+        const cols = (rs.db.query("PRAGMA table_info(memory_key_manifest)").all() as Array<{ name: string }>).map((c) => c.name);
+        expect(cols).toContain("entry");
+        // And the v1 table is gone rather than left shadowing the new one.
+        expect(rs.integrity().tables).not.toContain("memory_key_manifest_v1");
+      } finally {
+        rs.close();
+      }
+    });
+
+    test("a v1 row survives as the `memory` entry — the one a torn apply's repair and a rollback both need", () => {
+      const h = home();
+      writeV1(h, [
+        { old_key: "old-a", new_key: "new-a", status: "moved" },
+        { old_key: "old-b", new_key: "new-b", status: "planned" },
+      ]);
+      const rs = openRuntimeStateDb(h);
+      try {
+        expect(rs.db.query("SELECT old_key, entry, new_key, status FROM memory_key_manifest ORDER BY old_key").all()).toEqual([
+          { old_key: "old-a", entry: "memory", new_key: "new-a", status: "moved" },
+          { old_key: "old-b", entry: "memory", new_key: "new-b", status: "planned" },
+        ]);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
   test("a second open is idempotent (no re-migration, same version)", () => {
     const h = home(); openRuntimeStateDb(h).close();
-    const rs = openRuntimeStateDb(h); expect(rs.schemaVersion()).toBe(1); rs.close();
+    const rs = openRuntimeStateDb(h); expect(rs.schemaVersion()).toBe(RUNTIME_STATE_SCHEMA_VERSION); rs.close();
   });
   test("backup writes a consistent copy that opens on its own", () => {
     const h = home(); const rs = openRuntimeStateDb(h);

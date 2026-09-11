@@ -559,6 +559,32 @@ export class RuntimeSessionRecords {
     );
   }
 
+  /**
+   * Re-key EXACTLY these records' memory directory — the id-scoped sibling of
+   * `rekeyMemoryProjectKey` above, and the one §17 phase 5 uses (re-review NEW-3).
+   *
+   * The by-key form moves every record sitting at a key, which is correct for a directory rename
+   * seen from the directory's side and WRONG seen from the migration's: a project that is only
+   * half-moved, or one being rolled back, would sweep up records that were natively filed at the
+   * destination (a Winter session's own record is filed there from birth) and carry them somewhere
+   * they never lived. The manifest records which ids a move was derived from; this is how they are
+   * moved, and nothing else with them.
+   *
+   * Unknown ids are silently skipped: a record deleted since plan time is not an error, it is one
+   * fewer record to re-key. Returns how many rows actually changed.
+   */
+  setMemoryProjectKeyFor(winterSessionIds: readonly string[], memoryProjectKey: string): number {
+    if (winterSessionIds.length === 0) return 0;
+    const placeholders = winterSessionIds.map(() => "?").join(", ");
+    return this.rs.transaction(
+      () =>
+        this.rs.db
+          .query(`UPDATE runtime_sessions SET memory_project_key = ?, updated_at = ? WHERE winter_session_id IN (${placeholders})`)
+          .run(memoryProjectKey, this.now(), ...winterSessionIds).changes,
+      { mode: "immediate" },
+    );
+  }
+
   setTranscriptHealth(winterSessionId: string, health: RuntimeSessionRecord["transcriptHealth"]): void {
     this.rs.transaction(() => {
       this.require(winterSessionId);

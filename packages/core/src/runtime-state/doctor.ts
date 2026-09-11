@@ -30,6 +30,11 @@ export type FindingKind =
   | "db-missing"
   | "db-corrupt"
   | "db-newer-schema"
+  /** A healthy store written by an OLDER build of this schema. Not a fault and not repairable by
+   *  this tool: the next daemon boot migrates it in place (`db.ts`'s MIGRATIONS). It exists as its
+   *  own kind because the alternative — folding it into `db-corrupt` — told operators to restore a
+   *  backup that would itself be the older version (re-review NEW-1). */
+  | "db-unmigrated"
   | "index-drift"
   | "transcript-missing"
   | "duplicate-backend-id"
@@ -236,6 +241,19 @@ export async function diagnoseRuntimeState(home: string): Promise<Finding[]> {
     const integrity = rs.integrity();
     if (!integrity.ok) {
       return [{ kind: "db-corrupt", detail: `${rs.path}: ${integrity.checks.join("; ")}`, repairable: ["restore-backup"] }];
+    }
+
+    // An older schema is REPORTED, not refused, and everything below still runs: every table this
+    // diagnosis reads exists in every version of the schema, and the operator's real question ("is
+    // my runtime state healthy?") has a useful answer either way. Explicitly NOT repairable — the
+    // daemon fixes it by starting.
+    const schemaVersion = rs.schemaVersion();
+    if (schemaVersion < RUNTIME_STATE_SCHEMA_VERSION) {
+      findings.push({
+        kind: "db-unmigrated",
+        detail: `${rs.path}: schema ${schemaVersion} < ${RUNTIME_STATE_SCHEMA_VERSION} — the next daemon boot migrates it in place`,
+        repairable: [],
+      });
     }
 
     const readIndexResult = readIndex(home);
@@ -637,33 +655,78 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
     }
   }
 
-  // The one IRREVERSIBLE repair, made reversible: snapshot what is about to be overwritten (review
-  // r1, minor 7). Best-effort by design — a current file that will not open is the usual reason
-  // someone is restoring at all, and refusing the restore because the broken file cannot be backed
-  // up would be the tool working against its own purpose.
+  const dest = join(home, "runtimes", "runtime-state.db");
+
+  // THE ONE IRREVERSIBLE REPAIR, MADE REVERSIBLE — and it must never fail SILENTLY (re-review
+  // NEW-1). The first cut swallowed every failure, so on a store this build could not open readonly
+  // the repair overwrote a file with no copy of it anywhere and said so only in passing. Two doors,
+  // in order:
+  //
+  //   1. a CONSISTENT snapshot (`VACUUM INTO`) when the current file opens — the best copy;
+  //   2. a RAW BYTE COPY when it does not, because a file that will not open is the usual reason
+  //      someone is restoring at all, and a corrupt file is still the only evidence of what went
+  //      wrong. A byte copy needs nothing to be valid.
+  //
+  // Only when BOTH fail does the restore refuse, with the reason — better a repair the operator has
+  // to finish by hand than a file destroyed by a tool that was meant to make it recoverable.
   let snapshot: string | undefined;
-  try {
-    const current = openRuntimeStateDb(home, { readonly: true });
+  /** Sidecars that are now represented in the snapshot, so removing them below loses nothing. A
+   *  `VACUUM INTO` reads THROUGH the connection, so its output already contains every committed
+   *  frame — that door represents them all. */
+  let sidecarsCaptured = true;
+  if (existsSync(dest)) {
     try {
-      snapshot = current.backup();
-    } finally {
-      current.close();
+      const current = openRuntimeStateDb(home, { readonly: true });
+      try {
+        snapshot = current.backup();
+      } finally {
+        current.close();
+      }
+    } catch {
+      try {
+        const dir = join(home, "runtimes", "backups");
+        mkdirSync(dir, { recursive: true });
+        snapshot = join(dir, `pre-restore-${new Date().toISOString().replace(/[:.]/g, "-")}-${process.pid}.db`);
+        copyFileSync(dest, snapshot);
+        // THE SIDECARS COME WITH IT (re-review NEW-9). A byte copy of a WAL-mode database without
+        // its `-wal`/`-shm` cannot be opened read-only at all — which is exactly how the probe above
+        // inspects a candidate — so the snapshot this repair names in its own success message was a
+        // file the operator could not feed back through `--repair restore-backup`. And any committed
+        // but un-checkpointed tail lived ONLY in that `-wal`, which the sidecar removal below then
+        // deleted. Copying them beside the snapshot makes it both restorable and complete.
+        sidecarsCaptured = false;
+        for (const suffix of ["-wal", "-shm"]) {
+          if (existsSync(`${dest}${suffix}`)) copyFileSync(`${dest}${suffix}`, `${snapshot}${suffix}`);
+        }
+        sidecarsCaptured = true;
+      } catch (e) {
+        return {
+          applied: false,
+          detail: `refusing to overwrite ${dest}: it could not be snapshotted first (${e instanceof Error ? e.name : "unknown"}). Move it aside by hand and re-run.`,
+        };
+      }
     }
-  } catch {
-    /* nothing snapshottable — which is very often exactly why a restore is being run */
   }
 
-  const dest = join(home, "runtimes", "runtime-state.db");
   // SIDECARS FIRST, THEN THE COPY (review r1, minor 4). A leftover WAL from the REPLACED database
   // would be replayed over the restored one on the next open, so it must go — and it must go BEFORE
   // the copy, not after: in between lies a window where a crash (or a kill) would leave a RESTORED
   // database sitting beside the journal of the one it replaced, which is precisely the corruption
   // this clause exists to prevent. Removing them first can only ever leave the old file beside no
   // journal, and the old file is the one being thrown away.
+  // NEVER A SIDECAR THAT IS NOT IN THE SNAPSHOT. The removal itself is not optional — a leftover WAL
+  // from the REPLACED database would be replayed over the restored one on the next open — so a
+  // sidecar this repair could not capture is a reason to refuse, not a reason to delete it anyway.
+  if (!sidecarsCaptured) {
+    return {
+      applied: false,
+      detail: `refusing to overwrite ${dest}: its write-ahead log could not be snapshotted, and restoring would discard it. Move the store and its -wal aside by hand and re-run.`,
+    };
+  }
   for (const path of [`${dest}-wal`, `${dest}-shm`]) rmSync(path, { force: true });
   copyFileSync(real, dest);
   return {
     applied: true,
-    detail: `restored ${dest} from ${backupPath} (${statSync(dest).size} bytes); ${snapshot ? `the replaced file is at ${snapshot}` : "the replaced file could not be snapshotted (it did not open)"}`,
+    detail: `restored ${dest} from ${backupPath} (${statSync(dest).size} bytes); ${snapshot ? `the replaced file is at ${snapshot}` : "there was no file to replace"}`,
   };
 }

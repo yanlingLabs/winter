@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-export const RUNTIME_STATE_SCHEMA_VERSION = 1;
+export const RUNTIME_STATE_SCHEMA_VERSION = 4;
 
 export class RuntimeStateUnavailableError extends Error {
   constructor(public readonly path: string, public readonly reason: "missing" | "corrupt" | "newer-schema" | "unmigrated", cause?: unknown) {
@@ -66,6 +66,69 @@ const MIGRATIONS: ReadonlyArray<{ version: number; up: (db: Database) => void }>
     db.run(`CREATE TABLE memory_key_manifest (old_key TEXT PRIMARY KEY, new_key TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('planned','moved','rolled-back')), planned_at TEXT NOT NULL, moved_at TEXT)`);
     db.run(`INSERT INTO schema_meta(key, value) VALUES ('created_at', strftime('%Y-%m-%dT%H:%M:%fZ','now'))`);
   } },
+  // Schema v2 (P8b-29): the memory-key manifest becomes PER ENTRY.
+  //
+  // WHY THE SHAPE HAD TO CHANGE. `<home>/projects/<key>/` is not Norma's alone — it is also where
+  // the Winter SDK writes transcripts, and for the common "session opened at the repo root" case the
+  // transcript key and the compatibility memory key are the SAME string. So the destination of a
+  // §17 phase 5 relocation routinely EXISTS already on any home that has run a Winter session, and a
+  // whole-directory rename could only refuse there — permanently, and for every other project in
+  // that home along with it. Moving entry by entry into an existing directory is what makes the two
+  // layouts share one key; a row per entry is what lets rollback put back exactly the entries THIS
+  // migration moved and nothing the SDK created beside them.
+  //
+  // THE v1 ROWS, AND WHY CARRYING THEM IS NOT LOSSLESS. A v1 row described a WHOLE-DIRECTORY move,
+  // and there is no way to recover from it which entries that directory held — so it comes across as
+  // the `memory` entry ALONE: the one entry the live MEMDIR path resolves and the one a rollback most
+  // needs to restore. A `moved` v1 row whose project also held `<uuid>.jsonl`/`subagents/` therefore
+  // rolls back `memory` and leaves those siblings at the new key with no row naming them. That is
+  // still strictly better than dropping the row (which would strand the whole tree with no recorded
+  // way back), and the population is EMPTY BY CONSTRUCTION: 8a shipped phase 5 refused, so no
+  // released build ever wrote a row — only a pre-P8b-29 build of this very branch could have.
+  { version: 2, up: (db) => {
+    db.run(`ALTER TABLE memory_key_manifest RENAME TO memory_key_manifest_v1`);
+    db.run(`CREATE TABLE memory_key_manifest (
+      old_key TEXT NOT NULL, entry TEXT NOT NULL, new_key TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('planned','moved','rolled-back')),
+      planned_at TEXT NOT NULL, moved_at TEXT,
+      PRIMARY KEY (old_key, entry))`);
+    db.run(`INSERT INTO memory_key_manifest (old_key, entry, new_key, status, planned_at, moved_at)
+            SELECT old_key, 'memory', new_key, status, planned_at, moved_at FROM memory_key_manifest_v1`);
+    db.run(`DROP TABLE memory_key_manifest_v1`);
+  } },
+  // Schema v3 (re-review NEW-3): which RECORDS a planned move belongs to.
+  //
+  // `rekeyMemoryProjectKey(from, to)` re-keys every record sitting at `from` — the right answer when
+  // the only producer is the backfill (which always files today's key), and the wrong one the moment
+  // something files a record AT the compatibility key, which is exactly what a Winter session does.
+  // A half-moved project would then drag those records to the old key, and a rollback would file
+  // them there permanently. So the migration records WHOSE records it derived each pair from, and
+  // re-keys those ids and no others. Empty (`[]`) for a row carried up from v1/v2, which is what the
+  // one remaining by-key fallback is scoped to.
+  { version: 3, up: (db) => {
+    db.run(`ALTER TABLE memory_key_manifest ADD COLUMN record_ids TEXT NOT NULL DEFAULT '[]'`);
+  } },
+  // Schema v4 (re-review NEW-8): `undoing`, the state that makes an UNDO repairable.
+  //
+  // A refused project must move nothing at all, so `apply` puts back the entries it had already
+  // renamed when a collision appears mid-pass. That undo is itself a rename-then-commit pair, and
+  // its torn window is the MIRROR of the apply window: the entry back at the old key with a row
+  // still saying `moved`. Nothing read that shape — the boot repair looks at `planned` rows, `plan`
+  // and `apply` both skip `moved` ones — so the entry was stranded under a row that lied about it,
+  // and if the entry was `memory` the live MEMDIR map kept pointing at a directory that had moved
+  // away. A row therefore declares the undo BEFORE the first rename-back, and the boot repair
+  // finishes it. `CHECK` constraints cannot be altered in place, so the table is recreated.
+  { version: 4, up: (db) => {
+    db.run(`ALTER TABLE memory_key_manifest RENAME TO memory_key_manifest_v3`);
+    db.run(`CREATE TABLE memory_key_manifest (
+      old_key TEXT NOT NULL, entry TEXT NOT NULL, new_key TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('planned','moved','rolled-back','undoing')),
+      planned_at TEXT NOT NULL, moved_at TEXT, record_ids TEXT NOT NULL DEFAULT '[]',
+      PRIMARY KEY (old_key, entry))`);
+    db.run(`INSERT INTO memory_key_manifest (old_key, entry, new_key, status, planned_at, moved_at, record_ids)
+            SELECT old_key, entry, new_key, status, planned_at, moved_at, record_ids FROM memory_key_manifest_v3`);
+    db.run(`DROP TABLE memory_key_manifest_v3`);
+  } },
 ];
 
 // Fix round 1, finding (b): backup() can be called more than once per millisecond (two immediate
@@ -108,10 +171,18 @@ export function openRuntimeStateDb(home: string, opts: { readonly?: boolean; cre
   const opened: Database = db;
   const version = () => (opened.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0);
   if (version() > RUNTIME_STATE_SCHEMA_VERSION) { opened.close(); throw new RuntimeStateUnavailableError(path, "newer-schema"); }
-  // Minor (a): a readonly open of a pre-v1 (or not-yet-migrated) file must refuse rather than hand
-  // back a handle with none of the v1 tables — readonly can never run the migrations that would fix
-  // that up, so silently returning schemaVersion 0 here would be a worse trap than just refusing.
-  if (opts.readonly && version() < RUNTIME_STATE_SCHEMA_VERSION) { opened.close(); throw new RuntimeStateUnavailableError(path, "unmigrated"); }
+  // A readonly open of a PRE-SCHEMA file (`user_version` 0 — a valid sqlite file with none of this
+  // schema's tables) must refuse rather than hand back a handle nothing can query: readonly can
+  // never run the migration that would fix it up.
+  //
+  // BUT AN OLDER *SCHEMA* VERSION IS NOT THAT, and conflating the two was a real defect the moment
+  // this constant moved off 1 (re-review NEW-1). Every 8a-era home is a HEALTHY v1 store until a
+  // newer daemon opens it read-write; refusing it here made `norma doctor` — run, typically, before
+  // that first boot — call a healthy store corrupt and recommend restoring a backup that would
+  // itself be v1, which is advice that loops. The floor is therefore "has this schema at all",
+  // not "has the current version of it"; `schemaVersion()` reports the truth and the one reader
+  // that cares (`doctor.ts`) says "unmigrated — the next daemon boot migrates it in place".
+  if (opts.readonly && version() < 1) { opened.close(); throw new RuntimeStateUnavailableError(path, "unmigrated"); }
   if (!opts.readonly) for (const m of MIGRATIONS) if (version() < m.version) opened.transaction(() => { m.up(opened); opened.run(`PRAGMA user_version = ${m.version}`); })();
   return {
     path, db: opened,

@@ -250,7 +250,9 @@ describe("hot-settings T5b e2e: SettingsWatcher wired into a running daemon", ()
 describe("hot-settings P8b: the Winter-leg keys reach the live holder with no restart", () => {
   let daemon: RunningDaemon | undefined;
 
-  afterEach(() => daemon?.stop());
+  // CLEARED, not just stopped: a later test that throws before its own `startDaemon` lands would
+  // otherwise stop this already-stopped handle a second time.
+  afterEach(async () => { const stopping = daemon?.stop(); daemon = undefined; await stopping; });
 
   /** Polls the live holder past the watcher's debounce (150ms) + fs.watch latency — never a bare
    *  fixed sleep. Fails loudly with what it was waiting for rather than timing out anonymously. */
