@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import type {
-  CanUseTool, EffortLevel, Options, PermissionMode, SandboxSettingsConfig, SpawnClaudeCodeProcess,
+  CanUseTool, EffortLevel, McpServerConfig, Options, PermissionMode, ProviderConnectionConfig, SandboxSettingsConfig, SpawnClaudeCodeProcess,
 } from "@yanlinglabs/winter-agent-sdk";
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import type { SessionApprovalPolicy } from "../agent/gate";
@@ -151,6 +151,30 @@ export interface WinterOptionsInput {
   abort: AbortController;
   /** Task 7's `NORMA_CAPABILITY_TOOLS`, or `CAPABILITY_TOOL_MODES` until it lands. */
   capabilityTools?: Readonly<Record<string, { modes: readonly SessionMode[] }>>;
+  /**
+   * P8b-36 (Task 16): THIS session's daemon-owned capability servers, already keyed by server name
+   * (`buildSessionCapabilities(session)` — `capabilities/index.ts`'s `CapabilityServerRecord`).
+   * SPREAD into `Options.mcpServers` verbatim: the child derives each tool's wire name
+   * (`mcp__norma__<key>__<tool>`) from the RECORD KEY, so the record is not re-keyed here. Any other
+   * server merged into the same record goes through `assertNoCapabilityCollision` first — the
+   * driver's job, not this builder's. Absent ⇒ no `mcpServers` at all (the matrix test pins that).
+   */
+  capabilities?: Readonly<Record<string, McpServerConfig>>;
+  /**
+   * P8b-30 / Task 9 concern 6 (Task 16 obligation): the BYO endpoint for an `openai-compatible`
+   * provider. Threaded into `Options.provider.connection` so a session pointed at a non-OpenAI
+   * compatible endpoint is not silently routed to the catalog's `api.openai.com`. `endpointOrigin`
+   * is always `"user"` here — a host-entered endpoint, the conservative reading the SDK documents.
+   * Ignored when no provider is selected (a `winter-test/*` model, or a model Norma cannot name).
+   */
+  connection?: ProviderConnectionConfig;
+  /**
+   * P8b-24 / surface map §6.2: resume the backend transcript named by `sessionId` instead of
+   * starting a new one. When set, `Options.resume` carries the uuid and `Options.sessionId` is
+   * OMITTED — the id comes from the transcript. The driver sets it only when that transcript
+   * exists (measured: a resume of a transcript that was never written hangs and dies before init).
+   */
+  resume?: boolean;
   /** Extra child env, merged LAST. Never a channel for secrets. */
   env?: Record<string, string>;
   /** The environment PATH/HOME/TMPDIR are read from. Defaults to `process.env`; a test pins it. */
@@ -332,7 +356,9 @@ export function disallowedToolsFor(
  */
 export function buildWinterOptions(input: WinterOptionsInput): Options {
   const options: Options = {
-    sessionId: input.sessionId,
+    // A resume names the transcript through `resume` and gets its id FROM it; a fresh start names
+    // the id the child's transcript will be written under. Never both.
+    ...(input.resume ? { resume: input.sessionId } : { sessionId: input.sessionId }),
     cwd: input.cwd,
     permissionMode: permissionModeFor(input.policy),
     canUseTool: input.canUseTool,
@@ -343,6 +369,11 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // projector has no `assistant_delta` to produce and the stream is byte-identical to a session
     // before partial streaming existed.
     includePartialMessages: true,
+    // Task 16 ruling (ledger:93): ON. The dispatch golden carries a child's own text, and with this
+    // off a subagent's `assistant_message`/`assistant_delta` never reach the host at all (Task 11's
+    // measurement) — child transcripts would be thinner on the Winter leg than on the engine. The
+    // cost is more frames per child turn, which the projector folds onto the child's threadId.
+    forwardSubagentText: true,
     disallowedTools: disallowedToolsFor(input.mode, input.capabilityTools),
     permissions: { deny: controlPlaneDenyRules(input.home) },
     sandbox: sandboxConfigFor(input.home),
@@ -354,7 +385,9 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
   if (input.outputStyle !== undefined) options.outputStyle = input.outputStyle;
   if (input.policy === "bypass") options.allowDangerouslySkipPermissions = true;
   const provider = providerSelectionFor(input.model, input.credentials);
-  if (provider) options.provider = provider;
+  if (provider) options.provider = input.connection === undefined ? provider : { ...provider, connection: input.connection };
+  // P8b-36: the session's own servers, spread under their own names (see `capabilities` above).
+  if (input.capabilities !== undefined) options.mcpServers = { ...input.capabilities };
   // `toolAliases` is deliberately absent (the R4 measurement: none needed in 8b — the capability
   // tools carry their own `mcp__norma__*` names under R-1, and Winter's four default tools are
   // already bound under their built-in names by the router).

@@ -14,7 +14,7 @@ import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
 import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
-import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, repoRootFor } from "./agent/memory-dir";
+import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
 import { createProvider } from "./providers/manager";
 import type { Provider } from "./providers/types";
@@ -105,6 +105,7 @@ import { SettingsWatcher } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "./runtime-sdk/create";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
+import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
 import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord, type CapabilitySession } from "./capabilities";
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
 import { makeDaemonRoutineRunner } from "./routines/runner";
@@ -168,6 +169,12 @@ export interface RunningDaemon {
    * Exposed on the daemon because a test needs the SAME deps bundle daemon.ts wired, never a mirror.
    */
   buildSessionCapabilities(session: CapabilitySession): CapabilityServerRecord;
+  /**
+   * P8b Task 16: the Winter leg's driver table — the SAME instance `ipc/server.ts` routes through.
+   * A test that boots a REAL daemon reads a session's live driver (its `init` facts, its state, its
+   * child) off this rather than off a mirror it built itself.
+   */
+  winter: WinterSessionDrivers;
   /**
    * P8b Task 15: THE LIVE settings holder — the same binding the settings-watcher swaps, not a boot
    * snapshot. Reading it twice around a `settings.json` write is how a test proves a key is hot
@@ -666,7 +673,13 @@ export async function startDaemon(opts: {
   // engine/registry exist to hot-apply against); declared here (function scope, outside the gate)
   // so the shutdown path past the gate's close can still stop() it regardless of agentProvider.
   let settingsWatcher: SettingsWatcher | null = null;
-  let questions: QuestionBroker | null = null;
+  // P8b Task 16 HOISTED this out of the `if (agentProvider)` gate (it used to be built beside
+  // `taskStore` inside it): the Winter leg's question bridge (`AskUserQuestion` → `question_asked`)
+  // needs a broker whether or not an engine exists, and `ask_user.respond` must resolve into the
+  // SAME instance. Wire-identical on a no-provider daemon: `respond()` on a broker with nothing
+  // pending answers `{ ok: true, alreadyResolved: true }`, which is exactly the handler's old
+  // no-broker fallback.
+  const questions = new QuestionBroker();
   let taskStore: TaskStore | null = null;
   let plans: PlanBroker | null = null;
   // ipc/server.ts (Phase 4b Task 4) needs the SAME ToolRegistry instance the engine executes tool
@@ -892,6 +905,10 @@ export async function startDaemon(opts: {
       // session's own `Options.mcpServers` instead (`buildSessionCapabilities` above). The field is
       // reserved for the official leg, which has no host in 8b.
       capabilities: [],
+      // Task 12's seam, filled by Task 16: the inbound class of a session this process holds no
+      // live facet for — a parked (`resumable`) Winter session answers `unavailable` instead of
+      // holding its mail forever, and is never cold-resumed behind the daemon's back.
+      sessionPermissionClass: sessionPermissionClassFor({ records: () => runtime?.records, store }),
       log: (line) => console.error(`runtime-sdk: ${line}`),
     });
   } catch (err) {
@@ -932,6 +949,35 @@ export async function startDaemon(opts: {
     }
   }
 
+  // ── The Winter leg's driver table (P8b Task 16) ───────────────────────────────────────────────
+  // Built HERE, after §13's recovery (`startRuntimeState` above) and the router's own directory
+  // recovery + `parkRecoveredSessions` (just above): a projector is never constructed before that
+  // sweep has run, and nothing below can construct one before `startIpcServer` hands a client a
+  // socket. `ipc/server.ts` routes every `session.*` method through this table; with every
+  // `runtimes.winterLeg` flag false it answers "engine" for every new session and the engine
+  // path is byte-identical to today. The drivers it starts are tracked on `runtimeSdk`
+  // (`trackQuery`), so `stop()`'s `dispose()` ends them inside the shutdown budget.
+  const winterDrivers: WinterSessionDrivers = createWinterSessionDrivers({
+    home: normaHome,
+    profile: process.env.NORMA_PROFILE,
+    settings: () => settings, // LIVE holder
+    runtime: runtimeSdk,
+    records: runtime?.records,
+    checkpoints: runtime?.checkpoints,
+    store, hub, secrets,
+    buildSessionCapabilities,
+    approvals: approvalBroker,
+    questions,
+    gate: new PermissionGate(),
+    rootsOf: (sid) => sessionDirs.roots(sid),
+    tmpDirOf: (sid) => sessionTmpDir(sid),
+    outDirOf: (sid) => ensureOutdir(normaHome, sid),
+    // The SAME relocation-aware derivation the live memory path uses (`memoryDirOf` above), so the
+    // record names the directory the session actually reads.
+    memoryKeyOf: (cwd) => memoryProjectKeyFor(cwd, { normaHome, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) }),
+    log: (line) => console.error(`winter-leg: ${line}`),
+  });
+
   if (agentProvider) {
     const registry = new ToolRegistry();
     sharedRegistry = registry;
@@ -958,7 +1004,6 @@ export async function startDaemon(opts: {
     registerBackgroundTools(registry, { bgRegistry }, { deferred: true });
     registerSkillTools(registry, { skills: skillStore });
     registerToolSearchTool(registry);
-    questions = new QuestionBroker();
     taskStore = new TaskStore();
     registerAskUserTool(registry);
     registerAskQuestionTool(registry);
@@ -1924,6 +1969,8 @@ export async function startDaemon(opts: {
     runtimeSdk,
     // P8b-36: the per-session capability door, on the same deps object as the handle above.
     buildSessionCapabilities,
+    // P8b Task 16: the driver table — the Winter leg's door for every `session.*` handler.
+    winter: winterDrivers,
     ...opts.server,
   });
 
@@ -1936,6 +1983,7 @@ export async function startDaemon(opts: {
     runtimeSdk,
     sessions: store,
     buildSessionCapabilities,
+    winter: winterDrivers,
     // The HOLDER, read through a closure — never `settings` captured by value, which would freeze
     // this at boot and make every hot-reload assertion above it a lie.
     settings: () => settings,

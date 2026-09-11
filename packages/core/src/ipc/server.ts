@@ -58,6 +58,8 @@ import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory,
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { AgentEngine } from "../agent/engine";
 import type { NormaRuntimeSdk } from "../runtime-sdk/create";
+import { WinterLegRefusal, type WinterSessionDrivers } from "../runtime-sdk/session-driver";
+import type { WinterSession } from "../runtime-sdk/winter-session";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import { resolveModelAlias } from "../agent/model-aliases";
 import type { ApprovalBroker } from "../agent/approvals";
@@ -158,6 +160,20 @@ export interface IpcServerOptions {
    * `undefined` only on a daemon assembled without it (tests that inject a partial deps object).
    */
   buildSessionCapabilities?: (session: CapabilitySession) => CapabilityServerRecord;
+  /**
+   * P8b Task 16: THE driver table (`runtime-sdk/session-driver.ts`) — the Winter leg's whole door.
+   *
+   * `session.create` asks it which leg a NEW session goes on (P8b-13, `legForNewSession` off the
+   * LIVE settings) and, on the Winter leg, runs the creation transaction through it; every later
+   * `session.send`/`steer`/`interrupt`/`compact`/`setModel` asks it for the session's live driver
+   * first and takes the engine path — byte-identical to today — when there is none. A record that
+   * says "winter" with no live driver (a daemon restart, an idle timeout) is RESUMED here.
+   *
+   * `undefined` on a server built without one (every pre-8b test): the engine path is the only
+   * path, exactly as before this task. With every `runtimes.winterLeg` flag false the table
+   * answers "engine" for every new session and the handlers below are unchanged in effect.
+   */
+  winter?: WinterSessionDrivers;
   // session-activity-hygiene T8: hands the caller THE bound activity derivation this server stamps
   // `session.list` with, once, at construction. Called exactly once, synchronously, from inside
   // startIpcServer.
@@ -336,7 +352,25 @@ export interface IpcServerOptions {
 
 export interface IpcServer { stop(): void }
 
-class RpcFailure extends Error { constructor(public code: number, message: string) { super(message); } }
+/** `data` rides the JSON-RPC error envelope's own `data` field (the pump below forwards it
+ *  structurally; `sync.push`'s DIVERGED uses the same slot). P8b Task 16: the Winter leg's typed
+ *  refusals travel as `data: { code }` — the numeric `code` stays a JSON-RPC class, the string
+ *  names the refusal, and a client can branch on it without string-matching a message. */
+class RpcFailure extends Error { constructor(public code: number, message: string, public data?: unknown) { super(message); } }
+
+/** P8b Task 16: a `WinterLegRefusal` (or the driver's own typed errors) as the RPC error a client
+ *  can branch on. Anything else is rethrown untouched. */
+function rpcFromWinterRefusal(err: unknown): never {
+  if (err instanceof WinterLegRefusal) {
+    const invalid = err.code === "session_predates_winter_leg" || err.code === "not_supported_on_winter_leg";
+    throw new RpcFailure(invalid ? ERR.INVALID_PARAMS : ERR.INTERNAL, err.message, { code: err.code });
+  }
+  const code = (err as { code?: unknown } | null)?.code;
+  if (code === "winter_session_ended" || code === "not_supported_on_winter_leg") {
+    throw new RpcFailure(ERR.INVALID_PARAMS, (err as Error).message, { code });
+  }
+  throw err;
+}
 
 /** Maps a `MemoryStore` failure's structural `kind` to a JSON-RPC code, for the memory.*
  *  handlers below. Only two buckets, same precedent as routines.create/update's INVALID_PARAMS/
@@ -568,6 +602,28 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     throw new Error("startIpcServer: an engine requires a shared hub (engine and server must broadcast through the same SessionHub)");
   }
   const hub = opts.hub ?? new SessionHub(opts.store);
+
+  /** P8b Task 16: the session's live Winter driver, resuming one when its record says "winter"
+   *  (a daemon restart, an idle timeout). `undefined` ⇒ the engine's, exactly as today. A typed
+   *  refusal on the resume path (the binary is gone) becomes the RPC error. */
+  async function ensureWinterSession(sessionId: string): Promise<WinterSession | undefined> {
+    if (opts.winter === undefined) return undefined;
+    try { return await opts.winter.ensure(sessionId); } catch (err) { rpcFromWinterRefusal(err); }
+  }
+
+  /** P8b-22: a session whose record has NO Winter transcript, on a daemon that has no engine to
+   *  serve it, gets a typed refusal — never a crash, never a silent new transcript. While the
+   *  engine lives (Task 16) and the flag for the session's mode is off, this is unreachable: such
+   *  a session is the engine's, byte-identically. Task 17 (the engine's retirement) makes it the
+   *  answer for every engine-era record. */
+  function refuseIfPredatesWinterLeg(sessionId: string): void {
+    if (opts.winter === undefined || opts.engine) return;
+    if (opts.winter.legOf(sessionId) !== "engine") return;
+    let mode: "code" | "dispatch" | "chat" = "code";
+    try { const m = opts.store.meta(sessionId).mode; if (m === "chat" || m === "dispatch") mode = m; } catch { return; }
+    if (opts.winter.legForNewSession(mode) !== "winter") return;
+    throw new RpcFailure(ERR.INVALID_PARAMS, "this session predates the Winter leg; start a new session", { code: "session_predates_winter_leg" });
+  }
 
   /** session-activity-hygiene: the ONE place this server turns a session into a lifecycle state.
    *  `session.list` stamps every participating row through it, and `session.setActivity` echoes its
@@ -1144,7 +1200,31 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // unlike `sync.push`'s ingress: there is no irreplaceable log riding along here, so the
         // caller can simply be told.
         if (p.effort !== undefined) assertEffortSelectable(p.effort, model ?? opts.liveModel?.() ?? "", p.mode);
+        // P8b-13 (Task 16): THE LEG DECISION, for a NEW session only, off the LIVE settings — and
+        // BEFORE the product row is minted, so a Winter-leg refusal (P8b-2: no `winter` binary
+        // resolves; the router handle or the runtime spine did not construct) costs nothing but
+        // this reply and NEVER falls back to the engine. With every flag false this is "engine"
+        // and the handler below is unchanged.
+        const leg = opts.winter?.legForNewSession(p.mode ?? "code") ?? "engine";
+        if (leg === "winter") {
+          try { opts.winter!.assertAvailable(p.mode ?? "code"); } catch (err) { rpcFromWinterRefusal(err); }
+        }
         const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy, origin: p.origin, mode: p.mode, model, effort: p.effort });
+        // THE CREATION TRANSACTION (WS-16 §6, P8b-14): both legs persist a `RuntimeSessionRecord`.
+        // On the Winter leg the record allocates the backend uuid and the child is started; a
+        // failure there ROLLS THE ROW BACK (it was never announced to any client — the
+        // `session_created` broadcast is below) and the typed refusal is the reply. On the engine
+        // leg the record is the backfill's honest shape (no Winter transcript) and best-effort.
+        if (leg === "winter") {
+          try {
+            await opts.winter!.create(sessionId);
+          } catch (err) {
+            try { opts.store.deleteSession(sessionId); } catch { /* the row is gone or undeletable; the refusal still stands */ }
+            rpcFromWinterRefusal(err);
+          }
+        } else {
+          opts.winter?.recordEngineCreation(sessionId);
+        }
         const trusted = cwd ? (opts.trust?.isTrusted(cwd) ?? false) : false;
         // Broadcast the session_created event to every authed harness (not just attachments —
         // a brand-new session has none) so other harnesses can offer to follow (spec §4.4).
@@ -1351,6 +1431,23 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const p = parseParams(SessionSendParams, params);
         assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
         if (!socket.data.hubClient) throw new RpcFailure(ERR.NOT_FOUND, "attach to the session first");
+        // P8b Task 16: a session on the Winter leg — a live driver, or a record that says "winter"
+        // and is resumed here — takes its own path. The attachment check mirrors `hub.send`'s own
+        // (same message, same plain Error → INTERNAL), and the driver appends the `user_message`
+        // under this client's name exactly as `hub.send` would, then begins the turn (P8b-5).
+        {
+          const winterSession = await ensureWinterSession(p.sessionId);
+          if (winterSession !== undefined) {
+            if (hub.attachedSession(socket.data.hubClient) !== p.sessionId) {
+              throw new Error(`client ${socket.data.clientName} not attached to ${p.sessionId}`);
+            }
+            try {
+              const sent = await winterSession.send(p.text, socket.data.clientName);
+              return { seq: sent.seq };
+            } catch (err) { rpcFromWinterRefusal(err); }
+          }
+          refuseIfPredatesWinterLeg(p.sessionId);
+        }
         const seq = hub.send(socket.data.hubClient, p.sessionId, p.text);
         // Fire-and-forget: the response returns immediately and turn events stream separately.
         // If a turn is already running, this message just lands in history for the next turn
@@ -1362,17 +1459,39 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.sessionSteer: {
         const p = parseParams(SessionSteerParams, params);
+        {
+          const winterSession = await ensureWinterSession(p.sessionId);
+          if (winterSession !== undefined) {
+            try {
+              const steered = await winterSession.steer(p.text);
+              return { ok: true, injected: steered.injected };
+            } catch (err) { rpcFromWinterRefusal(err); }
+          }
+          refuseIfPredatesWinterLeg(p.sessionId);
+        }
         if (!opts.engine) return { ok: true, injected: false };
         return { ok: true, ...opts.engine.steer(p.sessionId, p.text) };
       }
       case METHODS.sessionInterrupt: {
         const p = parseParams(SessionInterruptParams, params);
         assertRemoteMayUseSession(opts.store, socket.data.authedRole, p.sessionId);
+        // P8b Task 16: only a LIVE driver has anything to interrupt; a resumable Winter session has
+        // no child, so the answer is "nothing was running" without spawning one to say so.
+        {
+          const live = opts.winter?.get(p.sessionId);
+          if (live !== undefined) return { ok: true, ...(await live.interrupt()) };
+          if (opts.winter?.legOf(p.sessionId) === "winter") return { ok: true, wasRunning: false };
+        }
         if (!opts.engine) return { ok: true, wasRunning: false };
         return { ok: true, ...opts.engine.interrupt(p.sessionId) };
       }
       case METHODS.sessionCompact: {
         const p = parseParams(SessionCompactParams, params);
+        // P8b Task 16 (ledger:30): Winter's `Query` has no compaction control at 0.0.4 — a typed
+        // "not supported on this leg", never a silent `compacted: false` (SDK 0.0.4 carry).
+        if (opts.winter?.get(p.sessionId) !== undefined || opts.winter?.legOf(p.sessionId) === "winter") {
+          throw new RpcFailure(ERR.INVALID_PARAMS, "session.compact is not supported on the Winter leg (the child compacts on its own; SDK 0.0.4 carry)", { code: "not_supported_on_winter_leg" });
+        }
         if (!opts.engine) return { ok: true, compacted: false, uptoSeq: 0, summaryChars: 0 };
         return { ok: true, ...(await opts.engine.compact(p.sessionId)) };
       }
@@ -1618,6 +1737,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
+        // P8b Task 16: a LIVE Winter child is told (`Query.setModel`); a resumable one re-reads the
+        // store when it reopens. The store write above is the contract; this is best-effort and
+        // never delays the reply.
+        void opts.winter?.get(p.sessionId)?.setModel(model ?? undefined).catch((err: unknown) => {
+          console.error(`session.setModel: the winter child for ${p.sessionId} refused the model: ${(err as Error)?.name ?? "unknown"}`);
+        });
         return {};
       }
       // provider-correctness T4: per-session reasoning effort — its OWN method rather than a second

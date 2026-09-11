@@ -30,3 +30,27 @@ export function legForNewSession(mode: SessionMode, settings: Settings | undefin
   const runtimes = settings?.runtimes as RuntimesWithLeg;
   return runtimes?.winterLeg?.[mode] === true ? "winter" : "engine";
 }
+
+/**
+ * **The leg an EXISTING session runs on, read from its 8a record** (P8b-13's "a resumed session
+ * follows its record, never the flag") — and the ONE predicate P8b-22's refusal keys on.
+ *
+ * There is no `leg` column on `RuntimeSessionRecord` (Task 16 finding: the brief assumed one). The
+ * leg is instead a fact the record already carries: a session created on the Winter leg has its
+ * BACKEND uuid allocated in the creation transaction (`Options.sessionId`, the name of the child's
+ * own transcript under `<home>/projects/<key>/`), and nothing else ever writes one — the §17 phase-4
+ * backfill deliberately leaves it absent ("no compatibility transcript exists"), and an engine-leg
+ * create (P8b-14's dual-run creation transaction) does the same. So `backendSessionId !== undefined`
+ * IS "this session has, or will have, a Winter transcript", which is exactly the fact routing needs:
+ * a record without one can never be resumed on the Winter leg, whatever a flag says today.
+ *
+ * `selection.reason` is stamped with a human-readable account of the leg at creation (what a host
+ * renders for "why is this session on that runtime"); it is NEVER parsed. Routing reads this.
+ *
+ * Deliberately NOT a function of `runtimeKind`: 8a records every session — engine sessions included
+ * — as `"winter-agent"`, because that is the only runtime kind this daemon hosts.
+ */
+export function sessionLegOf(record: { backendSessionId?: string } | undefined): SessionLeg | undefined {
+  if (record === undefined) return undefined;
+  return typeof record.backendSessionId === "string" && record.backendSessionId.length > 0 ? "winter" : "engine";
+}
