@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { PROJECTED_EVENT_COVERAGE, UNPERSISTED_KINDS, isKnownUnpersistedKind, kindOf, summarize } from "../../src/projector";
 import type { ProtocolSdkMessage } from "../../src/projector";
-import { assistantText, init, makeProjector } from "./harness";
+import { accept, assistantText, init, makeProjector } from "./harness";
 
 const msg = (o: Record<string, unknown>) => o as unknown as ProtocolSdkMessage;
 
@@ -35,17 +35,17 @@ describe("projector/hooks: observed, never persisted", () => {
   for (const [kind, frame] of unpersisted) {
     test(`${kind}: accept returns [] — nothing persisted, nothing broadcast`, () => {
       const { projector } = makeProjector();
-      projector.accept(init());
-      expect(projector.accept(msg(frame))).toEqual([]);
+      accept(projector, init());
+      expect(accept(projector, msg(frame))).toEqual([]);
     });
   }
 
   test("a whole stream of unpersisted frames around a turn changes the turn's own sequence not at all", () => {
     const { projector } = makeProjector();
     const out = [
-      ...projector.accept(init()),
-      ...unpersisted.flatMap(([, f]) => projector.accept(msg(f))),
-      ...projector.accept(assistantText("the answer")),
+      ...accept(projector, init()),
+      ...unpersisted.flatMap(([, f]) => accept(projector, msg(f))),
+      ...accept(projector, assistantText("the answer")),
     ];
     expect(out.map((e) => e.type)).toEqual(["assistant_message"]);
   });

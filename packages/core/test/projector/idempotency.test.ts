@@ -1,9 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { TRANSIENT_EVENT_TYPES } from "@norma/protocol";
-import { createEchoWindow } from "../../src/projector";
+import { ProjectorRefusedError, createEchoWindow } from "../../src/projector";
 import {
-  FakeCheckpoints, assistantText, assistantToolUse, init, makeProjector, result, run, textDelta,
-  toolResult, userTextFrame,
+  FakeCheckpoints, accept, assistantText, assistantToolUse, init, makeProjector, result, run, textDelta, toolResult, userTextFrame,
 } from "./harness";
 
 /** P8b-14's literal list: replaying a prefix duplicates no `tool_call`/`tool_result`/approval/
@@ -62,21 +61,40 @@ describe("projector: idempotency (P8b-14)", () => {
   test("flush() commits the last mark; without it the mark stays pending for 8a's recovery sweep", () => {
     const checkpoints = new FakeCheckpoints();
     const { projector } = makeProjector({ checkpoint: checkpoints });
-    projector.accept(init());
-    projector.accept(assistantText("hi"));
+    accept(projector, init());
+    accept(projector, assistantText("hi"));
     expect(checkpoints.completed).toEqual([]);      // not yet — the caller may still be appending
     projector.flush();
     expect(checkpoints.completed).toEqual(["as:0:1"]);
   });
 
-  test("a `pending-elsewhere` verdict refuses to re-project rather than risking a double-append", () => {
+  test("a `pending-elsewhere` verdict THROWS a typed refusal — never a silent empty array", () => {
+    // An empty array is indistinguishable from "this message produced nothing", which is how a
+    // mis-wire stays invisible in the one component whose job is not to lose events. Only 8a's
+    // recovery sweep can read the product log's tail and decide, so the projector refuses loudly.
     const checkpoints = new FakeCheckpoints();
     // Someone else claimed this exact source and never committed it.
     checkpoints.begin({ winterSessionId: "s_test", generation: 1, sourceId: "tu:toolu_01" });
     const { projector, warnings } = makeProjector({ checkpoint: checkpoints });
-    projector.accept(init());
-    expect(projector.accept(assistantToolUse("toolu_01", "Read", {}))).toEqual([]);
+    accept(projector, init());
+    let thrown: unknown;
+    try { accept(projector, assistantToolUse("toolu_01", "Read", {})); } catch (err) { thrown = err; }
+    expect((thrown as ProjectorRefusedError | undefined)?.name).toBe("ProjectorRefusedError");
+    expect((thrown as ProjectorRefusedError).code).toBe("projector_refused");
+    expect((thrown as ProjectorRefusedError).sourceId).toBe("tu:toolu_01");
+    expect(projector.refusals.map((r) => r.reason)).toEqual(["pending-elsewhere"]);
     expect(warnings.join(" ")).toContain("pending elsewhere");
+  });
+
+  test("a message that produces NO persisted event claims no checkpoint row (m9)", () => {
+    // A row for a source that can never appear in the product log sends recovery hunting for an
+    // append that was never going to happen.
+    const checkpoints = new FakeCheckpoints();
+    const { projector } = makeProjector({ checkpoint: checkpoints });
+    accept(projector, init());
+    expect(accept(projector, { type: "assistant", message: { content: [] } } as never)).toEqual([]);
+    expect(accept(projector, textDelta("only a transient"))).toHaveLength(1);
+    expect(checkpoints.begun).toEqual([]);
   });
 
   test("a different GENERATION is a different key — a resumed session re-projects, it does not skip", () => {
@@ -145,7 +163,7 @@ describe("projector: the P8b-5 echo dedupe, and the measurement that made it a n
 
   test("a text-only user frame the host never pushed IS projected — an inbound delivery is not an echo", () => {
     const { projector } = makeProjector();
-    const out = projector.accept(userTextFrame("<agent-message from=\"planner\">status?</agent-message>"));
+    const out = accept(projector, userTextFrame("<agent-message from=\"planner\">status?</agent-message>"));
     expect(out.map((e) => e.type)).toEqual(["user_message"]);
   });
 });

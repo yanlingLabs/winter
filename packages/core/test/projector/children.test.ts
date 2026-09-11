@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { MAIN_THREAD, TASK_STATUS_MAP, isSpawnTool } from "../../src/projector";
-import { assistantText, assistantToolUse, init, makeProjector, result, run, textDelta, toolResult } from "./harness";
+import {
+  accept, assistantText, assistantToolUse, init, makeProjector, result, run, textDelta, toolResult,
+} from "./harness";
 
 type Any = Record<string, unknown>;
 const spawn = (id: string, input: Record<string, unknown> = {}) =>
@@ -12,8 +14,8 @@ const taskFrame = (subtype: string, over: Record<string, unknown>) =>
 describe("projector/children: a spawned subagent's thread", () => {
   test("a spawning tool_use opens a child thread — tool_call first, then thread_started", () => {
     const { projector } = makeProjector();
-    projector.accept(init());
-    const out = projector.accept(spawn("toolu_03")) as unknown as Any[];
+    accept(projector, init());
+    const out = accept(projector, spawn("toolu_03")) as unknown as Any[];
     expect(out.map((e) => e.type)).toEqual(["tool_call", "thread_started"]);
     expect(out[0]).toMatchObject({ threadId: MAIN_THREAD, name: "spawn_agent", callId: "toolu_03" });
     expect(out[1]).toMatchObject({
@@ -26,9 +28,9 @@ describe("projector/children: a spawned subagent's thread", () => {
     // This is what lets thread_started and thread_completed be derived from one identifier with no
     // registry lookup and no host round-trip.
     const { projector } = makeProjector();
-    projector.accept(init());
-    projector.accept(spawn("toolu_03"));
-    const out = projector.accept(toolResult("toolu_03", "child final report")) as unknown as Any[];
+    accept(projector, init());
+    accept(projector, spawn("toolu_03"));
+    const out = accept(projector, toolResult("toolu_03", "child final report")) as unknown as Any[];
     expect(out.map((e) => e.type)).toEqual(["tool_result", "thread_completed"]);
     expect(out[1]).toMatchObject({ type: "thread_completed", threadId: "toolu_03", stopReason: "end_turn" });
   });
@@ -40,29 +42,29 @@ describe("projector/children: a spawned subagent's thread", () => {
       [{ interrupted: true }, "aborted"],
     ] as Array<[Record<string, unknown>, string]>) {
       const { projector } = makeProjector();
-      projector.accept(spawn("toolu_03"));
-      const out = projector.accept(toolResult("toolu_03", "x", block)) as unknown as Any[];
+      accept(projector, spawn("toolu_03"));
+      const out = accept(projector, toolResult("toolu_03", "x", block)) as unknown as Any[];
       expect(out.find((e) => e.type === "thread_completed")).toMatchObject({ stopReason });
     }
   });
 
   test("a tool_result for a call that is NOT a child produces no thread_completed", () => {
     const { projector } = makeProjector();
-    projector.accept(assistantToolUse("toolu_01", "Read", {}));
-    const out = projector.accept(toolResult("toolu_01", "contents")) as unknown as Any[];
+    accept(projector, assistantToolUse("toolu_01", "Read", {}));
+    const out = accept(projector, toolResult("toolu_01", "contents")) as unknown as Any[];
     expect(out.map((e) => e.type)).toEqual(["tool_result"]);
   });
 
   test("a child is opened ONCE — a repeated spawn block never re-opens the same thread", () => {
     const { projector } = makeProjector();
-    projector.accept(spawn("toolu_03"));
-    const again = projector.accept(spawn("toolu_03")) as unknown as Any[];
+    accept(projector, spawn("toolu_03"));
+    const again = accept(projector, spawn("toolu_03")) as unknown as Any[];
     expect(again.filter((e) => e.type === "thread_started")).toEqual([]);
   });
 
   test("a spawn with no subagent_type falls back to `general-purpose`, matching the engine's golden", () => {
     const { projector } = makeProjector();
-    const out = projector.accept(assistantToolUse("toolu_03", "Agent", { prompt: "do it", description: "d" })) as unknown as Any[];
+    const out = accept(projector, assistantToolUse("toolu_03", "Agent", { prompt: "do it", description: "d" })) as unknown as Any[];
     expect(out[1]).toMatchObject({ agentType: "general-purpose" });
   });
 
@@ -133,8 +135,8 @@ describe("projector/children: Winter's task graph → task_updated", () => {
 
   test("a task_started seeds the row, persists nothing itself, and a later patch carries its subject", () => {
     const { projector } = makeProjector();
-    expect(projector.accept(taskFrame("task_started", { task_id: "t1", description: "write the report" }))).toEqual([]);
-    const out = projector.accept(taskFrame("task_updated", { task_id: "t1", patch: { status: "running" } })) as unknown as Any[];
+    expect(accept(projector, taskFrame("task_started", { task_id: "t1", description: "write the report" }))).toEqual([]);
+    const out = accept(projector, taskFrame("task_updated", { task_id: "t1", patch: { status: "running" } })) as unknown as Any[];
     expect(out.map((e) => e.type)).toEqual(["task_updated"]);
     expect(out[0]!.task).toMatchObject({ id: "t1", subject: "write the report", status: "in_progress" });
   });
@@ -143,7 +145,7 @@ describe("projector/children: Winter's task graph → task_updated", () => {
     // `TaskSchema.subject` is z.string().min(1); an event that fails the schema is worse than a row
     // labelled by its task id.
     const { projector } = makeProjector();
-    const out = projector.accept(taskFrame("task_updated", { task_id: "t9", patch: { status: "pending" } })) as unknown as Any[];
+    const out = accept(projector, taskFrame("task_updated", { task_id: "t9", patch: { status: "pending" } })) as unknown as Any[];
     expect(out[0]!.task).toMatchObject({ id: "t9", subject: "t9", status: "pending" });
   });
 
@@ -152,37 +154,37 @@ describe("projector/children: Winter's task graph → task_updated", () => {
     // alternatives are worse: `deleted` makes the row vanish, and projecting nothing strands it at
     // in_progress forever. Flagged in the task report as a protocol change for a later phase.
     const { projector } = makeProjector();
-    const out = projector.accept(taskFrame("task_updated", { task_id: "t1", patch: { status: "failed", error: "the tool exited 1" } })) as unknown as Any[];
+    const out = accept(projector, taskFrame("task_updated", { task_id: "t1", patch: { status: "failed", error: "the tool exited 1" } })) as unknown as Any[];
     expect(out[0]!.task).toMatchObject({ status: "completed", metadata: { winterStatus: "failed", winterError: "the tool exited 1" } });
   });
 
   test("`killed` removes the row (status deleted), with the true status in metadata", () => {
     const { projector } = makeProjector();
-    const out = projector.accept(taskFrame("task_updated", { task_id: "t1", patch: { status: "killed" } })) as unknown as Any[];
+    const out = accept(projector, taskFrame("task_updated", { task_id: "t1", patch: { status: "killed" } })) as unknown as Any[];
     expect(out[0]!.task).toMatchObject({ status: "deleted", metadata: { winterStatus: "killed" } });
   });
 
   test("a task_notification's `stopped` is the patch vocabulary's `killed` under another name", () => {
     const { projector } = makeProjector();
-    const out = projector.accept(taskFrame("task_notification", { task_id: "t1", status: "stopped", summary: "cancelled", output_file: "/tmp/x" })) as unknown as Any[];
+    const out = accept(projector, taskFrame("task_notification", { task_id: "t1", status: "stopped", summary: "cancelled", output_file: "/tmp/x" })) as unknown as Any[];
     expect(out[0]!.task).toMatchObject({ status: "deleted", subject: "cancelled" });
   });
 
   test("a patch that says nothing projectable produces nothing", () => {
     const { projector } = makeProjector();
-    expect(projector.accept(taskFrame("task_updated", { task_id: "t1", patch: { total_paused_ms: 5 } }))).toEqual([]);
+    expect(accept(projector, taskFrame("task_updated", { task_id: "t1", patch: { total_paused_ms: 5 } }))).toEqual([]);
   });
 
   test("task_progress, background_tasks_changed and local_command_output persist nothing", () => {
     const { projector } = makeProjector();
-    expect(projector.accept(taskFrame("task_progress", { task_id: "t1", description: "d", usage: {} }))).toEqual([]);
-    expect(projector.accept(taskFrame("background_tasks_changed", { tasks: [] }))).toEqual([]);
-    expect(projector.accept(taskFrame("local_command_output", { content: "x" }))).toEqual([]);
+    expect(accept(projector, taskFrame("task_progress", { task_id: "t1", description: "d", usage: {} }))).toEqual([]);
+    expect(accept(projector, taskFrame("background_tasks_changed", { tasks: [] }))).toEqual([]);
+    expect(accept(projector, taskFrame("local_command_output", { content: "x" }))).toEqual([]);
   });
 
   test("every task event is MAIN-thread scoped — the task graph is the session's, not a thread's", () => {
     const { projector } = makeProjector();
-    const out = projector.accept(taskFrame("task_updated", { task_id: "t1", patch: { status: "running" } })) as unknown as Any[];
+    const out = accept(projector, taskFrame("task_updated", { task_id: "t1", patch: { status: "running" } })) as unknown as Any[];
     expect(out[0]).toMatchObject({ threadId: MAIN_THREAD });
   });
 });

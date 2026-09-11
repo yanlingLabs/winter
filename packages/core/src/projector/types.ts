@@ -1,4 +1,9 @@
-import type { SdkMessage as ProtocolSdkMessage } from "@yanlinglabs/winter-agent-sdk";
+// M3 (review r1): the barrel exports BOTH `SdkMessage` (the narrow
+// `Extract<…, system|assistant|result>` from `query.js`) and `SdkMessage as ProtocolSdkMessage`
+// (the WIRE union from `protocol/frames.js`). Importing the first and renaming it to the second's
+// name is precisely the trap G-8 / ruling P8b-8 exists to prevent: the declared contract then says
+// `user` and `stream_event` frames cannot occur, while the runtime yields both. Import the real one.
+import type { ProtocolSdkMessage } from "@yanlinglabs/winter-agent-sdk";
 import type { RuntimeKind } from "@yanlinglabs/winter-runtime-sdk";
 import type { NewSessionEvent, SessionEvent } from "@norma/protocol";
 
@@ -59,6 +64,33 @@ export interface ProjectorRefusal {
   at: string;
 }
 
+/**
+ * The projector REFUSED to project a source, and says so by throwing (M2, review r1).
+ *
+ * A `pending-elsewhere` verdict means a mark is open for this source: another projector holds it,
+ * or one died between its append and its commit. Re-projecting could double-append; not projecting
+ * silently loses a tool call. Only 8a's recovery sweep (`pending()` + `resolvePending`) can read the
+ * product log's tail and decide, so the projector refuses LOUDLY — an empty array would be
+ * indistinguishable from "this message produced nothing", which is how a mis-wire stays invisible.
+ *
+ * **The driver's obligation (Task 16): run the 8a recovery sweep BEFORE constructing a projector for
+ * a session.** A driver that would rather degrade than fail may catch this and continue; what it may
+ * not do is never find out.
+ */
+export class ProjectorRefusedError extends Error {
+  readonly code = "projector_refused" as const;
+  constructor(
+    readonly reason: "pending-elsewhere",
+    readonly sourceId: string,
+    readonly sessionId: string,
+    readonly winterSessionId: string,
+    readonly generation: number,
+  ) {
+    super(`projector refused ${sourceId} for ${winterSessionId}/${generation} (${reason}) — run the runtime-state recovery sweep before projecting this session`);
+    this.name = "ProjectorRefusedError";
+  }
+}
+
 export interface ProjectorDeps {
   /** The NORMA session id every produced event is stamped with. */
   sessionId: string;
@@ -72,8 +104,18 @@ export interface ProjectorDeps {
   /** Checkpoint key's session id. Defaults to `sessionId` — set it when the runtime record's
    *  `winterSessionId` differs from the product session id. */
   winterSessionId?: string;
-  /** Checkpoint key's generation (the record's incarnation counter). Defaults to 1. */
-  generation?: number;
+  /**
+   * The 8a record's generation — the session's incarnation counter, and half of every checkpoint
+   * key. **REQUIRED (M2, review r1), and a resume MUST bump it.**
+   *
+   * Three of the five source-id forms are POSITIONAL (`as:<turn>:<round>`, `um:<turn>:<round>`,
+   * `rs:<backend>:<turn>`) and every counter restarts at 0 in a fresh projector. A resume that
+   * re-used the previous generation would therefore replay its first frames straight into
+   * `already-committed` and project nothing — a silent transcript hole on the resume path, in the
+   * one component whose whole job is not to lose events. An optional field defaulting to `1` made
+   * that a forgettable caller detail; a required one makes it a decision at every call site.
+   */
+  generation: number;
   /** Recorded on the cursor row. Defaults to `"winter-agent"`. */
   runtimeKind?: RuntimeKind;
   /** Called for every refusal, in addition to `Projector.refusals` and a warn log. A throw from
@@ -81,9 +123,44 @@ export interface ProjectorDeps {
   onRefusal?: (refusal: ProjectorRefusal) => void;
 }
 
+/**
+ * What a projector call produced, split by SINK (m5, review r1).
+ *
+ * The obligation "append this, but BROADCAST that one" used to live in a doc comment, and a caller
+ * that appended everything would write an `assistant_delta` into the session JSONL — the exact
+ * prose-contract failure class CLAUDE.md's transient section documents. The split is now in the
+ * type, so the wrong sink is a compile error rather than a code review.
+ *
+ * `broadcast` holds ONLY transients (`TRANSIENT_EVENT_TYPES`). No single call ever returns both
+ * non-empty — a frame produces either a transient or persisted events, never a mix — which is what
+ * lets a caller that wants one ordered stream concatenate them safely. A test pins that.
+ */
+export interface ProjectedBatch {
+  /** Append these to the session store, in order. */
+  persist: SessionEvent[];
+  /** Hand these to `hub.broadcastTransient`. NEVER append them. */
+  broadcast: SessionEvent[];
+}
+
 export interface Projector {
+  /**
+   * THE HOST→PROJECTOR TURN DOOR (M1, review r1). Called when the host pushes a user turn into the
+   * prompt queue, AFTER it has appended its own `user_message` (P8b-5).
+   *
+   * It exists because the brief's terminal rule is PUSH-keyed — "a second `result` before a new
+   * user push" — and a projector with no push input could only approximate it frame-keyed. The
+   * approximation was wrong on the measured wire: a turn that emits no frame before its terminal
+   * (the ordinary "user hits stop before the first token" path, and the second envelope of the
+   * recorded tooluse run) was indistinguishable from a duplicate terminal, so its `turn_completed`
+   * was dropped and the client's spinner hung forever with every unit test green.
+   *
+   * It returns the `turn_started` the host appends beside its `user_message` — the seam Task 16
+   * uses, so `turn_started` has a producer on the Winter leg instead of an open obligation. It also
+   * records the pushed text in the echo window, which is what makes `dedupe.ts` reachable at all.
+   */
+  beginTurn(input: { text: string; at?: string }): ProjectedBatch;
   /** Fold one wire message into zero or more `SessionEvent`s, in emission order. */
-  accept(msg: ProtocolSdkMessage): SessionEvent[];
+  accept(msg: ProtocolSdkMessage): ProjectedBatch;
   /** True between the first frame of a turn and its `result`. */
   readonly turnRunning: boolean;
   /** `ts` of the most recent terminal, or undefined before the first one. */
@@ -105,7 +182,7 @@ export interface Projector {
    * gets back the terminal a turn that is still open needs (or `[]` when the turn already ended, or
    * when the throw is the "error-result-then-throw" pair of a result already projected).
    */
-  acceptError(err: unknown): SessionEvent[];
+  acceptError(err: unknown): ProjectedBatch;
   /** Every projection this projector declined, in order. Never silently empty of a real refusal. */
   readonly refusals: readonly ProjectorRefusal[];
 }

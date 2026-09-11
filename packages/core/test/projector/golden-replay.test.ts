@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { SessionEvent } from "@norma/protocol";
+import { SessionEvent } from "@norma/protocol";
 import { MAIN_THREAD, PROJECTED_EVENT_COVERAGE } from "../../src/projector";
 import type { ProtocolSdkMessage } from "../../src/projector";
-import { makeProjector, run } from "./harness";
+import { accept, beginTurn, makeProjector, run } from "./harness";
 
 /**
  * ── THE CUTOVER PROOF (ruling P8b-14, Norma map §13.3) ──────────────────────────────────────────
@@ -132,6 +132,25 @@ interface Scenario {
   mode: "code" | "dispatch" | "chat";
   /** `Options.forwardSubagentText` — when false a child's own text never reaches the host. */
   forwardsSubagentText?: boolean;
+  /** How many user turns the HOST pushed (M1's `beginTurn`). Default 1. */
+  turns?: number;
+  /**
+   * ── CROSS-LEG DIVERGENCES, DISCLOSED (M4, review r1) ────────────────────────────────────────
+   *
+   * Main-thread events the WINTER leg produces that the engine golden does not contain. A fixture
+   * must equal its RECORDING, not its golden — shaping a fixture to the golden converts a real
+   * behavioural difference between the two legs into a green test, which is the "green for the
+   * wrong reason" class this whole proof exists to avoid. So the extra events stay, and each one is
+   * declared here with the reason. The test removes exactly these (in order) before the ordered
+   * walk and fails if any declared addition is missing or any undeclared one appears.
+   */
+  documentedAdditions?: Array<{
+    type: string;
+    note: string;
+    /** Which occurrence is the addition. `last` matters where the golden already contains an event
+     *  of the same type — a second turn's `turn_completed` is the trailing one, not the first. */
+    occurrence?: "first" | "last";
+  }>;
 }
 
 /** Every scenario replayed. A literal list so a golden that stops being replayed fails HERE rather
@@ -139,7 +158,14 @@ interface Scenario {
 const SCENARIOS: readonly Scenario[] = [
   { name: "chat-text-only", golden: "chat-text-only", mode: "chat" },
   { name: "code-tool-call", golden: "code-tool-call", mode: "code" },
-  { name: "code-tool-denied", golden: "code-tool-denied", mode: "code" },
+  {
+    name: "code-tool-denied", golden: "code-tool-denied", mode: "code", turns: 2,
+    documentedAdditions: [
+      { type: "assistant_message", note: "THE WINTER CHILD KEEPS TALKING AFTER A DENIAL. Norma's engine ends the turn on a deny (its tool_result says \"Stop here and wait\"), so the golden's last events are tool_result(isError) -> turn_completed; the recorded child answered `tool round done` and only then terminated. A real cross-leg behavioural difference, surfaced here rather than fixture-shaped away. Whether it survives is Task 9's permission-message question." },
+      { type: "agent_error", note: "the recording's SECOND pushed envelope terminated `error_during_execution` (the scripted double ran out of turns). Its class is `tool_failure`." },
+      { type: "turn_completed", occurrence: "last", note: "that second envelope's own terminal — two pushes, two terminals (the M1 contract), where the one-turn golden has one. The LAST one is the addition: turn 1's own `end_turn` terminal is the golden's." },
+    ],
+  },
   { name: "code-child-spawn", golden: "code-child-spawn", mode: "code" },
   { name: "code-child-spawn-forwarded", golden: "code-child-spawn", mode: "code", forwardsSubagentText: true },
   { name: "code-provider-error", golden: "code-provider-error", mode: "code" },
@@ -196,13 +222,23 @@ describe("projector: golden-stream replay, every variant (P8b-14)", () => {
       const golden = canonicalThreads(readJsonl<Any>("golden", `${s.golden}.events.jsonl`));
       const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
       const { projector } = makeProjector({ mode: s.mode, sessionId: "s_test" });
-      const projected = canonicalThreads(run(projector, messages) as unknown as Any[]);
+      const projected = canonicalThreads(run(projector, messages, { turns: s.turns ?? 1 }) as unknown as Any[]);
 
       // The P8b-5 invariant, asserted directly: the projector re-appends NO user turn.
       expect(projected.filter((e) => e.type === "user_message")).toEqual([]);
 
       const goldenMain = golden.filter((e) => e.threadId === MAIN_THREAD || e.threadId === undefined);
-      const projectedMain = projected.filter((e) => e.threadId === MAIN_THREAD);
+      let projectedMain = projected.filter((e) => e.threadId === MAIN_THREAD);
+
+      // Remove the DECLARED cross-leg additions (M4) before the ordered walk, and fail if one is
+      // missing — an addition that quietly disappears is the same defect as an undeclared one.
+      for (const addition of s.documentedAdditions ?? []) {
+        const matches = projectedMain.map((e, i) => (e.type === addition.type ? i : -1)).filter((i) => i >= 0);
+        const at = addition.occurrence === "last" ? matches[matches.length - 1] : matches[0];
+        expect({ scenario: s.name, addition: addition.type, present: at !== undefined }).toEqual({ scenario: s.name, addition: addition.type, present: true });
+        projectedMain = [...projectedMain.slice(0, at!), ...projectedMain.slice(at! + 1)];
+      }
+
       const { expected, actual } = merged(goldenMain, projectedMain, (e) => isExternalOnMain(e.type as string));
       expect(actual).toEqual(expected);
     });
@@ -211,7 +247,7 @@ describe("projector: golden-stream replay, every variant (P8b-14)", () => {
       const golden = canonicalThreads(readJsonl<Any>("golden", `${s.golden}.events.jsonl`));
       const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
       const { projector } = makeProjector({ mode: s.mode, sessionId: "s_test" });
-      const projected = canonicalThreads(run(projector, messages) as unknown as Any[]);
+      const projected = canonicalThreads(run(projector, messages, { turns: s.turns ?? 1 }) as unknown as Any[]);
 
       const childIds = [...new Set(golden.map((e) => e.threadId as string))].filter((t) => t !== MAIN_THREAD && t !== undefined);
       for (const child of childIds) {
@@ -228,7 +264,7 @@ describe("projector: golden-stream replay, every variant (P8b-14)", () => {
   test("tool rows keep NORMA names on the Winter leg (P8b-25)", () => {
     for (const s of SCENARIOS) {
       const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
-      const names = (run(makeProjector().projector, messages) as unknown as Any[]).filter((e) => e.type === "tool_call").map((e) => e.name);
+      const names = (run(makeProjector().projector, messages, { turns: s.turns ?? 1 }) as unknown as Any[]).filter((e) => e.type === "tool_call").map((e) => e.name);
       for (const n of names) expect({ scenario: s.name, name: n, looksWinter: /^[A-Z]/.test(n as string) }).toEqual({ scenario: s.name, name: n, looksWinter: false });
     }
   });
@@ -236,7 +272,7 @@ describe("projector: golden-stream replay, every variant (P8b-14)", () => {
   test("every tool_result is linked to a tool_call the projector already produced", () => {
     for (const s of SCENARIOS) {
       const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
-      const out = run(makeProjector().projector, messages) as unknown as Any[];
+      const out = run(makeProjector().projector, messages, { turns: s.turns ?? 1 }) as unknown as Any[];
       const calls = new Set(out.filter((e) => e.type === "tool_call").map((e) => e.callId as string));
       for (const r of out.filter((e) => e.type === "tool_result")) {
         expect({ scenario: s.name, callId: r.callId, linked: calls.has(r.callId as string) }).toEqual({ scenario: s.name, callId: r.callId, linked: true });
@@ -247,7 +283,7 @@ describe("projector: golden-stream replay, every variant (P8b-14)", () => {
   test("every thread_completed closes a thread_started the projector already produced", () => {
     for (const s of SCENARIOS) {
       const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
-      const out = run(makeProjector().projector, messages) as unknown as Any[];
+      const out = run(makeProjector().projector, messages, { turns: s.turns ?? 1 }) as unknown as Any[];
       const started = new Set(out.filter((e) => e.type === "thread_started").map((e) => e.threadId as string));
       for (const c of out.filter((e) => e.type === "thread_completed")) {
         expect({ scenario: s.name, threadId: c.threadId, opened: started.has(c.threadId as string) }).toEqual({ scenario: s.name, threadId: c.threadId, opened: true });
@@ -258,8 +294,23 @@ describe("projector: golden-stream replay, every variant (P8b-14)", () => {
   test("no scenario produces a variant PROJECTED_EVENT_COVERAGE marks false", () => {
     for (const s of SCENARIOS) {
       const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
-      for (const e of run(makeProjector().projector, messages)) {
+      for (const e of run(makeProjector().projector, messages, { turns: s.turns ?? 1 })) {
         expect({ scenario: s.name, type: e.type, covered: PROJECTED_EVENT_COVERAGE[e.type] }).toEqual({ scenario: s.name, type: e.type, covered: true });
+      }
+    }
+  });
+
+  test("every event the projector produces PARSES against the protocol schema (n14)", () => {
+    // The cheapest possible insurance against a field mapping that type-checks and then fails zod
+    // on its way to the phone — which would kill the connection rather than drop one event.
+    for (const s of SCENARIOS) {
+      const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
+      const { projector } = makeProjector({ mode: s.mode });
+      const events = [...beginTurn(projector, "a pushed turn"), ...run(projector, messages, { turns: s.turns ?? 1 })];
+      for (const e of events) {
+        const parsed = SessionEvent.safeParse(e);
+        expect({ scenario: s.name, type: e.type, ok: parsed.success, issues: parsed.success ? [] : parsed.error.issues.map((i) => i.path.join(".")) })
+          .toEqual({ scenario: s.name, type: e.type, ok: true, issues: [] });
       }
     }
   });
@@ -267,17 +318,20 @@ describe("projector: golden-stream replay, every variant (P8b-14)", () => {
   test("no scenario ever produces a reasoning_item", () => {
     for (const s of SCENARIOS) {
       const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
-      expect(run(makeProjector().projector, messages).some((e) => e.type === "reasoning_item")).toBe(false);
+      expect(run(makeProjector().projector, messages, { turns: s.turns ?? 1 }).some((e) => e.type === "reasoning_item")).toBe(false);
     }
   });
 
   test("exactly one terminal set per turn, and the turn's last main-thread event is its terminal", () => {
     for (const s of SCENARIOS) {
       const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
-      const out = run(makeProjector().projector, messages) as unknown as Any[];
+      const out = run(makeProjector().projector, messages, { turns: s.turns ?? 1 }) as unknown as Any[];
+      // One terminal per BEGUN turn (M1). The wire's `result` count and the push count agree on a
+      // well-behaved stream, which is the invariant worth asserting.
       const terminals = out.filter((e) => e.type === "turn_completed");
       const results = messages.filter((m) => (m as Any).type === "result");
-      expect({ scenario: s.name, terminals: terminals.length }).toEqual({ scenario: s.name, terminals: results.length });
+      expect({ scenario: s.name, terminals: terminals.length, pushes: s.turns ?? 1 })
+        .toEqual({ scenario: s.name, terminals: results.length, pushes: results.length });
       const main = out.filter((e) => e.threadId === MAIN_THREAD);
       expect({ scenario: s.name, last: main[main.length - 1]?.type }).toEqual({ scenario: s.name, last: "turn_completed" });
     }

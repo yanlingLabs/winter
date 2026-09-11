@@ -37,7 +37,7 @@
  *     bun run packages/core/scripts/capture-projector-goldens.ts          # rewrite the fixtures
  *     bun run packages/core/scripts/capture-projector-goldens.ts --check  # fail if they'd change
  */
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { SessionEvent } from "@norma/protocol";
@@ -68,6 +68,15 @@ const OUT_DIR = join(import.meta.dir, "..", "test", "projector", "fixtures", "go
 // subagent wiring. It is copied rather than imported because both of those live in `.test.ts` files
 // that import `bun:test`, which cannot be loaded outside the test runner.
 
+/** Every temp dir this run created, removed at the end (n11, review r1) — four per scenario
+ *  otherwise, which is 28 abandoned directories per invocation. */
+const TEMP_DIRS: string[] = [];
+const temp = (prefix: string): string => {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  TEMP_DIRS.push(dir);
+  return dir;
+};
+
 interface Harness {
   engine: AgentEngine;
   store: SessionStore;
@@ -85,8 +94,8 @@ function setupEngine(provider: Provider, opts: {
   withSubagents?: boolean;
   seedFiles?: Record<string, string>;
 } = {}): Harness {
-  const home = mkdtempSync(join(tmpdir(), "norma-golden-home-"));
-  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-golden-cwd-")));
+  const home = temp("norma-golden-home-");
+  const cwd = realpathSync(temp("norma-golden-cwd-"));
   for (const [name, body] of Object.entries(opts.seedFiles ?? {})) writeFileSync(join(cwd, name), body);
   const store = new SessionStore(home);
   const hub = new SessionHub(store);
@@ -96,12 +105,12 @@ function setupEngine(provider: Provider, opts: {
   registerSpawnAgentTool(registry);
   const broker = new ApprovalBroker();
   const dirs = new SessionDirectories(() => [cwd]);
-  const assemblerHome = mkdtempSync(join(tmpdir(), "norma-golden-actx-"));
+  const assemblerHome = temp("norma-golden-actx-");
   const assemblerTrust = new TrustStore(join(assemblerHome, "trust.json"));
   const skills = new SkillStore({ normaHome: assemblerHome, trust: assemblerTrust });
   const assembler = new ContextAssembler({ normaHome: assemblerHome, trust: assemblerTrust, skills });
   const compactor = new Compactor({ provider: { provider, model: "golden-1" }, store, hub });
-  const agentsHome = mkdtempSync(join(tmpdir(), "norma-golden-agents-"));
+  const agentsHome = temp("norma-golden-agents-");
   const agentsTrust = new TrustStore(join(agentsHome, "trust.json"));
   const engine = new AgentEngine({
     store, hub, registry, broker,
@@ -327,4 +336,5 @@ for (const s of scenarios) {
   writeFileSync(path, body);
   console.log(`${before === undefined ? "new   " : before === body ? "same  " : "CHANGED"} ${s.name}.events.jsonl (${h.events.length} events: ${[...new Set(h.events.map((e) => e.type))].join(", ")})`);
 }
+for (const dir of TEMP_DIRS) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* a leftover temp dir must never fail a capture */ } }
 if (check && drift > 0) { console.error(`\n${drift} golden file(s) would change — rerun without --check to accept, and say why in the commit.`); process.exit(1); }

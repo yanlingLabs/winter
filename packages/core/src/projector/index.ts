@@ -10,7 +10,8 @@ import { isKnownUnpersistedKind, kindOf, summarize } from "./hooks";
 import { isQuestionTool } from "./questions";
 import { projectTerminal, totalsOf, type UsageTotals } from "./terminal";
 import { normaToolNameFor } from "./tool-names";
-import type { CheckpointStore, ProjectedEvent, Projector, ProjectorDeps, ProjectorRefusal, ProtocolSdkMessage } from "./types";
+import { ProjectorRefusedError } from "./types";
+import type { CheckpointStore, ProjectedBatch, ProjectedEvent, Projector, ProjectorDeps, ProjectorRefusal, ProtocolSdkMessage } from "./types";
 
 export { PROJECTED_EVENT_COVERAGE, SUBAGENT_TRANSCRIPT_INCLUDE } from "./event-coverage";
 export { createEchoWindow, ECHO_WINDOW, type EchoWindow } from "./dedupe";
@@ -27,9 +28,10 @@ export { UNPERSISTED_KINDS, isKnownUnpersistedKind, kindOf, summarize } from "./
 export { QUESTION_TOOLS, isQuestionTool } from "./questions";
 export { MAIN_THREAD, threadIdOf } from "./conversation";
 export { normaToolNameFor } from "./tool-names";
+export { ProjectorRefusedError } from "./types";
 export type {
-  CheckpointStore, Logger, ProjectedEvent, ProjectionCursorInput, ProjectionKey, Projector,
-  ProjectorDeps, ProjectorRefusal, ProtocolSdkMessage, SessionMode,
+  CheckpointStore, Logger, ProjectedBatch, ProjectedEvent, ProjectionCursorInput, ProjectionKey,
+  Projector, ProjectorDeps, ProjectorRefusal, ProtocolSdkMessage, SessionMode,
 } from "./types";
 
 /**
@@ -83,6 +85,9 @@ export function createProjector(deps: ProjectorDeps): Projector {
 
 interface PendingMark { sourceId: string; first: number; last: number; cursor: string }
 
+/** A fresh empty batch. A shared frozen object would be a foot-gun the day a caller mutates one. */
+const EMPTY_BATCH = (): ProjectedBatch => ({ persist: [], broadcast: [] });
+
 /** `totalsOf`'s parameter, narrowed to what it actually reads. */
 type ResultFrameLike = Parameters<typeof totalsOf>[0];
 
@@ -98,6 +103,10 @@ class ProjectorImpl implements Projector {
    *  re-stamps on `broadcastTransient` anyway; this keeps the value honest in between. */
   private lastSeq = 0;
   private turnIndex = 0;
+  /** Turns the HOST has pushed and the projector has not yet terminated (M1's push-keyed rule). */
+  private openTurns = 0;
+  /** A frame has arrived since the last terminal — the FALLBACK half of "is a turn open?". */
+  private sawFrame = false;
   private roundIndex = 0;
   /** `assistant` frames seen in the current turn — 1 is what makes `contextTokens` exact. */
   private roundsThisTurn = 0;
@@ -105,6 +114,8 @@ class ProjectorImpl implements Projector {
   private pending: PendingMark | undefined;
   private messageIndex = 0;
   private backendSessionId: string | undefined;
+  /** `system/init.model` — the session's canonical model row, which keys `contextTokens` (m6). */
+  private mainModel: string | undefined;
   private running = false;
   private resultAt: string | undefined;
   /** One log line per unknown wire `type`, not one per message. */
@@ -126,14 +137,34 @@ class ProjectorImpl implements Projector {
   constructor(private readonly deps: ProjectorDeps) {
     this.checkpoint = deps.checkpoint;
     this.winterSessionId = deps.winterSessionId ?? deps.sessionId;
-    this.generation = deps.generation ?? 1;
+    this.generation = deps.generation;
     this.echo = createEchoWindow();
   }
 
-  get turnRunning(): boolean { return this.running; }
+  get turnRunning(): boolean { return this.openTurns > 0 || this.sawFrame; }
+
+  /**
+   * The host pushed a user turn (M1, review r1). See `Projector.beginTurn` for why this door exists
+   * at all; in short, the brief's terminal rule is PUSH-keyed and a projector with no push input can
+   * only approximate it frame-keyed — an approximation that silently dropped the `turn_completed` of
+   * any turn whose first event was its terminal.
+   *
+   * It does three things: opens a turn (so exactly one `result` is expected for it), records the
+   * pushed text in the echo window (the only thing that makes `dedupe.ts` reachable), and returns
+   * the `turn_started` the host appends beside its own `user_message`.
+   *
+   * It does NOT return a `user_message`: the host appends that itself (P8b-5), and a projector that
+   * also produced one would double-append the user's turn.
+   */
+  beginTurn(input: { text: string; at?: string }): ProjectedBatch {
+    this.commitPending();
+    this.openTurns++;
+    this.echo.pushed(input.text);
+    return this.stampBatch([{ type: "turn_started", sessionId: this.deps.sessionId, threadId: MAIN_THREAD }]);
+  }
   get lastResultAt(): string | undefined { return this.resultAt; }
 
-  accept(msg: ProtocolSdkMessage): SessionEvent[] {
+  accept(msg: ProtocolSdkMessage): ProjectedBatch {
     this.commitPending();
     this.messageIndex++;
 
@@ -141,43 +172,31 @@ class ProjectorImpl implements Projector {
     const stream = asStreamEventFrame(msg);
     if (stream !== undefined) {
       const delta = deltaText(stream);
-      if (delta === undefined) return [];
+      if (delta === undefined) return EMPTY_BATCH();
       this.running = true;
-      return this.stamp([{ type: "assistant_delta", sessionId: this.deps.sessionId, threadId: threadIdOf(stream), delta }]);
+      this.sawFrame = true;
+      return this.stampBatch([{ type: "assistant_delta", sessionId: this.deps.sessionId, threadId: threadIdOf(stream), delta }]);
     }
 
     // ── consumed, nothing persisted ─────────────────────────────────────────────────────────────
     const init = asInitFrame(msg);
     if (init !== undefined) {
       this.backendSessionId = typeof init.session_id === "string" ? init.session_id : undefined;
+      this.mainModel = typeof init.model === "string" && init.model.length > 0 ? init.model : undefined;
       this.deps.log.debug?.("[projector] session init", {
         sessionId: this.deps.sessionId, mode: this.deps.mode,
         model: typeof init.model === "string" ? init.model : undefined,
         tools: Array.isArray(init.tools) ? init.tools.length : 0,
       });
-      return [];
+      return EMPTY_BATCH();
     }
 
-    const claim = (sourceId: string, produce: () => ProjectedEvent[]): SessionEvent[] => {
-      const key = { winterSessionId: this.winterSessionId, generation: this.generation, sourceId };
-      const verdict = this.checkpoint.begin(key);
-      if (verdict === "already-committed") {
-        this.deps.log.debug?.("[projector] replay: source already projected", { sourceId });
-        return [];
-      }
-      if (verdict === "pending-elsewhere") return this.refuse(sourceId);
-      const produced = produce();
-      const stamped = this.stamp(produced);
-      const persisted = stamped.filter((e) => !TRANSIENT_EVENT_TYPES.has(e.type));
-      const first = persisted[0]?.seq ?? this.lastSeq;
-      const last = persisted[persisted.length - 1]?.seq ?? this.lastSeq;
-      this.pending = { sourceId, first, last, cursor: `${this.turnIndex}:${this.messageIndex}` };
-      return stamped;
-    };
+    const claim = (sourceId: string, produce: () => ProjectedEvent[]): ProjectedBatch => this.claimed(sourceId, produce);
 
     const assistant = asAssistantFrame(msg);
     if (assistant !== undefined) {
       this.running = true;
+      this.sawFrame = true;
       this.roundIndex++;
       this.roundsThisTurn++;
       const threadId = threadIdOf(assistant);
@@ -213,6 +232,7 @@ class ProjectorImpl implements Projector {
     const userFrame = asUserFrame(msg);
     if (userFrame !== undefined) {
       this.running = true;
+      this.sawFrame = true;
       this.roundIndex++;
       const threadId = threadIdOf(userFrame);
       if (hasToolResults(userFrame)) {
@@ -236,10 +256,10 @@ class ProjectorImpl implements Projector {
       // the child's input. The echo window is consulted anyway, so a future echo is dropped here
       // rather than double-appended; see dedupe.ts.
       const text = userText(userFrame).trim();
-      if (text.length === 0) return [];
+      if (text.length === 0) return EMPTY_BATCH();
       if (this.echo.shouldDropEcho(text)) {
         this.deps.log.debug?.("[projector] dropped an echoed host push", { sessionId: this.deps.sessionId });
-        return [];
+        return EMPTY_BATCH();
       }
       return claim(`um:${this.turnIndex}:${this.roundIndex}`, () => [
         { type: "user_message", sessionId: this.deps.sessionId, threadId, text, clientName: "winter" },
@@ -248,14 +268,20 @@ class ProjectorImpl implements Projector {
 
     const resultFrame = asResultFrame(msg);
     if (resultFrame !== undefined) {
-      if (!this.running && this.turnIndex > 0) {
-        // §4.9: exactly one result per user envelope. A second one with no turn in between is a
-        // protocol violation — logged and dropped, never projected, because a second terminal would
-        // end a turn nobody started and duplicate the phone's spinner transition.
-        this.deps.log.warn?.("[projector] a second result arrived with no turn running — dropped", {
+      // ── EXACTLY ONE TERMINAL PER BEGUN TURN (M1, review r1) ──────────────────────────────────
+      //
+      // The rule is PUSH-keyed: one `result` per turn the host pushed. `openTurns` is that count.
+      // The `sawFrame` fallback keeps a driver that has not been taught `beginTurn` — and every
+      // replay harness feeding a recorded stream — working exactly as before: a turn that produced
+      // frames is evidently a turn. What only `beginTurn` can rescue is a turn whose FIRST event is
+      // its terminal (the user hits stop before the first token; the second envelope of the
+      // recorded tooluse run), and dropping that terminal hangs the client's spinner forever with
+      // every unit test green. That was the defect.
+      if (this.openTurns === 0 && !this.sawFrame) {
+        this.deps.log.warn?.("[projector] a result arrived with no begun turn and no frames — protocol violation, dropped", {
           sessionId: this.deps.sessionId, subtype: resultFrame.subtype,
         });
-        return [];
+        return EMPTY_BATCH();
       }
       const turn = this.turnIndex;
       const sourceId = `rs:${this.backendSessionId ?? this.winterSessionId}:${turn}`;
@@ -267,7 +293,7 @@ class ProjectorImpl implements Projector {
       // absent field reads as "not known", a zero reads as "measured, and it was nothing", and
       // `engine.ts:1689`'s compaction trigger skips a zero either way. Logged ONCE per session:
       // an unpriced row is a property of the model, so one line per turn would be noise.
-      if (totalsOf(msg as ResultFrameLike) === undefined && !this.loggedUnpricedUsage) {
+      if (totalsOf(msg as ResultFrameLike, this.mainModel) === undefined && !this.loggedUnpricedUsage) {
         this.loggedUnpricedUsage = true;
         this.deps.log.debug?.("[projector] the result carries no modelUsage (unpriced catalog row) — token counts report 0 and contextTokens is omitted", {
           sessionId: this.deps.sessionId,
@@ -276,7 +302,7 @@ class ProjectorImpl implements Projector {
       const events = claim(sourceId, () => {
         const out = projectTerminal({
           result: resultFrame, sessionId: this.deps.sessionId, threadId: MAIN_THREAD,
-          previous: this.totals, rounds,
+          previous: this.totals, rounds, ...(this.mainModel === undefined ? {} : { mainModel: this.mainModel }),
         });
         this.totals = out.totals ?? this.totals;
         return out.events;
@@ -287,6 +313,8 @@ class ProjectorImpl implements Projector {
       this.roundIndex = 0;
       this.roundsThisTurn = 0;
       this.running = false;
+      this.sawFrame = false;
+      if (this.openTurns > 0) this.openTurns--;
       this.terminalEmitted = true;
       this.resultAt = this.deps.now();
       return events;
@@ -296,7 +324,7 @@ class ProjectorImpl implements Projector {
     if (task !== undefined) return task;
 
     this.logSkipped(msg);
-    return [];
+    return EMPTY_BATCH();
   }
 
   /**
@@ -309,7 +337,7 @@ class ProjectorImpl implements Projector {
    * Returns `undefined` (not `[]`) when the message is not a task frame, so `accept` can tell "not
    * mine" from "mine, and it projected nothing".
    */
-  private acceptTaskFrame(msg: ProtocolSdkMessage): SessionEvent[] | undefined {
+  private acceptTaskFrame(msg: ProtocolSdkMessage): ProjectedBatch | undefined {
     const kind = kindOf(msg);
     const m = msg as Record<string, unknown>;
     const taskId = typeof m.task_id === "string" && m.task_id.length > 0 ? m.task_id : undefined;
@@ -318,11 +346,11 @@ class ProjectorImpl implements Projector {
     if (kind === "system/task_started") {
       seedTask(this.tasks, taskId, m.description);
       this.logSkipped(msg);   // the row is now tracked; the FRAME still persists nothing
-      return [];
+      return EMPTY_BATCH();
     }
     if (kind === "system/task_updated") {
       const patch = typeof m.patch === "object" && m.patch !== null ? (m.patch as Record<string, unknown>) : {};
-      return this.claimTask(`tk:${taskId}:${this.messageIndex}`, () => {
+      return this.claimed(`tk:${taskId}:${this.messageIndex}`, () => {
         const ev = applyTaskPatch(this.tasks, taskId, patch, this.deps.sessionId);
         return ev === undefined ? [] : [ev];
       });
@@ -333,8 +361,8 @@ class ProjectorImpl implements Projector {
       // — mapped here rather than widening children.ts's table with a value `patch.status` can
       // never hold.
       const status = m.status === "stopped" ? "killed" : typeof m.status === "string" ? m.status : undefined;
-      if (status === undefined) return [];
-      return this.claimTask(`tk:${taskId}:${this.messageIndex}`, () => {
+      if (status === undefined) return EMPTY_BATCH();
+      return this.claimed(`tk:${taskId}:${this.messageIndex}`, () => {
         const ev = applyTaskPatch(this.tasks, taskId, { status, ...(typeof m.summary === "string" ? { description: m.summary } : {}) }, this.deps.sessionId);
         return ev === undefined ? [] : [ev];
       });
@@ -359,7 +387,7 @@ class ProjectorImpl implements Projector {
    *    `result` is coming: without one the Mac's spinner runs forever and the phone's turn never
    *    closes. An already-closed turn gets nothing.
    */
-  acceptError(err: unknown): SessionEvent[] {
+  acceptError(err: unknown): ProjectedBatch {
     this.commitPending();
     const classified = classifyThrown(err);
     const name = err instanceof Error ? err.name : "";
@@ -367,13 +395,15 @@ class ProjectorImpl implements Projector {
       this.deps.log.debug?.("[projector] ResultError for a result already projected — the error-result-then-throw pair", {
         sessionId: this.deps.sessionId, code: classified.code,
       });
-      return [];
+      return EMPTY_BATCH();
     }
-    if (!this.running) {
+    if (!this.turnRunning) {
       this.deps.log.warn?.("[projector] the stream failed with no turn running", { sessionId: this.deps.sessionId, code: classified.code });
-      return [];
+      return EMPTY_BATCH();
     }
     this.running = false;
+    this.sawFrame = false;
+    if (this.openTurns > 0) this.openTurns--;
     this.resultAt = this.deps.now();
     this.turnIndex++;
     this.roundIndex = 0;
@@ -382,7 +412,7 @@ class ProjectorImpl implements Projector {
     // applies to `result.interrupted`, applied here so a thrown AbortError cannot smuggle an
     // `agent_error` past it.
     const aborted = classified.code === "aborted";
-    return this.stamp(aborted
+    return this.stampBatch(aborted
       ? [{ type: "turn_completed", sessionId: this.deps.sessionId, threadId: MAIN_THREAD, stopReason: "aborted", inputTokens: 0, outputTokens: 0 }]
       : [
           { type: "agent_error", sessionId: this.deps.sessionId, threadId: MAIN_THREAD, message: classified.message, code: classified.code },
@@ -390,17 +420,43 @@ class ProjectorImpl implements Projector {
         ]);
   }
 
-  /** A task frame's claim: same contract as `claim`, but `accept`'s closure is out of scope here. */
-  private claimTask(sourceId: string, produce: () => ProjectedEvent[]): SessionEvent[] {
+  /**
+   * Claim a source, project it, and leave the mark open for the next `accept` to commit.
+   *
+   * ORDER MATTERS AND IT IS NOT THE OBVIOUS ONE (m9, review r1): `produce()` runs BEFORE `begin()`.
+   * A message that yields no PERSISTED event — an empty assistant frame, a task patch that says
+   * nothing this schema can express — must not write a `projection_applied` row, because such a row
+   * describes a source that can never appear in the product log, and recovery would then hunt for
+   * an append that was never going to happen. Producing first is what makes "claim only what will
+   * be appended" expressible; `produce()` is pure enough for that (its only side effects — the
+   * child map, the task-row mirror — are ones a replay should perform anyway).
+   */
+  private claimed(sourceId: string, produce: () => ProjectedEvent[]): ProjectedBatch {
+    const produced = produce();
+    const persistedCount = produced.filter((e) => !TRANSIENT_EVENT_TYPES.has(e.type)).length;
+    if (persistedCount === 0) return this.stampBatch(produced);
+
     const key = { winterSessionId: this.winterSessionId, generation: this.generation, sourceId };
     const verdict = this.checkpoint.begin(key);
-    if (verdict === "already-committed") return [];
-    if (verdict === "pending-elsewhere") return this.refuse(sourceId);
-    const stamped = this.stamp(produce());
-    const first = stamped[0]?.seq ?? this.lastSeq;
-    const last = stamped[stamped.length - 1]?.seq ?? this.lastSeq;
+    if (verdict === "already-committed") {
+      // WARN, not debug (M2, review r1). A LIVE stream should never meet a committed mark; the way
+      // it happens is a resume that re-used its generation, and the symptom is a silent transcript
+      // hole on exactly the path that must not lose events. A deliberate re-read (recovery, a
+      // mirror catch-up) will log these too — which is the right trade: noise on an intentional
+      // replay beats silence on an accidental one. The ids are here so the cause is readable.
+      this.deps.log.warn?.("[projector] source already projected — skipping; on a live stream this means a resume that did not bump `generation`", {
+        sessionId: this.deps.sessionId, winterSessionId: this.winterSessionId,
+        generation: this.generation, sourceId,
+      });
+      return EMPTY_BATCH();
+    }
+    if (verdict === "pending-elsewhere") this.refuse(sourceId);
+
+    const batch = this.stampBatch(produced);
+    const first = batch.persist[0]?.seq ?? this.lastSeq;
+    const last = batch.persist[batch.persist.length - 1]?.seq ?? this.lastSeq;
     this.pending = { sourceId, first, last, cursor: `${this.turnIndex}:${this.messageIndex}` };
-    return stamped;
+    return batch;
   }
 
   /**
@@ -417,7 +473,7 @@ class ProjectorImpl implements Projector {
    * of `accept` would abort the driver's iteration over the rest of a turn that is otherwise fine,
    * turning a bookkeeping conflict into a dead session.
    */
-  private refuse(sourceId: string): SessionEvent[] {
+  private refuse(sourceId: string): never {
     const refusal: ProjectorRefusal = {
       reason: "pending-elsewhere", sourceId, sessionId: this.deps.sessionId,
       winterSessionId: this.winterSessionId, generation: this.generation, at: this.deps.now(),
@@ -427,7 +483,7 @@ class ProjectorImpl implements Projector {
       sessionId: this.deps.sessionId, sourceId,
     });
     try { this.deps.onRefusal?.(refusal); } catch { /* a driver's own handler must never break the fold */ }
-    return [];
+    throw new ProjectorRefusedError("pending-elsewhere", sourceId, this.deps.sessionId, this.winterSessionId, this.generation);
   }
 
   /**
@@ -493,13 +549,25 @@ class ProjectorImpl implements Projector {
     else this.deps.log.debug?.("[projector] unrecognised wire message — nothing projected", fields);
   }
 
-  /** Assign `seq`/`ts`. A transient reuses `lastSeq`; everything else consumes the next one. */
-  private stamp(events: ProjectedEvent[]): SessionEvent[] {
+  /**
+   * Assign `seq`/`ts` and SPLIT BY SINK (m5, review r1). A transient reuses `lastSeq` rather than
+   * consuming a new one — `assistant_delta` carries "the store's lastSeq at broadcast time, NOT its
+   * own seq" (`protocol/events.ts`), and a client that deduped it by seq would drop every one.
+   *
+   * No call ever fills both halves: a frame produces either a transient or persisted events, never
+   * a mix. `test/projector/conversation.test.ts` pins that, which is what lets a caller wanting one
+   * ordered stream concatenate `persist` and `broadcast` without reordering anything.
+   */
+  private stampBatch(events: ProjectedEvent[]): ProjectedBatch {
     const ts = Date.parse(this.deps.now());
-    return events.map((e) => {
+    const persist: SessionEvent[] = [];
+    const broadcast: SessionEvent[] = [];
+    for (const e of events) {
       const transient = TRANSIENT_EVENT_TYPES.has(e.type);
       const seq = transient ? this.lastSeq : (this.lastSeq = this.deps.nextSeq());
-      return { ...e, seq, ts: Number.isFinite(ts) ? ts : Date.now() } as SessionEvent;
-    });
+      const stamped = { ...e, seq, ts: Number.isFinite(ts) ? ts : Date.now() } as SessionEvent;
+      (transient ? broadcast : persist).push(stamped);
+    }
+    return { persist, broadcast };
   }
 }

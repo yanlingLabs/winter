@@ -43,7 +43,24 @@ import { classifyResult } from "./errors";
  *  - No `modelUsage` at all (an unpriced row — the measured case for every `winter-test/*` double)
  *    → zeros and no `contextTokens`. Nothing is fabricated.
  */
-export interface UsageTotals { input: number; output: number }
+export interface UsageTotals {
+  /** Every row's input (base + cache read + cache creation) — what the turn cost going in. */
+  input: number;
+  /** Every row's output. */
+  output: number;
+  /**
+   * The SESSION'S CANONICAL MODEL row's input only (m6, review r1).
+   *
+   * `contextTokens` answers "how full is this conversation's context", which is a fact about the
+   * main loop's model and nothing else. Winter's ledger is keyed by model and §4.2 says auxiliary
+   * calls (compaction summariser, classifier, advisor, `countTokens`) emit no stream events — which
+   * says nothing about whether they accrue into `modelUsage`. Summing every row would therefore let
+   * an auxiliary call inflate a figure labelled EXACT. Keying to the session's own model row closes
+   * that without needing to prove what the ledger does. With no model known (no `system/init` seen)
+   * this equals `input`, and the honest degradation is stated rather than hidden.
+   */
+  main: number;
+}
 
 interface LedgerRow { inputTokens?: unknown; outputTokens?: unknown; cacheReadInputTokens?: unknown; cacheCreationInputTokens?: unknown }
 
@@ -52,17 +69,21 @@ const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v)
 /** Sum the cumulative ledger across every model row. Input counts cache reads and cache writes:
  *  they are context the provider charged for on the way in, and leaving them out would under-report
  *  a cached conversation by most of its size. */
-export function totalsOf(result: ResultFrame): UsageTotals | undefined {
+export function totalsOf(result: ResultFrame, mainModel?: string): UsageTotals | undefined {
   const usage = (result as { modelUsage?: unknown }).modelUsage;
   if (typeof usage !== "object" || usage === null) return undefined;
   let input = 0;
   let output = 0;
-  for (const row of Object.values(usage as Record<string, LedgerRow>)) {
+  let main = 0;
+  let sawMain = false;
+  for (const [model, row] of Object.entries(usage as Record<string, LedgerRow>)) {
     if (typeof row !== "object" || row === null) continue;
-    input += num(row.inputTokens) + num(row.cacheReadInputTokens) + num(row.cacheCreationInputTokens);
+    const rowInput = num(row.inputTokens) + num(row.cacheReadInputTokens) + num(row.cacheCreationInputTokens);
+    input += rowInput;
     output += num(row.outputTokens);
+    if (mainModel !== undefined && model === mainModel) { main += rowInput; sawMain = true; }
   }
-  return { input, output };
+  return { input, output, main: sawMain ? main : input };
 }
 
 export interface TerminalInput {
@@ -71,8 +92,10 @@ export interface TerminalInput {
   threadId: string;
   /** Cumulative totals after the PREVIOUS result, or undefined if this is the first. */
   previous: UsageTotals | undefined;
-  /** How many `assistant` frames this turn produced — 1 makes `contextTokens` exact. */
+  /** How many `assistant` frames this turn produced — exactly 1 makes `contextTokens` exact. */
   rounds: number;
+  /** `system/init.model`, when one has been seen — keys the `contextTokens` row (m6). */
+  mainModel?: string;
 }
 
 export interface TerminalOutput { events: ProjectedEvent[]; totals: UsageTotals | undefined; stopReason: "end_turn" | "aborted" | "error" }
@@ -84,11 +107,15 @@ export interface TerminalOutput { events: ProjectedEvent[]; totals: UsageTotals 
  * boundary, never an `agent_error` — with no host-side "I called interrupt" flag to keep in sync.
  */
 export function projectTerminal(input: TerminalInput): TerminalOutput {
-  const { result, sessionId, threadId, previous, rounds } = input;
-  const totals = totalsOf(result);
+  const { result, sessionId, threadId, previous, rounds, mainModel } = input;
+  const totals = totalsOf(result, mainModel);
   const inputTokens = totals === undefined ? 0 : Math.max(0, totals.input - (previous?.input ?? 0));
   const outputTokens = totals === undefined ? 0 : Math.max(0, totals.output - (previous?.output ?? 0));
-  const contextTokens = totals !== undefined && rounds <= 1 && inputTokens > 0 ? { contextTokens: inputTokens } : {};
+  // `rounds === 1`, not `<= 1` (m8, review r1): a `result` with priced usage but NO assistant frame
+  // at all has zero observed rounds, and calling that "one round, therefore exact" states a
+  // measurement nobody made. Exactly one round is the only shape where the delta IS the round.
+  const mainDelta = totals === undefined ? 0 : Math.max(0, totals.main - (previous?.main ?? 0));
+  const contextTokens = totals !== undefined && rounds === 1 && mainDelta > 0 ? { contextTokens: mainDelta } : {};
 
   const interrupted = (result as { interrupted?: unknown }).interrupted === true;
   const isError = !interrupted && (result.is_error === true || (typeof result.subtype === "string" && result.subtype.startsWith("error_")));

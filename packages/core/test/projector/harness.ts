@@ -1,6 +1,6 @@
 import type { SessionEvent } from "@norma/protocol";
 import { createProjector } from "../../src/projector";
-import type { CheckpointStore, ProjectionKey, Projector, ProjectorDeps, ProtocolSdkMessage } from "../../src/projector";
+import type { CheckpointStore, ProjectedBatch, ProjectionKey, Projector, ProjectorDeps, ProtocolSdkMessage } from "../../src/projector";
 
 /** An in-memory `ProjectionCheckpoints` with the same three-verdict `begin` contract. The real
  *  class is exercised against SQLite by `test/runtime-state/checkpoints.test.ts`; what these tests
@@ -41,6 +41,7 @@ export function makeProjector(overrides: Partial<ProjectorDeps> = {}): TestProje
   const projector = createProjector({
     sessionId: "s_test",
     mode: "code",
+    generation: 1,
     nextSeq: () => ++seq,
     checkpoint: checkpoints,
     now: () => "2026-09-11T00:00:00.000Z",
@@ -52,10 +53,23 @@ export function makeProjector(overrides: Partial<ProjectorDeps> = {}): TestProje
   return { projector, checkpoints, warnings, debugs };
 }
 
-/** Feed a whole stream and collect every produced event, in order. */
-export function run(projector: Projector, messages: ProtocolSdkMessage[]): SessionEvent[] {
+/**
+ * One accept, flattened to an ordered event list. Safe because no single call ever fills both halves
+ * of a `ProjectedBatch` — a frame produces either a transient or persisted events, never a mix —
+ * and `conversation.test.ts` pins exactly that.
+ */
+export const flat = (b: ProjectedBatch): SessionEvent[] => [...b.persist, ...b.broadcast];
+export const accept = (p: Projector, m: ProtocolSdkMessage): SessionEvent[] => flat(p.accept(m));
+export const acceptError = (p: Projector, err: unknown): SessionEvent[] => flat(p.acceptError(err));
+export const beginTurn = (p: Projector, text: string): SessionEvent[] => flat(p.beginTurn({ text }));
+
+/** Feed a whole stream and collect every produced event, in order. `turns` is how many user turns
+ *  the HOST pushed (M1's `beginTurn` door); the default single push is what every one-turn scenario
+ *  needs, and the `turn_started` it returns is dropped here — the replay test asserts it. */
+export function run(projector: Projector, messages: ProtocolSdkMessage[], opts: { turns?: number } = {}): SessionEvent[] {
   const out: SessionEvent[] = [];
-  for (const m of messages) out.push(...projector.accept(m));
+  for (let i = 0; i < (opts.turns ?? 0); i++) projector.beginTurn({ text: `turn ${i + 1}` });
+  for (const m of messages) out.push(...accept(projector, m));
   projector.flush();
   return out;
 }

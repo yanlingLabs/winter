@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { AGENT_ERROR_CODES, classifyResult, classifyThrown, codeForHttpStatus, sanitizeDetail } from "../../src/projector";
 import type { AgentErrorCode } from "../../src/projector";
-import { assistantText, init, makeProjector, result } from "./harness";
+import { accept, acceptError, assistantText, init, makeProjector, result } from "./harness";
 
 type TC = { type: string; code?: string; message?: string; stopReason?: string };
 const res = (over: Record<string, unknown>) => ({ type: "result", subtype: "success", permission_denials: [], ...over } as never);
@@ -114,9 +114,9 @@ describe("projector/errors: an error message can NEVER carry opaque provider sta
 
   test("the end-to-end path is clean too: nothing opaque survives into the emitted agent_error", () => {
     const { projector } = makeProjector();
-    projector.accept(init());
-    projector.accept(assistantText("working"));
-    const out = projector.accept(result({
+    accept(projector, init());
+    accept(projector, assistantText("working"));
+    const out = accept(projector, result({
       is_error: true, subtype: "error_during_execution",
       result: "tool crashed; itemJson={\"encrypted_content\":\"SECRETSECRET\"}",
     }));
@@ -130,10 +130,10 @@ describe("projector/errors: an error message can NEVER carry opaque provider sta
 describe("projector/errors: the thrown-error door (surface map §4.8 item 3)", () => {
   test("a throw with a turn still open produces agent_error + turn_completed(error)", () => {
     const { projector } = makeProjector();
-    projector.accept(init());
-    projector.accept(assistantText("working"));
+    accept(projector, init());
+    accept(projector, assistantText("working"));
     const err = Object.assign(new Error("runtime exited"), { name: "ProcessError" });
-    const out = projector.acceptError(err) as unknown as TC[];
+    const out = acceptError(projector, err) as unknown as TC[];
     expect(out.map((e) => e.type)).toEqual(["agent_error", "turn_completed"]);
     expect(out[0]).toMatchObject({ code: "process_death" });
     expect(out[1]).toMatchObject({ stopReason: "error" });
@@ -142,28 +142,28 @@ describe("projector/errors: the thrown-error door (surface map §4.8 item 3)", (
 
   test("a thrown AbortError is a TURN BOUNDARY, not an error (P8b-24) — no agent_error", () => {
     const { projector } = makeProjector();
-    projector.accept(init());
-    projector.accept(assistantText("working"));
+    accept(projector, init());
+    accept(projector, assistantText("working"));
     const err = Object.assign(new Error("aborted"), { name: "AbortError" });
-    const out = projector.acceptError(err) as unknown as TC[];
+    const out = acceptError(projector, err) as unknown as TC[];
     expect(out.map((e) => e.type)).toEqual(["turn_completed"]);
     expect(out[0]).toMatchObject({ stopReason: "aborted" });
   });
 
   test("a ResultError for a result ALREADY projected is the error-result-then-throw pair — projected once, not twice", () => {
     const { projector } = makeProjector();
-    projector.accept(init());
-    projector.accept(assistantText("working"));
-    const terminal = projector.accept(result({ is_error: true, api_error_status: 500 }));
+    accept(projector, init());
+    accept(projector, assistantText("working"));
+    const terminal = accept(projector, result({ is_error: true, api_error_status: 500 }));
     expect(terminal.map((e) => e.type)).toEqual(["agent_error", "turn_completed"]);
     const err = Object.assign(new Error("result error: error_during_execution"), { name: "ResultError" });
-    expect(projector.acceptError(err)).toEqual([]);
+    expect(acceptError(projector, err)).toEqual([]);
   });
 
   test("a throw with no turn running produces nothing and warns", () => {
     const { projector, warnings } = makeProjector();
-    projector.accept(init());
-    expect(projector.acceptError(new Error("boom"))).toEqual([]);
+    accept(projector, init());
+    expect(acceptError(projector, new Error("boom"))).toEqual([]);
     expect(warnings.join(" ")).toContain("no turn running");
   });
 });
