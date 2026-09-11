@@ -1731,7 +1731,7 @@ if (import.meta.main) {
     break;
   }
   case "login": {
-    const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, OPENAI_API_KEY_SECRET, WEB_SEARCH_API_KEY_SECRET, EXA_API_KEY_SECRET, profileDisplayName } = await import("@norma/core");
+    const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, writeOpenAiApiKey, WEB_SEARCH_API_KEY_SECRET, EXA_API_KEY_SECRET, profileDisplayName } = await import("@norma/core");
     console.log(`${AQUA}${profileDisplayName()} login${RESET}`);
     const secrets = new KeychainSecretStore();
     if (process.argv.includes("--api-key")) {
@@ -1749,7 +1749,7 @@ if (import.meta.main) {
       // the provider sink itself safe against a key that reaches it some other way.
       const invisibleWarning = invisibleKeyCharWarning(key);
       if (invisibleWarning) { console.error(invisibleWarning); process.exit(1); }
-      await secrets.set(OPENAI_API_KEY_SECRET, key);
+      await writeOpenAiApiKey(secrets, key);
       console.log(`${AQUA}API key stored in Keychain${RESET} — set provider type in ~/.norma/settings.json (openai-compatible)`);
       break;
     }
@@ -1793,12 +1793,16 @@ if (import.meta.main) {
     break;
   }
   case "logout": {
-    const { KeychainSecretStore, CODEX_SECRET_NAMES } = await import("@norma/core");
+    const { KeychainSecretStore, CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, clearCredentialMaterial } = await import("@norma/core");
     const secrets = new KeychainSecretStore();
     // Phase 1a simplification: SecretStore gains delete() in 1b — empty value de-authorizes everywhere today.
     for (const name of Object.values(CODEX_SECRET_NAMES)) {
       await secrets.set(name, "");
     }
+    // Hotfix (credential material, P8b): the material record is what the spawned Winter child
+    // actually reads — blanking only the legacy five would leave a signed-out install still
+    // holding a live codex-oauth:default record the child happily authenticates with.
+    await clearCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth);
     console.log("signed out");
     break;
   }

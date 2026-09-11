@@ -33,7 +33,7 @@ import {
 } from "@norma/protocol";
 import type { TokenAuthority } from "../auth/tokens";
 import type { SecretStore } from "../auth/secret-store";
-import { OPENAI_API_KEY_SECRET } from "../providers/manager";
+import { writeOpenAiApiKey } from "../auth/credential-material";
 import type { RoutineStore } from "../routines/store";
 import type { WorkflowRuntime } from "../workflows/runtime";
 import type { WorkflowStore } from "../workflows/store";
@@ -2422,7 +2422,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const p = parseParams(ProviderConfigureParams, params);
         if (!opts.normaHome) throw new RpcFailure(ERR.INTERNAL, "provider.configure is not available on this server (no normaHome configured)");
         if (!opts.secrets) throw new RpcFailure(ERR.INTERNAL, "provider.configure is not available on this server (no secret store configured)");
-        await opts.secrets.set(OPENAI_API_KEY_SECRET, p.apiKey);
+        await writeOpenAiApiKey(opts.secrets, p.apiKey);
         const settingsPath = join(opts.normaHome, "settings.json");
         const settings = loadSettings(settingsPath);
         saveSettings(settingsPath, {

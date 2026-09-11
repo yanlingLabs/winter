@@ -16,6 +16,7 @@ import { PluginSupervisor } from "../src/plugins/supervisor";
 import { PluginContribRegistry } from "../src/plugins/contrib";
 import type { Provider, ProviderEvent } from "../src/providers/types";
 import { OPENAI_API_KEY_SECRET } from "../src/providers/manager";
+import { readOpenAiApiKey } from "../src/auth/credential-material";
 import { TrustStore } from "../src/agent/trust";
 import { WorkflowRuntime } from "../src/workflows/runtime";
 import { WorkflowStore } from "../src/workflows/store";
@@ -2973,7 +2974,10 @@ describe("provider.configure RPC (BYOK T1)", () => {
     });
     expect(res.result).toEqual({ ok: true });
 
-    expect(await srv.secrets.get(OPENAI_API_KEY_SECRET)).toBe("sk-test-123");
+    // Hotfix (credential material, P8b): the RPC now writes the JSON material record the spawned
+    // Winter child reads (openai:default), not the legacy raw openai-api-key string.
+    expect(await readOpenAiApiKey(srv.secrets)).toBe("sk-test-123");
+    expect(await srv.secrets.get(OPENAI_API_KEY_SECRET)).toBeNull();
 
     const settings = JSON.parse(readFileSync(srv.settingsPath, "utf8"));
     expect(settings.provider).toEqual({ type: "openai-compatible", baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini" });

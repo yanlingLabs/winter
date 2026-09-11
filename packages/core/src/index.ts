@@ -33,6 +33,13 @@ export {
 } from "./plugins/lifecycle";
 export { createProvider, OPENAI_API_KEY_SECRET, type ActiveProvider, type LiveModelSelection } from "./providers/manager";
 export { CodexAuthStore, CODEX_SECRET_NAMES } from "./providers/codex-oauth";
+export {
+  CREDENTIAL_MATERIAL_NAMES,
+  readCredentialMaterial, writeCredentialMaterial, clearCredentialMaterial,
+  readOpenAiApiKey, writeOpenAiApiKey,
+  migrateLegacyCredentialMaterial,
+  type CredentialMaterial, type ApiKeyMaterial, type OauthMaterial, type CredentialMigrationReport,
+} from "./auth/credential-material";
 export { runLoginFlow } from "./providers/pkce";
 export { CODEX, CODEX_MODELS, DEFAULT_CODEX_MODEL } from "./providers/codex-config";
 // WS-16 §15's `norma doctor` runs IN-PROCESS against NORMA_HOME — no RPC, because the whole point
