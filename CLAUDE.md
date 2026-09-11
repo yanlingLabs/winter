@@ -51,6 +51,10 @@ NORMA_HOME=~/.norma-dev NORMA_PROFILE=dev bun src/main.ts daemon run   # dev dae
 # build one (`bun run build:winter` → dist/winter, from the ../winter-agent-sdk checkout at the pinned tag)
 # and point the daemon at it, or EVERY session.create/session.dispatch refuses typed (winter_executable_unavailable):
 NORMA_WINTER_EXECUTABLE="$PWD/../../dist/winter" NORMA_HOME=~/.norma-dev NORMA_PROFILE=dev bun src/main.ts daemon run
+# (or set `runtimes.winterExecutable` in ~/.norma-dev/settings.json). FIRST RUN AFTER A REBUILD: the ad-hoc-signed dist/winter
+# reads Norma's Keychain items itself, so macOS shows ONE consent dialog per credential item — click "Always Allow" or the
+# turn stalls until the CLI's 180 s watchdog aborts it. Credentials are JSON "material" records (`openai:default`,
+# `codex-oauth:default`; see packages/core/src/auth/credential-material.ts) — the raw legacy records are migrated at boot.
 
 # Versioning — never edit versions by hand; VERSION file (#.#.### format) is canonical
 bun run version:bump                 # +0.0.001 (also --minor / --major)
