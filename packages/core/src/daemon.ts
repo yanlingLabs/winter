@@ -153,10 +153,25 @@ export interface RunningDaemon {
    * Tasks 5/9/16). `null` on a daemon that never loaded settings at all.
    */
   settings(): ReturnType<typeof loadSettings> | null;
-  /** Tear the daemon down. Everything except the runtime-state drain is synchronous and has already
-   *  happened when this returns; the promise (present only when the runtime spine opened) resolves
-   *  once the queued §16 deletions have drained, `runtime-state.db` is closed and the lock —
-   *  i.e. the socket file — is released. A caller that then exits the process MUST await it. */
+  /**
+   * Tear the daemon down, in THIS order (P8b Task 5 widened it — read the whole thing):
+   *
+   *   1. synchronous kills — the socket server, MCP, LSP, plugins, background agents, the settings
+   *      watcher, the routine scheduler/store, the dreamer. All of this has happened when `stop()`
+   *      RETURNS, exactly as it always has.
+   *   2. `runtimeSdk.dispose()` — every live Winter session ends (bounded by
+   *      `SHUTDOWN_QUERY_GRACE_MS`), then the router's own dispose. ASYNC.
+   *   3. `store.close()` — the session store. NO LONGER SYNCHRONOUS when a Winter handle exists: a
+   *      draining child appends its last events through it, so it must outlive step 2.
+   *   4. `runtime.close()` — the §16 deletion drain (bounded) and `runtime-state.db`, which step 2's
+   *      delivery receipts likewise write into.
+   *   5. `lock.release()` — unlinks the socket file, and `norma doctor`'s repairs check for its
+   *      absence before touching it.
+   *
+   * The returned promise is present whenever EITHER the Winter handle or the runtime spine exists —
+   * i.e. on essentially every real daemon. A caller that then exits the process MUST await it, or
+   * the process dies mid-drain with the lock still on disk.
+   */
   stop(): void | Promise<void>;
 }
 
@@ -1717,9 +1732,11 @@ export async function startDaemon(opts: {
       // server and is gone with it. `runtime.close()` then clears the retention interval, DRAINS the
       // queued §16 deletions (bounded, 5s — review r1 minor 5: a delete queued microseconds before
       // shutdown has only reached the microtask queue, and dropping it strands a runtime record
-      // whose session is gone), and closes `runtime-state.db`. That drain is the one part of
-      // teardown that cannot be synchronous, which is why `stop()` hands back a promise: everything
-      // before it has already happened when `stop()` returns, and `lock.release()` — which unlinks
+      // whose session is gone), and closes `runtime-state.db`. That drain was the FIRST part of
+      // teardown that could not be synchronous, which is why `stop()` hands back a promise (P8b
+      // Task 5 added a second, below: ending the live Winter sessions — so `store.close()` is on
+      // the async tail now too; see `RunningDaemon.stop`'s doc for the whole order), and
+      // `lock.release()` — which unlinks
       // the socket, and whose absence is what `norma doctor`'s repairs check before touching this
       // file — happens strictly after the handle is closed. AWAIT IT in any path that then calls
       // `process.exit` (daemon.ts's own SIGTERM handler below, and cli/src/main.ts's `daemon run`),

@@ -246,8 +246,9 @@ describe("dispose — G-14: every Query ends BEFORE the router disposes", () => 
     expect(disposeOrder[2]).toBe("sdk.dispose");
   });
 
-  test("an end that never resolves is bounded by the grace, and the router still disposes", async () => {
-    const { handle, disposeOrder } = await build({}, 50);
+  test("an end that never resolves is bounded by the grace, is LOGGED, and the router still disposes", async () => {
+    const lines: string[] = [];
+    const { handle, disposeOrder } = await build({ log: (line) => lines.push(line) }, 50);
     handle.trackQuery("stuck", FAKE_QUERY, () => new Promise<void>(() => {}));
     const started = Date.now();
     await handle.dispose();
@@ -255,6 +256,9 @@ describe("dispose — G-14: every Query ends BEFORE the router disposes", () => 
     expect(disposeOrder).toEqual(["sdk.dispose"]);
     expect(elapsed).toBeGreaterThanOrEqual(45);
     expect(elapsed).toBeLessThan(2_000); // nowhere near the real 5s budget
+    // A `stop()` that suddenly takes seconds must not be silent — it is the one thing that can push
+    // teardown past the app's SIGKILL deadline, and the operator needs the session id.
+    expect(lines).toEqual(["session stuck did not end within 50ms — disposing anyway"]);
   });
 
   test("an end that REJECTS is a straggler, not a failure: teardown completes", async () => {

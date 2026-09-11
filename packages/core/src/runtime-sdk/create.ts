@@ -178,12 +178,19 @@ function advisorFrom(deps: NormaRuntimeSdkDeps): { advisor?: NonNullable<Runtime
 }
 
 /** Await `end()`, but never longer than `ms`, and never fail because it did. A session that will
- *  not end must not hold the whole daemon's teardown, and a rejecting `end` is a straggler too. */
-function endWithin(end: () => Promise<void>, ms: number): Promise<void> {
+ *  not end must not hold the whole daemon's teardown, and a rejecting `end` is a straggler too.
+ *
+ *  A straggler is LOGGED, because a `stop()` that suddenly takes seconds is otherwise silent and
+ *  the operator has nothing to correlate it with — and because passing the grace is the one thing
+ *  that can push teardown past the app's own SIGKILL deadline (see `SHUTDOWN_QUERY_GRACE_MS`). */
+function endWithin(sessionId: string, end: () => Promise<void>, ms: number, log?: (line: string) => void): Promise<void> {
   return new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
+    const timer = setTimeout(() => {
+      log?.(`session ${sessionId} did not end within ${ms}ms — disposing anyway`);
+      resolve();
+    }, ms);
     const done = (): void => { clearTimeout(timer); resolve(); };
-    try { void end().then(done, done); } catch { done(); }
+    try { void end().then(done, (err: unknown) => { log?.(`session ${sessionId} failed to end: ${(err as Error)?.name ?? "unknown"}`); done(); }); } catch { done(); }
   });
 }
 
@@ -241,10 +248,10 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
       if (disposed) return;
       disposed = true;
       const grace = overrides.grace ?? SHUTDOWN_QUERY_GRACE_MS;
-      const ends = [...live.values()];
+      const ends = [...live.entries()];
       live.clear();
       // ALL of them, in parallel, each under its own budget — then, and only then, the router.
-      await Promise.all(ends.map((end) => endWithin(end, grace)));
+      await Promise.all(ends.map(([sessionId, end]) => endWithin(sessionId, end, grace, deps.log)));
       await sdk.dispose();
     },
   };
