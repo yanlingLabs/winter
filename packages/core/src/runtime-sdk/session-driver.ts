@@ -46,7 +46,7 @@ import type { PermissionGate } from "../agent/gate";
 import type { QuestionBroker } from "../agent/questions";
 import { NORMA_CAPABILITY_TOOLS, assertNoCapabilityCollision, type CapabilityServerRecord, type CapabilitySession } from "../capabilities";
 import { createProjector, type Projector } from "../projector";
-import type { RuntimeSessionRecords } from "../runtime-state/records";
+import type { RuntimeSessionRecord, RuntimeSessionRecords } from "../runtime-state/records";
 import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
@@ -60,7 +60,7 @@ import { buildWinterOptions, permissionModeFor } from "./mode-options";
 import { providerSelectionFor } from "./provider-selection";
 import { normaSessions } from "./sessions";
 import { NORMA_PEER_VERSIONS } from "./versions";
-import { startWinterSession, type WinterIncarnation, type WinterSession } from "./winter-session";
+import { startWinterSession, unconsumedUserMessages, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
 
 export type WinterLegRefusalCode =
   | "winter_executable_unavailable"   // P8b-2: no `winter` binary resolves (setting → env → bundle → home)
@@ -132,6 +132,10 @@ export interface WinterSessionDrivers {
   get(sessionId: string): WinterSession | undefined;
   /** A live driver, or a resumed one when the record says "winter"; undefined ⇒ the engine's. */
   ensure(sessionId: string): Promise<WinterSession | undefined>;
+  /** The session was DELETED (the reaper, the cleaner): end its child (bounded) and forget the
+   *  driver — a live child never outlives its session (the reaper's 600 s grace is shorter than
+   *  the 900 s idle timer). Never throws. */
+  evict(sessionId: string): Promise<void>;
   list(): WinterSession[];
   /** End every live driver (bounded each). Shutdown reaches them through `trackQuery` anyway; this
    *  is the door a test drives. */
@@ -159,6 +163,10 @@ export function sessionPermissionClassFor(deps: {
       const record = deps.records()?.byBackendSessionId(backend);
       if (record === undefined) return "unknown";
       const policy = deps.store.meta(record.winterSessionId).approvalPolicy;
+      // `bypassAvailable` is the SDK's "was `allowDangerouslySkipPermissions` granted" predicate,
+      // and `mode-options.ts` grants it under the `bypass` policy only — so the two ARE one
+      // predicate. (The SDK consults it for `plan` alone; `bypassPermissions` classifies
+      // `bypasses` unconditionally, everything else `prompts`.)
       return classifyPermissionMode(permissionModeFor(policy), { bypassAvailable: policy === "bypass" });
     } catch {
       return "unknown";
@@ -177,12 +185,33 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
 
   const legForNew = (mode: SessionMode): SessionLeg => legForNewSession(mode, deps.settings() ?? undefined);
 
-  const assertAvailable = (mode: SessionMode): void => {
+  /** The spine half of `assertAvailable`: the handle and 8a's repositories exist. */
+  const assertSpine = (): void => {
     if (deps.runtime === undefined) throw new WinterLegRefusal("winter_leg_unavailable", "the Winter runtime handle did not construct on this daemon; the Winter leg refuses (every mode still runs on the engine)");
     if (deps.records === undefined || deps.checkpoints === undefined) throw new WinterLegRefusal("winter_leg_unavailable", "runtime-state is offline on this daemon; the Winter leg needs its records and checkpoints");
-    const hook = deps.runtime.spawnHookFor(mode);
+  };
+
+  const assertAvailable = (mode: SessionMode): void => {
+    assertSpine();
+    const hook = deps.runtime!.spawnHookFor(mode);
     if (hook instanceof Error) throw new WinterLegRefusal("winter_executable_unavailable", hook.message);
   };
+
+  /** The 8a record, read WITHOUT letting a store failure out: on the engine paths (`legOf`,
+   *  `ensure`, every `session.*` handler of an engine session while the table is present) a
+   *  records store that will not answer must cost the log line only, never the RPC — the engine
+   *  path is the answer, exactly as if the table were absent. */
+  const recordOf = (sessionId: string): RuntimeSessionRecord | undefined => {
+    try { return deps.records?.get(sessionId); } catch (err) {
+      log(`runtime record for ${sessionId} unreadable (${err instanceof Error ? err.name : "unknown"}) — treated as engine-leg`);
+      return undefined;
+    }
+  };
+
+  /** ONE fallback for a cwd-less session on BOTH legs (its per-session temp dir, the CC-parity
+   *  $TMPDIR), so `transcriptProjectKey`/`memoryProjectKey` never differ by leg. (8a's boot
+   *  backfill falls back to `home` for the records it creates — a Task 17 alignment.) */
+  const cwdOf = (sessionId: string, cwd: string | null | undefined): string => cwd ?? deps.tmpDirOf(sessionId);
 
   /** The facts every incarnation of a session needs, assembled once per driver. */
   const assemble = (sessionId: string, backendSessionId: string): WinterSession => {
@@ -191,7 +220,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     const checkpoints = deps.checkpoints!;
     const meta = deps.store.meta(sessionId);
     const mode = modeOf(meta.mode);
-    const cwd = meta.cwd ?? deps.tmpDirOf(sessionId);
+    const cwd = cwdOf(sessionId, meta.cwd);
     const home = deps.home;
 
     const canUseTool = canUseToolFor({
@@ -214,7 +243,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       return stamped;
     };
 
-    const optionsFor = async (inc: WinterIncarnation) => {
+    const optionsFor = async (inc: WinterIncarnationShape) => {
       const live = deps.store.meta(sessionId);
       const settings = deps.settings();
       const hook = runtime.spawnHookFor(mode);
@@ -295,6 +324,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       },
       records,
       hasTranscript,
+      // P8b-39: the session log is the durable queue — what `open()` re-pushes is read from it.
+      unconsumed: () => unconsumedUserMessages(deps.store.read(sessionId)),
       idleTimeoutMs: deps.idleTimeoutMs ?? (() => winterOptionsFromSettings(deps.settings()).idleTimeoutSec * 1000),
       ...(deps.endGraceMs === undefined ? {} : { endGraceMs: deps.endGraceMs }),
       log,
@@ -319,10 +350,13 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
   const create = async (sessionId: string): Promise<WinterSession> => {
     const meta = deps.store.meta(sessionId);
     const mode = modeOf(meta.mode);
-    assertAvailable(mode);
+    // The executable was asserted by the caller BEFORE the product row was minted (`session.create`);
+    // here only the spine is re-checked — the first `open()` re-resolves the hook anyway and
+    // refuses typed if it went away in between.
+    assertSpine();
     const records = deps.records!;
     const settings = deps.settings();
-    const cwd = meta.cwd ?? deps.tmpDirOf(sessionId);
+    const cwd = cwdOf(sessionId, meta.cwd);
     const backendSessionId = randomUUID();
     const transcriptKey = transcriptProjectKey(cwd);
     const credentials = await credentialPresenceFrom(deps.secrets);
@@ -378,7 +412,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const meta = deps.store.meta(sessionId);
       const mode = modeOf(meta.mode);
       const settings = deps.settings();
-      const cwd = meta.cwd ?? deps.home;
+      const cwd = cwdOf(sessionId, meta.cwd);
       const transcriptKey = transcriptProjectKey(cwd);
       const providerId = settings?.provider?.type ?? "unstated";
       const authFamily: RuntimeSelection["authFamily"] = providerId === "openai-compatible" ? "api-key" : "custom";
@@ -405,8 +439,18 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     }
   };
 
+  /**
+   * INVARIANT (the single-process guarantee for racing resumes): from `ensure()`'s map miss to
+   * `assemble()`'s `drivers.set` there is NO `await` — `recordOf`, `store.meta`, `assertAvailable`
+   * and `assemble` are all synchronous, so two RPCs that race a resume after a restart both see
+   * ONE driver (the second finds it in the map), and the driver's own `opening` promise dedupes the
+   * spawn. Anything asynchronous a resume needs (credentials, the transcript check) belongs INSIDE
+   * `open()`/`optionsFor`, after the driver is in the table — `create()` may await before
+   * `assemble` only because its caller holds the freshly minted row nobody else can address yet.
+   * `session-driver.test.ts` pins the race.
+   */
   const resume = async (sessionId: string): Promise<WinterSession> => {
-    const record = deps.records?.get(sessionId);
+    const record = recordOf(sessionId);
     if (sessionLegOf(record) !== "winter" || record?.backendSessionId === undefined) {
       throw new WinterLegRefusal("session_predates_winter_leg", `session ${sessionId} predates the Winter leg (it has no Winter transcript); start a new session`);
     }
@@ -426,7 +470,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
 
   return {
     legForNewSession: legForNew,
-    legOf: (sessionId) => sessionLegOf(deps.records?.get(sessionId)),
+    legOf: (sessionId) => sessionLegOf(recordOf(sessionId)),
     assertAvailable,
     create,
     recordEngineCreation,
@@ -434,8 +478,14 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     async ensure(sessionId) {
       const live = drivers.get(sessionId);
       if (live !== undefined) return live;
-      if (sessionLegOf(deps.records?.get(sessionId)) !== "winter") return undefined;
-      return resume(sessionId);
+      if (sessionLegOf(recordOf(sessionId)) !== "winter") return undefined;
+      return resume(sessionId);   // synchronous up to `drivers.set` — see the invariant above
+    },
+    async evict(sessionId) {
+      const session = drivers.get(sessionId);
+      drivers.delete(sessionId);
+      if (session === undefined) return;
+      try { await session.end(); } catch (err) { log(`evicting ${sessionId}: end failed (${err instanceof Error ? err.name : "unknown"})`); }
     },
     list: () => [...drivers.values()],
     async endAll() {

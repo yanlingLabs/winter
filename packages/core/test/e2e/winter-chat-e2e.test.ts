@@ -15,15 +15,21 @@
 //       live and the same child takes the next send; then end() → resumable → a send RESUMES the
 //       same backend session (init reports the same id)
 //   (d2) the idle timeout ends the child (kill -0 fails) and a later send resumes it
+//   (i) P8b-39: a send held behind a running turn survives a daemon RESTART through the log — the
+//       resumed child runs it first, with exactly one turn_started, before the new text
+//   (j) P8b-39: a send held behind an INTERRUPTED turn is not auto-run; the next send runs it first
 //   (f) flag OFF (flipped hot) → the engine path; the record has no backend id (leg: engine)
 //   (g) send to that engine-era record with the flag back on → session_predates_winter_leg
 //   (tripwires) chat's init.tools = exactly the allowed built-ins ∪ chat's capability tools; a
 //       code-shaped child advertises BASE ∪ MCP ∪ its capability tools minus the ToolSearch/
 //       WaitForMcpServers half `toolSearchEnabled` excludes
 //   (e) stop() with a HANGING live turn ends inside the grace and the child is gone
-//   (h) ~/.norma and ~/.norma-dev have the same recursive NAME signature before and after
+//   (h) ~/.norma and ~/.norma-dev have the same recursive NAME signature before and after, their
+//       `projects/` subtrees (what a winter child writes) the same size/mtime signature, and no
+//       `dist/winter` process survives this file; the POSITIVE half — the transcript lives under
+//       the TEMP home — is (d)'s
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync, type Stats } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -94,27 +100,41 @@ class TestClient {
   close(): void { try { this.socket.end(); } catch { /* already closed */ } }
 }
 
-// ── the home-isolation signature (names only — see scripts/verify-runtime-state-compiled.ts) ────
+// ── the home-isolation signatures ─────────────────────────────────────────────────────────────
+//
+// NAMES over the whole home (a new transcript, a new project dir, a new memory file — anywhere),
+// and SIZE+MTIME over `projects/` only: that subtree is what a winter child writes (`<key>/
+// <uuid>.jsonl`, `.lock`, `.summary.json`, `_assistant/memory/`), and it is the one subtree the
+// user's LIVE daemon does not touch on its own — a size/mtime signature over `sessions/`, `logs/`
+// or `run/` would flake on every keystroke the user types meanwhile.
 
 const REAL_HOMES = [join(homedir(), ".norma"), join(homedir(), ".norma-dev")];
-function homeSignature(dir: string): string {
+function walkHome(dir: string, describe: (rel: string, st: Stats) => string): string {
   if (!existsSync(dir)) return `${dir}: absent`;
-  const names: string[] = [];
+  const lines: string[] = [];
   const walk = (p: string, rel: string): void => {
     let entries: string[];
-    try { entries = readdirSync(p).sort(); } catch { names.push(`${rel}/ <unreadable>`); return; }
+    try { entries = readdirSync(p).sort(); } catch { lines.push(`${rel}/ <unreadable>`); return; }
     for (const name of entries) {
       const child = join(p, name);
       const childRel = rel ? `${rel}/${name}` : name;
-      let isDir: boolean;
-      try { isDir = statSync(child).isDirectory(); } catch { names.push(`${childRel} <unreadable>`); continue; }
-      names.push(isDir ? `${childRel}/` : childRel);
-      if (isDir) walk(child, childRel);
+      let st: Stats;
+      try { st = statSync(child); } catch { lines.push(`${childRel} <unreadable>`); continue; }
+      lines.push(describe(childRel, st));
+      if (st.isDirectory()) walk(child, childRel);
     }
   };
   walk(dir, "");
-  return `${dir}: present\n${names.join("\n")}`;
+  return `${dir}: present\n${lines.join("\n")}`;
 }
+const homeSignature = (dir: string): string => walkHome(dir, (rel, st) => (st.isDirectory() ? `${rel}/` : rel));
+const projectsSignature = (home: string): string => walkHome(join(home, "projects"), (rel, st) => `${rel} ${st.size} ${st.mtimeMs}`);
+/** Every `dist/winter` process on the box, whoever spawned it (the survivors check) — matched on
+ *  the EXECUTABLE (the command line starts with the binary), not `pgrep -f`'s substring, which also
+ *  catches the shell that exported `NORMA_WINTER_EXECUTABLE=<bin>` to run this very file. */
+const winterSurvivors = (bin: string): string[] =>
+  Bun.spawnSync(["ps", "-axo", "pid=,command="]).stdout.toString().split("\n")
+    .map((l) => l.trim()).filter((l) => l.replace(/^\d+\s+/, "").startsWith(bin));
 
 /** The child processes of THIS test process that are the winter binary. */
 const winterChildren = (bin: string): string[] =>
@@ -129,6 +149,23 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
   let rt: RuntimeStateWiring;
   let client: TestClient;
   const signaturesBefore = new Map<string, string>();
+  const projectsBefore = new Map<string, string>();
+  const transcriptDir = (sid: string): string => { const r = record(sid)?.backendRoot; if (!r) throw new Error(`no backendRoot for ${sid}`); return r; };
+  const transcriptFile = (sid: string): string => join(transcriptDir(sid), `${backendOf(sid)}.jsonl`);
+  const transcripts = (sid: string): string[] => (existsSync(transcriptDir(sid)) ? readdirSync(transcriptDir(sid)).filter((n) => n.endsWith(".jsonl")).sort() : []);
+  const bootDaemon = async (): Promise<void> => {
+    daemon = await startDaemon({ home, secrets: new FileSecretStore(join(home, "test-secrets")), agentProvider: null });
+    if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
+    rt = daemon.runtimeState;
+    client = await TestClient.connect(daemon.socketPath);
+    await client.hello(daemon.tokens.harness, "e2e");
+  };
+  const stopDaemon = async (): Promise<void> => {
+    client.close();
+    const stopping = daemon?.stop();
+    daemon = undefined;
+    await stopping;
+  };
   const writeSettings = (chatFlag: boolean): void => {
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 2,
@@ -140,15 +177,11 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
   const backendOf = (sid: string): string => { const b = record(sid)?.backendSessionId; if (!b) throw new Error(`no backend id for ${sid}`); return b; };
 
   beforeAll(async () => {
-    for (const h of REAL_HOMES) signaturesBefore.set(h, homeSignature(h));
+    for (const h of REAL_HOMES) { signaturesBefore.set(h, homeSignature(h)); projectsBefore.set(h, projectsSignature(h)); }
     home = mkdtempSync(join(tmpdir(), "norma-winter-chat-e2e-"));
     mkdirSync(home, { recursive: true });
     writeSettings(true);
-    daemon = await startDaemon({ home, secrets: new FileSecretStore(join(home, "test-secrets")), agentProvider: null });
-    if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
-    rt = daemon.runtimeState;
-    client = await TestClient.connect(daemon.socketPath);
-    await client.hello(daemon.tokens.harness, "e2e");
+    await bootDaemon();
   });
 
   afterAll(async () => {
@@ -206,7 +239,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     expect(log.find((e) => e.type === "turn_completed")).toMatchObject({ stopReason: "end_turn" });
     // init proved the child ran under the record's backend id
     expect(driver?.init?.sessionId).toBe(rec!.backendSessionId);
-    expect(rec!.state === "ready" || record(sid)!.state === "idle").toBe(true);
+    expect(record(sid)!.state).toBe("idle");     // the record followed the driver: ready → idle (init) → running → idle
     expect(record(sid)!.generation).toBe(1);
   }, 30_000);
 
@@ -292,15 +325,28 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     await driver.end();
     expect(driver.state).toBe("resumable");
     expect(await goneWithin(pids, 3000)).toBe(true);
+    // M2 — the positive proof: the backend transcript EXISTS under the TEMP home (the record's
+    // `backendRoot`, `<uuid>.jsonl`) before the resume, it is the only transcript there, and the
+    // resumed child APPENDS to it rather than starting a second one under the same name.
+    expect(existsSync(transcriptFile(sid))).toBe(true);
+    expect(transcripts(sid)).toEqual([`${backendOf(sid)}.jsonl`]);
+    const sizeBefore = statSync(transcriptFile(sid)).size;
+    expect(sizeBefore).toBeGreaterThan(0);
+    expect(transcriptFile(sid).startsWith(home)).toBe(true);
     await client.call(METHODS.sessionSetModel, { sessionId: sid, model: "winter-test/echo" });
     const evCount = client.events.length;
     await client.call(METHODS.sessionSend, { sessionId: sid, text: "again" });
     await client.waitFor((e) => client.events.indexOf(e) >= evCount && e.type === "turn_completed" && e.sessionId === sid);
     expect(driver.state).toBe("live");
+    expect(driver.resumed).toBe(true);           // the incarnation opened under Options.resume
     expect(driver.generation).toBe(2);
     expect(driver.init?.sessionId).toBe(firstInit);
     expect(record(sid)!.generation).toBe(2);
     expect(rt.records.generations(sid).map((g) => g.endReason ?? "open")).toEqual(["ended", "open"]);
+    expect(transcripts(sid)).toEqual([`${backendOf(sid)}.jsonl`]);   // no second transcript
+    const t0 = Date.now();
+    while (statSync(transcriptFile(sid)).size <= sizeBefore && Date.now() - t0 < 5000) await Bun.sleep(50);
+    expect(statSync(transcriptFile(sid)).size).toBeGreaterThan(sizeBefore);   // it grew
   }, 40_000);
 
   test("(d2) the idle timeout ends an idle child (kill -0 fails) and a later send resumes it", async () => {
@@ -342,26 +388,104 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     expect(winterChildren(bin)).toEqual(before);
   }, 40_000);
 
+  test("(j) P8b-39: a send held behind an INTERRUPTED turn is not auto-run — no turn_started until the next send, which runs it FIRST and queues its own text", async () => {
+    const { sid } = await createChat("hang");
+    const driver = daemon!.winter.get(sid)!;
+    await client.call(METHODS.sessionSend, { sessionId: sid, text: "hang please" });
+    await Bun.sleep(400);
+    const held = await client.call<{ seq: number }>(METHODS.sessionSend, { sessionId: sid, text: "held one" });
+    expect(held.seq).toBeGreaterThan(0);
+    expect(driver.pendingSends).toEqual(["held one"]);
+    await client.call(METHODS.sessionInterrupt, { sessionId: sid });
+    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sid);
+    await Bun.sleep(300);
+    // the interrupted result did not run it: still owed, no turn begun for it, the child idle
+    expect(driver.pendingSends).toEqual(["held one"]);
+    expect(driver.turnRunning).toBe(false);
+    expect(driver.state).toBe("live");
+    const kinds = (log: SessionEvent[]) => types(log).filter((t) => ["user_message", "turn_started", "assistant_message", "turn_completed"].includes(t));
+    expect(kinds(daemon!.sessions.read(sid))).toEqual(["user_message", "turn_started", "user_message", "turn_completed"]);
+    // the next user action releases it FIRST (its ONE turn_started, appended as it runs, lands
+    // before the new text's user_message), and the new text waits behind it
+    const third = await client.call<{ seq: number }>(METHODS.sessionSend, { sessionId: sid, text: "third" });
+    expect(third.seq).toBeGreaterThan(0);
+    expect(driver.turnRunning).toBe(true);
+    expect(driver.pendingSends).toEqual(["third"]);
+    expect(kinds(daemon!.sessions.read(sid))).toEqual(["user_message", "turn_started", "user_message", "turn_completed", "turn_started", "user_message"]);
+    // (the hang double hangs on every turn — the held one is now the hanging turn on the SAME child)
+    expect(driver.generation).toBe(1);
+    await client.call(METHODS.sessionInterrupt, { sessionId: sid });
+    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sid && client.events.filter((x) => x.type === "turn_completed" && x.sessionId === sid).length >= 2);
+    await Bun.sleep(100);
+    expect(driver.pendingSends).toEqual(["third"]);   // paused again by the second interrupt
+    const log = daemon!.sessions.read(sid);
+    expect(kinds(log)).toEqual(["user_message", "turn_started", "user_message", "turn_completed", "turn_started", "user_message", "turn_completed"]);
+    expect(log.filter((e) => e.type === "agent_error")).toEqual([]);
+    expect(log.filter((e) => e.type === "user_message").map((e) => (e as { text: string }).text)).toEqual(["hang please", "held one", "third"]);
+    await driver.end();
+  }, 40_000);
+
+  test("(i) P8b-39: a send held behind a running turn survives a daemon RESTART through the log — resumed, it runs first with exactly one turn_started", async () => {
+    const { sid } = await createChat("echo");
+    await client.call(METHODS.sessionSend, { sessionId: sid, text: "one" });
+    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sid);   // the transcript now exists
+    await daemon!.winter.get(sid)!.end();                                              // the model is re-read on resume
+    await client.call(METHODS.sessionSetModel, { sessionId: sid, model: "winter-test/hang" });
+    const before = winterChildren(bin);
+    await client.call(METHODS.sessionSend, { sessionId: sid, text: "hang please" });
+    const pids = winterChildren(bin).filter((p) => !before.includes(p));
+    expect(daemon!.winter.get(sid)!.resumed).toBe(true);
+    await Bun.sleep(400);
+    await client.call(METHODS.sessionSend, { sessionId: sid, text: "held one" });
+    expect(daemon!.winter.get(sid)!.pendingSends).toEqual(["held one"]);
+    const transcriptBefore = statSync(transcriptFile(sid)).size;
+    await stopDaemon();                        // the hanging turn is aborted; "held one" is in the log only
+    expect(await goneWithin(pids, 3000)).toBe(true);
+    await bootDaemon();
+    expect(daemon!.winter.get(sid)).toBeUndefined();   // never cold-resumed at boot: the first RPC does it
+    expect(daemon!.winter.legOf(sid)).toBe("winter");
+    await client.call(METHODS.sessionAttach, { sessionId: sid, fromSeq: 0 });
+    await client.call(METHODS.sessionSetModel, { sessionId: sid, model: "winter-test/echo" });
+    const kinds = (log: SessionEvent[]) => types(log).filter((t) => ["user_message", "turn_started", "assistant_message", "turn_completed"].includes(t));
+    expect(kinds(daemon!.sessions.read(sid))).toEqual([
+      "user_message", "turn_started", "assistant_message", "turn_completed",   // one
+      "user_message", "turn_started", "user_message", "turn_completed",        // hang begun, held appended, hang aborted at stop
+    ]);
+    const evCount = client.events.length;
+    await client.call(METHODS.sessionSend, { sessionId: sid, text: "third" });
+    const driver = daemon!.winter.get(sid)!;
+    expect(driver.resumed).toBe(true);
+    expect(driver.generation).toBe(3);
+    await client.waitFor((e) => client.events.indexOf(e) >= evCount && e.type === "turn_completed" && e.sessionId === sid && client.events.filter((x) => client.events.indexOf(x) >= evCount && x.type === "turn_completed" && x.sessionId === sid).length >= 2);
+    await Bun.sleep(50);
+    const log = daemon!.sessions.read(sid);
+    expect(kinds(log)).toEqual([
+      "user_message", "turn_started", "assistant_message", "turn_completed",
+      "user_message", "turn_started", "user_message", "turn_completed",
+      "turn_started", "user_message", "assistant_message", "turn_completed",   // held one ran first (ONE turn_started), third appended + held
+      "turn_started", "assistant_message", "turn_completed",                   // third
+    ]);
+    expect(log.filter((e) => e.type === "turn_started")).toHaveLength(4);
+    expect(log.filter((e) => e.type === "user_message").map((e) => (e as { text: string }).text)).toEqual(["one", "hang please", "held one", "third"]);
+    expect(driver.init?.sessionId).toBe(backendOf(sid));
+    expect(transcripts(sid)).toEqual([`${backendOf(sid)}.jsonl`]);
+    expect(statSync(transcriptFile(sid)).size).toBeGreaterThan(transcriptBefore);
+    await driver.end();
+  }, 60_000);
+
   // (f)/(g) need the flag OFF and then ON again. The settings watcher is built only when an engine
   // exists (daemon.ts's `if (agentProvider)` gate), so on this no-provider daemon a hot flip cannot
   // land — each case boots its OWN daemon over the SAME home, which is also the truer scenario for
   // P8b-22: a session created before the flag, met again by a daemon that has it on.
   let engineSid: string;
   test("(f) with the flag OFF, session.create takes the engine path: a record with NO backend id (leg: engine)", async () => {
-    client.close();
-    const stopping = daemon?.stop();
-    daemon = undefined;
-    await stopping;
+    await stopDaemon();
     writeSettings(false);
-    daemon = await startDaemon({ home, secrets: new FileSecretStore(join(home, "test-secrets")), agentProvider: null });
-    if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
-    rt = daemon.runtimeState;
-    expect(daemon.settings()?.runtimes?.winterLeg?.chat).toBe(false);
-    client = await TestClient.connect(daemon.socketPath);
-    await client.hello(daemon.tokens.harness, "e2e");
+    await bootDaemon();
+    expect(daemon!.settings()?.runtimes?.winterLeg?.chat).toBe(false);
     const created = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "chat", model: "winter-test/echo" });
     engineSid = created.sessionId;
-    expect(daemon.winter.get(engineSid)).toBeUndefined();
+    expect(daemon!.winter.get(engineSid)).toBeUndefined();
     expect(winterChildren(bin)).toEqual([]);   // no child was spawned for an engine-leg create
     const rec = record(engineSid);
     expect(rec).toBeDefined();
@@ -375,16 +499,9 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
   }, 30_000);
 
   test("(g) with the flag back ON (a restart), session.send to that engine-era record → session_predates_winter_leg; history stays readable", async () => {
-    client.close();
-    const stopping = daemon?.stop();
-    daemon = undefined;
-    await stopping;
+    await stopDaemon();
     writeSettings(true);
-    daemon = await startDaemon({ home, secrets: new FileSecretStore(join(home, "test-secrets")), agentProvider: null });
-    if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
-    rt = daemon.runtimeState;
-    client = await TestClient.connect(daemon.socketPath);
-    await client.hello(daemon.tokens.harness, "e2e");
+    await bootDaemon();
     expect(sessionLegOf(record(engineSid))).toBe("engine");
     await client.call(METHODS.sessionAttach, { sessionId: engineSid, fromSeq: 0 });
     const refused = await client.request(METHODS.sessionSend, { sessionId: engineSid, text: "hello?" });
@@ -393,7 +510,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     const steerRefused = await client.request(METHODS.sessionSteer, { sessionId: engineSid, text: "hello?" });
     expect(steerRefused.error?.data).toEqual({ code: "session_predates_winter_leg" });
     // history stays readable, and nothing was appended by the refusal
-    expect(daemon.sessions.read(engineSid).filter((e) => e.type === "user_message")).toEqual([]);
+    expect(daemon!.sessions.read(engineSid).filter((e) => e.type === "user_message")).toEqual([]);
     expect(winterChildren(bin)).toEqual([]);
   }, 30_000);
 
@@ -457,7 +574,15 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     } finally { store.close(); }
   }, 30_000);
 
-  test("(h) home isolation: ~/.norma and ~/.norma-dev carry the same name signature as before this file ran", () => {
-    for (const h of REAL_HOMES) expect(homeSignature(h)).toBe(signaturesBefore.get(h)!);
+  test("(h) home isolation: ~/.norma and ~/.norma-dev carry the same name signature as before this file ran, their projects/ the same size+mtime signature, and no dist/winter survives", async () => {
+    for (const h of REAL_HOMES) {
+      expect(homeSignature(h)).toBe(signaturesBefore.get(h)!);
+      expect(projectsSignature(h)).toBe(projectsBefore.get(h)!);
+    }
+    // every child this file spawned is gone ((e) stopped the last daemon; a filtered run stops it here)
+    if (daemon !== undefined) await stopDaemon();
+    const t0 = Date.now();
+    while (winterSurvivors(bin).length > 0 && Date.now() - t0 < 3000) await Bun.sleep(50);
+    expect(winterSurvivors(bin).map((l) => l.slice(0, 120))).toEqual([]);
   });
 });

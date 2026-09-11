@@ -39,16 +39,30 @@
 //     init. `open()` therefore awaits the previous incarnation's `done` — state alone is not enough.
 //
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-// PUSHES (P8b-5 / P8b-38) — every push begins a turn
+// PUSHES (P8b-5 / P8b-38 / P8b-39) — every PUSH begins a turn; the session LOG is the queue
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 //
-// `send(text)` appends `user_message`, calls `projector.beginTurn` and persists ITS batch (the
-// `turn_started` — never one of the host's own), then pushes if no turn is running, else HOLDS the
-// text host-side and pushes it when the current `result` arrives (queued to the next turn, as the
-// engine does today). `steer(text)` appends, begins a turn, and pushes IMMEDIATELY. A delivery
-// (`deliver`, the messaging push sink) is a steer with `clientName: "messaging"`. Task 11's STEER
-// MEASUREMENT (P8b-38) is why a steer begins a turn too: a mid-turn push yields its OWN `result` on
-// this wire, and a turn that was not begun has its terminal dropped.
+// `send(text)` appends `user_message` immediately (as `hub.send` does today). If no turn is running
+// it calls `projector.beginTurn`, persists ITS batch (the `turn_started` — never one of the host's
+// own) and pushes. If a turn IS running the text is HELD: its `user_message` is in the log and
+// NOTHING else is — `beginTurn` runs only when the text is actually pushed (P8b-39), so a held
+// message looks in the log exactly as a queued one does on the engine: a `user_message` with no
+// turn until it runs. The host's `pending` list is a cache of that log, never the source of truth:
+//
+//   - after a normal `result` the next held text is pushed (and its turn begun) automatically;
+//   - after an INTERRUPT the held texts are NOT auto-run — they stay in the log until the next
+//     `send`/`steer` (the engine's own rule, engine.ts `interrupt`: a queued `user_message` waits
+//     for the next user action);
+//   - on resume (and so at boot, since a daemon resumes a session on its first RPC) `open()` asks
+//     the log (`deps.unconsumed`: every host-appended main-thread `user_message` with no
+//     `turn_started` after it) and re-pushes them in order — the first now, the rest one per
+//     `result` — so a held send survives a restart with exactly ONE `turn_started`, appended when
+//     it runs. Nothing is held only in memory.
+//
+// `steer(text)` appends, begins a turn, and pushes IMMEDIATELY. A delivery (`deliver`, the
+// messaging push sink) is a steer with `clientName: "messaging"`. Task 11's STEER MEASUREMENT
+// (P8b-38) is why a steer begins a turn too: a mid-turn push yields its OWN `result` on this wire,
+// and a turn that was not begun has its terminal dropped.
 //
 // "A turn is running" is a HOST-SIDE count (`inFlight` = pushes − results), never the projector's
 // `turnRunning`: `beginTurn` opens a projector turn before the push, so reading the projector after
@@ -63,10 +77,14 @@
 // child mid-turn never will, and `abort()` kills it ~50 ms later — so `end()` closes the queue,
 // waits `endGraceMs` (120), aborts, and waits `endGraceMs` again: ≤ 240 ms, inside the 300. Every
 // append the iteration's tail performs is guarded, because a closed store must never throw out of
-// the driver.
+// the driver. `end()` NEVER resolves with the session still `live`: a child that outlives the
+// second wait is already aborted and its iteration will close its own books, but the session is
+// `resumable` from the moment `end()` returns — the next `open()` awaits that iteration before it
+// spawns (finding 3), and no push can reach the closed queue in between.
 import type { Options, Query } from "@yanlinglabs/winter-agent-sdk";
 import type { NewSessionEvent, SessionEvent } from "@norma/protocol";
 import { MAIN_THREAD, ProjectorRefusedError, classifyThrown, type ProjectedBatch, type Projector, type ProtocolSdkMessage } from "../projector";
+import { PROJECTOR_PASSTHROUGH_CLIENT } from "../projector/index";
 import { asInitFrame, asResultFrame } from "../projector/conversation";
 import { ALLOWED_TRANSITIONS, type RuntimeSessionState } from "../runtime-state/records";
 import type { NormaRuntimeSdk, SessionMode } from "./create";
@@ -91,6 +109,12 @@ export interface WinterIncarnation {
   /** The incarnation's own `AbortController` — the one its `Options` carry and `trackQuery` gets. */
   abort: AbortController;
 }
+
+/** What the options thunk is handed: the incarnation BEFORE its generation exists. The 8a
+ *  generation is bumped only after the options were built (a refused executable must not leave a
+ *  generation row with no child behind it), so the thunk cannot see it — and needs nothing but
+ *  the resume decision and the abort controller. */
+export type WinterIncarnationShape = Pick<WinterIncarnation, "resume" | "abort">;
 
 /** The last `system/init` the child reported — the id proves a resume landed on the same backend
  *  session, and `tools` is the integration tripwire's subject (Task 16's e2e). */
@@ -120,7 +144,7 @@ export interface WinterSessionDeps {
   /** `Options` for ONE incarnation. Re-reads the session's LIVE facts (model, effort, policy) and
    *  re-resolves the spawn hook, so a `session.setModel` while resumable is honoured on resume. May
    *  throw a typed refusal (an executable that has gone away) — `open()` surfaces it. */
-  options: (incarnation: WinterIncarnation) => Options | Promise<Options>;
+  options: (incarnation: WinterIncarnationShape) => Options | Promise<Options>;
   /** A projector for ONE incarnation, built on ITS generation. */
   projector: (incarnation: WinterIncarnation) => Projector;
   /** A fresh queue per incarnation (a closed queue cannot be reused). */
@@ -138,11 +162,48 @@ export interface WinterSessionDeps {
   records?: WinterSessionRecords;
   /** Does the backend transcript exist? Decides `resume` vs a fresh start under the same uuid. */
   hasTranscript: () => boolean | Promise<boolean>;
+  /** P8b-39: the LOG's unconsumed user texts — `unconsumedUserMessages(store.read(sessionId))` —
+   *  re-pushed in order by every `open()`. Absent, the driver falls back to what it held in memory
+   *  (a unit harness with no log). */
+  unconsumed?: () => string[];
   /** HOT: `winterOptionsFromSettings(settings()).idleTimeoutSec * 1000`, read when the timer is armed. */
   idleTimeoutMs: () => number;
   /** Test seam for `WINTER_SESSION_END_GRACE_MS`. */
   endGraceMs?: number;
+  /** The idle timer's clock (a test hands in a fake it fires by hand). Default: `setTimeout`, unref'd. */
+  timers?: WinterTimers;
   log?: (line: string) => void;
+}
+
+export interface WinterTimers {
+  set(fn: () => void, ms: number): unknown;
+  clear(handle: unknown): void;
+}
+
+const REAL_TIMERS: WinterTimers = {
+  set(fn, ms) { const t = setTimeout(fn, ms); (t as { unref?: () => void }).unref?.(); return t; },
+  clear(handle) { clearTimeout(handle as ReturnType<typeof setTimeout>); },
+};
+
+/**
+ * P8b-39 — the log as the durable queue. Every host-appended main-thread `user_message` is a text
+ * the host owes the child; every main-thread `turn_started` is one it has pushed (the projector's
+ * `beginTurn` is the ONLY producer, and the driver calls it exactly once per push, at the push).
+ * FIFO-matching the two leaves the texts still owed, in order. The projector's own pass-through
+ * `user_message` (`clientName: "winter"`, a `user` frame the host never pushed) is not a debt.
+ */
+export function unconsumedUserMessages(events: readonly SessionEvent[]): string[] {
+  const owed: string[] = [];
+  for (const e of events) {
+    if ((e as { threadId?: string }).threadId !== undefined && (e as { threadId?: string }).threadId !== MAIN_THREAD) continue;
+    if (e.type === "user_message") {
+      if ((e as { clientName?: string }).clientName === PROJECTOR_PASSTHROUGH_CLIENT) continue;
+      owed.push((e as { text: string }).text);
+    } else if (e.type === "turn_started") {
+      owed.shift();
+    }
+  }
+  return owed;
 }
 
 export interface WinterSession {
@@ -152,6 +213,9 @@ export interface WinterSession {
   readonly state: WinterSessionState;
   /** The 8a generation of the current (or last) incarnation; 0 before the first opens. */
   readonly generation: number;
+  /** Whether the current (or last) incarnation opened under `Options.resume` (true) or started
+   *  fresh under the same uuid (false). The resume proof's subject. */
+  readonly resumed: boolean;
   /** The live `Query`, or undefined while `resumable`/`ended`. */
   readonly query: Query | undefined;
   readonly init: WinterInitFacts | undefined;
@@ -160,7 +224,8 @@ export interface WinterSession {
   /** Resolves when the CURRENT incarnation's iteration has returned (and its teardown ran).
    *  Already resolved while `resumable`/`ended`. */
   readonly done: Promise<void>;
-  /** Texts held host-side while a turn ran (P8b-5), pushed one per `result`. */
+  /** Texts held while a turn ran (P8b-5) — a cache of the log's unconsumed `user_message`s
+   *  (P8b-39), pushed one per `result`, or on the next `send`/`steer` after an interrupt. */
   readonly pendingSends: readonly string[];
   /** Deliveries that reached the push sink while `resumable` (P8b-24), pushed first on resume. */
   readonly heldDeliveries: readonly string[];
@@ -230,12 +295,17 @@ class WinterSessionImpl implements WinterSession {
   private inc: Incarnation | undefined;
   private lastDone: Promise<void> = Promise.resolve();
   private gen = 0;
+  private resumedValue = false;
   private initFacts: WinterInitFacts | undefined;
   private inFlight = 0;
   private ending = false;
   private endingPromise: Promise<void> | undefined;
-  private idleTimer: ReturnType<typeof setTimeout> | undefined;
+  private idleTimer: unknown;
+  private readonly timers: WinterTimers;
   private readonly pending: string[] = [];
+  /** Set by an interrupt: the held texts wait for the next `send`/`steer` instead of the next
+   *  `result` (engine parity). Cleared by those two doors and by every `open()`. */
+  private drainPaused = false;
   private readonly held: string[] = [];
   private endedReason: string | undefined;
   /** The open() in flight, so two concurrent sends resume ONE child, not two. */
@@ -245,10 +315,12 @@ class WinterSessionImpl implements WinterSession {
     this.sessionId = deps.sessionId;
     this.backendSessionId = deps.backendSessionId;
     this.mode = deps.mode;
+    this.timers = deps.timers ?? REAL_TIMERS;
   }
 
   get state(): WinterSessionState { return this.stateValue; }
   get generation(): number { return this.gen; }
+  get resumed(): boolean { return this.resumedValue; }
   get query(): Query | undefined { return this.inc?.query; }
   get init(): WinterInitFacts | undefined { return this.initFacts; }
   get turnRunning(): boolean { return this.inFlight > 0; }
@@ -263,16 +335,21 @@ class WinterSessionImpl implements WinterSession {
     // Open FIRST: a refused open (the binary is gone) then leaves no orphan `user_message`, and a
     // delivery held while resumable is appended by `open()` BEFORE this text — chronological.
     await this.open();
+    this.drainPaused = false;
+    if (this.inFlight === 0 && this.pending.length > 0) {
+      // Idle with texts still owed (an interrupt paused the drain): the log's order rules — the
+      // oldest runs now (its `turn_started` lands BEFORE this text's `user_message`, so a reader
+      // of the log pairs them the way they ran) and this one waits its turn.
+      this.beginAndPush(this.pending.shift()!, this.inc!);
+    }
     const seq = this.appendUser(text, clientName);
-    const wasRunning = this.inFlight > 0;
-    this.emit(this.inc!.projector.beginTurn({ text }));
-    if (wasRunning) {
-      // P8b-5: held host-side until the running turn's `result` arrives, then pushed — the turn is
-      // already begun (its `turn_started` is in the log), only the push waits.
+    if (this.inFlight > 0) {
+      // P8b-5/39: held until the running turn's `result` arrives. Its `user_message` is in the log;
+      // its turn is begun when it is pushed, not now.
       this.pending.push(text);
       return { seq, queued: true };
     }
-    this.push(text);
+    this.beginAndPush(text, this.inc!);
     return { seq, queued: false };
   }
 
@@ -281,9 +358,9 @@ class WinterSessionImpl implements WinterSession {
     await this.open();
     const seq = this.appendUser(text, clientName);
     const wasRunning = this.inFlight > 0;
+    this.drainPaused = false;
     // P8b-38: a steered-in message yields its OWN result on this wire, so it is a begun turn too.
-    this.emit(this.inc!.projector.beginTurn({ text }));
-    this.push(text);
+    this.beginAndPush(text, this.inc!);
     return { seq, injected: wasRunning };
   }
 
@@ -300,13 +377,15 @@ class WinterSessionImpl implements WinterSession {
       return;
     }
     this.appendUser(text, "messaging");
-    this.emit(this.inc.projector.beginTurn({ text }));
-    this.push(text);
+    this.beginAndPush(text, this.inc);
   }
 
   async interrupt(): Promise<{ wasRunning: boolean }> {
     const inc = this.inc;
     if (this.stateValue !== "live" || inc === undefined || this.inFlight === 0) return { wasRunning: false };
+    // Engine parity: whatever was held stays in the log until the next `send`/`steer` — the
+    // interrupted `result` must not start it. Set BEFORE the interrupt so its result sees it.
+    this.drainPaused = true;
     try {
       await inc.query.interrupt();
     } catch (err) {
@@ -338,7 +417,12 @@ class WinterSessionImpl implements WinterSession {
         // An idle child EOFs its stdout microseconds after `end_input`; a child mid-turn never does.
         if ((await Promise.race([inc.done.then(() => "done" as const), sleep(grace)])) === "done") return;
         try { inc.abort.abort(); } catch { /* an already-aborted controller is the outcome we wanted */ }
-        await Promise.race([inc.done, sleep(grace)]);
+        if ((await Promise.race([inc.done.then(() => "done" as const), sleep(grace)])) === "done") return;
+        // The child outlived the abort by more than the grace (measured ~50 ms; this is the tail).
+        // It IS aborted and its iteration WILL close its books; the session is `resumable` NOW, so
+        // nothing can push into the closed queue meanwhile — the next `open()` awaits `lastDone`.
+        this.log(`the winter child for ${this.sessionId} outlived abort by ${grace} ms — resumable now, its iteration closes later`);
+        if (this.inc === inc) { this.inc = undefined; this.stateValue = "resumable"; }
       } finally {
         this.endingPromise = undefined;
       }
@@ -356,23 +440,27 @@ class WinterSessionImpl implements WinterSession {
    * arrived while resumable (appended and begun now).
    */
   async open(): Promise<void> {
-    if (this.stateValue === "live" && this.inc !== undefined) return;
+    // An incarnation that is ENDING is not one to push into: fall through and await its `done`.
+    if (this.stateValue === "live" && this.inc !== undefined && !this.ending) return;
     if (this.opening !== undefined) return this.opening;
     this.opening = (async () => {
       this.assertNotEnded();
       await this.lastDone;
       const abort = new AbortController();
       const resume = await this.deps.hasTranscript();
+      // Options FIRST: a refused executable throws here and leaves NO generation row behind it.
+      const options = await this.deps.options({ resume, abort });
       const generation = this.deps.records?.bumpGeneration(this.sessionId, { runtimeKind: "winter-agent", backendSessionId: this.backendSessionId }).generation ?? this.gen + 1;
       const shape: WinterIncarnation = { generation, resume, abort };
-      const options = await this.deps.options(shape);
       const queue = (this.deps.queue ?? createHostPromptQueue)();
       const projector = this.deps.projector(shape);
       const query = this.deps.runtime.sdk.query({ prompt: queue, options });
       const inc: Incarnation = { ...shape, queue, projector, query, attachment: undefined, sawInit: false, done: Promise.resolve() };
       this.inc = inc;
       this.gen = generation;
+      this.resumedValue = resume;
       this.ending = false;
+      this.drainPaused = false;
       this.inFlight = 0;
       this.stateValue = "live";
       this.recordState(resume ? "running" : "idle");
@@ -381,15 +469,20 @@ class WinterSessionImpl implements WinterSession {
       this.deps.runtime.trackQuery(this.sessionId, abort, () => this.end());
       inc.done = this.run(inc);
       this.lastDone = inc.done;
-      // Replay, in the order the texts arrived. A pending send's `turn_started` was persisted by the
-      // incarnation that held it, so `beginTurn` here only re-opens the turn in THIS projector and
-      // its returned batch is deliberately dropped — two `turn_started`s for one push is the
-      // double-producer failure the projector's coverage map warns about.
-      for (const text of this.pending.splice(0)) { inc.projector.beginTurn({ text }); this.push(text); }
+      // Replay (P8b-39): what the LOG says is still owed, in its order — the first is pushed now
+      // (its `turn_started` appended now, the only one it will ever get), the rest wait one per
+      // `result` (P8b-5). The in-memory list is only a cache of the same facts and is discarded.
+      const cached = this.pending.splice(0);
+      const owed = this.deps.unconsumed !== undefined ? this.deps.unconsumed() : cached;
+      if (owed.length > 0) {
+        this.beginAndPush(owed[0]!, inc);
+        this.pending.push(...owed.slice(1));
+      }
+      // Deliveries that arrived while resumable: appended and begun now, after the owed texts
+      // (they are younger than every one of them — `send` cannot append while resumable).
       for (const text of this.held.splice(0)) {
         this.appendUser(text, "messaging");
-        this.emit(inc.projector.beginTurn({ text }));
-        this.push(text);
+        this.beginAndPush(text, inc);
       }
     })().finally(() => { this.opening = undefined; });
     return this.opening;
@@ -448,9 +541,8 @@ class WinterSessionImpl implements WinterSession {
       try { inc.attachment?.detach(); } catch { /* detach never throws by contract; belt only */ }
       inc.attachment = undefined;
       this.deps.runtime.untrack(this.sessionId);
-      // The turns still open on this incarnation (a held send that never got its push, a turn the
-      // abort cut short beyond the one `acceptError` closed) run on the next one; their
-      // `user_message`/`turn_started` pairs are already in the log.
+      // A held text never pushed is still owed — its `user_message` is in the log with no turn, and
+      // the next `open()` re-reads it from there (P8b-39).
       this.inFlight = 0;
       try { this.deps.records?.endGeneration(this.sessionId, inc.generation, ended ?? (this.ending ? "ended" : "exited")); } catch { /* the db may be closed at shutdown */ }
       this.recordState(ended === "ended" ? "failed" : "exited");
@@ -461,9 +553,14 @@ class WinterSessionImpl implements WinterSession {
 
   private onResult(inc: Incarnation): void {
     if (this.inFlight > 0) this.inFlight--;
-    // P8b-5: one held send per result — the turn it belongs to was begun when it was held.
-    const next = this.pending.shift();
-    if (next !== undefined) { this.push(next, inc); return; }
+    // An ending incarnation's queue is closed: a push would throw inside the iteration and cost
+    // the held text a spurious `agent_error`. It stays owed (it is in the log) for the next one.
+    if (this.ending || inc.queue.closed) return;
+    if (!this.drainPaused) {
+      // P8b-5: one held text per result; its turn is begun as it is pushed (P8b-39).
+      const next = this.pending.shift();
+      if (next !== undefined) { this.beginAndPush(next, inc); return; }
+    }
     if (this.inFlight === 0) {
       this.recordState("idle");
       inc.attachment?.refresh();
@@ -472,6 +569,12 @@ class WinterSessionImpl implements WinterSession {
   }
 
   // ── the small pieces ───────────────────────────────────────────────────────────────────────
+
+  /** THE one push door: `beginTurn`'s batch appended (its `turn_started`), then the push. */
+  private beginAndPush(text: string, inc: Incarnation): void {
+    this.emit(inc.projector.beginTurn({ text }));
+    this.push(text, inc);
+  }
 
   private push(text: string, inc: Incarnation | undefined = this.inc): void {
     if (inc === undefined) throw new Error(`no live winter incarnation for ${this.sessionId}`);
@@ -525,19 +628,17 @@ class WinterSessionImpl implements WinterSession {
     if (this.stateValue !== "live" || this.ending) return;
     const ms = this.deps.idleTimeoutMs();
     if (!Number.isFinite(ms) || ms <= 0) return;
-    const timer = setTimeout(() => {
+    this.idleTimer = this.timers.set(() => {
       this.idleTimer = undefined;
       if (this.stateValue === "live" && this.inFlight === 0 && !this.ending) {
         this.log(`session ${this.sessionId} idle for ${ms} ms — ending its winter child (resumable)`);
         void this.end();
       }
     }, ms);
-    (timer as { unref?: () => void }).unref?.();
-    this.idleTimer = timer;
   }
 
   private clearIdleTimer(): void {
-    if (this.idleTimer !== undefined) { clearTimeout(this.idleTimer); this.idleTimer = undefined; }
+    if (this.idleTimer !== undefined) { this.timers.clear(this.idleTimer); this.idleTimer = undefined; }
   }
 
   /** Mirror the driver's state onto the 8a record, WITHOUT ever throwing: only a transition the

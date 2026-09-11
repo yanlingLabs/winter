@@ -91,6 +91,11 @@ interface PendingMark { sourceId: string; first: number; last: number; cursor: s
 /** A fresh empty batch. A shared frozen object would be a foot-gun the day a caller mutates one. */
 const EMPTY_BATCH = (): ProjectedBatch => ({ persist: [], broadcast: [] });
 
+/** The `clientName` the projector stamps on the ONE `user_message` it produces itself — a `user`
+ *  text frame the host never pushed (a resume prompt, a send_message drain). The driver's log scan
+ *  (`unconsumedUserMessages`, P8b-39) reads it to tell the child's text from the host's debts. */
+export const PROJECTOR_PASSTHROUGH_CLIENT = "winter";
+
 /** `totalsOf`'s parameter, narrowed to what it actually reads. */
 type ResultFrameLike = Parameters<typeof totalsOf>[0];
 
@@ -285,7 +290,7 @@ class ProjectorImpl implements Projector {
         return EMPTY_BATCH();
       }
       return claim(`um:${this.turnIndex}:${this.roundIndex}`, () => [
-        { type: "user_message", sessionId: this.deps.sessionId, threadId, text, clientName: "winter" },
+        { type: "user_message", sessionId: this.deps.sessionId, threadId, text, clientName: PROJECTOR_PASSTHROUGH_CLIENT },
       ]);
     }
 

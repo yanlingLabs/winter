@@ -12,8 +12,9 @@ import { SHUTDOWN_QUERY_GRACE_MS, type NormaRuntimeSdk } from "../../src/runtime
 import { createProjector, type Projector } from "../../src/projector";
 import { createHostPromptQueue } from "../../src/runtime-sdk/prompt-queue";
 import {
-  WINTER_SESSION_END_GRACE_MS, startWinterSession, type WinterIncarnation, type WinterSession, type WinterSessionDeps,
+  WINTER_SESSION_END_GRACE_MS, startWinterSession, unconsumedUserMessages, type WinterIncarnation, type WinterSession, type WinterSessionDeps, type WinterTimers,
 } from "../../src/runtime-sdk/winter-session";
+import { PROJECTOR_PASSTHROUGH_CLIENT } from "../../src/projector/index";
 import type { WinterSessionAttachment } from "../../src/runtime-sdk/messaging";
 import { FakeCheckpoints } from "../projector/harness";
 
@@ -36,6 +37,8 @@ class FakeQuery {
   interruptEndsChild = false;
   /** A child that ignores its closing stdin (mid-turn) — `end()` must abort it. */
   ignoreClose = false;
+  /** A child that outlives its abort too (the tail `end()` must not wait for). */
+  ignoreAbort = false;
   private readonly buffer: Array<{ value: Frame } | { done: true } | { error: unknown }> = [];
   private readonly waiters: Array<(r: IteratorResult<Frame>) => void> = [];
   private readonly rejecters: Array<(e: unknown) => void> = [];
@@ -48,7 +51,7 @@ class FakeQuery {
   };
 
   constructor(prompt: AsyncIterable<string>, readonly options: Options) {
-    options.abortController?.signal.addEventListener("abort", () => this.fail(named("AbortError", "query aborted: runtime process killed")));
+    options.abortController?.signal.addEventListener("abort", () => { if (!this.ignoreAbort) this.fail(named("AbortError", "query aborted: runtime process killed")); });
     void (async () => {
       for await (const t of prompt) this.pushed.push(t);
       this.promptClosed = true;
@@ -100,6 +103,8 @@ interface Harness {
   records: { generation: number; state: string; transitions: string[]; ended: Array<{ generation: number; reason: string }> };
   checkpoints: FakeCheckpoints;
   transcriptExists: boolean;
+  /** The driver's idle clock, fired by hand: `armed` is what is scheduled right now. */
+  timers: { armed: Array<{ ms: number; fn: () => void }>; fire(): void };
   /** The current fake (the last query opened). */
   q(): FakeQuery;
   /** Wait for the driver to reach its init handling. */
@@ -118,12 +123,18 @@ function harness(overrides: Partial<Omit<WinterSessionDeps, "idleTimeoutMs">> & 
   const tracked: Harness["tracked"] = [];
   const checkpoints = new FakeCheckpoints();
   let seq = 0;
+  const armed: Array<{ ms: number; fn: () => void }> = [];
+  const fakeTimers: WinterTimers = {
+    set(fn, ms) { const entry = { ms, fn }; armed.push(entry); return entry; },
+    clear(handle) { const i = armed.indexOf(handle as { ms: number; fn: () => void }); if (i >= 0) armed.splice(i, 1); },
+  };
   const h: Harness = {
     session: undefined as unknown as WinterSession,
     queries, incarnations, events, broadcasts, attachments, tracked, untracked: 0,
     records: { generation: 0, state: "ready", transitions: [], ended: [] },
     checkpoints,
     transcriptExists: transcript ?? false,
+    timers: { armed, fire: () => { for (const t of armed.splice(0)) t.fn(); } },
     q: () => queries[queries.length - 1]!,
     settled: () => Bun.sleep(5),
     types: () => events.map((e) => e.type),
@@ -136,7 +147,7 @@ function harness(overrides: Partial<Omit<WinterSessionDeps, "idleTimeoutMs">> & 
   const idle = idleMs ?? 60_000;
   h.session = startWinterSession({
     sessionId: "s_x", backendSessionId: "be-x", mode: "chat", runtime,
-    options: (inc) => { incarnations.push(inc); return { abortController: inc.abort, cwd: "/repo", model: "winter-test/echo", ...(inc.resume ? { resume: "be-x" } : { sessionId: "be-x" }) }; },
+    options: (inc) => { incarnations.push({ ...inc, generation: h.records.generation + 1 }); return { abortController: inc.abort, cwd: "/repo", model: "winter-test/echo", ...(inc.resume ? { resume: "be-x" } : { sessionId: "be-x" }) }; },
     projector: (inc): Projector => createProjector({ sessionId: "s_x", mode: "chat", generation: inc.generation, winterSessionId: "s_x", nextSeq: () => seq + 1, checkpoint: checkpoints, now: () => new Date().toISOString(), log: {} }),
     queue: createHostPromptQueue,
     append: (e: NewSessionEvent) => { const stamped = { ...e, seq: ++seq, ts: Date.now() } as SessionEvent; events.push(stamped); return stamped; },
@@ -155,8 +166,11 @@ function harness(overrides: Partial<Omit<WinterSessionDeps, "idleTimeoutMs">> & 
       get: () => ({ state: h.records.state as never, generation: h.records.generation }),
     },
     hasTranscript: () => h.transcriptExists,
+    // P8b-39: the harness's event array IS the session log — what a resume re-pushes is read from it.
+    unconsumed: () => unconsumedUserMessages(events),
     idleTimeoutMs: () => idle,
     endGraceMs: 25,
+    timers: fakeTimers,
     ...over,
   });
   return h;
@@ -228,13 +242,16 @@ describe("startWinterSession — one incarnation", () => {
     await h.settled();
     expect(h.q().pushed).toEqual(["A"]);
     expect(h.session.pendingSends).toEqual(["B"]);
-    // B's user_message AND turn_started are already in the log — only its push waits.
-    expect(h.types()).toEqual(["user_message", "turn_started", "user_message", "turn_started"]);
+    // P8b-39: B's user_message is in the log and NOTHING else is — its turn begins when it is pushed.
+    expect(h.types()).toEqual(["user_message", "turn_started", "user_message"]);
+    expect(unconsumedUserMessages(h.events)).toEqual(["B"]);
     h.q().emit(assistant("a")); h.q().emit(result());
     await h.settled();
     expect(h.q().pushed).toEqual(["A", "B"]);
     expect(h.session.pendingSends).toEqual([]);
     expect(h.session.turnRunning).toBe(true);
+    expect(h.types()).toEqual(["user_message", "turn_started", "user_message", "assistant_message", "turn_completed", "turn_started"]);
+    expect(unconsumedUserMessages(h.events)).toEqual([]);
     h.q().emit(assistant("b")); h.q().emit(result());
     await h.settled();
     expect(seen(h, "turn_completed")).toHaveLength(2);
@@ -292,6 +309,52 @@ describe("startWinterSession — one incarnation", () => {
     await h.session.send("again", "cli");
     expect(h.q().pushed).toEqual(["hang", "again"]);
     expect(h.queries).toHaveLength(1);
+  });
+
+  test("P8b-39 (engine parity): a send held behind an interrupted turn is NOT auto-run — it stays in the log until the next send, which runs it FIRST and queues its own text", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    const b = await h.session.send("B", "cli");
+    expect(b.queued).toBe(true);
+    expect(await h.session.interrupt()).toEqual({ wasRunning: true });
+    await h.settled();
+    // the interrupted result did NOT push B
+    expect(h.q().pushed).toEqual(["A"]);
+    expect(h.session.pendingSends).toEqual(["B"]);
+    expect(h.session.turnRunning).toBe(false);
+    expect(h.records.transitions.at(-1)).toBe("idle");
+    expect(h.timers.armed).toHaveLength(1);               // idle: the timer is armed as usual
+    expect(h.types()).toEqual(["user_message", "turn_started", "user_message", "turn_completed"]);
+    expect(unconsumedUserMessages(h.events)).toEqual(["B"]);
+    // the next user action releases it: B runs now (its ONE turn_started appended now), C waits
+    const c = await h.session.send("C", "cli");
+    expect(c.queued).toBe(true);
+    expect(h.q().pushed).toEqual(["A", "B"]);
+    expect(h.session.pendingSends).toEqual(["C"]);
+    expect(h.types()).toEqual(["user_message", "turn_started", "user_message", "turn_completed", "turn_started", "user_message"]);
+    h.q().emit(result());
+    await h.settled();
+    expect(h.q().pushed).toEqual(["A", "B", "C"]);        // a normal result drains again
+    expect(seen(h, "turn_started")).toHaveLength(3);
+  });
+
+  test("P8b-39: a steer after an interrupt also re-arms the drain — its own text first, then the held one at its result", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    await h.session.send("B", "cli");
+    await h.session.interrupt();
+    await h.settled();
+    expect(h.q().pushed).toEqual(["A"]);
+    await h.session.steer("S", "cli");
+    expect(h.q().pushed).toEqual(["A", "S"]);
+    h.q().emit(result());
+    await h.settled();
+    expect(h.q().pushed).toEqual(["A", "S", "B"]);
+    expect(h.session.pendingSends).toEqual([]);
   });
 
   test("an interrupt-class END of the iteration (the child exits with AbortError) is a turn boundary: the interrupted terminal, NO agent_error, and `resumable`", async () => {
@@ -398,17 +461,91 @@ describe("startWinterSession — end(), the idle timer, the shutdown budget", ()
     expect(WINTER_SESSION_END_GRACE_MS * 2).toBeLessThan(SHUTDOWN_QUERY_GRACE_MS);
   });
 
-  test("the idle timer ends an idle live session — and does NOT fire while a turn runs", async () => {
+  test("the idle timer (a fake clock) is armed at init and after every result, cleared by a push, and ends the session when it fires", async () => {
     const h = harness({ idleTimeoutMs: 50 });
     await h.session.open();
+    expect(h.timers.armed).toEqual([]);                    // nothing before init
     h.q().emit(init(h.q().options));
+    await h.settled();
+    expect(h.timers.armed.map((t) => t.ms)).toEqual([50]); // idle since init
     await h.session.send("slow", "cli");
-    await Bun.sleep(120);
-    expect(h.session.state).toBe("live");          // a turn is running: no reaping
+    expect(h.timers.armed).toEqual([]);                    // a turn is running: no clock
     h.q().emit(result());
-    await Bun.sleep(120);
-    expect(h.session.state).toBe("resumable");     // idle for > 50 ms: ended
+    await h.settled();
+    expect(h.timers.armed.map((t) => t.ms)).toEqual([50]);
+    expect(h.session.state).toBe("live");
+    h.timers.fire();
+    await h.session.done;
+    expect(h.session.state).toBe("resumable");
     expect(h.records.ended).toEqual([{ generation: 1, reason: "ended" }]);
+    expect(h.timers.armed).toEqual([]);
+  });
+
+  test("m1: a result that lands inside end()'s grace never pushes the held text into the CLOSED queue — no spurious agent_error, the text stays owed", async () => {
+    const h = harness();
+    await h.session.open();
+    h.q().ignoreClose = true;
+    h.q().emit(init(h.q().options));
+    await h.session.send("A", "cli");
+    await h.session.send("B", "cli");   // held
+    const ending = h.session.end();     // closes the queue; waits 25 ms; then aborts
+    await Bun.sleep(5);
+    expect(h.q().promptClosed).toBe(true);
+    h.q().emit(result());               // A finishes on its own inside the grace
+    await ending;
+    expect(h.session.state).toBe("resumable");
+    expect(seen(h, "agent_error")).toEqual([]);
+    expect(seen(h, "turn_completed")).toHaveLength(1);
+    expect(h.q().pushed).toEqual(["A"]);
+    expect(unconsumedUserMessages(h.events)).toEqual(["B"]);
+    // and the next incarnation runs it from the log
+    await h.session.send("C", "cli");
+    expect(h.queries).toHaveLength(2);
+    expect(h.q().pushed).toEqual(["B"]);
+    expect(h.session.pendingSends).toEqual(["C"]);
+  });
+
+  test("m2: end() never resolves with the session still live — a child that outlives the abort leaves it `resumable`, and the next send waits for that iteration before it spawns", async () => {
+    const h = harness();
+    await h.session.open();
+    const first = h.q();
+    first.ignoreClose = true;
+    first.ignoreAbort = true;
+    first.emit(init(first.options));
+    await h.session.send("hang", "cli");
+    const t0 = Date.now();
+    await h.session.end();
+    expect(Date.now() - t0).toBeLessThan(200);
+    expect(h.session.state).toBe("resumable");
+    expect(h.session.query).toBeUndefined();
+    expect(first.options.abortController!.signal.aborted).toBe(true);
+    // a send now does not touch the closed queue: it awaits the old iteration's end
+    let opened = false;
+    const sending = h.session.send("next", "cli").then(() => { opened = true; });
+    await Bun.sleep(10);
+    expect(opened).toBe(false);
+    expect(h.queries).toHaveLength(1);
+    first.end();                        // the straggler finally exits
+    await sending;
+    expect(h.queries).toHaveLength(2);
+    expect(h.q().pushed).toEqual(["next"]);   // "hang" ran (it had its turn_started); only "next" was owed
+    expect(h.session.pendingSends).toEqual([]);
+    expect(h.session.state).toBe("live");
+  });
+
+  test("m3: a refused options thunk (the binary went away) bumps NO generation and ends none — the session stays resumable and a later open works", async () => {
+    let refuse = true;
+    const h = harness({
+      options: (inc) => { if (refuse) throw Object.assign(new Error("no winter binary"), { code: "winter_executable_unavailable" }); return { abortController: inc.abort, cwd: "/repo", sessionId: "be-x" }; },
+    });
+    await expect(h.session.open()).rejects.toMatchObject({ code: "winter_executable_unavailable" });
+    expect(h.records.generation).toBe(0);
+    expect(h.records.ended).toEqual([]);
+    expect(h.session.state).toBe("resumable");
+    refuse = false;
+    await h.session.open();
+    expect(h.records.generation).toBe(1);
+    expect(h.session.state).toBe("live");
   });
 });
 
@@ -427,6 +564,7 @@ describe("startWinterSession — resume", () => {
     expect(h.q().options.resume).toBe("be-x");
     expect(h.q().options.sessionId).toBeUndefined();
     expect(h.incarnations[1]).toMatchObject({ generation: 2, resume: true });
+    expect(h.session.resumed).toBe(true);
     expect(h.session.generation).toBe(2);
     expect(h.tracked).toHaveLength(2);
     expect(sent.queued).toBe(false);
@@ -446,6 +584,7 @@ describe("startWinterSession — resume", () => {
     expect(h.q().options.sessionId).toBe("be-x");
     expect(h.q().options.resume).toBeUndefined();
     expect(h.incarnations[1]).toMatchObject({ generation: 2, resume: false });
+    expect(h.session.resumed).toBe(false);
   });
 
   test("deliveries that reach the sink while resumable are HELD and pushed first on resume, before the new text", async () => {
@@ -464,13 +603,13 @@ describe("startWinterSession — resume", () => {
     expect(h.q().pushed).toEqual(["<agent-message>late</agent-message>"]);
     expect(h.session.pendingSends).toEqual(["now"]);
     expect(h.session.heldDeliveries).toEqual([]);
-    expect(h.events.map((e) => (e as { clientName?: string }).clientName ?? e.type)).toEqual(["messaging", "turn_started", "cli", "turn_started"]);
+    expect(h.events.map((e) => (e as { clientName?: string }).clientName ?? e.type)).toEqual(["messaging", "turn_started", "cli"]);
     h.q().emit(result());
     await h.settled();
     expect(h.q().pushed).toEqual(["<agent-message>late</agent-message>", "now"]);
   });
 
-  test("a send held behind a turn survives the incarnation's end: pushed first on resume with NO second turn_started", async () => {
+  test("P8b-39: a send held behind a turn survives the incarnation's end THROUGH THE LOG — re-pushed first on resume with exactly ONE turn_started, appended when it runs", async () => {
     const h = harness();
     await h.session.open();
     h.q().ignoreClose = true;
@@ -478,20 +617,43 @@ describe("startWinterSession — resume", () => {
     await h.session.send("A", "cli");
     await h.session.send("B", "cli");   // held
     await h.session.end();              // aborts A's hanging turn
-    expect(h.session.pendingSends).toEqual(["B"]);
     expect(seen(h, "turn_completed")).toHaveLength(1);   // A's aborted terminal only
-    await h.session.send("C", "cli");
-    // B was replayed first and is the running turn on the new child; C is held behind it (P8b-5).
-    expect(h.q().pushed).toEqual(["B"]);
-    expect(h.session.pendingSends).toEqual(["C"]);
-    expect(seen(h, "turn_started")).toHaveLength(3);      // A, B, C — B's was not re-appended
-    h.q().emit(result());                                 // B's result releases C
-    await h.settled();
-    expect(h.q().pushed).toEqual(["B", "C"]);
-    expect(h.session.pendingSends).toEqual([]);
-    h.q().emit(result());
-    await h.settled();
+    expect(seen(h, "turn_started")).toHaveLength(1);     // A's — B has none yet
+    expect(unconsumedUserMessages(h.events)).toEqual(["B"]);
+    // A RESTART: a fresh driver over the same log knows nothing but what the log says
+    const restarted = harness({ append: (e: NewSessionEvent) => { const stamped = { ...e, seq: h.events.length + 1, ts: Date.now() } as SessionEvent; h.events.push(stamped); return stamped; }, unconsumed: () => unconsumedUserMessages(h.events) });
+    await restarted.session.send("C", "cli");
+    // B was replayed first (from the log) and is the running turn on the new child; C is held (P8b-5).
+    expect(restarted.q().pushed).toEqual(["B"]);
+    expect(restarted.session.pendingSends).toEqual(["C"]);
+    expect(h.events.map((e) => e.type)).toEqual(["user_message", "turn_started", "user_message", "turn_completed", "turn_started", "user_message"]);
+    expect(seen(h, "turn_started")).toHaveLength(2);      // A, B — exactly one for B
+    restarted.q().emit(result());                         // B's result releases C
+    await restarted.settled();
+    expect(restarted.q().pushed).toEqual(["B", "C"]);
+    expect(restarted.session.pendingSends).toEqual([]);
+    expect(seen(h, "turn_started")).toHaveLength(3);
+    restarted.q().emit(result());
+    await restarted.settled();
     expect(seen(h, "turn_completed")).toHaveLength(3);
+    expect(unconsumedUserMessages(h.events)).toEqual([]);
+  });
+
+  test("unconsumedUserMessages: FIFO over main-thread user_message/turn_started; the projector's pass-through and child threads are not debts", () => {
+    const ev = (type: string, extra: Record<string, unknown> = {}): SessionEvent => ({ type, sessionId: "s", threadId: "main", seq: 0, ts: 0, ...extra } as unknown as SessionEvent);
+    expect(unconsumedUserMessages([])).toEqual([]);
+    expect(unconsumedUserMessages([ev("user_message", { text: "A", clientName: "cli" }), ev("turn_started")])).toEqual([]);
+    expect(unconsumedUserMessages([
+      ev("user_message", { text: "A", clientName: "cli" }), ev("turn_started"),
+      ev("user_message", { text: "B", clientName: "cli" }),
+      ev("turn_completed", { stopReason: "aborted" }),
+      ev("user_message", { text: "C", clientName: "messaging" }),
+    ])).toEqual(["B", "C"]);
+    // the child's own text (a resume prompt the projector passed through) is not owed
+    expect(unconsumedUserMessages([ev("user_message", { text: "echo", clientName: PROJECTOR_PASSTHROUGH_CLIENT })])).toEqual([]);
+    // a child thread's user_message/turn_started (the engine's send_message drains) do not count
+    expect(unconsumedUserMessages([ev("user_message", { text: "kid", clientName: "cli", threadId: "toolu_1" }), ev("turn_started", { threadId: "toolu_1" })])).toEqual([]);
+    expect(unconsumedUserMessages([ev("user_message", { text: "A", clientName: "cli" }), ev("turn_started", { threadId: "toolu_1" })])).toEqual(["A"]);
   });
 
   test("two concurrent sends from resumable open ONE child (never a second winter process on one transcript)", async () => {

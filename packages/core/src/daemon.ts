@@ -977,6 +977,14 @@ export async function startDaemon(opts: {
     memoryKeyOf: (cwd) => memoryProjectKeyFor(cwd, { normaHome, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) }),
     log: (line) => console.error(`winter-leg: ${line}`),
   });
+  /** A deleted session takes its Winter child (bounded `end()`, out of the table) AND its runtime
+   *  rows with it — the reaper's 600 s grace is shorter than the 900 s idle timer, so without the
+   *  first half a live child would outlive its session. The boot sweep above ran before any driver
+   *  could exist, so it keeps the bare records hook. */
+  const onSessionDeleted = (sessionId: string): void => {
+    void winterDrivers.evict(sessionId);
+    runtime?.onSessionDeleted(sessionId);
+  };
 
   if (agentProvider) {
     const registry = new ToolRegistry();
@@ -1722,8 +1730,8 @@ export async function startDaemon(opts: {
         home: normaHome,
         enabled: cleanerEnabledHot,
         // P8a Task 12: the second sanctioned deletion path takes runtime state with it too, exactly
-        // as the reaper's does (WS-16 §16).
-        onDelete: runtime?.onSessionDeleted,
+        // as the reaper's does (WS-16 §16) — and, since Task 16, the session's Winter child.
+        onDelete: onSessionDeleted,
       }),
     });
     dreamer.start();
@@ -1961,8 +1969,8 @@ export async function startDaemon(opts: {
     workflows: workflowRuntime ?? undefined,
     workflowStore,
     // P8a Task 12: the mint-time reaper inside this server deletes sessions too — same hook, same
-    // reach as the boot sweep above (WS-16 §16).
-    onSessionDeleted: runtime?.onSessionDeleted,
+    // reach as the boot sweep above (WS-16 §16), plus the Winter child (Task 16).
+    onSessionDeleted,
     // P8b Task 5: the Winter handle, on the deps object the IPC layer receives — this is the door
     // Task 16 opens a Chat session on the Winter leg through (`session.create`'s handler). Undefined
     // means the router never constructed; a Winter-leg create must then refuse with a typed error.

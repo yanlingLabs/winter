@@ -182,6 +182,30 @@ describe("attachWinterSession", () => {
     expect(b.pushed).toHaveLength(1);
   });
 
+  test("the wrapper reads `status()` BEFORE it pushes (Task 16 fix): a push that starts a turn is `delivered`, not `queued`", async () => {
+    // The driver's push sink begins a turn synchronously, so a `status()` read AFTER the push
+    // always says "running" and every delivery to an idle session would be receipted `queued`
+    // (e2e (c) caught it). This fake flips inside `push` — the old order fails it, the new passes.
+    const { runtime } = harness();
+    const a = fakeSession("be_a3");
+    const b = fakeSession("be_b3");
+    const attachedA = attachWinterSession(runtime, { sessionId: "s_a", backendSessionId: a.backendSessionId, query: a.query, push: (t) => a.pushed.push(t), displayName: "alpha3" });
+    const attachedB = attachWinterSession(runtime, {
+      sessionId: "s_b", backendSessionId: b.backendSessionId, query: b.query, displayName: "beta3", status: b.status,
+      push: (t) => { b.pushed.push(t); b.setStatus("running"); },
+    });
+    await attachedA.ready;
+    await attachedB.ready;
+    const outcome = await runtime.sdk.messaging.send({ from: buildSessionAddress(a.backendSessionId), to: "beta3", body: "start a turn", originToolCallId: "toolu_03" });
+    expect(outcome.status).toBe("delivered");
+    expect(b.pushed).toHaveLength(1);
+    expect(b.status()).toBe("running");
+    // and the NEXT delivery, with the turn now running, is `queued`
+    const second = await runtime.sdk.messaging.send({ from: buildSessionAddress(a.backendSessionId), to: "beta3", body: "mid-turn", originToolCallId: "toolu_04" });
+    expect(second.status).toBe("queued");
+    expect(b.pushed).toHaveLength(2);
+  });
+
   test("the wrapper's rendered frame is BYTE-IDENTICAL to the router's own push path", async () => {
     // The drift tripwire this module's header promises. `renderAttributedTurn` is not re-exported by
     // the published router, so Norma rebuilds it; a push-ONLY handle takes the router's own
