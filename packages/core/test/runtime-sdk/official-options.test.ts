@@ -5,6 +5,7 @@
 // that test's own comment), and the auto-memory-directory equality with the Winter leg's own MEMDIR
 // helper (WS-14 §2: "identical for both branches").
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { installMockModuleTripwire } from "../mock-module-tripwire";
 import * as winterAgentSdk from "@yanlinglabs/winter-agent-sdk";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import { ApprovalBroker } from "../../src/agent/approvals";
@@ -240,3 +241,9 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
     expect(denyA).not.toEqual(denyB);
   });
 });
+
+// Minor 4 (whole-branch review, adopting m6): placed AFTER every `describe` above — including
+// `officialInputFor — official_project_key_too_deep`'s own restoring `afterEach` — per this
+// tripwire's own header: it must be the LAST lifecycle hook the file registers so its `afterAll`
+// (deferred to a microtask) sees this file's truly final `mock.module` state.
+installMockModuleTripwire();

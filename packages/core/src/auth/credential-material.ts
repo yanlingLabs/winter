@@ -216,7 +216,7 @@ export async function migrateLegacyCredentialMaterial(store: SecretStore): Promi
 }
 
 /**
- * P8d-13's dead-provider cleanup relocated this class here from the now-deleted
+ * Phase 8d task 2.4's dead-provider cleanup relocated this class here from the now-deleted
  * `providers/codex-oauth.ts` (which existed only to house `CodexOAuthProvider`, superseded by
  * `providers/runtime-provider.ts`'s `createCodexOauthRuntimeProvider` — see that module's own
  * header for the ruling). `CodexAuthStore` itself was never part of that ruling: it is the ONLY

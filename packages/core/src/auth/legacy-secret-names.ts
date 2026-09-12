@@ -2,8 +2,8 @@
  * LEGACY raw provider-credential secret names (hotfix review r1, m1).
  *
  * A LEAF module on purpose: `auth/credential-material.ts` needs these names for its one-way
- * migration (`migrateLegacyCredentialMaterial`), its read-only fallbacks, and (P8d-13, since the
- * class relocated there from the now-deleted `providers/codex-oauth.ts`) `CodexAuthStore` — while
+ * migration (`migrateLegacyCredentialMaterial`), its read-only fallbacks, and (Phase 8d task 2.4,
+ * since the class relocated there from the now-deleted `providers/codex-oauth.ts`) `CodexAuthStore` — while
  * `providers/manager.ts` needs `auth/credential-material.ts`'s writers/readers — putting the names
  * in `manager.ts` would make that a real import cycle. This file imports nothing from
  * `providers/*`, so `auth/credential-material.ts` can import it without one.

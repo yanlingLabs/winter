@@ -65,9 +65,12 @@ export interface DaemonRuntimeStateDeps {
   /** Default `RUNTIME_SWEEP_INTERVAL_MS`. Injectable so a test can prove the periodic pass runs
    *  without waiting an hour. */
   sweepIntervalMs?: number;
-  /** Recovery's own test seams (`RecoveryDeps`): the 8b/8c step hooks, step 4's process probe and
-   *  step 8's scan root, whose default is a REAL path on the developer's machine. */
-  recovery?: { hooks?: RecoveryHooks; probe?: LeaseProbe; tempScanRoot?: string };
+  /** Recovery's own test seams (`RecoveryDeps`): the 8b/8c step hooks, step 4's process probe,
+   *  step 8's scan root, and P8d-12's `claude-resume-*` staging root — the last two default to a
+   *  REAL path on the developer's machine (`canonicalTempScanRoot()` / `os.tmpdir()`), so every
+   *  caller of `startRuntimeState` that does not name one sweeps the real thing (whole-branch
+   *  review, Major 1). */
+  recovery?: { hooks?: RecoveryHooks; probe?: LeaseProbe; tempScanRoot?: string; claudeResumeScanRoot?: string };
   /** §17 phase 5's filesystem seam (`MemoryKeyFs`). Injectable for ONE reason: the two failures this
    *  wiring has to survive — a repair that throws, and an apply that throws after a committed move —
    *  are both mid-`rename` failures, and a test cannot produce either by arranging files. */
@@ -196,6 +199,14 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
       hooks: deps.recovery?.hooks,
       probe: deps.recovery?.probe,
       tempScanRoot: deps.recovery?.tempScanRoot,
+      // Major 1 fix: the SAME ladder `resolveWinterExecutable` (`runtime-sdk/executable.ts`) reads
+      // for `NORMA_WINTER_EXECUTABLE` — an explicit dep wins, then the env seam, and only then does
+      // `recovery.ts`'s own default (`canonicalTempScanRoot()`/`os.tmpdir()`) apply. The env seam
+      // exists so a daemon boot (which has no `recovery:` opts to thread through `startDaemon`) can
+      // still be pointed at a throwaway root — the shared test helper (`test/runtime-state/support.ts`'s
+      // `withTempHome`) sets it for the test's lifetime, which is what keeps every `startDaemon`-style
+      // test from sweeping the developer's real tmpdir.
+      claudeResumeScanRoot: deps.recovery?.claudeResumeScanRoot ?? (process.env.NORMA_CLAUDE_RESUME_SCAN_ROOT?.trim() || undefined),
     });
     for (const step of lastRecovery.steps) {
       if (step.outcome === "ok" || step.outcome === "skipped") continue;
