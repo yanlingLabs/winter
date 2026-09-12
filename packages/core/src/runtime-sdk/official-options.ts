@@ -12,7 +12,9 @@
 // `officialInputFor` wraps it with the router's real `createApprovalBridge({broker, brand, mode,
 // containment})` at construction — the 0.0.2-era fail-closed-default workaround and its
 // `P8c-L1-BLOCKER` note are DELETED.
+import { chmodSync, mkdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { isVendorCompliantProjectKey, transcriptProjectKey, type CredentialRef, type PermissionResult, type ProviderSelection } from "@yanlinglabs/winter-agent-sdk";
 import { createApprovalBridge, officialConnectionEnv, officialCredentialPlan, type ApprovalRequest, type OfficialPermissionMode as RouterOfficialPermissionMode, type RouterOfficialInput, type RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import type { ContextAssembler } from "../agent/context";
@@ -20,6 +22,7 @@ import type { SessionApprovalPolicy } from "../agent/gate";
 import type { Mode as SessionMode } from "../agent/tools/registry";
 import { assistantMemoryDirFor, memoryDirFor, type MemoryDirOptions } from "../agent/memory-dir";
 import type { CapabilityServerRecord } from "../capabilities";
+import { officialSubscriptionAuthEnabled, type Settings } from "../settings";
 import { canUseToolFor, type CanUseToolDeps } from "./approval-bridge";
 import { CORE_BRAND } from "./brand";
 import { controlPlaneDenyRules, disallowedToolsFor, sandboxConfigFor } from "./mode-options";
@@ -27,6 +30,69 @@ import { officialCapabilityServersFor, type OfficialMcpModule } from "./official
 import { winterSystemPromptFor } from "./system-prompt";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import type { OfficialPeer } from "./create";
+
+/**
+ * Phase 9c (P9c-1, WS-00 §8 #1): env names the official leg's spawned child must NEVER inherit
+ * from the daemon's own process — the credential plan (`officialCredentialPlan`, above) alone
+ * injects the ONE variable it names for this session's family, and this leg sets its own
+ * `CLAUDE_CONFIG_DIR` (`officialConfigDirFor`, below) rather than letting the daemon's own value
+ * (a developer's shell, say) leak through. `minimalOsEnvironment`'s allowlist already excludes
+ * every one of these (none overlaps `HOME`/`PATH`/`LANG`/`LC_ALL`/`TERM`), so the explicit strip in
+ * `officialInputFor` is defence in depth against a FUTURE change to that allowlist, never a gap in
+ * it today — this constant is what a test iterates to prove the strip is exhaustive, and what a
+ * later change to the allowlist has to keep in mind.
+ */
+export const FORBIDDEN_CHILD_ENV = [
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_API_KEY",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+  "ANTHROPIC_PROFILE",
+  "ANTHROPIC_FEDERATION_RULE_ID",
+  "ANTHROPIC_ORGANIZATION_ID",
+  "CLAUDE_CONFIG_DIR",
+] as const satisfies readonly string[];
+
+/**
+ * Phase 9c (P9c-1): the Winter-owned `CLAUDE_CONFIG_DIR` (the router's own
+ * `RouterOfficialInput.spool` — WS-14 §1 profile 1) this leg spawns every session against while
+ * `runtimes.official.subscriptionAuth` is off (the shipped default, and the only value P9c-1
+ * allows before Anthropic approves subscription auth for this integration).
+ *
+ * NEVER the vendor's own `~/.claude` — the router's own `VENDOR_HOME_SEGMENT_RE` refuses ANY
+ * config dir under a `.claude` path segment outright, unconditionally, regardless of this setting
+ * (WS-14 §1/§3, WS-17 row 4; measured against the installed router package, `index-mfd2rg7x.js`'s
+ * `validateObservedConfigDir`) — so this name is deliberately `claude-config` (a hyphen, never a
+ * dot) rather than anything that could ever collide with that guard. Also never the router's own
+ * default spool name (`officialSpoolRoot`, `<home>/runtimes/official-agent-spool` — already
+ * provisioned 0700 at boot by `winter-dir.ts` for the router to fall back on when this leg
+ * deliberately does NOT override `spool`, i.e. while the flag is on): this leg names, creates and
+ * hardens ITS OWN directory for the audited, API-key-only default, rather than depending on a
+ * third-party package's own default nobody here pins.
+ */
+export function officialConfigDirFor(home: string): string {
+  return join(home, "runtimes", "claude-config");
+}
+
+/**
+ * `officialConfigDirFor`'s own directory, created lazily (0700) the first time a session actually
+ * spawns against it — never at import time, and never by a boot-time sweep this file does not own
+ * (`winter-dir.ts`'s own `SUBDIRS` is Lane M's, not this one's). `chmodSync` runs even when the
+ * directory already existed, so a stale, more permissive mode is corrected on every spawn, not just
+ * the first.
+ *
+ * CALLED FROM `official-session.ts`'s `open()`, NEVER from `officialInputFor` itself: this file's
+ * OWN tests (and every hand-built `OfficialInputDeps` fixture across the suite) pass a symbolic
+ * `home` like `/Users/x/.winter-test-home` that was never meant to be filesystem-backed —
+ * `officialInputFor` stays a pure(-ish) path computation, and only the real spawn path (a real
+ * `WINTER_HOME`) actually touches disk.
+ */
+export function ensureOfficialConfigDir(dir: string): void {
+  mkdirSync(dir, { recursive: true });
+  chmodSync(dir, 0o700);
+}
 
 /** P8c-2: the six-valued mapping `mode-options.ts`'s `permissionModeFor` already has, adapted for
  *  the official leg's OWN enum — same literal spellings (`default`/`plan`/`acceptEdits`/`dontAsk`),
@@ -155,6 +221,14 @@ export interface OfficialInputDeps {
    *  `undefined` until then (P8c-7's own gate). */
   hooks?: unknown;
   env?: Readonly<Record<string, string | undefined>>;
+  /** Phase 9c (P9c-1): the LIVE settings snapshot for this incarnation — `officialSubscriptionAuthEnabled`
+   *  reads it to decide whether this spawn gets `officialConfigDirFor(home)` as its `spool` (flag
+   *  off, the default) or none at all (flag on: the router's own default applies instead). Re-read
+   *  fresh on every call (`official-session.ts`'s `open()` builds this deps object per incarnation,
+   *  from `runtime.settings()` — never a boot snapshot), so a settings edit takes effect on the next
+   *  incarnation with no daemon restart. `undefined`/`null` behaves exactly like an absent block
+   *  (`officialSubscriptionAuthEnabled`'s own default: off). */
+  settings?: Settings | null;
 }
 
 /** `winterSystemPromptFor`'s memory-bucket choice, verbatim (chat/dispatch share `_assistant`; code
@@ -218,7 +292,20 @@ export function officialInputFor(
     ? {}
     : officialCapabilityServersFor(deps.capabilities, deps.officialPeer as unknown as OfficialMcpModule);
 
-  const base = minimalOsEnvironment(env);
+  const base: Record<string, string> = minimalOsEnvironment(env);
+  // Phase 9c (P9c-1): defence in depth (see `FORBIDDEN_CHILD_ENV`'s own doc) — a no-op today given
+  // `minimalOsEnvironment`'s allowlist, but load-bearing against a future change to it.
+  for (const name of FORBIDDEN_CHILD_ENV) delete base[name];
+  // Phase 9c (P9c-1): the flag's ONLY shipped value is `false` — this branch is what runs in
+  // production. `spool` left `undefined` (flag on) is NOT "no isolation": the router's own
+  // `officialSpoolRoot(home)` default still applies, and `VENDOR_HOME_SEGMENT_RE` still refuses
+  // `~/.claude` outright either way (see `officialConfigDirFor`'s own doc) — flipping the flag only
+  // widens which directory this leg is willing to authenticate FROM, never lets it reach the
+  // vendor's own home.
+  // The directory itself is NOT created here (see `ensureOfficialConfigDir`'s own doc) — the
+  // caller (`official-session.ts`'s `open()`) ensures it exists right before the real spawn.
+  const subscriptionAuth = officialSubscriptionAuthEnabled(deps.settings);
+  const spool: string | undefined = subscriptionAuth ? undefined : officialConfigDirFor(deps.home);
   const sharedTempRoot = env.WINTER_TMPDIR?.trim() ? env.WINTER_TMPDIR : tmpdir();
   // WS-14 §12: the router derives ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN for console-oauth)
   // from `provider.authRef` for every family it can — `explicitCredentials`/`explicitConnectionEnv`
@@ -242,6 +329,7 @@ export function officialInputFor(
       autoMemoryDirectory: autoMemoryDirectoryFor(input, deps.home),
       projectKey,
       sharedTempRoot,
+      ...(spool === undefined ? {} : { spool }),
       mcpServers,
       ...(credentials.length === 0 ? {} : { credentials }),
       ...(Object.keys(connectionEnv).length === 0 ? {} : { connectionEnv }),
