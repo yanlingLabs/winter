@@ -65,6 +65,15 @@ class TestClient {
   async hello(token: string, clientName: string): Promise<void> {
     await this.call(METHODS.hello, { protocolVersion: PROTOCOL_VERSION, role: "harness", token, clientName });
   }
+  async waitFor(pred: (e: SessionEvent) => boolean, ms = 20_000): Promise<SessionEvent> {
+    const t0 = Date.now();
+    for (;;) {
+      const hit = this.events.find(pred);
+      if (hit) return hit;
+      if (Date.now() - t0 > ms) throw new Error(`timed out waiting; saw: ${this.events.map((e) => e.type).join(",")}`);
+      await Bun.sleep(20);
+    }
+  }
   close(): void { try { this.socket.end(); } catch { /* closed */ } }
 }
 
@@ -147,19 +156,88 @@ describeWithWinterBinary("P8d-8 (D30) — advisor in init.tools on a real Winter
     expect(driver.init?.tools ?? []).not.toContain("advisor");
   }, 30_000);
 
-  // MEASURED, RECORDED HONESTLY (not asserted — the mechanism is unconfirmed, see this file's own
-  // header and the lane report's M5 diagnosis): setting `runtimes.advisorModel` to a string NO
-  // provider in the pinned catalog can serve did NOT remove `advisor` from `init.tools` for the real
-  // catalog `openai/gpt-6-astra` session above — it stayed present, identically to the automatic D30
-  // default. Left as a `console.warn` rather than a hard assertion: whether Norma's per-query
-  // `Options.advisor.model` is actually forwarded onto the WINTER leg's underlying `query()` (the
-  // router's own construction-time `advisor` option is official-leg-only by its own doc — a
-  // PER-QUERY value's fate on this leg is unverified) is exactly the open question the lane report
-  // carries forward; asserting either outcome here would state a mechanism this file did not confirm.
-  test("MEASUREMENT (not a hard assertion): an unroutable explicit advisorModel's effect on the real Winter child's own advisor gate", async () => {
+  // MEASURED AND HARD-ASSERTED (review fix F2 — round 1 left this as a `console.warn`): setting
+  // `runtimes.advisorModel` to a string NO provider in the pinned catalog can serve does NOT remove
+  // `advisor` from `init.tools` — it stays present, identically to the automatic D30 default.
+  //
+  // TWO DIFFERENT AXES, and this test is ONLY about the first one:
+  //  (1) TOOL VISIBILITY (`init.tools` — what this test asserts): whether the CHILD advertises the
+  //      `advisor` built-in AT ALL. Measured here to be governed by something coarser than "can this
+  //      exact stated model be resolved" — an unroutable override does not withdraw it.
+  //  (2) THE GENERATION TARGET (which model id actually appears on the wire when the tool is
+  //      CALLED): `Options.advisor.model` IS a disclosed, wired option documented to win over
+  //      `settings.advisor.model` (the SDK's `options.ts:544-552`, forwarded unconditionally by
+  //      `query.ts:692`) — a DIFFERENT axis from visibility, and the one Norma's own `advisorModel`
+  //      wiring is actually FOR. See the describe block below this one for that proof: an advisor
+  //      call reaching the fake with the EXPLICITLY CONFIGURED model id in the request, never the
+  //      session's own default — which is the axis "does the override do anything" actually asks.
+  test("MEASURED: an unroutable explicit advisorModel does NOT suppress advisor's TOOL VISIBILITY (a different axis from the generation target)", async () => {
     writeSettings("not-a-real-model-nobody-serves");
     await Bun.sleep(300);
     const { tools } = await createAndWaitForInit();
-    console.warn(`[advisor-winter-leg-e2e] an unroutable explicit runtimes.advisorModel -> init.tools ${tools.includes("advisor") ? "STILL contains" : "no longer contains"} "advisor" (measured, not assumed)`);
+    expect(tools).toContain("advisor");
   }, 30_000);
+});
+
+// ── F2 (review round 1): the GENERATION TARGET axis — an advisor call reaches the loopback fake
+// WITH THE EXPLICITLY CONFIGURED model id in the request, never the session's own default model. ──
+//
+// `runtimes.advisorModel` is set to a DIFFERENT, VALID openai-family catalog model than the
+// session's own ("sol" vs. the session's "astra") — both served by the SAME `openai` provider/
+// loopback, so the ONLY thing that can explain two DIFFERENT model ids appearing in two DIFFERENT
+// requests to the same endpoint is `Options.advisor.model` actually reaching the child and being
+// honoured for its own separate generation, exactly as `options.ts`/`query.ts` document.
+describeWithWinterBinary("P8d-8/F2 — the advisor's GENERATION TARGET on the real Winter child", (winterBin) => {
+  const SESSION_MODEL = "openai/gpt-6-astra"; // the session's OWN model (D30 default would also be "astra")
+  const ADVISOR_MODEL = "gpt-5.6-sol"; // an EXPLICIT, DIFFERENT, valid openai-family catalog model
+
+  test("an advisor tool call's own HTTP request names the EXPLICITLY CONFIGURED advisorModel, not the session's own model", async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "norma-advisor-target-")));
+    const requests: Array<{ model?: string; body: string }> = [];
+    const { responsesModelOf } = openaiResponsesFake;
+    const fake = await openaiResponsesFake.startOpenAiResponsesFake({
+      scenarios: {},
+      unknownModel: async (recorded) => {
+        const model = responsesModelOf(recorded);
+        requests.push({ model, body: recorded.body });
+        // The FIRST request (the session's own turn) calls the "advisor" tool (parameterless,
+        // `ADVISOR_DEFINITION.builtinName === "advisor"` on both legs). Every later request
+        // (the advisor's own generation, then the main turn's continuation) answers with plain text.
+        if (requests.length === 1) {
+          return openaiResponsesFake.responsesStream({ calls: [{ index: 0, itemId: "item_1", callId: "call_1", name: "advisor", argumentsJson: "{}" }] });
+        }
+        return openaiResponsesFake.responsesStream({ text: [`reply from ${model ?? "unknown"}`] });
+      },
+    });
+    try {
+      writeFileSync(join(home, "settings.json"), JSON.stringify({
+        schemaVersion: 2,
+        provider: { type: "openai-compatible", model: SESSION_MODEL, baseUrl: fake.url },
+        runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 10, advisorModel: ADVISOR_MODEL },
+      }, null, 2));
+      const secrets = new FileSecretStore(join(home, "test-secrets"));
+      await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test" });
+      const daemon = await startDaemon({ home, secrets, agentProvider: null });
+      if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
+      const client = await TestClient.connect(daemon.socketPath);
+      await client.hello(daemon.tokens.harness, "advisor-target-e2e");
+      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-advisor-target-cwd-")));
+      const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: SESSION_MODEL, cwd });
+      await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+      await client.call(METHODS.sessionSend, { sessionId, text: "please consult the advisor" });
+      await client.waitFor((e) => e.type === "turn_completed", 45_000);
+      console.warn(`[F2] MEASURED: ${requests.length} requests reached the loopback; models seen = ${JSON.stringify(requests.map((r) => r.model))}`);
+      expect(requests.length).toBeGreaterThanOrEqual(2);
+      expect(requests[0]!.model).not.toBe(ADVISOR_MODEL); // the session's own turn names its OWN model
+      const advisorRequest = requests.slice(1).find((r) => r.model === ADVISOR_MODEL);
+      expect(advisorRequest).toBeDefined(); // the advisor's OWN separate call named the CONFIGURED target
+      client.close();
+      const stopping = daemon.stop();
+      await stopping;
+      rmSync(cwd, { recursive: true, force: true });
+    } finally {
+      await fake.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
