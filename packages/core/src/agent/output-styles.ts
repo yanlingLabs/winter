@@ -13,6 +13,11 @@ export interface ResolvedStyle {
   description: string;
   body: string;
   keepCodingInstructions: boolean;
+  /** Review M1 (P9c-4): set ONLY when this style was read through the legacy project fallback —
+   *  the full path of the legacy file actually used, for `ContextAssembler`'s combined per-turn
+   *  deprecation notice. Absent for every built-in/user/non-fallback project style (every pre-9c
+   *  caller/test keeps its exact prior shape — this is a purely additive field). */
+  legacyPath?: string;
 }
 
 // Overlay bodies — each ASSUMES Winter's base SYSTEM_PROMPT is still present (keepCodingInstructions:
@@ -121,7 +126,10 @@ export class OutputStyleStore {
       const { path, usedLegacy } = this.resolveStylePath(cwd, name);
       const p = parseStyleFile(path, name, this.cap);
       if (p) {
-        if (usedLegacy) console.error(`output-style: reading legacy project style from ${path} — run \`winter migrate-project\` to convert`);
+        if (usedLegacy) {
+          console.error(`output-style: reading legacy project style from ${path} — run \`winter migrate-project\` to convert`);
+          return { ...p, legacyPath: path };
+        }
         return p;
       }
     }

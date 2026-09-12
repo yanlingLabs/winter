@@ -107,6 +107,12 @@ interface ResolverCacheEntry {
   // overlay file while purely on the fallback path would serve a stale cached merge forever.
   legacyProjectSig: string;
   legacyLocalSig: string;
+  // Review M1 (P9c-4): whether the legacy project/local file was ACTUALLY read into `effective` —
+  // mirrors the exact condition the read below gates on (including `trusted`, which the signatures
+  // above deliberately do NOT encode — an untrusted cwd can have a non-"absent" legacy signature
+  // while never having read it). `legacyOverlayPathsUsed` reads these, never the raw signatures.
+  usedLegacyProject: boolean;
+  usedLegacyLocal: boolean;
   effective: Settings;
 }
 
@@ -186,13 +192,17 @@ export class ProjectSettingsResolver {
 
     const overlays: Record<string, unknown>[] = [];
     let cacheable = true;
+    const readLegacyProject = trusted && useLegacyProject && legacyProjectSig !== "absent";
+    const readLegacyLocal = trusted && useLegacyLocal && legacyLocalSig !== "absent";
+    let usedLegacyProject = false;
+    let usedLegacyLocal = false;
     if (trusted && projectSig !== "absent") {
       const raw = readRawSettings(projectPath);
       if (raw) overlays.push(raw);
       else cacheable = false; // torn read — don't pin this under the current (torn) signature
-    } else if (trusted && useLegacyProject && legacyProjectSig !== "absent") {
+    } else if (readLegacyProject) {
       const raw = readRawSettings(legacyProjectPath);
-      if (raw) overlays.push(raw);
+      if (raw) { overlays.push(raw); usedLegacyProject = true; }
       else cacheable = false;
     }
     // fix-wave A1: settings.local.json is trust-gated too, exactly like the project file just
@@ -206,15 +216,36 @@ export class ProjectSettingsResolver {
       const raw = readRawSettings(localPath);
       if (raw) overlays.push(raw);
       else cacheable = false;
-    } else if (trusted && useLegacyLocal && legacyLocalSig !== "absent") {
+    } else if (readLegacyLocal) {
       const raw = readRawSettings(legacyLocalPath);
-      if (raw) overlays.push(raw);
+      if (raw) { overlays.push(raw); usedLegacyLocal = true; }
       else cacheable = false;
     }
 
     const effective = mergeSettings(base, overlays); // overlays.length === 0 -> returns base verbatim
-    if (cacheable) this.cache.set(cwd, { baseRef: base, trusted, projectSig, localSig, legacyProjectSig, legacyLocalSig, effective });
-    else this.cache.delete(cwd);
+    if (cacheable) {
+      this.cache.set(cwd, { baseRef: base, trusted, projectSig, localSig, legacyProjectSig, legacyLocalSig, usedLegacyProject, usedLegacyLocal, effective });
+    } else {
+      this.cache.delete(cwd);
+    }
     return effective;
+  }
+
+  /**
+   * Review M1 (P9c-4): which legacy overlay file(s), if any, `cwd`'s effective settings ACTUALLY
+   * read from — full paths, for `ContextAssembler`'s combined per-turn deprecation notice. Calls
+   * `effective(cwd)` itself first (idempotent — the same cache this class already maintains), so a
+   * caller never needs to sequence "resolve settings, then ask this" as two separate steps. Empty
+   * for a null/untrusted cwd, a flag-off resolution, or one where nothing fell back.
+   */
+  legacyOverlayPathsUsed(cwd: string | null): string[] {
+    if (!cwd) return [];
+    this.effective(cwd); // ensure this cwd's cache entry reflects the CURRENT files/flag/trust
+    const cached = this.cache.get(cwd);
+    if (!cached) return [];
+    const paths: string[] = [];
+    if (cached.usedLegacyProject) paths.push(join(cwd, LEGACY_PROJECT_DIR, "settings.json"));
+    if (cached.usedLegacyLocal) paths.push(join(cwd, LEGACY_PROJECT_DIR, "settings.local.json"));
+    return paths;
   }
 }

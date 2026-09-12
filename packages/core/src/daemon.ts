@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto";
 import { bootstrapWinterDir, resolveWinterHome, isDefaultWinterHome } from "./winter-dir";
 import { acquireLock, type Lock } from "./lock";
 import { resolveWinterProfile } from "./profile";
-import { isPristineHome, legacyHomeFor, planMigrationB, runMigrationB, MigrationRefused } from "./migration/migrate-b";
+import { describeHomePristineness, legacyHomeFor, planMigrationB, runMigrationB, MigrationRefused } from "./migration/migrate-b";
 import { manifestFileState } from "./migration/manifest";
 import { LegacyKeychainSecretStore } from "./migration/legacy-keychain-store";
 import { TokenAuthority } from "./auth/tokens";
@@ -353,19 +353,24 @@ export async function startDaemon(opts: {
     // check is IN ADDITION TO `isPristineHome` below, never a replacement for it.
     if (!isDefaultWinterHome(home, profile, opts.migration?.homedirOverride)) {
       console.error(`migration: ${home} is not the default home for the ${profile} profile — auto-migration skipped; run \`winter migrate --from ${legacyHome}\` to migrate it by hand`);
-    } else if (isPristineHome(home)) {
-      const plan = await planMigrationB({ legacyHome, home, profile });
-      const manifest = await runMigrationB(plan, { from: legacySecrets, to: secrets, log: (line) => console.error(`migration: ${line}`) });
-      const filesMoved = manifest.entries.filter((e) => e.status === "copied" || e.status === "rekeyed").length;
-      const rekeyed = manifest.entries.filter((e) => e.status === "rekeyed").length;
-      const kcCopied = manifest.keychain.filter((k) => k.status === "copied").length;
-      const kcSkipped = manifest.keychain.filter((k) => k.status === "skipped-existing").length;
-      console.error(`migration: ${filesMoved} files, ${kcCopied + kcSkipped} keychain items (${kcCopied} copied, ${kcSkipped} skipped-existing), settings rekeyed ${rekeyed} — from ${legacyHome}`);
     } else {
-      // A legacy home exists, but this home already has content of its own (not pristine) — never
-      // auto-migrate over it (P9c-10). One line so an operator isn't left wondering why the legacy
-      // home was never picked up; `winter migrate --from <legacyHome>` is the explicit door.
-      console.error(`migration: a legacy home was found at ${legacyHome}, but ${home} is not pristine — skipping (run \`winter migrate --from ${legacyHome}\` manually if you want it copied)`);
+      const check = describeHomePristineness(home);
+      if (check.pristine) {
+        const plan = await planMigrationB({ legacyHome, home, profile });
+        const manifest = await runMigrationB(plan, { from: legacySecrets, to: secrets, log: (line) => console.error(`migration: ${line}`) });
+        const filesMoved = manifest.entries.filter((e) => e.status === "copied" || e.status === "rekeyed").length;
+        const rekeyed = manifest.entries.filter((e) => e.status === "rekeyed").length;
+        const kcCopied = manifest.keychain.filter((k) => k.status === "copied").length;
+        const kcSkipped = manifest.keychain.filter((k) => k.status === "skipped-existing").length;
+        console.error(`migration: ${filesMoved} files, ${kcCopied + kcSkipped} keychain items (${kcCopied} copied, ${kcSkipped} skipped-existing), settings rekeyed ${rekeyed} — from ${legacyHome}`);
+      } else {
+        // A legacy home exists, but this home already has content of its own (not pristine) — never
+        // auto-migrate over it (P9c-10). One line so an operator isn't left wondering why the legacy
+        // home was never picked up; `winter migrate --from <legacyHome>` is the explicit door.
+        // Review M2: names the actual offending entry, not just "not pristine" — the same reason
+        // `winter doctor`'s migration row surfaces.
+        console.error(`migration: a legacy home was found at ${legacyHome}, but ${home} is not pristine (${check.reason}) — skipping (run \`winter migrate --from ${legacyHome}\` manually if you want it copied)`);
+      }
     }
   }
 
@@ -559,6 +564,10 @@ export async function startDaemon(opts: {
     // a settings-watcher reload swaps a NEW object into this binding, so this always sees the
     // current value, never a boot snapshot.
     legacySettings: () => settings,
+    // Review M1 (P9c-4): the SAME `projectSettings` instance every other permissions/dangerous-
+    // domains getter above reads, at the SAME repo-root resolution (`projectRootOf`, fix-wave B I1)
+    // — a settings-overlay legacy fallback folds into the assembler's one combined notice.
+    legacySettingsOverlayPathsFor: (cwd: string | null) => projectSettings.legacyOverlayPathsUsed(projectRootOf(cwd)),
   });
   // T2 (design doc "migration importer"): one-time-per-fact, idempotent best-effort import of
   // Phase 5b's MemoryStore facts into MEMDIR files, run at boot whenever memory.enabled's
