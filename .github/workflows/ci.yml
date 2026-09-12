@@ -328,13 +328,14 @@ jobs:
       # Winter Phase 8d (ruling P8d-22): thirteen Iroh-transport tests fail on `main` with
       # `IrohError ConnectionLost(LocallyClosed)` — reproduced UNSANDBOXED on main + only the
       # waitForFirstLine fix, so they PREDATE 8d and were masked until now by the daemon-hello bug
-      # (P8d-19). They are skipped BY NAME (never the whole GatewayGateTests suite — its count test
-      # is the remote-allowlist drift tripwire). Classifying them (relay/iroh environment vs a real
+      # (P8d-19). They are skipped BY EXACT NAME — all thirteen, never a whole suite (a test added to
+      # IrohE2ETests/FakePhoneConformanceTests must run; GatewayGateTests' count test is the
+      # remote-allowlist drift tripwire). Classifying them (relay/iroh environment vs a real
       # regression) is a P9 carry; remove this --skip when it lands.
       - name: NormaKit — swift test (retry once — known socket-test flake class)
         working-directory: apple/NormaKit
         env:
-          NORMAKIT_SKIP: 'IrohE2ETests|FakePhoneConformanceTests|GatewayGateTests/test(G1|G2|G3|R1|R2|T6b)_'
+          NORMAKIT_SKIP: 'IrohE2ETests/(testScenarioB_AttachSendStreamsEventsNoHarnessLeak|testScenarioC_ReconnectReplaysExactGapInOrderOverRealAsyncTransport|testScenarioD_IdempotentResendAcrossReconnectYieldsOneDaemonEffect)$|FakePhoneConformanceTests/(testFullLoopThroughNormaSessionClient_PromptRoundTripAndRealApprovalFlow|testLiveAttachRepointsForwardingToItsOwnConnection_TheProbeTheForegroundHopSends|testResumelessShellHandshakeDoesNotStealLiveForwarding_WhileTheOrphanedSessionKeepsPonging|testStreamingDeltasReachThePhone_OpaqueStateDoesNot_AndAnOversizedEventDoesNotKillTheLink)$|GatewayGateTests/(testG1_UpToDateReachable_HonestWatermark_NoHarnessLeak|testG2_MidHandshakeLiveEventIsDelivered|testG3_HelloAckIsFirstFrameThenReplay|testR1_CursorFarAheadYieldsSnapshotRequired|testR2_HelloAckReplayLiveStrictOrderUnderSuspendingSend|testT6b_ResumelessHelloDoesNotReorderAnotherConnectionsReplayFlush)$'
         run: swift test --skip "$NORMAKIT_SKIP" || (echo "::warning::NormaKit swift test failed once — retrying (known socket-test flake class)"; swift test --skip "$NORMAKIT_SKIP")
 
   # Winter Phase 8d (P8d-5): the compiled-binary proofs, on the macOS runner, after the pinned
