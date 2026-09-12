@@ -96,7 +96,7 @@ describe("diagnoseMigration / formatMigrationDoctorLines", () => {
     expect(lines.join("\n")).not.toContain("sk-super-secret-value");
   });
 
-  test("review M2: absent + legacy home present + home NOT pristine — names the offending entry and points at winter migrate --from", async () => {
+  test("fix wave C2: absent + legacy home present + home NOT pristine — names the offending entry and gives the SAME mv advice the refusal itself prints", async () => {
     const parent = tempDir();
     const legacyHome = join(parent, "legacy");
     mkdirSync(legacyHome, { recursive: true });
@@ -111,13 +111,17 @@ describe("diagnoseMigration / formatMigrationDoctorLines", () => {
       legacyStore: new FileSecretStore(join(parent, "legacy-secrets")),
     });
     expect(report.status).toBe("absent");
+    expect(report.home).toBe(home);
     expect(report.homeNotPristineReason).toBe(join(home, "sessions", "index.db"));
 
     const lines = formatMigrationDoctorLines(report);
     const reasonLine = lines.find((l) => l.includes("not pristine"));
     expect(reasonLine).toBeDefined();
     expect(reasonLine).toContain(join(home, "sessions", "index.db"));
-    expect(reasonLine).toContain(`winter migrate --from ${legacyHome}`);
+    // Advice and refusal must agree (fix wave C2) — the SAME instruction `planMigrationB`/
+    // `winter migrate` print, not the old `winter migrate --from` advice.
+    expect(reasonLine).toContain(`mv ${home} ${home}.bak`);
+    expect(reasonLine).not.toContain("winter migrate --from");
   });
 
   test("review M2: absent + legacy home present + home IS pristine (OS noise only) — no not-pristine row at all", async () => {

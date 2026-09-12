@@ -171,6 +171,11 @@ describe("daemon.ts boot hook — Migration B (P9c-15: default-home gate)", () =
     const migrationLines = capture.lines.filter((l) => l.startsWith("migration:"));
     expect(migrationLines.length).toBe(1);
     expect(migrationLines[0]).toContain("not pristine");
+    // Fix wave C2: the advice here must be the SAME instruction the `winter migrate`/
+    // `planMigrationB` refusal itself prints (`mv <home> <home>.bak`, then restart) — never the old
+    // `winter migrate --from` advice, which would just hit that same non-pristine refusal.
+    expect(migrationLines[0]).toContain(`mv ${home} ${home}.bak`);
+    expect(migrationLines[0]).not.toContain("winter migrate --from");
   });
 
   test("a caller that supplies `secrets` without `migration` is migration-inert even when a legacy home would otherwise qualify", async () => {

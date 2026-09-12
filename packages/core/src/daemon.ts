@@ -366,10 +366,13 @@ export async function startDaemon(opts: {
       } else {
         // A legacy home exists, but this home already has content of its own (not pristine) — never
         // auto-migrate over it (P9c-10). One line so an operator isn't left wondering why the legacy
-        // home was never picked up; `winter migrate --from <legacyHome>` is the explicit door.
-        // Review M2: names the actual offending entry, not just "not pristine" — the same reason
-        // `winter doctor`'s migration row surfaces.
-        console.error(`migration: a legacy home was found at ${legacyHome}, but ${home} is not pristine (${check.reason}) — skipping (run \`winter migrate --from ${legacyHome}\` manually if you want it copied)`);
+        // home was never picked up. Review M2: names the actual offending entry, not just "not
+        // pristine" — the same reason `winter doctor`'s migration row surfaces. Fix wave C2: the
+        // advice is the SAME instruction the `winter migrate`/`planMigrationB` refusal itself prints
+        // (`mv <home> <home>.bak`, then restart) — advice and refusal must always agree, since
+        // `winter migrate --from <legacyHome>` into a non-pristine `home` would just hit that same
+        // refusal.
+        console.error(`migration: a legacy home was found at ${legacyHome}, but ${home} is not pristine (${check.reason}) — move it aside, e.g. \`mv ${home} ${home}.bak\`, then restart to migrate`);
       }
     }
   }

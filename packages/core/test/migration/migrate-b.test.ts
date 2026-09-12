@@ -256,6 +256,27 @@ describe("isPristineHome (Step 3, P9c-10)", () => {
     expect(isPristineHome(home)).toBe(false);
   });
 
+  // Fix wave C2 (P9c-16, whole-branch review): Winter.app may have written a UI marker into
+  // `app-state/` before the daemon's first successful connect — that must never block Migration B.
+  test("an app-state marker beside otherwise-empty bootstrap dirs is still pristine", () => {
+    const home = tempDir();
+    for (const d of ["agents", "hooks", "logs", "memory", "outputs", "plugins", "projects", "runtimes", "sessions", "skills"]) {
+      mkdirSync(join(home, d), { recursive: true });
+    }
+    mkdirSync(join(home, "app-state"), { recursive: true });
+    writeFileSync(join(home, "app-state", "cli-install-offered"), "1");
+    expect(isPristineHome(home)).toBe(true);
+  });
+
+  test("an app-state marker does NOT exempt the rest of the home — a real session file elsewhere still makes it not pristine", () => {
+    const home = tempDir();
+    mkdirSync(join(home, "app-state"), { recursive: true });
+    writeFileSync(join(home, "app-state", "cli-install-offered"), "1");
+    mkdirSync(join(home, "sessions"), { recursive: true });
+    writeFileSync(join(home, "sessions", "index.db"), "already has real content");
+    expect(isPristineHome(home)).toBe(false);
+  });
+
   // Review M2: a Finder browse of a fresh home drops known OS noise with no user action at all —
   // it must never silently block the first-boot migration.
   test("a .DS_Store beside otherwise-empty bootstrap dirs is still pristine", () => {

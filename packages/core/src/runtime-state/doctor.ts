@@ -878,6 +878,10 @@ export interface MigrationDoctorReport {
    *  was ever written at `home` (Migration B has never run there). */
   status: "complete" | "in-progress" | "absent";
   finishedAt?: string;
+  /** Fix wave C2: kept on the report (not just the request `input`) so `formatMigrationDoctorLines`
+   *  can print the SAME `mv <home> <home>.bak` advice the daemon boot skip line and the
+   *  `winter migrate`/`planMigrationB` refusal itself print — advice and refusal must always agree. */
+  home: string;
   legacyHome: string;
   legacyHomePresent: boolean;
   /** The Keychain service `legacyStore` reads from, for the row's own text — never used to
@@ -923,6 +927,7 @@ export async function diagnoseMigration(input: {
   return {
     status,
     finishedAt: manifest?.finishedAt,
+    home: input.home,
     legacyHome: input.legacyHome,
     legacyHomePresent,
     legacyKeychainService: input.legacyKeychainService,
@@ -947,9 +952,12 @@ export function formatMigrationDoctorLines(report: MigrationDoctorReport): strin
   if (report.legacyHomePresent) {
     lines.push(`legacy home present: ${report.legacyHome} (safe to remove after verifying Winter)`);
   }
-  // Review M2: WHY it never auto-migrated, with a path forward.
+  // Review M2: WHY it never auto-migrated, with a path forward. Fix wave C2: the SAME instruction
+  // the daemon boot skip line and the `winter migrate`/`planMigrationB` refusal itself print — advice
+  // and refusal must always agree (a `winter migrate --from` into a non-pristine home just hits that
+  // same refusal).
   if (report.homeNotPristineReason) {
-    lines.push(`this home is not pristine (found ${report.homeNotPristineReason}) — legacy data at ${report.legacyHome} was never migrated; run \`winter migrate --from ${report.legacyHome}\``);
+    lines.push(`this home is not pristine (found ${report.homeNotPristineReason}) — legacy data at ${report.legacyHome} was never migrated; move ${report.home} aside, e.g. \`mv ${report.home} ${report.home}.bak\`, then restart to migrate`);
   }
   if (report.legacyKeychainRemaining > 0) {
     lines.push(`legacy keychain items remaining: ${report.legacyKeychainRemaining} under ${report.legacyKeychainService}`);

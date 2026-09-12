@@ -67,6 +67,16 @@ export function legacyHomeFor(profile: WinterProfile, env: NodeJS.ProcessEnv = p
 
 const BOOTSTRAP_TOP_LEVEL = new Set(["agents", "hooks", "logs", "memory", "outputs", "plugins", "projects", "run", "runtimes", "sessions", "skills"]);
 
+/** P9c-16 (whole-branch review, Critical C2): named app-owned top-level directories the pristine
+ *  check tolerates WITHOUT recursing into them at all — unlike `BOOTSTRAP_TOP_LEVEL`, their content
+ *  is never required to be empty. Winter.app must never write into `WINTER_HOME` before the
+ *  daemon's first successful connect, but a UI marker file (today: `app-state/cli-install-offered`)
+ *  is impractical to avoid — this is the ONE named exception, not a general escape hatch: any FUTURE
+ *  app-side home write is a deliberate addition to this list, reviewed the same way. A legacy
+ *  `app-state` directory in the SOURCE home still migrates normally (`copyFileWithHash` overwrites
+ *  the destination file byte-for-byte), so tolerating it here creates no divergence. */
+const TOLERATED_APP_OWNED_TOP_LEVEL = new Set(["app-state"]);
+
 /** Review M2: known macOS/Finder noise that must never block the first-boot migration — a mere
  *  Finder browse of a fresh `~/.winter` drops a `.DS_Store` (and `.localized` on some volumes; an
  *  AppleDouble `._*` sidecar can appear from a copy/USB-transfer touching the folder) with no user
@@ -129,9 +139,11 @@ export interface PristineCheck {
  * Full report for: an absent home, an empty directory, or a directory containing ONLY entries from
  * the bootstrap set (`agents hooks logs memory outputs plugins projects run runtimes sessions
  * skills`), each of which must itself be empty (`run/` may additionally hold `core.lock`/
- * `core.sock`) — ignoring known top-level OS noise (`isIgnorableTopLevelNoise`, review M2).
- * `pristine: false` the moment any OTHER entry exists anywhere — at the top level, or inside a
- * bootstrap-set directory — and `reason` names the first one found, full path.
+ * `core.sock`) — ignoring known top-level OS noise (`isIgnorableTopLevelNoise`, review M2) and any
+ * NAMED app-owned top-level directory (`TOLERATED_APP_OWNED_TOP_LEVEL`, P9c-16 — content never
+ * inspected, unlike the bootstrap set). `pristine: false` the moment any OTHER entry exists
+ * anywhere — at the top level, or inside a bootstrap-set directory — and `reason` names the first
+ * one found, full path.
  */
 export function describeHomePristineness(home: string): PristineCheck {
   let topEntries: string[];
@@ -142,6 +154,7 @@ export function describeHomePristineness(home: string): PristineCheck {
   }
   for (const entry of topEntries) {
     if (isIgnorableTopLevelNoise(entry)) continue; // Finder/AppleDouble noise — never blocks migration
+    if (TOLERATED_APP_OWNED_TOP_LEVEL.has(entry)) continue; // P9c-16: app-owned UI markers — content never inspected
     if (!BOOTSTRAP_TOP_LEVEL.has(entry)) return { pristine: false, reason: join(home, entry) };
     const full = join(home, entry);
     let st;
