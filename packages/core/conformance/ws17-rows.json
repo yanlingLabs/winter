@@ -6,7 +6,12 @@
       "title": "Real model-emitted `SendMessage` through the TS alias reaches `mcp__winter__send_message` with native args and returns the visible result (item 1)",
       "status": "proven",
       "citations": [
-        { "repo": "router", "tag": "phase-7b-runtime-sdk", "file": "test/conformance/rows.test.ts", "contains": "WS17-1" }
+        {
+          "repo": "router",
+          "tag": "phase-7b-runtime-sdk",
+          "file": "test/conformance/rows.test.ts",
+          "contains": "WS17-1"
+        }
       ],
       "note": "Proven in the router's own conformance table (owner: Lane B's alias handlers, with Lane A's toolAliases)."
     },
@@ -15,7 +20,12 @@
       "title": "`ListAgents` aliasing; canonical MCP duplicate deferred/hidden visibility; behavior without Tool Search (item 2)",
       "status": "proven",
       "citations": [
-        { "repo": "router", "tag": "phase-7b-runtime-sdk", "file": "test/conformance/rows.test.ts", "contains": "WS17-2" }
+        {
+          "repo": "router",
+          "tag": "phase-7b-runtime-sdk",
+          "file": "test/conformance/rows.test.ts",
+          "contains": "WS17-2"
+        }
       ],
       "note": "Proven in the router's own conformance table."
     },
@@ -24,37 +34,66 @@
       "title": "`disallowedTools` + permission floor cover harness-internal/direct paths aliases miss (item 3)",
       "status": "proven",
       "citations": [
-        { "repo": "router", "tag": "phase-7b-runtime-sdk", "file": "test/conformance/rows.test.ts", "contains": "WS17-3" }
+        {
+          "repo": "router",
+          "tag": "phase-7b-runtime-sdk",
+          "file": "test/conformance/rows.test.ts",
+          "contains": "WS17-3"
+        }
       ],
       "note": "Proven in the router's own conformance table."
     },
     {
       "row": 4,
       "title": "Two official sessions under the spool: isolated discovery, delivery, hold/refuse, idle wake, zero visibility into `~/.claude` (item 4)",
-      "status": "proven",
+      "status": "partial",
       "citations": [
-        { "repo": "norma", "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts", "contains": "WS-17 §8 row 4" },
-        { "repo": "norma", "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts", "contains": "9a MEASURED: row 4 HOLD" },
-        { "repo": "norma", "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts", "contains": "9a MEASURED: row 4 REFUSE" },
-        { "repo": "norma", "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts", "contains": "9a MEASURED: row 4 IDLE WAKE" }
+        {
+          "repo": "norma",
+          "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts",
+          "contains": "WS-17 §8 row 4"
+        },
+        {
+          "repo": "norma",
+          "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts",
+          "contains": "9a MEASURED: row 4 HOLD"
+        },
+        {
+          "repo": "norma",
+          "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts",
+          "contains": "9a MEASURED: row 4 REFUSE"
+        },
+        {
+          "repo": "norma",
+          "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts",
+          "contains": "9a MEASURED: row 4 IDLE WAKE"
+        }
       ],
-      "note": "PROVEN (8d + 9a): two official sessions, one spool — isolated discovery, delivery (SendMessage A->B), a planted ~/.claude byte-identical, HOLD (queued, delivered into B's next request body) and REFUSE (not_found, isError) match the spec on the real 0.3.250 binary; crash mid-turn -> resumable, next send = generation 2, matches WS-16 §14. The idle-wake half is a measured GAP, not proven: a genuinely `resumable` official session is refused `unavailable` exactly like an exited one, because router 0.0.3 exposes no cold-resume path (WS-15 §6.2) — carried to router 0.0.4."
+      "note": "PARTIAL — proven halves (8d + 9a): two official sessions, one spool — isolated discovery, delivery (SendMessage A->B), a planted ~/.claude byte-identical, HOLD (queued, delivered into B's next request body) and REFUSE (not_found, isError) match the spec on the real 0.3.250 binary; crash mid-turn -> resumable, next send = generation 2, matches WS-16 §14. The idle-wake half is a measured GAP, not proven: a genuinely `resumable` official session is refused `unavailable` exactly like an exited one, because router 0.0.3 exposes no cold-resume path (WS-15 §6.2) — carried to router 0.0.4."
     },
     {
       "row": 5,
       "title": "Official parent resume after restart restores completed children for native SendMessage resume (item 5)",
-      "status": "proven",
+      "status": "partial",
       "citations": [
-        { "repo": "norma", "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts", "contains": "WS-17 §8 row 5" }
+        {
+          "repo": "norma",
+          "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts",
+          "contains": "WS-17 §8 row 5"
+        }
       ],
-      "note": "PROVEN — refusal branch only (8d): native SendMessage to a completed official child, across a directory restart, refuses `unavailable` (WS-15 §6.2 wording). Router 0.0.3 exposes no official cold-resume path, so the restore direction itself stays unmeasured — carried to router 0.0.4."
+      "note": "PARTIAL — refusal branch only (8d): native SendMessage to a completed official child, across a directory restart, refuses `unavailable` (WS-15 §6.2 wording). Router 0.0.3 exposes no official cold-resume path, so the restore direction itself stays unmeasured — carried to router 0.0.4."
     },
     {
       "row": 6,
       "title": "Winter child identity + ResumeContext reconstructed after daemon restart (item 6)",
       "status": "proven",
       "citations": [
-        { "repo": "norma", "file": "packages/core/test/runtime-state/children-restart.test.ts", "contains": "WS-17 §8 row 6" }
+        {
+          "repo": "norma",
+          "file": "packages/core/test/runtime-state/children-restart.test.ts",
+          "contains": "WS-17 §8 row 6"
+        }
       ],
       "note": "Proven 8b, re-confirmed 8d: a second registry over the same home reconstructs the child whole."
     },
@@ -63,7 +102,12 @@
       "title": "Messaging: addressing, ambiguity/staleness, dedupe, queue bounds, TTL, retries, crash windows, loop prevention, reply routing, `notify_when_idle` (item 7)",
       "status": "proven",
       "citations": [
-        { "repo": "router", "tag": "phase-7b-runtime-sdk", "file": "test/conformance/rows.test.ts", "contains": "WS17-7" }
+        {
+          "repo": "router",
+          "tag": "phase-7b-runtime-sdk",
+          "file": "test/conformance/rows.test.ts",
+          "contains": "WS17-7"
+        }
       ],
       "note": "Proven in the router's own conformance table."
     },
@@ -72,7 +116,12 @@
       "title": "Shared filesystem `SessionStore` + pinned dialect: Claude→Winter, Winter→Claude, and both round-trips at every advertised level (item 8)",
       "status": "proven",
       "citations": [
-        { "repo": "router", "tag": "phase-7b-runtime-sdk", "file": "test/conformance/rows.test.ts", "contains": "WS17-8" }
+        {
+          "repo": "router",
+          "tag": "phase-7b-runtime-sdk",
+          "file": "test/conformance/rows.test.ts",
+          "contains": "WS17-8"
+        }
       ],
       "note": "Proven in the router's own conformance table; the official producer leg is proven through the door's real-runtime bed."
     },
@@ -81,8 +130,16 @@
       "title": "Capability matrix published across all axes, implemented vs correctly-unavailable distinguished (item 9)",
       "status": "partial",
       "citations": [
-        { "repo": "norma", "file": "packages/core/capability-matrix.json", "contains": "packages/core/scripts/capability-matrix.ts" },
-        { "repo": "norma", "file": "packages/core/test/capability-matrix.test.ts", "contains": "the drift tripwire for" }
+        {
+          "repo": "norma",
+          "file": "packages/core/capability-matrix.json",
+          "contains": "packages/core/scripts/capability-matrix.ts"
+        },
+        {
+          "repo": "norma",
+          "file": "packages/core/test/capability-matrix.test.ts",
+          "contains": "the drift tripwire for"
+        }
       ],
       "note": "Partial as measured in 8d: Norma's mode × runtime × surface rows are generated and drift-pinned (packages/core/capability-matrix.json, P8d-15). The other axes of the matrix are the router/SDK repo's own obligation, not proven here."
     },
@@ -98,7 +155,12 @@
       "title": "Delete/rebuild of the disposable `sessions/index.db` preserves runtime mappings, backend IDs, cursors (item 11)",
       "status": "proven",
       "citations": [
-        { "repo": "router", "tag": "phase-7b-runtime-sdk", "file": "test/conformance/rows.test.ts", "contains": "WS17-11" }
+        {
+          "repo": "router",
+          "tag": "phase-7b-runtime-sdk",
+          "file": "test/conformance/rows.test.ts",
+          "contains": "WS17-11"
+        }
       ],
       "note": "Proven in the router's own conformance table."
     },
@@ -107,7 +169,12 @@
       "title": "Documented message-size, 50-accepted/100-held queues, 5-minute dialog expiry, 12-hour idle subscription, permission-class behavior; inert `@` mentions retained (item 12)",
       "status": "proven",
       "citations": [
-        { "repo": "router", "tag": "phase-7b-runtime-sdk", "file": "test/conformance/rows.test.ts", "contains": "WS17-12" }
+        {
+          "repo": "router",
+          "tag": "phase-7b-runtime-sdk",
+          "file": "test/conformance/rows.test.ts",
+          "contains": "WS17-12"
+        }
       ],
       "note": "Proven in the router's own conformance table."
     },
@@ -116,8 +183,17 @@
       "title": "No verbatim all-rights-reserved artifacts in the Winter distribution; ephemeral CI fetch only (item 13)",
       "status": "proven",
       "citations": [
-        { "repo": "router", "tag": "phase-7b-runtime-sdk", "file": "test/conformance/rows.test.ts", "contains": "WS17-13" },
-        { "repo": "norma", "file": "scripts/embed-runtimes.sh", "contains": "VERIFY (never re-sign)" }
+        {
+          "repo": "router",
+          "tag": "phase-7b-runtime-sdk",
+          "file": "test/conformance/rows.test.ts",
+          "contains": "WS17-13"
+        },
+        {
+          "repo": "norma",
+          "file": "scripts/embed-runtimes.sh",
+          "contains": "VERIFY (never re-sign)"
+        }
       ],
       "note": "The router's proof is scoped to its own distribution (the pinned package, its bundle, or a vendored copy — never tracked; the OPTIONAL peer named in a REACHABLE declaration is rejected). Separately, by the user's P9c-1 ruling: the Winter DISTRIBUTION (the `@yanlinglabs/winter-agent-sdk*` packages) carries no all-rights-reserved artifact, while the APP embeds the unmodified `claude` binary under Anthropic's published permission — `scripts/embed-runtimes.sh` VERIFIES (never re-signs) that embedded binary's Developer ID signature and hardened-runtime flag before every Release build."
     },
@@ -126,7 +202,12 @@
       "title": "Native + aliased Agent/worktree, durable Cron, workflow, saved-approval, plan-mode, and arbitrary file/shell paths cannot create `CLAUDE.md`, `.claude/`, or `~/.claude/plans` under strict policy (item 14)",
       "status": "proven",
       "citations": [
-        { "repo": "router", "tag": "phase-7b-runtime-sdk", "file": "test/conformance/rows.test.ts", "contains": "WS17-14" }
+        {
+          "repo": "router",
+          "tag": "phase-7b-runtime-sdk",
+          "file": "test/conformance/rows.test.ts",
+          "contains": "WS17-14"
+        }
       ],
       "note": "Proven in the router's own conformance table, with a standing qualification: shell-escape spellings are caught post-hoc by the sweep, never pre-hoc."
     },
@@ -135,18 +216,35 @@
       "title": "Canonical memory + the D18 temp layout `/private/tmp/winter-<uid>/<engine>-<uid>/<key>/<uuid>/{scratchpad,tasks}`; cross-engine temp continuity (Claude→Winter in-place adoption; Winter→Claude clone-copy at the barrier; round trip stabilizes in the claude engine dir); vendor temp roots reported honestly; supervised pre-cleanup reconciliation; default-spawn `mirror_error` handoff refusal; entire-adapter projection before any all-Winter-names claim; `$bunfs` extraction avoided or tested (item 15)",
       "status": "proven",
       "citations": [
-        { "repo": "router", "tag": "phase-7b-runtime-sdk", "file": "test/conformance/rows.test.ts", "contains": "WS17-15" }
+        {
+          "repo": "router",
+          "tag": "phase-7b-runtime-sdk",
+          "file": "test/conformance/rows.test.ts",
+          "contains": "WS17-15"
+        }
       ],
-      "note": "Proven in the router's own conformance table."
+      "note": "Proven in the router's own conformance table; the official producer leg is proven through the door's real-runtime bed (hermetic, the four traffic opt-outs)."
     },
     {
       "row": 16,
       "title": "Standalone SDK launches its packaged runtime without the app; the app consumes the identical versioned artifact (companion §12.9)",
       "status": "proven",
       "citations": [
-        { "repo": "norma", "file": "scripts/release-lib.ts", "contains": "row16IdentityCheck" },
-        { "repo": "norma", "file": "scripts/stage-runtimes.ts", "contains": "platform-package" },
-        { "repo": "norma", "file": "packages/core/src/runtime-sdk/bundle-layout.ts", "contains": "winterSourceOf" }
+        {
+          "repo": "norma",
+          "file": "scripts/release-lib.ts",
+          "contains": "row16IdentityCheck"
+        },
+        {
+          "repo": "norma",
+          "file": "scripts/stage-runtimes.ts",
+          "contains": "platform-package"
+        },
+        {
+          "repo": "norma",
+          "file": "packages/core/src/runtime-sdk/bundle-layout.ts",
+          "contains": "winterSourceOf"
+        }
       ],
       "note": "PROVEN (9a): `@yanlinglabs/winter-agent-sdk-darwin-arm64@0.0.5` is on npm, built on a macOS arm64 runner from a path-neutral copy and published in lockstep with the wrapper, which pins the exact version as an optional dependency. The app's `stage-runtimes.ts` takes `winter` from the installed platform package (dual-hop resolution through the wrapper's own node_modules nesting; version-gated against REQUIRED_WINTER_AGENT_SDK). `release.ts`'s `row16IdentityCheck` requires the embedded pre-sign SHA-256 to equal the npm-shipped file's for a non-dry-run release (`--allow-checkout-winter` is the loud rehearsal escape); CI's verify job proves it without any SDK checkout."
     },
@@ -155,7 +253,12 @@
       "title": "Two identical raw model IDs behind different providers keep distinct provider-qualified identity/credentials/continuation/resume routes (companion §12.10)",
       "status": "proven",
       "citations": [
-        { "repo": "router", "tag": "phase-7b-runtime-sdk", "file": "test/conformance/rows.test.ts", "contains": "WS17-17" }
+        {
+          "repo": "router",
+          "tag": "phase-7b-runtime-sdk",
+          "file": "test/conformance/rows.test.ts",
+          "contains": "WS17-17"
+        }
       ],
       "note": "Proven in the router's own conformance table."
     },
@@ -164,7 +267,11 @@
       "title": "Declaration, request-schema, behavioral-trace, provider-adapter, TS package, core, protocol, and Swift client suites pass separately (item 16 / companion §12.11)",
       "status": "proven",
       "citations": [
-        { "repo": "norma", "file": ".github/workflows/ci.yml", "contains": "verify (workflow, runtime-state, runtimes)" }
+        {
+          "repo": "norma",
+          "file": ".github/workflows/ci.yml",
+          "contains": "verify (workflow, runtime-state, runtimes)"
+        }
       ],
       "note": "Proven 8d, re-confirmed 9a: app-repo CI runs protocol, core, plugin-sdk, cli, typecheck ×2, codegen, Swift (WinterProtocol + WinterKit) and the three compiled proofs (workflow, runtime-state, runtimes) as separate jobs; the SDK repo adds a per-push macOS build-platform job."
     }
