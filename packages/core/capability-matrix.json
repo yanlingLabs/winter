@@ -1,0 +1,132 @@
+{
+  "schema": 1,
+  "generatedBy": "packages/core/scripts/capability-matrix.ts",
+  "rows": [
+    {
+      "mode": "code",
+      "runtime": "winter-agent",
+      "surface": "cli",
+      "cell": "implemented",
+      "reason": "the Winter leg serves every mode (Task 17) — reachable from this surface"
+    },
+    {
+      "mode": "code",
+      "runtime": "claude-agent",
+      "surface": "cli",
+      "cell": "implemented",
+      "reason": "the official leg serves Code-mode sessions on a Claude catalog model with an Anthropic key (session-driver.ts's decideRuntime -> createOfficial), reachable from this surface"
+    },
+    {
+      "mode": "code",
+      "runtime": "winter-agent",
+      "surface": "mac",
+      "cell": "implemented",
+      "reason": "the Winter leg serves every mode (Task 17) — reachable from this surface"
+    },
+    {
+      "mode": "code",
+      "runtime": "claude-agent",
+      "surface": "mac",
+      "cell": "implemented",
+      "reason": "the official leg serves Code-mode sessions on a Claude catalog model with an Anthropic key (session-driver.ts's decideRuntime -> createOfficial), reachable from this surface"
+    },
+    {
+      "mode": "code",
+      "runtime": "winter-agent",
+      "surface": "ios-remote",
+      "cell": "implemented",
+      "reason": "the Winter leg serves every mode (Task 17) — reachable from this surface"
+    },
+    {
+      "mode": "code",
+      "runtime": "claude-agent",
+      "surface": "ios-remote",
+      "cell": "implemented",
+      "reason": "the official leg serves Code-mode sessions on a Claude catalog model with an Anthropic key (session-driver.ts's decideRuntime -> createOfficial), reachable from this surface"
+    },
+    {
+      "mode": "dispatch",
+      "runtime": "winter-agent",
+      "surface": "cli",
+      "cell": "correctly-unavailable",
+      "reason": "the TUI/CLI is code-only (packages/cli/src/session-mode.ts) — dispatch sessions are apps/orb-only and cannot be created or attached from here"
+    },
+    {
+      "mode": "dispatch",
+      "runtime": "claude-agent",
+      "surface": "cli",
+      "cell": "correctly-unavailable",
+      "reason": "the TUI/CLI is code-only (packages/cli/src/session-mode.ts) — dispatch sessions are apps/orb-only and cannot be created or attached from here"
+    },
+    {
+      "mode": "dispatch",
+      "runtime": "winter-agent",
+      "surface": "mac",
+      "cell": "implemented",
+      "reason": "the Winter leg serves every mode (Task 17) — reachable from this surface"
+    },
+    {
+      "mode": "dispatch",
+      "runtime": "claude-agent",
+      "surface": "mac",
+      "cell": "correctly-unavailable",
+      "reason": "SessionDispatchParams carries no model field at all (methods.ts) — the dispatch singleton can never name a Claude catalog model for the router to route on"
+    },
+    {
+      "mode": "dispatch",
+      "runtime": "winter-agent",
+      "surface": "ios-remote",
+      "cell": "implemented",
+      "reason": "the Winter leg serves every mode (Task 17) — reachable from this surface"
+    },
+    {
+      "mode": "dispatch",
+      "runtime": "claude-agent",
+      "surface": "ios-remote",
+      "cell": "correctly-unavailable",
+      "reason": "SessionDispatchParams carries no model field at all (methods.ts) — the dispatch singleton can never name a Claude catalog model for the router to route on"
+    },
+    {
+      "mode": "chat",
+      "runtime": "winter-agent",
+      "surface": "cli",
+      "cell": "correctly-unavailable",
+      "reason": "the TUI/CLI is code-only (packages/cli/src/session-mode.ts) — chat sessions are apps-only and cannot be created or attached from here"
+    },
+    {
+      "mode": "chat",
+      "runtime": "claude-agent",
+      "surface": "cli",
+      "cell": "correctly-unavailable",
+      "reason": "the TUI/CLI is code-only (packages/cli/src/session-mode.ts) — chat sessions are apps-only and cannot be created or attached from here"
+    },
+    {
+      "mode": "chat",
+      "runtime": "winter-agent",
+      "surface": "mac",
+      "cell": "implemented",
+      "reason": "the Winter leg serves every mode (Task 17) — reachable from this surface; chat's own tool registry excludes 46 Winter built-in(s) by design (runtime-sdk/mode-options.ts's disallowedToolsFor) — narrower by mode policy, not a runtime/surface gate"
+    },
+    {
+      "mode": "chat",
+      "runtime": "claude-agent",
+      "surface": "mac",
+      "cell": "correctly-unavailable",
+      "reason": "the official leg ships Code-only (P8c-1/P8c-2 policy, runtime-sdk/create.ts's official env block) — decideRuntime's own bail-outs never route a chat session to the claude-agent leg"
+    },
+    {
+      "mode": "chat",
+      "runtime": "winter-agent",
+      "surface": "ios-remote",
+      "cell": "implemented",
+      "reason": "the Winter leg serves every mode (Task 17) — reachable from this surface; chat's own tool registry excludes 46 Winter built-in(s) by design (runtime-sdk/mode-options.ts's disallowedToolsFor) — narrower by mode policy, not a runtime/surface gate"
+    },
+    {
+      "mode": "chat",
+      "runtime": "claude-agent",
+      "surface": "ios-remote",
+      "cell": "correctly-unavailable",
+      "reason": "the official leg ships Code-only (P8c-1/P8c-2 policy, runtime-sdk/create.ts's official env block) — decideRuntime's own bail-outs never route a chat session to the claude-agent leg"
+    }
+  ]
+}
