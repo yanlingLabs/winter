@@ -339,23 +339,23 @@ final class OfficeDocsCommandTests: XCTestCase {
     }
 
     /// Multiple occurrences, counted by us and cross-checked against the engine's boolean — and the
-    /// harder half: `replaceWith` CONTAINING `find`. Replacing "WINTER" with "WINTER INC" leaves
-    /// plenty of "WINTER"s behind, so any verification written as "no occurrences of `find` remain"
+    /// harder half: `replaceWith` CONTAINING `find`. Replacing "NORMA" with "NORMA INC" leaves
+    /// plenty of "NORMA"s behind, so any verification written as "no occurrences of `find` remain"
     /// would be wrong here. The implementation verifies by full expected-text equality instead, which
     /// this drill is the live proof of.
     func testLiveDocsReplaceHandlesMultipleOccurrencesAndAReplacementContainingTheSearchText() async throws {
         let (path, host, _) = try await openLive("two-page.odt")
         let result = await send(command("office.docs.replace",
-                                        args: ["path": path, "find": "WINTER", "replaceWith": "WINTER INC"],
+                                        args: ["path": path, "find": "NORMA", "replaceWith": "NORMA INC"],
                                         sessionId: "S1", commandId: "pcmd_replace_multi"), through: host)
         XCTAssertTrue(result.ok, "\(result)")
         XCTAssertTrue((result.result ?? "").contains("replaced 2 occurrences"),
-                      "\"WINTER\" occurs in paragraphs 1 and 3: \(result)")
+                      "\"NORMA\" occurs in paragraphs 1 and 3: \(result)")
 
         let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
-        XCTAssertTrue(contentXML.contains("WINTER INC GATE"), "paragraph 1 must be replaced: \(contentXML.prefix(0))")
-        XCTAssertTrue(contentXML.contains("WINTER INC PAGE TWO"), "paragraph 3 must be replaced too")
-        XCTAssertFalse(contentXML.contains("WINTER INC INC"),
+        XCTAssertTrue(contentXML.contains("NORMA INC GATE"), "paragraph 1 must be replaced: \(contentXML.prefix(0))")
+        XCTAssertTrue(contentXML.contains("NORMA INC PAGE TWO"), "paragraph 3 must be replaced too")
+        XCTAssertFalse(contentXML.contains("NORMA INC INC"),
                        "the replacement must not have been applied to its own output")
     }
 
