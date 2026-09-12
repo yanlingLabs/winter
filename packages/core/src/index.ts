@@ -46,7 +46,7 @@ export {
   readCredentialMaterial, writeCredentialMaterial, clearCredentialMaterial,
   readOpenAiApiKey, writeOpenAiApiKey,
   migrateLegacyCredentialMaterial,
-  // P8d-13: relocated here from the now-deleted `providers/codex-oauth.ts` — see
+  // Phase 8d task 2.4: relocated here from the now-deleted `providers/codex-oauth.ts` — see
   // `CodexAuthStore`'s own doc comment in `auth/credential-material.ts`.
   CodexAuthStore, CODEX_SECRET_NAMES,
   type CredentialMaterial, type ApiKeyMaterial, type OauthMaterial, type BearerMaterial, type CredentialMigrationReport,

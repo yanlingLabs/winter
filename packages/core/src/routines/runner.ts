@@ -9,7 +9,7 @@ import type { RoutineRunner } from "./scheduler";
 // `code === "rate_limit"` check. This message-prefix match remains as the FALLBACK for an
 // `agent_error` with no `code` at all (an older log, or one of engine.ts's two synthetic
 // agent_error emit sites — "no cwd" / context cap — which have no provider code to carry).
-// P8d-13: the message-prefix producer this fallback was originally paired with
+// Phase 8d task 2.4: the message-prefix producer this fallback was originally paired with
 // (`providers/openai-compatible.ts`'s `mapHttpError`) is gone — Norma's internal model calls now
 // run over `@yanlinglabs/winter-provider-runtime` adapters (`providers/runtime-provider.ts`), whose
 // own error messages are NOT guaranteed to start with "HTTP 429". This fallback is therefore a

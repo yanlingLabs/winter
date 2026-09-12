@@ -52,7 +52,7 @@ describe("parseProviderErrorCode", () => {
   });
 });
 
-// P8d-13: `mapHttpError`'s own describe block was removed here when `providers/openai-compatible.ts`
+// Phase 8d task 2.4: `mapHttpError`'s own describe block was removed here when `providers/openai-compatible.ts`
 // was deleted (its `CodexOAuthProvider`/`OpenAICompatibleProvider` callers — the only two —
 // were both superseded by `providers/runtime-provider.ts` in Winter Phase 8c). The 200-char-cap
 // structured-code regression it guarded (`parseProviderErrorCode` above still guards the parsing

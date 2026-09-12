@@ -1166,10 +1166,16 @@ export async function startDaemon(opts: {
     ...(runtime === undefined ? {} : { durable: createSinkCallStore(runtime.db) }),
   });
   hub.addObserver((event) => {
-    // P8d-13: the generation scopes the durable key `(session, generation, callId)`.
-    const generation = runtime?.records.get(event.sessionId)?.generation;
-    if (event.type === "tool_call") sinks.onToolCall({ ...event, generation });
-    else if (event.type === "tool_result") sinks.onToolResult({ ...event, generation });
+    // Nit 1 (whole-branch review): `hub.addObserver` fires for EVERY appended event of EVERY
+    // session, both legs — the generation lookup only matters to the two branches below, so it is
+    // computed inside each of them instead of once up front, and every other event type (the vast
+    // majority of traffic) never pays for a `records.get()` it has no use for.
+    if (event.type === "tool_call") {
+      // P8d-13: the generation scopes the durable key `(session, generation, callId)`.
+      sinks.onToolCall({ ...event, generation: runtime?.records.get(event.sessionId)?.generation });
+    } else if (event.type === "tool_result") {
+      sinks.onToolResult({ ...event, generation: runtime?.records.get(event.sessionId)?.generation });
+    }
   });
   const winterDrivers: WinterSessionDrivers = createWinterSessionDrivers({
     home: normaHome,

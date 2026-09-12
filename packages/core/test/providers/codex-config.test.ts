@@ -1,4 +1,4 @@
-// P8d-13: relocated from `codex-oauth.test.ts` (deleted alongside `providers/codex-oauth.ts` —
+// Phase 8d task 2.4: relocated from `codex-oauth.test.ts` (deleted alongside `providers/codex-oauth.ts` —
 // `CodexOAuthProvider`, the class that test file otherwise covered, was superseded by
 // `providers/runtime-provider.ts`'s `createCodexOauthRuntimeProvider` in Winter Phase 8c and never
 // re-added). These tests are about `codex-config.ts`'s own `CODEX_MODELS`/`DEFAULT_CODEX_MODEL`
