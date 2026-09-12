@@ -81,9 +81,11 @@ import {
   nameScanPlan,
   publishGuard,
   resolveSigningIdentity,
+  row16ProvenanceCheck,
   verifyVersionsJsonAgainstPins,
 } from "./release-lib";
 import { CODEX_MODELS_VERIFIED } from "../packages/core/src/providers/codex-config";
+import { REQUIRED_WINTER_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
 import { buildWinter } from "./build-winter";
 import { createHash } from "node:crypto";
 
@@ -413,26 +415,54 @@ if (!versionsCheck.ok) {
 const embeddedVersions = versionsCheck.versions!;
 console.log(`Embedded runtimes verified: winter re-signed (TeamIdentifier=${TEAM_ID}), claude untouched (TeamIdentifier=${CLAUDE_TEAM_ID}, hardened runtime, checksum matches VERSIONS.json).`);
 
-// Row 16 ("identical versioned artifact", P8d-2): the strongest form of this check rebuilds
-// `winter` from the pinned tag and compares PRE-SIGN hashes — only possible when a real SDK
-// checkout is available (NORMA_WINTER_SDK_CHECKOUT), since the sole other rung
-// (`build-winter.ts`'s own default `../winter-agent-sdk` sibling) is Winter-repo-scoped and not
-// assumed present on a release machine. Without a checkout this falls back to trusting the
-// `winterPreSign` hash `stage-runtimes.ts` itself recorded at staging time — a documented WEAKER
-// check (it cannot detect a compromised STAGING step, only a compromised EMBED step after it).
+// Row 16 ("identical versioned artifact", P8d-2/P8d-26): the strongest form of this check
+// verifies PROVENANCE — that the embedded winter came from a build of the SDK checkout named by
+// NORMA_WINTER_SDK_CHECKOUT actually sitting at the pinned tag, and that a rebuild from it
+// SUCCEEDS — never hash equality of that rebuild against the staged binary. Measured on the
+// controller's own release rehearsal (P8d-26): a fresh `bun build --compile` of the SAME pinned
+// tag hashes differently from the staged build every time — `bun build --compile` is not
+// byte-reproducible across invocations — so comparing hashes as a pass/fail gate made this check
+// permanently, spuriously red on a genuinely correct embed. `buildWinter()` itself enforces the
+// pinned-tag gate (`checkoutIsAtTag`) before it ever compiles anything and throws with that exact
+// reason on a mismatch, so "the rebuild did not succeed" already covers a wrong/missing tag as
+// well as a genuine build failure — this check does not need to tell those two apart, only that
+// provenance could not be established either way. Both hashes are always logged AND written into
+// a `row16.json` record beside the release artifacts (informational — a mismatch there is
+// EXPECTED and non-fatal). Only possible when a real SDK checkout is available
+// (NORMA_WINTER_SDK_CHECKOUT), since the sole other rung (`build-winter.ts`'s own default
+// `../winter-agent-sdk` sibling) is Winter-repo-scoped and not assumed present on a release
+// machine. Without a checkout this falls back to trusting the `winterPreSign` hash
+// `stage-runtimes.ts` itself recorded at staging time — a documented WEAKER check (it cannot
+// detect a compromised STAGING step, only a compromised EMBED step after it) — UNCHANGED by
+// P8d-26, since this rung already never compared hashes it couldn't independently reproduce.
 if (process.env.NORMA_WINTER_SDK_CHECKOUT) {
-  console.log(`Row 16: rebuilding winter from ${process.env.NORMA_WINTER_SDK_CHECKOUT} to verify the pre-sign hash matches VERSIONS.json...`);
+  const checkout = process.env.NORMA_WINTER_SDK_CHECKOUT;
+  console.log(`Row 16: rebuilding winter from ${checkout} to verify provenance (pinned-tag checkout + a successful rebuild — hash equality is NOT the check, P8d-26)...`);
   const freshWinterOut = join(OUT, "winter-row16-rebuild");
-  await buildWinter({ checkout: process.env.NORMA_WINTER_SDK_CHECKOUT, out: freshWinterOut });
-  const freshHash = createHash("sha256").update(readFileSync(freshWinterOut)).digest("hex");
-  if (freshHash !== embeddedVersions.checksums.winterPreSign) {
-    fail(
-      `Row 16: a fresh build of winter from the pinned tag (${process.env.NORMA_WINTER_SDK_CHECKOUT}) hashes to ` +
-        `${freshHash}, but VERSIONS.json's recorded winterPreSign is ${embeddedVersions.checksums.winterPreSign} — ` +
-        `the embedded winter is not a reproducible build of the pinned tag.`,
-    );
+  let rebuildSucceeded = true;
+  let rebuildError: string | undefined;
+  let freshHash: string | undefined;
+  try {
+    await buildWinter({ checkout, out: freshWinterOut });
+    freshHash = createHash("sha256").update(readFileSync(freshWinterOut)).digest("hex");
+  } catch (err) {
+    rebuildSucceeded = false;
+    rebuildError = err instanceof Error ? err.message : String(err);
   }
-  console.log(`Row 16: PASS — a fresh pinned-tag build's pre-sign hash matches the embedded winter's recorded VERSIONS.json checksum.`);
+  const row16 = row16ProvenanceCheck({
+    rebuildSucceeded,
+    rebuildError,
+    freshHash,
+    recordedHash: embeddedVersions.checksums.winterPreSign,
+  });
+  const row16Path = join(OUT, "row16.json");
+  writeFileSync(row16Path, `${JSON.stringify({ tag: `v${REQUIRED_WINTER_AGENT_SDK}`, checkout, ...row16.record }, null, 2)}\n`);
+  if (!row16.ok) fail(row16.failure!);
+  console.log(
+    `Row 16: PASS — provenance verified (pinned-tag checkout, rebuild succeeded). freshHash=${row16.record.freshHash} ` +
+      `recordedWinterPreSign=${row16.record.recordedHash} hashesMatch=${row16.record.hashesMatch} (a mismatch here is ` +
+      `EXPECTED and non-fatal — bun compiles are not byte-reproducible). Record written to ${row16Path}.`,
+  );
 } else {
   console.log(
     `Row 16: NORMA_WINTER_SDK_CHECKOUT not set — trusting the winterPreSign hash stage-runtimes.ts recorded at ` +

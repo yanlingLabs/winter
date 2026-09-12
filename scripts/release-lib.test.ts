@@ -11,6 +11,7 @@ import {
   preflight,
   publishGuard,
   resolveSigningIdentity,
+  row16ProvenanceCheck,
   verifyVersionsJsonAgainstPins,
 } from "./release-lib";
 import { REQUIRED_CLAUDE_AGENT_SDK, REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../packages/core/src/runtime-sdk/versions";
@@ -551,5 +552,54 @@ describe("catalogueStaleness (T2 review M2 — warn-only nudge in the release pi
     const r = catalogueStaleness({ verified: "soon", now: new Date("2026-09-01T00:00:00Z") });
     expect(r.stale).toBe(true);
     expect(r.line).toContain("not a parseable date");
+  });
+});
+
+describe("row16ProvenanceCheck (P8d-26: provenance, never rebuild-hash equality)", () => {
+  test("a successful rebuild whose hash DIFFERS from the staged build's does NOT fail — bun compiles are not byte-reproducible", () => {
+    const r = row16ProvenanceCheck({
+      rebuildSucceeded: true,
+      freshHash: "a".repeat(64),
+      recordedHash: "b".repeat(64),
+    });
+    expect(r.ok).toBe(true);
+    expect(r.failure).toBeUndefined();
+    expect(r.record.hashesMatch).toBe(false);
+    expect(r.record.freshHash).toBe("a".repeat(64));
+    expect(r.record.recordedHash).toBe("b".repeat(64));
+  });
+
+  test("a successful rebuild whose hash MATCHES is also ok, and reports hashesMatch: true", () => {
+    const same = "c".repeat(64);
+    const r = row16ProvenanceCheck({ rebuildSucceeded: true, freshHash: same, recordedHash: same });
+    expect(r.ok).toBe(true);
+    expect(r.record.hashesMatch).toBe(true);
+  });
+
+  test("a failed rebuild (e.g. the checkout is at the wrong tag — buildWinter's own checkoutIsAtTag gate) FAILS, naming the reason", () => {
+    const r = row16ProvenanceCheck({
+      rebuildSucceeded: false,
+      rebuildError: "build-winter: /checkout's HEAD carries 'v0.0.3', not v0.0.4; check out the pinned tag",
+      recordedHash: "d".repeat(64),
+    });
+    expect(r.ok).toBe(false);
+    expect(r.failure).toContain("v0.0.3");
+    expect(r.failure).toContain("not v0.0.4");
+    expect(r.record.rebuildSucceeded).toBe(false);
+    expect(r.record.freshHash).toBeUndefined();
+    expect(r.record.hashesMatch).toBeUndefined();
+  });
+
+  test("a failed rebuild with no error message still fails, with a fallback reason rather than 'undefined'", () => {
+    const r = row16ProvenanceCheck({ rebuildSucceeded: false, recordedHash: "e".repeat(64) });
+    expect(r.ok).toBe(false);
+    expect(r.failure).toContain("unknown reason");
+  });
+
+  test("the record always carries recordedHash, whether the rebuild succeeded or failed", () => {
+    const ok = row16ProvenanceCheck({ rebuildSucceeded: true, freshHash: "f".repeat(64), recordedHash: "g".repeat(64) });
+    const failed = row16ProvenanceCheck({ rebuildSucceeded: false, rebuildError: "boom", recordedHash: "g".repeat(64) });
+    expect(ok.record.recordedHash).toBe("g".repeat(64));
+    expect(failed.record.recordedHash).toBe("g".repeat(64));
   });
 });

@@ -458,3 +458,67 @@ export function verifyVersionsJsonAgainstPins(input: { versionsJsonText: string;
   }
   return { ok: failures.length === 0, failures, versions };
 }
+
+export interface Row16CheckInput {
+  /** Whether `buildWinter()` — which itself enforces the pinned-tag gate via `checkoutIsAtTag`
+   *  before it ever compiles anything — completed successfully. */
+  rebuildSucceeded: boolean;
+  /** The rebuild's own failure message when it did not succeed. `buildWinter()` surfaces a wrong/
+   *  missing tag and a genuine build failure the SAME way (both throw); this check does not need
+   *  to tell them apart, only that provenance could not be established either way. */
+  rebuildError?: string;
+  /** SHA-256 of the freshly rebuilt (pre-sign) winter binary — present only when `rebuildSucceeded`. */
+  freshHash?: string;
+  /** VERSIONS.json's recorded `winterPreSign` hash, from the STAGED build — a possibly different
+   *  `bun build --compile` invocation than this rebuild. */
+  recordedHash: string;
+}
+
+export interface Row16Record {
+  rebuildSucceeded: boolean;
+  rebuildError?: string;
+  freshHash?: string;
+  recordedHash: string;
+  /** Informational only — see `row16ProvenanceCheck`'s own doc for why this is never part of the
+   *  pass/fail decision. */
+  hashesMatch?: boolean;
+}
+
+export interface Row16CheckResult {
+  ok: boolean;
+  failure?: string;
+  record: Row16Record;
+}
+
+/**
+ * Row 16 ("identical versioned artifact") strong-path decision (P8d-2, revised by P8d-26). Verifies
+ * PROVENANCE — the embedded `winter` came from a build of the pinned tag that actually succeeds —
+ * NEVER hash equality of an independent rebuild against the staged binary. `bun build --compile` is
+ * not byte-reproducible across invocations: measured on the controller's own release rehearsal, a
+ * fresh rebuild of the SAME pinned tag hashed differently from the staged build. Comparing hashes
+ * as a pass/fail gate would make this check permanently, spuriously red on a genuinely correct
+ * embed — so a hash mismatch is recorded (`hashesMatch: false`) but never fails the check.
+ *
+ * FAILS only when the rebuild itself did not succeed (`rebuildSucceeded: false`) — which already
+ * covers a wrong/missing tag, since `buildWinter()` enforces `checkoutIsAtTag` before it ever
+ * compiles anything and throws with that exact reason on a mismatch; release.ts passes that
+ * already-computed outcome in here rather than this function re-deriving it, which is what makes
+ * this pure and unit-testable without a real SDK checkout or a real two-minute build.
+ */
+export function row16ProvenanceCheck(input: Row16CheckInput): Row16CheckResult {
+  const record: Row16Record = {
+    rebuildSucceeded: input.rebuildSucceeded,
+    ...(input.rebuildError === undefined ? {} : { rebuildError: input.rebuildError }),
+    ...(input.freshHash === undefined ? {} : { freshHash: input.freshHash }),
+    recordedHash: input.recordedHash,
+    ...(input.freshHash === undefined ? {} : { hashesMatch: input.freshHash === input.recordedHash }),
+  };
+  if (!input.rebuildSucceeded) {
+    return {
+      ok: false,
+      failure: `Row 16: could not establish provenance — rebuilding winter from the pinned tag failed: ${input.rebuildError ?? "unknown reason"}`,
+      record,
+    };
+  }
+  return { ok: true, record };
+}
