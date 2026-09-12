@@ -35,6 +35,10 @@ brew tap yanlingLabs/norma
 brew install --cask winter
 ```
 
+The `winter` cask lands with the first Winter release; until then the tap still ships the app
+under its pre-rename cask and command name — see the tap's current formula for the exact
+`brew install --cask` invocation.
+
 Or grab the latest `.dmg` from [Releases](https://github.com/yanlingLabs/norma/releases/latest),
 open it, and drag Winter to your Applications folder.
 
