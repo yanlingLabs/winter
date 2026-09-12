@@ -161,7 +161,11 @@ async function main(): Promise<void> {
       // injected `FileSecretStore` and the temp `NORMA_HOME`, not from the profile — the profile
       // only picks a Keychain service name (never reached) and the CLI's launchd label (not on this
       // path).
-      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir(), NORMA_HOME: tmpHome, NORMA_PROFILE: "dev" },
+      // Major 1 (whole-branch review): without this, `startRuntimeState`'s `claude-resume-*`
+      // staging sweep (P8d-12) falls back to the REAL machine's `os.tmpdir()` — the one thing this
+      // script's own header says it must never touch. Pointed at a subdir of the same temp home
+      // this script already `rm -rf`s in its `finally`.
+      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir(), NORMA_HOME: tmpHome, NORMA_PROFILE: "dev", NORMA_CLAUDE_RESUME_SCAN_ROOT: join(tmpHome, "claude-resume-scan") },
     });
     let stdout = "";
     let stderr = "";

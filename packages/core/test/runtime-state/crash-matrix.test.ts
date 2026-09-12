@@ -20,10 +20,14 @@ import { ISO, withTempHome } from "./support";
 const SELF = { pid: process.pid, startedAt: "2026-01-01T00:00:00.000Z" };
 const DEAD = { pid: 999_001, startedAt: "2026-01-01T00:00:00.000Z" };
 
-/** A recovery run over a temp home, with step 8's scan pointed at that home rather than at the
- *  developer's real `/private/tmp/norma-<uid>`. `probe` describes the machine the leases claim. */
+/** A recovery run over a temp home, with step 8's scan (AND, Major 1, its `claude-resume-*` staging
+ *  sweep) pointed at that home rather than at the developer's real `/private/tmp/norma-<uid>`.
+ *  This file calls `recoverRuntimeState` directly rather than through `startRuntimeState`, so
+ *  `support.ts`'s `NORMA_CLAUDE_RESUME_SCAN_ROOT` env seam is never consulted here — the explicit
+ *  dep is the only thing that keeps this file off the real machine's tmpdir. `probe` describes the
+ *  machine the leases claim. */
 const recover = (home: string, rs: RuntimeStateDb, store: SessionStore, probe?: LeaseProbe) =>
-  recoverRuntimeState({ home, rs, store, self: SELF, probe, tempScanRoot: join(home, "tmp-scan") });
+  recoverRuntimeState({ home, rs, store, self: SELF, probe, tempScanRoot: join(home, "tmp-scan"), claudeResumeScanRoot: join(home, "claude-resume-scan") });
 
 function seedRecord(rs: RuntimeStateDb, id: string): RuntimeSessionRecords {
   const records = new RuntimeSessionRecords(rs);
