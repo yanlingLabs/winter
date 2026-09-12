@@ -14,6 +14,8 @@ export { runWorkflowSubprocess } from "./workflows/subprocess-entry";
 // from THIS barrel — the same shape `runWorkflowSubprocess` above uses, and the only shape that
 // survives `bun build --compile` (a dynamic import keyed on a string does not resolve in $bunfs).
 export { runRuntimeStateProbe, type RuntimeStateProbeResult } from "./runtime-state/probe";
+export { runRuntimesProbe, type RuntimesProbeResult } from "./runtime-sdk/runtimes-probe";
+export { RUNTIME_BUNDLE_LAYOUT, bundleRuntimePath, parseVersionsJson, type VersionsJson, type RuntimeBundleEntry } from "./runtime-sdk/bundle-layout";
 export { WorkflowRuntime, type WorkflowRuntimeDeps, type WorkflowRuntimeEvent, type WorkflowLaunch } from "./workflows/runtime";
 export { WorkflowStore, type ResolvedWorkflow } from "./workflows/store";
 export {

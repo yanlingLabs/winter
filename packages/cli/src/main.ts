@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { resolveNormaHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, resolveNormaProfile } from "@norma/core";
+import { resolveNormaHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, runRuntimesProbe, resolveNormaProfile } from "@norma/core";
 import type { Settings } from "@norma/core";
 import { METHODS, type ApprovalPolicy, type Task } from "@norma/protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
@@ -1118,6 +1118,14 @@ if (import.meta.main) {
   // `__workflow-worker` branch above keeps its `includes` shape; it is not this batch's to change.
   if (process.argv[2] === "__runtime-state-probe") {
     const result = await runRuntimeStateProbe({ home: process.env.NORMA_HOME });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.exit(result.ok ? 0 : 1);
+  }
+  // Winter Phase 8d: the compiled-binary runtimes probe (`scripts/verify-runtimes-compiled.ts`) —
+  // same argv[2] shape and the same reasons as `__runtime-state-probe` above. Resolves both runtime
+  // ladders from THIS binary's execPath (the bundle rung is `<dirname(execPath)>/runtimes/…`).
+  if (process.argv[2] === "__runtimes-probe") {
+    const result = await runRuntimesProbe({ execPath: process.execPath, home: process.env.NORMA_HOME ?? "", env: process.env });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     process.exit(result.ok ? 0 : 1);
   }
