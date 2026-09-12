@@ -358,7 +358,21 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
       () =>
         executePlan(deps, plan).then(
           (outcome) => {
-            if (outcome.kind === "resumed") deps.store.setModel?.(sessionId, model);
+            if (outcome.kind === "resumed") {
+              deps.store.setModel?.(sessionId, model);
+              return;
+            }
+            // Minor 3 (whole-branch review): a deferred handoff that settles to `lossy_fork` or
+            // `blocked` used to leave no trace at all — the caller already got `{}` back at defer
+            // time (m5's own posture above), and neither of these outcomes writes to the store, so
+            // without this the runtime silently never moved and nothing said why. Kind + reason +
+            // session id ONLY — never the plan/selection itself, which can carry opaque provider
+            // state (this file's own header rule). `executePlan`'s own return only ever produces
+            // one of these three kinds, but its declared type is the full `PlanSwitchOutcome`, so
+            // the other kind is narrowed explicitly rather than asserted.
+            if (outcome.kind === "lossy_fork" || outcome.kind === "blocked") {
+              deps.log?.(`deferred handoff for ${sessionId} settled ${outcome.kind}: ${outcome.reason}`);
+            }
           },
           (err) => deps.log?.(`deferred handoff for ${sessionId} failed: ${err instanceof Error ? err.name : "unknown"}`),
         ),

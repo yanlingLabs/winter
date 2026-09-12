@@ -226,11 +226,12 @@ describe("planAndApplySwitch", () => {
   // write must skip the "deferred" outcome; this is the deferred path's own, later commit).
   describe("m5: the deferred handoff's model commit", () => {
     function deferredHarness(outcome: HandoffOutcome): {
-      run(): Promise<{ out: Awaited<ReturnType<typeof planAndApplySwitch>>; setModelCalls: Array<[string, string | null]>; resolveIdle: () => void; idlePromise: Promise<void> }>;
+      run(): Promise<{ out: Awaited<ReturnType<typeof planAndApplySwitch>>; setModelCalls: Array<[string, string | null]>; logLines: string[]; resolveIdle: () => void; idlePromise: Promise<void> }>;
     } {
       return {
         async run() {
           const setModelCalls: Array<[string, string | null]> = [];
+          const logLines: string[] = [];
           let resolveIdle: (() => void) | undefined;
           const idlePromise = new Promise<void>((resolve) => { resolveIdle = resolve; });
           const never = (): never => { throw new Error("not reached by this test"); };
@@ -255,42 +256,56 @@ describe("planAndApplySwitch", () => {
                 records, barrier, winter: fakeWinter({ live }),
                 runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
                 store: { meta: () => ({ mode: "code", cwd: "/x" }), setModel: (sid, model) => { setModelCalls.push([sid, model]); } },
+                log: (line) => { logLines.push(line); },
               }),
               "s1", "claude-sonnet-5", true,
             );
-            return { out, setModelCalls, resolveIdle: resolveIdle!, idlePromise };
+            return { out, setModelCalls, logLines, resolveIdle: resolveIdle!, idlePromise };
           });
         },
       };
     }
 
-    test("a `resumed` outcome commits the model, but only AFTER the barrier executes", async () => {
+    test("a `resumed` outcome commits the model, but only AFTER the barrier executes, and logs nothing", async () => {
       const { run } = deferredHarness({ kind: "resumed", selection: SELECTION("claude-agent") });
-      const { out, setModelCalls, resolveIdle, idlePromise } = await run();
+      const { out, setModelCalls, logLines, resolveIdle, idlePromise } = await run();
       expect(out).toEqual({ kind: "deferred" });
       expect(setModelCalls).toEqual([]); // never at defer time
       resolveIdle();
       await idlePromise;
       await Bun.sleep(10); // let the fire-and-forget continuation run
       expect(setModelCalls).toEqual([["s1", "claude-sonnet-5"]]);
+      expect(logLines).toEqual([]); // Minor 3's log line is for the NON-resumed outcomes only
     });
 
-    test("a `blocked` outcome never commits the model — the switch never actually happened", async () => {
+    // Minor 3 (whole-branch review): a deferred handoff settling to `blocked` used to leave no
+    // trace anywhere — the caller already got `{}` back at defer time, and `blocked` writes
+    // nothing to the store either. Exactly one log line, naming kind + reason + session id, and
+    // no store write.
+    test("a `blocked` outcome never commits the model — the switch never actually happened — and logs exactly once", async () => {
       const { run } = deferredHarness({ kind: "blocked", reason: "lease-held" });
-      const { setModelCalls, resolveIdle, idlePromise } = await run();
+      const { setModelCalls, logLines, resolveIdle, idlePromise } = await run();
       resolveIdle();
       await idlePromise;
       await Bun.sleep(10);
       expect(setModelCalls).toEqual([]);
+      expect(logLines).toHaveLength(1);
+      expect(logLines[0]).toContain("s1");
+      expect(logLines[0]).toContain("blocked");
+      expect(logLines[0]).toContain("lease-held");
     });
 
-    test("a `lossy-fork-offered` outcome never commits the model either", async () => {
+    test("a `lossy-fork-offered` outcome never commits the model either, and logs exactly once", async () => {
       const { run } = deferredHarness({ kind: "lossy-fork-offered", reason: "provider-native state would be dropped", step: 8 });
-      const { setModelCalls, resolveIdle, idlePromise } = await run();
+      const { setModelCalls, logLines, resolveIdle, idlePromise } = await run();
       resolveIdle();
       await idlePromise;
       await Bun.sleep(10);
       expect(setModelCalls).toEqual([]);
+      expect(logLines).toHaveLength(1);
+      expect(logLines[0]).toContain("s1");
+      expect(logLines[0]).toContain("lossy_fork");
+      expect(logLines[0]).toContain("provider-native state would be dropped");
     });
   });
 
