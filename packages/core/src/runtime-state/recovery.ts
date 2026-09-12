@@ -23,7 +23,8 @@
 // (`JSON.parse` echoes the corrupt bytes verbatim), and that payload is exactly the content the
 // runtime-state tables are trusted never to leak.
 import type { Database } from "bun:sqlite";
-import { readdirSync } from "node:fs";
+import { readdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionStore } from "../sessions/store";
 import type { RuntimeStateDb } from "./db";
@@ -75,6 +76,10 @@ export interface RecoveryDeps {
   /** Step 8's scan root. Defaults to §2's canonical `/private/tmp/norma-<uid>`; a test MUST point it
    *  at a temp directory, because the default is a real path on the developer's machine. */
   tempScanRoot?: string;
+  /** Step 8's SECOND scan root (P8d-12, WS-16 §10): the official leg's `claude-resume-*` staging
+   *  sweep. Defaults to `os.tmpdir()` — ALSO a real path on the developer's machine — so a test
+   *  MUST point this at a throwaway directory too, for the identical reason `tempScanRoot` must. */
+  claudeResumeScanRoot?: string;
   /**
    * "The product index has ALREADY been rebuilt in this process, since the lock was taken."
    *
@@ -488,7 +493,7 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
       });
     }
 
-    // ── 8. Lease-safe temp orphan scan — REPORT ONLY ─────────────────────────────────────────────
+    // ── 8. Lease-safe temp orphan scan — REPORT ONLY, plus P8d-12's staging SWEEP ────────────────
     // The canonical tree is `<scanRoot>/<temp-project-key>/<backend-session-uuid>/`, so an
     // authoritative root sits BELOW a direct child of the scan root. A child is an orphan only when no
     // recorded root lives inside it — anything shallower would report a whole project key as abandoned
@@ -504,11 +509,22 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
       );
       const scanRoot = deps.tempScanRoot ?? canonicalTempScanRoot();
       const scan = hooks.scanTempOrphans ?? (async (roots: string[]) => defaultTempScan(scanRoot, roots));
+      // P8d-12 (WS-16 §10): the ONE deletion this normally report-only step performs — a documented,
+      // narrow exception to this file's own header rule, bounded twice over (age AND unclaimed) and
+      // logged by COUNT only, never a path. `known` is reused as-is: a live `sdk-resume-staging` root
+      // is recorded in the SAME two columns the scan above already reads, under the SAME
+      // `active_local_write_root`/`local_write_root` names — no second query needed.
+      let claudeResumeRemoved = 0;
+      try {
+        claudeResumeRemoved = sweepClaudeResumeStaging(deps.claudeResumeScanRoot ?? tmpdir(), known);
+      } catch {
+        /* bounded: the staging sweep costs itself, never the rest of step 8 */
+      }
       try {
         const { orphans } = await scan([...known]);
-        finishStep(8, "ok", { root: scanRoot, known: known.size, orphans, deleted: 0 });
+        finishStep(8, "ok", { root: scanRoot, known: known.size, orphans, deleted: 0, claudeResumeRemoved });
       } catch (e) {
-        finishStep(8, "skipped", { root: scanRoot, known: known.size, errorName: e instanceof Error ? e.name : "unknown" });
+        finishStep(8, "skipped", { root: scanRoot, known: known.size, errorName: e instanceof Error ? e.name : "unknown", claudeResumeRemoved });
       }
     }
 
@@ -567,6 +583,63 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
     finishStep(12, "failed", { errorName: e instanceof Error ? e.name : "unknown" });
   }
   return finish();
+}
+
+/** WS-16 §10's own literal — repeated (not imported) in `runtime-sdk/mode-options.ts`'s
+ *  `controlPlaneDenyRules`, which names this constant right back; the two subsystems this phase
+ *  does not bridge with a shared module. */
+const CLAUDE_RESUME_PREFIX = "claude-resume-";
+
+/** A resume genuinely in flight is never this old — every drain/timeout window the router or the
+ *  official leg itself imposes is far shorter. Anything past this age under the staging root is
+ *  leaked, not live. */
+const CLAUDE_RESUME_STALE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * P8d-12 (WS-16 §10): sweep `claude-resume-*` staging directories — a DOCUMENTED, NARROW EXCEPTION
+ * to this file's own header rule ("step 8 reports and never deletes"). Two bounds, BOTH required,
+ * so this can never reach for a directory a live generation still needs:
+ *
+ *   - older than `CLAUDE_RESUME_STALE_MS` (mtime, real disk time — never the injectable `now()`
+ *     this file uses for its own writes, because a directory's age has to be judged against the
+ *     clock that actually wrote it), and
+ *   - not named in `known` — the SAME `local_write_root`/`active_local_write_root` set the scan
+ *     just above already built from `runtime_generations`/`runtime_sessions`, which is where a live
+ *     `sdk-resume-staging` root is recorded.
+ *
+ * NAMES NEVER LEAVE THIS FUNCTION — the caller receives a bare count, matching this whole step's
+ * "look and never open" discipline one deletion further: `readdirSync`/`statSync`/`rmSync` only,
+ * never a read of what is INSIDE a candidate directory. A directory that cannot be stat'd or removed
+ * is left for the next boot's pass rather than treated as a failure.
+ */
+function sweepClaudeResumeStaging(scanRoot: string, known: ReadonlySet<string>): number {
+  let entries: string[];
+  try {
+    entries = readdirSync(scanRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && e.name.startsWith(CLAUDE_RESUME_PREFIX))
+      .map((e) => e.name);
+  } catch {
+    return 0; // no temp root at all — nothing to sweep
+  }
+  let removed = 0;
+  for (const name of entries) {
+    const path = join(scanRoot, name);
+    if (known.has(path)) continue;
+    let ageMs: number;
+    try {
+      ageMs = Date.now() - statSync(path).mtimeMs;
+    } catch {
+      continue; // gone already, or unreadable — leave it for the next pass
+    }
+    if (ageMs < CLAUDE_RESUME_STALE_MS) continue;
+    try {
+      rmSync(path, { recursive: true, force: true });
+      removed++;
+    } catch {
+      /* best-effort: a directory that will not remove is left for the next pass */
+    }
+  }
+  return removed;
 }
 
 /**

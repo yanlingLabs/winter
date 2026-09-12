@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
@@ -101,7 +101,11 @@ const withHarness = (fn: (h: Harness) => Promise<void>): Promise<void> =>
         records: new RuntimeSessionRecords(rs),
         leases: new RuntimeLeases(rs, SELF()),
         children: new RuntimeChildren(rs),
-        run: (over = {}) => recoverRuntimeState({ home, rs, store, self: SELF(), tempScanRoot: join(home, "tmp-scan"), ...over }),
+        // `claudeResumeScanRoot` defaults here too — its OWN real-machine default is `os.tmpdir()`,
+        // exactly the trap `tempScanRoot` already guards against, and every test in this file goes
+        // through `h.run()`.
+        run: (over = {}) =>
+          recoverRuntimeState({ home, rs, store, self: SELF(), tempScanRoot: join(home, "tmp-scan"), claudeResumeScanRoot: join(home, "claude-resume-scan"), ...over }),
         attempts: () =>
           rs.db
             .query<AttemptRow, []>("SELECT step, winter_session_id, outcome, detail_json, daemon_pid FROM runtime_recovery_attempts ORDER BY id")
@@ -436,6 +440,80 @@ describe("recoverRuntimeState — WS-16 §13's twelve steps", () => {
       // Report only: 8a never deletes, and never opens a file under the scan root.
       expect(existsSync(orphan)).toBe(true);
       expect(existsSync(known)).toBe(true);
+    });
+  });
+
+  describe("P8d-12: the claude-resume-* staging sweep", () => {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const backdate = (path: string, ageMs: number): void => {
+      const at = (Date.now() - ageMs) / 1000;
+      utimesSync(path, at, at);
+    };
+
+    test("an unclaimed dir older than 24h is REMOVED, and the count is logged — never a path", async () => {
+      await withHarness(async (h) => {
+        const resumeScan = join(h.home, "claude-resume-scan");
+        const stale = join(resumeScan, "claude-resume-11111111-2222-4333-8444-555555555555");
+        mkdirSync(stale, { recursive: true });
+        backdate(stale, DAY_MS + 60_000);
+
+        const report = await h.run();
+        const step8 = report.steps.find((s) => s.step === 8)!;
+        expect(step8.detail.claudeResumeRemoved).toBe(1);
+        expect(JSON.stringify(step8.detail)).not.toContain(stale);
+        expect(existsSync(stale)).toBe(false);
+      });
+    });
+
+    test("a dir younger than 24h is left alone — a resume genuinely in flight is never this old", async () => {
+      await withHarness(async (h) => {
+        const resumeScan = join(h.home, "claude-resume-scan");
+        const fresh = join(resumeScan, "claude-resume-22222222-3333-4444-8555-666666666666");
+        mkdirSync(fresh, { recursive: true });
+        backdate(fresh, 60_000); // one minute old
+
+        const report = await h.run();
+        expect(report.steps.find((s) => s.step === 8)!.detail.claudeResumeRemoved).toBe(0);
+        expect(existsSync(fresh)).toBe(true);
+      });
+    });
+
+    test("a dir a LIVE generation names as its sdk-resume-staging root is never removed, however old", async () => {
+      await withHarness(async (h) => {
+        const resumeScan = join(h.home, "claude-resume-scan");
+        const claimed = join(resumeScan, "claude-resume-33333333-4444-4555-8666-777777777777");
+        mkdirSync(claimed, { recursive: true });
+        backdate(claimed, DAY_MS * 30);
+
+        h.records.create(newRecord(h.home, "s_claude"));
+        h.records.transition("s_claude", "ready");
+        h.records.bumpGeneration("s_claude", { runtimeKind: "claude-agent", localWriteRoot: claimed, localWriteRootKind: "sdk-resume-staging" });
+
+        const report = await h.run();
+        expect(report.steps.find((s) => s.step === 8)!.detail.claudeResumeRemoved).toBe(0);
+        expect(existsSync(claimed)).toBe(true);
+      });
+    });
+
+    test("a directory that does not match the claude-resume- prefix is never touched by this sweep", async () => {
+      await withHarness(async (h) => {
+        const resumeScan = join(h.home, "claude-resume-scan");
+        const unrelated = join(resumeScan, "not-claude-resume-at-all");
+        mkdirSync(unrelated, { recursive: true });
+        backdate(unrelated, DAY_MS * 30);
+
+        const report = await h.run();
+        expect(report.steps.find((s) => s.step === 8)!.detail.claudeResumeRemoved).toBe(0);
+        expect(existsSync(unrelated)).toBe(true);
+      });
+    });
+
+    test("a missing scan root costs nothing — no root yet is not a failure", async () => {
+      await withHarness(async (h) => {
+        const report = await h.run({ claudeResumeScanRoot: join(h.home, "never-created") });
+        expect(report.steps.find((s) => s.step === 8)!.detail.claudeResumeRemoved).toBe(0);
+        expect(report.ok).toBe(true);
+      });
     });
   });
 
