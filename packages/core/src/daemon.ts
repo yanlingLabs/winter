@@ -1054,7 +1054,7 @@ export async function startDaemon(opts: {
   const bashReviewer = agentProvider === null || agentProvider === undefined
     ? undefined
     : new BashReviewer({ provider: agentProvider, model: settings?.reviewer?.model });
-  const hooksFor = (session: CapabilitySession): { winter?: unknown; official?: unknown } =>
+  const hooksFor = (session: CapabilitySession) =>
     sessionHooksFor({
       sessionId: session.sessionId,
       home: normaHome,

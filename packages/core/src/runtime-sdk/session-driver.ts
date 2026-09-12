@@ -33,7 +33,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { classifyPermissionMode } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { PermissionClassLabel } from "@yanlinglabs/winter-agent-sdk/messaging";
-import type { EffortLevel, McpServerConfig, ProviderConnectionConfig } from "@yanlinglabs/winter-agent-sdk";
+import type { EffortLevel, McpServerConfig, Options, PermissionResult, ProviderConnectionConfig } from "@yanlinglabs/winter-agent-sdk";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { isSelectionRefusal, type RuntimeDirectoryEntry, type RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
@@ -48,7 +48,7 @@ import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
 import { winterOptionsFromSettings, type Settings } from "../settings";
-import { canUseToolFor } from "./approval-bridge";
+import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import type { NormaRuntimeSdk, SessionMode } from "./create";
 import { credentialPresenceFrom, credentialRefFor } from "./keychain";
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
@@ -177,22 +177,24 @@ export interface WinterLegDeps {
   extraMcpServers?: (session: CapabilitySession) => Record<string, McpServerConfig>;
   log?: (line: string) => void;
   /**
-   * P8c-14 (Neighbours' contracts): lane 2's `planBridgeFor(...)` module, wired at the CONTROLLER's
-   * merge — this file never imports it. `onExitPlanMode` is consulted in `canUseTool`'s composition
-   * BEFORE the generic bridge when `toolName === "ExitPlanMode"`; that composition lives in
-   * `approval-bridge.ts` (not this file), so this seam does nothing on its own today — it exists so
-   * `WinterLegDeps` already has the field lane 2 wires a value into, on BOTH legs (Winter's own
-   * `canUseToolFor` call sites and the official leg's `officialBrokerFor`, once
-   * `CanUseToolDeps.planBridge` lands alongside it).
+   * P8c-14 (integration round 2): lane 2's `planBridgeFor(...)` module — this file never imports
+   * it, only threads a value of this shape through to both legs' `CanUseToolDeps.planBridge`
+   * (`approval-bridge.ts`, consulted BEFORE the generic gate/never-prompt logic when
+   * `toolName === "ExitPlanMode"`). Now typed EXACTLY as `CanUseToolDeps.planBridge` (widened from
+   * the original `unknown`-shaped placeholder once a real consumer existed on both legs) — the
+   * Winter path passes it straight into `canUseToolFor` below; the official path passes it into
+   * `assembleOfficial`'s `canUseToolDeps` (`officialBrokerFor` reads the SAME field).
    */
-  planBridge?: { onExitPlanMode(req: unknown): Promise<unknown> };
+  planBridge?: { onExitPlanMode(req: BridgedApprovalRequest): Promise<PermissionResult> };
   /**
-   * P8c-14 (Neighbours' contracts): lane 3's `sessionHooksFor(...)` module, wired at the
-   * controller's merge — this file never imports it. `.official` is wired into the official leg's
-   * `OfficialInputDeps.hooks` below (`assembleOfficial`'s own `inputDeps()`); `.winter` is left to
-   * lane 3's own `mode-options.ts` wiring (this file's `buildWinterOptions` call is unchanged).
+   * P8c-14 (integration round 2): lane 3's `sessionHooksFor(...)` module — this file never imports
+   * it, only threads its result through. `.official` is wired into the official leg's
+   * `OfficialInputDeps.hooks` below (`assembleOfficial`'s own `inputDeps()`); `.winter` is now
+   * threaded into the Winter incarnation's `buildWinterOptions({..., hooks})` call above (`.winter`
+   * TYPED as `Options["hooks"]`, not `unknown`, since `mode-options.ts`'s `WinterOptionsInput.hooks`
+   * needs that exact type and `sessionHooksFor(...).winter` already produces it).
    */
-  hooksFor?: (session: CapabilitySession) => { winter?: unknown; official?: unknown };
+  hooksFor?: (session: CapabilitySession) => { winter?: Options["hooks"]; official?: unknown };
   /** Test seams. */
   idleTimeoutMs?: () => number;
   endGraceMs?: number;
@@ -341,6 +343,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       approvals: deps.approvals, questions: deps.questions, gate: deps.gate,
       emit: (event) => { deps.hub.append(sessionId, event); },
       threadId: "main",
+      // P8c-14 (integration round 2): `ExitPlanMode` on the Winter leg now answers through the
+      // controller-wired plan bridge (see `WinterLegDeps.planBridge`'s own doc comment).
+      ...(deps.planBridge === undefined ? {} : { planBridge: deps.planBridge }),
     });
 
     /** Predictive, and exact: the driver appends every batch synchronously right after the projector
@@ -433,6 +438,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         capabilities: { ...extra, ...capabilities } as CapabilityServerRecord,
         ...(connection === undefined ? {} : { connection }),
         resume: inc.resume,
+        // P8c-14 (integration round 2): the Winter-leg half of lane 3's hooks facade — the official
+        // leg's `inputDeps()` below already threads `.official`; this is that same call's `.winter`.
+        ...(deps.hooksFor === undefined ? {} : { hooks: deps.hooksFor(capSession).winter }),
       });
     };
 
@@ -583,6 +591,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
           // A getter, same as the Winter incarnation builder's own `canUseTool` above — a
           // `session.setPolicy` mid-session is seen by the NEXT approval, not just the next open().
           policy: () => deps.store.meta(sessionId).approvalPolicy,
+          // P8c-14 (integration round 2): the SAME plan bridge the Winter leg wires above —
+          // `officialBrokerFor` (official-options.ts) reads this field the identical way.
+          ...(deps.planBridge === undefined ? {} : { planBridge: deps.planBridge }),
         },
         policy: live.approvalPolicy,
         ...(hooks === undefined ? {} : { hooks }),
