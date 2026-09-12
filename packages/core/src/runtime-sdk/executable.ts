@@ -20,31 +20,69 @@
 // `dist/winter` (`build:winter --sign`) stays the STABLE-identity option for anyone who wants a
 // Keychain ACL that survives rebuilds (the npm binary is ad-hoc signed, and its bytes change on
 // every publish, re-triggering the one-time consent dialog — CLAUDE.md's third trap).
+//
+// P9a fix wave, C1: the platform package arrives as an OPTIONAL DEPENDENCY OF THE WRAPPER
+// (`@yanlinglabs/winter-agent-sdk`), not as a dependency of `packages/core` itself. Bun's isolated
+// linker nests such a package under the WRAPPER's own store entry
+// (`node_modules/.bun/@yanlinglabs+winter-agent-sdk@<ver>/node_modules/@yanlinglabs/<platform-pkg>`)
+// and links it only into the wrapper's own `node_modules` — never hoisted to `packages/core`'s own
+// `node_modules`, never to the workspace root. A single `createRequire(import.meta.url).resolve(...)`
+// rooted at THIS module walks straight past it (measured: proven identical to the claude leg's
+// `@anthropic-ai/claude-agent-sdk-darwin-arm64`/`-sdk` relationship). So this mirrors
+// `official-executable.ts`'s `resolveClaudeAgentSdkPackageDir` exactly: resolve the wrapper's own
+// `package.json` first, then `createRequire` THROUGH THAT to reach the platform package as a
+// dependency of the wrapper — falling back to the single hop only for a DIRECT install (e.g. a dev
+// `bun add <tarball> --optional` in `packages/core` itself, which is top-level-resolvable).
 import { createRequire } from "node:module";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { bundleRuntimePath } from "./bundle-layout";
+import { REQUIRED_WINTER_AGENT_SDK } from "./versions";
 
 export type WinterExecutableSource = "setting" | "env" | "bundle" | "home" | "platform-package";
 
+const WINTER_WRAPPER_PACKAGE = "@yanlinglabs/winter-agent-sdk";
+const WINTER_PLATFORM_PACKAGE = "@yanlinglabs/winter-agent-sdk-darwin-arm64";
+
 /**
- * P9a-9's package door: resolves `@yanlinglabs/winter-agent-sdk-darwin-arm64/package.json`
- * through THIS MODULE's OWN `createRequire(import.meta.url)` — unlike the official leg's
- * `resolveClaudeAgentSdkPackageDir` (which walks through the WRAPPER package's own `require` to
- * avoid a stray global-cache copy), the winter platform package is resolved directly because it
- * is installed as a plain optional dependency reachable from this file's own `node_modules`
- * ancestry under bun's installer (measured: `bun add <tarball> --optional` in `packages/core`
- * resolves here without needing the wrapper's own require as an intermediate hop). Returns
- * `undefined` when the optional dependency was not installed at all (a non-darwin/non-arm64 host,
- * or simply no `bun install` yet) — a legitimate skip, never a throw; the caller decides what an
- * absent rung means.
+ * P9a-9's package door, fixed by the P9a fix wave's C1: resolves
+ * `@yanlinglabs/winter-agent-sdk-darwin-arm64/package.json` with a DUAL `createRequire` hop —
+ * first resolve the wrapper's own `package.json` from `fromUrl` (default `import.meta.url`, so a
+ * test can root the whole resolution in a fixture directory instead), then resolve the platform
+ * package AS A DEPENDENCY OF THE WRAPPER via `createRequire(wrapperPackageJsonPath)`. Falls back
+ * to a single hop rooted at `fromUrl` when the wrapper itself cannot be resolved that way or does
+ * not carry the platform package as its own dependency — the direct-install dev shape (`bun add
+ * <tarball> --optional` in `packages/core`) is still top-level-resolvable and must keep working.
+ *
+ * Returns `undefined` when the optional dependency was not installed at all through either hop (a
+ * non-darwin/non-arm64 host, or simply no `bun install` yet) — a legitimate skip, never a throw;
+ * the caller decides what an absent rung means. A platform package whose OWN version disagrees
+ * with this build's pin (`REQUIRED_WINTER_AGENT_SDK`) THROWS instead (P9a fix wave, M2) — a mixed
+ * pair is not the pinned artifact (WS-02 §6), mirroring the claude leg's
+ * `resolveClaudeAgentSdkPackageDir`; staying silent about it would let a session run against an
+ * unpinned binary.
  */
-export function resolvePlatformPackageWinter(): string | undefined {
-  let packageJsonPath: string;
+export function resolvePlatformPackageWinter(fromUrl: string = import.meta.url): string | undefined {
+  const req = createRequire(fromUrl);
+  let packageJsonPath: string | undefined;
   try {
-    packageJsonPath = createRequire(import.meta.url).resolve("@yanlinglabs/winter-agent-sdk-darwin-arm64/package.json");
+    const wrapperPackageJson = req.resolve(`${WINTER_WRAPPER_PACKAGE}/package.json`);
+    packageJsonPath = createRequire(wrapperPackageJson).resolve(`${WINTER_PLATFORM_PACKAGE}/package.json`);
   } catch {
-    return undefined;
+    packageJsonPath = undefined;
+  }
+  if (packageJsonPath === undefined) {
+    try {
+      packageJsonPath = req.resolve(`${WINTER_PLATFORM_PACKAGE}/package.json`);
+    } catch {
+      return undefined;
+    }
+  }
+  const version = (JSON.parse(readFileSync(packageJsonPath, "utf8")) as { version: string }).version;
+  if (version !== REQUIRED_WINTER_AGENT_SDK) {
+    throw new Error(
+      `the installed platform package is winter ${version} but this build is pinned to ${REQUIRED_WINTER_AGENT_SDK} — a mixed pair is not the pinned artifact (WS-02 §6)`,
+    );
   }
   const binPath = join(dirname(packageJsonPath), "bin", "winter");
   try {
@@ -65,10 +103,11 @@ export type WinterExecutableResolution =
  *  `triedPlatformPackage` rather than smuggled into the path list. */
 export class WinterExecutableUnavailable extends Error {
   readonly code = "winter_executable_unavailable" as const;
-  constructor(readonly tried: string[], opts?: { triedPlatformPackage?: boolean }) {
+  constructor(readonly tried: string[], opts?: { triedPlatformPackage?: boolean; detail?: string }) {
     super(
       `winter runtime executable not found (tried: ${tried.join(", ") || "nothing configured"}` +
-        `${opts?.triedPlatformPackage ? ", nor the installed platform package (@yanlinglabs/winter-agent-sdk-darwin-arm64)" : ""}); ` +
+        `${opts?.triedPlatformPackage ? ", nor the installed platform package (@yanlinglabs/winter-agent-sdk-darwin-arm64)" : ""})` +
+        `${opts?.detail ? `: ${opts.detail}` : ""}; ` +
         `set settings.runtimes.winterExecutable or NORMA_WINTER_EXECUTABLE, run \`bun run build:winter\`, or install the optional ` +
         `@yanlinglabs/winter-agent-sdk-darwin-arm64 platform package (\`bun install\`)`,
     );
@@ -100,7 +139,14 @@ export function resolveWinterExecutable(input: {
   const tried: string[] = [];
   for (const [source, path] of implicit) { tried.push(path); if (input.exists(path)) return { ok: true, path, source }; }
   const resolvePlatformPackageBin = input.resolvePlatformPackageBin ?? resolvePlatformPackageWinter;
-  const packagePath = resolvePlatformPackageBin();
+  let packagePath: string | undefined;
+  try {
+    packagePath = resolvePlatformPackageBin();
+  } catch (err) {
+    // M2: a version-mismatched platform package throws rather than resolving silently — surfaced
+    // here, on the ladder's last rung, as the typed refusal naming both versions.
+    return { ok: false, error: new WinterExecutableUnavailable(tried, { triedPlatformPackage: true, detail: err instanceof Error ? err.message : String(err) }) };
+  }
   if (packagePath !== undefined) return { ok: true, path: packagePath, source: "platform-package" };
   return { ok: false, error: new WinterExecutableUnavailable(tried, { triedPlatformPackage: true }) };
 }
