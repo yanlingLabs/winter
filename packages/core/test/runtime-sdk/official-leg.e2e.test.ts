@@ -140,7 +140,7 @@ const probeDef: ToolDefinition = {
 
 async function buildWorld(
   selection: RuntimeSelection, secretsDir: string, baseUrl: string, policy: "auto" | "dont-ask" | "plan" = "auto",
-  opts: { reviewer?: BashReviewer; mode?: "code" | "chat"; hookFacade?: SessionHooksDeps["hookFacade"]; advisorReviewer?: ReviewerResolver } = {},
+  opts: { reviewer?: BashReviewer; mode?: "code" | "chat"; hookFacade?: SessionHooksDeps["hookFacade"]; advisorReviewer?: ReviewerResolver; onIncarnationStart?: (abort: AbortController) => void } = {},
 ): Promise<World> {
   const mode = opts.mode ?? "code";
   const home = mkdtempSync(join(tmpdir(), "p8c-official-e2e-"));
@@ -242,6 +242,7 @@ async function buildWorld(
     append: (e) => { const stamped = { ...e, seq: (e as { seq?: number }).seq ?? ++seq } as SessionEvent; events.push(stamped); if (process.env.DEBUG_E2E) console.log("EVENT", JSON.stringify(stamped).slice(0, 300)); return stamped; },
     broadcast: (e) => { events.push(e as unknown as SessionEvent); if (process.env.DEBUG_E2E) console.log("BROADCAST", JSON.stringify(e).slice(0, 300)); },
     log: (l) => { if (process.env.DEBUG_E2E) console.log("[log]", l); },
+    ...(opts.onIncarnationStart === undefined ? {} : { onIncarnationStart: opts.onIncarnationStart }),
   });
 
   const world: World = { home, cwd, runtime, events, session, backendSessionId, hermetic };
@@ -756,6 +757,25 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       await fake.close();
     }
   }, 60_000);
+
+  // P8d-18 (controller ruling): a TEST-ONLY crash seam (`onIncarnationStart` on
+  // `OfficialSessionDeps`, `official-session.ts`) was added so a test can grab each incarnation's own
+  // `AbortController` and simulate the crash `run()`'s own `finally` block needs to leave `state`
+  // at `"resumable"` (a deliberate `end()` is terminal for this leg — see that file's header).
+  //
+  // UNPROVEN, WITH THE EXACT BLOCKER (two approaches tried, both measured, neither reliable within
+  // this round's time box): (1) calling `.abort()` on the incarnation's own controller did not move
+  // `state` off `"live"` within 10s, live or with a request held open by a slow-responding fake —
+  // the router's official `Query` does not appear to treat that signal as "the child died". (2) the
+  // spawned `claude` process's own argv0 is rewritten to the short name "claude" (confirmed via
+  // `pgrep -P <pid> -l` at one point during debugging), so SIGKILL-by-PID (the same technique
+  // `winter-chat-e2e.test.ts` uses for the Winter binary) was attempted next — but a direct child of
+  // this test process named exactly "claude" could not be found at the moment a request was
+  // provably in flight at the loopback fake (`pgrep -P <thisPid> -x claude` returned empty even while
+  // a response was held open), which is itself a genuine unresolved puzzle about where the official
+  // leg's own HTTP call actually originates from (in-process vs. a short-lived subprocess) — pinning
+  // that down needs router-internal reading beyond this round's sanctioned scope. Recorded as a
+  // carry; the `onIncarnationStart` seam stays in place for whoever picks this up next.
 });
 
 test("claude runtime bed resolves on this machine (sanity: the platform package really installed)", () => {
