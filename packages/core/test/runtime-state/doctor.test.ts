@@ -7,7 +7,8 @@ import { openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION, type RuntimeStateDb }
 import { RuntimeSessionRecords, type NewRuntimeSessionRecord } from "../../src/runtime-state/records";
 import { RuntimeChildren, type PersistedWinterChild } from "../../src/runtime-state/children";
 import { RuntimeLeases } from "../../src/runtime-state/leases";
-import { diagnoseRuntimeState, repairRuntimeState, type Finding } from "../../src/runtime-state/doctor";
+import { diagnoseRuntimeState, latestRecoveryAttempts, repairRuntimeState, type Finding } from "../../src/runtime-state/doctor";
+import { restampStep } from "../../src/runtime-state/recovery";
 import { SessionStore } from "../../src/sessions/store";
 import { ISO, withTempHome } from "./support";
 
@@ -870,6 +871,57 @@ describe("diagnoseRuntimeState / restore-backup — a store written by an older 
       // The one irreversible repair did not run: the current store is byte-for-byte what it was.
       expect(readFileSync(dest)).toEqual(before);
       withDb(home, (_rs, records) => { expect(records.get("s_after_backup")).toBeDefined(); });
+    });
+  });
+});
+
+describe("latestRecoveryAttempts — P8d-11's attempt view", () => {
+  const seedAttempt = (rs: RuntimeStateDb, over: { daemonStartedAt: string; step: number; outcome: string; detail?: unknown; winterSessionId?: string | null }): number => {
+    const result = rs.db.run(
+      `INSERT INTO runtime_recovery_attempts (started_at, finished_at, daemon_pid, daemon_started_at, step, winter_session_id, outcome, detail_json)
+       VALUES (?, ?, 1, ?, ?, ?, ?, ?)`,
+      [ISO(), ISO(), over.daemonStartedAt, over.step, over.winterSessionId ?? null, over.outcome, JSON.stringify(over.detail ?? {})],
+    );
+    return typeof result.lastInsertRowid === "bigint" ? Number(result.lastInsertRowid) : result.lastInsertRowid;
+  };
+
+  test("returns only the MOST RECENT boot's step-summary rows, in step order", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, (rs) => {
+        seedAttempt(rs, { daemonStartedAt: "2026-09-01T00:00:00.000Z", step: 10, outcome: "skipped" });
+        seedAttempt(rs, { daemonStartedAt: "2026-09-12T00:00:00.000Z", step: 12, outcome: "ok", detail: { sessionsSeen: 2 } });
+        seedAttempt(rs, { daemonStartedAt: "2026-09-12T00:00:00.000Z", step: 10, outcome: "skipped", detail: { heldMessages: 0 } });
+        // A session-scoped row (step 2's per-session corrupt note) must never appear in the view —
+        // it is not one of the twelve step-summary rows.
+        seedAttempt(rs, { daemonStartedAt: "2026-09-12T00:00:00.000Z", step: 2, outcome: "failed", winterSessionId: "s_corrupt" });
+      });
+
+      const attempts = latestRecoveryAttempts(home);
+      expect(attempts.map((a) => a.step)).toEqual([10, 12]);
+      expect(attempts.find((a) => a.step === 10)?.outcome).toBe("skipped");
+      expect(attempts.every((a) => a.step !== 2)).toBe(true);
+    });
+  });
+
+  test("a restamped step 10 shows the restamped outcome, not the original `skipped` one", async () => {
+    await withTempHome(async (home) => {
+      let id = 0;
+      withDb(home, (rs) => {
+        id = seedAttempt(rs, { daemonStartedAt: "2026-09-12T00:00:00.000Z", step: 10, outcome: "skipped", detail: { heldMessages: 0 } });
+      });
+      withDb(home, (rs) => {
+        restampStep(rs.db, id, 10, "ok", { entriesLoaded: 4, staleMarked: 0 });
+      });
+
+      const attempts = latestRecoveryAttempts(home);
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]).toMatchObject({ step: 10, outcome: "ok", detail: { entriesLoaded: 4, staleMarked: 0 } });
+    });
+  });
+
+  test("a home with no runtime spine reports no attempts, never throws", async () => {
+    await withTempHome(async (home) => {
+      expect(latestRecoveryAttempts(home)).toEqual([]);
     });
   });
 });

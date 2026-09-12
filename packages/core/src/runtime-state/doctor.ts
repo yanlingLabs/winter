@@ -429,6 +429,61 @@ export async function diagnoseRuntimeState(home: string): Promise<Finding[]> {
   }
 }
 
+export interface RecoveryAttemptSummary {
+  step: number;
+  outcome: string;
+  detail: Record<string, unknown>;
+  finishedAt: string | null;
+}
+
+/**
+ * P8d-11: `norma doctor`'s read of the daemon's own `runtime_recovery_attempts` audit trail — the
+ * one boot-level (`winter_session_id IS NULL`) row per step from the MOST RECENT boot, so an
+ * operator sees today's recovery rather than every boot this home has ever done. `restampStep`
+ * (`recovery.ts`) updates step 10's row IN PLACE once the late `sdk.directory.recover()` call
+ * completes, so this is also the door that proves the restamp actually landed — the row this
+ * returns for step 10 is `"ok"`/`"partial"`/`"failed"`, never a permanent `"skipped"`, on any boot
+ * where the router handle came up.
+ *
+ * Read-only, the same `readonly` convention every other door in this file uses; `[]` for a home with
+ * no runtime spine at all (never a daemon boot) or one this build cannot open.
+ */
+export function latestRecoveryAttempts(home: string): RecoveryAttemptSummary[] {
+  let rs: RuntimeStateDb;
+  try {
+    rs = openRuntimeStateDb(home, { readonly: true });
+  } catch {
+    return [];
+  }
+  try {
+    const latestBoot = rs.db.query<{ daemon_started_at: string }, []>("SELECT daemon_started_at FROM runtime_recovery_attempts ORDER BY id DESC LIMIT 1").get();
+    if (!latestBoot) return [];
+    const rows = rs.db
+      .query<{ step: number; outcome: string; detail_json: string; finished_at: string | null }, [string]>(
+        "SELECT step, outcome, detail_json, finished_at FROM runtime_recovery_attempts WHERE daemon_started_at = ? AND winter_session_id IS NULL ORDER BY id",
+      )
+      .all(latestBoot.daemon_started_at);
+    // `id` order means the LAST row for a given step wins — exactly what a restamp (an UPDATE on
+    // the same row) already guarantees, and what would also cover a hypothetical future step that
+    // legitimately wrote more than once per boot.
+    const byStep = new Map<number, RecoveryAttemptSummary>();
+    for (const row of rows) {
+      let detail: Record<string, unknown> = {};
+      try {
+        detail = JSON.parse(row.detail_json) as Record<string, unknown>;
+      } catch {
+        /* an unparsable detail is reported empty, never thrown — this door is diagnostics only */
+      }
+      byStep.set(row.step, { step: row.step, outcome: row.outcome, detail, finishedAt: row.finished_at });
+    }
+    return [...byStep.values()].sort((a, b) => a.step - b.step);
+  } catch {
+    return [];
+  } finally {
+    rs.close();
+  }
+}
+
 /**
  * Run one repair. TOTAL — it returns a result or it returns a result.
  *

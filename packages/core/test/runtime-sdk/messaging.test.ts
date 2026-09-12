@@ -577,6 +577,55 @@ describe("parkRecoveredSessions (fix round 1, F3)", () => {
     expect(swept?.status).toBe("archived");
   });
 
+  test("P8d-11: an unattached AGENT (child) row is parked exactly like a session row", async () => {
+    // The widened scope (round-2 N-new-4's own carry): a crash-left `objectKind: "agent"` row is
+    // just as cold-resumable through `deliverIntoSession`/`coldResume` as a `session` row is, so it
+    // must lose its backend id the same way.
+    const store = createInMemoryRuntimeDirectoryStore();
+    const { runtime } = harness(store, "prompts");
+    await store.upsert({
+      address: addr("be_child_crashed"),
+      parsed: buildSessionAddress("be_child_crashed"),
+      runtimeKind: "winter-agent", objectKind: "agent", transport: "winter-session",
+      displayName: "child", status: "running", mode: "code", generation: 1,
+      selection: {
+        runtimeKind: "winter-agent", providerId: "unstated", modelRef: "unstated/unstated", family: "unstated",
+        authFamily: "custom", sdkVersion: NORMA_PEER_VERSIONS.winterAgentSdk, reason: "test", decidedAt: new Date().toISOString(),
+      },
+      backendSessionId: "be_child_crashed",
+      capabilities: { message: true, resume: true, notifyWhenIdle: true, reply: true },
+      updatedAt: new Date().toISOString(),
+    });
+
+    expect(await parkRecoveredSessions(runtime)).toBe(1);
+    const parked = await runtime.sdk.directory.get(addr("be_child_crashed"));
+    expect(parked?.backendSessionId).toBeUndefined();
+    expect(parked?.status).toBe("unavailable");
+  });
+
+  test("P8d-11: an ARCHIVED agent row is never un-archived by the widened sweep either", async () => {
+    const store = createInMemoryRuntimeDirectoryStore();
+    const { runtime } = harness(store, "prompts");
+    await store.upsert({
+      address: addr("be_child_archived"),
+      parsed: buildSessionAddress("be_child_archived"),
+      runtimeKind: "winter-agent", objectKind: "agent", transport: "winter-session",
+      displayName: "child-archived", status: "archived", mode: "code", generation: 1,
+      selection: {
+        runtimeKind: "winter-agent", providerId: "unstated", modelRef: "unstated/unstated", family: "unstated",
+        authFamily: "custom", sdkVersion: NORMA_PEER_VERSIONS.winterAgentSdk, reason: "test", decidedAt: new Date().toISOString(),
+      },
+      backendSessionId: "be_child_archived",
+      capabilities: { message: true, resume: true, notifyWhenIdle: true, reply: true },
+      updatedAt: new Date().toISOString(),
+    });
+
+    expect(await parkRecoveredSessions(runtime)).toBe(1);
+    const swept = await runtime.sdk.directory.get(addr("be_child_archived"));
+    expect(swept?.backendSessionId).toBeUndefined();
+    expect(swept?.status).toBe("archived");
+  });
+
   test("an ATTACHED session is left alone, and a second sweep is a no-op", async () => {
     const { runtime } = harness();
     const live = fakeSession("be_still_live");

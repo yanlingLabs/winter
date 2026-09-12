@@ -22,6 +22,7 @@
 // error contributes only its `name`: an error MESSAGE routinely quotes the payload it choked on
 // (`JSON.parse` echoes the corrupt bytes verbatim), and that payload is exactly the content the
 // runtime-state tables are trusted never to leak.
+import type { Database } from "bun:sqlite";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionStore } from "../sessions/store";
@@ -110,6 +111,15 @@ export interface RecoveryReport {
   corrupt: string[];
   /** "Every step completed." Orthogonal to `corrupt` — see this file's header. */
   ok: boolean;
+  /**
+   * P8d-11: the `id` of the `runtime_recovery_attempts` row THIS sweep wrote for step 10 —
+   * `undefined` only when the write itself failed (bounded, per this file's header). The daemon
+   * calls `restampStep(rs.db, report.step10AttemptId, 10, …)` once `sdk.directory.recover()` has
+   * actually run (still before `startIpcServer` — see 8b task-12's CONCERN 1), turning the honest
+   * `"skipped"` row this sweep left behind into the real outcome, in place, rather than leaving
+   * `norma doctor` reading a step that always says "skipped" on every boot.
+   */
+  step10AttemptId?: number;
 }
 
 /** §2's canonical ephemeral root. The numeric suffix is the ACTUAL uid, never a hard-coded value. */
@@ -141,21 +151,23 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
     outcome: string,
     detail: Record<string, number | string | string[]>,
     winterSessionId?: string,
-  ): void => {
+  ): number | undefined => {
     try {
-      rs.db.run(
+      const result = rs.db.run(
         `INSERT INTO runtime_recovery_attempts (started_at, finished_at, daemon_pid, daemon_started_at, step, winter_session_id, outcome, detail_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [startedAt, now(), self.pid, self.startedAt, step, winterSessionId ?? null, outcome, JSON.stringify(detail)],
       );
+      return typeof result.lastInsertRowid === "bigint" ? Number(result.lastInsertRowid) : result.lastInsertRowid;
     } catch {
       /* bounded: diagnostics are evidence, never a dependency */
+      return undefined;
     }
   };
 
-  const finishStep = (step: RecoveryStepReport["step"], outcome: RecoveryStepReport["outcome"], detail: RecoveryStepReport["detail"]): void => {
+  const finishStep = (step: RecoveryStepReport["step"], outcome: RecoveryStepReport["outcome"], detail: RecoveryStepReport["detail"]): number | undefined => {
     steps.push({ step, outcome, detail });
-    writeAttempt(step, outcome, detail);
+    const attemptId = writeAttempt(step, outcome, detail);
     // The sink is the CALLER's, and it is the last thing standing between a bad log target and a
     // daemon that will not boot. It is also called from inside the outer catch below, so an
     // unguarded throw here would escape the very guard that exists to contain it — a sink that
@@ -166,6 +178,7 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
     } catch {
       /* a logging sink must never take recovery down */
     }
+    return attemptId;
   };
 
   /** The per-session bound. Records the id once, writes ONE attempt row naming the step and the
@@ -198,6 +211,7 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
   // Assigned INSIDE the outer try below, not here: this is a db read like any other, and a read
   // above the guard is a read whose failure rejects the promise. Zero until the sweep has counted.
   let sessionsSeen = 0;
+  let step10AttemptId: number | undefined;
   const finish = (): RecoveryReport => ({
     startedAt,
     finishedAt: now(),
@@ -207,6 +221,7 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
     reclassified,
     corrupt,
     ok: steps.every((s) => s.outcome !== "failed"),
+    ...(step10AttemptId === undefined ? {} : { step10AttemptId }),
   });
 
   // Review r1 (Minor 4): the boundedness claim has to be TOTAL. The per-session guards cover every
@@ -518,16 +533,18 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
         // router handle is constructed in `daemon.ts` AFTER this sweep — it needs the directory
         // store this sweep's own `startRuntimeState` opened, and its `capabilities` come from the
         // tool-registry block later still. So on a real boot this step runs from the runtime-sdk
-        // construction site instead, and the ORDERING is a recorded plan conflict rather than a
-        // silent no-op: see the Task 12 report. A caller that CAN supply the hook (every test, and
-        // any future two-phase boot) takes the branch below and the whole step happens here.
-        finishStep(10, "skipped", { ...detail, reason: "the router handle is built after §13; recovery runs at runtime-sdk construction" });
+        // construction site instead (P8d-11 sanctions the late run) — the daemon calls
+        // `restampStep` below once that construction has happened, so this "skipped" row is never
+        // the FINAL word `norma doctor` reads on a real boot; it is here only until the restamp
+        // lands. A caller that CAN supply the hook (every test, and any future two-phase boot)
+        // takes the branch below and the whole step happens here instead.
+        step10AttemptId = finishStep(10, "skipped", { ...detail, reason: "the router handle is built after §13; recovery runs at runtime-sdk construction" });
       } else {
         try {
           await hooks.recoverDirectory();
-          finishStep(10, "ok", detail);
+          step10AttemptId = finishStep(10, "ok", detail);
         } catch (e) {
-          finishStep(10, "failed", { ...detail, errorName: e instanceof Error ? e.name : "unknown" });
+          step10AttemptId = finishStep(10, "failed", { ...detail, errorName: e instanceof Error ? e.name : "unknown" });
         }
       }
     }
@@ -576,4 +593,41 @@ function defaultTempScan(scanRoot: string, known: string[]): { orphans: string[]
     if (!claimed) orphans.push(path);
   }
   return { orphans };
+}
+
+/**
+ * P8d-11: turn a `"skipped"` step 10 into the real outcome once the router handle actually exists.
+ *
+ * `recoverRuntimeState` runs long before `daemon.ts` can build the router (see the step 10 block's
+ * own comment), so a real boot always leaves the `runtime_recovery_attempts` row for step 10 reading
+ * `"skipped"` — accurate at the moment it was written, but a permanently dishonest answer to "did
+ * §13 step 10 run" once the late `sdk.directory.recover()` call (8b task-12's own sanctioned
+ * ordering) actually completes moments later, still before `startIpcServer`. This function
+ * RE-STAMPS that SAME row — by `id`, matched against the step it names so a caller can never
+ * clobber the wrong step's evidence — with the outcome the late call actually had, so `norma
+ * doctor`'s attempt view (`latestRecoveryAttempts`, `runtime-state/doctor.ts`) reads one honest
+ * step 10 per boot instead of a `"skipped"` that never changes.
+ *
+ * Bounded like every other write in this file: a restamp that cannot land (the db closed under a
+ * fast shutdown race, say) costs the AUDIT ROW, never the boot — `sdk.directory.recover()` has
+ * already run either way.
+ */
+export function restampStep(
+  db: Database,
+  attemptId: number,
+  step: 10,
+  outcome: "ok" | "partial" | "failed" | "skipped",
+  detail: Record<string, unknown>,
+): void {
+  try {
+    db.run(`UPDATE runtime_recovery_attempts SET outcome = ?, detail_json = ?, finished_at = ? WHERE id = ? AND step = ?`, [
+      outcome,
+      JSON.stringify(detail),
+      new Date().toISOString(),
+      attemptId,
+      step,
+    ]);
+  } catch {
+    /* bounded: diagnostics are evidence, never a dependency — see this file's header */
+  }
 }

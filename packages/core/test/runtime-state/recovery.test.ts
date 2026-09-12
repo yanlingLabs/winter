@@ -6,7 +6,7 @@ import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state
 import { RuntimeSessionRecords, type NewRuntimeSessionRecord } from "../../src/runtime-state/records";
 import { RuntimeLeases, processStartedAt, type ProcessIdentity } from "../../src/runtime-state/leases";
 import { RuntimeChildren, type PersistedWinterChild } from "../../src/runtime-state/children";
-import { recoverRuntimeState, type RecoveryDeps, type RecoveryReport } from "../../src/runtime-state/recovery";
+import { recoverRuntimeState, restampStep, type RecoveryDeps, type RecoveryReport } from "../../src/runtime-state/recovery";
 import { SessionStore } from "../../src/sessions/store";
 import { ISO, withTempHome } from "./support";
 
@@ -469,6 +469,50 @@ describe("recoverRuntimeState — WS-16 §13's twelve steps", () => {
 
       expect(asked).toEqual(["s_live"]);
       expect(report.steps.find((s) => s.step === 3)?.detail).toMatchObject({ quarantined: 1, pendingMarks: 1 });
+    });
+  });
+});
+
+describe("restampStep — P8d-11's late re-stamp of step 10", () => {
+  test("an attempt whose step 10 was `skipped` is re-stamped `ok` with { entriesLoaded, staleMarked }", async () => {
+    await withHarness(async (h) => {
+      // No `recoverDirectory` hook — this is the real-boot shape: step 10 runs `"skipped"`, exactly
+      // as it does at the point `startRuntimeState` calls it, before the router handle exists.
+      const report = await h.run();
+      const before = h.attempts().find((r) => r.step === 10 && r.winter_session_id === null);
+      expect(before?.outcome).toBe("skipped");
+      expect(report.step10AttemptId).toBeDefined();
+
+      // The daemon's late call, after `sdk.directory.recover()` — the P8d-11 sanctioned ordering.
+      restampStep(h.rs.db, report.step10AttemptId!, 10, "ok", { entriesLoaded: 3, staleMarked: 1 });
+
+      const rows = h.attempts().filter((r) => r.step === 10 && r.winter_session_id === null);
+      // The SAME row, restamped in place — never a second one.
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.outcome).toBe("ok");
+      expect(JSON.parse(rows[0]!.detail_json)).toEqual({ entriesLoaded: 3, staleMarked: 1 });
+    });
+  });
+
+  test("never throws when the row is gone (bounded, matching this file's own diagnostics-are-evidence rule)", async () => {
+    await withHarness(async (h) => {
+      const report = await h.run();
+      h.rs.db.run("DELETE FROM runtime_recovery_attempts WHERE step = 10");
+      expect(() => restampStep(h.rs.db, report.step10AttemptId!, 10, "ok", { entriesLoaded: 0, staleMarked: 0 })).not.toThrow();
+    });
+  });
+
+  test("never restamps a DIFFERENT step's row, even if the id were reused by mistake", async () => {
+    await withHarness(async (h) => {
+      await h.run();
+      const step9 = h.attempts().find((r) => r.step === 9)!;
+      // Look up the real numeric id behind step 9's row and try (wrongly) to restamp it as step 10.
+      const id = (
+        h.rs.db.query<{ id: number }, []>("SELECT id FROM runtime_recovery_attempts WHERE step = 9 AND winter_session_id IS NULL").get()
+      )!.id;
+      restampStep(h.rs.db, id, 10, "ok", { entriesLoaded: 9, staleMarked: 9 });
+      const stillStep9 = h.rs.db.query<{ outcome: string }, [number]>("SELECT outcome FROM runtime_recovery_attempts WHERE id = ?").get(id);
+      expect(stillStep9?.outcome).toBe(step9.outcome); // untouched — the WHERE clause named step 10
     });
   });
 });
