@@ -103,7 +103,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         let feedClient = feed.client
         let sessionDirectory = SessionDirectory(lister: {
             try await feedClient.listSessions().map {
-                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs, activity: $0.activity, archived: $0.archived, signals: $0.signals, approvalPolicy: $0.approvalPolicy)
+                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs, activity: $0.activity, archived: $0.archived, signals: $0.signals, approvalPolicy: $0.approvalPolicy, runtimeKind: $0.runtimeKind, providerId: $0.providerId)
             }
         })
         directory = sessionDirectory
@@ -237,20 +237,49 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         // just needs THAT row refreshed, not a second source of truth kept in sync by hand.
         // Refresh happens BEFORE clearing `modelChangeInFlight` so the same re-render its `@Published`
         // flip forces already sees the fresh row.
+        // Winter Phase 8d (Task 4.2): routes through `AppModel.applyModelChange` — see
+        // `ShellSessionHost`'s identical twin wiring for the full rationale (a lossy cross-runtime
+        // switch now surfaces a confirm dialog instead of silently failing).
         adapter.onSetModel = { [weak self, weak adapter] model in
             guard let adapter else { return }
             adapter.modelChangeInFlight = true
             Task { @MainActor [weak self, weak adapter] in
                 guard let self else { return }
-                let ok = (try? await client.setModel(sessionId: self.sessionId, model: model)) != nil
-                if ok { await self.directory.refresh() }
+                let outcome = await AppModel.applyModelChange(client: client, sessionId: self.sessionId, model: model)
                 // provider-correctness T6: the RPC's answer is no longer swallowed. On SUCCESS the
                 // optimistic overlay retires (the refreshed row now carries the truth) and the
                 // selection goes on probation for exactly one turn; on REFUSAL the overlay reverts
                 // to `.none`, which re-renders whatever the daemon still holds. A revert is never a
                 // write of the previous value — see `OptimisticSelection.none`.
                 adapter?.pendingModel = .none
-                if ok { adapter?.armProbation(model: .some(model)) }
+                switch outcome {
+                case .ok:
+                    await self.directory.refresh()
+                    adapter?.armProbation(model: .some(model))
+                case .confirmationRequired(let warnings):
+                    adapter?.pendingModelConfirmation = .init(model: model, warnings: warnings)
+                case .disabled(let reason), .lossyFork(let reason), .blocked(let reason), .failed(let reason):
+                    adapter?.modelChangeError = reason
+                }
+                adapter?.modelChangeInFlight = false
+            }
+        }
+        // The confirm dialog's "Switch anyway" — same twin relationship as `onSetModel` above.
+        adapter.onConfirmModelSwitch = { [weak self, weak adapter] model in
+            guard let adapter else { return }
+            adapter.modelChangeInFlight = true
+            Task { @MainActor [weak self, weak adapter] in
+                guard let self else { return }
+                let outcome = await AppModel.applyModelChange(client: client, sessionId: self.sessionId, model: model, confirmLossy: true)
+                switch outcome {
+                case .ok:
+                    await self.directory.refresh()
+                    adapter?.armProbation(model: .some(model))
+                case .confirmationRequired:
+                    adapter?.modelChangeError = "the runtime switch could not be confirmed"
+                case .disabled(let reason), .lossyFork(let reason), .blocked(let reason), .failed(let reason):
+                    adapter?.modelChangeError = reason
+                }
                 adapter?.modelChangeInFlight = false
             }
         }

@@ -34,6 +34,26 @@ final class ServerMessageTests: XCTestCase {
         XCTAssertNil(plain.data)
     }
 
+    /// Winter Phase 8d (Task 4.2, Interfaces block): `RpcError.handoffCode` reads `error.data.code`
+    /// against the four `HandoffRpcCode` raw values — `session.setModel`'s own typed refusals
+    /// (`ipc/server.ts`'s `RpcFailure` third argument for `confirmation_required`/`lossy_fork`/
+    /// `blocked`, and the `refused` outcome's `handoff_disabled` case).
+    func testHandoffCodeParsesTheFourKnownCodesAndNilsOnEverythingElse() throws {
+        func handoffCode(_ line: String) -> HandoffRpcCode? {
+            guard case .response(_, .failure(let e)) = parseServerLine(line) else { XCTFail("expected a failure response"); return nil }
+            return e.handoffCode
+        }
+        XCTAssertEqual(handoffCode(#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"x","data":{"code":"handoff_confirmation_required","warnings":["reasoning state may be lost"]}}}"#), .confirmationRequired)
+        XCTAssertEqual(handoffCode(#"{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"x","data":{"code":"handoff_disabled"}}}"#), .disabled)
+        XCTAssertEqual(handoffCode(#"{"jsonrpc":"2.0","id":3,"error":{"code":-32602,"message":"x","data":{"code":"handoff_lossy_fork"}}}"#), .lossyFork)
+        XCTAssertEqual(handoffCode(#"{"jsonrpc":"2.0","id":4,"error":{"code":-32603,"message":"x","data":{"code":"handoff_blocked"}}}"#), .blocked)
+        // A refusal with NO data at all, and one with a code this enum deliberately does not carry
+        // (`runtime_selection_refused` — a plain refusal, not one of the four confirm/disable/error
+        // shapes a picker treats specially) — both `nil`, never a crash or a guessed case.
+        XCTAssertNil(handoffCode(#"{"jsonrpc":"2.0","id":5,"error":{"code":-32602,"message":"x"}}"#))
+        XCTAssertNil(handoffCode(#"{"jsonrpc":"2.0","id":6,"error":{"code":-32602,"message":"x","data":{"code":"runtime_selection_refused"}}}"#))
+    }
+
     func testEventNotificationDecodesSessionEvent() throws {
         let line = #"{"jsonrpc":"2.0","method":"event","params":{"type":"assistant_delta","seq":7,"sessionId":"s_1","ts":1,"threadId":"main","delta":"tok"}}"#
         guard case .event(.assistantDelta(let d)) = parseServerLine(line) else { return XCTFail() }

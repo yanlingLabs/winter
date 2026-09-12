@@ -160,6 +160,72 @@ final class ModelPickerTests: XCTestCase {
         XCTAssertTrue(t.sent.isEmpty, "no RPC should go out with no focused session")
     }
 
+    // MARK: - Winter Phase 8d (Task 4.2): AppModel.applyModelChange's outcome mapping — THE ONE
+    // door `ShellSessionHost`/`DetachedWindowController`'s live-session `onSetModel` wiring, and
+    // `AppModel.setSessionModel` itself, all resolve through.
+
+    /// Each of `HandoffRpcCode`'s four wire codes maps to its own `ModelChangeOutcome` case, and a
+    /// plain success maps to `.ok` — proved against a REAL `NormaClient` over a scripted
+    /// transport (not a stub of `applyModelChange` itself), so this also pins the wire shape:
+    /// `confirmLossy` defaults `false` and the confirm-sheet's resend sets it `true`.
+    @MainActor
+    func testApplyModelChangeMapsEachHandoffCodeAndPlainSuccess() async throws {
+        let t = AppScriptedTransport()
+        let client = NormaClient(makeTransport: { t }, token: "tok", clientName: "apply-model-change-test")
+        let connectTask = Task { try? await client.connect() }
+        await waitUntilSent(t, 1)
+        let hello = lineJSON(t.sent[0])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(hello["id"] as! Int),"result":{"ok":true}}"#)
+        await connectTask.value
+
+        async let confirmationOutcome = AppModel.applyModelChange(client: client, sessionId: "s_1", model: "claude-opus-5")
+        await waitUntilSent(t, 2)
+        let confirmReq = lineJSON(t.sent[1])
+        XCTAssertEqual((confirmReq["params"] as? [String: Any])?["confirmLossy"] as? Bool, false, "omitting confirmLossy must still send it explicitly false")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(confirmReq["id"] as! Int),"error":{"code":-32602,"message":"x","data":{"code":"handoff_confirmation_required","warnings":["reasoning state may be lost"]}}}"#)
+        let outcome1 = await confirmationOutcome
+        XCTAssertEqual(outcome1, .confirmationRequired(warnings: ["reasoning state may be lost"]))
+
+        async let disabledOutcome = AppModel.applyModelChange(client: client, sessionId: "s_1", model: "claude-opus-5")
+        await waitUntilSent(t, 3)
+        let disabledReq = lineJSON(t.sent[2])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(disabledReq["id"] as! Int),"error":{"code":-32602,"message":"cross-runtime handoff is disabled","data":{"code":"handoff_disabled"}}}"#)
+        let outcome2 = await disabledOutcome
+        XCTAssertEqual(outcome2, .disabled("cross-runtime handoff is disabled"))
+
+        async let lossyForkOutcome = AppModel.applyModelChange(client: client, sessionId: "s_1", model: "claude-opus-5")
+        await waitUntilSent(t, 4)
+        let lossyReq = lineJSON(t.sent[3])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(lossyReq["id"] as! Int),"error":{"code":-32602,"message":"forked","data":{"code":"handoff_lossy_fork"}}}"#)
+        let outcome3 = await lossyForkOutcome
+        XCTAssertEqual(outcome3, .lossyFork("forked"))
+
+        async let blockedOutcome = AppModel.applyModelChange(client: client, sessionId: "s_1", model: "claude-opus-5")
+        await waitUntilSent(t, 5)
+        let blockedReq = lineJSON(t.sent[4])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(blockedReq["id"] as! Int),"error":{"code":-32603,"message":"blocked","data":{"code":"handoff_blocked"}}}"#)
+        let outcome4 = await blockedOutcome
+        XCTAssertEqual(outcome4, .blocked("blocked"))
+
+        // A refusal with NO handoff code at all (e.g. `runtime_selection_refused`) is `.failed`,
+        // never mistaken for one of the four handoff shapes.
+        async let plainRefusalOutcome = AppModel.applyModelChange(client: client, sessionId: "s_1", model: "claude-opus-5")
+        await waitUntilSent(t, 6)
+        let plainReq = lineJSON(t.sent[5])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(plainReq["id"] as! Int),"error":{"code":-32602,"message":"no provider can serve this model"}}"#)
+        let outcome5 = await plainRefusalOutcome
+        XCTAssertEqual(outcome5, .failed("no provider can serve this model"))
+
+        // The confirm sheet's "Switch anyway" resend — confirmLossy:true — succeeds.
+        async let okOutcome = AppModel.applyModelChange(client: client, sessionId: "s_1", model: "claude-opus-5", confirmLossy: true)
+        await waitUntilSent(t, 7)
+        let okReq = lineJSON(t.sent[6])
+        XCTAssertEqual((okReq["params"] as? [String: Any])?["confirmLossy"] as? Bool, true)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(okReq["id"] as! Int),"result":{}}"#)
+        let outcome6 = await okOutcome
+        XCTAssertEqual(outcome6, .ok)
+    }
+
     // MARK: - T1 deferred item, closed: listSessions() → SessionSummary.model, end to end
 
     /// Proves `model` genuinely threads from the wire through `NormaKit.listSessions()` into

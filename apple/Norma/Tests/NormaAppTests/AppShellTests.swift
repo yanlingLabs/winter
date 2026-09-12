@@ -818,6 +818,19 @@ final class AppShellTests: XCTestCase {
         XCTAssertNil(recentsActivityDotStyle("teleporting"), "an unknown future value is not a licence to guess")
     }
 
+    // MARK: - Winter Phase 8d (Task 4.2, WS-14 §14): the runtime badge label
+
+    /// The branding ruling this function exists to serve: NEVER "Claude Code" — `"claude-agent"`
+    /// reads "Claude Agent", full stop. `nil` for an absent OR unrecognised value, same fail-quiet
+    /// posture as `recentsActivityDotStyle` above (never a guessed default).
+    func testRuntimeBadgeLabelMapsTheTwoKnownKindsAndNeverGuesses() {
+        XCTAssertEqual(runtimeBadgeLabel("winter-agent"), "Winter Agent")
+        XCTAssertEqual(runtimeBadgeLabel("claude-agent"), "Claude Agent")
+        XCTAssertNil(runtimeBadgeLabel(nil), "an absent runtimeKind shows no badge at all")
+        XCTAssertNil(runtimeBadgeLabel("claude-code"), "never surfaced as \"Claude Code\", and never guessed from an unrecognised string")
+        XCTAssertNil(runtimeBadgeLabel("engine"), "an old engine-era value is not a licence to invent a label")
+    }
+
     // MARK: - custom-sidebar: the row fill decision (PURE — one function, every row obeys it)
 
     /// The custom pane's rounded-rect row fill, decided in ONE pure function so every row — top

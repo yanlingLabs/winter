@@ -77,7 +77,7 @@ final class AppModel: ObservableObject {
         let feedClient = feed.client
         directory = SessionDirectory(lister: {
             try await feedClient.listSessions().map {
-                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs, activity: $0.activity, archived: $0.archived, signals: $0.signals, approvalPolicy: $0.approvalPolicy)
+                SessionSummary(sessionId: $0.sessionId, title: $0.title, createdAt: $0.createdAt, scope: $0.scope, cwd: $0.cwd, mode: $0.mode, parentSessionId: $0.parentSessionId, model: $0.model, effort: $0.effort, dirs: $0.dirs, activity: $0.activity, archived: $0.archived, signals: $0.signals, approvalPolicy: $0.approvalPolicy, runtimeKind: $0.runtimeKind, providerId: $0.providerId)
             }
         })
         // FINAL-REVIEW FIX (M1): cold-window bootstrap — session.list on construction, not only on
@@ -254,9 +254,23 @@ final class AppModel: ObservableObject {
     /// (`NormaClient.setModel` sends a literal wire `null`, never an omitted key). Unlike
     /// `setSessionPolicy`, there is no mode-agnostic special case to guard here — `session.setModel`
     /// itself has none (ipc/server.ts's own doc comment: "no chat/dispatch special case").
+    ///
+    /// Winter Phase 8d (Task 4.2): now a thin wrapper over `Self.applyModelChange` — the ONE door
+    /// every `session.setModel` call in the app goes through (`ShellSessionHost`'s and
+    /// `DetachedWindowController`'s own live-session `adapter.onSetModel` wiring, and
+    /// `stampHeldSelection`'s new-chat stamp, call the static helper directly with their own
+    /// `client`/`sessionId` — none of those holds an `AppModel`). This wrapper keeps returning
+    /// `Bool` (`outcome == .ok`) rather than the full outcome: its one caller is the orb's
+    /// `OrbWindowController.onSetModel` bridge (via `AppDelegate`), whose `(String?) async -> Bool`
+    /// shape predates 8d and whose compact picker has no confirm-sheet surface to populate — a
+    /// `.confirmationRequired`/`.disabled`/`.lossyFork`/`.blocked` outcome there degrades to the
+    /// same "the change did not take" the orb has always shown for any refusal, never a crash and
+    /// never a silent lossy switch. `ShellSessionHost`/`DetachedWindowController`'s wiring (this
+    /// file's neighbours) call `Self.applyModelChange` directly instead of this method, because
+    /// THEY have the confirm-sheet state (`FieldStateAdapter.pendingModelConfirmation`) to fill in.
     func setSessionModel(_ model: String?) async -> Bool {
         guard let sid = focusedSessionId else { return false }
-        return (try? await client.setModel(sessionId: sid, model: model)) != nil
+        return await Self.applyModelChange(client: client, sessionId: sid, model: model) == .ok
     }
 
     /// provider-correctness T6: the effort menu's focused-session surface — `setSessionModel`'s
@@ -482,5 +496,121 @@ final class AppModel: ObservableObject {
         if session.state.status == .disconnected { return "daemon unreachable" }
         if let sid = focusedSessionId { return "session \(sid.prefix(10))" }
         return "connected — no session yet"
+    }
+}
+
+// MARK: - Winter Phase 8d Task 4.2: the ONE `session.setModel` outcome-routing door
+
+/// The richer answer `session.setModel` can now give beyond plain success/`NOT_FOUND` — the
+/// handoff barrier's four typed codes (`HandoffRpcCode`, NormaKit) plus `.ok` and a catch-all
+/// `.failed` for everything else (an unresolvable sessionId, a transport error, a refusal that
+/// carries no handoff code at all — e.g. `runtime_selection_refused`/`session_predates_winter_leg`,
+/// which ARE real refusals but not one of the four confirm/disable/error shapes a picker treats
+/// specially).
+enum ModelChangeOutcome: Equatable {
+    case ok
+    /// `error.data.warnings` verbatim (WS-13 §8.2's own list) — the confirm sheet's bullet list.
+    /// Resending with `confirmLossy: true` is the caller's job (`AppModel.applyModelChange` again).
+    case confirmationRequired(warnings: [String])
+    /// The daemon's own refusal message, which NAMES the setting (`runtimes.handoff.crossRuntime`)
+    /// — surfaced verbatim rather than re-worded, so a support conversation can grep for it.
+    case disabled(String)
+    case lossyFork(String)
+    case blocked(String)
+    case failed(String)
+}
+
+extension AppModel {
+    /// **THE ONE door every `session.setModel` call in the app goes through** (Task 4.2's own
+    /// requirement) — static, not an instance method, because two of its four callers
+    /// (`ShellSessionHost`, `DetachedWindowController`) hold their OWN `NormaClient`
+    /// ("harness-per-window": each window is a full harness, not a facet of the orb's `AppModel`),
+    /// so the shared decision logic must not require an `AppModel` instance to exist. The other two
+    /// callers are `AppModel.setSessionModel` itself (the orb's focused-session surface) and
+    /// `ShellSessionHost.stampHeldSelection` (the new-chat "apply a held pick to the just-bound
+    /// session" stamp, which deliberately never blocks on the outcome — see that method's own doc
+    /// comment for why a refusal there must never hold up the user's message).
+    ///
+    /// Maps `RpcError.handoffCode` (NormaKit, Interfaces block) onto `ModelChangeOutcome` 1:1; any
+    /// other thrown error (including a plain `RpcError` with no handoff code, and a transport
+    /// failure) becomes `.failed(message)`.
+    static func applyModelChange(client: NormaClient, sessionId: String, model: String?, confirmLossy: Bool = false) async -> ModelChangeOutcome {
+        do {
+            try await client.setModel(sessionId: sessionId, model: model, confirmLossy: confirmLossy)
+            return .ok
+        } catch let err as RpcError {
+            switch err.handoffCode {
+            case .confirmationRequired:
+                let warnings = (err.data?["warnings"]?.arrayValue ?? []).compactMap { $0.stringValue }
+                return .confirmationRequired(warnings: warnings)
+            case .disabled: return .disabled(err.message)
+            case .lossyFork: return .lossyFork(err.message)
+            case .blocked: return .blocked(err.message)
+            case nil: return .failed(err.message)
+            }
+        } catch {
+            return .failed("\(error)")
+        }
+    }
+
+    // MARK: - Winter Phase 8d Task 4.2 (P8d-8): the ONE advisor setting, read/written directly
+
+    /// `settings.runtimes.advisorModel` (`packages/core/src/settings.ts`) is THE ONE D30 setting
+    /// (P8d-8) — read/written here the SAME way `UpdaterCoordinator.readChannelFromSettings()`
+    /// already reads `updates.channel`: direct JSON file access via `NormaPaths.settingsPath`,
+    /// never an RPC. This IS the app's existing settings-access pattern (the brief's own "find the
+    /// existing settings write path the app uses" — there is no generic `settings.set`-style RPC
+    /// anywhere in the protocol to route through instead, and `provider.configure` is a scoped,
+    /// purpose-specific BYOK verb with an unrelated params shape, not a general settings door; see
+    /// this lane's report for the full note). The daemon's settings-watcher hot-reloads the file on
+    /// write, exactly as a `norma model` CLI edit does — no daemon restart, ever (P8d-8's rule).
+    ///
+    /// Uses `AppProfile.normaHome` explicitly (never the bare env-only `NormaPaths.settingsPath()`)
+    /// — the SAME devfix discipline `AppModel.production()`/`AppDelegate` already apply to
+    /// `socketPath`, for the identical reason: a dev build must never read or write the DIST home's
+    /// settings.json.
+    ///
+    /// `nil` = unset ("Automatic"). Blank-is-absent on both sides, mirroring
+    /// `winterOptionsFromSettings`'s own rule (`settings.ts`): a blank string is never READ as a
+    /// model id, and is never WRITTEN — clearing removes the key rather than storing `""`.
+    nonisolated static func readAdvisorModelFromSettings() -> String? {
+        let url = URL(fileURLWithPath: NormaPaths.settingsPath(home: AppProfile.normaHome))
+        guard let data = try? Data(contentsOf: url),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let runtimes = obj["runtimes"] as? [String: Any],
+              let model = runtimes["advisorModel"] as? String
+        else { return nil }
+        let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// A shallow merge at both levels — preserves every other top-level key AND every other key
+    /// already under `runtimes` — the SAME shape `saveSettings(settingsPath, {...settings,
+    /// runtimes: {...settings.runtimes, advisorModel}})` takes on the daemon/CLI side
+    /// (`packages/cli/src/main.ts`'s `case "model"`). A MISSING settings.json is read as `{}`
+    /// (every field in `Settings` is optional, so an empty object is a valid file — the same
+    /// "first write creates it" the CLI's own `saveSettings` already does for a fresh home).
+    /// Returns `false` (writing nothing) on any parse/encode/I-O failure — never a partial file.
+    @discardableResult
+    static func writeAdvisorModelToSettings(_ model: String?) -> Bool {
+        let url = URL(fileURLWithPath: NormaPaths.settingsPath(home: AppProfile.normaHome))
+        var obj: [String: Any]
+        if let data = try? Data(contentsOf: url), let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            obj = parsed
+        } else {
+            obj = [:]
+        }
+        var runtimes = obj["runtimes"] as? [String: Any] ?? [:]
+        let trimmed = model?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmed, !trimmed.isEmpty {
+            runtimes["advisorModel"] = trimmed
+        } else {
+            runtimes.removeValue(forKey: "advisorModel")
+        }
+        obj["runtimes"] = runtimes
+        guard JSONSerialization.isValidJSONObject(obj),
+              let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
+        else { return false }
+        return (try? data.write(to: url, options: .atomic)) != nil
     }
 }

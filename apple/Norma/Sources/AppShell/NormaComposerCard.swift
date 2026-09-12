@@ -136,11 +136,23 @@ struct ComposerModelControl {
     let catalogue: SyncConfigSnapshot
     let modelChangeInFlight: Bool
     let effortChangeInFlight: Bool
+    /// Winter Phase 8d (Task 4.2, WS-14 §14): the session's runtime leg, straight off its
+    /// `session.list` row (`SessionSummary.runtimeKind`) — `nil` for the new-chat page (no session
+    /// yet) and for an unrecorded/pre-8d session. Rendered via `runtimeBadgeLabel` — never a guess.
+    var runtimeKind: String? = nil
     /// Fired as the menu is about to be read — refreshes the catalogue.
     let onOpen: () -> Void
     /// `nil` selects "Default" (clears the override).
     let onSetModel: (String?) -> Void
     let onSetEffort: (String?) -> Void
+    /// Winter Phase 8d (P8d-8, Task 4.2): the D30 advisor setting's current value
+    /// (`settings.runtimes.advisorModel`), read fresh alongside `onOpen` (`AppModel
+    /// .readAdvisorModelFromSettings()` — a local file read, not an RPC). `nil` = unset
+    /// ("Automatic"). Defaulted so every pre-8d construction site keeps compiling unchanged.
+    var advisorModel: String? = nil
+    /// Writes the setting directly (`AppModel.writeAdvisorModelToSettings`) — `nil` clears it.
+    /// Defaulted to a no-op for the same reason `advisorModel` above is defaulted.
+    var onSetAdvisorModel: (String?) -> Void = { _ in }
 }
 
 /// PURE: everything the model/effort chip shows and offers.
@@ -161,6 +173,13 @@ struct ComposerModelRow: Equatable {
     let tiers: [String]
     let modelChangeInFlight: Bool
     let effortChangeInFlight: Bool
+    /// Winter Phase 8d (Task 4.2, WS-14 §14): the session's runtime leg — `nil` for the new-chat
+    /// page (no session yet) and for an unrecorded/pre-8d session. Rendered via `runtimeBadge`
+    /// below, never inline in `chipTitle` — the badge is provenance, not part of the selection.
+    var runtimeKind: String? = nil
+    /// Winter Phase 8d (P8d-8, Task 4.2): the D30 advisor setting's current value, for the
+    /// "Advisor model" submenu's checkmark. `nil` = unset ("Automatic").
+    var advisorModel: String? = nil
 
     /// What the chip reads: the model in force, and the effort beside it once one is chosen.
     ///
@@ -173,6 +192,11 @@ struct ComposerModelRow: Equatable {
         guard let effort else { return model }
         return "\(model) · \(effort)"
     }
+
+    /// The runtime badge text (`runtimeBadgeLabel`, `ShellSidebar.swift`'s pure mapping) — `nil`
+    /// whenever that function says so (absent `runtimeKind`, or a future value it doesn't
+    /// recognise). Never "Claude Code".
+    var runtimeBadge: String? { runtimeBadgeLabel(runtimeKind) }
 
     /// The chip's hover line and accessibility label. Both axes, always named, including their
     /// "Default" readings — the tooltip is where "inherited from the daemon's default" can be said
@@ -198,6 +222,10 @@ struct ComposerModelChip: View {
     let onOpen: () -> Void
     let onSetModel: (String?) -> Void
     let onSetEffort: (String?) -> Void
+    /// Winter Phase 8d (P8d-8, Task 4.2): the "Advisor model" submenu's write door. Defaulted so
+    /// the (currently sole) construction site's older callers, and every test double, keep
+    /// compiling unchanged.
+    var onSetAdvisorModel: (String?) -> Void = { _ in }
 
     /// Local presentational state, the convention every other picker on this screen follows.
     @State private var showingMenu = false
@@ -212,6 +240,14 @@ struct ComposerModelChip: View {
                     .font(Typography.body())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
+                // Winter Phase 8d (Task 4.2, WS-14 §14): the runtime badge, absent whenever
+                // `ComposerModelRow.runtimeBadge` says so.
+                if let badge = row.runtimeBadge {
+                    Text(badge)
+                        .font(Typography.tiny())
+                        .foregroundStyle(Theme.textMuted)
+                        .lineLimit(1)
+                }
                 Image(systemName: "chevron.down")
                     .font(Typography.badge(.semibold))
                     .foregroundStyle(Theme.textMuted)
@@ -230,10 +266,73 @@ struct ComposerModelChip: View {
                 EffortMenuContent(wire: row.wire, tiers: row.tiers, current: row.effort,
                                   isDisabled: row.effortChangeInFlight,
                                   onSelect: { onSetEffort($0); showingMenu = false })
+                // Winter Phase 8d (P8d-8, Task 4.2): the D30 advisor picker — "Automatic" plus the
+                // SAME catalogue rows the model menu above just offered (`row.options`, verbatim —
+                // P8d-8's own ruling). A menu, not a THIRD stacked section: this is a one-shot
+                // local-settings edit with no in-flight/optimistic state to show, unlike the two
+                // live-session controls above it.
+                Divider().opacity(0.5).padding(.vertical, 6)
+                AdvisorModelMenuContent(options: row.options, current: row.advisorModel,
+                                        onSelect: { onSetAdvisorModel($0) })
             }
             .padding(12)
             .frame(minWidth: 200)
         }
+    }
+}
+
+/// Winter Phase 8d (P8d-8, Task 4.2): the composer chip's "Advisor model" submenu content —
+/// "Automatic" (clears the setting) plus every catalogue slug, exactly mirroring `ModelMenuContent`
+/// just above in SHAPE (an unlisted current value still gets its own row — a stale/custom slug is
+/// still what is pinned, and a selection the user cannot see is one they cannot clear) but reading
+/// "Automatic" rather than "Default": this picks the D30 REVIEWER model, a setting with no
+/// daemon-side notion of "the live default" the way a session's own model has — unset genuinely
+/// means "let the router decide" (D30's own per-family defaults), not "inherit some other value
+/// this menu could name".
+struct AdvisorModelMenuContent: View {
+    let options: [String]
+    let current: String?
+    let onSelect: (String?) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Advisor model")
+                .font(Typography.caption(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 4)
+            AdvisorModelPickerRow(model: nil, current: current, onSelect: onSelect)
+            ForEach(options, id: \.self) { model in
+                AdvisorModelPickerRow(model: model, current: current, onSelect: onSelect)
+            }
+            if let current, !options.contains(current) {
+                AdvisorModelPickerRow(model: current, current: current, onSelect: onSelect)
+            }
+        }
+    }
+}
+
+/// One advisor-menu row — `ModelPickerRow`'s twin, with "Automatic" (never "Default") as the `nil`
+/// label and no in-flight disable (there is no RPC round trip to disable against).
+struct AdvisorModelPickerRow: View {
+    let model: String?
+    let current: String?
+    let onSelect: (String?) -> Void
+
+    var body: some View {
+        Button {
+            onSelect(model)
+        } label: {
+            HStack {
+                Text(model ?? "Automatic")
+                Spacer()
+                if selectionIsCurrent(model, current: current) {
+                    Image(systemName: "checkmark")
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.vertical, 4)
     }
 }
 
@@ -377,7 +476,9 @@ struct NormaComposerCard: View {
                                 wire: efforts.wire,
                                 tiers: efforts.tiers,
                                 modelChangeInFlight: model.modelChangeInFlight,
-                                effortChangeInFlight: model.effortChangeInFlight)
+                                effortChangeInFlight: model.effortChangeInFlight,
+                                runtimeKind: model.runtimeKind,
+                                advisorModel: model.advisorModel)
     }
 
     var body: some View {
@@ -559,7 +660,8 @@ struct NormaComposerCard: View {
             ComposerModelChip(row: modelRow,
                               onOpen: model.onOpen,
                               onSetModel: model.onSetModel,
-                              onSetEffort: model.onSetEffort)
+                              onSetEffort: model.onSetEffort,
+                              onSetAdvisorModel: model.onSetAdvisorModel)
             NewChatControlButton(systemImage: "mic", label: "Dictate (not wired yet)", font: Typography.bodyLarge(.medium))
             sendButton
         }

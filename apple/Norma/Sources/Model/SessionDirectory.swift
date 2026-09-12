@@ -220,5 +220,15 @@ struct SessionSummary: Equatable, Identifiable {
     /// so chat and dispatch carry it too). It never means "no policy": every session has one.
     /// **Never coerce it to a displayed value** — see `FieldStateAdapter.sessionPolicyKnown`.
     var approvalPolicy: String? = nil
+    /// Winter Phase 8d (Task 4.2, WS-14 §14): the session's runtime leg, threaded through from
+    /// `listSessions()` — `"winter-agent"` → "Winter Agent", `"claude-agent"` → "Claude Agent",
+    /// `nil` → no badge (NEVER "Claude Code" — the branding ruling this field exists to serve).
+    /// Defaulted, same reasoning as `mode`/`dirs` above.
+    var runtimeKind: String? = nil
+    /// P8d-7: a finer fact than `runtimeKind` — which PROVIDER served this session (e.g.
+    /// "anthropic"), read from the runtime-state record independently of the leg. `nil` for an
+    /// older daemon, a record-less session, or simply "the leg is known but the provider isn't
+    /// (yet)" — never fabricated from `runtimeKind`.
+    var providerId: String? = nil
     var id: String { sessionId }
 }

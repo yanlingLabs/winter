@@ -751,6 +751,28 @@ final class FieldStateAdapter: ObservableObject {
     /// model-menu content, which reads the row directly via `currentSidebarSessionSummary`).
     var onSetModel: (String?) -> Void = { _ in }
 
+    /// Winter Phase 8d (Task 4.2): one confirm-dialog request at a time — set by `onSetModel`'s
+    /// wirer (`ShellSessionHost`/`DetachedWindowController`) when `AppModel.applyModelChange`
+    /// answers `.confirmationRequired`, read by the shared `WindowContentView` (ONE dialog covers
+    /// all three of its homes: the shell's live page, a detached window, the orb's morph window).
+    /// `warnings` is `error.data.warnings` verbatim. `nil` = no dialog showing.
+    struct PendingModelConfirmation: Equatable {
+        let model: String?
+        let warnings: [String]
+    }
+    @Published var pendingModelConfirmation: PendingModelConfirmation?
+
+    /// Winter Phase 8d (Task 4.2): resends the SAME model with `confirmLossy: true` — the confirm
+    /// dialog's "Switch anyway" button. Wired identically to `onSetModel` at each of its two
+    /// call sites; unwired (the default) is inert, matching every other callback here.
+    var onConfirmModelSwitch: (String?) -> Void = { _ in }
+
+    /// Winter Phase 8d (Task 4.2): a `session.setModel` outcome that is neither success nor a
+    /// confirm-dialog case — `.disabled`/`.lossyFork`/`.blocked`/`.failed`
+    /// (`ModelChangeOutcome`'s own doc names the distinction). A one-line alert, dismissed with a
+    /// plain OK — never a sheet, since there is nothing actionable to offer beyond "read this".
+    @Published var modelChangeError: String?
+
     /// Plan-immunity (2026-07-28 design): true for a chat-mode session — chat's approval policy is
     /// FIXED (core's engine.ts resolves it to the internal "chat" policy every turn regardless of
     /// the stored row, and session.setPolicy rejects ANY change for a chat target), so BOTH policy
