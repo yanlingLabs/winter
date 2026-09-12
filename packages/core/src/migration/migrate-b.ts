@@ -326,14 +326,14 @@ async function execute(plan: MigrationPlan, deps: MigrationDeps, resumeFrom?: Mi
   // silently re-attempting on a partially-created destination.
   if (!resumeFrom) writeManifestAtomic(plan.home, manifest);
 
-  const doneFiles = new Set(manifest.entries.map((e) => `${e.src} ${e.dest}`));
+  const doneFiles = new Set(manifest.entries.map((e) => `${e.src}\0${e.dest}`));
   const doneKeychain = new Set(manifest.keychain.map((k) => k.name));
   const fromService = legacyKeychainServiceFor(plan.profile);
   const toService = keychainService(plan.profile);
 
   let index = 0;
   for (const planEntry of plan.entries) {
-    if (doneFiles.has(`${planEntry.src} ${planEntry.dest}`)) {
+    if (doneFiles.has(`${planEntry.src}\0${planEntry.dest}`)) {
       index++;
       continue;
     }
