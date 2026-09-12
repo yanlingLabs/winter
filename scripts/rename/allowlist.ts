@@ -46,6 +46,17 @@ export const BINARY_EXTENSIONS: ReadonlySet<string> = new Set([
   "odt", "ods", "odp", "docx", "xlsx", "pptx", "xls", "doc", "ppt",
 ]);
 
+/** The app-test files that read the binary Office fixtures (P9b-29); the only files the fixture-content entry covers. */
+const FILES_OFFICE_FIXTURE_TESTS = [
+  "apple/Winter/Tests/WinterAppTests/OfficeDocsCommandTests.swift",
+  "apple/Winter/Tests/WinterAppTests/OfficeSheetsCommandTests.swift",
+  "apple/Winter/Tests/WinterAppTests/OfficeSlidesCommandTests.swift",
+  "apple/Winter/Tests/WinterAppTests/OfficeHelperLiveTests.swift",
+  "apple/Winter/Tests/WinterAppTests/OfficeRuntimeLiveTests.swift",
+  "apple/Winter/Tests/WinterAppTests/OfficePlaceAtomicallyTests.swift",
+  "apple/Winter/Tests/WinterAppTests/EditorPlumbingTests.swift",
+];
+
 export const RENAME_ALLOWLIST: readonly AllowlistEntry[] = [
   {
     id: "gh-repo",
@@ -121,9 +132,11 @@ export const RENAME_ALLOWLIST: readonly AllowlistEntry[] = [
     id: "claude-md-legacy-trap",
     // CLAUDE.md's LEGACY TRAP paragraph (P9b-13) must SPELL the stale wrapper and env names so a
     // reader recognises them on their own machine.
-    regex: /norma-dev|NORMA_HOME|NORMA_PROFILE|\.norma-dev/g,
+    // …and the Hard-rules line that keeps protecting the user's LIVE pre-migration install
+    // (`Norma.app` / `com.norma.app` / `~/.norma` / `com.norma.core`) until Migration B (9c).
+    regex: /norma-dev|NORMA_HOME|NORMA_PROFILE|\.norma-dev|Norma\.app|com\.norma\.(app|core)|~\/\.norma(?![A-Za-z0-9_-])/g,
     files: ["CLAUDE.md"],
-    why: "the dev-guide trap that names the stale `norma-dev` wrapper and the env names it exports (P9b-13)",
+    why: "the dev-guide trap naming the stale `norma-dev` wrapper/env names, and the hard rule naming the live Norma install until 9c (P9b-13; whole-branch review)",
   },
   {
     id: "contributing-clone-dir",
@@ -139,7 +152,8 @@ export const RENAME_ALLOWLIST: readonly AllowlistEntry[] = [
     // One|Two|Three; the tests that read, type into, save and re-open them assert those bytes (and a
     // case-insensitive `find: "norma"` against them). The expectations mirror the fixtures verbatim.
     regex: /NORMA( INC)*( GATE(WAY)?| PAGE TWO)?|Norma T6 Slide|"norma"/g, // bare NORMA + "NORMA INC…" = the replace drill's find/replaceWith/asserted results
-    files: ["apple/Winter/Tests/WinterAppTests/**"],
+    // Scoped to the files that read the fixtures (whole-branch review): a leak elsewhere in the app tests still fails.
+    files: FILES_OFFICE_FIXTURE_TESTS,
     why: "expectations that mirror binary Office fixture content byte-for-byte (P9b-29)",
   },
   {
