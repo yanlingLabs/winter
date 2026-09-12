@@ -1192,7 +1192,7 @@ export async function startDaemon(opts: {
   // `runtimeSdk` can be undefined (a packaging fault) — either absence already means every
   // `session.*` Winter-leg call refuses typed, so a handoff has nothing live to register against.
   if (runtime !== undefined && runtimeSdk !== undefined) {
-    registerHandoffParticipants({ runtime: runtimeSdk, winter: winterDrivers, records: runtime.records, store });
+    registerHandoffParticipants({ runtime: runtimeSdk, winter: winterDrivers, records: runtime.records, store, settings: () => settings });
   }
   /** A deleted session takes its Winter child (bounded `end()`, out of the table) AND its runtime
    *  rows with it — the reaper's 600 s grace is shorter than the 900 s idle timer, so without the
@@ -1950,7 +1950,7 @@ export async function startDaemon(opts: {
     ...(runtime === undefined || runtimeSdk === undefined ? {} : ((sdk: NormaRuntimeSdk) => ({
       handoff: {
         planAndApplySwitch: (sessionId: string, model: string | null, confirmLossy: boolean) =>
-          planAndApplySwitch({ runtime: sdk, winter: winterDrivers, records: runtime.records, store }, sessionId, model, confirmLossy),
+          planAndApplySwitch({ runtime: sdk, winter: winterDrivers, records: runtime.records, store, settings: () => settings }, sessionId, model, confirmLossy),
       },
     }))(runtimeSdk)),
     ...opts.server,

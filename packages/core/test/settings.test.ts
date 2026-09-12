@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC } from "../src/settings";
+import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled } from "../src/settings";
 import { DEFAULT_CODEX_MODEL } from "../src/providers/codex-config";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 
@@ -682,6 +682,8 @@ describe("settings.runtimes", () => {
       // and Task 17 Step 1 flipped dispatch once its e2e proof landed.
       winterLeg: { chat: true, dispatch: true, code: true },
       winterIdleTimeoutSec: 900,
+      // Fix wave (C2 / P8c-18): defaults OFF — see `handoffCrossRuntimeEnabled`'s own tests below.
+      handoff: { crossRuntime: false },
     });
     // The two optional strings stay ABSENT rather than becoming "": a present-but-empty value would
     // be a path/model the consumers have to special-case forever.
@@ -757,6 +759,35 @@ describe("settings.runtimes", () => {
 
   test("a wrongly-typed leg is rejected — a string 'true' must never read as a leg that is on", () => {
     expect(() => Settings.parse({ ...base, runtimes: { winterLeg: { chat: "true" } } })).toThrow();
+  });
+
+  // Fix wave (whole-branch review C2 / ruling P8c-18): the cross-runtime handoff fence.
+  test("crossRuntime defaults to false and accepts an explicit true", () => {
+    expect(Settings.parse({ ...base, runtimes: {} }).runtimes?.handoff).toEqual({ crossRuntime: false });
+    expect(Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: true } } }).runtimes?.handoff)
+      .toEqual({ crossRuntime: true });
+  });
+});
+
+describe("handoffCrossRuntimeEnabled", () => {
+  const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } };
+
+  test("null/undefined settings (a boot-degraded daemon) answer false, never a throw", () => {
+    expect(handoffCrossRuntimeEnabled(null)).toBe(false);
+    expect(handoffCrossRuntimeEnabled(undefined)).toBe(false);
+  });
+
+  test("an absent runtimes block answers false — the same 'absent means the safe default' rule every sibling getter follows", () => {
+    expect(handoffCrossRuntimeEnabled(Settings.parse(base))).toBe(false);
+  });
+
+  test("an empty runtimes block answers false (the schema's own default)", () => {
+    expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: {} }))).toBe(false);
+  });
+
+  test("explicit true flips it on; explicit false stays off", () => {
+    expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: true } } }))).toBe(true);
+    expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: false } } }))).toBe(false);
   });
 });
 

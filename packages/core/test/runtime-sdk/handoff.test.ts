@@ -2,6 +2,12 @@
 // barrier (test seam — `runtimeSdkInternals` only resolves a REAL router-built handle, so this file
 // never constructs one). No real winter binary; the RPC-level wiring (`session.setModel`'s case) is
 // proved separately.
+//
+// Fix wave (M1): `planAndApplySwitch` reads the REAL pinned catalog (`catalogRowsFor`, never
+// faked) for its own bail-out #4 — so every case below that means to REACH the fake selector uses
+// "claude-sonnet-5" (a real catalog row/alias), not a fictional string like the file's earlier
+// "anthropic/sonnet" (zero catalog rows, which the new bail-out now short-circuits to
+// `same-runtime` before the fake selector is ever called).
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,6 +17,7 @@ import { planAndApplySwitch, registerHandoffParticipants, type HandoffDeps } fro
 import { openRuntimeStateDb, RuntimeSessionRecords } from "../../src/runtime-state";
 import type { NormaRuntimeSdk } from "../../src/runtime-sdk/create";
 import type { LegSession, WinterSessionDrivers } from "../../src/runtime-sdk/session-driver";
+import type { Settings } from "../../src/settings";
 
 async function withRs<T>(fn: (rs: ReturnType<typeof openRuntimeStateDb>, records: RuntimeSessionRecords) => Promise<T> | T): Promise<T> {
   const home = mkdtempSync(join(tmpdir(), "norma-handoff-"));
@@ -80,12 +87,18 @@ function fakeWinter(opts: { live?: LegSession }): WinterSessionDrivers {
   };
 }
 
+/** Fix wave (C2 / P8c-18): every existing test in this file below is about the BARRIER's own
+ *  decision matrix, not the fence — so the default here is `crossRuntime: true` (the fence would
+ *  otherwise refuse every cross-runtime case before the barrier is ever reached, which is not what
+ *  those tests are proving). The fence itself gets its OWN `describe` block further down, which
+ *  overrides `settings` explicitly per case. */
 function deps(overrides: Partial<HandoffDeps>): HandoffDeps {
   return {
     runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")) }),
     winter: fakeWinter({}),
     records: {} as RuntimeSessionRecords,
     store: { meta: () => ({ mode: "code", cwd: "/x" }) },
+    settings: () => ({ runtimes: { handoff: { crossRuntime: true } } }) as unknown as Settings,
     ...overrides,
   };
 }
@@ -98,7 +111,7 @@ describe("planAndApplySwitch", () => {
 
   test("no runtime record: same-runtime (nothing to switch FROM)", async () => {
     await withRs(async (_rs, records) => {
-      const out = await planAndApplySwitch(deps({ records }), "s-nope", "anthropic/sonnet", false);
+      const out = await planAndApplySwitch(deps({ records }), "s-nope", "claude-sonnet-5", false);
       expect(out).toEqual({ kind: "same-runtime" });
     });
   });
@@ -122,7 +135,7 @@ describe("planAndApplySwitch", () => {
       seedRecord(records, "s1");
       const out = await planAndApplySwitch(
         deps({ records, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => ({ refused: true, reason: "runtime-unavailable", detail: "no claude executable" })) }) }),
-        "s1", "anthropic/sonnet", false,
+        "s1", "claude-sonnet-5", false,
       );
       expect(out).toEqual({ kind: "refused", code: "runtime_selection_refused", detail: "no claude executable" });
     });
@@ -142,7 +155,7 @@ describe("planAndApplySwitch", () => {
       const barrier: HandoffBarrier = { plan: async (_session, to) => { planCalled = to; return plan; }, execute: async () => { executeCalled = true; return { kind: "resumed", selection: SELECTION("claude-agent") }; } };
       const out = await planAndApplySwitch(
         deps({ records, barrier, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }) }),
-        "s1", "anthropic/sonnet", false,
+        "s1", "claude-sonnet-5", false,
       );
       expect(out).toEqual({ kind: "confirmation_required", warnings: ["reasoning state does not survive a move to the official leg"] });
       // A fresh selection landing on a DIFFERENT leg from the recorded one must reach the barrier's
@@ -166,7 +179,7 @@ describe("planAndApplySwitch", () => {
       const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return plan; }, execute: async (p) => { executedPlan = p; return { kind: "resumed", selection: SELECTION("claude-agent") }; } };
       const out = await planAndApplySwitch(
         deps({ records, barrier, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }) }),
-        "s1", "anthropic/sonnet", true,
+        "s1", "claude-sonnet-5", true,
       );
       expect(out).toEqual({ kind: "resumed", selection: SELECTION("claude-agent") });
       expect(planCalled).toBe(true);
@@ -197,7 +210,7 @@ describe("planAndApplySwitch", () => {
       const barrier: HandoffBarrier = { plan: async () => plan, execute: async () => { executeCalled = true; return { kind: "resumed", selection: SELECTION("claude-agent") }; } };
       const out = await planAndApplySwitch(
         deps({ records, barrier, winter: fakeWinter({ live }), runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }) }),
-        "s1", "anthropic/sonnet", true,
+        "s1", "claude-sonnet-5", true,
       );
       expect(out).toEqual({ kind: "deferred" });
       expect(executeCalled).toBe(false);
@@ -205,6 +218,114 @@ describe("planAndApplySwitch", () => {
       await idlePromise;
       await Bun.sleep(10); // let the fire-and-forget .then() run
       expect(executeCalled).toBe(true);
+    });
+  });
+
+  // Fix wave M1: mirrors `session-driver.ts`'s `decideRuntime` bail-out #4 — a model with NO row
+  // in the pinned catalog at all keeps today's plain in-runtime behaviour rather than reaching the
+  // (fake) selector at all.
+  test("M1: a model with no row in the real catalog at all bails to same-runtime BEFORE the selector runs", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      let selectorCalled = false;
+      const runtime = fakeRuntime({
+        selectRuntimeFor: async () => { selectorCalled = true; return SELECTION("claude-agent"); },
+      });
+      const out = await planAndApplySwitch(deps({ records, runtime }), "s1", "my-custom-finetune-id-nobody-published", false);
+      expect(out).toEqual({ kind: "same-runtime" });
+      expect(selectorCalled).toBe(false);
+    });
+  });
+
+  test("M1: a CATALOG-KNOWN model (claude-sonnet-5) does NOT bail out — the selector still runs", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      let selectorCalled = false;
+      const runtime = fakeRuntime({
+        selectRuntimeFor: freshOnlySelector(() => { selectorCalled = true; return SELECTION("winter-agent"); }),
+      });
+      const out = await planAndApplySwitch(deps({ records, runtime }), "s1", "claude-sonnet-5", false);
+      expect(out).toEqual({ kind: "same-runtime" }); // same leg as recorded — but the selector DID run
+      expect(selectorCalled).toBe(true);
+    });
+  });
+});
+
+// Fix wave C2 (whole-branch review / ruling P8c-18): the cross-runtime handoff fence. Every case
+// here reaches the point where a FRESH destination decision genuinely differs from the recorded
+// leg — the fence must refuse BEFORE the barrier is ever consulted and BEFORE anything is written.
+describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.handoff.crossRuntime)", () => {
+  test("disabled (the schema default): a cross-runtime destination is refused typed, no barrier call", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      let planCalled = false;
+      const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return null as unknown as HandoffPlan; }, execute: async () => null as unknown as HandoffOutcome };
+      const out = await planAndApplySwitch(
+        deps({
+          records, barrier,
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+          settings: () => ({ runtimes: { handoff: { crossRuntime: false } } }) as unknown as Settings,
+        }),
+        "s1", "claude-sonnet-5", false,
+      );
+      expect(out).toEqual({ kind: "refused", code: "handoff_disabled", detail: expect.stringContaining("disabled") });
+      expect(planCalled).toBe(false);
+    });
+  });
+
+  test("no runtimes block at all (an absent settings.json): the fence still refuses (absent means off)", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+          settings: () => null,
+        }),
+        "s1", "claude-sonnet-5", false,
+      );
+      expect(out).toEqual({ kind: "refused", code: "handoff_disabled", detail: expect.any(String) });
+    });
+  });
+
+  test("enabled: the fence steps aside and the barrier is reached exactly as before", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      let planCalled = false;
+      const plan: HandoffPlan = {
+        session: { projectKey: "pk", sessionId: "be-1" }, from: "winter-agent", to: "claude-agent",
+        steps: [{ step: 1, name: "lease" }],
+        decorationDoor: "fallback", tempContinuity: "clone-copy",
+        selection: { kind: "servable", selection: SELECTION("claude-agent"), review: { checked: true } as never },
+      };
+      const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return plan; }, execute: async () => ({ kind: "resumed", selection: SELECTION("claude-agent") }) };
+      const out = await planAndApplySwitch(
+        deps({
+          records, barrier,
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+          settings: () => ({ runtimes: { handoff: { crossRuntime: true } } }) as unknown as Settings,
+        }),
+        "s1", "claude-sonnet-5", true,
+      );
+      expect(planCalled).toBe(true);
+      expect(out).toEqual({ kind: "resumed", selection: SELECTION("claude-agent") });
+    });
+  });
+
+  test("a SAME-runtime model change is never fenced, flag on or off", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1"); // recorded leg: winter-agent
+      for (const crossRuntime of [true, false]) {
+        const out = await planAndApplySwitch(
+          deps({
+            records,
+            runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")) }),
+            settings: () => ({ runtimes: { handoff: { crossRuntime } } }) as unknown as Settings,
+          }),
+          "s1", "claude-sonnet-5", false,
+        );
+        expect(out).toEqual({ kind: "same-runtime" });
+      }
     });
   });
 });
@@ -228,6 +349,7 @@ describe("registerHandoffParticipants: selectionInputFor wiring", () => {
         runtime: { ...runtime, registerHandoffParticipants: (p) => { registered = p; } },
         winter: fakeWinter({}), records,
         store: { meta: () => ({ mode: "dispatch", cwd: "/x" }) },
+        settings: () => null,
       });
       expect(registered.selectionInputFor).toBeDefined();
       const persisted = SELECTION("winter-agent");
@@ -248,6 +370,7 @@ describe("registerHandoffParticipants: selectionInputFor wiring", () => {
       runtime: { ...runtime, registerHandoffParticipants: (p) => { registered = p; } },
       winter: fakeWinter({}), records: {} as RuntimeSessionRecords,
       store: { meta: () => ({ mode: "code", cwd: "/x" }) },
+      settings: () => null,
     });
     expect(registered.selectionInputFor).toBeUndefined();
   });
