@@ -70,7 +70,7 @@ WINTER_HOME=~/.winter-dev WINTER_PROFILE=dev bun src/main.ts daemon run
 # at it explicitly (wins over the package rung):
 WINTER_RUNTIME_EXECUTABLE="$PWD/../../dist/winter" WINTER_HOME=~/.winter-dev WINTER_PROFILE=dev bun src/main.ts daemon run
 # (or set `runtimes.winterExecutable` in ~/.winter-dev/settings.json). FIRST RUN AFTER A REBUILD OR A FRESH `bun install`:
-# the winter binary reads Winter's Keychain items itself, so macOS shows ONE consent dialog per credential item — click
+# the winter binary reads the daemon's Keychain items itself, so macOS shows ONE consent dialog per credential item — click
 # "Always Allow" or the turn stalls until the CLI's 180 s watchdog aborts it. `bun run build:winter --sign <identity>` (or env
 # `WINTER_RUNTIME_SIGN_IDENTITY`; `-` for an ad-hoc-but-STABLE identity works too) re-signs a freshly built `dist/winter`
 # with a fixed `--identifier com.winter.runtime`, so ITS Keychain ACL survives rebuilds instead of re-prompting every time

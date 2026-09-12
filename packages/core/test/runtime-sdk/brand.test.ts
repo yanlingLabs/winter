@@ -69,6 +69,12 @@ describe("CORE_BRAND", () => {
     expect(mcpToolName(CORE_BRAND, "computer__computer")).toBe("mcp__winter__computer__computer");
   });
 
+  // P9b-7's own consequence: the daemon takes the SDK's `presetName` as-is (never overridden), and
+  // it is the SDK's own value, not the bare brand token — see mode-options.ts's own consumer.
+  test("presetName is the SDK's own winter_code, not the bare brand token", () => {
+    expect(CORE_BRAND.presetName).toBe("winter_code");
+  });
+
   test("envPrefix carries its trailing underscore (ENV_PREFIX_RE requires it)", () => {
     expect(CORE_BRAND.envPrefix).toBe("WINTER_");
     expect(resolveBrand({ ...CORE_BRAND, envPrefix: "WINTER" }).ok).toBe(false);
