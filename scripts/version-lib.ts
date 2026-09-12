@@ -2,19 +2,68 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const ROOT = join(import.meta.dir, "..");
-export const FORMAT = /^(\d+)\.(\d+)\.(\d{3})$/;
 
-export function readCanonical(): string {
-  const v = readFileSync(join(ROOT, "VERSION"), "utf8").trim();
-  if (!FORMAT.test(v)) throw new Error(`VERSION "${v}" does not match #.#.### (e.g. 0.2.001)`);
+// Winter Phase 9c (P9c-2): the rebrand-scale version scheme. Groups are (major)(feature, always
+// 3 digits)(patch, always 1 digit) — e.g. "0.111.0". The pre-rename Norma scheme (`#.#.###`, e.g.
+// "0.2.014") deliberately no longer matches: `norma-final` carries its own copy of this file on
+// its own branch and stays on the old scheme; this tree is Winter-only from here on.
+export const FORMAT = /^(\d+)\.(\d{3})\.(\d)$/;
+
+/** Pure half of `readCanonical` — the exact string a real VERSION file's content should already
+ *  satisfy. Extracted so the error text (and its own wording) is unit-testable without a
+ *  malformed VERSION file ever touching the real repo. */
+export function parseCanonical(raw: string): string {
+  const v = raw.trim();
+  if (!FORMAT.test(v)) throw new Error(`VERSION "${v}" does not match #.###.# (e.g. 0.111.0)`);
   return v;
 }
 
-/** 0.2.001 -> 0.2.1 — semver forbids leading zeros; used ONLY for the private package.jsons. */
+/** Reads the canonical version from `path` (default: the real repo's `VERSION` file). The `path`
+ *  override exists for tests only — every production caller (bump-version.ts, sync-version.ts,
+ *  release.ts) calls this with no arguments. */
+export function readCanonical(path: string = join(ROOT, "VERSION")): string {
+  return parseCanonical(readFileSync(path, "utf8"));
+}
+
+/** 0.111.0 -> 0.111.0 (identity for the new scheme — no leading zeros survive Number() either
+ *  way); kept as a named twin because semver forbids leading zeros in general and this is used
+ *  ONLY for the private package.jsons, which a stray future scheme change could reintroduce. */
 export function semverTwin(v: string): string {
   const m = v.match(FORMAT);
   if (!m) throw new Error(`not a canonical version: ${v}`);
   return `${Number(m[1])}.${Number(m[2])}.${Number(m[3])}`;
+}
+
+export type BumpMode = "--patch" | "--feature" | "--major";
+
+/**
+ * Pure bump logic (P9c-2) — shared by bump-version.ts's CLI and release.ts's speculative
+ * "what version would a default bump produce" tag-preflight check, and unit-tested directly here
+ * rather than through a subprocess.
+ *
+ * `--patch` (last digit +1; the last digit is a SINGLE digit by `FORMAT`, so a patch already at 9
+ * throws naming `--feature` rather than silently overflowing to two digits).
+ * `--feature` (middle 3-digit group +1, zero-padded back to 3 digits; resets the patch digit to 0;
+ * a feature group already at 999 throws naming `--major`, the same "throw at the ceiling" shape).
+ * `--major` (first group +1; resets to `.000.0`).
+ * `--minor` is not a mode in this scheme (it was the old `#.#.###`'s middle group) — throws
+ * pointing at `--feature`, the new equivalent, rather than the generic unknown-mode message.
+ */
+export function nextVersion(current: string, mode: string): string {
+  const m = current.match(FORMAT);
+  if (!m) throw new Error(`VERSION "${current}" does not match #.###.# (e.g. 0.111.0)`);
+  const [major, feature, patch] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (mode === "--major") return `${major + 1}.000.0`;
+  if (mode === "--feature") {
+    if (feature >= 999) throw new Error(`feature ${String(feature).padStart(3, "0")} is at the #.###.# ceiling — use --major`);
+    return `${major}.${String(feature + 1).padStart(3, "0")}.0`;
+  }
+  if (mode === "--patch") {
+    if (patch >= 9) throw new Error(`patch ${patch} is at the #.###.# ceiling — use --feature`);
+    return `${major}.${String(feature).padStart(3, "0")}.${patch + 1}`;
+  }
+  if (mode === "--minor") throw new Error("--minor is not a #.###.# mode — use --feature");
+  throw new Error(`unknown mode ${mode} (use --patch | --feature | --major)`);
 }
 
 const PKGS = ["cli", "core", "protocol", "plugin-sdk"];

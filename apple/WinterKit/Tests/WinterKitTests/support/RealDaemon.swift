@@ -428,7 +428,7 @@ final class RealDaemonTests: XCTestCase {
         console.log("credentials: openai absent, codex-oauth absent");
         console.log("runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt");
         console.log("runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked");
-        console.log("winter-core 0.2.014 listening on /tmp/does-not-exist/core.sock");
+        console.log("winter-core 0.111.0 listening on /tmp/does-not-exist/core.sock");
         process.stdout.write(JSON.stringify({ socketPath: "/tmp/winter-p8d19-fake.sock", harness: "h", remote: "r" }) + "\\n");
         """
         let daemon = try await RealDaemon.start(fixtureOverride: fixture)

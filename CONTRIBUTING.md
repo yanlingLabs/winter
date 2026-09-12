@@ -179,8 +179,9 @@ never pass either one; a security test pins that.
   a fixture, never in a log line.
 - **Provider `encrypted_content` / `reasoning_item.itemJson` is opaque.** The session JSONL is its
   only sink. Never log it, never write it into a model-readable transcript.
-- **Versions are generated.** `VERSION` (format `#.#.###`) is canonical; edit it only via
-  `bun run version:bump` / `version:sync`. Never hand-edit a version in a `package.json` or plist.
+- **Versions are generated.** `VERSION` (format `#.###.#` — major.feature.patch) is canonical; edit
+  it only via `bun run version:bump` (patch) / `version:bump:feature` / `version:bump:major` /
+  `version:sync`. Never hand-edit a version in a `package.json` or plist.
 - **Minimum OS targets track the latest major Apple OS.** No legacy compatibility shims.
 - **`packages/core/src/providers/codex-config.ts` self-identifies as `originator: "winter"`.** That's
   a deliberate terms-of-service decision. Don't "fix" it to a first-party value.
