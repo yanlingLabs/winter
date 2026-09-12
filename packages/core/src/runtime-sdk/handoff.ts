@@ -55,6 +55,7 @@ import { runtimeSdkInternals } from "@yanlinglabs/winter-runtime-sdk";
 import type { HandoffParticipants, NormaRuntimeSdk, SessionMode } from "./create";
 import { RuntimeSessionRecords, type RuntimeSessionRecord } from "../runtime-state/records";
 import { sessionLegOf } from "./leg";
+import { testProviderNameFor } from "./provider-selection";
 import type { LegSession, WinterSessionDrivers } from "./session-driver";
 
 export interface HandoffDeps {
@@ -248,6 +249,14 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
     // caller keeps its own ordinary (store-write-only) behaviour for this case.
     return { kind: "same-runtime" };
   }
+  // Mirrors `session-driver.ts`'s OWN `decideRuntime` bail-out #2 for a NEW session: a
+  // `winter-test/<double>` model is chosen by env var, never by the catalog, and the router's
+  // listing has no row for it AT ALL — `selectRuntimeFor` refuses every such model outright
+  // (measured: `winter-chat-e2e.test.ts`'s `session.setModel` calls with `winter-test/<double>`
+  // models on an EXISTING session, which must keep today's in-runtime behaviour, exactly as
+  // `session.create` already does for the same models). Without this bail-out the fresh decision
+  // below would hard-refuse a plain, same-leg model change that never asked to move anything.
+  if (testProviderNameFor(model) !== undefined) return { kind: "same-runtime" };
   const mode = modeOf(deps.store.meta(sessionId).mode);
   // FRESH — no `persisted`. `SELECTION_RULES.persisted` returns a persisted selection BY IDENTITY,
   // so passing `record.selection` here (the pre-fix shape) made `decided.runtimeKind` always equal
