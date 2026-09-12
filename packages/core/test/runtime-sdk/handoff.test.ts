@@ -485,21 +485,23 @@ describe("registerHandoffParticipants: destination.confirmInit (m4 — the plan-
     };
   }
 
-  test("the session's state at PLAN time is unchanged at execute time: the m4 stale-state check passes (no 'moved from' refusal)", async () => {
-    // NOTE: this does not assert `result.ok === true` end to end — `RuntimeSessionRecords.transition`
-    // refuses EVERY self-transition (no state is in its own `ALLOWED_TRANSITIONS` list), and
-    // `confirmInit`'s patch call is unconditionally `transition(id, fresh.state, patch)`, i.e. always
-    // a self-transition. That is a PRE-EXISTING defect this task's m4 scope does not touch (m4 is
-    // about the staleness CHECK, not the patch mechanism) — flagged in the lane report rather than
-    // fixed here. What m4 owns and this test proves: the unchanged-state case reaches the (separate,
-    // pre-existing) patch attempt at all, rather than being wrongly refused as "moved".
+  test("the session's state at PLAN time is unchanged at execute time: confirmInit SUCCEEDS (P8d-24)", async () => {
+    // Round 1 found that `destinationRuntimeFor`'s patch call went through `transition(id,
+    // fresh.state, patch)` — a SELF-transition, which `ALLOWED_TRANSITIONS` refuses for every one
+    // of the 8 states — so this exact case used to report `IllegalStateTransitionError` even though
+    // nothing about the session had moved. P8d-24 (round 2) fixed it: `confirmInit` now uses
+    // `RuntimeSessionRecords.patch` (a same-state patch door, never a transition). This test is the
+    // round-2 ruling's own proof: the destination-side patch now SUCCEEDS where it previously threw.
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1"); // ready
       const destination = registerDestination(records, fakeWinterThatOpens());
       const built = destination({ projectKey: "pk", sessionId: "be-1" }, "claude-agent");
       const result = await built!.confirmInit(targetFor("s1"));
-      expect((result as { reason?: string }).reason ?? "").not.toContain("moved from");
-      expect((result as { reason?: string }).reason ?? "").toContain("the record could not be patched");
+      expect(result).toMatchObject({ ok: true });
+      const record = records.get("s1")!;
+      expect(record.runtimeKind).toBe("claude-agent");
+      expect(record.state).toBe("ready"); // untouched — `patch` never writes `state`
+      expect(record.backendSessionId).toBe(targetFor("s1").backendSessionId);
     });
   });
 

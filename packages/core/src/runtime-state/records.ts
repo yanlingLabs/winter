@@ -188,6 +188,18 @@ export class IllegalStateTransitionError extends Error {
   }
 }
 
+/** P8d-24: `patch`'s own typed refusal — the row's state was not `expected`, either at the read
+ *  that opened the transaction or (the race window) at the guarded write itself. Distinct from
+ *  `IllegalStateTransitionError`: that one names a transition the state machine forbids; this one
+ *  names a PATCH whose caller's assumption about the CURRENT state turned out to be wrong — there
+ *  is no "to" state here at all, because `patch` never writes one. */
+export class RuntimeSessionStateMismatchError extends Error {
+  constructor(public readonly winterSessionId: string, public readonly expected: RuntimeSessionState, public readonly actual: RuntimeSessionState) {
+    super(`runtime session ${winterSessionId} is ${actual}, not the expected ${expected} — refusing the patch`);
+    this.name = "RuntimeSessionStateMismatchError";
+  }
+}
+
 /** WS-16 §4: both versions are mandatory when provenance is `recorded`; omission is reserved for
  *  `legacy-unknown` and must never be read as "current". */
 export class VersionProvenanceError extends Error {
@@ -470,6 +482,63 @@ export class RuntimeSessionRecords {
       }
       return this.require(winterSessionId);
     });
+  }
+
+  /**
+   * P8d-24: a SAME-STATE patch — never a transition, and this NEVER writes the `state` column at
+   * all. `ALLOWED_TRANSITIONS` has no self-loop for any of the 8 states BY DESIGN (`transition`'s
+   * own doc comment), so a caller that needs to patch fields while a session's lifecycle state
+   * stays exactly what it already is cannot use `transition` — `transition(id, current.state,
+   * patch)` is a self-transition, and `ALLOWED_TRANSITIONS[current.state].includes(current.state)`
+   * is false for every state. `handoff.ts`'s destination-side `confirmInit` (WS-05 §12 step 8) is
+   * the first caller, and was discovered patching through `transition` this way — meaning that
+   * patch had likely always thrown `IllegalStateTransitionError` in production.
+   *
+   * This is `doctor.ts`'s `relinkBackend` precedent generalized into a repository method: a raw,
+   * guarded UPDATE whose WHERE clause carries `expectedState`, so a state change racing this call
+   * (between the read below and the write landing) is caught as a refusal rather than silently
+   * overwritten or silently ignored. `ALLOWED_TRANSITIONS` stays the state machine's ONE truth —
+   * this method adds no edge to it and cannot be used to change `state`.
+   *
+   * Refuses typed: `UnknownRuntimeSessionError` (via `require`) for an unknown id,
+   * `RuntimeSessionStateMismatchError` when the row's state is not `expectedState` — checked once
+   * up front (the common case, a cheap early exit) and re-proven by the guarded UPDATE's own
+   * `changes` count (the race window). Uses the SAME `PATCH_COLUMNS`/`NON_NULLABLE_PATCH_KEYS`
+   * mapping `transition` does, so the two doors never disagree about what an absent key vs. an
+   * explicit `undefined` means for a given column.
+   */
+  patch(winterSessionId: string, expectedState: RuntimeSessionState, patch: RuntimeSessionPatch): RuntimeSessionRecord {
+    return this.rs.transaction(
+      () => {
+        const current = this.require(winterSessionId);
+        if (current.state !== expectedState) throw new RuntimeSessionStateMismatchError(winterSessionId, expectedState, current.state);
+        const sets = ["updated_at = ?"];
+        const values: (string | number | null)[] = [this.now()];
+        for (const [key, column] of PATCH_COLUMNS) {
+          if (!(key in patch)) continue;
+          if (patch[key] === undefined && NON_NULLABLE_PATCH_KEYS.has(key)) continue;
+          sets.push(`${column} = ?`);
+          values.push(
+            key === "capabilities" ? JSON.stringify(patch.capabilities ?? [])
+            : key === "selection" ? JSON.stringify(patch.selection)
+            : (patch[key] as string | undefined) ?? null,
+          );
+        }
+        values.push(winterSessionId, expectedState);
+        let changes = 0;
+        try {
+          changes = this.rs.db.query(`UPDATE runtime_sessions SET ${sets.join(", ")} WHERE winter_session_id = ? AND state = ?`).run(...values).changes;
+        } catch (e) {
+          throw this.mapDuplicate(e, patch.backendSessionId);
+        }
+        // The race window: the read above proved the state a moment ago; this proves it AT THE
+        // WRITE. `require` re-reads so the thrown error names the state as it is NOW, not as it
+        // was at the read that already turned out to be stale.
+        if (changes === 0) throw new RuntimeSessionStateMismatchError(winterSessionId, expectedState, this.require(winterSessionId).state);
+        return this.require(winterSessionId);
+      },
+      { mode: "immediate" },
+    );
   }
 
   /** A new live backend process/handle attached: append its generation row and move the record's

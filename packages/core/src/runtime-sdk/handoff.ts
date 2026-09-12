@@ -171,7 +171,11 @@ function destinationRuntimeFor(deps: HandoffDeps, session: SessionKey, to: Runti
       }
       const before = { runtimeKind: fresh.runtimeKind, selection: fresh.selection, backendSessionId: fresh.backendSessionId };
       try {
-        deps.records.transition(winterSessionId, fresh.state, {
+        // P8d-24: `patch`, never `transition` — this never changes the lifecycle `state`, only the
+        // runtime/selection/backendSessionId fields, so it must not be spelled as a transition TO
+        // the record's own current state (`ALLOWED_TRANSITIONS` has no self-loop for any state; see
+        // `RuntimeSessionRecords.patch`'s own doc comment for why that made this always refuse).
+        deps.records.patch(winterSessionId, fresh.state, {
           runtimeKind: to,
           selection: target.selection,
           backendSessionId: target.backendSessionId,
@@ -186,7 +190,9 @@ function destinationRuntimeFor(deps: HandoffDeps, session: SessionKey, to: Runti
         return { ok: true, producer: { sdkVersion: target.selection.sdkVersion, engineVersion: target.selection.engineVersion } };
       } catch (err) {
         try {
-          deps.records.transition(winterSessionId, fresh.state, before);
+          // The lifecycle state was never touched above, so the revert targets the SAME
+          // `fresh.state` the forward patch did.
+          deps.records.patch(winterSessionId, fresh.state, before);
         } catch (revertErr) {
           deps.log?.(`handoff: confirmInit failed AND the record revert for ${winterSessionId} also failed (${revertErr instanceof Error ? revertErr.name : "unknown"}) — the record may now name a leg it cannot run on`);
         }
