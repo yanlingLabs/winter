@@ -2,7 +2,7 @@ import { test, expect, afterEach, jest } from "bun:test";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CanUseTool, PermissionUpdate } from "@yanlinglabs/winter-agent-sdk";
+import type { CanUseTool, PermissionResult, PermissionUpdate } from "@yanlinglabs/winter-agent-sdk";
 import { ApprovalRequestedEvent, ApprovalResolvedEvent, type NewSessionEvent } from "@norma/protocol";
 import { ApprovalBroker, approvalCardSummary, approvalOptionsFor } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
@@ -10,7 +10,7 @@ import { PermissionGate, type SessionApprovalPolicy } from "../../src/agent/gate
 import { PermissionRules } from "../../src/agent/permission-rules";
 import {
   canUseToolFor, neverPromptsMessage, approvalOptionsFromSuggestions,
-  NO_PARK_TIMEOUT_MS, type BridgeLogger, type CanUseToolDeps,
+  NO_PARK_TIMEOUT_MS, type BridgeLogger, type BridgedApprovalRequest, type CanUseToolDeps,
 } from "../../src/runtime-sdk/approval-bridge";
 import { gateToolNameFor } from "../../src/runtime-sdk/tool-names";
 
@@ -666,4 +666,48 @@ test("AskUserQuestion reaches the question bridge even under bypass", async () =
   expect((h.events[0] as { type: string }).type).toBe("question_asked");
   h.questions.respond(SESSION, "tu1", { Which: "A" }, "phone");
   await expect(pending).resolves.toMatchObject({ behavior: "allow" });
+});
+
+// -------------------------------------------------------------------------------------------
+// P8c-14 (integration round 2): ExitPlanMode is routed through `deps.planBridge` BEFORE the
+// generic gate/never-prompt logic — the seam session-driver.ts wires on both legs.
+// -------------------------------------------------------------------------------------------
+
+test("ExitPlanMode reaches deps.planBridge.onExitPlanMode and its PermissionResult is returned verbatim", async () => {
+  let received: (BridgedApprovalRequest & { plan?: string }) | undefined;
+  const verbatim: PermissionResult = { behavior: "allow", updatedInput: { plan: "do the thing" } };
+  const planBridge = {
+    onExitPlanMode: async (req: BridgedApprovalRequest): Promise<PermissionResult> => {
+      received = req as BridgedApprovalRequest & { plan?: string };
+      return verbatim;
+    },
+  };
+  const h = harness({ policy: "plan", planBridge });
+  const result = await h.canUse("ExitPlanMode", { plan: "do the thing" }, requestCtx({ toolUseID: "tu-plan" }));
+  // Returned exactly as the bridge answered it — no re-wrapping, no re-interpretation.
+  expect(result).toBe(verbatim);
+  expect(received?.sessionId).toBe(SESSION);
+  expect(received?.callId).toBe("tu-plan");
+  expect(received?.toolName).toBe("ExitPlanMode");
+  expect(received?.gateToolName).toBe("exit_plan_mode");
+  expect(received?.plan).toBe("do the thing");
+  // Never touched the broker/event stream the generic gate/card path uses — the plan bridge owns
+  // its own plan_presented/plan_resolved events, not approval_requested/approval_resolved.
+  expect(h.events).toHaveLength(0);
+});
+
+test("a request for any other tool never touches deps.planBridge", async () => {
+  let touched = false;
+  const planBridge = { onExitPlanMode: async (): Promise<PermissionResult> => { touched = true; return { behavior: "allow" as const }; } };
+  const h = harness({ policy: "auto", planBridge });
+  await h.canUse("Bash", { command: "ls" }, requestCtx());
+  await h.canUse("Read", { file_path: "/tmp/x" }, requestCtx());
+  expect(touched).toBe(false);
+});
+
+test("ExitPlanMode with no planBridge configured falls through unchanged (exit_plan_mode is READ_ONLY — silent allow, no card)", async () => {
+  const h = harness({ policy: "auto" }); // no planBridge dep at all
+  const result = await h.canUse("ExitPlanMode", { plan: "x" }, requestCtx());
+  expect(result).toEqual({ behavior: "allow", updatedInput: { plan: "x" } });
+  expect(h.events).toHaveLength(0);
 });

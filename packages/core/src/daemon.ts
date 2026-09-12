@@ -55,7 +55,9 @@ import { sessionTmpDir } from "./agent/session-tmp";
 import { PluginStore, pluginMcpEligible, pluginSpawnEligible, hookRegistryPlugins } from "./agent/plugins";
 import { PluginSupervisor } from "./plugins/supervisor";
 import { PluginContribRegistry } from "./plugins/contrib";
-import { HookRegistry } from "./plugins/hook-registry";
+import { HookRegistry, HookFacade } from "./plugins/hook-registry";
+import { HookRunner } from "./plugins/hook-runner";
+import { BashReviewer } from "./agent/reviewer";
 import { AuditLog } from "./peripheral/audit";
 import { PeripheralBroker, type PeripheralClass } from "./peripheral/broker";
 import { ProviderLink } from "./peripheral/provider-link";
@@ -72,6 +74,9 @@ import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "./runtime-sdk/creat
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
 import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
+import { planBridgeFor, type PlanBridge } from "./runtime-sdk/plan-bridge";
+import { sinksFor } from "./runtime-sdk/sinks";
+import { sessionHooksFor } from "./runtime-sdk/hooks";
 import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord, type CapabilitySession } from "./capabilities";
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
 import { makeDaemonRoutineRunner } from "./routines/runner";
@@ -244,6 +249,26 @@ function buildLeasePolicy(deps: {
     });
     return res.approved ? "granted" : "denied";
   };
+}
+
+/** `plugin__<pluginId>__<name>` → its two halves (P8c integration round 2, `capabilityDeps.external`
+ *  below) — the exact inverse of `ipc/server.ts`'s `tool.register` handler's own
+ *  `` `plugin__${pluginId}__${p.name}` `` template. Splits on the FIRST `__` after the `plugin__`
+ *  prefix: `pluginId` is a raw plugin-directory name that `agent/plugin-manifest.ts#loadManifest`
+ *  only WARNS about (not rejects) containing `__`, while `ToolRegisterParams`'s wire schema REJECTS
+ *  `__` in a tool `name` outright (`protocol/methods.ts`'s "Safe tool-name charset" comment) — so a
+ *  first-`__` split can only misparse a pluginId that already carries the exact collision hazard
+ *  `unregisterByPrefix` names as a known, documented risk elsewhere. Returns `undefined` for
+ *  anything not shaped `plugin__x__y` (never throws). */
+export function pluginToolNameParts(fullName: string): { pluginId: string; name: string } | undefined {
+  const PREFIX = "plugin__";
+  if (!fullName.startsWith(PREFIX)) return undefined;
+  const rest = fullName.slice(PREFIX.length);
+  const sep = rest.indexOf("__");
+  if (sep < 0) return undefined;
+  const pluginId = rest.slice(0, sep);
+  const name = rest.slice(sep + 2);
+  return pluginId && name ? { pluginId, name } : undefined;
 }
 
 export async function startDaemon(opts: {
@@ -872,6 +897,36 @@ export async function startDaemon(opts: {
     // Fix wave (review F7): the `lsp` tool over the SAME `let lspManager` holder the registry
     // door and `settings-apply.ts`'s hot `lsp.enabled` flip reassign — read per call.
     lsp: { lsp: () => lspManager ?? undefined },
+    // P8c integration round 2: the `external` capability server's real source
+    // (`capabilities/external.ts`'s own header names the design). `sharedRegistry` is the SAME
+    // `ToolRegistry` `tool.register` (ipc/server.ts) writes `plugin__<pluginId>__<name>` rows into
+    // — read live per session build, never a boot snapshot (a plugin registering mid-daemon-life
+    // reaches the NEXT session built, matching every other capability's "session keeps what it
+    // started with" contract). `null` (no agent provider) reads as zero tools, same as every other
+    // capability closure over `sharedRegistry`/`lspManager` in this object.
+    external: {
+      tools: (session) => {
+        if (!sharedRegistry) return [];
+        return sharedRegistry.listByPrefix("plugin__").flatMap((spec) => {
+          const parsed = pluginToolNameParts(spec.name);
+          if (!parsed) return [];
+          return [{
+            pluginId: parsed.pluginId,
+            name: parsed.name,
+            description: spec.description,
+            ...(spec.parameters === undefined ? {} : { parameters: spec.parameters as Record<string, unknown> }),
+            async invoke(argsJson: string) {
+              const args = JSON.parse(argsJson) as Record<string, unknown>;
+              const outcome = await sharedRegistry!.execute(spec.name, args, {
+                cwd: session.cwd, roots: session.roots, sessionId: session.sessionId,
+                tmpDir: session.tmpDir, outDir: session.outDir, mode: session.mode,
+              });
+              return outcome.isError ? { ok: false as const, message: outcome.output } : { ok: true as const, resultJson: outcome.output };
+            },
+          }];
+        });
+      },
+    },
   };
   /** THE door Task 16's session driver opens: one session in, its servers out — already keyed by
    *  name, i.e. already in `Options.mcpServers` shape (the child derives each tool's wire name from
@@ -1003,6 +1058,84 @@ export async function startDaemon(opts: {
   const titler = sessionTitler === undefined ? undefined : {
     maybeTitle: (sid: string): Promise<void> => (settings?.titles?.enabled === false ? Promise.resolve() : sessionTitler.maybeTitle(sid)),
   };
+  // ── P8c integration Wiring 1: the ExitPlanMode bridge (lane 2's `plan-bridge.ts`, P8c-14) ──────
+  // `winterDriversForPlanBridge` breaks the construction cycle: `planBridge` is a `WinterLegDeps`
+  // field `createWinterSessionDrivers` below needs at construction, but an APPROVAL's `setPolicy`
+  // reaches a LIVE child through that same `winterDrivers` table (mirrors `ipc/server.ts`'s own
+  // `session.setPolicy` composition: `store.setApprovalPolicy` + `winter.get(sessionId)?.setPolicy`)
+  // — so the reference is filled in right after `winterDrivers` itself is assigned, below.
+  let winterDriversForPlanBridge: WinterSessionDrivers | undefined;
+  const planBridgeLog = { info: (m: string) => console.error(`plan-bridge: ${m}`), error: (m: string) => console.error(`plan-bridge: ${m}`) };
+  const planBridge: PlanBridge = planBridgeFor({
+    emit: (event) => { hub.append(event.sessionId, event); },
+    setPolicy: async (sessionId, policy) => {
+      store.setApprovalPolicy(sessionId, policy);
+      try {
+        await winterDriversForPlanBridge?.get(sessionId)?.setPolicy(policy);
+      } catch (err) {
+        console.error(`plan-bridge: setPolicy for ${sessionId} failed: ${err instanceof Error ? err.name : "unknown"}`);
+      }
+    },
+    log: planBridgeLog,
+  });
+  // ── P8c integration Wiring 3: the Winter/official hooks facade (lane 3's `hooks.ts`, P8c-14) ───
+  // `hookRegistry`/`hooksEnabledFrom`/`lspAutoDiagnosticsEnabledFrom`/`projectRootOf` are all
+  // already live above (boot + Task 9 project-settings machinery); `HookFacade`/`HookRunner`/
+  // `BashReviewer` were never constructed anywhere in this file post-engine-deletion (8b) — this is
+  // their first live wiring since the retired AgentEngine's own `cfg.hooks`/`reviewer`. Read LIVE
+  // per call (settings hot-reload), matching every other getter in this block.
+  const winterHooksEnabled = (cwd?: string | null): boolean => {
+    const s = projectSettings.effective(projectRootOf(cwd));
+    return s ? hooksEnabledFrom(s) : true;
+  };
+  const winterLspAutoDiagnosticsEnabled = (cwd?: string | null): boolean => {
+    const s = projectSettings.effective(projectRootOf(cwd));
+    return s ? lspAutoDiagnosticsEnabledFrom(s) : true;
+  };
+  const hookFacade = new HookFacade({
+    registry: hookRegistry,
+    runner: new HookRunner(),
+    hooksEnabled: winterHooksEnabled,
+    cwdForSession: (sid) => { try { return store.meta(sid).cwd ?? undefined; } catch { return undefined; } },
+  });
+  // The retired engine's own BashReviewer gate (engine.ts:4547-4548): `provider`/`model` are the
+  // SAME shape `SessionTitler` above takes — inert without an `agentProvider` (mirrors `titler`'s
+  // own `agentProvider === null` guard).
+  const bashReviewer = agentProvider === null || agentProvider === undefined
+    ? undefined
+    : new BashReviewer({ provider: agentProvider, model: settings?.reviewer?.model });
+  const hooksFor = (session: CapabilitySession) =>
+    sessionHooksFor({
+      sessionId: session.sessionId,
+      home: normaHome,
+      roots: session.roots,
+      tmpDir: session.tmpDir,
+      hookFacade,
+      ...(bashReviewer === undefined ? {} : { reviewer: bashReviewer }),
+      reviewerEnabled: () => settings?.reviewer?.enabled,
+      reviewerAllow: () => settings?.reviewer?.allow,
+      policy: () => { try { return store.meta(session.sessionId).approvalPolicy; } catch { return undefined; } },
+      lsp: () => lspManager ?? undefined,
+      autoDiagnosticsEnabled: () => winterLspAutoDiagnosticsEnabled(session.cwd),
+    });
+  // ── P8c integration Wiring 2: the notification/schedule sinks (lane 2's `sinks.ts`, P8c-11) ────
+  // `hub.addObserver` (Dispatch/Phase 7's existing fan-out of every appended event of EVERY
+  // session, both legs alike — see `sessions/hub.ts`) is the wiring point named in the brief: it
+  // needs no change to `session-driver.ts`/`official-session.ts`, so both legs' projected
+  // `tool_call`/`tool_result` reach the sinks through the SAME hub every other cross-cutting
+  // observer (Dispatch's own) already uses.
+  const sinks = sinksFor({
+    routines: routineStore,
+    emit: (event) => { hub.append(event.sessionId, event); },
+    attachedCount: (sid) => hub.attachedCount(sid),
+    notifyFallback: (title, message) => notifyHeadless(title, message),
+    cwdFor: (sid) => { try { return store.meta(sid).cwd ?? undefined; } catch { return undefined; } },
+    log: { info: (m) => console.error(`sinks: ${m}`), error: (m) => console.error(`sinks: ${m}`) },
+  });
+  hub.addObserver((event) => {
+    if (event.type === "tool_call") sinks.onToolCall(event);
+    else if (event.type === "tool_result") sinks.onToolResult(event);
+  });
   const winterDrivers: WinterSessionDrivers = createWinterSessionDrivers({
     home: normaHome,
     profile: process.env.NORMA_PROFILE,
@@ -1035,7 +1168,19 @@ export async function startDaemon(opts: {
     extraMcpServers: (session) => configuredMcpServersFor({ settings, cwd: session.cwd, trusted: (dir) => trustStore.isTrusted(dir) }),
     log: (line) => console.error(`winter-leg: ${line}`),
     ...(opts.officialConnectionOverride === undefined ? {} : { officialConnectionOverride: opts.officialConnectionOverride }),
+    // P8c integration Wirings 1 & 3 (P8c-14): lane 2's plan bridge and lane 3's hooks facade,
+    // built above. `hooksFor` reaches the official leg's `Options.hooks` today (session-driver.ts's
+    // `assembleOfficial`); the Winter-leg side of `planBridge`/`hooksFor.winter` has no consumer yet
+    // in this spine (`approval-bridge.ts` never reads `WinterLegDeps.planBridge`, and this file's
+    // own `optionsFor` never threads `hooksFor(...).winter` into `buildWinterOptions` at all) — both
+    // fields are still wired here because `WinterLegDeps` already declares the seam and the brief's
+    // wiring is this daemon.ts assignment, not the still-open lane-1 consumption (see report).
+    planBridge,
+    hooksFor,
   });
+  // Wiring 1: fills the forward reference `planBridge`'s `setPolicy` closes over (declared above,
+  // before `winterDrivers` existed) — see that block's own comment for why the cycle is broken here.
+  winterDriversForPlanBridge = winterDrivers;
   /** A deleted session takes its Winter child (bounded `end()`, out of the table) AND its runtime
    *  rows with it — the reaper's 600 s grace is shorter than the 900 s idle timer, so without the
    *  first half a live child would outlive its session. The boot sweep above ran before any driver
@@ -1726,7 +1871,11 @@ export async function startDaemon(opts: {
     hooks: hookRegistry,
     questions: questions ?? undefined,
     tasks: undefined,
-    plans: undefined,
+    // P8c integration Wiring 1: lane 2's `planBridgeFor(...)` (built above), replacing the retired
+    // `PlanBroker` this field used to hold — `ipc/server.ts`'s existing, unchanged `plan.respond`
+    // case already calls `opts.plans?.respond(...)` generically (the `plans` field's TYPE was
+    // widened to `PlanBridge` alongside this wiring).
+    plans: planBridge,
     peripheral,
     providerLink,
     hardware,

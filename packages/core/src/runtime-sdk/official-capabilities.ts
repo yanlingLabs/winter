@@ -2,14 +2,17 @@
 // instances the daemon already built for this session (`capabilities/index.ts`'s
 // `buildCapabilitiesFor` / `CapabilityServerRecord`) — never a second copy of a tool's definition.
 //
-// Fix round 1 (item 0): router 0.0.3 publishes `capabilityServerDescriptors`/`officialMcpServers`/
-// `officialBranchLabel` at the package root (checkpoint b measured the 0.0.2 export gap and worked
-// around it with a hand-rolled `createSdkMcpServer`/`tool` path — that workaround is now DELETED).
-// `capabilityServerDescriptors` takes Norma's own `McpSdkServerConfigWithInstance` values VERBATIM
-// (the SAME objects `buildCapabilitiesFor` already builds for the Winter leg — see
-// `capabilities/server.ts`'s `capabilityServer()`) and derives the descriptor's `tools` from the
-// Winter instance's `listTools()`/`callTool()` itself, so behaviour is byte-identical on both legs
-// with NO handler code in this file at all — the router owns the whole bridge now.
+// Fix round 1 (item 0): router 0.0.3 publishes `officialMcpServers`/`officialBranchLabel` at the
+// package root (checkpoint b measured the 0.0.2 export gap and worked around it with a hand-rolled
+// `createSdkMcpServer`/`tool` path — that workaround is now DELETED for THOSE two). The router's own
+// `capabilityServerDescriptor`/`capabilityServerDescriptors` — the converters that would take
+// Norma's `McpSdkServerConfigWithInstance` values verbatim — are declared in the installed 0.0.3's
+// `official/mcp-descriptors.d.ts` but are NOT re-exported from the package root (measured directly
+// against the installed tarball; a router 0.0.4 carry, P8c ledger). So THIS file still builds the
+// descriptor BY HAND (`descriptorFromWinterConfig`, ~130 lines below) from the same
+// `listTools()`/`callTool()` the Winter leg already calls — byte-identical behaviour on both legs,
+// but with this file's own handler code, not the router's converter. `officialMcpServers` is the
+// one piece that IS the router's own, taking the hand-built descriptors from here.
 import type { McpSdkServerConfigWithInstance, WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
 import { isWinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
 import { officialBranchLabel, officialMcpServers } from "@yanlinglabs/winter-runtime-sdk";
