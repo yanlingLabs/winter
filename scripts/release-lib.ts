@@ -251,8 +251,10 @@ export interface AppcastInsertPlanInputs {
   dryRun: boolean;
   version: string;
   /** Current contents of the appcast this run would insert into (read by release.ts from
-   * whichever file `target` below resolves to — always `releases/appcast.xml` on disk, since
-   * that's the only copy that exists; the preview file is only ever an OUTPUT). */
+   * whichever file `target` below resolves to — always `releases/winter/appcast.xml` on disk
+   * (the P9b-9 Winter feed), since that's the only copy this pipeline ever writes; the frozen
+   * pre-rename `releases/appcast.xml` is never touched by it. The preview file is only ever an
+   * OUTPUT). */
   appcastXml: string;
   /** The rendered `<item>` block (release-lib's `appcastItem()`) to insert for this version. */
   item: string;
@@ -263,8 +265,9 @@ export interface AppcastInsertPlanResult {
    * out/release/<v>-dryrun/appcast-preview.xml ONLY (dry-run — F1 fix: never the tracked file;
    * `d3054fa3` moved every dry-run artifact under the `-dryrun` suffix, and release.ts's own
    * mirror of this sentence says the same);
-   * "repo" -> releases/appcast.xml (real run — release.ts must do this write from inside its
-   * `!DRY_RUN` publish tail, not before). */
+   * "repo" -> releases/winter/appcast.xml (real run — release.ts must do this write from inside
+   * its `!DRY_RUN` publish tail, not before; the frozen `releases/appcast.xml` — the pre-rename
+   * feed — is never touched by this pipeline). */
   target: "preview" | "repo";
   /** "insert": updatedXml is ready to write. "skip": an <item> for this exact
    * <sparkle:version> is already present — F2 fix, makes re-running (e.g. --resume-publish
@@ -357,7 +360,7 @@ export function publishGuard(i: PublishGuardInputs): PublishGuardResult {
       action: "dry-run-skip",
       lines: [
         `gh release create v${v} --title "Winter ${v}" + upload Winter-${v}.zip + Winter-${v}.dmg`,
-        `commit + push releases/appcast.xml`,
+        `commit + push releases/winter/appcast.xml`,
         `git tag v${v} && git push origin v${v}`,
       ],
     };

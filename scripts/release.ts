@@ -25,8 +25,9 @@
  * Whole-branch review fix (F1/F2, see .superpowers/sdd/progress-release.md): the appcast
  * `<item>` insert decision is `appcastInsertPlan` (release-lib.ts, unit-tested) — under
  * --dry-run it writes ONLY a preview at out/release/<v>-dryrun/appcast-preview.xml, mirroring
- * cask's out/ render; the TRACKED releases/appcast.xml is written only from inside the
- * publish tail's `if (!DRY_RUN)` block, never before. The insert is also idempotent: an
+ * cask's out/ render; the TRACKED releases/winter/appcast.xml (P9b-9's Winter feed; the frozen
+ * pre-rename releases/appcast.xml is never touched by this pipeline) is written only from
+ * inside the publish tail's `if (!DRY_RUN)` block, never before. The insert is also idempotent: an
  * `<item>` whose `<sparkle:version>` already matches the release version is skipped rather than
  * duplicated, so --resume-publish after a partial failure (or a stray re-run) can't double-
  * insert or get blocked by a self-inflicted dirty tree.
@@ -70,7 +71,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { FORMAT, ROOT, readCanonical } from "./version-lib";
 import {
   GH_REPO,
@@ -1015,6 +1016,11 @@ function assertValidXml(xml: string, label: string) {
 // appcast.xml` (the pre-rename feed — byte-identical after 9b; its terminal entry is 9c's handoff
 // release, never written by this pipeline again).
 const appcastPath = join(ROOT, "releases", "winter", "appcast.xml");
+// Repo-relative form of appcastPath, used everywhere this script probes/stages/commits the
+// tracked file by path (git operates relative to ROOT) — computed once so the git-status probe,
+// `git add`, and the resume log all name the SAME (renamed) feed instead of the frozen
+// `releases/appcast.xml` (F1 fix-wave, P9b fix-wave item 1).
+const appcastRel = relative(ROOT, appcastPath);
 const appcastPreviewPath = join(OUT, "appcast-preview.xml");
 const appcastXml = readFileSync(appcastPath, "utf8");
 const item = appcastItem({
@@ -1038,8 +1044,8 @@ if (appcastPlan.action === "insert") {
   assertValidXml(appcastPlan.updatedXml!, "appcast (with new item)");
 }
 if (appcastPlan.target === "preview") {
-  // --dry-run: releases/appcast.xml is NEVER touched (F1) — preview only, mirroring the cask's
-  // out/ render (section 11, below).
+  // --dry-run: releases/winter/appcast.xml (appcastPath) is NEVER touched (F1) — preview only,
+  // mirroring the cask's out/ render (section 11, below).
   if (appcastPlan.action === "insert") {
     writeFileSync(appcastPreviewPath, appcastPlan.updatedXml!);
     console.log(
@@ -1050,7 +1056,7 @@ if (appcastPlan.target === "preview") {
     console.log(`Appcast already carries ${version} — skipping insert (dry-run: ${appcastPath} NOT touched).`);
   }
 }
-// appcastPlan.target === "repo" (a real, non-dry-run run): the actual releases/appcast.xml
+// appcastPlan.target === "repo" (a real, non-dry-run run): the actual releases/winter/appcast.xml
 // write is deferred to the publish tail (section 12, inside `if (!DRY_RUN)`) — see F1 above.
 
 // ---------------------------------------------------------------------------
@@ -1210,7 +1216,7 @@ sh(`git push origin v${version}`);
 
 if (guard.action === "publish") {
   console.log(`Publishing v${version}...`);
-  const notes = `Winter ${version}${BETA ? " (beta)" : ""}\n\nSigned Sparkle appcast entry: releases/appcast.xml.`;
+  const notes = `Winter ${version}${BETA ? " (beta)" : ""}\n\nSigned Sparkle appcast entry: ${appcastRel}.`;
   const notesPath = join(OUT, "release-notes.md");
   writeFileSync(notesPath, notes);
   sh(`gh release create v${version} --title "Winter ${version}" --notes-file "${notesPath}" "${zipPath}" "${dmgPath}"`);
@@ -1232,7 +1238,7 @@ if (guard.action === "publish") {
   }
 }
 
-// Appcast write + commit+push. The actual releases/appcast.xml write lives HERE — inside
+// Appcast write + commit+push. The actual releases/winter/appcast.xml write lives HERE — inside
 // `!DRY_RUN`, past every abort/exit above (F1 fix, see section 10) — never earlier. Resume-safe
 // both ways: `appcastPlan.action === "skip"` means a prior attempt already wrote this version's
 // <item> (F2 fix — re-running never appends a duplicate), so nothing to write here either; the
@@ -1244,13 +1250,13 @@ if (appcastPlan.action === "insert") {
 } else {
   console.log(`Appcast already carries ${version} — skipping insert (resume-safe).`);
 }
-const appcastDirty = probe(`git status --porcelain -- releases/appcast.xml`).stdout.trim() !== "";
+const appcastDirty = probe(`git status --porcelain -- ${appcastRel}`).stdout.trim() !== "";
 if (appcastDirty) {
-  sh(`git add releases/appcast.xml`);
+  sh(`git add ${appcastRel}`);
   sh(`git commit -m "chore(releases): appcast entry for v${version}"`);
   sh(`git push`);
 } else {
-  console.log("  (resume) releases/appcast.xml already committed — nothing to do");
+  console.log(`  (resume) ${appcastRel} already committed — nothing to do`);
 }
 
 // Tag creation moved BEFORE `gh release create` (see comment there) — by this point the tag is
