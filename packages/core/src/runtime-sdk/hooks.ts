@@ -37,15 +37,23 @@
 // require a daemon restart") takes effect on this session's very next matching call, not just on
 // the next session.
 //
-// **The official leg (`official` in the return value) is a documented carry, not a stub bug.**
-// `OptionsTemplatePolicy.hooks` (global-constraints Interfaces block) is typed `unknown` precisely
-// because its shape is the router's own settings-file-style `SettingsHooksConfig`
-// (`@yanlinglabs/winter-agent-sdk`'s `settings/types.d.ts`: `SettingsHookMatcherGroup` /
-// `SettingsHookHandler`) — a DECLARATIVE config the router's `mergeHooks` consumes, not a place a
-// raw JS `HookCallback` closure over THIS session's `HookFacade`/`BashReviewer`/`LspManager`
-// instances can be handed directly. Neither that merge point nor a live-callback bridge for it is
-// among Lane 3's owned files or documented interfaces (they live in `runtime-sdk/official-options.ts`,
-// lane 1's), so `official` returns `undefined` here — see this file's own report for the carry.
+// **The official leg (`official` in the return value), fix wave M4 (ruling P8c-19).** Lane 3's own
+// header used to read `OptionsTemplatePolicy.hooks` as the router's DECLARATIVE, settings-file-style
+// `SettingsHooksConfig` — the wrong reading. Measured against the router 0.0.3 source
+// (`dist/official/options-template.d.ts` + `.js`): `buildOfficialOptions` does
+// `hooks: mergeHooks(createContainmentHooks(...), policy.hooks)`, and `mergeHooks(ours, hostHooks)`
+// treats `hostHooks` as `Record<HookEvent, HookCallbackMatcher[]>` — the SAME `HookCallback`/
+// `HookCallbackMatcher`/`HookEvent` shape `@yanlinglabs/winter-agent-sdk` exports (`options.d.ts`),
+// which is itself a structural mirror of `@anthropic-ai/claude-agent-sdk`'s own `sdk.d.ts` types
+// (`HookCallback = (input, toolUseID, {signal}) => Promise<HookJSONOutput>`; identical `HookInput`
+// field names — `tool_name`/`tool_input`/`tool_response`/`tool_use_id`/`session_id`/`agent_id` — on
+// both SDKs). So the exact object built for `winter` below is ALREADY the shape the official leg's
+// `mergeHooks` expects for its second argument: no translation, no second implementation. The
+// router puts its own containment matchers FIRST in each event's array (`mergeHooks`'s own
+// `[...matchers, ...host[event] ?? []]`), so Norma's groups here always run AFTER the containment
+// floor on the official leg — the ordering the fix-wave brief calls for. `official-options.ts`
+// (lane 1's file) threads this value into `OptionsTemplatePolicy.hooks` via `session-driver.ts`'s
+// `hooksFor(session).official`, already wired at integration.
 import { readFileSync, statSync } from "node:fs";
 import type {
   HookCallback, HookCallbackMatcher, HookJSONOutput, Options,
@@ -373,13 +381,19 @@ function diagnosticsPostToolUseHook(deps: SessionHooksDeps): HookCallback {
   };
 }
 
-/** `{ winter, official }` — see this file's own header for why `official` is `undefined` (a
- *  disclosed carry, not an oversight). `winter` is always populated: every hook function above is
- *  a safe, cheap no-op (`allow()`/`{}`) when its own dependency is absent, so registering the
- *  groups unconditionally costs nothing extra beyond the wire round trip `Options.hooks` already
- *  requires the moment ANY group is registered for an event — and the plugin-hook groups (no
- *  matcher) are the one case that always needs to be live, since a plugin can be enabled on a
- *  running daemon between sessions with no restart. */
+/** `{ winter, official }` — fix wave M4 (ruling P8c-19): BOTH legs get the same groups, built ONCE
+ *  from the same `deps` and the same per-tool hook functions (this file's header explains why the
+ *  two SDKs' `HookCallback`/`HookCallbackMatcher`/`HookEvent` shapes make that safe rather than a
+ *  reuse-across-legs hazard). `winter` is `Options["hooks"]` from `@yanlinglabs/winter-agent-sdk`;
+ *  `official` is the identical object, typed `unknown` only because `OptionsTemplatePolicy.hooks`
+ *  (the router 0.0.3 export `official-options.ts` assigns it through) declares no narrower type —
+ *  never a second, independently-built copy that could drift from `winter`.
+ *
+ *  Every hook function above is a safe, cheap no-op (`allow()`/`{}`) when its own dependency is
+ *  absent, so registering the groups unconditionally costs nothing extra beyond the wire round trip
+ *  `Options.hooks` already requires the moment ANY group is registered for an event — and the
+ *  plugin-hook groups (no matcher) are the one case that always needs to be live, since a plugin
+ *  can be enabled on a running daemon between sessions with no restart. */
 export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hooks"] | undefined; official: unknown } {
   const pending = new Map<string, PendingDiffSnapshot>();
 
@@ -404,6 +418,6 @@ export function sessionHooksFor(deps: SessionHooksDeps): { winter: Options["hook
   // rather than a second branch of `PostToolUse`.
   const postToolUseFailure: HookCallbackMatcher[] = [{ hooks: [pluginPostToolUseFailureHook(deps)] }];
 
-  const winter: Options["hooks"] = { PreToolUse: preToolUse, PostToolUse: postToolUse, PostToolUseFailure: postToolUseFailure };
-  return { winter, official: undefined };
+  const built: Options["hooks"] = { PreToolUse: preToolUse, PostToolUse: postToolUse, PostToolUseFailure: postToolUseFailure };
+  return { winter: built, official: built };
 }
