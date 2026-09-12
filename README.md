@@ -57,7 +57,9 @@ carries Winter.app inside it, installs and registers Winter as your menu-bar app
 itself, with no separate download. The first time Winter boots, it migrates your existing
 `~/.norma` home into `~/.winter` on its own — sessions, settings, memory, and Keychain items are
 copied over, never deleted from the old home and never overwritten in the new one. You can check on
-it any time with `winter migrate --status`.
+it any time with `winter migrate --status`. Once Winter is running the way you expect, the old
+Norma.app can be deleted — nothing in `~/.norma` is needed for Winter to work, and you can remove
+that directory too once you have verified the migration.
 
 If you installed via Homebrew, `brew install --cask norma` is deprecated in favor of `winter` —
 switch your tap reference:
