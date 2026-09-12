@@ -4,12 +4,14 @@ import { join } from "node:path";
 import { CORE_VERSION } from "../src/version";
 
 const ROOT = join(import.meta.dir, "..", "..", "..");
-const FORMAT = /^(\d+)\.(\d+)\.(\d{3})$/;
+// Winter Phase 9c (P9c-2): major.feature3.patch1 — e.g. "0.111.0". Replaces the pre-rename
+// Norma #.#.### scheme (e.g. "0.2.014"); norma-final keeps its own copy of that old regex.
+const FORMAT = /^(\d+)\.(\d{3})\.(\d)$/;
 const canonical = readFileSync(join(ROOT, "VERSION"), "utf8").trim();
 const m = canonical.match(FORMAT);
 const twin = m ? `${+m[1]!}.${+m[2]!}.${+m[3]!}` : "INVALID";
 
-test("VERSION matches #.#.###", () => {
+test("VERSION matches #.###.#", () => {
   expect(canonical).toMatch(FORMAT);
 });
 
