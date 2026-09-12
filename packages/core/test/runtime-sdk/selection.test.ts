@@ -118,6 +118,40 @@ describe("familyListingFromCatalog + the router's own selectRuntime", () => {
   test("M5: a CATALOG-KNOWN model (claude-sonnet-5) always has at least one row — decideRuntime does NOT bail out on it", () => {
     expect(catalogRowsFor("claude-sonnet-5").length).toBeGreaterThan(0);
   });
+
+  // Fix wave M2: the router's own `resolveModel` (the SDK's compiled code) matches ONLY a row's
+  // `key` or an entry's `canonicalModelId` — it has no `aliases`/`upstreamId` field to consult.
+  // `catalogRowsFor` matches a BROADER set (key/upstreamId/canonicalModelId/aliases), so an
+  // alias-only model passes `decideRuntime`'s bail-out #4 (a real catalog row exists) and then must
+  // still resolve against THIS listing, or it refuses despite being unambiguously catalogued.
+  test("M2: an alias-only model (haiku) resolves against the REAL router through familyListingFromCatalog", () => {
+    expect(catalogRowsFor("haiku").length).toBeGreaterThan(0); // pins the fixture's own premise
+    const result = selectRuntime({
+      mode: "code",
+      requested: { model: "haiku" },
+      families: familyListingFromCatalog(),
+      credentials: { byProvider: { anthropic: "keychain" }, authByProvider: { anthropic: { authFamily: "api-key" } } },
+      hasClaudePeer: true,
+      claudeOauthApproved: false,
+    });
+    if (isSelectionRefusal(result)) throw new Error(`unexpected refusal: ${result.detail}`);
+    expect(result.runtimeKind).toBe("claude-agent");
+    expect(result.providerId).toBe("anthropic");
+    // The REAL provider-qualified key is stamped — the alias only opened a second door onto the
+    // SAME row, it never displaces what `modelRef` records (this file's own `familyListingFromCatalog`
+    // doc comment).
+    expect(result.modelRef).toBe("anthropic/claude-haiku-4-5-20251001");
+  });
+
+  test("M2: an alias never resolves to the WRONG canonical model — 'haiku' and 'opus' land on different rows", () => {
+    const families = familyListingFromCatalog();
+    const creds = { byProvider: { anthropic: "keychain" as const }, authByProvider: { anthropic: { authFamily: "api-key" as const } } };
+    const haiku = selectRuntime({ mode: "code", requested: { model: "haiku" }, families, credentials: creds, hasClaudePeer: true, claudeOauthApproved: false });
+    const opus = selectRuntime({ mode: "code", requested: { model: "opus" }, families, credentials: creds, hasClaudePeer: true, claudeOauthApproved: false });
+    if (isSelectionRefusal(haiku) || isSelectionRefusal(opus)) throw new Error("unexpected refusal");
+    expect(haiku.modelRef).not.toBe(opus.modelRef);
+    expect(opus.modelRef).toBe("anthropic/claude-opus-5");
+  });
 });
 
 describe("createNormaRuntimeSdk(...).selectRuntimeFor", () => {
@@ -152,5 +186,21 @@ describe("createNormaRuntimeSdk(...).selectRuntimeFor", () => {
     handles.push(handle);
     const result = await handle.selectRuntimeFor({ mode: "code", model: "claude-sonnet-5" });
     expect(isSelectionRefusal(result)).toBe(true);
+  });
+
+  // Fix wave M2: the same real, end-to-end door `session-driver.ts`'s `decideRuntime` calls for a
+  // NEW session (`selectRuntimeFor`) — an alias-only model must succeed here too, not just against
+  // the pure `selectRuntime` function above.
+  test("M2: session.create's own door (selectRuntimeFor) resolves an alias-only model (haiku) to the official leg", async () => {
+    home = mkdtempSync(join(tmpdir(), "p8c-selection-alias-"));
+    secretsDir = join(home, "secrets");
+    const secrets = new FileSecretStore(secretsDir);
+    await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-ant-test" });
+    const handle = await createNormaRuntimeSdk({ home, settings: () => null, secrets, capabilities: [] });
+    handles.push(handle);
+    const result = await handle.selectRuntimeFor({ mode: "code", model: "haiku" });
+    if (isSelectionRefusal(result)) throw new Error(`unexpected refusal: ${result.detail}`);
+    expect(result.runtimeKind).toBe("claude-agent");
+    expect(result.providerId).toBe("anthropic");
   });
 });

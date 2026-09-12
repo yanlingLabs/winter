@@ -119,6 +119,29 @@ export function inventoryProvidersServing(model: string): string[] {
  * candidate), so inventing a real value here would be exactly the "one place a lane relies on an
  * inference nobody made" this codebase's own culture warns against — recorded as a carry for
  * whichever surface eventually renders it.
+ *
+ * M2 (whole-branch review): the router's OWN `resolveModel` (`select-runtime.ts`, the SDK's
+ * compiled code, not ours) matches a requested model against exactly two things — an entry's
+ * `canonicalModelId`, or a row's `key` — because the SDK's `ModelFamilyListing` row shape HAS no
+ * `aliases`/`upstreamId` field to consult at all. `catalogRowsFor` (this file, just above) matches
+ * a broader set — a row's `key`, `upstreamId`, `canonicalModelId` OR any of its `aliases` — which is
+ * exactly right for "does Norma's catalog know this model" (`decideRuntime`'s bail-out #4,
+ * `session-driver.ts`) but WRONG the moment that broader answer is fed to the router as a literal
+ * `requested.model` string: an alias/upstreamId match passes the bail-out (a real catalog row
+ * exists) and then reaches `resolveModel`, which cannot find it anywhere in THIS listing and
+ * refuses ("no model or catalog row … matches") even though the model is unambiguously catalogued.
+ * Fix: for every alias/upstreamId a row answers to, this listing carries one EXTRA row with that
+ * identifier as `key` (same provider/status — a synonym for the SAME row, never a different
+ * provider or a different canonical model), appended AFTER the row's own real entry — so
+ * `resolveModel`'s `row.key === model` check succeeds identically to a direct key/canonicalModelId
+ * request. `candidatesFor`'s own array-order pick (`resolveCandidateRows`'s `[first, ...rest]`)
+ * therefore still stamps the REAL provider-qualified key as `modelRef` whenever both survive its
+ * filters (same provider/status/servable/auth either way) — an alias row never displaces its own
+ * real row, it only adds a second door to the same one. These rows exist ONLY inside the
+ * `SelectionInput` fed to the router's pure functions (`selectRuntime`/`resolveCandidateRows`) —
+ * nothing UI-facing reads `familyListingFromCatalog()`'s output (grep confirms: `create.ts`'s
+ * `buildSelectionInput`/`selectRuntimeFor` are its only callers), so a synthetic `key` here never
+ * reaches a client's model picker.
  */
 export function familyListingFromCatalog(): ModelFamilyListing {
   const catalog = loadCatalog();
@@ -127,10 +150,17 @@ export function familyListingFromCatalog(): ModelFamilyListing {
     const canonicalIds = [...new Set(inFamily.map((m) => m.canonicalModelId))];
     const models = canonicalIds.map((canonicalModelId) => {
       const rows = inFamily.filter((m) => m.canonicalModelId === canonicalModelId);
+      const listedRows = rows.flatMap((r) => {
+        const base = { providerId: r.providerId, status: r.status, pricingBasis: "unknown", servable: "unknown" as const };
+        const synonyms = new Set([r.upstreamId, ...r.aliases]);
+        synonyms.delete(r.key);
+        synonyms.delete(canonicalModelId); // already matched at the entry level; no need to duplicate
+        return [{ key: r.key, ...base }, ...[...synonyms].map((key) => ({ key, ...base }))];
+      });
       return {
         canonicalModelId,
         displayName: rows[0]?.displayName ?? canonicalModelId,
-        rows: rows.map((r) => ({ key: r.key, providerId: r.providerId, status: r.status, pricingBasis: "unknown", servable: "unknown" as const })),
+        rows: listedRows,
       };
     });
     return {
