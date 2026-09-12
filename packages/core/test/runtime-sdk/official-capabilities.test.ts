@@ -36,10 +36,10 @@ async function spiedOfficialModule(): Promise<{ module: OfficialMcpModule; captu
   const real = (await import("@anthropic-ai/claude-agent-sdk")) as unknown as OfficialMcpModule;
   const captured: Array<{ name: string; handler: (args: Record<string, unknown>, extra: unknown) => Promise<{ content: unknown[]; isError?: boolean }> }> = [];
   const module: OfficialMcpModule = {
-    createSdkMcpServer: (options) => real.createSdkMcpServer(options),
+    createSdkMcpServer: (options) => real.createSdkMcpServer!(options),
     tool: (name, description, inputSchema, handler) => {
-      const def = real.tool(name, description, inputSchema, handler);
-      captured.push({ name, handler });
+      const def = real.tool!(name, description, inputSchema, handler as (args: unknown, extra: unknown) => Promise<unknown>);
+      captured.push({ name, handler: handler as (args: Record<string, unknown>, extra: unknown) => Promise<{ content: unknown[]; isError?: boolean }> });
       return def;
     },
   };

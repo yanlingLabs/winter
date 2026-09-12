@@ -2,46 +2,28 @@
 // instances the daemon already built for this session (`capabilities/index.ts`'s
 // `buildCapabilitiesFor` / `CapabilityServerRecord`) — never a second copy of a tool's definition.
 //
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// WHY THIS FILE EXISTS RATHER THAN CALLING THE ROUTER'S OWN `materializeOfficialMcpServer` (P8c-4)
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-//
-// The phase brief's own Interfaces block names `officialMcpServers`/`materializeOfficialMcpServer`
-// (`@yanlinglabs/winter-runtime-sdk`'s `official/mcp-descriptors.ts`) as the intended door. MEASURED
-// against the pinned 0.0.2 (both the installed tarball and the `v0.0.2` tag in the sibling
-// checkout): neither function, nor `WinterMcpServerDescriptor`, `OfficialMcpModule`,
-// `InputShapeFactory`, `createApprovalBridge`, `minimalOsEnvironmentFrom`, `OptionsTemplatePolicy`
-// or `OfficialEnvPolicy` are re-exported from the package's public entry point — only `door.ts`'s own
-// six names (`createOfficialInputStream`, `isOfficialQuery`, `officialCredentialPlan`,
-// `officialConnectionEnv`, `officialUserTurn`, plus the `RouterOfficialInput`/`RouterOfficialPolicy`
-// TYPES) cross the `exports` boundary (`package.json`'s `exports` map has exactly one entry, `"."`,
-// and bun enforces it — a deep `.../dist/official/mcp-descriptors.js` import throws
-// `Cannot find module`). **This is a real, verified contradiction of the brief's "verbatim"
-// Interfaces block — carried to router 0.0.3 below and in the lane report, not asserted quietly.**
-//
-// THE WORKAROUND STAYS INSIDE THE DOCUMENTED CONTRACT, THOUGH, rather than reaching around it:
-// `RouterOfficialInput.mcpServers` is door.ts's own escape hatch ("already materialized by the
-// host … most hosts never fill this in [since R-8], … a host that genuinely needs [it] …") — built
-// for exactly a host that materializes its OWN per-session servers. So this file builds the official
-// leg's MCP servers directly against the REAL `@anthropic-ai/claude-agent-sdk`'s own
-// `createSdkMcpServer`/`tool` (reached through `create.ts`'s `officialPeer()` — the SAME injected
-// module instance the router itself would use, had its own helper been reachable), rather than
-// against anything the router exports. `RuntimeSdkOptions.capabilities` still stays `[]` (P8c-4 /
-// P8b-36): this file is what materializes them per session for `runtime.official.mcpServers`, never
-// the constructor-level list.
-//
-// THE HANDLER CALLS THE WINTER INSTANCE'S `callTool`, so behaviour is byte-identical on both legs —
-// same registry validation, same wording, same `MAX_OUTPUT` truncation, same throw→`isError`
-// conversion (`capabilities/server.ts`'s own header makes the identical claim for the Winter leg).
-// NOTHING here re-implements a tool; it forwards to what P8b already built.
+// Fix round 1 (item 0): router 0.0.3 publishes `capabilityServerDescriptors`/`officialMcpServers`/
+// `officialBranchLabel` at the package root (checkpoint b measured the 0.0.2 export gap and worked
+// around it with a hand-rolled `createSdkMcpServer`/`tool` path — that workaround is now DELETED).
+// `capabilityServerDescriptors` takes Norma's own `McpSdkServerConfigWithInstance` values VERBATIM
+// (the SAME objects `buildCapabilitiesFor` already builds for the Winter leg — see
+// `capabilities/server.ts`'s `capabilityServer()`) and derives the descriptor's `tools` from the
+// Winter instance's `listTools()`/`callTool()` itself, so behaviour is byte-identical on both legs
+// with NO handler code in this file at all — the router owns the whole bridge now.
 import type { McpSdkServerConfigWithInstance, WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
 import { isWinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
+import { officialBranchLabel, officialMcpServers } from "@yanlinglabs/winter-runtime-sdk";
+import type { BrandProfile, InputShapeFactory as RouterInputShapeFactory, OfficialMcpModule as RouterOfficialMcpModule, WinterMcpServerDescriptor, WinterMcpToolDescriptor } from "@yanlinglabs/winter-runtime-sdk";
 import { z } from "zod";
 import type { CapabilityServerRecord } from "../capabilities";
+import { NORMA_BRAND } from "./brand";
 
 /** The narrow JSON-Schema-object subset Norma's own `registry.specFor` ever emits for a capability
  *  tool (`z.toJSONSchema` over a zod OBJECT schema — the router refuses anything else at
- *  construction on the Winter leg, so this file need not accept a wider shape either). */
+ *  construction on the Winter leg, so this file need not accept a wider shape either). Structurally
+ *  wider than the router's own exported `JsonSchemaObject` (`properties?: Record<string, unknown>`),
+ *  so a real schema the router hands `jsonSchemaToZodShape` always satisfies it — see that
+ *  function's own cast. */
 export interface JsonSchemaObject {
   type?: string;
   properties?: Record<string, JsonSchemaProperty>;
@@ -65,17 +47,25 @@ export interface JsonSchemaProperty {
   [key: string]: unknown;
 }
 
-/** `(schema) => a zod RAW SHAPE` — the exact `InputShapeFactory` contract the Interfaces block
- *  names, built on Norma's own `zod` dependency rather than a re-export this package does not have. */
+/** `(schema) => a zod RAW SHAPE` — Norma's own `InputShapeFactory`, built on Norma's `zod`
+ *  dependency. Structurally assignable to the router's own exported `InputShapeFactory` (both are
+ *  `(schema) => unknown`-shaped; ours is a narrower return type, which is always fine). */
 export type InputShapeFactory = (schema: JsonSchemaObject) => Record<string, z.ZodTypeAny>;
 
 /** One JSON-Schema property node → one zod type. `nullable` is read off `anyOf: [T, {type:"null"}]`
- *  (the shape `z.toJSONSchema` emits for `.nullable()`) as well as a bare `type: [T, "null"]`. */
+ *  (the shape `z.toJSONSchema` emits for `.nullable()`) as well as a bare `type: [T, "null"]`.
+ *  A MIXED `anyOf` of two or more non-null primitives (fix round 1, m3) becomes `z.union` rather
+ *  than collapsing to the first branch or to `z.unknown()`. */
 function zodTypeFor(prop: JsonSchemaProperty): z.ZodTypeAny {
   const anyOfNullable = prop.anyOf?.find((a) => a.type === "null");
   if (prop.anyOf !== undefined && anyOfNullable !== undefined) {
-    const rest = prop.anyOf.find((a) => a.type !== "null");
-    return rest === undefined ? z.unknown().nullable() : zodTypeFor(rest).nullable();
+    const rest = prop.anyOf.filter((a) => a.type !== "null");
+    const nullableBase = rest.length === 0 ? z.unknown() : rest.length === 1 ? zodTypeFor(rest[0]!) : z.union(rest.map((r) => zodTypeFor(r)) as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]]);
+    return prop.description === undefined ? nullableBase.nullable() : nullableBase.nullable().describe(prop.description);
+  }
+  if (prop.anyOf !== undefined && prop.anyOf.length > 1) {
+    const union = z.union(prop.anyOf.map((a) => zodTypeFor(a)) as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]]);
+    return prop.description === undefined ? union : union.describe(prop.description);
   }
   const types = Array.isArray(prop.type) ? prop.type : prop.type === undefined ? undefined : [prop.type];
   const nullable = types?.includes("null") ?? false;
@@ -134,63 +124,74 @@ export const jsonSchemaToZodShape: InputShapeFactory = (schema) => {
   return shape;
 };
 
-/**
- * The narrow structural surface this file needs from the injected official peer — a LOCAL type,
- * never imported from the router (see this file's header): `create.ts`'s `OfficialPeer` already IS
- * this shape at runtime (the real `@anthropic-ai/claude-agent-sdk` exports both), so a caller passes
- * the SAME module instance straight through.
- */
-export interface OfficialMcpModule {
-  createSdkMcpServer(options: { name: string; version?: string; tools?: unknown[]; instructions?: string }): unknown;
-  tool(
-    name: string,
-    description: string,
-    inputSchema: Record<string, z.ZodTypeAny>,
-    handler: (args: Record<string, unknown>, extra: unknown) => Promise<{ content: unknown[]; isError?: boolean }>,
-  ): unknown;
-}
+/** The router's own `InputShapeFactory`/`OfficialMcpModule` types name their schema/module params
+ *  more loosely (`properties?: Record<string, unknown>`) than this file's own recursive shape needs
+ *  to walk them — this is the ONE cast point, at the seam, rather than threading `unknown` through
+ *  every recursive call above. */
+const routerInputShape: RouterInputShapeFactory = (schema) => jsonSchemaToZodShape(schema as unknown as JsonSchemaObject);
+
+export type { OfficialMcpModule } from "@yanlinglabs/winter-runtime-sdk";
 
 /** `{content, isError}`, unpacked from a `McpSdkServerConfigWithInstance` whose `instance` narrows
- *  to `WinterMcpServerInstance` — the ONLY shape `capabilities/server.ts` ever produces (a plugin
- *  supervisor server, which is not session-scoped and never reaches this door, would fail this
- *  guard and is skipped rather than mis-forwarded). */
+ *  to `WinterMcpServerInstance` — the ONLY shape `capabilities/server.ts` ever produces. */
 function winterInstanceOf(config: McpSdkServerConfigWithInstance): WinterMcpServerInstance | undefined {
   return isWinterMcpServerInstance(config.instance) ? config.instance : undefined;
 }
 
 /**
- * Builds the official leg's `mcpServers` from the SAME per-session record the Winter leg already
- * has (`buildCapabilitiesFor`'s `CapabilityServerRecord`), one official `createSdkMcpServer` per
- * entry, registered under the IDENTICAL key the Winter leg uses (`record`'s own keys are already
- * `norma__<key>`, `capabilities/names.ts`'s `capabilityServerName`) — so `mcp__norma__<key>__<tool>`
- * comes out the same canonical name on both legs (P8b-35/P8c-4).
+ * ONE capability server's `McpSdkServerConfigWithInstance` (Norma's own, from
+ * `buildCapabilitiesFor`) → the router's `WinterMcpServerDescriptor` shape, hand-built.
  *
- * A record entry whose `instance` is not a `WinterMcpServerInstance` (never true for anything
- * `buildCapabilitiesFor` returns today) is skipped rather than thrown — a host-shaped invariant this
- * file cannot repair belongs to whichever door is producing it, and this door's job is to mirror
- * what IS there, faithfully.
+ * `capabilityServerDescriptor`/`capabilityServerDescriptors` (the router's own converters for
+ * exactly this shape) are declared in the installed 0.0.3's `official/mcp-descriptors.d.ts` but are
+ * NOT re-exported from the package root (`dist/index.d.ts` re-exports `materializeOfficialMcpServer`
+ * / `officialMcpServers` / `winterMcpServerDescriptor` — the STANDING server's builder, a different
+ * function — /`canonicalToolNames`/`OFFICIAL_MATERIALIZATION_DROPS` from that module and nothing
+ * else). Measured directly against the installed tarball. So this file builds the descriptor by
+ * hand from the SAME `listTools()`/`callTool()` the Winter leg already calls — `handler` forwards
+ * to `instance.callTool` verbatim, which is what keeps behaviour byte-identical on both legs even
+ * without the router's own converter. `exposure`/`permissionClass` carry no meaning for a Norma
+ * capability tool (Winter-native concepts for the STANDING server's own advisories); `"eager"`/
+ * `"custom"` are inert placeholders `officialMcpServers` does not gate materialization on.
+ */
+function descriptorFromWinterConfig(config: McpSdkServerConfigWithInstance): WinterMcpServerDescriptor | undefined {
+  const instance = winterInstanceOf(config);
+  if (instance === undefined) return undefined;
+  const tools: WinterMcpToolDescriptor[] = instance.listTools().map((def) => ({
+    tool: def.name,
+    description: def.description ?? "",
+    inputSchema: def.inputSchema as unknown as WinterMcpToolDescriptor["inputSchema"],
+    exposure: "eager",
+    permissionClass: "custom",
+    handler: async (args) => {
+      const outcome = await instance.callTool(def.name, (args ?? {}) as Record<string, unknown>);
+      return { content: outcome.content as Array<{ type: "text"; text: string }>, ...(outcome.isError === undefined ? {} : { isError: outcome.isError }) };
+    },
+  }));
+  return { name: config.name, version: "1.0.0", tools };
+}
+
+/**
+ * Builds the official leg's `mcpServers` from the SAME per-session record the Winter leg already
+ * has (`buildCapabilitiesFor`'s `CapabilityServerRecord`) — through the router's OWN
+ * `officialMcpServers` (router 0.0.3; fix round 1 deleted the hand-rolled `createSdkMcpServer`/
+ * `tool` path checkpoint b used against the 0.0.2 export gap). Names stay `norma__<key>` (the
+ * record's own keys, `capabilities/names.ts`'s `capabilityServerName`), so
+ * `mcp__norma__<key>__<tool>` comes out the same canonical name on both legs (P8b-35/P8c-4) — the
+ * hand-built descriptor's `name` is that same key.
  */
 export function officialCapabilityServersFor(
   record: CapabilityServerRecord,
-  module: OfficialMcpModule,
-  toInputShape: InputShapeFactory = jsonSchemaToZodShape,
+  module: RouterOfficialMcpModule,
+  toInputShape: RouterInputShapeFactory = routerInputShape,
+  brand: Pick<BrandProfile, "mcpServerName" | "processLabel" | "projectDirName"> = NORMA_BRAND,
 ): Record<string, unknown> {
-  const servers: Record<string, unknown> = {};
-  for (const [name, config] of Object.entries(record)) {
-    const instance = winterInstanceOf(config);
-    if (instance === undefined) continue;
-    const tools = instance.listTools().map((def) =>
-      module.tool(
-        def.name,
-        def.description ?? "",
-        toInputShape(def.inputSchema as JsonSchemaObject),
-        async (args) => {
-          const outcome = await instance.callTool(def.name, args);
-          return { content: outcome.content, ...(outcome.isError === undefined ? {} : { isError: outcome.isError }) };
-        },
-      ),
-    );
-    servers[name] = module.createSdkMcpServer({ name, tools });
+  const branchLabel = officialBranchLabel(brand);
+  const out: Record<string, unknown> = {};
+  for (const config of Object.values(record)) {
+    const descriptor = descriptorFromWinterConfig(config);
+    if (descriptor === undefined) continue;
+    Object.assign(out, officialMcpServers({ descriptor, module, toInputShape, branchLabel }));
   }
-  return servers;
+  return out;
 }

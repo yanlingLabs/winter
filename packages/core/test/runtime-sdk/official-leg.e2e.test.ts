@@ -122,7 +122,7 @@ const probeDef: ToolDefinition = {
   run: (args) => `probed: ${(args as { note: string }).note}`,
 };
 
-async function buildWorld(selection: RuntimeSelection, secretsDir: string, baseUrl: string): Promise<World> {
+async function buildWorld(selection: RuntimeSelection, secretsDir: string, baseUrl: string, policy: "auto" | "dont-ask" | "plan" = "auto"): Promise<World> {
   const home = mkdtempSync(join(tmpdir(), "p8c-official-e2e-"));
   const cwd = join(home, "work");
   mkdirSync(cwd, { recursive: true });
@@ -174,10 +174,10 @@ async function buildWorld(selection: RuntimeSelection, secretsDir: string, baseU
       approvals: new ApprovalBroker(),
       questions: new QuestionBroker(),
       gate: new PermissionGate(),
-      policy: "auto",
+      policy,
       emit: () => {},
     },
-    policy: "auto",
+    policy,
   };
 
   const sessionInput: OfficialSessionInput = { sessionId, mode: "code", cwd };
@@ -257,30 +257,42 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     });
   }, 60_000);
 
-  // P8c-L1-BLOCKER (see `official-options.ts`'s header on the `options` object it builds): the
-  // router's `assertOptionsInvariants` refuses ANY `canUseTool` that was not produced by its own
-  // (unexported) `createApprovalBridge`, so Norma cannot wire an approval broker on this leg with
-  // router 0.0.2. What THIS test proves instead — measured, not assumed — is that the capability
-  // server registration itself is correct end to end: the model can NAME the tool under the exact
-  // canonical `mcp__norma__<key>__<tool>` name (P8b-35/P8c-4) and the request reaches the router's
-  // own permission gate, which denies it with its fixed message. A round-trip through Norma's own
-  // handler (`official-capabilities.test.ts` proves that piece directly, real SDK module, no
-  // network) is BLOCKED end-to-end until router 0.0.3 exports the bridge factory.
-  test("a capability tool call reaches the router's permission gate under its exact canonical name (approval itself is P8c-L1-BLOCKED)", async () => {
+  // Fix round 1 (item 0): router 0.0.3's `createApprovalBridge` is now wired for real
+  // (`official-options.ts`) — a capability tool call reaches Norma's OWN approval flow, not the
+  // router's fixed fail-closed default. Two shapes: the APPROVE path (policy "auto", which
+  // `gate.evaluate`'s own "auto" column allows without a card) and the DENY path (policy
+  // "dont-ask", which never prompts and denies outright — same `canUseToolFor` semantics as the
+  // Winter leg, proven byte-identical in `approval-bridge.test.ts`).
+  test("a capability tool call SUCCEEDS through the real approval bridge (policy auto)", async () => {
     const turns: AnthropicTurnScript[] = [
       { blocks: [{ type: "tool_use", id: "call_1", name: "mcp__norma__probe__probe", jsonChunks: [JSON.stringify({ note: "hi" })] }], stopReason: "tool_use" },
       { blocks: [{ type: "text", chunks: ["done"] }], stopReason: "end_turn" },
     ];
     await withAnthropicLoopback(turns, async (fake) => {
       const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
-      const w = await buildWorld(selectionFor(), secretsDir, fake.url);
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto");
       await w.session.send("use the probe tool");
       await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
       const call = w.events.find((e) => e.type === "tool_call") as (SessionEvent & { name?: string }) | undefined;
       const result = w.events.find((e) => e.type === "tool_result") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
       expect(call?.name).toBe("mcp__norma__probe__probe");
+      expect(result?.isError).toBe(false);
+      expect(result?.output).toContain("probed: hi");
+    });
+  }, 60_000);
+
+  test("a capability tool call is DENIED through the real approval bridge (policy plan)", async () => {
+    const turns: AnthropicTurnScript[] = [
+      { blocks: [{ type: "tool_use", id: "call_1", name: "mcp__norma__probe__probe", jsonChunks: [JSON.stringify({ note: "hi" })] }], stopReason: "tool_use" },
+      { blocks: [{ type: "text", chunks: ["done"] }], stopReason: "end_turn" },
+    ];
+    await withAnthropicLoopback(turns, async (fake) => {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "plan");
+      await w.session.send("use the probe tool");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      const result = w.events.find((e) => e.type === "tool_result") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
       expect(result?.isError).toBe(true);
-      expect(result?.output).toContain("canUseTool");
     });
   }, 60_000);
 

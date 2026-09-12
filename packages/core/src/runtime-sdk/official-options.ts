@@ -2,28 +2,26 @@
 // re-built on every incarnation (mirrors `mode-options.ts`'s `buildWinterOptions`'s own "re-read the
 // session's LIVE facts" posture — nothing here is snapshotted at session creation).
 //
-// See `official-capabilities.ts`'s header for the router-0.0.2 export gap this file works around
-// (no `createApprovalBridge`/`minimalOsEnvironmentFrom`/`OptionsTemplatePolicy` reachable from the
-// package root). Two more findings from the same measurement pass, load-bearing here:
-//
-//  1. `minimalOsEnvironmentFrom` is unreachable, so `base` is built by hand from the same "§3's
-//     minimal OS set" the door's own doc names — `HOME`, `PATH`, `LANG`/`LC_ALL` when set, `TERM`.
-//  2. THE ROUTER AUTO-WRAPS A PLAIN `canUseTool`. Measured directly in the installed 0.0.2 dist
-//     (`dist/index.js`, `installFloor`): `isOurApprovalBridge(existing) ? existing :
-//     createApprovalBridge({ mode, containment, broker: existing })` — the router calls
-//     `createApprovalBridge` INTERNALLY on whatever plain broker function a host supplies, so this
-//     file never needed the unexported factory in the first place. The broker below is exactly the
-//     Interfaces block's own suggested shape: `(request) => canUseToolFor(deps)(request.toolName,
-//     request.input, {...})`, reusing 8b's bridge so approval semantics are identical on both legs.
+// Fix round 1 (item 0): router 0.0.3 publishes `createApprovalBridge`/`minimalOsEnvironmentFrom`
+// at the package root. `minimalOsEnvironment` below stays Norma's own hand-built version (`HOME`/
+// `PATH`/`LANG`/`LC_ALL`/`TERM`) rather than switching to `minimalOsEnvironmentFrom` — the two do
+// the identical §3 job and Norma's own version is what every existing test already pins; recorded
+// as a deliberate "no functional gap, no reason to churn a passing seam" choice, not an oversight.
+// The REAL fix this round makes is `officialBrokerFor`: it now builds the router's own
+// `ApprovalBroker` shape (`(request: ApprovalRequest) => Promise<PermissionResult>`) and
+// `officialInputFor` wraps it with the router's real `createApprovalBridge({broker, brand, mode,
+// containment})` at construction — the 0.0.2-era fail-closed-default workaround and its
+// `P8c-L1-BLOCKER` note are DELETED.
 import { homedir, tmpdir } from "node:os";
-import { isVendorCompliantProjectKey, transcriptProjectKey, type CredentialRef, type PermissionMode as WinterPermissionMode, type PermissionResult, type PermissionUpdate, type ProviderSelection } from "@yanlinglabs/winter-agent-sdk";
-import { officialConnectionEnv, officialCredentialPlan, type RouterOfficialInput, type RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
+import { isVendorCompliantProjectKey, transcriptProjectKey, type CredentialRef, type PermissionResult, type ProviderSelection } from "@yanlinglabs/winter-agent-sdk";
+import { createApprovalBridge, officialConnectionEnv, officialCredentialPlan, type ApprovalRequest, type OfficialPermissionMode as RouterOfficialPermissionMode, type RouterOfficialInput, type RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import type { ContextAssembler } from "../agent/context";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import type { Mode as SessionMode } from "../agent/tools/registry";
 import { assistantMemoryDirFor, memoryDirFor, type MemoryDirOptions } from "../agent/memory-dir";
 import type { CapabilityServerRecord } from "../capabilities";
 import { canUseToolFor, type CanUseToolDeps } from "./approval-bridge";
+import { NORMA_BRAND } from "./brand";
 import { officialCapabilityServersFor, type OfficialMcpModule } from "./official-capabilities";
 import { winterSystemPromptFor } from "./system-prompt";
 import { ClaudeExecutableUnavailable } from "./official-executable";
@@ -50,38 +48,31 @@ export function officialPermissionModeFor(policy: SessionApprovalPolicy): Offici
   }
 }
 
-/** The narrow surface the official runtime's broker call is shaped like — a LOCAL type (the
- *  router's own `ApprovalRequest` is not exported; see `official-capabilities.ts`'s header for why
- *  this file does not chase re-exports that do not exist at 0.0.2). Field names mirror Winter's own
- *  `CanUseTool` ctx VERBATIM (both trace to the same underlying approval vocabulary), which is what
- *  makes reusing 8b's bridge directly, rather than translating, the right shape. */
-export interface OfficialApprovalRequestLike {
-  toolName: string;
-  input: Record<string, unknown>;
-  signal: AbortSignal;
-  toolUseID: string;
-  requestId?: string;
-  agentID?: string;
-  suggestions?: PermissionUpdate[];
-  blockedPath?: string;
-}
-
-/** `(toolName, input, extra) => Promise<PermissionResult | null>` — the plain broker shape the
- *  router auto-wraps (see this file's header). Built on 8b's own `canUseToolFor` bridge so approval
- *  semantics — cards, policy gating, control-plane denial — are byte-identical on both legs. */
-export function officialBrokerFor(
-  deps: CanUseToolDeps,
-): (toolName: string, input: Record<string, unknown>, extra: OfficialApprovalRequestLike) => Promise<PermissionResult | null> {
+/**
+ * The router's own `ApprovalBroker` (`(request: ApprovalRequest) => Promise<PermissionResult>`),
+ * built on 8b's `canUseToolFor` bridge so approval semantics — cards, policy gating, control-plane
+ * denial — are byte-identical on both legs. `canUseToolFor`'s own signature is `(toolName, input,
+ * ctx)`; `ApprovalRequest` carries both plus the ctx fields under ONE object, so this is a field
+ * reshuffle, never a translation of MEANING. `PermissionResult` is never `null` on this door
+ * (`canUseToolFor`'s own contract already guarantees a typed result), so no `?? deny` fallback is
+ * needed the way the router's OWN default broker (for a session with none configured) has one.
+ */
+export function officialBrokerFor(deps: CanUseToolDeps): (request: ApprovalRequest) => Promise<PermissionResult> {
   const bridge = canUseToolFor(deps);
-  return (toolName, input, extra) =>
-    bridge(toolName, input, {
-      signal: extra.signal,
-      toolUseID: extra.toolUseID,
-      requestId: extra.requestId ?? extra.toolUseID,
-      ...(extra.agentID === undefined ? {} : { agentID: extra.agentID }),
-      ...(extra.suggestions === undefined ? {} : { suggestions: extra.suggestions }),
-      ...(extra.blockedPath === undefined ? {} : { blockedPath: extra.blockedPath }),
+  return async (request: ApprovalRequest) => {
+    const result = await bridge(request.toolName, request.input, {
+      signal: request.signal,
+      toolUseID: request.toolUseID,
+      requestId: request.requestId,
+      ...(request.agentID === undefined ? {} : { agentID: request.agentID }),
+      ...(request.suggestions === undefined ? {} : { suggestions: request.suggestions }),
+      ...(request.blockedPath === undefined ? {} : { blockedPath: request.blockedPath }),
     });
+    // `CanUseTool`'s own type allows `null` (the SDK's "transport escape") — `canUseToolFor`'s own
+    // header says its bridge "never uses the null transport escape", so this never actually fires;
+    // it exists only so this function's return type can be the router's own non-null `ApprovalBroker`.
+    return result ?? { behavior: "deny", message: "the host callback returned no decision", toolUseID: request.toolUseID };
+  };
 }
 
 /** §3's minimal OS environment, by hand (the router's own `minimalOsEnvironmentFrom` is not
@@ -202,9 +193,16 @@ export function officialInputFor(
   if (!isVendorCompliantProjectKey(projectKey)) return new OfficialProjectKeyTooDeep(input.cwd, projectKey);
 
   const env = deps.env ?? process.env;
-  const permissionMode: WinterPermissionMode = officialPermissionModeFor(deps.policy) as WinterPermissionMode;
+  const permissionMode: RouterOfficialPermissionMode = officialPermissionModeFor(deps.policy);
 
-  const broker = officialBrokerFor({ ...deps.canUseToolDeps, sessionId: input.sessionId, mode: input.mode, cwd: input.cwd });
+  // Fix round 1 (item 0): the REAL bridge (router 0.0.3) — never the fail-closed default a bare
+  // broker used to fall through to. `mode` here is the SAME `permissionMode` this session's
+  // `options.permissionMode` carries below, so the containment floor and the broker agree on it.
+  const canUseTool = createApprovalBridge({
+    broker: officialBrokerFor({ ...deps.canUseToolDeps, sessionId: input.sessionId, mode: input.mode, cwd: input.cwd }),
+    brand: NORMA_BRAND,
+    mode: permissionMode,
+  });
   const systemPromptAppend = winterSystemPromptFor(deps.assembler, {
     mode: input.mode,
     ...(input.origin === undefined ? {} : { origin: input.origin }),
@@ -250,26 +248,17 @@ export function officialInputFor(
       advertisesHandoff: true,
       ...(input.displayName === undefined ? {} : { displayName: input.displayName }),
       options: {
-        // Structural assignment onto `Omit<OptionsTemplatePolicy, …>` — see this file's header for
-        // why the type is not imported by name (it is not exported at 0.0.2).
+        // Structural assignment onto `OptionsTemplatePolicy` — the router 0.0.3 exports the type by
+        // name now, but `RouterOfficialInput["options"]` is already the precise shape this object
+        // must satisfy, so there is nothing an explicit import would add here.
         //
-        // P8c-L1-BLOCKER (measured against the installed 0.0.2 `dist/index.js`, `buildOfficialOptions`):
-        // `options.canUseTool` is used VERBATIM when set (`policy.canUseTool ?? createApprovalBridge({
-        // …fail-closed default… })`) — it is NEVER auto-wrapped. `assertOptionsInvariants`'s own tail
-        // check (`isOurApprovalBridge`) then refuses ANY value here that was not produced by the
-        // router's OWN `createApprovalBridge`, which `official-capabilities.ts`'s header already
-        // established is unreachable from the package root (only `"."` is in `package.json`'s
-        // `exports`, and `createApprovalBridge` is not re-exported through it). So `officialBrokerFor`
-        // above is built and TESTED (`official-options.test.ts`) but CANNOT be wired here today — doing
-        // so makes `buildOfficialOptions` throw `canUseTool: the approval bridge is missing or is not
-        // this branch's` for EVERY session, before any child spawns. Leaving the field UNSET falls
-        // through to the router's own branded default, which DENIES every tool call with a fixed
-        // message ("no approval broker is configured for this session … a host must bridge its broker
-        // into canUseTool") — sessions still open and hold a plain-text conversation; a capability
-        // tool call is refused until router 0.0.3 exports `createApprovalBridge` (or an equivalent
-        // per-session hook). CARRIED to the lane report; `official-leg.e2e.test.ts`'s capability-tool
-        // case is `.skip`ped with this same note.
-        permissionMode: permissionMode as unknown as never,
+        // Fix round 1 (item 0): the REAL bridge. `createApprovalBridge` (router 0.0.3) wraps
+        // `officialBrokerFor`'s plain `ApprovalBroker` with the containment floor + mode gate, and
+        // `assertOptionsInvariants`'s tail check (`isOurApprovalBridge`) now passes — a capability
+        // tool call reaches Norma's own approval flow (cards, policy gating, control-plane denial),
+        // identically to the Winter leg, instead of the router's fixed fail-closed default.
+        canUseTool,
+        permissionMode,
         systemPromptAppend,
         ...(deps.hooks === undefined ? {} : { hooks: deps.hooks }),
       } as RouterOfficialInput["options"],
