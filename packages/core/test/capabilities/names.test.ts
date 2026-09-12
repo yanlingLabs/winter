@@ -16,6 +16,7 @@ import { lspToolDefs } from "../../src/agent/tools/lsp";
 import {
   CAPABILITY_SERVER_KEYS,
   WINTER_CAPABILITY_TOOLS,
+  capabilityServerName,
   capabilityToolName,
   type CapabilityToolFacts,
 } from "../../src/capabilities/names";
@@ -64,11 +65,19 @@ describe("capabilityToolName (P8b-12)", () => {
     expect(capabilityToolName("research", "ReadPage")).toBe("mcp__winter__research__ReadPage");
   });
 
-  test("is branded `winter`, never `winter` (R-1)", () => {
+  // Since P9b-7 the daemon's own MCP namespace IS `winter` (`CORE_BRAND.mcpServerName`) — the SDK's
+  // own reserved brand name is no longer a foreign one to avoid, so a bare "does this name contain
+  // `winter`" check is meaningless: every capability tool legitimately does. What still has to hold
+  // (R-1, `capabilityServerName`'s own doc) is narrower: a capability SERVER's `winter__<key>` name
+  // can never equal the BARE brand name `"winter"` itself, which the router reserves for its
+  // standing messaging server — the `__<key>` suffix is what guarantees that.
+  test("is branded `winter`; a capability server name never collides with the bare brand (R-1)", () => {
     expect(CORE_BRAND.mcpServerName).toBe("winter");
+    for (const key of CAPABILITY_SERVER_KEYS) {
+      expect(capabilityServerName(key)).not.toBe(CORE_BRAND.mcpServerName);
+    }
     for (const name of Object.keys(WINTER_CAPABILITY_TOOLS)) {
       expect(name.startsWith("mcp__winter__")).toBe(true);
-      expect(name).not.toContain("winter");
     }
   });
 });

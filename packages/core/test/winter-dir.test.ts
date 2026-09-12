@@ -1,12 +1,39 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, existsSync, statSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { bootstrapWinterDir } from "../src/winter-dir";
+import { bootstrapWinterDir, resolveWinterHome } from "../src/winter-dir";
 
 function tmpHome(): string {
   return mkdtempSync(join(tmpdir(), "winter-home-"));
 }
+
+// P9b-7/P9b-12: this is the daemon's OWN home resolver — `WINTER_HOME` when set, `~/.winter`
+// otherwise. It is what `resolveWinterHome()` from the SDK, given `CORE_BRAND`, must equal
+// (pinned in `test/runtime-sdk/brand.test.ts`).
+describe("resolveWinterHome", () => {
+  test("WINTER_HOME wins when set", () => {
+    const saved = process.env.WINTER_HOME;
+    try {
+      process.env.WINTER_HOME = "/tmp/some-winter-home";
+      expect(resolveWinterHome()).toBe("/tmp/some-winter-home");
+    } finally {
+      if (saved === undefined) delete process.env.WINTER_HOME;
+      else process.env.WINTER_HOME = saved;
+    }
+  });
+
+  test("falls back to ~/.winter when unset", () => {
+    const saved = process.env.WINTER_HOME;
+    try {
+      delete process.env.WINTER_HOME;
+      expect(resolveWinterHome()).toBe(join(homedir(), ".winter"));
+    } finally {
+      if (saved === undefined) delete process.env.WINTER_HOME;
+      else process.env.WINTER_HOME = saved;
+    }
+  });
+});
 
 describe("bootstrapWinterDir", () => {
   test("creates the full directory layout", () => {
