@@ -137,7 +137,8 @@ export const RENAME_ALLOWLIST: readonly AllowlistEntry[] = [
     // reader recognises them on their own machine.
     // …and the Hard-rules line that keeps protecting the user's LIVE pre-migration install
     // (`Norma.app` / `com.norma.app` / `~/.norma` / `com.norma.core`) until Migration B (9c).
-    regex: /norma-dev|NORMA_HOME|NORMA_PROFILE|\.norma-dev|Norma\.app|com\.norma\.(app|core)|~\/\.norma(?![A-Za-z0-9_-])/g,
+    // …and (9c) the Migration B section, which names the legacy project files a `winter migrate-project` converts.
+    regex: /norma-dev|NORMA_HOME|NORMA_PROFILE|\.norma-dev|Norma\.app|com\.norma\.(app|core)|~\/\.norma(?![A-Za-z0-9_-])|NORMA\.md|(?<![A-Za-z0-9_~/])\.norma(?=\/)/g,
     files: ["CLAUDE.md"],
     why: "the dev-guide trap naming the stale `norma-dev` wrapper/env names, and the hard rule naming the live Norma install until 9c (P9b-13; whole-branch review)",
   },
@@ -170,7 +171,7 @@ export const RENAME_ALLOWLIST: readonly AllowlistEntry[] = [
     id: "migration-user-docs",
     // Phase 9c: the user-facing migration story ("Coming from Norma?", the 0.111.0 release notes) has to
     // name the product users are coming from, its home directory and its cask. Prose only — never code.
-    regex: /norma|Norma/g,
+    regex: /norma|Norma|NORMA/g,
     files: ["README.md", "releases/notes/*.md"],
     why: "user-facing migration documentation (Phase 9c) must name Norma, ~/.norma and the norma cask so users recognise what is being migrated",
   },

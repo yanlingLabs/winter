@@ -59,7 +59,7 @@ itself, with no separate download. The first time Winter boots, it migrates your
 copied over, never deleted from the old home and never overwritten in the new one. You can check on
 it any time with `winter migrate --status`. Once Winter is running the way you expect, the old
 Norma.app can be deleted — nothing in `~/.norma` is needed for Winter to work, and you can remove
-that directory too once you have verified the migration.
+that directory too once you have verified the migration. `winter doctor` tells you whether a legacy home is still sitting there and how many legacy Keychain items remain. If a project still has an old `NORMA.md` file or `.norma/` directory, run `winter migrate-project` inside it to rename them to `WINTER.md`/`.winter/`; until you do, Winter reads the old ones read-only and reminds you once per session.
 
 If you installed via Homebrew, `brew install --cask norma` is deprecated in favor of `winter` —
 switch your tap reference:

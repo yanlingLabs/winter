@@ -86,9 +86,20 @@ WINTER_RUNTIME_EXECUTABLE="$PWD/../../dist/winter" WINTER_HOME=~/.winter-dev WIN
 # (`winter login --anthropic-key`); without either the session refuses typed (`claude_executable_unavailable` /
 # `runtime_selection_refused`). Winter-leg sessions are unaffected. Cross-runtime handoff via `session.setModel` is fenced
 # by `runtimes.handoff.crossRuntime` (default false).
+# P9c-1 AMENDMENT (Phase 9c): the official leg authenticates ONLY with the user's own Anthropic API-key material — never a
+# claude.ai subscription — until Anthropic approves it for this integration. While `runtimes.official.subscriptionAuth` is
+# `false` (the default, and the only shipped value), every spawned `claude` child gets its own Winter-owned `CLAUDE_CONFIG_DIR`
+# (`officialConfigDirFor(home)` = `<home>/runtimes/claude-config`, created 0700), an environment scrubbed of every other
+# auth-injecting variable (`FORBIDDEN_CHILD_ENV`), and a per-session assertion that the SDK's own `system/init` message reports
+# `apiKeySource: "ANTHROPIC_API_KEY"` — a mismatch refuses typed as `official_auth_source_refused` before any turn runs.
+# `~/.claude` itself is unreachable from this leg regardless of the flag (the vendored router refuses any config dir under a
+# `.claude` path segment outright); flipping the flag on today only widens which config dir this leg uses and skips the
+# assertion — it does not grant subscription access, which needs router-level work gated on Anthropic's approval.
 
-# Versioning — never edit versions by hand; VERSION file (#.#.### format) is canonical
-bun run version:bump                 # +0.0.001 (also --minor / --major)
+# Versioning (Phase 9c, P9c-2) — never edit versions by hand; VERSION file (#.###.# format: 0 . three-digit feature
+# counter . single-digit patch, e.g. 0.111.0) is canonical. The first digit moves only for a rebrand-scale event.
+bun run version:bump                 # patch +1 (refuses past 9 — use a feature bump)
+bun run version:bump:feature         # feature +1, patch -> 0 (also version:bump:major, reserved)
 bun run version:sync                 # restamp package.jsons/plists from VERSION
 
 # Release (one command → signed, notarized, stapled zip+DMG+appcast+cask+gh release)
@@ -142,6 +153,10 @@ Every session is an append-only JSONL of `SessionEvent`s (each carrying `seq`/`s
 
 `~/.winter/settings.json` is watched (`settings-watcher.ts`) and hot-swapped atomically; feature code reads live getters. **No setting may ever require a daemon restart to take effect** — new settings must follow the hot-reload pattern.
 
+### Migration B (Phase 9c)
+
+Migration B (Phase 9c): on first boot the daemon auto-migrates a legacy `~/.norma[-dev]` home into a pristine `~/.winter[-dev]` (absent, empty, or only empty bootstrap dirs) before creating anything else — `packages/core/src/migration/migrate-b.ts`'s `planMigrationB`/`runMigrationB`, invoked from `daemon.ts`'s boot hook. Auto-migration fires ONLY when the home resolves (`path.resolve`) to the profile's own default — `~/.winter` (dist) or `~/.winter-dev` (dev), via `winter-dir.ts`'s `isDefaultWinterHome` — regardless of how it arrived (`WINTER_HOME`, an explicit `home`, or the default); any other home (a temp dir, a custom `WINTER_HOME`, a CI/gate home) never auto-migrates, logs one line, and `winter migrate --from <legacyHome>` stays the explicit door for it. Every file copies byte-for-byte except the disposable set (`run/**`, `logs/**`, `cache/**`, `daemon.log`, `*.db-wal`/`*.db-shm` → skipped; `**/index.db` → left for the runtime to rebuild) and `settings.json` (re-keyed: legacy env-var names and `~/.norma[-dev]` path segments rewritten to their Winter equivalents, keys never renamed — `migration/rekey-settings.ts`); the known-name Keychain items (`auth/legacy-secret-names.ts`'s `MIGRATION_B_SECRET_NAMES`) copy from the legacy Keychain service to the current one, never overwriting an existing destination item. The manifest at `<home>/migration/manifest.json` is written atomically after every step (crash-safe); a home caught mid-migration refuses boot typed (`home_half_migrated`) until `winter migrate --resume` or `--rollback` runs — the daemon never auto-resumes. `winter migrate [--from <legacyHome>] [--status|--resume|--rollback] [--yes]` drives the same library by hand on any home (every writing action refuses while the daemon's lock is held); `winter migrate-project [dir] [--yes]` converts one project's `NORMA.md`/`.norma/` to `WINTER.md`/`.winter/` (`git mv` when tracked, content untouched). Until a project converts, Winter reads its unconverted instructions file/rules/output-styles/settings.json read-only when the Winter-named path is absent (`legacy.readLegacyProjectFiles`, default on, `legacyProjectFilesReadEnabled()`), with a one-line deprecation notice folded into the session's system context. `winter doctor` reports migration status, whether a legacy home is still present, and how many legacy Keychain items remain (a count only, never names or values).
+
 ### Tool surface
 
 Tool design deliberately tracks Claude Code's shape (see `winter-vs-cc-tools.md` at repo root for the live comparison): file-based memory (a MEMDIR of markdown files written with normal write/edit — no dedicated memory tools), unrestricted reads (no path fence on read/glob/grep/ls; the sole read denial is `~/.winter/run`), out-of-root writes via an approval flow (grant denylist protects `~/.winter`), a single multi-purpose `lsp` tool (the `winter__lsp` capability server; auto-diagnostics-after-edit, the bash reviewer, plugin pre/post hooks and the diff-tab producer ride `Options.hooks` on BOTH legs since Phase 8c — `src/runtime-sdk/hooks.ts`), multimodal `read` (images/PDF/notebooks), and subagents with no wall-clock timeout — a progress-stall watchdog instead.
@@ -149,7 +164,7 @@ Tool design deliberately tracks Claude Code's shape (see `winter-vs-cc-tools.md`
 ## Hard rules
 
 - **Never kill or restart a running Winter.app or the user's live daemon.** Tests must never touch `~/.winter` — always point at a temp `WINTER_HOME`.
-- **Until Migration B (Phase 9c) the user's live daily-driver install is still `Norma.app` (`com.norma.app`) on `~/.norma` with Keychain `com.norma.core` — never launch, kill, restart, or write to any of them; its embedded daemon binary lives under `/Applications/Norma.app/Contents/Resources/` at its pre-rename name.** The renamed identities (`Winter.app`, `com.winter.app`, `~/.winter`, `com.winter.core`) are what THIS tree builds; they do not exist on the machine yet.
+- **Until the 9c handoff release has run on this machine, the user's live daily-driver install is still `Norma.app` (`com.norma.app`) on `~/.norma` with Keychain `com.norma.core` — never launch, kill, restart, or write to any of them; its embedded daemon binary lives under `/Applications/Norma.app/Contents/Resources/` at its pre-rename name.** The renamed identities (`Winter.app`, `com.winter.app`, `~/.winter`, `com.winter.core`) are what THIS tree builds; they do not exist on the machine yet.
 - **Never launch the dist app (`/Applications/Winter.app`, bundle `com.winter.app`, `~/.winter`) during development — dev work uses ONLY the dev app** ("Winter Dev", `com.winter.app.dev`, `~/.winter-dev`, Debug build with explicit `-derivedDataPath`). The dist copy is the user's daily driver, updated by Sparkle/brew; a Claude-launched dist instance is indistinguishable from it in the menu bar and defeats the entire dev/dist split. Same rule for local Release builds (`out/release/...`): build them, never launch them — a Release build under the same bundle id shadows the /Applications copy.
 - Secrets live in the macOS Keychain (`Bun.secrets`, service `com.winter.core`) — never on disk, never in fixtures.
 - `packages/core/src/providers/codex-config.ts` self-identifies as `originator: "winter"` — a deliberate ToS decision; do not revert to a first-party value.
