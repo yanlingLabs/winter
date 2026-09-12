@@ -141,7 +141,7 @@ describe("NormaClient", () => {
     await boot();
     const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cc", onEvent: () => {} });
     const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "norma-cc-")), approvalPolicy: "auto" });
-    await expect(client.compact(sessionId)).rejects.toThrow(/not supported on the Winter leg/);
+    await expect(client.compact(sessionId)).rejects.toThrow(/not supported on (the Winter|this runtime) leg/);
     client.close();
   });
 
