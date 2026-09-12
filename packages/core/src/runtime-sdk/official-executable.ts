@@ -10,14 +10,26 @@
 //     should name the setting that is wrong, not the router's generic one.
 //  2. There is no `winterLeg`-style "user's home" rung: a session's own credential lives in Keychain,
 //     never on disk, so there is nothing under `NORMA_HOME` this ladder would ever find. The two
-//     implicit rungs are the 8d bundle drop (a `claude` binary shipped beside `norma-core`) and, for
-//     every dev checkout until then, the optional platform package `bun install` already resolved —
-//     found THROUGH THE WRAPPER PACKAGE'S OWN `require` (never this file's), exactly as the router's
-//     own `test/official/support.ts` `officialRuntimeBed` resolves it, so a stray version in a global
-//     bun cache can never be picked up ahead of the pinned wrapper (WS-02 §6).
+//     implicit rungs are the P8d-1 bundle drop (`<dirname(execPath)>/runtimes/claude-official/claude`,
+//     `bundleRuntimePath` — the one place this layout is spelled) and, for every dev checkout, the
+//     optional platform package `bun install` already resolved — found THROUGH THE WRAPPER PACKAGE'S
+//     OWN `require` (never this file's), exactly as the router's own `test/official/support.ts`
+//     `officialRuntimeBed` resolves it, so a stray version in a global bun cache can never be picked
+//     up ahead of the pinned wrapper (WS-02 §6).
+//
+// P8d-1/P8d-2: a `claude` binary resolved through the BUNDLE rung is only as trustworthy as the
+// `VERSIONS.json` staged beside it — a mismatched embed (an old `claude` re-embedded next to a
+// newer `winter`, or vice versa) is not the pinned artifact this daemon was written against. So
+// the bundle rung ALSO reads and validates that file (`parseVersionsJson`, which already checks
+// EVERY pin — `officialSdk` included — against this build's `REQUIRED_*` constants) before
+// returning a path; any failure (missing file, bad JSON, a pin mismatch) is the typed refusal,
+// with the underlying reason as `detail`, never a silent pass-through of an unpinned binary. The
+// package door (dev only) carries no such file and is unaffected.
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { bundleRuntimePath } from "./bundle-layout";
+import { parseVersionsJson } from "./bundle-layout";
 
 export type ClaudeExecutableSource = "setting" | "env" | "bundle" | "package";
 
@@ -42,12 +54,12 @@ function isBareName(value: string): boolean {
 }
 
 /**
- * THE PACKAGE DOOR (dev only, until 8d's bundle drop): the optional platform package, resolved
- * THROUGH THE WRAPPER'S OWN `require` rather than this file's — the wrapper's `package.json` is
- * found first via `createRequire(import.meta.url)`, and the platform package is then resolved AS A
- * DEPENDENCY OF THAT PACKAGE (`createRequire(wrapperPackageJsonPath)`), so a different platform
- * build sitting in some other `node_modules` on the machine can never be picked up ahead of the
- * pinned wrapper.
+ * THE PACKAGE DOOR (dev only — the P8d-1 bundle rung is checked first in a Release build): the
+ * optional platform package, resolved THROUGH THE WRAPPER'S OWN `require` rather than this file's
+ * — the wrapper's `package.json` is found first via `createRequire(import.meta.url)`, and the
+ * platform package is then resolved AS A DEPENDENCY OF THAT PACKAGE
+ * (`createRequire(wrapperPackageJsonPath)`), so a different platform build sitting in some other
+ * `node_modules` on the machine can never be picked up ahead of the pinned wrapper.
  *
  * Returns the platform package's directory, or `undefined` when the optional dependency was not
  * installed (`bun install` skips an optional dependency for the wrong platform/arch, and a Linux CI
@@ -80,9 +92,27 @@ function resolveClaudeAgentSdkPackageDir(): string | undefined {
 }
 
 /**
- * P8c-3's ladder: `settings.runtimes.claudeExecutable` → env `NORMA_CLAUDE_EXECUTABLE` →
- * `<dirname(execPath)>/claude` (the 8d bundle drop) → the platform package under `node_modules`
- * (dev only) → the typed refusal.
+ * P8d-1/P8d-2's gate on the bundle rung: reads `VERSIONS.json` beside the resolved `claude`
+ * binary and validates every pin (`parseVersionsJson` already checks `officialSdk` — and every
+ * other field — against this build's `REQUIRED_*` constants). Returns the parse/validation
+ * error message on failure, `undefined` on success. A seam (`readVersions`) so tests never touch
+ * the real filesystem; defaults to a real `readFileSync`.
+ */
+function checkBundleVersions(execPath: string, readVersions: (p: string) => string): string | undefined {
+  const versionsPath = bundleRuntimePath(execPath, "versions");
+  try {
+    parseVersionsJson(readVersions(versionsPath));
+    return undefined;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+/**
+ * P8d-1's ladder: `settings.runtimes.claudeExecutable` → env `NORMA_CLAUDE_EXECUTABLE` →
+ * `<dirname(execPath)>/runtimes/claude-official/claude` (the Release bundle drop, gated on a
+ * valid `VERSIONS.json`) → the platform package under `node_modules` (dev only) → the typed
+ * refusal.
  *
  * An EXPLICIT path (setting or env) is authoritative — if it is set and missing, or if it is a bare
  * name, that IS the failure (never fall through to a different binary than the one configured). The
@@ -96,6 +126,8 @@ export function resolveClaudeExecutable(input: {
   exists: (p: string) => boolean;
   /** Test seam for the package door; defaults to the real dual-`createRequire` resolution. */
   resolvePackage?: () => string | undefined;
+  /** Test seam for the bundle rung's VERSIONS.json read; defaults to a real `readFileSync`. */
+  readVersions?: (p: string) => string;
 }): { path: string; source: ClaudeExecutableSource } | ClaudeExecutableUnavailable {
   const explicit: Array<[ClaudeExecutableSource, string | undefined]> = [
     ["setting", input.setting?.trim() || undefined],
@@ -106,8 +138,15 @@ export function resolveClaudeExecutable(input: {
     if (isBareName(path)) return new ClaudeExecutableUnavailable([path], "a bare command name is refused — the official leg never resolves the user's own install (WS-14 §5.1)");
     return input.exists(path) ? { path, source } : new ClaudeExecutableUnavailable([path]);
   }
-  const bundlePath = join(dirname(input.execPath), "claude");
-  if (input.exists(bundlePath)) return { path: bundlePath, source: "bundle" };
+  const bundlePath = bundleRuntimePath(input.execPath, "claude");
+  if (input.exists(bundlePath)) {
+    const readVersions = input.readVersions ?? ((p: string) => readFileSync(p, "utf8"));
+    const versionsError = checkBundleVersions(input.execPath, readVersions);
+    if (versionsError !== undefined) {
+      return new ClaudeExecutableUnavailable([bundlePath], `bundled claude at ${bundlePath} is not the pinned artifact: ${versionsError}`);
+    }
+    return { path: bundlePath, source: "bundle" };
+  }
   const resolvePackage = input.resolvePackage ?? resolveClaudeAgentSdkPackageDir;
   let platformDir: string | undefined;
   try {
