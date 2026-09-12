@@ -59,7 +59,7 @@ export function explicitTokenRegex(from: string): RegExp {
 export function globToRegex(glob: string): RegExp {
   let re = "";
   for (let i = 0; i < glob.length; i++) {
-    const c = glob[i];
+    const c = glob[i] ?? "";
     if (c === "*" && glob[i + 1] === "*") {
       re += ".*";
       i++;
@@ -151,7 +151,7 @@ export function rewriteText(text: string, relPath: string): RewriteResult {
       return CASE_MAP[m] ?? m;
     });
     // 4. restore
-    out = out.replace(new RegExp(`${PH_OPEN}(\\d+)${PH_CLOSE}`, "g"), (_m, n) => stash[Number(n)]);
+    out = out.replace(new RegExp(`${PH_OPEN}(\\d+)${PH_CLOSE}`, "g"), (_m, n) => stash[Number(n)] ?? "");
   }
 
   // residue: every surviving norma, and what permits it
@@ -227,7 +227,7 @@ export function planMoves(paths: string[]): { from: string; to: string; kind: "d
       })
       .sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b));
     if (candidates.length === 0) break;
-    const from = candidates[0];
+    const from = candidates[0]!;
     const to = `${from.slice(0, from.lastIndexOf("/") + 1)}${renameComponent(from.slice(from.lastIndexOf("/") + 1))}`;
     moves.push({ from, to, kind: "dir" });
     current = current.map((p) => (p === from || p.startsWith(from + "/") ? to + p.slice(from.length) : p));

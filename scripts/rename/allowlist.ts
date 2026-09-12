@@ -42,6 +42,8 @@ export const BINARY_EXTENSIONS: ReadonlySet<string> = new Set([
   "png", "jpg", "jpeg", "gif", "icns", "ico", "pdf", "zip", "gz", "tgz", "xz", "db", "sqlite", "sqlite3",
   "ttf", "otf", "woff", "woff2", "mp4", "mov", "wav", "aiff", "car", "xcframework", "a", "dylib", "so",
   "o", "bin", "dat", "heic", "webp", "svgz",
+  // Office fixtures are zip/OLE binaries (their CONTENT is test data, never rewritten — P9b-29)
+  "odt", "ods", "odp", "docx", "xlsx", "pptx", "xls", "doc", "ppt",
 ]);
 
 export const RENAME_ALLOWLIST: readonly AllowlistEntry[] = [
@@ -106,14 +108,39 @@ export const RENAME_ALLOWLIST: readonly AllowlistEntry[] = [
   {
     id: "rename-tooling",
     regex: /norma|Norma|NORMA/g,
-    files: ["scripts/rename/**"],
-    why: "the codemod and its tests spell the old name on purpose",
+    files: ["scripts/rename/**", "packages/core/test/rename/**"],
+    why: "the codemod, its tests and the residue test spell the old name on purpose",
   },
   {
     id: "frozen-norma-feed",
     regex: /norma|Norma|NORMA/g,
     files: ["releases/appcast.xml"],
     why: "the live Sparkle feed for shipped Norma installs — 9c's terminal handoff entry lands here (WS-16 §19)",
+  },
+  {
+    id: "claude-md-legacy-trap",
+    // CLAUDE.md's LEGACY TRAP paragraph (P9b-13) must SPELL the stale wrapper and env names so a
+    // reader recognises them on their own machine.
+    regex: /norma-dev|NORMA_HOME|NORMA_PROFILE|\.norma-dev/g,
+    files: ["CLAUDE.md"],
+    why: "the dev-guide trap that names the stale `norma-dev` wrapper and the env names it exports (P9b-13)",
+  },
+  {
+    id: "contributing-clone-dir",
+    // `git clone …/norma.git` (protected URL) still creates a `norma/` directory until the user renames the repo.
+    regex: /(?<=cd )norma(?![A-Za-z0-9_-])/g,
+    files: ["CONTRIBUTING.md"],
+    why: "the clone directory that the protected repo URL produces — flips with the GitHub rename",
+  },
+  {
+    id: "office-fixture-content",
+    // Test DATA, not a product surface (P9b-29): the Office fixtures under Tests/…/Fixtures/office are
+    // binary documents whose paragraphs/slide titles say NORMA GATE / NORMA PAGE TWO / Norma T6 Slide
+    // One|Two|Three; the tests that read, type into, save and re-open them assert those bytes (and a
+    // case-insensitive `find: "norma"` against them). The expectations mirror the fixtures verbatim.
+    regex: /NORMA (GATE(WAY)?|PAGE TWO)|Norma T6 Slide (One|Two|Three)|"norma"/g,
+    files: ["apple/Winter/Tests/WinterAppTests/**"],
+    why: "expectations that mirror binary Office fixture content byte-for-byte (P9b-29)",
   },
   {
     id: "legacy-names",
