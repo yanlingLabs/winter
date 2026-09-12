@@ -18,6 +18,16 @@ import IrohLib
 /// Task 3/`IrohListenerTests` — so an unbounded await would hang the whole suite on a regression
 /// instead of failing loudly). A couple of short fixed sleeps ARE used, but only as a "settle" grace
 /// window to confirm NO further frame arrives — the same idiom `GatewayGateTests` already uses.
+///
+/// Winter Phase 9a (P9a-11, Lane K): scenarios B, C, D are among the 13 tests `ci.yml`'s
+/// `NORMAKIT_SKIP` names by exact test — bisected to `ed6ebeca6c1fce175ef0e818361fb3662b38d6ca`
+/// (`session.dispatch`'s default mode now requires a resolvable `winter` executable this suite
+/// never provisions, which is what a `RealDaemon`-spawned daemon's `session.dispatch` needs); the
+/// resulting local connection close is what iroh-ffi reports to this scenario's own dialing peer
+/// as `IrohError { kind: Stream, message: "ConnectionLost(LocallyClosed)" }` — reproduced verbatim
+/// with `NORMA_WINTER_EXECUTABLE` unset. See `RealDaemon.waitForFirstLine`'s own doc comment for
+/// the full classification (scenario B passes once a real `winter` binary is available; C/D do
+/// not, for a second, independent cause documented there).
 final class IrohE2ETests: XCTestCase {
 
     // MARK: - Shared setup

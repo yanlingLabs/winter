@@ -241,6 +241,45 @@ struct RealDaemon {
     /// mid-flush is never mistaken for a complete line. 20s deadline: `startDaemon` boots a full
     /// agent-less core (sessions store, hub, IPC server, routine scheduler, ...) — a couple of
     /// seconds on a warm machine, generous headroom for CI.
+    ///
+    /// Winter Phase 9a (P9a-11, Lane K): the "DIFFERENT, deeper failure class" this fix's own
+    /// commit message carried forward (`CancellationError()`/`IrohError ConnectionLost
+    /// (LocallyClosed)` on `FakePhoneConformanceTests`/`GatewayGateTests`/`IrohE2ETests`, 13 tests
+    /// by name, skipped in `ci.yml`'s `NORMAKIT_SKIP`) is CLASSIFIED, not fixed here — bisected
+    /// (this worktree, this fixture unchanged at every step) to `ed6ebeca6c1fce175ef0e818361fb3662b38d6ca`
+    /// ("feat(core): Dispatch on the Winter leg — winterLeg.dispatch defaults to true", Task 17
+    /// Step 1, pre-dating 8d entirely): `session.dispatch {}`'s default mode now mints on the
+    /// Winter leg and requires a resolvable `winter` executable at create time — this fixture sets
+    /// no `NORMA_WINTER_EXECUTABLE` and stages no bundle/home binary (matching NormaKit's actual CI
+    /// `swift` job, which never builds/installs one), so every one of the 13 tests that seeds a
+    /// real session via `session.dispatch` fails there. Over `ScriptedRemoteConn`/`LoopbackListener`
+    /// (`GatewayGateTests`) the failure surfaces as a plain `RpcError`/`CancellationError` from
+    /// `NormaClient`; over the REAL Iroh transport (`IrohE2ETests`, `FakePhoneConformanceTests`) the
+    /// resulting local `close()` is what the Iroh FFI reports to the peer as `ConnectionLost
+    /// (LocallyClosed)` — confirmed by re-running with `NORMA_WINTER_EXECUTABLE` UNSET, which
+    /// reproduces `IrohError { kind: Stream, message: "ConnectionLost(LocallyClosed)" }` verbatim on
+    /// `FakePhoneConformanceTests/testStreamingDeltasReachThePhone_...`. None of this is an Iroh FFI
+    /// bug or a NormaKit Swift bug — it is `packages/core`'s dispatch-mode default, out of this
+    /// lane's edit scope (`apple/NormaKit/**` only).
+    ///
+    /// Providing a REAL, resolvable `winter` binary (`NORMA_WINTER_EXECUTABLE` pointed at a signed
+    /// `dist/winter`) makes 8 of the 13 pass outright (measured: `IrohE2ETests` scenarios B/C's
+    /// early phase, `FakePhoneConformanceTests` ×3, `GatewayGateTests` G2/G3/R1/T6b). The remaining
+    /// 5 — `GatewayGateTests` G1/R2, `IrohE2ETests` scenarios C/D, `FakePhoneConformanceTests`'s
+    /// streaming test — still fail even then, for a SECOND cause layered on the same commit: a
+    /// real, credential-less Winter turn synchronously emits `agentError`+`turnCompleted` "noise"
+    /// (a model-capability refusal — no reasoning-effort vocabulary on the default dispatch model)
+    /// that these tests' strict exact-frame-count assertions were never written to tolerate (they
+    /// assumed dispatch-mode's pre-`ed6ebeca` quiet, no-op engine behaviour); the streaming test's
+    /// own `agentProvider` injection (this file's `streamingProviderFixture`) is simply never
+    /// consulted by the Winter leg at all, so its synthetic chunks never reach the wire (0 of 6).
+    /// Both causes live in `packages/core`/the Winter routing behaviour, not here — WAIVED, not
+    /// fixed, by Lane K; see the lane report for the full per-test breakdown. A P9 carry: Lane N's
+    /// platform-package winter-resolution work (P9a-8/9a-9) would give CI's `swift` job a real
+    /// `winter` via `bun install` alone, likely un-skipping the first 8 structurally; the remaining
+    /// 5 need a `packages/core` fix (suppress turn-attempt noise for a fresh, credential-less
+    /// dispatch-mode session used as a pure event-log seed, and/or restore an Winter-leg-honored
+    /// `agentProvider`-equivalent test seam) that is out of NormaKit's scope.
     private static func waitForFirstLine(
         process: Process, stdoutPath: String, stderrPath: String, timeoutSeconds: Double = 20
     ) async throws -> String {

@@ -19,6 +19,13 @@ import NormaSessionKit
 ///   G6  `ScriptedRemoteConn` on `OSAllocatedUnfairLock` + `RemoteConn.peerID`
 ///   G7  the remote allowlist is EXACTLY the twenty names (Swift half of the cross-language
 ///       tripwire — the count is asserted, so this header must be re-stamped when it moves)
+///
+/// Winter Phase 9a (P9a-11, Lane K): G1, R2 (below) are among the 13 tests `ci.yml`'s
+/// `NORMAKIT_SKIP` names by exact test — bisected to `ed6ebeca6c1fce175ef0e818361fb3662b38d6ca`
+/// (`session.dispatch`'s default mode now requires a resolvable `winter` executable this Swift
+/// suite never provisions); see `RealDaemon.waitForFirstLine`'s own doc comment for the full
+/// classification (G2/G3/R1/T6b in this file are NOT waived — they pass once a real `winter`
+/// binary is available, and the 13's skip is what covers them for now).
 final class GatewayGateTests: XCTestCase {
 
     // MARK: - Shared helpers (per-file copies, matching this codebase's test-double convention)
