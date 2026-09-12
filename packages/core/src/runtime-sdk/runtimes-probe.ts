@@ -74,12 +74,28 @@ function claudeVersion(path: string): string | undefined {
   }
 }
 
-export async function runRuntimesProbe(input: { execPath: string; home: string; env: Record<string, string | undefined> }): Promise<RuntimesProbeResult> {
+export async function runRuntimesProbe(input: {
+  execPath: string;
+  home: string;
+  env: Record<string, string | undefined>;
+  /** P9a fix wave (M1 collateral): test seam for the P9a-9 platform-package rung, threaded
+   *  straight through to `resolveWinterExecutable`; defaults to its own default
+   *  (`resolvePlatformPackageWinter`) — never a behaviour change for the real `__runtimes-probe`
+   *  route, which never sets this. */
+  resolvePlatformPackageBin?: () => string | undefined;
+}): Promise<RuntimesProbeResult> {
   const errors: string[] = [];
   const exists = (p: string): boolean => existsSync(p);
 
   // --- winter ---------------------------------------------------------------------------------
-  const winterResolution = resolveWinterExecutable({ setting: undefined, env: input.env, execPath: input.execPath, home: input.home, exists });
+  const winterResolution = resolveWinterExecutable({
+    setting: undefined,
+    env: input.env,
+    execPath: input.execPath,
+    home: input.home,
+    exists,
+    ...(input.resolvePlatformPackageBin === undefined ? {} : { resolvePlatformPackageBin: input.resolvePlatformPackageBin }),
+  });
   const winter: RuntimesProbeResult["winter"] = { executable: false };
   if (winterResolution.ok) {
     winter.path = winterResolution.path;

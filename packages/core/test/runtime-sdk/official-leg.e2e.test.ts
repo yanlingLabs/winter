@@ -39,6 +39,7 @@ import { credentialRefFor, ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/ru
 import { sessionHooksFor, type SessionHooksDeps } from "../../src/runtime-sdk/hooks";
 import { attachOfficialSession } from "../../src/runtime-sdk/messaging";
 import { createSqliteRuntimeDirectoryStore, openRuntimeStateDb } from "../../src/runtime-state";
+import { processStartedAt } from "../../src/runtime-state/leases";
 import { buildChildAddress, buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { OfficialInputDeps, OfficialSessionInput } from "../../src/runtime-sdk/official-options";
 import { startOfficialSession, type OfficialSession } from "../../src/runtime-sdk/official-session";
@@ -143,7 +144,18 @@ const probeDef: ToolDefinition = {
 
 async function buildWorld(
   selection: RuntimeSelection, secretsDir: string, baseUrl: string, policy: "auto" | "dont-ask" | "plan" = "auto",
-  opts: { reviewer?: BashReviewer; mode?: "code" | "chat"; hookFacade?: SessionHooksDeps["hookFacade"]; advisorReviewer?: ReviewerResolver; onIncarnationStart?: (abort: AbortController) => void } = {},
+  opts: {
+    reviewer?: BashReviewer; mode?: "code" | "chat"; hookFacade?: SessionHooksDeps["hookFacade"]; advisorReviewer?: ReviewerResolver; onIncarnationStart?: (abort: AbortController) => void;
+    /** P9a-10: an alternate session id (default "s_official_e2e") — needed the moment a test wants
+     *  a NAMED, addressable session (e.g. "row4hold-b") rather than the shared fixed id every other
+     *  `buildWorld` caller uses. */
+    sessionId?: string;
+    /** P9a-10: wires `startOfficialSession`'s `messaging.attach` (`attachOfficialSession`) — the
+     *  ORIGINAL row4/row5 tests build their own bespoke session precisely to get this; every other
+     *  `buildWorld` caller runs unattached (byte-identical to before this option existed), so this
+     *  defaults to `false`. */
+    messagingAttach?: boolean;
+  } = {},
 ): Promise<World> {
   const mode = opts.mode ?? "code";
   const home = mkdtempSync(join(tmpdir(), "p8c-official-e2e-"));
@@ -162,6 +174,11 @@ async function buildWorld(
     settings: () => null,
     secrets,
     capabilities: [],
+    // P9a-10 (MEASURED first without this): a `from` address the router cannot classify is refused
+    // OUTRIGHT as unauthenticated, before WS-10 §13's own inbound matrix ever runs — the SAME fixed
+    // "prompts" classifier the row4/row5 tests above already use. Harmless for every OTHER
+    // `buildWorld` caller (none of them touch messaging).
+    sessionPermissionClass: () => "prompts",
     ...(opts.advisorReviewer === undefined ? {} : { advisorReviewer: opts.advisorReviewer }),
   });
   const officialPeer = await runtime.officialPeer();
@@ -172,9 +189,10 @@ async function buildWorld(
   const skills = new SkillStore({ normaHome: home, trust });
   const assembler = new ContextAssembler({ normaHome: home, trust, skills });
 
+  const sessionId = opts.sessionId ?? "s_official_e2e";
   const registry = new ToolRegistry();
   registry.register(probeDef);
-  const capSession = { sessionId: "s_official_e2e", mode, cwd, roots: [cwd] };
+  const capSession = { sessionId, mode, cwd, roots: [cwd] };
   const probeServer = capabilityServer({ key: "probe", defs: [probeDef] }, capSession);
   const capabilities: CapabilityServerRecord = { [probeServer.name]: probeServer };
 
@@ -182,7 +200,6 @@ async function buildWorld(
   const checkpoints = new MemCheckpoints();
   let seq = 0;
 
-  const sessionId = "s_official_e2e";
   const backendSessionId = crypto.randomUUID();
 
   // m1: a hermetic HOME for the CHILD process, distinct from `home` (NORMA_HOME) above — passed
@@ -246,6 +263,7 @@ async function buildWorld(
     broadcast: (e) => { events.push(e as unknown as SessionEvent); if (process.env.DEBUG_E2E) console.log("BROADCAST", JSON.stringify(e).slice(0, 300)); },
     log: (l) => { if (process.env.DEBUG_E2E) console.log("[log]", l); },
     ...(opts.onIncarnationStart === undefined ? {} : { onIncarnationStart: opts.onIncarnationStart }),
+    ...(opts.messagingAttach ? { messaging: { attach: attachOfficialSession } } : {}),
   });
 
   const world: World = { home, cwd, runtime, events, session, backendSessionId, hermetic };
@@ -274,6 +292,40 @@ async function waitFor(events: SessionEvent[], pred: (e: SessionEvent) => boolea
     if (hit) return hit;
     if (Date.now() - t0 > ms) throw new Error(`timed out waiting; saw: ${events.map((e) => e.type).join(",")}`);
     await Bun.sleep(20);
+  }
+}
+
+/**
+ * P9a-10/M5: `runtime.sdk.directory.get(<session address>)` reads the SAME row the spawn proxy's
+ * record sink wrote (`processIdentity.pid` — the router's own directory-store seam, WS-14 §9 / WS-15
+ * §6.4 step 2) — verbatim, no re-derivation. Polls because the record write races the spawn (the
+ * router's own `Promise.race([sink.record(...), timeout])`): by the time `session.send()`'s own
+ * promise resolves the row is USUALLY already there, but this is never assumed.
+ */
+async function officialChildPidOf(runtime: NormaRuntimeSdk, sessionId: string, timeoutMs = 10_000): Promise<number> {
+  const address = serializeRuntimeAddress(buildSessionAddress(sessionId));
+  const t0 = Date.now();
+  for (;;) {
+    const entry = await runtime.sdk.directory.get(address);
+    if (entry?.processIdentity?.pid !== undefined) return entry.processIdentity.pid;
+    if (Date.now() - t0 > timeoutMs) {
+      throw new Error(`officialChildPidOf: no processIdentity.pid recorded for ${address} within ${timeoutMs}ms (entry: ${JSON.stringify(entry)})`);
+    }
+    await Bun.sleep(20);
+  }
+}
+
+/** `true` once the OS agrees `pid` no longer exists (ESRCH), polled up to `timeoutMs`. */
+async function pollProcessGone(pid: number, timeoutMs = 5_000): Promise<boolean> {
+  const t0 = Date.now();
+  for (;;) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return true;
+    }
+    if (Date.now() - t0 > timeoutMs) return false;
+    await Bun.sleep(25);
   }
 }
 
@@ -1171,6 +1223,411 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     await runtime2.dispose();
     rmSync(home, { recursive: true, force: true });
   }, 60_000);
+
+  // ── Winter Phase 9a (P9a-10) — the crash proof, MEASURED, never asserted as a wish ─────────────
+  //
+  // P8d-18 (this file's own earlier block) tried "SIGKILL-by-PID" and measured it unreliable — but
+  // that was BEFORE the directory row's `processIdentity.pid` (M5) existed as a reliable lookup;
+  // round 2's blocker was LOCATING the child, not the router's own reaction to its death. This test
+  // retries the SAME idea armed with that lookup: `officialChildPidOf` reads the row the router's
+  // own spawn proxy wrote (`WS-14 §9 / WS-15 §6.4 step 2`), so there is no PID-hunting left to be
+  // unreliable about.
+  //
+  // Every assertion below is a MEASUREMENT, not a requirement this test enforces — see this file's
+  // own `[9a MEASURED]` console lines for the raw values a re-run would need to reproduce. Where the
+  // observed shape agrees with WS-16 §14's crash matrix ("crash mid-turn -> resumable; next send ->
+  // resume"), the assertion pins it; where it does not, the assertion pins the ACTUAL shape instead
+  // and the surrounding comment says so — the report to the controller names each as MATCHES-SPEC or
+  // GAP.
+  test("9a MEASURED: SIGKILL of the official child mid-turn (by the row's processIdentity.pid) — the record's state, the next send's incarnation, the projector's events", async () => {
+    const { startFake, stalledResponse, anthropicFake } = await import("@yanlinglabs/winter-provider-conformance");
+    let requestNum = 0;
+    const FIRST_PROMPT = "say hello (9a crash proof, first incarnation)";
+    const fake = await startFake({
+      routes: [{
+        path: "*",
+        handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            requestNum += 1;
+            if (requestNum === 1) return anthropicFake.anthropicTurnResponse({ blocks: [{ type: "text", chunks: ["hello"] }], stopReason: "end_turn" });
+            // The turn we crash mid-flight: held open well past the kill this test performs.
+            return stalledResponse(30_000);
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    try {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p9a-crash-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto", { sessionId: "p9a-crash" });
+      await w.session.send(FIRST_PROMPT);
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      expect(w.session.state).toBe("live"); // sanity: matches every other test's own first-turn baseline
+      const generationBeforeCrash = w.session.generation;
+
+      await w.session.send("this turn will be crashed mid-flight");
+      // Give the fake time to actually receive the SECOND request (the one that gets held) before
+      // hunting for the child's pid — same discipline as the P8d-18 abort re-measurement above.
+      const t0req = Date.now();
+      while (requestNum < 2 && Date.now() - t0req < 10_000) await Bun.sleep(20);
+      expect(requestNum).toBeGreaterThanOrEqual(2);
+
+      const pid = await officialChildPidOf(w.runtime, w.session.sessionId);
+      console.warn(`[9a MEASURED] official child pid = ${pid}, generation before crash = ${generationBeforeCrash}`);
+      expect(() => process.kill(pid, 0)).not.toThrow(); // sanity: genuinely alive before the kill
+
+      // P9a fix wave, n1: `officialChildPidOf` returns a bare pid, and a pid is recyclable — WS-14
+      // §9 warns against trusting one alone for a RECOVERY decision, but says nothing against a
+      // TEST killing whatever currently holds it milliseconds after reading it. Still, the row
+      // carries `processIdentity.startedAt` right here for free, so cross-check it before the kill:
+      // the OS's own `processStartedAt(pid)` (via `ps -o lstart=`, second-granularity) must land
+      // close to the moment the router's spawn-proxy record sink observed this same child, which a
+      // pid recycled from some unrelated, long-gone process would not.
+      const recordedEntry = await w.runtime.sdk.directory.get(serializeRuntimeAddress(buildSessionAddress(w.session.sessionId)));
+      const recordedStartedAt = recordedEntry?.processIdentity?.startedAt;
+      const observedStartedAt = processStartedAt(pid);
+      console.warn(`[9a MEASURED] processIdentity.startedAt recorded="${recordedStartedAt}" observed(ps)="${observedStartedAt}"`);
+      expect(observedStartedAt).not.toBe("unknown");
+      if (recordedStartedAt !== undefined) {
+        const driftMs = Math.abs(new Date(observedStartedAt).getTime() - new Date(recordedStartedAt).getTime());
+        console.warn(`[9a MEASURED] startedAt drift = ${driftMs}ms (recorded-vs-observed, same process expected well under 10s)`);
+        expect(driftMs).toBeLessThan(10_000);
+      }
+
+      process.kill(pid, "SIGKILL");
+
+      // (d) no orphan: the OS agrees the pid is gone, within a bounded window.
+      const gone = await pollProcessGone(pid, 5_000);
+      console.warn(`[9a MEASURED] (d) orphan check — pid gone within the drain budget = ${gone}`);
+      expect(gone).toBe(true);
+
+      // (a) the session record's state after the crash — WS-16 §14's matrix expects "resumable".
+      const deadlineState = Date.now() + 15_000;
+      while (w.session.state === "live" && Date.now() < deadlineState) await Bun.sleep(50);
+      const stateAfterCrash = w.session.state;
+      console.warn(`[9a MEASURED] (a) state after SIGKILL = "${stateAfterCrash}" (WS-16 §14 expects "resumable")`);
+      expect(stateAfterCrash).toBe("resumable");
+
+      // (b) the next send's incarnation — does it start a NEW generation (a resume), refuse, or
+      // silently no-op? Measured, not assumed: `OfficialSession`'s own state machine treats
+      // "resumable" as resumable-by-construction (only "ended" throws `OfficialSessionEnded`), so
+      // the a-priori expectation is that this succeeds and increments `generation`.
+      let sendAfterCrashError: string | undefined;
+      try {
+        await w.session.send("are you still there after the crash?");
+      } catch (err) {
+        sendAfterCrashError = err instanceof Error ? err.message : String(err);
+      }
+      console.warn(`[9a MEASURED] (b) session.send after the crash: ${sendAfterCrashError ? `THREW: ${sendAfterCrashError}` : "accepted"}`);
+      expect(sendAfterCrashError).toBeUndefined();
+      await waitFor(w.events, (e) => e.type === "turn_completed" && w.events.filter((x) => x.type === "turn_completed").length >= 2, 45_000);
+      const generationAfterCrash = w.session.generation;
+      console.warn(`[9a MEASURED] (b) generation before=${generationBeforeCrash} after=${generationAfterCrash}`);
+      expect(generationAfterCrash).toBeGreaterThan(generationBeforeCrash);
+
+      // (c) the model's SECOND incarnation sees the FIRST turn's user message in its transcript —
+      // the real wire evidence (the fake's own recorded request bodies), never an assumption about
+      // how CLAUDE_CONFIG_DIR-based resume represents history internally.
+      const sawFirstPromptAgain = fake.requests.some((r) => r.path === "/v1/messages" && r.body.includes(FIRST_PROMPT));
+      console.warn(`[9a MEASURED] (c) a later request's body contains the first turn's prompt = ${sawFirstPromptAgain}`);
+      expect(sawFirstPromptAgain).toBe(true);
+    } finally {
+      await fake.close();
+    }
+  }, 90_000);
+
+  // ── Winter Phase 9a (P9a-10) — WS-17 §8 row 4's three halves ────────────────────────────────────
+  //
+  // The ORIGINAL row 4 test above already proves one shape (A -> B while B has just completed its
+  // FIRST turn — B's outcome measured "queued", and B answers it with NO explicit re-send from the
+  // test: B's own SECOND `turn_completed` appears on its own, which is this row's own "idle wake"
+  // half, already measured there). These two MEASURE the remaining shapes the row's header names:
+  // mid-turn-and-held, and deleted.
+  //
+  // MEASURED FIRST (both attempts kept as the finding they are, not smoothed over): a raw
+  // `runtime.sdk.messaging.sendDetailed()` call from a bare `attachOfficialSession`-only identity —
+  // even with a hand-written "session" directory row seeded to match — is refused "not
+  // authenticated" / resolves "not_found": the router's own `peers`/liveness check for a TOP-LEVEL
+  // sibling session requires the SENDER to be a REAL, actually-running official session in this
+  // process (WS-10 §13's inbound authentication, `senderKnown`), not merely an attached handle or a
+  // manually-seeded row. So both tests below use the SAME proven shape the original row 4 test
+  // does: TWO real spawned sessions, A's own turn issuing the NATIVE `SendMessage` tool call.
+  interface Row4Pair {
+    runtime: NormaRuntimeSdk;
+    home: string;
+    eventsFor: Map<string, SessionEvent[]>;
+    makeSession: (sessionId: string, baseUrl: string) => OfficialSession;
+    cleanup: () => Promise<void>;
+  }
+
+  async function buildRow4Pair(prefix: string): Promise<Row4Pair> {
+    const home = mkdtempSync(join(tmpdir(), `p9a-${prefix}-home-`));
+    const secrets = new FileSecretStore(join(home, "secrets"));
+    await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: `sk-test-${prefix}` });
+    const credentialRef = credentialRefFor("anthropic")!;
+    const runtime = await createNormaRuntimeSdk({ home, settings: () => null, secrets, capabilities: [], sessionPermissionClass: () => "prompts" });
+    const officialPeer = await runtime.officialPeer();
+    if (officialPeer === undefined) throw new Error("unreachable: the suite is skipped without a bed");
+
+    const hermetic = hermeticOfficialHome(prefix);
+    const trust = new TrustStore(join(home, "trust.json"));
+    const cwd = join(home, "work");
+    mkdirSync(cwd, { recursive: true });
+    trust.trust(cwd);
+    const skills = new SkillStore({ normaHome: home, trust });
+    const assembler = new ContextAssembler({ normaHome: home, trust, skills });
+    const policy = "auto" as const;
+    const eventsFor = new Map<string, SessionEvent[]>();
+    let seq = 0;
+
+    const makeSession = (sessionId: string, baseUrl: string): OfficialSession => {
+      const events: SessionEvent[] = [];
+      eventsFor.set(sessionId, events);
+      const checkpoints = new MemCheckpoints();
+      const sessionInput: OfficialSessionInput = { sessionId, mode: "code", cwd };
+      const inputDeps: OfficialInputDeps = {
+        home,
+        selection: selectionFor(),
+        explicitCredentials: [{ variable: "ANTHROPIC_API_KEY", ref: credentialRef }],
+        explicitConnectionEnv: { ANTHROPIC_BASE_URL: baseUrl },
+        claudeExecutableFor: () => ({ path: claudeRuntimeForTests()!.executable }),
+        officialPeer,
+        assembler,
+        capabilities: {},
+        canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy, emit: () => {} },
+        policy,
+        env: { ...process.env, HOME: hermetic.home }, // the SAME child HOME for both sessions
+      };
+      return startOfficialSession({
+        sessionId,
+        backendSessionId: crypto.randomUUID(),
+        mode: "code",
+        runtime,
+        selection: selectionFor(),
+        sessionInput: () => sessionInput,
+        inputDeps: () => inputDeps,
+        projector: (generation) => createProjector({
+          sessionId, mode: "code", generation, runtimeKind: "claude-agent",
+          nextSeq: () => ++seq, checkpoint: checkpoints, now: () => new Date().toISOString(), log: { warn: () => {} },
+        }),
+        append: (e) => { const stamped = { ...e, seq: (e as { seq?: number }).seq ?? ++seq } as SessionEvent; events.push(stamped); return stamped; },
+        broadcast: (e) => { events.push(e as unknown as SessionEvent); },
+        log: () => {},
+        messaging: { attach: attachOfficialSession },
+      });
+    };
+
+    return {
+      runtime,
+      home,
+      eventsFor,
+      makeSession,
+      cleanup: async () => { await runtime.dispose(); rmSync(home, { recursive: true, force: true }); },
+    };
+  }
+
+  test("9a MEASURED: row 4 HOLD — A's native SendMessage reaches B while B is mid-turn (held response)", async () => {
+    const { startFake, stalledResponse, anthropicFake } = await import("@yanlinglabs/winter-provider-conformance");
+    const DONE = (text: string): AnthropicTurnScript => ({ blocks: [{ type: "text", chunks: [text] }], stopReason: "end_turn" });
+    let bTurns = 0;
+    const fakeB = await startFake({
+      routes: [{
+        path: "*",
+        handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            bTurns += 1;
+            if (bTurns === 1) return anthropicFake.anthropicTurnResponse(DONE("hi, I'm B"));
+            if (bTurns === 2) return stalledResponse(6_000); // B's SECOND turn — genuinely held when A sends
+            return anthropicFake.anthropicTurnResponse(DONE("got your message"));
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    let aTurns = 0;
+    const fakeA = await startFake({
+      routes: [{
+        path: "*",
+        handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            aTurns += 1;
+            if (aTurns === 1) return anthropicFake.anthropicTurnResponse({ blocks: [{ type: "tool_use", id: "call_sm_hold", name: "SendMessage", jsonChunks: [JSON.stringify({ to: "session:row4hold-b", message: "hello while you are busy" })] }], stopReason: "tool_use" });
+            return anthropicFake.anthropicTurnResponse(DONE("sent"));
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    const pair = await buildRow4Pair("row4hold");
+    try {
+      const sessionB = pair.makeSession("row4hold-b", fakeB.url);
+      await sessionB.send("hello");
+      await waitFor(pair.eventsFor.get("row4hold-b")!, (e) => e.type === "turn_completed", 45_000);
+      await sessionB.send("say something long while I hold you open");
+      const t0hold = Date.now();
+      while (bTurns < 2 && Date.now() - t0hold < 10_000) await Bun.sleep(20);
+      expect(bTurns).toBeGreaterThanOrEqual(2);
+      expect(sessionB.state).toBe("live"); // genuinely mid-turn when A's SendMessage lands below
+
+      const sessionA = pair.makeSession("row4hold-a", fakeA.url);
+      await sessionA.send("please message B for me, right now, while it is busy");
+      await waitFor(pair.eventsFor.get("row4hold-a")!, (e) => e.type === "turn_completed", 45_000);
+      const aResult = pair.eventsFor.get("row4hold-a")!.find((e) => e.type === "tool_result") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
+      console.warn(`[9a MEASURED] row4 HOLD: A's SendMessage tool_result while B mid-turn = ${JSON.stringify(aResult)}`);
+      expect(aResult?.isError).not.toBe(true);
+
+      // B's held response resolves on its own (6s); wait out its second turn, then send once more —
+      // the row's own "next request" the held-and-released delivery should surface on.
+      await waitFor(pair.eventsFor.get("row4hold-b")!, (e) => pair.eventsFor.get("row4hold-b")!.filter((x) => x.type === "turn_completed").length >= 2, 15_000);
+      await sessionB.send("anything for me?");
+      await waitFor(pair.eventsFor.get("row4hold-b")!, (e) => pair.eventsFor.get("row4hold-b")!.filter((x) => x.type === "turn_completed").length >= 3, 45_000);
+
+      const sawDelivery = fakeB.requests.some((r) => r.path === "/v1/messages" && r.body.includes("hello while you are busy"));
+      console.warn(`[9a MEASURED] row4 HOLD: a later request to B contains the held delivery = ${sawDelivery}`);
+      expect(sawDelivery).toBe(true);
+    } finally {
+      await fakeA.close();
+      await fakeB.close();
+      await pair.cleanup();
+    }
+  }, 90_000);
+
+  test("9a MEASURED: row 4 REFUSE — A's native SendMessage targets B after B's directory row is deleted", async () => {
+    const { startFake, anthropicFake } = await import("@yanlinglabs/winter-provider-conformance");
+    const DONE = (text: string): AnthropicTurnScript => ({ blocks: [{ type: "text", chunks: [text] }], stopReason: "end_turn" });
+    const fakeB = await startFake({
+      routes: [{
+        path: "*",
+        handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") return anthropicFake.anthropicTurnResponse(DONE("hi, I'm B"));
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    let aTurns = 0;
+    const fakeA = await startFake({
+      routes: [{
+        path: "*",
+        handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            aTurns += 1;
+            if (aTurns === 1) return anthropicFake.anthropicTurnResponse({ blocks: [{ type: "tool_use", id: "call_sm_refuse", name: "SendMessage", jsonChunks: [JSON.stringify({ to: "session:row4refuse-b", message: "are you still there?" })] }], stopReason: "tool_use" });
+            return anthropicFake.anthropicTurnResponse(DONE("sent"));
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    const pair = await buildRow4Pair("row4refuse");
+    try {
+      const sessionB = pair.makeSession("row4refuse-b", fakeB.url);
+      await sessionB.send("hello");
+      await waitFor(pair.eventsFor.get("row4refuse-b")!, (e) => e.type === "turn_completed", 45_000);
+
+      const address = serializeRuntimeAddress(buildSessionAddress("row4refuse-b"));
+      const before = await pair.runtime.sdk.directory.get(address);
+      expect(before).toBeDefined();
+      await pair.runtime.sdk.directory.forget(address);
+      const after = await pair.runtime.sdk.directory.get(address);
+      expect(after).toBeUndefined();
+
+      const sessionA = pair.makeSession("row4refuse-a", fakeA.url);
+      await sessionA.send("please message B for me — check if it is still there");
+      await waitFor(pair.eventsFor.get("row4refuse-a")!, (e) => e.type === "turn_completed", 45_000);
+      const aResult = pair.eventsFor.get("row4refuse-a")!.find((e) => e.type === "tool_result") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
+      console.warn(`[9a MEASURED] row4 REFUSE: A's SendMessage tool_result after B's row was deleted = ${JSON.stringify(aResult)}`);
+      // The outcome union's ten arms (messaging-contract.d.ts) — a deleted row is the "no such
+      // addressable object" shape, cited here as the SPECIFIC kind this router actually returns
+      // (through the model-facing tool's own JSON envelope) rather than "some refusal or other".
+      expect(aResult?.isError).toBe(true);
+      expect(aResult?.output).toContain("not_found");
+    } finally {
+      await fakeA.close();
+      await fakeB.close();
+      await pair.cleanup();
+    }
+  }, 90_000);
+
+  test("9a MEASURED: row 4 IDLE WAKE — A's native SendMessage targets B once B is genuinely resumable (not merely between turns)", async () => {
+    // MEASURED (this file's own 9a crash-proof test, above): state does NOT flip to "resumable"
+    // merely because a turn completed — right after a normal `turn_completed`, `state` is still
+    // "live" (the underlying CLI process keeps running, listening for more input on the SAME
+    // incarnation). P8d-18 (this file's own earlier block) also measured that a plain `abort()`
+    // never moves `state` off "live" either. The ONLY confirmed way this router's official leg
+    // reaches "resumable" without an explicit `.end()` is the SAME real-crash mechanism the 9a
+    // crash-proof test uses (`officialChildPidOf` + SIGKILL) — so THAT is how this test honestly
+    // constructs "B idle (resumable)", rather than assuming a natural idle-timeout this leg does
+    // not appear to have.
+    const { startFake, anthropicFake } = await import("@yanlinglabs/winter-provider-conformance");
+    const DONE = (text: string): AnthropicTurnScript => ({ blocks: [{ type: "text", chunks: [text] }], stopReason: "end_turn" });
+    let bTurns = 0;
+    const fakeB = await startFake({
+      routes: [{
+        path: "*",
+        handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            bTurns += 1;
+            return anthropicFake.anthropicTurnResponse(DONE(bTurns === 1 ? "hi, I'm B" : "got your message"));
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    let aTurns = 0;
+    const fakeA = await startFake({
+      routes: [{
+        path: "*",
+        handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            aTurns += 1;
+            if (aTurns === 1) return anthropicFake.anthropicTurnResponse({ blocks: [{ type: "tool_use", id: "call_sm_idle", name: "SendMessage", jsonChunks: [JSON.stringify({ to: "session:row4idle-b", message: "wake up, message for you" })] }], stopReason: "tool_use" });
+            return anthropicFake.anthropicTurnResponse(DONE("sent"));
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    const pair = await buildRow4Pair("row4idle");
+    try {
+      const sessionB = pair.makeSession("row4idle-b", fakeB.url);
+      await sessionB.send("hello");
+      await waitFor(pair.eventsFor.get("row4idle-b")!, (e) => e.type === "turn_completed", 45_000);
+      expect(sessionB.state).toBe("live"); // confirms the measurement above, on THIS run too
+
+      const pid = await officialChildPidOf(pair.runtime, "row4idle-b");
+      process.kill(pid, "SIGKILL");
+      const deadline = Date.now() + 15_000;
+      while (sessionB.state === "live" && Date.now() < deadline) await Bun.sleep(50);
+      console.warn(`[9a MEASURED] row4 IDLE WAKE: B's state once forced off "live" = "${sessionB.state}"`);
+      expect(sessionB.state).toBe("resumable");
+
+      const sessionA = pair.makeSession("row4idle-a", fakeA.url);
+      await sessionA.send("please message B for me — it should be idle now");
+      await waitFor(pair.eventsFor.get("row4idle-a")!, (e) => e.type === "turn_completed", 45_000);
+      const aResult = pair.eventsFor.get("row4idle-a")!.find((e) => e.type === "tool_result") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
+      console.warn(`[9a MEASURED] row4 IDLE WAKE: A's SendMessage tool_result to a resumable B = ${JSON.stringify(aResult)}`);
+      // MEASURED — NOT the "queued, delivered on next turn" half of the row's either/or: a
+      // genuinely "resumable" (not-live) official session is refused with the SAME shape row 5
+      // already pinned for a fully-EXITED child ("unavailable" — "is not live in this process...
+      // an exited official session is resumed by its backend session id through the official
+      // adapter, which builds the launch this messaging lane deliberately does not", WS-15 §6.2).
+      // So this router draws NO distinction between "resumable" and "exited" for inbound
+      // messaging purposes — both are simply "not live", and neither has a cold-resume path in
+      // router 0.0.3 (WS-15 §6.2, cited verbatim in the refusal reason). GAP against a reading of
+      // WS-16 §14/WS-10 §13 that expected "resumable" to still accept a queued delivery.
+      expect(aResult?.isError).toBe(true);
+      expect(aResult?.output).toContain("unavailable");
+      expect(aResult?.output).toContain("not live in this process");
+      const bTurnsAfter = bTurns;
+      await Bun.sleep(500); // belt: confirm B genuinely never received anything as a result
+      expect(bTurns).toBe(bTurnsAfter);
+      expect(fakeB.requests.some((r) => r.path === "/v1/messages" && r.body.includes("wake up, message for you"))).toBe(false);
+    } finally {
+      await fakeA.close();
+      await fakeB.close();
+      await pair.cleanup();
+    }
+  }, 90_000);
 });
 
 test("claude runtime bed resolves on this machine (sanity: the platform package really installed)", () => {

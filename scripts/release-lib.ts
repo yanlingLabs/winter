@@ -1,10 +1,19 @@
 /**
  * Pure, unit-tested parts of the release pipeline (scripts/release.ts). Nothing in this file
- * shells out, touches the filesystem, or reads process.argv — every real-world check (identity
- * lookup, notary profile probe, gh auth, git tree/tag state) lives in release.ts and is wired
- * into `preflight()` as a closure; this module only aggregates results and renders text.
+ * shells out, reads process.argv, or does any OTHER real-world check (identity lookup, notary
+ * profile probe, gh auth, git tree/tag state — all of those live in release.ts and are wired into
+ * `preflight()` as a closure); this module only aggregates results and renders text.
+ *
+ * ONE NAMED EXCEPTION (P9a-8, `row16IdentityCheck`): it hashes a single, already-resolved file
+ * path (the interfaces contract passes a `platformPackageBinPath`, not a pre-computed hash, unlike
+ * every other checksum this file compares) — a single synchronous `readFileSync` + digest, no
+ * shell-out, no directory walk, no argv. Kept here rather than in release.ts because the STRONG/
+ * WEAK/missing-package decision it makes is exactly the kind of branching logic this file exists
+ * to unit-test without a real release run.
  */
-import { parseVersionsJson, type VersionsJson } from "../packages/core/src/runtime-sdk/bundle-layout";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { parseVersionsJson, winterSourceOf, type VersionsJson } from "../packages/core/src/runtime-sdk/bundle-layout";
 
 export interface Preflight {
   ok: boolean;
@@ -521,4 +530,119 @@ export function row16ProvenanceCheck(input: Row16CheckInput): Row16CheckResult {
     };
   }
   return { ok: true, record };
+}
+
+export interface Row16IdentityResult {
+  /** Whether this release is clear to proceed on ITS OWN — a non-dry-run release still gates a
+   *  `strong: false` (WEAK) result behind `--allow-checkout-winter` in release.ts; this field alone
+   *  never encodes that decision, since it does not know whether the flag was passed. */
+  ok: boolean;
+  /** Whether the STRONG (checksum-equality) path was even attempted — `false` means the embedded
+   *  `winter` came from a from-source `checkout-build`, so `row16ProvenanceCheck` is the relevant
+   *  check instead (this function never re-derives that one). */
+  strong: boolean;
+  detail: string;
+}
+
+/**
+ * Row 16 ("identical versioned artifact") STRONG-path decision (P9a-8) — a literal checksum
+ * equality, now that the embedded `winter` can come from the SAME npm-published artifact a
+ * consumer's `bun install` fetches: `winterSource === "platform-package"` AND the embedded
+ * `winter`'s pre-sign SHA-256 equals the CURRENTLY INSTALLED platform package's own `bin/winter`
+ * SHA-256. `row16ProvenanceCheck` (above) is UNCHANGED and stays the check for the weaker
+ * `checkout-build` path (dry-run/rehearsal only, P9a-8) — this function never supersedes it, only
+ * adds the strong alternative alongside it.
+ *
+ * Four outcomes:
+ *  - STRONG OK:       winterSource=platform-package, checksums match            -> { ok: true,  strong: true  }
+ *  - STRONG MISMATCH: winterSource=platform-package, checksums DISAGREE         -> { ok: false, strong: true  }
+ *  - WEAK:            winterSource=checkout-build (or absent — an 8d-era bundle) -> { ok: true,  strong: false }
+ *    (WEAK is `ok: true` here — the identity check itself has nothing to fail; release.ts is what
+ *    turns a weak result into a hard failure for a non-dry-run release, unless `--allow-checkout-winter`
+ *    is passed, which is a decision this pure function does not have the inputs to make.)
+ *  - MISSING PACKAGE: winterSource=platform-package, but `platformPackageBinPath` is `undefined`
+ *    (no platform package installed on THIS machine to verify against)          -> { ok: false, strong: true }
+ *
+ * `platformPackageBinPath`, when given, is hashed HERE (the one named exception to this file's own
+ * "never touches the filesystem" rule — see the file header) rather than requiring release.ts to
+ * pre-compute yet another SHA-256 the caller would otherwise have to thread through unused on the
+ * WEAK/missing-package branches.
+ */
+export function row16IdentityCheck(input: { versionsJsonText: string; platformPackageBinPath: string | undefined; embeddedPreSignSha256: string }): Row16IdentityResult {
+  let versions: VersionsJson;
+  try {
+    versions = parseVersionsJson(input.versionsJsonText);
+  } catch (err) {
+    return { ok: false, strong: false, detail: `Row 16 (identity): VERSIONS.json: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  const source = winterSourceOf(versions);
+  if (source !== "platform-package") {
+    return {
+      ok: true,
+      strong: false,
+      detail:
+        `Row 16 (identity): WEAK — winterSource is "${source}", not the installed platform package. ` +
+        `This build embedded a from-source checkout build; row16ProvenanceCheck (provenance, not checksum ` +
+        `equality) is the relevant check for it. A non-dry-run release requires --allow-checkout-winter to ` +
+        `proceed on this weaker path.`,
+    };
+  }
+  if (input.platformPackageBinPath === undefined) {
+    return {
+      ok: false,
+      strong: true,
+      detail:
+        "Row 16 (identity): VERSIONS.json records winterSource=platform-package, but no " +
+        "@yanlinglabs/winter-agent-sdk-darwin-arm64 platform package is installed on THIS machine to verify " +
+        "the embedded binary's checksum against — the strong identity proof cannot be established here.",
+    };
+  }
+  const installedSha256 = createHash("sha256").update(readFileSync(input.platformPackageBinPath)).digest("hex");
+  if (installedSha256 !== input.embeddedPreSignSha256) {
+    return {
+      ok: false,
+      strong: true,
+      detail:
+        `Row 16 (identity): STRONG check FAILED — the embedded winter's pre-sign SHA-256 (${input.embeddedPreSignSha256}) ` +
+        `does not equal the installed platform package's bin/winter SHA-256 (${installedSha256}). The embedded binary ` +
+        "is not the artifact npm shipped.",
+    };
+  }
+  return {
+    ok: true,
+    strong: true,
+    detail: `Row 16 (identity): STRONG — winterSource=platform-package and the embedded pre-sign checksum equals the installed platform package's bin/winter checksum (${installedSha256}).`,
+  };
+}
+
+export interface Row16Gate {
+  proceed: boolean;
+  failure?: string;
+}
+
+/**
+ * P9a-8: the `--allow-checkout-winter`/`--dry-run` DECISION built on top of `row16IdentityCheck`'s
+ * result — factored out of release.ts (pure flag logic, no filesystem/argv reads of its own) so
+ * the gating behaviour is unit-testable without running a real release. Never re-derives
+ * `row16IdentityCheck`'s own verdict:
+ *
+ *  - `identity.ok === false` (a STRONG attempt that failed — mismatch or missing package) is
+ *    ALWAYS fatal, regardless of `dryRun`/`allowCheckoutWinter` — those flags excuse the WEAKER
+ *    checkout-build path, never a strong attempt that actually failed.
+ *  - `identity.strong === false` (WEAK — a checkout-build embed) proceeds when `dryRun` OR
+ *    `allowCheckoutWinter`; otherwise a non-dry-run release without the flag fails loudly.
+ *  - Otherwise (STRONG and ok) always proceeds.
+ */
+export function row16Gate(input: { identity: Row16IdentityResult; dryRun: boolean; allowCheckoutWinter: boolean }): Row16Gate {
+  if (!input.identity.ok) return { proceed: false, failure: input.identity.detail };
+  if (input.identity.strong) return { proceed: true };
+  if (input.dryRun || input.allowCheckoutWinter) return { proceed: true };
+  return {
+    proceed: false,
+    failure:
+      "Row 16 (identity): a non-dry-run release requires the STRONG checksum-equality path " +
+      "(winterSource=platform-package) — this build embedded a from-source checkout build. Pass " +
+      "--allow-checkout-winter to proceed anyway, or re-stage from the installed platform package " +
+      "(`bun install` once it is published).",
+  };
 }

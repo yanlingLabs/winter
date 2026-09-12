@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   appcastInsertPlan,
   appcastItem,
@@ -11,9 +14,12 @@ import {
   preflight,
   publishGuard,
   resolveSigningIdentity,
+  row16Gate,
+  row16IdentityCheck,
   row16ProvenanceCheck,
   verifyVersionsJsonAgainstPins,
 } from "./release-lib";
+import { sha256File } from "./stage-runtimes";
 import { REQUIRED_CLAUDE_AGENT_SDK, REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../packages/core/src/runtime-sdk/versions";
 
 describe("preflight", () => {
@@ -601,5 +607,140 @@ describe("row16ProvenanceCheck (P8d-26: provenance, never rebuild-hash equality)
     const failed = row16ProvenanceCheck({ rebuildSucceeded: false, rebuildError: "boom", recordedHash: "g".repeat(64) });
     expect(ok.record.recordedHash).toBe("g".repeat(64));
     expect(failed.record.recordedHash).toBe("g".repeat(64));
+  });
+});
+
+describe("row16IdentityCheck (P9a-8: the STRONG checksum-equality path)", () => {
+  const sha = (b: string) => b.repeat(64);
+  const goodVersionsJson = (overrides: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      schema: 1,
+      winterAgentSdk: REQUIRED_WINTER_AGENT_SDK,
+      winterRuntimeSdk: REQUIRED_WINTER_RUNTIME_SDK,
+      officialSdk: REQUIRED_CLAUDE_AGENT_SDK,
+      claudeCode: "2.1.250",
+      checksums: { winterPreSign: sha("a"), claude: sha("b") },
+      stagedAt: "2026-09-12T00:00:00Z",
+      winterSource: "platform-package",
+      ...overrides,
+    });
+
+  const temps: string[] = [];
+  afterAll(() => { for (const d of temps) rmSync(d, { recursive: true, force: true }); });
+  const tempFile = (content: string): string => {
+    const dir = mkdtempSync(join(tmpdir(), "row16-identity-"));
+    temps.push(dir);
+    const p = join(dir, "winter-fake");
+    writeFileSync(p, content);
+    return p;
+  };
+
+  test("STRONG OK: winterSource=platform-package and the embedded checksum equals the installed package's own checksum", () => {
+    const pkgPath = tempFile("the installed platform package's own winter bytes\n");
+    const embeddedSha = sha256File(pkgPath); // the embed is byte-identical to what's installed
+    const r = row16IdentityCheck({
+      versionsJsonText: goodVersionsJson({ checksums: { winterPreSign: embeddedSha, claude: sha("b") } }),
+      platformPackageBinPath: pkgPath,
+      embeddedPreSignSha256: embeddedSha,
+    });
+    expect(r).toEqual({ ok: true, strong: true, detail: expect.stringContaining("STRONG") });
+  });
+
+  test("STRONG MISMATCH: winterSource=platform-package but the checksums disagree — the embed does not match what npm shipped", () => {
+    const pkgPath = tempFile("the CURRENTLY installed platform package's winter bytes (post-republish)\n");
+    const installedSha = sha256File(pkgPath);
+    const staleEmbeddedSha = sha("f"); // whatever was embedded at a prior staging time
+    const r = row16IdentityCheck({
+      versionsJsonText: goodVersionsJson({ checksums: { winterPreSign: staleEmbeddedSha, claude: sha("b") } }),
+      platformPackageBinPath: pkgPath,
+      embeddedPreSignSha256: staleEmbeddedSha,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.strong).toBe(true);
+    expect(r.detail).toContain("STRONG check FAILED");
+    expect(r.detail).toContain(staleEmbeddedSha);
+    expect(r.detail).toContain(installedSha);
+  });
+
+  test("WEAK: winterSource=checkout-build never attempts the strong path, and is ok on its own (release.ts is what gates it)", () => {
+    const r = row16IdentityCheck({
+      versionsJsonText: goodVersionsJson({ winterSource: "checkout-build" }),
+      platformPackageBinPath: undefined,
+      embeddedPreSignSha256: sha("a"),
+    });
+    expect(r).toEqual({ ok: true, strong: false, detail: expect.stringContaining("WEAK") });
+  });
+
+  test("WEAK (absent winterSource, an 8d-era bundle) behaves identically to explicit checkout-build", () => {
+    const text = JSON.stringify({
+      schema: 1,
+      winterAgentSdk: REQUIRED_WINTER_AGENT_SDK,
+      winterRuntimeSdk: REQUIRED_WINTER_RUNTIME_SDK,
+      officialSdk: REQUIRED_CLAUDE_AGENT_SDK,
+      claudeCode: "2.1.250",
+      checksums: { winterPreSign: sha("a"), claude: sha("b") },
+      stagedAt: "2026-09-12T00:00:00Z",
+      // no winterSource field at all
+    });
+    const r = row16IdentityCheck({ versionsJsonText: text, platformPackageBinPath: undefined, embeddedPreSignSha256: sha("a") });
+    expect(r.ok).toBe(true);
+    expect(r.strong).toBe(false);
+  });
+
+  test("MISSING PACKAGE: winterSource=platform-package but no platform package is installed on this machine -> fails, strong: true", () => {
+    const r = row16IdentityCheck({
+      versionsJsonText: goodVersionsJson(),
+      platformPackageBinPath: undefined,
+      embeddedPreSignSha256: sha("a"),
+    });
+    expect(r.ok).toBe(false);
+    expect(r.strong).toBe(true);
+    expect(r.detail).toContain("no @yanlinglabs/winter-agent-sdk-darwin-arm64 platform package is installed");
+  });
+
+  test("an unparseable VERSIONS.json fails cleanly, never throws", () => {
+    const r = row16IdentityCheck({ versionsJsonText: "{", platformPackageBinPath: undefined, embeddedPreSignSha256: sha("a") });
+    expect(r.ok).toBe(false);
+    expect(r.strong).toBe(false);
+    expect(r.detail).toContain("VERSIONS.json");
+  });
+});
+
+describe("row16Gate (P9a-8: --allow-checkout-winter / --dry-run flag logic)", () => {
+  const strongOk = { ok: true, strong: true, detail: "strong ok" } as const;
+  const strongFail = { ok: false, strong: true, detail: "strong failed: mismatch" } as const;
+  const weak = { ok: true, strong: false, detail: "weak" } as const;
+
+  test("STRONG + ok: always proceeds, regardless of dryRun/allowCheckoutWinter", () => {
+    for (const dryRun of [true, false]) {
+      for (const allowCheckoutWinter of [true, false]) {
+        expect(row16Gate({ identity: strongOk, dryRun, allowCheckoutWinter })).toEqual({ proceed: true });
+      }
+    }
+  });
+
+  test("STRONG + failed (mismatch/missing package): ALWAYS fatal, even with --allow-checkout-winter or --dry-run", () => {
+    for (const dryRun of [true, false]) {
+      for (const allowCheckoutWinter of [true, false]) {
+        const r = row16Gate({ identity: strongFail, dryRun, allowCheckoutWinter });
+        expect(r.proceed).toBe(false);
+        expect(r.failure).toBe("strong failed: mismatch");
+      }
+    }
+  });
+
+  test("WEAK + --dry-run (no --allow-checkout-winter): proceeds — a rehearsal is exempt", () => {
+    expect(row16Gate({ identity: weak, dryRun: true, allowCheckoutWinter: false })).toEqual({ proceed: true });
+  });
+
+  test("WEAK + --allow-checkout-winter (non-dry-run): proceeds — the loud escape hatch", () => {
+    expect(row16Gate({ identity: weak, dryRun: false, allowCheckoutWinter: true })).toEqual({ proceed: true });
+  });
+
+  test("WEAK + neither flag, non-dry-run: FAILS — a real release requires the strong path by default", () => {
+    const r = row16Gate({ identity: weak, dryRun: false, allowCheckoutWinter: false });
+    expect(r.proceed).toBe(false);
+    expect(r.failure).toContain("--allow-checkout-winter");
+    expect(r.failure).toContain("STRONG checksum-equality path");
   });
 });

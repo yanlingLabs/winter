@@ -45,88 +45,12 @@ jobs:
         working-directory: packages/${{ matrix.package }}
         run: bun test ${{ matrix.args }}
 
-  # Winter Phase 8d (P8d-16): the ONE place this workflow reads the pinned winter-agent-sdk
-  # version, rather than hardcoding it in BOTH the tag `ref:` AND the uploaded-artifact `name:`
-  # below (it drifted from `versions.ts`'s own `REQUIRED_WINTER_AGENT_SDK` once already, in 8c's
-  # spine) — `scripts/pins.test.ts` is the tripwire that a literal never creeps back into either.
-  versions:
-    name: read pinned versions
-    runs-on: macos-latest
-    outputs:
-      winter-agent-sdk: ${{ steps.read.outputs.winter-agent-sdk }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Read REQUIRED_WINTER_AGENT_SDK
-        id: read
-        run: |
-          VERSION=$(bun -e 'import { REQUIRED_WINTER_AGENT_SDK } from "./packages/core/src/runtime-sdk/versions"; console.log(REQUIRED_WINTER_AGENT_SDK);')
-          echo "winter-agent-sdk=${VERSION}" >> "$GITHUB_OUTPUT"
-
-  # P8b-2: build the `winter` runtime binary the daemon spawns, FROM THE PINNED TAG.
-  #
-  # Not a dependency resolution against a sibling `src` (the shape the router just retired) and not
-  # an npm install either: the platform package that would carry a prebuilt binary is `private` and
-  # is not published, so the only honest way to get the exact peer this daemon is pinned to is to
-  # check that tag out and compile it. `build-winter.ts` refuses any other commit.
-  #
-  # `bun-version` is PINNED, not `latest`: the SDK's `build-runtime.ts` compiles with
-  # `bun build --compile`, so the bun on the runner is part of the artifact. A floating `latest`
-  # would make a pinned-tag build vary with whenever the job happened to run.
-  winter-binary:
-    name: build winter (pinned tag)
-    runs-on: macos-latest
-    needs: versions
-    steps:
-      - uses: actions/checkout@v4
-
-      # actions/checkout paths must live INSIDE the workspace, so the SDK lands in a dot-dir here
-      # rather than beside the repo. Public repository — no token. `fetch-depth: 0` because
-      # build-winter.ts proves the checkout with `git tag --points-at HEAD`, which needs the tag
-      # objects present locally.
-      - uses: actions/checkout@v4
-        with:
-          repository: yanlingLabs/winter-agent-sdk
-          ref: v${{ needs.versions.outputs.winter-agent-sdk }}
-          path: .winter-agent-sdk
-          fetch-depth: 0
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.3.14"
-
-      # This repo's own install: build-winter.ts reads REQUIRED_WINTER_AGENT_SDK out of
-      # packages/core/src/runtime-sdk/versions.ts, which imports SDK_VERSION from the npm package.
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      # The SDK checkout is pnpm-managed (never `bun install` there — it rewrites the manifest).
-      - name: Install the SDK checkout's dependencies
-        working-directory: .winter-agent-sdk
-        run: pnpm install --frozen-lockfile
-
-      - name: Build dist/winter
-        env:
-          NORMA_WINTER_SDK_CHECKOUT: ${{ github.workspace }}/.winter-agent-sdk
-        run: bun run build:winter
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: winter-v${{ needs.versions.outputs.winter-agent-sdk }}
-          path: dist/winter
-          if-no-files-found: error
-          retention-days: 7
+  # P9a-8: the `winter-binary` job (P8b-2: build winter from the pinned-tag SDK checkout, upload
+  # as an artifact, every consumer downloads it) is DELETED — winter's ONLY source is the installed
+  # npm platform package (`@yanlinglabs/winter-agent-sdk-darwin-arm64`, an optional dependency of
+  # the wrapper that `bun install` resolves on darwin-arm64; published at v0.0.5). The 0.0.5 pin
+  # flip removed the dated checkout+build fallback blocks and the `versions` job they consumed;
+  # each job that needs `winter` now FAILS LOUDLY if the package did not install.
 
   # core is split OUT of the matrix above rather than given `needs:` on it, so the other three
   # entries stay independent of the winter build: a broken/slow SDK checkout must not hold up the
@@ -137,7 +61,6 @@ jobs:
   test-core:
     name: test · core
     runs-on: macos-latest
-    needs: [versions, winter-binary]
     steps:
       - uses: actions/checkout@v4
 
@@ -148,13 +71,25 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: winter-v${{ needs.versions.outputs.winter-agent-sdk }}
-          path: dist
+      # P9a-8: `bun install` above must have brought the winter platform package (the same
+      # dual-hop resolver the daemon's ladder uses); absent = a loud failure, never a fallback.
+      - name: Check for the installed winter platform package (P9a-8)
+        id: winter-package
+        working-directory: packages/core
+        run: |
+          BIN=$(bun -e '
+          import { resolvePlatformPackageWinter } from "./src/runtime-sdk/executable";
+          console.log(resolvePlatformPackageWinter() ?? "");
+          ')
+          echo "bin=${BIN}" >> "$GITHUB_OUTPUT"
+          if [ -n "$BIN" ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "::error::the winter platform package (@yanlinglabs/winter-agent-sdk-darwin-arm64 at REQUIRED_WINTER_AGENT_SDK) did not install — bun install is the ONLY winter source since the 0.0.5 pin flip (P9a-8)"; exit 1; fi
 
-      - name: Make the winter binary executable
-        run: chmod +x dist/winter
+      - name: Use the installed platform package's winter (P9a-8 — the strong row-16 path)
+        run: |
+          mkdir -p dist
+          cp "${{ steps.winter-package.outputs.bin }}" dist/winter
+          chmod +x dist/winter
+
 
       # P8c-9: the official leg's real-runtime proofs (`describeWithClaudeRuntime`) must not
       # silently skip in CI — `bun install` resolves the optional platform package for macOS
@@ -202,7 +137,6 @@ jobs:
   test-cli:
     name: test · cli
     runs-on: macos-latest
-    needs: [versions, winter-binary]
     steps:
       - uses: actions/checkout@v4
 
@@ -213,13 +147,24 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: winter-v${{ needs.versions.outputs.winter-agent-sdk }}
-          path: dist
+      # P9a-8: see test-core's identical block — the platform package must be installed.
+      - name: Check for the installed winter platform package (P9a-8)
+        id: winter-package
+        working-directory: packages/core
+        run: |
+          BIN=$(bun -e '
+          import { resolvePlatformPackageWinter } from "./src/runtime-sdk/executable";
+          console.log(resolvePlatformPackageWinter() ?? "");
+          ')
+          echo "bin=${BIN}" >> "$GITHUB_OUTPUT"
+          if [ -n "$BIN" ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "::error::the winter platform package (@yanlinglabs/winter-agent-sdk-darwin-arm64 at REQUIRED_WINTER_AGENT_SDK) did not install — bun install is the ONLY winter source since the 0.0.5 pin flip (P9a-8)"; exit 1; fi
 
-      - name: Make the winter binary executable
-        run: chmod +x dist/winter
+      - name: Use the installed platform package's winter (P9a-8 — the strong row-16 path)
+        run: |
+          mkdir -p dist
+          cp "${{ steps.winter-package.outputs.bin }}" dist/winter
+          chmod +x dist/winter
+
 
       - name: Test
         working-directory: packages/cli
@@ -345,7 +290,7 @@ jobs:
       - name: NormaKit — swift test (retry once — known socket-test flake class)
         working-directory: apple/NormaKit
         env:
-          NORMAKIT_SKIP: 'IrohE2ETests/(testScenarioB_AttachSendStreamsEventsNoHarnessLeak|testScenarioC_ReconnectReplaysExactGapInOrderOverRealAsyncTransport|testScenarioD_IdempotentResendAcrossReconnectYieldsOneDaemonEffect)$|FakePhoneConformanceTests/(testFullLoopThroughNormaSessionClient_PromptRoundTripAndRealApprovalFlow|testLiveAttachRepointsForwardingToItsOwnConnection_TheProbeTheForegroundHopSends|testResumelessShellHandshakeDoesNotStealLiveForwarding_WhileTheOrphanedSessionKeepsPonging|testStreamingDeltasReachThePhone_OpaqueStateDoesNot_AndAnOversizedEventDoesNotKillTheLink)$|GatewayGateTests/(testG1_UpToDateReachable_HonestWatermark_NoHarnessLeak|testG2_MidHandshakeLiveEventIsDelivered|testG3_HelloAckIsFirstFrameThenReplay|testR1_CursorFarAheadYieldsSnapshotRequired|testR2_HelloAckReplayLiveStrictOrderUnderSuspendingSend|testT6b_ResumelessHelloDoesNotReorderAnotherConnectionsReplayFlush)$'
+          NORMAKIT_SKIP: 'IrohE2ETests/(testScenarioC_ReconnectReplaysExactGapInOrderOverRealAsyncTransport|testScenarioD_IdempotentResendAcrossReconnectYieldsOneDaemonEffect)$|FakePhoneConformanceTests/(testStreamingDeltasReachThePhone_OpaqueStateDoesNot_AndAnOversizedEventDoesNotKillTheLink)$|GatewayGateTests/(testG1_UpToDateReachable_HonestWatermark_NoHarnessLeak|testR2_HelloAckReplayLiveStrictOrderUnderSuspendingSend)$'
         run: swift test --skip "$NORMAKIT_SKIP" || (echo "::warning::NormaKit swift test failed once — retrying (known socket-test flake class)"; swift test --skip "$NORMAKIT_SKIP")
 
   # Winter Phase 8d (P8d-5): the compiled-binary proofs, on the macOS runner, after the pinned
@@ -355,7 +300,6 @@ jobs:
   verify:
     name: verify (workflow, runtime-state, runtimes)
     runs-on: macos-latest
-    needs: [versions, winter-binary]
     steps:
       - uses: actions/checkout@v4
 
@@ -366,13 +310,20 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: winter-v${{ needs.versions.outputs.winter-agent-sdk }}
-          path: dist
+      # P9a-8: `verify:runtimes` (below) resolves winter through its OWN ladder (the installed
+      # platform package first — the strong row-16 path), so this job only makes SURE the platform
+      # package installed (the 0.0.5 pin flip removed the dated checkout+build fallback).
+      - name: Check for the installed winter platform package (P9a-8)
+        id: winter-package
+        working-directory: packages/core
+        run: |
+          BIN=$(bun -e '
+          import { resolvePlatformPackageWinter } from "./src/runtime-sdk/executable";
+          console.log(resolvePlatformPackageWinter() ?? "");
+          ')
+          echo "bin=${BIN}" >> "$GITHUB_OUTPUT"
+          if [ -n "$BIN" ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "::error::the winter platform package (@yanlinglabs/winter-agent-sdk-darwin-arm64 at REQUIRED_WINTER_AGENT_SDK) did not install — bun install is the ONLY winter source since the 0.0.5 pin flip (P9a-8)"; exit 1; fi
 
-      - name: Make the winter binary executable
-        run: chmod +x dist/winter
 
       - name: verify:workflow
         run: bun run verify:workflow

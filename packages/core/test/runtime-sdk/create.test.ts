@@ -269,7 +269,11 @@ describe("createNormaRuntimeSdk — the advisor (P8d-8: ALWAYS an advisor key, n
 });
 
 describe("spawnHookFor — P8b-1's one topology site", () => {
-  test("nothing configured ⇒ the typed refusal, never a throw and never a fallback", async () => {
+  test("an explicit NORMA_WINTER_EXECUTABLE that is missing on disk ⇒ the typed refusal, never a throw and never a fallback", async () => {
+    // P9a fix wave (M1 class): "nothing configured" is no longer a refusal in a tree where the
+    // platform package is installed (the ladder's last rung finds it), so the deterministic refusal
+    // is an explicit path that does not exist — P8b-2 says an explicit path never falls through.
+    process.env.NORMA_WINTER_EXECUTABLE = join(home, "missing-winter");
     const { handle } = await build();
     const hook = handle.spawnHookFor("chat");
     expect(hook).toBeInstanceOf(WinterExecutableUnavailable);

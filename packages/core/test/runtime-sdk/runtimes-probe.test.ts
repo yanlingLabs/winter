@@ -1,9 +1,13 @@
-// Winter Phase 8d — `runRuntimesProbe` takes no injectable seams (the spine's own contract: it
-// runs outside a daemon, `{ execPath, home, env }` only), so this exercises it against REAL files
-// on disk in a mkdtemp tree — fake, non-Mach-O `winter`/`claude` "binaries" (a plain executable
-// shell script for `claude`, since the probe DOES spawn `claude --version`; a chmod'd text file
-// for `winter`, since the probe NEVER spawns it — M2). No real winter/claude build, no Keychain,
-// no real home.
+// Winter Phase 8d — `runRuntimesProbe` runs outside a daemon (`{ execPath, home, env }`), so this
+// exercises it against REAL files on disk in a mkdtemp tree — fake, non-Mach-O `winter`/`claude`
+// "binaries" (a plain executable shell script for `claude`, since the probe DOES spawn `claude
+// --version`; a chmod'd text file for `winter`, since the probe NEVER spawns it — M2). No real
+// winter/claude build, no Keychain, no real home.
+//
+// P9a fix wave (M1 collateral): the ONE seam it does carry, `resolvePlatformPackageBin`, is
+// threaded straight through to `resolveWinterExecutable`'s own P9a-9 rung — added so this file's
+// own "nothing staged" assertions never depend on whether THIS tree's ambient node_modules happens
+// to carry the winter platform package (m1's local-pack proof leaves exactly that residue behind).
 import { afterAll, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -80,7 +84,9 @@ describe("runRuntimesProbe (P8d-1 bundle layout, real fs, no daemon)", () => {
     // `node_modules` inside `$bunfs` for the package door to find anything through.
     const home = tempDir("runtimes-probe-home-empty-");
     const execPath = join(tempDir("runtimes-probe-resources-empty-"), "norma-core");
-    const result = await runRuntimesProbe({ execPath, home, env: {} });
+    // P9a fix wave, M1 collateral: never depend on this tree's ambient node_modules (m1's
+    // local-pack residue) for a test titled "nothing staged anywhere" — inject the miss.
+    const result = await runRuntimesProbe({ execPath, home, env: {}, resolvePlatformPackageBin: () => undefined });
 
     expect(result.winter.path).toBeUndefined();
     expect(result.winter.executable).toBe(false);

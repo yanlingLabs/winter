@@ -40,7 +40,7 @@ import { copyFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSyn
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { stageRuntimes } from "./stage-runtimes";
+import { resolveInstalledWinterPackage, stageRuntimes, type StageRuntimesOpts } from "./stage-runtimes";
 import { REQUIRED_CLAUDE_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -117,12 +117,27 @@ async function main(): Promise<void> {
   log(`\n--- Step 2: staged binary at ${stagedBinary} (dirname(execPath) is what the bundle rung resolves against) ---`);
 
   // ---- Step 3: stage the runtime payload beside it ----------------------------------------------
+  // P9a-8: winter's source is now a ladder — the installed platform package first (the strong
+  // row-16 path), an already-built dist/winter next (checkout-build, e.g. CI's fallback step or a
+  // prior `bun run build:winter`), and only as a last resort a real from-source build. This proof
+  // is about the BUNDLE RUNG resolving inside the compiled binary (step 6 below), never about
+  // which winter-source ladder rung staged it — so it takes whichever is cheapest and available,
+  // loudly, rather than paying for a two-minute SDK-checkout build when something staged already
+  // exists.
   log("\n--- Step 3: staging runtimes/ (stageRuntimes) ---");
-  const winterPath = existsSync(DIST_WINTER) ? DIST_WINTER : undefined;
-  log(winterPath ? `using already-built ${DIST_WINTER}` : `no ${DIST_WINTER} found — stageRuntimes will call buildWinter() (a real SDK-checkout build)`);
+  const platformPackage = resolveInstalledWinterPackage();
+  let stageOpts: StageRuntimesOpts = { out: join(resources, "runtimes") };
+  if (platformPackage !== undefined) {
+    log(`using the installed platform package: ${platformPackage.binPath} (version ${platformPackage.version}) — winterSource will be platform-package`);
+  } else if (existsSync(DIST_WINTER)) {
+    log(`WARNING: no @yanlinglabs/winter-agent-sdk-darwin-arm64 platform package installed — falling back to the already-built ${DIST_WINTER} (winterSource=checkout-build, the weaker row-16 path)`);
+    stageOpts = { ...stageOpts, winterPath: DIST_WINTER, winterSource: "checkout-build" };
+  } else {
+    log(`WARNING: no platform package installed and no ${DIST_WINTER} found — stageRuntimes will call buildWinter() (a real SDK-checkout build, winterSource=checkout-build)`);
+  }
   let staged: Awaited<ReturnType<typeof stageRuntimes>>;
   try {
-    staged = await stageRuntimes({ out: join(resources, "runtimes"), winterPath });
+    staged = await stageRuntimes(stageOpts);
   } catch (err) {
     fail(`stageRuntimes failed: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -199,6 +214,7 @@ async function main(): Promise<void> {
       ["result.claude.executable === true", claude?.executable === true],
       [`result.claude.version starts with '${EXPECTED_CLAUDE_VERSION_PREFIX}' (M1)`, !!claudeVersion?.startsWith(EXPECTED_CLAUDE_VERSION_PREFIX)],
       [`result.versions.officialSdk === ${REQUIRED_CLAUDE_AGENT_SDK} (this build's pin)`, versions?.officialSdk === REQUIRED_CLAUDE_AGENT_SDK],
+      [`result.versions.winterSource === '${staged.versions.winterSource}' (P9a-8: matches what Step 3 actually staged)`, versions?.winterSource === staged.versions.winterSource],
       ["probe exited 0", exitCode === 0],
       ...untouched.map(([dir, ok]) => [`${dir}: unchanged`, ok] as [string, boolean]),
     ];

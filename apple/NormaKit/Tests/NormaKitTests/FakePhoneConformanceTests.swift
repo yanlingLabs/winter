@@ -36,6 +36,16 @@ import IrohLib
 /// STREAM CLEANLY through the shipped client (events land, `client.gaps` stays silent) — the real
 /// "attach → see messages" flow, end-to-end — with the independent harness observers retained as
 /// corroboration that the underlying daemon round trips genuinely happened.
+///
+/// Winter Phase 9a (P9a-11, Lane K): all four tests in this file are among the 13 `ci.yml`'s
+/// `NORMAKIT_SKIP` names by exact test — bisected to `ed6ebeca6c1fce175ef0e818361fb3662b38d6ca`
+/// (`session.dispatch`'s default mode now requires a resolvable `winter` executable this suite
+/// never provisions). Three of the four pass outright once a real `winter` binary is available
+/// (`NORMA_WINTER_EXECUTABLE`); `testStreamingDeltasReachThePhone_...` does not, for a second,
+/// independent cause — its `streamingProviderFixture`'s injected `agentProvider` (this file's own
+/// synthetic-event seam, built for the retired engine) is never consulted by the Winter leg, so
+/// none of its chunks reach the wire. See `RealDaemon.waitForFirstLine`'s own doc comment for the
+/// full classification.
 final class FakePhoneConformanceTests: XCTestCase {
 
     // MARK: - Host + ceremony setup (mirrors PairingE2ETests' own pattern)
