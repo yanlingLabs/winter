@@ -54,6 +54,7 @@ import {
 import type { DeliveryOutcome, GlobalAgentMessage, ListedRuntimeObject, PermissionClassLabel, RuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { Query, SessionMessagingFacet } from "@yanlinglabs/winter-agent-sdk";
 import type {
+  AttachedOfficialSession,
   AttachedWinterSession,
   RuntimeDirectoryEntry,
   RuntimeDirectoryStore,
@@ -345,6 +346,132 @@ export function attachWinterSession(runtime: NormaRuntimeSdk, session: WinterSes
       // the handle instead leaves the row wrong but UNREACHABLE, because the `parking` latch above
       // refuses every delivery for the rest of this handle's life. A leaked registry entry for a
       // session that is over is a bounded cost; an untracked `winter` process is not.
+      chain = chain.then(park, park).then(
+        () => { detachHandle(); },
+        (error: unknown) => {
+          log(`could not park ${address} (${error instanceof Error ? error.name : "unknown"}) — the handle stays registered so nothing can cold-resume it`);
+        },
+      );
+    },
+  };
+}
+
+/** What an official session attached with no persisted runtime choice records (M6b's own
+ *  `UNSTATED_SELECTION`, mirrored for the `claude-agent` runtime kind). */
+const UNSTATED_OFFICIAL_SELECTION = {
+  runtimeKind: "claude-agent",
+  providerId: "unstated",
+  modelRef: "unstated/unstated",
+  family: "unstated",
+  authFamily: "custom",
+  sdkVersion: NORMA_PEER_VERSIONS.claudeAgentSdk ?? "unstated",
+  reason: "attached without a persisted runtime selection; the session's own record is authoritative",
+} as const;
+
+/** Every capability an attached official session has. `resume`/`notifyWhenIdle`/`reply` are false —
+ *  unlike `AttachedWinterSession`, `AttachedOfficialSession` carries no facet at all (WS-14: "the
+ *  pinned official SDK exposes no messaging surface of any kind... an input-stream push is the whole
+ *  mechanism"), so there is no child/idle/reply surface to advertise honestly. */
+const LIVE_OFFICIAL_CAPABILITIES = { message: true, resume: false, notifyWhenIdle: false, reply: false } as const;
+
+/** The session facts M6b's attach may state. Mirrors `WinterSessionAttachment`'s own shape, minus
+ *  everything that assumes a `Query.messaging` facet — this leg has none. */
+export interface OfficialSessionAttachment {
+  /** Norma's own session id. */
+  sessionId: string;
+  /** The BACKEND (official runtime) session id — the facet target and the directory address. */
+  backendSessionId: string;
+  /** Pushes one turn into the session's input stream (`OfficialSession.deliver`) — the whole
+   *  delivery mechanism this leg has. */
+  deliver: (text: string) => void;
+  displayName?: string;
+  title?: string;
+  mode?: string;
+  cwd?: string;
+  generation?: number;
+  selection?: RuntimeDirectoryEntry["selection"];
+  status?: () => LiveSessionStatus;
+  log?: (line: string) => void;
+}
+
+export interface OfficialSessionAttachHandle {
+  /** Re-record the directory row from the session's live status (F6, mirrored from Winter's own). */
+  refresh(): void;
+  /** Remove the live handle and park the directory row `exited`. Idempotent. See
+   *  `attachWinterSession`'s own doc comment for why this is never `forget()`. */
+  detach(): void;
+  readonly address: SerializedRuntimeAddress;
+  /** See `attachWinterSession`'s own `ready` — the identical durable-write window, named the same
+   *  way for the identical reason. */
+  readonly ready: Promise<void>;
+}
+
+/**
+ * M6b — the official leg's counterpart to `attachWinterSession` above: makes a live `OfficialSession`
+ * a messaging receiver, registered under its backend id exactly the same way (`buildSessionAddress` +
+ * `serializeRuntimeAddress`, the live handle written before the durable row, the identical
+ * park-before-detach ordering so a delivery in the window between `detach()` and the row actually
+ * landing meets a typed `unavailable` rather than a cold-resume race).
+ *
+ * Structurally simpler than the Winter door because `AttachedOfficialSession` is `push` and nothing
+ * else — there is no `Query.messaging` facet on this leg to wrap (this function's own header note).
+ */
+export function attachOfficialSession(runtime: NormaRuntimeSdk, session: OfficialSessionAttachment): OfficialSessionAttachHandle {
+  const parsed: RuntimeAddress = buildSessionAddress(session.backendSessionId);
+  const address = serializeRuntimeAddress(parsed) as SerializedRuntimeAddress;
+  const generation = session.generation ?? 1;
+
+  const liveStatusOf = (): LiveSessionStatus => session.status?.() ?? "idle";
+  const log = session.log ?? ((): void => {});
+
+  const handle: AttachedOfficialSession = {
+    push: (text: string) => session.deliver(text),
+    status: liveStatusOf,
+  };
+
+  const entry = (live: boolean): RuntimeDirectoryEntry => ({
+    address,
+    parsed,
+    runtimeKind: "claude-agent",
+    objectKind: "session",
+    // A top-level official session is reached directly (a live `push`, not through an owner) — the
+    // same half of `RuntimeTransport` the router's own `RouterOfficialInput` doc reserves for that
+    // ("a `claude-handle` child is delivered to DIRECTLY, a `claude-child` only through its owning
+    // parent"); nothing here is ever a `claude-child`, because this leg's children are not attached
+    // through this door yet (official-session.ts's own header: a Task 1.2 carry).
+    transport: "claude-handle",
+    ...(session.displayName === undefined ? {} : { displayName: session.displayName }),
+    ...(session.title === undefined ? {} : { title: session.title }),
+    status: live ? liveStatusOf() : "exited",
+    mode: session.mode ?? "code",
+    ...(session.cwd === undefined ? {} : { cwd: session.cwd }),
+    generation,
+    selection: session.selection ?? { ...UNSTATED_OFFICIAL_SELECTION, decidedAt: new Date().toISOString() },
+    // See `attachWinterSession`'s own note on `backendSessionId`: a parked row carries none, on
+    // purpose — this leg's driver resumes from the 8a `runtime_sessions` record, not a directory
+    // cold-resume.
+    ...(live ? { backendSessionId: session.backendSessionId } : {}),
+    capabilities: live ? { ...LIVE_OFFICIAL_CAPABILITIES } : { message: false, resume: false, notifyWhenIdle: false, reply: false },
+    updatedAt: new Date().toISOString(),
+  });
+
+  const detachHandle = runtime.sdk.messaging.attachOfficialSession(address, handle);
+  let chain: Promise<void> = runtime.sdk.directory.record(entry(true));
+
+  let detached = false;
+  return {
+    address,
+    get ready(): Promise<void> {
+      return chain;
+    },
+    refresh(): void {
+      if (detached) return;
+      chain = chain.then(() => runtime.sdk.directory.record(entry(true)), () => runtime.sdk.directory.record(entry(true)));
+    },
+    detach(): void {
+      if (detached) return;
+      detached = true;
+      const park = (): Promise<void> => runtime.sdk.directory.record(entry(false));
       chain = chain.then(park, park).then(
         () => { detachHandle(); },
         (error: unknown) => {

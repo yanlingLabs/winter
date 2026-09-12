@@ -52,7 +52,7 @@ import { canUseToolFor } from "./approval-bridge";
 import type { NormaRuntimeSdk, SessionMode } from "./create";
 import { credentialPresenceFrom, credentialRefFor } from "./keychain";
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
-import { attachWinterSession } from "./messaging";
+import { attachOfficialSession, attachWinterSession } from "./messaging";
 import { buildWinterOptions, permissionModeFor } from "./mode-options";
 import { catalogRowsFor, providerSelectionFor, testProviderNameFor } from "./provider-selection";
 import { normaSessions } from "./sessions";
@@ -491,6 +491,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
    */
   const assembleOfficial = (sessionId: string, backendSessionId: string, persistedSelection: RuntimeSelection): OfficialSession => {
     const runtime = deps.runtime!;
+    const records = deps.records;
     const meta = deps.store.meta(sessionId);
     const mode = modeOf(meta.mode);
     const cwd = winterCwdOf(sessionId, meta.cwd);
@@ -609,6 +610,15 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       projector: projectorFor,
       append,
       broadcast: (event) => { deps.hub.broadcastTransient(sessionId, event); },
+      messaging: {
+        attach: attachOfficialSession,
+        facts: () => {
+          const title = deps.store.getTitle(sessionId) ?? undefined;
+          const record = records?.get(sessionId);
+          return { ...(title === undefined ? {} : { title }), cwd, ...(record === undefined ? {} : { selection: record.selection }) };
+        },
+      },
+      records,
       log,
     });
     drivers.set(sessionId, session);

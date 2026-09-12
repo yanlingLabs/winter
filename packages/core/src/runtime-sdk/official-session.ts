@@ -23,6 +23,7 @@ import type { NormaRuntimeSdk, SessionMode } from "./create";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { OfficialCredentialPlanRefused, officialInputFor, OfficialProjectKeyTooDeep, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
 import { ClaudeExecutableUnavailable } from "./official-executable";
+import { attachOfficialSession, type OfficialSessionAttachHandle, type OfficialSessionAttachment } from "./messaging";
 
 export type OfficialSessionState = "live" | "resumable" | "ended";
 
@@ -31,6 +32,13 @@ export interface OfficialInitFacts {
   sessionId?: string;
   model?: string;
   tools: string[];
+}
+
+/** M6a: the structural subset of 8a's `RuntimeSessionRecords` this driver writes — the same shape
+ *  `WinterSessionRecords` names for the Winter leg, narrowed to the one call this leg makes.
+ *  Optional as a whole (a unit test hands in a counting fake or nothing). */
+export interface OfficialSessionRecords {
+  setTranscriptHealth(winterSessionId: string, health: "repair-required"): void;
 }
 
 export interface OfficialSessionDeps {
@@ -55,6 +63,16 @@ export interface OfficialSessionDeps {
   projector: (generation: number) => Projector;
   append: (event: NewSessionEvent) => SessionEvent;
   broadcast: (event: NewSessionEvent) => void;
+  /** M6b: Task 12's door, mirrored onto this leg. Absent means no session is ever a messaging
+   *  receiver (a unit test that does not care about `SendMessage`). */
+  messaging?: {
+    attach: typeof attachOfficialSession;
+    /** Attachment facts beyond the pinned four, read at attach time (title, cwd, selection…) —
+     *  same shape as `WinterSessionDeps.messaging.facts`. */
+    facts?: () => Partial<Pick<OfficialSessionAttachment, "displayName" | "title" | "cwd" | "selection">>;
+  };
+  /** M6a: where `records.setTranscriptHealth` lands. Absent in a unit test that does not care. */
+  records?: OfficialSessionRecords;
   log?: (line: string) => void;
 }
 
@@ -127,12 +145,28 @@ interface Incarnation {
   abort: AbortController;
   done: Promise<void>;
   sawInit: boolean;
+  /** M6b: the messaging door's own handle, when `deps.messaging` is configured. */
+  attachment?: OfficialSessionAttachHandle;
 }
 
 const isExpectedEndError = (err: unknown): boolean => {
   const name = err instanceof Error ? err.name : "";
   return name === "ProcessError" || name === "AbortError" || name === "CLIConnectionError";
 };
+
+/**
+ * M6a: the router's `OfficialSessionStoreError` (`official/errors.d.ts` §13.11 — WS-14 §5's
+ * `mirror_error`): a session-store failure that MUST NOT fail the turn, but sets
+ * `transcriptHealth: repair-required`. The class itself is not exported from the package root, so
+ * this is a structural check on its two declared, literal-typed fields rather than an `instanceof` —
+ * FAIL CLOSED: any frame that does not match both fields exactly is left to the normal `init`/
+ * projector handling below, never swallowed here.
+ */
+function isMirrorErrorFrame(msg: unknown): msg is { code: "official_session_store_failure"; transcriptHealth: "repair-required" } {
+  if (typeof msg !== "object" || msg === null) return false;
+  const m = msg as Record<string, unknown>;
+  return m["code"] === "official_session_store_failure" && m["transcriptHealth"] === "repair-required";
+}
 
 export function startOfficialSession(deps: OfficialSessionDeps): OfficialSession {
   return new OfficialSessionImpl(deps);
@@ -154,6 +188,12 @@ class OfficialSessionImpl implements OfficialSession {
   private opening: Promise<void> | undefined;
   private idleWaiters: Array<() => void> = [];
   private turnStart: number | undefined;
+  /** M6a: set once this session has seen a mirror-error frame — the setter fires exactly once per
+   *  session, across every incarnation. */
+  private mirrorErrorHandled = false;
+  /** m7: whether the CURRENT (or most recently opened) incarnation is not this instance's first —
+   *  i.e. a prior generation ended `resumable` and `open()` span a new one. */
+  private resumedValue = false;
 
   constructor(private readonly deps: OfficialSessionDeps) {
     this.sessionId = deps.sessionId;
@@ -163,7 +203,7 @@ class OfficialSessionImpl implements OfficialSession {
 
   get state(): OfficialSessionState { return this.stateValue; }
   get generation(): number { return this.gen; }
-  get resumed(): boolean { return false; } // carried — see this file's header
+  get resumed(): boolean { return this.resumedValue; }
   get init(): OfficialInitFacts | undefined { return this.initFacts; }
   get turnRunning(): boolean { return this.inFlight > 0; }
   get turnStartedAt(): number | undefined { return this.inFlight > 0 ? this.turnStart : undefined; }
@@ -275,6 +315,10 @@ class OfficialSessionImpl implements OfficialSession {
       if (!isOfficialQuery(routerQuery)) throw new Error(`the router opened ${this.sessionId} on the wrong leg (expected the official leg)`);
       const inc: Incarnation = { stream, projector, query: routerQuery, abort, sawInit: false, done: Promise.resolve() };
       this.inc = inc;
+      // m7: `resumed` is honest about THIS instance's own history — generation 1 is a fresh start,
+      // every later one (a prior incarnation ended `resumable`, e.g. an unexpected crash rather than
+      // a deliberate `end()`, which is now terminal) is a resume.
+      this.resumedValue = this.gen > 0;
       this.gen = generation;
       this.ending = false;
       this.inFlight = 0;
@@ -282,6 +326,9 @@ class OfficialSessionImpl implements OfficialSession {
       // Tracked BEFORE the iteration starts (`winter-session.ts`'s own precedent) — a shutdown
       // landing between the spawn and the first frame must still end this child.
       this.deps.runtime.trackQuery(this.sessionId, abort, () => this.end());
+      // M6b: attach BEFORE the loop starts — `open()` is the door's own call site, not gated on the
+      // child's `system/init` the way Winter's messaging attach is (this leg's simpler design).
+      this.attachMessaging(inc, generation);
       inc.done = this.run(inc);
       this.lastDone = inc.done;
     })().finally(() => { this.opening = undefined; });
@@ -291,12 +338,27 @@ class OfficialSessionImpl implements OfficialSession {
   private async run(inc: Incarnation): Promise<void> {
     try {
       for await (const raw of inc.query) {
+        // M6a: WS-14 §5's `mirror_error` — non-fatal to the turn by contract, so it is consumed
+        // here and nothing else happens: no projector frame, no `agent_error`, one durable
+        // `transcriptHealth` write for the whole session's life (never per-incarnation).
+        if (isMirrorErrorFrame(raw)) {
+          if (!this.mirrorErrorHandled) {
+            this.mirrorErrorHandled = true;
+            try { this.deps.records?.setTranscriptHealth(this.sessionId, "repair-required"); } catch (err) { this.log(`setTranscriptHealth failed for ${this.sessionId}: ${err instanceof Error ? err.name : "unknown"}`); }
+          }
+          continue;
+        }
         const msg = raw as unknown as ProtocolSdkMessage;
         if (isInitFrame(msg)) {
           inc.sawInit = true;
           const reportedId = typeof msg.session_id === "string" ? msg.session_id : undefined;
           if (reportedId !== undefined && reportedId !== this.backendSessionId) {
+            // m8 (WS-16 §6): a mismatch is a configuration fault in the router's spawn plan, never
+            // something a session should paper over — end it with a typed terminal instead of
+            // continuing to process frames from a child that is not who it was launched to be.
             this.safeAppend({ type: "agent_error", sessionId: this.sessionId, threadId: MAIN_THREAD, message: new OfficialBackendIdMismatch(this.backendSessionId, reportedId).message, code: "official_backend_id_mismatch" });
+            void this.end();
+            continue;
           }
           this.initFacts = {
             ...(reportedId === undefined ? {} : { sessionId: reportedId }),
@@ -331,17 +393,47 @@ class OfficialSessionImpl implements OfficialSession {
       }
     } finally {
       try { inc.projector.flush(); } catch { /* checkpoint store may already be closed */ }
+      // M6b: detach in the ONE place every generation-end path (deliberate `end()`, a backend-id
+      // mismatch, a crash) funnels through — never inside `end()` itself, which only starts the
+      // close and does not wait for it.
+      try { inc.attachment?.detach(); } catch { /* detach never throws by contract; belt only */ }
+      inc.attachment = undefined;
       this.deps.runtime.untrack(this.sessionId);
       this.inFlight = 0;
       this.settleIdle();
       if (this.inc === inc) this.inc = undefined;
-      this.stateValue = "resumable";
+      // m7: a DELIBERATE `end()` is terminal for this instance (`OfficialSessionEnded` says so:
+      // "cannot be resumed") — multi-incarnation resume on this leg is unmeasured (this file's own
+      // header), so only an end nobody asked for (a crash, `this.ending` still false here) leaves
+      // the door open for the next `send()` to spawn a fresh incarnation.
+      this.stateValue = this.ending ? "ended" : "resumable";
     }
   }
 
   private onResult(): void {
     if (this.inFlight > 0) this.inFlight--;
     if (this.inFlight === 0) this.settleIdle();
+  }
+
+  /** M6b: `attachWinterSession`'s door, mirrored — see `open()`'s own call site for why this fires
+   *  there rather than at `system/init` the way Winter's does. Never throws: a failed attach means
+   *  this session is simply not a `SendMessage` receiver this generation, not a broken turn. */
+  private attachMessaging(inc: Incarnation, generation: number): void {
+    if (this.deps.messaging === undefined) return;
+    try {
+      inc.attachment = this.deps.messaging.attach(this.deps.runtime, {
+        sessionId: this.sessionId,
+        backendSessionId: this.backendSessionId,
+        deliver: (text) => this.deliver(text),
+        mode: this.mode,
+        generation,
+        status: () => (this.inFlight > 0 ? "running" : "idle"),
+        log: (line) => this.log(line),
+        ...(this.deps.messaging.facts?.() ?? {}),
+      });
+    } catch (err) {
+      this.log(`messaging attach failed for ${this.sessionId}: ${err instanceof Error ? err.name : "unknown"}`);
+    }
   }
 
   private beginAndPush(text: string, inc: Incarnation): void {
