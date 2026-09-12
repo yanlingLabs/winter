@@ -63,7 +63,19 @@ export interface HandoffDeps {
   runtime: NormaRuntimeSdk;
   winter: WinterSessionDrivers;
   records: RuntimeSessionRecords;
-  store: { meta(sessionId: string): { mode?: string; cwd?: string | null } };
+  store: {
+    meta(sessionId: string): { mode?: string; cwd?: string | null };
+    /**
+     * m5 (whole-branch review): the DEFERRED branch's own model commit — `ipc/server.ts`'s
+     * `session.setModel` handler must NOT write the model preference for a `"deferred"` outcome
+     * (the switch has not happened yet, and the eventual barrier execution can still resolve to
+     * `lossy_fork`/`blocked`, never having moved anything). `planAndApplySwitch` calls this itself,
+     * from inside the deferred continuation, ONLY once the barrier has actually executed AND
+     * resumed — see the deferred branch below. Optional so a caller/test that never exercises the
+     * deferred path (every same-runtime/immediate case) needs no store write door at all.
+     */
+    setModel?(sessionId: string, model: string | null): void;
+  };
   /** Fix wave (C2 / P8c-18): the LIVE settings holder — read hot, at call time, in
    *  `planAndApplySwitch`, never a boot snapshot (`winterOptionsFromSettings`'s own pattern). */
   settings: () => Settings | null | undefined;
@@ -138,12 +150,32 @@ function sourceOwnerFor(deps: HandoffDeps, session: SessionKey, from: RuntimeKin
 function destinationRuntimeFor(deps: HandoffDeps, session: SessionKey, to: RuntimeKind): HandoffDestinationRuntime | undefined {
   const record = deps.records.byBackendSessionId(session.sessionId);
   if (record === undefined) return undefined;
+  const winterSessionId = record.winterSessionId;
+  // m4 (whole-branch review): captured at PLAN time — `destinationRuntimeFor` is called once, when
+  // the barrier builds its plan, but `confirmInit` below runs at EXECUTE time, an arbitrary amount
+  // later (the source's own drain, or the deferred-turn wait in `planAndApplySwitch`). Using the
+  // stale `record.state` closed over here as the transition's FROM state would risk applying a
+  // lifecycle transition against a state that is no longer true — the session could have been
+  // archived, deleted, or otherwise moved by something else in between. `confirmInit` re-reads the
+  // record fresh and refuses typed if it moved, rather than trusting this snapshot or guessing.
+  const planState = record.state;
   return {
     runtimeKind: to,
     confirmInit: async (target: HandoffResumeTarget) => {
-      const before = { runtimeKind: record.runtimeKind, selection: record.selection, backendSessionId: record.backendSessionId };
+      const fresh = deps.records.get(winterSessionId);
+      if (fresh === undefined) {
+        return { ok: false, reason: "the session record no longer exists" };
+      }
+      if (fresh.state !== planState) {
+        return { ok: false, reason: `the session moved from ${planState} to ${fresh.state} between plan and execute` };
+      }
+      const before = { runtimeKind: fresh.runtimeKind, selection: fresh.selection, backendSessionId: fresh.backendSessionId };
       try {
-        deps.records.transition(record.winterSessionId, record.state, {
+        // P8d-24: `patch`, never `transition` — this never changes the lifecycle `state`, only the
+        // runtime/selection/backendSessionId fields, so it must not be spelled as a transition TO
+        // the record's own current state (`ALLOWED_TRANSITIONS` has no self-loop for any state; see
+        // `RuntimeSessionRecords.patch`'s own doc comment for why that made this always refuse).
+        deps.records.patch(winterSessionId, fresh.state, {
           runtimeKind: to,
           selection: target.selection,
           backendSessionId: target.backendSessionId,
@@ -152,15 +184,17 @@ function destinationRuntimeFor(deps: HandoffDeps, session: SessionKey, to: Runti
         return { ok: false, reason: `the record could not be patched to the target leg: ${err instanceof Error ? err.name : "unknown"}` };
       }
       try {
-        await deps.winter.evict(record.winterSessionId);
-        const opened = await deps.winter.ensure(record.winterSessionId);
+        await deps.winter.evict(winterSessionId);
+        const opened = await deps.winter.ensure(winterSessionId);
         if (opened === undefined) throw new Error("no driver could be opened on the target leg");
         return { ok: true, producer: { sdkVersion: target.selection.sdkVersion, engineVersion: target.selection.engineVersion } };
       } catch (err) {
         try {
-          deps.records.transition(record.winterSessionId, record.state, before);
+          // The lifecycle state was never touched above, so the revert targets the SAME
+          // `fresh.state` the forward patch did.
+          deps.records.patch(winterSessionId, fresh.state, before);
         } catch (revertErr) {
-          deps.log?.(`handoff: confirmInit failed AND the record revert for ${record.winterSessionId} also failed (${revertErr instanceof Error ? revertErr.name : "unknown"}) — the record may now name a leg it cannot run on`);
+          deps.log?.(`handoff: confirmInit failed AND the record revert for ${winterSessionId} also failed (${revertErr instanceof Error ? revertErr.name : "unknown"}) — the record may now name a leg it cannot run on`);
         }
         return { ok: false, reason: err instanceof Error ? err.name : "unknown" };
       }
@@ -313,8 +347,21 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
     // Deferred, fire-and-forget: `session.setModel`'s own "best-effort, never delays the reply"
     // posture (mirrored from its existing live-driver notification) — the caller replies `{}` now,
     // and this fires once the boundary the barrier's own drain step would have waited for anyway.
+    //
+    // m5 (whole-branch review): the model preference commits HERE, from inside this continuation,
+    // and ONLY on a `resumed` outcome — never at defer time, when the eventual result could still
+    // be `lossy_fork`/`blocked` and the runtime never actually moves. `ipc/server.ts`'s own
+    // unconditional store write covers `same-runtime`/`resumed` (the caller's ordinary, immediate
+    // path); its `"deferred"` case must return without that write, which is why this function owns
+    // the commit for exactly that one outcome instead.
     void live.idle().then(
-      () => executePlan(deps, plan).catch((err) => deps.log?.(`deferred handoff for ${sessionId} failed: ${err instanceof Error ? err.name : "unknown"}`)),
+      () =>
+        executePlan(deps, plan).then(
+          (outcome) => {
+            if (outcome.kind === "resumed") deps.store.setModel?.(sessionId, model);
+          },
+          (err) => deps.log?.(`deferred handoff for ${sessionId} failed: ${err instanceof Error ? err.name : "unknown"}`),
+        ),
       () => { /* the session ended before settling — nothing left to hand off */ },
     );
     return { kind: "deferred" };

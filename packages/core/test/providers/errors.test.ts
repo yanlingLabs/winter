@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { isContextLengthError, parseProviderErrorCode } from "../../src/providers/errors";
-import { mapHttpError } from "../../src/providers/openai-compatible";
 
 /** THE REAL SHAPE (recorded 2026-08-02, followups T1).
  *
@@ -53,32 +52,12 @@ describe("parseProviderErrorCode", () => {
   });
 });
 
-describe("mapHttpError surfaces the structured provider code past the 200-char message cap", () => {
-  test("form (A) — code survives the cap anyway, and is still surfaced structurally", async () => {
-    const ev = await mapHttpError(400, null, Promise.resolve(BODY_RESPONSES_FORM));
-    expect(ev.type).toBe("error");
-    expect(ev).toMatchObject({ code: "bad_request", providerCode: "context_length_exceeded" });
-  });
-
-  /** The load-bearing one: revert `mapHttpError` to prose-only and this fails, because the 200-char
-   *  slice cuts the body mid-`"type"` and the structured code never appears in `message` at all. */
-  test("form (B) — the code is CUT from the message by the cap, yet providerCode still carries it", async () => {
-    const ev = await mapHttpError(400, null, Promise.resolve(BODY_CHAT_FORM));
-    expect("message" in ev && ev.message.includes("context_length_exceeded")).toBe(false); // truncated away
-    expect(ev).toMatchObject({ code: "bad_request", providerCode: "context_length_exceeded" });
-  });
-
-  test("a body with no structured code leaves providerCode absent (shape unchanged for every other error)", async () => {
-    const ev = await mapHttpError(500, null, Promise.resolve("upstream exploded"));
-    expect(ev).toEqual({ type: "error", code: "server", message: "HTTP 500 — upstream exploded" });
-    expect("providerCode" in ev).toBe(false);
-  });
-
-  test("429 keeps its retryAfterMs handling untouched", async () => {
-    const ev = await mapHttpError(429, "2", Promise.resolve(""));
-    expect(ev).toEqual({ type: "error", code: "rate_limit", message: "HTTP 429", retryAfterMs: 2000 });
-  });
-});
+// P8d-13: `mapHttpError`'s own describe block was removed here when `providers/openai-compatible.ts`
+// was deleted (its `CodexOAuthProvider`/`OpenAICompatibleProvider` callers — the only two —
+// were both superseded by `providers/runtime-provider.ts` in Winter Phase 8c). The 200-char-cap
+// structured-code regression it guarded (`parseProviderErrorCode` above still guards the parsing
+// half) has no equivalent producer on the new adapter path today; recorded as a lane-2 concern
+// rather than silently dropped.
 
 describe("isContextLengthError — conservative recognition", () => {
   test("recognizes the structured code, even when the prose was truncated away", () => {

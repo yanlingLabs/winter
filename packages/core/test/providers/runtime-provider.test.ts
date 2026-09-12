@@ -6,7 +6,8 @@ import { codexFake, openaiResponsesFake } from "@yanlinglabs/winter-provider-con
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/auth/credential-material";
 import { DEFAULT_CODEX_MODEL } from "../../src/providers/codex-config";
-import { createCodexOauthRuntimeProvider, createOpenAiCompatibleRuntimeProvider } from "../../src/providers/runtime-provider";
+import { createCodexOauthRuntimeProvider, createOpenAiCompatibleRuntimeProvider, _translateEventsForTests } from "../../src/providers/runtime-provider";
+import { QuotaManager } from "../../src/providers/quota";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
 import { SessionTitler } from "../../src/agent/titles";
@@ -111,5 +112,52 @@ describe("RuntimeBackedProvider over a loopback fake", () => {
     } finally {
       await fake.close();
     }
+  });
+});
+
+// P8d-13: the subscription-quota carry — closed for the one shape (`rate_limit`/`kind:
+// "subscription-quota"`) that has a real consumer. Driven directly against `translateEvents`
+// (exported test-only) rather than a real HTTP fake: reproducing the codex conformance package's
+// own `rate_limit` wire frame would test that package's fake, not this file's translation.
+describe("translateEvents — the P8d-13 subscription-quota carry", () => {
+  async function* fakeRuntimeEvents(events: Array<Record<string, unknown>>): AsyncIterable<never> {
+    for (const e of events) yield e as never;
+  }
+
+  test("a rate_limit/subscription-quota frame is reported via onSubscriptionQuota, never yielded as a ProviderEvent", async () => {
+    const reported: Array<Record<string, unknown>> = [];
+    const info = { limitType: "5h", remainingFraction: 0.2, resetsAt: "2026-09-13T00:00:00.000Z" };
+    const events = _translateEventsForTests(
+      fakeRuntimeEvents([
+        { type: "rate_limit", kind: "subscription-quota", info },
+        { type: "text_delta", text: "still streaming" },
+        { type: "done", stopReason: "stop" },
+      ]),
+      (i) => reported.push(i),
+    );
+    const yielded = [];
+    for await (const e of events) yielded.push(e);
+
+    expect(reported).toEqual([info]);
+    // The frame itself never became a ProviderEvent — only the delta and the done that followed it.
+    expect(yielded).toEqual([{ type: "text_delta", delta: "still streaming" }, { type: "done", stopReason: "end_turn" }]);
+  });
+
+  test("with no onSubscriptionQuota callback, the frame is silently dropped (this module's pre-8d behaviour when nobody asks)", async () => {
+    const events = _translateEventsForTests(fakeRuntimeEvents([{ type: "rate_limit", kind: "subscription-quota", info: { x: 1 } }, { type: "done", stopReason: "stop" }]));
+    const yielded = [];
+    for await (const e of events) yielded.push(e);
+    expect(yielded).toEqual([{ type: "done", stopReason: "end_turn" }]);
+  });
+
+  test("QuotaManager.noteSubscriptionQuota records the LATEST snapshot, and it never feeds waitIfLimited", async () => {
+    const q = new QuotaManager();
+    expect(q.subscriptionQuota()).toBeUndefined();
+    q.noteSubscriptionQuota({ remainingFraction: 0.5 });
+    q.noteSubscriptionQuota({ remainingFraction: 0.1 }); // supersedes, never merges
+    expect(q.subscriptionQuota()?.info).toEqual({ remainingFraction: 0.1 });
+    // Purely informational — the manager is not "limited" just because a quota snapshot arrived.
+    expect(q.state()).toEqual({ kind: "ok" });
+    await q.waitIfLimited(); // must resolve immediately — nothing here ever blocks a turn
   });
 });

@@ -25,6 +25,7 @@ import { SessionStore, SYNCED_SESSION_ID_RE } from "../sessions/store";
 import { openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION, RuntimeStateUnavailableError, type RuntimeStateDb } from "./db";
 import { ALLOWED_TRANSITIONS, RuntimeSessionRecords } from "./records";
 import { RuntimeLeases, type LeaseRow } from "./leases";
+import { rollbackMemoryKeyMigration } from "./migrations/memory-keys";
 
 export type FindingKind =
   | "db-missing"
@@ -42,7 +43,11 @@ export type FindingKind =
   | "stale-live-registration"
   | "missing-workspace"
   | "missing-child-resume-context"
-  | "orphan-generation";
+  | "orphan-generation"
+  /** P8d-11 (the 8b M-4 obligations): §17 phase 5's memory-key manifest has `moved` rows a
+   *  `memory-keys-rollback` repair could put back, or an `undoing` row a crash left mid-flight
+   *  (settled by the next daemon boot, never by this tool — diagnosis never repairs by itself). */
+  | "memory-keys-migration";
 
 export interface Finding {
   kind: FindingKind;
@@ -57,7 +62,10 @@ export type RepairOp =
   | { kind: "quarantine-tail"; winterSessionId: string }
   | { kind: "relink-backend"; winterSessionId: string; backendSessionId: string }
   | { kind: "detach-backend"; winterSessionId: string }
-  | { kind: "restore-backup"; backupPath: string };
+  | { kind: "restore-backup"; backupPath: string }
+  /** P8d-11: `rollbackMemoryKeyMigration` given an operator door. Whole-manifest, like
+   *  `rebuild-index` — a rollback undoes every `moved` project's relocation, not one session's. */
+  | { kind: "memory-keys-rollback" };
 
 export interface RepairResult {
   applied: boolean;
@@ -423,7 +431,85 @@ export async function diagnoseRuntimeState(home: string): Promise<Finding[]> {
       });
     }
 
+    // P8d-11: §17 phase 5's memory-key manifest state. Every table this diagnosis reads exists in
+    // every schema version (the same rule that lets `db-unmigrated` continue rather than refuse), so
+    // this runs unconditionally — an aggregate `GROUP BY` over a table that is empty on the
+    // overwhelming majority of homes (nobody ever turned the flag on) costs one cheap query and
+    // reports nothing. `moved` is the only status this tool can act on (`memory-keys-rollback`);
+    // `undoing` is reported but never offered as a repair — that row is the boot repair's, settled at
+    // the next daemon start, not something a read-only-by-design tool should touch mid-torn-window.
+    const memoryKeyCounts = rs.db.query<{ status: string; n: number }, []>("SELECT status, COUNT(*) AS n FROM memory_key_manifest GROUP BY status").all();
+    if (memoryKeyCounts.length > 0) {
+      const byStatus = Object.fromEntries(memoryKeyCounts.map((c) => [c.status, c.n]));
+      const moved = byStatus.moved ?? 0;
+      const undoing = byStatus.undoing ?? 0;
+      const rolledBack = byStatus["rolled-back"] ?? 0;
+      const planned = byStatus.planned ?? 0;
+      findings.push({
+        kind: "memory-keys-migration",
+        detail:
+          `memory-key manifest: ${moved} moved, ${planned} planned, ${rolledBack} rolled back` +
+          (undoing > 0 ? `, ${undoing} mid-undo (settled by the next daemon boot, not by this tool)` : ""),
+        repairable: moved > 0 ? ["memory-keys-rollback"] : [],
+      });
+    }
+
     return findings;
+  } finally {
+    rs.close();
+  }
+}
+
+export interface RecoveryAttemptSummary {
+  step: number;
+  outcome: string;
+  detail: Record<string, unknown>;
+  finishedAt: string | null;
+}
+
+/**
+ * P8d-11: `norma doctor`'s read of the daemon's own `runtime_recovery_attempts` audit trail — the
+ * one boot-level (`winter_session_id IS NULL`) row per step from the MOST RECENT boot, so an
+ * operator sees today's recovery rather than every boot this home has ever done. `restampStep`
+ * (`recovery.ts`) updates step 10's row IN PLACE once the late `sdk.directory.recover()` call
+ * completes, so this is also the door that proves the restamp actually landed — the row this
+ * returns for step 10 is `"ok"`/`"partial"`/`"failed"`, never a permanent `"skipped"`, on any boot
+ * where the router handle came up.
+ *
+ * Read-only, the same `readonly` convention every other door in this file uses; `[]` for a home with
+ * no runtime spine at all (never a daemon boot) or one this build cannot open.
+ */
+export function latestRecoveryAttempts(home: string): RecoveryAttemptSummary[] {
+  let rs: RuntimeStateDb;
+  try {
+    rs = openRuntimeStateDb(home, { readonly: true });
+  } catch {
+    return [];
+  }
+  try {
+    const latestBoot = rs.db.query<{ daemon_started_at: string }, []>("SELECT daemon_started_at FROM runtime_recovery_attempts ORDER BY id DESC LIMIT 1").get();
+    if (!latestBoot) return [];
+    const rows = rs.db
+      .query<{ step: number; outcome: string; detail_json: string; finished_at: string | null }, [string]>(
+        "SELECT step, outcome, detail_json, finished_at FROM runtime_recovery_attempts WHERE daemon_started_at = ? AND winter_session_id IS NULL ORDER BY id",
+      )
+      .all(latestBoot.daemon_started_at);
+    // `id` order means the LAST row for a given step wins — exactly what a restamp (an UPDATE on
+    // the same row) already guarantees, and what would also cover a hypothetical future step that
+    // legitimately wrote more than once per boot.
+    const byStep = new Map<number, RecoveryAttemptSummary>();
+    for (const row of rows) {
+      let detail: Record<string, unknown> = {};
+      try {
+        detail = JSON.parse(row.detail_json) as Record<string, unknown>;
+      } catch {
+        /* an unparsable detail is reported empty, never thrown — this door is diagnostics only */
+      }
+      byStep.set(row.step, { step: row.step, outcome: row.outcome, detail, finishedAt: row.finished_at });
+    }
+    return [...byStep.values()].sort((a, b) => a.step - b.step);
+  } catch {
+    return [];
   } finally {
     rs.close();
   }
@@ -458,9 +544,35 @@ export async function repairRuntimeState(home: string, op: RepairOp, deps: { sto
         return detachBackend(home, op.winterSessionId);
       case "restore-backup":
         return restoreBackup(home, op.backupPath);
+      case "memory-keys-rollback":
+        return repairMemoryKeysRollback(home);
     }
   } catch (e) {
     return { applied: false, detail: e instanceof Error ? `${e.name}: ${e.message}` : "repair failed" };
+  }
+}
+
+/**
+ * P8d-11: `rollbackMemoryKeyMigration` given an operator door. `isDaemonLockHeld` above already
+ * refuses this while the daemon is running — the same gate every other repair here shares — so this
+ * function only ever runs against a store nothing else is writing.
+ */
+function repairMemoryKeysRollback(home: string): RepairResult {
+  let rs: RuntimeStateDb | undefined;
+  try {
+    rs = openRuntimeStateDb(home);
+    const result = rollbackMemoryKeyMigration({ rs, home });
+    if (result.rolledBack === 0 && result.failures.length === 0) {
+      return { applied: false, detail: "no relocated memory-key entries to roll back" };
+    }
+    const detail =
+      `${result.rolledBack} entrie(s) rolled back` +
+      (result.failures.length > 0 ? `; ${result.failures.length} blocked (an entry already exists at its destination — clear it and re-run)` : "");
+    return { applied: result.rolledBack > 0, detail };
+  } catch (e) {
+    return { applied: false, detail: e instanceof Error ? `${e.name}: ${e.message}` : "memory-key rollback failed" };
+  } finally {
+    rs?.close();
   }
 }
 

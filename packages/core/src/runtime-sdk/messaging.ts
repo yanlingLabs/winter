@@ -567,14 +567,15 @@ export async function parkRecoveredSessions(
   try {
     const attached = new Set(runtime.sdk.messaging.winterAdapter.sessions.addresses());
     for (const entry of await runtime.sdk.directory.list()) {
-      // ⚠️ SCOPE CARRY (round 2, N-new-4): `session` rows only, which is COMPLETE as shipped —
-      // nothing in `packages/core/src` records an `objectKind: "agent"` directory row yet. It stops
-      // being complete the moment Task 16/17 starts recording children: the router's `childDelivery`
-      // routes an `agent` row whose `transport` is `winter-session` into the SAME
-      // `deliverIntoSession`/`coldResume` door, so a child row left behind by a crashed daemon would
-      // reopen the restart door one row kind over. Widen this predicate in the same change that
-      // starts writing those rows.
-      if (entry.runtimeKind !== "winter-agent" || entry.objectKind !== "session") continue;
+      // P8d-11 WIDENS the round-2 (N-new-4) scope carry: `session` AND `agent` rows now both park.
+      // Nothing in `packages/core/src` writes an `objectKind: "agent"` directory row today either —
+      // this remains a forward guard, exactly like N-new-3's "never un-archive" rule just below it
+      // — but the router's `childDelivery` routes an `agent` row whose `transport` is
+      // `winter-session` into the SAME `deliverIntoSession`/`coldResume` door a `session` row uses,
+      // so a child row left behind by a crashed daemon would reopen the restart door one row kind
+      // over the moment something starts writing them. Widened here, ahead of that producer, rather
+      // than waiting for it to land first and repeat N-new-4's own "safety by accident" shape.
+      if (entry.runtimeKind !== "winter-agent" || (entry.objectKind !== "session" && entry.objectKind !== "agent")) continue;
       if (attached.has(entry.address)) continue;
       // A row with no backend id has no resume source, which is the ONLY thing this sweep removes —
       // so it is already parked, whatever its status says (`detach()` leaves `exited`, this sweep

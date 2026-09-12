@@ -12,7 +12,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { HandoffBarrier, HandoffOutcome, HandoffPlan, RuntimeKind, RuntimeSelection, SelectionInput } from "@yanlinglabs/winter-runtime-sdk";
+import type { HandoffBarrier, HandoffOutcome, HandoffPlan, HandoffResumeTarget, RuntimeKind, RuntimeSelection, SelectionInput } from "@yanlinglabs/winter-runtime-sdk";
 import { planAndApplySwitch, registerHandoffParticipants, type HandoffDeps } from "../../src/runtime-sdk/handoff";
 import { openRuntimeStateDb, RuntimeSessionRecords } from "../../src/runtime-state";
 import type { NormaRuntimeSdk } from "../../src/runtime-sdk/create";
@@ -221,6 +221,79 @@ describe("planAndApplySwitch", () => {
     });
   });
 
+  // m5 (whole-branch review): the deferred branch must commit the model ONLY once the barrier has
+  // actually executed and RESUMED — never at defer time (`ipc/server.ts`'s own immediate store
+  // write must skip the "deferred" outcome; this is the deferred path's own, later commit).
+  describe("m5: the deferred handoff's model commit", () => {
+    function deferredHarness(outcome: HandoffOutcome): {
+      run(): Promise<{ out: Awaited<ReturnType<typeof planAndApplySwitch>>; setModelCalls: Array<[string, string | null]>; resolveIdle: () => void; idlePromise: Promise<void> }>;
+    } {
+      return {
+        async run() {
+          const setModelCalls: Array<[string, string | null]> = [];
+          let resolveIdle: (() => void) | undefined;
+          const idlePromise = new Promise<void>((resolve) => { resolveIdle = resolve; });
+          const never = (): never => { throw new Error("not reached by this test"); };
+          const live: LegSession = {
+            sessionId: "s1", backendSessionId: "be-1", mode: "code", state: "live", generation: 1, resumed: true,
+            init: undefined, turnRunning: true, turnStartedAt: Date.now(), done: Promise.resolve(),
+            pendingSends: [], heldDeliveries: [],
+            send: never, steer: never, interrupt: never, compact: never, setModel: never, setPolicy: never,
+            end: never, deliver: never, open: never, idle: () => idlePromise,
+          };
+          const plan: HandoffPlan = {
+            session: { projectKey: "pk", sessionId: "be-1" }, from: "winter-agent", to: "claude-agent",
+            steps: [{ step: 1, name: "lease" }],
+            decorationDoor: "fallback", tempContinuity: "clone-copy",
+            selection: { kind: "servable", selection: SELECTION("claude-agent"), review: { checked: true } as never },
+          };
+          const barrier: HandoffBarrier = { plan: async () => plan, execute: async () => outcome };
+          return await withRs(async (_rs, records) => {
+            seedRecord(records, "s1");
+            const out = await planAndApplySwitch(
+              deps({
+                records, barrier, winter: fakeWinter({ live }),
+                runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+                store: { meta: () => ({ mode: "code", cwd: "/x" }), setModel: (sid, model) => { setModelCalls.push([sid, model]); } },
+              }),
+              "s1", "claude-sonnet-5", true,
+            );
+            return { out, setModelCalls, resolveIdle: resolveIdle!, idlePromise };
+          });
+        },
+      };
+    }
+
+    test("a `resumed` outcome commits the model, but only AFTER the barrier executes", async () => {
+      const { run } = deferredHarness({ kind: "resumed", selection: SELECTION("claude-agent") });
+      const { out, setModelCalls, resolveIdle, idlePromise } = await run();
+      expect(out).toEqual({ kind: "deferred" });
+      expect(setModelCalls).toEqual([]); // never at defer time
+      resolveIdle();
+      await idlePromise;
+      await Bun.sleep(10); // let the fire-and-forget continuation run
+      expect(setModelCalls).toEqual([["s1", "claude-sonnet-5"]]);
+    });
+
+    test("a `blocked` outcome never commits the model — the switch never actually happened", async () => {
+      const { run } = deferredHarness({ kind: "blocked", reason: "lease-held" });
+      const { setModelCalls, resolveIdle, idlePromise } = await run();
+      resolveIdle();
+      await idlePromise;
+      await Bun.sleep(10);
+      expect(setModelCalls).toEqual([]);
+    });
+
+    test("a `lossy-fork-offered` outcome never commits the model either", async () => {
+      const { run } = deferredHarness({ kind: "lossy-fork-offered", reason: "provider-native state would be dropped", step: 8 });
+      const { setModelCalls, resolveIdle, idlePromise } = await run();
+      resolveIdle();
+      await idlePromise;
+      await Bun.sleep(10);
+      expect(setModelCalls).toEqual([]);
+    });
+  });
+
   // Fix wave M1: mirrors `session-driver.ts`'s `decideRuntime` bail-out #4 — a model with NO row
   // in the pinned catalog at all keeps today's plain in-runtime behaviour rather than reaching the
   // (fake) selector at all.
@@ -373,5 +446,99 @@ describe("registerHandoffParticipants: selectionInputFor wiring", () => {
       settings: () => null,
     });
     expect(registered.selectionInputFor).toBeUndefined();
+  });
+});
+
+describe("registerHandoffParticipants: destination.confirmInit (m4 — the plan-time snapshot's own torn window)", () => {
+  function targetFor(sessionId: string): HandoffResumeTarget {
+    return {
+      backendSessionId: `be-${sessionId}-new`,
+      selection: SELECTION("claude-agent"),
+    } as unknown as HandoffResumeTarget; // only these two fields are read by confirmInit
+  }
+
+  function registerDestination(
+    records: RuntimeSessionRecords,
+    winterOverride?: WinterSessionDrivers,
+  ): (session: { projectKey: string; sessionId: string }, to: RuntimeKind) => { confirmInit(target: HandoffResumeTarget): Promise<{ ok: boolean; reason?: string }> } {
+    const runtime = fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")) });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let registered: any;
+    registerHandoffParticipants({
+      runtime: { ...runtime, registerHandoffParticipants: (p) => { registered = p; } },
+      winter: winterOverride ?? fakeWinter({}), records,
+      store: { meta: () => ({ mode: "code", cwd: "/x" }) },
+      settings: () => null,
+    });
+    return registered.destination;
+  }
+
+  /** Unlike `fakeWinter`, `ensure` actually resolves — needed for the ONE test in this block that
+   *  drives `confirmInit`'s SUCCESS path all the way through. */
+  function fakeWinterThatOpens(): WinterSessionDrivers {
+    const never = (): never => { throw new Error("not reached by this test"); };
+    return {
+      legForNewSession: () => "winter", legOf: never, assertAvailable: () => {},
+      create: never, get: () => undefined, runTurn: never,
+      ensure: async () => ({}) as LegSession,
+      evict: async () => {}, list: () => [], endAll: never,
+    };
+  }
+
+  test("the session's state at PLAN time is unchanged at execute time: confirmInit SUCCEEDS (P8d-24)", async () => {
+    // Round 1 found that `destinationRuntimeFor`'s patch call went through `transition(id,
+    // fresh.state, patch)` — a SELF-transition, which `ALLOWED_TRANSITIONS` refuses for every one
+    // of the 8 states — so this exact case used to report `IllegalStateTransitionError` even though
+    // nothing about the session had moved. P8d-24 (round 2) fixed it: `confirmInit` now uses
+    // `RuntimeSessionRecords.patch` (a same-state patch door, never a transition). This test is the
+    // round-2 ruling's own proof: the destination-side patch now SUCCEEDS where it previously threw.
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1"); // ready
+      const destination = registerDestination(records, fakeWinterThatOpens());
+      const built = destination({ projectKey: "pk", sessionId: "be-1" }, "claude-agent");
+      const result = await built!.confirmInit(targetFor("s1"));
+      expect(result).toMatchObject({ ok: true });
+      const record = records.get("s1")!;
+      expect(record.runtimeKind).toBe("claude-agent");
+      expect(record.state).toBe("ready"); // untouched — `patch` never writes `state`
+      expect(record.backendSessionId).toBe(targetFor("s1").backendSessionId);
+    });
+  });
+
+  test("m4: the session moved between plan and execute — confirmInit refuses typed and NEVER patches the record", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1"); // ready — the snapshot `destination(...)` takes below
+      const destination = registerDestination(records);
+      const built = destination({ projectKey: "pk", sessionId: "be-1" }, "claude-agent");
+
+      // Something else moves the record AFTER the plan-time snapshot but BEFORE execute.
+      records.transition("s1", "archived");
+
+      const result = await built!.confirmInit(targetFor("s1"));
+      expect(result.ok).toBe(false);
+      expect((result as { reason: string }).reason).toContain("moved from ready to archived");
+      // The record was NEVER patched to the target leg — the stale-state refusal happens before
+      // any write, not after a write that then has to be reverted.
+      expect(records.get("s1")!.runtimeKind).toBe("winter-agent");
+      expect(records.get("s1")!.state).toBe("archived");
+    });
+  });
+
+  test("the record vanishes entirely between plan and execute: confirmInit refuses typed rather than throwing", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const destination = registerDestination(records);
+      const built = destination({ projectKey: "pk", sessionId: "be-1" }, "claude-agent");
+
+      // No public delete door on RuntimeSessionRecords reaches this test — an OWN-property override
+      // shadows the class's prototype method for one id only, which is enough to simulate "gone by
+      // execute time" without a second `registerHandoffParticipants` construction (which would take
+      // a FRESH plan-time snapshot and defeat the point).
+      const realGet = records.get.bind(records);
+      records.get = ((id: string) => (id === "s1" ? undefined : realGet(id))) as typeof records.get;
+
+      const result = await built!.confirmInit(targetFor("s1"));
+      expect(result).toEqual({ ok: false, reason: "the session record no longer exists" });
+    });
   });
 });

@@ -363,8 +363,7 @@ describe("daemon IPC", () => {
   // WebFetch(domain:...) rule to the daemon's OWN settings.json (global scope), and the REAL
   // daemon's live settings-watcher (settings-watcher.ts, 150ms debounce) picking it up so the NEXT
   // fetch to the same domain AND a subdomain both run cardless. `globalThis.fetch` is monkey-patched
-  // for the duration (save/restore) so web_fetch never hits the real network — same technique as
-  // providers/openai-compatible.test.ts's own "consumer break mid-stream" test.
+  // for the duration (save/restore) so web_fetch never hits the real network.
 
   // Edge case called out explicitly by the brief: a rule-bearing optionId with NO usable project
   // root (a null session cwd) must never hang or crash the respond — PermissionRules.append()

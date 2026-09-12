@@ -117,10 +117,13 @@ export async function createProvider(settings: Settings, secrets: SecretStore, s
     // resolution (and, on a 401, refresh write-back) goes through `credential-store.ts`'s
     // `CredentialStore`, which reads/writes the SAME `codex-oauth:default` material record the
     // spawned Winter child does (`runtime-provider.ts`'s own header). No eager credential check
-    // here — matches the pre-existing `CodexOAuthProvider` construction, which never touched the
-    // secret store at construction time either; a missing/invalid credential surfaces as a typed
-    // `auth` error from the FIRST `streamTurn()` call, same as before.
-    inner = createCodexOauthRuntimeProvider(secrets);
+    // here — matches the pre-8c `CodexOAuthProvider` construction (deleted, P8d-13: superseded by
+    // this adapter and never re-added), which never touched the secret store at construction time
+    // either; a missing/invalid credential surfaces as a typed `auth` error from the FIRST
+    // `streamTurn()` call, same as before.
+    // P8d-13: the ONE wiring line for the subscription-quota carry — `quota` already exists above
+    // (constructed before the provider-type branch), so this is the door, not a new one.
+    inner = createCodexOauthRuntimeProvider(secrets, undefined, (info) => quota.noteSubscriptionQuota(info));
   } else {
     // Fail-fast, unchanged: `createProvider` itself throws before anything is constructed when no
     // key is stored (manager.test.ts pins this exact message).

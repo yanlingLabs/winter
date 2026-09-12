@@ -35,12 +35,14 @@ export {
   type ConsentBlockPlugin,
 } from "./plugins/lifecycle";
 export { createProvider, OPENAI_API_KEY_SECRET, type ActiveProvider, type LiveModelSelection } from "./providers/manager";
-export { CodexAuthStore, CODEX_SECRET_NAMES } from "./providers/codex-oauth";
 export {
   CREDENTIAL_MATERIAL_NAMES,
   readCredentialMaterial, writeCredentialMaterial, clearCredentialMaterial,
   readOpenAiApiKey, writeOpenAiApiKey,
   migrateLegacyCredentialMaterial,
+  // P8d-13: relocated here from the now-deleted `providers/codex-oauth.ts` — see
+  // `CodexAuthStore`'s own doc comment in `auth/credential-material.ts`.
+  CodexAuthStore, CODEX_SECRET_NAMES,
   type CredentialMaterial, type ApiKeyMaterial, type OauthMaterial, type BearerMaterial, type CredentialMigrationReport,
 } from "./auth/credential-material";
 export { runLoginFlow } from "./providers/pkce";

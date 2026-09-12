@@ -7,6 +7,7 @@ import {
   DuplicateBackendSessionError,
   IllegalStateTransitionError,
   RuntimeSessionRecords,
+  RuntimeSessionStateMismatchError,
   UnknownRuntimeGenerationError,
   UnknownRuntimeSessionError,
   VersionProvenanceError,
@@ -206,6 +207,70 @@ describe("RuntimeSessionRecords", () => {
         expect(patched.transcriptHealth).toBe("clean");
         expect(patched.capabilities).toEqual(["resume"]);
       })));
+
+  // P8d-24: `patch` is a SAME-STATE door — the destination-side fix for `handoff.ts`'s
+  // `confirmInit`, which used to spell this as `transition(id, current.state, fields)` and always
+  // throw (`ALLOWED_TRANSITIONS` has no self-loop for any state).
+  describe("patch (P8d-24 — a same-state patch door, never a transition)", () => {
+    test("applies the named fields and moves updatedAt, WITHOUT touching state", () =>
+      withTempHome((home) =>
+        use(home, (rs) => {
+          let tick = 0;
+          const clocked = new RuntimeSessionRecords(rs, () => `2026-09-12T00:00:0${tick++}.000Z`);
+          clocked.create(newRecord(home, "s_p"));
+          clocked.transition("s_p", "ready");
+          const patched = clocked.patch("s_p", "ready", { runtimeKind: "claude-agent", backendSessionId: UUID });
+          expect(patched.state).toBe("ready"); // untouched
+          expect(patched.runtimeKind).toBe("claude-agent");
+          expect(patched.backendSessionId).toBe(UUID);
+          expect(patched.updatedAt).not.toBe(patched.createdAt);
+          // untouched fields keep their creation values
+          expect(patched.modelRef).toBe("gpt-5.6-sol");
+        })));
+
+    test("refuses typed (RuntimeSessionStateMismatchError) when the row's state is not the expected one", () =>
+      withTempHome((home) =>
+        use(home, (_rs, records) => {
+          records.create(newRecord(home, "s_m"));
+          records.transition("s_m", "ready");
+          let caught: unknown;
+          try {
+            records.patch("s_m", "running", { runtimeKind: "claude-agent" });
+          } catch (e) {
+            caught = e;
+          }
+          expect(caught).toBeInstanceOf(RuntimeSessionStateMismatchError);
+          expect((caught as RuntimeSessionStateMismatchError).winterSessionId).toBe("s_m");
+          expect((caught as RuntimeSessionStateMismatchError).expected).toBe("running");
+          expect((caught as RuntimeSessionStateMismatchError).actual).toBe("ready");
+          // the refusal left the row completely untouched
+          expect(records.get("s_m")?.state).toBe("ready");
+          expect(records.get("s_m")?.runtimeKind).toBe("winter-agent");
+        })));
+
+    test("refuses typed (UnknownRuntimeSessionError) for an unknown id", () =>
+      withTempHome((home) =>
+        use(home, (_rs, records) => {
+          expect(() => records.patch("s_nope", "ready", { runtimeKind: "claude-agent" })).toThrow(UnknownRuntimeSessionError);
+        })));
+
+    test("never adds a self-loop to ALLOWED_TRANSITIONS — the state machine's truth is unchanged", () => {
+      for (const state of Object.keys(ALLOWED_TRANSITIONS) as Array<keyof typeof ALLOWED_TRANSITIONS>) {
+        expect(ALLOWED_TRANSITIONS[state]).not.toContain(state);
+      }
+    });
+
+    test("a duplicate backendSessionId is refused the same way transition refuses it", () =>
+      withTempHome((home) =>
+        use(home, (_rs, records) => {
+          records.create(newRecord(home, "s_a"));
+          records.transition("s_a", "ready", { backendSessionId: UUID });
+          records.create(newRecord(home, "s_b"));
+          records.transition("s_b", "ready");
+          expect(() => records.patch("s_b", "ready", { backendSessionId: UUID })).toThrow(DuplicateBackendSessionError);
+          expect(records.get("s_b")?.backendSessionId).toBeUndefined();
+        })));
+  });
 
   test("list filters by state, runtime kind and parent", () =>
     withTempHome((home) =>

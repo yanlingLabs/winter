@@ -137,8 +137,18 @@ function mapErrorCode(
  * per-turn accumulator (`calls`) folds the runtime's streamed `tool_call_start/delta/end` triple
  * into Norma's single complete `tool_call` event — unexercised today (every internal caller passes
  * `tools: []`) but mapped for a future caller rather than silently dropped.
+ *
+ * `onSubscriptionQuota` is the P8d-13 carry's own door: Norma's `ProviderEvent` union
+ * (`providers/types.ts`, a zod schema outside this lane's file ownership) has no slot for R6-B's
+ * `rate_limit`/`kind:"subscription-quota"` frame, so this side channel is how the detail reaches
+ * `QuotaManager` (`manager.ts` wires it to `quota.noteSubscriptionQuota`) without widening that
+ * union. Called, never yielded — the generator's own event loop continues past it exactly as the
+ * pre-8d code silently dropped it, except now the detail actually goes somewhere.
  */
-async function* translateEvents(events: AsyncIterable<RuntimeProviderEvent>): AsyncIterable<ProviderEvent> {
+async function* translateEvents(
+  events: AsyncIterable<RuntimeProviderEvent>,
+  onSubscriptionQuota?: (info: Record<string, unknown>) => void,
+): AsyncIterable<ProviderEvent> {
   const calls = new Map<string, { name: string; args: string }>();
   for await (const ev of events) {
     switch (ev.type) {
@@ -192,13 +202,20 @@ async function* translateEvents(events: AsyncIterable<RuntimeProviderEvent>): As
         };
         return;
       }
+      // P8d-13: the carry is closed for the one shape that has a real consumer — `rate_limit`'s
+      // `kind: "subscription-quota"` now reaches `QuotaManager` via `onSubscriptionQuota` (never
+      // yielded — see this function's own doc comment on why). No OTHER `rate_limit` kind exists
+      // in the pinned runtime today (R6-B's own comment: "SUBSCRIPTION-QUOTA states ONLY"), so this
+      // is not a partial handling of the type, just of the one real shape it has.
+      case "rate_limit":
+        if (ev.kind === "subscription-quota") onSubscriptionQuota?.(ev.info);
+        break;
       // `message_start`/`thinking_summary_delta`/`thinking_exposed_delta`/`native_state`/
-      // `rate_limit`/`retry`/`auth_status`: no Norma `ProviderEvent` target for a one-shot
-      // internal-model call — none of compactor/titler/bash-reviewer ever continues a turn
-      // across provider-native state, and `providers/quota.ts`'s `QuotaManager` already tracks
-      // rate limiting off the `error`+`usage` events above (the adapter's own `withRetry`
-      // already retries a rate-limited request in-band before any of this is reached). Dropped
-      // rather than guessed at — a carry if a future caller needs the subscription-quota detail.
+      // `retry`/`auth_status`: still no Norma `ProviderEvent` target for a one-shot internal-model
+      // call — none of compactor/titler/bash-reviewer ever continues a turn across provider-native
+      // state, and `providers/quota.ts`'s `QuotaManager` already tracks HTTP rate limiting off the
+      // `error`+`usage` events above (the adapter's own `withRetry` already retries a rate-limited
+      // request in-band before any of this is reached). Dropped rather than guessed at.
       default:
         break;
     }
@@ -212,12 +229,21 @@ class RuntimeBackedProvider implements Provider {
   private readonly adapter: ProviderAdapter;
   private readonly context: ProviderContext;
   private readonly modelsFn: () => ModelInfo[];
+  private readonly onSubscriptionQuota?: (info: Record<string, unknown>) => void;
 
-  constructor(cfg: { id: string; adapter: ProviderAdapter; context: ProviderContext; models: () => ModelInfo[] }) {
+  constructor(cfg: {
+    id: string;
+    adapter: ProviderAdapter;
+    context: ProviderContext;
+    models: () => ModelInfo[];
+    /** P8d-13: see `translateEvents`'s own doc comment. */
+    onSubscriptionQuota?: (info: Record<string, unknown>) => void;
+  }) {
     this.id = cfg.id;
     this.adapter = cfg.adapter;
     this.context = cfg.context;
     this.modelsFn = cfg.models;
+    this.onSubscriptionQuota = cfg.onSubscriptionQuota;
   }
 
   models(): ModelInfo[] {
@@ -225,7 +251,7 @@ class RuntimeBackedProvider implements Provider {
   }
 
   streamTurn(req: TurnRequest): AsyncIterable<ProviderEvent> {
-    return translateEvents(this.adapter.streamTurn(mapTurnRequest(req), this.context));
+    return translateEvents(this.adapter.streamTurn(mapTurnRequest(req), this.context), this.onSubscriptionQuota);
   }
 }
 
@@ -267,7 +293,15 @@ export function createOpenAiCompatibleRuntimeProvider(secrets: SecretStore, base
  * route) rather than the real `CODEX.tokenUrl` — a 401 in a test must refresh against the fake, not
  * dial out.
  */
-export function createCodexOauthRuntimeProvider(secrets: SecretStore, testBackendUrl?: string): Provider {
+export function createCodexOauthRuntimeProvider(
+  secrets: SecretStore,
+  testBackendUrl?: string,
+  /** P8d-13: the subscription-quota carry's own door — see `translateEvents`'s doc comment.
+   *  `manager.ts` wires this to `quota.noteSubscriptionQuota`. Optional so every existing caller
+   *  (every test, and any future one-shot construction that has no `QuotaManager` to report to)
+   *  is unaffected. */
+  onSubscriptionQuota?: (info: Record<string, unknown>) => void,
+): Provider {
   const context: ProviderContext = {
     connection: { providerId: "codex-oauth", ...(testBackendUrl ? { baseUrl: testBackendUrl, local: true } : {}) },
     credentials: credentialStoreOverSecretStore(secrets),
@@ -279,5 +313,10 @@ export function createCodexOauthRuntimeProvider(secrets: SecretStore, testBacken
     descriptors: () => undefined,
     ...(testBackendUrl ? { tokenUrl: `${testBackendUrl}/oauth/token` } : {}),
   });
-  return new RuntimeBackedProvider({ id: "codex-oauth", adapter, context, models: () => CODEX_MODELS });
+  return new RuntimeBackedProvider({ id: "codex-oauth", adapter, context, models: () => CODEX_MODELS, onSubscriptionQuota });
 }
+
+/** Test-only: `translateEvents` is the one place the P8d-13 subscription-quota carry is decided,
+ *  and reaching it through a real HTTP fake would mean reproducing the codex conformance package's
+ *  own `rate_limit` wire frame rather than testing this file's own translation. */
+export const _translateEventsForTests = translateEvents;

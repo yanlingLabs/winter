@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore, type SecretStore } from "../../src/auth/secret-store";
 import {
+  CODEX_SECRET_NAMES,
   CREDENTIAL_MATERIAL_NAMES,
+  CodexAuthStore,
   clearCredentialMaterial,
   migrateLegacyCredentialMaterial,
   readCredentialMaterial,
@@ -14,7 +16,6 @@ import {
   writeOpenAiApiKey,
   type CredentialMaterial,
 } from "../../src/auth/credential-material";
-import { CodexAuthStore, CODEX_SECRET_NAMES } from "../../src/providers/codex-oauth";
 import { OPENAI_API_KEY_SECRET } from "../../src/providers/manager";
 
 function store(): FileSecretStore {

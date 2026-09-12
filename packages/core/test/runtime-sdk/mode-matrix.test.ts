@@ -1,4 +1,5 @@
 import { test, expect } from "bun:test";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CanUseTool, PermissionMode } from "@yanlinglabs/winter-agent-sdk";
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
@@ -189,7 +190,15 @@ test("the control-plane deny rules cover the four write tools × the control-pla
     expect(deny).toContain(`${tool}(//h/run/**)`);
     expect(deny).toContain(`${tool}(//h/runtimes/**)`);
   }
-  expect(deny).toHaveLength(4 * 7 + 3 * 2);
+  // P8d-12 (WS-16 §10): the official leg's SDK-parent staging root, denied to BOTH the write and
+  // the read-class tools — rooted at the SYSTEM temp dir, never under `home`. `fsRootAnchored`
+  // prepends exactly ONE more slash onto an already-absolute pattern (`tmpdir()` is absolute), so
+  // the wire form carries two leading slashes total, not three.
+  const claudeResumeTarget = `/${join(tmpdir(), "claude-resume-*", "**")}`;
+  for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Glob", "Grep"]) {
+    expect(deny).toContain(`${tool}(${claudeResumeTarget})`);
+  }
+  expect(deny).toHaveLength(4 * 8 + 3 * 3);
 });
 
 /**
@@ -228,7 +237,8 @@ test("every deny rule is //-anchored, and resolves to the fence target it names"
   }
   expect(specs.has(`/${join(home, "run")}/**`)).toBe(true);        // the daemon control plane
   expect(specs.has(`/${join(home, "runtimes")}/**`)).toBe(true);   // the runtime store (reads; Task 17)
-  expect(specs.size).toBe(8);
+  expect(specs.has(`/${join(tmpdir(), "claude-resume-*", "**")}`)).toBe(true); // P8d-12's staging root
+  expect(specs.size).toBe(9);
   // The two inert forms must never reappear.
   for (const s of specs) {
     expect({ s, singleSlashAbsolute: /^\/[^/]/.test(s) }).toEqual({ s, singleSlashAbsolute: false });
