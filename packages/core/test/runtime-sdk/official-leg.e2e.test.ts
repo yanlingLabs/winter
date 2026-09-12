@@ -457,6 +457,9 @@ describeWithClaudeRuntime("the official leg through startDaemon + IPC (P8c-14)",
     const rt = daemon!.runtimeState;
     if ("unavailable" in rt) throw rt.unavailable;
     expect(rt.records.get(sessionId)?.runtimeKind).toBe("claude-agent");
+    // m5: the record's `authRef` is the LOCATOR only (never material — records.ts's own rule),
+    // derived through `credentialRefFor` exactly as the Winter path's own record write is.
+    expect(rt.records.get(sessionId)?.authRef).toBe("keychain:anthropic:default");
     await client.call(METHODS.sessionSend, { sessionId, text: "say hello" });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 45_000);
     const kinds = client.events.filter((e) => e.sessionId === sessionId).map((e) => e.type);

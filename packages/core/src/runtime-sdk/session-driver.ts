@@ -691,6 +691,13 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     }
     const backendSessionId = randomUUID();
     const transcriptKey = transcriptProjectKey(cwd);
+    // m5: the same locator-only rule the Winter path follows (records.ts's own rule: never
+    // material, just where to find it) — `credentialRefFor` is this leg's OWN source of truth for
+    // "is this provider one of Norma's keychain-backed slots", the identical function the Winter
+    // path's `explicitCredentials` build already calls (`credentialRefFor(provider.providerId) ??
+    // provider.authRef!` above). `selection.providerId` is "anthropic" for a real Claude selection,
+    // so this resolves to `keychain:anthropic:default`.
+    const authRef = credentialRefFor(selection.providerId);
     try {
       records.create({
         winterSessionId: sessionId,
@@ -698,6 +705,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         backendSessionId,
         providerId: selection.providerId,
         modelRef: selection.modelRef,
+        ...(authRef?.kind === "keychain" ? { authRef: `keychain:${authRef.account}` } : {}),
         backendRoot: join(deps.home, "projects", transcriptKey),
         effectiveTempDir: deps.tmpDirOf(sessionId),
         transcriptProjectKey: transcriptKey,
