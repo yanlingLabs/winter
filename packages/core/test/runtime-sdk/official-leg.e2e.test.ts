@@ -1162,7 +1162,10 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     // (`messaging.ts`'s own header — `coldResume` only ever calls `peers.winter.query`), so this is
     // the row's "or the router's refusal verbatim" branch, not an actual resume.
     expect(outcome.outcome.status).not.toBe("resumed_and_delivered");
-    expect(["unavailable", "refused", "not_found", "held"]).toContain(outcome.outcome.status);
+    // Pinned to the SPECIFIC refusal the router gives today (lane-3b review, Minor): a drift to any
+    // other refusal shape is a behaviour change worth seeing, not a silently-still-green OR.
+    expect(outcome.outcome.status).toBe("unavailable");
+    expect(JSON.stringify(outcome)).toContain("is not active");
 
     parentHandle2.detach();
     await runtime2.dispose();
