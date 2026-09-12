@@ -20,7 +20,7 @@
 import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync, cpSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { FORMAT, ROOT, readCanonical } from "./version-lib";
+import { ROOT, nextVersion, readCanonical } from "./version-lib";
 
 const SPARKLE_VERSION = "2.9.4"; // matches apple/Winter/Package.resolved, not project.yml's "from: 2.6.0" floor
 const TOOLS = join(ROOT, ".tools", "sparkle");
@@ -56,8 +56,12 @@ sh(`"${TOOLS}/bin/generate_keys" --account ${TEST_KEY_ACCOUNT} -x "${keyFile}"`)
 
 // 3. Build Release once.
 const vCur = readCanonical();
-const m = vCur.match(FORMAT)!;
-const vNext = `${m[1]}.${m[2]}.${String(Number(m[3]) + 1).padStart(3, "0")}`;
+// P9c-2: was inline #.#.### patch-padding arithmetic — now delegates to version-lib's own
+// nextVersion("--patch"), which knows the current #.###.# ceiling/rollover rules. This is a
+// local rig, never released, so the ceiling case (vCur's patch already at 9) throwing here is
+// the right behaviour: bump VERSION (or run the gate from a non-ceiling checkout) rather than
+// silently computing a malformed vNext.
+const vNext = nextVersion(vCur, "--patch");
 sh(`xcodegen generate`, join(ROOT, "apple", "Winter"));
 sh(
   `xcodebuild -project Winter.xcodeproj -scheme Winter -destination 'platform=macOS' -configuration Release -derivedDataPath "${OUT}/dd" build`,

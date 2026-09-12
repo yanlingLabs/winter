@@ -36,9 +36,9 @@ final class UpdaterCoordinatorTests: XCTestCase {
         var turns = 1
         let c = UpdaterCoordinator(deps: Self.deps(activeTurns: { turns }))
         var installed = 0
-        let postponed = c.handleRelaunchRequest(version: "0.2.002", untilInvoking: { installed += 1 })
+        let postponed = c.handleRelaunchRequest(version: "0.111.1", untilInvoking: { installed += 1 })
         XCTAssertTrue(postponed)
-        XCTAssertEqual(c.stagedVersion, "0.2.002")
+        XCTAssertEqual(c.stagedVersion, "0.111.1")
         try? await Task.sleep(for: .seconds(0.05))
         XCTAssertEqual(installed, 0)              // still busy — never yanked
         turns = 0
@@ -50,7 +50,7 @@ final class UpdaterCoordinatorTests: XCTestCase {
         // pollInterval far larger than the test window: only an immediate first check can install.
         let c = UpdaterCoordinator(deps: Self.deps(activeTurns: { 0 }, pollInterval: 1000))
         var installed = 0
-        _ = c.handleRelaunchRequest(version: "0.2.002", untilInvoking: { installed += 1 })
+        _ = c.handleRelaunchRequest(version: "0.111.1", untilInvoking: { installed += 1 })
         try? await Task.sleep(for: .seconds(0.05))
         XCTAssertEqual(installed, 1)   // fails if the impl waits pollIntervalSeconds before the first check
     }
@@ -58,7 +58,7 @@ final class UpdaterCoordinatorTests: XCTestCase {
     func testRestartNowOverridesWhileBusy() async {
         let c = UpdaterCoordinator(deps: Self.deps(activeTurns: { 5 }))
         var installed = 0
-        _ = c.handleRelaunchRequest(version: "0.2.002", untilInvoking: { installed += 1 })
+        _ = c.handleRelaunchRequest(version: "0.111.1", untilInvoking: { installed += 1 })
         c.installNow()
         XCTAssertEqual(installed, 1)
         c.installNow()                            // idempotent — no double-install
@@ -80,8 +80,8 @@ final class UpdaterCoordinatorTests: XCTestCase {
         var events: [String] = []
         c.onStagedChange = { staged, _ in events.append(staged ? "staged" : "unstaged") }
         c.onWillInstall = { events.append("willInstall") }
-        _ = c.handleRelaunchRequest(version: "0.2.002", untilInvoking: { events.append("install") })
-        XCTAssertEqual(c.stagedVersion, "0.2.002")
+        _ = c.handleRelaunchRequest(version: "0.111.1", untilInvoking: { events.append("install") })
+        XCTAssertEqual(c.stagedVersion, "0.111.1")
         try? await Task.sleep(for: .seconds(0.05))
         XCTAssertEqual(events, ["staged"])        // busy: staged only — no install, no arming
         turns = 0
@@ -99,7 +99,7 @@ final class UpdaterCoordinatorTests: XCTestCase {
         let c = UpdaterCoordinator(deps: Self.deps(activeTurns: { 5 }))
         var events: [String] = []
         c.onWillInstall = { events.append("willInstall") }
-        _ = c.handleRelaunchRequest(version: "0.2.002", untilInvoking: { events.append("install") })
+        _ = c.handleRelaunchRequest(version: "0.111.1", untilInvoking: { events.append("install") })
         c.installNow()
         XCTAssertEqual(events, ["willInstall", "install"])
         c.installNow()                            // idempotent second call — no re-arm, no re-install
@@ -113,7 +113,7 @@ final class UpdaterCoordinatorTests: XCTestCase {
         let c = UpdaterCoordinator(deps: Self.deps(activeTurns: { 1 }, now: { clock }, badgeAfter: 0.01))
         c.onStagedChange = { staged, _ in stagedStates.append(staged) }
         c.onBadgeChange = { badges.append($0) }
-        _ = c.handleRelaunchRequest(version: "0.2.002", untilInvoking: {})
+        _ = c.handleRelaunchRequest(version: "0.111.1", untilInvoking: {})
         XCTAssertEqual(stagedStates, [true])
         clock = clock.addingTimeInterval(1)       // "24h" later (scaled by badgeAfter)
         try? await Task.sleep(for: .seconds(0.05))
@@ -130,7 +130,7 @@ final class UpdaterCoordinatorTests: XCTestCase {
         var dirty = true
         let c = UpdaterCoordinator(deps: Self.deps(activeTurns: { 0 }, dirtyEditors: { dirty }))
         var installed = 0
-        _ = c.handleRelaunchRequest(version: "0.2.002", untilInvoking: { installed += 1 })
+        _ = c.handleRelaunchRequest(version: "0.111.1", untilInvoking: { installed += 1 })
         try? await Task.sleep(for: .seconds(0.05))
         XCTAssertEqual(installed, 0)               // idle daemon, but a dirty editor still blocks
         dirty = false
@@ -143,7 +143,7 @@ final class UpdaterCoordinatorTests: XCTestCase {
     func testIdleAndCleanStillInstallsOnThePoll() async {
         let c = UpdaterCoordinator(deps: Self.deps(activeTurns: { 0 }, dirtyEditors: { false }))
         var installed = 0
-        _ = c.handleRelaunchRequest(version: "0.2.002", untilInvoking: { installed += 1 })
+        _ = c.handleRelaunchRequest(version: "0.111.1", untilInvoking: { installed += 1 })
         try? await Task.sleep(for: .seconds(0.05))
         XCTAssertEqual(installed, 1)
     }
@@ -157,7 +157,7 @@ final class UpdaterCoordinatorTests: XCTestCase {
     func testRestartNowOverridesEvenWithADirtyEditor() async {
         let c = UpdaterCoordinator(deps: Self.deps(activeTurns: { 0 }, dirtyEditors: { true }))
         var installed = 0
-        _ = c.handleRelaunchRequest(version: "0.2.002", untilInvoking: { installed += 1 })
+        _ = c.handleRelaunchRequest(version: "0.111.1", untilInvoking: { installed += 1 })
         c.installNow()
         XCTAssertEqual(installed, 1)
     }

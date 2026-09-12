@@ -417,7 +417,7 @@ final class MenuBarEntryPointsTests: XCTestCase {
         var fired = 0
         let controller = makeController(onInstallUpdate: { fired += 1 })
         controller.install()
-        controller.setUpdateStaged(true, version: "0.2.002")
+        controller.setUpdateStaged(true, version: "0.111.1")
 
         let item = controller.updateItem
         XCTAssertNotNil(item.target)
@@ -539,7 +539,7 @@ final class MenuBarEntryPointsTests: XCTestCase {
     func testSetUpdateStagedFalseClearsBadgeToIdleBrandAsset() {
         let controller = makeController()
         controller.install()
-        controller.setUpdateStaged(true, version: "0.2.002")
+        controller.setUpdateStaged(true, version: "0.111.1")
         controller.setUpdateBadge(true)
 
         controller.setUpdateStaged(false, version: nil)
