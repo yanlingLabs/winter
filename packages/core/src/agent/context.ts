@@ -3,6 +3,8 @@ import { join } from "node:path";
 import type { TrustStore } from "./trust";
 import type { SkillStore } from "./skills";
 import type { ResolvedStyle } from "./output-styles";
+import { LEGACY_INSTRUCTIONS_FILE, LEGACY_PROJECT_DIR, resolveLegacyProjectDir, resolveLegacyProjectPath } from "./legacy-project-files";
+import type { Settings } from "../settings";
 
 export const BASE_PROMPT = [
   "You are Winter, an agentic assistant running on the user's Mac.",
@@ -207,6 +209,7 @@ export class ContextAssembler {
   private readonly caps: Required<AssemblerCaps>;
   private readonly memory?: MemoryContextConfig;
   private readonly styleResolver?: (cwd: string | null) => ResolvedStyle | null;
+  private readonly legacySettings?: () => Settings | null;
   constructor(deps: {
     winterHome: string;
     trust: TrustStore;
@@ -215,6 +218,11 @@ export class ContextAssembler {
     caps?: AssemblerCaps;
     memory?: MemoryContextConfig;
     styleResolver?: (cwd: string | null) => ResolvedStyle | null;
+    /** Phase 9c (P9c-4): live settings getter for the legacy project-instructions/project-dir read-only fallback —
+     *  absent means "never fall back" (every pre-9c caller/test keeps its exact prior behavior).
+     *  Production wires the SAME reassignable `settings` holder every other hot getter in
+     *  `daemon.ts` reads (`() => settings`), never a boot snapshot. */
+    legacySettings?: () => Settings | null;
   }) {
     this.winterHome = deps.winterHome;
     this.trust = deps.trust;
@@ -222,6 +230,7 @@ export class ContextAssembler {
     this.basePrompt = deps.basePrompt ?? BASE_PROMPT;
     this.memory = deps.memory;
     this.styleResolver = deps.styleResolver;
+    this.legacySettings = deps.legacySettings;
     this.caps = {
       instructionsBytes: deps.caps?.instructionsBytes ?? 32768,
       memoryLines: deps.caps?.memoryLines ?? 200,
@@ -323,11 +332,33 @@ export class ContextAssembler {
     const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
     sections.push(`Today's date is ${today}.`);
 
-    const userInstr = readCapped(join(this.winterHome, "WINTER.md"), this.caps.instructionsBytes);
+    // Phase 9c (P9c-4): live gate + accumulator for the legacy read-only fallback — collected
+    // across every reader below into ONE combined deprecation-notice line, pushed once at the end
+    // of this block, rather than one line per reader.
+    //
+    // `legacySettings` ABSENT (every pre-9c caller/test) means "this feature does not exist for
+    // this caller" — never falls back, regardless of what `legacyProjectFilesReadEnabled`'s own
+    // null-input default would say. That default (ON) only applies once a caller HAS opted in by
+    // supplying the dep and it evaluates to `null` (settings genuinely failed to load in
+    // production) — the same "absent config vs. dep-present-but-null" distinction the `memory` dep
+    // just above already draws (see its own doc comment).
+    const legacyFallbackEnabled = this.legacySettings !== undefined;
+    const legacySettingsValue = legacyFallbackEnabled ? this.legacySettings!() : null;
+    const legacyNoticePaths: string[] = [];
+    const resolveInstr = (winterPath: string, legacyPath: string) =>
+      legacyFallbackEnabled ? resolveLegacyProjectPath(winterPath, legacyPath, legacySettingsValue) : { path: winterPath, usedLegacy: false };
+    const resolveRulesDir = (winterDir: string, legacyDir: string) =>
+      legacyFallbackEnabled ? resolveLegacyProjectDir(winterDir, legacyDir, legacySettingsValue) : { dir: winterDir, usedLegacy: false };
+
+    const userInstrResolved = resolveInstr(join(this.winterHome, "WINTER.md"), join(this.winterHome, LEGACY_INSTRUCTIONS_FILE));
+    if (userInstrResolved.usedLegacy) legacyNoticePaths.push(userInstrResolved.path);
+    const userInstr = readCapped(userInstrResolved.path, this.caps.instructionsBytes);
     if (userInstr) sections.push(`## User instructions (~/.winter/WINTER.md)\n${userInstr}`);
 
     if (cwd && trusted) {
-      const projInstr = readCapped(join(cwd, "WINTER.md"), this.caps.instructionsBytes);
+      const projInstrResolved = resolveInstr(join(cwd, "WINTER.md"), join(cwd, LEGACY_INSTRUCTIONS_FILE));
+      if (projInstrResolved.usedLegacy) legacyNoticePaths.push(projInstrResolved.path);
+      const projInstr = readCapped(projInstrResolved.path, this.caps.instructionsBytes);
       if (projInstr) sections.push(`## Project instructions (WINTER.md)\n${projInstr}`);
     }
 
@@ -338,7 +369,9 @@ export class ContextAssembler {
     // unbounded prompt; `readCapped` truncates each file to whatever of that budget remains, and
     // files are read in sorted filename order for determinism.
     if (cwd && trusted) {
-      const rulesDir = join(cwd, ".winter", "rules");
+      const rulesResolved = resolveRulesDir(join(cwd, ".winter", "rules"), join(cwd, LEGACY_PROJECT_DIR, "rules"));
+      if (rulesResolved.usedLegacy) legacyNoticePaths.push(rulesResolved.dir);
+      const rulesDir = rulesResolved.dir;
       let files: string[] = [];
       try { files = readdirSync(rulesDir).filter((f) => f.endsWith(".md")).sort(); } catch { /* no rules dir → none */ }
       const parts: string[] = [];
@@ -356,6 +389,15 @@ export class ContextAssembler {
         }
       }
       if (parts.length) sections.push(`## Project rules (.winter/rules/)\n${parts.join("\n\n")}`);
+    }
+
+    // Phase 9c (P9c-4): ONE combined deprecation notice, covering every legacy path any reader
+    // above actually fell back to this turn — never one line per reader. Session-level system
+    // text via the SAME mechanism as every other section here (no new SessionEvent variant).
+    if (legacyNoticePaths.length > 0) {
+      sections.push(
+        `Winter is reading legacy project files read-only: ${legacyNoticePaths.join(", ")}. Run \`winter migrate-project\` to convert them to their Winter-named equivalents.`,
+      );
     }
 
     // File-based memory (MEMDIR, T1; bucket switch added by Dreaming Phase 7b): supersedes the

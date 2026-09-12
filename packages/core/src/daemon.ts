@@ -537,6 +537,10 @@ export async function startDaemon(opts: {
       if (!s) { console.error(`output-style: unknown style "${name}" — using default`); return null; }
       return s;
     },
+    // Phase 9c (P9c-4): the SAME reassignable `settings` holder every other hot getter here reads —
+    // a settings-watcher reload swaps a NEW object into this binding, so this always sees the
+    // current value, never a boot snapshot.
+    legacySettings: () => settings,
   });
   // T2 (design doc "migration importer"): one-time-per-fact, idempotent best-effort import of
   // Phase 5b's MemoryStore facts into MEMDIR files, run at boot whenever memory.enabled's
