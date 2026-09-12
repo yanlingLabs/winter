@@ -215,6 +215,23 @@ export interface NormaRuntimeSdk {
    */
   selectRuntimeFor(input: { mode: SessionMode; model?: string; persisted?: RuntimeSelection }): Promise<RuntimeSelection | SelectionRefusal>;
   /**
+   * P8c handoff fix: the raw `SelectionInput` a fresh decision would use, built from the SAME live
+   * facts `selectRuntimeFor` reads (catalog, credential presence, official-peer availability) but
+   * returned as DATA rather than run through `selectRuntime`.
+   *
+   * WHY THIS EXISTS. `handoff.ts`'s `selectionInputFor` hands the router's barrier a `SelectionInput`
+   * so `barrier.plan()` can review destination servability against this deployment's real catalog and
+   * credentials — the router's OWN unregistered default (this file's `handoff.selectionInputFor`
+   * fallback, above) synthesizes an empty one instead ("ABSENT MEANS UNREVIEWED, NOT ASSUMED-FINE").
+   * `handoff.ts` has no reach into `deps.secrets`/the official peer/the catalog — this is the one
+   * door those facts leave this module through, for that lane, without duplicating the construction.
+   *
+   * OPTIONAL: a hand-built test double for this interface (several exist — `handoff.test.ts`,
+   * `session-driver.test.ts`) need not implement it; `handoff.ts` treats its absence as "no
+   * `selectionInputFor` to register" rather than a crash.
+   */
+  buildSelectionInput?(input: { mode: SessionMode; model?: string; persisted?: RuntimeSelection }): Promise<SelectionInput>;
+  /**
    * P8c-14 (Neighbours' contracts, for lane 4): registers the live handoff participants + the
    * fresh-selection reviewer, AFTER construction — `createRuntimeSdk({ handoff })` is fixed at
    * construction time, but the daemon's session-driver table (where a `HandoffSourceOwner`/
@@ -441,6 +458,24 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
     ...advisorFrom(deps),
   });
 
+  // P8c handoff fix: the ONE construction `selectRuntimeFor` and `buildSelectionInput` both run —
+  // factored out so the fresh-decision door (`selectRuntimeFor`) and the raw-data door
+  // (`buildSelectionInput`, for `handoff.ts`'s barrier review) can never drift into two answers for
+  // the same session.
+  const buildSelectionInput = async (input: { mode: SessionMode; model?: string; persisted?: RuntimeSelection }): Promise<SelectionInput> => {
+    const credentials = await credentialPresenceFrom(deps.secrets);
+    return {
+      mode: input.mode,
+      requested: { ...(input.model === undefined ? {} : { model: input.model }) },
+      families: familyListingFromCatalog(),
+      credentials,
+      hasClaudePeer: officialModule !== undefined,
+      claudeOauthApproved: D14_CLAUDE_OAUTH_APPROVED_DEFAULT,
+      ...(input.persisted === undefined ? {} : { persisted: input.persisted }),
+      versions: selectionVersionsFrom(sdk.versions),
+    };
+  };
+
   // sessionId → that session's graceful teardown and its abort controller. Keyed by session so a
   // resumed session replaces its predecessor's entry rather than accumulating one.
   const live = new Map<string, { abort: AbortController; end: () => Promise<void> }>();
@@ -489,24 +524,15 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
       return resolution instanceof ClaudeExecutableUnavailable ? resolution : { path: resolution.path };
     },
     async selectRuntimeFor(input: { mode: SessionMode; model?: string; persisted?: RuntimeSelection }): Promise<RuntimeSelection | SelectionRefusal> {
-      const credentials = await credentialPresenceFrom(deps.secrets);
       try {
-        return selectRuntime({
-          mode: input.mode,
-          requested: { ...(input.model === undefined ? {} : { model: input.model }) },
-          families: familyListingFromCatalog(),
-          credentials,
-          hasClaudePeer: officialModule !== undefined,
-          claudeOauthApproved: D14_CLAUDE_OAUTH_APPROVED_DEFAULT,
-          ...(input.persisted === undefined ? {} : { persisted: input.persisted }),
-          versions: selectionVersionsFrom(sdk.versions),
-        });
+        return selectRuntime(await buildSelectionInput(input));
       } catch (err) {
         if (err instanceof SelectionRefusedError) return err.refusal;
         if (typeof err === "object" && err !== null && isSelectionRefusal(err)) return err;
         throw err;
       }
     },
+    buildSelectionInput,
     registerHandoffParticipants(p: HandoffParticipants): void {
       handoffParticipants.current = p;
     },
