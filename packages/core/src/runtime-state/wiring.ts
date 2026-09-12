@@ -29,7 +29,7 @@ import { backfillNativeSessions, type BackfillReport } from "./migrations/backfi
 import { applyMemoryKeyMigration, memoryKeyRelocations, planMemoryKeyMigration, reconcileMemoryKeyManifest, type MemoryKeyFs } from "./migrations/memory-keys";
 import { RuntimeSessionRecords } from "./records";
 import { recoverRuntimeState, type RecoveryHooks, type RecoveryReport } from "./recovery";
-import { deleteSessionRuntimeState, retentionFromSettings, sweepRetention } from "./retention";
+import { deleteSessionRuntimeState, pruneSinkCalls, retentionFromSettings, sweepRetention } from "./retention";
 
 /** WS-16 §16's housekeeping cadence. Hourly is deliberate: both windows are measured in DAYS, so a
  *  sweep is only ever removing rows that crossed a horizon since the last pass. */
@@ -91,7 +91,7 @@ export interface RuntimeStateWiring {
   lastBackfill: BackfillReport | null;
   /** One retention pass, reading the windows LIVE. Also the door a test drives instead of waiting
    *  out the hourly interval. */
-  sweepNow(): Promise<{ deliveriesPruned: number; leasesPruned: number }>;
+  sweepNow(): Promise<{ deliveriesPruned: number; leasesPruned: number; sinkCallsPruned: number }>;
   /** The reaper's/cleaner's `onDelete` hook. Synchronous by signature because both callers are, so
    *  the async §16 deletion is queued onto one chain and never interleaves with itself. */
   onSessionDeleted(sessionId: string): void;
@@ -368,15 +368,23 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
     runMemoryKeyMigration(deps.settings());
 
     // ── §16 retention: at boot, then hourly, always off the LIVE windows ─────────────────────────
-    const sweepNow = async (): Promise<{ deliveriesPruned: number; leasesPruned: number }> => {
-      if (closing) return { deliveriesPruned: 0, leasesPruned: 0 };
-      return await sweepRetention(directory, retentionFromSettings(deps.settings() ?? undefined));
+    const sweepNow = async (): Promise<{ deliveriesPruned: number; leasesPruned: number; sinkCallsPruned: number }> => {
+      if (closing) return { deliveriesPruned: 0, leasesPruned: 0, sinkCallsPruned: 0 };
+      const retention = retentionFromSettings(deps.settings() ?? undefined);
+      const swept = await sweepRetention(directory, retention);
+      // P8d-13: shares the SAME retention read as the router's own sinks above — one settings read,
+      // one window, never two sources of truth about what "old" means for a durable dedupe table.
+      const sinkCallsPruned = pruneSinkCalls(rs, retention);
+      return { ...swept, sinkCallsPruned };
     };
     const sweep = async (): Promise<void> => {
       try {
         const swept = await sweepNow();
-        if (swept.deliveriesPruned > 0 || swept.leasesPruned > 0) {
-          log(`runtime retention: pruned ${swept.deliveriesPruned} receipted deliver(ies), ${swept.leasesPruned} released name lease(s)`);
+        if (swept.deliveriesPruned > 0 || swept.leasesPruned > 0 || swept.sinkCallsPruned > 0) {
+          log(
+            `runtime retention: pruned ${swept.deliveriesPruned} receipted deliver(ies), ${swept.leasesPruned} released name lease(s), ` +
+              `${swept.sinkCallsPruned} sink call record(s)`,
+          );
         }
       } catch (e) {
         log(`runtime retention sweep failed (it runs again at the next interval): ${errName(e)}`);

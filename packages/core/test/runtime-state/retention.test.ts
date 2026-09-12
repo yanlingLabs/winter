@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   ChildProfiles, ProjectionCheckpoints, RuntimeChildren, RuntimeLeases, RuntimeSessionRecords, archiveSession,
-  createSqliteRuntimeDirectoryStore, deleteSessionRuntimeState, openRuntimeStateDb, retentionFromSettings,
+  createSqliteRuntimeDirectoryStore, deleteSessionRuntimeState, openRuntimeStateDb, pruneSinkCalls, retentionFromSettings,
   sweepRetention, type RuntimeStateDb,
 } from "../../src/runtime-state";
 import { Settings } from "../../src/settings";
@@ -422,6 +422,50 @@ describe("archiveSession", () => {
         // A running session is not retired behind its own back; it is stopped first.
         expect(() => archiveSession(records, "s_live")).toThrow(/running → archived/);
         expect(records.get("s_live")!.state).toBe("running");
+      } finally {
+        rs.close();
+      }
+    });
+  });
+});
+
+describe("pruneSinkCalls (P8d-13)", () => {
+  test("prunes rows past the deliveries window, leaves recent ones", async () => {
+    await withTempHome(async (home) => {
+      const rs = openRuntimeStateDb(home);
+      try {
+        const now = Date.now();
+        rs.db.run("INSERT INTO runtime_sink_calls (winter_session_id, generation, call_id, at) VALUES (?, 1, 'old', ?)", ["s1", now - 40 * DAY]);
+        rs.db.run("INSERT INTO runtime_sink_calls (winter_session_id, generation, call_id, at) VALUES (?, 1, 'recent', ?)", ["s1", now - 5 * DAY]);
+        const pruned = pruneSinkCalls(rs, retentionFromSettings(undefined)); // default 30-day window
+        expect(pruned).toBe(1);
+        const remaining = rs.db.query<{ call_id: string }, []>("SELECT call_id FROM runtime_sink_calls").all().map((r) => r.call_id);
+        expect(remaining).toEqual(["recent"]);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("a narrowed window prunes more, with no daemon restart", async () => {
+    await withTempHome(async (home) => {
+      const rs = openRuntimeStateDb(home);
+      try {
+        const now = Date.now();
+        rs.db.run("INSERT INTO runtime_sink_calls (winter_session_id, generation, call_id, at) VALUES (?, 1, 'a', ?)", ["s1", now - 2 * DAY]);
+        expect(pruneSinkCalls(rs, retentionFromSettings(undefined))).toBe(0); // 30-day default keeps it
+        expect(pruneSinkCalls(rs, { deliveriesMs: DAY, nameLeasesMs: DAY })).toBe(1); // 1-day window drops it
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("an empty table is a no-op", async () => {
+    await withTempHome(async (home) => {
+      const rs = openRuntimeStateDb(home);
+      try {
+        expect(pruneSinkCalls(rs, retentionFromSettings(undefined))).toBe(0);
       } finally {
         rs.close();
       }

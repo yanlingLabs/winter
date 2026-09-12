@@ -1,6 +1,8 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import type { NewSessionEvent } from "@norma/protocol";
-import { sinksFor, type ProjectedToolCall, type ProjectedToolResult, type RoutineSink } from "../../src/runtime-sdk/sinks";
+import { createSinkCallStore, sinksFor, type ProjectedToolCall, type ProjectedToolResult, type RoutineSink } from "../../src/runtime-sdk/sinks";
+import { openRuntimeStateDb } from "../../src/runtime-state/db";
+import { withTempHome } from "../runtime-state/support";
 
 const SESSION = "s_sinks_test";
 
@@ -167,4 +169,80 @@ test("schedule create: a RoutineStore validation failure is logged, not thrown, 
   sinks.onToolCall(call({ name: "schedule", callId: "tu-cron-11", argsJson: JSON.stringify({ cron: "0 9 * * *", prompt: "x" }) }));
   expect(() => sinks.onToolResult(toolResult({ callId: "tu-cron-11", output: JSON.stringify({ id: "w-11" }) }))).not.toThrow();
   expect(errors.length).toBeGreaterThan(0);
+});
+
+// ── P8d-13: the durable half of the dedupe ──────────────────────────────────────────────────────
+
+describe("createSinkCallStore + a restarted daemon", () => {
+  test("a restarted daemon (a fresh `sinks` instance over the SAME db) does not re-notify the same callId", async () => {
+    await withTempHome(async (home) => {
+      const rs = openRuntimeStateDb(home);
+      try {
+        const durable = createSinkCallStore(rs);
+        const events1: NewSessionEvent[] = [];
+        // "Before the restart": one daemon process, one sinks instance, one call.
+        const before = sinksFor({
+          routines: fakeRoutines(),
+          emit: (e) => { events1.push(e); },
+          attachedCount: () => 0,
+          durable,
+        });
+        before.onToolCall(call({ callId: "tu-restart-1", generation: 1, argsJson: JSON.stringify({ message: "before restart", status: "proactive" }) }));
+        expect(events1).toHaveLength(1);
+
+        // "After the restart": a BRAND NEW sinks instance (empty in-memory `seen`), same db, same
+        // generation — the projector replaying its own tail on resume is exactly this shape.
+        const events2: NewSessionEvent[] = [];
+        const after = sinksFor({
+          routines: fakeRoutines(),
+          emit: (e) => { events2.push(e); },
+          attachedCount: () => 0,
+          durable: createSinkCallStore(rs), // a fresh store handle too — the table is what persists
+        });
+        after.onToolCall(call({ callId: "tu-restart-1", generation: 1, argsJson: JSON.stringify({ message: "before restart", status: "proactive" }) }));
+        expect(events2).toHaveLength(0); // the durable store already knew this (sessionId, generation, callId)
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("the SAME callId in a DIFFERENT generation is a genuinely new call, not a replay", async () => {
+    await withTempHome(async (home) => {
+      const rs = openRuntimeStateDb(home);
+      try {
+        const durable = createSinkCallStore(rs);
+        const events: NewSessionEvent[] = [];
+        const sinks = sinksFor({ routines: fakeRoutines(), emit: (e) => { events.push(e); }, attachedCount: () => 0, durable });
+        sinks.onToolCall(call({ callId: "tu-1", generation: 1, argsJson: JSON.stringify({ message: "gen 1", status: "proactive" }) }));
+        sinks.onToolCall(call({ callId: "tu-1", generation: 2, argsJson: JSON.stringify({ message: "gen 2", status: "proactive" }) }));
+        expect(events).toHaveLength(2);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("without a generation, the durable door is skipped — the in-memory `seen` set is still the guard within one process", () => {
+    const rs = { db: { query: () => ({ get: () => { throw new Error("must not be reached — no generation supplied"); } }), run: () => { throw new Error("must not be reached"); } } } as never;
+    const durable = createSinkCallStore(rs);
+    const events: NewSessionEvent[] = [];
+    const sinks = sinksFor({ routines: fakeRoutines(), emit: (e) => { events.push(e); }, attachedCount: () => 0, durable });
+    const c = call({ callId: "tu-no-gen", argsJson: JSON.stringify({ message: "no generation", status: "proactive" }) });
+    sinks.onToolCall(c);
+    sinks.onToolCall(c);
+    expect(events).toHaveLength(1); // deduped by the in-memory `seen` set alone
+  });
+
+  test("createSinkCallStore never throws on a broken db — a read failure never suppresses a real notification, a write failure is swallowed", () => {
+    const broken = {
+      db: {
+        query: () => ({ get: () => { throw new Error("db is gone"); } }),
+        run: () => { throw new Error("db is gone"); },
+      },
+    } as never;
+    const durable = createSinkCallStore(broken);
+    expect(durable.hasSeen("s1", 1, "c1")).toBe(false);
+    expect(() => durable.markSeen("s1", 1, "c1")).not.toThrow();
+  });
 });

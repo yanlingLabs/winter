@@ -260,7 +260,7 @@ describe("daemon wiring — the retention sweep reads settings live", () => {
       await rt.directory.deliveries.put(receipted("recent", 5 * 86_400_000));
 
       // The shipped 30-day window: the 40-day-old receipt goes, the 5-day-old one stays.
-      expect(await rt.sweepNow()).toEqual({ deliveriesPruned: 1, leasesPruned: 0 });
+      expect(await rt.sweepNow()).toEqual({ deliveriesPruned: 1, leasesPruned: 0, sinkCallsPruned: 0 });
       expect(await rt.directory.deliveries.get("recent")).toBeDefined();
 
       writeSettings(home, { runtimes: { retention: { deliveriesDays: 1 } } });

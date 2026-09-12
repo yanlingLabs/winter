@@ -69,6 +69,18 @@ export async function sweepRetention(
   return { deliveriesPruned, leasesPruned };
 }
 
+/**
+ * P8d-13: prune `runtime_sink_calls` past the SAME deliveries window `sweepRetention` already reads
+ * for the router's own durable sinks — the table exists for an identical purpose (crash-durable
+ * replay dedupe) at an identical cost profile, so it shares that cutoff rather than inventing a
+ * second setting. `at` is stored as epoch milliseconds (`sinks.ts`'s `createSinkCallStore`); the
+ * cutoff here is computed the same way, in the same unit, so the two never disagree about "old".
+ */
+export function pruneSinkCalls(rs: RuntimeStateDb, retention: RuntimeRetention, now: () => Date = () => new Date()): number {
+  const cutoff = now().getTime() - retention.deliveriesMs;
+  return rs.db.run("DELETE FROM runtime_sink_calls WHERE at < ?", [cutoff]).changes;
+}
+
 export interface DeleteSessionRuntimeStateDeps {
   rs: RuntimeStateDb;
   records: RuntimeSessionRecords;
