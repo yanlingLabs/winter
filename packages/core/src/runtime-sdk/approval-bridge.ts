@@ -81,6 +81,21 @@ export interface CanUseToolDeps {
   log?: BridgeLogger;
   /** Test seam; defaults to `Date.now`. */
   now?: () => number;
+  /**
+   * P8c-14 (integration round 2): lane 2's `planBridgeFor(...)` (`runtime-sdk/plan-bridge.ts`),
+   * consulted here BEFORE the generic gate/never-prompt logic whenever the incoming call is
+   * `ExitPlanMode` (Winter's own spelling — `tool-names.ts`'s `WINTER_NORMA_TOOL_PAIRS` maps it to
+   * `exit_plan_mode`, but the dispatch switch below sees the WIRE name). Typed as the Interfaces
+   * block's original `(req: BridgedApprovalRequest) => Promise<PermissionResult>` — the concrete
+   * `PlanBridge.onExitPlanMode` actually takes `BridgedPlanRequest` (`BridgedApprovalRequest` plus
+   * a `plan: string` field plan-bridge.ts's own header comment explains at length); a real
+   * `PlanBridge` still satisfies this narrower method-shorthand type (bivariant method checking,
+   * the same trick `WinterLegDeps.planBridge` uses), and `planRequestFor` below always builds the
+   * WIDER `BridgedPlanRequest`-shaped object so the concrete bridge gets its `plan` field regardless
+   * of what this deps type says. Absent ⇒ `ExitPlanMode` falls through to the ordinary gate path
+   * (today: an unclassified tool name, `"ask"`-shaped) — never a crash, matching every other
+   * optional dep in this file. */
+  planBridge?: { onExitPlanMode(req: BridgedApprovalRequest): Promise<PermissionResult> };
 }
 
 /** The deny text a policy that never prompts hands back to the model. Copied VERBATIM from
@@ -257,6 +272,39 @@ export function approvalOptionsFromSuggestions(suggestions: readonly PermissionU
  * escalation args; and the safety reviewer. It also performs no rules-store READ, so a standing
  * rule that silences a card today does not silence it here — Winter's own rule stages do that.
  */
+
+/**
+ * `ExitPlanMode`'s `canUseTool` request → the `BridgedApprovalRequest`-shaped object
+ * `deps.planBridge.onExitPlanMode` needs, WIDENED with `plan` (`BridgedPlanRequest`,
+ * `plan-bridge.ts`) so the concrete `planBridgeFor(...)` bridge — which reads `sessionId`,
+ * `callId` and `plan` and nothing else — gets its plan text regardless of what `CanUseToolDeps`'s
+ * own (narrower) method type says. Building a typed variable rather than passing an object literal
+ * is what lets the extra `plan` field through with no cast (an object literal assigned straight
+ * into a call would fail TS's excess-property check; a variable reference structurally satisfying
+ * the narrower type does not, per plan-bridge.ts's own header comment). Every other field mirrors
+ * `raiseCard`'s own record for parity, even though the plan bridge does not read them.
+ */
+function planRequestFor(
+  deps: CanUseToolDeps,
+  toolName: string,
+  gateToolName: string,
+  input: Record<string, unknown>,
+  ctx: Parameters<CanUseTool>[2],
+  now: () => number,
+): BridgedApprovalRequest & { plan: string } {
+  const argsJson = safeArgsJson(input);
+  const summary = approvalCardSummary({ name: gateToolName, argsJson });
+  const issuedAt = now();
+  const expiresAt = issuedAt + NO_PARK_TIMEOUT_MS;
+  const plan = typeof input.plan === "string" ? input.plan : "";
+  return {
+    sessionId: deps.sessionId, callId: ctx.toolUseID, toolName, gateToolName,
+    requestId: ctx.requestId, agentID: ctx.agentID, suggestions: ctx.suggestions,
+    decisionReason: ctx.decisionReason, blockedPath: ctx.blockedPath,
+    summary, issuedAt, expiresAt, plan,
+  };
+}
+
 export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
   const log = deps.log ?? consoleBridgeLogger;
   const now = deps.now ?? (() => Date.now());
@@ -313,6 +361,17 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     // (4) Already aborted: deny without touching the broker or the event stream.
     if (ctx.signal.aborted) {
       return { behavior: "deny", message: `${toolName} was not run — the turn was aborted before the approval could be raised.` };
+    }
+
+    // (4b) P8c-14 (integration round 2): `ExitPlanMode` — Winter's OWN wire name (`tool-names.ts`'s
+    // `WINTER_NORMA_TOOL_PAIRS` maps it to `exit_plan_mode`, but `toolName` here is what the CHILD
+    // called) — is answered through the plan bridge BEFORE the generic gate/never-prompt logic
+    // below: a plan presentation is not a permission decision the mode-based never-prompt rule or
+    // the approval policy should ever see (dispatch/chat never enter plan mode in the first place,
+    // and CODE mode's plan/ask/auto verdicts have nothing to do with "should this plan be shown").
+    // Absent `deps.planBridge` falls straight through to the ordinary path below, unchanged.
+    if (toolName === "ExitPlanMode" && deps.planBridge) {
+      return await deps.planBridge.onExitPlanMode(planRequestFor(deps, toolName, gateToolNameFor(toolName), input, ctx, now));
     }
 
     const policy = policyNow();

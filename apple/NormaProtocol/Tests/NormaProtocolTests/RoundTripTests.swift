@@ -69,6 +69,34 @@ final class RoundTripTests: XCTestCase {
         XCTAssertNil(without.task.metadata)
     }
 
+    /// Winter Phase 8c (P8c-5) — the runtime-annotation fields on `session_created` are additive/
+    /// optional, same with/without pattern as `testTaskGraphFieldsOptional` above: the (now
+    /// extended) `session_created.json` fixture carries all three, and the untouched
+    /// `session_created_with_mode.json` fixture (predates them) still decodes with all three nil.
+    func testSessionCreatedRuntimeAnnotationOptional() throws {
+        guard let withURL = Bundle.module.url(forResource: "session_created", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing session_created.json fixture")
+        }
+        let withData = try Data(contentsOf: withURL)
+        guard case .sessionCreated(let with) = try JSONDecoder().decode(SessionEvent.self, from: withData) else { return XCTFail() }
+        XCTAssertEqual(with.runtimeKind, "winter-agent")
+        XCTAssertEqual(with.providerId, "openai")
+        XCTAssertEqual(with.modelRef, "gpt-5.6-sol")
+
+        let reencoded = try JSONEncoder().encode(SessionEvent.sessionCreated(with))
+        guard case .sessionCreated(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(with, redecoded)
+
+        guard let withoutURL = Bundle.module.url(forResource: "session_created_with_mode", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing session_created_with_mode.json fixture")
+        }
+        let withoutData = try Data(contentsOf: withoutURL)
+        guard case .sessionCreated(let without) = try JSONDecoder().decode(SessionEvent.self, from: withoutData) else { return XCTFail() }
+        XCTAssertNil(without.runtimeKind)
+        XCTAssertNil(without.providerId)
+        XCTAssertNil(without.modelRef)
+    }
+
     /// Phase 5e T1 (reviewer maturity — the NormaKit-trap task): the NEW `tool_review` variant
     /// decodes with its verdict/toolName/reason/summary intact — this is what proves the exhaustive
     /// switches + codec were actually synced, not just that the union compiles.

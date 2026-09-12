@@ -1,3 +1,4 @@
+import { takeFileDiff } from "../runtime-sdk/diff-attach";
 import type { ProjectedEvent, ProtocolSdkMessage } from "./types";
 
 /**
@@ -38,6 +39,38 @@ export interface ResultFrame extends Rec { type: "result"; subtype: string; perm
 export interface StreamEventFrame extends Rec { type: "stream_event"; event: Rec; parent_tool_use_id?: string | null }
 /** `{type:"system", subtype:"init", model, tools, session_id, …}` — `frames.d.ts:546-561`. */
 export interface InitFrame extends Rec { type: "system"; subtype: "init"; session_id?: string; model?: string; tools?: unknown }
+
+/**
+ * A mirror error on the OFFICIAL stream (P8c-11 / Task 2.2, WS-16 §13's "mirror row"): the
+ * router's own JSONL mirror of the official runtime's session onto Winter's compat store fell out
+ * of sync with what the child actually wrote. `runtime-state/recovery.ts`'s step-6 handoff check
+ * already names the daemon-side consequence — `records.setTranscriptHealth(id, "repair-required")`
+ * — for exactly this fact when IT detects the mismatch; this guard is the projector's OWN door for
+ * the case where the mismatch is reported ON THE WIRE, inline in a live turn, rather than only
+ * caught by a later handoff-time reconciliation pass.
+ *
+ * **NO PINNED SHAPE EXISTS for this today.** `@yanlinglabs/winter-runtime-sdk`'s
+ * `official-sdk-shapes.d.ts` types `OfficialQuery` as `AsyncIterable<unknown>` precisely because
+ * the router passes the official SDK's own message stream through verbatim (`OfficialSdkModule`'s
+ * one method promises nothing else) — there is no seam-side contract to read a "mirror_error"
+ * shape off of, and lane 1's e2e recordings (`test/fixtures/official/*.jsonl`) had not landed by
+ * the time this lane ran. This guard is therefore **PROVISIONAL**: it recognises the two shapes a
+ * frame family named "mirror error" would plausibly take, following this file's own `type`/
+ * `subtype` convention (`kindOf`, `projector/hooks.ts`) — a top-level `{type:"mirror_error", …}`
+ * frame, or a `system`-family `{type:"system", subtype:"mirror_error", …}` one — and reads an
+ * optional `detail`/`reason` string field under either shape. The whole-branch review is expected
+ * to re-verify this against a real recorded frame once one exists; until then this is best-effort,
+ * never a claim that the real shape is confirmed.
+ */
+export interface MirrorErrorFrame extends Rec { detail?: string }
+
+export function asMirrorErrorFrame(m: ProtocolSdkMessage): MirrorErrorFrame | undefined {
+  const r = m as Rec;
+  const isMirrorError = r.type === "mirror_error" || (r.type === "system" && r.subtype === "mirror_error");
+  if (!isMirrorError) return undefined;
+  const detail = typeof r.detail === "string" ? r.detail : typeof r.reason === "string" ? r.reason : undefined;
+  return detail !== undefined ? { detail } : {};
+}
 
 const hasContent = (m: unknown): m is { content: ContentBlock[] } =>
   isRec(m) && Array.isArray((m as Rec).content) && ((m as Rec).content as unknown[]).every((b) => isRec(b) && typeof (b as Rec).type === "string");
@@ -158,6 +191,13 @@ export function toolResultOutput(block: ContentBlock): string {
  * mis-fold in this file that would be invisible in every unit test that only feeds declared shapes.
  * `interrupted: true` (the in-flight block an interrupt cancels, `[interrupted]`) is likewise an
  * error result, not a success.
+ *
+ * M5 (whole-branch review): `fileDiff` is taken here — `takeFileDiff(sessionId, callId)`
+ * (`runtime-sdk/diff-attach.ts`) — the ONE place a `tool_result` event is emitted for a completed
+ * call, so it is also the one place the hooks lane's PostToolUse-produced diff summary (attached
+ * under the SAME sessionId/toolUseId) can be handed to the persisted event. A take is destructive
+ * (`diff-attach.ts`'s own doc), so a replayed `tool_result` never re-attaches a diff — the summary
+ * rides the event exactly once, the same turn it was produced on.
  */
 export function toolResults(frame: UserFrame, sessionId: string, threadId: string): ProjectedEvent[] {
   const out: ProjectedEvent[] = [];
@@ -166,7 +206,8 @@ export function toolResults(frame: UserFrame, sessionId: string, threadId: strin
     const callId = str(b.tool_use_id);
     if (callId === undefined || callId.length === 0) continue;
     const isError = b.is_error === true || b.denied === true || b.interrupted === true;
-    out.push({ type: "tool_result", sessionId, threadId, callId, output: toolResultOutput(b), isError });
+    const fileDiff = takeFileDiff(sessionId, callId);
+    out.push({ type: "tool_result", sessionId, threadId, callId, output: toolResultOutput(b), isError, ...(fileDiff === undefined ? {} : { fileDiff }) });
   }
   return out;
 }

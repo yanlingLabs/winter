@@ -33,13 +33,13 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { classifyPermissionMode } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { PermissionClassLabel } from "@yanlinglabs/winter-agent-sdk/messaging";
-import type { EffortLevel, McpServerConfig, ProviderConnectionConfig } from "@yanlinglabs/winter-agent-sdk";
+import type { EffortLevel, McpServerConfig, Options, PermissionResult, ProviderConnectionConfig } from "@yanlinglabs/winter-agent-sdk";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
-import type { RuntimeDirectoryEntry, RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
+import { isSelectionRefusal, type RuntimeDirectoryEntry, type RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import type { SecretStore } from "../auth/secret-store";
 import type { ApprovalBroker } from "../agent/approvals";
-import type { PermissionGate } from "../agent/gate";
+import type { PermissionGate, SessionApprovalPolicy } from "../agent/gate";
 import type { QuestionBroker } from "../agent/questions";
 import { NORMA_CAPABILITY_TOOLS, assertNoCapabilityCollision, type CapabilityServerRecord, type CapabilitySession } from "../capabilities";
 import { createProjector, type Projector } from "../projector";
@@ -48,13 +48,14 @@ import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
 import { winterOptionsFromSettings, type Settings } from "../settings";
-import { canUseToolFor } from "./approval-bridge";
+import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import type { NormaRuntimeSdk, SessionMode } from "./create";
-import { credentialPresenceFrom } from "./keychain";
+import { clearSession } from "./diff-attach";
+import { credentialPresenceFrom, credentialRefFor } from "./keychain";
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
-import { attachWinterSession } from "./messaging";
+import { attachOfficialSession, attachWinterSession } from "./messaging";
 import { buildWinterOptions, permissionModeFor } from "./mode-options";
-import { providerSelectionFor } from "./provider-selection";
+import { catalogRowsFor, providerSelectionFor, testProviderNameFor } from "./provider-selection";
 import { normaSessions } from "./sessions";
 import { NORMA_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
@@ -62,6 +63,9 @@ import { DISPATCH_EFFORT, DISPATCH_MODEL } from "../agent/dispatch-config";
 import type { AgentRegistry } from "../agent/bg-agent-registry";
 import type { ContextAssembler } from "../agent/context";
 import { startWinterSession, unconsumedUserMessages, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
+import { ClaudeExecutableUnavailable } from "./official-executable";
+import { startOfficialSession, type OfficialSession } from "./official-session";
+import type { OfficialInputDeps, OfficialSessionInput } from "./official-options";
 
 export type WinterLegRefusalCode =
   | "winter_executable_unavailable"   // P8b-2: no `winter` binary resolves (setting → env → bundle → home)
@@ -70,7 +74,43 @@ export type WinterLegRefusalCode =
   // `session_unrecorded` (fix wave F2) is minted by `ipc/server.ts` directly — a session with NO
   // record at all (phone-owned, `createSynced`) never reaches the table's own refusals.
   | "winter_session_ended"            // the driver said the store refused it for good
-  | "not_supported_on_winter_leg";    // `session.compact` (SDK 0.0.4 carry)
+  | "not_supported_on_winter_leg"     // `session.compact` (SDK 0.0.4 carry)
+  | "claude_executable_unavailable"   // P8c-3: no `claude` binary resolves for an official-leg create
+  | "runtime_selection_refused";      // P8c-14: the router's selectRuntime refused this session's model
+
+/**
+ * P8c-14: the intersection of `WinterSession`'s and `OfficialSession`'s public members — everything
+ * the IPC layer and this table's own `evict`/`list`/`endAll`/`runTurn` need, on EITHER leg, without
+ * caring which one a given driver actually is. Deliberately excludes `query`/`turnStartedAt`
+ * (Winter-only; nothing outside `winter-session.ts` reads them) and `resumed`'s callers never
+ * needed cross-leg parity beyond the boolean itself.
+ */
+export interface LegSession {
+  readonly sessionId: string;
+  readonly backendSessionId: string;
+  readonly mode: SessionMode;
+  readonly state: "live" | "resumable" | "ended";
+  readonly generation: number;
+  readonly resumed: boolean;
+  readonly init: { sessionId?: string; model?: string; tools: string[] } | undefined;
+  readonly turnRunning: boolean;
+  /** Present on both legs (`WinterSession`/`OfficialSession` both track it) — `daemon.ts`'s
+   *  `list_sessions` activity surface reads it across whichever leg a session is actually on. */
+  readonly turnStartedAt: number | undefined;
+  readonly done: Promise<void>;
+  readonly pendingSends: readonly string[];
+  readonly heldDeliveries: readonly string[];
+  send(text: string, clientName?: string): Promise<{ seq: number; queued: boolean }>;
+  steer(text: string, clientName?: string): Promise<{ seq: number; injected: boolean }>;
+  interrupt(): Promise<{ wasRunning: boolean }>;
+  compact(): Promise<never>;
+  setModel(model?: string): Promise<void>;
+  setPolicy(policy: SessionApprovalPolicy): Promise<void>;
+  end(): Promise<void>;
+  deliver(text: string): void;
+  open(): Promise<void>;
+  idle(): Promise<void>;
+}
 
 export class WinterLegRefusal extends Error {
   constructor(readonly code: WinterLegRefusalCode, message: string) {
@@ -137,9 +177,37 @@ export interface WinterLegDeps {
    *  `norma__<key>` server refuses the session typed (`assertNoCapabilityCollision`). */
   extraMcpServers?: (session: CapabilitySession) => Record<string, McpServerConfig>;
   log?: (line: string) => void;
+  /**
+   * P8c-14 (integration round 2): lane 2's `planBridgeFor(...)` module — this file never imports
+   * it, only threads a value of this shape through to both legs' `CanUseToolDeps.planBridge`
+   * (`approval-bridge.ts`, consulted BEFORE the generic gate/never-prompt logic when
+   * `toolName === "ExitPlanMode"`). Now typed EXACTLY as `CanUseToolDeps.planBridge` (widened from
+   * the original `unknown`-shaped placeholder once a real consumer existed on both legs) — the
+   * Winter path passes it straight into `canUseToolFor` below; the official path passes it into
+   * `assembleOfficial`'s `canUseToolDeps` (`officialBrokerFor` reads the SAME field).
+   */
+  planBridge?: { onExitPlanMode(req: BridgedApprovalRequest): Promise<PermissionResult> };
+  /**
+   * P8c-14 (integration round 2): lane 3's `sessionHooksFor(...)` module — this file never imports
+   * it, only threads its result through. `.official` is wired into the official leg's
+   * `OfficialInputDeps.hooks` below (`assembleOfficial`'s own `inputDeps()`); `.winter` is now
+   * threaded into the Winter incarnation's `buildWinterOptions({..., hooks})` call above (`.winter`
+   * TYPED as `Options["hooks"]`, not `unknown`, since `mode-options.ts`'s `WinterOptionsInput.hooks`
+   * needs that exact type and `sessionHooksFor(...).winter` already produces it).
+   */
+  hooksFor?: (session: CapabilitySession) => { winter?: Options["hooks"]; official?: unknown };
   /** Test seams. */
   idleTimeoutMs?: () => number;
   endGraceMs?: number;
+  /**
+   * TEST ONLY — never set by production `daemon.ts` wiring (fix round 1, M2): the ONLY way an
+   * official-leg e2e reaches a loopback fake is a real `anthropic:default` credential PLUS this
+   * override, injected the same way `startDaemon`'s own test callers already inject a fake
+   * provider — never an ambient env var (the deleted `NORMA_OFFICIAL_TEST_BASE_URL` hatch). Mirrors
+   * the `winter-test/<name>` double's own shape: a value only a test constructs, threaded through
+   * an explicit parameter, inert unless a caller supplies one.
+   */
+  officialConnectionOverride?: () => { explicitConnectionEnv?: Readonly<Record<string, string>>; authFamily?: RuntimeSelection["authFamily"] } | undefined;
 }
 
 export interface WinterSessionDrivers {
@@ -150,22 +218,23 @@ export interface WinterSessionDrivers {
   /** Refuse (typed) unless a Winter-leg session of this mode could be created right now. Runs
    *  BEFORE the product row is minted, so a refusal costs nothing. */
   assertAvailable(mode: SessionMode): void;
-  /** The Winter half of the creation transaction, for a session row that already exists: persist
-   *  the record (fresh backend uuid), start the driver, register it. Throws `WinterLegRefusal`. */
-  create(sessionId: string): Promise<WinterSession>;
+  /** The creation transaction, for a session row that already exists: decide the leg
+   *  (`runtime.selectRuntimeFor`), persist the record (fresh backend uuid), start the driver,
+   *  register it. Throws `WinterLegRefusal`. P8c-14: may return either leg's session. */
+  create(sessionId: string): Promise<LegSession>;
   /** The live driver, if any. */
-  get(sessionId: string): WinterSession | undefined;
+  get(sessionId: string): LegSession | undefined;
   /** One HEADLESS turn (routines, the -p path): the session's driver (created for a session that
    *  has no record yet, resumed otherwise), `send`, then wait until nothing is in flight. */
   runTurn(sessionId: string, text: string, clientName: string): Promise<void>;
-  /** A live driver, or a resumed one when the record says "winter"; undefined ⇒ no Winter
+  /** A live driver, or a resumed one when the record says "winter"/"official"; undefined ⇒ no
    *  transcript to resume (an engine-era or record-less session — the IPC layer refuses typed). */
-  ensure(sessionId: string): Promise<WinterSession | undefined>;
+  ensure(sessionId: string): Promise<LegSession | undefined>;
   /** The session was DELETED (the reaper, the cleaner): end its child (bounded) and forget the
    *  driver — a live child never outlives its session (the reaper's 600 s grace is shorter than
    *  the 900 s idle timer). Never throws. */
   evict(sessionId: string): Promise<void>;
-  list(): WinterSession[];
+  list(): LegSession[];
   /** End every live driver (bounded each). Shutdown reaches them through `trackQuery` anyway; this
    *  is the door a test drives. */
   endAll(): Promise<void>;
@@ -220,7 +289,7 @@ export function childrenSinkFor(registry: AgentRegistry, sessionId: string, log:
 }
 
 export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDrivers {
-  const drivers = new Map<string, WinterSession>();
+  const drivers = new Map<string, LegSession>();
   const log = deps.log ?? ((): void => {});
   const sdkVersion = NORMA_PEER_VERSIONS.winterAgentSdk;
 
@@ -275,6 +344,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       approvals: deps.approvals, questions: deps.questions, gate: deps.gate,
       emit: (event) => { deps.hub.append(sessionId, event); },
       threadId: "main",
+      // P8c-14 (integration round 2): `ExitPlanMode` on the Winter leg now answers through the
+      // controller-wired plan bridge (see `WinterLegDeps.planBridge`'s own doc comment).
+      ...(deps.planBridge === undefined ? {} : { planBridge: deps.planBridge }),
     });
 
     /** Predictive, and exact: the driver appends every batch synchronously right after the projector
@@ -314,9 +386,21 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const selection = providerSelectionFor(model, credentials);
       // P8b-30: a BYO `openai-compatible` endpoint travels as the provider's connection, or the
       // catalog's `openai` row would route it to api.openai.com.
+      //
+      // Fix wave item 2 (measured against a real child): `local: true` is a DELIBERATE
+      // compatibility decision, not an oversight — the SAME one `providers/runtime-provider.ts`'s
+      // own `createOpenAiCompatibleRuntimeProvider` already makes for the identical setting.
+      // Without it the Winter runtime's own endpoint policy refuses a loopback/private-address
+      // base URL outright ("points at a loopback address but the connection is not declared
+      // local"), which — measured — is not merely a test-fixture inconvenience: it silently
+      // broke every real self-hosted/LAN `openai-compatible` endpoint (Ollama, LM Studio, a local
+      // gateway) on the Winter leg, even though Norma's own `openai-compatible` provider type has
+      // never had an endpoint allowlist ("arbitrary API models are legitimate there" — the SAME
+      // doc comment `runtime-provider.ts` cites). A no-op for an ordinary public HTTPS endpoint
+      // (the address-class check never triggers for one).
       const connection: ProviderConnectionConfig | undefined =
         settings?.provider?.type === "openai-compatible" && selection?.providerId === "openai"
-          ? { baseUrl: settings.provider.baseUrl, endpointOrigin: "user" }
+          ? { baseUrl: settings.provider.baseUrl, endpointOrigin: "user", local: true }
           : undefined;
       const capSession: CapabilitySession = {
         sessionId, mode, cwd,
@@ -367,6 +451,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         capabilities: { ...extra, ...capabilities } as CapabilityServerRecord,
         ...(connection === undefined ? {} : { connection }),
         resume: inc.resume,
+        // P8c-14 (integration round 2): the Winter-leg half of lane 3's hooks facade — the official
+        // leg's `inputDeps()` below already threads `.official`; this is that same call's `.winter`.
+        ...(deps.hooksFor === undefined ? {} : { hooks: deps.hooksFor(capSession).winter }),
       });
     };
 
@@ -416,6 +503,152 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     return session;
   };
 
+  /**
+   * P8c-14: the official leg's per-session assembly, mirroring `assemble()`'s shape as closely as
+   * the two legs' state machines allow (same `append`/titler hook, same capability-record source).
+   * SYNCHRONOUS on purpose — `ensure()`'s "no await from map-miss to drivers.set" invariant (see
+   * `assemble`'s own callers) applies to this leg too, and `runtime.officialPeerSync()`/
+   * `claudeExecutableFor()` are both synchronous accessors for exactly this reason.
+   */
+  const assembleOfficial = (sessionId: string, backendSessionId: string, persistedSelection: RuntimeSelection): OfficialSession => {
+    const runtime = deps.runtime!;
+    const records = deps.records;
+    const meta = deps.store.meta(sessionId);
+    const mode = modeOf(meta.mode);
+    const cwd = winterCwdOf(sessionId, meta.cwd);
+    // TEST-ONLY (see `officialConnectionOverride` on `WinterLegDeps`): the LIVE query's own
+    // selection is widened to the injected `authFamily` (a loopback needs `custom` so the
+    // env-allowlist's family-shape check does not itself refuse `ANTHROPIC_BASE_URL`) — never the
+    // PERSISTED record, which keeps the router's real decision.
+    const connectionOverride = deps.officialConnectionOverride?.();
+    const selection: RuntimeSelection = connectionOverride?.authFamily === undefined
+      ? persistedSelection
+      : { ...persistedSelection, authFamily: connectionOverride.authFamily };
+
+    let claimedInBatch = 0;
+    const append = (event: Parameters<SessionHub["append"]>[1]) => {
+      const stamped = deps.hub.append(sessionId, event);
+      claimedInBatch = 0;
+      if (deps.titler !== undefined && event.type === "turn_completed") {
+        const threadId = (event as { threadId?: string }).threadId;
+        const stop = (event as { stopReason?: string }).stopReason;
+        if ((threadId === undefined || threadId === "main") && stop !== "error") {
+          try { void deps.titler.maybeTitle(sessionId); } catch { /* maybeTitle never throws by contract; belt only */ }
+        }
+      }
+      return stamped;
+    };
+
+    const capSessionFor = (): CapabilitySession => ({
+      sessionId, mode, cwd,
+      roots: deps.rootsOf(sessionId),
+      tmpDir: deps.tmpDirOf(sessionId),
+      outDir: deps.outDirOf(sessionId),
+    });
+
+    const sessionInput = (): OfficialSessionInput => {
+      const live = deps.store.meta(sessionId);
+      let primary: string | undefined = live.cwd ?? undefined;
+      let extraDirs: string[] = [];
+      try {
+        const rows = deps.store.dirs(sessionId).map((d) => d.path);
+        primary ??= rows[0];
+        extraDirs = primary === undefined ? [] : rows.filter((d) => d !== primary);
+      } catch { /* a session with no dirs row: workdir-less */ }
+      return {
+        sessionId, mode,
+        cwd: primary ?? cwd,
+        outDir: deps.outDirOf(sessionId),
+        extraDirs,
+        ...(live.effort === undefined ? {} : { effort: live.effort }),
+        ...(live.origin === undefined ? {} : { origin: live.origin }),
+      };
+    };
+
+    const inputDeps = async (): Promise<OfficialInputDeps> => {
+      const live = deps.store.meta(sessionId);
+      const capSession = capSessionFor();
+      const capabilities = deps.buildSessionCapabilities(capSession);
+      const hooks = deps.hooksFor?.(capSession).official;
+      // The SAME credential read `optionsFor` (the Winter incarnation builder, above) makes per
+      // incarnation — `officialCredentialPlan`'s auto-derivation (`official-options.ts`) needs this
+      // provider's `authRef` to inject `ANTHROPIC_API_KEY` at spawn.
+      const credentials = await credentialPresenceFrom(deps.secrets);
+      const provider = providerSelectionFor(live.model, credentials);
+      // TEST-ONLY (`WinterLegDeps.officialConnectionOverride`, fix round 1 M2 — never an ambient
+      // env var, never set by production `daemon.ts` wiring): a loopback fake needs
+      // `ANTHROPIC_BASE_URL` beside the key, which the `api-key` family's own variable set does
+      // not include (WS-14 §12) — the SAME reason the router's own door-bed test widens to
+      // `authFamily: "custom"` (done above, in `assembleOfficial`). `custom` needs the credential
+      // named explicitly too (`officialCredentialPlan` refuses to guess it for that family), so
+      // this still derives the REAL keychain ref for the provider the router actually selected —
+      // only the CONNECTION is test-injected, never the credential material.
+      const testOverrides = connectionOverride === undefined || provider?.providerId === undefined ? {} : {
+        explicitCredentials: [{ variable: "ANTHROPIC_API_KEY", ref: credentialRefFor(provider.providerId) ?? provider.authRef! }],
+        ...(connectionOverride.explicitConnectionEnv === undefined ? {} : { explicitConnectionEnv: connectionOverride.explicitConnectionEnv }),
+      };
+      return {
+        home: deps.home,
+        selection,
+        ...(provider === undefined ? {} : { provider }),
+        ...testOverrides,
+        officialPeer: runtime.officialPeerSync(),
+        claudeExecutableFor: () => runtime.claudeExecutableFor(),
+        assembler: deps.assembler ?? { assemble: () => "" },
+        capabilities,
+        canUseToolDeps: {
+          approvals: deps.approvals, questions: deps.questions, gate: deps.gate,
+          emit: (event) => { deps.hub.append(sessionId, event); },
+          home: deps.home, threadId: "main",
+          ...(live.origin === undefined ? {} : { origin: live.origin }),
+          // A getter, same as the Winter incarnation builder's own `canUseTool` above — a
+          // `session.setPolicy` mid-session is seen by the NEXT approval, not just the next open().
+          policy: () => deps.store.meta(sessionId).approvalPolicy,
+          // P8c-14 (integration round 2): the SAME plan bridge the Winter leg wires above —
+          // `officialBrokerFor` (official-options.ts) reads this field the identical way.
+          ...(deps.planBridge === undefined ? {} : { planBridge: deps.planBridge }),
+        },
+        policy: live.approvalPolicy,
+        ...(hooks === undefined ? {} : { hooks }),
+      };
+    };
+
+    const projectorFor = (generation: number): Projector =>
+      createProjector({
+        sessionId, mode,
+        generation,
+        winterSessionId: sessionId,
+        runtimeKind: "claude-agent",
+        nextSeq: () => deps.store.lastSeq(sessionId) + (++claimedInBatch),
+        checkpoint: deps.checkpoints!,
+        now: () => new Date().toISOString(),
+        log: {
+          warn: (message, fields) => log(`${message} ${fields === undefined ? "" : JSON.stringify(fields)}`.trim()),
+        },
+      });
+
+    const session = startOfficialSession({
+      sessionId, backendSessionId, mode, runtime, selection,
+      sessionInput,
+      inputDeps,
+      projector: projectorFor,
+      append,
+      broadcast: (event) => { deps.hub.broadcastTransient(sessionId, event); },
+      messaging: {
+        attach: attachOfficialSession,
+        facts: () => {
+          const title = deps.store.getTitle(sessionId) ?? undefined;
+          const record = records?.get(sessionId);
+          return { ...(title === undefined ? {} : { title }), cwd, ...(record === undefined ? {} : { selection: record.selection }) };
+        },
+      },
+      records,
+      log,
+    });
+    drivers.set(sessionId, session);
+    return session;
+  };
+
   /** `selection.reason` is what `norma doctor` and the app render for "why is this session on that
    *  runtime" — it narrates a FACT, never a flag: since Task 17 the Winter leg is the only leg
    *  (fix wave F12 retired the "settings.runtimes.winterLeg.<mode> is on" wording, which named a
@@ -431,7 +664,106 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     decidedAt: new Date().toISOString(),
   });
 
-  const create = async (sessionId: string): Promise<WinterSession> => {
+  /**
+   * P8c-14: the router's decision for a NEW session, or `undefined` when the selector must not be
+   * consulted at all. FOUR deliberate bail-outs, each preserving today's Winter-only behaviour
+   * byte-for-byte rather than risking a regression on a case the selector was never meant to judge:
+   *
+   *   1. No `selectRuntimeFor` on the handle — a partial test double (`session-driver.test.ts`'s
+   *      own fake `NormaRuntimeSdk`, which implements only `spawnHookFor`/`trackQuery`/`untrack`).
+   *   2. `winter-test/<name>` — the double-selection convention (`testProviderNameFor`): it is
+   *      chosen by env var, never by the catalog, and the listing has no row for it AT ALL, so
+   *      `selectRuntime` refuses every such session outright (measured) — exactly the models every
+   *      existing Winter e2e creates.
+   *   3. `meta.model` unset — the session named no model of its own. Today's Winter path resolves
+   *      one LATER, inside `optionsFor`, from `settings.provider.model` live at OPEN time; asking
+   *      the selector to judge an as-yet-undecided model is not what P8c-12 means by "decides the
+   *      leg for a session", and the router refuses an empty `requested` unconditionally (measured)
+   *      — which would turn "no model configured yet" into a hard `session.create` failure for
+   *      every mode. Once a model-picker UI sets `meta.model` explicitly (8d), this bail-out stops
+   *      firing for that session.
+   *   4. (Fix round 1, M5) The model has NO ROW IN THE PINNED CATALOG AT ALL —
+   *      `catalogRowsFor(model).length === 0` — e.g. a custom `provider.baseUrl` endpoint's own
+   *      model id, which `providerSelectionFor`'s own doc calls "served by no inventory provider …
+   *      letting the child's own catalog-first selection answer, never a host-side throw". The
+   *      selector has NOTHING to route on for a name it does not recognise at all — this is exactly
+   *      that same "the child decides" case, not the D13 "we know the family, we lack the
+   *      credential" refusal, so it keeps today's literal too. A model the catalog DOES recognise
+   *      (e.g. a Claude model) but no provider can serve is NOT this bail-out — that stays a real,
+   *      typed `runtime_selection_refused` (bail-out 4 checks the catalog, not the credential map).
+   *
+   * Outside those four cases the router's answer — including a REFUSAL — is honoured: a Claude
+   * model with no configured credential is `runtime_selection_refused`, never a silent Winter
+   * fallback (D13's own "never a substitution").
+   */
+  const decideRuntime = async (mode: SessionMode, model: string | undefined): Promise<RuntimeSelection | undefined> => {
+    if (typeof deps.runtime?.selectRuntimeFor !== "function") return undefined;
+    if (model === undefined || testProviderNameFor(model) !== undefined) return undefined;
+    if (catalogRowsFor(model).length === 0) return undefined;
+    const decided = await deps.runtime.selectRuntimeFor({ mode, model });
+    if (isSelectionRefusal(decided)) throw new WinterLegRefusal("runtime_selection_refused", decided.detail);
+    return decided;
+  };
+
+  const createOfficial = async (sessionId: string, selection: RuntimeSelection): Promise<LegSession> => {
+    const records = deps.records!;
+    const meta = deps.store.meta(sessionId);
+    const cwd = winterCwdOf(sessionId, meta.cwd);
+    const executable = deps.runtime!.claudeExecutableFor();
+    if (executable instanceof ClaudeExecutableUnavailable) {
+      throw new WinterLegRefusal("claude_executable_unavailable", executable.message);
+    }
+    const backendSessionId = randomUUID();
+    const transcriptKey = transcriptProjectKey(cwd);
+    // m5: the same locator-only rule the Winter path follows (records.ts's own rule: never
+    // material, just where to find it) — `credentialRefFor` is this leg's OWN source of truth for
+    // "is this provider one of Norma's keychain-backed slots", the identical function the Winter
+    // path's `explicitCredentials` build already calls (`credentialRefFor(provider.providerId) ??
+    // provider.authRef!` above). `selection.providerId` is "anthropic" for a real Claude selection,
+    // so this resolves to `keychain:anthropic:default`.
+    const authRef = credentialRefFor(selection.providerId);
+    try {
+      records.create({
+        winterSessionId: sessionId,
+        runtimeKind: "claude-agent",
+        backendSessionId,
+        providerId: selection.providerId,
+        modelRef: selection.modelRef,
+        ...(authRef?.kind === "keychain" ? { authRef: `keychain:${authRef.account}` } : {}),
+        backendRoot: join(deps.home, "projects", transcriptKey),
+        effectiveTempDir: deps.tmpDirOf(sessionId),
+        transcriptProjectKey: transcriptKey,
+        memoryProjectKey: deps.memoryKeyOf(cwd),
+        tempProjectKey: transcriptKey,
+        transcriptDialect: "claude-code-jsonl",
+        transcriptHealth: "clean",
+        compatibilityLevel: "agent-state",
+        conformanceCorpusVersion: "unverified",
+        versionProvenance: "recorded",
+        sdkVersion: selection.sdkVersion,
+        engineVersion: selection.sdkVersion,   // the official SDK's own version (P8c-14)
+        providerCatalogVersion: catalogVersion(),
+        providerAdapterVersion: "unstated",
+        capabilities: ["message", "resume"],
+        selection,
+      });
+      records.transition(sessionId, "ready");
+    } catch (err) {
+      throw new WinterLegRefusal("winter_leg_unavailable", `the runtime record for ${sessionId} could not be written (${err instanceof Error ? err.name : "unknown"})`);
+    }
+    const session = assembleOfficial(sessionId, backendSessionId, selection);
+    try {
+      await session.open();
+    } catch (err) {
+      drivers.delete(sessionId);
+      if (err instanceof WinterLegRefusal) throw err;
+      if (err instanceof ClaudeExecutableUnavailable) throw new WinterLegRefusal("claude_executable_unavailable", err.message);
+      throw new WinterLegRefusal("winter_leg_unavailable", `the official child for ${sessionId} could not be started (${err instanceof Error ? err.name : "unknown"})`);
+    }
+    return session;
+  };
+
+  const create = async (sessionId: string): Promise<LegSession> => {
     const meta = deps.store.meta(sessionId);
     const mode = modeOf(meta.mode);
     // The executable was asserted by the caller BEFORE the product row was minted (`session.create`);
@@ -441,11 +773,17 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     const records = deps.records!;
     const settings = deps.settings();
     const cwd = winterCwdOf(sessionId, meta.cwd);
+
+    const decided = await decideRuntime(mode, meta.model);
+    if (decided !== undefined && decided.runtimeKind === "claude-agent") {
+      return createOfficial(sessionId, decided);
+    }
+
     const backendSessionId = randomUUID();
     const transcriptKey = transcriptProjectKey(cwd);
     const credentials = await credentialPresenceFrom(deps.secrets);
     const selection = providerSelectionFor(meta.model, credentials);
-    const providerId = selection?.providerId ?? settings?.provider?.type ?? "unstated";
+    const providerId = decided?.providerId ?? selection?.providerId ?? settings?.provider?.type ?? "unstated";
     const authFamily: RuntimeSelection["authFamily"] = settings?.provider?.type === "openai-compatible" ? "api-key" : "custom";
     try {
       records.create({
@@ -471,7 +809,10 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         providerCatalogVersion: catalogVersion(),
         providerAdapterVersion: "unstated",
         capabilities: ["message", "resume"],
-        selection: selectionFor(mode, meta.model, providerId, authFamily),
+        // P8c-14: the router's OWN decision when it was consulted (persisted verbatim — "the
+        // persisted selection wins", never re-derived); the pre-8c hand-built literal only when
+        // `decideRuntime` deliberately did not ask (see that function's own three bail-outs).
+        selection: decided ?? selectionFor(mode, meta.model, providerId, authFamily),
       });
       records.transition(sessionId, "ready");
     } catch (err) {
@@ -498,9 +839,32 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
    * `assemble` only because its caller holds the freshly minted row nobody else can address yet.
    * `session-driver.test.ts` pins the race.
    */
-  const resume = async (sessionId: string): Promise<WinterSession> => {
+  const resumeOfficial = async (sessionId: string, record: RuntimeSessionRecord): Promise<LegSession> => {
+    const executable = deps.runtime!.claudeExecutableFor();
+    if (executable instanceof ClaudeExecutableUnavailable) {
+      throw new WinterLegRefusal("claude_executable_unavailable", executable.message);
+    }
+    // P8c-14: "the persisted selection wins" (D13's own rule) — resume reads `record.selection`
+    // BY IDENTITY, never re-decides through `selectRuntimeFor`.
+    const session = assembleOfficial(sessionId, record.backendSessionId!, record.selection);
+    try {
+      await session.open();
+    } catch (err) {
+      drivers.delete(sessionId);
+      if (err instanceof WinterLegRefusal) throw err;
+      if (err instanceof ClaudeExecutableUnavailable) throw new WinterLegRefusal("claude_executable_unavailable", err.message);
+      throw new WinterLegRefusal("winter_leg_unavailable", `the official child for ${sessionId} could not be resumed (${err instanceof Error ? err.name : "unknown"})`);
+    }
+    return session;
+  };
+
+  const resume = async (sessionId: string): Promise<LegSession> => {
     const record = recordOf(sessionId);
-    if (sessionLegOf(record) !== "winter" || record?.backendSessionId === undefined) {
+    const leg = sessionLegOf(record);
+    if (leg === "official" && record !== undefined) {
+      return resumeOfficial(sessionId, record);
+    }
+    if (leg !== "winter" || record?.backendSessionId === undefined) {
       throw new WinterLegRefusal("session_predates_winter_leg", `session ${sessionId} predates the Winter leg (it has no Winter transcript); start a new session`);
     }
     const mode = modeOf(deps.store.meta(sessionId).mode);
@@ -517,6 +881,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     return session;
   };
 
+  /** P8c-14: a leg the table can actually resume/create a driver on. */
+  const isResumableLeg = (leg: SessionLeg | undefined): boolean => leg === "winter" || leg === "official";
+
   return {
     legForNewSession: legForNew,
     legOf: (sessionId) => sessionLegOf(recordOf(sessionId)),
@@ -526,23 +893,27 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     async ensure(sessionId) {
       const live = drivers.get(sessionId);
       if (live !== undefined) return live;
-      if (sessionLegOf(recordOf(sessionId)) !== "winter") return undefined;
+      if (!isResumableLeg(sessionLegOf(recordOf(sessionId)))) return undefined;
       return resume(sessionId);   // synchronous up to `drivers.set` — see the invariant above
     },
     async runTurn(sessionId, text, clientName) {
-      const session = drivers.get(sessionId) ?? (sessionLegOf(recordOf(sessionId)) === "winter" ? await resume(sessionId) : await create(sessionId));
+      const session = drivers.get(sessionId) ?? (isResumableLeg(sessionLegOf(recordOf(sessionId))) ? await resume(sessionId) : await create(sessionId));
       await session.send(text, clientName);
       await session.idle();
     },
     async evict(sessionId) {
       const session = drivers.get(sessionId);
       drivers.delete(sessionId);
+      // M5 (whole-branch review): `diff-attach.ts`'s pending map is per-session and in-memory —
+      // an evicted session's own PostToolUse attachments (a call whose matching `tool_result`
+      // never made it into the log before eviction) must not linger forever under a dead id.
+      clearSession(sessionId);
       if (session === undefined) return;
       try { await session.end(); } catch (err) { log(`evicting ${sessionId}: end failed (${err instanceof Error ? err.name : "unknown"})`); }
     },
     list: () => [...drivers.values()],
     async endAll() {
-      await Promise.all([...drivers.values()].map((s) => s.end().catch(() => {})));
+      await Promise.all([...drivers.entries()].map(([sessionId, s]) => s.end().catch(() => {}).finally(() => clearSession(sessionId))));
     },
   };
 }

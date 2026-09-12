@@ -71,6 +71,11 @@ export interface RuntimeSessionRecord {
   state: RuntimeSessionState;
   generation: number;
   selection: RuntimeSelection;
+  /** Winter Phase 8c (P8c-6): set once, by `runtime-sdk/import-legacy.ts`'s `importEngineEraSession`,
+   *  when THIS record's transcript was converted from an engine-era log rather than native to the
+   *  Winter leg from creation. `undefined` for every other record — including one imported before
+   *  this column existed, which is the honest "unknown" rather than a fabricated "no". */
+  importedFrom?: "engine-era";
 }
 
 /** What a caller supplies: the record minus everything `create` stamps itself. */
@@ -97,6 +102,20 @@ export type RuntimeSessionPatch = Partial<
     | "capabilities"
     | "lastVerifiedClaudeConsumer"
     | "lastVerifiedWinterConsumer"
+    // Winter Phase 8c (P8c-6): `importEngineEraSession` patches all three of these ALONGSIDE the
+    // state transition it drives the record through — a new backend transcript (`backendSessionId`,
+    // already above), a health it can now claim (`transcriptHealth`, already above) and its own
+    // ceiling (`compatibilityLevel` is unchanged in practice — an engine-era row is already
+    // "conversation" — but the setter exists so a future, richer import need not add a second one)
+    // plus the marker itself.
+    | "compatibilityLevel"
+    | "importedFrom"
+    // Winter Phase 8c (P8c-14/Task 4.1): a certified handoff's OWN write — the destination leg's
+    // `confirmInit` patches both together (never one without the other: a `runtimeKind` naming a
+    // leg the `selection` doesn't agree with is exactly the "two copies of D13 would drift" shape
+    // P8c-12 warns about), and reverts both together if `confirmInit` ends up refusing after all.
+    | "runtimeKind"
+    | "selection"
   >
 >;
 
@@ -219,6 +238,7 @@ interface SessionRow {
   state: string;
   generation: number;
   selection_json: string;
+  imported_from: string | null;
 }
 
 interface GenerationDbRow {
@@ -253,7 +273,7 @@ const SESSION_COLUMNS =
   "active_local_write_root_kind, effective_temp_dir, transcript_project_key, memory_project_key, temp_project_key, transcript_dialect, transcript_health, " +
   "compatibility_level, conformance_corpus_version, last_verified_claude_consumer, last_verified_winter_consumer, sdk_version, engine_version, " +
   "provider_catalog_version, provider_adapter_version, version_provenance, created_at, updated_at, last_projected_cursor, parent_winter_session_id, " +
-  "capabilities_json, state, generation, selection_json";
+  "capabilities_json, state, generation, selection_json, imported_from";
 
 /** `?, ?, …` for every column in `SESSION_COLUMNS` — derived rather than counted by hand so the
  *  placeholder list can never drift from the column list. */
@@ -271,6 +291,10 @@ const PATCH_COLUMNS: ReadonlyArray<readonly [keyof RuntimeSessionPatch, string]>
   ["capabilities", "capabilities_json"],
   ["lastVerifiedClaudeConsumer", "last_verified_claude_consumer"],
   ["lastVerifiedWinterConsumer", "last_verified_winter_consumer"],
+  ["compatibilityLevel", "compatibility_level"],
+  ["importedFrom", "imported_from"],
+  ["runtimeKind", "runtime_kind"],
+  ["selection", "selection_json"],
 ];
 
 const DUPLICATE_BACKEND_ID = /UNIQUE constraint failed: runtime_sessions\.backend_session_id/;
@@ -280,7 +304,7 @@ const DUPLICATE_BACKEND_ID = /UNIQUE constraint failed: runtime_sessions\.backen
  *  `transcriptHealth` a NULL is a refusal the schema would raise, and for `capabilities` an
  *  undefined used to serialise as `[]`, which silently emptied a list the caller never mentioned.
  *  Emptying the list is still available, and says so: `capabilities: []`. */
-const NON_NULLABLE_PATCH_KEYS: ReadonlySet<keyof RuntimeSessionPatch> = new Set<keyof RuntimeSessionPatch>(["transcriptHealth", "capabilities"]);
+const NON_NULLABLE_PATCH_KEYS: ReadonlySet<keyof RuntimeSessionPatch> = new Set<keyof RuntimeSessionPatch>(["transcriptHealth", "capabilities", "compatibilityLevel", "runtimeKind", "selection"]);
 
 function fromRow(row: SessionRow): RuntimeSessionRecord {
   return {
@@ -317,6 +341,7 @@ function fromRow(row: SessionRow): RuntimeSessionRecord {
     state: row.state as RuntimeSessionState,
     generation: row.generation,
     selection: JSON.parse(row.selection_json) as RuntimeSelection,
+    importedFrom: opt(row.imported_from) as RuntimeSessionRecord["importedFrom"],
   };
 }
 
@@ -379,6 +404,7 @@ export class RuntimeSessionRecords {
             "creating",
             0,
             JSON.stringify(input.selection),
+            input.importedFrom ?? null,
           );
       } catch (e) {
         throw this.mapDuplicate(e, input.backendSessionId);
@@ -430,7 +456,11 @@ export class RuntimeSessionRecords {
         if (!(key in patch)) continue;
         if (patch[key] === undefined && NON_NULLABLE_PATCH_KEYS.has(key)) continue;
         sets.push(`${column} = ?`);
-        values.push(key === "capabilities" ? JSON.stringify(patch.capabilities ?? []) : (patch[key] as string | undefined) ?? null);
+        values.push(
+          key === "capabilities" ? JSON.stringify(patch.capabilities ?? [])
+          : key === "selection" ? JSON.stringify(patch.selection)
+          : (patch[key] as string | undefined) ?? null,
+        );
       }
       values.push(winterSessionId);
       try {

@@ -1,5 +1,5 @@
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
-import type { ProviderSelection } from "@yanlinglabs/winter-agent-sdk";
+import type { ModelFamilyListing, ProviderSelection } from "@yanlinglabs/winter-agent-sdk";
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { NORMA_CREDENTIAL_INVENTORY, credentialRefFor } from "./keychain";
 
@@ -19,7 +19,7 @@ export function testProviderNameFor(model: string | undefined): string | undefin
 
 /** Every catalog row whose id, upstream id, canonical id or alias is `model`. Memoised through
  *  `loadCatalog`, which is itself memoised for the life of the process. */
-function catalogRowsFor(model: string): Array<{ key: string; providerId: string }> {
+export function catalogRowsFor(model: string): Array<{ key: string; providerId: string }> {
   const catalog = loadCatalog();
   return catalog.models.filter((m) =>
     m.key === model || m.upstreamId === model || m.canonicalModelId === model || m.aliases.includes(model),
@@ -96,4 +96,80 @@ export function providerSelectionFor(
 export function inventoryProvidersServing(model: string): string[] {
   const serving = new Set(catalogRowsFor(model).map((r) => r.providerId));
   return NORMA_CREDENTIAL_INVENTORY.filter((s) => serving.has(s.provider)).map((s) => s.provider);
+}
+
+/**
+ * P8c-12: `families` — the ONE `ModelFamilyListing` `selectRuntimeFor` (`create.ts`) builds
+ * `SelectionInput` from, with exactly the fields `select-runtime.ts`'s `candidatesFor`/
+ * `resolveSlot` read (`row.key/providerId/status/servable`, `family.slots[].name/canonicalModelId`).
+ *
+ * `servable` IS ALWAYS `"unknown"` HERE, DELIBERATELY (never `"present"`/`"absent"`) — Norma has no
+ * independent per-provider reachability probe, and the doc on `ModelRowServable` is explicit that
+ * `"unknown"` is the honest answer for a row nobody has probed. The REAL admission gate is
+ * `candidatesFor`'s OWN separate `providerAuthView`/credential check, which this listing does not
+ * duplicate — a row with no configured credential is excluded there regardless of what this
+ * function reports for `servable`.
+ *
+ * `active` is always `undefined` — Norma does not (yet) persist a per-session "active family" the
+ * way `Query.listModelFamilies()` does; the D25 reserved-slot names and the "unique name across
+ * every family" fallback (`resolveSlot`'s own next two rungs) still work with no active set.
+ *
+ * `pricingBasis` is a placeholder ("unknown") — no selection-routing logic this file's own read of
+ * `select-runtime.ts` consumes it (only `key`/`providerId`/`status`/`servable` are read for a
+ * candidate), so inventing a real value here would be exactly the "one place a lane relies on an
+ * inference nobody made" this codebase's own culture warns against — recorded as a carry for
+ * whichever surface eventually renders it.
+ *
+ * M2 (whole-branch review): the router's OWN `resolveModel` (`select-runtime.ts`, the SDK's
+ * compiled code, not ours) matches a requested model against exactly two things — an entry's
+ * `canonicalModelId`, or a row's `key` — because the SDK's `ModelFamilyListing` row shape HAS no
+ * `aliases`/`upstreamId` field to consult at all. `catalogRowsFor` (this file, just above) matches
+ * a broader set — a row's `key`, `upstreamId`, `canonicalModelId` OR any of its `aliases` — which is
+ * exactly right for "does Norma's catalog know this model" (`decideRuntime`'s bail-out #4,
+ * `session-driver.ts`) but WRONG the moment that broader answer is fed to the router as a literal
+ * `requested.model` string: an alias/upstreamId match passes the bail-out (a real catalog row
+ * exists) and then reaches `resolveModel`, which cannot find it anywhere in THIS listing and
+ * refuses ("no model or catalog row … matches") even though the model is unambiguously catalogued.
+ * Fix: for every alias/upstreamId a row answers to, this listing carries one EXTRA row with that
+ * identifier as `key` (same provider/status — a synonym for the SAME row, never a different
+ * provider or a different canonical model), appended AFTER the row's own real entry — so
+ * `resolveModel`'s `row.key === model` check succeeds identically to a direct key/canonicalModelId
+ * request. `candidatesFor`'s own array-order pick (`resolveCandidateRows`'s `[first, ...rest]`)
+ * therefore still stamps the REAL provider-qualified key as `modelRef` whenever both survive its
+ * filters (same provider/status/servable/auth either way) — an alias row never displaces its own
+ * real row, it only adds a second door to the same one. These rows exist ONLY inside the
+ * `SelectionInput` fed to the router's pure functions (`selectRuntime`/`resolveCandidateRows`) —
+ * nothing UI-facing reads `familyListingFromCatalog()`'s output (grep confirms: `create.ts`'s
+ * `buildSelectionInput`/`selectRuntimeFor` are its only callers), so a synthetic `key` here never
+ * reaches a client's model picker.
+ */
+export function familyListingFromCatalog(): ModelFamilyListing {
+  const catalog = loadCatalog();
+  const families = catalog.families.map((family) => {
+    const inFamily = catalog.models.filter((m) => m.modelFamily === family.id);
+    const canonicalIds = [...new Set(inFamily.map((m) => m.canonicalModelId))];
+    const models = canonicalIds.map((canonicalModelId) => {
+      const rows = inFamily.filter((m) => m.canonicalModelId === canonicalModelId);
+      const listedRows = rows.flatMap((r) => {
+        const base = { providerId: r.providerId, status: r.status, pricingBasis: "unknown", servable: "unknown" as const };
+        const synonyms = new Set([r.upstreamId, ...r.aliases]);
+        synonyms.delete(r.key);
+        synonyms.delete(canonicalModelId); // already matched at the entry level; no need to duplicate
+        return [{ key: r.key, ...base }, ...[...synonyms].map((key) => ({ key, ...base }))];
+      });
+      return {
+        canonicalModelId,
+        displayName: rows[0]?.displayName ?? canonicalModelId,
+        rows: listedRows,
+      };
+    });
+    return {
+      id: family.id,
+      displayName: family.displayName,
+      vendor: family.vendor,
+      slots: family.slots.map((s) => ({ name: s.name, canonicalModelId: s.canonicalModelId, description: s.description, reason: s.reason })),
+      models,
+    };
+  });
+  return { active: undefined, families };
 }

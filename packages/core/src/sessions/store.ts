@@ -392,7 +392,17 @@ export class SessionStore {
     // terms (same additive column, same reset-to-undefined on a full index rebuild). Validating it
     // is the CALLER's job, exactly as it is for `model`: which levels a model accepts is provider
     // knowledge, and only `session.create`'s handler knows the session's mode (the tier gate).
-    opts: { cwd?: string; approvalPolicy?: SessionApprovalPolicy; origin?: string; mode?: "code" | "dispatch" | "chat"; parentSessionId?: string; model?: string; effort?: string } = {},
+    opts: {
+      cwd?: string; approvalPolicy?: SessionApprovalPolicy; origin?: string; mode?: "code" | "dispatch" | "chat";
+      parentSessionId?: string; model?: string; effort?: string;
+      // Winter Phase 8c (P8c-5): the seq-1 `session_created`'s runtime annotation. EVENT-ONLY —
+      // no index column, no reset-on-rebuild concern (unlike `mode` above): a row is never queried
+      // or filtered by these, they are just carried onto the event the caller already computes
+      // (the resolved runtimeKind/model — see ipc/server.ts's two call sites). `providerId` has no
+      // producer yet in this phase; the parameter exists so a later phase is a producer change,
+      // not a signature change.
+      runtimeKind?: "claude-agent" | "winter-agent"; providerId?: string; modelRef?: string;
+    } = {},
   ): string {
     if (!SCOPE_RE.test(scope)) throw new Error(`invalid scope: ${scope}`);
     const sessionId = `s_${randomBytes(6).toString("hex")}`;
@@ -415,7 +425,13 @@ export class SessionStore {
       "INSERT INTO sessions (session_id, scope, created_at, last_seq, cwd, approval_policy, origin, mode, parent_session_id, model, effort, dirs) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
       [sessionId, scope, Date.now(), opts.cwd ?? null, opts.approvalPolicy ?? "ask", opts.origin ?? null, opts.mode ?? null, opts.parentSessionId ?? null, opts.model ?? null, opts.effort ?? null, JSON.stringify(dirs)],
     );
-    this.append(sessionId, { type: "session_created", sessionId, scope, ...(opts.mode ? { mode: opts.mode } : {}) });
+    this.append(sessionId, {
+      type: "session_created", sessionId, scope,
+      ...(opts.mode ? { mode: opts.mode } : {}),
+      ...(opts.runtimeKind ? { runtimeKind: opts.runtimeKind } : {}),
+      ...(opts.providerId ? { providerId: opts.providerId } : {}),
+      ...(opts.modelRef ? { modelRef: opts.modelRef } : {}),
+    });
     return sessionId;
   }
 

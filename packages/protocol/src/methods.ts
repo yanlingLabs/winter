@@ -273,6 +273,15 @@ export const SessionListResult = z.object({
       // `turnRunning || bgWork` — the same disjunction `activityFor` calls "work is happening".
       working: z.boolean(),
     }).optional(),
+    // Winter Phase 8c (P8c-14/Task 4.2): which runtime leg the session's RECORD names — "winter-agent"
+    // (the Winter leg, resumed by a spawned `winter` child) or "claude-agent" (the official leg, a
+    // spawned `claude` child). Derived from `opts.winter.legOf(sessionId)` at list time, never stored
+    // on the row itself (the durable fact lives in the runtime-state record, WS-16 §4's
+    // `RuntimeSessionRecord.runtimeKind`). Absent means one of three honest things, never a lie: no
+    // runtime spine on this daemon, an engine-era session with no leg at all, or a session with no
+    // runtime record (a phone-owned row `sync.push` materialised). A picker that wants to render
+    // "which runtime is this on" must therefore treat absence as unknown, not as a default leg.
+    runtimeKind: z.enum(["claude-agent", "winter-agent"]).optional(),
   })),
 });
 
@@ -510,7 +519,19 @@ export const SessionSetPolicyResult = z.object({ ok: z.literal(true) });
 // "explicitly clearing it". Result mirrors skills.write's bare-`{}` idiom (nothing to report beyond
 // success — a thrown RpcFailure is how the daemon reports an unknown sessionId, same NOT_FOUND
 // precedent as session.setPolicy).
-export const SessionSetModelParams = z.object({ sessionId: z.string().min(1), model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).nullable() });
+export const SessionSetModelParams = z.object({
+  sessionId: z.string().min(1),
+  model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).nullable(),
+  // Winter Phase 8c (P8c-5/P8c-14, WS-13 §8.2): a model switch that crosses runtime legs (Winter <->
+  // the official leg) may be LOSSY — the handoff barrier's own warning list (a source with reasoning
+  // state moving to a foreign target, chiefly). Absent/false means "the caller has not confirmed
+  // anything yet"; the daemon refuses a lossy, unconfirmed switch typed
+  // (`handoff_confirmation_required`, carrying the warnings) rather than performing it or silently
+  // downgrading to an in-place model change. Meaningless (and ignored) for a same-leg model change,
+  // which is never lossy. `true` is a one-shot confirmation for THIS call only — it is never stored,
+  // so confirming once does not waive the warning on a later, different switch.
+  confirmLossy: z.boolean().optional(),
+});
 export const SessionSetModelResult = z.object({});
 
 // provider-correctness T4 (spec Component 4): per-session reasoning effort. Its OWN method rather

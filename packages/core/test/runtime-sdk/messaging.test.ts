@@ -18,7 +18,7 @@ import * as winter from "@yanlinglabs/winter-agent-sdk";
 import { createInMemoryRuntimeDirectoryStore, createRuntimeSdk } from "@yanlinglabs/winter-runtime-sdk";
 import type { RuntimeDirectoryStore, RuntimeSdk, SerializedRuntimeAddress } from "@yanlinglabs/winter-runtime-sdk";
 import { NORMA_BRAND } from "../../src/runtime-sdk/brand";
-import { attachWinterSession, parkRecoveredSessions, releaseAllHeld, renderAttributedTurn } from "../../src/runtime-sdk/messaging";
+import { attachOfficialSession, attachWinterSession, parkRecoveredSessions, releaseAllHeld, renderAttributedTurn } from "../../src/runtime-sdk/messaging";
 import type { NormaRuntimeSdk } from "../../src/runtime-sdk/create";
 import { NORMA_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
 
@@ -721,5 +721,53 @@ describe("the wrapper's own refusal path (fix round 1, N2)", () => {
     // is pinned here is that the frame carries the sender's class verbatim — the one fact the
     // receiving model reads to decide how much to trust it.
     expect(renderAttributedTurn(message, { winterSessionId: "someone_else" })).toContain('sender-permission-class="bypasses"');
+  });
+});
+
+// M6b — the official leg's counterpart to `attachWinterSession`. `AttachedOfficialSession` carries
+// no facet (WS-14: "an input-stream push is the whole mechanism"), so there is nothing to assert
+// about children/idle here — only that a delivery addressed to the session's name reaches `push`,
+// which `official-session.ts` wires to `OfficialSession.deliver`.
+describe("attachOfficialSession", () => {
+  test("a delivery addressed to the target's NAME reaches its push sink, receipted `delivered`", async () => {
+    const store = createInMemoryRuntimeDirectoryStore();
+    // A local `createRuntimeSdk` (rather than the shared `harness()`) because this test needs the
+    // OFFICIAL side of the router's `sessionPermissionClass` declaration — `harness()`'s own knob
+    // only wires the Winter one. Without it the receiver's class reads `unknown` and WS-10 §13's
+    // matrix holds the message rather than guessing (a real, orthogonal fact this test is not
+    // about — see the sibling `attachWinterSession` describe block for that matrix's own tests).
+    const spawned: unknown[] = [];
+    const sdk = createRuntimeSdk({
+      peers: { winter: { ...winter, query: ((args: unknown) => { spawned.push(args); throw new Error("a cold resume was attempted"); }) as typeof winter.query } },
+      peerVersions: NORMA_PEER_VERSIONS,
+      keychain: { read: async () => undefined },
+      brand: NORMA_BRAND,
+      directoryStore: store,
+      handoff: { winterHome: "/tmp/norma-messaging-test" },
+      messaging: { messaging: { official: { permissionClass: () => "prompts" } } },
+    });
+    const runtime = { sdk } as unknown as NormaRuntimeSdk;
+    const sender = fakeSession("be_other");
+    attachWinterSession(runtime, { sessionId: "s_other", backendSessionId: sender.backendSessionId, query: sender.query, push: (t) => sender.pushed.push(t) });
+    const delivered: string[] = [];
+    const attached = attachOfficialSession(runtime, { sessionId: "s_c", backendSessionId: "be_c", deliver: (t) => delivered.push(t), displayName: "gamma", mode: "code" });
+    await attached.ready;
+
+    const outcome = await runtime.sdk.messaging.send({
+      from: buildSessionAddress("be_other"),
+      to: "gamma",
+      body: "official leg says hi",
+      originToolCallId: "toolu_off_1",
+    });
+
+    expect(outcome.status).toBe("delivered");
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toContain("official leg says hi");
+
+    const record = await store.deliveries.get(outcome.messageId);
+    expect(record?.outcome?.status).toBe("delivered");
+
+    attached.detach();
+    await attached.ready;
   });
 });

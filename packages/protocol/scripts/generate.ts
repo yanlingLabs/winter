@@ -15,7 +15,13 @@ writeFileSync(join(outDir, "session-event.schema.json"), JSON.stringify(schema, 
 // 2. Canonical fixtures — one per variant; Swift must decode + re-encode all of them.
 const base = { seq: 7, sessionId: "s_fixture", ts: 1781270000000 };
 const fixtures: Record<string, unknown> = {
-  "session_created": { ...base, type: "session_created", scope: "global" },
+  // Winter Phase 8c (P8c-5): the runtime annotation fields extend this SAME canonical fixture
+  // (never a second one — the Swift round-trip test pins the exact fixture COUNT, and
+  // `session_created_with_mode` just below already covers the old/additive-field shape).
+  "session_created": {
+    ...base, type: "session_created", scope: "global",
+    runtimeKind: "winter-agent", providerId: "openai", modelRef: "gpt-5.6-sol",
+  },
   // Dispatch durability follow-up: mode is additive/optional on the EXISTING session_created
   // shape — a dedicated fixture (distinct from session_created.json above) so Swift round-trips
   // one carrying it, mirroring approval_requested_with_reviewer_reason's with/without pattern.

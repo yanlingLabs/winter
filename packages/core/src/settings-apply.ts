@@ -221,6 +221,7 @@ export function makeApply(deps: SettingsApplyDeps): (prev: Settings | null, next
     const disabled = winterLegDisabledKeys(next);
     if (disabled.length > 0) log(`runtimes.winterLeg.{${disabled.join(",")}} = false: the engine leg no longer exists; ignored (every session runs on the Winter leg)`);
     if (before.winterExecutable !== after.winterExecutable) log("runtimes.winterExecutable changed — it takes effect for new sessions");
+    if (before.claudeExecutable !== after.claudeExecutable) log("runtimes.claudeExecutable changed — it takes effect for new sessions on the official leg");
     if (before.advisorModel !== after.advisorModel) log("runtimes.advisorModel changed — it takes effect for new sessions");
     if (before.idleTimeoutSec !== after.idleTimeoutSec) log("runtimes.winterIdleTimeoutSec changed — it takes effect for new sessions");
   }

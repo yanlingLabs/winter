@@ -46,8 +46,12 @@ export type { SessionMode };
  *  P8b-33 added `web` to P8b-12's five: every mode disallows the SDK's built-in WebSearch/WebFetch
  *  in 8b (no keys, no dangerous-domain floor), so code keeps the daemon-owned pair. The fix wave
  *  added `lsp` (review F7): the `lsp` tool was retired on the premise that Winter's own LSP serves
- *  the child, and the measured 0.0.4 advertised set has none. */
-export const CAPABILITY_SERVER_KEYS = ["sessions", "computer", "browser", "office", "research", "web", "lsp"] as const;
+ *  the child, and the measured 0.0.4 advertised set has none. Phase 8c Lane 3 (Task 3.4) added
+ *  `external`: plugin-contributed tools, forwarded to the owning plugin over its existing RPC —
+ *  its tool set is per-plugin and dynamic, so (unlike every other key) it has no corresponding
+ *  `NORMA_CAPABILITY_TOOLS` rows; mode scoping for it lives on each `ExternalToolSource.modes`
+ *  instead (default `["code"]`, `capabilities/server.ts`'s own documented fallback). */
+export const CAPABILITY_SERVER_KEYS = ["sessions", "computer", "browser", "office", "research", "web", "lsp", "external"] as const;
 export type CapabilityServerKey = (typeof CAPABILITY_SERVER_KEYS)[number];
 
 /**

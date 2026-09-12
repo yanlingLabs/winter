@@ -190,6 +190,14 @@ export interface WinterOptionsInput {
   env?: Record<string, string>;
   /** The environment PATH/HOME/TMPDIR are read from. Defaults to `process.env`; a test pins it. */
   baseEnv?: Record<string, string | undefined>;
+  /**
+   * P8c-7 (measured = YES, `test/runtime-sdk/hooks-measure.e2e.test.ts`): `hooks.ts`'s
+   * `sessionHooksFor(...).winter` — plugin manifest hooks, the bash safety reviewer,
+   * diagnostics-after-edit, and the `fileDiff` producer, wired verbatim onto `Options.hooks`.
+   * Absent ⇒ no hooks at all (byte-identical to every pre-8c-Lane-3 session) — the driver decides
+   * whether to build one; this builder never constructs `SessionHooksDeps` itself.
+   */
+  hooks?: Options["hooks"];
 }
 
 /**
@@ -401,6 +409,7 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
   if (input.systemPrompt !== undefined) options.systemPrompt = input.systemPrompt;
   if (input.outputStyle !== undefined) options.outputStyle = input.outputStyle;
   if (input.policy === "bypass") options.allowDangerouslySkipPermissions = true;
+  if (input.hooks !== undefined) options.hooks = input.hooks;
   const provider = providerSelectionFor(input.model, input.credentials);
   if (provider) options.provider = input.connection === undefined ? provider : { ...provider, connection: input.connection };
   // P8b-36: the session's own servers, spread under their own names (see `capabilities` above).
