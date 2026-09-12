@@ -37,7 +37,13 @@ export function preflight(opts: { checks: Record<string, () => string | null> })
 // Distribution backbone (design spec 2026-07-15-release-pipeline-design.md) — GitHub Releases
 // is the sole download host; matches the `origin` remote and project.yml's SUFeedURL. Exported
 // so release.ts's publish tail (gh release URL, cask url) shares this single source of truth.
-export const GH_REPO = "yanlingLabs/norma";
+//
+// P9c-12: the GitHub repo was renamed `norma` -> `winter` — old `yanlingLabs/norma` URLs redirect,
+// but this release (0.2.015, the handoff release) publishes to the new name directly, same as
+// every release after it. This is a controller decision specific to `norma-final` (Lane H owns
+// GH_REPO on this branch), NOT a rename of anything ELSE this frozen, pre-rename tree calls
+// itself — the app, the daemon, the bundle IDs, `~/.norma` all stay Norma-named.
+export const GH_REPO = "yanlingLabs/winter";
 
 /**
  * Renders one Sparkle appcast `<item>` for the update-check enclosure (the `.zip`). Schema
@@ -613,6 +619,105 @@ export function row16IdentityCheck(input: { versionsJsonText: string; platformPa
     strong: true,
     detail: `Row 16 (identity): STRONG — winterSource=platform-package and the embedded pre-sign checksum equals the installed platform package's bin/winter checksum (${installedSha256}).`,
   };
+}
+
+// -----------------------------------------------------------------------------------------------
+// Winter Phase 9c, Lane H: `--embed-winter` — the final Norma release (0.2.015) carries the
+// released, notarized, stapled Winter.app inside `Contents/Resources/Winter.app`. The pure
+// decisions (whether the flag is even required, and whether a candidate path passes the three
+// named checks) live here; the actual shell-outs (`codesign`, `xcrun stapler`, reading the
+// candidate's `Info.plist`) stay in release.ts, which hands their already-computed results in.
+// -----------------------------------------------------------------------------------------------
+
+/** `Winter.app`'s own bundle identifier — the identity `--embed-winter`'s candidate must carry. */
+export const WINTER_APP_BUNDLE_ID = "com.winter.app";
+
+export interface EmbedWinterFlagGateInput {
+  dryRun: boolean;
+  /** `argv` value following `--embed-winter`, or `undefined` when the flag was not passed. */
+  embedWinterPath: string | undefined;
+}
+
+export interface EmbedWinterFlagGateResult {
+  /** "embed": a path was given — release.ts validates + copies it in. "none": no flag, dry run —
+   *  continue with no nested Winter.app (prints "EMBED: none"). "refuse": no flag, NOT a dry run —
+   *  a real handoff release without an embedded Winter.app is a release.ts bug, not a rehearsal. */
+  action: "embed" | "none" | "refuse";
+  failure?: string;
+}
+
+/**
+ * Decides what release.ts's embed step should do with `--embed-winter`, BEFORE any filesystem or
+ * shell work — a dry run may rehearse with no embedded Winter.app at all (`EMBED: none`), but a
+ * real release always requires one.
+ */
+export function embedWinterFlagGate(input: EmbedWinterFlagGateInput): EmbedWinterFlagGateResult {
+  if (input.embedWinterPath) return { action: "embed" };
+  if (input.dryRun) return { action: "none" };
+  return { action: "refuse", failure: "--embed-winter is required for the handoff release" };
+}
+
+export interface EmbedWinterCheckInput {
+  /** The candidate's `Contents/Info.plist` `CFBundleIdentifier`, or `undefined` when the plist is
+   *  missing/unreadable/lacks the key. */
+  bundleIdentifier: string | undefined;
+  /** Result of `codesign --verify --deep --strict` against the candidate bundle. */
+  signatureOk: boolean;
+  /** Result of `xcrun stapler validate` against the candidate bundle. */
+  staplingOk: boolean;
+}
+
+export interface EmbedWinterCheckResult {
+  ok: boolean;
+  failures: string[];
+}
+
+/**
+ * The three named `--embed-winter` gates (Lane H brief, Step 4): the candidate must BE
+ * `com.winter.app`, must carry a real, unbroken signature, and must be notarized+stapled.
+ * Aggregates every failing check at once, same shape as `preflight`/`embedWinterCheck`'s siblings
+ * above — a candidate failing more than one check should say so in a single message.
+ */
+export function embedWinterCheck(input: EmbedWinterCheckInput): EmbedWinterCheckResult {
+  const failures: string[] = [];
+  if (input.bundleIdentifier !== WINTER_APP_BUNDLE_ID) {
+    failures.push(
+      `--embed-winter: CFBundleIdentifier is "${input.bundleIdentifier ?? "(missing)"}", expected "${WINTER_APP_BUNDLE_ID}"`,
+    );
+  }
+  if (!input.signatureOk) {
+    failures.push(`--embed-winter: codesign --verify --deep --strict failed on the candidate Winter.app`);
+  }
+  if (!input.staplingOk) {
+    failures.push(`--embed-winter: xcrun stapler validate failed on the candidate Winter.app — it must be notarized and stapled`);
+  }
+  return { ok: failures.length === 0, failures };
+}
+
+/** The handoff release's exact `gh release create` title (Lane H brief, Step 4). */
+export function handoffReleaseTitle(version: string): string {
+  return `Norma ${version} — Norma is now Winter`;
+}
+
+/**
+ * The handoff release's notes body: names the handoff, the embedded Winter.app's size, and that
+ * this is the last Norma release. `embeddedWinterSizeBytes` is `null` under a flag-less dry run
+ * (`EMBED: none`) — the body still renders, just without a size line, so a rehearsal without
+ * `--embed-winter` can still preview the rest of the notes.
+ */
+export function handoffReleaseBody(i: { version: string; beta: boolean; embeddedWinterSizeBytes: number | null }): string {
+  const sizeLine =
+    i.embeddedWinterSizeBytes === null
+      ? ""
+      : `\n\nThis release embeds Winter.app (${(i.embeddedWinterSizeBytes / (1024 * 1024)).toFixed(1)} MB) and installs it into ` +
+        `/Applications on launch, then hands off and quits.`;
+  return (
+    `Norma ${i.version}${i.beta ? " (beta)" : ""} — Norma is now Winter.\n\n` +
+    `This is the LAST Norma release. On launch it installs the bundled Winter.app into /Applications, ` +
+    `moves your login item and helper registrations over, stops Norma's own daemon, opens Winter, and quits. ` +
+    `Winter migrates your Norma data on its own first start.${sizeLine}\n\n` +
+    `Signed Sparkle appcast entry: releases/appcast.xml.`
+  );
 }
 
 export interface Row16Gate {

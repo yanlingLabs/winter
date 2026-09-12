@@ -75,12 +75,17 @@ import { FORMAT, ROOT, readCanonical } from "./version-lib";
 import {
   GH_REPO,
   NAME_SCAN_EXCLUSIONS,
+  WINTER_APP_BUNDLE_ID,
   appcastInsertPlan,
   appcastItem,
   caskFrom,
   catalogueStaleness,
   dmgStagePlan,
+  embedWinterCheck,
+  embedWinterFlagGate,
   embeddedRuntimesDescriptionLine,
+  handoffReleaseBody,
+  handoffReleaseTitle,
   preflight,
   nameScanPlan,
   publishGuard,
@@ -122,6 +127,11 @@ const RESUME_PUBLISH = argv.includes("--resume-publish");
 // before the platform package is published (or on a machine with no installed copy to verify
 // against). Never silent: every use is echoed in the summary line below.
 const ALLOW_CHECKOUT_WINTER = argv.includes("--allow-checkout-winter");
+// Winter Phase 9c (Lane H): the handoff release's embedded Winter.app — `--embed-winter <path>`.
+// `embedWinterFlagGate` (release-lib.ts) decides what an absent flag means (a dry run may
+// rehearse with none; a real release never may).
+const embedWinterFlagIdx = argv.indexOf("--embed-winter");
+const EMBED_WINTER_PATH = embedWinterFlagIdx === -1 ? undefined : argv[embedWinterFlagIdx + 1];
 
 function fail(msg: string): never {
   console.error(`\nFAIL: ${msg}\n`);
@@ -324,6 +334,43 @@ sh(
 const app = join(dd, "Build", "Products", "Release", "Norma.app");
 if (!existsSync(app)) fail(`build did not produce ${app}`);
 console.log(`Built: ${app}`);
+
+// ---------------------------------------------------------------------------
+// 3a. Embed Winter.app (Winter Phase 9c, Lane H handoff) — AFTER the build, BEFORE 3b's
+//     Sparkle re-sign, whose LAST step re-seals the outer app (`resignPreservingEntitlements
+//     (app)`): Winter.app must already be sitting in Contents/Resources by then so the outer
+//     app's own signature — and the notarization submission a few steps later — covers it.
+//     Winter.app itself is NEVER re-signed here: it arrives already signed, notarized, and
+//     stapled by its OWN separate release, and a bare (non-`--deep`) re-sign of the outer app
+//     bundle does not touch an already-valid nested bundle's own seal — only wraps around it.
+//     That is standard nested-bundle practice; contrast with Sparkle's OWN nested helpers just
+//     below, which get the opposite treatment (explicit re-sign) because they ship ad-hoc-signed
+//     and notarization rejects them as-is.
+// ---------------------------------------------------------------------------
+const embedGate = embedWinterFlagGate({ dryRun: DRY_RUN, embedWinterPath: EMBED_WINTER_PATH });
+if (embedGate.action === "refuse") fail(embedGate.failure!);
+let embeddedWinterSizeBytes: number | null = null;
+if (embedGate.action === "none") {
+  console.log("EMBED: none (no --embed-winter passed — dry run continues with no nested Winter.app)");
+} else {
+  const winterSrc = EMBED_WINTER_PATH!;
+  if (!existsSync(winterSrc)) fail(`--embed-winter: no such path: ${winterSrc}`);
+  const winterSrcPlist = join(winterSrc, "Contents", "Info.plist");
+  if (!existsSync(winterSrcPlist)) fail(`--embed-winter: ${winterSrc} has no Contents/Info.plist — not a valid .app bundle`);
+  const bundleIdentifierProbe = probe(`/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "${winterSrcPlist}"`);
+  const embedValidation = embedWinterCheck({
+    bundleIdentifier: bundleIdentifierProbe.ok ? bundleIdentifierProbe.stdout.trim() : undefined,
+    signatureOk: probe(`codesign --verify --deep --strict "${winterSrc}"`).ok,
+    staplingOk: probe(`xcrun stapler validate "${winterSrc}"`).ok,
+  });
+  if (!embedValidation.ok) fail(`--embed-winter validation failed:\n  ${embedValidation.failures.join("\n  ")}`);
+  const winterDest = join(app, "Contents", "Resources", "Winter.app");
+  rmSync(winterDest, { recursive: true, force: true });
+  sh(`ditto "${winterSrc}" "${winterDest}"`);
+  if (!existsSync(winterDest)) fail(`--embed-winter: ditto did not produce ${winterDest}`);
+  embeddedWinterSizeBytes = Number(sh(`du -sk "${winterDest}"`).trim().split(/\s+/)[0]) * 1024;
+  console.log(`EMBED: Winter.app embedded at ${winterDest} (${(embeddedWinterSizeBytes / (1024 * 1024)).toFixed(1)} MB, ${WINTER_APP_BUNDLE_ID}, validated: identifier + signature + stapling).`);
+}
 
 // ---------------------------------------------------------------------------
 // 3b. Re-sign Sparkle.framework's nested helper binaries (T2 finding, see header comment) —
@@ -1183,6 +1230,7 @@ Artifacts:
   DMG notarization: ${dmgSubmission.id} (${dmgSubmission.status})
   Appcast enclosure signature: ${signResult.testKey ? "EPHEMERAL TEST KEY [DRY-RUN: test key — NOT publishable]" : "production key"}
   Row 16 (winter source): winterSource=${winterSourceOf(embeddedVersions)}, strong=${row16Identity.strong}${!row16Identity.strong && ALLOW_CHECKOUT_WINTER ? " (--allow-checkout-winter)" : ""}
+  Embed: ${embeddedWinterSizeBytes === null ? "none (no --embed-winter)" : `Winter.app embedded (${(embeddedWinterSizeBytes / (1024 * 1024)).toFixed(1)} MB)`}
 
 DRY RUN: publish skipped —
 ${guard.lines.map((l) => `  - ${l}`).join("\n")}
@@ -1206,10 +1254,13 @@ sh(`git push origin v${version}`);
 
 if (guard.action === "publish") {
   console.log(`Publishing v${version}...`);
-  const notes = `Norma ${version}${BETA ? " (beta)" : ""}\n\nSigned Sparkle appcast entry: releases/appcast.xml.`;
+  // Winter Phase 9c (Lane H): this pipeline now ONLY ever ships the handoff release (0.2.015) —
+  // `norma-final` is frozen after it, so the title/body naming the handoff is unconditional here,
+  // not gated on a version check.
+  const notes = handoffReleaseBody({ version, beta: BETA, embeddedWinterSizeBytes });
   const notesPath = join(OUT, "release-notes.md");
   writeFileSync(notesPath, notes);
-  sh(`gh release create v${version} --title "Norma ${version}" --notes-file "${notesPath}" "${zipPath}" "${dmgPath}"`);
+  sh(`gh release create v${version} --title "${handoffReleaseTitle(version)}" --notes-file "${notesPath}" "${zipPath}" "${dmgPath}"`);
 } else {
   // guard.action === "resume": upload only whatever assets aren't already on the release.
   console.log(`Resuming publish of v${version}...`);

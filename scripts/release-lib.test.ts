@@ -8,7 +8,12 @@ import {
   caskFrom,
   catalogueStaleness,
   dmgStagePlan,
+  embedWinterCheck,
+  embedWinterFlagGate,
   embeddedRuntimesDescriptionLine,
+  GH_REPO,
+  handoffReleaseBody,
+  handoffReleaseTitle,
   NAME_SCAN_EXCLUSIONS,
   nameScanPlan,
   preflight,
@@ -18,6 +23,7 @@ import {
   row16IdentityCheck,
   row16ProvenanceCheck,
   verifyVersionsJsonAgainstPins,
+  WINTER_APP_BUNDLE_ID,
 } from "./release-lib";
 import { sha256File } from "./stage-runtimes";
 import { REQUIRED_CLAUDE_AGENT_SDK, REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../packages/core/src/runtime-sdk/versions";
@@ -160,12 +166,12 @@ end
     const rendered = caskFrom(tmpl, {
       version: "0.2.002",
       sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      url: "https://github.com/yanlingLabs/norma/releases/download/v0.2.002/Norma-0.2.002.dmg",
+      url: "https://github.com/yanlingLabs/winter/releases/download/v0.2.002/Norma-0.2.002.dmg",
     });
     expect(rendered).toContain('version "0.2.002"');
     expect(rendered).toContain('sha256 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"');
     expect(rendered).toContain(
-      'url "https://github.com/yanlingLabs/norma/releases/download/v0.2.002/Norma-0.2.002.dmg"',
+      'url "https://github.com/yanlingLabs/winter/releases/download/v0.2.002/Norma-0.2.002.dmg"',
     );
     expect(rendered).toContain('name "Norma 0.2.002"');
     expect(rendered).not.toContain("{{");
@@ -742,5 +748,87 @@ describe("row16Gate (P9a-8: --allow-checkout-winter / --dry-run flag logic)", ()
     expect(r.proceed).toBe(false);
     expect(r.failure).toContain("--allow-checkout-winter");
     expect(r.failure).toContain("STRONG checksum-equality path");
+  });
+});
+
+describe("GH_REPO (P9c-12)", () => {
+  test("points at the renamed repo, not the pre-rename name", () => {
+    expect(GH_REPO).toBe("yanlingLabs/winter");
+  });
+});
+
+describe("embedWinterFlagGate (Winter Phase 9c, Lane H)", () => {
+  test("a path given -> always 'embed', dry-run or not", () => {
+    expect(embedWinterFlagGate({ dryRun: false, embedWinterPath: "/tmp/Winter.app" })).toEqual({ action: "embed" });
+    expect(embedWinterFlagGate({ dryRun: true, embedWinterPath: "/tmp/Winter.app" })).toEqual({ action: "embed" });
+  });
+
+  test("no path, --dry-run -> 'none' (a rehearsal may proceed with no embedded Winter.app)", () => {
+    expect(embedWinterFlagGate({ dryRun: true, embedWinterPath: undefined })).toEqual({ action: "none" });
+  });
+
+  test("no path, non-dry-run -> 'refuse' with the exact user-facing line", () => {
+    const r = embedWinterFlagGate({ dryRun: false, embedWinterPath: undefined });
+    expect(r.action).toBe("refuse");
+    expect(r.failure).toBe("--embed-winter is required for the handoff release");
+  });
+});
+
+describe("embedWinterCheck (Winter Phase 9c, Lane H)", () => {
+  const passing = { bundleIdentifier: WINTER_APP_BUNDLE_ID, signatureOk: true, staplingOk: true };
+
+  test("every check passing -> ok", () => {
+    expect(embedWinterCheck(passing)).toEqual({ ok: true, failures: [] });
+  });
+
+  test("wrong bundle identifier fails with the exact identifier named in the message", () => {
+    const r = embedWinterCheck({ ...passing, bundleIdentifier: "com.norma.app" });
+    expect(r.ok).toBe(false);
+    expect(r.failures).toEqual([
+      `--embed-winter: CFBundleIdentifier is "com.norma.app", expected "${WINTER_APP_BUNDLE_ID}"`,
+    ]);
+  });
+
+  test("missing/unreadable bundle identifier reports \"(missing)\"", () => {
+    const r = embedWinterCheck({ ...passing, bundleIdentifier: undefined });
+    expect(r.failures[0]).toContain('"(missing)"');
+  });
+
+  test("signature failure and stapling failure each surface their own line", () => {
+    const r = embedWinterCheck({ ...passing, signatureOk: false, staplingOk: false });
+    expect(r.ok).toBe(false);
+    expect(r.failures).toEqual([
+      "--embed-winter: codesign --verify --deep --strict failed on the candidate Winter.app",
+      "--embed-winter: xcrun stapler validate failed on the candidate Winter.app — it must be notarized and stapled",
+    ]);
+  });
+
+  test("aggregates every failing check at once, not just the first", () => {
+    const r = embedWinterCheck({ bundleIdentifier: "com.norma.app", signatureOk: false, staplingOk: false });
+    expect(r.failures).toHaveLength(3);
+  });
+});
+
+describe("handoffReleaseTitle / handoffReleaseBody (Winter Phase 9c, Lane H)", () => {
+  test("title names both the version and the handoff", () => {
+    expect(handoffReleaseTitle("0.2.015")).toBe("Norma 0.2.015 — Norma is now Winter");
+  });
+
+  test("body with a known embed size names the handoff, the size, and the last-release fact", () => {
+    const body = handoffReleaseBody({ version: "0.2.015", beta: false, embeddedWinterSizeBytes: 50 * 1024 * 1024 });
+    expect(body).toContain("Norma is now Winter");
+    expect(body).toContain("LAST Norma release");
+    expect(body).toContain("50.0 MB");
+  });
+
+  test("body renders (with no size line) when embeddedWinterSizeBytes is null", () => {
+    const body = handoffReleaseBody({ version: "0.2.015", beta: false, embeddedWinterSizeBytes: null });
+    expect(body).toContain("Norma is now Winter");
+    expect(body).not.toContain("MB)");
+  });
+
+  test("beta threads into the body the same way the pre-existing notes string did", () => {
+    const body = handoffReleaseBody({ version: "0.2.015", beta: true, embeddedWinterSizeBytes: null });
+    expect(body).toContain("0.2.015 (beta)");
   });
 });
