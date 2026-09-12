@@ -76,12 +76,20 @@ import {
   caskFrom,
   catalogueStaleness,
   dmgStagePlan,
+  embeddedRuntimesDescriptionLine,
   preflight,
   nameScanPlan,
   publishGuard,
   resolveSigningIdentity,
+  verifyVersionsJsonAgainstPins,
 } from "./release-lib";
 import { CODEX_MODELS_VERIFIED } from "../packages/core/src/providers/codex-config";
+import { buildWinter } from "./build-winter";
+import { createHash } from "node:crypto";
+
+// Winter Phase 8d (P8d-2): Anthropic's team identity on the embedded, UNMODIFIED `claude` binary —
+// NEVER Norma's own TEAM_ID below (claude is verified, never re-signed). Controller measurement M1.
+const CLAUDE_TEAM_ID = "Q6L2SF6YDW";
 
 const TEAM_ID = "37N77U9RSZ";
 const NOTARY_PROFILE = "norma-notary";
@@ -362,6 +370,78 @@ for (const target of nestedSparkleHelpers) {
   if (existsSync(target)) assertSigned(target, `Sparkle.framework nested helper (${target.split("/").pop()})`);
 }
 
+// --- Winter Phase 8d: the two embedded runtimes (P8d-1/P8d-2) --------------
+// `winter` is embed-time RE-SIGNED under Norma's own team identity (embed-runtimes.sh) — it fits
+// `assertSigned`'s existing generic check (TeamIdentifier=TEAM_ID + a secure timestamp) exactly,
+// same as norma-core/NormaHelper above.
+const embeddedRuntimesDir = join(app, "Contents", "Resources", "runtimes");
+const embeddedWinterPath = join(embeddedRuntimesDir, "winter");
+assertSigned(embeddedWinterPath, "winter (embedded runtime)");
+
+// `claude` is embedded UNMODIFIED (P8d-2: never re-signed, never patched) — it does NOT fit
+// `assertSigned`'s generic check, which asserts NORMA'S OWN team identity; this binary is signed by
+// Anthropic (CLAUDE_TEAM_ID), and the checks that matter for an untouched vendor artifact are
+// different: a real, unbroken Developer ID signature (`--verify --strict`, not just "some
+// TeamIdentifier + timestamp field is present"), THAT specific team, and — the check `assertSigned`
+// has no equivalent of — that the bytes actually shipped are the exact ones `VERSIONS.json`
+// recorded at staging time (a stale or swapped embed could carry a perfectly valid Anthropic
+// signature while still not being the pinned artifact this release means to ship).
+const embeddedClaudePath = join(embeddedRuntimesDir, "claude-official", "claude");
+const embeddedVersionsPath = join(embeddedRuntimesDir, "claude-official", "VERSIONS.json");
+if (!existsSync(embeddedClaudePath)) fail(`claude (embedded runtime) not found at ${embeddedClaudePath} — build did not embed it as expected`);
+try {
+  sh(`codesign --verify --strict "${embeddedClaudePath}"`);
+} catch {
+  fail(`codesign --verify --strict failed on the embedded claude at ${embeddedClaudePath} — not a valid, untampered Developer ID signature`);
+}
+const claudeDvv = probe(`codesign -dvv "${embeddedClaudePath}" 2>&1`).stdout;
+if (!claudeDvv.includes(`TeamIdentifier=${CLAUDE_TEAM_ID}`)) {
+  fail(`claude (embedded runtime): expected TeamIdentifier=${CLAUDE_TEAM_ID} (Anthropic PBC) — this binary must be embedded UNMODIFIED, never re-signed:\n${claudeDvv}`);
+}
+if (!/flags=.*runtime/.test(claudeDvv)) {
+  fail(`claude (embedded runtime): missing the hardened-runtime flag:\n${claudeDvv}`);
+}
+if (!existsSync(embeddedVersionsPath)) fail(`VERSIONS.json not found at ${embeddedVersionsPath} — the embedded claude has no accompanying pin record`);
+const embeddedClaudeSha256 = createHash("sha256").update(readFileSync(embeddedClaudePath)).digest("hex");
+const versionsCheck = verifyVersionsJsonAgainstPins({
+  versionsJsonText: readFileSync(embeddedVersionsPath, "utf8"),
+  claudeSha256: embeddedClaudeSha256,
+});
+if (!versionsCheck.ok) {
+  fail(`${embeddedVersionsPath} failed the pin/checksum gate:\n  ${versionsCheck.failures.join("\n  ")}`);
+}
+const embeddedVersions = versionsCheck.versions!;
+console.log(`Embedded runtimes verified: winter re-signed (TeamIdentifier=${TEAM_ID}), claude untouched (TeamIdentifier=${CLAUDE_TEAM_ID}, hardened runtime, checksum matches VERSIONS.json).`);
+
+// Row 16 ("identical versioned artifact", P8d-2): the strongest form of this check rebuilds
+// `winter` from the pinned tag and compares PRE-SIGN hashes — only possible when a real SDK
+// checkout is available (NORMA_WINTER_SDK_CHECKOUT), since the sole other rung
+// (`build-winter.ts`'s own default `../winter-agent-sdk` sibling) is Winter-repo-scoped and not
+// assumed present on a release machine. Without a checkout this falls back to trusting the
+// `winterPreSign` hash `stage-runtimes.ts` itself recorded at staging time — a documented WEAKER
+// check (it cannot detect a compromised STAGING step, only a compromised EMBED step after it).
+if (process.env.NORMA_WINTER_SDK_CHECKOUT) {
+  console.log(`Row 16: rebuilding winter from ${process.env.NORMA_WINTER_SDK_CHECKOUT} to verify the pre-sign hash matches VERSIONS.json...`);
+  const freshWinterOut = join(OUT, "winter-row16-rebuild");
+  await buildWinter({ checkout: process.env.NORMA_WINTER_SDK_CHECKOUT, out: freshWinterOut });
+  const freshHash = createHash("sha256").update(readFileSync(freshWinterOut)).digest("hex");
+  if (freshHash !== embeddedVersions.checksums.winterPreSign) {
+    fail(
+      `Row 16: a fresh build of winter from the pinned tag (${process.env.NORMA_WINTER_SDK_CHECKOUT}) hashes to ` +
+        `${freshHash}, but VERSIONS.json's recorded winterPreSign is ${embeddedVersions.checksums.winterPreSign} — ` +
+        `the embedded winter is not a reproducible build of the pinned tag.`,
+    );
+  }
+  console.log(`Row 16: PASS — a fresh pinned-tag build's pre-sign hash matches the embedded winter's recorded VERSIONS.json checksum.`);
+} else {
+  console.log(
+    `Row 16: NORMA_WINTER_SDK_CHECKOUT not set — trusting the winterPreSign hash stage-runtimes.ts recorded at ` +
+      `staging time (${embeddedVersions.checksums.winterPreSign}) rather than reproducing a fresh build. This is a ` +
+      `WEAKER check: it cannot detect a compromised staging step, only a compromised embed step after it. Set ` +
+      `NORMA_WINTER_SDK_CHECKOUT to the pinned-tag winter-agent-sdk checkout for the full row-16 proof.`,
+  );
+}
+
 // --- Office (office-plumbing wave) ------------------------------------------
 // NormaOfficeHelper is Norma's own compiled binary (like NormaHelper above), embedded at
 // Contents/MacOS/ — TeamIdentifier + secure timestamp checked and enrolled in HARDENING_PINS below,
@@ -508,6 +588,12 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   // deliberately NOT enrolled here — see the team-ID-only probe on libmergedlo.dylib above this
   // array, and that probe's own comment for why.
   { path: join(app, "Contents", "MacOS", "NormaOfficeHelper"), label: "NormaOfficeHelper", expect: [] },
+  // Winter Phase 8d (P8d-2) — `winter` is re-signed at embed time under Norma's own team identity
+  // (embed-runtimes.sh), same posture as norma-core/NormaHelper above. `claude` is deliberately
+  // NOT enrolled here: it is embedded UNMODIFIED (Anthropic's own signature, never re-signed), so
+  // this entitlements-relaxation check — which only has an opinion about code THIS repo signs —
+  // does not apply to it; its identity/checksum are verified separately, above this array.
+  { path: embeddedWinterPath, label: "winter (embedded runtime)", expect: [] },
   // panel-cef Task 6a: the GPU helper joined the Renderer. Chromium routes the GPU process to the
   // `(GPU)` bundle only when it needs the JIT-capable variant — SwiftShader — which a Mac with a
   // working Metal path never reaches, so this was invisible until Task 6a forced the software path
@@ -867,6 +953,9 @@ const item = appcastItem({
   length: signResult.length,
   beta: BETA,
   minSystem: MIN_SYSTEM,
+  // P8d-2: names the embedded runtime pair this exact release ships, from the SAME VERSIONS.json
+  // the signing checks above already verified — never re-typed.
+  description: embeddedRuntimesDescriptionLine({ winterAgentSdk: embeddedVersions.winterAgentSdk, officialSdk: embeddedVersions.officialSdk }),
 });
 let appcastPlan: ReturnType<typeof appcastInsertPlan>;
 try {

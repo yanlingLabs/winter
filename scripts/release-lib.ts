@@ -4,6 +4,7 @@
  * lookup, notary profile probe, gh auth, git tree/tag state) lives in release.ts and is wired
  * into `preflight()` as a closure; this module only aggregates results and renders text.
  */
+import { parseVersionsJson, type VersionsJson } from "../packages/core/src/runtime-sdk/bundle-layout";
 
 export interface Preflight {
   ok: boolean;
@@ -33,6 +34,12 @@ export const GH_REPO = "yanlingLabs/norma";
  * Renders one Sparkle appcast `<item>` for the update-check enclosure (the `.zip`). Schema
  * mirrors scripts/sparkle-feed-gate.ts's local test appcast: title/version/shortVersionString,
  * an optional `sparkle:channel` for beta, minimumSystemVersion, and the signed enclosure.
+ *
+ * P8d-2: `description` is OPTIONAL and, when given, renders as a standard RSS/Sparkle
+ * `<description>` element (CDATA-wrapped release notes — Sparkle has always supported this; it is
+ * new to THIS repo's template, never a new element invented for this) — never a bespoke element.
+ * `embeddedRuntimesDescriptionLine` is the one caller release.ts uses to fill it, naming the
+ * embedded runtime pair for a release.
  */
 export function appcastItem(i: {
   version: string;
@@ -41,11 +48,13 @@ export function appcastItem(i: {
   length: number;
   beta: boolean;
   minSystem: string;
+  description?: string;
 }): string {
   const url = `https://github.com/${GH_REPO}/releases/download/v${i.version}/${i.zipName}`;
   const channel = i.beta ? "\n      <sparkle:channel>beta</sparkle:channel>" : "";
+  const description = i.description ? `\n      <description><![CDATA[${i.description}]]></description>` : "";
   return `    <item>
-      <title>${i.version}</title>
+      <title>${i.version}</title>${description}
       <sparkle:version>${i.version}</sparkle:version>
       <sparkle:shortVersionString>${i.version}</sparkle:shortVersionString>${channel}
       <sparkle:minimumSystemVersion>${i.minSystem}</sparkle:minimumSystemVersion>
@@ -405,4 +414,47 @@ export function catalogueStaleness(i: { verified: string; now: Date; staleAfterD
       `This release ships CODEX_MODELS' context windows as constants; a stale window silently breaks ` +
       `auto-compaction. Re-derive: NORMA_CODEX_LIVE_DRIFT=1 bun test codex-models-drift`,
   };
+}
+
+/**
+ * P8d-2: the one line naming the embedded runtime pair, threaded into `appcastItem`'s
+ * `description` field (never a new Sparkle element — see that function's own doc).
+ */
+export function embeddedRuntimesDescriptionLine(v: { winterAgentSdk: string; officialSdk: string }): string {
+  return `Winter agent SDK ${v.winterAgentSdk} · Claude Agent SDK ${v.officialSdk}`;
+}
+
+export interface VersionsJsonPinCheck {
+  ok: boolean;
+  failures: string[];
+  /** The parsed record, when parsing itself succeeded (independent of whether the checksum check
+   *  below passed) — release.ts's own log line wants the staged versions either way. */
+  versions?: VersionsJson;
+}
+
+/**
+ * The PURE half of release.ts's `claude` gate (P8d-2): does the staged `VERSIONS.json` TEXT parse
+ * and match this build's pins (`parseVersionsJson` — `bundle-layout.ts`, the ladder's own gate,
+ * reused rather than re-typed here), AND does its recorded `checksums.claude` equal the ACTUAL
+ * SHA-256 of the binary release.ts just hashed off disk? The second check is what catches a stale
+ * or tampered embed that a valid-looking (even pin-matching) `VERSIONS.json` could otherwise paper
+ * over — the codesign/TeamIdentifier half of the gate stays in release.ts itself (real `codesign`
+ * shell-outs, not pure). Aggregates rather than throwing so release.ts can report every mismatch
+ * in one `fail()` call, same shape as `preflight`.
+ */
+export function verifyVersionsJsonAgainstPins(input: { versionsJsonText: string; claudeSha256: string }): VersionsJsonPinCheck {
+  let versions: VersionsJson;
+  try {
+    versions = parseVersionsJson(input.versionsJsonText);
+  } catch (err) {
+    return { ok: false, failures: [`VERSIONS.json: ${err instanceof Error ? err.message : String(err)}`] };
+  }
+  const failures: string[] = [];
+  if (versions.checksums.claude !== input.claudeSha256) {
+    failures.push(
+      `VERSIONS.json checksums.claude (${versions.checksums.claude}) does not match the embedded claude ` +
+        `binary's actual SHA-256 (${input.claudeSha256}) — the embedded file does not match what was staged/recorded`,
+    );
+  }
+  return { ok: failures.length === 0, failures, versions };
 }

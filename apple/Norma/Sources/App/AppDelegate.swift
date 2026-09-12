@@ -1608,9 +1608,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         startTask?.cancel()
-        // Lifecycle T6: stop the supervised daemon FIRST, before the peripheral teardown below —
-        // this is what makes app-quit (and, via T3's terminateNow routing, system shutdown too)
-        // take the daemon down with it. No-op if we're in `.connectOnly` or nothing was spawned.
+        // Lifecycle T6 (Winter Phase 8d P8d-6: now a DEFENSIVE no-op belt, not the primary call).
+        // The primary `daemonSupervisor?.stop()` moved into `applicationShouldTerminate`'s
+        // `.terminateLater` deferral below — by the time AppKit reaches this method (which only
+        // happens AFTER that deferral's `reply(toApplicationShouldTerminate:)` fires), the
+        // supervised daemon is already stopped. This call stays as a belt for any path that could
+        // somehow reach `applicationWillTerminate` without going through that deferral first
+        // (`stop()`'s own doc: "safe to call with nothing running") — never load-bearing anymore,
+        // but harmless, and removing it would trade a free safety net for nothing.
         daemonSupervisor?.stop()
         // Task 4 (2f): best-effort revoke-all BEFORE `appModel?.stop()` closes the socket below —
         // `terminate()`'s revoke RPC is fired on an unstructured Task, so ordering it first gives
@@ -1633,6 +1638,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// window closes (`syncDockPresence()`); the explicit `hideDockIcon()` below is
     /// belt-and-suspenders for the edge case where no main window was open (nothing to close, so
     /// nothing to trigger demotion through those callbacks).
+    /// Winter Phase 8d (P8d-6, PAIRED with `RealDaemonProcess.gracefulExitTimeout` raised to 5s):
+    /// a REAL quit (`.terminateNow` from `terminateDecision`) is deferred through AppKit's own
+    /// sanctioned `.terminateLater` mechanism rather than returned directly. The supervised daemon
+    /// stop this used to run synchronously inside `applicationWillTerminate` — bounded at 2s to
+    /// fit inside THAT callback's own tighter ~5s force-quit window — now runs during this
+    /// deferral instead, which has no such window (an app that returns `.terminateLater` is
+    /// telling AppKit "asynchronous work is in flight; wait for `reply(toApplicationShouldTerminate:)`"),
+    /// so the daemon gets the FULL 5s of grace before SIGKILL instead of being capped at 2s.
+    /// `applicationWillTerminate` still runs after the reply fires, exactly as before — its own
+    /// `daemonSupervisor?.stop()` call is now a no-op belt (see that method's own doc).
+    ///
+    /// Cheap even when there is nothing to defer FOR: `DaemonSupervisor.stop()` no-ops
+    /// near-instantly when `.connectOnly` (dev, or a hand-run daemon this app never spawned) or
+    /// when nothing is running, and `reply(toApplicationShouldTerminate:)` then fires on the very
+    /// next main-actor turn — one Task hop, not a real user-visible delay.
+    ///
+    /// `!isRunningUnitTests` gates the `reply(toApplicationShouldTerminate:)` call itself — same
+    /// posture as `daemonSupervisorDeps`'s `.neverSupervise`/every other real-side-effect gate in
+    /// this file — for a reason specific to THIS call and worth spelling out: Apple's own docs
+    /// state calling `reply(toApplicationShouldTerminate:)` with no matching `.terminateLater`
+    /// actually pending in AppKit's OWN termination machinery is undefined behavior. Every test
+    /// that calls `applicationShouldTerminate(_:)` directly (`AppLifecycleTests`,
+    /// `AppShellTests`) does exactly that — a synthetic invocation, never a real `NSApp.terminate()`
+    /// — precisely so it can inspect the DECISION without also tearing down the xctest host (see
+    /// `AppLifecycleTests`' own "never run() on a REAL AppDelegate with reallyQuitting == true"
+    /// comment for the sibling danger this already guards against on a different call path). This
+    /// gate keeps `reply()` reachable ONLY through a genuine `NSApp.terminate()` sequence, which is
+    /// the only place production ever calls this method from.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let reply = terminateDecision(
             reallyQuitting: reallyQuitting,
@@ -1641,8 +1674,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if reply == .terminateCancel {
             closeMainWindows()
             hideDockIcon()
+            return .terminateCancel
         }
-        return reply
+        Task { @MainActor in
+            self.daemonSupervisor?.stop()
+            if !Self.isRunningUnitTests {
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        return .terminateLater
     }
 
 

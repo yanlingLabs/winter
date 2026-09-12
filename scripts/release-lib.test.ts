@@ -5,12 +5,15 @@ import {
   caskFrom,
   catalogueStaleness,
   dmgStagePlan,
+  embeddedRuntimesDescriptionLine,
   NAME_SCAN_EXCLUSIONS,
   nameScanPlan,
   preflight,
   publishGuard,
   resolveSigningIdentity,
+  verifyVersionsJsonAgainstPins,
 } from "./release-lib";
+import { REQUIRED_CLAUDE_AGENT_SDK, REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../packages/core/src/runtime-sdk/versions";
 
 describe("preflight", () => {
   test("every check passing -> ok with no failures", () => {
@@ -80,6 +83,60 @@ describe("appcastItem", () => {
     expect(xml).toContain(base.zipName);
     expect(xml).toContain("<item>");
     expect(xml).toContain("</item>");
+  });
+
+  test("no description given (existing callers) -> no <description> element at all", () => {
+    const xml = appcastItem({ ...base, beta: false });
+    expect(xml).not.toContain("<description>");
+  });
+
+  test("P8d-2: an optional description renders as a CDATA-wrapped standard <description> element", () => {
+    const xml = appcastItem({ ...base, beta: false, description: "Winter agent SDK 0.0.4 · Claude Agent SDK 0.3.250" });
+    expect(xml).toContain("<description><![CDATA[Winter agent SDK 0.0.4 · Claude Agent SDK 0.3.250]]></description>");
+  });
+});
+
+describe("embeddedRuntimesDescriptionLine (P8d-2)", () => {
+  test("names both pinned SDK versions", () => {
+    expect(embeddedRuntimesDescriptionLine({ winterAgentSdk: REQUIRED_WINTER_AGENT_SDK, officialSdk: REQUIRED_CLAUDE_AGENT_SDK })).toBe(
+      `Winter agent SDK ${REQUIRED_WINTER_AGENT_SDK} · Claude Agent SDK ${REQUIRED_CLAUDE_AGENT_SDK}`,
+    );
+  });
+});
+
+describe("verifyVersionsJsonAgainstPins (P8d-2's claude gate, pure half)", () => {
+  const sha = "a".repeat(64);
+  const goodVersionsJson = JSON.stringify({
+    schema: 1,
+    winterAgentSdk: REQUIRED_WINTER_AGENT_SDK,
+    winterRuntimeSdk: REQUIRED_WINTER_RUNTIME_SDK,
+    officialSdk: REQUIRED_CLAUDE_AGENT_SDK,
+    claudeCode: "2.1.250",
+    checksums: { winterPreSign: sha, claude: sha },
+    stagedAt: "2026-09-12T00:00:00Z",
+  });
+
+  test("a valid record whose recorded claude checksum matches the actual binary -> ok", () => {
+    const r = verifyVersionsJsonAgainstPins({ versionsJsonText: goodVersionsJson, claudeSha256: sha });
+    expect(r.ok).toBe(true);
+    expect(r.failures).toEqual([]);
+    expect(r.versions?.officialSdk).toBe(REQUIRED_CLAUDE_AGENT_SDK);
+  });
+
+  test("a checksum mismatch fails, names both hashes, but still returns the parsed record", () => {
+    const wrongSha = "b".repeat(64);
+    const r = verifyVersionsJsonAgainstPins({ versionsJsonText: goodVersionsJson, claudeSha256: wrongSha });
+    expect(r.ok).toBe(false);
+    expect(r.failures[0]).toContain(sha);
+    expect(r.failures[0]).toContain(wrongSha);
+    expect(r.versions).toBeDefined();
+  });
+
+  test("unparseable or pin-mismatched VERSIONS.json fails via the SAME gate the executable ladder uses, versions omitted", () => {
+    const r = verifyVersionsJsonAgainstPins({ versionsJsonText: "{not json", claudeSha256: sha });
+    expect(r.ok).toBe(false);
+    expect(r.versions).toBeUndefined();
+    expect(r.failures[0]).toContain("VERSIONS.json");
   });
 });
 

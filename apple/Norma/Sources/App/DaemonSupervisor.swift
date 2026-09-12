@@ -181,10 +181,16 @@ final class DaemonSupervisor {
 /// BEFORE signaling the process, so whichever exit races in reads back the right flag — a SIGTERM
 /// from an external `kill` would otherwise be indistinguishable from our own.
 final class RealDaemonProcess: DaemonProcess {
-    /// Bound the SIGTERM->SIGKILL escalation (T6 review FIX 2) so `terminateGracefully()` always
-    /// finishes well within `applicationWillTerminate`'s window — macOS gives ~5s before it
-    /// force-quits us, so 2s of grace then SIGKILL is safe.
-    static let gracefulExitTimeout: TimeInterval = 2.0
+    /// Bound the SIGTERM->SIGKILL escalation (T6 review FIX 2; raised under Winter Phase 8d P8d-6,
+    /// PAIRED with `AppDelegate.applicationShouldTerminate` moving the call to `stop()` behind
+    /// `.terminateLater` instead of leaving it inside `applicationWillTerminate`). The original 2s
+    /// figure was sized to fit entirely INSIDE `applicationWillTerminate`'s own tighter window —
+    /// macOS gives that callback ~5s before it force-quits the app. `.terminateLater` escapes that
+    /// window (Apple's own sanctioned mechanism for a quit that needs to do real asynchronous work
+    /// before finishing), so this can now use the full 5s of grace before escalating to SIGKILL,
+    /// giving a daemon mid-flush of a session JSONL a real chance to exit cleanly instead of being
+    /// killed at 2s. NEVER raise this alone — see that method's own doc for why the pairing matters.
+    static let gracefulExitTimeout: TimeInterval = 5.0
     private static let pollInterval: TimeInterval = 0.05
 
     private let process: Process
