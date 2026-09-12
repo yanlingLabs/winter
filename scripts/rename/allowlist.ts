@@ -67,6 +67,22 @@ export const RENAME_ALLOWLIST: readonly AllowlistEntry[] = [
     why: "the user's live relay-ops credentials in the login Keychain (infra/relay/README.md) — renaming the service string strands the items",
   },
   {
+    id: "crypto-domain-tags",
+    // Versioned Ed25519/HKDF domain-separation tags: `norma-relay-config/1` is baked into the two
+    // checked-in SIGNED relay configs (and a pinned cross-language test vector); `norma-pair-proof/1`
+    // and `norma-pair-sas/1` are computed live by BOTH pairing parties. They are protocol constants
+    // (Global Constraints: no protocol change) — a rename would invalidate the signed artifacts and
+    // break pairing between a Winter Mac and a Norma phone across the 9c cutover. They change only
+    // by a deliberate `/2` bump with a re-sign/re-pair plan (P9b-28).
+    regex: /norma-(relay-config|pair-proof|pair-sas)\/[0-9]+/g,
+    why: "versioned crypto domain-separation tags — protocol constants baked into signed artifacts and live pairing; bump deliberately, never rename",
+  },
+  {
+    id: "config-key-keychain",
+    regex: /com\.norma\.config-key(?![A-Za-z0-9_.-])/g,
+    why: "the login-Keychain service holding the relay-config SIGNING key — same class as com.norma.infra/cf (P9b-28)",
+  },
+  {
     id: "infra-ssh-key",
     regex: /norma-relay(?![A-Za-z0-9_])/g,
     files: ["infra/**"],

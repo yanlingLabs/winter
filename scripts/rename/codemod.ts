@@ -18,9 +18,10 @@
 // asserting the destination does not exist.
 //
 // Gates (computed BEFORE anything is written in --apply): every surviving `norma` match must be
-// permitted by an allowlist entry (or sit in an EXEMPT path), and no `winter[-_]?winter` /
-// `WinterWinter` may exist outside scripts/rename/. A second run over the output reports zero
-// changes (idempotent).
+// permitted by an allowlist entry (or sit in an EXEMPT path); no `winter[-_]?winter` /
+// `WinterWinter` may exist in rewritten CONTENT outside scripts/rename/ nor in any planned
+// destination PATH; no destination may already exist; the top-level `norma/` scaffold must already
+// be deleted (P9b-2). A second run over the output reports zero changes (idempotent).
 import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
@@ -199,6 +200,11 @@ export function renamePath(relPath: string): string {
   return relPath.split("/").map(renameComponent).join("/");
 }
 
+/** P9b-2: the Phase-0 `norma/` scaffold is DELETED, never renamed — a paths run refuses while it is tracked. */
+export function scaffoldPresent(paths: string[]): boolean {
+  return paths.some((p) => p === "norma" || p.startsWith("norma/"));
+}
+
 /**
  * Plans the `git mv` sequence for a set of tracked paths: directories shallowest-first (each move
  * carries its subtree, tracked or not), re-deriving names after every move; then files whose
@@ -326,7 +332,9 @@ if (import.meta.main) {
   if (doubleWinter.length > 0) gateFailures.push(`${doubleWinter.length} double-winter match(es)`);
   for (const m of moves) {
     if (existsSync(join(root, m.to))) gateFailures.push(`move destination exists: ${m.to}`);
+    if (new RegExp(DOUBLE_WINTER.source).test(m.to)) gateFailures.push(`double-winter in a destination path: ${m.to}`);
   }
+  if (!contentOnly && scaffoldPresent(files)) gateFailures.push("the top-level `norma/` scaffold is still tracked — `git rm -r norma` first (P9b-2); the tool never renames it");
 
   // Report
   const changedFiles = stats.filter((s) => s.changed);

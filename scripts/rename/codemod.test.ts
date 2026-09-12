@@ -1,6 +1,6 @@
 // Winter Phase 9b — the codemod's rule corpus (P9b-1/P9b-8). Pure functions only; no git.
 import { describe, expect, test } from "bun:test";
-import { entryAppliesTo, globToRegex, isExemptPath, planMoves, renamePath, rewriteText } from "./codemod";
+import { entryAppliesTo, globToRegex, isExemptPath, planMoves, renamePath, rewriteText, scaffoldPresent } from "./codemod";
 import { EXPLICIT_TOKEN_MAP, RENAME_ALLOWLIST } from "./allowlist";
 
 const rw = (s: string, path = "packages/core/src/x.ts") => rewriteText(s, path);
@@ -76,6 +76,12 @@ describe("protection (P9b-5) — external infrastructure survives", () => {
     expect(r.out).toBe("com.norma.infra com.norma.cf norma-notary ~/norma-private/git-hooks 'Norma v2' ~/.ssh/norma-relay");
     expect(r.residue.every((x) => x.permittedBy !== "UNPERMITTED")).toBe(true);
   });
+  test("crypto domain tags and the relay-config signing key service survive everywhere (P9b-28)", () => {
+    const r = rw('domain: "norma-relay-config/1" proof: "norma-pair-proof/1" sas: "norma-pair-sas/1" service: "com.norma.config-key"', "apple/WinterProtocol/Sources/WinterProtocol/Pairing.swift");
+    expect(r.out).toBe('domain: "norma-relay-config/1" proof: "norma-pair-proof/1" sas: "norma-pair-sas/1" service: "com.norma.config-key"');
+    expect(r.residue.map((x) => x.permittedBy)).toEqual(["crypto-domain-tags", "crypto-domain-tags", "crypto-domain-tags", "config-key-keychain"]);
+    expect(rw("norma-relay-config-thing").out).toBe("winter-relay-config-thing"); // no version suffix → not a tag
+  });
   test("norma-relay is only protected under infra/", () => {
     expect(rw("norma-relay", "packages/core/src/x.ts").out).toBe("winter-relay");
   });
@@ -129,6 +135,13 @@ describe("paths", () => {
       { from: "apple/Winter/Support/Norma.entitlements", to: "apple/Winter/Support/Winter.entitlements", kind: "file" },
       { from: "packages/core/src/norma-dir.ts", to: "packages/core/src/winter-dir.ts", kind: "file" },
     ]);
+  });
+});
+
+describe("scaffold refusal (P9b-2)", () => {
+  test("a tracked top-level norma/ is detected; apple/Norma is not it", () => {
+    expect(scaffoldPresent(["norma/norma/normaApp.swift", "apple/Norma/x"])).toBe(true);
+    expect(scaffoldPresent(["apple/Norma/x", "norma-vs-cc-tools.md"])).toBe(false);
   });
 });
 
