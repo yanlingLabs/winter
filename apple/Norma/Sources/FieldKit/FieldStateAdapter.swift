@@ -906,6 +906,14 @@ final class FieldStateAdapter: ObservableObject {
     func applyAdvisorModelSelection(_ model: String?) {
         if AppModel.writeAdvisorModelToSettings(model) {
             advisorModel = model
+        } else {
+            // Whole-branch review Major 2: a `false` return means settings.json exists but is
+            // unparseable — the write refused rather than clobbering it. Reuses the SAME
+            // "Couldn't …" alert `ModelChangeOutcome`'s other failure cases already show
+            // (`WindowContentView`'s `.alert("Couldn't switch model", …)`), rather than a second
+            // alert for what is, to the user, the identical class of event ("this pick did not
+            // take effect").
+            modelChangeError = "the advisor setting could not be saved — settings.json could not be read"
         }
     }
 

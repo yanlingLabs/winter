@@ -1057,6 +1057,43 @@ final class AdvisorSettingsTests: XCTestCase {
         XCTAssertEqual(Set((runtimes ?? [:]).keys), ["advisorModel"], "no sibling runtimes.* field invented either")
     }
 
+    /// Whole-branch review Major 2 — THE regression this fix wave closes: a settings.json that
+    /// EXISTS and is readable but does NOT parse as a JSON object (hand-edited, truncated, or a
+    /// bare JSON array/string/number at the root) must be left byte-for-byte UNTOUCHED and the
+    /// write must report `false` — never the pre-fix behaviour of silently replacing it with
+    /// `{"runtimes":{"advisorModel":…}}` (which the daemon's settings-watcher would then hot-load,
+    /// resetting every other setting in the file).
+    func testWriteOnAnUnparseableSettingsFileLeavesItByteIdenticalAndReportsFalse() throws {
+        let dir = try tempHome()
+        setenv("NORMA_HOME", dir.path, 1)
+        defer { unsetenv("NORMA_HOME") }
+        let malformed = #"{"schemaVersion": 2, "provider": { unterminated"#
+        try write(malformed, to: dir)
+        let before = try Data(contentsOf: dir.appendingPathComponent("settings.json"))
+
+        XCTAssertFalse(AppModel.writeAdvisorModelToSettings("claude-opus-5"), "an unparseable file must refuse the write, not clobber it")
+
+        let after = try Data(contentsOf: dir.appendingPathComponent("settings.json"))
+        XCTAssertEqual(before, after, "the file must be byte-for-byte unchanged after a refused write")
+        XCTAssertNil(AppModel.readAdvisorModelFromSettings(), "nothing was written, so there is still nothing to read")
+    }
+
+    /// The SAME refusal for a file that parses as valid JSON but whose ROOT is not an object
+    /// (e.g. a bare JSON array) — `Settings` is always an object, so this is exactly as malformed
+    /// as truncated JSON from this function's point of view, and must refuse identically.
+    func testWriteOnASettingsFileWhoseRootIsNotAnObjectLeavesItUntouchedAndReportsFalse() throws {
+        let dir = try tempHome()
+        setenv("NORMA_HOME", dir.path, 1)
+        defer { unsetenv("NORMA_HOME") }
+        try write(#"["not", "an", "object"]"#, to: dir)
+        let before = try Data(contentsOf: dir.appendingPathComponent("settings.json"))
+
+        XCTAssertFalse(AppModel.writeAdvisorModelToSettings("claude-opus-5"))
+
+        let after = try Data(contentsOf: dir.appendingPathComponent("settings.json"))
+        XCTAssertEqual(before, after)
+    }
+
     /// A write must never corrupt the file into something `Settings.parse` (the daemon's own
     /// validator) would reject — proved here by checking every field this fixture came in with is
     /// still the SAME TYPE it started as (an object stays an object, a bool stays a bool) after the
