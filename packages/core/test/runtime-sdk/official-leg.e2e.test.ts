@@ -37,7 +37,11 @@ import type { OfficialInputDeps, OfficialSessionInput } from "../../src/runtime-
 import { startOfficialSession, type OfficialSession } from "../../src/runtime-sdk/official-session";
 import { createProjector, type CheckpointStore } from "../../src/projector";
 import { z } from "zod";
-import { claudeRuntimeForTests, describeWithClaudeRuntime, LOOPBACK_MODEL_ID, withAnthropicLoopback, type AnthropicTurnScript } from "../helpers/claude-runtime";
+import {
+  claudeRuntimeForTests, describeWithClaudeRuntime, LOOPBACK_MODEL_ID, withAnthropicLoopback,
+  hermeticOfficialHome, cleanupHermeticOfficialHomes,
+  type AnthropicTurnScript, type HermeticOfficialHome,
+} from "../helpers/claude-runtime";
 
 const CATALOG_CLAUDE_MODEL = "claude-sonnet-5"; // a real pinned-catalog Claude model id (selectRuntime must recognize it)
 
@@ -108,12 +112,19 @@ interface World {
   runtime: NormaRuntimeSdk;
   events: SessionEvent[];
   session: OfficialSession;
+  backendSessionId: string;
+  /** m1: the CHILD's own hermetic `HOME` — distinct from `home` (NORMA_HOME) above. Before this,
+   *  nothing in this file ever gave the spawned `claude` process a `HOME` at all, so it silently
+   *  inherited the real machine's `$HOME` and every "never touches `~/.claude`" assertion was
+   *  checking the wrong directory (m1: `hermeticOfficialHome` was exported and unused). */
+  hermetic: HermeticOfficialHome;
 }
 
 const worlds: World[] = [];
 
 afterEach(async () => {
   for (const w of worlds.splice(0)) { await w.runtime.dispose(); rmSync(w.home, { recursive: true, force: true }); }
+  cleanupHermeticOfficialHomes();
 });
 
 const probeDef: ToolDefinition = {
@@ -162,6 +173,13 @@ async function buildWorld(selection: RuntimeSelection, secretsDir: string, baseU
   const sessionId = "s_official_e2e";
   const backendSessionId = crypto.randomUUID();
 
+  // m1: a hermetic HOME for the CHILD process, distinct from `home` (NORMA_HOME) above — passed
+  // through `officialInputFor`'s own `env` door (`minimalOsEnvironment` reads `env.HOME`), the same
+  // door a production daemon has (`officialInputFor`'s `deps.env ?? process.env`). Everything else
+  // in `process.env` (PATH in particular — the child needs a real one to execute at all) still
+  // passes through; only `HOME` is overridden.
+  const hermetic = hermeticOfficialHome();
+
   const inputDeps: OfficialInputDeps = {
     home,
     selection,
@@ -179,6 +197,7 @@ async function buildWorld(selection: RuntimeSelection, secretsDir: string, baseU
       emit: () => {},
     },
     policy,
+    env: { ...process.env, HOME: hermetic.home },
   };
 
   const sessionInput: OfficialSessionInput = { sessionId, mode: "code", cwd };
@@ -203,7 +222,7 @@ async function buildWorld(selection: RuntimeSelection, secretsDir: string, baseU
     log: (l) => { if (process.env.DEBUG_E2E) console.log("[log]", l); },
   });
 
-  const world: World = { home, cwd, runtime, events, session };
+  const world: World = { home, cwd, runtime, events, session, backendSessionId, hermetic };
   worlds.push(world);
   return world;
 }
@@ -253,8 +272,18 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       expect(auth).toBeDefined();
       expect(String(auth)).not.toContain("sk-e2e");
 
-      // `~/.claude` is never created — `CLAUDE_CONFIG_DIR` scopes everything under the temp home.
-      expect(existsSync(join(w.home, ".claude"))).toBe(false);
+      // m1: the OBSERVED `CLAUDE_CONFIG_DIR`/spool a fresh-spool launch actually used
+      // (`officialSpoolRoot(winterHome)` — WS-14 §1 profile 1) lives under NORMA_HOME (`w.home`,
+      // the router's own `winterHome`, per `create.ts`'s `handoff: { winterHome: deps.home }`) —
+      // never under the child's hermetic `HOME`. The real `claude` CLI writing into it (a real file
+      // on disk, not merely a configured option) is the actual proof CLAUDE_CONFIG_DIR took effect.
+      const spoolRoot = join(w.home, "runtimes", "official-agent-spool");
+      expect(existsSync(spoolRoot)).toBe(true);
+
+      // m1: `~/.claude` is never created under the CHILD's own (hermetic) HOME — before this fix
+      // the child had no HOME of its own (it silently inherited the real machine's `$HOME`), so this
+      // assertion checked the wrong directory and passed for the wrong reason.
+      expect(existsSync(join(w.hermetic.home, ".claude"))).toBe(false);
     });
   }, 60_000);
 
