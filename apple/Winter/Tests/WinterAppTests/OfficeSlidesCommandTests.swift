@@ -382,9 +382,9 @@ final class OfficeSlidesCommandTests: XCTestCase {
         let before0 = try await client.slidesRead(docId: docId, slide: 0)
         let before1 = try await client.slidesRead(docId: docId, slide: 1)
         let before2 = try await client.slidesRead(docId: docId, slide: 2)
-        XCTAssertEqual(before0.title, "Winter T6 Slide One")
-        XCTAssertEqual(before1.title, "Winter T6 Slide Two")
-        XCTAssertEqual(before2.title, "Winter T6 Slide Three")
+        XCTAssertEqual(before0.title, "Norma T6 Slide One")
+        XCTAssertEqual(before1.title, "Norma T6 Slide Two")
+        XCTAssertEqual(before2.title, "Norma T6 Slide Three")
 
         // Index 1 -> index 2: one MovePageDown-equivalent step.
         let count = try await client.slidesManagePage(docId: docId, op: .reorder, slide: 1, at: nil, to: 2, layout: nil)
@@ -394,12 +394,12 @@ final class OfficeSlidesCommandTests: XCTestCase {
         let after1 = try await client.slidesRead(docId: docId, slide: 1)
         let after2 = try await client.slidesRead(docId: docId, slide: 2)
 
-        XCTAssertEqual(after0.title, "Winter T6 Slide One",
+        XCTAssertEqual(after0.title, "Norma T6 Slide One",
                        "index 0 must be untouched by a move that targeted index 1 — if THIS fails instead of "
                            + "index 1/2, setPart did not scope the move the way this call assumed")
-        XCTAssertEqual(after1.title, "Winter T6 Slide Three",
+        XCTAssertEqual(after1.title, "Norma T6 Slide Three",
                        "the content that was at index 2 must have shifted up to index 1")
-        XCTAssertEqual(after2.title, "Winter T6 Slide Two",
+        XCTAssertEqual(after2.title, "Norma T6 Slide Two",
                        "the slide this call targeted (index 1) must now be at index 2")
 
         try await client.close(docId: docId)
@@ -462,14 +462,14 @@ final class OfficeSlidesCommandTests: XCTestCase {
 
         // Slide 1 (index 0) — the two-part discriminator's OTHER half: genuinely untouched.
         let savedSlide1 = try await independentClient.slidesRead(docId: independentDocId, slide: 0)
-        XCTAssertEqual(savedSlide1.title, "Winter T6 Slide One",
+        XCTAssertEqual(savedSlide1.title, "Norma T6 Slide One",
                        "slide 1 must be UNTOUCHED by a write aimed at slide 2 — a wrong-part edit "
                            + "would show up here, not on slide 2 itself")
         XCTAssertEqual(savedSlide1.body, "first bullet", "slide 1's body must also be untouched")
 
         // Slide 3 (index 2) — the SAME discriminator on the other side of the target.
         let savedSlide3 = try await independentClient.slidesRead(docId: independentDocId, slide: 2)
-        XCTAssertEqual(savedSlide3.title, "Winter T6 Slide Three", "slide 3 must be UNTOUCHED")
+        XCTAssertEqual(savedSlide3.title, "Norma T6 Slide Three", "slide 3 must be UNTOUCHED")
         XCTAssertEqual(savedSlide3.body, "third bullet", "slide 3's body must also be untouched")
 
         try await independentClient.close(docId: independentDocId)
@@ -484,9 +484,9 @@ final class OfficeSlidesCommandTests: XCTestCase {
         let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
         XCTAssertTrue(contentXML.contains("CHANGED TITLE"), "saved content.xml must contain the new title text")
         XCTAssertTrue(contentXML.contains("CHANGED BODY"), "saved content.xml must contain the new body text")
-        XCTAssertTrue(contentXML.contains("Winter T6 Slide Three"), "saved content.xml must still contain slide 3's untouched title")
+        XCTAssertTrue(contentXML.contains("Norma T6 Slide Three"), "saved content.xml must still contain slide 3's untouched title")
         XCTAssertTrue(contentXML.contains("third bullet"), "saved content.xml must still contain slide 3's untouched body")
-        XCTAssertFalse(contentXML.contains("Winter T6 Slide Two"), "slide 2's OLD title must be gone from the saved bytes, not just superseded in a read")
+        XCTAssertFalse(contentXML.contains("Norma T6 Slide Two"), "slide 2's OLD title must be gone from the saved bytes, not just superseded in a read")
     }
 
     /// **The OTHER discriminator `set_text` needs — not cross-SLIDE, cross-FIELD, on the SAME slide.**
@@ -552,13 +552,13 @@ final class OfficeSlidesCommandTests: XCTestCase {
             let docId = "slides-set-body-only-two-part-reopen"
             _ = try await independentClient.open(docId: docId, path: path)
             let saved = try await independentClient.slidesRead(docId: docId, slide: 1)
-            XCTAssertEqual(saved.title, "Winter T6 Slide Two", "title must survive UNTOUCHED when only body is named")
+            XCTAssertEqual(saved.title, "Norma T6 Slide Two", "title must survive UNTOUCHED when only body is named")
             XCTAssertEqual(saved.body, "BODY ONLY CHANGED", "body must be changed in the saved file")
             try await independentClient.close(docId: docId)
 
             let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
             XCTAssertTrue(contentXML.contains("BODY ONLY CHANGED"), "saved content.xml must contain the new body")
-            XCTAssertTrue(contentXML.contains("Winter T6 Slide Two"), "saved content.xml must still contain the untouched original title")
+            XCTAssertTrue(contentXML.contains("Norma T6 Slide Two"), "saved content.xml must still contain the untouched original title")
         }
     }
 
@@ -600,27 +600,27 @@ final class OfficeSlidesCommandTests: XCTestCase {
         XCTAssertEqual(infoAfter.count, 3, "reorder must never change the slide count")
 
         let savedSlide1 = try await independentClient.slidesRead(docId: independentDocId, slide: 0)
-        XCTAssertEqual(savedSlide1.title, "Winter T6 Slide Two", "index 0 must now hold what was slide 2")
+        XCTAssertEqual(savedSlide1.title, "Norma T6 Slide Two", "index 0 must now hold what was slide 2")
         let savedSlide2 = try await independentClient.slidesRead(docId: independentDocId, slide: 1)
-        XCTAssertEqual(savedSlide2.title, "Winter T6 Slide Three", "index 1 must now hold what was slide 3")
+        XCTAssertEqual(savedSlide2.title, "Norma T6 Slide Three", "index 1 must now hold what was slide 3")
         let savedSlide3 = try await independentClient.slidesRead(docId: independentDocId, slide: 2)
-        XCTAssertEqual(savedSlide3.title, "Winter T6 Slide One", "index 2 must now hold the slide this call targeted — moved two full positions")
+        XCTAssertEqual(savedSlide3.title, "Norma T6 Slide One", "index 2 must now hold the slide this call targeted — moved two full positions")
         XCTAssertEqual(savedSlide3.body, "first bullet", "the moved slide's own body must have traveled with it, not been left behind or duplicated")
 
         try await independentClient.close(docId: independentDocId)
 
         // fix round 1 (review F-1): the three `contains` checks this seal originally had were
         // VACUOUS — the pristine, never-written fixture already contains all three titles
-        // (`unzip -p three-slide.odp content.xml | grep -o "Winter T6 Slide [A-Za-z]*"` on the
+        // (`unzip -p three-slide.odp content.xml | grep -o "Norma T6 Slide [A-Za-z]*"` on the
         // committed fixture returns all three), and `String.contains` is order-blind, so this
         // seal's entire subject — ORDER — was unobservable by the check that claimed to prove it.
         // Fixed to compare byte OFFSETS directly: the saved bytes must show "Two" before "Three"
         // before "One", the exact permutation this move produces, not merely that all three
         // strings exist somewhere in the file (which pristine bytes already satisfy).
         let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
-        guard let twoRange = contentXML.range(of: "Winter T6 Slide Two"),
-              let threeRange = contentXML.range(of: "Winter T6 Slide Three"),
-              let oneRange = contentXML.range(of: "Winter T6 Slide One") else {
+        guard let twoRange = contentXML.range(of: "Norma T6 Slide Two"),
+              let threeRange = contentXML.range(of: "Norma T6 Slide Three"),
+              let oneRange = contentXML.range(of: "Norma T6 Slide One") else {
             return XCTFail("all three titles must be present in the saved bytes at all: \(contentXML.prefix(200))")
         }
         XCTAssertTrue(twoRange.lowerBound < threeRange.lowerBound,
@@ -664,19 +664,19 @@ final class OfficeSlidesCommandTests: XCTestCase {
         XCTAssertEqual(infoAfter.count, 3, "reorder must never change the slide count")
 
         let savedSlide1 = try await independentClient.slidesRead(docId: independentDocId, slide: 0)
-        XCTAssertEqual(savedSlide1.title, "Winter T6 Slide Three", "index 0 must now hold the slide this call targeted — moved two full positions backwards")
+        XCTAssertEqual(savedSlide1.title, "Norma T6 Slide Three", "index 0 must now hold the slide this call targeted — moved two full positions backwards")
         XCTAssertEqual(savedSlide1.body, "third bullet", "the moved slide's own body must have traveled with it")
         let savedSlide2 = try await independentClient.slidesRead(docId: independentDocId, slide: 1)
-        XCTAssertEqual(savedSlide2.title, "Winter T6 Slide One", "index 1 must now hold what was slide 1")
+        XCTAssertEqual(savedSlide2.title, "Norma T6 Slide One", "index 1 must now hold what was slide 1")
         let savedSlide3 = try await independentClient.slidesRead(docId: independentDocId, slide: 2)
-        XCTAssertEqual(savedSlide3.title, "Winter T6 Slide Two", "index 2 must now hold what was slide 2")
+        XCTAssertEqual(savedSlide3.title, "Norma T6 Slide Two", "index 2 must now hold what was slide 2")
 
         try await independentClient.close(docId: independentDocId)
 
         let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
-        guard let threeRange = contentXML.range(of: "Winter T6 Slide Three"),
-              let oneRange = contentXML.range(of: "Winter T6 Slide One"),
-              let twoRange = contentXML.range(of: "Winter T6 Slide Two") else {
+        guard let threeRange = contentXML.range(of: "Norma T6 Slide Three"),
+              let oneRange = contentXML.range(of: "Norma T6 Slide One"),
+              let twoRange = contentXML.range(of: "Norma T6 Slide Two") else {
             return XCTFail("all three titles must be present in the saved bytes at all: \(contentXML.prefix(200))")
         }
         XCTAssertTrue(threeRange.lowerBound < oneRange.lowerBound,
@@ -730,9 +730,9 @@ final class OfficeSlidesCommandTests: XCTestCase {
             XCTAssertTrue(infoText.hasPrefix("4 slides"), infoText)
             // Original three, in order, at positions 1/2/3 — the new (empty) slide at position 4.
             let lines = infoText.split(separator: "\n")
-            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("1. ") && $0.contains("Winter T6 Slide One") }), infoText)
-            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("2. ") && $0.contains("Winter T6 Slide Two") }), infoText)
-            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("3. ") && $0.contains("Winter T6 Slide Three") }), infoText)
+            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("1. ") && $0.contains("Norma T6 Slide One") }), infoText)
+            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("2. ") && $0.contains("Norma T6 Slide Two") }), infoText)
+            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("3. ") && $0.contains("Norma T6 Slide Three") }), infoText)
             XCTAssertTrue(lines.contains(where: { $0.hasPrefix("4. ") }), "there must be a 4th slide line: \(infoText)")
 
             // fix round 1 (review F-1's own evidence line, "scenarios 1 and 3 never reopen at all")
@@ -769,14 +769,14 @@ final class OfficeSlidesCommandTests: XCTestCase {
 
         // Index 0 — untouched (was slide 1, still slide 1).
         let savedSlide1 = try await independentClient.slidesRead(docId: independentDocId, slide: 0)
-        XCTAssertEqual(savedSlide1.title, "Winter T6 Slide One", "slide 1 must be untouched by an insert at position 2")
+        XCTAssertEqual(savedSlide1.title, "Norma T6 Slide One", "slide 1 must be untouched by an insert at position 2")
         // Index 1 — the new, empty slide (this is where `at: 2` landed it).
         // Index 2 — what WAS slide 2, shifted down one.
         let savedSlide3 = try await independentClient.slidesRead(docId: independentDocId, slide: 2)
-        XCTAssertEqual(savedSlide3.title, "Winter T6 Slide Two", "the original slide 2 must have shifted to position 3")
+        XCTAssertEqual(savedSlide3.title, "Norma T6 Slide Two", "the original slide 2 must have shifted to position 3")
         // Index 3 — what WAS slide 3, shifted down one.
         let savedSlide4 = try await independentClient.slidesRead(docId: independentDocId, slide: 3)
-        XCTAssertEqual(savedSlide4.title, "Winter T6 Slide Three", "the original slide 3 must have shifted to position 4")
+        XCTAssertEqual(savedSlide4.title, "Norma T6 Slide Three", "the original slide 3 must have shifted to position 4")
 
         try await independentClient.close(docId: independentDocId)
 
@@ -787,9 +787,9 @@ final class OfficeSlidesCommandTests: XCTestCase {
         let contentXML = try readODFEntry(atPath: middlePath, entry: "content.xml")
         let pageCount = contentXML.components(separatedBy: "<draw:page ").count - 1
         XCTAssertEqual(pageCount, 4, "saved content.xml must show exactly 4 <draw:page> elements after a middle insert")
-        XCTAssertTrue(contentXML.contains("Winter T6 Slide One"), "saved content.xml must still contain slide 1's untouched title")
-        XCTAssertTrue(contentXML.contains("Winter T6 Slide Two"), "saved content.xml must still contain the shifted slide 2's title")
-        XCTAssertTrue(contentXML.contains("Winter T6 Slide Three"), "saved content.xml must still contain the shifted slide 3's title")
+        XCTAssertTrue(contentXML.contains("Norma T6 Slide One"), "saved content.xml must still contain slide 1's untouched title")
+        XCTAssertTrue(contentXML.contains("Norma T6 Slide Two"), "saved content.xml must still contain the shifted slide 2's title")
+        XCTAssertTrue(contentXML.contains("Norma T6 Slide Three"), "saved content.xml must still contain the shifted slide 3's title")
 
         // --- Scenario 3: `at` = 1 -> insert at the very front. ---
         do {
@@ -817,9 +817,9 @@ final class OfficeSlidesCommandTests: XCTestCase {
             XCTAssertTrue(infoText.contains("4 slides"), infoText)
             let lines = infoText.split(separator: "\n")
             // The new (empty) slide at position 1 — original three shifted to positions 2/3/4.
-            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("2. ") && $0.contains("Winter T6 Slide One") }), infoText)
-            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("3. ") && $0.contains("Winter T6 Slide Two") }), infoText)
-            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("4. ") && $0.contains("Winter T6 Slide Three") }), infoText)
+            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("2. ") && $0.contains("Norma T6 Slide One") }), infoText)
+            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("3. ") && $0.contains("Norma T6 Slide Two") }), infoText)
+            XCTAssertTrue(lines.contains(where: { $0.hasPrefix("4. ") && $0.contains("Norma T6 Slide Three") }), infoText)
 
             // fix round 1 (review F-1's own evidence line, "scenarios 1 and 3 never reopen at all")
             // — a raw page-count seal against the SAVED bytes, matching scenario 1's own fix.
@@ -975,7 +975,7 @@ final class OfficeSlidesCommandTests: XCTestCase {
 
         // Index 0 — untouched (was slide 1, still slide 1).
         let savedSlide1 = try await independentClient.slidesRead(docId: independentDocId, slide: 0)
-        XCTAssertEqual(savedSlide1.title, "Winter T6 Slide One", "slide 1 must be UNTOUCHED by a delete that targeted slide 2")
+        XCTAssertEqual(savedSlide1.title, "Norma T6 Slide One", "slide 1 must be UNTOUCHED by a delete that targeted slide 2")
         XCTAssertEqual(savedSlide1.body, "first bullet", "slide 1's body must also be untouched")
 
         // Index 1 — what WAS slide 3, now shifted down to occupy slide 2's old position. This is the
@@ -983,17 +983,17 @@ final class OfficeSlidesCommandTests: XCTestCase {
         // deleted instead (or some other wrong-part failure), this position would read "Slide One" or
         // stay empty, not "Slide Three".
         let savedSlide2 = try await independentClient.slidesRead(docId: independentDocId, slide: 1)
-        XCTAssertEqual(savedSlide2.title, "Winter T6 Slide Three", "the surviving third slide must have shifted into the deleted slide's old position")
+        XCTAssertEqual(savedSlide2.title, "Norma T6 Slide Three", "the surviving third slide must have shifted into the deleted slide's old position")
         XCTAssertEqual(savedSlide2.body, "third bullet")
 
         try await independentClient.close(docId: independentDocId)
 
         // Filesystem-level seal, same discipline `91ad38ce` established for `set_text`.
         let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
-        XCTAssertFalse(contentXML.contains("Winter T6 Slide Two"), "deleted slide's title must be gone from the saved bytes")
+        XCTAssertFalse(contentXML.contains("Norma T6 Slide Two"), "deleted slide's title must be gone from the saved bytes")
         XCTAssertFalse(contentXML.contains("second bullet"), "deleted slide's body must be gone from the saved bytes")
-        XCTAssertTrue(contentXML.contains("Winter T6 Slide One"), "saved content.xml must still contain slide 1's untouched title")
-        XCTAssertTrue(contentXML.contains("Winter T6 Slide Three"), "saved content.xml must still contain the surviving third slide's title")
+        XCTAssertTrue(contentXML.contains("Norma T6 Slide One"), "saved content.xml must still contain slide 1's untouched title")
+        XCTAssertTrue(contentXML.contains("Norma T6 Slide Three"), "saved content.xml must still contain the surviving third slide's title")
     }
 
 

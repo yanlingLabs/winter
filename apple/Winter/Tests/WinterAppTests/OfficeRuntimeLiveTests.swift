@@ -567,7 +567,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         view.mouseDown(with: makeMouseEvent(.leftMouseDown))
         view.mouseUp(with: makeMouseEvent(.leftMouseUp))
         // 'Z' — AppKit physical keyCode 6 (verified in `OfficeInputCodesTests`), a letter this
-        // fixture's own A1 seed content ("WINTER GATE") does not already contain, so a successful
+        // fixture's own A1 seed content ("NORMA GATE") does not already contain, so a successful
         // insertion is unambiguously this drill's own doing, not a coincidence of existing content.
         view.keyDown(with: makeKeyEvent(.keyDown, characters: "Z", keyCode: 6))
         view.keyUp(with: makeKeyEvent(.keyUp, characters: "Z", keyCode: 6))
@@ -751,7 +751,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                       + "F2's fix: input now carries the SAME part the viewport was showing")
         XCTAssertFalse(sheet1XML.contains(marker), "the typed marker must NOT leak onto sheet 1 — "
                       + "the pre-fix failure mode this drill exists to close")
-        XCTAssertTrue(sheet1XML.contains("WINTER GATE"), "sheet 1's own original seed content must be "
+        XCTAssertTrue(sheet1XML.contains("NORMA GATE"), "sheet 1's own original seed content must be "
                       + "completely untouched, not merely marker-free")
 
         view.unmount()
@@ -944,7 +944,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         //
         // **The disabled-build signature, RE-MEASURED in fix round 4 (NEW-3) with A's saved bytes
         // dumped rather than inferred from which assertions fired.** With `setView` deleted and the
-        // click removed: A's Sheet1 is UNTOUCHED (`WINTER GATE`, `42`) and **A's Sheet2!A1 =
+        // click removed: A's Sheet1 is UNTOUCHED (`NORMA GATE`, `42`) and **A's Sheet2!A1 =
         // `4EDIZ`** — the marker (`T4EDIZ`) minus its FIRST character, which is destroyed. B's own
         // dirty flag does flip, both before and after A's save. 3 failing assertions, and the
         // reasons are two different things, not one: (a) the first `setPart(A.handle, 1)` runs while
@@ -1079,7 +1079,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         let sheet2XML = try XCTUnwrap(extractTableXML(content, sheetName: "Sheet2"), "Sheet2 must still exist")
         XCTAssertTrue(sheet2XML.contains(marker), "the typed marker must appear on A's SHEET 2")
         XCTAssertFalse(sheet1XML.contains(marker), "the typed marker must NOT leak onto A's sheet 1")
-        XCTAssertTrue(sheet1XML.contains("WINTER GATE"), "A's sheet 1 seed content must be untouched")
+        XCTAssertTrue(sheet1XML.contains("NORMA GATE"), "A's sheet 1 seed content must be untouched")
 
         // (3) B is untouched, checkpoint 2 — after A's full save (the highest-risk moment, given the
         // `.uno:Save` active-frame hazard documented above). B was never explicitly edited or saved
@@ -1312,7 +1312,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         let sheet2XML = try XCTUnwrap(extractTableXML(content, sheetName: "Sheet2"), "Sheet2 must still exist")
         XCTAssertTrue(sheet2XML.contains(marker), "the typed marker must appear on A's SHEET 2")
         XCTAssertFalse(sheet1XML.contains(marker), "the typed marker must NOT leak onto A's sheet 1")
-        XCTAssertTrue(sheet1XML.contains("WINTER GATE"), "A's sheet 1 seed content must be untouched")
+        XCTAssertTrue(sheet1XML.contains("NORMA GATE"), "A's sheet 1 seed content must be untouched")
 
         XCTAssertEqual(runtime.stateSnapshot.documents[pathB]?.dirty, false,
                        "B's dirty flag flipped after A's save — A's `.uno:Save` dispatch leaked onto B")
@@ -1520,7 +1520,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         let sheet2XML = try XCTUnwrap(extractTableXML(content, sheetName: "Sheet2"), "Sheet2 must still exist")
         XCTAssertTrue(sheet2XML.contains(marker), "the typed marker must appear on SHEET 2")
         XCTAssertFalse(sheet1XML.contains(marker), "the typed marker must NOT leak onto sheet 1")
-        XCTAssertTrue(sheet1XML.contains("WINTER GATE"), "sheet 1's own seed content must be untouched — "
+        XCTAssertTrue(sheet1XML.contains("NORMA GATE"), "sheet 1's own seed content must be untouched — "
                       + "this is the save-side half of the same proof: the saved file's own ACTIVE part "
                       + "reflects where the user's real typing left it (sheet 2), not wherever a stray "
                       + "prefetch/paint last painted, since every paint's own part always matches the "
@@ -1583,7 +1583,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// **The disabled-build signature, RE-MEASURED in fix round 4 (NEW-3) with the saved bytes
     /// actually dumped rather than inferred from which assertions fired.** With `setView` deleted
     /// from both dedicated-thread input functions (restored immediately after), the saved file
-    /// contains: Sheet1 completely untouched (`WINTER GATE`, `42`), and **Sheet2!A1 = `4EDIT`** — the
+    /// contains: Sheet1 completely untouched (`NORMA GATE`, `42`), and **Sheet2!A1 = `4EDIT`** — the
     /// marker is `T4EDIT`, so every character but the FIRST lands correctly and the first one is
     /// destroyed. Exactly ONE assertion fails (`the typed marker must appear on A's SHEET 2`, a
     /// substring miss), and B's own dirty flag stays false.
@@ -1736,7 +1736,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                         + "fails: measured, the disabled build leaves sheet 1 untouched and puts "
                         + "'4EDIT' — the marker minus its first character — on sheet 2. See this "
                         + "test's own header for the four-step mechanism and the dumped bytes.")
-        XCTAssertTrue(sheet1XML.contains("WINTER GATE"), "A's sheet 1 seed content must be untouched")
+        XCTAssertTrue(sheet1XML.contains("NORMA GATE"), "A's sheet 1 seed content must be untouched")
 
         runtime.close(pathA)
         runtime.close(pathB)
@@ -1776,12 +1776,12 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// finding fail differently and the difference is the point:
     ///
     ///   * **Paint gate deleted, input gates intact** — saved body text
-    ///     `EDWINTER GATEoffice stage A embed probeWINTER PAGE TWOT4`. Burst 1 lands correctly at the
+    ///     `EDNORMA GATEoffice stage A embed probeNORMA PAGE TWOT4`. Burst 1 lands correctly at the
     ///     end of page 2; the interleaved paint yanks the caret to page-1 start; burst 2 lands
     ///     there. **2 failing assertions** (the marker-appears-once assertion still holds — the
     ///     burst landed in exactly one, wrong, place).
     ///   * **All three gates deleted (the real pre-round-4 build)** — saved body text
-    ///     `DE4TWINTER GATEoffice stage A embed probeWINTER PAGE TWO`. **3 failing assertions.** The
+    ///     `DE4TNORMA GATEoffice stage A embed probeNORMA PAGE TWO`. **3 failing assertions.** The
     ///     whole marker is at page-1 start and it is REVERSED, which is the ungated INPUT prefix
     ///     showing its own hand: `GotoPage(1)` ran before EVERY keystroke, so each character was
     ///     inserted at page-1 start and pushed its predecessor right. Plain typing into any Writer
@@ -1884,10 +1884,10 @@ final class OfficeRuntimeLiveTests: XCTestCase {
 
         // Read the SAVED bytes back, the standard every other drill in this file holds itself to.
         let text = strippedODFBodyText(try readODFContentXML(atPath: path))
-        XCTAssertTrue(text.contains("WINTER PAGE TWOT4ED"),
+        XCTAssertTrue(text.contains("NORMA PAGE TWOT4ED"),
                       "the whole typed marker must sit where it was typed, at the end of page 2 — "
                         + "got: \(text)")
-        XCTAssertTrue(text.hasPrefix("WINTER GATE"),
+        XCTAssertTrue(text.hasPrefix("NORMA GATE"),
                       "page 1 must still begin with its own seed text — anything in front of it is "
                         + "text that was typed on page 2 and landed at page-1 start, which is "
                         + "exactly what an ungated setPart's GotoPage(1) does to the caret. got: \(text)")
@@ -2982,7 +2982,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         let documentXML = try readODFEntry(atPath: docPath, entry: "word/document.xml")
         XCTAssertTrue(documentXML.contains("T4EDIT"), "the typed marker is missing from the SAVED "
                       + "real file's own word/document.xml — the edit never reached disk")
-        XCTAssertTrue(documentXML.contains("WINTER GATE"), "the fixture's own seed text is missing "
+        XCTAssertTrue(documentXML.contains("NORMA GATE"), "the fixture's own seed text is missing "
                       + "— the save wrote something other than this document")
         // `[Content_Types].xml` — the brackets MUST be backslash-escaped: `unzip -p` treats its
         // filename argument as a shell-style PATTERN, so a bare `[Content_Types].xml` parses as a
@@ -3493,7 +3493,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         // `</office:text>`, tags stripped). Hardcoded rather than re-read from `fixturePath` at
         // runtime: OfficeHelperLiveTests' own sha256 pin on gate.odt means any future change to the
         // fixture breaks that hash test first, before this literal could silently drift out of sync.
-        let seedText = "WINTER GATEoffice stage A embed probe"
+        let seedText = "NORMA GATEoffice stage A embed probe"
         XCTAssertTrue(body.hasSuffix(seedText), "the untouched seed text must survive, byte-identical, "
                       + "as the tail — got: \"\(body)\"")
         // Fix round 1, M-2: the ORIGINAL `hasPrefix`-based assertions here were a confirmed gap —
@@ -3813,7 +3813,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
 
         let sharedStrings = extractDir.appendingPathComponent("xl/sharedStrings.xml")
         let original = try String(contentsOf: sharedStrings, encoding: .utf8)
-        let modified = original.replacingOccurrences(of: "WINTER GATE", with: "WINTER GATE RELOADED")
+        let modified = original.replacingOccurrences(of: "NORMA GATE", with: "NORMA GATE RELOADED")
         precondition(modified != original, "the fixture's own known text — see OfficeHelperLiveTests' "
                      + "Expectation table — must be present to edit; if gate.xlsx's content ever "
                      + "changes, this string needs to change with it")
@@ -4479,7 +4479,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         // an EARLIER version of this test pinned SHARED/LIFO here — that was a guess made BEFORE
         // ever running the drill, and it was WRONG; corrected against the real observed body,
         // never left standing on the strength of the a-priori reasoning alone). The real body
-        // after undo was `"BBBBAAAAWINTER GATE..."` — BOTH markers intact, byte-for-byte identical
+        // after undo was `"BBBBAAAANORMA GATE..."` — BOTH markers intact, byte-for-byte identical
         // to the pre-undo body. **REFUSED/NO-OP**: dispatching `.uno:Undo` via view A's own
         // primary-view door did NOT remove view B's edit (the most recent action) NOR view A's own
         // — consistent with LO's collaborative undo REFUSING to act on a foreign view's top undo
@@ -4608,7 +4608,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                         + "Saved body: \(strippedODFBodyText(content))")
         // The untouched NEIGHBOURING cell, not A1. Typing straight after a click REPLACES the
         // clicked cell's content (ordinary spreadsheet UX — `typeOneCharacterOnPrimaryView`'s own
-        // header says so), so `gate.ods`'s A1 seed "WINTER GATE" is legitimately gone here; asserting
+        // header says so), so `gate.ods`'s A1 seed "NORMA GATE" is legitimately gone here; asserting
         // it survived would be asserting the gesture did NOT work. A2 is what proves this was a save
         // of the SAME document with one cell changed, rather than some other document entirely.
         //
@@ -5752,11 +5752,11 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// meaningless.
     ///
     /// Geometry of the drill: the marker `ABCDE` is typed at the very start of `two-page.odt`'s
-    /// first paragraph (`WINTER GATE`), then Left twice puts the caret between `C` and `D`. One
+    /// first paragraph (`NORMA GATE`), then Left twice puts the caret between `C` and `D`. One
     /// Backspace has exactly two possible outcomes and they are different strings:
     ///
-    /// - deletes BEFORE the caret (correct, `KEY_BACKSPACE`): `ABDEWINTER GATE`
-    /// - deletes AFTER the caret  (the bug, `KEY_DELETE`):    `ABCEWINTER GATE`
+    /// - deletes BEFORE the caret (correct, `KEY_BACKSPACE`): `ABDENORMA GATE`
+    /// - deletes AFTER the caret  (the bug, `KEY_DELETE`):    `ABCENORMA GATE`
     ///
     /// so the destination IS the direction here — no ordering ambiguity to hide in.
     /// `testForwardDeleteThroughTheRealCanvasStillRemovesTheCharacterAfterTheCaret` is the control
@@ -5765,8 +5765,8 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     func testBackspaceThroughTheRealCanvasRemovesTheCharacterBeforeTheCaret() async throws {
         try await runDeleteDirectionDrill(
             deleteKeyCharacters: "\u{7F}", deleteKeyCode: 51, name: "backspace-direction",
-            expectedBody: "ABDEWINTER GATE",
-            wrongBody: "ABCEWINTER GATE",
+            expectedBody: "ABDENORMA GATE",
+            wrongBody: "ABCENORMA GATE",
             explanation: "Backspace (AppKit keyCode 51) must delete the character BEFORE the caret. "
                 + "Getting the forward-delete string instead means this key reached LOK as "
                 + "com.sun.star.awt.Key::DELETE (1286) rather than ::BACKSPACE (1283)")
@@ -5780,8 +5780,8 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     func testForwardDeleteThroughTheRealCanvasStillRemovesTheCharacterAfterTheCaret() async throws {
         try await runDeleteDirectionDrill(
             deleteKeyCharacters: "\u{F728}", deleteKeyCode: 117, name: "forward-delete-direction",
-            expectedBody: "ABCEWINTER GATE",
-            wrongBody: "ABDEWINTER GATE",
+            expectedBody: "ABCENORMA GATE",
+            wrongBody: "ABDENORMA GATE",
             explanation: "fn+Delete (AppKit keyCode 117) must delete the character AFTER the caret")
     }
 
@@ -6231,11 +6231,11 @@ final class OfficeRuntimeLiveTests: XCTestCase {
 
     /// `two-page.odt`'s body text as `strippedODFBodyText` renders it — the three paragraphs
     /// concatenated with no separator. Re-derived from the fixture's own bytes, not assumed:
-    /// `unzip -p two-page.odt content.xml | sed 's/<[^>]*>/|/g'` -> `WINTER GATE`,
-    /// `office stage A embed probe`, `WINTER PAGE TWO`.
-    private static let twoPageBody = "WINTER GATEoffice stage A embed probeWINTER PAGE TWO"
-    /// The same body minus the `WINTER GATE` prefix each delete-direction expectation re-states.
-    private static let twoPageBodyTail = "office stage A embed probeWINTER PAGE TWO"
+    /// `unzip -p two-page.odt content.xml | sed 's/<[^>]*>/|/g'` -> `NORMA GATE`,
+    /// `office stage A embed probe`, `NORMA PAGE TWO`.
+    private static let twoPageBody = "NORMA GATEoffice stage A embed probeNORMA PAGE TWO"
+    /// The same body minus the `NORMA GATE` prefix each delete-direction expectation re-states.
+    private static let twoPageBodyTail = "office stage A embed probeNORMA PAGE TWO"
 
     private struct LiveTypingDrill {
         let host: ShellSessionHost

@@ -1786,7 +1786,7 @@ final class OfficeHelperLiveTests: XCTestCase {
             XCTAssertEqual(pixels.count, TileMath.bytesPerTile, "\(key): tile byte count")
         }
         // At least the origin tile (which the six-format matrix already knows carries real
-        // "WINTER GATE" content) must be non-blank; edge tiles at this viewport's far corners may
+        // "NORMA GATE" content) must be non-blank; edge tiles at this viewport's far corners may
         // legitimately be blank if gate.xlsx's content doesn't reach that far — asserting non-blank
         // on the ORIGIN tile specifically is the honest, content-aware version of "non-blank."
         let originKey = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
@@ -2381,7 +2381,7 @@ final class OfficeHelperLiveTests: XCTestCase {
 
             // Dumped bytes — the fixture's own seed text must survive the round trip.
             let sharedStrings = try readOOXMLEntry(atPath: savedPath, entry: "xl/sharedStrings.xml")
-            XCTAssertTrue(sharedStrings.contains("WINTER GATE"), "xlsx: seed text must survive the save")
+            XCTAssertTrue(sharedStrings.contains("NORMA GATE"), "xlsx: seed text must survive the save")
 
             // Reopen as a genuinely valid, re-loadable xlsx — not merely non-empty bytes.
             let reopenHelper = try await spawnLiveHelper()
@@ -2439,7 +2439,7 @@ final class OfficeHelperLiveTests: XCTestCase {
             // (`word/document.xml` existing AT ALL is itself the assertion that the DOCX export
             // filter ran: the failure this fixes produced no output file whatsoever.)
             let documentXML = try readOOXMLEntry(atPath: savedPath, entry: "word/document.xml")
-            XCTAssertTrue(documentXML.contains("WINTER GATE"), "docx: seed text must survive the save")
+            XCTAssertTrue(documentXML.contains("NORMA GATE"), "docx: seed text must survive the save")
             XCTAssertTrue(documentXML.contains("<w:body"), "docx: the saved part must be real "
                           + "WordprocessingML, not an ODF/other payload under a .docx name")
 
@@ -2681,7 +2681,7 @@ final class OfficeHelperLiveTests: XCTestCase {
     ///
     /// Three scenarios, each targeting a specific formula-bar design question (this task's own
     /// report records what each one actually found and the resulting wiring decision):
-    /// 1. **Full → empty → full** — click A1 ("WINTER GATE", real content) → click B2 (genuinely
+    /// 1. **Full → empty → full** — click A1 ("NORMA GATE", real content) → click B2 (genuinely
     ///    empty, per `two-sheet.ods`'s own seed) → click B1 (the number 42): does 19 fire on
     ///    EVERY cell move, including onto an empty cell? If it never fires there, a naive store
     ///    would leave stale content on screen against a fresh, empty cell's own ref unless the
@@ -2696,7 +2696,7 @@ final class OfficeHelperLiveTests: XCTestCase {
     ///    at its `"EMPTY"` sentinel (Task 5's own finding for in-cell edit mode)? This is the
     ///    brief's own "type → content updates" drill leg.
     ///
-    /// A1's/B1's own distinctive seed content ("WINTER GATE", "42") is the cross-check: whatever
+    /// A1's/B1's own distinctive seed content ("NORMA GATE", "42") is the cross-check: whatever
     /// type=19 sends must contain them verbatim, or this is not really the formula bar's own
     /// content.
     func testProbeInvestigatesWhetherCellFormulaCallbacksExistForTheFormulaBarsContent() async throws {
@@ -2713,7 +2713,7 @@ final class OfficeHelperLiveTests: XCTestCase {
         _ = try await helper.client.open(docId: docId, path: calcPath)
         try? await Task.sleep(nanoseconds: 500_000_000)
 
-        // --- Scenario 1+2: full (A1, "WINTER GATE") -> empty (B2) -> full (B1, 42). Column width
+        // --- Scenario 1+2: full (A1, "NORMA GATE") -> empty (B2) -> full (B1, 42). Column width
         // ~1280 twips (two-sheet.ods's own co1 style, 0.889in), row height ~256 twips (ro1,
         // 0.178in) — B2 sits in row 2 (y > 256), B1 in row 1 (y < 256), matching the fixture's own
         // seed content read directly off its content.xml.
