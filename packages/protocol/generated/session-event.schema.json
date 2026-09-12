@@ -33,6 +33,21 @@
             "dispatch",
             "chat"
           ]
+        },
+        "runtimeKind": {
+          "type": "string",
+          "enum": [
+            "claude-agent",
+            "winter-agent"
+          ]
+        },
+        "providerId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "modelRef": {
+          "type": "string",
+          "minLength": 1
         }
       },
       "required": [

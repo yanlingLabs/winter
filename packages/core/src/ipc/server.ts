@@ -60,6 +60,7 @@ import type { ModelInfo } from "../providers/types";
 import type { ChildrenRpc } from "../runtime-sdk/children-rpc";
 import type { NormaRuntimeSdk } from "../runtime-sdk/create";
 import { WinterLegRefusal, type LegSession, type WinterSessionDrivers } from "../runtime-sdk/session-driver";
+import { readWinterTasks } from "../runtime-sdk/tasks-reader";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import { resolveModelAlias } from "../agent/model-aliases";
 import type { ApprovalBroker } from "../agent/approvals";
@@ -1258,7 +1259,19 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (opts.winter !== undefined) {
           try { opts.winter.assertAvailable(p.mode ?? "code"); } catch (err) { rpcFromWinterRefusal(err); }
         }
-        const sessionId = opts.store.createSession(p.scope, { cwd, approvalPolicy, origin: p.origin, mode: p.mode, model, effort: p.effort });
+        // Winter Phase 8c (P8c-5): `runtimeKind` is knowable HERE and only here — `opts.winter`
+        // (this daemon's one runtime-sdk facade, pre-8c-lane1-merge scope) is defined precisely
+        // when a session runs the Winter leg; the 8a runtime record `winter.create()` mints just
+        // below does not exist yet, so this is the ONE fact this call site can honestly stamp on
+        // the seq-1 event. `modelRef` rides the ALREADY-RESOLVED `model` local (set above, before
+        // the effort check) — never the caller's raw, possibly-aliased `p.model`. `providerId` has
+        // no producer in this phase (see store.ts's doc comment on the parameter) and is
+        // deliberately omitted, not set to a guess.
+        const sessionId = opts.store.createSession(p.scope, {
+          cwd, approvalPolicy, origin: p.origin, mode: p.mode, model, effort: p.effort,
+          ...(opts.winter !== undefined ? { runtimeKind: "winter-agent" as const } : {}),
+          ...(model !== undefined ? { modelRef: model } : {}),
+        });
         // THE CREATION TRANSACTION (WS-16 §6, P8b-14): the record allocates the backend uuid and
         // the child is started; a failure there ROLLS THE ROW BACK (it was never announced to any
         // client — the `session_created` broadcast is below) and the typed refusal is the reply.
@@ -1395,8 +1408,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // refuse typed BEFORE the row exists, persist the record + start the child after it, roll
         // the row back on a refusal. (`winter` is undefined only on a bare test server.)
         if (opts.winter !== undefined) { try { opts.winter.assertAvailable("dispatch"); } catch (err) { rpcFromWinterRefusal(err); } }
+        // Winter Phase 8c (P8c-5): same reasoning as session.create above — `runtimeKind` is
+        // knowable here (opts.winter's presence) and nowhere later in this transaction; dispatch
+        // takes no model param, so `modelRef` stays unset (the dispatch singleton always uses the
+        // live/boot default model).
         const sessionId = opts.store.createSession("global", {
           cwd: homedir(), approvalPolicy: "auto", origin: "dispatch", mode: "dispatch",
+          ...(opts.winter !== undefined ? { runtimeKind: "winter-agent" as const } : {}),
         });
         if (opts.winter !== undefined) {
           try {
@@ -1684,6 +1702,21 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.taskList: {
         const p = parseParams(TaskListParams, params);
+        // Winter Phase 8c (P8c-11, Task 2.3): the task graph lives in the CHILD's own in-memory
+        // store (measured against the winter-agent-sdk checkout — no file, see tasks-reader.ts's
+        // doc comment), so a Winter-leg session's task list is folded from its OWN persisted
+        // `task_updated` history rather than read from `opts.tasks` (the retired engine's
+        // in-process `TaskStore`, which no live producer writes to any more — kept as the fallback
+        // for a session not on the Winter leg, and for a bare test server with no `winter` wired).
+        //
+        // review r1 (Major): `opts.winter?.get(id)` alone only sees a LIVE child — an idle/resumed
+        // Winter-leg session (no driver running right now) fell through to the retired, empty
+        // TaskStore path. Same shape as `session.compact`/`session.interrupt`'s own leg check just
+        // above: a RECORDED "winter" leg (`legOf`) reads the folded history too, live driver or
+        // not; only an engine-era session (or no `winter` at all) takes the legacy fallback.
+        if (opts.winter?.get(p.sessionId) !== undefined || opts.winter?.legOf(p.sessionId) === "winter") {
+          return { ok: true, tasks: readWinterTasks(opts.store, p.sessionId) };
+        }
         return { ok: true, tasks: opts.tasks?.list(p.sessionId) ?? [] };
       }
       case METHODS.threadList: {

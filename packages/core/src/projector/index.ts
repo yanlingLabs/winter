@@ -1,11 +1,11 @@
 import { TRANSIENT_EVENT_TYPES, type SessionEvent } from "@norma/protocol";
 import {
-  MAIN_THREAD, asAssistantFrame, asInitFrame, asResultFrame, asStreamEventFrame, asUserFrame,
-  assistantText, deltaText, hasToolResults, threadIdOf, toolCalls, toolResults, userText,
+  MAIN_THREAD, asAssistantFrame, asInitFrame, asMirrorErrorFrame, asResultFrame, asStreamEventFrame,
+  asUserFrame, assistantText, deltaText, hasToolResults, threadIdOf, toolCalls, toolResults, userText,
 } from "./conversation";
 import { applyTaskPatch, childFromSpawn, isSpawnTool, seedTask, threadCompletedFrom, threadStarted, type ChildRecord, type TaskRow } from "./children";
 import { createEchoWindow, type EchoWindow } from "./dedupe";
-import { classifyThrown } from "./errors";
+import { classifyThrown, sanitizeDetail } from "./errors";
 import { isKnownUnpersistedKind, kindOf, summarize } from "./hooks";
 import { isQuestionTool } from "./questions";
 import { projectTerminal, totalsOf, type UsageTotals } from "./terminal";
@@ -217,6 +217,23 @@ class ProjectorImpl implements Projector {
         tools: Array.isArray(init.tools) ? init.tools.length : 0,
       });
       return EMPTY_BATCH();
+    }
+
+    // ── the official leg's mirror error (P8c-11 / Task 2.2, provisional shape — see
+    // `asMirrorErrorFrame`'s doc comment) — never persisted, never broadcast; the ONE side effect
+    // the batch carries besides the two event sinks. `sanitizeDetail` is the same opaque-marker
+    // filter `errors.ts` uses for `agent_error.message`: a mirror failure can in principle name a
+    // provider payload, and this log line is not the session JSONL.
+    // No `claimed`/checkpoint guard here (review r1, minor): the flag this sets is idempotent —
+    // re-marking an already `"repair-required"` record a second time on a replay changes nothing
+    // — and the wire shape itself is provisional (see `asMirrorErrorFrame`'s doc comment). Revisit
+    // once the real recorded shape lands, in case it turns out NOT idempotent to re-apply.
+    const mirrorError = asMirrorErrorFrame(msg);
+    if (mirrorError !== undefined) {
+      this.deps.log.warn?.("[projector] the official leg reported a mirror error — this session's transcript health is repair-required", {
+        sessionId: this.deps.sessionId, ...(sanitizeDetail(mirrorError.detail) !== undefined ? { detail: sanitizeDetail(mirrorError.detail) } : {}),
+      });
+      return { persist: [], broadcast: [], transcriptHealth: "repair-required" };
     }
 
     const claim = (sourceId: string, produce: () => ProjectedEvent[]): ProjectedBatch => this.claimed(sourceId, produce);

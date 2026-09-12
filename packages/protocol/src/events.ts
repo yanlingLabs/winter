@@ -30,6 +30,21 @@ export const SessionCreatedEvent = Base.extend({
   // Chat Mode Slice A: "chat" added — a conversation with no filesystem/shell access that shares
   // dispatch's _assistant memory bucket but, unlike dispatch, is NOT a singleton (many chats).
   mode: z.enum(["code", "dispatch", "chat"]).optional(),
+  // Winter Phase 8c (P8c-5): the runtime annotation — which leg backs this session, its provider
+  // and the model it opened with. All three OPTIONAL by design (protocol discipline P8c-5: no new
+  // variant, no new method): the row in `sessions/store.ts`'s `createSession` is inserted BEFORE
+  // the runtime record exists (the child hasn't been asked to start yet), so a session minted via
+  // `session.create`/`session.dispatch` carries only `runtimeKind` (known: `opts.winter` decides
+  // the leg before the row is created — see `ipc/server.ts`'s two call sites) and, when the caller
+  // named one, `modelRef` (the already-resolved model). `providerId` has no producer yet — the
+  // catalog lookup this would need is out of this lane's scope — and stays undefined until a later
+  // phase wires it in; the field exists on the wire now so that phase is a producer change, not a
+  // protocol change. A resume/handoff that moves a session to a different leg does NOT rewrite this
+  // seq-1 event (events are immutable); the CURRENT leg is `session.setModel`'s and the Mac's
+  // problem to read from elsewhere (P8c-12's `RuntimeSelection`), not this one.
+  runtimeKind: z.enum(["claude-agent", "winter-agent"]).optional(),
+  providerId: z.string().min(1).optional(),
+  modelRef: z.string().min(1).optional(),
 });
 
 export const HarnessAttachedEvent = Base.extend({
