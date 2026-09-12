@@ -40,8 +40,10 @@ enum AppProfile {
     static var menuBarAssetPrefix: String { isDev ? "mb-dev" : "mb" }
 
     /// Keychain service this profile's daemon stores its tokens under — mirrors
-    /// `packages/core/src/profile.ts`'s `keychainService()` exactly (dist stays the historical
-    /// literal, never migrate). Every `KeychainToken` read (`AppModel.production()`,
+    /// `packages/core/src/profile.ts`'s `keychainService()` exactly. The dist service is now
+    /// `com.winter.core` (dev: `.dev`), a NEW pair holding nothing until Migration B (9c) copies
+    /// over the pre-rename items — see `LegacyNames.keychainService`/`.keychainServiceDev` for
+    /// that pre-rename pair. Every `KeychainToken` read (`AppModel.production()`,
     /// `RemoteHost.Config`) must pass this, not the bare `"com.winter.core"` default — otherwise a
     /// dev-profile app reads the DIST daemon's token and fails to authenticate against its own dev
     /// daemon (the bug this property exists to prevent).
