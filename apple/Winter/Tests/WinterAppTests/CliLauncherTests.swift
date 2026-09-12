@@ -27,19 +27,31 @@ final class CliLauncherTests: XCTestCase {
         XCTAssertEqual(fallback.path, tmp.appendingPathComponent(".local/bin/winter-dev").path)
     }
 
-    func testRemoveLegacyWinterWrapperOnlyRemovesOurWrapper() throws {
+    func testRemoveLegacyDevWrapperOnlyRemovesOurWrapperUnderEitherLegacyName() throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("dd-legacy-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let legacy = dir.appendingPathComponent("winter")
-        try Data("#!/bin/sh\nexec /usr/bin/env bun \"/old/packages/cli/src/main.ts\" \"$@\"\n".utf8).write(to: legacy)
-        CliLauncher.removeLegacyWinterWrapper(besides: dir.appendingPathComponent("winter-dev"))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path), "our old wrapper is removed")
 
-        let foreign = dir.appendingPathComponent("winter")
-        try Data("#!/bin/sh\necho user-owned\n".utf8).write(to: foreign)
-        CliLauncher.removeLegacyWinterWrapper(besides: dir.appendingPathComponent("winter-dev"))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: foreign.path), "a foreign `winter` is NEVER touched")
+        // Both legacy names (`norma`, `norma-dev`) are removed when they prove to be our wrapper.
+        for name in LegacyNames.devWrapperNames {
+            let legacy = dir.appendingPathComponent(name)
+            try Data("#!/bin/sh\nexec /usr/bin/env bun \"/old/packages/cli/src/main.ts\" \"$@\"\n".utf8).write(to: legacy)
+        }
+        CliLauncher.removeLegacyDevWrapper(besides: dir.appendingPathComponent("winter-dev"))
+        for name in LegacyNames.devWrapperNames {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent(name).path), "our old \(name) wrapper is removed")
+        }
+
+        let foreignNorma = dir.appendingPathComponent("norma")
+        try Data("#!/bin/sh\necho user-owned\n".utf8).write(to: foreignNorma)
+        CliLauncher.removeLegacyDevWrapper(besides: dir.appendingPathComponent("winter-dev"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: foreignNorma.path), "a foreign `norma` is NEVER touched")
+
+        // The CURRENT names (`winter`, `winter-dev`) are never inspected by this legacy cleanup at all.
+        let current = dir.appendingPathComponent("winter")
+        try Data("#!/bin/sh\nexec /usr/bin/env bun \"/old/packages/cli/src/main.ts\" \"$@\"\n".utf8).write(to: current)
+        CliLauncher.removeLegacyDevWrapper(besides: dir.appendingPathComponent("winter-dev"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: current.path), "the CURRENT `winter` name is out of scope for legacy cleanup")
     }
 
     func testEnsureWrapperWritesOnceAndRewritesOnDrift() throws {

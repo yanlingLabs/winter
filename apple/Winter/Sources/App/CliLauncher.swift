@@ -77,16 +77,23 @@ final class CliLauncher {
         return home.appendingPathComponent(".local/bin/winter-dev")
     }
 
-    /// One-time migration: earlier dev builds installed the wrapper AS `winter`, which now
-    /// belongs to the DISTRIBUTION app's symlink. Removes a sibling `winter` iff its content
-    /// proves it was our bun wrapper (starts with the historical exec line) — a user-owned or
-    /// dist-owned `winter` is never touched.
-    static func removeLegacyWinterWrapper(besides installPath: URL) {
-        let legacy = installPath.deletingLastPathComponent().appendingPathComponent("winter")
-        guard let content = try? String(contentsOf: legacy, encoding: .utf8),
-              content.hasPrefix("#!/bin/sh\nexec /usr/bin/env bun \""),
-              content.contains("/packages/cli/src/main.ts\" \"$@\"") else { return }
-        try? FileManager.default.removeItem(at: legacy)
+    /// One-time migration: earlier dev builds installed the wrapper under a legacy Norma-era name
+    /// (`LegacyNames.devWrapperNames` — `norma`, before this app's own dev/dist split even
+    /// existed, and `norma-dev` after it). `norma` now belongs to the DISTRIBUTION app's own
+    /// symlink (its post-rename successor `winter` does likewise; see `CliInstaller`), so this
+    /// only ever removes a sibling under a LEGACY name, never the current `winter`/`winter-dev`.
+    /// Removes a sibling iff its content proves it was our own bun wrapper (starts with the
+    /// historical exec line) — a user-owned or dist-owned file under either legacy name is never
+    /// touched.
+    static func removeLegacyDevWrapper(besides installPath: URL) {
+        let directory = installPath.deletingLastPathComponent()
+        for name in LegacyNames.devWrapperNames {
+            let legacy = directory.appendingPathComponent(name)
+            guard let content = try? String(contentsOf: legacy, encoding: .utf8),
+                  content.hasPrefix("#!/bin/sh\nexec /usr/bin/env bun \""),
+                  content.contains("/packages/cli/src/main.ts\" \"$@\"") else { continue }
+            try? FileManager.default.removeItem(at: legacy)
+        }
     }
 
     /// Writes the wrapper script iff it's missing or its bytes have drifted from what
@@ -95,7 +102,7 @@ final class CliLauncher {
     /// rewrites the file nor touches its mtime. Returns the resolved install path either way.
     func ensureWrapper() throws -> URL {
         let path = installPathOverride ?? Self.wrapperInstallPath()
-        Self.removeLegacyWinterWrapper(besides: path)
+        Self.removeLegacyDevWrapper(besides: path)
         let directory = path.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 

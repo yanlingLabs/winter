@@ -665,7 +665,7 @@ targets:
         # Computer use (Phase 5 CU): screen-recording purpose string shown in the TCC prompt when
         # Winter first captures the screen for a computer-use screenshot.
         NSScreenCaptureUsageDescription: "Winter captures your screen for computer-use screenshots you explicitly ask it to take."
-        SUFeedURL: "https://updates.yanlinglabs.com/appcast.xml"
+        SUFeedURL: "https://updates.yanlinglabs.com/winter/appcast.xml"
         SUPublicEDKey: "mmce2Wik1c09oXqBvWp+DjsfwtSAdpaCCDkJ98sgAtg="
         SUEnableAutomaticChecks: true
         SUAutomaticallyUpdate: true
