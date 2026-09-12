@@ -13,10 +13,10 @@ function git(args: string[], cwd: string): { code: number; stdout: string; stder
 
 /** mkdtemp + git init + an initial commit so HEAD exists. */
 function repo(): string {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "norma-wt-")));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-wt-")));
   git(["init"], dir);
-  git(["config", "user.email", "test@norma.dev"], dir);
-  git(["config", "user.name", "Norma Test"], dir);
+  git(["config", "user.email", "test@winter.dev"], dir);
+  git(["config", "user.name", "Winter Test"], dir);
   writeFileSync(join(dir, "README.md"), "hello\n");
   git(["add", "-A"], dir);
   git(["commit", "-m", "init"], dir);
@@ -28,12 +28,12 @@ describe.if(isMac)("WorktreeManager", () => {
     const dir = repo();
     const m = new WorktreeManager({ baseRef: () => "head" });
     const wt = m.enter("s", dir, "feat");
-    expect(wt.branch).toBe("norma/feat");
+    expect(wt.branch).toBe("winter/feat");
     expect(wt.name).toBe("feat");
     expect(wt.originalCwd).toBe(dir);
     expect(existsSync(wt.dir)).toBe(true);
     expect(m.active("s")).toEqual(wt);
-    const listed = git(["branch", "--list", "norma/feat"], dir);
+    const listed = git(["branch", "--list", "winter/feat"], dir);
     expect(listed.stdout.trim().length).toBeGreaterThan(0);
   });
 
@@ -41,9 +41,9 @@ describe.if(isMac)("WorktreeManager", () => {
     const dir = repo();
     const m = new WorktreeManager({ baseRef: () => "fresh" });
     const wt = m.enter("s", dir, "feat2");
-    expect(wt.branch).toBe("norma/feat2");
+    expect(wt.branch).toBe("winter/feat2");
     expect(existsSync(wt.dir)).toBe(true);
-    const listed = git(["branch", "--list", "norma/feat2"], dir);
+    const listed = git(["branch", "--list", "winter/feat2"], dir);
     expect(listed.stdout.trim().length).toBeGreaterThan(0);
   });
 
@@ -70,7 +70,7 @@ describe.if(isMac)("WorktreeManager", () => {
   });
 
   test("enter in a non-git dir → error", () => {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), "norma-wt-notgit-")));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-wt-notgit-")));
     const m = new WorktreeManager({ baseRef: () => "head" });
     expect(() => m.enter("s", dir, "feat")).toThrow(/not a git repository/);
   });
@@ -80,7 +80,7 @@ describe.if(isMac)("WorktreeManager", () => {
     const m = new WorktreeManager({ baseRef: () => "head" });
     const wt = m.enter("s", dir, "feat");
     const result = m.exit("s", "keep");
-    expect(result).toEqual({ name: "feat", branch: "norma/feat", removed: false, originalCwd: dir });
+    expect(result).toEqual({ name: "feat", branch: "winter/feat", removed: false, originalCwd: dir });
     expect(existsSync(wt.dir)).toBe(true);
     expect(m.active("s")).toBeUndefined();
   });
@@ -90,7 +90,7 @@ describe.if(isMac)("WorktreeManager", () => {
     const m = new WorktreeManager({ baseRef: () => "head" });
     const wt = m.enter("s", dir, "feat");
     const result = m.exit("s", "remove");
-    expect(result).toEqual({ name: "feat", branch: "norma/feat", removed: true, originalCwd: dir });
+    expect(result).toEqual({ name: "feat", branch: "winter/feat", removed: true, originalCwd: dir });
     expect(existsSync(wt.dir)).toBe(false);
     expect(m.active("s")).toBeUndefined();
   });
@@ -114,7 +114,7 @@ describe.if(isMac)("WorktreeManager", () => {
     const wt = m.enter("s", dir, "feat");
     writeFileSync(join(wt.dir, "dirty.txt"), "uncommitted\n");
     const result = m.exit("s", "remove", true);
-    expect(result).toEqual({ name: "feat", branch: "norma/feat", removed: true, originalCwd: dir });
+    expect(result).toEqual({ name: "feat", branch: "winter/feat", removed: true, originalCwd: dir });
     expect(existsSync(wt.dir)).toBe(false);
     expect(m.active("s")).toBeUndefined();
   });
@@ -135,9 +135,9 @@ describe.if(isMac)("WorktreeManager: createDetached/removeDetached (stateless, 4
     const dir = repo();
     const m = new WorktreeManager({ baseRef: () => "head" });
     const wt = m.createDetached(dir, "spawn-feat");
-    expect(wt.branch).toBe("norma/spawn-feat");
+    expect(wt.branch).toBe("winter/spawn-feat");
     expect(existsSync(wt.dir)).toBe(true);
-    const listed = git(["branch", "--list", "norma/spawn-feat"], dir);
+    const listed = git(["branch", "--list", "winter/spawn-feat"], dir);
     expect(listed.stdout.trim().length).toBeGreaterThan(0);
     // no per-session bookkeeping — active() sees nothing
     expect(m.active("any-session")).toBeUndefined();
@@ -147,7 +147,7 @@ describe.if(isMac)("WorktreeManager: createDetached/removeDetached (stateless, 4
     const dir = repo();
     const m = new WorktreeManager({ baseRef: () => "head" });
     const wt = m.createDetached(dir);
-    expect(wt.branch).toMatch(/^norma\/[0-9a-f]{8}$/);
+    expect(wt.branch).toMatch(/^winter\/[0-9a-f]{8}$/);
     expect(existsSync(wt.dir)).toBe(true);
   });
 
@@ -164,7 +164,7 @@ describe.if(isMac)("WorktreeManager: createDetached/removeDetached (stateless, 4
   });
 
   test("createDetached in a non-git dir → error", () => {
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), "norma-wt-notgit-")));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-wt-notgit-")));
     const m = new WorktreeManager({ baseRef: () => "head" });
     expect(() => m.createDetached(dir, "x")).toThrow(/not a git repository/);
   });

@@ -1,12 +1,12 @@
 // Winter Phase 8d (P8d-1/P8d-2) — the STANDALONE proof of `embed-runtimes.sh` (the body of
 // project.yml's "Embed runtimes" postCompileScript), run exactly the way the section brief
-// prescribes: BUILT_PRODUCTS_DIR=<mkdtemp>, CONTENTS_FOLDER_PATH=Norma.app/Contents,
+// prescribes: BUILT_PRODUCTS_DIR=<mkdtemp>, CONTENTS_FOLDER_PATH=Winter.app/Contents,
 // CONFIGURATION=Release, EXPANDED_CODE_SIGN_IDENTITY=- (ad-hoc — this is the build-phase proof,
 // not release.ts's own gate, which requires a real Developer ID team identity).
 //
 // The claude-verify step needs the REAL @anthropic-ai/claude-agent-sdk platform package (an
 // optional dependency bun install may or may not have resolved on this machine/arch) — SKIP with a
-// printed reason when it is absent, UNLESS NORMA_CLAUDE_REQUIRE_RUNTIME=1, in which case that is a
+// printed reason when it is absent, UNLESS WINTER_CLAUDE_REQUIRE_RUNTIME=1, in which case that is a
 // hard failure (the same CI-honesty shape `test/helpers/claude-runtime.ts` already uses).
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
@@ -41,8 +41,8 @@ describe("embed-runtimes.sh (P8d-1/P8d-2 postCompileScript body, standalone)", (
       throw new Error(`this test needs the pinned dist/winter at ${PINNED_DIST_WINTER} (never rebuild it — see the brief's working rules)`);
     }
     if (!claudePlatformAvailable()) {
-      if (process.env.NORMA_CLAUDE_REQUIRE_RUNTIME === "1") {
-        throw new Error("NORMA_CLAUDE_REQUIRE_RUNTIME=1 and the @anthropic-ai/claude-agent-sdk platform package is not installed on this machine");
+      if (process.env.WINTER_CLAUDE_REQUIRE_RUNTIME === "1") {
+        throw new Error("WINTER_CLAUDE_REQUIRE_RUNTIME=1 and the @anthropic-ai/claude-agent-sdk platform package is not installed on this machine");
       }
       console.log("SKIP: @anthropic-ai/claude-agent-sdk platform package not installed on this machine/arch — cannot exercise the claude verify step here");
       return;
@@ -57,14 +57,14 @@ describe("embed-runtimes.sh (P8d-1/P8d-2 postCompileScript body, standalone)", (
           ...process.env,
           CONFIGURATION: "Release",
           BUILT_PRODUCTS_DIR: builtProducts,
-          CONTENTS_FOLDER_PATH: "Norma.app/Contents",
+          CONTENTS_FOLDER_PATH: "Winter.app/Contents",
           EXPANDED_CODE_SIGN_IDENTITY: "-",
-          NORMA_STAGE_WINTER_PATH: PINNED_DIST_WINTER,
+          WINTER_STAGE_RUNTIME_PATH: PINNED_DIST_WINTER,
         },
       });
       if (r.status !== 0) throw new Error(`embed-runtimes.sh exited ${r.status}:\n[stderr]\n${r.stderr}\n[stdout]\n${r.stdout}`);
 
-      const dest = join(builtProducts, "Norma.app", "Contents", "Resources", "runtimes");
+      const dest = join(builtProducts, "Winter.app", "Contents", "Resources", "runtimes");
       expect(existsSync(join(dest, "winter"))).toBe(true);
       expect(existsSync(join(dest, "claude-official", "claude"))).toBe(true);
       expect(existsSync(join(dest, "claude-official", "VERSIONS.json"))).toBe(true);
@@ -72,7 +72,7 @@ describe("embed-runtimes.sh (P8d-1/P8d-2 postCompileScript body, standalone)", (
       // winter: re-signed with the stable identifier, ad-hoc identity accepted (this is the
       // build-phase proof, not release.ts's real-team-identity gate).
       const winterDvv = spawnSync("codesign", ["-dvv", join(dest, "winter")], { encoding: "utf8" });
-      expect(`${winterDvv.stdout}${winterDvv.stderr}`).toContain("Identifier=com.norma.winter");
+      expect(`${winterDvv.stdout}${winterDvv.stderr}`).toContain("Identifier=com.winter.runtime");
 
       // claude: untouched, still verifies as the real Anthropic-signed artifact.
       const claudeVerify = spawnSync("codesign", ["--verify", "--strict", join(dest, "claude-official", "claude")], { encoding: "utf8" });

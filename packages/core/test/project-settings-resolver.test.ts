@@ -6,7 +6,7 @@ import { ProjectSettingsResolver } from "../src/project-settings";
 import { Settings, workflowsEnabledFrom } from "../src/settings";
 
 // Task 6: the cwd-keyed, mtime-cached "effective settings" read-through built on Task 5's
-// mergeSettings. Every test uses a fresh mkdtemp'd directory — never ~/.norma (project rule).
+// mergeSettings. Every test uses a fresh mkdtemp'd directory — never ~/.winter (project rule).
 
 function tmpDir(prefix: string): string {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
@@ -33,10 +33,10 @@ function trustStub(initial: boolean): { isTrusted(dir: string): boolean; set(v: 
 }
 
 describe("ProjectSettingsResolver", () => {
-  test("(a) trusted cwd: .norma/settings.json overlay merges into base", () => {
-    const cwd = tmpDir("norma-psr-a-");
-    mkdirSync(join(cwd, ".norma"), { recursive: true });
-    writeFileSync(join(cwd, ".norma", "settings.json"), JSON.stringify({ reviewer: { enabled: false } }));
+  test("(a) trusted cwd: .winter/settings.json overlay merges into base", () => {
+    const cwd = tmpDir("winter-psr-a-");
+    mkdirSync(join(cwd, ".winter"), { recursive: true });
+    writeFileSync(join(cwd, ".winter", "settings.json"), JSON.stringify({ reviewer: { enabled: false } }));
     const base = minimalBase({ reviewer: { enabled: true } });
     const resolver = new ProjectSettingsResolver({ base: () => base, trust: { isTrusted: () => true } });
 
@@ -44,10 +44,10 @@ describe("ProjectSettingsResolver", () => {
   });
 
   test("(b) untrusted cwd: BOTH project file and settings.local.json are ignored (fix-wave A1: a repo can git add -f a settings.local.json, so gitignore is not a trust boundary)", () => {
-    const cwd = tmpDir("norma-psr-b-");
-    mkdirSync(join(cwd, ".norma"), { recursive: true });
-    writeFileSync(join(cwd, ".norma", "settings.json"), JSON.stringify({ reviewer: { enabled: false } }));
-    writeFileSync(join(cwd, ".norma", "settings.local.json"), JSON.stringify({ permissions: { additionalDirectories: ["/x"] } }));
+    const cwd = tmpDir("winter-psr-b-");
+    mkdirSync(join(cwd, ".winter"), { recursive: true });
+    writeFileSync(join(cwd, ".winter", "settings.json"), JSON.stringify({ reviewer: { enabled: false } }));
+    writeFileSync(join(cwd, ".winter", "settings.local.json"), JSON.stringify({ permissions: { additionalDirectories: ["/x"] } }));
     const base = minimalBase({ reviewer: { enabled: true } });
     const resolver = new ProjectSettingsResolver({ base: () => base, trust: { isTrusted: () => false } });
 
@@ -57,9 +57,9 @@ describe("ProjectSettingsResolver", () => {
   });
 
   test("(b2) trusted cwd: settings.local.json still merges (the trusted-cwd-applies-local case fix-wave A1 keeps)", () => {
-    const cwd = tmpDir("norma-psr-b2-");
-    mkdirSync(join(cwd, ".norma"), { recursive: true });
-    writeFileSync(join(cwd, ".norma", "settings.local.json"), JSON.stringify({ permissions: { additionalDirectories: ["/x"] } }));
+    const cwd = tmpDir("winter-psr-b2-");
+    mkdirSync(join(cwd, ".winter"), { recursive: true });
+    writeFileSync(join(cwd, ".winter", "settings.local.json"), JSON.stringify({ permissions: { additionalDirectories: ["/x"] } }));
     const base = minimalBase();
     const resolver = new ProjectSettingsResolver({ base: () => base, trust: { isTrusted: () => true } });
 
@@ -75,9 +75,9 @@ describe("ProjectSettingsResolver", () => {
   });
 
   test("(d) hot-reload: an out-of-band rewrite is picked up on the next call (mtime-checked, no watcher)", () => {
-    const cwd = tmpDir("norma-psr-d-");
-    const file = join(cwd, ".norma", "settings.json");
-    mkdirSync(join(cwd, ".norma"), { recursive: true });
+    const cwd = tmpDir("winter-psr-d-");
+    const file = join(cwd, ".winter", "settings.json");
+    mkdirSync(join(cwd, ".winter"), { recursive: true });
     writeFileSync(file, JSON.stringify({ reviewer: { enabled: true } }));
     const base = minimalBase();
     const resolver = new ProjectSettingsResolver({ base: () => base, trust: { isTrusted: () => true } });
@@ -92,9 +92,9 @@ describe("ProjectSettingsResolver", () => {
   });
 
   test("(e) malformed project JSON fails safe to base, and is never cached — fixing the file is picked up immediately", () => {
-    const cwd = tmpDir("norma-psr-e-");
-    const file = join(cwd, ".norma", "settings.json");
-    mkdirSync(join(cwd, ".norma"), { recursive: true });
+    const cwd = tmpDir("winter-psr-e-");
+    const file = join(cwd, ".winter", "settings.json");
+    mkdirSync(join(cwd, ".winter"), { recursive: true });
     writeFileSync(file, "{ not json at all");
     const base = minimalBase({ reviewer: { enabled: true } });
     const resolver = new ProjectSettingsResolver({ base: () => base, trust: { isTrusted: () => true } });
@@ -108,9 +108,9 @@ describe("ProjectSettingsResolver", () => {
   });
 
   test("(f) base-swap invalidation: a new base() reference is picked up even with unchanged overlay files", () => {
-    const cwd = tmpDir("norma-psr-f-");
-    mkdirSync(join(cwd, ".norma"), { recursive: true });
-    writeFileSync(join(cwd, ".norma", "settings.json"), JSON.stringify({ reviewer: { enabled: false } }));
+    const cwd = tmpDir("winter-psr-f-");
+    mkdirSync(join(cwd, ".winter"), { recursive: true });
+    writeFileSync(join(cwd, ".winter", "settings.json"), JSON.stringify({ reviewer: { enabled: false } }));
     let base = minimalBase({ reviewer: { enabled: true } });
     const resolver = new ProjectSettingsResolver({ base: () => base, trust: { isTrusted: () => true } });
 
@@ -125,9 +125,9 @@ describe("ProjectSettingsResolver", () => {
   });
 
   test("(g) trust-flip invalidation: trusting a project mid-session applies its overlay on the next call", () => {
-    const cwd = tmpDir("norma-psr-g-");
-    mkdirSync(join(cwd, ".norma"), { recursive: true });
-    writeFileSync(join(cwd, ".norma", "settings.json"), JSON.stringify({ reviewer: { enabled: false } }));
+    const cwd = tmpDir("winter-psr-g-");
+    mkdirSync(join(cwd, ".winter"), { recursive: true });
+    writeFileSync(join(cwd, ".winter", "settings.json"), JSON.stringify({ reviewer: { enabled: false } }));
     const base = minimalBase({ reviewer: { enabled: true } });
     const trust = trustStub(false);
     const resolver = new ProjectSettingsResolver({ base: () => base, trust });
@@ -138,23 +138,23 @@ describe("ProjectSettingsResolver", () => {
     expect(resolver.effective(cwd)?.reviewer?.enabled).toBe(false); // now trusted -> applied
   });
 
-  test("(h1) symlinked .norma directory is refused — overlay not applied, effective is base verbatim", () => {
-    const cwd = tmpDir("norma-psr-h1-");
-    const realDir = tmpDir("norma-psr-h1-real-");
+  test("(h1) symlinked .winter directory is refused — overlay not applied, effective is base verbatim", () => {
+    const cwd = tmpDir("winter-psr-h1-");
+    const realDir = tmpDir("winter-psr-h1-real-");
     writeFileSync(join(realDir, "settings.json"), JSON.stringify({ reviewer: { enabled: false } }));
-    symlinkSync(realDir, join(cwd, ".norma")); // cwd/.norma is a symlink to a real dir elsewhere
+    symlinkSync(realDir, join(cwd, ".winter")); // cwd/.winter is a symlink to a real dir elsewhere
     const base = minimalBase({ reviewer: { enabled: true } });
     const resolver = new ProjectSettingsResolver({ base: () => base, trust: { isTrusted: () => true } });
 
     expect(resolver.effective(cwd)).toBe(base);
   });
 
-  test("(h2) symlinked settings.local.json inside a REAL .norma dir is refused too", () => {
-    const cwd = tmpDir("norma-psr-h2-");
-    const decoy = tmpDir("norma-psr-h2-decoy-");
-    mkdirSync(join(cwd, ".norma"), { recursive: true }); // .norma itself is real
+  test("(h2) symlinked settings.local.json inside a REAL .winter dir is refused too", () => {
+    const cwd = tmpDir("winter-psr-h2-");
+    const decoy = tmpDir("winter-psr-h2-decoy-");
+    mkdirSync(join(cwd, ".winter"), { recursive: true }); // .winter itself is real
     writeFileSync(join(decoy, "x.json"), JSON.stringify({ permissions: { additionalDirectories: ["/evil"] } }));
-    symlinkSync(join(decoy, "x.json"), join(cwd, ".norma", "settings.local.json"));
+    symlinkSync(join(decoy, "x.json"), join(cwd, ".winter", "settings.local.json"));
     const base = minimalBase();
     const resolver = new ProjectSettingsResolver({ base: () => base, trust: { isTrusted: () => true } });
 
@@ -162,9 +162,9 @@ describe("ProjectSettingsResolver", () => {
   });
 
   test("(i) cache hit: two consecutive unchanged calls return the SAME object reference (no re-merge)", () => {
-    const cwd = tmpDir("norma-psr-i-");
-    mkdirSync(join(cwd, ".norma"), { recursive: true });
-    writeFileSync(join(cwd, ".norma", "settings.json"), JSON.stringify({ reviewer: { enabled: false } }));
+    const cwd = tmpDir("winter-psr-i-");
+    mkdirSync(join(cwd, ".winter"), { recursive: true });
+    writeFileSync(join(cwd, ".winter", "settings.json"), JSON.stringify({ reviewer: { enabled: false } }));
     const base = minimalBase({ reviewer: { enabled: true } });
     const resolver = new ProjectSettingsResolver({ base: () => base, trust: { isTrusted: () => true } });
 
@@ -181,13 +181,13 @@ describe("ProjectSettingsResolver", () => {
 // not just a raw property read.
 describe("workflows.{enabled,keywordTrigger} become per-project via ProjectSettingsResolver", () => {
   test("an untrusted project's workflows.enabled:false overlay is IGNORED (base's default-ON wins); a trusted project's applies", () => {
-    const untrustedCwd = tmpDir("norma-psr-wf-untrusted-");
-    mkdirSync(join(untrustedCwd, ".norma"), { recursive: true });
-    writeFileSync(join(untrustedCwd, ".norma", "settings.json"), JSON.stringify({ workflows: { enabled: false } }));
+    const untrustedCwd = tmpDir("winter-psr-wf-untrusted-");
+    mkdirSync(join(untrustedCwd, ".winter"), { recursive: true });
+    writeFileSync(join(untrustedCwd, ".winter", "settings.json"), JSON.stringify({ workflows: { enabled: false } }));
 
-    const trustedCwd = tmpDir("norma-psr-wf-trusted-");
-    mkdirSync(join(trustedCwd, ".norma"), { recursive: true });
-    writeFileSync(join(trustedCwd, ".norma", "settings.json"), JSON.stringify({ workflows: { enabled: false } }));
+    const trustedCwd = tmpDir("winter-psr-wf-trusted-");
+    mkdirSync(join(trustedCwd, ".winter"), { recursive: true });
+    writeFileSync(join(trustedCwd, ".winter", "settings.json"), JSON.stringify({ workflows: { enabled: false } }));
 
     const base = minimalBase();
     const trust = { isTrusted: (dir: string) => dir === trustedCwd }; // only the trusted cwd is trusted

@@ -1,6 +1,6 @@
 /** Disk-backed prompt history (Phase 3c Task 3) — one JSON line per submitted/steered/cleared
- *  entry at `~/.norma/history.jsonl` by default (the composer injects the path; tests always pass
- *  a temp file so nothing here ever touches a real `~/.norma`). Every read/write is best-effort:
+ *  entry at `~/.winter/history.jsonl` by default (the composer injects the path; tests always pass
+ *  a temp file so nothing here ever touches a real `~/.winter`). Every read/write is best-effort:
  *  a missing file, an unwritable directory, or a corrupt line degrades to "no history" rather than
  *  crashing the TUI — prompt history is a convenience, never load-bearing. */
 

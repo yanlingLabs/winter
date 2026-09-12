@@ -132,7 +132,7 @@ function TranscriptEntry({ block, highlight }: { block: Block; highlight?: Highl
     }
 
     case "interrupted":
-      return <Text dimColor>{"  ⎿  Interrupted · What should Norma do instead?"}</Text>;
+      return <Text dimColor>{"  ⎿  Interrupted · What should Winter do instead?"}</Text>;
 
     default: {
       const _exhaustive: never = block;

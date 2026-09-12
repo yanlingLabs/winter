@@ -1,6 +1,6 @@
 import { randomBytes, createHash } from "node:crypto";
 import { z } from "zod";
-import { PeripheralClassSchema, type Holder, type NewSessionEvent } from "@norma/protocol";
+import { PeripheralClassSchema, type Holder, type NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import type { AuditLog } from "./audit";
 
 export type PeripheralClass = z.infer<typeof PeripheralClassSchema>;

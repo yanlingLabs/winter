@@ -1,7 +1,7 @@
 // P8b Task 5: the Winter runtime handle, wired into a REAL daemon boot.
 //
 // The thing under test is the BOOT ORDER and the SHUTDOWN ORDER, so every test here calls
-// `startDaemon` against a temp home rather than `createNormaRuntimeSdk` directly (the unit tests in
+// `startDaemon` against a temp home rather than `createWinterRuntimeSdk` directly (the unit tests in
 // `test/runtime-sdk/create.test.ts` do that): that the handle is built after the runtime spine and
 // gets ITS directory store, that a spine which would not open costs durability and nothing else,
 // and that teardown ends the Winter sessions while the stores they write into are still open.
@@ -61,9 +61,9 @@ describe("daemon boot — the Winter handle", () => {
       const handle = d.runtimeSdk;
       expect(handle).toBeDefined();
       if (handle === undefined) return;
-      // The brand reached the router: this handle speaks Norma, not Winter.
-      expect(handle.sdk.brand.mcpServerName).toBe("norma");
-      expect(handle.sdk.brand.homeDirName).toBe(".norma");
+      // The brand reached the router: this handle speaks Winter, not Winter.
+      expect(handle.sdk.brand.mcpServerName).toBe("winter");
+      expect(handle.sdk.brand.homeDirName).toBe(".winter");
       expect(handle.sdk.messaging).toBeDefined();
 
       // THE WIRE THAT MATTERS: a row written through 8a's own store is visible through the router's
@@ -77,12 +77,12 @@ describe("daemon boot — the Winter handle", () => {
 
   test("spawnHookFor on a real daemon refuses in the typed way when no binary is configured", async () => {
     await withTempHome(async (home) => {
-      const before = process.env.NORMA_WINTER_EXECUTABLE;
+      const before = process.env.WINTER_RUNTIME_EXECUTABLE;
       // P9a fix wave (M1 class): a dev checkout now HAS a winter on the ladder's last rung (the
       // installed platform package), so "nothing configured" is no longer a refusal in this tree.
       // An EXPLICIT env path that is missing on disk is the deterministic refusal (P8b-2: an explicit
       // path is authoritative and never falls through) — the daemon's own answer, no ambient tree.
-      process.env.NORMA_WINTER_EXECUTABLE = join(home, "missing-winter");
+      process.env.WINTER_RUNTIME_EXECUTABLE = join(home, "missing-winter");
       try {
         const d = await boot(home);
         const hook = d.runtimeSdk?.spawnHookFor("chat");
@@ -90,8 +90,8 @@ describe("daemon boot — the Winter handle", () => {
         expect(hook).toBeInstanceOf(Error);
         expect((hook as { code?: string }).code).toBe("winter_executable_unavailable");
       } finally {
-        if (before === undefined) delete process.env.NORMA_WINTER_EXECUTABLE;
-        else process.env.NORMA_WINTER_EXECUTABLE = before;
+        if (before === undefined) delete process.env.WINTER_RUNTIME_EXECUTABLE;
+        else process.env.WINTER_RUNTIME_EXECUTABLE = before;
       }
     });
   });
@@ -170,7 +170,7 @@ describe("daemon boot — the capability servers (Tasks 6-7, P8b-36)", () => {
     await withTempHome(async (home) => {
       const d = await boot(home);
       expect(d.runtimeSdk).toBeDefined();
-      for (const key of ["norma__sessions", "norma__browser", "norma__office", "norma__research", "norma__web", "norma__computer"]) {
+      for (const key of ["winter__sessions", "winter__browser", "winter__office", "winter__research", "winter__web", "winter__computer"]) {
         expect(handleHoldsCapability(d, key), `${key} is on the handle and should not be`).toBe(false);
       }
     });
@@ -186,9 +186,9 @@ describe("daemon boot — the capability servers (Tasks 6-7, P8b-36)", () => {
       // ALWAYS present (kept, advertising zero tools, same "inert not absent" contract every other
       // capability server already follows) since this daemon boot wires no `CapabilityDeps.external`.
       expect(Object.keys(servers)).toEqual([
-        "norma__sessions", "norma__browser", "norma__office", "norma__research", "norma__web",
-        "norma__lsp",   // fix wave F7: the `lsp` capability server
-        "norma__external",   // Phase 8c Lane 3 Task 3.4: plugin-contributed tools (none wired here)
+        "winter__sessions", "winter__browser", "winter__office", "winter__research", "winter__web",
+        "winter__lsp",   // fix wave F7: the `lsp` capability server
+        "winter__external",   // Phase 8c Lane 3 Task 3.4: plugin-contributed tools (none wired here)
       ]);
       for (const [key, s] of Object.entries(servers)) {
         // The invariant N1 exists to make unrepresentable: key === the config's own name.
@@ -208,7 +208,7 @@ describe("daemon boot — the capability servers (Tasks 6-7, P8b-36)", () => {
     await withTempHome(async (home) => {
       writeFileSync(join(home, "settings.json"), JSON.stringify({ computerUse: { enabled: true } }));
       const d = await boot(home);
-      expect(Object.keys(d.buildSessionCapabilities(session()))).toContain("norma__computer");
+      expect(Object.keys(d.buildSessionCapabilities(session()))).toContain("winter__computer");
     });
   });
 
@@ -218,7 +218,7 @@ describe("daemon boot — the capability servers (Tasks 6-7, P8b-36)", () => {
       const code = d.buildSessionCapabilities(session({ sessionId: "s_code", mode: "code" }));
       const chat = d.buildSessionCapabilities(session({ sessionId: "s_chat", mode: "chat" }));
       const browserOf = (servers: Readonly<Record<string, { instance: unknown }>>): WinterMcpServerInstance =>
-        servers["norma__browser"]!.instance as WinterMcpServerInstance;
+        servers["winter__browser"]!.instance as WinterMcpServerInstance;
       // Both alive at once; the chat one advertises the READ-ONLY browser schema, the code one the
       // full schema. Nothing is shared between them.
       const codeSchema = JSON.stringify(browserOf(code).listTools()[0]!.inputSchema);

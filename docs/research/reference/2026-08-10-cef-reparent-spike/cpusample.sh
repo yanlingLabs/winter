@@ -8,7 +8,7 @@
 #     ("what did this cost while parked?") at all. The first version of this sampler used it and
 #     produced numbers that looked fine and meant nothing. Instantaneous cost is the difference of
 #     two cumulative readings divided by the wall time between them (see analyze-spike-ledger.py).
-#  2. It filters on `norma-dd-spike`, the spike build's derivedData path, so it can never sample
+#  2. It filters on `winter-dd-spike`, the spike build's derivedData path, so it can never sample
 #     the user's own running dev app — a different bundle at a different path, same bundle id.
 #
 # Usage:  ./cpusample.sh [seconds] > cpu.txt      (run it ~1s BEFORE launching the spike)
@@ -16,7 +16,7 @@
 end=$(( $(date +%s) + ${1:-320} ))
 while [ $(date +%s) -lt $end ]; do
   ts=$(python3 -c 'import time;print(int(time.time()*1000))')
-  ps -Ao pid=,time=,rss=,command= | grep 'norma-dd-spike' | grep -v grep | while read -r pid tm rss rest; do
+  ps -Ao pid=,time=,rss=,command= | grep 'winter-dd-spike' | grep -v grep | while read -r pid tm rss rest; do
     role="app"
     case "$rest" in
       *--type=renderer*) role="renderer" ;;

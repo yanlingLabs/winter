@@ -8,7 +8,7 @@
 // complete", NOT "was every session healthy": a handled per-session throw is this guarantee working,
 // and a daemon that refused to boot over one unreadable row would be the outage the boundedness
 // clause was written to prevent. `corrupt` is the orthogonal answer, and it is what an operator (and
-// `norma doctor`) reads.
+// `winter doctor`) reads.
 //
 // WHAT IS AND IS NOT IMPLEMENTED IN 8a. Steps 3, 5 (reattach), 6 and 10 are seams whose real work
 // belongs to 8b/8c — they are hooks with an explicit default of "nothing reattached / skipped",
@@ -73,7 +73,7 @@ export interface RecoveryDeps {
    * report and takes nobody's lease away.
    */
   probe?: LeaseProbe;
-  /** Step 8's scan root. Defaults to §2's canonical `/private/tmp/norma-<uid>`; a test MUST point it
+  /** Step 8's scan root. Defaults to §2's canonical `/private/tmp/winter-<uid>`; a test MUST point it
    *  at a temp directory, because the default is a real path on the developer's machine. */
   tempScanRoot?: string;
   /** Step 8's SECOND scan root (P8d-12, WS-16 §10): the official leg's `claude-resume-*` staging
@@ -122,14 +122,14 @@ export interface RecoveryReport {
    * calls `restampStep(rs.db, report.step10AttemptId, 10, …)` once `sdk.directory.recover()` has
    * actually run (still before `startIpcServer` — see 8b task-12's CONCERN 1), turning the honest
    * `"skipped"` row this sweep left behind into the real outcome, in place, rather than leaving
-   * `norma doctor` reading a step that always says "skipped" on every boot.
+   * `winter doctor` reading a step that always says "skipped" on every boot.
    */
   step10AttemptId?: number;
 }
 
 /** §2's canonical ephemeral root. The numeric suffix is the ACTUAL uid, never a hard-coded value. */
 export function canonicalTempScanRoot(): string {
-  return `/private/tmp/norma-${process.getuid?.() ?? -1}`;
+  return `/private/tmp/winter-${process.getuid?.() ?? -1}`;
 }
 
 export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryReport> {
@@ -551,7 +551,7 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
         // tool-registry block later still. So on a real boot this step runs from the runtime-sdk
         // construction site instead (P8d-11 sanctions the late run) — the daemon calls
         // `restampStep` below once that construction has happened, so this "skipped" row is never
-        // the FINAL word `norma doctor` reads on a real boot; it is here only until the restamp
+        // the FINAL word `winter doctor` reads on a real boot; it is here only until the restamp
         // lands. A caller that CAN supply the hook (every test, and any future two-phase boot)
         // takes the branch below and the whole step happens here instead.
         step10AttemptId = finishStep(10, "skipped", { ...detail, reason: "the router handle is built after §13; recovery runs at runtime-sdk construction" });
@@ -683,7 +683,7 @@ function defaultTempScan(scanRoot: string, known: string[]): { orphans: string[]
  * §13 step 10 run" once the late `sdk.directory.recover()` call (8b task-12's own sanctioned
  * ordering) actually completes moments later, still before `startIpcServer`. This function
  * RE-STAMPS that SAME row — by `id`, matched against the step it names so a caller can never
- * clobber the wrong step's evidence — with the outcome the late call actually had, so `norma
+ * clobber the wrong step's evidence — with the outcome the late call actually had, so `winter
  * doctor`'s attempt view (`latestRecoveryAttempts`, `runtime-state/doctor.ts`) reads one honest
  * step 10 per boot instead of a `"skipped"` that never changes.
  *

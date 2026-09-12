@@ -183,11 +183,11 @@ describe("projector/errors: a credential-resolution api_error classifies as auth
       is_error: true,
       terminal_reason: "api_error",
       api_error_status: null,
-      result: "provider request failed (network): the keychain record for keychain:com.norma.core.dev/codex-access-token is not valid JSON credential material",
+      result: "provider request failed (network): the keychain record for keychain:com.winter.core.dev/codex-access-token is not valid JSON credential material",
     }));
     expect(classified.code).toBe("auth");
     expect(classified.message).toBe(
-      "the provider rejected these credentials: provider request failed (network): the keychain record for keychain:com.norma.core.dev/codex-access-token is not valid JSON credential material",
+      "the provider rejected these credentials: provider request failed (network): the keychain record for keychain:com.winter.core.dev/codex-access-token is not valid JSON credential material",
     );
   });
 
@@ -196,7 +196,7 @@ describe("projector/errors: a credential-resolution api_error classifies as auth
       is_error: true,
       terminal_reason: "api_error",
       api_error_status: null,
-      result: "the keychain record for keychain:com.norma.core.dev/openai:default is not a recognized credential material shape",
+      result: "the keychain record for keychain:com.winter.core.dev/openai:default is not a recognized credential material shape",
     }));
     expect(classified.code).toBe("auth");
   });

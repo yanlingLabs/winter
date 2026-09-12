@@ -7,7 +7,7 @@ import { DEFAULT_CODEX_MODEL } from "../src/providers/codex-config";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 
 function tmpSettings(content: unknown): string {
-  const p = join(mkdtempSync(join(tmpdir(), "norma-set-")), "settings.json");
+  const p = join(mkdtempSync(join(tmpdir(), "winter-set-")), "settings.json");
   writeFileSync(p, JSON.stringify(content));
   return p;
 }
@@ -59,7 +59,7 @@ describe("loadSettings", () => {
   });
 
   test("missing settings file throws a readable error", () => {
-    expect(() => loadSettings(join(mkdtempSync(join(tmpdir(), "norma-set-")), "settings.json"))).toThrow(/norma daemon run/);
+    expect(() => loadSettings(join(mkdtempSync(join(tmpdir(), "winter-set-")), "settings.json"))).toThrow(/winter daemon run/);
   });
 
   test("legacy v1-app settings (no schemaVersion) migrate, preserving v1 keys", () => {
@@ -213,7 +213,7 @@ describe("loadSettings", () => {
     expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, subagents: { maxConcurrent: -1 } })).toThrow();
   });
 
-  // 4h-i Task 3: subagents.maxDepth — CC parity (CC allows nesting depth up to 5; Norma's engine
+  // 4h-i Task 3: subagents.maxDepth — CC parity (CC allows nesting depth up to 5; Winter's engine
   // defaults to 2 when this is unset — see engine.ts's `subagentMaxDepth ?? 2`).
   test("subagents.maxDepth parses (1-5 inclusive); absent → undefined; out-of-range/non-integer rejected", () => {
     const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, subagents: { maxDepth: 3 } });
@@ -307,7 +307,7 @@ describe("loadSettings", () => {
   // "ultra" was added to REASONING_EFFORTS on 2026-07-10 from a reading of the live /models
   // catalogue that was never checked against the request validator. Effort is GLOBAL and
   // HOT-RELOADED (providers/manager.ts's live resolver re-reads settings.json every turn), so
-  // `norma model --effort ultra` doesn't fail at set-time — it silently PERSISTS, and then breaks
+  // `winter model --effort ultra` doesn't fail at set-time — it silently PERSISTS, and then breaks
   // EVERY session with an opaque HTTP 400 one turn later. Measured live against the Codex OAuth
   // endpoint this session (do not re-derive, do not weaken): "ultra" is rejected by a DIFFERENT,
   // GLOBAL enum layer (`invalid_value`, model-agnostic) than per-model rejections; "none" is
@@ -321,7 +321,7 @@ describe("loadSettings", () => {
     const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: "none" } });
     expect(s.provider.reasoningEffort).toBe("none");
 
-    // The actual `norma model --effort ultra` path: setReasoningEffort + saveSettings (which
+    // The actual `winter model --effort ultra` path: setReasoningEffort + saveSettings (which
     // validates before writing). Before this task's fix, this round-trip SUCCEEDED and wrote
     // "ultra" to settings.json on disk — exactly the write that then 400s every session's next
     // turn against the live endpoint.
@@ -330,9 +330,9 @@ describe("loadSettings", () => {
   });
 
   // ----------------------------------------------------------------------------------------------
-  // provider-correctness T5 — the NORMA-LEVEL tier vocabulary (`CLIENT_EFFORTS`), which lives beside
+  // provider-correctness T5 — the WINTER-LEVEL tier vocabulary (`CLIENT_EFFORTS`), which lives beside
   // `REASONING_EFFORTS` precisely so the two are read together and never conflated. `REASONING_EFFORTS`
-  // is what the endpoint's request validator accepts; `CLIENT_EFFORTS` is what Norma offers on top and
+  // is what the endpoint's request validator accepts; `CLIENT_EFFORTS` is what Winter offers on top and
   // TRANSLATES away before a request exists. The two must stay disjoint, and `wireEffort` must be a
   // TOTAL function into the first set — those are the only two properties that keep `ultra` off the wire.
   // ----------------------------------------------------------------------------------------------
@@ -511,7 +511,7 @@ describe("cleanerEnabledFrom (session-activity-hygiene T7: cleaner.enabled defau
   });
 
   test("the flag round-trips through a real settings.json (the watcher's own read path)", () => {
-    const p = join(mkdtempSync(join(tmpdir(), "norma-cleaner-settings-")), "settings.json");
+    const p = join(mkdtempSync(join(tmpdir(), "winter-cleaner-settings-")), "settings.json");
     saveSettings(p, { ...base, cleaner: { enabled: false } });
     expect(cleanerEnabledFrom(loadSettings(p))).toBe(false);
   });
@@ -519,19 +519,19 @@ describe("cleanerEnabledFrom (session-activity-hygiene T7: cleaner.enabled defau
 
 describe("saveSettings", () => {
   test("writes a file that loadSettings round-trips", () => {
-    const p = join(mkdtempSync(join(tmpdir(), "norma-save-")), "settings.json");
+    const p = join(mkdtempSync(join(tmpdir(), "winter-save-")), "settings.json");
     const s: Settings = { schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, plugins: { enabled: ["a"] } };
     saveSettings(p, s);
     expect(loadSettings(p)).toEqual(s);
   });
 
   test("throws on an invalid object (bad schemaVersion) and does not write", () => {
-    const p = join(mkdtempSync(join(tmpdir(), "norma-save-")), "settings.json");
+    const p = join(mkdtempSync(join(tmpdir(), "winter-save-")), "settings.json");
     expect(() => saveSettings(p, { schemaVersion: 1, provider: { type: "codex-oauth", model: "gpt-5.4" } } as unknown as Settings)).toThrow();
   });
 });
 
-describe("setProviderModel / setReasoningEffort (norma model CLI's pure transforms)", () => {
+describe("setProviderModel / setReasoningEffort (winter model CLI's pure transforms)", () => {
   test("setProviderModel changes only provider.model, preserving every other field", () => {
     const s: Settings = { schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: "high" }, plugins: { enabled: ["a"] } };
     const next = setProviderModel(s, "gpt-5.6-luna");
@@ -583,13 +583,13 @@ describe("permission directories", () => {
   });
 
   test("loadPermissionDirs merges user + project + local, expands ~, dedups (trusted project)", () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-perm-home-"));
-    const project = mkdtempSync(join(tmpdir(), "norma-perm-proj-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-perm-home-"));
+    const project = mkdtempSync(join(tmpdir(), "winter-perm-proj-"));
     wf(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, permissions: { additionalDirectories: ["~/shared"] } }));
-    mkdirSync(join(project, ".norma"), { recursive: true });
-    wf(join(project, ".norma", "settings.json"), JSON.stringify({ permissions: { additionalDirectories: ["/opt/data", "~/shared"] } }));
-    wf(join(project, ".norma", "settings.local.json"), JSON.stringify({ permissions: { additionalDirectories: ["/tmp/local-grant"] } }));
-    // committed .norma/settings.json only merges when the project is trusted — see
+    mkdirSync(join(project, ".winter"), { recursive: true });
+    wf(join(project, ".winter", "settings.json"), JSON.stringify({ permissions: { additionalDirectories: ["/opt/data", "~/shared"] } }));
+    wf(join(project, ".winter", "settings.local.json"), JSON.stringify({ permissions: { additionalDirectories: ["/tmp/local-grant"] } }));
+    // committed .winter/settings.json only merges when the project is trusted — see
     // "loadPermissionDirs trust gating" below for the untrusted-gates-it-out coverage.
     const dirs = loadPermissionDirs(home, project, true);
     const { homedir } = require("node:os");
@@ -600,28 +600,28 @@ describe("permission directories", () => {
   });
 
   test("loadPermissionDirs tolerates missing files and missing blocks", () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-perm-h2-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-perm-h2-"));
     expect(loadPermissionDirs(home)).toEqual([]); // nothing configured
   });
 
   test("addLocalDir appends to settings.local.json without duplicates", () => {
-    const project = mkdtempSync(join(tmpdir(), "norma-perm-add-"));
+    const project = mkdtempSync(join(tmpdir(), "winter-perm-add-"));
     addLocalDir(project, "/opt/one");
     addLocalDir(project, "/opt/one"); // dup ignored
     addLocalDir(project, "/opt/two");
-    const local = JSON.parse(require("node:fs").readFileSync(join(project, ".norma", "settings.local.json"), "utf8"));
+    const local = JSON.parse(require("node:fs").readFileSync(join(project, ".winter", "settings.local.json"), "utf8"));
     expect(local.permissions.additionalDirectories).toEqual(["/opt/one", "/opt/two"]);
   });
 });
 
 describe("loadPermissionDirs trust gating", () => {
   function scaffold() {
-    const home = mkdtempSync(join(tmpdir(), "norma-tg-home-"));
-    const project = mkdtempSync(join(tmpdir(), "norma-tg-proj-"));
-    mkdirSync(join(project, ".norma"), { recursive: true });
+    const home = mkdtempSync(join(tmpdir(), "winter-tg-home-"));
+    const project = mkdtempSync(join(tmpdir(), "winter-tg-proj-"));
+    mkdirSync(join(project, ".winter"), { recursive: true });
     wf(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, permissions: { additionalDirectories: ["/opt/user-dir"] } }));
-    wf(join(project, ".norma", "settings.json"), JSON.stringify({ permissions: { additionalDirectories: ["/opt/committed-dir"] } }));       // committed → trust-gated
-    wf(join(project, ".norma", "settings.local.json"), JSON.stringify({ permissions: { additionalDirectories: ["/opt/local-dir"] } }));    // fix-wave A2: local is ALSO trust-gated now (a repo can force-commit one)
+    wf(join(project, ".winter", "settings.json"), JSON.stringify({ permissions: { additionalDirectories: ["/opt/committed-dir"] } }));       // committed → trust-gated
+    wf(join(project, ".winter", "settings.local.json"), JSON.stringify({ permissions: { additionalDirectories: ["/opt/local-dir"] } }));    // fix-wave A2: local is ALSO trust-gated now (a repo can force-commit one)
     return { home, project };
   }
 
@@ -642,10 +642,10 @@ describe("loadPermissionDirs trust gating", () => {
   });
 
   test("SECURITY: an untrusted committed settings.json cannot self-grant a broad root", () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-tg-h2-"));
-    const project = mkdtempSync(join(tmpdir(), "norma-tg-p2-"));
-    mkdirSync(join(project, ".norma"), { recursive: true });
-    wf(join(project, ".norma", "settings.json"), JSON.stringify({ permissions: { additionalDirectories: ["/", "~"] } }));
+    const home = mkdtempSync(join(tmpdir(), "winter-tg-h2-"));
+    const project = mkdtempSync(join(tmpdir(), "winter-tg-p2-"));
+    mkdirSync(join(project, ".winter"), { recursive: true });
+    wf(join(project, ".winter", "settings.json"), JSON.stringify({ permissions: { additionalDirectories: ["/", "~"] } }));
     const { homedir } = require("node:os");
     const untrusted = loadPermissionDirs(home, project, false);
     expect(untrusted).not.toContain("/");
@@ -748,7 +748,7 @@ describe("settings.runtimes", () => {
     // Asserting today's behaviour rather than choosing one: zod v4's `z.object()` strips unknown
     // keys, which is what lets a user's file survive a downgrade and what `loadSettings`'s own v1
     // migration comment already relies on. A future `.strict()` here would turn every settings.json
-    // written by a NEWER Norma into a boot failure on an older one.
+    // written by a NEWER Winter into a boot failure on an older one.
     const parsed = Settings.parse({ ...base, runtimes: { winterLegg: { chat: true }, nonsense: 1 } });
     expect(parsed.runtimes).not.toHaveProperty("winterLegg");
     expect(parsed.runtimes).not.toHaveProperty("nonsense");

@@ -8,7 +8,7 @@ import { realpathSync } from "node:fs";
  * one memory dir per git repo (worktrees resolve to the SAME dir as their main checkout), a plain
  * cwd when not a repo at all, and a settings override that replaces the computation entirely.
  *
- * Deliberately has NO knowledge of `Settings` (the zod type) — callers pass a plain `{ normaHome,
+ * Deliberately has NO knowledge of `Settings` (the zod type) — callers pass a plain `{ winterHome,
  * directory? }` bag, same "getter/plain-deps, not the settings shape" convention engine.ts's
  * EngineConfig getters already follow (e.g. `reviewerAllow: () => settings?.reviewer?.allow`).
  */
@@ -88,11 +88,11 @@ export function sanitizeProjectKey(absPath: string): string {
 }
 
 export interface MemoryDirOptions {
-  normaHome: string;
+  winterHome: string;
   /** `settings.memory.directory` — an absolute or `~/`-relative override that REPLACES the
-   *  computed `~/.norma/projects/<key>/memory` path entirely (CC's own "relocatable directory"
+   *  computed `~/.winter/projects/<key>/memory` path entirely (CC's own "relocatable directory"
    *  setting) — no further per-project nesting under it. Empty/whitespace-only is treated as
-   *  absent (a settings.json with `"directory": ""` must not resolve to `normaHome` itself). */
+   *  absent (a settings.json with `"directory": ""` must not resolve to `winterHome` itself). */
   directory?: string;
   /**
    * P8b-17 — THE LIVE PATH AND THE MIGRATION MOVE TOGETHER.
@@ -131,7 +131,7 @@ function resolveOverride(opts: MemoryDirOptions): string | null {
 export function memoryDirFor(cwd: string, opts: MemoryDirOptions): string {
   const override = resolveOverride(opts);
   if (override) return override;
-  return join(opts.normaHome, "projects", memoryProjectKeyFor(cwd, opts), "memory");
+  return join(opts.winterHome, "projects", memoryProjectKeyFor(cwd, opts), "memory");
 }
 
 /**
@@ -165,32 +165,32 @@ export function memoryProjectKeyFor(cwd: string, opts: MemoryDirOptions): string
 export function memoryDirForRecord(record: { memoryProjectKey: string }, opts: MemoryDirOptions): string {
   const override = resolveOverride(opts);
   if (override) return override;
-  return join(opts.normaHome, "projects", record.memoryProjectKey, "memory");
+  return join(opts.winterHome, "projects", record.memoryProjectKey, "memory");
 }
 
 /**
  * The "no project" bucket (T2, design doc's "facts that don't map to a project → a sensible
- * default location"): `~/.norma/projects/_global/memory`, the SAME `projects/<key>/memory` shape
+ * default location"): `~/.winter/projects/_global/memory`, the SAME `projects/<key>/memory` shape
  * `memoryDirFor` uses, with a reserved key (`_global`) `sanitizeProjectKey` can never itself
  * produce (its output always starts with a sanitized absolute-path segment, never `_`) — so this
  * can't collide with any real project's directory. Two consumers share it: T2's migration
  * importer (legacy USER-scope facts, which were never tied to a repo, land here) and the
  * memory.* RPC rewire (ipc/server.ts) when a caller passes no `cwd` (the CLI's `scope:"user"`,
- * no `--project`, never did) — so a fact migrated here is immediately visible to `norma memory
+ * no `--project`, never did) — so a fact migrated here is immediately visible to `winter memory
  * list` with no flags, no coincidence.
  */
 export function globalMemoryDirFor(opts: MemoryDirOptions): string {
   const override = resolveOverride(opts);
   if (override) return override;
-  return join(opts.normaHome, "projects", "_global", "memory");
+  return join(opts.winterHome, "projects", "_global", "memory");
 }
 
-/** Dreaming (Phase 7b): the shared assistant-memory bucket — `~/.norma/projects/_assistant/memory`.
+/** Dreaming (Phase 7b): the shared assistant-memory bucket — `~/.winter/projects/_assistant/memory`.
  *  Reserved key like `_global` (sanitizeProjectKey can never emit a leading underscore). Loaded
  *  ONLY by assistant-mode sessions (dispatch now; chat/cowork later) via ContextAssembler's
  *  memoryBucket branch — never by cwd resolution, so code sessions structurally cannot see it.
  *  DELIBERATELY ignores the `memory.directory` relocation override: honoring it would collapse
  *  this bucket into the project bucket and leak dream memories into code sessions. */
-export function assistantMemoryDirFor(opts: { normaHome: string }): string {
-  return join(opts.normaHome, "projects", "_assistant", "memory");
+export function assistantMemoryDirFor(opts: { winterHome: string }): string {
+  return join(opts.winterHome, "projects", "_assistant", "memory");
 }

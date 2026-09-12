@@ -4,7 +4,7 @@ import { bundleRuntimePath } from "../../src/runtime-sdk/bundle-layout";
 import { REQUIRED_CLAUDE_AGENT_SDK, REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../../src/runtime-sdk/versions";
 
 const exists = (set: string[]) => (p: string) => set.includes(p);
-const base = { env: {}, execPath: "/bundle/Contents/MacOS/norma-core" };
+const base = { env: {}, execPath: "/bundle/Contents/MacOS/winter-core" };
 // P8d-1: the bundle rung moved under `Resources/runtimes/claude-official/` — this is that exact
 // path (and its VERSIONS.json sibling) for `base`.
 const BUNDLE_CLAUDE = bundleRuntimePath(base.execPath, "claude");
@@ -29,12 +29,12 @@ const readVersions = (text: string) => (p: string) => {
 
 describe("resolveClaudeExecutable (P8c-3 ladder, P8d-1 bundle layout + VERSIONS.json gate)", () => {
   test("setting wins over everything", () => {
-    const r = resolveClaudeExecutable({ ...base, setting: "/s/claude", env: { NORMA_CLAUDE_EXECUTABLE: "/e/claude" }, exists: exists(["/s/claude", "/e/claude"]) });
+    const r = resolveClaudeExecutable({ ...base, setting: "/s/claude", env: { WINTER_CLAUDE_EXECUTABLE: "/e/claude" }, exists: exists(["/s/claude", "/e/claude"]) });
     expect(r).toEqual({ path: "/s/claude", source: "setting" });
   });
 
   test("env beats bundle and the package door", () => {
-    const r = resolveClaudeExecutable({ ...base, env: { NORMA_CLAUDE_EXECUTABLE: "/e/claude" }, exists: exists(["/e/claude", BUNDLE_CLAUDE]), resolvePackage: () => "/pkg" });
+    const r = resolveClaudeExecutable({ ...base, env: { WINTER_CLAUDE_EXECUTABLE: "/e/claude" }, exists: exists(["/e/claude", BUNDLE_CLAUDE]), resolvePackage: () => "/pkg" });
     expect(r).toEqual({ path: "/e/claude", source: "env" });
   });
 
@@ -81,7 +81,7 @@ describe("resolveClaudeExecutable (P8c-3 ladder, P8d-1 bundle layout + VERSIONS.
   });
 
   test("an ENV path that does not exist is the failure too — not just the setting branch", () => {
-    const r = resolveClaudeExecutable({ ...base, env: { NORMA_CLAUDE_EXECUTABLE: "/gone/claude" }, exists: exists([BUNDLE_CLAUDE]), resolvePackage: () => "/pkg" });
+    const r = resolveClaudeExecutable({ ...base, env: { WINTER_CLAUDE_EXECUTABLE: "/gone/claude" }, exists: exists([BUNDLE_CLAUDE]), resolvePackage: () => "/pkg" });
     expect(r).toBeInstanceOf(ClaudeExecutableUnavailable);
     if (r instanceof ClaudeExecutableUnavailable) expect(r.tried).toEqual(["/gone/claude"]);
   });
@@ -92,7 +92,7 @@ describe("resolveClaudeExecutable (P8c-3 ladder, P8d-1 bundle layout + VERSIONS.
   });
 
   test("a whitespace-only setting or env value is treated as UNSET, not as a missing path", () => {
-    const r = resolveClaudeExecutable({ ...base, setting: "   ", env: { NORMA_CLAUDE_EXECUTABLE: "\t\n" }, exists: exists([BUNDLE_CLAUDE]), readVersions: readVersions(goodVersionsJson) });
+    const r = resolveClaudeExecutable({ ...base, setting: "   ", env: { WINTER_CLAUDE_EXECUTABLE: "\t\n" }, exists: exists([BUNDLE_CLAUDE]), readVersions: readVersions(goodVersionsJson) });
     expect(r).toEqual({ path: BUNDLE_CLAUDE, source: "bundle" });
   });
 
@@ -103,7 +103,7 @@ describe("resolveClaudeExecutable (P8c-3 ladder, P8d-1 bundle layout + VERSIONS.
   });
 
   test("a bare env value is refused too", () => {
-    const r = resolveClaudeExecutable({ ...base, env: { NORMA_CLAUDE_EXECUTABLE: "claude" }, exists: () => true });
+    const r = resolveClaudeExecutable({ ...base, env: { WINTER_CLAUDE_EXECUTABLE: "claude" }, exists: () => true });
     expect(r).toBeInstanceOf(ClaudeExecutableUnavailable);
   });
 

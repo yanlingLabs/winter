@@ -1,4 +1,4 @@
-// P8b Task 16 — THE DRIVER TABLE: `sessionId → WinterSession`, and everything a Norma session needs
+// P8b Task 16 — THE DRIVER TABLE: `sessionId → WinterSession`, and everything a Winter session needs
 // assembled before a `winter` child can run it.
 //
 // `ipc/server.ts` routes by asking this table (see `WinterSessionDrivers`): a live driver wins; a
@@ -41,7 +41,7 @@ import type { SecretStore } from "../auth/secret-store";
 import type { ApprovalBroker } from "../agent/approvals";
 import type { PermissionGate, SessionApprovalPolicy } from "../agent/gate";
 import type { QuestionBroker } from "../agent/questions";
-import { NORMA_CAPABILITY_TOOLS, assertNoCapabilityCollision, type CapabilityServerRecord, type CapabilitySession } from "../capabilities";
+import { WINTER_CAPABILITY_TOOLS, assertNoCapabilityCollision, type CapabilityServerRecord, type CapabilitySession } from "../capabilities";
 import { createProjector, type Projector } from "../projector";
 import type { RuntimeSessionRecord, RuntimeSessionRecords } from "../runtime-state/records";
 import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
@@ -50,15 +50,15 @@ import type { SessionStore } from "../sessions/store";
 import { winterOptionsFromSettings, type Settings } from "../settings";
 import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
-import type { NormaRuntimeSdk, SessionMode } from "./create";
+import type { WinterRuntimeSdk, SessionMode } from "./create";
 import { clearSession } from "./diff-attach";
 import { credentialPresenceFrom, credentialRefFor } from "./keychain";
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
 import { attachOfficialSession, attachWinterSession } from "./messaging";
 import { buildWinterOptions, permissionModeFor } from "./mode-options";
 import { catalogRowsFor, providerSelectionFor, testProviderNameFor } from "./provider-selection";
-import { normaSessions } from "./sessions";
-import { NORMA_PEER_VERSIONS } from "./versions";
+import { winterSessions } from "./sessions";
+import { WINTER_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
 import { DISPATCH_EFFORT, DISPATCH_MODEL } from "../agent/dispatch-config";
 import type { AgentRegistry } from "../agent/bg-agent-registry";
@@ -123,18 +123,18 @@ export class WinterLegRefusal extends Error {
 /** The narrowed `SessionMode` a stored `mode` column resolves to (absent = code, as everywhere). */
 const modeOf = (raw: string | undefined): SessionMode => (raw === "chat" || raw === "dispatch" ? raw : "code");
 
-/** Norma's effort strings that are also the SDK's `EffortLevel`. `none` is the wire's "unset" and
- *  `ultra` is Norma-only (a client-side selector the engine translates); neither crosses here. */
+/** Winter's effort strings that are also the SDK's `EffortLevel`. `none` is the wire's "unset" and
+ *  `ultra` is Winter-only (a client-side selector the engine translates); neither crosses here. */
 const SDK_EFFORTS: ReadonlySet<string> = new Set(["low", "medium", "high", "xhigh", "max"]);
 const sdkEffortOf = (raw: string | undefined): EffortLevel | undefined => (raw !== undefined && SDK_EFFORTS.has(raw) ? (raw as EffortLevel) : undefined);
 
 export interface WinterLegDeps {
   home: string;
-  /** `NORMA_PROFILE` for the child (`""` on dist). */
+  /** `WINTER_PROFILE` for the child (`""` on dist). */
   profile?: string;
   /** THE LIVE settings holder. */
   settings: () => Settings | null | undefined;
-  runtime: NormaRuntimeSdk | undefined;
+  runtime: WinterRuntimeSdk | undefined;
   /** 8a's repositories; undefined when the spine is offline (the Winter leg then refuses). */
   records: RuntimeSessionRecords | undefined;
   checkpoints: ProjectionCheckpoints | undefined;
@@ -150,8 +150,8 @@ export interface WinterLegDeps {
   outDirOf: (sessionId: string) => string;
   /** The memory key the LIVE memory path files this cwd under (relocation-aware). */
   memoryKeyOf: (cwd: string) => string;
-  /** Task 17 Step 0(a): the daemon's ONE `ContextAssembler` — Norma's system prompt per mode,
-   *  composed per incarnation (hot: NORMA.md, memory, the output style are re-read on resume).
+  /** Task 17 Step 0(a): the daemon's ONE `ContextAssembler` — Winter's system prompt per mode,
+   *  composed per incarnation (hot: WINTER.md, memory, the output style are re-read on resume).
    *  Absent (a harness without one) ⇒ no `systemPrompt` and the child runs Winter's own. */
   assembler?: Pick<ContextAssembler, "assemble">;
   /** Task 17 (P8b-15): the persisted child roster (`createPersistedChildren` over 8a's
@@ -162,7 +162,7 @@ export interface WinterLegDeps {
   /** The activity enforcement's post-turn re-check (`enforcement.onTurnSettled(sessionId)`). */
   onTurnSettled?: (sessionId: string) => void;
   /**
-   * Fix wave (review row 4): Norma's `SessionTitler` — P8b-10 keeps it on Norma's OWN provider
+   * Fix wave (review row 4): Winter's `SessionTitler` — P8b-10 keeps it on Winter's OWN provider
    * layer (never `sdk.query()`). Fired fire-and-forget after every MAIN-thread `turn_completed`
    * that is not an error terminal, which is exactly where the engine fired it (`engine.ts`'s two
    * depth-0 completion sites: `void this.cfg.titler.maybeTitle(sessionId)` right after the
@@ -171,11 +171,11 @@ export interface WinterLegDeps {
    */
   titler?: { maybeTitle(sessionId: string): Promise<void> };
   /** Any OTHER MCP servers merged into a session's record. Fix wave (review row 7): the daemon
-   *  fills this with Norma's CONFIGURED servers — `settings.mcpServers` + a trusted project's
+   *  fills this with Winter's CONFIGURED servers — `settings.mcpServers` + a trusted project's
    *  `.mcp.json` — as SDK stdio configs (`runtime-sdk/external-mcp.ts`), read live per incarnation.
    *  Plugin-contributed tools (`tool.register`) are NOT here: they are registry entries, not server
-   *  configs, and stay the `norma__external` capability carry. A key colliding with a daemon-owned
-   *  `norma__<key>` server refuses the session typed (`assertNoCapabilityCollision`). */
+   *  configs, and stay the `winter__external` capability carry. A key colliding with a daemon-owned
+   *  `winter__<key>` server refuses the session typed (`assertNoCapabilityCollision`). */
   extraMcpServers?: (session: CapabilitySession) => Record<string, McpServerConfig>;
   log?: (line: string) => void;
   /**
@@ -204,7 +204,7 @@ export interface WinterLegDeps {
    * TEST ONLY — never set by production `daemon.ts` wiring (fix round 1, M2): the ONLY way an
    * official-leg e2e reaches a loopback fake is a real `anthropic:default` credential PLUS this
    * override, injected the same way `startDaemon`'s own test callers already inject a fake
-   * provider — never an ambient env var (the deleted `NORMA_OFFICIAL_TEST_BASE_URL` hatch). Mirrors
+   * provider — never an ambient env var (the deleted `WINTER_OFFICIAL_TEST_BASE_URL` hatch). Mirrors
    * the `winter-test/<name>` double's own shape: a value only a test constructs, threaded through
    * an explicit parameter, inert unless a caller supplies one.
    */
@@ -242,12 +242,12 @@ export interface WinterSessionDrivers {
 }
 
 /**
- * The `sessionPermissionClass` seam Task 12 left for this task (`NormaRuntimeSdkDeps`): the inbound
+ * The `sessionPermissionClass` seam Task 12 left for this task (`WinterRuntimeSdkDeps`): the inbound
  * class of a session this process holds NO live facet for. Without it every unattached receiver
  * holds its mail forever; with it a parked (`resumable`) session answers the honest `unavailable`
  * and is never cold-resumed behind the daemon's back.
  *
- * The directory address carries the BACKEND id; the 8a record is the hop back to Norma's session,
+ * The directory address carries the BACKEND id; the 8a record is the hop back to Winter's session,
  * whose stored policy is the fact the class is derived from — `permissionModeFor(policy)` →
  * `classifyPermissionMode`, the same 1:1 map the session's own `Options.permissionMode` took.
  */
@@ -292,7 +292,7 @@ export function childrenSinkFor(registry: AgentRegistry, sessionId: string, log:
 export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDrivers {
   const drivers = new Map<string, LegSession>();
   const log = deps.log ?? ((): void => {});
-  const sdkVersion = NORMA_PEER_VERSIONS.winterAgentSdk;
+  const sdkVersion = WINTER_PEER_VERSIONS.winterAgentSdk;
 
   const catalogVersion = (): string => {
     try { return loadCatalog().catalogVersion; } catch { return "unstated"; }
@@ -395,7 +395,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // base URL outright ("points at a loopback address but the connection is not declared
       // local"), which — measured — is not merely a test-fixture inconvenience: it silently
       // broke every real self-hosted/LAN `openai-compatible` endpoint (Ollama, LM Studio, a local
-      // gateway) on the Winter leg, even though Norma's own `openai-compatible` provider type has
+      // gateway) on the Winter leg, even though Winter's own `openai-compatible` provider type has
       // never had an endpoint allowlist ("arbitrary API models are legitimate there" — the SAME
       // doc comment `runtime-provider.ts` cites). A no-op for an ordinary public HTTPS endpoint
       // (the address-class check never triggers for one).
@@ -411,7 +411,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         signal: inc.abort.signal,
       };
       const capabilities = deps.buildSessionCapabilities(capSession);
-      // Norma's own voice (Step 0(a)): the engine's `primaryDir`/`cwd`/`additionalWorkDirs` inputs,
+      // Winter's own voice (Step 0(a)): the engine's `primaryDir`/`cwd`/`additionalWorkDirs` inputs,
       // read live so a resume sees the session's current directories.
       let primary: string | undefined = live.cwd ?? undefined;
       let extraDirs: string[] = [];
@@ -426,15 +426,15 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       });
       // P8b-36 obligation: any other server merged into the same record must not shadow a
       // daemon-owned one. Since the fix wave the configured user/project MCP servers ARE merged
-      // here, so the guard is live: a `settings.mcpServers` key spelled `norma__browser` refuses
+      // here, so the guard is live: a `settings.mcpServers` key spelled `winter__browser` refuses
       // this session TYPED (the message names the server) rather than handing the model a
-      // `browser` that is not Norma's under Norma's name. The user fixes the key; settings are hot.
+      // `browser` that is not Winter's under Winter's name. The user fixes the key; settings are hot.
       const extra = deps.extraMcpServers?.(capSession) ?? {};
       try { assertNoCapabilityCollision(extra, capabilities); } catch (err) {
         throw new WinterLegRefusal("winter_leg_unavailable", err instanceof Error ? err.message : String(err));
       }
       // P8d-8 (D30), computed ONCE (review Minor fix): `runtimes.advisorModel` when the user set
-      // one, else Norma's own D30 default for this session's model family.
+      // one, else Winter's own D30 default for this session's model family.
       const advisorModel = winterOptionsFromSettings(settings).advisorModel ?? d30DefaultModel(model);
       return buildWinterOptions({
         mode,
@@ -451,7 +451,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         spawn: hook,
         canUseTool,
         abort: inc.abort,
-        capabilityTools: NORMA_CAPABILITY_TOOLS,
+        capabilityTools: WINTER_CAPABILITY_TOOLS,
         capabilities: { ...extra, ...capabilities } as CapabilityServerRecord,
         ...(connection === undefined ? {} : { connection }),
         resume: inc.resume,
@@ -459,7 +459,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // leg's `inputDeps()` below already threads `.official`; this is that same call's `.winter`.
         ...(deps.hooksFor === undefined ? {} : { hooks: deps.hooksFor(capSession).winter }),
         // P8d-8 (D30): a LIVE read at every incarnation — `runtimes.advisorModel` when the user set
-        // one, else Norma's own D30 default for this session's model family (`advisor-reviewer.ts`'s
+        // one, else Winter's own D30 default for this session's model family (`advisor-reviewer.ts`'s
         // `d30DefaultModel`), so `Options.advisor.model` is ALWAYS explicit rather than depending on
         // the child's own internal default resolution (the M5 gap this task diagnosed). Computed
         // ONCE (review Minor fix) — the prior form called both `winterOptionsFromSettings` and
@@ -483,7 +483,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       });
 
     const hasTranscript = async (): Promise<boolean> => {
-      try { await normaSessions(home).getSessionInfo(backendSessionId); return true; } catch { return false; }
+      try { await winterSessions(home).getSessionInfo(backendSessionId); return true; } catch { return false; }
     };
 
     const session = startWinterSession({
@@ -660,7 +660,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     return session;
   };
 
-  /** `selection.reason` is what `norma doctor` and the app render for "why is this session on that
+  /** `selection.reason` is what `winter doctor` and the app render for "why is this session on that
    *  runtime" — it narrates a FACT, never a flag: since Task 17 the Winter leg is the only leg
    *  (fix wave F12 retired the "settings.runtimes.winterLeg.<mode> is on" wording, which named a
    *  setting that no longer decides anything). */
@@ -681,7 +681,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
    * byte-for-byte rather than risking a regression on a case the selector was never meant to judge:
    *
    *   1. No `selectRuntimeFor` on the handle — a partial test double (`session-driver.test.ts`'s
-   *      own fake `NormaRuntimeSdk`, which implements only `spawnHookFor`/`trackQuery`/`untrack`).
+   *      own fake `WinterRuntimeSdk`, which implements only `spawnHookFor`/`trackQuery`/`untrack`).
    *   2. `winter-test/<name>` — the double-selection convention (`testProviderNameFor`): it is
    *      chosen by env var, never by the catalog, and the listing has no row for it AT ALL, so
    *      `selectRuntime` refuses every such session outright (measured) — exactly the models every
@@ -728,7 +728,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     const transcriptKey = transcriptProjectKey(cwd);
     // m5: the same locator-only rule the Winter path follows (records.ts's own rule: never
     // material, just where to find it) — `credentialRefFor` is this leg's OWN source of truth for
-    // "is this provider one of Norma's keychain-backed slots", the identical function the Winter
+    // "is this provider one of Winter's keychain-backed slots", the identical function the Winter
     // path's `explicitCredentials` build already calls (`credentialRefFor(provider.providerId) ??
     // provider.authRef!` above). `selection.providerId` is "anthropic" for a real Claude selection,
     // so this resolves to `keychain:anthropic:default`.

@@ -1,9 +1,9 @@
-// Pure/isolatable logic behind `norma plugin ...`, split out of main.ts so it can be
+// Pure/isolatable logic behind `winter plugin ...`, split out of main.ts so it can be
 // unit-tested without going through the top-level `if (import.meta.main)` dispatch.
 //
 // Phase 4d-ii Task 1: the reusable pure Settings-transform + fs helpers moved to
-// `@norma/core`'s `plugins/lifecycle.ts` (so the coming plugin-lifecycle RPCs, which live in
-// @norma/core and can't import from @norma/cli, can share them). They're re-exported below so
+// `@yanlinglabs/winter-core`'s `plugins/lifecycle.ts` (so the coming plugin-lifecycle RPCs, which live in
+// @yanlinglabs/winter-core and can't import from @yanlinglabs/winter-cli, can share them). They're re-exported below so
 // every existing import site in this package (main.ts, tests) still resolves identically — a
 // pure refactor, no behavior change. Only what's genuinely CLI-specific stays defined here:
 // `installPlugin` (network — git clone), `installNeedsConsentHint`, `revokePluginTokenBestEffort`.
@@ -20,7 +20,7 @@ import {
   setPluginEnabled,
   stripPluginConsents,
   type ConsentBlockPlugin,
-} from "@norma/core";
+} from "@yanlinglabs/winter-core";
 
 export {
   applyFreshPluginConsent,
@@ -53,10 +53,10 @@ export function installPlugin(opts: { url: string; name?: string; pluginsRoot: s
   return { name, target };
 }
 
-/** True when `norma plugin install`'s post-install message should print the "review and consent"
+/** True when `winter plugin install`'s post-install message should print the "review and consent"
  *  hint. Two independent ways a freshly installed plugin can bring in something that needs a
  *  human's consent before it runs: `hasMcp` (a legacy `.mcp.json` file) or
- *  `requiredConsents.length > 0` (a norma-plugin.json manifest declaring ANY exec/tcc/hardware
+ *  `requiredConsents.length > 0` (a winter-plugin.json manifest declaring ANY exec/tcc/hardware
  *  content — contributes.mcpServers, contributes.hooks, an entry point, or explicit
  *  permissions.exec/tcc/hardware). requiredConsentClasses (plugin-manifest.ts) always derives
  *  "exec" whenever contributes.mcpServers is non-empty, so this subsumes a manifest-only plugin

@@ -1,8 +1,8 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { resolveWinterHome } from "../winter-dir";
 import { nextRunAt, parseSpec } from "./spec";
 
 export interface Routine {
@@ -212,5 +212,7 @@ export class RoutineStore {
 }
 
 export function openRoutineStore(path?: string): RoutineStore {
-  return new RoutineStore(path ?? join(homedir(), ".norma", "routines.db"));
+  // P9b-12: routed through the resolver rather than hardcoding `~/.winter` — a `WINTER_HOME`
+  // override must move this file with everything else.
+  return new RoutineStore(path ?? join(resolveWinterHome(), "routines.db"));
 }

@@ -1,13 +1,13 @@
-// Phase 5b Task 4 — `norma memory list|show <name>|rm <name> [--project]` (main.ts) and `/memory`
+// Phase 5b Task 4 — `winter memory list|show <name>|rm <name> [--project]` (main.ts) and `/memory`
 // (tui/commands.ts) share this module.
 //
 // `parseMemoryArgs` is pure argv-in/route-out (routeCliInvocation's precedent in main.ts) so
 // `--project` resolution and the usage fallback are unit-testable without a socket, and so
 // main.ts can validate BEFORE connecting (routines' "argument validation happens before
-// connecting" precedent). `runMemoryRoute` is the ONE client-driven step both `norma memory`'s
+// connecting" precedent). `runMemoryRoute` is the ONE client-driven step both `winter memory`'s
 // case and its tests share: main.ts's own argv switch can't be driven directly by a unit test
 // (routines-cli.ts's header comment explains why) — this is the testable seam that stands in for
-// it, exercised with a fake NormaClient the same way tui/commands.test.ts's runners are. It never
+// it, exercised with a fake WinterClient the same way tui/commands.test.ts's runners are. It never
 // catches: a store failure surfaces as a thrown RpcFailure, same as routines.create/enable/
 // disable — the caller's try/catch prints `.message` and exits 1.
 //
@@ -20,8 +20,8 @@
 // MEMDIR (`memoryDirFor`); no `--project` (scope:"user", no cwd) falls back server-side to the
 // "no project" global bucket (`globalMemoryDirFor`) — the SAME bucket the migration importer
 // (core/src/agent/memory-migrate.ts) uses for facts that don't map to a project, so a fact
-// migrated there is immediately visible to a plain `norma memory list`.
-import type { NormaClient } from "./client";
+// migrated there is immediately visible to a plain `winter memory list`.
+import type { WinterClient } from "./client";
 
 export type MemoryScope = "user" | "project";
 
@@ -30,7 +30,7 @@ export type MemoryScope = "user" | "project";
 export interface MemoryFactMetaLike { name: string; description: string; type: string }
 export interface MemoryFactLike extends MemoryFactMetaLike { body: string }
 
-export const MEMORY_USAGE = "usage: norma memory list [--project] | show <name> [--project] | rm <name> [--project]";
+export const MEMORY_USAGE = "usage: winter memory list [--project] | show <name> [--project] | rm <name> [--project]";
 
 export type ResolvedMemoryRoute =
   | { kind: "list"; scope: MemoryScope; cwd?: string }
@@ -65,7 +65,7 @@ export type MemoryRouteResult =
 /** Calls the one memory.* RPC an already-resolved (non-"usage") route needs and returns the raw
  *  result. See the file header for why this — not main.ts's switch itself — is the tested seam. */
 export async function runMemoryRoute(
-  client: Pick<NormaClient, "memoryList" | "memoryRead" | "memoryDelete">,
+  client: Pick<WinterClient, "memoryList" | "memoryRead" | "memoryDelete">,
   route: ResolvedMemoryRoute,
 ): Promise<MemoryRouteResult> {
   if (route.kind === "list") {
@@ -89,18 +89,18 @@ export function formatFactDetail(f: MemoryFactMetaLike): string {
 }
 
 /** Full plain "name (type) — description" line — what `/memory` prints verbatim (no color,
- *  mirrors /skills' own inline "name (source) — description" template) and what `norma memory
+ *  mirrors /skills' own inline "name (source) — description" template) and what `winter memory
  *  list`'s colored line wraps AQUA/DIM around. */
 export function formatFactLine(f: MemoryFactMetaLike): string {
   return `${f.name} ${formatFactDetail(f)}`;
 }
 
-/** `norma memory list` / `/memory`'s full body: one line per fact, or the empty-state fallback. */
+/** `winter memory list` / `/memory`'s full body: one line per fact, or the empty-state fallback. */
 export function formatMemoryList(facts: MemoryFactMetaLike[]): string[] {
   return facts.length === 0 ? ["(no memory facts)"] : facts.map((f) => formatFactLine(f));
 }
 
-/** `norma memory rm <name>`'s confirmation — mirrors memory_delete's own tool-result wording
+/** `winter memory rm <name>`'s confirmation — mirrors memory_delete's own tool-result wording
  *  (`` `deleted memory fact "${name}" (${scope} scope)` ``). */
 export function formatDeleted(name: string, scope: MemoryScope): string {
   return `deleted memory fact "${name}" (${scope} scope)`;

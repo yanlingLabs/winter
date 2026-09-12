@@ -34,7 +34,7 @@ describe("deriveInstallName", () => {
 });
 
 describe("resolvePluginTarget (path containment)", () => {
-  const root = "/tmp/norma-plugins-root";
+  const root = "/tmp/winter-plugins-root";
   test("a plain name resolves under the root", () => {
     expect(resolvePluginTarget(root, "demo")).toBe(join(root, "demo"));
   });
@@ -52,13 +52,13 @@ describe("resolvePluginTarget (path containment)", () => {
 });
 
 /** A local plugin directory (manifest + a trivial skill), suitable for `installPluginFromDir`. */
-function makePluginFixtureDir(opts: { manifest?: "norma-plugin.json" | "plugin.json" | "none" } = {}): string {
-  const src = mkdtempSync(join(tmpdir(), "norma-plugin-src-"));
+function makePluginFixtureDir(opts: { manifest?: "winter-plugin.json" | "plugin.json" | "none" } = {}): string {
+  const src = mkdtempSync(join(tmpdir(), "winter-plugin-src-"));
   mkdirSync(join(src, "skills", "greet"), { recursive: true });
   writeFileSync(join(src, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: hi\n---\nbody");
-  const manifest = opts.manifest ?? "norma-plugin.json";
-  if (manifest === "norma-plugin.json") {
-    writeFileSync(join(src, "norma-plugin.json"), JSON.stringify({ id: "demo", version: "1.0.0" }));
+  const manifest = opts.manifest ?? "winter-plugin.json";
+  if (manifest === "winter-plugin.json") {
+    writeFileSync(join(src, "winter-plugin.json"), JSON.stringify({ id: "demo", version: "1.0.0" }));
   } else if (manifest === "plugin.json") {
     writeFileSync(join(src, "plugin.json"), JSON.stringify({ name: "demo", version: "1.0.0" }));
   }
@@ -66,20 +66,20 @@ function makePluginFixtureDir(opts: { manifest?: "norma-plugin.json" | "plugin.j
 }
 
 describe("installPluginFromDir", () => {
-  test("copies a fixture dir with a norma-plugin.json manifest into <pluginsRoot>/<name>; never touches settings", () => {
+  test("copies a fixture dir with a winter-plugin.json manifest into <pluginsRoot>/<name>; never touches settings", () => {
     const src = makePluginFixtureDir();
-    const pluginsRoot = mkdtempSync(join(tmpdir(), "norma-plugins-root-"));
+    const pluginsRoot = mkdtempSync(join(tmpdir(), "winter-plugins-root-"));
 
     const result = installPluginFromDir(src, "demo", pluginsRoot);
 
     expect(result).toEqual({ name: "demo", target: join(pluginsRoot, "demo") });
-    expect(existsSync(join(result.target, "norma-plugin.json"))).toBe(true);
+    expect(existsSync(join(result.target, "winter-plugin.json"))).toBe(true);
     expect(existsSync(join(result.target, "skills", "greet", "SKILL.md"))).toBe(true);
   });
 
   test("copies a fixture dir with a legacy plugin.json manifest too", () => {
     const src = makePluginFixtureDir({ manifest: "plugin.json" });
-    const pluginsRoot = mkdtempSync(join(tmpdir(), "norma-plugins-root-"));
+    const pluginsRoot = mkdtempSync(join(tmpdir(), "winter-plugins-root-"));
 
     const result = installPluginFromDir(src, "demo", pluginsRoot);
 
@@ -88,7 +88,7 @@ describe("installPluginFromDir", () => {
 
   test("refuses a traversal name before copying anything", () => {
     const src = makePluginFixtureDir();
-    const pluginsRoot = mkdtempSync(join(tmpdir(), "norma-plugins-root-"));
+    const pluginsRoot = mkdtempSync(join(tmpdir(), "winter-plugins-root-"));
 
     expect(() => installPluginFromDir(src, "../escaped", pluginsRoot)).toThrow(/invalid plugin name/);
     expect(existsSync(join(pluginsRoot, "..", "escaped"))).toBe(false);
@@ -96,17 +96,17 @@ describe("installPluginFromDir", () => {
 
   test("refuses when the target already exists", () => {
     const src = makePluginFixtureDir();
-    const pluginsRoot = mkdtempSync(join(tmpdir(), "norma-plugins-root-"));
+    const pluginsRoot = mkdtempSync(join(tmpdir(), "winter-plugins-root-"));
     mkdirSync(join(pluginsRoot, "demo"), { recursive: true });
 
     expect(() => installPluginFromDir(src, "demo", pluginsRoot)).toThrow(/already exists/);
   });
 
-  test("refuses a sourceDir with no manifest (neither norma-plugin.json nor plugin.json)", () => {
+  test("refuses a sourceDir with no manifest (neither winter-plugin.json nor plugin.json)", () => {
     const src = makePluginFixtureDir({ manifest: "none" });
-    const pluginsRoot = mkdtempSync(join(tmpdir(), "norma-plugins-root-"));
+    const pluginsRoot = mkdtempSync(join(tmpdir(), "winter-plugins-root-"));
 
-    expect(() => installPluginFromDir(src, "demo", pluginsRoot)).toThrow(/no norma-plugin\.json or plugin\.json/);
+    expect(() => installPluginFromDir(src, "demo", pluginsRoot)).toThrow(/no winter-plugin\.json or plugin\.json/);
     expect(existsSync(join(pluginsRoot, "demo"))).toBe(false);
   });
 });
@@ -216,13 +216,13 @@ describe("buildConsentBlock (exact strings — spec §1: full exec-payload discl
     ]);
   });
 
-  test("hardware only → header + one 'hardware access via Norma.app helper: <perm>' line per entry", () => {
+  test("hardware only → header + one 'hardware access via Winter.app helper: <perm>' line per entry", () => {
     expect(buildConsentBlock(mkInfo({
       requiredConsents: ["hardware"],
       hardwarePermissions: ["battery"],
     }))).toEqual([
       "plugin demo requests:",
-      "hardware access via Norma.app helper: battery",
+      "hardware access via Winter.app helper: battery",
     ]);
   });
 
@@ -237,7 +237,7 @@ describe("buildConsentBlock (exact strings — spec §1: full exec-payload discl
       "plugin kitchen-sink requests:",
       "mcp: node s.js",
       "will request macOS permission: input-monitoring",
-      "hardware access via Norma.app helper: battery",
+      "hardware access via Winter.app helper: battery",
     ]);
   });
 
@@ -334,7 +334,7 @@ describe("removePluginFromSettings", () => {
 
 describe("removePluginDir", () => {
   test("deletes an existing plugin directory and returns its path", () => {
-    const pluginsRoot = mkdtempSync(join(tmpdir(), "norma-plugins-root-"));
+    const pluginsRoot = mkdtempSync(join(tmpdir(), "winter-plugins-root-"));
     const dir = join(pluginsRoot, "demo");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "plugin.json"), "{}");
@@ -343,11 +343,11 @@ describe("removePluginDir", () => {
     expect(existsSync(dir)).toBe(false);
   });
   test("a traversal name is refused", () => {
-    const pluginsRoot = mkdtempSync(join(tmpdir(), "norma-plugins-root-"));
+    const pluginsRoot = mkdtempSync(join(tmpdir(), "winter-plugins-root-"));
     expect(() => removePluginDir(pluginsRoot, "../x")).toThrow(/invalid plugin name/);
   });
   test("a nonexistent (but validly-scoped) name is refused", () => {
-    const pluginsRoot = mkdtempSync(join(tmpdir(), "norma-plugins-root-"));
+    const pluginsRoot = mkdtempSync(join(tmpdir(), "winter-plugins-root-"));
     expect(() => removePluginDir(pluginsRoot, "ghost")).toThrow(/no such plugin/);
   });
 });

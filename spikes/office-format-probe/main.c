@@ -6,8 +6,8 @@
  * headers, same `lok_init_2` + `file://` profile-URL shape, same machine-greppable one-line output
  * contract). It exists because those five tests decide the SHAPE of the `docs format` / `slides
  * format` verbs — above all LT-4, which decides whether `docs format` may honestly say "applied" or
- * must say "posted" — and answering them through the full app (xcodebuild -> NormaAppTests ->
- * OfficeCommandConsumer -> OfficeRuntime -> spawned NormaOfficeHelper -> LOKBridge) would cost a
+ * must say "posted" — and answering them through the full app (xcodebuild -> WinterAppTests ->
+ * OfficeCommandConsumer -> OfficeRuntime -> spawned WinterOfficeHelper -> LOKBridge) would cost a
  * full app build per iteration for questions that are one C call each.
  *
  * Every op below drives the SAME primitives `LOKBridge.swift` drives, in the same order, with the

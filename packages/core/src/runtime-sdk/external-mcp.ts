@@ -1,10 +1,10 @@
-// Fix wave (whole-branch review row 7): Norma's CONFIGURED MCP servers, forwarded to a Winter child.
+// Fix wave (whole-branch review row 7): Winter's CONFIGURED MCP servers, forwarded to a Winter child.
 //
 // Two sources, the same two `McpManager` starts for the daemon's shared registry (`agent/mcp/
 // manager.ts`): the user's `settings.mcpServers` (source "user") and a TRUSTED project's
 // `<cwd>/.mcp.json` (source "project", trust-gated exactly as `McpManager.ensureProject` gates it —
 // an untrusted directory contributes nothing, and nothing is read from it). Both are stdio servers
-// in Norma's settings grammar (`command`, `args`, `env`); they are forwarded as the SDK's
+// in Winter's settings grammar (`command`, `args`, `env`); they are forwarded as the SDK's
 // `McpStdioServerConfig` under the SAME KEY the manager registers them under, so the child names
 // their tools `mcp__<key>__<tool>` — the names `tool.list` and the Mac's tool rows already carry.
 //
@@ -12,12 +12,12 @@
 // registry (`tool.list`, `mcp.*` RPCs); a Winter child cannot reach an in-daemon stdio client, so
 // each session's child starts the configured servers itself from these configs. One extra process
 // per configured server per live session — recorded in the fix-wave report as the cost of this
-// door; the alternative (a `norma__external` capability server proxying the daemon's clients) is
+// door; the alternative (a `winter__external` capability server proxying the daemon's clients) is
 // the plugin-contributed-tools carry and lands with it.
 //
 // PRECEDENCE mirrors the registry: user servers were started first there and project tools with a
 // colliding name were skipped, so here a user server shadows a same-keyed project server. Neither
-// may shadow a daemon-owned `norma__<key>` server — that is `assertNoCapabilityCollision`'s job at
+// may shadow a daemon-owned `winter__<key>` server — that is `assertNoCapabilityCollision`'s job at
 // the driver, which refuses the SESSION (typed) rather than choose.
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
@@ -54,7 +54,7 @@ function stdio(cfg: { command: string; args?: string[]; env?: Record<string, str
   };
 }
 
-/** The `Options.mcpServers` entries Norma's configuration contributes to ONE session, keyed as the
+/** The `Options.mcpServers` entries Winter's configuration contributes to ONE session, keyed as the
  *  daemon's registry keys them. Never throws: a malformed or missing `.mcp.json` contributes nothing
  *  (the manager's own "record none" posture). */
 export function configuredMcpServersFor(input: ConfiguredMcpInput): Record<string, McpStdioServerConfig> {

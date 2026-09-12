@@ -102,7 +102,7 @@ import { officeTimeoutMessage, officeResolvedPathWithinFence } from "./sheets";
  * here AND an independent ceiling app-side (`OfficeCommandConsumer.officeDocsMaxParagraphIndex`).
  * This is not belt-and-braces for its own sake: `z.number().int().positive()` is NOT a bound
  * (`Number.isInteger(1e30)` is `true`), the app's `Int(Double)` conversion TRAPS outside `Int`'s
- * range, and a trap aborts Norma.app along with every open document's unsaved edits. That class shipped
+ * range, and a trap aborts Winter.app along with every open document's unsaved edits. That class shipped
  * twice in this arc (`sheets insert_rows at:1e30`, `slides read slide:1e30`), both measured as
  * SIGTRAPs — and `docs.ts` did not exist during the sweep that closed them, so it is outside that
  * sweep by construction. The daemon's ceiling makes the refusal immediate and specific; the app's is
@@ -156,7 +156,7 @@ const DocsLineSpacing = z.enum(["single", "1.15", "1.5", "double"]);
  *  document's own style catalogue.
  *
  *  An unknown style name is a SILENT no-op in the engine — the exception is swallowed and nothing
- *  reaches Norma — which is why the app pre-validates against that catalogue before dispatching and
+ *  reaches Winter — which is why the app pre-validates against that catalogue before dispatching and
  *  refuses loudly instead. */
 const DocsParagraphStyle = z.enum([
   "default", "textBody", "title", "subtitle", "quotation", "heading1", "heading2", "heading3",
@@ -373,7 +373,7 @@ export function docsToolDefs(deps: DocsToolDeps): ToolDefinition[] {
   return [{
     name: "docs",
     description:
-      "Read and edit a text document Norma has access to (.odt, .docx — any format the office engine "
+      "Read and edit a text document Winter has access to (.odt, .docx — any format the office engine "
       + "can open). "
       + "**A write verb whose path does not exist CREATES the document** — there is no separate "
       + "\"create\" or \"new\" verb, exactly as with the `write` tool for ordinary files. The kind "
@@ -388,7 +388,7 @@ export function docsToolDefs(deps: DocsToolDeps): ToolDefinition[] {
       + "⌘Z takes back your whole tool call, however many edits it made, and ⌘⇧Z puts it back. So a "
       + "write is recoverable BY THEM, not by you — you still cannot reverse your own edit, so read "
       + "before you write. "
-      + "Before EVERY verb — `read` and `info` included — if a human already has that file open in a tab, Norma first SAVES whatever unsaved edits their tab is holding. So a read is NOT read-only with respect to disk: it flushes the human's own work to the file before reporting on it. (Nothing to flush when this tool opens the file itself.) The one exception is a file that ALSO changed on disk outside Norma while that tab held it: there are then two versions and Norma will not pick between them, so a read SKIPS that save and still answers from the tab's live content, and a write is REFUSED until the human answers the conflict banner in their tab. "
+      + "Before EVERY verb — `read` and `info` included — if a human already has that file open in a tab, Winter first SAVES whatever unsaved edits their tab is holding. So a read is NOT read-only with respect to disk: it flushes the human's own work to the file before reporting on it. (Nothing to flush when this tool opens the file itself.) The one exception is a file that ALSO changed on disk outside Winter while that tab held it: there are then two versions and Winter will not pick between them, so a read SKIPS that save and still answers from the tab's live content, and a write is REFUSED until the human answers the conflict banner in their tab. "
       + "Pick a verb:\n"
       + "• info — path. Page, paragraph and character counts. Start here: it also doubles as a check "
       + "that the Mac app can actually open documents right now. The page count comes from the "
@@ -399,7 +399,7 @@ export function docsToolDefs(deps: DocsToolDeps): ToolDefinition[] {
       + "narrower range next time without recounting. A toParagraph past the end simply stops at the "
       + "end; a fromParagraph past the end refuses and tells you how many paragraphs there are. Note "
       + "that a paragraph range does NOT make the read cheaper — the engine can only hand over the "
-      + "whole document, and Norma takes the slice — so use it to keep the ANSWER manageable, not to "
+      + "whole document, and Winter takes the slice — so use it to keep the ANSWER manageable, not to "
       + "speed anything up. A very long document refuses with the limit named; ask for a range.\n"
       + "• replace — path, find, replaceWith, optional all. Replaces EVERY occurrence and reports how "
       + "many. `find` is LITERAL and CASE-SENSITIVE — not a regex, not a wildcard, and it cannot span "
@@ -432,14 +432,14 @@ export function docsToolDefs(deps: DocsToolDeps): ToolDefinition[] {
       + "document and tells you what it could confirm. Two things that check does NOT mean. When it "
       + "says it could not confirm something, that means it could not CHECK — not that it failed. "
       + "And when you format several occurrences at once, a confirmation means the attribute is "
-      + "there in AT LEAST ONE of them, not that every one was reached — Norma cannot check them "
+      + "there in AT LEAST ONE of them, not that every one was reached — Winter cannot check them "
       + "individually. Re-read if it matters.\n"
       + "Every path must be inside this session's own working directories — an office read/write "
       + "COPIES the file and parses it with LibreOffice, so it is not an ordinary file read/write and "
       + "the usual unrestricted-reads rule does not cover it.\n"
       + "The Mac app has to be running and showing this session, or nothing here can work — info's "
       + "own refusal tells you if that's the problem.\n"
-      + "A document a human has open with UNSAVED changes does NOT refuse a write any more — Norma saves their edits first and then writes. A write is refused only when that save FAILS (the refusal names what went wrong), or when the file also changed on disk outside Norma "
+      + "A document a human has open with UNSAVED changes does NOT refuse a write any more — Winter saves their edits first and then writes. A write is refused only when that save FAILS (the refusal names what went wrong), or when the file also changed on disk outside Winter "
       + "and the human still has a conflict banner to answer.\n"
       + "If insert or append reports that it could not verify what it wrote, the text may still be "
       + "sitting in the document unsaved — nothing was saved by THIS call, but if a human had that "
@@ -559,7 +559,7 @@ export function docsToolDefs(deps: DocsToolDeps): ToolDefinition[] {
         if (allowedVerbs.includes(a.verb)) continue;
         const takenBy = allowedVerbs.map((v) => `\`${v}\``).join(" or ");
         throw new Error(`docs ${a.verb} has no \`${key}\` — that operand belongs to ${takenBy}. `
-          + "Nothing was changed. (Norma refuses an operand it cannot honour rather than ignoring "
+          + "Nothing was changed. (Winter refuses an operand it cannot honour rather than ignoring "
           + "it, because ignoring one would report success for something it did not do.)");
       }
       if (a.verb === "format") {
@@ -590,7 +590,7 @@ export function docsToolDefs(deps: DocsToolDeps): ToolDefinition[] {
       // fence refusal, not the app-not-running one").
       const resolvedPath = officeDocsResolvedPathWithinFence(a.path, deps.dirsOf(sessionId));
       if (!resolvedPath) {
-        throw new Error(`path is outside the allowed directories: ${a.path}. Norma's office tools `
+        throw new Error(`path is outside the allowed directories: ${a.path}. Winter's office tools `
           + "are limited to the session's working directories.");
       }
 

@@ -9,7 +9,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-ROOT="$REPO/apple/Norma/vendor/libreoffice/product-set"
+ROOT="$REPO/apple/Winter/vendor/libreoffice/product-set"
 RUN="${OFP_RUN_DIR:-/tmp/ofp-run}"
 
 mkdir -p "$RUN/fc/cache" "$RUN/profile-$$"

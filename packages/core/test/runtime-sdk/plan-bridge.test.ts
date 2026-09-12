@@ -1,6 +1,6 @@
 import { afterEach, expect, jest, test } from "bun:test";
-import type { NewSessionEvent } from "@norma/protocol";
-import { PlanPresentedEvent, PlanResolvedEvent } from "@norma/protocol";
+import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
+import { PlanPresentedEvent, PlanResolvedEvent } from "@yanlinglabs/winter-protocol";
 import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { planBridgeFor, type BridgedPlanRequest } from "../../src/runtime-sdk/plan-bridge";
 

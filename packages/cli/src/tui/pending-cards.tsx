@@ -195,7 +195,7 @@ function PlanCard({ pending, onPlan, planBodyRows }: { pending: Extract<PendingC
   // response parsing above is untouched by truncation.
   const { shown, hidden } = capPlanBody(pending.plan, planBodyRows);
 
-  // Phase 3b T7 restyle (theme colors only): the "Plan" header takes the Norma accent; the plan body
+  // Phase 3b T7 restyle (theme colors only): the "Plan" header takes the Winter accent; the plan body
   // and the fixed menu are unchanged.
   return (
     <Box flexDirection="column">

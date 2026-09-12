@@ -12,7 +12,7 @@ import {
 } from "../../src/agent/tools/list-sessions";
 import { makeActivityDeriver } from "../../src/sessions/activity";
 import { ACTIVITY_MODE_REFUSAL, ARCHIVED_IMMUTABLE_REFUSAL } from "../../src/sessions/set-activity";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type SessionActivity, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type SessionActivity, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { FakeProvider } from "../../src/agent/fake-provider";
@@ -20,7 +20,7 @@ import { SessionStore } from "../../src/sessions/store";
 
 // session-activity-hygiene T8: dispatch's management surface — `list_sessions` (the read) and
 // `manage_session` (the write). Driven through the REAL ToolRegistry (`execute`, the same door the
-// engine calls) against a REAL SessionStore in a temp NORMA_HOME, with the SAME
+// engine calls) against a REAL SessionStore in a temp WINTER_HOME, with the SAME
 // `makeActivityDeriver` production binds — no hand-rolled state machine anywhere in this file, so a
 // derivation change shows up here as a behaviour change rather than being mirrored twice.
 
@@ -42,7 +42,7 @@ interface Harness {
 const homes: string[] = [];
 
 function harness(opts: { scanBytesPerSession?: number; scanBytesTotal?: number } = {}): Harness {
-  const home = mkdtempSync(join(tmpdir(), "norma-list-sessions-"));
+  const home = mkdtempSync(join(tmpdir(), "winter-list-sessions-"));
   homes.push(home);
   const store = new SessionStore(home);
   const registry = new ToolRegistry();
@@ -84,7 +84,7 @@ afterEach(() => {
 /** A directory that actually exists — `canonDir` realpaths what it can, and on macOS /var is a
  *  symlink to /private/var, so a fixture cwd must be compared through the same resolution. */
 function realDir(label: string): string {
-  return mkdtempSync(join(tmpdir(), `norma-ls-${label}-`));
+  return mkdtempSync(join(tmpdir(), `winter-ls-${label}-`));
 }
 
 describe("list_sessions (T8): what it shows", () => {
@@ -532,7 +532,7 @@ describe("the per-mode registry (T8)", () => {
 // and nothing about whether daemon.ts hooked them to the daemon's real store/hub/engine. The T7
 // review recorded the exact failure that costs: a consumer handed a DIFFERENT hub instance reads
 // `attachedCount` as 0 forever and calls every attached session idle, silently, for good. So this
-// boots the REAL daemon (temp NORMA_HOME + injected FakeProvider, the mode-toolset-census.test.ts
+// boots the REAL daemon (temp WINTER_HOME + injected FakeProvider, the mode-toolset-census.test.ts
 // precedent), attaches a REAL harness over the REAL socket, and asks the REAL registry's tool.
 // ---------------------------------------------------------------------------------------------
 describe("list_sessions (T8): wired to the real daemon", () => {

@@ -1,9 +1,9 @@
-// Winter Phase 8d — `norma doctor`'s "runtimes" section (Lane 1 fills; Lane 4 prints). Diagnoses
+// Winter Phase 8d — `winter doctor`'s "runtimes" section (Lane 1 fills; Lane 4 prints). Diagnoses
 // where each runtime executable resolves from (or the typed reason it does not) and, when the
 // bundle rung's VERSIONS.json exists, the parsed record. READ-ONLY: never spawns a runtime, never
 // touches a store, safe beside a live daemon — every resolver this composes is itself pure/typed,
 // and every remaining throw surface (the platform-package door's version-mismatch throw) is caught
-// here so a doctor run can NEVER crash `norma doctor`, only report an `error` string.
+// here so a doctor run can NEVER crash `winter doctor`, only report an `error` string.
 import { existsSync, readFileSync } from "node:fs";
 import { winterOptionsFromSettings, type Settings } from "../settings";
 import { bundleRuntimePath, parseVersionsJson, type VersionsJson } from "./bundle-layout";
@@ -33,7 +33,7 @@ export async function diagnoseRuntimes(input: {
   settings: Settings | undefined;
   /** P9a fix wave (M1 collateral): test seam for the P9a-9 platform-package rung, threaded
    *  straight through to `resolveWinterExecutable`; defaults to its own default
-   *  (`resolvePlatformPackageWinter`) — never a behaviour change for the real `norma doctor`
+   *  (`resolvePlatformPackageWinter`) — never a behaviour change for the real `winter doctor`
    *  route, which never sets this. */
   resolvePlatformPackageBin?: () => string | undefined;
 }): Promise<RuntimesReport> {

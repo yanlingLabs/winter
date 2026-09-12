@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ShortcutRegisterParams, TileUpdateParams, ProviderRegisterParams } from "@norma/protocol";
+import { ShortcutRegisterParams, TileUpdateParams, ProviderRegisterParams } from "@yanlinglabs/winter-protocol";
 
 /**
  * Latest-per-plugin storage for the three "declarative UI contribution" plugin verbs

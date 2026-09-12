@@ -1,4 +1,4 @@
-// The ONE piece of machinery every Norma capability server is built out of (P8b Tasks 6-7).
+// The ONE piece of machinery every Winter capability server is built out of (P8b Tasks 6-7).
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // ONE IMPLEMENTATION, TWO DOORS — and the door is the `ToolDefinition` itself
@@ -19,7 +19,7 @@
 //     `browser` refusal, which is a per-mode SCHEMA failure and not a prose message.
 //
 // A private registry rather than the shared one because the shared one is a live, daemon-global
-// object the plugin supervisor and `tool.register` RPC write into (Norma map §5.6): a capability
+// object the plugin supervisor and `tool.register` RPC write into (Winter map §5.6): a capability
 // server must advertise exactly its own tools and nothing a plugin happened to add.
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -48,7 +48,7 @@
 import type { McpSdkServerConfigWithInstance, WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
 import type { ComputerUseService } from "../agent/computer-use";
 import { ToolRegistry, type ToolContext, type ToolDefinition } from "../agent/tools/registry";
-import { NORMA_CAPABILITY_TOOLS, capabilityServerName, capabilityToolName, type SessionMode } from "./names";
+import { WINTER_CAPABILITY_TOOLS, capabilityServerName, capabilityToolName, type SessionMode } from "./names";
 
 /**
  * Everything a capability call needs to know about WHO is calling. Fixed for the life of the
@@ -66,7 +66,7 @@ import { NORMA_CAPABILITY_TOOLS, capabilityServerName, capabilityToolName, type 
  * (updating `signal` at each turn boundary, say) works without rebuilding the servers.
  */
 export interface CapabilitySession {
-  /** Norma's own session id — what every emitted event is scoped to. */
+  /** Winter's own session id — what every emitted event is scoped to. */
   sessionId: string;
   /** THIS session's mode. Resolves `argsByMode` (chat's read-only `browser` subset) exactly as the
    *  engine does, and decides which schema `listTools()` advertises. */
@@ -139,14 +139,14 @@ export interface CapabilityServerSpec {
  * NOT enforce `modes` (mode there resolves `argsFor` and deferral only; the engine's mode gate is
  * `namesForMode`, which runs at ADVERTISEMENT time), so nothing downstream would have caught it.
  *
- * The source of truth is `NORMA_CAPABILITY_TOOLS`, deliberately: it is the same table Task 9 derives
+ * The source of truth is `WINTER_CAPABILITY_TOOLS`, deliberately: it is the same table Task 9 derives
  * `CAPABILITY_TOOL_MODES` from, so the two gates cannot disagree — and `names.test.ts` pins every
  * row of it against the real `ToolDefinition`s, so the table cannot drift from the tools either.
  * A tool absent from the table falls back to the registry's own documented default (`["code"]`),
  * which is the restrictive answer; `wire-names.test.ts` proves the absent case is unreachable.
  */
 function modesFor(serverKey: string, def: ToolDefinition): readonly SessionMode[] {
-  const facts = (NORMA_CAPABILITY_TOOLS as Readonly<Record<string, { modes: readonly SessionMode[] }>>)[
+  const facts = (WINTER_CAPABILITY_TOOLS as Readonly<Record<string, { modes: readonly SessionMode[] }>>)[
     capabilityToolName(serverKey, def.name)
   ];
   return facts?.modes ?? (def.modes as readonly SessionMode[] | undefined) ?? ["code"];

@@ -71,7 +71,7 @@ export function appcastItem(i: {
     </item>`;
 }
 
-/** Interpolates a brew cask template (T3's packaging/norma.rb.tmpl) — `{{version}}`/`{{sha256}}`/`{{url}}`. */
+/** Interpolates a brew cask template (T3's packaging/winter.rb.tmpl) — `{{version}}`/`{{sha256}}`/`{{url}}`. */
 export function caskFrom(tmpl: string, i: { version: string; sha256: string; url: string }): string {
   return tmpl
     .replaceAll("{{version}}", i.version)
@@ -106,7 +106,7 @@ export function dmgStagePlan(appPath: string): DmgStageOp[] {
 
 /**
  * Bundle-relative paths the §11b artifact identity scan deliberately does NOT read, as anchored
- * regexes against POSIX-relative paths (`Contents/…`) inside `Norma.app`.
+ * regexes against POSIX-relative paths (`Contents/…`) inside `Winter.app`.
  *
  * Added by panel-cef Task 5, and kept as narrow as the measurement allowed. The scan reads every
  * shipped byte as text and fails closed on any hit; embedding Chromium adds 317MB of it, so the
@@ -128,8 +128,8 @@ export function dmgStagePlan(appPath: string): DmgStageOp[] {
  *     `v8_context_snapshot.arm64.bin`, `gpu_shader_cache.bin`, `Info.plist`),
  *   - `Contents/Resources/Licenses/CREDITS.html` — 19.6MB of third-party contributor names, the
  *     obvious candidate for exclusion, measured at ZERO hits and therefore left in,
- *   - and every byte Norma actually compiles: the app, the five CEF helpers, norma-core,
- *     NormaHelper, Sparkle.
+ *   - and every byte Winter actually compiles: the app, the five CEF helpers, winter-core,
+ *     WinterHelper, Sparkle.
  * That last group is where the leaks this gate exists for (absolute builder paths in Mach-O debug
  * stabs, v0.2.001) actually happen, and none of it is excluded.
  *
@@ -156,7 +156,7 @@ export const NAME_SCAN_EXCLUSIONS: readonly RegExp[] = [
   // Directory-anchored (`(\/|$)`) rather than a bare prefix so the scan walker prunes the whole
   // vs/ subtree as one excluded node — same shape as the lproj rule above — while a name that
   // merely starts with "vs" (e.g. a hypothetical "vsx" sibling) does not accidentally match.
-  // The in-repo `EditorAssets/app` page shell (Norma's OWN code, landed by Task 4) is
+  // The in-repo `EditorAssets/app` page shell (Winter's OWN code, landed by Task 4) is
   // deliberately NOT covered by this pattern and stays fully scanned — only vendored, unreviewed
   // third-party bytes get this treatment.
   /^Contents\/Resources\/EditorAssets\/vs(\/|$)/,
@@ -251,8 +251,10 @@ export interface AppcastInsertPlanInputs {
   dryRun: boolean;
   version: string;
   /** Current contents of the appcast this run would insert into (read by release.ts from
-   * whichever file `target` below resolves to — always `releases/appcast.xml` on disk, since
-   * that's the only copy that exists; the preview file is only ever an OUTPUT). */
+   * whichever file `target` below resolves to — always `releases/winter/appcast.xml` on disk
+   * (the P9b-9 Winter feed), since that's the only copy this pipeline ever writes; the frozen
+   * pre-rename `releases/appcast.xml` is never touched by it. The preview file is only ever an
+   * OUTPUT). */
   appcastXml: string;
   /** The rendered `<item>` block (release-lib's `appcastItem()`) to insert for this version. */
   item: string;
@@ -263,8 +265,9 @@ export interface AppcastInsertPlanResult {
    * out/release/<v>-dryrun/appcast-preview.xml ONLY (dry-run — F1 fix: never the tracked file;
    * `d3054fa3` moved every dry-run artifact under the `-dryrun` suffix, and release.ts's own
    * mirror of this sentence says the same);
-   * "repo" -> releases/appcast.xml (real run — release.ts must do this write from inside its
-   * `!DRY_RUN` publish tail, not before). */
+   * "repo" -> releases/winter/appcast.xml (real run — release.ts must do this write from inside
+   * its `!DRY_RUN` publish tail, not before; the frozen `releases/appcast.xml` — the pre-rename
+   * feed — is never touched by this pipeline). */
   target: "preview" | "repo";
   /** "insert": updatedXml is ready to write. "skip": an <item> for this exact
    * <sparkle:version> is already present — F2 fix, makes re-running (e.g. --resume-publish
@@ -295,7 +298,7 @@ export function appcastInsertPlan(i: AppcastInsertPlanInputs): AppcastInsertPlan
 }
 
 export interface ResolveSigningIdentityInputs {
-  /** release.ts's `NORMA_SIGN_IDENTITY` escape hatch — when set, returned as-is with no lookup
+  /** release.ts's `WINTER_SIGN_IDENTITY` escape hatch — when set, returned as-is with no lookup
    * at all (so `identitiesOutput` doesn't even need to be real, letting a differently-provisioned
    * keychain, e.g. CI, skip `security find-identity` entirely). */
   envOverride?: string;
@@ -356,8 +359,8 @@ export function publishGuard(i: PublishGuardInputs): PublishGuardResult {
     return {
       action: "dry-run-skip",
       lines: [
-        `gh release create v${v} --title "Norma ${v}" + upload Norma-${v}.zip + Norma-${v}.dmg`,
-        `commit + push releases/appcast.xml`,
+        `gh release create v${v} --title "Winter ${v}" + upload Winter-${v}.zip + Winter-${v}.dmg`,
+        `commit + push releases/winter/appcast.xml`,
         `git tag v${v} && git push origin v${v}`,
       ],
     };
@@ -421,7 +424,7 @@ export function catalogueStaleness(i: { verified: string; now: Date; staleAfterD
     line:
       `WARNING: Codex model catalogue last verified ${i.verified} (${ageDays} days ago, budget ${budget}). ` +
       `This release ships CODEX_MODELS' context windows as constants; a stale window silently breaks ` +
-      `auto-compaction. Re-derive: NORMA_CODEX_LIVE_DRIFT=1 bun test codex-models-drift`,
+      `auto-compaction. Re-derive: WINTER_CODEX_LIVE_DRIFT=1 bun test codex-models-drift`,
   };
 }
 

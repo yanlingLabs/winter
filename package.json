@@ -1,5 +1,5 @@
 {
-  "name": "norma-monorepo",
+  "name": "winter-monorepo",
   "private": true,
   "type": "module",
   "engines": {
@@ -7,7 +7,7 @@
   },
   "scripts": {
     "test": "pnpm -r --workspace-concurrency=1 test",
-    "protocol:generate": "pnpm --filter @norma/protocol generate",
+    "protocol:generate": "pnpm --filter @yanlinglabs/winter-protocol generate",
     "version:sync": "bun run scripts/sync-version.ts",
     "version:bump": "bun run scripts/bump-version.ts",
     "build:winter": "bun run scripts/build-winter.ts",

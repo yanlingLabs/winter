@@ -23,7 +23,7 @@ describe("externalCapability", () => {
     expect((server.instance as WinterMcpServerInstance).listTools()).toEqual([]);
   });
 
-  test("a fake plugin's contributed tool appears under the P8b-35 wire name mcp__norma__external__<tool>", () => {
+  test("a fake plugin's contributed tool appears under the P8b-35 wire name mcp__winter__external__<tool>", () => {
     const source: ExternalToolSource = {
       pluginId: "battery-limiter", name: "set_limit", description: "Sets the charge limit.",
       parameters: { type: "object", properties: { percent: { type: "number" } } },
@@ -33,7 +33,7 @@ describe("externalCapability", () => {
     const tools = instance.listTools();
     expect(tools).toEqual([{ name: "set_limit", description: "Sets the charge limit.", inputSchema: { type: "object", properties: { percent: { type: "number" } } } }]);
     // The router builds `mcp__<server.name>__<tool.name>` (capabilities/names.ts's own convention);
-    // `server.name` is `capabilityServerName("external")` ("norma__external"), so the wire name a
+    // `server.name` is `capabilityServerName("external")` ("winter__external"), so the wire name a
     // child actually sees is exactly `capabilityToolName("external", "set_limit")`.
     expect(`mcp__${capabilityServerName("external")}__set_limit`).toBe(capabilityToolName("external", "set_limit"));
   });
@@ -124,7 +124,7 @@ describe("externalCapability", () => {
     };
   }
 
-  test("after a fake tool.register, a Code session's norma__external server lists mcp__norma__external__<name> and a call executes through the registry", async () => {
+  test("after a fake tool.register, a Code session's winter__external server lists mcp__winter__external__<name> and a call executes through the registry", async () => {
     // `tool.register`'s own handler (ipc/server.ts) registers exactly this shape: the namespaced
     // name, a passthrough args schema, and a `run()` closing over the plugin RPC bridge.
     const registry = new ToolRegistry();

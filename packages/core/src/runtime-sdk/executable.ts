@@ -11,7 +11,7 @@
 // P8d-1: the "bundle" rung moved from a bare `<dirname(execPath)>/winter` sibling to
 // `<dirname(execPath)>/runtimes/winter` (`bundleRuntimePath`, the one place this layout is
 // spelled) — the Release app now embeds BOTH runtimes under one `Resources/runtimes/` subtree
-// rather than dropping `winter` next to `norma-core` itself.
+// rather than dropping `winter` next to `winter-core` itself.
 //
 // P9a-9: the ladder gains a FIFTH, LAST rung — the installed npm platform package
 // (`@yanlinglabs/winter-agent-sdk-darwin-arm64`, published starting with the v0.0.5 tag; see
@@ -108,7 +108,7 @@ export class WinterExecutableUnavailable extends Error {
       `winter runtime executable not found (tried: ${tried.join(", ") || "nothing configured"}` +
         `${opts?.triedPlatformPackage ? ", nor the installed platform package (@yanlinglabs/winter-agent-sdk-darwin-arm64)" : ""})` +
         `${opts?.detail ? `: ${opts.detail}` : ""}; ` +
-        `set settings.runtimes.winterExecutable or NORMA_WINTER_EXECUTABLE, run \`bun run build:winter\`, or install the optional ` +
+        `set settings.runtimes.winterExecutable or WINTER_RUNTIME_EXECUTABLE, run \`bun run build:winter\`, or install the optional ` +
         `@yanlinglabs/winter-agent-sdk-darwin-arm64 platform package (\`bun install\`)`,
     );
     this.name = "WinterExecutableUnavailable";
@@ -130,7 +130,7 @@ export function resolveWinterExecutable(input: {
    *  (never real-install-dependent) so the ladder's unit tests never need `bun add` a tarball. */
   resolvePlatformPackageBin?: () => string | undefined;
 }): WinterExecutableResolution {
-  const explicit: Array<[WinterExecutableSource, string | undefined]> = [["setting", input.setting?.trim() || undefined], ["env", input.env.NORMA_WINTER_EXECUTABLE?.trim() || undefined]];
+  const explicit: Array<[WinterExecutableSource, string | undefined]> = [["setting", input.setting?.trim() || undefined], ["env", input.env.WINTER_RUNTIME_EXECUTABLE?.trim() || undefined]];
   for (const [source, path] of explicit) {
     if (!path) continue;
     return input.exists(path) ? { ok: true, path, source } : { ok: false, error: new WinterExecutableUnavailable([path]) };

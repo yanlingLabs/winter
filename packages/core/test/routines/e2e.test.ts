@@ -66,11 +66,11 @@ interface RealHarness {
 /** Assembles the real store+hub+routine-store+audit trio (mirrors exactly what daemon.ts
  *  constructs), leaving only the WinterTurnRunner to be supplied per-test. */
 function buildHarness(): RealHarness {
-  const sessionsHome = makeHome("norma-e2e-routines-sessions-");
+  const sessionsHome = makeHome("winter-e2e-routines-sessions-");
   const sessionStore = new SessionStore(sessionsHome);
   const hub = new SessionHub(sessionStore);
 
-  const routinesDir = makeHome("norma-e2e-routines-store-");
+  const routinesDir = makeHome("winter-e2e-routines-store-");
   const routineStore = openRoutineStore(join(routinesDir, "routines.db"));
   const auditPath = join(routinesDir, "routines-audit.jsonl");
   const audit = new RoutineAuditLog(auditPath);

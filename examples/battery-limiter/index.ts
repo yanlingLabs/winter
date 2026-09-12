@@ -1,20 +1,20 @@
-import { createPlugin } from "@norma/plugin-sdk";
+import { createPlugin } from "@yanlinglabs/winter-plugin-sdk";
 
 /**
  * battery-limiter — the reference Tier-2 (`platform`) plugin for `ctx.hardware()` (Phase 4c Task 5,
  * design spec §5). Every hardware access below goes through `ctx.hardware(verb, args)` — the SDK's
  * thin wrapper around core's `hardware.request` JSON-RPC method, which core then brokers to
- * Norma.app's privileged XPC helper (NormaHelper, Task 3) via a `hardware_requested` push to the
+ * Winter.app's privileged XPC helper (WinterHelper, Task 3) via a `hardware_requested` push to the
  * active provider connection. This plugin never talks to the helper directly and never needs to —
  * that's the entire point of `ctx.hardware` existing.
  *
- * Two tools, both consent-gated on the "battery" hardware class (`norma-plugin.json`'s
+ * Two tools, both consent-gated on the "battery" hardware class (`winter-plugin.json`'s
  * `permissions.hardware: ["battery"]`):
  *  - `set_charge_limit {percent}` -> `ctx.hardware("setChargeLimit", {percent})`
  *  - `get_charge_limit {}` -> `ctx.hardware("getChargeLimit")`
  *
  * Both calls THROW on any typed hardware failure (unknown_verb/consent_denied/no_provider/timeout/
- * provider_error — see `@norma/plugin-sdk`'s `PluginContext.hardware` doc comment) rather than
+ * provider_error — see `@yanlinglabs/winter-plugin-sdk`'s `PluginContext.hardware` doc comment) rather than
  * returning an error-shaped value, so a failure naturally becomes a typed `plugin.toolResult
  * {error}` — no try/catch needed here, same "let it throw" posture as sample-echo's `boom` tool.
  *
@@ -54,7 +54,7 @@ function currentValue(): string {
 const plugin = createPlugin({
   tools: {
     set_charge_limit: {
-      description: "Sets the battery charge limit (percent, 1-100) via Norma.app's XPC helper.",
+      description: "Sets the battery charge limit (percent, 1-100) via Winter.app's XPC helper.",
       parameters: {
         type: "object",
         properties: { percent: { type: "number" } },
@@ -73,7 +73,7 @@ const plugin = createPlugin({
       },
     },
     get_charge_limit: {
-      description: "Reads the current battery charge limit via Norma.app's XPC helper.",
+      description: "Reads the current battery charge limit via Winter.app's XPC helper.",
       parameters: { type: "object", properties: {} },
       run: async (_args, ctx) => {
         const result = await ctx.hardware("getChargeLimit");

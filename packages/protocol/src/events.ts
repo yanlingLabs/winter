@@ -168,7 +168,7 @@ export const ApprovalResolvedEvent = ThreadBase.extend({
  *  single request.
  *
  *  `contextTokens` (additive optional, like `agent_error.code` — an extra field on an EXISTING
- *  variant, so no new Swift case and no NormaKit exhaustive-switch trap) is the OTHER figure: the
+ *  variant, so no new Swift case and no WinterKit exhaustive-switch trap) is the OTHER figure: the
  *  provider-reported input size of the turn's LARGEST single request, i.e. how full the context
  *  actually got. That is the only correct input to the auto-compaction trigger
  *  (`engine.ts`'s `maybeAutoCompact`), which previously read `inputTokens` and therefore compacted
@@ -185,11 +185,11 @@ export const ApprovalResolvedEvent = ThreadBase.extend({
  *  it is the per-round MAXIMUM (`Math.max` across the turn's requests), never a sum and never the
  *  last round's value.
  *
- *  Mirrored on the Swift side too (followups T3, `apple/NormaProtocol/Sources/NormaProtocol/
+ *  Mirrored on the Swift side too (followups T3, `apple/WinterProtocol/Sources/WinterProtocol/
  *  SessionEvent.swift`'s `TurnCompleted.contextTokens`), with a TS-generated fixture
  *  (`turn_completed_with_contextTokens.json`) proving the round-trip — the "TS-only, no Swift
  *  mirror, no client renders it" reasoning that used to sit here expired the moment
- *  `NormaChatKit`'s `ChatEngine` became a live SECOND producer of `turn_completed`: its events reach
+ *  `WinterChatKit`'s `ChatEngine` became a live SECOND producer of `turn_completed`: its events reach
  *  this daemon's log verbatim via `sync.push`, and the field only survives that trip because the
  *  Swift type that gets JSON-encoded once (on the phone, at emit time) actually carries it. A
  *  future field addition to an existing variant should re-ask this question fresh rather than
@@ -200,7 +200,7 @@ export const TurnCompletedEvent = ThreadBase.extend({
   contextTokens: z.number().int().nonnegative().optional(),
 });
 /** `code` (phase 5 routines T3, blocking concern carried from T2's runner.ts report): additive
- *  optional field on this EXISTING variant (not a new SessionEvent variant — no NormaKit
+ *  optional field on this EXISTING variant (not a new SessionEvent variant — no WinterKit
  *  exhaustive-switch trap) mirroring `ProviderEvent`'s own `{type:"error", code, message,
  *  retryAfterMs?}` shape (providers/types.ts) — `engine.ts` forwards `ev.code` when the error came
  *  from a live provider stream; the two synthetic `agent_error` emit sites (no cwd, context-cap)
@@ -328,7 +328,7 @@ export const ChildUpdateEvent = ThreadBase.extend({
  *  existing `notifyWorkflowCompletion` assistant-facing `task_notification` these SAME runtime
  *  events also drive — the wire events are new observability, not a replacement channel. NOT
  *  sensitive (no `encrypted_content`) — normal generator fixtures, same precedent as
- *  `tool_review`/`notification_requested` above (full NormaKit exhaustive-switch discipline: these
+ *  `tool_review`/`notification_requested` above (full WinterKit exhaustive-switch discipline: these
  *  are NEW variants). */
 export const WorkflowStartedEvent = ThreadBase.extend({ type: z.literal("workflow_started"), runId: z.string().min(1), name: z.string().optional(), summary: z.string() });
 export const WorkflowProgressEvent = ThreadBase.extend({ type: z.literal("workflow_progress"), runId: z.string().min(1), phase: z.string().optional(), log: z.string().optional(), running: z.number().int().nonnegative(), completed: z.number().int().nonnegative(), total: z.number().int().nonnegative() });
@@ -401,7 +401,7 @@ export const PluginToolInvokeEvent = ThreadBase.extend({
 });
 
 /** TRANSIENT (broadcast-only, like `assistant_delta`/the lease events/`plugin_tool_invoke` above)
- *  — core pushes this to the active PROVIDER's connection (Norma.app, spec §5) when a plugin (or
+ *  — core pushes this to the active PROVIDER's connection (Winter.app, spec §5) when a plugin (or
  *  the harness, dev/testing) calls `hardware.request` (methods.ts): the app-side broker answers
  *  via `hardware.respond` {requestId, resultJson?, error?}, the same approval-broker
  *  request/response pattern as `peripheral_call_requested`/`plugin_tool_invoke`. A hardware verb
@@ -445,7 +445,7 @@ export const TileActionEvent = Base.extend({
   actionId: z.string().min(1),
 });
 
-/** Reviewer observability (phase 5e T1, spec §1 — full NormaKit switch-trap discipline: this is a
+/** Reviewer observability (phase 5e T1, spec §1 — full WinterKit switch-trap discipline: this is a
  *  NEW variant, unlike `agent_error.code` above). Persisted once per ACTUAL `reviewer.review()`
  *  invocation (engine.ts's review hook) — NEVER for the `bashLooksSafe` static bypass, so this
  *  observes model-invocations of the reviewer, not every gate decision. `summary` is the capped,
@@ -473,11 +473,11 @@ export const ToolReviewEvent = ThreadBase.extend({
  *  and replayed like `tool_review`/`task_updated`, so a client that attaches/reattaches later
  *  still sees it in the session's history. `title`/`message` mirror the tool's own zod bounds
  *  (min(1)/max(100) and min(1)/max(500)) — the tool always supplies a non-empty title (defaults
- *  to "Norma" when the caller omits one), so this schema can require both rather than treating
+ *  to "Winter" when the caller omits one), so this schema can require both rather than treating
  *  either as optional.
  *
- *  DELIVERY is entirely client-side (NormaKit/CLI/app), not this schema's concern: the app posts
- *  a native `UNUserNotificationCenter` alert (see `SessionModel.apply` in the Norma target, which
+ *  DELIVERY is entirely client-side (WinterKit/CLI/app), not this schema's concern: the app posts
+ *  a native `UNUserNotificationCenter` alert (see `SessionModel.apply` in the Winter target, which
  *  additionally gates delivery on the event's `ts` being wall-clock-fresh — a reattach/refocus
  *  replays a session's ENTIRE history from seq 0, and without that freshness gate every
  *  historical notification would re-fire as a new banner on every reconnect); the daemon itself
@@ -576,7 +576,7 @@ export const PanelTabKind = z.enum(["web", "document", "code", "note", "diff", "
  *  The APP's producer truncates a title to this and DROPS an over-long URL rather than truncating it
  *  (a truncated URL is a different, wrong URL that would later be restored into a web view), so a
  *  real page never reaches these limits from the shipped path. Mirrored in Swift by
- *  `PanelURLPolicy.urlMaxLength`/`.titleMaxLength` (`apple/Norma/Sources/AppShell/PanelURLPolicy
+ *  `PanelURLPolicy.urlMaxLength`/`.titleMaxLength` (`apple/Winter/Sources/AppShell/PanelURLPolicy
  *  .swift`), with a literal pin test on each side naming the other — two hand-mirrored numbers in
  *  two languages with no compile-time coupling is this repo's worst known drift class
  *  (`TRANSIENT_EVENT_TYPES`), and drift here is SILENT in both directions because the app's
@@ -839,13 +839,13 @@ export type SessionEvent = z.infer<typeof SessionEvent>;
  *  exempt these from BOTH seq-based dedupe AND lastSeq/cursor advancement (see
  *  `AssistantDeltaEvent`'s own doc comment for the original statement of that obligation).
  *
- *  **Why this constant exists.** The list was hand-copied into four places — `NormaClient.route`
- *  (Mac), `NormaSessionClient` (phone), its test mirror, and the daemon's remote live-stream
+ *  **Why this constant exists.** The list was hand-copied into four places — `WinterClient.route`
+ *  (Mac), `WinterSessionClient` (phone), its test mirror, and the daemon's remote live-stream
  *  filter (`sessions/remote-stream.ts`) — because Swift's `SessionEvent.Discriminator` is
  *  `private`. Hand-mirrored list #4 was one copy too many: an event type that is transient in the
  *  daemon but missing from a client's copy is dropped 100% of the time, silently, with a green
  *  suite (exactly the iOS-streaming bug — the phone's client was missing the whole list). The
- *  Swift mirror is `SessionEvent.transientTypes` in `apple/NormaProtocol`; both sides are pinned to
+ *  Swift mirror is `SessionEvent.transientTypes` in `apple/WinterProtocol`; both sides are pinned to
  *  the same literal nine by parity tests (`packages/core/test/ipc/remote-live-stream.test.ts`
  *  and `SessionEventTransientTests`), so editing one side alone fails a test rather than silently
  *  diverging.
@@ -872,7 +872,7 @@ export const TRANSIENT_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<
   //
   // **Corrected mechanism (whole-branch review, Minor-1): the phone decodes this variant fine,
   // `args` included.** `SessionEvent.PanelCommand` has carried `args` since B2 Task 2, content-
-  // checked by NormaProtocol's own round-trip test. `NormaKit`'s `try?` (`parseServerLine`)
+  // checked by WinterProtocol's own round-trip test. `WinterKit`'s `try?` (`parseServerLine`)
   // protects the CONNECTION from a genuinely unrecognized event — it has nothing to do with this
   // one, which decodes just fine. What actually drops it is the phone's chat-transcript fold, which
   // handles only `HISTORY_EVENT_TYPES ∪ {assistant_delta}` and `default: break`s on everything else

@@ -8,7 +8,7 @@ import type { CapabilitySession } from "../../src/capabilities/server";
 
 /**
  * The `computer` capability server (P8b Task 6), over the SAME fake `ComputerUseService`
- * `test/agent/computer-tool.test.ts` uses — no real peripheral broker, no leases, no Norma.app.
+ * `test/agent/computer-tool.test.ts` uses — no real peripheral broker, no leases, no Winter.app.
  */
 
 function fakeCu(result: CuActResult): { calls: Array<{ sid: string; cls: string; payload: string }>; service: ComputerUseService } {
@@ -28,7 +28,7 @@ describe("computerCapability: the server shape", () => {
   test("is an `sdk` server named `computer` with a callable instance", () => {
     const server = computerCapability(session(), { computerUse: () => undefined });
     expect(server.type).toBe("sdk");
-    expect(server.name).toBe("norma__computer");
+    expect(server.name).toBe("winter__computer");
     expect(isWinterMcpServerInstance(server.instance)).toBe(true);
   });
 

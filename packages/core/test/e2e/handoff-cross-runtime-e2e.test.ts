@@ -3,9 +3,9 @@
 // back, on the REAL binaries (`dist/winter` + the pinned platform Claude runtime) against the
 // Anthropic LOOPBACK fake (never the network, never a real key).
 //
-// Gated on BOTH `describeWithWinterBinary` (skips without NORMA_WINTER_EXECUTABLE) and
+// Gated on BOTH `describeWithWinterBinary` (skips without WINTER_RUNTIME_EXECUTABLE) and
 // `describeWithClaudeRuntime` (skips without the optional platform package) — either missing skips
-// the whole file with a printed reason; `NORMA_WINTER_REQUIRE_BINARY=1`/`NORMA_CLAUDE_REQUIRE_RUNTIME=1`
+// the whole file with a printed reason; `WINTER_RUNTIME_REQUIRE_BINARY=1`/`WINTER_CLAUDE_REQUIRE_RUNTIME=1`
 // (CI) turn a missing binary into a failure instead.
 //
 // The daemon/session setup mirrors `test/runtime-sdk/official-leg.e2e.test.ts`'s P8c-14 block
@@ -30,7 +30,7 @@
 // and every other real-child Winter e2e use, to avoid the network/real keys on that leg), and
 // `providerSelectionFor`'s own header (`runtime-sdk/provider-selection.ts`) is explicit that
 // "`winter-test/<name>` … is not a catalog provider and must never be resolved against one" — so
-// `familyListingFromCatalog()` (what `NormaRuntimeSdk.buildSelectionInput` feeds the barrier) can
+// `familyListingFromCatalog()` (what `WinterRuntimeSdk.buildSelectionInput` feeds the barrier) can
 // never contain it, and the router's `reviewPersistedSelection` refuses outright
 // (`review.kind === "fresh-refused"`) the instant it tries to re-resolve the persisted model against
 // today's catalog to sanity-check it. A REAL `resumed` round-trip needs a Winter-leg session on a
@@ -43,7 +43,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runtimeSdkInternals, type RuntimeKind, type SessionKey } from "@yanlinglabs/winter-runtime-sdk";
 import { openaiResponsesFake } from "@yanlinglabs/winter-provider-conformance/fakes";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/auth/credential-material";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
@@ -124,7 +124,7 @@ describeWithWinterBinary("cross-runtime handoff (P8c, the phase's key proof)", (
     let script: AnthropicTurnScript = { blocks: [{ type: "text", chunks: ["hello from the official leg"] }], stopReason: "end_turn" };
 
     beforeAll(async () => {
-      home = realpathSync(mkdtempSync(join(tmpdir(), "norma-handoff-x-")));
+      home = realpathSync(mkdtempSync(join(tmpdir(), "winter-handoff-x-")));
       writeFileSync(join(home, "settings.json"), JSON.stringify({
         schemaVersion: 2,
         provider: { type: "openai-compatible", model: WINTER_DOUBLE_MODEL, baseUrl: "http://127.0.0.1:9/v1" },
@@ -171,7 +171,7 @@ describeWithWinterBinary("cross-runtime handoff (P8c, the phase's key proof)", (
       const d = daemon!;
       if ("unavailable" in d.runtimeState) throw d.runtimeState.unavailable;
       const rt = d.runtimeState;
-      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-handoff-x-cwd-")));
+      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-handoff-x-cwd-")));
 
       // ── Step 1: a Winter-leg Code session, one completed turn ──────────────────────────────
       const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, {
@@ -219,7 +219,7 @@ describeWithWinterBinary("cross-runtime handoff (P8c, the phase's key proof)", (
       // What the barrier's own `plan()` reports for THIS session, though, is a typed REFUSAL —
       // before `execute()` is ever reached — and it is a real, structural one, not a fluke:
       // `selectionInputFor` (registered by this fix) reviews the persisted selection against
-      // `NormaRuntimeSdk.buildSelectionInput`'s real, pinned `familyListingFromCatalog()`, and this
+      // `WinterRuntimeSdk.buildSelectionInput`'s real, pinned `familyListingFromCatalog()`, and this
       // session's persisted model is `winter-test/echo` — a test double `provider-selection.ts`
       // documents as deliberately UNRESOLVABLE against the real catalog ("must never be resolved
       // against one"). The router's `reviewPersistedSelection` therefore cannot even re-derive a
@@ -289,7 +289,7 @@ describeWithWinterBinary("cross-runtime handoff on a REAL catalog provider (fix 
     const anthropicScript: AnthropicTurnScript = { blocks: [{ type: "text", chunks: ["hello from the official leg (real catalog handoff)"] }], stopReason: "end_turn" };
 
     beforeAll(async () => {
-      home = realpathSync(mkdtempSync(join(tmpdir(), "norma-handoff-real-")));
+      home = realpathSync(mkdtempSync(join(tmpdir(), "winter-handoff-real-")));
 
       // ── The openai loopback (the Winter leg's real, catalog-listed provider) ────────────────
       const openaiFake = await openaiResponsesFake.startOpenAiResponsesFake({
@@ -355,7 +355,7 @@ describeWithWinterBinary("cross-runtime handoff on a REAL catalog provider (fix 
       const d = daemon!;
       if ("unavailable" in d.runtimeState) throw d.runtimeState.unavailable;
       const rt = d.runtimeState;
-      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-handoff-real-cwd-")));
+      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-handoff-real-cwd-")));
 
       // ── Step 1: a Winter-leg session on the REAL catalog openai row, one completed turn ─────
       const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, {
@@ -465,7 +465,7 @@ describeWithWinterBinary("cross-runtime handoff on a REAL catalog provider (fix 
           // `winter-test/<double>` the catalog cannot name at all). A `resumed` round trip needs
           // the SOURCE session's PERSISTED family to already be "claude" (a Claude-family model
           // temporarily hosted on Winter for lack of a servable Anthropic-protocol row) — every
-          // Claude-family catalog row Norma's OWN credential inventory can serve is Anthropic-
+          // Claude-family catalog row Winter's OWN credential inventory can serve is Anthropic-
           // protocol, which D13-2 routes straight to the official runtime the instant a peer and a
           // credential both exist, so this deployment has no way to construct that fixture; recorded
           // here as the honest, measured limit — see this test's own `console.warn` below.

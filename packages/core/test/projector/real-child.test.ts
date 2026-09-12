@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { query } from "@yanlinglabs/winter-agent-sdk";
-import { SessionEvent } from "@norma/protocol";
+import { SessionEvent } from "@yanlinglabs/winter-protocol";
 import { createHostPromptQueue } from "../../src/runtime-sdk/prompt-queue";
 import { MAIN_THREAD, createProjector } from "../../src/projector";
 import type { ProjectedBatch, ProtocolSdkMessage } from "../../src/projector";
@@ -27,12 +27,12 @@ import { FakeCheckpoints } from "./harness";
  *       the one question the original measurement deliberately could not answer (it gated its
  *       second envelope on the first terminal "so the turns stay separable").
  *
- * SKIPS cleanly when `NORMA_WINTER_EXECUTABLE` is unset; `NORMA_WINTER_REQUIRE_BINARY=1` makes a
+ * SKIPS cleanly when `WINTER_RUNTIME_EXECUTABLE` is unset; `WINTER_RUNTIME_REQUIRE_BINARY=1` makes a
  * missing binary a FAILURE, so CI can never go green by skipping the proof (P8b-2).
  *
- * **The child never sees a real home.** `HOME`, `TMPDIR`, `NORMA_HOME` and `WINTER_HOME` are all
+ * **The child never sees a real home.** `HOME`, `TMPDIR`, `WINTER_HOME` and `WINTER_HOME` are all
  * built onto a fresh `mkdtemp`, and the env is CONSTRUCTED rather than spread from `process.env` —
- * inheriting would leak the developer's `~/.norma`, `~/.winter` and any provider credentials in the
+ * inheriting would leak the developer's `~/.winter`, `~/.winter` and any provider credentials in the
  * environment into a spawned process. `winter-test/*` models select an in-process double, so
  * nothing reaches the network.
  */
@@ -106,8 +106,10 @@ async function driveChild(bin: string, opts: {
       // CONSTRUCTED, never spread from process.env — see the header.
       env: {
         PATH: process.env.PATH ?? "/usr/bin:/bin",
-        HOME: home, TMPDIR: home, NORMA_HOME: home, WINTER_HOME: home,
-        NORMA_PROFILE: "test",
+        // Pre-rename this set two distinct env keys — the daemon's own home var, and WINTER_HOME (the SDK's
+        // brand-derived home); the rename makes them the same key, so it is written once now.
+        HOME: home, TMPDIR: home, WINTER_HOME: home,
+        WINTER_PROFILE: "test",
         WINTER_TEST_PROVIDER: opts.provider,
       },
     },
@@ -193,14 +195,14 @@ describeWithWinterBinary("projector: a REAL winter child", (bin) => {
     const userFrame = run.messages.find((m) => (m as { type?: string }).type === "user") as { message: { content: Array<Record<string, unknown>> } };
     expect(userFrame.message.content[0]).toMatchObject({ type: "tool_result", denied: true });
 
-    // (b) the projector folds the live stream into the golden's shape: a tool_call (NORMA-named),
+    // (b) the projector folds the live stream into the golden's shape: a tool_call (WINTER-named),
     // its error result, the post-denial text, and one terminal per begun turn.
     const kinds = run.events.filter((e) => (e as { threadId?: string }).threadId === MAIN_THREAD).map((e) => e.type);
     expect(kinds).toEqual([
       "turn_started", "tool_call", "tool_result", "assistant_message", "turn_completed",
       "turn_started", "agent_error", "turn_completed",
     ]);
-    // `test_tool` has no Norma name, so it falls through unchanged — the documented fail-open.
+    // `test_tool` has no Winter name, so it falls through unchanged — the documented fail-open.
     expect(run.events.find((e) => e.type === "tool_call")).toMatchObject({ name: "test_tool" });
     expect(run.events.find((e) => e.type === "tool_result")).toMatchObject({ isError: true });
     // the error-result-then-throw pair (§4.8 item 3) surfaces as a throw the driver must catch

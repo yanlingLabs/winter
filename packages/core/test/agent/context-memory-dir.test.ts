@@ -10,13 +10,13 @@ import { SkillStore } from "../../src/agent/skills";
 // `memory` dep — the legacy phase-5b path (unconditional when `memory` is omitted) is covered,
 // UNCHANGED, by context.test.ts. This file only exercises the branch introduced by T1.
 
-function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "norma-ctx-mem-"))); }
+function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "winter-ctx-mem-"))); }
 
 function setup() {
   const home = realDir();
   mkdirSync(join(home, "memory"), { recursive: true });
   const trust = new TrustStore(join(home, "trust.json"));
-  const skills = new SkillStore({ normaHome: home, trust });
+  const skills = new SkillStore({ winterHome: home, trust });
   return { home, trust, skills };
 }
 
@@ -26,7 +26,7 @@ describe("ContextAssembler + MEMDIR (T1)", () => {
     const cwd = realDir();
     const memDir = join(home, "projects", "some-key", "memory"); // never created
     const a = new ContextAssembler({
-      normaHome: home, trust, skills,
+      winterHome: home, trust, skills,
       memory: { enabled: () => true, dirFor: () => memDir, assistantDir: () => join(home, "projects", "_assistant", "memory") },
     });
     const out = a.assemble({ cwd });
@@ -44,7 +44,7 @@ describe("ContextAssembler + MEMDIR (T1)", () => {
     mkdirSync(memDir, { recursive: true });
     writeFileSync(join(memDir, "MEMORY.md"), "- [coffee-pref](coffee-pref.md) — Likes oat milk lattes\n");
     const a = new ContextAssembler({
-      normaHome: home, trust, skills,
+      winterHome: home, trust, skills,
       memory: { enabled: () => true, dirFor: () => memDir, assistantDir: () => join(home, "projects", "_assistant", "memory") },
     });
     const out = a.assemble({ cwd });
@@ -61,7 +61,7 @@ describe("ContextAssembler + MEMDIR (T1)", () => {
     mkdirSync(memDir, { recursive: true });
     writeFileSync(join(memDir, "MEMORY.md"), Array.from({ length: 201 }, (_, i) => `line${i}`).join("\n"));
     const a = new ContextAssembler({
-      normaHome: home, trust, skills,
+      winterHome: home, trust, skills,
       memory: { enabled: () => true, dirFor: () => memDir, assistantDir: () => join(home, "projects", "_assistant", "memory") },
     });
     const out = a.assemble({ cwd });
@@ -79,7 +79,7 @@ describe("ContextAssembler + MEMDIR (T1)", () => {
     // 30 lines of ~900 bytes each (< 200 lines, > 25KB) so the BYTE cap fires, not the line cap.
     writeFileSync(join(memDir, "MEMORY.md"), Array.from({ length: 30 }, () => "y".repeat(900)).join("\n"));
     const a = new ContextAssembler({
-      normaHome: home, trust, skills,
+      winterHome: home, trust, skills,
       memory: { enabled: () => true, dirFor: () => memDir, assistantDir: () => join(home, "projects", "_assistant", "memory") },
     });
     const out = a.assemble({ cwd });
@@ -97,7 +97,7 @@ describe("ContextAssembler + MEMDIR (T1)", () => {
     writeFileSync(join(home, "memory", "MEMORY.md"), "LEGACY_USER_MEMORY_FACT");
     const cwd = realDir();
     const a = new ContextAssembler({
-      normaHome: home, trust, skills,
+      winterHome: home, trust, skills,
       memory: { enabled: () => false, dirFor: () => join(home, "projects", "x", "memory"), assistantDir: () => join(home, "projects", "_assistant", "memory") },
     });
     const out = a.assemble({ cwd });
@@ -108,7 +108,7 @@ describe("ContextAssembler + MEMDIR (T1)", () => {
   test("no cwd: memory config present but nothing to key a project dir off — no MEMDIR section injected", () => {
     const { home, trust, skills } = setup();
     const a = new ContextAssembler({
-      normaHome: home, trust, skills,
+      winterHome: home, trust, skills,
       memory: { enabled: () => true, dirFor: () => join(home, "projects", "x", "memory"), assistantDir: () => join(home, "projects", "_assistant", "memory") },
     });
     const out = a.assemble({ cwd: null });
@@ -121,7 +121,7 @@ describe("ContextAssembler + MEMDIR (T1)", () => {
     const memDir = join(home, "projects", "proj", "memory");
     let enabled = true;
     const a = new ContextAssembler({
-      normaHome: home, trust, skills,
+      winterHome: home, trust, skills,
       memory: { enabled: () => enabled, dirFor: () => memDir, assistantDir: () => join(home, "projects", "_assistant", "memory") },
     });
     expect(a.assemble({ cwd })).toContain("NO dedicated memory tools");

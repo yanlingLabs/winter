@@ -1,6 +1,6 @@
 /**
  * Winter Phase 8d — the compiled-binary proof that the P8d-1 bundle layout resolves inside the
- * REAL Release artifact (`dist/norma-core`, a `bun build --compile` single-file binary), the same
+ * REAL Release artifact (`dist/winter-core`, a `bun build --compile` single-file binary), the same
  * way `scripts/verify-runtime-state-compiled.ts` proves 8a's runtime spine.
  *
  * Why this can't be proven under plain `bun test`: `official-executable.ts`'s package door and
@@ -10,18 +10,18 @@
  * bundle rung (not the dev `node_modules` package door) is what actually resolves.
  *
  * Steps:
- *   1. `bun run --filter '@norma/cli' compile:core` -> dist/norma-core (the same invocation
+ *   1. `bun run --filter '@yanlinglabs/winter-cli' compile:core` -> dist/winter-core (the same invocation
  *      verify-workflow-compiled.ts and verify-runtime-state-compiled.ts use).
- *   2. mkdtemp a fake `Contents/Resources/` — copy the compiled binary in as `norma-core` (so
- *      `process.execPath` inside the spawned process really is `<tmp>/Resources/norma-core`, and
+ *   2. mkdtemp a fake `Contents/Resources/` — copy the compiled binary in as `winter-core` (so
+ *      `process.execPath` inside the spawned process really is `<tmp>/Resources/winter-core`, and
  *      `dirname(execPath)` really is `<tmp>/Resources`, exactly like a Release app).
  *   3. `stageRuntimes({ out: <tmp>/Resources/runtimes, winterPath: dist/winter if present })` —
  *      reuses an already-built `dist/winter` (CI's `winter-binary` artifact, or a prior
  *      `bun run build:winter`) rather than paying for a fresh SDK-checkout build here; the claude
  *      binary resolves through the same installed-platform-package door `stage-runtimes.ts`
  *      always uses.
- *   4. Take a signature of the REAL homes (`~/.norma`, `~/.norma-dev`) BEFORE the run.
- *   5. `spawn(<tmp>/Resources/norma-core, ["__runtimes-probe"], { env: { NORMA_HOME: <tmp>/home } })`.
+ *   4. Take a signature of the REAL homes (`~/.winter`, `~/.winter-dev`) BEFORE the run.
+ *   5. `spawn(<tmp>/Resources/winter-core, ["__runtimes-probe"], { env: { WINTER_HOME: <tmp>/home } })`.
  *   6. Parse the one JSON result line; assert both ladders resolved via "bundle", the staged
  *      `VERSIONS.json` parsed and matches this build's pins, and `claude --version` really ran.
  *   7. Re-take the real-home signature and assert it is UNCHANGED.
@@ -45,13 +45,13 @@ import { REQUIRED_CLAUDE_AGENT_SDK } from "../packages/core/src/runtime-sdk/vers
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(SCRIPTS_DIR, "..");
-const DIST_BINARY = join(REPO_ROOT, "dist", "norma-core");
+const DIST_BINARY = join(REPO_ROOT, "dist", "winter-core");
 const DIST_WINTER = join(REPO_ROOT, "dist", "winter");
 const COMPILE_TIMEOUT_MS = 180_000;
 /** The probe resolves two ladders, best-effort `codesign`s them, and runs one real `claude
  *  --version` — seconds in practice; this only guards against a genuine hang. */
 const PROBE_TIMEOUT_MS = 60_000;
-const REAL_HOMES = [join(homedir(), ".norma"), join(homedir(), ".norma-dev")];
+const REAL_HOMES = [join(homedir(), ".winter"), join(homedir(), ".winter-dev")];
 /** Controller measurement M1: the pinned platform package's own `claude --version`. */
 const EXPECTED_CLAUDE_VERSION_PREFIX = "2.1.250";
 
@@ -93,11 +93,11 @@ async function main(): Promise<void> {
   log(`dist binary : ${DIST_BINARY}`);
 
   // ---- Step 1: compile the REAL Release artifact -----------------------------------------------
-  log("\n--- Step 1: compiling dist/norma-core (bun run --filter '@norma/cli' compile:core) ---");
+  log("\n--- Step 1: compiling dist/winter-core (bun run --filter '@yanlinglabs/winter-cli' compile:core) ---");
   const compileStart = Date.now();
   const compile = spawnSync(
     process.execPath,
-    ["run", "--filter", "@norma/cli", "compile:core"],
+    ["run", "--filter", "@yanlinglabs/winter-cli", "compile:core"],
     { cwd: REPO_ROOT, encoding: "utf8", timeout: COMPILE_TIMEOUT_MS },
   );
   log(`compile:core exit=${compile.status ?? "null"} signal=${compile.signal ?? "none"} (${Date.now() - compileStart}ms)`);
@@ -108,10 +108,10 @@ async function main(): Promise<void> {
   if (!existsSync(DIST_BINARY)) fail(`compile:core reported success but ${DIST_BINARY} was not produced`);
 
   // ---- Step 2: a fake Contents/Resources/ with the compiled binary copied in -------------------
-  const tmpRoot = mkdtempSync(join(tmpdir(), "norma-runtimes-probe-"));
+  const tmpRoot = mkdtempSync(join(tmpdir(), "winter-runtimes-probe-"));
   const resources = join(tmpRoot, "Resources");
   mkdirSync(resources, { recursive: true });
-  const stagedBinary = join(resources, "norma-core");
+  const stagedBinary = join(resources, "winter-core");
   copyFileSync(DIST_BINARY, stagedBinary);
   chmodSync(stagedBinary, 0o755);
   log(`\n--- Step 2: staged binary at ${stagedBinary} (dirname(execPath) is what the bundle rung resolves against) ---`);
@@ -144,8 +144,8 @@ async function main(): Promise<void> {
   log(`staged: winter=${staged.winterPath} claude=${staged.claudePath} versions=${staged.versionsPath}`);
   log(`VERSIONS.json: ${JSON.stringify(staged.versions)}`);
 
-  const tmpHome = mkdtempSync(join(tmpdir(), "norma-runtimes-probe-home-"));
-  log(`\n--- Step 4: temp NORMA_HOME = ${tmpHome} ---`);
+  const tmpHome = mkdtempSync(join(tmpdir(), "winter-runtimes-probe-home-"));
+  log(`\n--- Step 4: temp WINTER_HOME = ${tmpHome} ---`);
   const before = REAL_HOMES.map(homeSignature);
 
   try {
@@ -154,9 +154,9 @@ async function main(): Promise<void> {
     const child = spawn(stagedBinary, ["__runtimes-probe"], {
       stdio: ["ignore", "pipe", "pipe"],
       // Narrow env, same reasoning as verify-runtime-state-compiled.ts: inheriting process.env
-      // could drag this shell's own NORMA_HOME/NORMA_WINTER_EXECUTABLE/NORMA_CLAUDE_EXECUTABLE in,
+      // could drag this shell's own WINTER_HOME/WINTER_RUNTIME_EXECUTABLE/WINTER_CLAUDE_EXECUTABLE in,
       // which would defeat the entire point of proving the BUNDLE rung resolves.
-      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir(), NORMA_HOME: tmpHome },
+      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir(), WINTER_HOME: tmpHome },
     });
     let stdout = "";
     let stderr = "";
@@ -229,13 +229,13 @@ async function main(): Promise<void> {
           "JSON line at all -> the __runtimes-probe route or the runtime-sdk barrel did not survive " +
           "`bun build --compile`; (b) source !== 'bundle' -> bundleRuntimePath's execPath math is " +
           "wrong for this layout, or stageRuntimes wrote somewhere else; (c) a real home changed -> " +
-          "the probe resolved a home instead of reading NORMA_HOME, the one failure this script must " +
+          "the probe resolved a home instead of reading WINTER_HOME, the one failure this script must " +
           "never let through.",
       );
     }
 
     log(
-      "\nRESULT: PASS — dist/norma-core (the real `bun build --compile` Release artifact), laid out " +
+      "\nRESULT: PASS — dist/winter-core (the real `bun build --compile` Release artifact), laid out " +
         "exactly as the app bundle will be, resolved BOTH runtime executables through the P8d-1 " +
         "'bundle' rung, parsed a matching VERSIONS.json, and ran a real `claude --version` — the " +
         "user's real homes were left untouched throughout.",

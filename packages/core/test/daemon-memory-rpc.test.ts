@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, existsSync, writeFileSync, readFileSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startDaemon, type RunningDaemon } from "../src/daemon";
 import { startIpcServer } from "../src/ipc/server";
 import { SessionStore } from "../src/sessions/store";
@@ -12,7 +12,7 @@ import { memoryDirFor, globalMemoryDirFor } from "../src/agent/memory-dir";
 import { FakeProvider } from "../src/agent/fake-provider";
 
 // Phase 5b Task 3 (design doc §4): the memory.list/read/write/delete/audit RPCs over the daemon's
-// real MemoryStore (wired unconditionally in daemon.ts — memoryStore needs only normaHome/trust,
+// real MemoryStore (wired unconditionally in daemon.ts — memoryStore needs only winterHome/trust,
 // no agentProvider — same precedent as routines/skills/mcp; see server.test.ts's "routines.* RPCs"
 // describe block, which this file mirrors: a dedicated real-daemon TestClient harness, kept in its
 // own file rather than folded into server.test.ts's already-3000-line suite).
@@ -21,7 +21,7 @@ import { FakeProvider } from "../src/agent/fake-provider";
 // default ON) now routes list/read/write/delete onto MEMDIR files instead of the legacy store —
 // see ipc/server.ts's memory.* handlers. The FIRST describe block below explicitly boots every
 // daemon with `memory.enabled: false` so every pre-T2 assertion here (trust-gating, the exact
-// `<cwd>/.norma/memory` path, the legacy store's audit trail) keeps testing the UNCHANGED escape
+// `<cwd>/.winter/memory` path, the legacy store's audit trail) keeps testing the UNCHANGED escape
 // hatch, byte-for-byte. The SECOND describe block is new T2 coverage of the enabled (default)
 // files path.
 
@@ -77,10 +77,10 @@ describe("memory.* RPCs (Phase 5b Task 3) — legacy store (memory.enabled: fals
   let harnessToken: string;
 
   async function boot(): Promise<void> {
-    const home = mkdtempSync(join(tmpdir(), "norma-daemon-memory-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-daemon-memory-"));
     // T2: memory.enabled defaults ON (T1), which would route these RPCs onto MEMDIR files instead
     // — every test below asserts the LEGACY store's own behavior (trust-gating, the exact
-    // `<cwd>/.norma/memory` path, its central audit.jsonl), so it's disabled here explicitly.
+    // `<cwd>/.winter/memory` path, its central audit.jsonl), so it's disabled here explicitly.
     writeFileSync(join(home, "settings.json"), JSON.stringify({ memory: { enabled: false } }));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     daemon = await startDaemon({ home, secrets, agentProvider: null });
@@ -162,7 +162,7 @@ describe("memory.* RPCs (Phase 5b Task 3) — legacy store (memory.enabled: fals
     await c.request(METHODS.memoryDelete, { scope: "user", name: "a" });
 
     const withoutCwd = await c.request(METHODS.memoryAudit, {});
-    const projectDir = mkdtempSync(join(tmpdir(), "norma-memory-legacy-audit-cwd-"));
+    const projectDir = mkdtempSync(join(tmpdir(), "winter-memory-legacy-audit-cwd-"));
     const withCwd = await c.request(METHODS.memoryAudit, { cwd: projectDir });
     expect(withCwd.error).toBeUndefined();
     expect(withCwd.result.lines).toEqual(withoutCwd.result.lines);
@@ -173,14 +173,14 @@ describe("memory.* RPCs (Phase 5b Task 3) — legacy store (memory.enabled: fals
     await boot();
     const c = await TestClient.connect(daemon.socketPath);
     await c.hello(harnessToken, "memory-tester");
-    const projectDir = mkdtempSync(join(tmpdir(), "norma-memory-project-"));
+    const projectDir = mkdtempSync(join(tmpdir(), "winter-memory-project-"));
 
     const w = await c.request(METHODS.memoryWrite, {
       scope: "project", name: "x", description: "d", body: "b", cwd: projectDir,
     });
     expect(w.error?.code).toBe(ERR.INVALID_PARAMS);
     expect(w.error?.message).toBe("project memory requires a trusted directory");
-    expect(existsSync(join(projectDir, ".norma", "memory", "x.md"))).toBe(false);
+    expect(existsSync(join(projectDir, ".winter", "memory", "x.md"))).toBe(false);
 
     const l = await c.request(METHODS.memoryList, { scope: "project", cwd: projectDir });
     expect(l.error?.code).toBe(ERR.INVALID_PARAMS);
@@ -193,11 +193,11 @@ describe("memory.* RPCs (Phase 5b Task 3) — legacy store (memory.enabled: fals
     c.close();
   });
 
-  test("project scope on a directory trusted via daemon.trustDir round-trips under <cwd>/.norma/memory", async () => {
+  test("project scope on a directory trusted via daemon.trustDir round-trips under <cwd>/.winter/memory", async () => {
     await boot();
     const c = await TestClient.connect(daemon.socketPath);
     await c.hello(harnessToken, "memory-tester");
-    const projectDir = mkdtempSync(join(tmpdir(), "norma-memory-project-"));
+    const projectDir = mkdtempSync(join(tmpdir(), "winter-memory-project-"));
     const trusted = await c.request(METHODS.trustDir, { path: projectDir });
     expect(trusted.error).toBeUndefined();
 
@@ -205,7 +205,7 @@ describe("memory.* RPCs (Phase 5b Task 3) — legacy store (memory.enabled: fals
       scope: "project", name: "x", description: "d", body: "b", cwd: projectDir,
     });
     expect(w.error).toBeUndefined();
-    expect(existsSync(join(projectDir, ".norma", "memory", "x.md"))).toBe(true);
+    expect(existsSync(join(projectDir, ".winter", "memory", "x.md"))).toBe(true);
 
     const read = await c.request(METHODS.memoryRead, { scope: "project", name: "x", cwd: projectDir });
     expect(read.result.fact).toMatchObject({ name: "x", description: "d", body: "b" });
@@ -275,7 +275,7 @@ describe("memory.* RPCs (Phase 5b Task 3) — legacy store (memory.enabled: fals
   // typed INTERNAL (a silently no-oping write/delete would mask a wiring bug). Reached via a bare
   // startIpcServer with no `memory` wired — the daemon fixture above always wires one.
   test("no MemoryStore wired: list/audit degrade to empty; read/write/delete are typed INTERNAL", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-memory-no-store-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-memory-no-store-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -309,7 +309,7 @@ describe("memory.* RPCs (Phase 5b Task 3) — legacy store (memory.enabled: fals
   // the shared boot()/daemon fixture above can't mint plugin tokens. The role gate (ipc/server.ts,
   // checked BEFORE the switch) rejects a plugin connection regardless of whether `memory` is wired.
   test("memory.* verbs are role-rejected for a plugin connection, exactly like routines.*", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-memory-plugin-role-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-memory-plugin-role-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -346,7 +346,7 @@ describe("memory.* RPCs (T2) — file-backed (memory.enabled: true, default)", (
   let home: string;
 
   async function boot(settingsOverrides?: Record<string, unknown>): Promise<void> {
-    home = mkdtempSync(join(tmpdir(), "norma-daemon-memory-files-"));
+    home = mkdtempSync(join(tmpdir(), "winter-daemon-memory-files-"));
     if (settingsOverrides) writeFileSync(join(home, "settings.json"), JSON.stringify(settingsOverrides));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     daemon = await startDaemon({ home, secrets, agentProvider: null });
@@ -365,7 +365,7 @@ describe("memory.* RPCs (T2) — file-backed (memory.enabled: true, default)", (
     });
     expect(written.error).toBeUndefined();
 
-    const target = globalMemoryDirFor({ normaHome: home });
+    const target = globalMemoryDirFor({ winterHome: home });
     expect(existsSync(join(target, "coffee-pref.md"))).toBe(true);
 
     const listed = await c.request(METHODS.memoryList, { scope: "user" });
@@ -387,17 +387,17 @@ describe("memory.* RPCs (T2) — file-backed (memory.enabled: true, default)", (
     await boot();
     const c = await TestClient.connect(daemon.socketPath);
     await c.hello(harnessToken, "memory-files-tester");
-    const projectDir = mkdtempSync(join(tmpdir(), "norma-memory-files-project-")); // deliberately never trusted
+    const projectDir = mkdtempSync(join(tmpdir(), "winter-memory-files-project-")); // deliberately never trusted
 
     const w = await c.request(METHODS.memoryWrite, {
       scope: "project", name: "build-cmd", description: "d", body: "Use bun run build", cwd: projectDir,
     });
     expect(w.error).toBeUndefined(); // no trust check on this path — unlike the legacy store's PROJECT_TRUST_ERROR
 
-    const target = memoryDirFor(projectDir, { normaHome: home });
+    const target = memoryDirFor(projectDir, { winterHome: home });
     expect(existsSync(join(target, "build-cmd.md"))).toBe(true);
     // and NOT at the legacy store's own project path — the two backends never cross-write.
-    expect(existsSync(join(projectDir, ".norma", "memory", "build-cmd.md"))).toBe(false);
+    expect(existsSync(join(projectDir, ".winter", "memory", "build-cmd.md"))).toBe(false);
 
     const read = await c.request(METHODS.memoryRead, { scope: "project", name: "build-cmd", cwd: projectDir });
     expect(read.result.fact).toMatchObject({ name: "build-cmd", body: "Use bun run build" });
@@ -411,7 +411,7 @@ describe("memory.* RPCs (T2) — file-backed (memory.enabled: true, default)", (
     await c.request(METHODS.memoryWrite, { scope: "user", name: "a", description: "d", body: "b" });
     await c.request(METHODS.memoryDelete, { scope: "user", name: "a" });
 
-    const target = globalMemoryDirFor({ normaHome: home });
+    const target = globalMemoryDirFor({ winterHome: home });
     const lines = readFileSync(join(target, ".audit.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
     expect(lines).toEqual([{ ts: expect.any(Number), op: "delete", name: "a" }]);
     c.close();
@@ -441,7 +441,7 @@ describe("memory.* RPCs (T2) — file-backed (memory.enabled: true, default)", (
     await boot();
     const c = await TestClient.connect(daemon.socketPath);
     await c.hello(harnessToken, "memory-files-tester");
-    const projectDir = mkdtempSync(join(tmpdir(), "norma-memory-files-audit-project-"));
+    const projectDir = mkdtempSync(join(tmpdir(), "winter-memory-files-audit-project-"));
 
     // A project-scope delete lands in that project's own MEMDIR .audit.jsonl...
     await c.request(METHODS.memoryWrite, { scope: "project", name: "x", description: "d", body: "b", cwd: projectDir });
@@ -486,7 +486,7 @@ describe("memory.* RPCs (T2) — file-backed (memory.enabled: true, default)", (
   // in this block pass `agentProvider: null` (no turns driven, so the boot-time snapshot never
   // needs to change) and rely on `boot()`'s own default. This test overrides that.
   test("hot toggle: flipping memory.enabled true -> false (no restart) makes the NEXT call read the legacy store instead", async () => {
-    home = mkdtempSync(join(tmpdir(), "norma-daemon-memory-files-hot-"));
+    home = mkdtempSync(join(tmpdir(), "winter-daemon-memory-files-hot-"));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     daemon = await startDaemon({ home, secrets, agentProvider: { provider: new FakeProvider([]), model: "fake-1" } });
     harnessToken = daemon.tokens.harness;
@@ -495,7 +495,7 @@ describe("memory.* RPCs (T2) — file-backed (memory.enabled: true, default)", (
     await c.hello(harnessToken, "memory-files-tester");
 
     await c.request(METHODS.memoryWrite, { scope: "user", name: "a", description: "d", body: "b" });
-    const target = globalMemoryDirFor({ normaHome: home });
+    const target = globalMemoryDirFor({ winterHome: home });
     expect(existsSync(join(target, "a.md"))).toBe(true);
 
     // ATOMIC write (temp + rename): the live SettingsWatcher reads settings.json on its fs.watch

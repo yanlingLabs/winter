@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { CODEX_MODELS, REASONING_EFFORTS, catalogRowsFor } from "@norma/core";
+import { CODEX_MODELS, REASONING_EFFORTS, catalogRowsFor } from "@yanlinglabs/winter-core";
 import { parseModelArgs, validateEffort, validateModelSlug, validateAdvisorSlug } from "../src/model-cli";
 
 describe("parseModelArgs", () => {

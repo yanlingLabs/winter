@@ -3,7 +3,7 @@
 // `winter` child: multiple matcher groups on the same event (the unmatched plugin group alongside a
 // `Bash`-matched group) fire together correctly, and the fileDiff producer's PreToolUse snapshot /
 // PostToolUse diff+persist+attach round-trips through a real child's actual Write. SKIPS cleanly
-// when `NORMA_WINTER_EXECUTABLE` is unset (`describeWithWinterBinary`, P8b-2 contract).
+// when `WINTER_RUNTIME_EXECUTABLE` is unset (`describeWithWinterBinary`, P8b-2 contract).
 import { expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,8 +31,10 @@ async function drive(bin: string, opts: {
       hooks: opts.hooks,
       env: {
         PATH: process.env.PATH ?? "/usr/bin:/bin",
-        HOME: opts.home, TMPDIR: opts.home, NORMA_HOME: opts.home, WINTER_HOME: opts.home,
-        NORMA_PROFILE: "test", WINTER_TEST_PROVIDER: opts.provider,
+        // Pre-rename this set two distinct env keys — the daemon's own home var, and WINTER_HOME (the SDK's
+        // brand-derived home); the rename makes them the same key, so it is written once now.
+        HOME: opts.home, TMPDIR: opts.home, WINTER_HOME: opts.home,
+        WINTER_PROFILE: "test", WINTER_TEST_PROVIDER: opts.provider,
       },
     },
   });

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Holder, NewSessionEvent } from "@norma/protocol";
+import type { Holder, NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import { AuditLog } from "../../src/peripheral/audit";
 import {
   PeripheralBroker,
@@ -138,7 +138,7 @@ interface Fakes {
 }
 
 function setup(overrides: Partial<PeripheralBrokerDeps> = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "norma-broker-"));
+  const dir = mkdtempSync(join(tmpdir(), "winter-broker-"));
   const auditPath = join(dir, "audit.jsonl");
   const audit = new AuditLog(auditPath);
   const fakes: Fakes = { emitted: [], pushed: [], pushReturn: true, policyReturn: "granted", policyCalls: [] };
@@ -534,7 +534,7 @@ describe("PeripheralBroker", () => {
   });
 
   test("policy race: contention arising WHILE a slow (ask-mode) policy wait is in flight is re-checked on resolve, never double-granted", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-broker-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-broker-"));
     const audit = new AuditLog(join(dir, "audit.jsonl"));
     let releaseS1!: () => void;
     const gate = new Promise<void>((resolve) => { releaseS1 = resolve; });

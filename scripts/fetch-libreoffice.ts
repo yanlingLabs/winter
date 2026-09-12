@@ -1,6 +1,6 @@
 /**
  * Vendors the PROVEN headless LibreOffice macOS arm64 product-set into
- * apple/Norma/vendor/libreoffice/ (gitignored -- ~488MB unpacked, ~154MiB compressed) the way
+ * apple/Winter/vendor/libreoffice/ (gitignored -- ~488MB unpacked, ~154MiB compressed) the way
  * scripts/fetch-cef.ts and scripts/fetch-monaco.ts vendor their own dependencies: pinned,
  * hash-verified, extracted, stamped for idempotency.
  *
@@ -45,7 +45,7 @@
  *
  * --- Artifact shape: product-set/ + LICENSES/ + VERSION-PIN, exactly three top-level entries ---
  * The tarball unpacks to exactly those three things, placed directly under VENDOR_DIR:
- *   apple/Norma/vendor/libreoffice/product-set/{Frameworks,Resources}/   -- the LOK installPath
+ *   apple/Winter/vendor/libreoffice/product-set/{Frameworks,Resources}/   -- the LOK installPath
  *     is product-set/Frameworks/ (the directory CONTAINING libmergedlo.dylib) -- Resources/ must
  *     stay Frameworks/'s literal sibling on disk, with NO symlinks anywhere in that ancestry:
  *     dyld resolves a dlopen'd library through directory symlinks to its REAL path before LOK's
@@ -53,8 +53,8 @@
  *     runs, so a symlinked installPath silently loads the WRONG Resources/ instead of failing
  *     loudly (bit the productization gate twice -- see the release notes linked above). ditto (below)
  *     preserves real-directory placement the same way fetch-cef.ts's framework copies do.
- *   apple/Norma/vendor/libreoffice/LICENSES/            -- per-project license texts + MANIFEST.md
- *   apple/Norma/vendor/libreoffice/VERSION-PIN            -- commit/flags/recipe-hash/engine facts
+ *   apple/Winter/vendor/libreoffice/LICENSES/            -- per-project license texts + MANIFEST.md
+ *   apple/Winter/vendor/libreoffice/VERSION-PIN            -- commit/flags/recipe-hash/engine facts
  *
  * --- Idempotency ---
  * Same shape as fetch-cef.ts / fetch-monaco.ts: a stamp file records the exact (tag, assetName,
@@ -134,7 +134,7 @@ if (!isValidSha256Hex(PINNED_SHA256)) {
 // Full provenance (configure flags, closure recipe) travels inside the artifact as VERSION-PIN.
 const LIBREOFFICE_CORE_COMMIT = "11482c8f71bc76ed6260bc03b1576a52a788ab4f";
 
-const VENDOR_DIR = join(ROOT, "apple", "Norma", "vendor", "libreoffice");
+const VENDOR_DIR = join(ROOT, "apple", "Winter", "vendor", "libreoffice");
 const PRODUCT_SET_DIR = join(VENDOR_DIR, "product-set");
 const LICENSES_DIR = join(VENDOR_DIR, "LICENSES");
 const VERSION_PIN_PATH = join(VENDOR_DIR, "VERSION-PIN");
@@ -211,7 +211,7 @@ try {
 // Download, verify, extract, place. Everything transient lives under one temp dir that is
 // always removed on the way out, success or failure (mirrors fetch-cef.ts / fetch-monaco.ts).
 // ---------------------------------------------------------------------------
-const tmp = mkdtempSync(join(tmpdir(), "norma-libreoffice-"));
+const tmp = mkdtempSync(join(tmpdir(), "winter-libreoffice-"));
 // fail() calls process.exit(), which does NOT unwind the stack -- the `finally` below never
 // runs on that path (same trap fetch-cef.ts/fetch-monaco.ts document). Every fail() called from
 // inside this try must go through here first, or a failure leaks a temp dir with a partial
@@ -316,7 +316,7 @@ try {
     join(extractDir, "product-set"),
     PRODUCT_SET_DIR,
   ]);
-  execOrFail(`failed to copy LICENSES/ -- Norma.app is required to ship these notices`, "ditto", [
+  execOrFail(`failed to copy LICENSES/ -- Winter.app is required to ship these notices`, "ditto", [
     join(extractDir, "LICENSES"),
     LICENSES_DIR,
   ]);

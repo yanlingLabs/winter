@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { NewSessionEvent } from "@norma/protocol";
+import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 
 /**
  * PluginSupervisor — process lifecycle for Tier-2 (`platform`) plugins (design spec §3, plan
@@ -142,7 +142,7 @@ export type SupervisorStatus = "starting" | "running" | "backoff" | "circuit-ope
 
 /** `plugins.supervisor.{registrationTimeoutMs,backoffCapMs,circuitFailures,circuitWindowMs}`
  *  (settings.ts) plus two constructor-only test-injection seams that are deliberately NOT part of
- *  settings.json: `invokeTimeoutMs` (spec: env-var only, `NORMA_PLUGIN_TOOL_TIMEOUT_MS`) and
+ *  settings.json: `invokeTimeoutMs` (spec: env-var only, `WINTER_PLUGIN_TOOL_TIMEOUT_MS`) and
  *  `killGraceMs` (spec-fixed 5s SIGTERM→SIGKILL grace, not settings-overridable at all). */
 export interface PluginSupervisorSettings {
   registrationTimeoutMs?: number;
@@ -159,9 +159,9 @@ export interface PluginSupervisorDeps {
   /** Injectable clock — defaults to `Date.now`. Every lifecycle decision (backoff delay math,
    *  circuit-window pruning) reads time through this, never `Date.now()` directly. */
   now?: () => number;
-  /** `~/.norma/run` (norma-dir.ts's `dirs.runDir`) — PID files live at `<runDir>/plugins/<id>.pid`. */
+  /** `~/.winter/run` (winter-dir.ts's `dirs.runDir`) — PID files live at `<runDir>/plugins/<id>.pid`. */
   runDir: string;
-  /** `NORMA_SOCKET` value handed to every spawned plugin process. */
+  /** `WINTER_SOCKET` value handed to every spawned plugin process. */
   socketPath: string;
   /** Daemon-side lazy mint (`SessionStore#mintPluginToken`), called fresh right before every
    *  spawn (including restarts) — re-minting rotates the token each time, which is fine (the old
@@ -304,7 +304,7 @@ export class PluginSupervisor {
     this.backoffCapMs = deps.settings?.backoffCapMs ?? 60_000;
     this.circuitFailures = deps.settings?.circuitFailures ?? 5;
     this.circuitWindowMs = deps.settings?.circuitWindowMs ?? 10 * 60_000;
-    this.invokeTimeoutMs = deps.settings?.invokeTimeoutMs ?? Number(process.env.NORMA_PLUGIN_TOOL_TIMEOUT_MS ?? 60_000);
+    this.invokeTimeoutMs = deps.settings?.invokeTimeoutMs ?? Number(process.env.WINTER_PLUGIN_TOOL_TIMEOUT_MS ?? 60_000);
     this.killGraceMs = deps.settings?.killGraceMs ?? 5_000;
   }
 
@@ -533,7 +533,7 @@ export class PluginSupervisor {
     this.failPendingInvokes(id);
   }
 
-  /** Manual restart — the small CLI/manager-UI rider (`norma plugin restart <id>`, spec: "restart
+  /** Manual restart — the small CLI/manager-UI rider (`winter plugin restart <id>`, spec: "restart
    *  via re-enable in 4d UI"): forces a fresh spawn cycle regardless of current status, including
    *  "circuit-open" (which nothing else ever recovers from) and "stopped". Clears backoff/circuit
    *  accounting and kills any process still owned first — restart means start over clean. The
@@ -625,7 +625,7 @@ export class PluginSupervisor {
 
   /** Requires "running" + a live connection (set by `notifyRegistered`); pushes
    *  `plugin_tool_invoke` on that connection and awaits `resolveToolResult` (per-call timeout
-   *  `invokeTimeoutMs`, default 60s / `NORMA_PLUGIN_TOOL_TIMEOUT_MS`). Never throws — every
+   *  `invokeTimeoutMs`, default 60s / `WINTER_PLUGIN_TOOL_TIMEOUT_MS`). Never throws — every
    *  failure path is a typed `InvokeError`. `sessionId` on the pushed event is the plugin id
    *  itself (non-empty, satisfies the protocol's `Base.sessionId.min(1)`) — this push targets a
    *  specific plugin CONNECTION, not a session's attachments, so there is no real session to
@@ -729,10 +729,10 @@ export class PluginSupervisor {
       const cwd = config.entry.cwd ? join(config.dir, config.entry.cwd) : config.dir;
       const env: Record<string, string> = {
         ...(process.env as Record<string, string>),
-        NORMA_PLUGIN_TOKEN: token,
-        NORMA_SOCKET: this.deps.socketPath,
-        NORMA_PLUGIN_ID: config.id,
-        NORMA_PLUGIN_DIR: config.dir,
+        WINTER_PLUGIN_TOKEN: token,
+        WINTER_SOCKET: this.deps.socketPath,
+        WINTER_PLUGIN_ID: config.id,
+        WINTER_PLUGIN_DIR: config.dir,
       };
       proc = this.spawnFn(cmd, { cwd, env });
     } catch (err) {

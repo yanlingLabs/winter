@@ -1,0 +1,1218 @@
+# THE SOURCE OF TRUTH FOR THE APP TARGET. `Winter.xcodeproj` is GENERATED FROM THIS FILE AND IS NOT
+# TRACKED (`.gitignore` beside this file) — so there is no committed project anyone can fix once, and
+# whatever your working tree last generated is what a build uses.
+#
+# `xcodegen generate` BEFORE EVERY BUILD, and always before one that is meant to prove something.
+# `sources: - path: Sources` is a DIRECTORY: xcodegen enumerates it at generate time, so a file added
+# since the last generate is simply not in the target — it compiles nowhere, its tests do not exist,
+# and the build goes green. Measured on the browser-runtime branch (T4): two tasks' worth of new
+# sources were missing from a stale local project, silently.
+name: Winter
+options:
+  bundleIdPrefix: com.winter
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+packages:
+  WinterKit:
+    path: ../WinterKit
+  WinterProtocol:
+    path: ../WinterProtocol
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: "2.6.0"
+targets:
+  Winter:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+        # office-plumbing Task 2: Sources/OfficeHelper/main.swift is the WinterOfficeHelper
+        # target's OWN entry point (below), compiled separately for that target. Without this
+        # exclude, the `- path: Sources` directory sweep has no per-subdirectory opt-out and would
+        # ALSO compile it into this app target, colliding with Sources/App/main.swift. Sources/
+        # OfficeWire IS swept normally here — it is the shared wire codec both targets compile, by
+        # design (see that file's own header comment for why it lives outside OfficeHelper/).
+        excludes:
+          - OfficeHelper
+      - path: Support/AppIcon.icns
+      # DD-T4: dev icon bundles alongside dist; the config-selected CFBundleIconFile
+      # ($(WINTER_APP_ICON)) picks AppIcon (dist) / AppIconDev (dev) at build time.
+      - path: Support/AppIconDev.icns
+      - path: HelperShared
+      # SP2b Task 6: the production-signed relay config, embedded as a bundle resource and
+      # verified at load (RemoteAccessCoordinator.loadVerifiedRelayConfig) against
+      # WinterKit's RelayConfigTrust.productionPublicKey before a single relay URL is trusted.
+      - path: Resources
+        # editor-plumbing Task 4: `EditorAssets/` is placed by the "Embed Monaco editor assets"
+        # postCompileScript below, which dittos it NESTED (app/ and vs/ keep their subpaths). It
+        # must NOT also go through Xcode's automatic Copy Bundle Resources, because `- path:
+        # Resources` is an xcodegen GROUP and that copy FLATTENS: this project's own build log shows
+        # `Resources/MenuBar/mb-dev-idle.png` arriving as `Contents/Resources/mb-dev-idle.tiff` —
+        # no subdirectory survives, and COMBINE_HIDPI can transform the bytes on the way. Left
+        # unexcluded, `editor.html`/`editor.js`/`bridge-protocol.js` would ALSO appear bare at the
+        # Resources root: dead copies nothing serves, on a path the name-scan rules do not describe.
+        # `EditorPlumbingTests.testTheEditorPageIsEmbeddedNestedAndNotFlattened` pins both halves.
+        excludes:
+          - EditorAssets
+      # sidebar-brand T1: the brand palette (docs/brand.md) — colorsets ONLY, no app-icon set.
+      # The `.icns` path still owns the icon via Info.plist's CFBundleIconFile
+      # ($(WINTER_APP_ICON)), and ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME stays unset so
+      # the `AccentColor` colorset here is a plain named color, NOT the app-wide control tint
+      # (the iOS ruling: the accent stays out of the sidebar).
+      - path: Assets.xcassets
+    dependencies:
+      - package: WinterKit
+      - package: WinterProtocol
+      - package: Sparkle
+      - target: WinterHelper
+        embed: false
+      # office-plumbing Task 2: same build-order-only relationship as WinterHelper immediately
+      # above — WinterOfficeHelper is a bare `type: tool` product (like WinterHelper, unlike the CEF
+      # helpers' full .app bundles below) that the "Embed WinterOfficeHelper" postCompileScript
+      # copies by hand; xcodegen's automatic embedding machinery is not involved either way.
+      - target: WinterOfficeHelper
+        embed: false
+      # panel-cef Task 6a: the app now LINKS CEF's C++/C-API translation layer, which Task 4 built
+      # for the helper targets alone. `Sources/CEF/WinterCEF.mm` calls CefInitialize /
+      # CefDoMessageLoopWork / CefBrowserHost::CreateBrowser / CefShutdown — none of them
+      # header-only, unlike Task 3's CefAppProtocol conformance (which added zero CEF linkage and
+      # is why the app could carry it with no dependency at all). The framework ITSELF is still
+      # never linked: `libcef_dll_dylib.cc` in this static library is what resolves every one of
+      # those entry points through the runtime `dlopen` that `CefScopedLibraryLoader::LoadInMain`
+      # performs — a macOS sandbox requirement CEF documents, not a style choice.
+      - target: CefDllWrapper
+      # panel-cef Task 4: build-order dependencies only (embed: false), matching the WinterHelper
+      # entry directly above — xcodegen's automatic app-embedding machinery has no first-class
+      # notion of "a full nested .app bundle inside Contents/Frameworks/" (that shape is CEF/
+      # Chromium's own convention, not a recognized product type like an extension or XPC service),
+      # so the "Embed CEF helpers" postCompileScript below does the copy by hand, exactly like
+      # "Embed WinterHelper" already does for WinterHelper's bare executable. These five just need to
+      # finish building before that script runs.
+      - target: CEFHelperBase
+        embed: false
+      - target: CEFHelperAlerts
+        embed: false
+      - target: CEFHelperGPU
+        embed: false
+      - target: CEFHelperPlugin
+        embed: false
+      - target: CEFHelperRenderer
+        embed: false
+    # panel-cef Task 2: CEF is vendored (fetched, SHA1-verified, gitignored — scripts/fetch-cef.ts)
+    # rather than committed (332MB uncompressed). preBuildScripts runs before Compile Sources so a
+    # missing framework fails FAST with the fix command, instead of surfacing later as a confusing
+    # missing-header/link error once Tasks 3-6 add code that actually consumes vendor/cef/. Applies
+    # to every configuration (not Release-only like the winter-core embed below) — CEF is exercised
+    # in Debug too (dev testing), per docs/research/2026-08-09-cef-pump.md finding 1.
+    preBuildScripts:
+      - name: Check CEF framework vendored
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          CEF_DIR="${SRCROOT}/vendor/cef"
+          # The stamp check matters as much as the directory checks: fetch-cef.ts only writes
+          # .vendored-version AFTER all three dirs finish copying, so a run killed mid-copy can
+          # leave Release/+include/ complete and libcef_dll/ partial with no stamp. Directory
+          # existence alone would false-pass that state (Task 2 whole-branch review, Important) —
+          # the exact "confusing error instead of a clear one" failure mode this gate exists to
+          # prevent, just moved one step later (a partial-tree compile error instead of nothing).
+          # LICENSE.txt/CREDITS.html are checked here for the same reason the dirs are, and are
+          # equally non-optional (panel-cef Task 5): they are fetch-cef.ts's COPY_FILES, they are
+          # a BSD-3-Clause redistribution obligation, and a tree vendored by a pre-Task-5 revision
+          # of that script has a valid stamp and no CREDITS.html. Naming the fix here beats
+          # discovering it in the middle of the postCompileScript that copies them.
+          if [ ! -d "${CEF_DIR}/Release/Chromium Embedded Framework.framework" ] || \
+             [ ! -d "${CEF_DIR}/include" ] || \
+             [ ! -d "${CEF_DIR}/libcef_dll" ] || \
+             [ ! -f "${CEF_DIR}/LICENSE.txt" ] || \
+             [ ! -f "${CEF_DIR}/CREDITS.html" ] || \
+             [ ! -f "${CEF_DIR}/.vendored-version" ]; then
+            echo "error: CEF framework not vendored at ${CEF_DIR}." >&2
+            echo "error: from the repo root, run: bun run scripts/fetch-cef.ts" >&2
+            echo "error: (or: bun run cef:fetch) — then rebuild." >&2
+            exit 1
+          fi
+      - name: Check Monaco vendored
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          # editor-plumbing Task 1: Monaco is vendored the same way CEF is above (fetched,
+          # hash-verified, gitignored — scripts/fetch-monaco.ts) and for the same reason (~14MB
+          # of minified third-party JS has no business being committed). Same three-part check
+          # as the CEF gate above, for the same reason: the loader marker alone would false-pass
+          # a tree left partial by a run that died mid-copy (vs/ copied, LICENSE never reached),
+          # and fetch-monaco.ts only writes .vendored-version after both finish.
+          MONACO_DIR="${SRCROOT}/vendor/monaco"
+          if [ ! -f "${MONACO_DIR}/vs/loader.js" ] || \
+             [ ! -f "${MONACO_DIR}/LICENSE" ] || \
+             [ ! -f "${MONACO_DIR}/.vendored-version" ]; then
+            echo "error: Monaco editor assets not vendored at ${MONACO_DIR}." >&2
+            echo "error: from the repo root, run: bun run scripts/fetch-monaco.ts" >&2
+            echo "error: (or: bun run monaco:fetch) — then rebuild." >&2
+            exit 1
+          fi
+      - name: Check LibreOffice vendored
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          # office-plumbing Task 2 (carry T2-c): same three-part check as the CEF/Monaco gates
+          # above, for the same reason — directory existence alone would false-pass a tree left
+          # partial by a run killed mid-extract (scripts/fetch-libreoffice.ts only writes
+          # .vendored-version after the whole product-set finishes unpacking). The vendored tree
+          # itself was not wired into any preBuildScripts gate before this task; this is that
+          # wiring.
+          LIBREOFFICE_DIR="${SRCROOT}/vendor/libreoffice"
+          if [ ! -d "${LIBREOFFICE_DIR}/product-set/Frameworks" ] || \
+             [ ! -d "${LIBREOFFICE_DIR}/product-set/Resources" ] || \
+             [ ! -f "${LIBREOFFICE_DIR}/product-set/Frameworks/libmergedlo.dylib" ] || \
+             [ ! -f "${LIBREOFFICE_DIR}/.vendored-version" ]; then
+            echo "error: LibreOffice product-set not vendored at ${LIBREOFFICE_DIR}." >&2
+            echo "error: from the repo root, run: bun run libreoffice:fetch" >&2
+            exit 1
+          fi
+    postCompileScripts:
+      - name: Embed WinterHelper
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          DEST_MACOS="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/MacOS"
+          DEST_LAUNCHD="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Library/LaunchDaemons"
+          mkdir -p "${DEST_MACOS}" "${DEST_LAUNCHD}"
+          cp "${BUILT_PRODUCTS_DIR}/WinterHelper" "${DEST_MACOS}/WinterHelper"
+          # DD-T4: rewrite the launchd plist's Label + MachServices to the profile-correct value
+          # (dist: com.winter.helper; dev: com.winter.helper.dev) so a dev build's helper daemon
+          # registers under a DISTINCT service and never collides with an installed dist helper.
+          # The OUTPUT FILENAME stays `com.winter.helper.plist` because the app resolves the daemon
+          # by FILENAME (HelperClient: `SMAppService.daemon(plistName: "com.winter.helper.plist")`) —
+          # only the plist CONTENTS carry the per-config Label. In Release the sed is a byte-for-byte
+          # no-op (HELPER_LABEL == com.winter.helper), keeping the dist output identical to the old cp.
+          HELPER_LABEL="com.winter.helper"
+          if [ "${CONFIGURATION}" != "Release" ]; then HELPER_LABEL="com.winter.helper.dev"; fi
+          sed "s/com\.winter\.helper/${HELPER_LABEL}/g" "${SRCROOT}/HelperResources/com.winter.helper.plist" > "${DEST_LAUNCHD}/com.winter.helper.plist"
+      - name: Embed CEF framework
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          # panel-cef Task 5. Two jobs: put the vendored framework at the ONE path CEF's own
+          # loader computes, and give it a real code identity.
+          #
+          # The path is not a preference. libcef_dll/wrapper/cef_scoped_library_loader_mac.mm
+          # builds it from the running executable: the main process uses "../Frameworks", a
+          # helper uses "../../.." — from Contents/Frameworks/Winter Helper.app/Contents/MacOS
+          # that is also Contents/Frameworks. Both land on
+          # Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework.
+          #
+          # SIGNING, and why it is done HERE rather than left to Xcode: this framework is not a
+          # build product, so nothing in the target graph signs it, and it arrives from CEF's CDN
+          # ad-hoc/linker-signed with `TeamIdentifier=not set` and `Sealed Resources=none`
+          # (measured with codesign -dvv on the vendored copy). Three consequences, all of which
+          # this script exists to fix:
+          #   1. Notarization rejects any nested Mach-O lacking a Developer ID signature, a secure
+          #      timestamp, or the hardened-runtime flag — and, exactly as the "Embed winter-core"
+          #      script below already records, a nested signature does NOT inherit those from the
+          #      outer xcodebuild invocation. Hence the explicit --options runtime / --timestamp.
+          #   2. Library validation. Both the app (Task 6) and all five helpers dlopen this
+          #      framework, and the helpers additionally dlopen Libraries/libcef_sandbox.dylib.
+          #      Under the hardened runtime a process may only load libraries signed by the SAME
+          #      TEAM ID (or by Apple). Signing here with this build's identity is what makes that
+          #      condition hold — and it is why this branch does NOT add
+          #      com.apple.security.cs.disable-library-validation. The plan flagged the spike's
+          #      ad-hoc crash as "very likely an artifact of Team-ID-less signatures"; Task 5
+          #      confirmed it by A/B on a copy of the built app (Developer ID framework: the
+          #      helper loads it and reaches CefExecuteProcess; the same helper against an
+          #      ad-hoc-re-signed framework: dlopen refused). Upstream agrees — Google Chrome
+          #      ships zero disable-library-validation anywhere in its bundle.
+          #   3. Sealed resources. Signing the framework BUNDLE (not just its Mach-O) is what
+          #      writes its _CodeSignature/CodeResources, without which `codesign --verify --deep
+          #      --strict` on the outer app has nothing to check the 220-odd locale packs against.
+          #
+          # Inside-out: the five Libraries/*.dylib are signed FIRST, then the framework bundle
+          # whose seal covers them, then (last, by Xcode's own CodeSign phase, after every script
+          # here) the app. Same shape as the winter-core embed below, one level deeper.
+          #
+          # VERSIONED LAYOUT, and why this script rearranges a third-party bundle at all.
+          # CEF ships its framework FLAT — binary, Libraries/ and Resources/ at the bundle root,
+          # no Versions/ — because CEF's own build is CMake/ninja, which never runs Xcode's
+          # product validator. Xcode does, unconditionally: `builtin-validationUtility` runs after
+          # CodeSign for every application target (measured — it runs even with
+          # VALIDATE_PRODUCT=NO, which this project already sets), and it rejected the app with
+          #   error: Framework …/Chromium Embedded Framework.framework did not contain an
+          #   Info.plist
+          # So the copy is restructured here into the standard macOS versioned-framework shape:
+          # Versions/A/{binary,Libraries,Resources}, Versions/Current -> A, and top-level symlinks.
+          # Three independent reasons this is the right fix rather than silencing the validator:
+          #   - Sparkle.framework, already embedded in this same app, is versioned (Versions/B)
+          #     and this same validator has passed it in every build this project has ever done.
+          #   - Every shipped Chromium-family app on a real Mac ships the versioned shape:
+          #     /Applications/Google Chrome.app and Visual Studio Code.app (Electron) both have
+          #     Versions/A + Current + top-level symlinks. Flat is CEF's packaging convention, not
+          #     Chromium's runtime requirement.
+          #   - It keeps a real check enabled instead of turning one off to accommodate a layout.
+          # The VENDORED tree is never touched — it stays the pristine, SHA1-verified upstream
+          # artifact; only the copy inside the app is restructured. Runtime paths are unaffected:
+          # CEF computes ".../Chromium Embedded Framework.framework/Chromium Embedded Framework"
+          # (loader) and ".../Libraries/libcef_sandbox.dylib" (sandbox), both of which resolve
+          # through the top-level symlinks, and dlopen follows symlinks.
+          CEF_SRC="${SRCROOT}/vendor/cef/Release/Chromium Embedded Framework.framework"
+          DEST_FRAMEWORKS="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Frameworks"
+          DEST="${DEST_FRAMEWORKS}/Chromium Embedded Framework.framework"
+          # Copying 317MB and signing a 224MB Mach-O on every incremental build is not
+          # acceptable, and basedOnDependencyAnalysis:false means this phase runs on every one.
+          # The stamp is the up-to-date check. It deliberately lives OUTSIDE the bundle, in this
+          # target's temp dir: a stray dotfile under Contents/Frameworks/ would be sealed into the
+          # app's CodeResources and shipped. It records the vendored CEF version, the signing
+          # identity and the configuration, so a CEF bump or an identity change (dev build ->
+          # release build) re-copies and re-signs rather than silently keeping the old bits. The
+          # `-d "${DEST}"` half matters independently: it catches a wiped bundle whose temp dir
+          # survived.
+          # The trailing token is this script's own EMBED-RECIPE revision: bump it whenever the
+          # layout or signing below changes, so an existing build directory re-does the work
+          # instead of skipping on a stamp whose CEF version and identity both still match.
+          STAMP="${TARGET_TEMP_DIR}/cef-framework.stamp"
+          WANT="$(cat "${SRCROOT}/vendor/cef/.vendored-version")|${EXPANDED_CODE_SIGN_IDENTITY}|${CONFIGURATION}|recipe-2-versioned"
+          if [ -d "${DEST}" ] && [ -f "${STAMP}" ] && [ "$(cat "${STAMP}")" = "${WANT}" ]; then
+            echo "CEF framework already embedded and signed for this identity — skipping"
+            exit 0
+          fi
+          # Secure timestamps need Apple's timestamp server. Required for notarization, so
+          # non-negotiable in Release; skipped in Debug so a dev build still works offline.
+          TS=""
+          if [ "${CONFIGURATION}" = "Release" ]; then TS="--timestamp"; fi
+          mkdir -p "${DEST_FRAMEWORKS}" "${TARGET_TEMP_DIR}"
+          # Stamp first, content second: the stamp must never outlive a copy that did not finish.
+          rm -f "${STAMP}"
+          rm -rf "${DEST}"
+          # ditto, not cp -R: preserves the bundle exactly, matching every other bundle copy in
+          # this codebase (fetch-cef.ts, release.ts, fetch-iroh.sh, and the helper embed below).
+          ditto "${CEF_SRC}" "${DEST}"
+          if [ ! -d "${DEST}/Libraries" ] || [ ! -f "${DEST}/Resources/Info.plist" ]; then
+            echo "error: vendored CEF framework is missing Libraries/ or Resources/Info.plist —" >&2
+            echo "error: the upstream distribution layout changed; re-check fetch-cef.ts." >&2
+            exit 1
+          fi
+          # Flat -> versioned (see the header). Only these three entries exist at the root of
+          # CEF's flat framework, so afterwards the root holds exactly Versions/ plus the three
+          # symlinks — nothing loose, which `codesign --strict` would object to.
+          # Guarded so a future CEF that ships ALREADY versioned is left alone rather than having
+          # its top-level symlinks moved into Versions/A — which would build, copy and sign
+          # cleanly while producing a framework nothing can load.
+          if [ -d "${DEST}/Versions" ]; then
+            echo "note: vendored CEF framework is already versioned — leaving its layout as-is"
+          else
+            mkdir -p "${DEST}/Versions/A"
+            mv "${DEST}/Chromium Embedded Framework" "${DEST}/Libraries" "${DEST}/Resources" "${DEST}/Versions/A/"
+            ln -s "A" "${DEST}/Versions/Current"
+            ln -s "Versions/Current/Chromium Embedded Framework" "${DEST}/Chromium Embedded Framework"
+            ln -s "Versions/Current/Libraries" "${DEST}/Libraries"
+            ln -s "Versions/Current/Resources" "${DEST}/Resources"
+          fi
+          for LIB in "${DEST}/Versions/A/Libraries/"*.dylib; do
+            codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime ${TS} "${LIB}"
+          done
+          # Sign the VERSION directory, not the framework root — this is what Xcode itself does
+          # for Sparkle.framework in this same app ("CodeSign …/Sparkle.framework/Versions/B" in
+          # the build log), and it is what puts _CodeSignature inside Versions/A where a versioned
+          # framework's seal belongs. Verification through the root still resolves via
+          # Versions/Current, so `codesign -dvv "…framework"` and --deep --strict are unaffected.
+          codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime ${TS} "${DEST}/Versions/A"
+          printf '%s' "${WANT}" > "${STAMP}"
+      - name: Embed CEF + Chromium licence notices
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          # panel-cef Task 5 — a licence obligation, not housekeeping. CEF and Chromium are both
+          # BSD-3-Clause, whose second condition requires a BINARY redistribution to reproduce the
+          # copyright notice and disclaimer "in the documentation and/or other materials provided
+          # with the distribution". Vendoring them into the build tree does not satisfy that;
+          # Winter.app itself has to carry them, which is what this does. Winter is Apache-2.0 and
+          # stays cleanly so precisely by shipping theirs alongside.
+          #
+          # Both files come from the same SHA1-verified tarball fetch-cef.ts already downloads
+          # (its COPY_FILES), so there is no separate source to keep in sync:
+          #   LICENSE.txt  -> Licenses/CEF-LICENSE.txt  (renamed: "LICENSE.txt" alone inside an
+          #                   app bundle reads as Winter's own licence, which it is not)
+          #   CREDITS.html -> Licenses/CREDITS.html     (Chromium's own filename, ~19.6MB of
+          #                   third-party attributions)
+          # scripts/release.ts gates BOTH in the built artifact — presence plus a content sanity
+          # check — rather than trusting that this script ran.
+          SRC_DIR="${SRCROOT}/vendor/cef"
+          DEST="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/Licenses"
+          mkdir -p "${DEST}"
+          for PAIR in "LICENSE.txt:CEF-LICENSE.txt" "CREDITS.html:CREDITS.html"; do
+            SRC_NAME="${PAIR%%:*}"
+            DEST_NAME="${PAIR##*:}"
+            if [ ! -f "${SRC_DIR}/${SRC_NAME}" ]; then
+              echo "error: required licence notice ${SRC_NAME} is missing from ${SRC_DIR}" >&2
+              echo "error: re-vendor CEF with: bun run cef:fetch" >&2
+              exit 1
+            fi
+            ditto "${SRC_DIR}/${SRC_NAME}" "${DEST}/${DEST_NAME}"
+          done
+      - name: Embed Monaco editor assets
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          # editor-plumbing Task 1: Monaco is vendored (fetched, hash-verified, gitignored —
+          # scripts/fetch-monaco.ts) the same way CEF is, for the same reason — third-party bytes
+          # this repo doesn't author have no business being committed. This phase places it, plus
+          # the in-repo editor page shell Task 4 lands at Resources/EditorAssets/app, plus the
+          # licence notice, into the built app — mirroring "Embed CEF framework" / "Embed CEF +
+          # Chromium licence notices" above. No signing needed (pure JS/HTML/CSS resources, unlike
+          # CEF's Mach-O framework) and no stamp/skip — a 14MB ditto on every build is cheap,
+          # matching "Embed CEF + Chromium licence notices" above rather than the signing-heavy
+          # "Embed CEF framework" phase's stamp.
+          MONACO_SRC="${SRCROOT}/vendor/monaco"
+          DEST_RESOURCES="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
+          DEST_EDITOR="${DEST_RESOURCES}/EditorAssets"
+          mkdir -p "${DEST_EDITOR}"
+          # rm -rf before each ditto (not a bare merge-in) — matches "Embed CEF helpers" below:
+          # ditto merges into an existing destination, so a future Monaco bump that DROPS a file
+          # would otherwise leave it lingering in the built bundle across incremental builds.
+          rm -rf "${DEST_EDITOR}/vs"
+          ditto "${MONACO_SRC}/vs" "${DEST_EDITOR}/vs"
+          # Resources/EditorAssets/app is the in-repo editor page shell (Winter's OWN HTML/CSS/JS,
+          # NOT vendored) — Task 4 creates it. Guarded rather than required: this phase is wired
+          # ahead of Task 4 landing the directory it copies, and an absent not-yet-created source
+          # dir must not fail every build between now and then.
+          if [ -d "${SRCROOT}/Resources/EditorAssets/app" ]; then
+            rm -rf "${DEST_EDITOR}/app"
+            ditto "${SRCROOT}/Resources/EditorAssets/app" "${DEST_EDITOR}/app"
+          fi
+          # Licence notice — same obligation and same precedent as "Embed CEF + Chromium licence
+          # notices" above (Monaco is MIT, not BSD-3-Clause, but the redistribution courtesy is
+          # the same: ship the notice alongside the binary distribution). Fails closed like that
+          # phase, not best-effort: a missing licence file here means fetch-monaco.ts's own
+          # COPY_FILES-equivalent obligation was skipped, which must not ship silently.
+          if [ ! -f "${MONACO_SRC}/LICENSE" ]; then
+            echo "error: required licence notice LICENSE is missing from ${MONACO_SRC}" >&2
+            echo "error: re-vendor Monaco with: bun run monaco:fetch" >&2
+            exit 1
+          fi
+          mkdir -p "${DEST_RESOURCES}/Licenses"
+          ditto "${MONACO_SRC}/LICENSE" "${DEST_RESOURCES}/Licenses/MONACO-LICENSE.txt"
+      - name: Embed CEF helpers
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          # panel-cef Task 4: CEF looks for these five bundles at this EXACT nested path — the path
+          # is not a preference (Task 4 brief) — so this copies each already-built helper .app from
+          # ${BUILT_PRODUCTS_DIR} (where every target in this scheme's products land, Winter
+          # included) into Contents/Frameworks/. ditto, not cp -R: preserves bundle structure
+          # exactly, matching every other app-bundle copy in this codebase (fetch-cef.ts,
+          # release.ts, fetch-iroh.sh — see fetch-cef.ts's own comment on why).
+          DEST_FRAMEWORKS="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Frameworks"
+          mkdir -p "${DEST_FRAMEWORKS}"
+          for NAME in "Winter Helper" "Winter Helper (Alerts)" "Winter Helper (GPU)" "Winter Helper (Plugin)" "Winter Helper (Renderer)"; do
+            SRC="${BUILT_PRODUCTS_DIR}/${NAME}.app"
+            if [ ! -d "${SRC}" ]; then
+              echo "error: expected built CEF helper bundle not found at ${SRC}" >&2
+              echo "error: check that all five CEFHelper* targets are in this scheme's build list." >&2
+              exit 1
+            fi
+            rm -rf "${DEST_FRAMEWORKS}/${NAME}.app"
+            ditto "${SRC}" "${DEST_FRAMEWORKS}/${NAME}.app"
+          done
+      - name: Embed WinterOfficeHelper
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          # office-plumbing Task 2 — bare-tool product, embedded exactly like "Embed WinterHelper"
+          # above (WinterOfficeHelper is `type: tool`, not a nested .app bundle: the brief's
+          # "embeds NOTHING itself" plus "follow how WinterHelper is embedded today"). Unlike
+          # WinterHelper (an SMAppService launchd daemon with its own rewritten plist),
+          # WinterOfficeHelper is spawned DIRECTLY by OfficeHelperSupervisor — no launchd
+          # registration, no plist, no dev/dist Label split needed (each app instance spawns only
+          # its OWN embedded copy; there is no shared system-wide service-name table to collide
+          # in), just the executable at the same Contents/MacOS/ WinterHelper already uses.
+          DEST_MACOS="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/MacOS"
+          mkdir -p "${DEST_MACOS}"
+          cp "${BUILT_PRODUCTS_DIR}/WinterOfficeHelper" "${DEST_MACOS}/WinterOfficeHelper"
+          # Office Stage B Task 1 — the seatbelt profile, placed at Contents/Resources/office-helper.sb,
+          # sibling to Contents/Resources/LibreOffice (the "Embed LibreOffice (signed)" script
+          # below): main.swift's `resolveSandboxProfilePath()` climbs two directories up from its
+          # own embedded MacOS/ location the same way `resolveInstallRoot()` already does for the LO
+          # root, so this destination is not a free choice — it must match that computation exactly.
+          DEST_RESOURCES="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources"
+          mkdir -p "${DEST_RESOURCES}"
+          cp "${SRCROOT}/Sources/OfficeHelper/office-helper.sb" "${DEST_RESOURCES}/office-helper.sb"
+      - name: Embed LibreOffice (signed)
+        basedOnDependencyAnalysis: false
+        # bash, not the project-wide default /bin/sh (which on macOS is bash running in a
+        # POSIX-restricted mode): this script relies on `<(...)` process substitution to avoid a
+        # classic POSIX subshell trap — piping `find` into `while read` instead would run the loop
+        # in a subshell, silently discarding SIGNED_COUNT's increments the moment the loop exits.
+        shell: /bin/bash
+        script: |
+          set -euo pipefail
+          # office-plumbing Task 2. Two jobs, same shape as "Embed CEF framework" above (one level
+          # simpler: LibreOffice's product-set is a plain directory tree, not a .framework bundle
+          # Xcode's product validator inspects, so there is no versioned-layout restructuring here):
+          #
+          #   1. COPY, preserving REAL directories throughout — never a symlinked installPath
+          #      ancestor (carry T2-b). dyld resolves a dlopen'd library through directory symlinks
+          #      to its REAL path BEFORE LOK's ${ORIGIN}-relative bootstrap (fundamentalrc's
+          #      BRAND_BASE_DIR chain) ever runs, so a symlinked installPath would silently load
+          #      the WRONG Resources/ instead of failing loudly — bit the productization gate
+          #      twice (trim-gate-report.md). `ditto` of a tree that is ALREADY symlink-free
+          #      (verified: zero symlinks anywhere under vendor/libreoffice/product-set/) stays
+          #      symlink-free, so a flat, real-directory copy is both the simplest option and the
+          #      correct one — unlike CEF's framework, nothing here calls for a Versions/A +
+          #      top-level-symlinks rewrite.
+          #   2. SIGN every Mach-O the copy contains with THIS build's identity (carry T2-a). The
+          #      vendored dylibs arrive adhoc/linker-signed (`codesign -dv` on any of them shows
+          #      `flags=0x20002(adhoc,linker-signed)`, `TeamIdentifier=not set`) — they were built
+          #      LOCALLY (scripts/build-libreoffice.ts's documented recipe), not harvested from a
+          #      notarized official distribution the way CEF is, so unlike CEF/Sparkle there was
+          #      never a Developer-ID-signed source to begin with; the prior notarization proof in
+          #      task-1-gate-report.md was against a DIFFERENT artifact (the TDF dmg harvest) and
+          #      does not transfer to this from-source build. Library validation under the
+          #      hardened runtime requires the SAME team ID as the loading process for anything
+          #      dlopen'd in-process — the helper dlopens libmergedlo.dylib (Task 3), which
+          #      transitively pulls in the other 65 — so signing depth-first with this build's
+          #      identity is what makes that load legal. (Full notarization is a release-pipeline
+          #      concern, out of scope here — this phase establishes the SIGNING POSTURE only.)
+          #
+          # DESTINATION: Contents/Resources/LibreOffice/, NOT Contents/Frameworks/LibreOffice/ —
+          # an implementer-discovered deviation from the brief's own wording, forced by a real
+          # codesign failure, not a style choice. `Contents/Frameworks/` (with `PlugIns/`,
+          # `XPCServices/`) is Apple's "nested code" territory (TN2206): sealing the outer app
+          # requires every IMMEDIATE item there to be independently-signed code — a `.framework`, a
+          # bare dylib, or an executable — nothing else. LibreOffice's product-set is a loose mixed
+          # tree (66 dylibs AND ~200MB of plain resources side by side), which is not any of those,
+          # so codesign recursed into it looking for nested code and failed on the first plain
+          # resource it found: `Winter.app: code object is not signed at all — In subcomponent:
+          # …/Contents/Frameworks/LibreOffice/Resources/classification/example_nl-NL.xml` (a bare
+          # XML file; `file` and `codesign -dv` both agree it is not, and never was, a Mach-O).
+          # Contents/Resources/ carries no such nested-code obligation — signed Mach-Os living there
+          # are just ordinary resources, hashed byte-for-byte with their own embedded signatures
+          # intact, exactly like this same script block's neighbor two phases down ("Embed
+          # winter-core" ships a signed Mach-O executable at Contents/Resources/winter-core through
+          # every notarized release). T2-b's real invariant is RELATIVE, not about which Apple
+          # bundle directory contains it: LOK's ${ORIGIN} bootstrap resolves from libmergedlo's own
+          # real path, so `Frameworks/` and `Resources/` as real siblings inside `LibreOffice/` is
+          # what matters, and that is preserved wherever `LibreOffice/` itself sits.
+          #
+          # NAME-SCAN NOTE (historical + current state) — at Task 2 time, deliberately NOT
+          # excluded here or in scripts/release-lib.ts, for the reasons below. SINCE THEN: the
+          # leaking 20260818 asset was DELETED from GitHub, the 20260819 re-cut rebuilt the engine
+          # scrubbed (neutral prefix-map paths + --with-vendor=Winter + a bytes-level name-scan
+          # gate inside build-libreoffice.ts, so a leaking artifact is unproducible), and the
+          # whole-branch review authorized exactly ONE single-file NAME_SCAN_EXCLUSIONS entry in
+          # release-lib.ts for a natural-language collision inside IANA registry data (measured:
+          # 1 file of 3,296, zero hits on every other pattern). The scan stays ON everywhere else.
+          # The original Task-2 finding, kept for the record:
+          # for this task asked for a NAME_SCAN_EXCLUSIONS entry for Contents/Frameworks/
+          # LibreOffice/ (now Contents/Resources/LibreOffice/, per the relocation above), mirroring
+          # the EditorAssets/vs precedent. Measuring first (that file's own rule: "widening this
+          # list is a security decision, not a build fix," and the EditorAssets precedent itself was
+          # only added after measuring zero hits) found the OPPOSITE of zero hits: the local
+          # builder's account name appears in plaintext in 8 of the 66 vendored dylibs (152 string
+          # occurrences — boost/property_tree __FILE__ literals; build-libreoffice.ts's recipe never
+          # applied Winter's own -file-prefix-map/-oso_prefix privacy flags, which only cover Winter's
+          # OWN Swift/ObjC++ compiles, not LibreOffice's separate from-source build) AND in two
+          # Resources config files (versionrc's `Vendor=`, registry/main.xcd's `ooVendor` —
+          # LibreOffice's own build-identity field, user-facing in a real install). That is exactly
+          # the identity leak the release name-scan exists to catch, and it is already present in
+          # the then-published vendor-libreoffice-20260818 release asset (since deleted). Excluding
+          # the path wholesale would have blinded a fail-closed privacy gate to a proven leak — so
+          # the scan stayed ON until the scrubbed re-cut landed (see the current-state note above).
+          LIBREOFFICE_SRC="${SRCROOT}/vendor/libreoffice/product-set"
+          DEST_RESOURCES="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources"
+          DEST="${DEST_RESOURCES}/LibreOffice"
+
+          # Copying ~488MB and signing 66 Mach-Os on every incremental build is not acceptable, and
+          # basedOnDependencyAnalysis:false means this phase runs on every one — same stamp
+          # discipline as "Embed CEF framework" above. The trailing token is this script's own
+          # EMBED-RECIPE revision: bump it whenever the layout or signing below changes (recipe-2:
+          # the Frameworks/ -> Resources/ relocation above), so an existing build directory re-does
+          # the work instead of skipping on a stale-but-matching stamp — and so a build directory
+          # that still has a STALE copy at the OLD Contents/Frameworks/LibreOffice/ path (nothing
+          # ever removes that path on its own; only this script's own DEST is ever rm -rf'd) is
+          # forced to redo the copy rather than leaving both an old, wrong copy AND a new, right one
+          # on disk together.
+          STAMP="${TARGET_TEMP_DIR}/libreoffice-embed.stamp"
+          WANT="$(cat "${SRCROOT}/vendor/libreoffice/.vendored-version")|${EXPANDED_CODE_SIGN_IDENTITY}|${CONFIGURATION}|recipe-2"
+          if [ -d "${DEST}" ] && [ -f "${STAMP}" ] && [ "$(cat "${STAMP}")" = "${WANT}" ]; then
+            echo "LibreOffice product-set already embedded and signed for this identity — skipping"
+            exit 0
+          fi
+
+          # Stale copy at the pre-relocation path (Contents/Frameworks/LibreOffice/), if any, from a
+          # build directory that predates recipe-2 — removed so it cannot both fail codesign AND
+          # sit there unexplained alongside the correct Resources/ copy.
+          rm -rf "${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Frameworks/LibreOffice"
+
+          rm -f "${STAMP}"
+          rm -rf "${DEST}"
+          mkdir -p "${DEST_RESOURCES}" "${TARGET_TEMP_DIR}"
+          ditto "${LIBREOFFICE_SRC}" "${DEST}"
+
+          # T2-b gate: zero DIRECTORY symlinks anywhere in the embedded tree (a file symlink would
+          # not trigger the dyld hazard the carry describes, and none are expected either way since
+          # the vendored source has none at all).
+          SYMLINK_VIOLATIONS=0
+          while IFS= read -r -d '' LINK; do
+            if [ -d "${LINK}" ]; then
+              echo "error: directory symlink found in embedded LibreOffice tree: ${LINK}" >&2
+              SYMLINK_VIOLATIONS=$((SYMLINK_VIOLATIONS + 1))
+            fi
+          done < <(find "${DEST}" -type l -print0)
+          if [ "${SYMLINK_VIOLATIONS}" -gt 0 ]; then
+            echo "error: ${SYMLINK_VIOLATIONS} directory symlink(s) under Contents/Resources/LibreOffice/ —" >&2
+            echo "error: dyld would resolve a dlopen path through them before LOK's \${ORIGIN} bootstrap" >&2
+            echo "error: runs, silently loading the wrong Resources/. See carry T2-b (progress.md)." >&2
+            exit 1
+          fi
+          if [ ! -d "${DEST}/Resources" ] || [ -L "${DEST}/Resources" ]; then
+            echo "error: Contents/Resources/LibreOffice/Resources must be a real directory, the" >&2
+            echo "error: literal sibling of Frameworks/ — the vendored layout ditto was supposed to" >&2
+            echo "error: preserve. Investigate the copy; do not paper over with a symlink." >&2
+            exit 1
+          fi
+
+          # Enumerate real Mach-Os by CONTENT, not by a `*.dylib` glob: 8 of the 66 vendored
+          # libraries carry a version suffix AFTER the .dylib extension (libuno_sal.dylib.3,
+          # libicui18n.dylib.78, ...) — a bare `*.dylib` glob silently misses every one of those.
+          SRC_MACHO_COUNT=0
+          while IFS= read -r -d '' F; do
+            if file "${F}" | grep -q "Mach-O"; then SRC_MACHO_COUNT=$((SRC_MACHO_COUNT + 1)); fi
+          done < <(find "${LIBREOFFICE_SRC}/Frameworks" -type f -print0)
+
+          TS=""
+          if [ "${CONFIGURATION}" = "Release" ]; then TS="--timestamp"; fi
+
+          SIGNED_COUNT=0
+          while IFS= read -r -d '' F; do
+            if file "${F}" | grep -q "Mach-O"; then
+              codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime ${TS} "${F}"
+              SIGNED_COUNT=$((SIGNED_COUNT + 1))
+            fi
+          done < <(find "${DEST}/Frameworks" -type f -print0)
+
+          if [ "${SIGNED_COUNT}" -ne "${SRC_MACHO_COUNT}" ] || [ "${SIGNED_COUNT}" -eq 0 ]; then
+            echo "error: signed ${SIGNED_COUNT} Mach-Os in the embedded LibreOffice tree but the" >&2
+            echo "error: vendored source has ${SRC_MACHO_COUNT} — the copy or the Mach-O enumeration" >&2
+            echo "error: is wrong. Investigate before shipping; do not widen this check to hide it." >&2
+            exit 1
+          fi
+
+          printf '%s' "${WANT}" > "${STAMP}"
+          echo "LibreOffice product-set embedded + signed: ${SIGNED_COUNT} Mach-Os, identity ${EXPANDED_CODE_SIGN_IDENTITY}"
+      - name: Embed winter-core
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          # Release only — Debug builds stay connect-only (shipped-only coupling; see the plan's
+          # Global Constraints). A missing binary in Debug is expected, not an error.
+          if [ "${CONFIGURATION}" != "Release" ]; then echo "skip winter-core embed (non-Release)"; exit 0; fi
+          DEST_RES="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources"
+          mkdir -p "${DEST_RES}"
+          ( cd "${SRCROOT}/../../packages/cli" && bun run compile:core )
+          cp "${SRCROOT}/../../dist/winter-core" "${DEST_RES}/winter-core"
+          chmod +x "${DEST_RES}/winter-core"
+          # Stable code identity: bun's ad-hoc signature changes every rebuild, which would re-prompt
+          # Keychain access for com.winter.core secrets on each update; the app's team identity is
+          # stable, and the outer app signature runs last, leaving this nested signature intact.
+          # --options runtime --timestamp (release-pipeline T1): a plain re-sign here does NOT
+          # inherit hardened runtime/secure-timestamp from the outer xcodebuild invocation —
+          # verified empirically: without these flags codesign -dvv on the embedded winter-core
+          # showed flags=0x0(none) even when the outer app build had ENABLE_HARDENED_RUNTIME=YES
+          # and OTHER_CODE_SIGN_FLAGS=--timestamp. Notarization requires every nested Mach-O to
+          # carry the hardened-runtime flag, so this nested resign must request it explicitly.
+          # Release-only (see CONFIGURATION check above) — dev/Debug builds never reach this line.
+          codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime --timestamp "${DEST_RES}/winter-core"
+      # Winter Phase 8d (P8d-1/P8d-2): the SECOND embedded binary, right after winter-core, same
+      # Release-only shape. The body lives in scripts/embed-runtimes.sh (not inline, unlike the
+      # script above) because it has a real gate worth unit-testing standalone
+      # (scripts/embed-runtimes.test.ts) — stage the P8d-1 runtimes/ layout, re-sign ONLY winter
+      # with a stable identifier, VERIFY (never re-sign) the vendored claude binary is still
+      # exactly the pinned Anthropic-signed artifact. Xcode already exports BUILT_PRODUCTS_DIR,
+      # CONTENTS_FOLDER_PATH, CONFIGURATION and EXPANDED_CODE_SIGN_IDENTITY into a Run Script
+      # phase's environment — the script reads them exactly as this file's other postCompileScripts
+      # do; nothing extra to pass here.
+      - name: Embed runtimes
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          "${SRCROOT}/../../scripts/embed-runtimes.sh"
+    info:
+      path: Support/Info.plist
+      properties:
+        # DD-T4: identity carried by config-selected build settings (base = dist, Debug override =
+        # dev). Release resolves these to the byte-stable dist literals Winter/com.winter.app/AppIcon.
+        CFBundleName: "$(WINTER_APP_NAME)"
+        CFBundleDisplayName: "$(WINTER_APP_NAME)"
+        CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
+        CFBundleIconFile: "$(WINTER_APP_ICON)"
+        CFBundleShortVersionString: "0.2.014"
+        CFBundleVersion: "0.2.014"
+        LSUIElement: true
+        LSMinimumSystemVersion: "26.0"
+        # panel-cef Task 3: NSPrincipalClass is DELIBERATELY ABSENT. `NSPrincipalClass:
+        # NSApplication` sat here for the app's entire life and never did anything — SwiftUI's
+        # `App.main()` does not route through `NSApplicationMain`'s principal-class lookup; it
+        # constructs its own private `SwiftUI.AppKitApplication` and ignores the key (measured:
+        # docs/research/2026-08-09-cef-pump.md). Deleted rather than re-pointed at
+        # `WinterApplication`: an inert key that LOOKS like it installs the CEF subclass is
+        # exactly what fooled both the spike and this plan into believing the job was already
+        # done. The real installation is `Sources/App/main.swift` claiming the singleton before
+        # `WinterApp.main()`, pinned at runtime by `WinterApplicationTests` (nothing about it fails
+        # to compile, so a test is the only guard). NOTE the near-namesake below that IS live and
+        # IS honoured: the TEST BUNDLE's `INFOPLIST_KEY_NSPrincipalClass: HarnessTeardownObserver`
+        # — a different mechanism (XCTest instantiates a test bundle's principal class at bundle
+        # load), untouched by any of this.
+        # Computer use (Phase 5 CU): screen-recording purpose string shown in the TCC prompt when
+        # Winter first captures the screen for a computer-use screenshot.
+        NSScreenCaptureUsageDescription: "Winter captures your screen for computer-use screenshots you explicitly ask it to take."
+        SUFeedURL: "https://updates.yanlinglabs.com/winter/appcast.xml"
+        SUPublicEDKey: "mmce2Wik1c09oXqBvWp+DjsfwtSAdpaCCDkJ98sgAtg="
+        SUEnableAutomaticChecks: true
+        SUAutomaticallyUpdate: true
+        # Sparkle's default scheduled-check interval is 86400s (24h) — far too slow for the
+        # current release cadence. 3600 is Sparkle's minimum for scheduled checks; the idle gate
+        # (UpdaterCoordinator) still controls WHEN a staged update may relaunch, so an hourly
+        # check never interrupts active work.
+        SUScheduledCheckInterval: 3600
+    # Empty entitlements (release-pipeline T1 audit, both variants launch-tested on a
+    # throwaway WINTER_HOME with Developer ID + hardened runtime + CODE_SIGN_INJECT_
+    # BASE_ENTITLEMENTS=NO): `com.apple.security.cs.disable-library-validation` was
+    # dropped after confirming it isn't needed — (1) `winter-core` runs as a spawned
+    # CHILD PROCESS (Process(), not dlopen'd), so the app's own library-validation
+    # entitlement never governs it; (2) the only in-process dynamic loading the app
+    # does is Sparkle.framework (embedded, signed by the SAME Developer ID team — always
+    # allowed under hardened runtime's library validation) and the Swift standard
+    # libraries (re-signed with the same identity by CopySwiftLibs); (3) the trackpad
+    # gesture code's two `dlopen` calls (Gesture/TrackpadHaptics.swift, Gesture/
+    # MultitouchTrigger.swift) target `/System/Library/PrivateFrameworks/
+    # MultitouchSupport.framework` — an Apple-signed system framework, which library
+    # validation always permits regardless of team match; (4) the Dashboard plugin
+    # manager (`Dashboard/panes/PluginManagerView.swift`) also runs plugins via
+    # `Process()`, never in-process. Empirically: an empty-entitlements Release build
+    # launched fully on a throwaway `WINTER_HOME` — bundled daemon spawned, listened on
+    # `run/core.sock`, no crash — identical outcome to the entitled variant. If a future
+    # plugin architecture ever needs to dlopen a differently-signed dylib IN-PROCESS,
+    # this decision must be revisited.
+    entitlements:
+      path: Support/Winter.entitlements
+      properties: {}
+    settings:
+      base:
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 37N77U9RSZ
+        CODE_SIGN_STYLE: Manual
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        SWIFT_OBJC_BRIDGING_HEADER: Support/WinterBridge.h
+        # panel-cef Task 3: WinterApplication.mm's CefAppProtocol conformance imports the vendored
+        # CEF headers. The search path is the DISTRIBUTION ROOT (vendor/cef), not vendor/cef/include
+        # — CEF's headers include their siblings as "include/cef_base.h", i.e. relative to the root.
+        # Array form rather than a space-joined string ON PURPOSE: this checkout's SRCROOT contains
+        # a space, and each array element reaches Xcode as one already-quoted path (the same class
+        # of quoting trap the Release OTHER_SWIFT_FLAGS comment below records being bitten by).
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/vendor/cef
+        # CEF 151's public headers require C++20 — measured, not assumed: cef_scoped_refptr.h:101
+        # uses std::same_as (a C++20 concept), and a probe compile at gnu++17 fails there with 20
+        # errors. xcodegen's setting preset leaves the project on gnu++14, which fails identically.
+        # Scoped to this target: it is the only one with C++ (WinterHelper is pure Swift).
+        CLANG_CXX_LANGUAGE_STANDARD: gnu++20
+        # DD-T4: dist identity is the base; the Debug config overrides all three for dev. Info.plist
+        # keys above reference these ($(WINTER_APP_NAME)/$(WINTER_APP_ICON)/$(PRODUCT_BUNDLE_IDENTIFIER)).
+        PRODUCT_BUNDLE_IDENTIFIER: com.winter.app
+        WINTER_APP_NAME: Winter
+        WINTER_APP_ICON: AppIcon
+      configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.winter.app.dev
+          WINTER_APP_NAME: Winter Dev
+          WINTER_APP_ICON: AppIconDev
+        Release:
+          # Privacy defense-in-depth: remap the builder's home prefix in compiler-recorded paths
+          # (debug info, coverage, index data) so none of them can surface in shipped bits.
+          # NOTE: this flag does NOT remap `#filePath` literals (verified empirically — the
+          # literal survives the map); the one functional `#filePath` (CliLauncher.defaultRepoRoot)
+          # is compiled out of Release at the source (`#if DEBUG`) instead. The release-artifact
+          # name scan in the release flow is the actual gate.
+          # $(HOME), not $(SRCROOT): the home prefix has no spaces, so the flag needs no inner
+          # quoting (quoted OTHER_SWIFT_FLAGS values reach swiftc with literal quotes and the
+          # prefix silently fails to match).
+          OTHER_SWIFT_FLAGS: -file-prefix-map $(HOME)=/builder
+          # The C-family twin of the Swift flag above — for the app target's OWN ObjC++
+          # (`WinterApplication.mm`, `WinterCEF.mm`), whose `__FILE__`/assert macros embed absolute
+          # source paths. panel-cef B1 gave exactly this flag to all six targets it CREATED
+          # (CefDllWrapper + the five helpers) but never to this pre-existing target, which is the
+          # one that links the flagged binary: the 0.2.011 release run was BLOCKED by the
+          # name-guard's artifact scan on `Contents/MacOS/Winter` — the first release to contain
+          # ObjC++ at all — with `WinterCEF.mm`'s and a CEF header's builder paths inside. Unlike
+          # Swift's `#filePath` (the caveat above), clang's `-ffile-prefix-map` DOES remap
+          # `__FILE__`, so this is a complete fix, and the release scan remains the gate.
+          OTHER_CPLUSPLUSFLAGS: -ffile-prefix-map=$(HOME)=/builder
+          # The linker separately records absolute intermediate-object paths (N_OSO stabs in the
+          # symtab, for dSYM lookup) which -file-prefix-map cannot reach — verified as the last
+          # builder-path residue in release binaries. -oso_prefix strips that prefix at link time.
+          OTHER_LDFLAGS: -Wl,-oso_prefix,$(HOME)/
+          # -oso_prefix does not cover the -add_ast_path records (N_AST stabs: absolute
+          # .swiftmodule paths for lldb). Release-config stripping removes ALL debug stabs
+          # (N_OSO + N_AST) from the product before signing — the belt to oso_prefix's braces.
+          # STRIP_STYLE debugging: debug symbols only; the dyld/export tables are untouched.
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: debugging
+  WinterAppTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/WinterAppTests
+      - path: HelperSources/SMCController.swift
+      # Office Stage B Task 7 — OfficeAutosaveScheduler.swift is Foundation-only by deliberate
+      # constraint (see its own header): no LOK, no bridging header, no wire types, so it is safe
+      # to compile directly into the test bundle, mirroring SMCController.swift's own precedent one
+      # line up, and letting the cadence tests inject a fake clock with zero subprocess/socket
+      # involved. The REST of Sources/OfficeHelper stays out of this target on purpose — everything
+      # else there either needs the bridging header (LOKBridge.swift/TileRenderer.swift/Support) or
+      # is exercised only through a real spawned process (OfficeHelperServer.swift, via
+      # WinterOfficeHelperFixture/WinterOfficeHelper — see those targets' own `excludes:`).
+      - path: Sources/OfficeHelper/OfficeAutosaveScheduler.swift
+    dependencies:
+      - target: Winter
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        # Rider 2 (dock-ghost teardown): the harness-wide XCTestObservation registers via the test
+        # bundle's principal class — XCTest instantiates it once at bundle load, before any test
+        # runs (Tests/WinterAppTests/HarnessTeardownObserver.swift; the value is its bare @objc
+        # name, no module prefix). The target has no Info.plist file (GENERATE_INFOPLIST_FILE
+        # above), so this INFOPLIST_KEY_ build setting is how the key reaches the generated plist.
+        INFOPLIST_KEY_NSPrincipalClass: HarnessTeardownObserver
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Winter.app/Contents/MacOS/Winter"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+  WinterHelper:
+    type: tool
+    platform: macOS
+    sources:
+      - path: HelperSources
+      - path: HelperShared
+    settings:
+      base:
+        PRODUCT_NAME: WinterHelper
+        PRODUCT_BUNDLE_IDENTIFIER: com.winter.helper
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 37N77U9RSZ
+        CODE_SIGN_STYLE: Manual
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        # Task 4 (4c) rider (T3 review): without this, codesign identifies the embedded helper
+        # binary as "WinterHelper" (the PRODUCT_NAME) rather than its bundle id/plist Label
+        # (com.winter.helper) — SMAppService/launchd match the daemon by that Label, and
+        # HelperServiceDelegate's code-signing requirement pins the CONNECTING peer's team, not
+        # this identifier, but keeping the signed identifier in sync with the Label/mach-service
+        # name avoids a needless mismatch. `-i com.winter.helper` explicitly sets it (Release/base);
+        # DD-T4's Debug config overrides it to `-i com.winter.helper.dev` to match the dev Label the
+        # embed script seds into the launchd plist and the `#if DEBUG` winterHelperMachServiceName.
+        OTHER_CODE_SIGN_FLAGS: -i com.winter.helper
+      configs:
+        Debug:
+          OTHER_CODE_SIGN_FLAGS: -i com.winter.helper.dev
+        Release:
+          # Same privacy set as the Winter target: compiler-recorded paths (file-prefix-map),
+          # linker OSO stabs (oso_prefix), and AST-path stabs (Release strip) must not carry
+          # the builder's home prefix.
+          OTHER_SWIFT_FLAGS: -file-prefix-map $(HOME)=/builder
+          OTHER_LDFLAGS: -Wl,-oso_prefix,$(HOME)/
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: debugging
+  # office-plumbing Task 2 — the office helper process, `type: tool` like WinterHelper above (a
+  # bare executable, no bundle Xcode's product validator inspects — "embeds NOTHING itself" per
+  # the brief). Unlike WinterHelper this is NOT an SMAppService launchd daemon: OfficeHelperSupervisor
+  # (Sources/AppShell/OfficeHelperSupervisor.swift) spawns it DIRECTLY with Process(), handing it
+  # a socket path, a scratch state directory, and a per-launch token as CLI args — so there is no
+  # dev/dist mach-service-Label split to carry the way WinterHelper's OTHER_CODE_SIGN_FLAGS below
+  # has (each app instance only ever spawns its OWN embedded copy).
+  #
+  # LSUIElement (via INFOPLIST_KEY_LSUIElement below): the brief's stated shape for this target,
+  # carried even though a bare `type: tool` product is never Launch-Services-activated the way an
+  # actual .app bundle would be (nothing here ever puts it in the Dock or app switcher regardless)
+  # — kept for parity with what a full app-bundle shape of this target would need, and because
+  # GENERATE_INFOPLIST_FILE already gives `type: tool` a real __TEXT,__info_plist section to carry
+  # it in.
+  WinterOfficeHelper:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/OfficeWire
+      - path: Sources/OfficeHelper
+        # Office Stage B Task 1: office-helper.sb is read at RUNTIME as raw text (main.swift's own
+        # `resolveSandboxProfilePath()`), never through Xcode's Copy Bundle Resources — a bare
+        # `type: tool` product has no established resource-bundle convention in this project (no
+        # prior target here has ever bundled one), so this sidesteps that unknown entirely rather
+        # than discover it the hard way. Excluded from the source sweep so xcodegen never tries to
+        # classify it as a compiled source OR silently invent a resources phase for it; the "Embed
+        # WinterOfficeHelper" postCompileScript below copies it to `Contents/Resources/` explicitly,
+        # the same deliberate-copy shape that script already uses for the executable itself.
+        excludes:
+          - office-helper.sb
+    settings:
+      base:
+        PRODUCT_NAME: WinterOfficeHelper
+        PRODUCT_BUNDLE_IDENTIFIER: com.winter.office-helper
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_LSUIElement: YES
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 37N77U9RSZ
+        CODE_SIGN_STYLE: Manual
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        OTHER_CODE_SIGN_FLAGS: -i com.winter.office-helper
+        # Office Stage A Task 3 — LOKBridge.swift dlopens LibreOfficeKit via lok_init_2 and calls
+        # through its C vtable structs directly. SCOPED TO THIS TARGET ONLY: neither Winter.app nor
+        # WinterOfficeHelperFixture link the bridging header (the fixture excludes LOKBridge.swift
+        # itself below, and stays LOK-free by design — see OfficeHelperServer.swift's
+        # OfficeDocumentBridge header). Same mechanism as the Winter target's own
+        # SWIFT_OBJC_BRIDGING_HEADER (CEF interop), a separate header because this target needs
+        # none of CEF's C++/gnu++20 surface — LOK's public headers are plain C.
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/OfficeHelper/Support/OfficeHelperBridge.h
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/Sources/OfficeKit/include
+      configs:
+        Release:
+          OTHER_SWIFT_FLAGS: -file-prefix-map $(HOME)=/builder
+          OTHER_LDFLAGS: -Wl,-oso_prefix,$(HOME)/
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: debugging
+  # office-plumbing Task 2 — TEST-ONLY spawnable stand-in for WinterOfficeHelper
+  # (OfficeSupervisorTests). Lives under Tests/ rather than Sources/ specifically so it is never
+  # swept by the app target's own `- path: Sources` entry (no exclude needed there, unlike
+  # OfficeHelper/ above) and reads as test infrastructure by its location alone. It links the SAME
+  # OfficeHelperServer.swift the real helper does (excluding only that target's own main.swift) —
+  # deliberately not a second, hand-rolled reimplementation of the protocol that could drift from
+  # the real one; see Tests/OfficeHelperFixtureSources/main.swift's header for the three failure
+  # modes it drives via OfficeHelperServer.Hooks.
+  WinterOfficeHelperFixture:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/OfficeWire
+      - path: Sources/OfficeHelper
+        excludes:
+          - main.swift
+          # Office Stage A Task 3 — LOKBridge.swift needs the SWIFT_OBJC_BRIDGING_HEADER only the
+          # real WinterOfficeHelper target carries (LOK C symbols); this fixture stays LOK-free by
+          # design (see OfficeHelperServer.swift's OfficeDocumentBridge / FakeOfficeDocumentBridge
+          # header) and would fail to compile if it swept this file in. Support/ (the bridging
+          # header itself) excluded too for the same reason, though a stray .h reference alone
+          # would be inert without the build setting — belt and suspenders.
+          # TileRenderer.swift (Task 4) joins this list for the identical reason:
+          # `UnsafeMutablePointer<LibreOfficeKitDocument>` is a LOK C type only visible through the
+          # same bridging header this fixture deliberately does not carry.
+          - LOKBridge.swift
+          - TileRenderer.swift
+          - Support
+          # Office Stage B Task 1: the fixture is NOT sandboxed (it is LOK-free by design — see the
+          # excludes above — and OfficeSupervisorTests' own scenarios are handshake/death-detection,
+          # never document-shaped, so there is no LOK attack surface here to fence). Excluded for
+          # the same xcodegen-resource-phase reason as the real target above, not a statement that
+          # it needs the file.
+          - office-helper.sb
+      - path: Tests/OfficeHelperFixtureSources
+    settings:
+      base:
+        PRODUCT_NAME: WinterOfficeHelperFixture
+        PRODUCT_BUNDLE_IDENTIFIER: com.winter.office-helper-fixture
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 37N77U9RSZ
+        CODE_SIGN_STYLE: Manual
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+  # panel-cef Task 4 — CEF's own generated C++/C-API translation layer ("libcef_dll_wrapper" in
+  # CEF's own CMakeLists.txt, vendored verbatim alongside include/ and Release/ by fetch-cef.ts).
+  # CefExecuteProcess / CefScopedLibraryLoader / CefScopedSandboxContext — what the five helper
+  # mains below call — are NOT header-only, unlike WinterApplication.mm's CefAppProtocol
+  # conformance (Task 3, which needed zero CEF linkage): they're real translation units that live
+  # here, and CefExecuteProcess alone pulls in a dozen more (app_cpptoc.h and friends) transitively.
+  # Rather than hand-picking files and fighting CEF's own generated-code dependency web, this
+  # target compiles the SAME file set CEF's own libcef_dll/CMakeLists.txt does — read directly
+  # (it's vendored, not guessed): `add_library(libcef_dll_wrapper ...)` at CMakeLists.txt:818
+  # compiles ALL of base/ + cpptoc/ (including cpptoc/test/ and cpptoc/views/) + ctocpp/ (including
+  # ctocpp/test/ and ctocpp/views/) + wrapper/ — CEF does NOT trim test/views for a minimal embed,
+  # measured by reading the file rather than assumed. `path: vendor/cef/libcef_dll` below is one
+  # recursive glob for exactly that reason: it IS CEF's own file list, not a subset of it.
+  CefDllWrapper:
+    type: library.static
+    platform: macOS
+    sources:
+      - path: vendor/cef/libcef_dll
+        excludes:
+          - CMakeLists.txt
+    settings:
+      base:
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/vendor/cef
+        # Same requirement as WinterApplication.mm (Task 3): CEF 151's public headers need C++20
+        # (std::same_as in cef_scoped_refptr.h:101; gnu++17 fails identically to the gnu++14
+        # default). This target compiles far more of those headers than Task 3's did.
+        CLANG_CXX_LANGUAGE_STANDARD: gnu++20
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        # CEF's own libcef_dll/CMakeLists.txt:842 — "Creating the CEF wrapper library. Do not
+        # define this for dependent targets." PRIVATE to this target only: Xcode/xcodegen build
+        # settings do not propagate across a target dependency edge (unlike CMake's PUBLIC/
+        # INTERFACE), so simply not repeating this on the five helper targets below already
+        # matches CMake's PRIVATE semantic — nothing extra to do to keep it scoped.
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - $(inherited)
+          - WRAPPING_CEF_SHARED=1
+      configs:
+        Release:
+          # C++ half of the Winter/WinterHelper targets' Release privacy-scrub block (their
+          # OTHER_SWIFT_FLAGS -file-prefix-map has no effect on this target — it has no Swift).
+          # LOAD-BEARING, not belt-and-suspenders: libcef_dll/base/cef_logging.cc and other
+          # wrapper sources bake __FILE__ into string literals, which STRIP_STYLE cannot remove
+          # after the fact — only the compiler flag stops the builder's home path from ever being
+          # written into the object file in the first place.
+          # No OTHER_LDFLAGS -oso_prefix here: a static library has no link step of its own — the
+          # .a's member objects' OSO stabs get resolved at the LINKING target's link step (the
+          # five helper targets below, which each set it), not here.
+          OTHER_CPLUSPLUSFLAGS: -ffile-prefix-map=$(HOME)=/builder
+  # panel-cef Task 4 — the five out-of-process helper bundles. Every shared line lives ONCE, in
+  # the `CEFHelper` targetTemplate near the bottom of this file (Task 5): read that for the whole
+  # rationale — bundle naming, the exact nested path CEF requires, the shared Info.plist, C++20,
+  # CEF_USE_SANDBOX, and the Release privacy-scrub block. Each target below carries ONLY what
+  # genuinely differs between the five.
+  #
+  # Why a template (panel-cef Task 5): Task 4 left an identical ~30-line settings block repeated
+  # five times, and Task 5's own edit is exactly the change that block makes dangerous — an
+  # entitlement (or a hardening flag, or a sandbox define) applied to four of five and nobody
+  # noticing, because the four-of-five case looks exactly like the five-of-five case in a diff.
+  # With the template, "shared" and "per-variant" are structurally distinct: anything that must
+  # differ is a templateAttribute, and anything else CANNOT diverge by omission.
+  CEFHelperBase:
+    templates: [CEFHelper]
+    templateAttributes:
+      productName: "Winter Helper"
+      bundleId: com.winter.app.cefhelper
+  CEFHelperAlerts:
+    templates: [CEFHelper]
+    templateAttributes:
+      productName: "Winter Helper (Alerts)"
+      bundleId: com.winter.app.cefhelper.alerts
+  # panel-cef Task 6a: `allow-jit` ADDED HERE, on the evidence Task 5 said it would take.
+  #
+  # Task 5 gave the Renderer `allow-jit` and deliberately withheld it from GPU despite Chrome
+  # shipping it on both, naming GPU "the FIRST suspect if Task 6's GPU process dies". Task 5's own
+  # review then pointed out that this Mac could never produce that evidence: the JIT user in
+  # Chromium's GPU process is **SwiftShader** (`libvk_swiftshader.dylib`, which this build ships),
+  # and an Apple Silicon Mac with a working Metal path never reaches it. So Task 6a forced the
+  # software path deliberately and measured all four cells:
+  #
+  #   hardened runtime + Metal (default)   -> gpu-process runs in `Winter Helper.app` (BASE), 0 crashes
+  #   hardened runtime + --use-angle=swiftshader
+  #                                        -> gpu-process moves to `Winter Helper (GPU).app` and
+  #                                           CRASH-LOOPS: repeated
+  #                                           "GPU process exited unexpectedly: exit_code=9", and the
+  #                                           crash report reads
+  #                                           "termination": {"namespace":"CODESIGNING",
+  #                                                           "indicator":"Invalid Page"}
+  #                                           — the kernel killing it for executing a page it is not
+  #                                           entitled to map. That is precisely MAP_JIT without
+  #                                           `com.apple.security.cs.allow-jit`.
+  #   Debug (no hardened runtime) + swiftshader -> survives; proves nothing, because the entitlement
+  #                                           is only enforced under the hardened runtime.
+  #
+  # The routing is the part that makes this invisible without forcing it: Chromium sends the GPU
+  # process to the `(GPU)` helper bundle ONLY when it needs the JIT-capable variant. On a Mac with a
+  # working Metal path that bundle is never launched at all, so the missing entitlement cannot be
+  # observed — it lands on a user with a blocklisted GPU, in a VM, or on a software-fallback page.
+  #
+  # `com.apple.security.cs.allow-jit` and nothing else, matching what Chrome 151 ships on its own
+  # GPU helper (measured locally in Task 5). Both JIT-needing helpers share ONE entitlements file
+  # (`Support/CEFHelperJit.entitlements`) rather than carrying two identical copies — the same
+  # anti-drift reasoning as the `CEFHelper` targetTemplate below: two files with the same content
+  # is exactly the shape where one gets edited and the other does not.
+  #
+  # SECOND FILE, NOT OPTIONAL: `scripts/release.ts`'s `HARDENING_PINS` asserts the entitlement set
+  # of every signed component in BOTH directions, so an entitlement added here and not there fails
+  # the release gate closed. That pin is the reason this is a two-file change.
+  CEFHelperGPU:
+    templates: [CEFHelper]
+    templateAttributes:
+      productName: "Winter Helper (GPU)"
+      bundleId: com.winter.app.cefhelper.gpu
+    entitlements:
+      path: Support/CEFHelperJit.entitlements
+      properties:
+        com.apple.security.cs.allow-jit: true
+  CEFHelperPlugin:
+    templates: [CEFHelper]
+    templateAttributes:
+      productName: "Winter Helper (Plugin)"
+      bundleId: com.winter.app.cefhelper.plugin
+  # One of TWO helpers with an entitlement (panel-cef Task 6a added GPU's — see its block above for
+  # the measurement that earned it). `com.apple.security.cs.allow-jit` remains the only entitlement
+  # this branch adds anywhere: the app, the other three helpers and WinterHelper all ship
+  # entitlement-free under the hardened runtime, which is where Task 5 deliberately started.
+  #
+  # `com.apple.security.cs.allow-jit` — V8 compiles JavaScript to native code at runtime, which
+  # under the hardened runtime requires an MAP_JIT mapping, which requires this entitlement.
+  # Evidence, measured on this machine rather than recalled — /Applications/Google Chrome.app,
+  # `codesign -d --entitlements`, Chromium 151 era, the same Chromium this CEF wraps:
+  #     Helper (Renderer)  -> allow-jit, and nothing else
+  #     Helper (GPU)       -> allow-jit, and nothing else
+  #     Helper (Plugin)    -> no entitlements
+  #     Helper (Alerts)    -> no entitlements
+  #     Helper (base)      -> no entitlements
+  #     Google Chrome.app  -> device/permission entitlements only; NO allow-jit, and NO
+  #                           com.apple.security.cs.disable-library-validation anywhere in the
+  #                           whole bundle.
+  # That last line is the load-bearing one for this branch: upstream Chromium ships a
+  # notarized, hardened-runtime browser with no library-validation escape, which is why Task 5
+  # did not add one (see the "Embed CEF framework" script's comment for the measured A/B that
+  # confirms same-Team-ID nested signing is sufficient).
+  #
+  # Task 5 withheld `allow-jit` from GPU under its "only what a signed run proves necessary" rule,
+  # naming it the first suspect if Task 6's GPU process died. **It died, and it now has one** —
+  # Task 6a forced the software-rendering path and got the crash as evidence (CEFHelperGPU above).
+  # The discipline worked exactly as intended: the entitlement was added when, and only when, a
+  # measurement demanded it.
+  CEFHelperRenderer:
+    templates: [CEFHelper]
+    templateAttributes:
+      productName: "Winter Helper (Renderer)"
+      bundleId: com.winter.app.cefhelper.renderer
+    entitlements:
+      path: Support/CEFHelperJit.entitlements
+      properties:
+        com.apple.security.cs.allow-jit: true
+targetTemplates:
+  # panel-cef Task 5 — the single definition of a CEF helper bundle. All five targets above
+  # (CEFHelperBase / Alerts / GPU / Plugin / Renderer) are this template plus two attributes,
+  # so no shared setting can be present on four of them and missing on the fifth.
+  #
+  # ---- carried verbatim from Task 4, which wrote all of this five times ----
+  # CEF's own cmake/cef_variables.cmake:398-404 defines CEF_HELPER_APP_SUFFIXES as base, Alerts,
+  # GPU, Plugin, Renderer (docs/research/2026-08-09-cef-spike.md, correction #1 — an earlier plan
+  # draft said four; wrong). All five share ONE source file (CEFHelperSources/process_helper_mac.cc
+  # — CEF's own build does the same: one process_helper_mac.cc compiled five times) and differ ONLY
+  # in PRODUCT_NAME / PRODUCT_BUNDLE_IDENTIFIER (and, since Task 5, the Renderer's one entitlement).
+  # Xcode preserves spaces AND parentheses verbatim in PRODUCT_NAME for the actual Contents/MacOS/
+  # executable filename (confirmed real-world precedent: shipped Chromium-family apps ship exactly
+  # "...Helper (GPU).app/Contents/MacOS/...Helper (GPU)") — the brief's path is exact and this
+  # reproduces it exactly, not approximately. The xcodegen TARGET NAMEs stay plain identifiers on
+  # purpose (no spaces/parens) — deliberately decoupled from PRODUCT_NAME, which carries the
+  # required display/path string instead — and deliberately NOT "WinterHelper*", to avoid the exact
+  # near-namesake confusion Task 3 called out for NSPrincipalClass: these are unrelated to
+  # WinterHelper (the SMAppService launchd daemon target) and unrelated to WinterCEF (Task 6's
+  # planned bridge target name).
+  #
+  # Info.plist: ONE shared generated-but-tracked file (Support/CEFHelperInfo.plist — a NEW instance
+  # of the "Info.plist keys live in two tracked places" pattern Task 3 carried forward: project.yml
+  # here, the generated file there), referenced by all five targets. This works because xcodegen's
+  # `info.properties` values are build-setting REFERENCES ($(PRODUCT_NAME),
+  # $(PRODUCT_BUNDLE_IDENTIFIER)) resolved per-target at Info.plist preprocessing time — exactly how
+  # the main Winter target's own Info.plist already resolves $(WINTER_APP_NAME) — so one file
+  # legitimately produces five different compiled Info.plists. Keys match the REAL helper Info.plist
+  # docs/research/2026-08-09-cef-spike.md measured (Q3) on CEF's own built "cefsimple Helper.app"
+  # byte-for-byte, not invented: CFBundleIdentifier, LSMinimumSystemVersion, LSUIElement,
+  # LSFileQuarantineEnabled, NSSupportsAutomaticGraphicsSwitching, and LSEnvironment.MallocNanoZone=0
+  # (a known Chromium-on-macOS allocator requirement for helper processes). CFBundleExecutable is
+  # deliberately absent — Xcode auto-derives it from PRODUCT_NAME regardless, matching the main Winter
+  # target's own Info.plist, which also never lists it.
+  CEFHelper:
+    type: application
+    platform: macOS
+    sources:
+      - path: CEFHelperSources/process_helper_mac.cc
+    dependencies:
+      - target: CefDllWrapper
+    info:
+      path: Support/CEFHelperInfo.plist
+      properties:
+        CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
+        LSMinimumSystemVersion: "26.0"
+        LSUIElement: true
+        LSFileQuarantineEnabled: true
+        NSSupportsAutomaticGraphicsSwitching: true
+        LSEnvironment:
+          MallocNanoZone: "0"
+    settings:
+      base:
+        PRODUCT_NAME: "${productName}"
+        PRODUCT_BUNDLE_IDENTIFIER: "${bundleId}"
+        # Overridden wholesale by scripts/release.ts's xcodebuild invocation
+        # (CODE_SIGN_IDENTITY="Developer ID Application" DEVELOPMENT_TEAM=… CODE_SIGN_STYLE=Manual
+        # ENABLE_HARDENED_RUNTIME=YES OTHER_CODE_SIGN_FLAGS=--timestamp), which applies to every
+        # target in the scheme — same as the Winter target's own identical base setting. This value
+        # is what a local dev build uses, nothing more.
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 37N77U9RSZ
+        CODE_SIGN_STYLE: Manual
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        HEADER_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/vendor/cef
+          # editor-plumbing Task 2: `Sources/CEF/WinterEditorScheme.h` — the ONE place the
+          # `winter-editor://` scheme's name and option flags are written. These five helper
+          # processes must register the identical scheme the browser process does (`cef_app.h`:
+          # "the registered schemes should be the same across all processes"), and a second copy of
+          # the flags in `process_helper_mac.cc` would drift from `WinterApp`'s the first time
+          # either changed, silently — no test in this repo can boot CEF to notice. One template
+          # entry covers all five targets, which is the whole point of the template.
+          # Array form, like the two entries above it: this checkout's SRCROOT contains a space,
+          # and each array element reaches Xcode as one already-quoted path (see the Winter
+          # target's own HEADER_SEARCH_PATHS comment for the quoting trap this avoids).
+          - $(SRCROOT)/Sources/CEF
+        # CEF 151's public headers require C++20 — measured, not assumed (Task 3):
+        # cef_scoped_refptr.h:101 uses std::same_as, and a probe compile at gnu++17 fails there
+        # with 20 errors. xcodegen's setting preset leaves the project on gnu++14, same failure.
+        CLANG_CXX_LANGUAGE_STANDARD: gnu++20
+        # Client-side-only (grepped: absent from every vendored CEF header and every libcef_dll
+        # source), so this can be defined here without affecting the wrapper library's own build.
+        # Gates CefScopedSandboxContext in process_helper_mac.cc exactly as CEF's own upstream
+        # source gates it — see that file's header comment. Task 4's review found that deleting it
+        # from all five targets compiles, links, and leaves the suite green while silently
+        # producing UNSANDBOXED renderer processes; it is not runtime-pinnable until Task 6.
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - $(inherited)
+          - CEF_USE_SANDBOX=1
+      configs:
+        Release:
+          # Same privacy-scrub reasoning as CefDllWrapper's Release config, plus the half that only
+          # applies to a target with an actual link step: OTHER_LDFLAGS -oso_prefix strips OSO stabs
+          # recorded at THIS link (covering both this target's own object file and every object
+          # CefDllWrapper.a contributes), and DEPLOYMENT_POSTPROCESSING + STRIP_INSTALLED_PRODUCT +
+          # STRIP_STYLE match Winter/WinterHelper's own Release blocks exactly — these five are
+          # shipped binaries too.
+          OTHER_CPLUSPLUSFLAGS: -ffile-prefix-map=$(HOME)=/builder
+          OTHER_LDFLAGS: -Wl,-oso_prefix,$(HOME)/
+          DEPLOYMENT_POSTPROCESSING: YES
+          STRIP_INSTALLED_PRODUCT: YES
+          STRIP_STYLE: debugging
+schemes:
+  Winter:
+    build:
+      targets:
+        Winter: all
+        WinterHelper: all
+        WinterOfficeHelper: all
+        # F7 (T2 review, "if trivial"): [test], not `all` — the fixture is test-only infrastructure
+        # (Tests/OfficeHelperFixtureSources/, never embedded, never touched by any postCompileScript),
+        # so it belongs in the same scheme-action scope as WinterAppTests itself immediately below,
+        # not built as part of a plain `build`/`build-for-testing` action that has no testing intent.
+        # `build-for-testing` still builds it: that action IS "prepare for the test action," which is
+        # exactly what `[test]` scopes this to — the same reasoning that already makes WinterAppTests'
+        # own `[test]` scoping work today.
+        WinterOfficeHelperFixture: [test]
+        CEFHelperBase: all
+        CEFHelperAlerts: all
+        CEFHelperGPU: all
+        CEFHelperPlugin: all
+        CEFHelperRenderer: all
+        WinterAppTests: [test]
+    test:
+      targets: [WinterAppTests]

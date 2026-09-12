@@ -1,12 +1,12 @@
 # Security Policy
 
-Norma runs an AI agent with real access to a real Mac — the filesystem, the shell, the screen, the
+Winter runs an AI agent with real access to a real Mac — the filesystem, the shell, the screen, the
 keyboard, a browser, and a direct link to the owner's phone. We take reports about that surface
 seriously.
 
 ## Supported versions
 
-Only the **latest release** is supported. Norma auto-updates through Sparkle, so users are normally
+Only the **latest release** is supported. Winter auto-updates through Sparkle, so users are normally
 within one version of `main`. Fixes ship in a new release rather than as patches to older ones.
 
 | Version | Supported |
@@ -26,7 +26,7 @@ Report it privately through GitHub:
 
 Helpful things to include:
 
-- Norma version (`norma --version`) and macOS version
+- Winter version (`winter --version`) and macOS version
 - Which surface is affected — daemon, CLI, Mac app, remote/phone transport, a plugin
 - What an attacker gains, and what access they need to start with
 - Reproduction steps, or a proof of concept
@@ -46,14 +46,14 @@ This is a small project without a bug bounty. We can offer a fast fix and public
 These are in scope and genuinely interesting to us:
 
 - **Sandbox escape.** The agent's shell runs under a macOS seatbelt profile with an explicit
-  writable set. Anything that writes outside it without consent — or that reaches `~/.norma`, which
+  writable set. Anything that writes outside it without consent — or that reaches `~/.winter`, which
   is denied to the agent unconditionally — is a real finding.
-- **Approval bypass.** Norma's permission model is enforced in the daemon, not suggested in a
+- **Approval bypass.** Winter's permission model is enforced in the daemon, not suggested in a
   prompt. Any path that performs a gated action (an out-of-root write, a dangerous-domain
   navigation, an unsandboxed command) without the policy that governs it is in scope.
 - **Mode escape.** A tool reachable from a mode it isn't registered for — for example filesystem or
   shell access from Chat mode — is a vulnerability, not a quirk.
-- **Daemon socket authentication.** The Unix socket at `~/.norma/run/core.sock` is token
+- **Daemon socket authentication.** The Unix socket at `~/.winter/run/core.sock` is token
   authenticated with roles. Anything that authenticates without a valid token, or that escalates
   from the `remote` or `plugin` role to `harness`/`admin`, is in scope.
 - **The remote (phone) surface.** The remote role has a deliberately small method allowlist and a
@@ -79,24 +79,24 @@ These are in scope and genuinely interesting to us:
 - Model output quality, hallucination, or cost.
 - Findings that require an attacker to already have local code execution as the user, or physical
   access to an unlocked Mac.
-- Issues in third-party dependencies with no Norma-specific exploit path — report those upstream.
+- Issues in third-party dependencies with no Winter-specific exploit path — report those upstream.
 - Missing hardening that isn't exploitable, from automated scanners with no proof of impact.
 - Social engineering, and denial of service against your own machine.
 
-## What Norma does on your behalf
+## What Winter does on your behalf
 
 Stated plainly, so you know what you're auditing:
 
 - **Credentials never touch disk.** API keys and OAuth tokens live in the macOS Keychain
-  (`Bun.secrets`, service `com.norma.core`).
-- **Data stays local.** There is no Norma backend, account or telemetry. Model calls go to your
+  (`Bun.secrets`, service `com.winter.core`).
+- **Data stays local.** There is no Winter backend, account or telemetry. Model calls go to your
   provider; web fetching is performed locally; the phone connects to your Mac directly and
   end-to-end encrypted. When a direct path can't be established, the connection relays through an
   iroh relay we operate (`infra/relay/`) — it forwards ciphertext only, and terminates nothing.
 - **Shell commands are sandboxed** under a seatbelt profile with a per-session writable set. So are
   the model-authored workflow scripts, which run in a separate confined subprocess.
 - **Reads are unrestricted by design** — `read`/`glob`/`grep`/`ls` have no path fence. That is a
-  deliberate decision, matching what the user themselves can read. The single denial is Norma's own
+  deliberate decision, matching what the user themselves can read. The single denial is Winter's own
   runtime/credential directory.
 - **Every release is signed and notarized by Apple**, and every update is EdDSA-signed and verified
   by Sparkle before it installs.

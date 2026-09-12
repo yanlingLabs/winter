@@ -1,5 +1,5 @@
 /** `<AgentsView>` / `<AgentsApp>` (session-activity-hygiene T9; FULLSCREEN since bugfix pass B3) —
- *  the Ink surface of `norma agents`.
+ *  the Ink surface of `winter agents`.
  *
  *  `<AgentsView>` is PRESENTATION ONLY: state + a clock in, rows out. No client, no side effects, no
  *  `Date.now()` — the `<TaskList>` / `<AgentList>` convention, and what lets the render tests assert
@@ -21,7 +21,7 @@
  *  Row shape, one line each (the `<AgentList>` selected-row idiom: a `▶ ` pointer that is plain
  *  ASCII, so tests never parse ANSI):
  *
- *    ▶ ● background  Fix the reaper                    4m 12s  ~/code/norma        s_1a2b3c4d5e6f
+ *    ▶ ● background  Fix the reaper                    4m 12s  ~/code/winter        s_1a2b3c4d5e6f
  *      ○ active      Refactor the hub                    ≥13s  ~/code/other        s_0f1e2d3c4b5a
  */
 
@@ -96,7 +96,7 @@ export function AgentsView({ state, nowMs, home = homedir(), frameRows, listStar
   const below = state.rows.length - end;
   return (
     <Box flexDirection="column" height={frameRows}>
-      <Text bold color={theme.accent}>norma agents</Text>
+      <Text bold color={theme.accent}>winter agents</Text>
       {state.rows.length === 0
         ? <Text dimColor>{AGENTS_EMPTY_STATE}</Text>
         : (
@@ -204,7 +204,7 @@ export function AgentsApp({ store, onAction, now = () => Date.now() }: {
 
 /** The real mount `runAgentsCommand` is handed by main.ts — since B3 a FULLSCREEN alt-screen
  *  surface through `mountFullscreen`, the exact machinery `mountTui` uses (alt-screen escape
- *  order, the damage-diffing writer with B1's cursor-escape pass-through, `NORMA_TUI_DIFF=0`
+ *  order, the damage-diffing writer with B1's cursor-escape pass-through, `WINTER_TUI_DIFF=0`
  *  kill-switch, resize reset, exit hygiene) — never a second hand-rolled alt-screen stack.
  *
  *  T9 originally kept this an INLINE render so the `open` verb's resume command would survive on

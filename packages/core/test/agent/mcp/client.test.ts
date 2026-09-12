@@ -30,7 +30,7 @@ describe.if(isMac)("McpStdioClient", () => {
   });
 
   test("a bare `null` JSON-RPC line from the server is ignored, not a crash", async () => {
-    const c = new McpStdioClient({ command: "bun", args: ["run", FIXTURE], env: { NORMA_FAKE_NULL: "1" } });
+    const c = new McpStdioClient({ command: "bun", args: ["run", FIXTURE], env: { WINTER_FAKE_NULL: "1" } });
     await c.start();
     expect(c.tools().map((t) => t.name)).toEqual(["echo"]);
     c.stop();
@@ -44,7 +44,7 @@ describe.if(isMac)("McpStdioClient", () => {
   });
 
   test("resourcesCapable() is true, listResources/readResource work, when the fixture opts in", async () => {
-    const c = new McpStdioClient({ command: "bun", args: ["run", FIXTURE], env: { NORMA_FAKE_RESOURCES: "1" } });
+    const c = new McpStdioClient({ command: "bun", args: ["run", FIXTURE], env: { WINTER_FAKE_RESOURCES: "1" } });
     await c.start();
     expect(c.resourcesCapable()).toBe(true);
     const resources = await c.listResources();

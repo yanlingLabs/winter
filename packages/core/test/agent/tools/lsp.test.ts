@@ -30,7 +30,7 @@ function withEnv<T>(vars: Record<string, string | undefined>, fn: () => T): T {
 }
 
 function realDir(): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), "norma-lsp-tools-")));
+  return realpathSync(mkdtempSync(join(tmpdir(), "winter-lsp-tools-")));
 }
 
 function toFileUri(p: string): string {
@@ -51,7 +51,7 @@ function setup() {
     join(root, "target.ts"),
     "// line 0\n// line 1\n// line 2\nfunction target() {}\n// line 4\n",
   );
-  mkdirSync(join(root, ".norma-tmp"), { recursive: true });
+  mkdirSync(join(root, ".winter-tmp"), { recursive: true });
   const lsp = new LspManager({ serverCommands: { typescript: FAKE, swift: FAKE } });
   const r = new ToolRegistry();
   registerLspTools(r, { lsp, cwdOf: () => root, rootsOf: () => [root] });
@@ -131,7 +131,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
     const { root, lsp, r } = setup();
     try {
       await withEnv({
-        NORMA_LSP_FAKE_DIAGS: JSON.stringify([
+        WINTER_LSP_FAKE_DIAGS: JSON.stringify([
           { range: { start: { line: 2, character: 4 } }, severity: 1, message: "Cannot find name 'foo'.", source: "tsserver" },
           { range: { start: { line: 5, character: 0 } }, severity: 2, message: "unused variable" },
         ]),
@@ -150,7 +150,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
   test("action 'diagnostics': empty publish -> \"no diagnostics\" (not a timeout)", async () => {
     const { lsp, r } = setup();
     try {
-      await withEnv({ NORMA_LSP_FAKE_DIAGS: "[]" }, async () => {
+      await withEnv({ WINTER_LSP_FAKE_DIAGS: "[]" }, async () => {
         const out = await r.execute("lsp", { action: "diagnostics", file_path: "usage.ts" }, ctx("s1"));
         expect(out).toMatchObject({ isError: false, output: "no diagnostics" });
       });
@@ -165,7 +165,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
       const diags = Array.from({ length: 105 }, (_, i) => ({
         range: { start: { line: i, character: 0 } }, severity: 1, message: `err ${i}`,
       }));
-      await withEnv({ NORMA_LSP_FAKE_DIAGS: JSON.stringify(diags) }, async () => {
+      await withEnv({ WINTER_LSP_FAKE_DIAGS: JSON.stringify(diags) }, async () => {
         const out = await r.execute("lsp", { action: "diagnostics", file_path: "usage.ts" }, ctx("s1"));
         expect(out.isError).toBe(false);
         const lines = out.output.split("\n");
@@ -185,7 +185,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
     try {
       const targetPath = join(root, "target.ts");
       await withEnv({
-        NORMA_LSP_FAKE_DEFINITION: JSON.stringify([
+        WINTER_LSP_FAKE_DEFINITION: JSON.stringify([
           { uri: toFileUri(targetPath), range: { start: { line: 3, character: 2 } } },
         ]),
       }, async () => {
@@ -210,7 +210,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
     try {
       const offFencePath = join(outside, "secret.ts");
       await withEnv({
-        NORMA_LSP_FAKE_DEFINITION: JSON.stringify([{ uri: toFileUri(offFencePath), range: { start: { line: 0, character: 0 } } }]),
+        WINTER_LSP_FAKE_DEFINITION: JSON.stringify([{ uri: toFileUri(offFencePath), range: { start: { line: 0, character: 0 } } }]),
       }, async () => {
         const out = await r.execute("lsp", { action: "definition", file_path: "usage.ts", line: 1, character: 1 }, ctx("s1"));
         expect(out.isError).toBe(false);
@@ -229,7 +229,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
       const defs = Array.from({ length: 55 }, (_, i) => ({
         uri: toFileUri(offFence), range: { start: { line: i, character: 0 } },
       }));
-      await withEnv({ NORMA_LSP_FAKE_DEFINITION: JSON.stringify(defs) }, async () => {
+      await withEnv({ WINTER_LSP_FAKE_DEFINITION: JSON.stringify(defs) }, async () => {
         const out = await r.execute("lsp", { action: "definition", file_path: "usage.ts", line: 1, character: 1 }, ctx("s1"));
         expect(out.isError).toBe(false);
         const lines = out.output.split("\n");
@@ -246,7 +246,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
   test("action 'definition': empty result -> \"no definition found\"", async () => {
     const { lsp, r } = setup();
     try {
-      await withEnv({ NORMA_LSP_FAKE_DEFINITION: "[]" }, async () => {
+      await withEnv({ WINTER_LSP_FAKE_DEFINITION: "[]" }, async () => {
         const out = await r.execute("lsp", { action: "definition", file_path: "usage.ts", line: 1, character: 1 }, ctx("s1"));
         expect(out).toMatchObject({ isError: false, output: "no definition found" });
       });
@@ -260,7 +260,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
     const refSpy = spyOn(LspClient.prototype, "references");
     try {
       await withEnv({
-        NORMA_LSP_FAKE_REFERENCES: JSON.stringify([
+        WINTER_LSP_FAKE_REFERENCES: JSON.stringify([
           { uri: toFileUri(join(root, "a.ts")), range: { start: { line: 1, character: 0 } } },
           { uri: toFileUri(join(root, "b.ts")), range: { start: { line: 5, character: 3 } } },
         ]),
@@ -285,7 +285,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
       const refs = Array.from({ length: 205 }, (_, i) => ({
         uri: toFileUri(join(root, "usage.ts")), range: { start: { line: i, character: 0 } },
       }));
-      await withEnv({ NORMA_LSP_FAKE_REFERENCES: JSON.stringify(refs) }, async () => {
+      await withEnv({ WINTER_LSP_FAKE_REFERENCES: JSON.stringify(refs) }, async () => {
         const out = await r.execute("lsp", { action: "references", file_path: "usage.ts", line: 1, character: 1 }, ctx("s1"));
         expect(out.isError).toBe(false);
         const lines = out.output.split("\n");
@@ -302,7 +302,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
   test("action 'references': empty result -> \"no references found\"", async () => {
     const { lsp, r } = setup();
     try {
-      await withEnv({ NORMA_LSP_FAKE_REFERENCES: "[]" }, async () => {
+      await withEnv({ WINTER_LSP_FAKE_REFERENCES: "[]" }, async () => {
         const out = await r.execute("lsp", { action: "references", file_path: "usage.ts", line: 1, character: 1 }, ctx("s1"));
         expect(out).toMatchObject({ isError: false, output: "no references found" });
       });
@@ -316,7 +316,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
     try {
       const targetPath = join(root, "target.ts");
       await withEnv({
-        NORMA_LSP_FAKE_IMPLEMENTATION: JSON.stringify([{ uri: toFileUri(targetPath), range: { start: { line: 3, character: 2 } } }]),
+        WINTER_LSP_FAKE_IMPLEMENTATION: JSON.stringify([{ uri: toFileUri(targetPath), range: { start: { line: 3, character: 2 } } }]),
       }, async () => {
         const out = await r.execute("lsp", { action: "implementation", file_path: "usage.ts", line: 10, character: 5 }, ctx("s1"));
         expect(out.isError).toBe(false);
@@ -330,7 +330,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
   test("action 'implementation': empty result -> its own \"no implementation found\" sentinel", async () => {
     const { lsp, r } = setup();
     try {
-      await withEnv({ NORMA_LSP_FAKE_IMPLEMENTATION: "[]" }, async () => {
+      await withEnv({ WINTER_LSP_FAKE_IMPLEMENTATION: "[]" }, async () => {
         const out = await r.execute("lsp", { action: "implementation", file_path: "usage.ts", line: 1, character: 1 }, ctx("s1"));
         expect(out).toMatchObject({ isError: false, output: "no implementation found" });
       });
@@ -342,7 +342,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
   test("action 'hover': returns the client's rendered contents as-is", async () => {
     const { lsp, r } = setup();
     try {
-      await withEnv({ NORMA_LSP_FAKE_HOVER: JSON.stringify({ contents: { kind: "markdown", value: "**const** x: number" } }) }, async () => {
+      await withEnv({ WINTER_LSP_FAKE_HOVER: JSON.stringify({ contents: { kind: "markdown", value: "**const** x: number" } }) }, async () => {
         const out = await r.execute("lsp", { action: "hover", file_path: "usage.ts", line: 1, character: 1 }, ctx("s1"));
         expect(out).toMatchObject({ isError: false, output: "**const** x: number" });
       });
@@ -354,7 +354,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
   test("action 'hover': a server without hover support renders a clean, non-error message", async () => {
     const { lsp, r } = setup();
     try {
-      await withEnv({ NORMA_LSP_FAKE_UNSUPPORTED: "textDocument/hover" }, async () => {
+      await withEnv({ WINTER_LSP_FAKE_UNSUPPORTED: "textDocument/hover" }, async () => {
         const out = await r.execute("lsp", { action: "hover", file_path: "usage.ts", line: 1, character: 1 }, ctx("s1"));
         expect(out.isError).toBe(false);
         expect(out.output).toContain("hover not supported by");
@@ -368,7 +368,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
     const { lsp, r } = setup();
     try {
       await withEnv({
-        NORMA_LSP_FAKE_DOCUMENT_SYMBOLS: JSON.stringify([
+        WINTER_LSP_FAKE_DOCUMENT_SYMBOLS: JSON.stringify([
           { name: "target", kind: 12, range: { start: { line: 3, character: 0 } }, selectionRange: { start: { line: 3, character: 9 } } },
         ]),
       }, async () => {
@@ -383,7 +383,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
   test("action 'symbols': a server without documentSymbol support renders a clean, non-error message", async () => {
     const { lsp, r } = setup();
     try {
-      await withEnv({ NORMA_LSP_FAKE_UNSUPPORTED: "textDocument/documentSymbol" }, async () => {
+      await withEnv({ WINTER_LSP_FAKE_UNSUPPORTED: "textDocument/documentSymbol" }, async () => {
         const out = await r.execute("lsp", { action: "symbols", file_path: "usage.ts" }, ctx("s1"));
         expect(out.isError).toBe(false);
         expect(out.output).toContain("document symbols not supported by");
@@ -397,7 +397,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
     const { lsp, r } = setup();
     try {
       await withEnv({
-        NORMA_LSP_FAKE_WORKSPACE_SYMBOLS: JSON.stringify([
+        WINTER_LSP_FAKE_WORKSPACE_SYMBOLS: JSON.stringify([
           { name: "target", kind: 12, location: { uri: "file:///workspace/target.ts", range: { start: { line: 3, character: 9 } } } },
         ]),
       }, async () => {
@@ -414,7 +414,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
     writeFileSync(join(root, "Package.swift"), "// swift-tools-version:5.9\n");
     const spy = spyOn(lsp, "clientFor");
     try {
-      await withEnv({ NORMA_LSP_FAKE_WORKSPACE_SYMBOLS: "[]" }, async () => {
+      await withEnv({ WINTER_LSP_FAKE_WORKSPACE_SYMBOLS: "[]" }, async () => {
         await r.execute("lsp", { action: "workspace_symbols", symbol: "x" }, ctx("s1"));
       });
       expect(spy).toHaveBeenCalledWith(root, "swift");
@@ -427,7 +427,7 @@ describe.if(isMac)("lsp tool: happy-path formatting + position conversion (real 
     const { root, lsp, r } = setup();
     const spy = spyOn(lsp, "clientFor");
     try {
-      await withEnv({ NORMA_LSP_FAKE_WORKSPACE_SYMBOLS: "[]" }, async () => {
+      await withEnv({ WINTER_LSP_FAKE_WORKSPACE_SYMBOLS: "[]" }, async () => {
         await r.execute("lsp", { action: "workspace_symbols", symbol: "x" }, ctx("s1"));
       });
       expect(spy).toHaveBeenCalledWith(root, "typescript");

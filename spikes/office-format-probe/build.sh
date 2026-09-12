@@ -6,5 +6,5 @@ set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p out
 clang -Wall -Wno-unused-parameter -o out/office-format-probe main.c \
-  -I "../../apple/Norma/Sources/OfficeKit/include"
+  -I "../../apple/Winter/Sources/OfficeKit/include"
 echo "built: out/office-format-probe"

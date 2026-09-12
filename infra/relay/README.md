@@ -1,4 +1,4 @@
-# Norma relay infrastructure (SP2b Task 6)
+# Winter relay infrastructure (SP2b Task 6)
 
 Two Oracle Always-Free `iroh-relay` VMs in Frankfurt (`relay-1`/`relay-2.yanlinglabs.com`), the
 production signed relay config the app bundles, and the tooling to provision/verify/bench/upgrade
@@ -35,9 +35,9 @@ them. Everything here is designed to run at **$0** within Oracle's Always-Free t
 | `provision.ts` | Idempotent provisioner: VCN, IGW, dual-stack subnet, security list, 2x instances, Cloudflare DNS. `--dry-run` prints the plan with zero network calls. |
 | `cloud-init.yaml.tmpl` | Rendered per-instance: dedicated `iroh-relay` system user, hardened systemd unit, ufw, unattended-upgrades, sha256-verified binary install. |
 | `relay-config.json` | Unsigned source config (`{version, relays}`) — sign with `scripts/sign-relay-config.ts` (exact invocation below). |
-| `relay-config.signed.json` | Signed output (committed — public data). Identical copy lives at `apple/Norma/Resources/relay-config.signed.json` (the one actually embedded in the app bundle). |
+| `relay-config.signed.json` | Signed output (committed — public data). Identical copy lives at `apple/Winter/Resources/relay-config.signed.json` (the one actually embedded in the app bundle). |
 | `health-check.ts` | DNS (dual-stack) + TLS cert + HTTPS identity + a real iroh connectivity probe, per relay. |
-| `bench.ts` | N-parallel `norma-fake-phone probe-relay` burst against one relay; success rate + p50/p95; optional SSH-captured relay-side memory. |
+| `bench.ts` | N-parallel `winter-fake-phone probe-relay` burst against one relay; success rate + p50/p95; optional SSH-captured relay-side memory. |
 | `upgrade-drill.md` | Exact steps + rollback path for rolling a new `iroh-relay` version onto a live box. |
 
 ## Running `provision.ts`
@@ -62,7 +62,7 @@ The committed `relay-config.signed.json` (both copies) was produced with exactly
 ```sh
 bun scripts/sign-relay-config.ts --generate                      # ONCE — refuses if the key already exists
 bun scripts/sign-relay-config.ts infra/relay/relay-config.json   # writes infra/relay/relay-config.signed.json
-cp infra/relay/relay-config.signed.json apple/Norma/Resources/relay-config.signed.json
+cp infra/relay/relay-config.signed.json apple/Winter/Resources/relay-config.signed.json
 ```
 
 After changing `relay-config.json` (bump `version` — anti-rollback is strictly-increasing), re-run
@@ -81,7 +81,7 @@ the second and third commands, and update nothing else: the public key in
   Verified by reading `iroh-relay/src/defaults.rs` at tag v1.0.2: `DEFAULT_RELAY_QUIC_PORT = 7842`.
   iroh-relay's address-discovery protocol is QUIC-native, not RFC 5389 STUN. Port 80/tcp is
   deliberately NOT opened externally: the binary always binds an HTTP listener locally (needed only
-  for the captive-portal detection path, which Norma's own clients never use), and ACME validation
+  for the captive-portal detection path, which Winter's own clients never use), and ACME validation
   here uses **TLS-ALPN-01** (confirmed via the binary's embedded `acme-tls/1` ALPN string), which
   needs only 443 — not the HTTP-01 challenge's port 80.
 - **`quic_bind_addr` is a field of `[tls]`, not top-level** — confirmed empirically while writing
@@ -93,7 +93,7 @@ the second and third commands, and update nothing else: the public key in
 - Full schema pinned by reading `iroh-relay/src/main.rs` at tag v1.0.2 (its `Config`/`TlsConfig`
   structs) rather than guessing — see `cloud-init.yaml.tmpl` for the actual rendered TOML.
 - Dual-stack: `[::]` binds (IPv4 + IPv6 on the same socket — Ubuntu's default `bindv6only=0`).
-- Access control: `access = "everyone"` (no allowlist) — deliberate. The relay is OUTSIDE Norma's
+- Access control: `access = "everyone"` (no allowlist) — deliberate. The relay is OUTSIDE Winter's
   trust boundary: it only ever relays already end-to-end-encrypted iroh QUIC traffic between pinned
   endpoint IDs (`RelayConfigTrust`/`RelayConfigStore` verify the CONFIG that names the relay, not
   anything the relay itself asserts), so anyone reaching it can at worst relay their own traffic
@@ -133,8 +133,8 @@ changes needed, just re-run once Oracle's provisioning catches up):
 2. `bun infra/relay/health-check.ts` — DNS/TLS/HTTPS/iroh-probe against both relays.
 3. Forced-relay E2E, both directions:
    ```sh
-   NORMA_RELAY_E2E=1 swift test --filter IrohRelayE2ETests   # relay-1 (default)
-   NORMA_RELAY_E2E=1 NORMA_RELAY_E2E_URL="https://relay-2.yanlinglabs.com./" swift test --filter IrohRelayE2ETests
+   WINTER_RELAY_E2E=1 swift test --filter IrohRelayE2ETests   # relay-1 (default)
+   WINTER_RELAY_E2E=1 WINTER_RELAY_E2E_URL="https://relay-2.yanlinglabs.com./" swift test --filter IrohRelayE2ETests
    ```
    Paste both runs' results below once executed.
 4. `bun infra/relay/bench.ts --url https://relay-1.yanlinglabs.com./ --ssh-host ubuntu@relay-1.yanlinglabs.com`

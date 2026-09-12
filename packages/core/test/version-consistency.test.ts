@@ -25,13 +25,13 @@ for (const p of ["cli", "core", "protocol", "plugin-sdk"]) {
 }
 
 test("project.yml carries the canonical version (both keys)", () => {
-  const yml = readFileSync(join(ROOT, "apple", "Norma", "project.yml"), "utf8");
+  const yml = readFileSync(join(ROOT, "apple", "Winter", "project.yml"), "utf8");
   expect(yml).toContain(`CFBundleShortVersionString: "${canonical}"`);
   expect(yml).toContain(`CFBundleVersion: "${canonical}"`);
 });
 
 test("Support/Info.plist carries the canonical version (both keys)", () => {
-  const plist = readFileSync(join(ROOT, "apple", "Norma", "Support", "Info.plist"), "utf8");
+  const plist = readFileSync(join(ROOT, "apple", "Winter", "Support", "Info.plist"), "utf8");
   const count = plist.split(`<string>${canonical}</string>`).length - 1;
   expect(count).toBeGreaterThanOrEqual(2); // ShortVersionString + BundleVersion
 });

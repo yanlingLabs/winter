@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { ComputerUseService, CU_UNAVAILABLE_MESSAGE, type PeripheralBrokerLike, type CuScheduler } from "../../src/agent/computer-use";
 
 // A fully scriptable fake PeripheralBroker + a manual scheduler, so lease lifecycle / heartbeat /
-// error mapping are exercised with zero real timers and zero Norma.app.
+// error mapping are exercised with zero real timers and zero Winter.app.
 class FakeBroker implements PeripheralBrokerLike {
   leaseCalls: Array<{ sessionId: string; class: string }> = [];
   renewCalls: Array<{ leaseId: string }> = [];

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TrustStore } from "../../src/agent/trust";
 
-function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "norma-trust-"))); }
+function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "winter-trust-"))); }
 function storeFile(): string { return join(realDir(), "trust.json"); }
 
 describe("TrustStore", () => {

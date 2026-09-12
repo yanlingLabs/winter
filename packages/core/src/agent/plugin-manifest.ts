@@ -3,12 +3,12 @@ import { join } from "node:path";
 import { z } from "zod";
 
 /**
- * norma-plugin.json — the Phase 4 superset manifest (design spec §1). Lives next to, and takes
- * precedence over, the legacy `plugin.json` (metadata-only, Tier-1). Malformed norma-plugin.json
+ * winter-plugin.json — the Phase 4 superset manifest (design spec §1). Lives next to, and takes
+ * precedence over, the legacy `plugin.json` (metadata-only, Tier-1). Malformed winter-plugin.json
  * never bricks a plugin: the loader falls back to the legacy path with a warning — see
  * `loadManifest` below.
  */
-export const NormaPluginManifest = z.object({
+export const WinterPluginManifest = z.object({
   id: z.string().min(1),
   name: z.string().optional(), description: z.string().optional(),
   version: z.string().optional(), author: z.string().optional(),
@@ -31,19 +31,19 @@ export const NormaPluginManifest = z.object({
   entry: z.object({ command: z.string().min(1), args: z.array(z.string()).optional(), cwd: z.string().optional() }).optional(),
   signature: z.string().optional(), // RESERVED — unenforced until Phase 6 PKI
 });
-export type NormaManifest = z.infer<typeof NormaPluginManifest>;
+export type WinterManifest = z.infer<typeof WinterPluginManifest>;
 
 /**
- * Reads norma-plugin.json out of `dir` (a plugin directory whose canonical name is `dirName`).
- * - valid norma-plugin.json → { manifest, legacy: false }. When manifest.id doesn't match
+ * Reads winter-plugin.json out of `dir` (a plugin directory whose canonical name is `dirName`).
+ * - valid winter-plugin.json → { manifest, legacy: false }. When manifest.id doesn't match
  *   dirName, the directory wins (id is coerced) and a warning is logged — the directory name
- *   stays canonical throughout Norma's plugin model.
- * - missing norma-plugin.json → { legacy: true }, no manifest, no log (the caller falls back to
+ *   stays canonical throughout Winter's plugin model.
+ * - missing winter-plugin.json → { legacy: true }, no manifest, no log (the caller falls back to
  *   the legacy plugin.json metadata path — this is the common/expected case, not a warning).
  * - present but malformed (bad JSON or schema failure) → { legacy: true } + a logged warning.
  *   Never throws — a broken manifest degrades to legacy loading, it never bricks the plugin.
  */
-export function loadManifest(dir: string, dirName: string, log?: (m: string) => void): { manifest?: NormaManifest; legacy: boolean } {
+export function loadManifest(dir: string, dirName: string, log?: (m: string) => void): { manifest?: WinterManifest; legacy: boolean } {
   // Final-review Fix 3 (id/name charset): tool.register's own wire schema (protocol/methods.ts)
   // now REJECTS a `__` in a tool NAME outright, but a pluginId is a raw directory name — user/
   // filesystem-controlled, so it's a WARNING here, not a hard reject (a plugin someone already
@@ -57,26 +57,26 @@ export function loadManifest(dir: string, dirName: string, log?: (m: string) => 
   if (dirName.includes("__")) {
     log?.(`plugin ${dirName}: directory name contains "__" — this can collide with another plugin's tool-unregister prefix (plugin__<id>__); consider renaming the plugin directory`);
   }
-  const path = join(dir, "norma-plugin.json");
+  const path = join(dir, "winter-plugin.json");
   if (!existsSync(path)) return { legacy: true };
 
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(path, "utf8"));
   } catch {
-    log?.(`plugin ${dirName}: malformed norma-plugin.json (loading as legacy)`);
+    log?.(`plugin ${dirName}: malformed winter-plugin.json (loading as legacy)`);
     return { legacy: true };
   }
 
-  const parsed = NormaPluginManifest.safeParse(raw);
+  const parsed = WinterPluginManifest.safeParse(raw);
   if (!parsed.success) {
-    log?.(`plugin ${dirName}: invalid norma-plugin.json (loading as legacy)`);
+    log?.(`plugin ${dirName}: invalid winter-plugin.json (loading as legacy)`);
     return { legacy: true };
   }
 
   let manifest = parsed.data;
   if (manifest.id !== dirName) {
-    log?.(`plugin ${dirName}: norma-plugin.json id "${manifest.id}" does not match directory name — using directory name`);
+    log?.(`plugin ${dirName}: winter-plugin.json id "${manifest.id}" does not match directory name — using directory name`);
     manifest = { ...manifest, id: dirName };
   }
   return { manifest, legacy: false };
@@ -88,7 +88,7 @@ export function loadManifest(dir: string, dirName: string, log?: (m: string) => 
  * permissions.exec), tcc (accessibility/screen-recording/input-monitoring), hardware (battery
  * etc, routed through the XPC helper).
  */
-export function requiredConsentClasses(m: NormaManifest): Array<"exec" | "tcc" | "hardware"> {
+export function requiredConsentClasses(m: WinterManifest): Array<"exec" | "tcc" | "hardware"> {
   const classes: Array<"exec" | "tcc" | "hardware"> = [];
   const execNeeded = Boolean(m.entry) || Boolean(m.contributes?.mcpServers?.length) || Boolean(m.contributes?.hooks?.length) || Boolean(m.permissions?.exec);
   if (execNeeded) classes.push("exec");
@@ -102,7 +102,7 @@ export function requiredConsentClasses(m: NormaManifest): Array<"exec" | "tcc" |
  * text always shows the exec payload (commands to be run), never just a summary."). One line per
  * mcpServer, then one line per hook, then the entry command (at most one) — in manifest order.
  */
-export function execPayloadLines(m: NormaManifest): string[] {
+export function execPayloadLines(m: WinterManifest): string[] {
   const lines: string[] = [];
   for (const server of m.contributes?.mcpServers ?? []) {
     lines.push(`mcp: ${[server.command, ...(server.args ?? [])].join(" ")}`);

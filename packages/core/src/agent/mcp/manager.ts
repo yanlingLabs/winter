@@ -29,7 +29,7 @@ export class McpManager {
 
   /**
    * Shared per-server bring-up used by startAll/doEnsureProject/startPlugins: spawn the client,
-   * handshake under NORMA_MCP_START_TIMEOUT_MS, register its tools as
+   * handshake under WINTER_MCP_START_TIMEOUT_MS, register its tools as
    * `mcp__<serverKey>__<tool>`, and report a status. Every failure (start timeout/error, or —
    * in "throw" collision mode — a registration throw) is caught HERE so one bad server never
    * rejects the `Promise.all` its caller runs it under.
@@ -170,7 +170,7 @@ export class McpManager {
    *
    * Two sources per plugin (design spec §2 — "mcpServers may now come from the manifest instead
    * of .mcp.json (both accepted; manifest wins on conflict)"):
-   *  - `manifestServers` present (norma-plugin.json `contributes.mcpServers`, passed by the
+   *  - `manifestServers` present (winter-plugin.json `contributes.mcpServers`, passed by the
    *    caller): those servers are started and `<dir>/.mcp.json` is IGNORED entirely for this
    *    plugin — manifest wins, no merge.
    *  - `manifestServers` absent: falls back to the legacy `<dir>/.mcp.json` path, unchanged. A

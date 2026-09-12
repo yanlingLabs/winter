@@ -2,7 +2,7 @@
 // hooks lane's PostToolUse producer (`attachFileDiff`) and the projector's `tool_result` emission
 // (`takeFileDiff`). In-memory, per session, keyed by the tool-use id; a take is destructive so a replayed
 // `tool_result` never re-attaches a diff. `clearSession` runs when a session ends or is evicted.
-import type { FileDiffSummary } from "@norma/protocol";
+import type { FileDiffSummary } from "@yanlinglabs/winter-protocol";
 
 const pending = new Map<string, Map<string, FileDiffSummary>>();
 

@@ -1,5 +1,5 @@
 {
-  "name": "@norma-spike/bun-compile",
+  "name": "@winter-spike/bun-compile",
   "private": true,
   "type": "module",
   "scripts": {

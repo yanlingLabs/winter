@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveWithinAny, resolveWithin, canonicalizeForWrite, resolveLeafSymlinks } from "../../src/agent/paths";
 
-function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "norma-paths-"))); }
+function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "winter-paths-"))); }
 
 describe("resolveWithinAny", () => {
   test("allows a path inside any of the roots", () => {
@@ -42,7 +42,7 @@ describe("resolveWithinAny", () => {
   test("a vanished/nonexistent root does not break resolution against the other, valid roots", () => {
     const a = realDir();
     writeFileSync(join(a, "x.txt"), "");
-    const ghost = join(a, "..", "norma-vanished-root-" + Date.now());
+    const ghost = join(a, "..", "winter-vanished-root-" + Date.now());
     expect(() => resolveWithinAny([a, ghost], "x.txt")).not.toThrow();
     expect(resolveWithinAny([a, ghost], "x.txt")).toBe(join(a, "x.txt"));
     expect(resolveWithinAny([a, ghost], join(a, "x.txt"))).toBe(join(a, "x.txt"));

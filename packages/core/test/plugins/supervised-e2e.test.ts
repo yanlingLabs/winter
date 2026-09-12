@@ -9,13 +9,13 @@ import { bootSupervisedServer, isPidAlive, waitFor } from "./supervised-fixtures
  * IPC server (mirroring server.test.ts's `bootBridgeServer` construction — direct `ToolRegistry`/
  * `PluginSupervisor`/`PluginContribRegistry` instances, since neither `RunningDaemon` nor
  * `IpcServer` exposes them) and a real `PluginSupervisor` with PRODUCTION spawn/signal deps (all
- * omitted below — only timing knobs are shortened for test speed), pointed at a tmp `normaHome`
+ * omitted below — only timing knobs are shortened for test speed), pointed at a tmp `winterHome`
  * that has `examples/sample-echo` actually installed, enabled, and exec-consented in
  * `settings.json` — exactly the state `pluginSpawnEligible` (agent/plugins.ts) requires before the
  * real daemon would ever spawn it.
  *
  * The install/settings/boot machinery is shared with Task 7's `gate-4b.test.ts` — see
- * `./supervised-fixtures.ts` for the SDK-import-path rewrite rationale (bare `@norma/plugin-sdk`
+ * `./supervised-fixtures.ts` for the SDK-import-path rewrite rationale (bare `@yanlinglabs/winter-plugin-sdk`
  * specifier -> absolute path into `packages/plugin-sdk/src/index.ts`) and the full boot sequence.
  */
 

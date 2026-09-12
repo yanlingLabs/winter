@@ -1,4 +1,4 @@
-import type { ApprovalOption } from "@norma/protocol";
+import type { ApprovalOption } from "@yanlinglabs/winter-protocol";
 
 export interface ApprovalOutcome {
   approved: boolean;
@@ -133,7 +133,7 @@ export class ApprovalBroker {
 const WORKFLOW_TOOL = "Workflow";
 
 /** The one-line human-readable summary on an approval card. Copy of engine.ts's private
- *  `approvalCardSummary`; `call.name` is a NORMA tool name (`runtime-sdk/tool-names.ts` normalizes
+ *  `approvalCardSummary`; `call.name` is a WINTER tool name (`runtime-sdk/tool-names.ts` normalizes
  *  a Winter name before this is called) and `argsJson` the call's raw JSON arguments. */
 export function approvalCardSummary(call: { name: string; argsJson: string }): string {
   const oneLine = (s: string) => s.split(/\r?\n/).join(" ").trim();

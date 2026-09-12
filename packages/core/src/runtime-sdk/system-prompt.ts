@@ -1,8 +1,8 @@
-// P8b Task 17 Step 0(a) — Norma's OWN system prompt on the Winter leg, composed from the SAME
+// P8b Task 17 Step 0(a) — Winter's OWN system prompt on the Winter leg, composed from the SAME
 // sources `engine.ts`'s `turn()` composes it from today (the persona per mode, the `_assistant`
 // memory bucket for chat/dispatch, the project MEMDIR for code, the workspace block, the trusted
 // project instructions, the output style for a main conversation) — so a chat session on the Winter
-// leg speaks as Norma, not as Winter's coding agent (Task 16 review M3).
+// leg speaks as Winter, not as Winter's coding agent (Task 16 review M3).
 //
 // The mapping below is `engine.ts` `turn()`'s `assembler.assemble({...})` call, argument by argument
 // (`test/runtime-sdk/system-prompt.test.ts` pins it BYTE-FOR-BYTE against a real engine turn per
@@ -10,11 +10,11 @@
 // engine-registry "Deferred tools" index (Winter defers and searches its own tools), the code-mode
 // plan-mode paragraph (Winter's `plan` permission mode carries its own), and the `/ultracode`
 // reminder (the Workflow tool is a Task 17 capability carry) — all three are engine mechanics, not
-// Norma's voice.
+// Winter's voice.
 //
 // `Options.outputStyle` stays UNSET on purpose: the assembler already folds the resolved style into
 // the base slot (`ContextAssembler.assemble`'s style gate), exactly as the engine ships it, so an
-// unset style is byte-identical to today and a set one is applied ONCE, by Norma, never a second
+// unset style is byte-identical to today and a set one is applied ONCE, by Winter, never a second
 // time by Winter's own style loader.
 import type { ContextAssembler } from "../agent/context";
 import { CHAT_SYSTEM_PROMPT } from "../agent/chat-prompt";

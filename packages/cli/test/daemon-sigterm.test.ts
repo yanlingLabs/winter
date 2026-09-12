@@ -12,14 +12,14 @@ import { join } from "node:path";
  *
  * This spawns a subprocess that runs `startDaemon` with an injected `FileSecretStore` + the SAME
  * shutdown handler main.ts registers — NOT the literal `main.ts daemon run`, deliberately: the real
- * entry defaults to `KeychainSecretStore` (global service "com.norma.core"), so spawning it would
+ * entry defaults to `KeychainSecretStore` (global service "com.winter.core"), so spawning it would
  * read the LIVE daemon's Keychain token, which the review forbids touching. The socket-cleanup
  * behavior under test is identical either way (the handler + `stop()`/`lock.release()` are shared).
  */
 describe("daemon run SIGTERM socket cleanup", () => {
   const fixture = `
-    import { startDaemon, FileSecretStore } from "@norma/core";
-    const home = process.env.NORMA_HOME;
+    import { startDaemon, FileSecretStore } from "@yanlinglabs/winter-core";
+    const home = process.env.WINTER_HOME;
     const daemon = await startDaemon({ home, secrets: new FileSecretStore(home + "/secrets"), agentProvider: null });
     const shutdown = async () => { await daemon.stop(); process.exit(0); };
     process.on("SIGTERM", shutdown);
@@ -27,13 +27,13 @@ describe("daemon run SIGTERM socket cleanup", () => {
   `;
 
   test("SIGTERM leaves NO stale socket file (the reviewer's exact repro, now passing)", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-sigterm-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-sigterm-"));
     const socketPath = join(home, "run", "core.sock");
 
     const proc = Bun.spawn(["bun", "-e", fixture], {
-      // cwd inside the cli package so `@norma/core` resolves via the workspace.
+      // cwd inside the cli package so `@yanlinglabs/winter-core` resolves via the workspace.
       cwd: join(import.meta.dir, ".."),
-      env: { ...process.env, NORMA_HOME: home },
+      env: { ...process.env, WINTER_HOME: home },
       stdout: "pipe",
       stderr: "pipe",
     });

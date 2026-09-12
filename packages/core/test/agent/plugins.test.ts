@@ -3,9 +3,9 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PluginStore, consentComplete, pluginMcpEligible, pluginHooksEligible, pluginSpawnEligible, type PluginInfo } from "../../src/agent/plugins";
-import { execPayloadLines, loadManifest, requiredConsentClasses, type NormaManifest } from "../../src/agent/plugin-manifest";
+import { execPayloadLines, loadManifest, requiredConsentClasses, type WinterManifest } from "../../src/agent/plugin-manifest";
 
-function home(): string { return mkdtempSync(join(tmpdir(), "norma-plugins-")); }
+function home(): string { return mkdtempSync(join(tmpdir(), "winter-plugins-")); }
 function plugin(h: string, name: string, opts: { manifest?: unknown; skills?: string[]; mcp?: boolean } = {}) {
   const dir = join(h, "plugins", name); mkdirSync(dir, { recursive: true });
   if (opts.manifest !== undefined) writeFileSync(join(dir, "plugin.json"), typeof opts.manifest === "string" ? opts.manifest : JSON.stringify(opts.manifest));
@@ -13,14 +13,14 @@ function plugin(h: string, name: string, opts: { manifest?: unknown; skills?: st
   if (opts.mcp) writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { fake: { command: "true" } } }));
   return dir;
 }
-function normaPlugin(h: string, name: string, manifest: unknown, opts: { skills?: string[] } = {}) {
+function winterPlugin(h: string, name: string, manifest: unknown, opts: { skills?: string[] } = {}) {
   const dir = join(h, "plugins", name); mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "norma-plugin.json"), typeof manifest === "string" ? manifest : JSON.stringify(manifest));
+  writeFileSync(join(dir, "winter-plugin.json"), typeof manifest === "string" ? manifest : JSON.stringify(manifest));
   for (const s of opts.skills ?? []) { mkdirSync(join(dir, "skills", s), { recursive: true }); writeFileSync(join(dir, "skills", s, "SKILL.md"), `---\nname: ${s}\ndescription: d\n---\nbody`); }
   return dir;
 }
-/** Minimal valid NormaManifest, id/tier defaulted, everything else overridable. */
-function mkManifest(overrides: Partial<NormaManifest> = {}): NormaManifest {
+/** Minimal valid WinterManifest, id/tier defaulted, everything else overridable. */
+function mkManifest(overrides: Partial<WinterManifest> = {}): WinterManifest {
   return { id: "p", tier: "capability", ...overrides };
 }
 /** Minimal valid PluginInfo (legacy-shaped defaults), everything overridable — for pure
@@ -35,17 +35,17 @@ function mkPluginInfo(overrides: Partial<PluginInfo> = {}): PluginInfo {
 }
 
 describe("PluginStore", () => {
-  test("missing plugins dir → []", () => { expect(new PluginStore({ normaHome: home() }).list()).toEqual([]); });
+  test("missing plugins dir → []", () => { expect(new PluginStore({ winterHome: home() }).list()).toEqual([]); });
   test("manifest parsed; dir name canonical; skills + hasMcp listed", () => {
     const h = home(); plugin(h, "demo", { manifest: { name: "other-name", version: "0.1.0", description: "d" }, skills: ["greet", "bye"], mcp: true });
-    const [p] = new PluginStore({ normaHome: h }).list();
+    const [p] = new PluginStore({ winterHome: h }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.name).toBe("demo");                 // DIR NAME canonical, not manifest.name
     expect(p.version).toBe("0.1.0");
     expect(p.skills.sort()).toEqual(["bye", "greet"]);
     expect(p.hasMcp).toBe(true);
     expect(p.mcpEnabled).toBe(false); expect(p.disabled).toBe(false);
-    // Phase 4a additions — no norma-plugin.json present, so this is the legacy path.
+    // Phase 4a additions — no winter-plugin.json present, so this is the legacy path.
     expect(p.legacy).toBe(true);
     expect(p.tier).toBeUndefined();
     expect(p.requiredConsents).toEqual([]);
@@ -58,7 +58,7 @@ describe("PluginStore", () => {
   });
   test("manifest-less + malformed-manifest plugins still load", () => {
     const h = home(); plugin(h, "bare", { skills: ["s1"] }); plugin(h, "broken", { manifest: "{not json", skills: ["s2"] });
-    const list = new PluginStore({ normaHome: h }).list();
+    const list = new PluginStore({ winterHome: h }).list();
     expect(list.map((p) => p.name).sort()).toEqual(["bare", "broken"]);
     for (const p of list) {
       expect(p.legacy).toBe(true);
@@ -70,23 +70,23 @@ describe("PluginStore", () => {
   });
   test("mcpEnabled/disabled from settings; disabled beats enabled", () => {
     const h = home(); plugin(h, "a", { mcp: true }); plugin(h, "b", { mcp: true });
-    const l = new PluginStore({ normaHome: h, plugins: { enabled: ["a", "b"], disabled: ["b"] } }).list();
+    const l = new PluginStore({ winterHome: h, plugins: { enabled: ["a", "b"], disabled: ["b"] } }).list();
     expect(l.find((p) => p.name === "a")!.mcpEnabled).toBe(true);
     const b = l.find((p) => p.name === "b")!;
     expect(b.disabled).toBe(true); expect(b.mcpEnabled).toBe(false);
   });
 });
 
-describe("PluginStore + norma-plugin.json", () => {
+describe("PluginStore + winter-plugin.json", () => {
   test("valid manifest → tier/requiredConsents populated, legacy:false, hasManifestMcp:true", () => {
     const h = home();
-    normaPlugin(h, "demo", {
+    winterPlugin(h, "demo", {
       id: "demo", tier: "platform", description: "manifest desc", version: "1.0.0",
       permissions: { exec: true, tcc: ["accessibility"] },
       contributes: { mcpServers: [{ name: "srv", command: "node", args: ["server.js"] }] },
       entry: { command: "node", args: ["index.js"] },
     }, { skills: ["greet"] });
-    const [p] = new PluginStore({ normaHome: h }).list();
+    const [p] = new PluginStore({ winterHome: h }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.name).toBe("demo"); // dir name still canonical
     expect(p.description).toBe("manifest desc");
@@ -102,7 +102,7 @@ describe("PluginStore + norma-plugin.json", () => {
     expect(p.tccPermissions).toEqual(["accessibility"]);
     expect(p.hardwarePermissions).toEqual([]);
     // manifestServers is filled from the SAME loadManifest call — daemon.ts reads this directly
-    // instead of re-parsing norma-plugin.json a second time (final-review fix).
+    // instead of re-parsing winter-plugin.json a second time (final-review fix).
     expect(p.manifestServers).toEqual([{ name: "srv", command: "node", args: ["server.js"] }]);
     // Phase 4b Task 3 addition — entry carried the same way (daemon.ts's PluginSupervisor wiring
     // reads p.entry directly, no second manifest read).
@@ -111,11 +111,11 @@ describe("PluginStore + norma-plugin.json", () => {
 
   test("contributes.hooks → manifestHooks carried verbatim (Phase 4f Task 2)", () => {
     const h = home();
-    normaPlugin(h, "demo", {
+    winterPlugin(h, "demo", {
       id: "demo", tier: "capability",
       contributes: { hooks: [{ event: "pre-tool", command: "./deny.sh", timeoutMs: 500 }, { event: "post-tool", command: "./observe.sh" }] },
     });
-    const [p] = new PluginStore({ normaHome: h }).list();
+    const [p] = new PluginStore({ winterHome: h }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.manifestHooks).toEqual([
       { event: "pre-tool", command: "./deny.sh", timeoutMs: 500 },
@@ -125,46 +125,46 @@ describe("PluginStore + norma-plugin.json", () => {
 
   test("no contributes.hooks → manifestHooks undefined", () => {
     const h = home();
-    normaPlugin(h, "demo", { id: "demo", tier: "capability", contributes: { skills: true } });
-    const [p] = new PluginStore({ normaHome: h }).list();
+    winterPlugin(h, "demo", { id: "demo", tier: "capability", contributes: { skills: true } });
+    const [p] = new PluginStore({ winterHome: h }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.manifestHooks).toBeUndefined();
   });
 
-  test("legacy plugin (no norma-plugin.json) → manifestHooks undefined", () => {
+  test("legacy plugin (no winter-plugin.json) → manifestHooks undefined", () => {
     const h = home(); plugin(h, "demo", { mcp: true });
-    const [p] = new PluginStore({ normaHome: h }).list();
+    const [p] = new PluginStore({ winterHome: h }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.manifestHooks).toBeUndefined();
   });
 
   test("no entry declared → PluginInfo.entry undefined (capability-tier / skills-only plugins)", () => {
     const h = home();
-    normaPlugin(h, "demo", { id: "demo", tier: "capability", contributes: { skills: true } });
-    const [p] = new PluginStore({ normaHome: h }).list();
+    winterPlugin(h, "demo", { id: "demo", tier: "capability", contributes: { skills: true } });
+    const [p] = new PluginStore({ winterHome: h }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.entry).toBeUndefined();
   });
 
-  test("legacy plugin (no norma-plugin.json) → entry undefined", () => {
+  test("legacy plugin (no winter-plugin.json) → entry undefined", () => {
     const h = home(); plugin(h, "demo", { mcp: true });
-    const [p] = new PluginStore({ normaHome: h }).list();
+    const [p] = new PluginStore({ winterHome: h }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.entry).toBeUndefined();
   });
 
   test("no contributes.mcpServers → hasManifestMcp false, manifestServers undefined", () => {
     const h = home();
-    normaPlugin(h, "demo", { id: "demo", tier: "capability", contributes: { skills: true } });
-    const [p] = new PluginStore({ normaHome: h }).list();
+    winterPlugin(h, "demo", { id: "demo", tier: "capability", contributes: { skills: true } });
+    const [p] = new PluginStore({ winterHome: h }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.hasManifestMcp).toBe(false);
     expect(p.manifestServers).toBeUndefined();
   });
 
-  test("legacy plugin (no norma-plugin.json) → manifestServers undefined", () => {
+  test("legacy plugin (no winter-plugin.json) → manifestServers undefined", () => {
     const h = home(); plugin(h, "demo", { mcp: true });
-    const [p] = new PluginStore({ normaHome: h }).list();
+    const [p] = new PluginStore({ winterHome: h }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.legacy).toBe(true);
     expect(p.manifestServers).toBeUndefined();
@@ -172,19 +172,19 @@ describe("PluginStore + norma-plugin.json", () => {
 
   test("id mismatch → directory name wins + warning logged", () => {
     const h = home();
-    normaPlugin(h, "demo", { id: "other-id", tier: "capability" });
+    winterPlugin(h, "demo", { id: "other-id", tier: "capability" });
     const logs: string[] = [];
-    const [p] = new PluginStore({ normaHome: h, log: (m) => logs.push(m) }).list();
+    const [p] = new PluginStore({ winterHome: h, log: (m) => logs.push(m) }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.name).toBe("demo");
     expect(logs.some((m) => m.includes("demo") && m.includes("other-id"))).toBe(true);
   });
 
-  test("malformed norma-plugin.json → legacy:true + warning, never bricks", () => {
+  test("malformed winter-plugin.json → legacy:true + warning, never bricks", () => {
     const h = home();
-    normaPlugin(h, "demo", "{not json");
+    winterPlugin(h, "demo", "{not json");
     const logs: string[] = [];
-    const [p] = new PluginStore({ normaHome: h, log: (m) => logs.push(m) }).list();
+    const [p] = new PluginStore({ winterHome: h, log: (m) => logs.push(m) }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.legacy).toBe(true);
     expect(p.name).toBe("demo");
@@ -192,22 +192,22 @@ describe("PluginStore + norma-plugin.json", () => {
     expect(logs.some((m) => m.includes("demo"))).toBe(true);
   });
 
-  test("schema-invalid norma-plugin.json (bad tier) → legacy:true + warning", () => {
+  test("schema-invalid winter-plugin.json (bad tier) → legacy:true + warning", () => {
     const h = home();
-    normaPlugin(h, "demo", { id: "demo", tier: "not-a-tier" });
+    winterPlugin(h, "demo", { id: "demo", tier: "not-a-tier" });
     const logs: string[] = [];
-    const [p] = new PluginStore({ normaHome: h, log: (m) => logs.push(m) }).list();
+    const [p] = new PluginStore({ winterHome: h, log: (m) => logs.push(m) }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.legacy).toBe(true);
     expect(logs.length).toBeGreaterThan(0);
   });
 
-  test("norma-plugin.json takes precedence over legacy plugin.json when both present", () => {
+  test("winter-plugin.json takes precedence over legacy plugin.json when both present", () => {
     const h = home();
     const dir = join(h, "plugins", "demo"); mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "plugin.json"), JSON.stringify({ description: "legacy-desc", version: "0.0.1" }));
-    writeFileSync(join(dir, "norma-plugin.json"), JSON.stringify({ id: "demo", tier: "capability", description: "manifest-desc", version: "2.0.0" }));
-    const [p] = new PluginStore({ normaHome: h }).list();
+    writeFileSync(join(dir, "winter-plugin.json"), JSON.stringify({ id: "demo", tier: "capability", description: "manifest-desc", version: "2.0.0" }));
+    const [p] = new PluginStore({ winterHome: h }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.description).toBe("manifest-desc");
     expect(p.version).toBe("2.0.0");
@@ -218,8 +218,8 @@ describe("PluginStore + norma-plugin.json", () => {
 describe("PluginStore + consent-block display data (Task 3)", () => {
   test("hardware-only manifest → hardwarePermissions populated, tcc/execPayload empty", () => {
     const h = home();
-    normaPlugin(h, "demo", { id: "demo", tier: "platform", permissions: { hardware: ["battery"] } });
-    const [p] = new PluginStore({ normaHome: h }).list();
+    winterPlugin(h, "demo", { id: "demo", tier: "platform", permissions: { hardware: ["battery"] } });
+    const [p] = new PluginStore({ winterHome: h }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.hardwarePermissions).toEqual(["battery"]);
     expect(p.tccPermissions).toEqual([]);
@@ -228,8 +228,8 @@ describe("PluginStore + consent-block display data (Task 3)", () => {
 
   test("manifest with no exec/tcc/hardware content → all three display arrays empty", () => {
     const h = home();
-    normaPlugin(h, "demo", { id: "demo", tier: "capability", contributes: { skills: true } });
-    const [p] = new PluginStore({ normaHome: h }).list();
+    winterPlugin(h, "demo", { id: "demo", tier: "capability", contributes: { skills: true } });
+    const [p] = new PluginStore({ winterHome: h }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.requiredConsents).toEqual([]);
     expect(p.execPayload).toEqual([]);
@@ -244,7 +244,7 @@ describe("PluginStore + consents (Task 2)", () => {
   // record, still eligible.
   test("legacy plugin: enable alone is eligible — no consents involved (UNCHANGED baseline)", () => {
     const h = home(); plugin(h, "demo", { mcp: true });
-    const [p] = new PluginStore({ normaHome: h, plugins: { enabled: ["demo"] } }).list();
+    const [p] = new PluginStore({ winterHome: h, plugins: { enabled: ["demo"] } }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.legacy).toBe(true);
     expect(p.requiredConsents).toEqual([]);
@@ -255,12 +255,12 @@ describe("PluginStore + consents (Task 2)", () => {
 
   test("consented fills from settings.plugins.consents[name] — one entry per present class", () => {
     const h = home();
-    normaPlugin(h, "demo", {
+    winterPlugin(h, "demo", {
       id: "demo", tier: "capability",
       permissions: { tcc: ["accessibility"] },
       contributes: { mcpServers: [{ name: "srv", command: "node" }] },
     });
-    const [p] = new PluginStore({ normaHome: h, consents: { demo: { exec: 1000, tcc: 2000 } } }).list();
+    const [p] = new PluginStore({ winterHome: h, consents: { demo: { exec: 1000, tcc: 2000 } } }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.requiredConsents.sort()).toEqual(["exec", "tcc"]);
     expect(p.consented.sort()).toEqual(["exec", "tcc"]);
@@ -268,20 +268,20 @@ describe("PluginStore + consents (Task 2)", () => {
 
   test("consents present for a DIFFERENT plugin id → this plugin's consented stays []", () => {
     const h = home();
-    normaPlugin(h, "demo", { id: "demo", tier: "capability", permissions: { exec: true } });
-    const [p] = new PluginStore({ normaHome: h, consents: { other: { exec: 1 } } }).list();
+    winterPlugin(h, "demo", { id: "demo", tier: "capability", permissions: { exec: true } });
+    const [p] = new PluginStore({ winterHome: h, consents: { other: { exec: 1 } } }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.consented).toEqual([]);
   });
 
   test("partial consent — only some required classes recorded", () => {
     const h = home();
-    normaPlugin(h, "demo", {
+    winterPlugin(h, "demo", {
       id: "demo", tier: "platform",
       permissions: { tcc: ["accessibility"], hardware: ["battery"] },
       entry: { command: "node" },
     });
-    const [p] = new PluginStore({ normaHome: h, consents: { demo: { exec: 1 } } }).list();
+    const [p] = new PluginStore({ winterHome: h, consents: { demo: { exec: 1 } } }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.requiredConsents.sort()).toEqual(["exec", "hardware", "tcc"]);
     expect(p.consented).toEqual(["exec"]);
@@ -339,25 +339,25 @@ describe("pluginMcpEligible", () => {
   // in that combo, end-to-end through a real PluginStore fixture (not just the pure predicate).
   test("CARRIED: mcpServers present + permissions.exec:false, enabled, no record → excluded", () => {
     const h = home();
-    normaPlugin(h, "demo", {
+    winterPlugin(h, "demo", {
       id: "demo", tier: "capability",
       permissions: { exec: false },
       contributes: { mcpServers: [{ name: "srv", command: "node" }] },
     });
-    const [p] = new PluginStore({ normaHome: h, plugins: { enabled: ["demo"] } }).list();
+    const [p] = new PluginStore({ winterHome: h, plugins: { enabled: ["demo"] } }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.requiredConsents).toContain("exec");
     expect(pluginMcpEligible(p)).toBe(false);
   });
   test("CARRIED: same plugin, once exec-consented → included", () => {
     const h = home();
-    normaPlugin(h, "demo", {
+    winterPlugin(h, "demo", {
       id: "demo", tier: "capability",
       permissions: { exec: false },
       contributes: { mcpServers: [{ name: "srv", command: "node" }] },
     });
     const [p] = new PluginStore({
-      normaHome: h, plugins: { enabled: ["demo"] }, consents: { demo: { exec: Date.now() } },
+      winterHome: h, plugins: { enabled: ["demo"] }, consents: { demo: { exec: Date.now() } },
     }).list();
     if (!p) throw new Error("expected one plugin");
     expect(pluginMcpEligible(p)).toBe(true);
@@ -395,17 +395,17 @@ describe("pluginHooksEligible (Phase 4f Task 2)", () => {
 
   test("end-to-end through a real PluginStore fixture: hooks present, unconsented → excluded", () => {
     const h = home();
-    normaPlugin(h, "demo", { id: "demo", tier: "capability", contributes: { hooks: [{ event: "pre-tool", command: "./deny.sh" }] } });
-    const [p] = new PluginStore({ normaHome: h, plugins: { enabled: ["demo"] } }).list();
+    winterPlugin(h, "demo", { id: "demo", tier: "capability", contributes: { hooks: [{ event: "pre-tool", command: "./deny.sh" }] } });
+    const [p] = new PluginStore({ winterHome: h, plugins: { enabled: ["demo"] } }).list();
     if (!p) throw new Error("expected one plugin");
     expect(p.requiredConsents).toContain("exec");
     expect(pluginHooksEligible(p)).toBe(false);
   });
   test("end-to-end: same plugin, once exec-consented → included", () => {
     const h = home();
-    normaPlugin(h, "demo", { id: "demo", tier: "capability", contributes: { hooks: [{ event: "pre-tool", command: "./deny.sh" }] } });
+    winterPlugin(h, "demo", { id: "demo", tier: "capability", contributes: { hooks: [{ event: "pre-tool", command: "./deny.sh" }] } });
     const [p] = new PluginStore({
-      normaHome: h, plugins: { enabled: ["demo"] }, consents: { demo: { exec: Date.now() } },
+      winterHome: h, plugins: { enabled: ["demo"] }, consents: { demo: { exec: Date.now() } },
     }).list();
     if (!p) throw new Error("expected one plugin");
     expect(pluginHooksEligible(p)).toBe(true);
@@ -446,22 +446,22 @@ describe("pluginSpawnEligible (Phase 4b Task 3 — PluginSupervisor eligibility)
     }))).toBe(true);
   });
 
-  test("end-to-end through a real PluginStore fixture: entry+tier from norma-plugin.json, enable+consent flip eligibility", () => {
+  test("end-to-end through a real PluginStore fixture: entry+tier from winter-plugin.json, enable+consent flip eligibility", () => {
     const h = home();
-    normaPlugin(h, "demo", {
+    winterPlugin(h, "demo", {
       id: "demo", tier: "platform",
       permissions: { exec: true },
       entry: { command: "bun", args: ["index.ts"] },
     });
-    const notEnabled = new PluginStore({ normaHome: h }).list()[0]!;
+    const notEnabled = new PluginStore({ winterHome: h }).list()[0]!;
     expect(pluginSpawnEligible(notEnabled)).toBe(false); // not enabled yet
 
-    const enabledUnconsented = new PluginStore({ normaHome: h, plugins: { enabled: ["demo"] } }).list()[0]!;
+    const enabledUnconsented = new PluginStore({ winterHome: h, plugins: { enabled: ["demo"] } }).list()[0]!;
     expect(enabledUnconsented.requiredConsents).toEqual(["exec"]);
     expect(pluginSpawnEligible(enabledUnconsented)).toBe(false); // enabled but missing exec consent
 
     const consented = new PluginStore({
-      normaHome: h, plugins: { enabled: ["demo"] }, consents: { demo: { exec: Date.now() } },
+      winterHome: h, plugins: { enabled: ["demo"] }, consents: { demo: { exec: Date.now() } },
     }).list()[0]!;
     expect(pluginSpawnEligible(consented)).toBe(true);
     expect(consented.entry).toEqual({ command: "bun", args: ["index.ts"] });
@@ -469,7 +469,7 @@ describe("pluginSpawnEligible (Phase 4b Task 3 — PluginSupervisor eligibility)
 });
 
 describe("loadManifest", () => {
-  test("missing norma-plugin.json → legacy:true, no manifest, no log", () => {
+  test("missing winter-plugin.json → legacy:true, no manifest, no log", () => {
     const h = home(); const dir = join(h, "plugins", "x"); mkdirSync(dir, { recursive: true });
     const logs: string[] = [];
     const r = loadManifest(dir, "x", (m) => logs.push(m));
@@ -478,7 +478,7 @@ describe("loadManifest", () => {
   });
   test("valid manifest with matching id → legacy:false, manifest returned as-is", () => {
     const h = home();
-    const dir = normaPlugin(h, "x", { id: "x", tier: "capability", name: "X Plugin" });
+    const dir = winterPlugin(h, "x", { id: "x", tier: "capability", name: "X Plugin" });
     const logs: string[] = [];
     const r = loadManifest(dir, "x", (m) => logs.push(m));
     expect(r.legacy).toBe(false);
@@ -488,7 +488,7 @@ describe("loadManifest", () => {
   });
   test("mismatched id is coerced to dirName", () => {
     const h = home();
-    const dir = normaPlugin(h, "x", { id: "y", tier: "capability" });
+    const dir = winterPlugin(h, "x", { id: "y", tier: "capability" });
     const r = loadManifest(dir, "x", () => {});
     expect(r.manifest?.id).toBe("x");
   });
@@ -503,7 +503,7 @@ describe("loadManifest", () => {
 
   test("final-review Fix 3: a pluginId (dirName) containing \"__\" logs a warning even with a valid manifest", () => {
     const h = home();
-    const dir = normaPlugin(h, "foo__evil", { id: "foo__evil", tier: "capability" });
+    const dir = winterPlugin(h, "foo__evil", { id: "foo__evil", tier: "capability" });
     const logs: string[] = [];
     const r = loadManifest(dir, "foo__evil", (m) => logs.push(m));
     expect(r.legacy).toBe(false);

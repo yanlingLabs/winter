@@ -6,7 +6,7 @@
 # Runs a single hardened `iroh-relay` (n0-computer/iroh, tag v{IROH_RELAY_VERSION}) behind
 # Let's Encrypt TLS on 443/tcp, plus its QUIC address-discovery listener on
 # {QUIC_ADDR_DISCOVERY_PORT}/udp. No allowlist (`access = "everyone"`) -- the relay is
-# deliberately outside Norma's trust boundary: it only ever relays already end-to-end-encrypted
+# deliberately outside Winter's trust boundary: it only ever relays already end-to-end-encrypted
 # iroh QUIC traffic between pinned endpoint IDs, so anyone reaching it can, at worst, relay their
 # own traffic through it.
 

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { FakeProvider } from "../../src/agent/fake-provider";
@@ -31,7 +31,7 @@ import type { ToolContext } from "../../src/agent/tools/registry";
  * the app's verdict passed through untouched; does the tool fail fast when nobody can answer).
  *
  * The app's own half — CDP, the sensitive floor's field inspection, the scheme door — is pinned in
- * `apple/Norma/Tests/NormaAppTests`, and the composition of BOTH halves against real Chromium is the
+ * `apple/Winter/Tests/WinterAppTests`, and the composition of BOTH halves against real Chromium is the
  * human's gate. What is closed here is the gap between them.
  */
 

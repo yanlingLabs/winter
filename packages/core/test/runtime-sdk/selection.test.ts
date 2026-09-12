@@ -1,6 +1,6 @@
 // P8c Task 1.3 — the selection matrix: `familyListingFromCatalog` fed through the router's own
-// REAL `selectRuntime`, and `createNormaRuntimeSdk(...).selectRuntimeFor` end to end. Nothing here
-// re-derives D13/D28's routing table — the whole point is that Norma's listing/credential inputs
+// REAL `selectRuntime`, and `createWinterRuntimeSdk(...).selectRuntimeFor` end to end. Nothing here
+// re-derives D13/D28's routing table — the whole point is that Winter's listing/credential inputs
 // produce the SAME decision the router's own pinned rules would for a host that got them right.
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { isSelectionRefusal, selectRuntime, type RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { writeCredentialMaterial } from "../../src/auth/credential-material";
-import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "../../src/runtime-sdk/create";
+import { createWinterRuntimeSdk, type WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
 import { catalogRowsFor, familyListingFromCatalog } from "../../src/runtime-sdk/provider-selection";
 
@@ -154,10 +154,10 @@ describe("familyListingFromCatalog + the router's own selectRuntime", () => {
   });
 });
 
-describe("createNormaRuntimeSdk(...).selectRuntimeFor", () => {
+describe("createWinterRuntimeSdk(...).selectRuntimeFor", () => {
   let home: string;
   let secretsDir: string;
-  const handles: NormaRuntimeSdk[] = [];
+  const handles: WinterRuntimeSdk[] = [];
 
   afterEach(async () => {
     for (const h of handles.splice(0)) await h.dispose();
@@ -169,7 +169,7 @@ describe("createNormaRuntimeSdk(...).selectRuntimeFor", () => {
     secretsDir = join(home, "secrets");
     const secrets = new FileSecretStore(secretsDir);
     await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-ant-test" });
-    const handle = await createNormaRuntimeSdk({ home, settings: () => null, secrets, capabilities: [] });
+    const handle = await createWinterRuntimeSdk({ home, settings: () => null, secrets, capabilities: [] });
     handles.push(handle);
     const result = await handle.selectRuntimeFor({ mode: "code", model: "claude-sonnet-5" });
     if (isSelectionRefusal(result)) throw new Error(`unexpected refusal: ${result.detail}`);
@@ -182,7 +182,7 @@ describe("createNormaRuntimeSdk(...).selectRuntimeFor", () => {
   test("refuses typed (never substitutes) when no provider has a credential for the model", async () => {
     home = mkdtempSync(join(tmpdir(), "p8c-selection-"));
     secretsDir = join(home, "secrets");
-    const handle = await createNormaRuntimeSdk({ home, settings: () => null, secrets: new FileSecretStore(secretsDir), capabilities: [] });
+    const handle = await createWinterRuntimeSdk({ home, settings: () => null, secrets: new FileSecretStore(secretsDir), capabilities: [] });
     handles.push(handle);
     const result = await handle.selectRuntimeFor({ mode: "code", model: "claude-sonnet-5" });
     expect(isSelectionRefusal(result)).toBe(true);
@@ -196,7 +196,7 @@ describe("createNormaRuntimeSdk(...).selectRuntimeFor", () => {
     secretsDir = join(home, "secrets");
     const secrets = new FileSecretStore(secretsDir);
     await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-ant-test" });
-    const handle = await createNormaRuntimeSdk({ home, settings: () => null, secrets, capabilities: [] });
+    const handle = await createWinterRuntimeSdk({ home, settings: () => null, secrets, capabilities: [] });
     handles.push(handle);
     const result = await handle.selectRuntimeFor({ mode: "code", model: "haiku" });
     if (isSelectionRefusal(result)) throw new Error(`unexpected refusal: ${result.detail}`);

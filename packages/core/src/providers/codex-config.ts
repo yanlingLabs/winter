@@ -46,15 +46,15 @@ export const CODEX = {
 
     /**
      * Originator header — identifies the client to the ChatGPT backend.
-     * We SELF-IDENTIFY as "norma" rather than sending codex-rs's first-party value
-     * "codex_cli_rs". Deliberate go-public decision (ToS mitigation, option A): Norma is an
+     * We SELF-IDENTIFY as "winter" rather than sending codex-rs's first-party value
+     * "codex_cli_rs". Deliberate go-public decision (ToS mitigation, option A): Winter is an
      * independent client and says so honestly — we do not impersonate OpenAI's own first-party
      * originator to obtain `is_first_party_originator` treatment. Tradeoff accepted: OpenAI's
-     * backend can distinguish (and, if it ever chooses, cleanly gate) Norma traffic; the
+     * backend can distinguish (and, if it ever chooses, cleanly gate) Winter traffic; the
      * shipped BYO-API-key path is the sanctioned fallback if the ChatGPT-OAuth route is
      * ever restricted. Do NOT revert to a first-party value to chase fingerprint parity.
      */
-    originator: "norma",
+    originator: "winter",
   } as Record<string, string>,
 } as const;
 

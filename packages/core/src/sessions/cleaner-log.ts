@@ -17,7 +17,7 @@ export interface CleanerLogEntry {
 
 /** Appends one NDJSON line to `<home>/cleaner.jsonl`, creating the file (and `home`, defensively —
  *  the same `mkdirSync(..., {recursive:true})` precedent `SessionStore`'s own constructor uses) if
- *  missing. `home` is a parameter — never a global/normaHome import — so every caller, test
+ *  missing. `home` is a parameter — never a global/winterHome import — so every caller, test
  *  included, stays temp-home-safe.
  *
  *  Deliberately NOT best-effort itself: this throws like any other fs call (ENOSPC, permissions, a

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { NewSessionEvent } from "@norma/protocol";
+import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import { AuditLog } from "../../src/peripheral/audit";
 import { HardwareBroker, verbClass, type HardwareBrokerDeps, type HardwareRequester } from "../../src/peripheral/hardware";
 
@@ -31,7 +31,7 @@ interface Fakes {
 }
 
 function setup(overrides: Partial<HardwareBrokerDeps> = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "norma-hardware-"));
+  const dir = mkdtempSync(join(tmpdir(), "winter-hardware-"));
   const auditPath = join(dir, "audit.jsonl");
   const audit = new AuditLog(auditPath);
   const fakes: Fakes = { pushed: [], pushReturn: true };
@@ -62,7 +62,7 @@ describe("HardwareBroker", () => {
   test("no provider (pushToProvider returns false) → typed no_provider immediately", async () => {
     const { broker } = setup({ pushToProvider: () => false });
     const res = await broker.request({ requester: pluginRequester, verb: "getChargeLimit" });
-    expect(res).toEqual({ code: "no_provider", message: "hardware features require Norma.app" });
+    expect(res).toEqual({ code: "no_provider", message: "hardware features require Winter.app" });
   });
 
   test("a known verb pushes a hardware_requested event carrying requestId/verb/argsJson", async () => {
@@ -155,7 +155,7 @@ describe("HardwareBroker", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       kind: "hardware", verb: "getChargeLimit", requester: harnessRequester,
-      outcome: { code: "no_provider", message: "hardware features require Norma.app" },
+      outcome: { code: "no_provider", message: "hardware features require Winter.app" },
     });
   });
 
@@ -183,16 +183,16 @@ describe("HardwareBroker", () => {
     });
   });
 
-  test("NORMA_HARDWARE_TIMEOUT_MS env var overrides the default when no explicit timeoutMs is given", async () => {
-    const orig = process.env.NORMA_HARDWARE_TIMEOUT_MS;
-    process.env.NORMA_HARDWARE_TIMEOUT_MS = "15";
+  test("WINTER_HARDWARE_TIMEOUT_MS env var overrides the default when no explicit timeoutMs is given", async () => {
+    const orig = process.env.WINTER_HARDWARE_TIMEOUT_MS;
+    process.env.WINTER_HARDWARE_TIMEOUT_MS = "15";
     try {
       const { broker } = setup();
       const res = await broker.request({ requester: pluginRequester, verb: "getChargeLimit" });
       expect(res).toEqual({ code: "timeout" });
     } finally {
-      if (orig === undefined) delete process.env.NORMA_HARDWARE_TIMEOUT_MS;
-      else process.env.NORMA_HARDWARE_TIMEOUT_MS = orig;
+      if (orig === undefined) delete process.env.WINTER_HARDWARE_TIMEOUT_MS;
+      else process.env.WINTER_HARDWARE_TIMEOUT_MS = orig;
     }
   });
 

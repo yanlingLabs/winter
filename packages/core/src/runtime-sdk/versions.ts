@@ -34,7 +34,7 @@ export function installedClaudeAgentSdkVersion(): string | undefined {
  *  inside a compiled $bunfs binary, where createRequire cannot resolve a manifest). P8b-4.
  *  `claudeAgentSdk` is OMITTED (never `undefined`-valued) when the optional peer is not installed —
  *  a Winter-only host must not carry a stray key the router's version matrix would try to satisfy. */
-export const NORMA_PEER_VERSIONS: { winterAgentSdk: string; claudeAgentSdk?: string } = {
+export const WINTER_PEER_VERSIONS: { winterAgentSdk: string; claudeAgentSdk?: string } = {
   winterAgentSdk: SDK_VERSION,
   ...(installedClaudeAgentSdkVersion() === undefined ? {} : { claudeAgentSdk: installedClaudeAgentSdkVersion()! }),
 };

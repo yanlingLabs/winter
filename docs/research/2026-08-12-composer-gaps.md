@@ -17,7 +17,7 @@ Headline for each:
   this exact screen**, in the header row a few inches above the composer. The composer chip is a
   second, dead affordance for machinery that is already live on the same page.
 * **Gap 2 is "build new, from an existing recipe."** The cowork strip the user is describing is a
-  real, measurable surface in `NormaComposerCard`; the policy picker row body is a real, shared
+  real, measurable surface in `WinterComposerCard`; the policy picker row body is a real, shared
   view (`policyPickerRow`). Nothing joins them today. The surgery is small; the *decisions* are not.
 
 ---
@@ -26,7 +26,7 @@ Headline for each:
 
 ### 1.1 What the user sees today
 
-`apple/Norma/Sources/AppShell/NormaComposerCard.swift:207-215` — the control row's model slot:
+`apple/Winter/Sources/AppShell/WinterComposerCard.swift:207-215` — the control row's model slot:
 
 ```swift
 HStack(spacing: 4) {
@@ -44,11 +44,11 @@ hit-target beyond the tooltip. `newChatModelPlaceholder` is `"Default model"`
 
 The two neighbours, **out of scope** but noted as requested:
 
-* `NormaComposerCard.swift:204` — `NewChatControlButton(systemImage: "plus", label: "Attach (not
+* `WinterComposerCard.swift:204` — `NewChatControlButton(systemImage: "plus", label: "Attach (not
   wired yet)")`. `NewChatControlButton` (`NewChatPage.swift:280-298`) is `Button {} label:` — an
   **empty action closure**. Not trivially adjacent: attachment needs a file-picker, an upload path,
   and a wire shape none of which exist.
-* `NormaComposerCard.swift:216` — the same for `"mic"` / Dictate. Also not adjacent.
+* `WinterComposerCard.swift:216` — the same for `"mic"` / Dictate. Also not adjacent.
 
 The card has **two homes** and both show this chip:
 
@@ -64,7 +64,7 @@ code and dispatch sessions.
 
 ### 1.2 What iOS does, end to end
 
-**Control.** `norma-ios/Norma/Code/ChatComposerView.swift:97-126` — `modelPill`, a real `Button`
+**Control.** `norma-ios/Winter/Code/ChatComposerView.swift:97-126` — `modelPill`, a real `Button`
 in the composer's control row (position 2, right after the mocked `+`):
 
 * label = `picker.selectedOption.displayName` at 14 pt regular, `.primary`;
@@ -127,11 +127,11 @@ working-dirs chip, background verb, **model menu**, **effort menu**, policy ⋯.
 | model menu content | `:419-438` | header `Model` (11 pt semibold secondary), a `Default` row, one row per `modelPickerOptions(adapter.modelCatalogue)`, plus a row for an unlisted current slug. `.padding(12)`, `.frame(minWidth: 160)` |
 | model row | `:444-463` | sets `adapter.pendingModel` (optimistic), fires `adapter.onSetModel(model)`, closes; `.disabled(adapter.modelChangeInFlight)`, `.padding(.vertical, 4)` |
 | effort button | `:469-484` | `Image(systemName: "gauge.with.dots.needle.33percent")`, same idiom |
-| effort menu content | `:495-528` | header `Reasoning effort`, `Default`, then `opts.wire`, then a second `Norma` section for `opts.tiers`, then an `.unknown` row for a current value in neither list. `.frame(minWidth: 180)` |
+| effort menu content | `:495-528` | header `Reasoning effort`, `Default`, then `opts.wire`, then a second `Winter` section for `opts.tiers`, then an `.unknown` row for a current value in neither list. `.frame(minWidth: 180)` |
 | effort row | `:530-549` | mirror of the model row against `onSetEffort` / `effortChangeInFlight` |
 
 The **pure decisions** behind them are already extracted and unit-tested
-(`apple/Norma/Tests/NormaAppTests/ModelPickerTests.swift`, 33 tests):
+(`apple/Winter/Tests/WinterAppTests/ModelPickerTests.swift`, 33 tests):
 
 * `modelPickerOptions(_:)` — `WindowContentView.swift:724`. `catalogue.models.map(\.id)`. Empty is a
   real answer; never derive a lineup.
@@ -169,7 +169,7 @@ And the **shell already wires every one of them** — `ShellSessionHost.wire(ada
 * `onRefreshModelCatalogue` → `:1566` → `refreshModelCatalogue()` (`:1595-1603`) →
   `client.syncConfig()` → `adapter.modelCatalogue = snapshot`.
 
-Kit layer: `NormaClient.setModel` (`apple/NormaKit/.../NormaClient+Methods.swift:510`),
+Kit layer: `WinterClient.setModel` (`apple/WinterKit/.../WinterClient+Methods.swift:510`),
 `setEffort` (`:529`), `syncConfig()` (`:1236` region, returning `SyncConfigSnapshot` at `:1168`).
 
 **The Mac's failure story vs iOS's.** The Mac fires and forgets (no `FailureBanner` equivalent), but
@@ -185,14 +185,14 @@ Do not trust the memory note. The authority is `packages/core/src/settings.ts`:
 
 * **Wire efforts** — `REASONING_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"]`
   (`settings.ts:29`). `"minimal"` is deliberately **absent** — the endpoint refuses it.
-* **Norma-level tiers** — `CLIENT_EFFORTS = ["ultra"]` (`settings.ts:51`). Exactly one today.
+* **Winter-level tiers** — `CLIENT_EFFORTS = ["ultra"]` (`settings.ts:51`). Exactly one today.
   Strictly disjoint from the above. Translated by `CLIENT_EFFORT_WIRE` (`:58`) — `ultra → max` —
   plus a delegation posture in the prompt, at `AgentEngine.resolveSel`, before a request body exists.
 * **Eligibility** — `clientEffortEligible(mode)` (`settings.ts:89`): `mode === undefined || mode ===
   "code"`. A fail-closed allowlist; a future mode gets no tiers for free.
 * **Per model, not global** — the client never hard-codes the list. `sync.config` serves
   `models[].efforts` per slug plus `clientEfforts`
-  (`NormaClient+Methods.swift:1131` `SyncConfigModelInfo`, `:1168` `SyncConfigSnapshot`).
+  (`WinterClient+Methods.swift:1131` `SyncConfigModelInfo`, `:1168` `SyncConfigSnapshot`).
 * **Validation** — `assertEffortSelectable` (`packages/core/src/ipc/server.ts:476`) is shared
   verbatim by `session.setEffort` and `session.create`. A tier on a non-code session is refused with
   a sentence naming the mode. A wire effort outside `effortsForModel(model)` is refused, *unless*
@@ -244,12 +244,12 @@ Three shapes, and the wire already supports the good one:
   phone's New Chat sets model **and** effort at create time on a latency-critical path, and
   "two round-trips leave a window in which a turn fired immediately after create resolves at the
   GLOBAL effort, silently."
-* **But `NormaKit` does not pass them.** `NormaClient.createSession`
-  (`NormaClient+Methods.swift:303`) is
+* **But `WinterKit` does not pass them.** `WinterClient.createSession`
+  (`WinterClient+Methods.swift:303`) is
   `createSession(scope:cwd:approvalPolicy:mode:)` — no `model`, no `effort`. **This is the one kit
   change Gap 1 needs**, and it is additive (two optional params onto an existing `obj([...])`).
 * The page would also need a catalogue to draw rows from. `ShellSessionHost.managementClient`
-  (`ShellSessionHost.swift:221`) is a live `NormaClient` and `syncConfig()` is role-agnostic and
+  (`ShellSessionHost.swift:221`) is a live `WinterClient` and `syncConfig()` is role-agnostic and
   takes no `sessionId`, so a `host`-owned snapshot is a one-call fetch — the same call
   `refreshModelCatalogue` already makes, just off the management client instead of the attachment's.
 
@@ -268,9 +268,9 @@ a `setModel`/`setEffort` follow-up on the reuse path, or the choice must be defi
 
 **Mechanical (a few hours, one file mostly):**
 
-* Turn `NormaComposerCard.swift:207-215` into a `Button` in the `NewChatControlChip` idiom, opening a
+* Turn `WinterComposerCard.swift:207-215` into a `Button` in the `NewChatControlChip` idiom, opening a
   `.popover`.
-* Give `NormaComposerCard` the inputs it needs. It currently takes no adapter. Two honest options:
+* Give `WinterComposerCard` the inputs it needs. It currently takes no adapter. Two honest options:
   (a) pass `@ObservedObject var adapter: FieldStateAdapter?` — the adapter is already in scope at the
   live call site (`WindowContentView.swift:187` constructs the card with `adapter.draftBinding`); or
   (b) pass a small value struct + two closures, iOS-style, so the new-chat page can supply a
@@ -295,7 +295,7 @@ a `setModel`/`setEffort` follow-up on the reuse path, or the choice must be defi
 * The new-chat pre-session question — see "Needs your call".
 
 **Not needed:** any daemon change, any protocol change, any new RPC, any new pure decision function.
-The only non-app edit is the optional widening of `NormaClient.createSession`, and only if the
+The only non-app edit is the optional widening of `WinterClient.createSession`, and only if the
 new-chat page is allowed to pick.
 
 ---
@@ -304,11 +304,11 @@ new-chat page is allowed to pick.
 
 ### 2.1 Where the "cowork-style" presentation actually is
 
-It is **on the Mac**, in `NormaComposerCard` itself — not on iOS. (Checked: `norma-ios/Norma` has
+It is **on the Mac**, in `WinterComposerCard` itself — not on iOS. (Checked: `norma-ios/Winter` has
 **no** `setPolicy`, no approval-policy picker, and no policy row anywhere near its composer. iOS has
 no equivalent to describe.)
 
-`NormaComposerCard.swift:176-198` — `coworkStrip`:
+`WinterComposerCard.swift:176-198` — `coworkStrip`:
 
 ```swift
 HStack(spacing: 10) {
@@ -328,7 +328,7 @@ the user is pointing at. It is a placeholder, exactly like the model chip.
 
 ### 2.2 Exact anatomy of the strip (values, not adjectives)
 
-Container — `stripSurface(band:)`, `NormaComposerCard.swift:152-174`:
+Container — `stripSurface(band:)`, `WinterComposerCard.swift:152-174`:
 
 | property | value | source |
 |---|---|---|
@@ -342,7 +342,7 @@ Container — `stripSurface(band:)`, `NormaComposerCard.swift:152-174`:
 The band is the *only* visible part: the strip is a full-height rounded rect **behind** an opaque
 composer (`Theme.composerSurface` = **#F9F9F7** / **#272726**), so only its protruding edge and side
 rims show. The composer keeps its own complete border on all four sides
-(`NormaComposerCard.swift:119-133`) — that is what makes the strip read as a second surface rather
+(`WinterComposerCard.swift:119-133`) — that is what makes the strip read as a second surface rather
 than as the card growing a section. Canvas-behind-composer-surface is a **4-value** separation in
 light mode (0xF5F4F0 vs 0xF9F9F7): deliberately subtle. **This is the "litle row background" the
 user means.**
@@ -358,7 +358,7 @@ Content:
   `RowHover`-filled rounded rect at `shellSidebarRowCornerRadius = 6` (`ShellSidebar.swift:735`,
   style at `:1367`).
 * Motion: `band` animates 0→40 under the mode segment's `withAnimation(.easeInOut(duration: 0.24))`
-  (`NormaComposerCard.swift:229`), and the row is pinned to the growing edge and `.clipped()`
+  (`WinterComposerCard.swift:229`), and the row is pinned to the growing edge and `.clipped()`
   (`:163-171`) so it *travels out from underneath* rather than fading in place. The composer's own
   height never changes — a standing ruling.
 
@@ -368,7 +368,7 @@ how the 0.5 pt half-alpha rim actually renders on a Retina panel, are gate obser
 
 ### 2.3 The direction — and the one thing that does not line up
 
-The strip has two edges (`NormaComposerStripEdge`, `NormaComposerCard.swift:10-13`):
+The strip has two edges (`WinterComposerStripEdge`, `WinterComposerCard.swift:10-13`):
 
 * `.below` — `ZStack(alignment: .top)`, band protrudes **below** the composer. Used by
   `NewChatPage.swift:509`.
@@ -465,9 +465,9 @@ Three ways out, in order of honesty:
 
 1. **Add `approvalPolicy` to `SessionListResult`** and read it on the row like `model`/`effort`
    already are. Full protocol-checklist sweep (`packages/protocol` → `pnpm protocol:generate` →
-   `apple/NormaProtocol` → `NormaKit`), but it is a *field* on an existing result, not a new variant.
+   `apple/WinterProtocol` → `WinterKit`), but it is a *field* on an existing result, not a new variant.
    Per CLAUDE.md's own field-vs-variant warning, nothing fails to compile — the sweep must be done
-   by meaning: `store.list()`'s producer, `NormaClient.listSessions()`'s decoder,
+   by meaning: `store.list()`'s producer, `WinterClient.listSessions()`'s decoder,
    `SessionSummary`.
 2. **Render the row without a current-value claim** — a "Permissions" chip that opens the picker but
    shows no label until the user sets one this session. Honest, zero backend work, weaker product.
@@ -481,7 +481,7 @@ Three ways out, in order of honesty:
 Mechanical:
 
 * Generalize the strip's gate. Today `stripSurface`'s two conditions and the `band` computation all
-  read `newChatShowsCoworkControls(mode:)` (`NormaComposerCard.swift:63`, `:154`). It needs to become
+  read `newChatShowsCoworkControls(mode:)` (`WinterComposerCard.swift:63`, `:154`). It needs to become
   a decision that also answers yes for a non-chat live session — as its **own named pure function**,
   next to `newChatShowsCoworkControls`, so it is testable and so the cowork pin
   (`SidebarBrandTests.swift:320-323`) keeps meaning what it says.
@@ -490,7 +490,7 @@ Mechanical:
   `policyMenuContent` already renders (`WindowContentView.swift:371-386`). Label = the current
   policy's `policyDisplayLabel`, red + `⚠` when `isPolicyDangerous`.
 * `policyPickerRow` is `internal` on an `extension WindowContentView` (`WorkSidebar.swift:191`).
-  `NormaComposerCard` is a *different type*, so the row body must either move to a free function /
+  `WinterComposerCard` is a *different type*, so the row body must either move to a free function /
   small struct, or the card must be handed a `@ViewBuilder`. **Moving it is the right call** — it is
   already documented as "one implementation for both surfaces" and this makes it three.
 
@@ -516,7 +516,7 @@ The composer appears before a session exists. Pick one:
 * **(A) No picker on the new-chat page.** The chip is live only on a live session; the new-chat card
   either omits it or renders it disabled with "picks the default; change it once the chat starts".
 * **(B) Hold the choice and stamp it at create.** Add `newChatModel`/`newChatEffort` to
-  `ShellSessionHost` beside `newChatDraft`, widen `NormaClient.createSession` with the `model`/
+  `ShellSessionHost` beside `newChatDraft`, widen `WinterClient.createSession` with the `model`/
   `effort` the daemon already accepts, and pass them through `sendFirstChatMessage`.
 
 **Recommendation: (B).** Three reasons and they are all evidence, not taste. The daemon *already*
@@ -567,44 +567,44 @@ breaks the build — which means the sweep must be done by meaning, per CLAUDE.m
 ## Appendix — file:line index
 
 **Mac composer**
-- `apple/Norma/Sources/AppShell/NormaComposerCard.swift` — `:10` strip edge enum, `:63` band gate,
+- `apple/Winter/Sources/AppShell/WinterComposerCard.swift` — `:10` strip edge enum, `:63` band gate,
   `:152-174` `stripSurface`, `:176-198` `coworkStrip`, `:181` the "Ask" placeholder, `:202-221`
   control row, `:204` Attach placeholder, `:207-215` **the model placeholder**, `:216` Dictate
   placeholder, `:223-254` mode segment, `:256-283` send button
-- `apple/Norma/Sources/AppShell/NewChatPage.swift` — `:71` mode options, `:101-128` all metrics,
+- `apple/Winter/Sources/AppShell/NewChatPage.swift` — `:71` mode options, `:101-128` all metrics,
   `:118` `newChatModelPlaceholder`, `:136` `newChatShowsCoworkControls`, `:147`
   `newChatSendBlockedReason`, `:280-298` `NewChatControlButton`, `:301-330` `NewChatControlChip`,
   `:503-515` the page's card, `:522-526` `submit`
 
 **Mac model/effort machinery (all live)**
-- `apple/Norma/Sources/ChatContent/WindowContentView.swift` — `:100-143` header row, `:125`/`:131`
+- `apple/Winter/Sources/ChatContent/WindowContentView.swift` — `:100-143` header row, `:125`/`:131`
   the visibility gates, `:346-386` policy ⋯, `:388-463` model menu, `:465-549` effort menu,
   `:724-834` the pure decisions
-- `apple/Norma/Sources/FieldKit/FieldStateAdapter.swift` — `:612-623` policy state, `:631-641` model
+- `apple/Winter/Sources/FieldKit/FieldStateAdapter.swift` — `:612-623` policy state, `:631-641` model
   state, `:654` `isChatSession`, `:722-747` catalogue + optimistic overlay, `:775` `armProbation`,
   `:844` `effectiveSelection`, `:914` `selectionRevertAxis`
-- `apple/Norma/Sources/AppShell/ShellSessionHost.swift` — `:221` `managementClient`, `:756-770`
+- `apple/Winter/Sources/AppShell/ShellSessionHost.swift` — `:221` `managementClient`, `:756-770`
   new-chat published state, `:843-902` `sendFirstChatMessage`, `:904-916`
   `deliverPendingFirstMessage`, `:1490-1573` `wire(adapter:feed:)`, `:1595-1603`
   `refreshModelCatalogue`, `:1745-1840` `ShellSessionView`
-- `apple/NormaKit/Sources/NormaKit/NormaClient+Methods.swift` — `:303` `createSession` (**no
+- `apple/WinterKit/Sources/WinterKit/WinterClient+Methods.swift` — `:303` `createSession` (**no
   model/effort**), `:510` `setModel`, `:529` `setEffort`, `:1131` `SyncConfigModelInfo`, `:1168`
   `SyncConfigSnapshot`, `:1239` `syncConfig()`
-- `apple/Norma/Tests/NormaAppTests/ModelPickerTests.swift` — 33 pins on the pure decisions
-- `apple/Norma/Tests/NormaAppTests/PolicyMenuTests.swift:123-140` — the six modes, danger flag, labels
+- `apple/Winter/Tests/WinterAppTests/ModelPickerTests.swift` — 33 pins on the pure decisions
+- `apple/Winter/Tests/WinterAppTests/PolicyMenuTests.swift:123-140` — the six modes, danger flag, labels
 
 **Mac policy machinery**
-- `apple/Norma/Sources/ChatContent/WorkSidebar.swift` — `:135` `sessionPolicyModes`, `:140`
+- `apple/Winter/Sources/ChatContent/WorkSidebar.swift` — `:135` `sessionPolicyModes`, `:140`
   `policyDisplayLabel`, `:155` `isPolicyDangerous`, `:191-208` `policyPickerRow`, `:210-228`
   the sidebar's Options block + `:221` the chat gate, `:288` `currentSidebarSessionSummary`
 
 **iOS**
-- `norma-ios/Norma/Code/ChatComposerView.swift:97-126` — the model pill; `:78-80` the sheet
-- `norma-ios/Norma/Code/ModelPickerSheet.swift` — the two-page sheet; `:53` the no-catalogue gate;
+- `norma-ios/Winter/Code/ChatComposerView.swift:97-126` — the model pill; `:78-80` the sheet
+- `norma-ios/Winter/Code/ModelPickerSheet.swift` — the two-page sheet; `:53` the no-catalogue gate;
   `:244` `FailureBanner`; `:266-312` `PickerRow`
-- `norma-ios/Norma/Code/ModelPickerModel.swift` — `:225` the model, `:325-338` `offeredEfforts`,
+- `norma-ios/Winter/Code/ModelPickerModel.swift` — `:225` the model, `:325-338` `offeredEfforts`,
   `:368-378` the pill labels, `:385-449` the awaited applies
-- `norma-ios/Norma/Code/CodeSessionView.swift:85-100` — construction; `:144` the composer mount
+- `norma-ios/Winter/Code/CodeSessionView.swift:85-100` — construction; `:144` the composer mount
 - (no policy/approval-mode picker exists anywhere in `norma-ios`)
 
 **Daemon**

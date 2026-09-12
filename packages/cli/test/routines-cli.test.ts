@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { formatRoutineDetail, formatRoutineLine, routinePromptHead, type RoutineLike } from "../src/routines-cli";
 
-// Phase 5 routines T4 — pure formatting helpers shared by `norma routines` (main.ts) and
+// Phase 5 routines T4 — pure formatting helpers shared by `winter routines` (main.ts) and
 // `/routines` (tui/commands.ts). These are the ONLY unit-testable surface of the CLI/in-chat
 // routines feature (main.ts's argv switch itself is verified by self-review + the gate suite,
 // same precedent as every other subcommand there — see main.test.ts's header comment).

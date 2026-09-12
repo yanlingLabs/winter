@@ -61,8 +61,8 @@ describe("officialCapabilityServersFor — the real official SDK module", () => 
   test("registers one server per record entry, under the SAME key the Winter leg uses", async () => {
     const { module } = await spiedOfficialModule();
     const servers = officialCapabilityServersFor(record(), module);
-    expect(Object.keys(servers)).toEqual(["norma__probe"]);
-    const built = servers["norma__probe"] as { type: string; name: string; instance: unknown };
+    expect(Object.keys(servers)).toEqual(["winter__probe"]);
+    const built = servers["winter__probe"] as { type: string; name: string; instance: unknown };
     expect(built.type).toBe("sdk");
     expect(built.instance).toBeDefined();
   });
@@ -86,7 +86,7 @@ describe("officialCapabilityServersFor — the real official SDK module", () => 
 
   test("a record entry whose instance is not a WinterMcpServerInstance is skipped, not thrown", async () => {
     const { module } = await spiedOfficialModule();
-    const bogus: CapabilityServerRecord = { norma__bogus: { type: "sdk", name: "norma__bogus", instance: { not: "a winter instance" } } };
+    const bogus: CapabilityServerRecord = { winter__bogus: { type: "sdk", name: "winter__bogus", instance: { not: "a winter instance" } } };
     expect(() => officialCapabilityServersFor(bogus, module)).not.toThrow();
     expect(officialCapabilityServersFor(bogus, module)).toEqual({});
   });

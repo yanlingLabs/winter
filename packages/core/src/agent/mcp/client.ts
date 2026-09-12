@@ -29,7 +29,7 @@ export class McpStdioClient {
   tools(): McpToolInfo[] { return this._tools; }
   resourcesCapable(): boolean { return this._resourcesCapable; }
 
-  async start(timeoutMs = Number(process.env.NORMA_MCP_START_TIMEOUT_MS ?? 10000)): Promise<void> {
+  async start(timeoutMs = Number(process.env.WINTER_MCP_START_TIMEOUT_MS ?? 10000)): Promise<void> {
     const child = spawn(this.cfg.command, this.cfg.args ?? [], { env: { ...process.env, ...this.cfg.env }, stdio: ["pipe", "pipe", "pipe"] });
     this.child = child;
     child.on("error", (e) => this.die(e instanceof Error ? e : new Error(String(e))));
@@ -41,7 +41,7 @@ export class McpStdioClient {
     child.stderr!.on("data", () => { /* could log to daemon log */ });
 
     const handshake = (async () => {
-      const initRes = await this.request("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "norma", version: "0.0.1" } });
+      const initRes = await this.request("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "winter", version: "0.0.1" } });
       this._resourcesCapable = !!(initRes && typeof initRes === "object" && initRes.capabilities && typeof initRes.capabilities === "object" && "resources" in initRes.capabilities);
       this.notify("notifications/initialized", {});
       const res = await this.request("tools/list", {});

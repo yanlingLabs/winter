@@ -9,7 +9,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -70,7 +70,7 @@ function tableWithProviders(byId: Map<string, string>): Pick<RuntimeSessionRecor
 
 describe("session.list carries the recorded runtimeKind", () => {
   test("winter, official, engine-era, and unrecorded rows each answer honestly", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-list-runtimekind-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-list-runtimekind-"));
     const store = new SessionStore(home);
     const winterId = store.createSession("g");
     const officialId = store.createSession("g");
@@ -102,7 +102,7 @@ describe("session.list carries the recorded runtimeKind", () => {
   });
 
   test("no driver table at all: every row is silently absent the field (a bare test server)", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-list-runtimekind-bare-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-list-runtimekind-bare-"));
     const store = new SessionStore(home);
     const sessionId = store.createSession("g");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -125,7 +125,7 @@ describe("session.list carries the recorded runtimeKind", () => {
   // Winter Phase 8d (P8d-7, Task 4.1): `providerId` is a FINER fact than `runtimeKind` — read from
   // the SAME record, but present or absent independently of whether a leg is known.
   test("providerId rides the record independently of runtimeKind — present, absent, and no-door cases", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-list-providerid-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-list-providerid-"));
     const store = new SessionStore(home);
     const recordedId = store.createSession("g");
     const unrecordedId = store.createSession("g");
@@ -153,7 +153,7 @@ describe("session.list carries the recorded runtimeKind", () => {
   });
 
   test("no records door at all: providerId is silently absent on every row (a bare test server)", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-list-providerid-bare-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-list-providerid-bare-"));
     const store = new SessionStore(home);
     const sessionId = store.createSession("g");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));

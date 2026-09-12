@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -70,7 +70,7 @@ describe("fix wave F2: a session with no runtime record refuses typed on the Win
   afterEach(() => { stop?.(); stop = undefined; });
 
   async function boot(winter: WinterSessionDrivers) {
-    const home = mkdtempSync(join(tmpdir(), "norma-unrecorded-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-unrecorded-"));
     const store = new SessionStore(home);
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
     const tokens = await authority.ensureTokens();
@@ -120,7 +120,7 @@ describe("fix wave F2: a session with no runtime record refuses typed on the Win
   });
 
   test("a server built WITHOUT the driver table is untouched: the message lands in the log as before", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-unrecorded-bare-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-unrecorded-bare-"));
     const store = new SessionStore(home);
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
     const tokens = await authority.ensureTokens();

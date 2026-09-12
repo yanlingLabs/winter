@@ -14,15 +14,15 @@ export type HarnessKind = "terminal" | "app";
  *
  *  The real hello strings this covers, as of this task — verified in source, and pinned verbatim by
  *  `test/sessions/activity-enforcement.test.ts`'s "harness kinds" block:
- *    - `cli-p`     — `norma -p`, the one-shot   (packages/cli/src/main.ts:613)
+ *    - `cli-p`     — `winter -p`, the one-shot   (packages/cli/src/main.ts:613)
  *    - `cli-chat`  — the interactive Ink TUI     (same line)
  *    - `cli-<verb>` × 22 more, plus two built by template string
  *      (`cli-plugin-revoke-<id>`, `cli-plugin-restart-<name>`) — which is why this is a PREFIX rule
  *      and not a list of literals, since a literal list would silently mis-classify those two into
  *      the non-aborting default and nothing would ever notice.
- *  The app-kind clients, for the record: `orb` (apple/Norma AppModel.ownClientName, shared by the
+ *  The app-kind clients, for the record: `orb` (apple/Winter AppModel.ownClientName, shared by the
  *  menu-bar harness and every detached window), `iphone-gateway` (the Mac gateway's daemon-facing
- *  client, one per phone session), `norma-probe` (the NormaKit debug streamer). */
+ *  client, one per phone session), `winter-probe` (the WinterKit debug streamer). */
 export const TERMINAL_CLIENT_PREFIXES: readonly string[] = ["cli-"];
 
 /** Classifies a harness. `role` is the connection's authenticated hello role — `"remote"` is
@@ -160,7 +160,7 @@ export function createActivityEnforcement(deps: ActivityEnforcementDeps): Activi
    *  Separate because the two have different lifetimes. The plan's words are "auto-background FOR
    *  THAT TURN": the protection belongs to the turn and ends with it (`onTurnSettled`), while the
    *  derivation mark belongs to the moment and ends as soon as anyone attaches. Collapsing them let
-   *  a read-only viewer strip the protection just by looking: `norma watch` attaches, and it is
+   *  a read-only viewer strip the protection just by looking: `winter watch` attaches, and it is
    *  terminal-kind (`cli-watch`), so closing it would have aborted a turn the app had deliberately
    *  left running — the stored `backgrounded` flag is not set (that is the whole point of the mark
    *  being provisional), so nothing else stood in the way. */

@@ -9,6 +9,6 @@ set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p out
 clang -Wall -Wno-unused-parameter -o out/office-lok-gate main.c \
-  -I "../../apple/Norma/Sources/OfficeKit/include" \
+  -I "../../apple/Winter/Sources/OfficeKit/include" \
   -framework CoreGraphics -framework ImageIO -framework CoreFoundation
 echo "built: out/office-lok-gate"

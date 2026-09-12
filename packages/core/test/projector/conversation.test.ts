@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { TRANSIENT_EVENT_TYPES } from "@norma/protocol";
+import { TRANSIENT_EVENT_TYPES } from "@yanlinglabs/winter-protocol";
 import { MAIN_THREAD } from "../../src/projector";
 import {
   accept, assistantText, assistantToolUse, init, makeProjector, result, run, textDelta, toolResult, userTextFrame,
@@ -48,16 +48,16 @@ describe("projector: conversation fold (Winter 8b Task 10)", () => {
     expect(JSON.stringify(out)).not.toContain("private chain of thought");
   });
 
-  test("a tool_use block becomes a tool_call carrying callId, the NORMA name, and argsJson", () => {
+  test("a tool_use block becomes a tool_call carrying callId, the WINTER name, and argsJson", () => {
     const { projector } = makeProjector();
     const out = accept(projector, assistantToolUse("toolu_01", "Read", { file_path: "note.txt" }));
     expect(out.map((e) => e.type)).toEqual(["tool_call"]);
-    // `Read` → `read` (ruling P8b-25): the SessionEvent surface keeps Norma's tool vocabulary.
+    // `Read` → `read` (ruling P8b-25): the SessionEvent surface keeps Winter's tool vocabulary.
     expect(out[0]).toMatchObject({ type: "tool_call", callId: "toolu_01", name: "read", threadId: MAIN_THREAD });
     expect(JSON.parse((out[0] as { argsJson: string }).argsJson)).toEqual({ file_path: "note.txt" });
   });
 
-  test("tool NAMES are translated Winter → Norma, and an unknown name passes through unchanged", () => {
+  test("tool NAMES are translated Winter → Winter, and an unknown name passes through unchanged", () => {
     const { projector } = makeProjector();
     const seen = (winter: string) => (accept(projector, assistantToolUse(`c-${winter}`, winter, {}))[0] as { name: string }).name;
     expect(seen("Read")).toBe("read");
@@ -65,8 +65,8 @@ describe("projector: conversation fold (Winter 8b Task 10)", () => {
     expect(seen("Edit")).toBe("edit");
     expect(seen("Bash")).toBe("bash");
     expect(seen("Agent")).toBe("spawn_agent");
-    expect(seen("mcp__norma__browser__browser")).toBe("browser");
-    expect(seen("mcp__norma__office__docs")).toBe("docs");
+    expect(seen("mcp__winter__browser__browser")).toBe("browser");
+    expect(seen("mcp__winter__office__docs")).toBe("docs");
     // fail-OPEN: an unfamiliar label is cosmetic; dropping the call would break the callId linkage
     expect(seen("mcp__someone_else__thing")).toBe("mcp__someone_else__thing");
     expect(seen("BrandNewWinterTool")).toBe("BrandNewWinterTool");

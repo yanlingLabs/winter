@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -88,7 +88,7 @@ async function boot(winter: WinterSessionDrivers | undefined, store: SessionStor
 
 describe("task.list over the Winter leg reads the session's own task_updated history", () => {
   test("a session opts.winter has, with a task_updated in its log, returns that task", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-task-list-live-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-task-list-live-"));
     const store = new SessionStore(home);
     const sessionId = store.createSession("global");
     store.append(sessionId, {
@@ -108,7 +108,7 @@ describe("task.list over the Winter leg reads the session's own task_updated his
   });
 
   test("a session opts.winter does NOT have falls back to the engine's TaskStore (empty, since none is wired)", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-task-list-cold-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-task-list-cold-"));
     const store = new SessionStore(home);
     const sessionId = store.createSession("global");
     store.append(sessionId, {
@@ -133,7 +133,7 @@ describe("task.list over the Winter leg reads the session's own task_updated his
   });
 
   test("review r1 (Major): an IDLE Winter-leg session (recorded leg, no live driver) still returns its folded tasks", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-task-list-idle-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-task-list-idle-"));
     const store = new SessionStore(home);
     const sessionId = store.createSession("global");
     store.append(sessionId, {
@@ -157,7 +157,7 @@ describe("task.list over the Winter leg reads the session's own task_updated his
   });
 
   test("M3 (whole-branch review): an IDLE OFFICIAL-leg session (recorded leg, no live driver) still returns its folded tasks", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-task-list-official-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-task-list-official-"));
     const store = new SessionStore(home);
     const sessionId = store.createSession("global");
     store.append(sessionId, {
@@ -180,7 +180,7 @@ describe("task.list over the Winter leg reads the session's own task_updated his
   });
 
   test("an ENGINE-era session (recorded leg \"engine\", never Winter) still takes the legacy fallback", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-task-list-engine-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-task-list-engine-"));
     const store = new SessionStore(home);
     const sessionId = store.createSession("global");
     store.append(sessionId, {

@@ -9,20 +9,20 @@ async function checks(): Promise<string[]> {
   const results: string[] = [];
 
   // 1. bun:sqlite
-  const db = new Database(join(mkdtempSync(join(tmpdir(), "norma-spike-")), "t.db"));
+  const db = new Database(join(mkdtempSync(join(tmpdir(), "winter-spike-")), "t.db"));
   db.run("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)");
   db.run("INSERT INTO t (v) VALUES (?)", ["hello"]);
   const row = db.query("SELECT v FROM t WHERE id = 1").get() as { v: string };
   results.push(`sqlite: ${row.v === "hello" ? "OK" : "FAIL"}`);
 
   // 2. Bun.secrets (Keychain)
-  await Bun.secrets.set({ service: "com.norma.spike", name: "probe", value: "s3cret" });
-  const got = await Bun.secrets.get({ service: "com.norma.spike", name: "probe" });
-  await Bun.secrets.delete({ service: "com.norma.spike", name: "probe" });
+  await Bun.secrets.set({ service: "com.winter.spike", name: "probe", value: "s3cret" });
+  const got = await Bun.secrets.get({ service: "com.winter.spike", name: "probe" });
+  await Bun.secrets.delete({ service: "com.winter.spike", name: "probe" });
   results.push(`secrets: ${got === "s3cret" ? "OK" : "FAIL"}`);
 
   // 3. unix socket round-trip
-  const sock = join(tmpdir(), `norma-spike-${process.pid}.sock`);
+  const sock = join(tmpdir(), `winter-spike-${process.pid}.sock`);
   const server = Bun.listen({
     unix: sock,
     socket: { data(s, d) { s.write(d); } }, // echo
@@ -49,7 +49,7 @@ function App() {
   }, []);
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="cyan" padding={1}>
-      <Text color="cyan" bold>◍ norma bun-compile spike</Text>
+      <Text color="cyan" bold>◍ winter bun-compile spike</Text>
       {lines.map((l, i) => <Text key={i}>{l}</Text>)}
     </Box>
   );

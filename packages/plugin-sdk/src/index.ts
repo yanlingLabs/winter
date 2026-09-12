@@ -2,20 +2,20 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket,
-} from "@norma/protocol";
+} from "@yanlinglabs/winter-protocol";
 
 /**
- * `@norma/plugin-sdk` — the Tier-2 plugin authoring library (design spec §4, plan Phase 4b
+ * `@yanlinglabs/winter-plugin-sdk` — the Tier-2 plugin authoring library (design spec §4, plan Phase 4b
  * Task 5). `createPlugin({tools, onShortcut, tile}).serve()` owns the WHOLE lifecycle contract
  * (connect, hello, register, dispatch, reconnect, clean shutdown) so a plugin author never has
  * to implement it themselves — see the class doc below for the exact wire sequence.
  *
- * SELF-CONTAINED BY DESIGN: this package imports wire *types* from `@norma/protocol` (a
+ * SELF-CONTAINED BY DESIGN: this package imports wire *types* from `@yanlinglabs/winter-protocol` (a
  * declared dependency) but never `packages/core` — a plugin process is a separate OS process the
  * supervisor spawns (packages/core/src/plugins/supervisor.ts), so pulling in core's daemon
  * machinery here would be both wrong (core is a server, this is a client) and a dependency
  * cycle risk. The NDJSON framing/request-response correlation below is a small, deliberately
- * duplicated mirror of `packages/cli/src/client.ts`'s `NormaClient` — same shapes over the wire,
+ * duplicated mirror of `packages/cli/src/client.ts`'s `WinterClient` — same shapes over the wire,
  * independent implementation, so plugin authors installing this package never pull in the CLI or
  * core.
  */
@@ -44,7 +44,7 @@ export interface PluginToolDef {
 /** Phase 4c Task 5 (design spec §5): the helper bag every tool `run` handler receives as its
  *  second argument. Today this is just `hardware` — a plugin's own escape hatch into core's
  *  `hardware.request` broker (Phase 4c Task 2) for verbs like `setChargeLimit`/`getChargeLimit`,
- *  routed through Norma.app's privileged XPC helper. Kept as its own named interface (not inlined
+ *  routed through Winter.app's privileged XPC helper. Kept as its own named interface (not inlined
  *  into `PluginToolDef.run`'s signature) because it's public surface a plugin author imports and
  *  destructures directly. */
 export interface PluginContext {
@@ -96,7 +96,7 @@ export interface PluginDefinition {
    *  supplies.
    *
    *  Independently of dispatch, if this is set, `serve()` also registers whatever shortcut ids
-   *  the plugin's own `norma-plugin.json` (`contributes.shortcuts`, design spec §1/§6 — "plugins
+   *  the plugin's own `winter-plugin.json` (`contributes.shortcuts`, design spec §1/§6 — "plugins
    *  declare shortcut IDs in the manifest") declares, via `shortcut.register`, on every
    *  (re)registration. Reading the manifest is a plain `fs.readFileSync` off `process.cwd()` (the
    *  supervisor spawns each plugin process cwd'd into its own plugin directory) — never a
@@ -124,11 +124,11 @@ export interface PluginDefinition {
 }
 
 export interface ServeOptions {
-  /** Defaults to `NORMA_SOCKET`. */
+  /** Defaults to `WINTER_SOCKET`. */
   socketPath?: string;
-  /** Defaults to `NORMA_PLUGIN_TOKEN`. */
+  /** Defaults to `WINTER_PLUGIN_TOKEN`. */
   token?: string;
-  /** Defaults to `NORMA_PLUGIN_ID`. */
+  /** Defaults to `WINTER_PLUGIN_ID`. */
   pluginId?: string;
 }
 
@@ -189,8 +189,8 @@ interface DeclaredShortcut { id: string; description?: string; default?: string 
 
 function readDeclaredShortcuts(): DeclaredShortcut[] {
   try {
-    const pluginDir = process.env.NORMA_PLUGIN_DIR ?? process.cwd();
-    const raw = readFileSync(join(pluginDir, "norma-plugin.json"), "utf8");
+    const pluginDir = process.env.WINTER_PLUGIN_DIR ?? process.cwd();
+    const raw = readFileSync(join(pluginDir, "winter-plugin.json"), "utf8");
     const parsed = JSON.parse(raw) as { contributes?: { shortcuts?: unknown } };
     const shortcuts = parsed.contributes?.shortcuts;
     if (!Array.isArray(shortcuts)) return [];
@@ -220,7 +220,7 @@ type PendingEntry = { resolve: (v: unknown) => void; reject: (e: Error) => void 
 
 // -------------------------------------------------------------------------------------------
 // `hardware.request`'s wire result union — a local TS type kept independent of
-// `@norma/protocol`'s `HardwareRequestResult` zod schema (methods.ts), same precedent as core's
+// `@yanlinglabs/winter-protocol`'s `HardwareRequestResult` zod schema (methods.ts), same precedent as core's
 // own `packages/core/src/peripheral/hardware.ts` (`HardwareRequestResult` there): coverage that
 // the two stay in sync lives in tests (this package's + core's), not the type system. This SDK
 // never zod-parses ANY RPC result (see `request()` above, `Promise<unknown>` throughout) — adding
@@ -488,14 +488,14 @@ export function createPlugin(def: PluginDefinition): Plugin {
       return Promise.reject(new Error("createPlugin().serve(): already serving"));
     }
 
-    socketPath = opts?.socketPath ?? process.env.NORMA_SOCKET;
-    token = opts?.token ?? process.env.NORMA_PLUGIN_TOKEN;
-    pluginId = opts?.pluginId ?? process.env.NORMA_PLUGIN_ID;
+    socketPath = opts?.socketPath ?? process.env.WINTER_SOCKET;
+    token = opts?.token ?? process.env.WINTER_PLUGIN_TOKEN;
+    pluginId = opts?.pluginId ?? process.env.WINTER_PLUGIN_ID;
 
     const missing: string[] = [];
-    if (!socketPath) missing.push("socketPath (NORMA_SOCKET)");
-    if (!token) missing.push("token (NORMA_PLUGIN_TOKEN)");
-    if (!pluginId) missing.push("pluginId (NORMA_PLUGIN_ID)");
+    if (!socketPath) missing.push("socketPath (WINTER_SOCKET)");
+    if (!token) missing.push("token (WINTER_PLUGIN_TOKEN)");
+    if (!pluginId) missing.push("pluginId (WINTER_PLUGIN_ID)");
     if (missing.length > 0) {
       return Promise.reject(new Error(`createPlugin().serve(): missing ${missing.join(", ")}`));
     }

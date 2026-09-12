@@ -1,5 +1,5 @@
 import type { PermissionResult } from "@yanlinglabs/winter-agent-sdk";
-import type { NewSessionEvent } from "@norma/protocol";
+import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import type { BridgedApprovalRequest } from "./approval-bridge";
 import { NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
@@ -61,7 +61,7 @@ export interface PlanBridgeDeps {
   /** Test seam; defaults to `Date.now`. */
   now?: () => number;
   /** Defaults to `NO_PARK_TIMEOUT_MS` (24.8 days) — the SAME park ceiling `approval-bridge.ts`/
-   *  `question-bridge.ts` use, not the retired engine's 5-minute `NORMA_PLAN_TIMEOUT_MS`: a plan
+   *  `question-bridge.ts` use, not the retired engine's 5-minute `WINTER_PLAN_TIMEOUT_MS`: a plan
    *  is exactly as human-paced as any other approval card, and a shorter park would silently auto-
    *  reject a plan a human is still reading. */
   parkTimeoutMs?: number;

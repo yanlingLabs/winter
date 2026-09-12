@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Signs a relay config with the Norma relay-config Ed25519 key (SP2b Task 2).
+ * Signs a relay config with the Winter relay-config Ed25519 key (SP2b Task 2).
  *
  * Usage:
  *   bun run scripts/sign-relay-config.ts <config.json>   # normal mode
@@ -9,7 +9,7 @@
  *                                                         # test seed (0xD4 x 32) -- no Keychain
  *                                                         # touched; for cross-language test
  *                                                         # vectors only (see task-2-brief.md
- *                                                         # Step 10 / apple/NormaProtocol's
+ *                                                         # Step 10 / apple/WinterProtocol's
  *                                                         # RelayConfigTests.swift)
  *
  * The private key lives in the macOS login Keychain as a generic password (service
@@ -18,7 +18,7 @@
  * generated in a later task); every other invocation only reads it.
  *
  * Signs `"norma-relay-config/1"` (UTF-8) + the canonical-CBOR encoding of `{relays, version}` --
- * the exact same domain string and map shape `apple/NormaProtocol`'s `RelayConfigSigner` and
+ * the exact same domain string and map shape `apple/WinterProtocol`'s `RelayConfigSigner` and
  * `QRPayload` use there, verified with `Curve25519.Signing`. This script re-implements the
  * canonical-CBOR *encoder* (not the decoder -- nothing here needs to parse CBOR) so it can run
  * standalone under Bun with no dependency on the Swift package.
@@ -198,7 +198,7 @@ function signConfig(config: RelayConfig, seed: Buffer): SignedRelayConfigJSON {
 // ---------------------------------------------------------------------------
 
 // "test-relay-config-key" -- see task-2-brief.md Step 10 and
-// apple/NormaProtocol/Tests/NormaProtocolTests/RelayConfigTests.swift. Not a secret: a
+// apple/WinterProtocol/Tests/WinterProtocolTests/RelayConfigTests.swift. Not a secret: a
 // clearly-named, hardcoded test fixture, never used to sign anything real.
 const TEST_SEED = Buffer.alloc(32, 0xd4);
 

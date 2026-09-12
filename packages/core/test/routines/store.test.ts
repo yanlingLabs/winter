@@ -1,13 +1,29 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openRoutineStore, type RoutineStore } from "../../src/routines/store";
 
 function makeStore(): { store: RoutineStore; dir: string } {
-  const dir = mkdtempSync(join(tmpdir(), "norma-routines-"));
+  const dir = mkdtempSync(join(tmpdir(), "winter-routines-"));
   return { store: openRoutineStore(join(dir, "routines.db")), dir };
 }
+
+// P9b-12: the standalone default path bypassed the home resolver (hardcoded `~/.winter`) before
+// this fix — a WINTER_HOME override must move it with everything else.
+describe("openRoutineStore — default path", () => {
+  test("lands under WINTER_HOME when called with no path", () => {
+    const saved = process.env.WINTER_HOME;
+    const home = mkdtempSync(join(tmpdir(), "winter-routines-home-"));
+    try {
+      process.env.WINTER_HOME = home;
+      openRoutineStore().close();
+      expect(existsSync(join(home, "routines.db"))).toBe(true);
+    } finally {
+      if (saved === undefined) delete process.env.WINTER_HOME; else process.env.WINTER_HOME = saved;
+    }
+  });
+});
 
 describe("RoutineStore — create", () => {
   test("creates a routine, validating spec and generating an id", () => {
@@ -167,7 +183,7 @@ describe("RoutineStore — recordDefer backoff progression", () => {
 
 describe("openRoutineStore — path handling", () => {
   test("creates the parent directory for an injected path", () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-routines-parent-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-routines-parent-"));
     const nested = join(dir, "nested", "sub", "routines.db");
     const store = openRoutineStore(nested);
     const routine = store.create({ spec: "every 1h", prompt: "a" });

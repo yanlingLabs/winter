@@ -3,7 +3,7 @@ import { z } from "zod";
 // lives): the `session_activity` EVENT variant needs the same enum, and events.ts cannot import
 // from this file — methods.ts already imports from events.ts, so the reverse edge would be a module
 // cycle whose `z.enum(...)` const would be in the TDZ at events.ts's evaluation. Re-exported by the
-// package index either way, so `@norma/protocol` consumers see no difference.
+// package index either way, so `@yanlinglabs/winter-protocol` consumers see no difference.
 import { SessionEvent, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption, PanelTabKind, PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH, DIFF_ID_SHAPE } from "./events";
 
 export const PROTOCOL_VERSION = 0;
@@ -116,7 +116,7 @@ export const SessionCreateParams = z.object({
   // routines/runner.ts's runHeadless stamps `routine/<id>` here (ALONGSIDE the session-title stamp
   // T2 already ships as a documented fallback — see that file's own doc comment: the title is
   // user-visible, this field is the machine-readable record, and neither is ever overwritten by
-  // the other). Additive/optional so every existing caller (CLI, NormaKit) that never sends it is
+  // the other). Additive/optional so every existing caller (CLI, WinterKit) that never sends it is
   // unaffected — SessionStore.createSession defaults it to `undefined`/NULL on the row.
   origin: z.string().min(1).optional(),
   // Dispatch (Phase 7): "code" (default) | "dispatch". The handler REJECTS "dispatch" — the
@@ -126,14 +126,14 @@ export const SessionCreateParams = z.object({
   // The handler rejects it for remote callers only (Mac-local for this slice).
   mode: z.enum(["code", "dispatch", "chat"]).optional(),
   // Chat Slice D Task 1: an optional per-session model override, stamped at creation time —
-  // additive/optional so every existing caller (CLI, NormaKit, the phone) that never sends it is
+  // additive/optional so every existing caller (CLI, WinterKit, the phone) that never sends it is
   // unaffected. Index-only metadata (like `cwd`/`approvalPolicy`, NOT `mode` — see
   // `SessionRow.model`'s own doc comment in store.ts), so it does NOT ride the `session_created`
   // event and resets to absent on a full index rebuild. Bounded — see SESSION_MODEL_MAX_CHARS.
   model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).optional(),
   // provider-correctness T6: the effort half of `model` just above, stamped at creation time and
   // validated by the SAME rules `session.setEffort` applies (model-aware membership against
-  // `effortsForModel`, plus the code-sessions-only gate for a Norma-level tier). Added rather than
+  // `effortsForModel`, plus the code-sessions-only gate for a Winter-level tier). Added rather than
   // left to a create-then-setEffort pair because the phone's New Chat flow sets model AND effort at
   // create time on a latency-critical path: two round-trips leave a window in which a turn fired
   // immediately after create resolves at the GLOBAL effort, silently. Index-only metadata like
@@ -159,9 +159,9 @@ export const SessionListResult = z.object({
     // `title`/`forkedFrom` above are: the value really does flow out of `store.list()`, so a
     // schema-validating client must be able to read it. It could not — a zod object strips every key
     // it does not name, so the TS client (packages/cli/src/client.ts `validated()`) silently dropped
-    // a field the daemon was already putting on the socket, while Swift's `NormaClient.listSessions()`
+    // a field the daemon was already putting on the socket, while Swift's `WinterClient.listSessions()`
     // (which reads raw JSON, not a schema) has been consuming `s["cwd"]` all along. This declaration
-    // closes that asymmetry; `norma agents`' cwd column is its first schema-validating consumer.
+    // closes that asymmetry; `winter agents`' cwd column is its first schema-validating consumer.
     //
     // Optional and index-only, on `origin`'s exact terms: absent means "no recorded cwd" — a session
     // created without one, or one whose index was rebuilt (cwd does NOT ride the event log, so a full
@@ -190,7 +190,7 @@ export const SessionListResult = z.object({
     // client must be able to read it. Absent means "this session uses the global default", never
     // "no effort" (an unset effort omits the provider's `reasoning` block entirely; `"none"` is a
     // distinct, real, measured level — see REASONING_EFFORTS in core's settings.ts).
-    // provider-correctness T5: the value may ALSO be a Norma-level tier from
+    // provider-correctness T5: the value may ALSO be a Winter-level tier from
     // `sync.config.clientEfforts` (e.g. "ultra") — the user's SELECTION is stored and reported
     // verbatim, never rewritten to its wire translation. A picker matching this against the
     // chosen model's `efforts` array alone will miss; match against BOTH lists.
@@ -220,7 +220,7 @@ export const SessionListResult = z.object({
     // leaving it blank — store.ts's `recoverAll` pass 2), and unlike `activity`/`dirs` it rides no
     // participation gate, so chat and dispatch rows carry it too. A consumer that coerced absence
     // to `"auto"` would be asserting a policy nobody stated — see `FieldStateAdapter`'s
-    // `sessionPolicyKnown` (apple/Norma) for the shape of an honest answer.
+    // `sessionPolicyKnown` (apple/Winter) for the shape of an honest answer.
     approvalPolicy: z.string().min(1).optional(),
     // Chat Slice D Task 2: round-trips SessionRow.forkedFrom (store.ts). Declared here — rather
     // than left to smuggle through undeclared — for the same reason `title` above is: the value
@@ -402,7 +402,7 @@ export const SessionCompactResult = z.object({
  *  validates every `skills.list` response through `SkillsListResult.safeParse` and throws on
  *  failure, and `z.array()` fails the whole array on one bad element. Phase 5c T1's always-present
  *  `writing-skills` builtin did exactly that (`source:"builtin"` wasn't in this enum), breaking
- *  `norma skills` on every invocation until the 5c T3 review fix admitted it here. */
+ *  `winter skills` on every invocation until the 5c T3 review fix admitted it here. */
 export const SkillMetaSchema = z.object({
   name: z.string(),
   description: z.string(),
@@ -412,7 +412,7 @@ export const SkillMetaSchema = z.object({
   // (never false) otherwise.
   claudeFormat: z.boolean().optional(),
   // Phase 5c Task 3: mirrors SkillStore's `author?` (agent/skills.ts) — set for a self-authored
-  // skill (T1 stamps `author: norma` in the frontmatter, T3's list()/load() parse it back out),
+  // skill (T1 stamps `author: winter` in the frontmatter, T3's list()/load() parse it back out),
   // undefined for every other source. Additive/optional: an older server that never sends it still
   // parses.
   author: z.string().optional(),
@@ -438,7 +438,7 @@ export const SkillsReadParams = z.object({ name: z.string().min(1), cwd: z.strin
 /** Mirrors `MemoryReadResult`'s `{fact}` pattern: `SkillMetaSchema` plus the full body. */
 export const SkillsReadResult = z.object({ skill: SkillMetaSchema.extend({ body: z.string() }) });
 
-/** No `cwd`/scope: `writeSelf` always targets `~/.norma/skills/self`, independent of caller cwd. */
+/** No `cwd`/scope: `writeSelf` always targets `~/.winter/skills/self`, independent of caller cwd. */
 export const SkillsWriteParams = z.object({
   name: z.string().min(1),
   description: z.string().min(1),
@@ -475,7 +475,7 @@ export const PluginInfoSchema = z.object({
   hasMcp: z.boolean(),
   mcpEnabled: z.boolean(),
   disabled: z.boolean(),
-  // Phase 4a Task 3 additions — carried so the CLI's consent flow (norma plugin enable/list) can
+  // Phase 4a Task 3 additions — carried so the CLI's consent flow (winter plugin enable/list) can
   // render tier + consent state + the full exec-payload disclosure without a second round trip.
   // All optional so older-shaped fixtures/servers still parse (see methods.test.ts).
   tier: z.enum(["capability", "platform"]).optional(),
@@ -487,7 +487,7 @@ export const PluginInfoSchema = z.object({
   execPayload: z.array(z.string()).optional(),
   /** manifest.permissions.tcc verbatim, for the "will request macOS permission: <each>" lines. */
   tccPermissions: z.array(z.string()).optional(),
-  /** manifest.permissions.hardware verbatim, for the "hardware access via Norma.app helper: <each>" lines. */
+  /** manifest.permissions.hardware verbatim, for the "hardware access via Winter.app helper: <each>" lines. */
   hardwarePermissions: z.array(z.string()).optional(),
   /** Phase 4d-i Task 4: live PluginSupervisor runtime status for Tier-2 (`platform`,
    *  pluginSpawnEligible) plugins — the SAME `SupervisorStatus` the supervisor tracks
@@ -546,7 +546,7 @@ export const SessionSetModelResult = z.object({});
 
 // provider-correctness T4 (spec Component 4): per-session reasoning effort. Its OWN method rather
 // than a second argument on `session.setModel` — the user's call, verbatim: "effort and model are
-// two different things, just like the CLI", where `norma model <slug>` and `norma model --effort
+// two different things, just like the CLI", where `winter model <slug>` and `winter model --effort
 // <level>` are separate controls over separate axes. Everything else mirrors `session.setModel`
 // above: mode-agnostic (there is no "fixed effort" concept for any mode, unlike session.setPolicy's
 // chat rule), `effort: null` CLEARS the override so the next resolution falls back to the global
@@ -565,7 +565,7 @@ export const SessionSetEffortResult = z.object({});
 
 // session-activity-hygiene T3 (spec §1): the WRITE half of the session lifecycle — `session.list`'s
 // derived `activity` (T2) is the read half. ONE method behind every surface that moves a session's
-// state: the TUI's `/background` and `/archive`, dispatch's management verbs (T8), the `norma
+// state: the TUI's `/background` and `/archive`, dispatch's management verbs (T8), the `winter
 // agents` TUI (T9), and the phone (which is why it joins the remote allowlist — 19 → 20).
 //
 // The VALUE NAMES A TARGET STATE, not a flag, and only the two STORED states are settable —
@@ -594,7 +594,7 @@ export const SessionSetEffortResult = z.object({});
 // with a RUNNING TURN is `INVALID_PARAMS` ("stop or background it first"), because archived is a
 // flag over IDLE (spec §1.4) and archiving a live turn would strand it behind a hidden tab.
 // PHONE DEBT (activity-verb-semantics, owed at the next kit bump): the iOS companion consumes this
-// method through NormaKit's Gateway allowlist and has NOT been updated. It owes BOTH halves — the
+// method through WinterKit's Gateway allowlist and has NOT been updated. It owes BOTH halves — the
 // widened `activity` param (`"unbackground"` is new; the result shape is unchanged, so nothing
 // breaks on the wire today) AND the changed SEMANTICS of what it already sends: `null` no longer
 // clears both flags, it is RESUME (archive bit only), so a phone control that sends `null` to
@@ -749,8 +749,8 @@ export const EngineActivityResult = z.object({
 
 export const QuotaStateParams = z.object({});
 /** The FLAT merge of `QuotaManager.state()` ({kind:"ok"} | {kind:"limited", resumeAt}) and
- *  `.usage()` ({inputTokens, outputTokens}) — matches NormaKit's `quotaState()` wrapper
- *  field-for-field (apple/NormaKit/Sources/NormaKit/NormaClient+Methods.swift). */
+ *  `.usage()` ({inputTokens, outputTokens}) — matches WinterKit's `quotaState()` wrapper
+ *  field-for-field (apple/WinterKit/Sources/WinterKit/WinterClient+Methods.swift). */
 export const QuotaStateResult = z.object({
   kind: z.enum(["ok", "limited"]),
   resumeAt: z.number().int().nonnegative().optional(),
@@ -862,7 +862,7 @@ export const PluginRevokeTokenParams = z.object({ pluginId: z.string().min(1) })
 export const PluginRevokeTokenResult = z.object({ ok: z.literal(true) });
 
 /** Final-review Fix 1: the manual-restart rider (`PluginSupervisor.restart`, plugins/supervisor.ts
- *  — existed and was tested but had no caller) exposed over the wire so `norma plugin restart
+ *  — existed and was tested but had no caller) exposed over the wire so `winter plugin restart
  *  <id>` can recover a plugin stuck "circuit-open" (nothing else ever clears that state short of
  *  a daemon restart). Same role precedent as `plugins.list` — harness OR admin, NOT one of the six
  *  plugin-role verbs (a plugin can never restart itself or another plugin). */
@@ -871,9 +871,9 @@ export const PluginRestartResult = z.object({ ok: z.literal(true) });
 
 // ---------------------------------------------------------------------------------------------
 // Hardware helper (Phase 4c Task 1, spec §5): plugin (or harness, dev/testing) → core →
-// Norma.app's XPC helper. `hardware.request` is PLUGIN-CALLABLE (ipc/server.ts's
+// Winter.app's XPC helper. `hardware.request` is PLUGIN-CALLABLE (ipc/server.ts's
 // PLUGIN_ALLOWED_METHODS gains it, growing the plugin-role allowlist to seven verbs);
-// `hardware.respond` is NOT — only the active provider connection (Norma.app) may answer a
+// `hardware.respond` is NOT — only the active provider connection (Winter.app) may answer a
 // `hardware_requested` push (events.ts), same precedent as `peripheral.respond` above. The
 // core-side broker (Task 2) owns unknown-verb/consent/no-provider/timeout error shaping; this
 // task only pins the wire shapes.
@@ -888,8 +888,8 @@ export const HardwareRequestParams = z.object({
  *  Success carries `resultJson`; failures are typed by `code`: `unknown_verb`
  *  (`verbClass(verb) === null`, core's peripheral/hardware.ts), `consent_denied` (a plugin-role
  *  caller's manifest permissions/consent record didn't cover the verb's class — `missing` names
- *  which permission/consent class was absent), `no_provider` (Norma.app isn't connected —
- *  `message` is the user-facing "hardware features require Norma.app" string), `timeout` (the
+ *  which permission/consent class was absent), `no_provider` (Winter.app isn't connected —
+ *  `message` is the user-facing "hardware features require Winter.app" string), `timeout` (the
  *  provider never answered within the broker's timeoutMs), and `provider_error` (the provider's
  *  own `hardware.respond` carried an `error` string, passed through verbatim as `message`). */
 export const HardwareRequestResult = z.union([
@@ -942,7 +942,7 @@ export const TileActionResult = PluginPushResult;
 // daemon (no restart required), instead of the CLI-only, file-based, restart-to-apply flow that
 // predates this task. Mirrors the CLI's own plugin-cli.ts flow (missingConsents/
 // buildConsentBlock/applyFreshPluginConsent/setPluginEnabled/grantPluginConsents/
-// removePluginFromSettings/removePluginDir, all @norma/core's plugins/lifecycle.ts) but wire-
+// removePluginFromSettings/removePluginDir, all @yanlinglabs/winter-core's plugins/lifecycle.ts) but wire-
 // shaped as typed result unions that never throw for an expected outcome — same precedent as
 // `HardwareRequestResult`/`PluginPushResult` above. NOT plugin-role verbs: a plugin can never
 // install/enable/disable/remove/consent itself or another plugin — ipc/server.ts's
@@ -1137,7 +1137,7 @@ export const MemoryAuditResult = z.object({ lines: z.array(MemoryAuditLineSchema
 /** BYOK T1 (design doc `2026-07-16-byok-provider-setup-design.md` §1): the in-app "bring your own
  *  OpenAI API key" path — a scoped, purpose-specific RPC (deliberately NOT a generic secret-write
  *  verb). `type` is a literal (openai-compatible only, v1) — switching back to codex-oauth stays
- *  CLI-only (`norma login`), same "out of scope" carve-out as the design doc. `model` defaults to
+ *  CLI-only (`winter login`), same "out of scope" carve-out as the design doc. `model` defaults to
  *  "gpt-4o" server-side when omitted (ipc/server.ts's handler), mirroring `ProviderSettings`'s own
  *  required (non-optional) `model` field for openai-compatible. Provider-TYPE changes need a
  *  daemon restart to take effect (providers/manager.ts fixes `providerType` at boot) — this RPC
@@ -1153,12 +1153,12 @@ export const ProviderConfigureResult = z.object({ ok: z.literal(true) });
 // ---------------------------------------------------------------------------------------------
 // Workflows (CC-parity phase 3, Track C Task C2): the RPC surface over `WorkflowRuntime` (live
 // runs, core/src/workflows/runtime.ts, A3+/B2) + `WorkflowStore` (saved, trust-gated
-// `.norma/workflows/*.js` scripts, C1) — mirrors the routines.*/memory.* blocks above (harness AND
+// `.winter/workflows/*.js` scripts, C1) — mirrors the routines.*/memory.* blocks above (harness AND
 // admin role, no additional role check at the wire-schema layer; ipc/server.ts enforces it).
 // LOCAL-ONLY IN V1 (Global Constraints): these four verbs are deliberately NOT added to
 // PLUGIN_ALLOWED_METHODS or REMOTE_ALLOWED_METHODS (ipc/server.ts) — a plugin or remote (iPhone
 // gateway) connection is role-rejected before dispatch ever reaches a handler for any of them. The
-// Swift NormaKit mirror for these same four methods is a LATER task (Track D) — no protocol
+// Swift WinterKit mirror for these same four methods is a LATER task (Track D) — no protocol
 // codegen fixture cost here either way: only new `SessionEvent` VARIANTS need
 // `pnpm protocol:generate`'s fixtures, and this task adds no new event variant.
 //
@@ -1247,7 +1247,7 @@ export const SyncHeadsResult = z.object({
      *  Unvalidated on the way OUT, deliberately: this reports the daemon's own column, which every
      *  ingress into it (`session.setEffort`, `session.create`, `sync.push`) has already checked.
      *  Absent means "no override" — the session resolves at the global default. It may be a
-     *  Norma-level TIER only in theory: `sync.heads` lists CHAT sessions exclusively and every
+     *  Winter-level TIER only in theory: `sync.heads` lists CHAT sessions exclusively and every
      *  ingress refuses a tier for chat, so a reader that treats it as a wire effort is safe today —
      *  but `SessionSummary.effort`'s rule (match against BOTH lists) is the one to follow. */
     effort: z.string().optional(),
@@ -1316,7 +1316,7 @@ export const SYNC_MAX_CHUNK_B64 = 384 * 1024;
  *  only symptom is "the answers are different on the Mac". Its ingress validation is model-aware
  *  (`effortsForModel`, packages/core/src/ipc/sync.ts) exactly as `session.setEffort`'s is, and it
  *  drops-and-logs rather than failing the push, exactly as `model` does. One rule is stricter here
- *  than at `session.setEffort`: a Norma-level TIER (`sync.config.clientEfforts`, e.g. `"ultra"`) is
+ *  than at `session.setEffort`: a Winter-level TIER (`sync.config.clientEfforts`, e.g. `"ultra"`) is
  *  ALWAYS dropped on this ingress, because a tier is code-sessions-only and this surface is
  *  chat-only fail-closed — no session reachable through it may ever hold one. */
 export const SyncPushParams = z.object({
@@ -1470,7 +1470,7 @@ export const SyncConfigResult = z.object({
    *  configured no effort" and send none itself — never as a level to put on the wire, and never as
    *  a reason to pick one. */
   defaultEffort: z.string(),
-  /** NORMA-LEVEL effort tiers this daemon offers — selectable in Norma, **never sent upstream**,
+  /** WINTER-LEVEL effort tiers this daemon offers — selectable in Winter, **never sent upstream**,
    *  and offered on CODE sessions only (`session.setEffort` refuses them for chat/dispatch).
    *  `["ultra"]` on a current daemon (`CLIENT_EFFORTS`, packages/core/src/settings.ts).
    *
@@ -1483,7 +1483,7 @@ export const SyncConfigResult = z.object({
    *  — `ultra` was offered by a phone-side mock while a global enum on the backend rejected it — so
    *  re-merging the two lists would reintroduce it through the fix.
    *
-   *  `[]` is a real answer and the only correct degrade: "this daemon offers no Norma-level tiers".
+   *  `[]` is a real answer and the only correct degrade: "this daemon offers no Winter-level tiers".
    *  A client renders exactly what it is told (wire levels from `models[].efforts`, tiers from
    *  here) and invents neither, so an older daemon meeting a newer client simply shows no tiers
    *  rather than offering one the daemon would refuse. */
@@ -1553,7 +1553,7 @@ export const PanelTabSchema = z.object({
  *  enumerated correctly.
  *
  *  **What it prevents, concretely.** A tab's `url` is not just a label: `PanelWebTab.makeContent()`
- *  (`apple/Norma/Sources/AppShell/PanelWebTab.swift`) loads it into a REAL Chromium browser on every
+ *  (`apple/Winter/Sources/AppShell/PanelWebTab.swift`) loads it into a REAL Chromium browser on every
  *  restore. A persisted `javascript:…` would therefore be re-executed against whatever page is
  *  loaded, every time the session is reopened — for as long as the session exists, which is forever
  *  (sessions are user-delete-only). `file://` would turn a stored string into a local-file read, and
@@ -1646,7 +1646,7 @@ export const PanelOpenTabParams = z.object({
     });
   }
   // fix-wave 2026-08-14, Item 1: `diffId` pairs with `kind === "diff"` in the PRESENT-implies
-  // direction only. Three shipped comments (NormaKit's `NormaClient+Methods.swift`,
+  // direction only. Three shipped comments (WinterKit's `WinterClient+Methods.swift`,
   // ShellSessionHost.swift ×2) already claimed this refinement enforced that pairing
   // server-side; until this issue, it only checked the url scheme above, so those comments were
   // aspirational rather than true. The REVERSE is deliberately not required here — an id-less
@@ -1691,13 +1691,13 @@ export const PanelReportNavigationResult = z.object({ ok: z.literal(true) });
  *
  *  **"Over CDP" was this sentence's original wording and B2 Task 3 built it otherwise, so it is
  *  corrected here rather than left to read as a spec.** `read` and `screenshot` do go over the Chrome
- *  DevTools Protocol (`Runtime.evaluate`, `Page.captureScreenshot`, through `NormaCEFExecuteCDP`);
+ *  DevTools Protocol (`Runtime.evaluate`, `Page.captureScreenshot`, through `WinterCEFExecuteCDP`);
  *  `navigate` and `back` go through the SAME two CEF entry points the panel's own address bar and
- *  back button use (`NormaCEFLoadURL`/`NormaCEFGoBack`), deliberately, so the app has one load path
+ *  back button use (`WinterCEFLoadURL`/`WinterCEFGoBack`), deliberately, so the app has one load path
  *  rather than two.
  *
  *  **"At most once", not "once", and the two zero-call cases are real** — both decided in
- *  `PanelCommandConsumer` (apple/Norma/Sources/AppShell), both leaving the command to expire on its
+ *  `PanelCommandConsumer` (apple/Winter/Sources/AppShell), both leaving the command to expire on its
  *  `deadlineMs`: a command that arrives during the app's quit beat (the browser runtime is latched
  *  shut; the app is about to stop existing, so a failure and a timeout describe the same fact), and a
  *  verb still running when the app's own copy of the deadline fires (the daemon's timer was armed for

@@ -4,7 +4,7 @@
 //
 // WHY IT EXISTS. Task 17 retired the registry-door `lsp` tool "because Winter's own LSP serves the
 // child" — and the measured 0.0.4 advertised set has NO `LSP` (`runtime-sdk/tool-names.ts`:
-// `WINTER_ADVERTISED_TOOLS_0_0_4`; the SDK's `descriptors/lsp.ts` is capability-gated and a Norma
+// `WINTER_ADVERTISED_TOOLS_0_0_4`; the SDK's `descriptors/lsp.ts` is capability-gated and a Winter
 // child never gets it). CLAUDE.md's tool surface promises "a single multi-purpose `lsp` tool", so
 // this server is that promise on the Winter leg: the same `ToolDefinition` the registry door
 // registers (`agent/tools/lsp.ts`'s `lspToolDefs`), the same fence discipline (every file_path

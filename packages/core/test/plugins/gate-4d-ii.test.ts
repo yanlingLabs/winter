@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import {
   createSupervisedInstance,
   installSampleEcho,
@@ -106,7 +106,7 @@ describe("4d-ii gate: over-the-wire plugin lifecycle (install -> enable/consent 
     "plugins.install -> plugin.enable needs_consent (no mutation) -> plugin.enable{consent:true} hot-spawns a real child -> plugin.disable hot-stops + strips consent -> plugin.remove clears settings+dir",
     async () => {
       const pluginId = "sample-echo";
-      const home = mkdtempSync(join(tmpdir(), "norma-gate-4d-ii-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-gate-4d-ii-"));
       const settingsPath = join(home, "settings.json");
       // Plain, plugin-free settings — deliberately NOT `writeAndLoadSettings` (that helper writes
       // the plugin as already enabled+consented, exactly the end state this gate's own RPC calls
@@ -117,21 +117,21 @@ describe("4d-ii gate: over-the-wire plugin lifecycle (install -> enable/consent 
       const socketPath = join(home, "core.sock");
 
       // A fixture plugin dir NOT yet anywhere under `home`'s plugins root: `installSampleEcho`
-      // copies examples/sample-echo into a THROWAWAY staging normaHome and rewrites its
-      // `@norma/plugin-sdk` import to an absolute path (a bare copy has no node_modules of its
+      // copies examples/sample-echo into a THROWAWAY staging winterHome and rewrites its
+      // `@yanlinglabs/winter-plugin-sdk` import to an absolute path (a bare copy has no node_modules of its
       // own) — reused here purely for that copy-and-rewrite, so `plugins.install` below is the
       // ONLY thing that ever puts the plugin under this test's real `home`.
-      const srcHome = mkdtempSync(join(tmpdir(), "norma-gate-4d-ii-src-"));
+      const srcHome = mkdtempSync(join(tmpdir(), "winter-gate-4d-ii-src-"));
       const srcDir = installSampleEcho(srcHome, pluginId);
 
-      // `plugins: true` + `wireNormaHome: true` wires a live PluginStore AND forwards `normaHome`
+      // `plugins: true` + `wireWinterHome: true` wires a live PluginStore AND forwards `winterHome`
       // into the IPC server (supervised-fixtures.ts) — the second is what the five lifecycle RPCs
       // need to read/write settings.json and the plugins dir directly; the first is what
       // `plugins.list` needs to enrich with fresh supervisor status. Deliberately NOT calling
       // `startAll()` — nothing is spawn-eligible yet (nothing is even installed yet), and the whole
       // point of this gate is that `plugin.enable{consent:true}` alone is what makes the real child
       // come up.
-      const inst: SupervisedInstance = await createSupervisedInstance({ home, socketPath, plugins: true, wireNormaHome: true });
+      const inst: SupervisedInstance = await createSupervisedInstance({ home, socketPath, plugins: true, wireWinterHome: true });
 
       const tokens = await inst.authority.ensureTokens();
       const harness = await TestClient.connect(socketPath);
@@ -145,7 +145,7 @@ describe("4d-ii gate: over-the-wire plugin lifecycle (install -> enable/consent 
       expect(installRes.result.hasMcp).toBe(false);
       expect(installRes.result.consentBlock[0]).toBe(`plugin ${pluginId} requests:`);
       expect(installRes.result.consentBlock).toContain("entry: bun index.ts");
-      expect(existsSync(join(home, "plugins", pluginId, "norma-plugin.json"))).toBe(true);
+      expect(existsSync(join(home, "plugins", pluginId, "winter-plugin.json"))).toBe(true);
 
       const settingsAfterInstall = readFileSync(settingsPath, "utf8");
 

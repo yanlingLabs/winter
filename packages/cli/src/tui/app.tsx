@@ -72,7 +72,7 @@
  *  that one case). A pruned roster row auto-closes its view; `x`-dismissals live in App state only
  *  (never the reducer's aggregates).
  *
- *  RESUME REPLAY (Task 5): `resumeTargetSeq` (mount.ts ← main.ts, set only on the `norma resume <id>`
+ *  RESUME REPLAY (Task 5): `resumeTargetSeq` (mount.ts ← main.ts, set only on the `winter resume <id>`
  *  Ink route, which attaches from seq 0 instead of the tip) drives a `resuming` flag — true from
  *  mount until an event with `seq >= resumeTargetSeq` is processed (or never true at all if the prop
  *  is omitted or 0), rendering a dim "Resuming conversation…" line above the composer/card meanwhile.
@@ -87,7 +87,7 @@ import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } 
 import { Box, Text, useInput, useStdin } from "ink";
 import { Chalk } from "chalk";
 import wrapAnsi from "wrap-ansi";
-import { METHODS, type ApprovalPolicy, type SessionActivity, type SessionEvent } from "@norma/protocol";
+import { METHODS, type ApprovalPolicy, type SessionActivity, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import { POLICY_ORDER } from "./policy-order";
 import { initialState, reduce, statusChromeModel, type AgentRow, type Block, type LocalEvent, type PendingCard, type TuiState } from "./state";
 import { makeFlattenCache, makeStreamRenderer } from "./flatten-blocks";
@@ -109,10 +109,10 @@ import type { parsePlanResponse } from "../plan-response";
 import { runCommand, type CommandCtx } from "./commands";
 import { ChoiceMenu, choiceMenuRows, initialChoiceSelection, moveChoice, type ChoiceRequest } from "./choice-menu";
 import { buildFileIndex } from "./file-index";
-import type { NormaClient } from "../client";
+import type { WinterClient } from "../client";
 
-/** The subset of `NormaClient` `<App>` actually calls — declared structurally so tests can pass a
- *  fake that only records these callbacks (the real `NormaClient` satisfies it field-for-field). */
+/** The subset of `WinterClient` `<App>` actually calls — declared structurally so tests can pass a
+ *  fake that only records these callbacks (the real `WinterClient` satisfies it field-for-field). */
 export interface AppClient {
   send(sessionId: string, text: string): unknown;
   steer(sessionId: string, text: string): unknown;
@@ -123,7 +123,7 @@ export interface AppClient {
   request(method: string, params?: unknown): unknown;
   /** child-transcript-view T3: the two typed members (unlike the `unknown`-returning callbacks
    *  above) — App reads `delivered`/`status` off the results to render feedback notes. Declared
-   *  as the STRUCTURAL subset App consumes; the real `NormaClient.sendToThread`/`agentStop`
+   *  as the STRUCTURAL subset App consumes; the real `WinterClient.sendToThread`/`agentStop`
    *  results (which also carry `ok: true`) are assignable as-is. */
   sendToThread(sessionId: string, agent: string, text: string): Promise<{ delivered: "queued" | "resumed"; agentId: string }>;
   agentStop(sessionId: string, agent: string): Promise<{ status: string }>;
@@ -170,7 +170,7 @@ export interface AppProps {
   /** Exit request (mount.ts wires it to the alt-screen teardown) — the double-press ctrl+C/ctrl+D
    *  flow (Task 5) calls this on the SECOND press within the window. */
   onExitRequest?: () => void;
-  /** Set ONLY on the Ink `norma resume <id>` route (main.ts attaches from seq 0 there instead of the
+  /** Set ONLY on the Ink `winter resume <id>` route (main.ts attaches from seq 0 there instead of the
    *  tip, replaying the whole session) — the seq the replay is expected to reach. Drives the
    *  "Resuming conversation…" line: shown from mount until an event with `seq >= resumeTargetSeq` is
    *  processed, or never shown at all if this is `undefined` (a fresh session — today's behavior,
@@ -190,8 +190,8 @@ const readCols = (): number => (typeof process.stdout.columns === "number" ? pro
 /** The welcome header — the FIRST lines of the transcript line log (prepended once; they scroll off
  *  the top as the transcript grows, exactly like any other scrollback line). T6 CC-parity polish:
  *  an accent `✻` identity mark (the CC reference leads its banner with a brand glyph beside a text
- *  column — adapted to Norma's spark, the glyph the spinner/notes already own) + bold-accent
- *  `Norma` + dim version, then the dim `model · cwd` context line indented 2 columns so it sits
+ *  column — adapted to Winter's spark, the glyph the spinner/notes already own) + bold-accent
+ *  `Winter` + dim version, then the dim `model · cwd` context line indented 2 columns so it sits
  *  under the wordmark exactly like the transcript's own gutter content column. Still exactly 3
  *  lines — the banner's row count is load-bearing for the scroll tests' geometry. A fixed-level
  *  Chalk instance (same reason as flatten-blocks.ts / markdown.ts: the ambient default downgrades
@@ -199,7 +199,7 @@ const readCols = (): number => (typeof process.stdout.columns === "number" ? pro
 function welcomeLines(version: string, model: string, cwd: string): string[] {
   const ansi = new Chalk({ level: 3 });
   return [
-    `${ansi.hex(theme.accent)("✻")} ${ansi.hex(theme.accent).bold("Norma")}${ansi.dim(` v${version}`)}`,
+    `${ansi.hex(theme.accent)("✻")} ${ansi.hex(theme.accent).bold("Winter")}${ansi.dim(` v${version}`)}`,
     `  ${ansi.dim(`${model} · ${cwd}`)}`,
     "",
   ];
@@ -440,9 +440,9 @@ export function App({
   // Phase 3d T2: the in-chat slash-command registry (commands.ts, T1) — `appendNote` commits a note
   // block through the SAME reducer/dispatch path every other transcript line goes through, via the
   // App-internal `local_note` event (state.ts's `LocalEvent` — never a real wire event). `client` is
-  // cast to the full `NormaClient` the runners need (`CommandCtx.client`) — `AppClient` above is
+  // cast to the full `WinterClient` the runners need (`CommandCtx.client`) — `AppClient` above is
   // deliberately only the subset App itself calls; the real production `client` prop (main.ts) is
-  // always a genuine `NormaClient`, which satisfies both shapes.
+  // always a genuine `WinterClient`, which satisfies both shapes.
   //
   // T2 review item 3: the SESSION'S live cwd lives in a ref, seeded from the mount-time prop (the
   // welcome banner keeps the original value on purpose), and every run builds a FRESH ctx reading
@@ -484,7 +484,7 @@ export function App({
 
   const onRunCommand = useCallback((text: string) => {
     const ctx: CommandCtx = {
-      client: client as unknown as NormaClient,
+      client: client as unknown as WinterClient,
       sessionId,
       cwd: cwdRef.current,
       appendNote,

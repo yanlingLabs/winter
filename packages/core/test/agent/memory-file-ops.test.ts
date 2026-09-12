@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { listMemoryDir, readMemoryDir, writeMemoryDir, deleteMemoryDir, auditTailMemDir, type MemDirAuditLine } from "../../src/agent/memory-file-ops";
 import type { MemoryFact } from "../../src/agent/memory";
 
-function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "norma-memfileops-"))); }
+function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "winter-memfileops-"))); }
 
 function fact(overrides: Partial<MemoryFact> = {}): MemoryFact {
   return { name: "coffee-pref", description: "Likes oat milk lattes", type: "user", body: "Prefers oat milk.", ...overrides };

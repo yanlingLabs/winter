@@ -1,4 +1,4 @@
-<h1 align="center">Norma</h1>
+<h1 align="center">Winter</h1>
 
 <p align="center">
   <b>An AI that actually lives on your Mac.</b><br>
@@ -18,7 +18,7 @@
 ---
 
 Most AI tools are one of two things: a chat window in a browser tab, or a coding agent in a
-terminal. Norma is meant to be the whole thing — the assistant you talk to, the agent that writes
+terminal. Winter is meant to be the whole thing — the assistant you talk to, the agent that writes
 your code, and the orchestrator that goes and does multi-step work while you get on with your day —
 as one native macOS product that runs on your own machine, under your own subscription or API key.
 
@@ -32,20 +32,24 @@ sessions over an encrypted direct link — no cloud in the middle.
 
 ```sh
 brew tap yanlingLabs/norma
-brew install --cask norma
+brew install --cask winter
 ```
 
+The `winter` cask lands with the first Winter release; until then the tap still ships the app
+under its pre-rename cask and command name — see the tap's current formula for the exact
+`brew install --cask` invocation.
+
 Or grab the latest `.dmg` from [Releases](https://github.com/yanlingLabs/norma/releases/latest),
-open it, and drag Norma to your Applications folder.
+open it, and drag Winter to your Applications folder.
 
 Requires **macOS 26 or later** on Apple silicon. Then point her at the model you already pay for:
 
 ```sh
-norma login              # sign in with your ChatGPT account
-norma login --api-key    # or paste an OpenAI API key
+winter login              # sign in with your ChatGPT account
+winter login --api-key    # or paste an OpenAI API key
 ```
 
-That's the whole setup. She's in your menu bar, and `norma` works in any terminal. Details on
+That's the whole setup. She's in your menu bar, and `winter` works in any terminal. Details on
 [models, reasoning effort and search keys](#bringing-your-own-ai) are further down. (Newer Homebrew
 may ask you to trust the tap once: `brew trust yanlingLabs/norma`.)
 
@@ -53,13 +57,13 @@ may ask you to trust the tap once: `brew trust yanlingLabs/norma`.)
 
 - [The three modes](#the-three-modes) · [Surfaces](#surfaces-where-you-talk-to-her)
 - [What she can actually do](#what-she-can-actually-do) · [Memory](#memory-that-you-can-read)
-- [Background sessions](#background-sessions-and-multiple-harnesses) · [Extending Norma](#extending-norma)
+- [Background sessions](#background-sessions-and-multiple-harnesses) · [Extending Winter](#extending-winter)
 - [Privacy & security](#your-mac-your-data) · [Bring your own AI](#bringing-your-own-ai)
 - [For developers](#for-developers) · [Roadmap](#roadmap) · [FAQ](#faq)
 
 ## The three modes
 
-Norma isn't one agent with a system prompt swap. Each mode is a genuinely different product with its
+Winter isn't one agent with a system prompt swap. Each mode is a genuinely different product with its
 own toolset, its own permission posture, and its own surface — enforced in the daemon, not suggested
 in a prompt.
 
@@ -89,8 +93,8 @@ Four-finger tap the trackpad anywhere and a text field appears — type anything
 to Dispatch. Sessions Dispatch spawns can be detached into their own floating windows, so you can
 watch a task work, or jump in and talk to it.
 
-**The terminal.** `norma` gives you a full Ink/React TUI for Code mode — streaming transcript,
-scrollback, task blocks, approvals inline. `norma -p "…"` is a one-shot for scripts. Every CLI
+**The terminal.** `winter` gives you a full Ink/React TUI for Code mode — streaming transcript,
+scrollback, task blocks, approvals inline. `winter -p "…"` is a one-shot for scripts. Every CLI
 command talks to the same daemon the app does.
 
 **Your iPhone.** A companion iOS app (closed source, built on the open kits in this repo) connects
@@ -99,8 +103,8 @@ command talks to the same daemon the app does.
 drive Dispatch, read transcripts, approve things. Chat runs **on the phone itself**, so it works
 with your Mac asleep and syncs back when the two next see each other.
 
-**And your own app.** `NormaProtocol`, `NormaSessionKit` and `NormaChatKit` are published as Swift
-Package products from this repo — the exact same kits Norma's own iOS app is built on. If you want
+**And your own app.** `WinterProtocol`, `WinterSessionKit` and `WinterChatKit` are published as Swift
+Package products from this repo — the exact same kits Winter's own iOS app is built on. If you want
 to build your own client, you get the whole capability surface, not a subset.
 
 ## What she can actually do
@@ -133,7 +137,7 @@ Two kinds, deliberately.
 
 **In Code mode**, memory is project-scoped and *written by the agent, by hand* — plain markdown
 files in a folder on your Mac. No hidden database, no embeddings you can't inspect. Open them in any
-editor, correct them, delete them. `norma memory list` and `norma memory show` if you'd rather stay
+editor, correct them, delete them. `winter memory list` and `winter memory show` if you'd rather stay
 in the terminal.
 
 **In Chat and Dispatch**, memory is automatic: a background "dreaming" pass distills what mattered
@@ -153,16 +157,16 @@ The inverse also holds: a single session can have **many harnesses attached at o
 window, a detached orb window, a TUI, and your phone — and every one of them streams the same tokens
 in real time. Close them all and the work continues; open one tomorrow and you rejoin mid-turn.
 
-## Extending Norma
+## Extending Winter
 
 - **MCP servers** — connect any Model Context Protocol server; tools show up in the agent's hands,
   with resources readable too. Tool schemas load on demand, so a hundred MCP tools cost you nothing
   until one is actually used.
 - **Skills** — drop-in markdown capability packs. Popular open-source skill packs already run on
-  Norma unmodified, and the agent can write its own.
+  Winter unmodified, and the agent can write its own.
 - **Plugins → Add-ons** — separate processes granted narrow, user-consented capabilities. They
   contribute tools, UI tiles and skills back to the agent, and can also be *whole small apps* living
-  inside Norma's window (think fan control, window management, a dynamic island). `examples/battery-limiter`
+  inside Winter's window (think fan control, window management, a dynamic island). `examples/battery-limiter`
   is a complete working reference. *(The `plugin-sdk` package is being renamed to the Add-ons SDK —
   see the [roadmap](#roadmap).)*
 - **Output styles** and **hooks** — reshape how she writes, and run your own code at lifecycle points.
@@ -174,16 +178,16 @@ This part matters more than anything else here, so we'll say it plainly:
 - **No credentials ever touch disk.** Every API key, OAuth token and secret lives in the macOS
   Keychain — never in a config file, never in plain text, never in a fixture.
 - **Everything she remembers is a file you own.** Memory, settings, session logs — all plain files
-  under `~/.norma`. Move them, back them up, read them, delete them.
-- **Nothing leaves your machine except model calls.** Web fetching is local, and there is no Norma
+  under `~/.winter`. Move them, back them up, read them, delete them.
+- **Nothing leaves your machine except model calls.** Web fetching is local, and there is no Winter
   account, backend or telemetry. Your phone connects to your Mac directly, end-to-end encrypted; if
   the two can't hole-punch to each other, the connection falls back to relaying through an
   [iroh](https://iroh.computer) relay we run — which forwards ciphertext it cannot read, and never
   sees a session.
 - **The shell is sandboxed.** Commands run under a macOS seatbelt profile with an explicit writable
-  set; writes outside your project need your consent, and Norma's own credential directory is
+  set; writes outside your project need your consent, and Winter's own credential directory is
   denied to the agent unconditionally.
-- **Every build is signed and notarized by Apple**, and updates are Sparkle EdDSA-signed. Norma
+- **Every build is signed and notarized by Apple**, and updates are Sparkle EdDSA-signed. Winter
   updates herself in the background and only installs when she's *not* in the middle of helping you
   — she waits for a natural pause, then picks up exactly where she left off.
 - **The engine is fully open.** The daemon, the CLI, the Mac app, the protocol and the client kits
@@ -192,40 +196,40 @@ This part matters more than anything else here, so we'll say it plainly:
 
 ## Bringing your own AI
 
-Norma is the assistant; the intelligence behind her is your own — either your existing ChatGPT
+Winter is the assistant; the intelligence behind her is your own — either your existing ChatGPT
 subscription or an OpenAI API key, whichever you signed in with during [install](#install).
 
 Available models are the GPT-5.6 family — `sol`, `terra` and `luna` — selectable per session, with a
-reasoning-effort setting from `none` through `max`, plus Norma's own `ultra` tier:
+reasoning-effort setting from `none` through `max`, plus Winter's own `ultra` tier:
 
 ```sh
-norma model              # list what's available
-norma model sol          # set the default
+winter model              # list what's available
+winter model sol          # set the default
 ```
 
 Optional search keys:
 
 ```sh
-norma login --exa-key           # Exa — powers Search in Chat and Dispatch
-norma login --web-search-key    # Brave — powers web_search in Code
+winter login --exa-key           # Exa — powers Search in Chat and Dispatch
+winter login --web-search-key    # Brave — powers web_search in Code
 ```
 
 > Exa's key requirement is going away, and Brave is being retired in favour of Exa everywhere.
 
-**A note in plain language: Norma is an independent project and is not affiliated with, endorsed by,
+**A note in plain language: Winter is an independent project and is not affiliated with, endorsed by,
 or sponsored by OpenAI.** Signing in with a ChatGPT account uses that account under OpenAI's own
 terms, which don't specifically bless third-party apps — so, as with any tool that isn't OpenAI's
 own, there's some risk to that account, and it's yours to weigh. If you'd rather not, the API-key
 option is the straightforward, officially-supported path. Either way, your credentials live only in
-your Mac's Keychain and Norma keeps no copy.
+your Mac's Keychain and Winter keeps no copy.
 
 ## For developers
 
 ### Architecture
 
-Norma is a **TypeScript/Bun daemon** (`norma-core`) that runs the agent loop — providers, tools,
+Winter is a **TypeScript/Bun daemon** (`winter-core`) that runs the agent loop — providers, tools,
 sessions, plugins, scheduling — and a **native Swift app** that gives it a face. They speak JSON-RPC
-2.0 over NDJSON on a Unix socket at `~/.norma/run/core.sock`.
+2.0 over NDJSON on a Unix socket at `~/.winter/run/core.sock`.
 
 The daemon is the single source of truth. Every client — the CLI, the Mac app, the orb, your phone —
 is a *view over its event stream*. Sessions are append-only JSONL logs of typed events; clients
@@ -236,14 +240,14 @@ four features.
 ```
 packages/
   protocol/     the contract: zod schemas for every RPC method and session event
-  core/         norma-core: agent loop, tools, providers, sessions, plugins, workflows, routines
-  cli/          the `norma` command — Ink/React TUI, headless mode, daemon lifecycle
+  core/         winter-core: agent loop, tools, providers, sessions, plugins, workflows, routines
+  cli/          the `winter` command — Ink/React TUI, headless mode, daemon lifecycle
   plugin-sdk/   what third-party plugins (→ add-ons) build against
 apple/
-  NormaProtocol/  Swift mirror of the protocol; round-trips every TS-generated fixture in tests
-  NormaKit/       Swift daemon client + the iroh transport (NormaSessionKit)
-  NormaChatKit/   the standalone on-device chat engine
-  Norma/          the macOS app — menu bar, chat window, orb, CEF browser, Monaco editor
+  WinterProtocol/  Swift mirror of the protocol; round-trips every TS-generated fixture in tests
+  WinterKit/       Swift daemon client + the iroh transport (WinterSessionKit)
+  WinterChatKit/   the standalone on-device chat engine
+  Winter/          the macOS app — menu bar, chat window, orb, CEF browser, Monaco editor
 examples/       reference plugins (battery-limiter is a real, complete one)
 ```
 
@@ -300,7 +304,7 @@ because the app depends on three large vendored artifacts that are fetched, not 
 **Next**
 
 - **Cowork mode** and **Build mode** (see [the table above](#the-three-modes))
-- A web UI, so Norma isn't Mac-only for people who just want the chat
+- A web UI, so Winter isn't Mac-only for people who just want the chat
 - More providers beyond Codex OAuth and OpenAI-compatible
 - Deep research, an advisor tool, and image generation (API *and* local — as a tool and as its own
   mode)
@@ -313,20 +317,20 @@ Ideas and disagreement welcome in [Discussions](https://github.com/yanlingLabs/n
 
 **Is this another Claude Code / Codex CLI?** No. Code mode covers that ground and takes real
 inspiration from Claude Code's permission model and tool shape — but a coding agent is one of
-Norma's three modes, not the product. The product is the whole assistant.
+Winter's three modes, not the product. The product is the whole assistant.
 
 **Does it need a subscription?** It needs *a* model. Either your existing ChatGPT account or an
-OpenAI API key. Norma itself is free and open source.
+OpenAI API key. Winter itself is free and open source.
 
-**Does my data go through your servers?** There is no Norma backend, no account and no telemetry.
+**Does my data go through your servers?** There is no Winter backend, no account and no telemetry.
 Model calls go to your provider. Your phone connects to your Mac directly; when a direct connection
 isn't possible it falls back to relaying through an iroh relay we run, which only ever forwards
 ciphertext — it can't read a session, and holds nothing.
 
-**Windows or Linux?** Not today — Norma is deeply native macOS. A web UI is on the roadmap for the
+**Windows or Linux?** Not today — Winter is deeply native macOS. A web UI is on the roadmap for the
 chat surface.
 
-**Can I use it without the app?** Yes. `norma daemon run` plus the TUI is a complete Code-mode
+**Can I use it without the app?** Yes. `winter daemon run` plus the TUI is a complete Code-mode
 experience with no app installed.
 
 ## Contributing
@@ -337,4 +341,4 @@ an issue to discuss anything nontrivial before sending a PR. Security reports go
 
 ## License
 
-[Apache License 2.0](LICENSE). © 2026 Norma.
+[Apache License 2.0](LICENSE). © 2026 Winter.

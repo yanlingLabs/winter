@@ -6,7 +6,7 @@
 // package root (checkpoint b measured the 0.0.2 export gap and worked around it with a hand-rolled
 // `createSdkMcpServer`/`tool` path — that workaround is now DELETED for THOSE two). The router's own
 // `capabilityServerDescriptor`/`capabilityServerDescriptors` — the converters that would take
-// Norma's `McpSdkServerConfigWithInstance` values verbatim — are declared in the installed 0.0.3's
+// Winter's `McpSdkServerConfigWithInstance` values verbatim — are declared in the installed 0.0.3's
 // `official/mcp-descriptors.d.ts` but are NOT re-exported from the package root (measured directly
 // against the installed tarball; a router 0.0.4 carry, P8c ledger). So THIS file still builds the
 // descriptor BY HAND (`descriptorFromWinterConfig`, ~130 lines below) from the same
@@ -19,9 +19,9 @@ import { officialBranchLabel, officialMcpServers } from "@yanlinglabs/winter-run
 import type { BrandProfile, InputShapeFactory as RouterInputShapeFactory, OfficialMcpModule as RouterOfficialMcpModule, WinterMcpServerDescriptor, WinterMcpToolDescriptor } from "@yanlinglabs/winter-runtime-sdk";
 import { z } from "zod";
 import type { CapabilityServerRecord } from "../capabilities";
-import { NORMA_BRAND } from "./brand";
+import { CORE_BRAND } from "./brand";
 
-/** The narrow JSON-Schema-object subset Norma's own `registry.specFor` ever emits for a capability
+/** The narrow JSON-Schema-object subset Winter's own `registry.specFor` ever emits for a capability
  *  tool (`z.toJSONSchema` over a zod OBJECT schema — the router refuses anything else at
  *  construction on the Winter leg, so this file need not accept a wider shape either). Structurally
  *  wider than the router's own exported `JsonSchemaObject` (`properties?: Record<string, unknown>`),
@@ -50,7 +50,7 @@ export interface JsonSchemaProperty {
   [key: string]: unknown;
 }
 
-/** `(schema) => a zod RAW SHAPE` — Norma's own `InputShapeFactory`, built on Norma's `zod`
+/** `(schema) => a zod RAW SHAPE` — Winter's own `InputShapeFactory`, built on Winter's `zod`
  *  dependency. Structurally assignable to the router's own exported `InputShapeFactory` (both are
  *  `(schema) => unknown`-shaped; ours is a narrower return type, which is always fine). */
 export type InputShapeFactory = (schema: JsonSchemaObject) => Record<string, z.ZodTypeAny>;
@@ -135,7 +135,7 @@ export const jsonSchemaToZodShape: InputShapeFactory = (schema) => {
  * Lane 3b (P8d-17 root cause): this is ALSO the CONSTRUCTION-level `RuntimeSdkOptions.toInputShape`
  * bridge `create.ts` must forward — see that file's own `advisorFrom`-adjacent wiring. Exported (was
  * a private const) because without it, `deps.toInputShape` inside the router's own
- * `officialCapabilityServers` stays `undefined` forever and — since Norma's construction-level
+ * `officialCapabilityServers` stays `undefined` forever and — since Winter's construction-level
  * `capabilities` list is `[]` on purpose (P8b-36, capability tools ride the PER-SESSION
  * `officialCapabilityServersFor` door instead) — the router's own early-return fires SILENTLY for
  * EVERY official-leg session: `winterMcpServerDescriptor` (the STANDING server — SendMessage,
@@ -157,7 +157,7 @@ function winterInstanceOf(config: McpSdkServerConfigWithInstance): WinterMcpServ
 }
 
 /**
- * ONE capability server's `McpSdkServerConfigWithInstance` (Norma's own, from
+ * ONE capability server's `McpSdkServerConfigWithInstance` (Winter's own, from
  * `buildCapabilitiesFor`) → the router's `WinterMcpServerDescriptor` shape, hand-built.
  *
  * `capabilityServerDescriptor`/`capabilityServerDescriptors` (the router's own converters for
@@ -168,7 +168,7 @@ function winterInstanceOf(config: McpSdkServerConfigWithInstance): WinterMcpServ
  * else). Measured directly against the installed tarball. So this file builds the descriptor by
  * hand from the SAME `listTools()`/`callTool()` the Winter leg already calls — `handler` forwards
  * to `instance.callTool` verbatim, which is what keeps behaviour byte-identical on both legs even
- * without the router's own converter. `exposure`/`permissionClass` carry no meaning for a Norma
+ * without the router's own converter. `exposure`/`permissionClass` carry no meaning for a Winter
  * capability tool (Winter-native concepts for the STANDING server's own advisories); `"eager"`/
  * `"custom"` are inert placeholders `officialMcpServers` does not gate materialization on.
  */
@@ -193,16 +193,16 @@ function descriptorFromWinterConfig(config: McpSdkServerConfigWithInstance): Win
  * Builds the official leg's `mcpServers` from the SAME per-session record the Winter leg already
  * has (`buildCapabilitiesFor`'s `CapabilityServerRecord`) — through the router's OWN
  * `officialMcpServers` (router 0.0.3; fix round 1 deleted the hand-rolled `createSdkMcpServer`/
- * `tool` path checkpoint b used against the 0.0.2 export gap). Names stay `norma__<key>` (the
+ * `tool` path checkpoint b used against the 0.0.2 export gap). Names stay `winter__<key>` (the
  * record's own keys, `capabilities/names.ts`'s `capabilityServerName`), so
- * `mcp__norma__<key>__<tool>` comes out the same canonical name on both legs (P8b-35/P8c-4) — the
+ * `mcp__winter__<key>__<tool>` comes out the same canonical name on both legs (P8b-35/P8c-4) — the
  * hand-built descriptor's `name` is that same key.
  */
 export function officialCapabilityServersFor(
   record: CapabilityServerRecord,
   module: RouterOfficialMcpModule,
   toInputShape: RouterInputShapeFactory = routerInputShape,
-  brand: Pick<BrandProfile, "mcpServerName" | "processLabel" | "projectDirName"> = NORMA_BRAND,
+  brand: Pick<BrandProfile, "mcpServerName" | "processLabel" | "projectDirName"> = CORE_BRAND,
 ): Record<string, unknown> {
   const branchLabel = officialBranchLabel(brand);
   const out: Record<string, unknown> = {};

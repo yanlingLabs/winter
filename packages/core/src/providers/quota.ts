@@ -11,7 +11,7 @@ export class QuotaManager {
   private listeners: ((s: QuotaState) => void)[] = [];
   private totals = { inputTokens: 0, outputTokens: 0 };
   /** P8d-13's carry item: R6-B `rate_limit`/`kind:"subscription-quota"` info (`{info: Record<string,
-   *  unknown>}`, provider-runtime's own shape — Norma reports it verbatim, never re-shapes it) from
+   *  unknown>}`, provider-runtime's own shape — Winter reports it verbatim, never re-shapes it) from
    *  the codex adapter (`runtime-provider.ts`'s `translateEvents`). Distinct from `limitedUntil`
    *  above on purpose: an HTTP 429 (`noteRateLimit`) is a concrete backoff deadline this manager
    *  ENFORCES (`waitIfLimited` blocks the next `streamTurn` on it); a subscription-quota frame is

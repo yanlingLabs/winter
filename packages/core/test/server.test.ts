@@ -2,7 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, realpathSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startDaemon, type RunningDaemon, CORE_VERSION } from "../src/daemon";
 import { startIpcServer } from "../src/ipc/server";
 import { SessionStore } from "../src/sessions/store";
@@ -99,7 +99,7 @@ describe("daemon IPC", () => {
     // dedicated coverage in test/agent/engine-reviewer.test.ts.
     settingsOverride?: Record<string, unknown>,
   ): Promise<void> {
-    const home = mkdtempSync(join(tmpdir(), "norma-daemon-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-daemon-"));
     daemonHome = home;
     if (settingsOverride) {
       writeFileSync(join(home, "settings.json"), JSON.stringify({
@@ -124,7 +124,7 @@ describe("daemon IPC", () => {
   async function bootPluginTestServer(): Promise<{
     store: SessionStore; socketPath: string; harnessToken: string; adminToken: string; stop: () => void;
   }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-plugin-role-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-plugin-role-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -288,7 +288,7 @@ describe("daemon IPC", () => {
 
   test("malformed JSON line gets an id:null error frame that our own schema accepts", async () => {
     await boot();
-    const { RpcResponse } = await import("@norma/protocol");
+    const { RpcResponse } = await import("@yanlinglabs/winter-protocol");
     const c = await TestClient.connect(daemon.socketPath);
     await c.hello(harnessToken, "garbler");
     (c as any).socket.write(new TextEncoder().encode("THIS IS NOT JSON\n"));
@@ -375,13 +375,13 @@ describe("daemon IPC", () => {
   // isolation, same "own SessionStore + TokenAuthority, no AgentEngine" shape as
   // remote-role.test.ts's bootPluginTestServer sibling below.
   test("approval.respond: a rule-bearing optionId with no session cwd — RuleAppendError is caught, logged, and the approval still resolves", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-approve-nocwd-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-approve-nocwd-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
     const tokens = await authority.ensureTokens();
     const broker = new ApprovalBroker();
-    const permissionRules = new PermissionRules({ globalAllow: () => undefined, normaHome: home });
+    const permissionRules = new PermissionRules({ globalAllow: () => undefined, winterHome: home });
     const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, broker, permissionRules });
     try {
       const sessionId = store.createSession("global", { approvalPolicy: "ask" }); // no cwd at all
@@ -431,13 +431,13 @@ describe("daemon IPC", () => {
   describe("workflow.list/run/stop/get (CC-parity phase 3, Track C Task C2)", () => {
     async function bootWorkflowServer(): Promise<{
       store: SessionStore; trust: TrustStore; workflows: WorkflowRuntime; workflowStore: WorkflowStore;
-      socketPath: string; harnessToken: string; remoteToken: string; normaHome: string; stop: () => void;
+      socketPath: string; harnessToken: string; remoteToken: string; winterHome: string; stop: () => void;
     }> {
-      const home = mkdtempSync(join(tmpdir(), "norma-workflow-rpc-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-workflow-rpc-"));
       const store = new SessionStore(home);
       const trust = new TrustStore(join(home, "trust.json"));
-      const workflowStore = new WorkflowStore({ normaHome: home, trust });
-      const runsDir = mkdtempSync(join(tmpdir(), "norma-workflow-rpc-runs-"));
+      const workflowStore = new WorkflowStore({ winterHome: home, trust });
+      const runsDir = mkdtempSync(join(tmpdir(), "winter-workflow-rpc-runs-"));
       const workflows = new WorkflowRuntime({
         onEvent: () => {},
         spawnAgent: (_sid, _prompt, _opts, signal) =>
@@ -450,7 +450,7 @@ describe("daemon IPC", () => {
       const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, trust, workflows, workflowStore });
       return {
         store, trust, workflows, workflowStore, socketPath, harnessToken: tokens.harness, remoteToken: tokens.remote,
-        normaHome: home, stop: () => { server.stop(); store.close(); },
+        winterHome: home, stop: () => { server.stop(); store.close(); },
       };
     }
 
@@ -563,9 +563,9 @@ describe("daemon IPC", () => {
 
     test("workflow.run resolves a saved workflow by name via WorkflowStore, trust-gated to the session's own cwd", async () => {
       const srv = await bootWorkflowServer();
-      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-workflow-rpc-cwd-")));
-      mkdirSync(join(cwd, ".norma", "workflows"), { recursive: true });
-      writeFileSync(join(cwd, ".norma", "workflows", "hello.js"),
+      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-workflow-rpc-cwd-")));
+      mkdirSync(join(cwd, ".winter", "workflows"), { recursive: true });
+      writeFileSync(join(cwd, ".winter", "workflows", "hello.js"),
         `export const meta = {name:"hello", description:"says hi"}; return "hi from project";`);
 
       const c = await TestClient.connect(srv.socketPath);
@@ -608,8 +608,8 @@ describe("daemon IPC", () => {
 
     test("workflow.list surfaces saved workflows from WorkflowStore alongside running runs", async () => {
       const srv = await bootWorkflowServer();
-      mkdirSync(join(srv.normaHome, "workflows"), { recursive: true });
-      writeFileSync(join(srv.normaHome, "workflows", "nightly.js"),
+      mkdirSync(join(srv.winterHome, "workflows"), { recursive: true });
+      writeFileSync(join(srv.winterHome, "workflows", "nightly.js"),
         `export const meta = {name:"nightly", description:"nightly sweep"}; return "ok";`);
 
       const c = await TestClient.connect(srv.socketPath);
@@ -668,9 +668,9 @@ describe("daemon IPC", () => {
   test("startIpcServer refuses an engine without a shared hub", () => {
     // Build a throwaway engine; we only need the constructor guard to fire.
     expect(() => {
-      const store = new SessionStore(mkdtempSync(join(tmpdir(), "norma-guard-")));
+      const store = new SessionStore(mkdtempSync(join(tmpdir(), "winter-guard-")));
       startIpcServer({
-        socketPath: join(mkdtempSync(join(tmpdir(), "norma-guard-sock-")), "s.sock"),
+        socketPath: join(mkdtempSync(join(tmpdir(), "winter-guard-sock-")), "s.sock"),
         serverVersion: "test", tokens: {} as any, store,
         engine: {} as any, // engine present...
         // ...no hub
@@ -686,7 +686,7 @@ describe("daemon IPC", () => {
     await c.hello(harnessToken, "adder-bad");
     const res = await c.request(METHODS.sessionAddDir, {
       sessionId: "s_does_not_exist",
-      path: realpathSync(mkdtempSync(join(tmpdir(), "norma-x-"))),
+      path: realpathSync(mkdtempSync(join(tmpdir(), "winter-x-"))),
     });
     expect(res.error).toBeTruthy();
     expect(res.error.code).toBe(ERR.NOT_FOUND);
@@ -708,13 +708,13 @@ describe("daemon IPC", () => {
     const { result } = await c.request(METHODS.skillsList, {});
     expect(result.ok).toBe(true);
     // The writing-skills builtin (phase 5c) is always discovered, regardless of home — it ships
-    // in-repo and is resolved relative to the module, not normaHome.
+    // in-repo and is resolved relative to the module, not winterHome.
     expect(result.skills).toEqual([{ name: "writing-skills", description: expect.any(String), source: "builtin", path: expect.any(String) }]);
     c.close();
   });
 
   test("skills.list discovers a user skill over the socket (the daemon wires its one skillStore into the server)", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-daemon-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-daemon-"));
     mkdirSync(join(home, "skills", "greet"), { recursive: true });
     writeFileSync(join(home, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nSay hello warmly.\n");
     const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -736,7 +736,7 @@ describe("daemon IPC", () => {
     if (process.platform !== "darwin") return; // spawns a child process
     const { FakeProvider } = await import("../src/agent/fake-provider");
     const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
-    const home = mkdtempSync(join(tmpdir(), "norma-daemon-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-daemon-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 2,
       provider: { type: "codex-oauth", model: "gpt-5.4" },
@@ -758,7 +758,7 @@ describe("daemon IPC", () => {
     if (process.platform !== "darwin") return; // spawns a child process
     const { FakeProvider } = await import("../src/agent/fake-provider");
     const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
-    const home = mkdtempSync(join(tmpdir(), "norma-daemon-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-daemon-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 2,
       provider: { type: "codex-oauth", model: "gpt-5.4" },
@@ -769,7 +769,7 @@ describe("daemon IPC", () => {
     daemon = await startDaemon({ home, secrets, agentProvider: { provider: fake, model: "fake-1" } });
     harnessToken = daemon.tokens.harness;
 
-    const projectDir = realpathSync(mkdtempSync(join(tmpdir(), "norma-mcp-project-")));
+    const projectDir = realpathSync(mkdtempSync(join(tmpdir(), "winter-mcp-project-")));
     writeFileSync(join(projectDir, ".mcp.json"), JSON.stringify({ mcpServers: { proj: { command: "bun", args: ["run", fixture] } } }));
 
     const c = await TestClient.connect(daemon.socketPath);
@@ -804,11 +804,11 @@ describe("daemon IPC", () => {
   });
 
   test("plugins.list returns a PluginStore's plugins over the socket", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-plugins-ipc-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-plugins-ipc-"));
     mkdirSync(join(home, "plugins", "demo", "skills", "greet"), { recursive: true });
     writeFileSync(join(home, "plugins", "demo", "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: hi\n---\nbody");
     writeFileSync(join(home, "plugins", "demo", ".mcp.json"), JSON.stringify({ mcpServers: { fake: { command: "true" } } }));
-    const plugins = new PluginStore({ normaHome: home, plugins: { enabled: ["demo"] } });
+    const plugins = new PluginStore({ winterHome: home, plugins: { enabled: ["demo"] } });
 
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     const authority = new TokenAuthority(secrets);
@@ -824,7 +824,7 @@ describe("daemon IPC", () => {
       expect(result.plugins).toHaveLength(1);
       expect(result.plugins[0]).toMatchObject({
         name: "demo", skills: ["greet"], hasMcp: true, mcpEnabled: true, disabled: false,
-        status: "na", // legacy plugin (no norma-plugin.json) — never tier "platform", never spawn-eligible
+        status: "na", // legacy plugin (no winter-plugin.json) — never tier "platform", never spawn-eligible
       });
       c.close();
     } finally {
@@ -840,18 +840,18 @@ describe("daemon IPC", () => {
   // ---------------------------------------------------------------------------------------------
   describe("plugins.list supervisor status (Phase 4d-i Task 4)", () => {
     test("Tier-2 plugin the supervisor reports \"running\" includes status:\"running\"; Tier-1 plugin includes status:\"na\"", async () => {
-      const home = mkdtempSync(join(tmpdir(), "norma-plugins-status-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-plugins-status-"));
       // Tier-2 (platform) plugin — spawn-eligible: tier platform + entry + enabled + exec-consented.
       mkdirSync(join(home, "plugins", "runner"), { recursive: true });
-      writeFileSync(join(home, "plugins", "runner", "norma-plugin.json"), JSON.stringify({
+      writeFileSync(join(home, "plugins", "runner", "winter-plugin.json"), JSON.stringify({
         id: "runner", tier: "platform", entry: { command: "bun", args: ["index.ts"] },
       }));
       // Tier-1 (capability) plugin — never spawn-eligible, no process ever runs for it.
       mkdirSync(join(home, "plugins", "toolbox"), { recursive: true });
-      writeFileSync(join(home, "plugins", "toolbox", "norma-plugin.json"), JSON.stringify({ id: "toolbox", tier: "capability" }));
+      writeFileSync(join(home, "plugins", "toolbox", "winter-plugin.json"), JSON.stringify({ id: "toolbox", tier: "capability" }));
 
       const plugins = new PluginStore({
-        normaHome: home,
+        winterHome: home,
         plugins: { enabled: ["runner", "toolbox"] },
         consents: { runner: { exec: Date.now() } },
       });
@@ -894,13 +894,13 @@ describe("daemon IPC", () => {
     });
 
     test("a spawn-eligible plugin the supervisor has never tracked reports status \"stopped\" (never \"na\")", async () => {
-      const home = mkdtempSync(join(tmpdir(), "norma-plugins-status-untracked-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-plugins-status-untracked-"));
       mkdirSync(join(home, "plugins", "runner"), { recursive: true });
-      writeFileSync(join(home, "plugins", "runner", "norma-plugin.json"), JSON.stringify({
+      writeFileSync(join(home, "plugins", "runner", "winter-plugin.json"), JSON.stringify({
         id: "runner", tier: "platform", entry: { command: "bun", args: ["index.ts"] },
       }));
       const plugins = new PluginStore({
-        normaHome: home, plugins: { enabled: ["runner"] }, consents: { runner: { exec: Date.now() } },
+        winterHome: home, plugins: { enabled: ["runner"] }, consents: { runner: { exec: Date.now() } },
       });
       const secrets = new FileSecretStore(join(home, "test-secrets"));
       const authority = new TokenAuthority(secrets);
@@ -927,15 +927,15 @@ describe("daemon IPC", () => {
     });
 
     test("no supervisor wired at all: Tier-1 plugin still \"na\"; a spawn-eligible (Tier-2-shaped) plugin falls back to \"stopped\"", async () => {
-      const home = mkdtempSync(join(tmpdir(), "norma-plugins-status-nosupervisor-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-plugins-status-nosupervisor-"));
       mkdirSync(join(home, "plugins", "toolbox"), { recursive: true });
-      writeFileSync(join(home, "plugins", "toolbox", "norma-plugin.json"), JSON.stringify({ id: "toolbox", tier: "capability" }));
+      writeFileSync(join(home, "plugins", "toolbox", "winter-plugin.json"), JSON.stringify({ id: "toolbox", tier: "capability" }));
       mkdirSync(join(home, "plugins", "runner"), { recursive: true });
-      writeFileSync(join(home, "plugins", "runner", "norma-plugin.json"), JSON.stringify({
+      writeFileSync(join(home, "plugins", "runner", "winter-plugin.json"), JSON.stringify({
         id: "runner", tier: "platform", entry: { command: "bun", args: ["index.ts"] },
       }));
       const plugins = new PluginStore({
-        normaHome: home, plugins: { enabled: ["toolbox", "runner"] }, consents: { runner: { exec: Date.now() } },
+        winterHome: home, plugins: { enabled: ["toolbox", "runner"] }, consents: { runner: { exec: Date.now() } },
       });
       const secrets = new FileSecretStore(join(home, "test-secrets"));
       const authority = new TokenAuthority(secrets);
@@ -972,7 +972,7 @@ describe("daemon IPC", () => {
     if (process.platform !== "darwin") return; // spawns a child process
     const { FakeProvider } = await import("../src/agent/fake-provider");
     const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
-    const home = mkdtempSync(join(tmpdir(), "norma-plugin-consent-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
     seedDemoPlugin(home, fixture);
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 2,
@@ -998,7 +998,7 @@ describe("daemon IPC", () => {
     if (process.platform !== "darwin") return; // spawns a child process
     const { FakeProvider } = await import("../src/agent/fake-provider");
     const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
-    const home = mkdtempSync(join(tmpdir(), "norma-plugin-consent-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
     seedDemoPlugin(home, fixture);
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 2,
@@ -1026,7 +1026,7 @@ describe("daemon IPC", () => {
     if (process.platform !== "darwin") return; // spawns a child process
     const { FakeProvider } = await import("../src/agent/fake-provider");
     const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
-    const home = mkdtempSync(join(tmpdir(), "norma-plugin-consent-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
     seedDemoPlugin(home, fixture);
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 2,
@@ -1060,7 +1060,7 @@ describe("daemon IPC", () => {
     mkdirSync(join(home, "plugins", "demo", "skills", "greet"), { recursive: true });
     writeFileSync(join(home, "plugins", "demo", "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: hi\n---\nbody");
     writeFileSync(join(home, "plugins", "demo", ".mcp.json"), JSON.stringify({ mcpServers: { fake: { command: "bun", args: ["run", fixture] } } }));
-    writeFileSync(join(home, "plugins", "demo", "norma-plugin.json"), JSON.stringify({
+    writeFileSync(join(home, "plugins", "demo", "winter-plugin.json"), JSON.stringify({
       id: "demo", tier: "capability",
       contributes: { mcpServers: [{ name: "fake", command: "bun", args: ["run", fixture] }] },
     }));
@@ -1070,7 +1070,7 @@ describe("daemon IPC", () => {
     if (process.platform !== "darwin") return; // spawns a child process
     const { FakeProvider } = await import("../src/agent/fake-provider");
     const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
-    const home = mkdtempSync(join(tmpdir(), "norma-plugin-consent-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
     seedManifestPlugin(home, fixture);
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 2,
@@ -1114,7 +1114,7 @@ describe("daemon IPC", () => {
     if (process.platform !== "darwin") return; // spawns a child process
     const { FakeProvider } = await import("../src/agent/fake-provider");
     const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
-    const home = mkdtempSync(join(tmpdir(), "norma-plugin-consent-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
     seedManifestPlugin(home, fixture);
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 2,
@@ -1152,7 +1152,7 @@ describe("daemon IPC", () => {
   function seedManifestOnlyPlugin(home: string, fixture: string): void {
     // Deliberately NO .mcp.json anywhere in this plugin dir.
     mkdirSync(join(home, "plugins", "demo"), { recursive: true });
-    writeFileSync(join(home, "plugins", "demo", "norma-plugin.json"), JSON.stringify({
+    writeFileSync(join(home, "plugins", "demo", "winter-plugin.json"), JSON.stringify({
       id: "demo", tier: "capability",
       contributes: { mcpServers: [{ name: "fake", command: "bun", args: ["run", fixture] }] },
     }));
@@ -1162,7 +1162,7 @@ describe("daemon IPC", () => {
     if (process.platform !== "darwin") return; // spawns a child process
     const { FakeProvider } = await import("../src/agent/fake-provider");
     const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
-    const home = mkdtempSync(join(tmpdir(), "norma-plugin-consent-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
     seedManifestOnlyPlugin(home, fixture);
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 2,
@@ -1188,13 +1188,13 @@ describe("daemon IPC", () => {
     if (process.platform !== "darwin") return; // spawns a child process
     const { FakeProvider } = await import("../src/agent/fake-provider");
     const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
-    const home = mkdtempSync(join(tmpdir(), "norma-plugin-consent-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
     mkdirSync(join(home, "plugins", "demo"), { recursive: true });
     // .mcp.json declares a DIFFERENT server name than the manifest, so precedence is unambiguous.
     writeFileSync(join(home, "plugins", "demo", ".mcp.json"), JSON.stringify({
       mcpServers: { legacy: { command: "/nonexistent-legacy-server" } },
     }));
-    writeFileSync(join(home, "plugins", "demo", "norma-plugin.json"), JSON.stringify({
+    writeFileSync(join(home, "plugins", "demo", "winter-plugin.json"), JSON.stringify({
       id: "demo", tier: "capability",
       contributes: { mcpServers: [{ name: "fake", command: "bun", args: ["run", fixture] }] },
     }));
@@ -1227,7 +1227,7 @@ describe("daemon IPC", () => {
   // needing the `ps -o lstart=` identity check, so this doesn't depend on any real process at all.
   // -----------------------------------------------------------------------------------------
   test("Phase 4d-cleanup Task 2: a daemon booted with NO agent provider still sweeps a stale orphaned plugin PID file at boot", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-daemon-no-provider-sweep-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-daemon-no-provider-sweep-"));
     const pidDir = join(home, "run", "plugins");
     mkdirSync(pidDir, { recursive: true });
     const pidFile = join(pidDir, "ghost-plugin.pid");
@@ -1249,7 +1249,7 @@ describe("daemon IPC", () => {
   // Review-caught regression (post Phase 4d-cleanup Task 2): hoisting `PluginSupervisor`
   // construction out of `if (agentProvider)` (above) made `opts.supervisor` ALWAYS defined, which
   // silently widened `hotApplyStart` (ipc/server.ts) — its old guard was `!opts.supervisor ||
-  // !opts.normaHome`, so a no-provider daemon fell through to a REAL `opts.supervisor.restart()`
+  // !opts.winterHome`, so a no-provider daemon fell through to a REAL `opts.supervisor.restart()`
   // spawn on `plugin.enable {consent:true}`, where before this task it always returned "stopped"
   // with no spawn. Fixed by also gating on `opts.registry` (only ever wired for a
   // provider-configured daemon — same signal `tool.register` already uses). This proves the FIX:
@@ -1259,7 +1259,7 @@ describe("daemon IPC", () => {
   // (`bun --version`) — if the bug regressed, this WOULD spawn a real OS process.
   // -----------------------------------------------------------------------------------------
   test("Phase 4d-cleanup Task 2 fix: a daemon booted with NO agent provider does NOT hot-spawn on plugin.enable — settings recorded, status stays \"stopped\", no process spawned", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-daemon-no-provider-enable-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-daemon-no-provider-enable-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 2,
       provider: { type: "codex-oauth", model: "gpt-5.4" }, // unused — agentProvider: null below forces no-provider
@@ -1267,7 +1267,7 @@ describe("daemon IPC", () => {
     // A Tier-2 (platform) plugin with an `entry` — spawn-eligible once enabled+consented, exactly
     // the shape `plugin.enable{consent:true}` would hot-spawn on a provider-configured daemon.
     mkdirSync(join(home, "plugins", "runner"), { recursive: true });
-    writeFileSync(join(home, "plugins", "runner", "norma-plugin.json"), JSON.stringify({
+    writeFileSync(join(home, "plugins", "runner", "winter-plugin.json"), JSON.stringify({
       id: "runner", tier: "platform", entry: { command: "bun", args: ["--version"] },
     }));
 
@@ -1326,7 +1326,7 @@ describe("daemon IPC", () => {
   // connection is role-rejected by the allowlist gate BEFORE ever reaching those handlers — an
   // even stronger form of "never touching the broker" than the old typed-denied result.
   test("peripheral.lease/renew/release from a plugin-role connection are role-rejected before ever reaching the broker", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-peripheral-plugin-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-peripheral-plugin-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const rawToken = store.mintPluginToken("plugin-client");
@@ -1412,7 +1412,7 @@ describe("daemon IPC", () => {
     const { PeripheralBroker } = await import("../src/peripheral/broker");
     const { ProviderLink } = await import("../src/peripheral/provider-link");
 
-    const home = mkdtempSync(join(tmpdir(), "norma-peripheral-call-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-peripheral-call-"));
     const audit = new AuditLog(join(home, "audit.jsonl"));
     const providerLink = new ProviderLink();
     const broker = new PeripheralBroker({
@@ -1473,8 +1473,8 @@ describe("daemon IPC", () => {
     await boot();
     const c = await TestClient.connect(daemon.socketPath);
     await c.hello(harnessToken, "trust-lister");
-    const dirA = realpathSync(mkdtempSync(join(tmpdir(), "norma-trust-a-")));
-    const dirB = realpathSync(mkdtempSync(join(tmpdir(), "norma-trust-b-")));
+    const dirA = realpathSync(mkdtempSync(join(tmpdir(), "winter-trust-a-")));
+    const dirB = realpathSync(mkdtempSync(join(tmpdir(), "winter-trust-b-")));
     await c.request(METHODS.trustDir, { path: dirA });
     await c.request(METHODS.trustDir, { path: dirB });
 
@@ -1508,12 +1508,12 @@ describe("daemon IPC", () => {
   });
 
   test("daemon.status pluginsCount reflects the real installed-plugin count (Phase 4d-i Task 4 — was hardcoded 0)", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-daemon-status-plugins-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-daemon-status-plugins-"));
     for (const name of ["alpha", "beta", "gamma"]) {
       mkdirSync(join(home, "plugins", name), { recursive: true });
       writeFileSync(join(home, "plugins", name, "plugin.json"), JSON.stringify({ description: name }));
     }
-    const plugins = new PluginStore({ normaHome: home });
+    const plugins = new PluginStore({ winterHome: home });
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     const authority = new TokenAuthority(secrets);
     const tokens = await authority.ensureTokens();
@@ -1584,7 +1584,7 @@ describe("daemon IPC", () => {
     });
 
     // Phase 4c Task 1 (spec §5): hardware.respond is deliberately NOT on the plugin allowlist —
-    // only the active provider connection (Norma.app) may answer a hardware_requested push, same
+    // only the active provider connection (Winter.app) may answer a hardware_requested push, same
     // precedent as peripheral.respond. A plugin connection calling it is role-rejected before
     // dispatch ever reaches the (Task 2) handler.
     test("hardware.respond from a plugin connection is role-rejected — provider-only, not one of the seven plugin verbs", async () => {
@@ -1645,7 +1645,7 @@ describe("daemon IPC", () => {
 
   // -----------------------------------------------------------------------------------------
   // Hardware helper (Phase 4c Task 2, spec §5): plugin (or harness, dev/testing) → core →
-  // Norma.app's XPC helper, via HardwareBroker + the SAME ProviderLink/PeripheralBroker.isProvider
+  // Winter.app's XPC helper, via HardwareBroker + the SAME ProviderLink/PeripheralBroker.isProvider
   // gate peripheral.respond uses. Constructed directly here (AuditLog/PeripheralBroker/
   // ProviderLink/HardwareBroker/PluginStore), mirroring daemon.ts's own wiring exactly — same
   // precedent as "plugin tool bridge (Task 4)"'s bootBridgeServer and the "noop capability call
@@ -1663,7 +1663,7 @@ describe("daemon IPC", () => {
       const { ProviderLink } = await import("../src/peripheral/provider-link");
       const { HardwareBroker } = await import("../src/peripheral/hardware");
 
-      const home = mkdtempSync(join(tmpdir(), "norma-hardware-ipc-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-hardware-ipc-"));
       const store = new SessionStore(home);
       const socketPath = join(home, "core.sock");
       const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -1681,16 +1681,16 @@ describe("daemon IPC", () => {
       const hardware = new HardwareBroker({
         audit, pushToProvider: (e) => providerLink.push(e), timeoutMs: opts.timeoutMs ?? 500,
       });
-      const plugins = new PluginStore({ normaHome: home, consents: opts.consents });
+      const plugins = new PluginStore({ winterHome: home, consents: opts.consents });
 
-      // Phase 4d-ii Task 2: `normaHome` wired (harmless for every EXISTING test here — no
+      // Phase 4d-ii Task 2: `winterHome` wired (harmless for every EXISTING test here — no
       // settings.json exists at `home` unless a test writes one, so `livePlugins()`'s
       // `loadSettings` throws and it falls back to the `plugins` snapshot above, same as before
       // this change) — lets a dedicated regression test below prove `plugin.setConsent`'s hardware
       // grant is honored by `hardware.request` immediately, without a restart.
       const server = startIpcServer({
         socketPath, serverVersion: "test", tokens: authority, store, peripheral, providerLink, hardware, plugins,
-        normaHome: home,
+        winterHome: home,
       });
       return {
         store, socketPath, harnessToken: tokens.harness, home,
@@ -1700,7 +1700,7 @@ describe("daemon IPC", () => {
 
     function seedBatteryPlugin(home: string, pluginId: string, permissions: { hardware?: string[] } = { hardware: ["battery"] }): void {
       mkdirSync(join(home, "plugins", pluginId), { recursive: true });
-      writeFileSync(join(home, "plugins", pluginId, "norma-plugin.json"), JSON.stringify({
+      writeFileSync(join(home, "plugins", pluginId, "winter-plugin.json"), JSON.stringify({
         id: pluginId, tier: "capability", permissions,
       }));
     }
@@ -1730,7 +1730,7 @@ describe("daemon IPC", () => {
       const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
 
       const res = await plugin.request(METHODS.hardwareRequest, { verb: "getChargeLimit" });
-      expect(res.result).toEqual({ code: "no_provider", message: "hardware features require Norma.app" });
+      expect(res.result).toEqual({ code: "no_provider", message: "hardware features require Winter.app" });
 
       plugin.close(); srv.stop();
     });
@@ -1998,7 +1998,7 @@ describe("daemon IPC", () => {
       store: SessionStore; socketPath: string; harnessToken: string; adminToken: string;
       supervisor: PluginSupervisor; stop: () => void;
     }> {
-      const home = mkdtempSync(join(tmpdir(), "norma-plugin-restart-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-plugin-restart-"));
       const store = new SessionStore(home);
       const socketPath = join(home, "core.sock");
       const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -2081,7 +2081,7 @@ describe("daemon IPC", () => {
   // Plugin lifecycle RPCs (Phase 4d-ii Task 2): plugins.install/plugin.enable/disable/remove/
   // setConsent applied HOT to the running daemon — no restart, unlike the CLI's file-based flow.
   // A real PluginSupervisor (fake spawn/isAlivePid/signalPid, same injection precedent as
-  // "plugin.restart"/"plugins.list supervisor status" above) + `normaHome` wired so the RPC
+  // "plugin.restart"/"plugins.list supervisor status" above) + `winterHome` wired so the RPC
   // handlers can read/write settings.json and the plugins directory directly.
   // -----------------------------------------------------------------------------------------
   describe("plugin lifecycle RPCs (Task 2)", () => {
@@ -2090,7 +2090,7 @@ describe("daemon IPC", () => {
       store: SessionStore; socketPath: string; harnessToken: string;
       supervisor: PluginSupervisor; stop: () => void;
     }> {
-      const home = mkdtempSync(join(tmpdir(), "norma-plugin-lifecycle-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-plugin-lifecycle-"));
       writeFileSync(join(home, "settings.json"), JSON.stringify({
         schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" },
       }));
@@ -2098,14 +2098,14 @@ describe("daemon IPC", () => {
       // any manifest with an entry point (plugin-manifest.ts), so this plugin always starts out
       // needing consent, exercising the two-step enable flow below.
       mkdirSync(join(home, "plugins", "runner"), { recursive: true });
-      writeFileSync(join(home, "plugins", "runner", "norma-plugin.json"), JSON.stringify({
+      writeFileSync(join(home, "plugins", "runner", "winter-plugin.json"), JSON.stringify({
         id: "runner", tier: "platform", entry: { command: "bun", args: ["index.ts"] },
       }));
       const store = new SessionStore(home);
       const socketPath = join(home, "core.sock");
       const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
       const tokens = await authority.ensureTokens();
-      const plugins = new PluginStore({ normaHome: home });
+      const plugins = new PluginStore({ winterHome: home });
       const supervisor = new PluginSupervisor({
         runDir: join(home, "run"),
         socketPath,
@@ -2122,7 +2122,7 @@ describe("daemon IPC", () => {
       // match — the dedicated no-provider case (registry omitted) is covered separately above.
       const registry = new ToolRegistry();
       const server = startIpcServer({
-        socketPath, serverVersion: "test", tokens: authority, store, plugins, supervisor, registry, normaHome: home,
+        socketPath, serverVersion: "test", tokens: authority, store, plugins, supervisor, registry, winterHome: home,
       });
       return {
         home, settingsPath: join(home, "settings.json"), pluginsRoot: join(home, "plugins"),
@@ -2183,7 +2183,7 @@ describe("daemon IPC", () => {
       const settings = JSON.parse(readFileSync(srv.settingsPath, "utf8"));
       expect(settings.plugins.enabled).toEqual([]);
       expect(settings.plugins.disabled).toEqual(["runner"]);
-      // Matches the CLI's `norma plugin disable` (main.ts, which composes
+      // Matches the CLI's `winter plugin disable` (main.ts, which composes
       // stripPluginConsents(setPluginEnabled(...))) and the design spec's fresh-consent semantics
       // (lifecycle.ts's stripPluginConsents doc, settings.ts:38-40): disable deletes the plugin's
       // whole consent record, so re-`plugin.enable` after a disable requires consenting again.
@@ -2206,8 +2206,8 @@ describe("daemon IPC", () => {
 
     test("(d) plugins.install copies a fixture dir and returns requiredConsents/hasMcp/consentBlock, never touching settings", async () => {
       const srv = await bootLifecycleServer();
-      const src = mkdtempSync(join(tmpdir(), "norma-plugin-src-"));
-      writeFileSync(join(src, "norma-plugin.json"), JSON.stringify({ id: "fresh", tier: "platform", entry: { command: "bun" } }));
+      const src = mkdtempSync(join(tmpdir(), "winter-plugin-src-"));
+      writeFileSync(join(src, "winter-plugin.json"), JSON.stringify({ id: "fresh", tier: "platform", entry: { command: "bun" } }));
       const c = await TestClient.connect(srv.socketPath);
       await c.hello(srv.harnessToken, "cli-install");
 
@@ -2218,7 +2218,7 @@ describe("daemon IPC", () => {
       expect(res.result.requiredConsents).toEqual(["exec"]);
       expect(res.result.hasMcp).toBe(false);
       expect(res.result.consentBlock[0]).toBe("plugin fresh requests:");
-      expect(existsSync(join(srv.pluginsRoot, "fresh", "norma-plugin.json"))).toBe(true);
+      expect(existsSync(join(srv.pluginsRoot, "fresh", "winter-plugin.json"))).toBe(true);
       expect(readFileSync(srv.settingsPath, "utf8")).toBe(before); // installed disabled+unconsented — settings untouched
 
       c.close(); srv.stop();
@@ -2226,7 +2226,7 @@ describe("daemon IPC", () => {
 
     test("plugins.install derives the name from `source`'s basename when `name` is omitted", async () => {
       const srv = await bootLifecycleServer();
-      const src = mkdtempSync(join(tmpdir(), "norma-plugin-derived-"));
+      const src = mkdtempSync(join(tmpdir(), "winter-plugin-derived-"));
       writeFileSync(join(src, "plugin.json"), JSON.stringify({ name: "derived" }));
       const c = await TestClient.connect(srv.socketPath);
       await c.hello(srv.harnessToken, "cli-install-derived");
@@ -2242,22 +2242,22 @@ describe("daemon IPC", () => {
 
     test("plugins.install on an already-installed name -> already_installed, no double copy", async () => {
       const srv = await bootLifecycleServer();
-      const src = mkdtempSync(join(tmpdir(), "norma-plugin-src2-"));
-      writeFileSync(join(src, "norma-plugin.json"), JSON.stringify({ id: "runner", tier: "capability" }));
+      const src = mkdtempSync(join(tmpdir(), "winter-plugin-src2-"));
+      writeFileSync(join(src, "winter-plugin.json"), JSON.stringify({ id: "runner", tier: "capability" }));
       const c = await TestClient.connect(srv.socketPath);
       await c.hello(srv.harnessToken, "cli-install-dup");
 
       const res = await c.request(METHODS.pluginsInstall, { source: src, name: "runner" });
       expect(res.result).toEqual({ code: "already_installed", name: "runner" });
       // the pre-existing fixture (tier: platform) was never clobbered by the capability-tier source
-      expect(JSON.parse(readFileSync(join(srv.pluginsRoot, "runner", "norma-plugin.json"), "utf8")).tier).toBe("platform");
+      expect(JSON.parse(readFileSync(join(srv.pluginsRoot, "runner", "winter-plugin.json"), "utf8")).tier).toBe("platform");
 
       c.close(); srv.stop();
     });
 
     test("plugins.install on a source with no manifest -> invalid_source, nothing copied", async () => {
       const srv = await bootLifecycleServer();
-      const src = mkdtempSync(join(tmpdir(), "norma-plugin-empty-"));
+      const src = mkdtempSync(join(tmpdir(), "winter-plugin-empty-"));
       const c = await TestClient.connect(srv.socketPath);
       await c.hello(srv.harnessToken, "cli-install-invalid");
 
@@ -2390,7 +2390,7 @@ describe("daemon IPC", () => {
       registry: ToolRegistry; supervisor: PluginSupervisor; contrib: PluginContribRegistry;
       stop: () => void;
     }> {
-      const home = mkdtempSync(join(tmpdir(), "norma-plugin-bridge-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-plugin-bridge-"));
       const store = new SessionStore(home);
       const socketPath = join(home, "core.sock");
       const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -2693,7 +2693,7 @@ describe("daemon IPC", () => {
       store: SessionStore; socketPath: string; harnessToken: string; supervisor: PluginSupervisor;
       stop: () => void;
     }> {
-      const home = mkdtempSync(join(tmpdir(), "norma-plugin-push-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-plugin-push-"));
       const store = new SessionStore(home);
       const socketPath = join(home, "core.sock");
       const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -2935,7 +2935,7 @@ describe("daemon IPC", () => {
 // -----------------------------------------------------------------------------------------
 // provider.configure RPC (BYOK T1, design doc `2026-07-16-byok-provider-setup-design.md` §1): the
 // in-app "bring your own OpenAI API key" path. A bare `startIpcServer` (no full daemon/engine) with
-// `normaHome` + a `FileSecretStore` wired directly — same self-contained precedent as the "plugin
+// `winterHome` + a `FileSecretStore` wired directly — same self-contained precedent as the "plugin
 // lifecycle RPCs" describe block above — so assertions can read back both the secret store and
 // settings.json without exposing `home` off the shared daemon fixture.
 // -----------------------------------------------------------------------------------------
@@ -2944,7 +2944,7 @@ describe("provider.configure RPC (BYOK T1)", () => {
     home: string; settingsPath: string; socketPath: string; harnessToken: string;
     secrets: FileSecretStore; store: SessionStore; stop: () => void;
   }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-provider-configure-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-provider-configure-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 2,
       provider: { type: "codex-oauth", model: "gpt-5.4" },
@@ -2955,7 +2955,7 @@ describe("provider.configure RPC (BYOK T1)", () => {
     const authority = new TokenAuthority(new FileSecretStore(join(home, "auth-secrets")));
     const tokens = await authority.ensureTokens();
     const secrets = new FileSecretStore(join(home, "provider-secrets"));
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, normaHome: home, secrets });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets });
     return {
       home, settingsPath: join(home, "settings.json"), socketPath, harnessToken: tokens.harness,
       secrets, store,
@@ -3050,14 +3050,14 @@ describe("provider.configure RPC (BYOK T1)", () => {
   });
 
   test("a server with no secret store configured -> typed INTERNAL failure, never a crash", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-provider-configure-nostore-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-provider-configure-nostore-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" } }));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "auth-secrets")));
     const tokens = await authority.ensureTokens();
-    // normaHome wired, secrets deliberately omitted.
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, normaHome: home });
+    // winterHome wired, secrets deliberately omitted.
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home });
     const c = await TestClient.connect(socketPath);
     await c.hello(tokens.harness, "cli-provider-configure-nostore");
 

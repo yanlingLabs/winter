@@ -10,8 +10,8 @@ import { checkMockModuleLeaks, installMockModuleTripwire, _uninstallForTests } f
 // Fictional, unresolvable-as-a-real-file specifiers — `mock.module` accepts any string id (measured
 // separately), and nothing in this codebase ever imports these, so leaving them "mocked" for the
 // rest of this `bun test` process (which — measured — `mock.restore()` cannot undo) is inert.
-const FAKE_ID_A = "norma-test-fixture/tripwire-fake-a";
-const FAKE_ID_B = "norma-test-fixture/tripwire-fake-b";
+const FAKE_ID_A = "winter-test-fixture/tripwire-fake-a";
+const FAKE_ID_B = "winter-test-fixture/tripwire-fake-b";
 
 describe("checkMockModuleLeaks", () => {
   test("a module mocked once (never revisited) is reported as leaked", () => {

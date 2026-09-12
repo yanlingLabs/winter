@@ -75,7 +75,7 @@ function resolveSelection(
 }
 
 /** Builds the `liveModel` resolver for `createProvider`. `settingsPath` is optional — omitted
- *  (e.g. tests, `norma provider-smoke`) means the resolver just keeps returning the boot-time
+ *  (e.g. tests, `winter provider-smoke`) means the resolver just keeps returning the boot-time
  *  selection forever (no re-read possible without a path). */
 function buildLiveModelResolver(
   providerType: Settings["provider"]["type"],
@@ -128,7 +128,7 @@ export async function createProvider(settings: Settings, secrets: SecretStore, s
     // Fail-fast, unchanged: `createProvider` itself throws before anything is constructed when no
     // key is stored (manager.test.ts pins this exact message).
     const apiKey = await readOpenAiApiKey(secrets);
-    if (!apiKey) throw new Error("no API key stored — run: norma login --api-key");
+    if (!apiKey) throw new Error("no API key stored — run: winter login --api-key");
     inner = createOpenAiCompatibleRuntimeProvider(secrets, settings.provider.baseUrl);
   }
   const liveModel = buildLiveModelResolver(providerType, settings, settingsPath);

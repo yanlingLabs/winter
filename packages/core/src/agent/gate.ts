@@ -49,14 +49,14 @@ export type SessionApprovalPolicy = "plan" | "dont-ask" | "ask" | "accept-edits"
 // from child tool sets, so this can only fire if a provider ignores that) — allow it to return the
 // bridge/placeholder path cleanly rather than hang on an approval prompt.
 // task_stop is read-only too (4h-ii-c Task 2): orchestration like spawn_agent/send_message — it
-// only aborts Norma's OWN child work (a bg agent's AbortController, or a bg bash task it started)
+// only aborts Winter's OWN child work (a bg agent's AbortController, or a bg bash task it started)
 // and never touches anything external on its own; CC's TaskStop prompts no approval either.
 // CC-parity cleanup (removal of the redundant standalone `bash_kill` tool): task_stop's bash-task
 // branch is now the ONLY way to kill a background bash task — there is no longer a separate
 // MUTATING-gated `bash_kill` path a bash caller could reach for the exact same kill. This was
 // flagged here for review while both tools existed (the READ_ONLY/MUTATING split for the same
 // underlying OS-process-kill action); it's resolved in favor of matching CC, whose single
-// TaskStop also prompts no approval — task_stop's target is Norma's own bookkeeping (a bg agent
+// TaskStop also prompts no approval — task_stop's target is Winter's own bookkeeping (a bg agent
 // or a bg bash task IT started), not an arbitrary external process, so READ_ONLY stands.
 // agent_list/agent_output (phase 5a Task 1) are read-only too, per the plan's own global
 // constraint ("New tools are READ_ONLY ... they only read registry/store state"): both only ever
@@ -84,7 +84,7 @@ export type SessionApprovalPolicy = "plan" | "dont-ask" | "ask" | "accept-edits"
 // planning session should still be able to do.
 // list_sessions/manage_session are read-only too (dispatch-tool-deferral gate-classification
 // follow-up): list_sessions only ever reads SessionStore/registry state and bounded transcript
-// bytes, same class as task_get/agent_list. manage_session's targets are Norma's OWN session
+// bytes, same class as task_get/agent_list. manage_session's targets are Winter's OWN session
 // bookkeeping, never an arbitrary external process — `stop` is the SAME resumable ESC abort
 // task_stop already rides free above; `background`/`archive`/`resume` only flip two reversible
 // per-session flags (sessions/set-activity.ts). The reviewed design substitutes LOUDNESS for a
@@ -105,7 +105,7 @@ export type SessionApprovalPolicy = "plan" | "dont-ask" | "ask" | "accept-edits"
 // dispatch), never a caller-supplied destination outside that. A spreadsheet cell COULD carry
 // adversarial text, but that is the identical risk `read`/`glob`/`grep` already accept without a
 // NETWORK-style classification — the document is local, fenced, and already inside the boundary the
-// user granted Norma, unlike a url a model could point at anything.
+// user granted Winter, unlike a url a model could point at anything.
 const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill", "ToolSearch", "ask_user", "AskQuestion", "task_create", "task_update", "task_list", "task_get", "exit_plan_mode", "enter_plan_mode", "spawn_agent", "send_message", "task_stop", "agent_list", "agent_output", "lsp", "push_notification", "list_sessions", "manage_session"]);
 // `computer` (Phase 5 CU) is MUTATING: a computer-use action drives real mouse/keyboard/screen, so
 // it must pass the gate on EVERY call (spec §4.6: "every CU action passes the permission gate") —
@@ -198,7 +198,7 @@ const READ_ONLY = new Set(["read", "glob", "grep", "ls", "bash_output", "Skill",
 // `docs info`/`docs read` ask under ask/dont-ask and deny under plan even though neither mutates,
 // because this gate is keyed by TOOL NAME and `docs` also carries `replace`/`insert`/`append`.
 const MUTATING = new Set(["write", "edit", "bash", "notebook_edit", "enter_worktree", "exit_worktree", "computer", "schedule", "Workflow", "session_spawn", "sheets", "slides", "docs"]);
-// web_fetch (4g Task 5, T6 adds web_search here) is Norma's ONLY network-capable tool — it does NOT
+// web_fetch (4g Task 5, T6 adds web_search here) is Winter's ONLY network-capable tool — it does NOT
 // belong in READ_ONLY (it makes a live outbound request; the response bytes are DATA that could
 // carry adversarial "instructions", so an unattended session shouldn't get an implicit pass) and it
 // is NOT quite MUTATING either (unlike write/edit/bash it never touches an arbitrary fs/process
@@ -422,11 +422,11 @@ export class PermissionGate {
     // external branches in engine.ts (each ultimately calls `this.cfg.reviewer.review(...)`,
     // reviewer.ts): its `ReviewClass` is a closed `"bash" | "fs" | "external"` union, and EACH class's
     // instructions text is FIXED inside `BashReviewer.review()` itself — "bash" reviews a shell
-    // command, "fs" an unusual write target, "external" a third-party MCP/plugin call Norma cannot
+    // command, "fs" an unusual write target, "external" a third-party MCP/plugin call Winter cannot
     // inspect. None of the three describes "a script that launches an unbounded background
     // multi-agent swarm"; reusing "external"'s text would misrepresent the review target to the
     // REVIEWING MODEL itself (telling it this is uninspectable third-party code, when a workflow
-    // script is the opposite — fully Norma-authored and fully inspectable) — a correctness problem
+    // script is the opposite — fully Winter-authored and fully inspectable) — a correctness problem
     // with the review, not merely a style mismatch. A proper fix would add a fourth ReviewClass (and
     // its own instructions constant) to reviewer.ts, which sits outside this task's file scope
     // (gate.ts/engine.ts/tests + the spec doc only) — so FALL BACK to carding it here, unconditionally,

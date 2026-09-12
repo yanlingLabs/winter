@@ -1,4 +1,4 @@
-// Pure stall-detection state for `norma -p`. No timers, no wall-clock reads — every function
+// Pure stall-detection state for `winter -p`. No timers, no wall-clock reads — every function
 // takes `now` as an argument so the logic can be tested deterministically with synthetic
 // timelines. The only real setInterval/Date.now() calls live in main.ts's wiring.
 export interface WatchdogState { turnRunning: boolean; toolsInFlight: number; approvalsPending: number; lastEventAt: number }

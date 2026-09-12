@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, SESSION_MODEL_MAX_CHARS, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, SESSION_MODEL_MAX_CHARS, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
@@ -66,7 +66,7 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
   afterEach(() => { stop?.(); stop = undefined; });
 
   async function boot(): Promise<{ store: SessionStore; socketPath: string; harnessToken: string; remoteToken: string }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-set-model-rpc-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-set-model-rpc-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -351,7 +351,7 @@ describe("session.create validates model exactly like session.setModel (followup
   afterEach(() => { stop2?.(); stop2 = undefined; });
 
   async function boot2(models: ModelInfo[]): Promise<{ store: SessionStore; socketPath: string; harnessToken: string }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-create-model-rpc-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-create-model-rpc-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import {
   LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket,
   type NewSessionEvent,
-} from "@norma/protocol";
+} from "@yanlinglabs/winter-protocol";
 import { startIpcServer, type IpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
@@ -93,7 +93,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** sha256 hex digest, lowercase — matches `hashToken()` in ../../src/peripheral/broker.ts AND
- *  `sha256Hex()` in apple/Norma/Sources/App/PeripheralProvider.swift (both documented as
+ *  `sha256Hex()` in apple/Winter/Sources/App/PeripheralProvider.swift (both documented as
  *  byte-identical). Used to drive a scripted provider that validates a REAL core-minted token
  *  exactly the way the Swift provider's `shouldServe()` does — closing the Task-4 report's MINOR
  *  ("Swift hash tests lack a literal cross-impl vector"). */
@@ -165,7 +165,7 @@ interface Harness {
  *  round-trip, spec v1 has no wire method for it) while every lease/renew/release/advertise/
  *  revoke/respond operation below still goes over the REAL unix socket via TestClient. */
 async function buildHarness(opts: { expiryMs?: number; heartbeatMs?: number; callTimeoutMs?: number } = {}): Promise<Harness> {
-  const home = mkdtempSync(join(tmpdir(), "norma-e2e-peripheral-"));
+  const home = mkdtempSync(join(tmpdir(), "winter-e2e-peripheral-"));
   const store = new SessionStore(home);
   const hub = new SessionHub(store);
   const secrets = new FileSecretStore(join(home, "test-secrets"));

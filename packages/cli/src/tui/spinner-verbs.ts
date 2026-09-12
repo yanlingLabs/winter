@@ -1,11 +1,11 @@
 // Whimsical verb lists for the in-progress spinner and the turn-complete
-// summary line. These are Norma's own words — written fresh for this project,
+// summary line. These are Winter's own words — written fresh for this project,
 // not lifted from any other tool's list. `pickVerb` is a pure, deterministic
 // selector: callers inject a seed (e.g. the turn's start timestamp) so the
 // same seed always yields the same verb, with no wall-clock or RNG access
 // inside this module.
 
-/** ~50 original whimsical gerunds shown while Norma is working on a turn. */
+/** ~50 original whimsical gerunds shown while Winter is working on a turn. */
 export const SPINNER_VERBS: string[] = [
   "Percolating",
   "Untangling",

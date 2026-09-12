@@ -17,7 +17,7 @@ const wait = (ms = 10) => new Promise((r) => setTimeout(r, ms));
 // non-TTY test harness — same convention as flatten-blocks.test.ts's local stripAnsi helper.
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
 
-const historyPath = (): string => join(mkdtempSync(join(tmpdir(), "norma-composer-")), "history.jsonl");
+const historyPath = (): string => join(mkdtempSync(join(tmpdir(), "winter-composer-")), "history.jsonl");
 
 describe("Composer", () => {
   test("(a) type text + Enter while idle calls onSubmit once and clears the buffer", async () => {

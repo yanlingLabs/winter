@@ -11,7 +11,7 @@ const skillsStub = { list: () => [], loadBody: () => null } as any; // ContextAs
 const BASE = "BASE_PROMPT_MARKER";
 
 function assembler(styleResolver?: (cwd: string | null) => ResolvedStyle | null) {
-  return new ContextAssembler({ normaHome: tmp(), trust: trustStub, skills: skillsStub, basePrompt: BASE, styleResolver });
+  return new ContextAssembler({ winterHome: tmp(), trust: trustStub, skills: skillsStub, basePrompt: BASE, styleResolver });
 }
 
 describe("assemble() output-style injection", () => {

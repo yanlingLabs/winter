@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { MemoryStore, type MemoryFact } from "../../src/agent/memory";
 import { TrustStore } from "../../src/agent/trust";
 
-function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "norma-mem-"))); }
+function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "winter-mem-"))); }
 
 /** Always-trusted stub — most tests only need project scope to behave like user scope. */
 const alwaysTrusted = { isTrusted: (_dir: string) => true };
@@ -14,7 +14,7 @@ const neverTrusted = { isTrusted: (_dir: string) => false };
 
 function setup(trust: { isTrusted: (dir: string) => boolean } = alwaysTrusted, nowMs?: () => number) {
   const home = realDir();
-  const store = new MemoryStore({ normaHome: home, trust, ...(nowMs ? { nowMs } : {}) });
+  const store = new MemoryStore({ winterHome: home, trust, ...(nowMs ? { nowMs } : {}) });
   return { home, store };
 }
 
@@ -223,7 +223,7 @@ describe("MemoryStore", () => {
     // fs failure (scope root collides with a plain file): wrapped error, deliberately unclassified
     const home = realDir();
     writeFileSync(join(home, "memory"), "not a directory");
-    const fsStore = new MemoryStore({ normaHome: home, trust: alwaysTrusted });
+    const fsStore = new MemoryStore({ winterHome: home, trust: alwaysTrusted });
     const fsFail = await fsStore.write("user", fact({ name: "a" }), { source: "tool" });
     expect(fsFail.ok).toBe(false);
     if (!fsFail.ok) expect(fsFail.kind).toBeUndefined();
@@ -240,21 +240,21 @@ describe("MemoryStore", () => {
     const cwd = realDir();
     const res = await store.write("project", fact(), { source: "tool" }, cwd);
     expect(res.ok).toBe(false);
-    expect(existsSync(join(cwd, ".norma", "memory"))).toBe(false);
+    expect(existsSync(join(cwd, ".winter", "memory"))).toBe(false);
   });
 
   test("project scope: trusted round-trip (temp dirs + stub trust)", async () => {
     const cwd = realDir();
     const stubTrust = { isTrusted: (dir: string) => dir === cwd };
     const home = realDir();
-    const store = new MemoryStore({ normaHome: home, trust: stubTrust });
+    const store = new MemoryStore({ winterHome: home, trust: stubTrust });
 
     const w = await store.write("project", fact(), { source: "tool" }, cwd);
     expect(w.ok).toBe(true);
-    expect(existsSync(join(cwd, ".norma", "memory", "coffee-pref.md"))).toBe(true);
-    // audit always lands under normaHome, never under the project dir, for BOTH scopes
+    expect(existsSync(join(cwd, ".winter", "memory", "coffee-pref.md"))).toBe(true);
+    // audit always lands under winterHome, never under the project dir, for BOTH scopes
     expect(existsSync(join(home, "memory", "audit.jsonl"))).toBe(true);
-    expect(existsSync(join(cwd, ".norma", "memory", "audit.jsonl"))).toBe(false);
+    expect(existsSync(join(cwd, ".winter", "memory", "audit.jsonl"))).toBe(false);
 
     const r = store.read("project", "coffee-pref", cwd);
     expect(r.ok).toBe(true);
@@ -289,7 +289,7 @@ describe("MemoryStore", () => {
     // This exercises doWrite's own try/catch (fs error → typed result); it does NOT exercise
     // enqueue's rejection isolation — no rejection ever reaches the queue on this path.
     writeFileSync(join(home, "memory"), "not a directory");
-    const store = new MemoryStore({ normaHome: home, trust: alwaysTrusted });
+    const store = new MemoryStore({ winterHome: home, trust: alwaysTrusted });
 
     const first = await store.write("user", fact({ name: "a" }), { source: "tool" });
     expect(first.ok).toBe(false);
@@ -306,7 +306,7 @@ describe("MemoryStore", () => {
     // the failing call itself still rejects loudly rather than being swallowed.
     const home = realDir();
     const bombTrust = { isTrusted: (_dir: string): boolean => { throw new Error("trust store exploded"); } };
-    const store = new MemoryStore({ normaHome: home, trust: bombTrust });
+    const store = new MemoryStore({ winterHome: home, trust: bombTrust });
 
     await expect(store.write("project", fact(), { source: "tool" }, realDir())).rejects.toThrow("trust store exploded");
     const after = await store.write("user", fact({ name: "b" }), { source: "tool" }); // user scope never consults trust

@@ -10,7 +10,7 @@ function lines(path: string): unknown[] {
 
 describe("AuditLog", () => {
   test("append writes ts-stamped JSONL, one line per entry", () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-audit-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-audit-"));
     const path = join(dir, "audit.jsonl");
     const log = new AuditLog(path);
 
@@ -31,7 +31,7 @@ describe("AuditLog", () => {
   });
 
   test("mkdir-safe: creates missing parent directories on first write", () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-audit-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-audit-"));
     const path = join(dir, "nested", "deeper", "audit.jsonl");
     expect(existsSync(path)).toBe(false);
 
@@ -42,7 +42,7 @@ describe("AuditLog", () => {
   });
 
   test("a caller-supplied ts field is clobbered by the write-time stamp", () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-audit-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-audit-"));
     const path = join(dir, "audit.jsonl");
     const log = new AuditLog(path);
 
@@ -54,7 +54,7 @@ describe("AuditLog", () => {
   });
 
   test("write errors are logged, never thrown — a directory colliding with the log path is swallowed", () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-audit-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-audit-"));
     const path = join(dir, "audit.jsonl");
     // Pre-create the "file" path AS A DIRECTORY so appendFileSync fails with EISDIR.
     mkdirSync(path);

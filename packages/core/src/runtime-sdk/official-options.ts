@@ -3,9 +3,9 @@
 // session's LIVE facts" posture — nothing here is snapshotted at session creation).
 //
 // Fix round 1 (item 0): router 0.0.3 publishes `createApprovalBridge`/`minimalOsEnvironmentFrom`
-// at the package root. `minimalOsEnvironment` below stays Norma's own hand-built version (`HOME`/
+// at the package root. `minimalOsEnvironment` below stays Winter's own hand-built version (`HOME`/
 // `PATH`/`LANG`/`LC_ALL`/`TERM`) rather than switching to `minimalOsEnvironmentFrom` — the two do
-// the identical §3 job and Norma's own version is what every existing test already pins; recorded
+// the identical §3 job and Winter's own version is what every existing test already pins; recorded
 // as a deliberate "no functional gap, no reason to churn a passing seam" choice, not an oversight.
 // The REAL fix this round makes is `officialBrokerFor`: it now builds the router's own
 // `ApprovalBroker` shape (`(request: ApprovalRequest) => Promise<PermissionResult>`) and
@@ -21,7 +21,7 @@ import type { Mode as SessionMode } from "../agent/tools/registry";
 import { assistantMemoryDirFor, memoryDirFor, type MemoryDirOptions } from "../agent/memory-dir";
 import type { CapabilityServerRecord } from "../capabilities";
 import { canUseToolFor, type CanUseToolDeps } from "./approval-bridge";
-import { NORMA_BRAND } from "./brand";
+import { CORE_BRAND } from "./brand";
 import { controlPlaneDenyRules, disallowedToolsFor, sandboxConfigFor } from "./mode-options";
 import { officialCapabilityServersFor, type OfficialMcpModule } from "./official-capabilities";
 import { winterSystemPromptFor } from "./system-prompt";
@@ -88,7 +88,7 @@ export function minimalOsEnvironment(env: Readonly<Record<string, string | undef
 
 /** The router's own `officialCredentialPlan` throws `RuntimeLaunchInputError` (unexported, so it is
  *  not `instanceof`-checkable here) when a non-`custom` family has no credential ref and no explicit
- *  plan — surfaced as a Norma-typed refusal rather than an uncaught throw out of this function. */
+ *  plan — surfaced as a Winter-typed refusal rather than an uncaught throw out of this function. */
 export class OfficialCredentialPlanRefused extends Error {
   readonly code = "official_credential_plan_refused" as const;
   constructor(detail: string) {
@@ -100,7 +100,7 @@ export class OfficialCredentialPlanRefused extends Error {
 export class OfficialProjectKeyTooDeep extends Error {
   readonly code = "official_project_key_too_deep" as const;
   constructor(readonly cwd: string, readonly key: string) {
-    super(`the transcript project key for "${cwd}" ("${key}") exceeds the official runtime's own length limit; move the project to a shorter path or set a shorter NORMA_TMPDIR (WS-14 §3/R-4)`);
+    super(`the transcript project key for "${cwd}" ("${key}") exceeds the official runtime's own length limit; move the project to a shorter path or set a shorter WINTER_TMPDIR (WS-14 §3/R-4)`);
     this.name = "OfficialProjectKeyTooDeep";
   }
 }
@@ -119,7 +119,7 @@ export interface OfficialSessionInput {
 }
 
 export interface OfficialInputDeps {
-  /** NORMA_HOME. */
+  /** WINTER_HOME. */
   home: string;
   /** This session's persisted/decided `RuntimeSelection` (P8c-12) — `officialCredentialPlan`'s
    *  own family-derivation key. */
@@ -161,7 +161,7 @@ export interface OfficialInputDeps {
  *  is per-project) — so the official leg's `autoMemoryDirectory` is the SAME directory the Winter
  *  leg's MEMDIR resolves to for this session (WS-14 §2: "identical for both branches"). */
 export function autoMemoryDirectoryFor(input: OfficialSessionInput, home: string): string {
-  const opts: MemoryDirOptions = { normaHome: home };
+  const opts: MemoryDirOptions = { winterHome: home };
   return input.mode === "dispatch" || input.mode === "chat" ? assistantMemoryDirFor(opts) : memoryDirFor(input.cwd, opts);
 }
 
@@ -201,7 +201,7 @@ export function officialInputFor(
   // `options.permissionMode` carries below, so the containment floor and the broker agree on it.
   const canUseTool = createApprovalBridge({
     broker: officialBrokerFor({ ...deps.canUseToolDeps, sessionId: input.sessionId, mode: input.mode, cwd: input.cwd }),
-    brand: NORMA_BRAND,
+    brand: CORE_BRAND,
     mode: permissionMode,
   });
   const systemPromptAppend = winterSystemPromptFor(deps.assembler, {
@@ -219,7 +219,7 @@ export function officialInputFor(
     : officialCapabilityServersFor(deps.capabilities, deps.officialPeer as unknown as OfficialMcpModule);
 
   const base = minimalOsEnvironment(env);
-  const sharedTempRoot = env.NORMA_TMPDIR?.trim() ? env.NORMA_TMPDIR : tmpdir();
+  const sharedTempRoot = env.WINTER_TMPDIR?.trim() ? env.WINTER_TMPDIR : tmpdir();
   // WS-14 §12: the router derives ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN for console-oauth)
   // from `provider.authRef` for every family it can — `explicitCredentials`/`explicitConnectionEnv`
   // are the `custom`-family escape hatch a hermetic loopback bed needs (WS-14's own precedent: name
@@ -256,7 +256,7 @@ export function officialInputFor(
         // Fix round 1 (item 0): the REAL bridge. `createApprovalBridge` (router 0.0.3) wraps
         // `officialBrokerFor`'s plain `ApprovalBroker` with the containment floor + mode gate, and
         // `assertOptionsInvariants`'s tail check (`isOurApprovalBridge`) now passes — a capability
-        // tool call reaches Norma's own approval flow (cards, policy gating, control-plane denial),
+        // tool call reaches Winter's own approval flow (cards, policy gating, control-plane denial),
         // identically to the Winter leg, instead of the router's fixed fail-closed default.
         canUseTool,
         permissionMode,

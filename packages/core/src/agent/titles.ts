@@ -36,7 +36,7 @@ export class SessionTitler {
     this.model = deps.model ?? deps.provider.model;
     // A junk env value must fall back to the default, not become NaN — setTimeout(fn, NaN) fires
     // immediately (dreamer.ts's constructor guards the same footgun the same way).
-    const n = Number(process.env.NORMA_TITLE_TIMEOUT_MS);
+    const n = Number(process.env.WINTER_TITLE_TIMEOUT_MS);
     this.timeoutMs = deps.timeoutMs ?? (Number.isFinite(n) && n > 0 ? n : 15000);
   }
 

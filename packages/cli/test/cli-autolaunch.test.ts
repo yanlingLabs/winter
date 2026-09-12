@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ensureDaemonReachable } from "../src/main";
 
-// Lifecycle Task 5: `norma` auto-launches Norma.app when the daemon is down. `ensureDaemonReachable`
+// Lifecycle Task 5: `winter` auto-launches Winter.app when the daemon is down. `ensureDaemonReachable`
 // is the pure, injectable core (fs/exec/clock/env seams passed in) — these tests never touch a real
 // socket, never shell out to `open`, and never launch the real app; `connect()` wires the real seams
 // (see main.ts) and is exercised by hand / the headless sanity check, not here.

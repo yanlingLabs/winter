@@ -1,9 +1,9 @@
-import type { Task } from "@norma/protocol";
+import type { Task } from "@yanlinglabs/winter-protocol";
 
 /** Session-scoped agent task lists. Engine-memory (same lifecycle as loadedSkills) — the
  *  task_updated events are persisted for harness replay; the store itself is not (deferred).
  *
- *  Task descriptions (4g-ii, CC parity): @norma/protocol's `Task` has no `description` field
+ *  Task descriptions (4g-ii, CC parity): @yanlinglabs/winter-protocol's `Task` has no `description` field
  *  (only id/subject/status/activeForm), and this task deliberately does NOT touch
  *  packages/protocol (a zero-fixture-drift constraint for this phase). So descriptions are kept
  *  in a SEPARATE per-session map here, core-side only — never merged into the `Task` objects
@@ -37,7 +37,7 @@ export class TaskStore {
 
   /** Patch shape widened to every patchable Task field (4h-ii-d, CC parity: owner/blocks/
    *  blockedBy/metadata joined status/subject/activeForm) — `Partial<Omit<Task, "id">>` tracks
-   *  @norma/protocol's `Task` automatically, so a future protocol-side field needs no store change.
+   *  @yanlinglabs/winter-protocol's `Task` automatically, so a future protocol-side field needs no store change.
    *  The store itself still just shallow-merges the patch onto the existing task (`{...t, ...patch}`);
    *  the addBlocks/addBlockedBy append+dedupe and metadata shallow-merge computation happens in the
    *  TOOL (tools/tasks.ts's task_update), which reads the current task via `get()`, computes the
@@ -54,7 +54,7 @@ export class TaskStore {
   /** Terminal removal from the store's live map (the tool caller — tasks.ts's task_update
    *  "deleted" branch — emits a task_updated event with `status: "deleted"` via `update()` BEFORE
    *  calling this, so live task views see the removal on the wire; T3 review fix wave 1,
-   *  @norma/protocol's Task.status enum now has a "deleted" value). This method itself still just
+   *  @yanlinglabs/winter-protocol's Task.status enum now has a "deleted" value). This method itself still just
    *  drops the id from the map/description store — no event, no return value beyond the
    *  existed/didn't-exist boolean. Returns false (no-op) if the id doesn't exist. */
   delete(sessionId: string, id: string): boolean {

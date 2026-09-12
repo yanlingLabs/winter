@@ -1,6 +1,6 @@
 /**
- * Publishes the vendored iroh-ffi Apple XCFramework (apple/NormaKit/vendor/IrohLib.xcframework)
- * as a checksum'd GitHub release asset on the public repo, so `apple/NormaKit/Package.swift`
+ * Publishes the vendored iroh-ffi Apple XCFramework (apple/WinterKit/vendor/IrohLib.xcframework)
+ * as a checksum'd GitHub release asset on the public repo, so `apple/WinterKit/Package.swift`
  * can consume it via `.binaryTarget(url:checksum:)` — resolvable by a REMOTE SPM consumer (the
  * future iOS app) with no local fetch step, as well as by local Mac builds.
  *
@@ -27,11 +27,11 @@ import { join } from "node:path";
 import { GH_REPO } from "./release-lib";
 import { ROOT } from "./version-lib";
 
-const NORMAKIT_DIR = join(ROOT, "apple", "NormaKit");
-const VENDOR_DIR = join(NORMAKIT_DIR, "vendor");
+const WINTERKIT_DIR = join(ROOT, "apple", "WinterKit");
+const VENDOR_DIR = join(WINTERKIT_DIR, "vendor");
 const XCFRAMEWORK_DIR = join(VENDOR_DIR, "IrohLib.xcframework");
 const FETCH_SCRIPT = join(VENDOR_DIR, "fetch-iroh.sh");
-const PACKAGE_SWIFT = join(NORMAKIT_DIR, "Package.swift");
+const PACKAGE_SWIFT = join(WINTERKIT_DIR, "Package.swift");
 const ZIP_PATH = "/tmp/IrohLib.xcframework.zip";
 const ASSET_NAME = "IrohLib.xcframework.zip";
 
@@ -72,7 +72,7 @@ function computeSpmChecksum(): string {
   const out = execFileSync(
     "swift",
     ["package", "compute-checksum", ZIP_PATH],
-    { cwd: NORMAKIT_DIR, encoding: "utf8" },
+    { cwd: WINTERKIT_DIR, encoding: "utf8" },
   );
   const checksum = out.trim();
   if (!/^[0-9a-f]{64}$/.test(checksum)) {
@@ -107,7 +107,7 @@ function main(): void {
     console.error("");
     console.error("Aborting without zipping or uploading — replacing the hosted asset would");
     console.error("change its bytes (ditto zips embed mtimes) and invalidate the checksum");
-    console.error("pinned in apple/NormaKit/Package.swift, breaking `swift build` everywhere.");
+    console.error("pinned in apple/WinterKit/Package.swift, breaking `swift build` everywhere.");
     console.error("");
     console.error("If you really mean to replace it (e.g. after bumping the xcframework");
     console.error("contents without bumping IROH_VERSION), re-run with --force, then update");
@@ -130,7 +130,7 @@ function main(): void {
       console.warn("  Package.swift's pinned checksum no longer matches the uploaded asset:");
       console.warn(`  - ${committed ?? "(no checksum: found in Package.swift)"}`);
       console.warn(`  + ${checksum}`);
-      console.warn("  UPDATE apple/NormaKit/Package.swift's `.binaryTarget(checksum:)` to the");
+      console.warn("  UPDATE apple/WinterKit/Package.swift's `.binaryTarget(checksum:)` to the");
       console.warn("  `+` value above, or every `swift build` will fail checksum verification.");
     }
     console.log(`Uploading asset with --clobber...`);

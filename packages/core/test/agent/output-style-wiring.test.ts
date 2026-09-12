@@ -22,9 +22,9 @@ function styleResolver(store: OutputStyleStore, nameFor: (cwd: string | null) =>
 describe("daemon-style styleResolver wiring", () => {
   test("a set outputStyle selects the built-in overlay; unset is byte-identical", () => {
     const home = tmp("nh-");
-    const store = new OutputStyleStore({ normaHome: home, trust: trustStub });
+    const store = new OutputStyleStore({ winterHome: home, trust: trustStub });
     let active: string | undefined = undefined;
-    const asm = new ContextAssembler({ normaHome: home, trust: trustStub, skills: skillsStub, basePrompt: "BASE", styleResolver: styleResolver(store, () => active) });
+    const asm = new ContextAssembler({ winterHome: home, trust: trustStub, skills: skillsStub, basePrompt: "BASE", styleResolver: styleResolver(store, () => active) });
 
     const off = asm.assemble({ cwd: null });
     expect(off.startsWith("BASE")).toBe(true);
@@ -36,8 +36,8 @@ describe("daemon-style styleResolver wiring", () => {
     expect(on.includes("proactive mode")).toBe(true); // overlay injected, hot (no reconstruction)
   });
   test("an unknown style name → base prompt (fallback)", () => {
-    const store = new OutputStyleStore({ normaHome: tmp("nh-"), trust: trustStub });
-    const asm = new ContextAssembler({ normaHome: tmp("nh2-"), trust: trustStub, skills: skillsStub, basePrompt: "BASE", styleResolver: styleResolver(store, () => "does-not-exist") });
+    const store = new OutputStyleStore({ winterHome: tmp("nh-"), trust: trustStub });
+    const asm = new ContextAssembler({ winterHome: tmp("nh2-"), trust: trustStub, skills: skillsStub, basePrompt: "BASE", styleResolver: styleResolver(store, () => "does-not-exist") });
     expect(asm.assemble({ cwd: null }).startsWith("BASE")).toBe(true);
   });
 });

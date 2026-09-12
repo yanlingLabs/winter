@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { SessionEvent } from "@norma/protocol";
+import { SessionEvent } from "@yanlinglabs/winter-protocol";
 import { MAIN_THREAD, PROJECTED_EVENT_COVERAGE } from "../../src/projector";
 import type { ProtocolSdkMessage } from "../../src/projector";
 import { accept, beginTurn, makeProjector, run } from "./harness";
 
 /**
- * ── THE CUTOVER PROOF (ruling P8b-14, Norma map §13.3) ──────────────────────────────────────────
+ * ── THE CUTOVER PROOF (ruling P8b-14, Winter map §13.3) ──────────────────────────────────────────
  *
  * For each scenario: `fixtures/golden/<s>.events.jsonl` is the PRODUCT CONTRACT, recorded from the
  * real `AgentEngine` by `scripts/capture-projector-goldens.ts`. `fixtures/sdk/<s>.messages.jsonl` is
@@ -102,10 +102,10 @@ type Any = Record<string, unknown>;
  *   - token counts — the engine reports per-round figures, Winter a cumulative ledger delta;
  *     `terminal.test.ts` pins that mapping exactly.
  *   - `tool_call.argsJson` / `tool_result.output` BODIES — the Winter tool's argument schema is its
- *     own (`{file_path}` vs Norma's `{path}`), so byte-equality would assert a rename that is not
+ *     own (`{file_path}` vs Winter's `{path}`), so byte-equality would assert a rename that is not
  *     happening. Shape and `callId` linkage are asserted instead.
  * `tool_call.name` and `agent_error.code` ARE compared literally: the first is ruling P8b-25 (the
- * Mac and iOS tool rows key on Norma's names), the second is digest item 20's one-distinct-code-
+ * Mac and iOS tool rows key on Winter's names), the second is digest item 20's one-distinct-code-
  * per-class, which `routines/runner.ts:81` consumes.
  */
 function compare(e: Any): Any {
@@ -192,7 +192,7 @@ const SCENARIOS: readonly Scenario[] = [
     provenance: "measured",
     provenanceNote: "byte-for-byte the recorded winter-test/tooluse stream, retargeted to Write",
     documentedAdditions: [
-      { type: "assistant_message", note: "THE WINTER CHILD KEEPS TALKING AFTER A DENIAL. Norma's engine ends the turn on a deny (its tool_result says \"Stop here and wait\"), so the golden's last events are tool_result(isError) -> turn_completed; the recorded child answered `tool round done` and only then terminated. A real cross-leg behavioural difference, surfaced here rather than fixture-shaped away. Whether it survives is Task 9's permission-message question." },
+      { type: "assistant_message", note: "THE WINTER CHILD KEEPS TALKING AFTER A DENIAL. Winter's engine ends the turn on a deny (its tool_result says \"Stop here and wait\"), so the golden's last events are tool_result(isError) -> turn_completed; the recorded child answered `tool round done` and only then terminated. A real cross-leg behavioural difference, surfaced here rather than fixture-shaped away. Whether it survives is Task 9's permission-message question." },
       { type: "agent_error", note: "the recording's SECOND pushed envelope terminated `error_during_execution` (the scripted double ran out of turns). Its class is `tool_failure`." },
       { type: "turn_started", occurrence: "last", note: "the SECOND push's own turn_started — `beginTurn` produces it (never the driver), and the one-turn golden has one." },
       { type: "turn_completed", occurrence: "last", note: "that second envelope's own terminal — two pushes, two terminals (the M1 contract), where the one-turn golden has one. The LAST one is the addition: turn 1's own `end_turn` terminal is the golden's." },
@@ -309,7 +309,7 @@ describe("projector: golden-stream replay, every variant (P8b-14)", () => {
     });
   }
 
-  test("tool rows keep NORMA names on the Winter leg (P8b-25)", () => {
+  test("tool rows keep WINTER names on the Winter leg (P8b-25)", () => {
     for (const s of SCENARIOS) {
       const messages = readJsonl<ProtocolSdkMessage>("sdk", `${s.name}.messages.jsonl`);
       const names = (run(makeProjector().projector, messages, { pushAt: s.pushAt ?? [0] }) as unknown as Any[]).filter((e) => e.type === "tool_call").map((e) => e.name);

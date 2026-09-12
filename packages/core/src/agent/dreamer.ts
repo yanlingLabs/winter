@@ -12,7 +12,7 @@ export const DREAM_TICK_MS = 300_000; // 5min
 export const DREAM_WINDOW_MAX_CHARS = 200_000;
 
 export const DREAM_INSTRUCTION = [
-  "You are Norma's memory, consolidating while she rests. You receive: her current memory files, her tombstones list, today's date, and a transcript window of her recent conversations as the user's assistant (including outcomes of work sessions she delegated).",
+  "You are Winter's memory, consolidating while she rests. You receive: her current memory files, her tombstones list, today's date, and a transcript window of her recent conversations as the user's assistant (including outcomes of work sessions she delegated).",
   "Distill the transcript into durable memories:",
   "- SYNTHESIZE, don't transcribe: combine observations into abstractions that will matter weeks from now — preferences, ongoing projects, people, decisions, constraints. Never write fact-lists or echo single messages.",
   "- REVISE over time: every memory file carries `revised: <date>` frontmatter and a `sources: <seq ranges>` line. Update time-bounded facts as they age (an upcoming event becomes a past one; finished work is finished). Rewrite files rather than appending contradictions.",
@@ -32,7 +32,7 @@ export interface DreamerDeps {
   enabled: () => boolean;           // memoryEnabledHot
   activeTurnCount: () => number;    // engine idle signal
   now?: () => number;               // injectable clock (tests)
-  timeoutMs?: number;               // default NORMA_DREAM_TIMEOUT_MS ?? 120_000
+  timeoutMs?: number;               // default WINTER_DREAM_TIMEOUT_MS ?? 120_000
   /** session-activity-hygiene T7 (spec §3): the session cleaner "rides the existing Dreaming cycle
    *  (its scheduler, its model configuration, low effort)". THE SCHEDULER is this class's tick
    *  timer, so the cleaner hangs off it here — one pass per tick, AFTER the dream pass.
@@ -61,7 +61,7 @@ export class Dreamer {
     this.now = deps.now ?? Date.now;
     // A junk env value must fall back to the default, not become NaN — setTimeout(fn, NaN) fires
     // immediately (lsp/client.ts's envNum guards the same footgun the same way).
-    const n = Number(process.env.NORMA_DREAM_TIMEOUT_MS);
+    const n = Number(process.env.WINTER_DREAM_TIMEOUT_MS);
     this.timeoutMs = deps.timeoutMs ?? (Number.isFinite(n) && n > 0 ? n : 120_000);
   }
 
@@ -118,7 +118,7 @@ export class Dreamer {
     const lines: string[] = [];
     for (const e of events) {
       if (e.type === "user_message") lines.push(`[user] ${e.text}`);
-      else if (e.type === "assistant_message") lines.push(`[norma] ${e.text}`);
+      else if (e.type === "assistant_message") lines.push(`[winter] ${e.text}`);
       else if (e.type === "child_update") lines.push(`[delegated work "${e.title}" → ${e.status}]${e.resultSummary ? ` ${e.resultSummary}` : ""}`);
     }
     let transcript = lines.join("\n");

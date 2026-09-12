@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { PanelOpenTabParams, PANEL_COMMAND_ARGS_MAX_JSON_BYTES } from "@norma/protocol";
+import { PanelOpenTabParams, PANEL_COMMAND_ARGS_MAX_JSON_BYTES } from "@yanlinglabs/winter-protocol";
 import type { ToolDefinition, ToolRegistry } from "./registry";
 import type { PanelCommandAction, PanelCommandOutcome } from "../../panel/commands";
 import type { PanelTabState } from "../../panel/store";
@@ -323,7 +323,7 @@ function commandArgs(a: BrowserArgs): Record<string, unknown> | undefined {
       const selector = requireSelector(a);
       if (a.text === undefined) {
         throw new Error(
-          'type needs text — e.g. verb:"type", selector:"input[name=\\"q\\"]", text:"norma". '
+          'type needs text — e.g. verb:"type", selector:"input[name=\\"q\\"]", text:"winter". '
           + "type SETS the field (whatever is in it is replaced), so pass the whole value you want.",
         );
       }
@@ -465,7 +465,7 @@ export interface BrowserToolDeps {
  *    doc explains why it is a prefix rule and not a literal list.
  *
  * Everything else passes, which is the deliberately loose half: `orb` (the Mac app) passes, and so
- * does `norma-probe` (NormaKit's debug streamer), which has no panel either. That direction of error
+ * does `winter-probe` (WinterKit's debug streamer), which has no panel either. That direction of error
  * is the cheap one — a false "available" costs one deadline, a false "unavailable" would refuse a
  * command the app could have served — and the alternative, matching the literal name `orb`, would
  * silently disable the whole tool the day the app renames its client.
@@ -701,10 +701,10 @@ export function browserToolDefs(deps: BrowserToolDeps): ToolDefinition[] {
   return [{
     name: "browser",
     description:
-      "Drive the user's real browser — the tabs in Norma's side panel, in the user's own logged-in "
+      "Drive the user's real browser — the tabs in Winter's side panel, in the user's own logged-in "
       + "profile, visible to them live. Pick a verb:\n"
       + "• tabs — list this session's open tabs (tabId, url, title, which is active). Answered by "
-      + "Norma itself, so it works even when the Mac app is closed. Start here when you don't have a tabId.\n"
+      + "Winter itself, so it works even when the Mac app is closed. Start here when you don't have a tabId.\n"
       + "• open — mint a NEW tab on a url (http/https), IN ADDITION to the ones already open. Returns "
       + "its tabId. Works with the app closed; the tab appears in the user's strip. Use it for your "
       + "first tab, and after that only when you need the current page KEPT alongside the new one. "

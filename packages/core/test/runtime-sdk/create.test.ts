@@ -1,4 +1,4 @@
-// `createNormaRuntimeSdk` against a REAL router handle (the in-memory directory store the router
+// `createWinterRuntimeSdk` against a REAL router handle (the in-memory directory store the router
 // itself ships for hermetic hosts) and a `FileSecretStore` in a temp dir. No child process is
 // spawned anywhere here: the topology is exercised through `spawnHookFor`'s RESOLUTION only, which
 // is a pure function of settings/env/paths.
@@ -11,10 +11,10 @@ import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { DEFAULT_DELIVERIES_DAYS, DEFAULT_NAME_LEASES_DAYS } from "../../src/runtime-state/retention";
 import { RUNTIME_SHUTDOWN_DRAIN_MS } from "../../src/runtime-state/wiring";
-import { NORMA_BRAND } from "../../src/runtime-sdk/brand";
-import { createNormaRuntimeSdk, SHUTDOWN_QUERY_GRACE_MS, type NormaRuntimeSdk, type NormaRuntimeSdkDeps } from "../../src/runtime-sdk/create";
+import { CORE_BRAND } from "../../src/runtime-sdk/brand";
+import { createWinterRuntimeSdk, SHUTDOWN_QUERY_GRACE_MS, type WinterRuntimeSdk, type WinterRuntimeSdkDeps } from "../../src/runtime-sdk/create";
 import { WinterExecutableUnavailable } from "../../src/runtime-sdk/executable";
-import { NORMA_PEER_VERSIONS, REQUIRED_CLAUDE_AGENT_SDK } from "../../src/runtime-sdk/versions";
+import { WINTER_PEER_VERSIONS, REQUIRED_CLAUDE_AGENT_SDK } from "../../src/runtime-sdk/versions";
 import type { Settings } from "../../src/settings";
 
 const DAY_MS = 86_400_000;
@@ -23,7 +23,7 @@ let home: string;
 let secretsDir: string;
 let settings: Settings | null;
 let envBefore: string | undefined;
-let handles: NormaRuntimeSdk[];
+let handles: WinterRuntimeSdk[];
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "p8b-create-"));
@@ -32,13 +32,13 @@ beforeEach(() => {
   handles = [];
   // The env door is a real input to `spawnHookFor`; a developer machine that happens to export it
   // would otherwise make the "nothing resolves" case pass for the wrong reason.
-  envBefore = process.env.NORMA_WINTER_EXECUTABLE;
-  delete process.env.NORMA_WINTER_EXECUTABLE;
+  envBefore = process.env.WINTER_RUNTIME_EXECUTABLE;
+  delete process.env.WINTER_RUNTIME_EXECUTABLE;
 });
 afterEach(async () => {
   for (const h of handles) await h.dispose();
-  if (envBefore === undefined) delete process.env.NORMA_WINTER_EXECUTABLE;
-  else process.env.NORMA_WINTER_EXECUTABLE = envBefore;
+  if (envBefore === undefined) delete process.env.WINTER_RUNTIME_EXECUTABLE;
+  else process.env.WINTER_RUNTIME_EXECUTABLE = envBefore;
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -50,7 +50,7 @@ function withRuntimes(runtimes: Omit<NonNullable<Settings["runtimes"]>, "handoff
   return { schemaVersion: 2, runtimes: { handoff: { crossRuntime: false }, ...runtimes } } as unknown as Settings;
 }
 
-function deps(extra: Partial<NormaRuntimeSdkDeps> = {}): NormaRuntimeSdkDeps {
+function deps(extra: Partial<WinterRuntimeSdkDeps> = {}): WinterRuntimeSdkDeps {
   return {
     home,
     settings: () => settings,
@@ -64,7 +64,7 @@ function deps(extra: Partial<NormaRuntimeSdkDeps> = {}): NormaRuntimeSdkDeps {
 /** Build a handle and capture the exact `RuntimeSdkOptions` this file handed the router. The real
  *  factory still runs, so every assertion is against a genuinely-constructed handle. */
 async function build(
-  extra: Partial<NormaRuntimeSdkDeps> = {},
+  extra: Partial<WinterRuntimeSdkDeps> = {},
   grace?: number,
   // P8c-1: `undefined` (the default) means "let the real optional peer resolve" — this dev
   // environment has `@anthropic-ai/claude-agent-sdk` installed, so most tests exercise the REAL
@@ -73,11 +73,11 @@ async function build(
   // M4's test seam: a fake "installed version" string, to drive the version guard without an
   // actually-mismatched node_modules tree.
   installedClaudeAgentSdkVersion?: () => string | undefined,
-): Promise<{ handle: NormaRuntimeSdk; opts: RuntimeSdkOptions; disposeOrder: string[] }> {
+): Promise<{ handle: WinterRuntimeSdk; opts: RuntimeSdkOptions; disposeOrder: string[] }> {
   const { createRuntimeSdk } = await import("@yanlinglabs/winter-runtime-sdk");
   const disposeOrder: string[] = [];
   let captured: RuntimeSdkOptions | undefined;
-  const handle = await createNormaRuntimeSdk(deps(extra), {
+  const handle = await createWinterRuntimeSdk(deps(extra), {
     ...(grace === undefined ? {} : { grace }),
     ...(officialPeer === undefined ? {} : { officialPeer: officialPeer as () => Promise<never> }),
     ...(installedClaudeAgentSdkVersion === undefined ? {} : { installedClaudeAgentSdkVersion }),
@@ -98,16 +98,17 @@ async function build(
   return { handle, opts: captured, disposeOrder };
 }
 
-describe("createNormaRuntimeSdk — the options it hands the router", () => {
+describe("createWinterRuntimeSdk — the options it hands the router", () => {
   test("constructs a real handle; messaging and directory are live", async () => {
     const { handle, opts } = await build();
     expect(handle.sdk.messaging).toBeDefined();
     expect(typeof handle.sdk.messaging.send).toBe("function");
     expect(handle.sdk.directory).toBeDefined();
     // Resolved through the injected peer's own `resolveBrand`, and it is OURS.
-    expect(handle.sdk.brand.mcpServerName).toBe("norma");
-    expect(handle.sdk.brand.homeDirName).toBe(".norma");
-    expect(opts.brand).toBe(NORMA_BRAND);
+    expect(handle.sdk.brand.mcpServerName).toBe("winter");
+    expect(handle.sdk.brand.homeDirName).toBe(".winter");
+    expect(opts.brand).toBe(CORE_BRAND);
+    expect(opts.brand!.presetName).toBe("winter_code");
   });
 
   test("a Winter-only host (the official peer fails to load): no claude peer, Winter unaffected (P8b-4)", async () => {
@@ -118,7 +119,7 @@ describe("createNormaRuntimeSdk — the options it hands the router", () => {
     expect("claude" in opts.peers).toBe(false);
     // No longer an identity check (M4: peerVersions is now built fresh so `claudeAgentSdk` can be
     // omitted independently of the module-level constant) — the winterAgentSdk VALUE still matches.
-    expect(opts.peerVersions?.winterAgentSdk).toBe(NORMA_PEER_VERSIONS.winterAgentSdk);
+    expect(opts.peerVersions?.winterAgentSdk).toBe(WINTER_PEER_VERSIONS.winterAgentSdk);
     // `vendoredOfficialRuntime` is independent of the peer MODULE import (it is the executable
     // ladder, `official-executable.ts`) — a failed peer import must not disturb it either way.
     expect(await handle.officialPeer()).toBeUndefined();
@@ -139,7 +140,7 @@ describe("createNormaRuntimeSdk — the options it hands the router", () => {
     expect(opts.peers.winter).toBeDefined();
     expect(opts.peers.claude).toBeUndefined();
     expect(opts.peerVersions?.claudeAgentSdk).toBeUndefined();
-    expect(opts.peerVersions?.winterAgentSdk).toBe(NORMA_PEER_VERSIONS.winterAgentSdk);
+    expect(opts.peerVersions?.winterAgentSdk).toBe(WINTER_PEER_VERSIONS.winterAgentSdk);
     expect(await handle.officialPeer()).toBeUndefined();
     expect(lines.some((l) => l.includes("0.3.999-not-the-pin") && l.includes(REQUIRED_CLAUDE_AGENT_SDK))).toBe(true);
   });
@@ -191,7 +192,7 @@ describe("createNormaRuntimeSdk — the options it hands the router", () => {
   });
 });
 
-describe("createNormaRuntimeSdk — retention (G-12)", () => {
+describe("createWinterRuntimeSdk — retention (G-12)", () => {
   test("an absent runtimes block still passes the shipped 30/7 windows, in ms", async () => {
     settings = null;
     const { opts } = await build();
@@ -238,7 +239,7 @@ describe("createNormaRuntimeSdk — retention (G-12)", () => {
   });
 });
 
-describe("createNormaRuntimeSdk — the advisor (P8d-8: ALWAYS an advisor key, never conditional)", () => {
+describe("createWinterRuntimeSdk — the advisor (P8d-8: ALWAYS an advisor key, never conditional)", () => {
   test("no advisorReviewer wired ⇒ the advisor key IS still present, and its resolver answers undefined", async () => {
     settings = null;
     const { opts } = await build();
@@ -269,11 +270,11 @@ describe("createNormaRuntimeSdk — the advisor (P8d-8: ALWAYS an advisor key, n
 });
 
 describe("spawnHookFor — P8b-1's one topology site", () => {
-  test("an explicit NORMA_WINTER_EXECUTABLE that is missing on disk ⇒ the typed refusal, never a throw and never a fallback", async () => {
+  test("an explicit WINTER_RUNTIME_EXECUTABLE that is missing on disk ⇒ the typed refusal, never a throw and never a fallback", async () => {
     // P9a fix wave (M1 class): "nothing configured" is no longer a refusal in a tree where the
     // platform package is installed (the ladder's last rung finds it), so the deterministic refusal
     // is an explicit path that does not exist — P8b-2 says an explicit path never falls through.
-    process.env.NORMA_WINTER_EXECUTABLE = join(home, "missing-winter");
+    process.env.WINTER_RUNTIME_EXECUTABLE = join(home, "missing-winter");
     const { handle } = await build();
     const hook = handle.spawnHookFor("chat");
     expect(hook).toBeInstanceOf(WinterExecutableUnavailable);
@@ -282,10 +283,10 @@ describe("spawnHookFor — P8b-1's one topology site", () => {
     expect((hook as WinterExecutableUnavailable).tried.some((p) => p.startsWith(home))).toBe(true);
   });
 
-  test("NORMA_WINTER_EXECUTABLE naming an existing file ⇒ the spawn hook", async () => {
+  test("WINTER_RUNTIME_EXECUTABLE naming an existing file ⇒ the spawn hook", async () => {
     const bin = join(home, "winter-bin");
     writeFileSync(bin, "#!/bin/sh\n");
-    process.env.NORMA_WINTER_EXECUTABLE = bin;
+    process.env.WINTER_RUNTIME_EXECUTABLE = bin;
     const { handle } = await build();
     expect(handle.spawnHookFor("code")).toEqual({ pathToClaudeCodeExecutable: bin });
     // Path (a): the SDK's own `defaultSpawn` stays in charge until the engine is published.
@@ -297,7 +298,7 @@ describe("spawnHookFor — P8b-1's one topology site", () => {
     const settingBin = join(home, "setting-winter");
     writeFileSync(envBin, "#!/bin/sh\n");
     writeFileSync(settingBin, "#!/bin/sh\n");
-    process.env.NORMA_WINTER_EXECUTABLE = envBin;
+    process.env.WINTER_RUNTIME_EXECUTABLE = envBin;
 
     const { handle } = await build();
     expect(handle.spawnHookFor("dispatch")).toEqual({ pathToClaudeCodeExecutable: envBin });
@@ -310,7 +311,7 @@ describe("spawnHookFor — P8b-1's one topology site", () => {
   test("every mode resolves the same binary in 8b (the topology is one decision, not three)", async () => {
     const bin = join(home, "winter-bin");
     writeFileSync(bin, "#!/bin/sh\n");
-    process.env.NORMA_WINTER_EXECUTABLE = bin;
+    process.env.WINTER_RUNTIME_EXECUTABLE = bin;
     const { handle } = await build();
     for (const mode of ["chat", "dispatch", "code"] as const) {
       expect(handle.spawnHookFor(mode)).toEqual({ pathToClaudeCodeExecutable: bin });

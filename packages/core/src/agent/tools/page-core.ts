@@ -15,7 +15,7 @@ import { SHIPPED_DANGEROUS_DOMAINS, dangerousDomainMatch } from "../dangerous-do
  * every `<a>` tag into `text (href)` prose and so destroys the structure a link list needs.
  *
  * The cache is in-memory ONLY, and that is a SECURITY posture, not a performance choice: chat
- * mode's contract is that it leaves nothing behind, and `~/.norma` is agent-readable by design
+ * mode's contract is that it leaves nothing behind, and `~/.winter` is agent-readable by design
  * (only the run dir is denied — see CLAUDE.md's tool-surface note) — a disk cache would put
  * fetched web content into a location the agent (and, on a shared machine, whoever else can read
  * that agent's files) can read outside of the conversation that fetched it. Memory-only means the

@@ -21,7 +21,7 @@ function client(clientName: string, role?: string | null): HubClient {
 
 describe("SessionHub.attachedHarnesses", () => {
   test("reports name AND role per attachment, is per-session, and follows detach", () => {
-    const store = new SessionStore(mkdtempSync(join(tmpdir(), "norma-test-harnesses-")));
+    const store = new SessionStore(mkdtempSync(join(tmpdir(), "winter-test-harnesses-")));
     const hub = new SessionHub(store);
     const a = store.createSession("global", {});
     const b = store.createSession("global", {});
@@ -57,10 +57,10 @@ describe("SessionHub.attachedHarnesses", () => {
   });
 
   test("a role-less client reports undefined rather than being dropped from the list", () => {
-    const store = new SessionStore(mkdtempSync(join(tmpdir(), "norma-test-harnesses-")));
+    const store = new SessionStore(mkdtempSync(join(tmpdir(), "winter-test-harnesses-")));
     const hub = new SessionHub(store);
     const s = store.createSession("global", {});
-    hub.attach(client("norma-probe"), s, 0);
-    expect(hub.attachedHarnesses(s)).toEqual([{ clientName: "norma-probe", role: undefined }]);
+    hub.attach(client("winter-probe"), s, 0);
+    expect(hub.attachedHarnesses(s)).toEqual([{ clientName: "winter-probe", role: undefined }]);
   });
 });

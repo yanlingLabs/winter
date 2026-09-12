@@ -4,9 +4,9 @@
 // to resume, ever — P8b-22's refusal is permanent for that record AS IT STANDS. This module is the
 // other half of that refusal: `session.send` on such a session (the ONE call site, `ipc/server.ts`)
 // converts the session's own `SessionEvent` log into Claude-dialect entries and appends them as a
-// NEW backend transcript UNDER THE SAME NORMA SESSION ID, so the record can then genuinely resume on
+// NEW backend transcript UNDER THE SAME WINTER SESSION ID, so the record can then genuinely resume on
 // the Winter leg — never a resume of the ORIGINAL (there is nothing to resume), and never a new
-// Norma session (the id, title and every other Norma-side fact survive untouched).
+// Winter session (the id, title and every other Winter-side fact survive untouched).
 //
 // WHAT NEVER CROSSES THIS DOOR. `reasoning_item` events are DROPPED, unconditionally — they carry
 // opaque provider state (`itemJson`, CLAUDE.md's own "session JSONL is its only sink" rule) that
@@ -18,7 +18,7 @@
 //
 // THE COALESCING RULE. A real Claude turn is not "one event, one transcript entry" — a single
 // assistant turn may emit narration text AND one or more tool calls together, and the tools that ran
-// answer together before the model speaks again. Norma's own log records those as SEPARATE events
+// answer together before the model speaks again. Winter's own log records those as SEPARATE events
 // (one `assistant_message` for the text, one `tool_call` per call, one `tool_result` per call), so a
 // literal one-entry-per-event conversion would write consecutive same-role dialect entries — two
 // "assistant" entries in a row with nothing from the "user" side between them, which is not the
@@ -35,7 +35,7 @@
 // `tool_result` shapes, `engine.ts:265-297`) — mirrored here rather than imported (the sibling repo
 // is read-only for 8c, Global Constraints: "neither sibling repo is modified"). `error` (not
 // Anthropic's `is_error`) is the tool_result marker that shape defines; a `tool_result` this module
-// writes carries it only when Norma's own `isError` was true, matching the ContentBlock's own
+// writes carries it only when Winter's own `isError` was true, matching the ContentBlock's own
 // "optional, set only when true" contract.
 //
 // THE WRITER-LEASE DISCOVERY (measured, real-binary e2e). `WinterCompatibilitySessionStore.append()`
@@ -61,13 +61,13 @@ import { randomUUID } from "node:crypto";
 import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { WinterCompatibilitySessionStore, transcriptProjectKey, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
-import type { SessionEvent } from "@norma/protocol";
+import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import { MAIN_THREAD } from "../projector";
 import { RuntimeSessionRecords, type RuntimeSessionState } from "../runtime-state/records";
 import { sessionLegOf } from "./leg";
 
 export interface ConvertEngineEraLogOpts {
-  /** The Norma session id — becomes the dialect entries' OWN `sessionId` field is the BACKEND id
+  /** The Winter session id — becomes the dialect entries' OWN `sessionId` field is the BACKEND id
    *  (see `backendSessionId` below); this is carried only for callers that want it in scope. */
   sessionId: string;
   /** The fresh backend transcript uuid the converted log is written under (`Options.resume`'s
@@ -186,7 +186,7 @@ export interface ImportLegacySessionStore {
 }
 
 export interface ImportLegacyDeps {
-  /** The daemon's `NORMA_HOME` — same value every other Winter-leg door in this package takes. */
+  /** The daemon's `WINTER_HOME` — same value every other Winter-leg door in this package takes. */
   home: string;
   /** The product session's own event log + metadata. */
   store: {
@@ -235,7 +235,7 @@ export class ImportLegacySessionError extends Error {
  * transcript, and patch the SAME record so it resumes on the Winter leg from here on.
  *
  * NEVER MINTS A NEW RECORD. `records.create` is `session.create`'s door; this function only ever
- * `transition()`s the row that already exists — the Norma session id, its title, its working
+ * `transition()`s the row that already exists — the Winter session id, its title, its working
  * directories and every other product-level fact are untouched. Idempotent is NOT claimed: calling
  * this twice on the same (now-imported) record throws, because the record is no longer `"engine"`
  * leg — `ipc/server.ts`'s own call site only ever reaches this once, on the `session_predates_

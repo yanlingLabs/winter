@@ -12,7 +12,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -78,7 +78,7 @@ const cases: Array<{ name: string; outcome: PlanSwitchOutcome; expectWrite: bool
 describe("session.setModel — the P8c-14 handoff outcome gate", () => {
   for (const c of cases) {
     test(`${c.name}: ${c.expectWrite ? "writes the model" : "refuses typed, writes nothing"}`, async () => {
-      const home = mkdtempSync(join(tmpdir(), `norma-setmodel-handoff-${c.name}-`));
+      const home = mkdtempSync(join(tmpdir(), `winter-setmodel-handoff-${c.name}-`));
       const store = new SessionStore(home);
       const sessionId = store.createSession("global");
       const { server, client } = await (async () => {
@@ -108,7 +108,7 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
   // `meta.model` must stay exactly what it was before this call, because `planAndApplySwitch`'s
   // OWN deferred continuation is what commits it, once, when the turn settles to "resumed".
   test("deferred: succeeds with no error, but leaves meta.model UNCHANGED (the continuation commits it later)", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-setmodel-handoff-deferred-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-setmodel-handoff-deferred-"));
     const store = new SessionStore(home);
     const sessionId = store.createSession("global");
     const { server, c } = await boot(store, home, { kind: "deferred" });

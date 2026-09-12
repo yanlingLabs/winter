@@ -1,20 +1,20 @@
 {
-  "name": "@norma/cli",
+  "name": "@yanlinglabs/winter-cli",
   "version": "0.2.14",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
-    "norma": "./src/main.ts"
+    "winter": "./src/main.ts"
   },
   "scripts": {
     "test": "bun test",
-    "compile": "bun build --compile src/main.ts --outfile ../../dist/norma",
-    "compile:core": "bun build --compile src/main.ts --outfile ../../dist/norma-core"
+    "compile": "bun build --compile src/main.ts --outfile ../../dist/winter",
+    "compile:core": "bun build --compile src/main.ts --outfile ../../dist/winter-core"
   },
   "dependencies": {
-    "@norma/core": "workspace:*",
-    "@norma/protocol": "workspace:*",
+    "@yanlinglabs/winter-core": "workspace:*",
+    "@yanlinglabs/winter-protocol": "workspace:*",
     "chalk": "^5.6.2",
     "cli-highlight": "^2.1.11",
     "figures": "^6.1.0",

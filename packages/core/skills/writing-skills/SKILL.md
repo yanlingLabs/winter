@@ -1,6 +1,6 @@
 ---
 name: writing-skills
-description: Use when a task reveals a recurring, multi-step capability worth saving for future sessions — writing a new Norma skill, or improving an existing self-authored one, via skill_write.
+description: Use when a task reveals a recurring, multi-step capability worth saving for future sessions — writing a new Winter skill, or improving an existing self-authored one, via skill_write.
 ---
 
 # Writing Skills
@@ -23,7 +23,7 @@ every future session that matches its description.
 
 ## Format: what skill_write produces
 
-`skill_write` saves the skill to **self-scope** (`~/.norma/skills/self/<name>/SKILL.md`), so it
+`skill_write` saves the skill to **self-scope** (`~/.winter/skills/self/<name>/SKILL.md`), so it
 persists across sessions and future turns can discover and load it. The store stamps the file's
 frontmatter itself:
 
@@ -31,7 +31,7 @@ frontmatter itself:
 ---
 name: <slug>
 description: <one line>
-author: norma
+author: winter
 ---
 
 <body>
@@ -67,6 +67,6 @@ revise a skill after finding a gap, not a separate "update" operation.
 ## Precedence note
 
 A self-authored skill can be shadowed by a project-level or user-level skill of the same name (project
-> user > self > plugin > builtin). If you're revising a *builtin* Norma skill rather than writing a
+> user > self > plugin > builtin). If you're revising a *builtin* Winter skill rather than writing a
 new one, `skill_write` still only writes to self-scope — the self-scope copy takes precedence over
 the builtin from then on.

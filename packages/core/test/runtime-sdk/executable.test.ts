@@ -8,17 +8,17 @@ import { bundleRuntimePath } from "../../src/runtime-sdk/bundle-layout";
 import { REQUIRED_WINTER_AGENT_SDK } from "../../src/runtime-sdk/versions";
 
 const exists = (set: string[]) => (p: string) => set.includes(p);
-const base = { env: {}, execPath: "/bundle/Contents/MacOS/norma-core", home: "/tmp/h" };
+const base = { env: {}, execPath: "/bundle/Contents/MacOS/winter-core", home: "/tmp/h" };
 // P8d-1: the bundle rung moved under `Resources/runtimes/` — this is that exact path for `base`.
 const BUNDLE_WINTER = bundleRuntimePath(base.execPath, "winter");
 
 describe("resolveWinterExecutable (P8b-2 ladder, P8d-1 bundle layout)", () => {
   test("setting wins over everything", () => {
-    const r = resolveWinterExecutable({ ...base, setting: "/s/winter", env: { NORMA_WINTER_EXECUTABLE: "/e/winter" }, exists: exists(["/s/winter", "/e/winter"]) });
+    const r = resolveWinterExecutable({ ...base, setting: "/s/winter", env: { WINTER_RUNTIME_EXECUTABLE: "/e/winter" }, exists: exists(["/s/winter", "/e/winter"]) });
     expect(r).toEqual({ ok: true, path: "/s/winter", source: "setting" });
   });
   test("env beats bundle and home", () => {
-    const r = resolveWinterExecutable({ ...base, env: { NORMA_WINTER_EXECUTABLE: "/e/winter" }, exists: exists(["/e/winter", BUNDLE_WINTER]) });
+    const r = resolveWinterExecutable({ ...base, env: { WINTER_RUNTIME_EXECUTABLE: "/e/winter" }, exists: exists(["/e/winter", BUNDLE_WINTER]) });
     expect(r).toEqual({ ok: true, path: "/e/winter", source: "env" });
   });
   test("bundle rung is <dirname(execPath)>/runtimes/winter, then <home>/runtimes/bin/winter", () => {
@@ -46,12 +46,12 @@ describe("resolveWinterExecutable (P8b-2 ladder, P8d-1 bundle layout)", () => {
     // Both spellings of "configured with nothing": a blank `winterExecutable` in settings.json and
     // an exported-but-empty env var. Neither may become the authoritative-and-missing failure —
     // they fall through to the implicit locations like the absent values they are.
-    const r = resolveWinterExecutable({ ...base, setting: "   ", env: { NORMA_WINTER_EXECUTABLE: "\t\n" }, exists: exists([BUNDLE_WINTER]) });
+    const r = resolveWinterExecutable({ ...base, setting: "   ", env: { WINTER_RUNTIME_EXECUTABLE: "\t\n" }, exists: exists([BUNDLE_WINTER]) });
     expect(r).toEqual({ ok: true, path: BUNDLE_WINTER, source: "bundle" });
   });
 
   test("an ENV path that does not exist is the failure too — not just the setting branch", () => {
-    const r = resolveWinterExecutable({ ...base, env: { NORMA_WINTER_EXECUTABLE: "/gone/winter" }, exists: exists([BUNDLE_WINTER, "/tmp/h/runtimes/bin/winter"]) });
+    const r = resolveWinterExecutable({ ...base, env: { WINTER_RUNTIME_EXECUTABLE: "/gone/winter" }, exists: exists([BUNDLE_WINTER, "/tmp/h/runtimes/bin/winter"]) });
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.error).toBeInstanceOf(WinterExecutableUnavailable);
@@ -120,7 +120,7 @@ describe("resolvePlatformPackageWinter (P9a-9, fix wave C1/M2)", () => {
    *  probe module's own directory created) — the "not installed at all" legitimate-skip shape,
    *  proven through a real fixture rather than by trusting the ambient dev tree. */
   function emptyFixture(): string {
-    const root = mkdtempSync(join(tmpdir(), "norma-p9a-empty-"));
+    const root = mkdtempSync(join(tmpdir(), "winter-p9a-empty-"));
     cleanups.push(() => rmSync(root, { recursive: true, force: true }));
     const probeDir = join(root, "packages", "core", "src", "runtime-sdk");
     mkdirSync(probeDir, { recursive: true });
@@ -140,7 +140,7 @@ describe("resolvePlatformPackageWinter (P9a-9, fix wave C1/M2)", () => {
     const wrapperVersion = opts.wrapperVersion ?? REQUIRED_WINTER_AGENT_SDK;
     const platformVersion = opts.platformVersion ?? REQUIRED_WINTER_AGENT_SDK;
     const binPresent = opts.binPresent ?? true;
-    const root = mkdtempSync(join(tmpdir(), "norma-p9a-nested-"));
+    const root = mkdtempSync(join(tmpdir(), "winter-p9a-nested-"));
     cleanups.push(() => rmSync(root, { recursive: true, force: true }));
     const storeScope = join(root, "node_modules", ".bun", `@yanlinglabs+winter-agent-sdk@${wrapperVersion}`, "node_modules", "@yanlinglabs");
     const wrapperDir = join(storeScope, "winter-agent-sdk");
@@ -168,7 +168,7 @@ describe("resolvePlatformPackageWinter (P9a-9, fix wave C1/M2)", () => {
   function directFixture(opts: { platformVersion?: string; binPresent?: boolean } = {}): string {
     const platformVersion = opts.platformVersion ?? REQUIRED_WINTER_AGENT_SDK;
     const binPresent = opts.binPresent ?? true;
-    const root = mkdtempSync(join(tmpdir(), "norma-p9a-direct-"));
+    const root = mkdtempSync(join(tmpdir(), "winter-p9a-direct-"));
     cleanups.push(() => rmSync(root, { recursive: true, force: true }));
     const platformDir = join(root, "node_modules", "@yanlinglabs", "winter-agent-sdk-darwin-arm64");
     mkdirSync(join(platformDir, "bin"), { recursive: true });

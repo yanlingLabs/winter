@@ -1,4 +1,4 @@
-// P8b Task 17 Step 0(a) — NORMA'S VOICE ON THE WINTER LEG, pinned byte-for-byte per mode against
+// P8b Task 17 Step 0(a) — WINTER'S VOICE ON THE WINTER LEG, pinned byte-for-byte per mode against
 // the engine's `assemble({...})` mapping. Until Step 4 this file ran a REAL `AgentEngine` turn over
 // the fake provider and compared its recorded `instructions` (equality, not prefix — the engine ran
 // with no ToolSearch config under `auto`, so `buildInstructionsFull` added nothing); the engine is
@@ -23,16 +23,16 @@ import { SessionHub } from "../../src/sessions/hub";
 import { SessionStore } from "../../src/sessions/store";
 
 function world(style?: ResolvedStyle) {
-  const home = realpathSync(mkdtempSync(join(tmpdir(), "norma-winter-voice-")));
-  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-winter-voice-cwd-")));
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-voice-")));
+  const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-voice-cwd-")));
   const trust = new TrustStore(join(home, "trust.json"));
   trust.trust(cwd);
-  writeFileSync(join(cwd, "NORMA.md"), "PROJECT_RULE_SENTINEL");
+  writeFileSync(join(cwd, "WINTER.md"), "PROJECT_RULE_SENTINEL");
   mkdirSync(join(home, "memory", "_assistant"), { recursive: true });
   writeFileSync(join(home, "memory", "_assistant", "MEMORY.md"), "- ASSISTANT_MEMORY_SENTINEL\n");
-  const skills = new SkillStore({ normaHome: home, trust });
+  const skills = new SkillStore({ winterHome: home, trust });
   const assembler = new ContextAssembler({
-    normaHome: home, trust, skills,
+    winterHome: home, trust, skills,
     memory: { enabled: () => true, dirFor: () => join(home, "memory", "project"), assistantDir: () => join(home, "memory", "_assistant") },
     ...(style === undefined ? {} : { styleResolver: () => style }),
   });
@@ -71,7 +71,7 @@ function engineInstructions(w: ReturnType<typeof world>, session: { mode?: "code
   return engineAssemble(w.assembler, session, sessionId);
 }
 describe("winterSystemPromptFor — the engine's composed instructions, per mode", () => {
-  test("chat: Norma's chat persona + the _assistant bucket, byte-identical to the engine's turn", async () => {
+  test("chat: Winter's chat persona + the _assistant bucket, byte-identical to the engine's turn", async () => {
     const w = world();
     // the Mac app creates chat sessions with cwd = the home directory; the persona reads no
     // project instructions, but the assembler's other sections still key off the cwd
@@ -92,7 +92,7 @@ describe("winterSystemPromptFor — the engine's composed instructions, per mode
     expect(ours).toBe(engine);
   });
 
-  test("code with a cwd: the base prompt, the TRUSTED project NORMA.md, the project bucket", async () => {
+  test("code with a cwd: the base prompt, the TRUSTED project WINTER.md, the project bucket", async () => {
     const w = world();
     const engine = await engineInstructions(w, { mode: "code", cwd: w.cwd });
     const ours = winterSystemPromptFor(w.assembler, { mode: "code", primary: w.cwd, cwd: w.cwd });
@@ -135,7 +135,7 @@ describe("winterSystemPromptFor — the engine's composed instructions, per mode
     const a = world();
     const b = world();
     const nullStyle = new ContextAssembler({
-      normaHome: b.home, trust: new TrustStore(join(b.home, "trust.json")), skills: new SkillStore({ normaHome: b.home, trust: new TrustStore(join(b.home, "trust.json")) }),
+      winterHome: b.home, trust: new TrustStore(join(b.home, "trust.json")), skills: new SkillStore({ winterHome: b.home, trust: new TrustStore(join(b.home, "trust.json")) }),
       memory: { enabled: () => true, dirFor: () => join(b.home, "memory", "project"), assistantDir: () => join(b.home, "memory", "_assistant") },
       styleResolver: () => null,
     });

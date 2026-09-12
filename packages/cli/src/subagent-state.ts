@@ -36,7 +36,7 @@ export interface CliSubagent {
   // packages/core/src/agent/subagents.ts). Until then the roster row shows its last activity verb
   // and a wedged child is indistinguishable from a busy one. These three fields are what
   // `subagentStalled()` below turns into a PRE-KILL verdict, and they are deliberately the same
-  // three the `norma -p` headless watchdog (src/watchdog.ts's `WatchdogState`) already keeps:
+  // three the `winter -p` headless watchdog (src/watchdog.ts's `WatchdogState`) already keeps:
   // last-event time plus the two kinds of legitimate silence.
   //
   // All three are OPTIONAL and spread-omitted until something actually sets them, so a row built
@@ -71,7 +71,7 @@ function patch(items: CliSubagent[], threadId: string, f: (s: CliSubagent) => Cl
  *  stall reset). What the wire gives us is a SUBSET of what that chokepoint sees — no reasoning or
  *  usage events reach the roster, and `reasoning_item` only ever lands AFTER a block completes —
  *  so fewer stamps make this hint fire SOONER, not later (T5 review: the original comment had the
- *  direction backwards). That is exactly why ROSTER_STALL_MS matches `NORMA_TURN_STALL_MS`'s 180s
+ *  direction backwards). That is exactly why ROSTER_STALL_MS matches `WINTER_TURN_STALL_MS`'s 180s
  *  (main.ts) rather than something tighter: a high-effort child can legitimately think for over a
  *  minute between rounds with total wire silence, and a roster that cries "Stalled" at a thinking
  *  child destroys the verb's meaning. Known structural blind spot, accepted: a child stuck INSIDE
@@ -145,7 +145,7 @@ export function updateSubagents(items: CliSubagent[], e: WireEvent): CliSubagent
     // Live stall hint (task-5) — the three branches below exist ONLY to keep the two
     // legitimate-silence counters and the freshness stamp honest; none of them touches any
     // pre-existing field, so every counter/label/token aggregate is unchanged by their addition.
-    // (In the TUI these reach here via tui/state.ts's `feedAgents` routing; `norma -p`'s main.ts
+    // (In the TUI these reach here via tui/state.ts's `feedAgents` routing; `winter -p`'s main.ts
     // already fed every event through this reducer.)
     case "tool_result":
       if (threadId === "main") return items;
@@ -184,7 +184,7 @@ export function subagentSilentMs(s: CliSubagent, nowMs: number): number {
 
 /**
  * Live stall verdict for ONE roster row (task-5) — pure, `now` injected, no timers, exactly the
- * shape `src/watchdog.ts`'s `isStalled` already uses for the `norma -p` turn watchdog, per-child:
+ * shape `src/watchdog.ts`'s `isStalled` already uses for the `winter -p` turn watchdog, per-child:
  *
  *   working, nothing in flight, no approval awaiting a human, and silent past `thresholdMs`.
  *

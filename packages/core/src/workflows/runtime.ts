@@ -19,7 +19,7 @@ const WORKFLOW_SUBCOMMAND = "__workflow-worker";
  *  spike (trackA-spike-notes.md). */
 function defaultWorkerCommand(): { file: string; args: string[] } {
   if (Bun.main.startsWith("/$bunfs/") || Bun.main.includes("/$bunfs/")) {
-    // COMPILED: execPath IS the norma-core binary; the subcommand routes through main.ts's switch.
+    // COMPILED: execPath IS the winter-core binary; the subcommand routes through main.ts's switch.
     return { file: process.execPath, args: [WORKFLOW_SUBCOMMAND] };
   }
   // DEV/TEST: execPath is `bun`; hand it the entry .ts directly — this also works under `bun test`,
@@ -85,11 +85,11 @@ export class WorkflowRuntime {
    *  never pruned, so a long-lived daemon accumulates one string per run ever launched. */
   private readonly sources = new Map<string, string>();
   /** Task A6: journal root, `<runsDir>/<runId>/journal.jsonl` per run. Defaults to a fresh temp dir
-   *  so a caller who doesn't pass `runsDir` (every test today) never touches a real NORMA_HOME —
-   *  the daemon wires the actual `<normaHome>/workflows-runs` path explicitly (Task B2). */
+   *  so a caller who doesn't pass `runsDir` (every test today) never touches a real WINTER_HOME —
+   *  the daemon wires the actual `<winterHome>/workflows-runs` path explicitly (Task B2). */
   private readonly runsDir: string;
   constructor(private readonly deps: WorkflowRuntimeDeps) {
-    this.runsDir = deps.runsDir ?? mkdtempSync(join(tmpdir(), "norma-workflow-runs-"));
+    this.runsDir = deps.runsDir ?? mkdtempSync(join(tmpdir(), "winter-workflow-runs-"));
   }
 
   launch(l: WorkflowLaunch): string {

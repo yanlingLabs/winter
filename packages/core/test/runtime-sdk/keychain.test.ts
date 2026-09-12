@@ -9,13 +9,13 @@ import { TOKEN_NAMES } from "../../src/auth/tokens";
 import { keychainService } from "../../src/profile";
 import { OPENAI_API_KEY_SECRET } from "../../src/providers/manager";
 import { CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, CodexAuthStore, writeOpenAiApiKey } from "../../src/auth/credential-material";
-import { credentialPresenceFrom, credentialRefFor, keychainSeamFromSecretStore, NORMA_CREDENTIAL_INVENTORY } from "../../src/runtime-sdk/keychain";
+import { credentialPresenceFrom, credentialRefFor, keychainSeamFromSecretStore, WINTER_CREDENTIAL_INVENTORY } from "../../src/runtime-sdk/keychain";
 
 // The real `CredentialRef` (`@yanlinglabs/winter-agent-sdk` protocol/config.d.ts:317-333) is a
 // discriminated union with NO `api_key` kind and NO `provider`/`secretName` fields — the brief's
 // `{ kind: "api_key", provider, secretName }` placeholder does not exist on the installed type.
 // The kind that names a Keychain-backed secret is `{ kind: "keychain"; account: string; service?:
-// string }`; `account` is the secret name, `service` is checked against Norma's own
+// string }`; `account` is the secret name, `service` is checked against Winter's own
 // `keychainService()` by this adapter (see keychain.ts).
 //
 // HOTFIX (post-8b, 2026-09-11): the inventory's secret names moved from raw token/key strings
@@ -73,7 +73,7 @@ describe("KeychainSeam over SecretStore", () => {
     expect(await seam.read({ kind: "none" })).toBeUndefined();
   });
 
-  test("a stored EMPTY secret reads as undefined, exactly like presence treats it (norma logout writes \"\" to the codex material record)", async () => {
+  test("a stored EMPTY secret reads as undefined, exactly like presence treats it (winter logout writes \"\" to the codex material record)", async () => {
     await store.set(CREDENTIAL_MATERIAL_NAMES.openai, "");
     expect(await keychainSeamFromSecretStore(store).read({ kind: "keychain", account: CREDENTIAL_MATERIAL_NAMES.openai })).toBeUndefined();
   });
@@ -83,7 +83,7 @@ describe("KeychainSeam over SecretStore", () => {
     await expect(seam.read({ kind: "keychain", account: CREDENTIAL_MATERIAL_NAMES.openai })).resolves.toBeUndefined();
   });
 
-  test("a ref.service that differs from Norma's own keychainService() is refused; unset service is accepted", async () => {
+  test("a ref.service that differs from Winter's own keychainService() is refused; unset service is accepted", async () => {
     await writeOpenAiApiKey(store, "sk-test");
     const seam = keychainSeamFromSecretStore(store);
     expect(await seam.read({ kind: "keychain", account: CREDENTIAL_MATERIAL_NAMES.openai })).toBe("sk-test");
@@ -110,13 +110,13 @@ describe("KeychainSeam over SecretStore", () => {
 
   test("credentialPresenceFrom: authByProvider (P8c-10) — openai and anthropic are api-key, codex-oauth is custom", async () => {
     await writeOpenAiApiKey(store, "sk-test");
-    await store.set(NORMA_CREDENTIAL_INVENTORY.find((s) => s.provider === "anthropic")!.secretName, JSON.stringify({ kind: "api-key", key: "sk-ant-test" }));
+    await store.set(WINTER_CREDENTIAL_INVENTORY.find((s) => s.provider === "anthropic")!.secretName, JSON.stringify({ kind: "api-key", key: "sk-ant-test" }));
     const presence = await credentialPresenceFrom(store);
     expect(presence.authByProvider).toEqual({ openai: { authFamily: "api-key" }, anthropic: { authFamily: "api-key" } });
   });
 
   test("credentialPresenceFrom: PRESENCE IS PARSEABILITY (hotfix review r1, M1) — a raw non-JSON leftover (the OLD pre-hotfix shape) is ABSENT, never present", async () => {
-    await store.set(NORMA_CREDENTIAL_INVENTORY.find((s) => s.provider === "codex-oauth")!.secretName, "codex-token");
+    await store.set(WINTER_CREDENTIAL_INVENTORY.find((s) => s.provider === "codex-oauth")!.secretName, "codex-token");
     const presence = await credentialPresenceFrom(store);
     expect(presence.byProvider["codex-oauth"]).toBeUndefined();
   });
@@ -127,7 +127,7 @@ describe("KeychainSeam over SecretStore", () => {
   });
 
   test("the inventory's contents are pinned — adding/renaming a provider is a deliberate edit to this test too", () => {
-    expect(NORMA_CREDENTIAL_INVENTORY).toEqual([
+    expect(WINTER_CREDENTIAL_INVENTORY).toEqual([
       { provider: "openai", secretName: "openai:default", kind: "keychain" },
       { provider: "codex-oauth", secretName: "codex-oauth:default", kind: "keychain" },
       { provider: "anthropic", secretName: "anthropic:default", kind: "keychain" },
@@ -151,7 +151,7 @@ describe("KeychainSeam over SecretStore", () => {
       CODEX_SECRET_NAMES.account,
       CODEX_SECRET_NAMES.expires,
     ];
-    const inventoryNames = new Set(NORMA_CREDENTIAL_INVENTORY.map((s) => s.secretName));
+    const inventoryNames = new Set(WINTER_CREDENTIAL_INVENTORY.map((s) => s.secretName));
     const seam = keychainSeamFromSecretStore(store);
     for (const name of excluded) {
       expect(inventoryNames.has(name)).toBe(false);

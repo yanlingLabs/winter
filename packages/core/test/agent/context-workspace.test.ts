@@ -11,14 +11,14 @@ import { assistantMemoryDirFor } from "../../src/agent/memory-dir";
 // code/cowork turn) + the workdir-less MEMDIR redirection (the SAME `workdirLess` input feeds
 // both). Mirrors context-output-style.test.ts's "byte-identical when unset" bar and
 // context-memory-dir.test.ts / context-assistant.test.ts's setup pattern (a real TrustStore +
-// SkillStore, no `.norma/memory` legacy fixtures lying around to leak into the diff).
+// SkillStore, no `.winter/memory` legacy fixtures lying around to leak into the diff).
 
-function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "norma-ctx-ws-"))); }
+function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "winter-ctx-ws-"))); }
 
 function setup() {
   const home = realDir();
   const trust = new TrustStore(join(home, "trust.json"));
-  const skills = new SkillStore({ normaHome: home, trust });
+  const skills = new SkillStore({ winterHome: home, trust });
   return { home, trust, skills };
 }
 
@@ -26,7 +26,7 @@ describe("assemble() workspace block (working-directories T6)", () => {
   test("outDir absent: no block at all — byte-identical to before this field existed", () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
-    const a = new ContextAssembler({ normaHome: home, trust, skills });
+    const a = new ContextAssembler({ winterHome: home, trust, skills });
     const out = a.assemble({ cwd });
     expect(out).not.toContain("## Workspace");
   });
@@ -34,7 +34,7 @@ describe("assemble() workspace block (working-directories T6)", () => {
   test("outDir present, workdirLess absent: the block is inserted as EXACTLY ONE extra section — everything else byte-identical (the output-styles byte-identical-when-unset bar)", () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
-    const a = new ContextAssembler({ normaHome: home, trust, skills });
+    const a = new ContextAssembler({ winterHome: home, trust, skills });
     const withoutBlock = a.assemble({ cwd });
     const withBlock = a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER" });
 
@@ -54,7 +54,7 @@ describe("assemble() workspace block (working-directories T6)", () => {
   test("names $OUTDIR both ways: the env var (bash) and the literal absolute path (write/edit)", () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
-    const a = new ContextAssembler({ normaHome: home, trust, skills });
+    const a = new ContextAssembler({ winterHome: home, trust, skills });
     const out = a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER" });
     expect(out).toContain("$OUTDIR");
     expect(out).toContain("/tmp/OUTDIR-MARKER");
@@ -63,7 +63,7 @@ describe("assemble() workspace block (working-directories T6)", () => {
   test("workdirLess: true — $OUTDIR is the DEFAULT DIRECTORY, scratch to $TMPDIR, don't ask to write elsewhere", () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
-    const a = new ContextAssembler({ normaHome: home, trust, skills });
+    const a = new ContextAssembler({ winterHome: home, trust, skills });
     const out = a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", workdirLess: true });
     expect(out).toContain("$TMPDIR");
     expect(out).toContain("no project directory");
@@ -78,7 +78,7 @@ describe("assemble() workspace block (working-directories T6)", () => {
   test("workdirLess: false (with-dirs) NAMES the working directory and demotes $OUTDIR to a mailbox", () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
-    const a = new ContextAssembler({ normaHome: home, trust, skills });
+    const a = new ContextAssembler({ winterHome: home, trust, skills });
     const withDirs = a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", workdirLess: false });
     // the working directory is named as a literal absolute path — the thing the old block never did
     expect(withDirs).toContain(`\`${cwd}\``);
@@ -100,7 +100,7 @@ describe("assemble() workspace block (working-directories T6)", () => {
   test("the two branches are genuinely different text, not one plus extras", () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
-    const a = new ContextAssembler({ normaHome: home, trust, skills });
+    const a = new ContextAssembler({ winterHome: home, trust, skills });
     const withDirs = a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", workdirLess: false });
     const workdirLess = a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", workdirLess: true });
     const block = (s: string) => s.split("\n\n").find((p) => p.startsWith("## Workspace"))!;
@@ -113,7 +113,7 @@ describe("assemble() workspace block (working-directories T6)", () => {
 
   test("cwd null with workdirLess unset still renders the no-directory branch — never an `undefined` path in the prompt", () => {
     const { home, trust, skills } = setup();
-    const a = new ContextAssembler({ normaHome: home, trust, skills });
+    const a = new ContextAssembler({ winterHome: home, trust, skills });
     const out = a.assemble({ cwd: null, outDir: "/tmp/OUTDIR-MARKER" });
     expect(out).toContain("no project directory");
     expect(out).not.toContain("undefined");
@@ -122,7 +122,7 @@ describe("assemble() workspace block (working-directories T6)", () => {
   test("extraDirs: listed in the with-dirs branch only when the session actually has more than one", () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
-    const a = new ContextAssembler({ normaHome: home, trust, skills });
+    const a = new ContextAssembler({ winterHome: home, trust, skills });
     const none = a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", workdirLess: false });
     expect(none).not.toMatch(/you may also write in/i);
     const some = a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", workdirLess: false, extraDirs: ["/tmp/DIR-B", "/tmp/DIR-C"] });
@@ -134,7 +134,7 @@ describe("assemble() workspace block (working-directories T6)", () => {
   test("extraDirs absent vs [] is byte-identical — the pre-existing-caller bar", () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
-    const a = new ContextAssembler({ normaHome: home, trust, skills });
+    const a = new ContextAssembler({ winterHome: home, trust, skills });
     expect(a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", workdirLess: false }))
       .toBe(a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", workdirLess: false, extraDirs: [] }));
   });
@@ -142,7 +142,7 @@ describe("assemble() workspace block (working-directories T6)", () => {
   test("extraDirs never leak into the workdir-less branch — no directory to add them to", () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
-    const a = new ContextAssembler({ normaHome: home, trust, skills });
+    const a = new ContextAssembler({ winterHome: home, trust, skills });
     const out = a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", workdirLess: true, extraDirs: ["/tmp/DIR-B"] });
     expect(out).not.toContain("/tmp/DIR-B");
   });
@@ -150,7 +150,7 @@ describe("assemble() workspace block (working-directories T6)", () => {
   test("basePromptOverride set (dispatch/chat): no block at all, even with outDir present — dispatch/chat swap the base slot entirely", () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
-    const a = new ContextAssembler({ normaHome: home, trust, skills });
+    const a = new ContextAssembler({ winterHome: home, trust, skills });
     const out = a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", basePromptOverride: "DISPATCH_BASE" });
     expect(out).not.toContain("## Workspace");
   });
@@ -158,7 +158,7 @@ describe("assemble() workspace block (working-directories T6)", () => {
   test("skipOutputStyle (dispatch CHILD) does NOT suppress the block — orthogonal to style, a dispatch child is a real code session with a real $OUTDIR", () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
-    const a = new ContextAssembler({ normaHome: home, trust, skills });
+    const a = new ContextAssembler({ winterHome: home, trust, skills });
     const out = a.assemble({ cwd, outDir: "/tmp/OUTDIR-MARKER", skipOutputStyle: true });
     expect(out).toContain("## Workspace");
   });
@@ -170,10 +170,10 @@ describe("assemble() workdir-less MEMDIR redirection (working-directories T6)", 
   test("workdirLess: true redirects the project memory branch to memory.assistantDir() — the SAME closure chat/dispatch's memoryBucket:\"assistant\" branch already reads, not a second computation", () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
-    const assistantDir = assistantMemoryDirFor({ normaHome: home });
+    const assistantDir = assistantMemoryDirFor({ winterHome: home });
     const projectDir = join(home, "projects", "some-project-key", "memory");
     const a = new ContextAssembler({
-      normaHome: home, trust, skills,
+      winterHome: home, trust, skills,
       memory: { enabled: () => true, dirFor: () => projectDir, assistantDir: () => assistantDir },
     });
     const out = a.assemble({ cwd, workdirLess: true });
@@ -188,10 +188,10 @@ describe("assemble() workdir-less MEMDIR redirection (working-directories T6)", 
   test("workdirLess absent/false (with-dirs session): keeps memory.dirFor(cwd) — byte-identical to pre-T6", () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
-    const assistantDir = assistantMemoryDirFor({ normaHome: home });
+    const assistantDir = assistantMemoryDirFor({ winterHome: home });
     const projectDir = join(home, "projects", "some-project-key", "memory");
     const a = new ContextAssembler({
-      normaHome: home, trust, skills,
+      winterHome: home, trust, skills,
       memory: { enabled: () => true, dirFor: () => projectDir, assistantDir: () => assistantDir },
     });
     const out = a.assemble({ cwd });
@@ -202,12 +202,12 @@ describe("assemble() workdir-less MEMDIR redirection (working-directories T6)", 
   test("memoryBucket: \"assistant\" (chat/dispatch) is unaffected by workdirLess — mutually exclusive branches, the assistant-mode read-only shape survives untouched", () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
-    const assistantDir = assistantMemoryDirFor({ normaHome: home });
+    const assistantDir = assistantMemoryDirFor({ winterHome: home });
     const projectDir = join(home, "projects", "some-project-key", "memory");
     mkdirSync(assistantDir, { recursive: true });
-    writeFileSync(join(assistantDir, "MEMORY.md"), "- [Alex](alex.md) — builds Norma\n");
+    writeFileSync(join(assistantDir, "MEMORY.md"), "- [Alex](alex.md) — builds Winter\n");
     const a = new ContextAssembler({
-      normaHome: home, trust, skills,
+      winterHome: home, trust, skills,
       memory: { enabled: () => true, dirFor: () => projectDir, assistantDir: () => assistantDir },
     });
     // workdirLess is TRUE here too — proving memoryBucket:"assistant" still wins first (the `else

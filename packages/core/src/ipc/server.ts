@@ -30,7 +30,7 @@ import {
   PanelCommandResultParams, PanelReadDiffParams,
   SYSTEM_SESSION_ID,
   type SessionEvent, ConnWriter, type WritableSocket,
-} from "@norma/protocol";
+} from "@yanlinglabs/winter-protocol";
 import type { TokenAuthority } from "../auth/tokens";
 import type { SecretStore } from "../auth/secret-store";
 import { writeOpenAiApiKey } from "../auth/credential-material";
@@ -58,7 +58,7 @@ import { SyncPushBuffers, syncHeads, syncPull, syncPush, syncConfig, syncMemory,
 import { SessionHub, type HubClient } from "../sessions/hub";
 import type { ModelInfo } from "../providers/types";
 import type { ChildrenRpc } from "../runtime-sdk/children-rpc";
-import type { NormaRuntimeSdk } from "../runtime-sdk/create";
+import type { WinterRuntimeSdk } from "../runtime-sdk/create";
 import { WinterLegRefusal, type LegSession, type WinterSessionDrivers } from "../runtime-sdk/session-driver";
 import { readWinterTasks } from "../runtime-sdk/tasks-reader";
 import { ImportLegacySessionError } from "../runtime-sdk/import-legacy";
@@ -168,7 +168,7 @@ export interface IpcServerOptions {
   //
   // `undefined` means the router could not construct (a packaging fault; see daemon.ts's slot). A
   // Winter-leg create must then refuse with a typed error, never crash and never silently fall back.
-  runtimeSdk?: NormaRuntimeSdk;
+  runtimeSdk?: WinterRuntimeSdk;
   /**
    * P8b Tasks 6-7 (P8b-36): build THIS session's daemon-owned capability servers.
    *
@@ -270,9 +270,9 @@ export interface IpcServerOptions {
   bg?: BackgroundTaskRegistry; // background bash tasks; bg.list/peek/kill/killAll
   skills?: SkillStore;       // discovered SKILL.md skills; skills.list/read/write/delete (5c T3)
   mcp?: McpManager;          // MCP servers started at boot; mcp.list
-  plugins?: PluginStore;     // discovered ~/.norma/plugins/*; plugins.list
-  // Phase 4d-ii Task 2: `<normaHome>/settings.json` + `<normaHome>/plugins/` — the SAME
-  // convention `bootstrapNormaDir` (norma-dir.ts) and every other normaHome-taking store
+  plugins?: PluginStore;     // discovered ~/.winter/plugins/*; plugins.list
+  // Phase 4d-ii Task 2: `<winterHome>/settings.json` + `<winterHome>/plugins/` — the SAME
+  // convention `bootstrapWinterDir` (winter-dir.ts) and every other winterHome-taking store
   // (PluginStore, SkillStore, ContextAssembler, …) already assumes. Lets the plugin-lifecycle
   // RPCs below (plugins.install/plugin.enable/disable/remove/setConsent) read+write settings.json
   // and the plugins directory directly, and re-derive a FRESH `PluginStore` per call (`livePlugins`
@@ -281,13 +281,13 @@ export interface IpcServerOptions {
   // "applied HOT, no restart" requirement exists to fix. Optional: a server built without it (most
   // existing tests) keeps working via `livePlugins`'s fallback to the boot-time `plugins` above;
   // the five lifecycle RPCs themselves become a typed INTERNAL failure (never a crash) when a
-  // caller actually invokes them with no `normaHome` wired.
-  normaHome?: string;
+  // caller actually invokes them with no `winterHome` wired.
+  winterHome?: string;
   // BYOK T1 (design doc `2026-07-16-byok-provider-setup-design.md` §1): the daemon's OWN
   // SecretStore — threaded here so `provider.configure` can write the BYO OpenAI API key
   // server-side (never a Swift/Keychain write, avoiding the Bun.secrets item-format mismatch the
   // design doc's recon flagged). Optional, same "typed INTERNAL failure, never a crash" precedent
-  // as `normaHome` above: a server built without one (most existing tests) makes
+  // as `winterHome` above: a server built without one (most existing tests) makes
   // `provider.configure` a typed failure rather than throwing on construction. daemon.ts always
   // wires its own `secrets` (KeychainSecretStore by default, `startDaemon({secrets})`-injectable
   // for tests) into this field. Also `sync.config`'s ONLY route to the Exa key (Chat Slice D task
@@ -352,7 +352,7 @@ export interface IpcServerOptions {
   peripheral?: PeripheralBroker; // lease machinery; peripheral.* verbs (Phase 2f)
   providerLink?: ProviderLink;   // bridges PeripheralBroker.call()'s pushToProvider to the live
                                   // provider connection this server tracks (Phase 2f)
-  // Phase 4c Task 2 (spec §5): plugin (or harness, dev/testing) → Norma.app's XPC helper.
+  // Phase 4c Task 2 (spec §5): plugin (or harness, dev/testing) → Winter.app's XPC helper.
   // `hardware` is constructed with the SAME `providerLink` as `peripheral` above (daemon.ts) — the
   // app's one provider connection doubles as the hardware provider. `hardware.respond` reuses
   // `peripheral.isProvider()` to gate on that SAME connection identity (see the hardware.respond
@@ -404,7 +404,7 @@ export interface IpcServerOptions {
   // (every pre-C2 test, and a no-agentProvider daemon) degrades workflow.list's running section to
   // [] and workflow.stop to a soft no-op, while workflow.run/get become a typed RpcFailure.
   workflows?: WorkflowRuntime;
-  // The daemon's own WorkflowStore (C1) — trust-gated project/user `.norma`/`<normaHome>` `.js`
+  // The daemon's own WorkflowStore (C1) — trust-gated project/user `.winter`/`<winterHome>` `.js`
   // workflow discovery, backing workflow.list's "saved" section and workflow.run's by-name
   // resolution. Built UNCONDITIONALLY in daemon.ts (no engine dependency — same precedent as
   // `outputStyleStore`), so it's present even on a no-agentProvider daemon. Optional here only for
@@ -485,8 +485,8 @@ function skillErrorCode(failure: { kind?: SkillErrorKind }): number {
 // below.
 //
 // Phase 4c Task 1 (spec §5) adds a seventh: `hardware.request` — a plugin's own tool may need to
-// ask Norma.app's XPC helper to do something (e.g. set the battery charge limit). `hardware.respond`
-// is DELIBERATELY NOT here: only the active provider connection (Norma.app) may answer a
+// ask Winter.app's XPC helper to do something (e.g. set the battery charge limit). `hardware.respond`
+// is DELIBERATELY NOT here: only the active provider connection (Winter.app) may answer a
 // `hardware_requested` push, same precedent as `peripheral.respond` staying off this list — a
 // plugin connection calling it is role-rejected before dispatch, never reaching the handler.
 // Task 2 wires `hardware.request`'s handler (consent gate + HardwareBroker) below.
@@ -574,7 +574,7 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
  *  point: refusal is the gate's default, not an opt-in list of blocked modes to maintain). */
 // Winter Phase 8d (Task 4.4 fix round 1): exported so `packages/core/scripts/capability-matrix.ts`
 // reads this SAME set for its ios-remote surface-reachability row instead of a duplicated literal
-// — the capability matrix is a Norma-repo-internal consumer (no dependency-direction problem, the
+// — the capability matrix is a Winter-repo-internal consumer (no dependency-direction problem, the
 // reason `session-mode.ts`'s own copy stays a literal — see that file's own comment).
 export const REMOTE_ELIGIBLE_SESSION_MODES = new Set(["code", "dispatch", "chat"]);
 
@@ -622,7 +622,7 @@ function assertEffortSelectable(effort: string, model: string, mode: string | un
     // `clientEffortEligible` is a fail-closed allowlist (settings.ts) — a mode nobody has written
     // yet is refused, deliberately unlike `engine.ts`'s `resolveMode`, which defaults to "code".
     if (!clientEffortEligible(mode)) {
-      throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${effort}' is a Norma-level tier offered on code sessions only — this is a '${mode ?? "unknown"}' session (wire efforts: ${effortsForModel(model).join(", ")})`);
+      throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${effort}' is a Winter-level tier offered on code sessions only — this is a '${mode ?? "unknown"}' session (wire efforts: ${effortsForModel(model).join(", ")})`);
     }
     return;
   }
@@ -904,7 +904,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   // that session — mirrors the session.create broadcast above for the same reason: a harness
   // watching the session list (but not attached to this particular session) still needs to learn
   // its title live. Attached harnesses may receive it twice (fanOut + this); seq-based dedupe
-  // absorbs that (NormaKit dedupes on seq; the CLI ignores unknown/duplicate event types).
+  // absorbs that (WinterKit dedupes on seq; the CLI ignores unknown/duplicate event types).
   //
   // session-activity-hygiene T9: `session_activity` rides this same path (SessionHub.emitActivity)
   // — a roster of BACKGROUND sessions is by definition a view of sessions with no attachments, so
@@ -934,8 +934,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   // `SessionHub.broadcastTransient`) requires a REAL, already-created session row and throws
   // "unknown session" otherwise — there is no session backing `SYSTEM_SESSION_ID`, and minting a
   // fake one just to read a counter would be its own footgun (a phantom row in session.list).
-  // NormaKit's dedupe gate is scoped to the currently ATTACHED session (`e.sessionId == attached`,
-  // NormaClient.swift) and `$system` can never equal a real attached session id, so this event
+  // WinterKit's dedupe gate is scoped to the currently ATTACHED session (`e.sessionId == attached`,
+  // WinterClient.swift) and `$system` can never equal a real attached session id, so this event
   // always bypasses that gate regardless of its seq value — a locally-monotonic counter is
   // sufficient (schema-valid, ordered) without needing the store at all.
   let systemSeq = 0;
@@ -968,10 +968,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    *  `RpcRequest.params` (protocol/jsonrpc.ts) is `z.unknown().optional()` so the envelope already
    *  accepts it — but every no-argument method's schema is `z.object({})`, and
    *  `z.object({}).safeParse(undefined)` FAILS, so a legal frame came back
-   *  `-32602 invalid params: (root)`. That is what killed the orb (NormaKit's `session.dispatch`
+   *  `-32602 invalid params: (root)`. That is what killed the orb (WinterKit's `session.dispatch`
    *  omitted the key → `AppModel.ensureFocusedSession()` returned nil → Enter no-op'd and the
    *  yellow-light detach bailed on a permanently-nil focus), and the identical client-side pattern
-   *  still exists in the TS CLI client and the phone's `NormaSessionClient`. Both are fixed too,
+   *  still exists in the TS CLI client and the phone's `WinterSessionClient`. Both are fixed too,
    *  but a client-side fix only protects clients that UPDATE — this protects every client that
    *  ever talks to this daemon, including already-shipped and version-skewed ones (the phone).
    *
@@ -1018,8 +1018,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   /** The cache key: settings.json's mtime (every lifecycle write touches it) + the plugins dir's
    *  mtime (install/remove touch it — enable/disable/setConsent don't, but they always write
    *  settings.json, which is enough on its own to change this key). */
-  function livePluginsCacheKey(normaHome: string): string {
-    return `${statMtimeOrZero(join(normaHome, "settings.json"))}:${statMtimeOrZero(join(normaHome, "plugins"))}`;
+  function livePluginsCacheKey(winterHome: string): string {
+    return `${statMtimeOrZero(join(winterHome, "settings.json"))}:${statMtimeOrZero(join(winterHome, "plugins"))}`;
   }
 
   /** Called at the end of every plugin-lifecycle RPC handler that mutates settings.json or the
@@ -1033,33 +1033,33 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   /** Rebuilds `opts.hooks` (Phase 4f Task 2) off a FRESH `livePlugins()` read — called at every
    *  point a plugin-lifecycle RPC below already calls `invalidateLivePluginsCache()`, so the two
    *  never drift: whatever `livePlugins()` would now return, the hook registry reflects. A safe
-   *  no-op when `opts.hooks` or `opts.normaHome` is unset (most existing tests) — same "typed
+   *  no-op when `opts.hooks` or `opts.winterHome` is unset (most existing tests) — same "typed
    *  no-op" precedent `hotApplyStart`/`hotApplyStop` already follow for a no-provider daemon. */
   function rebuildHookRegistry(): void {
-    if (!opts.hooks || !opts.normaHome) return;
-    opts.hooks.rebuild(hookRegistryPlugins(livePlugins(), opts.normaHome));
+    if (!opts.hooks || !opts.winterHome) return;
+    opts.hooks.rebuild(hookRegistryPlugins(livePlugins(), opts.winterHome));
   }
 
   /** A fresh, settings-current view of installed plugins — unlike `opts.plugins` (its
    *  `enabled`/`disabled`/`consents` deps are a snapshot captured once at daemon boot and never
    *  updated), this re-reads settings.json on every CACHE-MISS call so a `plugin.enable`/`disable`/
-   *  `setConsent` written moments ago — by this task's own RPCs, or a concurrent `norma plugin
+   *  `setConsent` written moments ago — by this task's own RPCs, or a concurrent `winter plugin
    *  ...` CLI invocation — is reflected immediately, without a daemon restart (the whole point of
-   *  this task). Falls back to the boot-time `opts.plugins` when `normaHome` isn't wired (keeps
-   *  every pre-existing test that passes a bare `plugins:` PluginStore, with no `normaHome`,
+   *  this task). Falls back to the boot-time `opts.plugins` when `winterHome` isn't wired (keeps
+   *  every pre-existing test that passes a bare `plugins:` PluginStore, with no `winterHome`,
    *  working unchanged) or when settings.json can't be read (defensive — never throws); neither
    *  fallback path is cached (nothing stable to key on). */
   function livePlugins(): PluginInfo[] {
-    if (!opts.normaHome) return opts.plugins?.list() ?? [];
-    const key = livePluginsCacheKey(opts.normaHome);
+    if (!opts.winterHome) return opts.plugins?.list() ?? [];
+    const key = livePluginsCacheKey(opts.winterHome);
     if (livePluginsCache && livePluginsCache.key === key) return livePluginsCache.list;
     let settings: Settings;
     try {
-      settings = loadSettings(join(opts.normaHome, "settings.json"));
+      settings = loadSettings(join(opts.winterHome, "settings.json"));
     } catch {
       return opts.plugins?.list() ?? [];
     }
-    const list = new PluginStore({ normaHome: opts.normaHome, plugins: settings.plugins, consents: settings.plugins?.consents }).list();
+    const list = new PluginStore({ winterHome: opts.winterHome, plugins: settings.plugins, consents: settings.plugins?.consents }).list();
     livePluginsCache = { key, list };
     return list;
   }
@@ -1085,8 +1085,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
    *  `plugin.enable` — settings-only recording is the correct behavior for that daemon shape. */
   function hotApplyStart(info: PluginInfo): SupervisorStatus | "na" {
     if (!pluginSpawnEligible(info)) return "na";
-    if (!opts.supervisor || !opts.registry || !opts.normaHome) return "stopped";
-    const config: EligiblePlugin = { id: info.name, dir: join(opts.normaHome, "plugins", info.name), entry: info.entry! };
+    if (!opts.supervisor || !opts.registry || !opts.winterHome) return "stopped";
+    const config: EligiblePlugin = { id: info.name, dir: join(opts.winterHome, "plugins", info.name), entry: info.entry! };
     opts.supervisor.restart(config);
     return opts.supervisor.status(info.name);
   }
@@ -1370,7 +1370,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           } catch (err) {
             // The row AND its runtime rows: `create` may have persisted the record (with its backend
             // uuid) before the child refused to start, and a record for a session that no longer
-            // exists is parked by every later recovery and counted by `norma doctor` forever —
+            // exists is parked by every later recovery and counted by `winter doctor` forever —
             // retention never removes it, only a session deletion does. Same hook the reaper fires.
             try { opts.store.deleteSession(sessionId); } catch { /* the row is gone or undeletable; the refusal still stands */ }
             try { opts.onSessionDeleted?.(sessionId); } catch { /* best effort; the refusal still stands */ }
@@ -1408,13 +1408,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // can't reach this handler either way (it runs on a later turn, not inline) — the try/catch
         // is the error sink for that turn.
         //
-        // Skipped outright with no `opts.normaHome` wired (most existing tests): unlike the
-        // destructive half (`store.emptySessionIds`/`deleteSession`, which need no normaHome at
+        // Skipped outright with no `opts.winterHome` wired (most existing tests): unlike the
+        // destructive half (`store.emptySessionIds`/`deleteSession`, which need no winterHome at
         // all), reaping with no audit trail at all is not a degraded mode this feature should ever
         // run in — see reaper.ts's own doc comment on the delete-then-audit order. Every real
-        // caller (daemon.ts) always wires `normaHome`.
-        if (opts.normaHome) {
-          const home = opts.normaHome;
+        // caller (daemon.ts) always wires `winterHome`.
+        if (opts.winterHome) {
+          const home = opts.winterHome;
           const reap = opts.reapEmptySessions ?? reapEmptySessions;
           setTimeout(() => {
             try { reap({ store: opts.store, attachedCount: (id) => hub.attachedCount(id), home, onDelete: opts.onSessionDeleted }); }
@@ -1804,7 +1804,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             // append — enforced by `p.approved` being part of THIS same condition, not a separate
             // branch, so there is no path that persists a rule for a denied call. Wrapped in
             // try/catch: `append()` throws RuleAppendError for scope "project" when there's no
-            // usable project root (a null session cwd, or one nested inside/equal to normaHome) —
+            // usable project root (a null session cwd, or one nested inside/equal to winterHome) —
             // the approval outcome must never hang or fail on a persistence problem, so a failure
             // here only logs; `resolve()` below still runs unconditionally either way.
             try {
@@ -2059,7 +2059,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // values diverge yet.
         //
         // NOT a claim that any other string is "an invalid effort": it is a claim about what is
-        // valid ON THE WIRE. A Norma-level tier that never reaches the wire (`ultra`, which sends
+        // valid ON THE WIRE. A Winter-level tier that never reaches the wire (`ultra`, which sends
         // `max` plus a delegation instruction, code sessions only) is a different kind of value —
         // provider-correctness T5 landed it, and, exactly as this comment anticipated, it is
         // admitted HERE as a client-side selector translated before the request (at
@@ -2212,10 +2212,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
       case METHODS.syncMemory: {
         const p = parseParams(SyncMemoryParams, params);
-        // No `normaHome` wired (most existing tests) → no bucket to page over — same typed no-op
+        // No `winterHome` wired (most existing tests) → no bucket to page over — same typed no-op
         // shape as `syncMemory`'s own missing-directory branch, not a crash.
-        if (!opts.normaHome) return { files: [], complete: true };
-        return syncMemory(opts.normaHome, p.cursor ?? 0);
+        if (!opts.winterHome) return { files: [], complete: true };
+        return syncMemory(opts.winterHome, p.cursor ?? 0);
       }
 
       // -----------------------------------------------------------------------------------------
@@ -2356,7 +2356,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
 
       // -----------------------------------------------------------------------------------------
       // Workflows (CC-parity phase 3, Track C Task C2): the management/control surface over
-      // WorkflowRuntime (live runs) + WorkflowStore (saved `.norma/workflows/*.js` scripts, C1).
+      // WorkflowRuntime (live runs) + WorkflowStore (saved `.winter/workflows/*.js` scripts, C1).
       // Role-gated exactly like routines.*/memory.* above — no additional role check here (harness
       // AND admin may both call these; a plugin or remote connection is role-rejected before
       // dispatch ever reaches this switch, since none of these four are in PLUGIN_ALLOWED_METHODS
@@ -2420,8 +2420,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         } catch (e) {
           throw new RpcFailure(ERR.NOT_FOUND, (e as Error).message);
         }
-        // working-directories T5: this legacy verb (CLI `norma add-dir`, the TUI's `/add-dir`,
-        // NormaKit's `addDir`) is now a THIN ALIAS over the one setter rather than a second writer
+        // working-directories T5: this legacy verb (CLI `winter add-dir`, the TUI's `/add-dir`,
+        // WinterKit's `addDir`) is now a THIN ALIAS over the one setter rather than a second writer
         // of the fence. It used to `opts.dirs.add(...)` an in-memory root that no client could see,
         // that no restart survived, and that no lock rule applied to; the same call now lands the
         // directory in the `dirs` row exactly as `session.setDirs {op:"add"}` does — one writer, one
@@ -2535,7 +2535,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
 
       // -----------------------------------------------------------------------------------------
       // Hardware helper (Phase 4c Task 2, spec §5): plugin (or harness, dev/testing) → core →
-      // Norma.app's XPC helper. Consent gating lives HERE, not in HardwareBroker — the broker has
+      // Winter.app's XPC helper. Consent gating lives HERE, not in HardwareBroker — the broker has
       // no PluginStore access, only `verbClass` (this file's `hardware.request` case is the one
       // place that has BOTH the requesting plugin's PluginInfo and the verb's class at once). A
       // plugin-role caller must have the verb's class in its manifest's `permissions.hardware`
@@ -2609,7 +2609,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         parseParams(QuotaStateParams, params);
         const state = opts.quota?.state() ?? { kind: "ok" as const };
         const usage = opts.quota?.usage() ?? { inputTokens: 0, outputTokens: 0 };
-        return { ...state, ...usage }; // FLAT merge — see carried item #2 (matches the NormaKit wrapper)
+        return { ...state, ...usage }; // FLAT merge — see carried item #2 (matches the WinterKit wrapper)
       }
       case METHODS.trustList: {
         parseParams(TrustListParams, params);
@@ -2642,10 +2642,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // -----------------------------------------------------------------------------------------
       case METHODS.providerConfigure: {
         const p = parseParams(ProviderConfigureParams, params);
-        if (!opts.normaHome) throw new RpcFailure(ERR.INTERNAL, "provider.configure is not available on this server (no normaHome configured)");
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "provider.configure is not available on this server (no winterHome configured)");
         if (!opts.secrets) throw new RpcFailure(ERR.INTERNAL, "provider.configure is not available on this server (no secret store configured)");
         await writeOpenAiApiKey(opts.secrets, p.apiKey);
-        const settingsPath = join(opts.normaHome, "settings.json");
+        const settingsPath = join(opts.winterHome, "settings.json");
         const settings = loadSettings(settingsPath);
         saveSettings(settingsPath, {
           ...settings,
@@ -2657,7 +2657,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // -----------------------------------------------------------------------------------------
       // plugin.revokeToken (Phase 4b Task 2, spec §3): harness-role admin verb, same precedent as
       // trust.remove above — NOT one of the six plugin-role verbs (rejected by the allowlist gate
-      // above before ever reaching here if called from a plugin connection). The CLI's `norma
+      // above before ever reaching here if called from a plugin connection). The CLI's `winter
       // plugin disable/remove` call this best-effort instead of opening the daemon's sqlite
       // directly (locking risk) — mint stays daemon-side (Task 3, lazily at supervisor spawn).
       // -----------------------------------------------------------------------------------------
@@ -2672,7 +2672,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
 
       // -----------------------------------------------------------------------------------------
       // plugin.restart (final-review Fix 1): the `PluginSupervisor.restart()` manual-restart rider
-      // existed and was tested (supervisor.ts) but had no caller — this wires it up so `norma
+      // existed and was tested (supervisor.ts) but had no caller — this wires it up so `winter
       // plugin restart <id>` can recover a plugin stuck "circuit-open" (nothing else ever clears
       // that state short of a daemon restart). harness OR admin role, same precedent as
       // `plugins.list` above (no extra role check here) — NOT one of the six plugin-role verbs, so
@@ -2694,20 +2694,20 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // -----------------------------------------------------------------------------------------
       // Plugin lifecycle (Phase 4d-ii Task 2): install/enable/disable/remove/setConsent applied
       // HOT to the running daemon — the over-the-wire counterpart to the CLI's file-based,
-      // restart-to-apply `norma plugin ...` flow (plugin-cli.ts). harness-role (like
+      // restart-to-apply `winter plugin ...` flow (plugin-cli.ts). harness-role (like
       // `plugin.restart`/`plugins.list` above — no extra role check needed here); NOT any of the
       // six plugin-role verbs, so a plugin connection is role-rejected before dispatch
       // (PLUGIN_ALLOWED_METHODS above deliberately omits all five). Every result is a typed union
       // — none of these ever throw for an expected outcome (unknown plugin, bad source, needs
       // consent, already installed) — same discipline as `hardware.request`'s HardwareRequestResult
       // above; a thrown RpcFailure(INTERNAL) is reserved for genuine server misconfiguration (no
-      // `normaHome` wired at all, which only an incomplete test harness would hit — `daemon.ts`
+      // `winterHome` wired at all, which only an incomplete test harness would hit — `daemon.ts`
       // always wires it).
       // -----------------------------------------------------------------------------------------
       case METHODS.pluginsInstall: {
         const p = parseParams(PluginsInstallParams, params);
-        if (!opts.normaHome) throw new RpcFailure(ERR.INTERNAL, "plugins.install is not available on this server (no normaHome configured)");
-        const pluginsRoot = join(opts.normaHome, "plugins");
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugins.install is not available on this server (no winterHome configured)");
+        const pluginsRoot = join(opts.winterHome, "plugins");
         let name: string;
         try {
           name = deriveInstallName(p.source, p.name);
@@ -2746,8 +2746,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // the user agrees (the CLI's interactive `readLine` prompt, over the wire).
           return { code: "needs_consent", requiredConsents: info.requiredConsents, consentBlock: buildConsentBlock(info) };
         }
-        if (!opts.normaHome) throw new RpcFailure(ERR.INTERNAL, "plugin.enable is not available on this server (no normaHome configured)");
-        const settingsPath = join(opts.normaHome, "settings.json");
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.enable is not available on this server (no winterHome configured)");
+        const settingsPath = join(opts.winterHome, "settings.json");
         const settings = p.consent === true
           ? applyFreshPluginConsent(() => loadSettings(settingsPath), p.name, info.requiredConsents, Date.now())
           : setPluginEnabled(loadSettings(settingsPath), p.name, true);
@@ -2761,9 +2761,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const p = parseParams(PluginDisableParams, params);
         const info = livePlugins().find((pl) => pl.name === p.name);
         if (!info) return { code: "unknown_plugin" };
-        if (!opts.normaHome) throw new RpcFailure(ERR.INTERNAL, "plugin.disable is not available on this server (no normaHome configured)");
-        const settingsPath = join(opts.normaHome, "settings.json");
-        // Fresh-consent semantics on disable (matches the CLI's `norma plugin disable` and the
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.disable is not available on this server (no winterHome configured)");
+        const settingsPath = join(opts.winterHome, "settings.json");
+        // Fresh-consent semantics on disable (matches the CLI's `winter plugin disable` and the
         // design spec — lifecycle.ts's stripPluginConsents doc, settings.ts:38-40): re-enabling
         // a disabled plugin must require consenting again, so strip its consent record here too.
         saveSettings(settingsPath, stripPluginConsents(setPluginEnabled(loadSettings(settingsPath), p.name, false), p.name));
@@ -2776,10 +2776,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const p = parseParams(PluginRemoveParams, params);
         const info = livePlugins().find((pl) => pl.name === p.name);
         if (!info) return { code: "unknown_plugin" };
-        if (!opts.normaHome) throw new RpcFailure(ERR.INTERNAL, "plugin.remove is not available on this server (no normaHome configured)");
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.remove is not available on this server (no winterHome configured)");
         hotApplyStop(p.name); // stop the running process BEFORE the directory backing it disappears
-        const pluginsRoot = join(opts.normaHome, "plugins");
-        const settingsPath = join(opts.normaHome, "settings.json");
+        const pluginsRoot = join(opts.winterHome, "plugins");
+        const settingsPath = join(opts.winterHome, "settings.json");
         // removePluginFromSettings strips both enabled/disabled list membership AND the plugin's
         // whole consent record (it composes stripPluginConsents internally — see lifecycle.ts).
         const settings = removePluginFromSettings(loadSettings(settingsPath), p.name);
@@ -2795,8 +2795,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const p = parseParams(PluginSetConsentParams, params);
         const info = livePlugins().find((pl) => pl.name === p.name);
         if (!info) return { code: "unknown_plugin" };
-        if (!opts.normaHome) throw new RpcFailure(ERR.INTERNAL, "plugin.setConsent is not available on this server (no normaHome configured)");
-        const settingsPath = join(opts.normaHome, "settings.json");
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "plugin.setConsent is not available on this server (no winterHome configured)");
+        const settingsPath = join(opts.winterHome, "settings.json");
         saveSettings(settingsPath, grantPluginConsents(loadSettings(settingsPath), p.name, p.classes, Date.now()));
         invalidateLivePluginsCache();
         rebuildHookRegistry();
@@ -3078,8 +3078,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // branch on which one it got.
       case METHODS.panelReadDiff: {
         const p = parseParams(PanelReadDiffParams, params);
-        if (!opts.normaHome) throw new RpcFailure(ERR.INTERNAL, "panel.readDiff is not available on this server (no normaHome configured)");
-        const found = await readStoredDiff(opts.normaHome, p.sessionId, p.diffId);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "panel.readDiff is not available on this server (no winterHome configured)");
+        const found = await readStoredDiff(opts.winterHome, p.sessionId, p.diffId);
         if (!found) throw new RpcFailure(ERR.NOT_FOUND, `diff not found: "${p.diffId}"`);
         return {
           path: found.header.path, added: found.header.added, removed: found.header.removed,

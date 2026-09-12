@@ -20,7 +20,7 @@
 //
 // PARTICIPANTS ARE REGISTERED ONCE (`registerHandoffParticipants`, called from `ipc/server.ts`'s
 // server-setup body, not from any RPC case) through the hook lane 1 left for exactly this
-// (`NormaRuntimeSdk.registerHandoffParticipants` — see `create.ts`'s own P8c-14 doc comment): the
+// (`WinterRuntimeSdk.registerHandoffParticipants` — see `create.ts`'s own P8c-14 doc comment): the
 // router's `handoff.participants`/`.selectionInputFor` are read LAZILY, at handoff time, so this
 // module's closures reach the live driver table and record store without `create.ts` ever knowing
 // they exist.
@@ -36,7 +36,7 @@
 // call with NO `persisted` field, so it answers what today's catalog/credentials would pick for the
 // requested model, independent of the recorded leg; (2) `selectionInputFor` is registered here so
 // `barrier.plan()` reviews the DESTINATION's servability with this deployment's real catalog and
-// credentials (via `NormaRuntimeSdk.buildSelectionInput`) instead of the router's own unreviewed
+// credentials (via `WinterRuntimeSdk.buildSelectionInput`) instead of the router's own unreviewed
 // default — `persisted` is still passed to IT, because reviewing "is the persisted family still
 // servable on the destination" is exactly the barrier's job, not the initial leg decision's.
 import type {
@@ -52,7 +52,7 @@ import type {
   SessionKey,
 } from "@yanlinglabs/winter-runtime-sdk";
 import { runtimeSdkInternals } from "@yanlinglabs/winter-runtime-sdk";
-import type { HandoffParticipants, NormaRuntimeSdk, SessionMode } from "./create";
+import type { HandoffParticipants, WinterRuntimeSdk, SessionMode } from "./create";
 import { RuntimeSessionRecords, type RuntimeSessionRecord } from "../runtime-state/records";
 import { handoffCrossRuntimeEnabled, type Settings } from "../settings";
 import { sessionLegOf } from "./leg";
@@ -60,7 +60,7 @@ import { catalogRowsFor, testProviderNameFor } from "./provider-selection";
 import type { LegSession, WinterSessionDrivers } from "./session-driver";
 
 export interface HandoffDeps {
-  runtime: NormaRuntimeSdk;
+  runtime: WinterRuntimeSdk;
   winter: WinterSessionDrivers;
   records: RuntimeSessionRecords;
   store: {
@@ -83,7 +83,7 @@ export interface HandoffDeps {
   /**
    * Test seam: a fake `{plan, execute}` in place of `runtimeSdkInternals(runtime.sdk)?.barrier`.
    * `runtimeSdkInternals` resolves a handle against a WeakMap the router's OWN factory populates —
-   * a handle built any other way (a plain test double for `NormaRuntimeSdk.sdk`) answers `undefined`
+   * a handle built any other way (a plain test double for `WinterRuntimeSdk.sdk`) answers `undefined`
    * there regardless of what it structurally looks like, so a unit test that wants to drive
    * `planAndApplySwitch`'s branches without a real router construction supplies one directly.
    * Production never sets this — see `barrierFor` below.
@@ -204,7 +204,7 @@ function destinationRuntimeFor(deps: HandoffDeps, session: SessionKey, to: Runti
 
 /**
  * WS-05 §12's Lane D door: builds the `SelectionInput` `barrier.plan()` reviews destination
- * servability against, using `NormaRuntimeSdk.buildSelectionInput` — the SAME real catalog/
+ * servability against, using `WinterRuntimeSdk.buildSelectionInput` — the SAME real catalog/
  * credentials/official-peer facts `selectRuntimeFor` reads, never a synthesized view.
  *
  * `persisted: args.persisted` is where the router's OWN "the persisted selection wins" rule
@@ -216,7 +216,7 @@ function destinationRuntimeFor(deps: HandoffDeps, session: SessionKey, to: Runti
  * call already decided THAT question before the barrier was ever reached.
  *
  * Absent when `deps.runtime.buildSelectionInput` is absent (a hand-built test double for
- * `NormaRuntimeSdk` that does not implement it) — `registerHandoffParticipants` below omits the key
+ * `WinterRuntimeSdk` that does not implement it) — `registerHandoffParticipants` below omits the key
  * entirely in that case, which is the router's own "unreviewed" default, not a crash.
  */
 function selectionInputFor(deps: HandoffDeps): ((args: { session: SessionKey; from: RuntimeKind; to: RuntimeKind; persisted: RuntimeSelection }) => Promise<SelectionInput>) | undefined {

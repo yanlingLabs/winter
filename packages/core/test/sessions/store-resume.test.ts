@@ -6,10 +6,10 @@ import { SessionStore } from "../../src/sessions/store";
 
 // Documents resume-after-restart at the storage layer: a normal daemon restart (index.db
 // and logs survive on disk, nothing deleted) must still list the session with its cwd intact
-// and replay its events — this is what `norma resume` relies on to reattach after a kill/restart.
+// and replay its events — this is what `winter resume` relies on to reattach after a kill/restart.
 describe("resume after restart (storage)", () => {
   test("a fresh store on the same home preserves cwd + events", () => {
-    const home = realpathSync(mkdtempSync(join(tmpdir(), "norma-resume-")));
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-resume-")));
     const s1 = new SessionStore(home);
     const sid = s1.createSession("global", { cwd: "/tmp/proj", approvalPolicy: "auto" });
     s1.append(sid, { type: "user_message", sessionId: sid, threadId: "main", text: "codename is Falcon", clientName: "t" });

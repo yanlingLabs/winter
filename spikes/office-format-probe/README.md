@@ -6,8 +6,8 @@ decide the SHAPE of `docs format` / `slides format`, above all **LT-4** (does
 format` honestly say "applied" rather than "posted").
 
 Scratch only, like `spikes/office-lok-gate` — not part of any Xcode target. It exists because those
-questions are one C call each, and answering them through the full app (xcodebuild -> NormaAppTests
--> OfficeCommandConsumer -> OfficeRuntime -> spawned NormaOfficeHelper -> LOKBridge) costs a full app
+questions are one C call each, and answering them through the full app (xcodebuild -> WinterAppTests
+-> OfficeCommandConsumer -> OfficeRuntime -> spawned WinterOfficeHelper -> LOKBridge) costs a full app
 build per iteration.
 
     ./build.sh

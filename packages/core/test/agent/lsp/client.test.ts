@@ -32,7 +32,7 @@ describe.if(isMac)("LspClient", () => {
   }, 8000);
 
   test("diagnostics(): non-empty publish resolves with the canned diagnostics", async () => {
-    await withEnv({ NORMA_LSP_FAKE_DIAGS: JSON.stringify([
+    await withEnv({ WINTER_LSP_FAKE_DIAGS: JSON.stringify([
       { range: { start: { line: 3, character: 1 }, end: { line: 3, character: 5 } }, severity: 2, message: "unused var", source: "fake-lsp" },
     ]) }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI, diagSettleMs: 50 });
@@ -44,7 +44,7 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("diagnostics(): an empty publish resolves to [] — a valid answer, not a timeout", async () => {
-    await withEnv({ NORMA_LSP_FAKE_DIAGS: "[]" }, async () => {
+    await withEnv({ WINTER_LSP_FAKE_DIAGS: "[]" }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI, diagSettleMs: 50 });
       await c.start();
       const diags = await c.diagnostics("file:///workspace/clean.ts", "const y = 1;", 2000);
@@ -58,7 +58,7 @@ describe.if(isMac)("LspClient", () => {
     // follows ~100ms later as a SECOND publish for the same uri. Resolve-on-first-publish returns
     // "no diagnostics" for a file whose only problem is a TYPE error — the exact live failure this
     // settle window exists to prevent.
-    await withEnv({ NORMA_LSP_FAKE_STAGED_DIAGS: "1", NORMA_LSP_FAKE_DIAGS: JSON.stringify([
+    await withEnv({ WINTER_LSP_FAKE_STAGED_DIAGS: "1", WINTER_LSP_FAKE_DIAGS: JSON.stringify([
       { range: { start: { line: 0, character: 6 }, end: { line: 0, character: 9 } }, severity: 1, message: "Type 'string' is not assignable to type 'number'.", source: "fake-lsp" },
     ]) }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI, diagSettleMs: 250 });
@@ -73,7 +73,7 @@ describe.if(isMac)("LspClient", () => {
     // settle window (5s) deliberately larger than the overall timeout (600ms): both staged
     // publishes land (~0ms and ~100ms), the settle timer never gets to fire, and the deadline
     // must resolve with the latest data rather than throwing — data beats a timeout error.
-    await withEnv({ NORMA_LSP_FAKE_STAGED_DIAGS: "1", NORMA_LSP_FAKE_DIAGS: JSON.stringify([
+    await withEnv({ WINTER_LSP_FAKE_STAGED_DIAGS: "1", WINTER_LSP_FAKE_DIAGS: JSON.stringify([
       { range: { start: { line: 1, character: 0 }, end: { line: 1, character: 4 } }, severity: 1, message: "late but real", source: "fake-lsp" },
     ]) }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI, diagSettleMs: 5000 });
@@ -85,7 +85,7 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("diagnostics(): no publish ever arrives → rejects with a typed timeout", async () => {
-    await withEnv({ NORMA_LSP_FAKE_NO_DIAGNOSTICS: "1" }, async () => {
+    await withEnv({ WINTER_LSP_FAKE_NO_DIAGNOSTICS: "1" }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI });
       await c.start();
       await expect(c.diagnostics("file:///workspace/silent.ts", "x", 150)).rejects.toThrow(LspTimeoutError);
@@ -94,7 +94,7 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("definition(): round-trips the canned location, 0-based through", async () => {
-    await withEnv({ NORMA_LSP_FAKE_DEFINITION: JSON.stringify([
+    await withEnv({ WINTER_LSP_FAKE_DEFINITION: JSON.stringify([
       { uri: "file:///workspace/def.ts", range: { start: { line: 9, character: 2 }, end: { line: 9, character: 8 } } },
     ]) }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI });
@@ -106,7 +106,7 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("references(): round-trips the canned locations", async () => {
-    await withEnv({ NORMA_LSP_FAKE_REFERENCES: JSON.stringify([
+    await withEnv({ WINTER_LSP_FAKE_REFERENCES: JSON.stringify([
       { uri: "file:///workspace/a.ts", range: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } } },
       { uri: "file:///workspace/b.ts", range: { start: { line: 5, character: 3 }, end: { line: 5, character: 9 } } },
     ]) }, async () => {
@@ -126,9 +126,9 @@ describe.if(isMac)("LspClient", () => {
     // were never handed. The old code never opened the doc for definition/references, so this
     // returned nothing live even though the fake server (which answered regardless) stayed green.
     await withEnv({
-      NORMA_LSP_FAKE_REQUIRE_OPEN: "1",
-      NORMA_LSP_FAKE_DEFINITION: JSON.stringify([{ uri: "file:///workspace/target.ts", range: { start: { line: 7, character: 0 }, end: { line: 7, character: 4 } } }]),
-      NORMA_LSP_FAKE_REFERENCES: JSON.stringify([{ uri: "file:///workspace/ref.ts", range: { start: { line: 2, character: 1 }, end: { line: 2, character: 5 } } }]),
+      WINTER_LSP_FAKE_REQUIRE_OPEN: "1",
+      WINTER_LSP_FAKE_DEFINITION: JSON.stringify([{ uri: "file:///workspace/target.ts", range: { start: { line: 7, character: 0 }, end: { line: 7, character: 4 } } }]),
+      WINTER_LSP_FAKE_REFERENCES: JSON.stringify([{ uri: "file:///workspace/ref.ts", range: { start: { line: 2, character: 1 }, end: { line: 2, character: 5 } } }]),
     }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI, diagSettleMs: 100 });
       await c.start();
@@ -141,7 +141,7 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("split-write: a response body split across two stdout writes reassembles correctly", async () => {
-    await withEnv({ NORMA_LSP_FAKE_SPLIT: "1" }, async () => {
+    await withEnv({ WINTER_LSP_FAKE_SPLIT: "1" }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI });
       await c.start();
       const locs = await c.definition("file:///workspace/a.ts", "x", 0, 0);
@@ -151,7 +151,7 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("merged frames: two complete frames delivered in one chunk both dispatch", async () => {
-    await withEnv({ NORMA_LSP_FAKE_MERGE: "1" }, async () => {
+    await withEnv({ WINTER_LSP_FAKE_MERGE: "1" }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI, diagSettleMs: 50 });
       await c.start();
       // Prime the doc first so both position queries skip the ensure-open gate and issue their
@@ -173,7 +173,7 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("server death mid-request rejects the pending request with a typed error", async () => {
-    await withEnv({ NORMA_LSP_FAKE_DIE_ON: "textDocument/definition" }, async () => {
+    await withEnv({ WINTER_LSP_FAKE_DIE_ON: "textDocument/definition" }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI });
       await c.start();
       await expect(c.definition("file:///workspace/a.ts", "x", 0, 0)).rejects.toThrow(LspServerExitedError);
@@ -193,7 +193,7 @@ describe.if(isMac)("LspClient", () => {
   // --- lsp consolidation T1: hover/documentSymbols/workspaceSymbols/implementation -------------
 
   test("hover(): MarkupContent {kind,value} renders its value", async () => {
-    await withEnv({ NORMA_LSP_FAKE_HOVER: JSON.stringify({ contents: { kind: "markdown", value: "**const** x: number" } }) }, async () => {
+    await withEnv({ WINTER_LSP_FAKE_HOVER: JSON.stringify({ contents: { kind: "markdown", value: "**const** x: number" } }) }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI });
       await c.start();
       const out = await c.hover("file:///workspace/a.ts", "const x = 1;", 0, 6);
@@ -203,7 +203,7 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("hover(): a bare string `contents` renders as-is", async () => {
-    await withEnv({ NORMA_LSP_FAKE_HOVER: JSON.stringify({ contents: "plain string hover" }) }, async () => {
+    await withEnv({ WINTER_LSP_FAKE_HOVER: JSON.stringify({ contents: "plain string hover" }) }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI });
       await c.start();
       const out = await c.hover("file:///workspace/a.ts", "const x = 1;", 0, 6);
@@ -213,7 +213,7 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("hover(): an array of MarkedString (string + {language,value}) joins them", async () => {
-    await withEnv({ NORMA_LSP_FAKE_HOVER: JSON.stringify({ contents: ["line one", { language: "ts", value: "const x: number" }] }) }, async () => {
+    await withEnv({ WINTER_LSP_FAKE_HOVER: JSON.stringify({ contents: ["line one", { language: "ts", value: "const x: number" }] }) }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI });
       await c.start();
       const out = await c.hover("file:///workspace/a.ts", "const x = 1;", 0, 6);
@@ -223,7 +223,7 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("hover(): a null result renders \"no hover info\"", async () => {
-    await withEnv({ NORMA_LSP_FAKE_HOVER: "null" }, async () => {
+    await withEnv({ WINTER_LSP_FAKE_HOVER: "null" }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI });
       await c.start();
       const out = await c.hover("file:///workspace/a.ts", "const x = 1;", 0, 6);
@@ -233,7 +233,7 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("hover(): a server answering -32601 (method not found) rejects with LspNotSupportedError", async () => {
-    await withEnv({ NORMA_LSP_FAKE_UNSUPPORTED: "textDocument/hover" }, async () => {
+    await withEnv({ WINTER_LSP_FAKE_UNSUPPORTED: "textDocument/hover" }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI });
       await c.start();
       await expect(c.hover("file:///workspace/a.ts", "const x = 1;", 0, 6)).rejects.toThrow(LspNotSupportedError);
@@ -242,7 +242,7 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("hover(): a DIFFERENT RPC error code (-32000) propagates as a plain LspRequestError, NOT LspNotSupportedError — only -32601 means 'unsupported'", async () => {
-    await withEnv({ NORMA_LSP_FAKE_RPC_ERROR: "textDocument/hover:-32000" }, async () => {
+    await withEnv({ WINTER_LSP_FAKE_RPC_ERROR: "textDocument/hover:-32000" }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI });
       await c.start();
       const err = await c.hover("file:///workspace/a.ts", "const x = 1;", 0, 6).then(() => null, (e: unknown) => e);
@@ -254,12 +254,12 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("hover(): rides ensureParsed — the target document is opened/parsed before the query", async () => {
-    await withEnv({ NORMA_LSP_FAKE_HOVER: JSON.stringify({ contents: "opened ok" }) }, async () => {
+    await withEnv({ WINTER_LSP_FAKE_HOVER: JSON.stringify({ contents: "opened ok" }) }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI, diagSettleMs: 100 });
       await c.start();
       // `ensureParsed` is private; spyOn works against the instance regardless (TS privacy is
       // compile-time only) — this pins that hover() actually rides it (like definition/references
-      // do), not that the fake server enforces it (NORMA_LSP_FAKE_REQUIRE_OPEN only gates the
+      // do), not that the fake server enforces it (WINTER_LSP_FAKE_REQUIRE_OPEN only gates the
       // definition/references/implementation cases below).
       const spy = spyOn(c as unknown as { ensureParsed: () => Promise<void> }, "ensureParsed");
       const out = await c.hover("file:///workspace/a.ts", "const x = 1;", 0, 6);
@@ -271,7 +271,7 @@ describe.if(isMac)("LspClient", () => {
 
   test("documentSymbols(): flat SymbolInformation[] renders name/kind/line", async () => {
     await withEnv({
-      NORMA_LSP_FAKE_DOCUMENT_SYMBOLS: JSON.stringify([
+      WINTER_LSP_FAKE_DOCUMENT_SYMBOLS: JSON.stringify([
         { name: "Foo", kind: 5, location: { uri: "file:///workspace/a.ts", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } } },
         { name: "bar", kind: 12, location: { uri: "file:///workspace/a.ts", range: { start: { line: 4, character: 0 }, end: { line: 4, character: 1 } } } },
       ]),
@@ -286,7 +286,7 @@ describe.if(isMac)("LspClient", () => {
 
   test("documentSymbols(): hierarchical DocumentSymbol[] renders children indented under their parent", async () => {
     await withEnv({
-      NORMA_LSP_FAKE_DOCUMENT_SYMBOLS: JSON.stringify([
+      WINTER_LSP_FAKE_DOCUMENT_SYMBOLS: JSON.stringify([
         {
           name: "Foo", kind: 5,
           range: { start: { line: 0, character: 0 }, end: { line: 5, character: 1 } },
@@ -306,7 +306,7 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("documentSymbols(): empty array renders \"no symbols found\"", async () => {
-    await withEnv({ NORMA_LSP_FAKE_DOCUMENT_SYMBOLS: "[]" }, async () => {
+    await withEnv({ WINTER_LSP_FAKE_DOCUMENT_SYMBOLS: "[]" }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI });
       await c.start();
       const out = await c.documentSymbols("file:///workspace/a.ts", "");
@@ -316,7 +316,7 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("documentSymbols(): -32601 rejects with LspNotSupportedError", async () => {
-    await withEnv({ NORMA_LSP_FAKE_UNSUPPORTED: "textDocument/documentSymbol" }, async () => {
+    await withEnv({ WINTER_LSP_FAKE_UNSUPPORTED: "textDocument/documentSymbol" }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI });
       await c.start();
       await expect(c.documentSymbols("file:///workspace/a.ts", "")).rejects.toThrow(LspNotSupportedError);
@@ -326,7 +326,7 @@ describe.if(isMac)("LspClient", () => {
 
   test("workspaceSymbols(): renders name/kind/path:line:character across the workspace, no didOpen required", async () => {
     await withEnv({
-      NORMA_LSP_FAKE_WORKSPACE_SYMBOLS: JSON.stringify([
+      WINTER_LSP_FAKE_WORKSPACE_SYMBOLS: JSON.stringify([
         { name: "target", kind: 12, location: { uri: "file:///workspace/target.ts", range: { start: { line: 3, character: 9 } } } },
       ]),
     }, async () => {
@@ -341,7 +341,7 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("workspaceSymbols(): empty array renders \"no symbols found\"", async () => {
-    await withEnv({ NORMA_LSP_FAKE_WORKSPACE_SYMBOLS: "[]" }, async () => {
+    await withEnv({ WINTER_LSP_FAKE_WORKSPACE_SYMBOLS: "[]" }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI });
       await c.start();
       const out = await c.workspaceSymbols("nothing");
@@ -351,7 +351,7 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("workspaceSymbols(): -32601 rejects with LspNotSupportedError", async () => {
-    await withEnv({ NORMA_LSP_FAKE_UNSUPPORTED: "workspace/symbol" }, async () => {
+    await withEnv({ WINTER_LSP_FAKE_UNSUPPORTED: "workspace/symbol" }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI });
       await c.start();
       await expect(c.workspaceSymbols("target")).rejects.toThrow(LspNotSupportedError);
@@ -360,7 +360,7 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("implementation(): round-trips the canned location, 0-based through (same shape as definition)", async () => {
-    await withEnv({ NORMA_LSP_FAKE_IMPLEMENTATION: JSON.stringify([
+    await withEnv({ WINTER_LSP_FAKE_IMPLEMENTATION: JSON.stringify([
       { uri: "file:///workspace/impl.ts", range: { start: { line: 14, character: 2 }, end: { line: 14, character: 8 } } },
     ]) }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI });
@@ -373,8 +373,8 @@ describe.if(isMac)("LspClient", () => {
 
   test("implementation(): rides ensureParsed — a server that only answers for open docs still resolves", async () => {
     await withEnv({
-      NORMA_LSP_FAKE_REQUIRE_OPEN: "1",
-      NORMA_LSP_FAKE_IMPLEMENTATION: JSON.stringify([{ uri: "file:///workspace/target.ts", range: { start: { line: 7, character: 0 } } }]),
+      WINTER_LSP_FAKE_REQUIRE_OPEN: "1",
+      WINTER_LSP_FAKE_IMPLEMENTATION: JSON.stringify([{ uri: "file:///workspace/target.ts", range: { start: { line: 7, character: 0 } } }]),
     }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI, diagSettleMs: 100 });
       await c.start();
@@ -385,7 +385,7 @@ describe.if(isMac)("LspClient", () => {
   });
 
   test("implementation(): -32601 rejects with LspNotSupportedError", async () => {
-    await withEnv({ NORMA_LSP_FAKE_UNSUPPORTED: "textDocument/implementation" }, async () => {
+    await withEnv({ WINTER_LSP_FAKE_UNSUPPORTED: "textDocument/implementation" }, async () => {
       const c = new LspClient({ command: "bun", args: ["run", FIXTURE], rootUri: ROOT_URI });
       await c.start();
       await expect(c.implementation("file:///workspace/a.ts", "x", 0, 0)).rejects.toThrow(LspNotSupportedError);

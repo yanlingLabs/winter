@@ -3,20 +3,20 @@ import {
   runAddDirRoute, runBgKillRoute, runBgListRoute, runBgPeekRoute,
   runCdRoute, runCompactRoute, runInterruptRoute, runSteerRoute,
 } from "../src/main";
-import type { NormaClient } from "../src/client";
+import type { WinterClient } from "../src/client";
 
 // Plan-immunity Task 2, fix round 1 (whole-branch review, Important): the send/watch/resume gate
 // shipped in the first pass left EIGHT more session-targeted CLI verbs reaching chat/dispatch
 // sessions with no check at all — add-dir, cd, steer, interrupt, compact, and bg's three sub-verbs
 // (list/peek/kill). The reviewer proved this live against a real dev daemon (quoted in the ledger):
-// `norma steer <chatSessionId> "..."` injected a real user_message into a chat session's JSONL;
-// `norma steer <dispatchId> "..."` started a real dispatch turn from the terminal; `norma add-dir`/
-// `norma cd` mutated a chat session's roots/cwd; `norma bg peek` read a chat session's task output
+// `winter steer <chatSessionId> "..."` injected a real user_message into a chat session's JSONL;
+// `winter steer <dispatchId> "..."` started a real dispatch turn from the terminal; `winter add-dir`/
+// `winter cd` mutated a chat session's roots/cwd; `winter bg peek` read a chat session's task output
 // into the terminal.
 //
 // Each verb's route logic is now extracted into its own testable function — client + params in, a
 // plain discriminated result out (no console.log/process.exit inside) — mirroring tui/commands.ts's
-// runner convention, so the gate is provable with a FAKE NormaClient (recorded calls, canned
+// runner convention, so the gate is provable with a FAKE WinterClient (recorded calls, canned
 // results — same double as tui/commands.test.ts's own `makeClient`) instead of only reachable by
 // hand through a real CLI invocation against a real daemon (main.ts's `case` blocks stay thin,
 // obviously-correct wrappers around these that print/exit on the result, unchanged in shape from
@@ -24,7 +24,7 @@ import type { NormaClient } from "../src/client";
 
 type Impl = Record<string, (...args: unknown[]) => unknown>;
 
-function makeClient(impl: Impl): { client: NormaClient; calls: { method: string; args: unknown[] }[] } {
+function makeClient(impl: Impl): { client: WinterClient; calls: { method: string; args: unknown[] }[] } {
   const calls: { method: string; args: unknown[] }[] = [];
   const client: Record<string, unknown> = {};
   for (const [name, fn] of Object.entries(impl)) {
@@ -33,7 +33,7 @@ function makeClient(impl: Impl): { client: NormaClient; calls: { method: string;
       return Promise.resolve(fn(...args));
     };
   }
-  return { client: client as unknown as NormaClient, calls };
+  return { client: client as unknown as WinterClient, calls };
 }
 
 const rows = [
@@ -47,7 +47,7 @@ describe("runAddDirRoute", () => {
   test("refuses a chat target — addDir is never called", async () => {
     const { client, calls } = makeClient({ listSessions: () => ({ sessions: rows }), addDir: () => ["/x"] });
     const r = await runAddDirRoute(client, "s_chat", "/tmp", false);
-    expect(r).toEqual({ ok: false, message: "chat sessions live in the Norma app" });
+    expect(r).toEqual({ ok: false, message: "chat sessions live in the Winter app" });
     expect(calls.some((c) => c.method === "addDir")).toBe(false);
   });
 
@@ -70,7 +70,7 @@ describe("runCdRoute", () => {
   test("refuses a chat target — setCwd is never called", async () => {
     const { client, calls } = makeClient({ listSessions: () => ({ sessions: rows }), setCwd: () => "/tmp" });
     const r = await runCdRoute(client, "s_chat", "/tmp");
-    expect(r).toEqual({ ok: false, message: "chat sessions live in the Norma app" });
+    expect(r).toEqual({ ok: false, message: "chat sessions live in the Winter app" });
     expect(calls.some((c) => c.method === "setCwd")).toBe(false);
   });
 
@@ -92,7 +92,7 @@ describe("runSteerRoute — the reviewer's exact live repro (inject-text-into-se
   test("refuses a chat target — steer is never called (no user_message injected)", async () => {
     const { client, calls } = makeClient({ listSessions: () => ({ sessions: rows }), steer: () => ({ injected: true }) });
     const r = await runSteerRoute(client, "s_chat", "do this instead");
-    expect(r).toEqual({ ok: false, message: "chat sessions live in the Norma app" });
+    expect(r).toEqual({ ok: false, message: "chat sessions live in the Winter app" });
     expect(calls.some((c) => c.method === "steer")).toBe(false);
   });
 
@@ -115,7 +115,7 @@ describe("runInterruptRoute", () => {
   test("refuses a chat target", async () => {
     const { client, calls } = makeClient({ listSessions: () => ({ sessions: rows }), interrupt: () => ({ wasRunning: true }) });
     const r = await runInterruptRoute(client, "s_chat");
-    expect(r).toEqual({ ok: false, message: "chat sessions live in the Norma app" });
+    expect(r).toEqual({ ok: false, message: "chat sessions live in the Winter app" });
     expect(calls.some((c) => c.method === "interrupt")).toBe(false);
   });
 
@@ -137,7 +137,7 @@ describe("runCompactRoute", () => {
   test("refuses a chat target", async () => {
     const { client, calls } = makeClient({ listSessions: () => ({ sessions: rows }), compact: () => ({ compacted: true, uptoSeq: 9, summaryChars: 100 }) });
     const r = await runCompactRoute(client, "s_chat");
-    expect(r).toEqual({ ok: false, message: "chat sessions live in the Norma app" });
+    expect(r).toEqual({ ok: false, message: "chat sessions live in the Winter app" });
     expect(calls.some((c) => c.method === "compact")).toBe(false);
   });
 
@@ -159,7 +159,7 @@ describe("runBgListRoute", () => {
   test("refuses a chat target — bgList is never called", async () => {
     const { client, calls } = makeClient({ listSessions: () => ({ sessions: rows }), bgList: () => [] });
     const r = await runBgListRoute(client, "s_chat");
-    expect(r).toEqual({ ok: false, message: "chat sessions live in the Norma app" });
+    expect(r).toEqual({ ok: false, message: "chat sessions live in the Winter app" });
     expect(calls.some((c) => c.method === "bgList")).toBe(false);
   });
 
@@ -182,7 +182,7 @@ describe("runBgPeekRoute — the reviewer's exact live repro (read chat output i
   test("refuses a chat target — bgPeek is never called", async () => {
     const { client, calls } = makeClient({ listSessions: () => ({ sessions: rows }), bgPeek: () => ({ chunk: "secret output", status: "running", exitCode: null }) });
     const r = await runBgPeekRoute(client, "s_chat", "t1");
-    expect(r).toEqual({ ok: false, message: "chat sessions live in the Norma app" });
+    expect(r).toEqual({ ok: false, message: "chat sessions live in the Winter app" });
     expect(calls.some((c) => c.method === "bgPeek")).toBe(false);
   });
 
@@ -204,7 +204,7 @@ describe("runBgKillRoute", () => {
   test("refuses a chat target — bgKill is never called", async () => {
     const { client, calls } = makeClient({ listSessions: () => ({ sessions: rows }), bgKill: () => ({ ok: true }) });
     const r = await runBgKillRoute(client, "s_chat", "t1");
-    expect(r).toEqual({ ok: false, message: "chat sessions live in the Norma app" });
+    expect(r).toEqual({ ok: false, message: "chat sessions live in the Winter app" });
     expect(calls.some((c) => c.method === "bgKill")).toBe(false);
   });
 

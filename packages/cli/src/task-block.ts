@@ -1,4 +1,4 @@
-import type { Task } from "@norma/protocol";
+import type { Task } from "@yanlinglabs/winter-protocol";
 import { collapseCompleted, formatElapsed, formatTokens, sortTasksForDisplay, taskCountsLine, taskGlyph } from "./task-display";
 import type { CliSubagent } from "./subagent-state";
 import { anySubagentAlive, subagentElapsedMs, subagentTokens } from "./subagent-display";
@@ -31,7 +31,7 @@ export function NONTTY_FINISH_LINE(stopReason: string): string {
   return `${DIM}✓ subagent done${stopReason !== "end_turn" ? ` (${stopReason})` : ""}${RESET}\n`;
 }
 
-// ANSI — Norma blue for the live/in-progress state (status line + in_progress glyph), green for
+// ANSI — Winter blue for the live/in-progress state (status line + in_progress glyph), green for
 // completed, dim for pending/idle text, bold for the single active row's subject. Co-located here
 // (rather than main.ts's own AQUA/DIM/RESET) since task-block.ts is the pure-rendering module both
 // the TTY block and the status line live in; main.ts imports DIM/RESET from here instead of

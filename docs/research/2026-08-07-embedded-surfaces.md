@@ -1,4 +1,4 @@
-# Embedding a browser, terminal, interpreter and document renderers in Norma.app
+# Embedding a browser, terminal, interpreter and document renderers in Winter.app
 
 **Date:** 2026-08-07 · **Status:** research, no code written · **Question:** how hard is it to put a browser, a terminal, a code interpreter and renderers (three.js, HTML, PDF, Word, PowerPoint) inside the macOS app — and does that mean shipping Chromium?
 
@@ -8,9 +8,9 @@
 
 ## 1. The two facts that decide most of this
 
-### Norma is NOT App-Sandboxed
+### Winter is NOT App-Sandboxed
 
-`apple/Norma/Support/Norma.entitlements` is literally `<dict/>` — empty. Norma ships as a Developer ID app (DMG + Homebrew cask + Sparkle), **not** through the Mac App Store, and the release pipeline signs with `ENABLE_HARDENED_RUNTIME=YES CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO`, so nothing is injected either.
+`apple/Winter/Support/Winter.entitlements` is literally `<dict/>` — empty. Winter ships as a Developer ID app (DMG + Homebrew cask + Sparkle), **not** through the Mac App Store, and the release pipeline signs with `ENABLE_HARDENED_RUNTIME=YES CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO`, so nothing is injected either.
 
 This is the single biggest enabler and it is easy to underestimate:
 
@@ -24,7 +24,7 @@ Hardened runtime *is* on, which constrains one thing only: writable-executable m
 
 `packages/core/src/workflows/` already self-spawns the daemon's own binary as `__workflow-worker` under **`/usr/bin/sandbox-exec` (seatbelt)**, with an NDJSON stdio bridge, a capability model, a journal, and real tests including a live containment integration test. `bun run verify:workflow` proves it on the compiled artifact.
 
-So "add a code interpreter" is mostly **a new surface over machinery Norma already has**, not new infrastructure. That is a much smaller job than it looks from the outside.
+So "add a code interpreter" is mostly **a new surface over machinery Winter already has**, not new infrastructure. That is a much smaller job than it looks from the outside.
 
 ---
 
@@ -44,9 +44,9 @@ So "add a code interpreter" is mostly **a new surface over machinery Norma alrea
 | Notarization | Clean, nothing extra | Doable, fiddly — every nested binary signed |
 | Sparkle delta updates | Small | Enormous |
 
-### Why Chromium is the wrong default *for Norma*
+### Why Chromium is the wrong default *for Winter*
 
-Not because CEF is bad — because of Norma's release pipeline. `scripts/release.ts` produces a signed, notarized, stapled zip + DMG + appcast + Homebrew cask, and Sparkle ships **delta** updates. Adding a quarter-gigabyte framework means:
+Not because CEF is bad — because of Winter's release pipeline. `scripts/release.ts` produces a signed, notarized, stapled zip + DMG + appcast + Homebrew cask, and Sparkle ships **delta** updates. Adding a quarter-gigabyte framework means:
 
 - every release uploads and every user downloads a far bigger artifact,
 - the nested-signing step (already the fiddliest part of the pipeline — see the hardened-runtime comments in `release.ts`) grows a whole tree of helper executables,
@@ -109,25 +109,25 @@ Signed `Developer ID Application: OpenAI OpCo, LLC`, hardened runtime on, no MAS
 1. **Sandbox + Chromium is achievable.** ChatGPT is App-Sandboxed *and* embeds Chromium. Harder than implied above, but not the blocker the CEF-vs-MAS forum threads suggest.
 2. **`disable-library-validation` is NOT required.** Listed as typical above; ChatGPT does without it, presumably because every nested binary is signed under one team ID. Only the two JIT entitlements are unavoidable.
 
-**What this does not change:** 1.4 GB, an owned Chromium patch cadence, and `allow-unsigned-executable-memory` — which is a strict superset of `allow-jit` and materially weakens the process. OpenAI pays that because their product *is* a web app in a shell. Norma's is not.
+**What this does not change:** 1.4 GB, an owned Chromium patch cadence, and `allow-unsigned-executable-memory` — which is a strict superset of `allow-jit` and materially weakens the process. OpenAI pays that because their product *is* a web app in a shell. Winter's is not.
 
 ### The honest case FOR Chromium
 
 Stated plainly, because the rest of this note argues the other way:
 
-1. **CDP (Chrome DevTools Protocol)** — and this one is strong *for Norma specifically*. Full programmatic control of a page: intercept network, read the real post-JS DOM, click, fill, screenshot, wait for selectors. It is what Puppeteer and Playwright speak. `WKWebView` offers `evaluateJavaScript` plus navigation delegates — far thinner and far more brittle for driving a page.
+1. **CDP (Chrome DevTools Protocol)** — and this one is strong *for Winter specifically*. Full programmatic control of a page: intercept network, read the real post-JS DOM, click, fill, screenshot, wait for selectors. It is what Puppeteer and Playwright speak. `WKWebView` offers `evaluateJavaScript` plus navigation delegates — far thinner and far more brittle for driving a page.
 
-   Norma already ships `computer.ts`, `read-page.ts`, `page-core.ts`, `web.ts` — and `page-core` is **fetch → clean HTML → text, with no browser at all**. So today Norma cannot read a JS-rendered page, use a logged-in session, or interact with anything. Chromium + CDP would not merely be a viewer; it would be a genuine capability jump for the agent.
+   Winter already ships `computer.ts`, `read-page.ts`, `page-core.ts`, `web.ts` — and `page-core` is **fetch → clean HTML → text, with no browser at all**. So today Winter cannot read a JS-rendered page, use a logged-in session, or interact with anything. Chromium + CDP would not merely be a viewer; it would be a genuine capability jump for the agent.
 2. **Chrome extensions** — uBlock, password managers. WebKit has no embeddable extension model at all.
 3. **Site compatibility** — the web is tested against Chrome; some SaaS degrades in WebKit.
 4. **Web APIs WebKit lacks or lags** — WebUSB, WebSerial, WebHID, File System Access, parts of WebCodecs.
-5. **Identical rendering cross-platform**, if Norma ever leaves macOS.
+5. **Identical rendering cross-platform**, if Winter ever leaves macOS.
 6. **Stronger 3D/WebGL**, which touches the three.js case directly.
 
 **Separate the two goals before deciding**, because they are different products:
 
 - A panel **for the user to look at things** → `WKWebView` wins easily.
-- A browser **for Norma to operate on the user's behalf** → CDP is a real capability WebKit cannot match, and the size and update cadence start to look like a fair price.
+- A browser **for Winter to operate on the user's behalf** → CDP is a real capability WebKit cannot match, and the size and update cadence start to look like a fair price.
 
 **They are not mutually exclusive.** A `WKWebView` viewing panel plus a **headless Chromium for automation, driven from the daemon** — where the seatbelt machinery already lives — is a real architecture, and it keeps the heavyweight engine out of the UI process entirely. That is probably the best of both if automation becomes the goal.
 
@@ -149,13 +149,13 @@ Either way the hard part that usually bites — spawning a real shell with the u
 
 ## 4. The code interpreter: mostly already built
 
-Norma already runs model-authored JS in a **seatbelt-sandboxed subprocess** with a capability-gated bridge. Extending that to a user-facing interpreter is a matter of:
+Winter already runs model-authored JS in a **seatbelt-sandboxed subprocess** with a capability-gated bridge. Extending that to a user-facing interpreter is a matter of:
 
 1. more languages (spawn `python3`/`node` under the same `sandbox-exec` profile),
 2. a UI surface for input/output,
 3. deciding the capability grants per language.
 
-**Keep it in the daemon, not the app.** That matches Norma's own architecture rule — the daemon is the single source of truth and every client is a view over its event stream — and it keeps execution out of the UI process. It also sidesteps the JIT entitlement question entirely (§6).
+**Keep it in the daemon, not the app.** That matches Winter's own architecture rule — the daemon is the single source of truth and every client is a view over its event stream — and it keeps execution out of the UI process. It also sidesteps the JIT entitlement question entirely (§6).
 
 **Do not** reach for in-process `JavaScriptCore` for this. It would drag a JIT entitlement into the app for no benefit over a subprocess you already know how to sandbox.
 
@@ -178,7 +178,7 @@ The Office answer is the pleasant surprise: QuickLook previews Microsoft Office,
 
 ## 6. Entitlements: what each option costs
 
-Norma currently ships **zero** entitlements with hardened runtime enabled. Each addition is a change to `Support/Norma.entitlements` and needs a re-check of notarization.
+Winter currently ships **zero** entitlements with hardened runtime enabled. Each addition is a change to `Support/Winter.entitlements` and needs a re-check of notarization.
 
 | Feature | Entitlement needed |
 | --- | --- |
@@ -237,7 +237,7 @@ Note that `allow-unsigned-executable-memory` is a strict superset of `allow-jit`
 
 ## Local facts this rests on
 
-- `apple/Norma/Support/Norma.entitlements` — empty (`<dict/>`)
-- `apple/Norma/project.yml` — no App Sandbox; `scripts/release.ts` signs with `ENABLE_HARDENED_RUNTIME=YES CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO`
+- `apple/Winter/Support/Winter.entitlements` — empty (`<dict/>`)
+- `apple/Winter/project.yml` — no App Sandbox; `scripts/release.ts` signs with `ENABLE_HARDENED_RUNTIME=YES CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO`
 - `packages/core/src/workflows/sandbox.ts` + `sandbox.test.ts` — the existing `sandbox-exec` seatbelt runtime and its live containment test
 - No `WebKit`/`WKWebView` usage anywhere in `apple/` today

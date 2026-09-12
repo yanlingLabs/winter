@@ -7,7 +7,7 @@ import {
   moveSelection, withNotice, AgentsStore,
 } from "../../src/agents-cli";
 
-// session-activity-hygiene T9: the Ink surface of `norma agents`. Content assertions only (the
+// session-activity-hygiene T9: the Ink surface of `winter agents`. Content assertions only (the
 // codebase's own rule for these render tests — "assert content, not ANSI"), which is exactly why the
 // selected row's marker is a plain "▶ " rather than a color.
 
@@ -64,8 +64,8 @@ describe("<AgentsView>", () => {
   });
 
   test("the open verb's notice is the exact resume command", () => {
-    const frame = render(<AgentsView state={withNotice(seeded(), "norma resume s_bg")} nowMs={T0} />).lastFrame() ?? "";
-    expect(frame).toContain("norma resume s_bg");
+    const frame = render(<AgentsView state={withNotice(seeded(), "winter resume s_bg")} nowMs={T0} />).lastFrame() ?? "";
+    expect(frame).toContain("winter resume s_bg");
   });
 
   test("an untitled row (added by a transient before the next poll) shows its id, not a gap", () => {
@@ -77,10 +77,10 @@ describe("<AgentsView>", () => {
   // had always been sending.
   test("renders the cwd column, home-collapsed", () => {
     const s = applySessionList(emptyAgentsState(), [
-      { sessionId: "s_bg", activity: "background", title: "Fix the reaper", cwd: "/Users/x/code/norma" },
+      { sessionId: "s_bg", activity: "background", title: "Fix the reaper", cwd: "/Users/x/code/winter" },
     ], T0);
     const frame = render(<AgentsView state={s} nowMs={T0} home="/Users/x" />).lastFrame() ?? "";
-    expect(frame).toContain("~/code/norma");
+    expect(frame).toContain("~/code/winter");
   });
 
   test("a session with no recorded cwd renders a dash, not a fabricated path", () => {
@@ -153,10 +153,10 @@ describe("<AgentsView> fullscreen (frameRows)", () => {
   });
 
   test("a notice renders above the hint, inside the frame", () => {
-    const s = withNotice(seeded(), "norma resume s_bg");
+    const s = withNotice(seeded(), "winter resume s_bg");
     const lines = (render(<AgentsView state={s} nowMs={T0} frameRows={12} />).lastFrame() ?? "").split("\n");
     expect(lines.length).toBe(12);
-    expect(lines.at(-2)!).toContain("norma resume s_bg"); // the dismissible hand-off line
+    expect(lines.at(-2)!).toContain("winter resume s_bg"); // the dismissible hand-off line
     expect(lines.at(-1)!).toContain("q quit");
   });
 });
@@ -193,7 +193,7 @@ describe("<AgentsApp> — input mechanics", () => {
 });
 
 // -------------------------------------------------------------------------------------------
-// B3 — the mount: `norma agents` goes through the SAME fullscreen machinery as the main TUI
+// B3 — the mount: `winter agents` goes through the SAME fullscreen machinery as the main TUI
 // (mount.ts's scaffold: alt-screen escapes, the damage-diffing writer WITH the B1 cursor-escape
 // pass-through, mouse tracking, exit hygiene). These mirror mount.test.ts's seams: injected
 // render, escape sink, stdout stream — no real terminal.
@@ -292,8 +292,8 @@ describe("mountAgentsFullscreen — the alt-screen mount (B3)", () => {
 
   test("B1 on THIS surface: frames are damage-diffed and a bare cursor-visibility chunk passes through without wiping the paint", () => {
     withTty(() => {
-      const prevDiff = process.env.NORMA_TUI_DIFF;
-      delete process.env.NORMA_TUI_DIFF;
+      const prevDiff = process.env.WINTER_TUI_DIFF;
+      delete process.env.WINTER_TUI_DIFF;
       try {
         const { stream, writes } = fakeStdoutStream();
         let inkStdout: NodeJS.WriteStream | undefined;
@@ -316,8 +316,8 @@ describe("mountAgentsFullscreen — the alt-screen mount (B3)", () => {
         inkStdout!.write("\x1b[2K\x1b[1A\x1b[2K\x1b[G" + "a\nb\n"); // identical frame re-render
         expect(writes.length).toBe(2); // zero damage ⇒ zero bytes — prev untouched by the control chunk
       } finally {
-        if (prevDiff === undefined) delete process.env.NORMA_TUI_DIFF;
-        else process.env.NORMA_TUI_DIFF = prevDiff;
+        if (prevDiff === undefined) delete process.env.WINTER_TUI_DIFF;
+        else process.env.WINTER_TUI_DIFF = prevDiff;
       }
     });
   });

@@ -6,7 +6,7 @@ import { CREDENTIAL_MATERIAL_NAMES, readCredentialMaterial, writeCredentialMater
 
 /**
  * One row of the credential inventory: a provider id, the `SecretStore` name that backs it, and
- * the `CredentialRef["kind"]` it is reached through. Norma's own secrets are ALWAYS Keychain-
+ * the `CredentialRef["kind"]` it is reached through. Winter's own secrets are ALWAYS Keychain-
  * resident in production (`KeychainSecretStore` over `Bun.secrets`; `FileSecretStore` stands in
  * for it in tests) — so every row here is `kind: "keychain"`. `CredentialRef`'s other kinds
  * (`env`/`file`/`inline`/`aws-default-chain`/`none`) name credentials the HOST supplies some other
@@ -36,11 +36,11 @@ export interface CredentialSlot {
  * HOTFIX (post-8b, 2026-09-11): these are JSON MATERIAL records, not the raw token/key strings the
  * inventory used to point at (`"openai-api-key"` / `"codex-access-token"`). The spawned Winter
  * child resolves a `CredentialRef` by reading the Keychain ITSELF (`Bun.secrets.get`, never through
- * Norma's own provider code) and `JSON.parse`s whatever it finds — a raw string fails outright
+ * Winter's own provider code) and `JSON.parse`s whatever it finds — a raw string fails outright
  * ("... is not valid JSON credential material"). `auth/credential-material.ts` is the single
  * source of truth for these records; the OLD raw names (`OPENAI_API_KEY_SECRET`,
  * `CODEX_SECRET_NAMES.access` and its four bookkeeping siblings) are now a one-way migration
- * source (`migrateLegacyCredentialMaterial`, run once at daemon boot) and `norma logout`'s blank
+ * source (`migrateLegacyCredentialMaterial`, run once at daemon boot) and `winter logout`'s blank
  * target — never read through this seam, and `CodexAuthStore` no longer writes them at all.
  *
  * The list is a LITERAL array on purpose (not derived, not spread from elsewhere): adding a
@@ -74,19 +74,19 @@ export interface CredentialSlot {
  * `auth/credential-material.ts` is not a lane-1-owned file this phase (it is not named in the
  * 8c lane map at all), and `readCredentialMaterial`/`writeCredentialMaterial` both take an
  * arbitrary secret NAME (never keyed off that constant internally), so nothing requires editing it
- * to add a third provider row here. `norma login --anthropic-key` (`cli/main.ts`) writes exactly
+ * to add a third provider row here. `winter login --anthropic-key` (`cli/main.ts`) writes exactly
  * this name.
  */
 export const ANTHROPIC_CREDENTIAL_SECRET_NAME = "anthropic:default";
 
-/** `norma login --anthropic-key` (`cli/main.ts`) — the SAME `{kind:"api-key", key}` material shape
+/** `winter login --anthropic-key` (`cli/main.ts`) — the SAME `{kind:"api-key", key}` material shape
  *  `writeOpenAiApiKey` writes, under the anthropic row's own name. No legacy raw-key record exists
  *  for this provider (it is new in 8c), so there is no blank-the-legacy-name step to mirror. */
 export async function writeAnthropicApiKey(store: SecretStore, key: string): Promise<void> {
   await writeCredentialMaterial(store, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key });
 }
 
-export const NORMA_CREDENTIAL_INVENTORY: readonly CredentialSlot[] = [
+export const WINTER_CREDENTIAL_INVENTORY: readonly CredentialSlot[] = [
   { provider: "openai", secretName: CREDENTIAL_MATERIAL_NAMES.openai, kind: "keychain" },
   { provider: "codex-oauth", secretName: CREDENTIAL_MATERIAL_NAMES.codexOauth, kind: "keychain" },
   { provider: "anthropic", secretName: ANTHROPIC_CREDENTIAL_SECRET_NAME, kind: "keychain" },
@@ -104,7 +104,7 @@ function describeError(err: unknown): string {
 }
 
 /**
- * `KeychainSeam` over Norma's own `SecretStore` (`Bun.secrets` in production via
+ * `KeychainSeam` over Winter's own `SecretStore` (`Bun.secrets` in production via
  * `KeychainSecretStore`; `FileSecretStore` in tests — never opened directly here). `undefined` is
  * the seam's NORMAL answer for a miss (surface map §1.3) — never a throw, and never a log of the
  * ref or the material.
@@ -112,11 +112,11 @@ function describeError(err: unknown): string {
  * Only `ref.kind === "keychain"` is answerable from this store (every other `CredentialRef` kind
  * names a credential the host resolves some other way — an env var, a file, an inline value, the
  * AWS default chain, or none at all — and this seam has nothing to say about those). A `ref.service`
- * naming a DIFFERENT Keychain service than Norma's own `keychainService()` is refused (this store
- * has nothing under that service); an unset `service` is accepted, since Norma's `SecretStore`
+ * naming a DIFFERENT Keychain service than Winter's own `keychainService()` is refused (this store
+ * has nothing under that service); an unset `service` is accepted, since Winter's `SecretStore`
  * already resolves its one Keychain service once at module load (`auth/secret-store.ts:16`,
  * profile-aware) and most refs this seam sees will not spell it. Within that, only a `ref.account`
- * present in `NORMA_CREDENTIAL_INVENTORY` is served: an unlisted secret name (e.g. the Sparkle key,
+ * present in `WINTER_CREDENTIAL_INVENTORY` is served: an unlisted secret name (e.g. the Sparkle key,
  * a pairing token, a Search/ReadPage capability key) is refused as `undefined`, identically to a
  * genuine miss — there is no arbitrary secret-name read through this seam.
  *
@@ -138,7 +138,7 @@ function describeError(err: unknown): string {
  * from the middle of a launch.
  */
 export function keychainSeamFromSecretStore(store: SecretStore): KeychainSeam {
-  const known = new Set(NORMA_CREDENTIAL_INVENTORY.map((slot) => slot.secretName));
+  const known = new Set(WINTER_CREDENTIAL_INVENTORY.map((slot) => slot.secretName));
   return {
     async read(ref: CredentialRef): Promise<string | undefined> {
       if (ref.kind !== "keychain") return undefined;
@@ -169,8 +169,8 @@ export function keychainSeamFromSecretStore(store: SecretStore): KeychainSeam {
 
 /**
  * The `CredentialRef` for a known provider, or `undefined` when `provider` is not in
- * `NORMA_CREDENTIAL_INVENTORY`. Its `account` is the inventory's `secretName` and its `service` is
- * Norma's own `keychainService()` — the SAME pair `keychainSeamFromSecretStore.read` above accepts.
+ * `WINTER_CREDENTIAL_INVENTORY`. Its `account` is the inventory's `secretName` and its `service` is
+ * Winter's own `keychainService()` — the SAME pair `keychainSeamFromSecretStore.read` above accepts.
  *
  * The `keychain:<account>` string form of this ref (never constructed here — see 8a) is the exact
  * locator `RuntimeSessionRecord.authRef` persists (`runtime-state/records.ts:46`: "Opaque locator
@@ -182,7 +182,7 @@ export function keychainSeamFromSecretStore(store: SecretStore): KeychainSeam {
  * separately — this function is the one place that knows both.
  */
 export function credentialRefFor(provider: string): CredentialRef | undefined {
-  const slot = NORMA_CREDENTIAL_INVENTORY.find((s) => s.provider === provider);
+  const slot = WINTER_CREDENTIAL_INVENTORY.find((s) => s.provider === provider);
   if (!slot) return undefined;
   return { kind: "keychain", account: slot.secretName, service: keychainService() };
 }
@@ -213,7 +213,7 @@ export function credentialRefFor(provider: string): CredentialRef | undefined {
  */
 /**
  * P8c-10: which `SelectionAuthFamily` each inventory provider's credential belongs to (WS-14 §12's
- * own table, C-14). `openai`/`anthropic` are both a bare API key; `codex-oauth` is Norma's own
+ * own table, C-14). `openai`/`anthropic` are both a bare API key; `codex-oauth` is Winter's own
  * OAuth material shape, which the router's selector treats as `"custom"` (never `"claude-oauth"` —
  * that family is reserved for the Anthropic subscription login this daemon does not have, D14).
  */
@@ -225,7 +225,7 @@ const PROVIDER_AUTH_FAMILY: Readonly<Record<string, "api-key" | "custom">> = {
 
 export async function credentialPresenceFrom(
   store: SecretStore,
-  inventory: readonly CredentialSlot[] = NORMA_CREDENTIAL_INVENTORY,
+  inventory: readonly CredentialSlot[] = WINTER_CREDENTIAL_INVENTORY,
 ): Promise<CredentialPresence> {
   const byProvider: Record<string, CredentialRef["kind"]> = {};
   const authByProvider: Record<string, { authFamily: "api-key" | "custom" }> = {};

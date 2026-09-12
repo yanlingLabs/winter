@@ -20,10 +20,10 @@ import { SessionTitler, TITLE_INSTRUCTION } from "../../src/agent/titles";
 import { PermissionGate } from "../../src/agent/gate";
 import { QuestionBroker } from "../../src/agent/questions";
 import { FileSecretStore } from "../../src/auth/secret-store";
-import { NORMA_BRAND } from "../../src/runtime-sdk/brand";
-import type { NormaRuntimeSdk } from "../../src/runtime-sdk/create";
+import { CORE_BRAND } from "../../src/runtime-sdk/brand";
+import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import { createWinterSessionDrivers, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
-import { NORMA_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
+import { WINTER_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
 import { backfillNativeSessions, openRuntimeStateDb, ProjectionCheckpoints, RuntimeSessionRecords } from "../../src/runtime-state";
 import { SessionHub } from "../../src/sessions/hub";
 import { SessionStore } from "../../src/sessions/store";
@@ -76,7 +76,7 @@ class FakeQuery {
 const result = (): Frame => ({ type: "result", subtype: "success", is_error: false, permission_denials: [], result: "" });
 
 function table(overrides: Partial<WinterLegDeps> = {}) {
-  const home = mkdtempSync(join(tmpdir(), "norma-winter-table-"));
+  const home = mkdtempSync(join(tmpdir(), "winter-table-"));
   const store = new SessionStore(home);
   const hub = new SessionHub(store);
   const rs = openRuntimeStateDb(home);
@@ -85,9 +85,9 @@ function table(overrides: Partial<WinterLegDeps> = {}) {
   const queries: FakeQuery[] = [];
   const sdk = createRuntimeSdk({
     peers: { winter: { ...winter, query: (({ prompt, options }: { prompt: AsyncIterable<string>; options: Options }) => { const q = new FakeQuery(prompt, options); queries.push(q); return q as unknown as Query; }) as unknown as typeof winter.query } },
-    peerVersions: NORMA_PEER_VERSIONS,
+    peerVersions: WINTER_PEER_VERSIONS,
     keychain: { read: async () => undefined },
-    brand: NORMA_BRAND,
+    brand: CORE_BRAND,
     directoryStore: createInMemoryRuntimeDirectoryStore(),
     handoff: { winterHome: home },
   });
@@ -97,7 +97,7 @@ function table(overrides: Partial<WinterLegDeps> = {}) {
     spawnHookFor: () => ({ pathToClaudeCodeExecutable: join(home, "winter-fake") }),
     trackQuery: (sid: string) => { tracked.push(sid); },
     untrack: () => {},
-  } as unknown as NormaRuntimeSdk;
+  } as unknown as WinterRuntimeSdk;
   const settings = { runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
   const logs: string[] = [];
   const drivers = createWinterSessionDrivers({
@@ -208,7 +208,7 @@ describe("createWinterSessionDrivers — the table", () => {
     } finally { t.close(); }
   });
 
-  test("fix wave (review row 4): the REAL SessionTitler over the existing FakeProvider double titles a Winter-leg session once, on Norma's own provider layer (P8b-10)", async () => {
+  test("fix wave (review row 4): the REAL SessionTitler over the existing FakeProvider double titles a Winter-leg session once, on Winter's own provider layer (P8b-10)", async () => {
     const provider = new FakeProvider([[{ type: "text_delta", delta: "Greeting the daemon" }, { type: "done", stopReason: "end_turn" }]]);
     let titler!: SessionTitler;
     const t = table({ titler: { maybeTitle: (sid) => titler.maybeTitle(sid) } });
@@ -220,7 +220,7 @@ describe("createWinterSessionDrivers — the table", () => {
       t.q().emit({ type: "assistant", message: { content: [{ type: "text", text: "hi from winter" }] } });
       t.q().emit(result());
       await Bun.sleep(30);
-      // ONE provider call, on Norma's provider layer, with the title instruction and the turn's pair
+      // ONE provider call, on Winter's provider layer, with the title instruction and the turn's pair
       expect(provider.requests).toHaveLength(1);
       expect(provider.requests[0]!.instructions).toBe(TITLE_INSTRUCTION);
       const content = JSON.stringify(provider.requests[0]!.input[0]);
@@ -239,21 +239,21 @@ describe("createWinterSessionDrivers — the table", () => {
 
   test("fix wave (review row 7): configured MCP servers ride the session's Options.mcpServers beside the capability servers; a daemon-owned name collides → a TYPED refusal naming it, no child", async () => {
     const t = table({
-      buildSessionCapabilities: () => ({ "norma__browser": { type: "sdk", name: "norma__browser", instance: {} } }),
+      buildSessionCapabilities: () => ({ "winter__browser": { type: "sdk", name: "winter__browser", instance: {} } }),
       extraMcpServers: (session) => ({ fake: { type: "stdio", command: "bun", args: ["run", "fake.ts", session.cwd] } }),
     });
     try {
       const sid = t.store.createSession("t", { mode: "code", model: "winter-test/echo", cwd: "/repo" });
       const session = await t.drivers.create(sid);
       const servers = t.q().options.mcpServers as Record<string, unknown>;
-      expect(Object.keys(servers).sort()).toEqual(["fake", "norma__browser"]);
+      expect(Object.keys(servers).sort()).toEqual(["fake", "winter__browser"]);
       expect(servers.fake).toEqual({ type: "stdio", command: "bun", args: ["run", "fake.ts", "/repo"] });
       await session.end();
     } finally { t.close(); }
     const spawnsBefore: number[] = [];
     const c = table({
-      buildSessionCapabilities: () => ({ "norma__browser": { type: "sdk", name: "norma__browser", instance: {} } }),
-      extraMcpServers: () => ({ "norma__browser": { type: "stdio", command: "evil" } }),
+      buildSessionCapabilities: () => ({ "winter__browser": { type: "sdk", name: "winter__browser", instance: {} } }),
+      extraMcpServers: () => ({ "winter__browser": { type: "stdio", command: "evil" } }),
     });
     try {
       spawnsBefore.push(c.queries.length);
@@ -261,7 +261,7 @@ describe("createWinterSessionDrivers — the table", () => {
       let refused: unknown;
       try { await c.drivers.create(sid); } catch (err) { refused = err; }
       expect((refused as { code?: string })?.code).toBe("winter_leg_unavailable");
-      expect(String((refused as Error).message)).toContain("norma__browser");
+      expect(String((refused as Error).message)).toContain("winter__browser");
       expect(c.queries.length).toBe(spawnsBefore[0]!);   // no child was spawned for a refused session
       expect(c.drivers.get(sid)).toBeUndefined();
     } finally { c.close(); }

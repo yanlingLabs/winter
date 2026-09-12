@@ -15,7 +15,7 @@ import {
   MemoryListResult, MemoryReadResult, MemoryDeleteResult,
   WorkflowListResult, WorkflowRunResult, WorkflowStopResult, WorkflowGetResult,
   ConnWriter, type WritableSocket,
-} from "@norma/protocol";
+} from "@yanlinglabs/winter-protocol";
 
 /** Mirrors `RoutineSchema` (protocol/src/methods.ts) / `Routine` (core/src/routines/store.ts)
  *  field-for-field — a plain inline interface, matching this file's own convention of spelling
@@ -67,7 +67,7 @@ export interface ConnectOptions {
   onEvent: (event: SessionEvent) => void;
 }
 
-export class NormaClient {
+export class WinterClient {
   private decoder = new LineDecoder();
   private nextId = 1;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
@@ -79,8 +79,8 @@ export class NormaClient {
     this.timeoutMs = timeoutMs;
   }
 
-  static async connect(opts: ConnectOptions): Promise<NormaClient> {
-    const client = new NormaClient(opts.timeoutMs ?? 5000);
+  static async connect(opts: ConnectOptions): Promise<WinterClient> {
+    const client = new WinterClient(opts.timeoutMs ?? 5000);
     client.socket = await Bun.connect({
       unix: opts.socketPath,
       socket: {
@@ -125,9 +125,9 @@ export class NormaClient {
     // value is undefined, so a params-less call used to emit a frame with no `params` key at all.
     // That is legal JSON-RPC 2.0, but every no-argument method's daemon schema is `z.object({})`
     // and `z.object({}).safeParse(undefined)` FAILS — the exact defect that killed the orb's
-    // `session.dispatch` from the Swift client (see NormaClient.swift's own note). The daemon now
+    // `session.dispatch` from the Swift client (see WinterClient.swift's own note). The daemon now
     // normalizes too (`parseParams`, ipc/server.ts), but this client must not depend on that: a
-    // `norma` CLI can be pointed at an older daemon. Normalized HERE rather than at `listSessions`
+    // `winter` CLI can be pointed at an older daemon. Normalized HERE rather than at `listSessions`
     // (today's only params-less caller) so the whole class is closed for every future one.
     this.writer.enqueue(encodeLine({ jsonrpc: "2.0", id, method, params: params ?? {} }));
     return new Promise((resolve, reject) => {
@@ -246,7 +246,7 @@ export class NormaClient {
     await this.sessionSetPolicy({ sessionId, policy });
   }
   /** session-activity-hygiene T3: `session.setActivity` — the lifecycle write verb behind the TUI's
-   *  `/background` and `/archive` and the `norma agents` roster's verbs.
+   *  `/background` and `/archive` and the `winter agents` roster's verbs.
    *
    *  activity-verb-semantics: FOUR values, ONE FLAG PER VERB. `"background"`/`"archived"` SET their
    *  own stored bit and leave the other alone; `"unbackground"` clears the background bit only; and
@@ -299,7 +299,7 @@ export class NormaClient {
   async pluginRevokeToken(pluginId: string): Promise<{ ok: true }> {
     return this.validated(PluginRevokeTokenResult, await this.request(METHODS.pluginRevokeToken, { pluginId }), METHODS.pluginRevokeToken);
   }
-  /** Final-review Fix 1: `norma plugin restart <id>` — forces a fresh spawn cycle for a plugin the
+  /** Final-review Fix 1: `winter plugin restart <id>` — forces a fresh spawn cycle for a plugin the
    *  daemon's supervisor is already tracking, including recovering one stuck "circuit-open"
    *  (nothing else ever clears that state). harness/admin role, same precedent as `pluginsList`
    *  above — NOT one of the six plugin-role verbs. */
@@ -325,7 +325,7 @@ export class NormaClient {
     return this.validated(RoutinesDeleteResult, await this.request(METHODS.routinesDelete, { id }), METHODS.routinesDelete);
   }
   /** Phase 5b T4: the CLI/slash surface over T3's `memory.*` RPCs — list/read/delete only (write
-   *  stays tool-only, per the brief: `norma memory list|show <name>|rm <name>`, no `write`/`add`
+   *  stays tool-only, per the brief: `winter memory list|show <name>|rm <name>`, no `write`/`add`
    *  subcommand; audit has no CLI surface yet either). Mirrors the routines.* quartet above:
    *  harness/admin role, no special gating, a store failure is a thrown RpcFailure (never a typed
    *  result union) for read/delete exactly like routines.create/update. */
@@ -339,7 +339,7 @@ export class NormaClient {
     await this.validated(MemoryDeleteResult, await this.request(METHODS.memoryDelete, { scope, name, cwd }), METHODS.memoryDelete);
   }
   /** CC-parity phase 3 (Workflows, Track C Task C2): the management/control surface over the
-   *  daemon's WorkflowRuntime (live runs) + WorkflowStore (saved `.norma/workflows` scripts, C1)
+   *  daemon's WorkflowRuntime (live runs) + WorkflowStore (saved `.winter/workflows` scripts, C1)
    *  — mirrors the routines.* / memory.* quartets above: harness/admin role, no special gating
    *  (LOCAL-ONLY IN V1 — these four are not reachable over the remote/plugin roles,
    *  ipc/server.ts's allowlists). `workflowRun`'s `name`/`script` mirror the wire's own "exactly

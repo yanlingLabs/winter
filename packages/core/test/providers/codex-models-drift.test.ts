@@ -31,19 +31,19 @@ import { CodexAuthStore } from "../../src/auth/credential-material";
  *      reproduced inside the guard built to prevent it. This layer cannot detect drift on the
  *      PROVIDER's side (nobody edits our file when OpenAI changes a window) — that is layer 2.
  *
- *   2. LIVE, CREDENTIAL-GATED, OPT-IN (`NORMA_CODEX_LIVE_DRIFT=1` + a Codex OAuth token present).
+ *   2. LIVE, CREDENTIAL-GATED, OPT-IN (`WINTER_CODEX_LIVE_DRIFT=1` + a Codex OAuth token present).
  *      The real guard: fetches the catalogue and fails on ANY disagreement. Absent the env flag it
  *      is SKIPPED (`test.skipIf`), so CI and a plain `bun test` stay green and offline.
  *
  *      Opting in with NO credentials FAILS — it does not pass and it does not silently return
  *      (review M1). A guard that reports success when it made no call is worse than one that
  *      reports a skip: "pass" reads as "checked, no drift". This bites in a specific, already-seen
- *      way — `SERVICE` resolves at module load to the DIST keychain (`com.norma.core`), so a
+ *      way — `SERVICE` resolves at module load to the DIST keychain (`com.winter.core`), so a
  *      developer working the dev profile would otherwise see a green pass for a check that never
  *      ran. Run it for the dev profile with:
  *
- *          NORMA_CODEX_LIVE_DRIFT=1 bun test codex-models-drift                      # dist login
- *          NORMA_PROFILE=dev NORMA_CODEX_LIVE_DRIFT=1 bun test codex-models-drift    # dev login
+ *          WINTER_CODEX_LIVE_DRIFT=1 bun test codex-models-drift                      # dist login
+ *          WINTER_PROFILE=dev WINTER_CODEX_LIVE_DRIFT=1 bun test codex-models-drift    # dev login
  *
  *      Why gated on an ENV FLAG and not on credential presence alone: on a developer Mac the
  *      credentials ARE present, so a creds-only gate would make the ordinary `bun test` reach the
@@ -63,7 +63,7 @@ import { CodexAuthStore } from "../../src/auth/credential-material";
  * The live half NEVER prints, logs or persists the token, and NEVER refreshes it — a refresh
  * rotates the running daemon's stored credential, so a test that refreshed could log the user's
  * daemon out. An expired token surfaces as an HTTP 401 and fails the live test with that message,
- * which is the correct outcome: re-run `norma login` and re-run the guard.
+ * which is the correct outcome: re-run `winter login` and re-run the guard.
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  *
  * WHAT THIS GUARD DELIBERATELY DOES NOT COVER — `reasoningEffort`.
@@ -124,8 +124,8 @@ const PINNED = [
 const RE_DERIVE =
   `DO NOT edit the pin to match the code. Re-derive the value from the live catalogue ` +
   `(GET ${CODEX.backendUrl}/models?client_version=1.0.0 — run ` +
-  `\`NORMA_CODEX_LIVE_DRIFT=1 bun test codex-models-drift\`, or ` +
-  `\`NORMA_PROFILE=dev …\` on the dev profile) and re-stamp CODEX_MODELS_VERIFIED in ` +
+  `\`WINTER_CODEX_LIVE_DRIFT=1 bun test codex-models-drift\`, or ` +
+  `\`WINTER_PROFILE=dev …\` on the dev profile) and re-stamp CODEX_MODELS_VERIFIED in ` +
   `src/providers/codex-config.ts. A 100,000-token transcription error survived three weeks of ` +
   `green suites exactly because a pin was edited to agree with the constant.`;
 
@@ -173,16 +173,16 @@ describe("CODEX_MODELS drift guard (pinned + dated)", () => {
 // the runner's output rather than silently omitting the case — and, per review M1, missing
 // credentials once opted in is a FAILURE, never a pass: a guard that reports success for a check it
 // never performed is worse than one that reports a skip.
-const liveRequested = process.env.NORMA_CODEX_LIVE_DRIFT === "1";
+const liveRequested = process.env.WINTER_CODEX_LIVE_DRIFT === "1";
 
 describe("CODEX_MODELS drift guard (live catalogue)", () => {
   test.skipIf(!liveRequested)("every CODEX_MODELS entry agrees with the live /models payload", async () => {
     const tokens = await new CodexAuthStore(new KeychainSecretStore()).load();
     expect(
       tokens,
-      `NORMA_CODEX_LIVE_DRIFT=1 was set but no Codex OAuth token is in the "${keychainService()}" keychain, ` +
-      `so NOTHING was checked. Run \`norma login\` — or, if you work the dev profile, re-run with ` +
-      `NORMA_PROFILE=dev (this reads the dist keychain by default).`,
+      `WINTER_CODEX_LIVE_DRIFT=1 was set but no Codex OAuth token is in the "${keychainService()}" keychain, ` +
+      `so NOTHING was checked. Run \`winter login\` — or, if you work the dev profile, re-run with ` +
+      `WINTER_PROFILE=dev (this reads the dist keychain by default).`,
     ).toBeTruthy();
     // M7 (whole-branch review): `toBeTruthy`, not `.not.toBeNull()` — the latter PASSES on
     // `undefined`, and the `if (!tokens) return` below would then return CLEANLY out of a green

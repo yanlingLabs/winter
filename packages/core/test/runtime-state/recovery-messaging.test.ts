@@ -21,10 +21,10 @@ import { createSqliteRuntimeDirectoryStore } from "../../src/runtime-state/direc
 import { processStartedAt } from "../../src/runtime-state/leases";
 import { recoverRuntimeState } from "../../src/runtime-state/recovery";
 import { SessionStore } from "../../src/sessions/store";
-import { NORMA_BRAND } from "../../src/runtime-sdk/brand";
+import { CORE_BRAND } from "../../src/runtime-sdk/brand";
 import { attachWinterSession } from "../../src/runtime-sdk/messaging";
-import type { NormaRuntimeSdk } from "../../src/runtime-sdk/create";
-import { NORMA_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
+import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
+import { WINTER_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
 import { ISO, withTempHome } from "./support";
 
 const ADDR = (id: string): SerializedRuntimeAddress => serializeRuntimeAddress(buildSessionAddress(id)) as SerializedRuntimeAddress;
@@ -41,7 +41,7 @@ const entry = (id: string, displayName: string): RuntimeDirectoryEntry => ({
   generation: 1,
   selection: {
     runtimeKind: "winter-agent", providerId: "openai", modelRef: "openai/gpt-5.6-sol", family: "openai",
-    authFamily: "api-key", sdkVersion: NORMA_PEER_VERSIONS.winterAgentSdk, reason: "test", decidedAt: ISO(),
+    authFamily: "api-key", sdkVersion: WINTER_PEER_VERSIONS.winterAgentSdk, reason: "test", decidedAt: ISO(),
   },
   backendSessionId: id,
   capabilities: { message: true, resume: true, notifyWhenIdle: true, reply: true },
@@ -103,13 +103,13 @@ describe("recovery step 10 — directory.recover() over the 8a store", () => {
         const directoryStore = createSqliteRuntimeDirectoryStore(rs);
         const sdk = createRuntimeSdk({
           peers: { winter },
-          peerVersions: NORMA_PEER_VERSIONS,
+          peerVersions: WINTER_PEER_VERSIONS,
           keychain: { read: async () => undefined },
-          brand: NORMA_BRAND,
+          brand: CORE_BRAND,
           directoryStore,
           handoff: { winterHome: home },
         });
-        const runtime = { sdk } as unknown as NormaRuntimeSdk;
+        const runtime = { sdk } as unknown as WinterRuntimeSdk;
 
         // ── What the PREVIOUS daemon left behind ────────────────────────────────────────────────
         // Both sessions' rows, and one delivery that was claimed and never receipted: the process

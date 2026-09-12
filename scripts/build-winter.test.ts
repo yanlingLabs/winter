@@ -88,18 +88,18 @@ describe("checkoutIsAtTag (P8b-2 pinned-peer gate)", () => {
   });
 });
 
-// P8d-14: the dev `--sign`/`NORMA_WINTER_SIGN_IDENTITY` re-sign step. `buildWinter()` itself is
+// P8d-14: the dev `--sign`/`WINTER_RUNTIME_SIGN_IDENTITY` re-sign step. `buildWinter()` itself is
 // not exercised here (a real SDK checkout + a two-minute compile) — only the codesign argv it
 // runs, and that argv's actual effect on a real (fake, non-Mach-O) file via the real `codesign`
 // binary. No Keychain access, no real winter/claude binary.
 describe("signWinterArgs (P8d-14 re-sign for a stable Keychain-ACL identity)", () => {
-  test("carries a stable --identifier com.norma.winter, hardened runtime, and a secure timestamp — same shape as the Release embed step (P8d-2)", () => {
+  test("carries a stable --identifier com.winter.runtime, hardened runtime, and a secure timestamp — same shape as the Release embed step (P8d-2)", () => {
     expect(signWinterArgs("-", "/tmp/dist/winter")).toEqual([
-      "--force", "--sign", "-", "--identifier", "com.norma.winter", "--options", "runtime", "--timestamp", "/tmp/dist/winter",
+      "--force", "--sign", "-", "--identifier", "com.winter.runtime", "--options", "runtime", "--timestamp", "/tmp/dist/winter",
     ]);
   });
 
-  test("a REAL codesign with an ad-hoc (`-`) identity lands Identifier=com.norma.winter — the identifier is what fixes the Keychain-reprompt trap, not a real team identity", () => {
+  test("a REAL codesign with an ad-hoc (`-`) identity lands Identifier=com.winter.runtime — the identifier is what fixes the Keychain-reprompt trap, not a real team identity", () => {
     const dir = mkdtempSync(join(tmpdir(), "build-winter-sign-"));
     temps.push(dir);
     const fake = join(dir, "winter-fake");
@@ -109,7 +109,7 @@ describe("signWinterArgs (P8d-14 re-sign for a stable Keychain-ACL identity)", (
     if (cs.status !== 0) throw new Error(`codesign failed: ${cs.stderr || cs.stdout}`);
     const dvv = spawnSync("codesign", ["-dvv", fake], { encoding: "utf8" });
     const out = `${dvv.stdout}${dvv.stderr}`;
-    expect(out).toContain("Identifier=com.norma.winter");
+    expect(out).toContain("Identifier=com.winter.runtime");
   });
 });
 

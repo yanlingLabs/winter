@@ -1,11 +1,11 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { resolveNormaHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, runRuntimesProbe, resolveNormaProfile } from "@norma/core";
-import type { Settings } from "@norma/core";
-import { METHODS, type ApprovalPolicy, type Task } from "@norma/protocol";
+import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, runRuntimesProbe, resolveWinterProfile } from "@yanlinglabs/winter-core";
+import type { Settings } from "@yanlinglabs/winter-core";
+import { METHODS, type ApprovalPolicy, type Task } from "@yanlinglabs/winter-protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
-import { NormaClient } from "./client";
+import { WinterClient } from "./client";
 import { checkCodeSession, filterCodeSessions, sessionModeMarker, sessionRuntimeMarker } from "./session-mode";
 import { applyEvent, isStalled, type WatchdogState } from "./watchdog";
 import { streamAction } from "./stream-state";
@@ -203,29 +203,29 @@ async function readLine(promptText: string): Promise<string | null> {
 
 async function getToken(): Promise<string> {
   const t = await new KeychainSecretStore().get(TOKEN_NAMES.harness);
-  if (!t) throw new Error("no harness token — is the daemon installed? run: norma daemon run");
+  if (!t) throw new Error("no harness token — is the daemon installed? run: winter daemon run");
   return t;
 }
 
 function socketPath(): string {
-  return join(resolveNormaHome(), "run", "core.sock");
+  return join(resolveWinterHome(), "run", "core.sock");
 }
 
 const AUTOLAUNCH_POLL_MS = 200;
 const AUTOLAUNCH_TIMEOUT_MS = 8000;
 
-// Lifecycle Task 5: the pure core behind "norma auto-launches Norma.app when the daemon is down."
+// Lifecycle Task 5: the pure core behind "winter auto-launches Winter.app when the daemon is down."
 // fs/exec/clock/env are all seams (deps) so the 3 outcomes are unit-testable with zero real process
 // launches — connect() below wires the real ones. Dev is unaffected: my bun daemon already has the
 // socket live → "already-up" before anything else runs; without it and without an installed app
 // bundle in the dev tree → "no-app", and the caller preserves today's getToken() dev-hint error.
 export async function ensureDaemonReachable(deps: {
   socketExists: () => boolean;
-  appBundlePresent: () => boolean; // `open -Ra "Norma"` / bundle-id lookup succeeds
-  launchApp: () => void; // `open -g -b com.norma.app` — comes up as the menu-bar agent, no window
+  appBundlePresent: () => boolean; // `open -Ra "Winter"` / bundle-id lookup succeeds
+  launchApp: () => void; // `open -g -b com.winter.app` — comes up as the menu-bar agent, no window
   sleepMs: (ms: number) => Promise<void>;
   now: () => number;
-  noAutoLaunch: boolean; // NORMA_NO_AUTOLAUNCH — escape hatch for scripts/CI, always "no-app"
+  noAutoLaunch: boolean; // WINTER_NO_AUTOLAUNCH — escape hatch for scripts/CI, always "no-app"
 }): Promise<"already-up" | "launched" | "no-app"> {
   if (deps.socketExists()) return "already-up";
   if (deps.noAutoLaunch || !deps.appBundlePresent()) return "no-app";
@@ -245,28 +245,28 @@ export async function ensureDaemonReachable(deps: {
     await deps.sleepMs(AUTOLAUNCH_POLL_MS);
   }
   if (deps.socketExists()) return "launched";
-  throw new Error("Norma isn't responding — open Norma.app manually, or run: norma daemon run");
+  throw new Error("Winter isn't responding — open Winter.app manually, or run: winter daemon run");
 }
 
 function appBundlePresent(): boolean {
   // Only a REAL install counts — never a Debug build. mdfind/`open -Ra` also match Xcode
   // DerivedData Debug builds (Spotlight-indexed), which would auto-launch a dev build and
   // break the "dev is unaffected" invariant. DerivedData is never under /Applications.
-  return existsSync("/Applications/Norma.app") || existsSync(join(homedir(), "Applications", "Norma.app"));
+  return existsSync("/Applications/Winter.app") || existsSync(join(homedir(), "Applications", "Winter.app"));
 }
 
-async function connect(name: string, onEvent: (e: any) => void = () => {}): Promise<NormaClient> {
+async function connect(name: string, onEvent: (e: any) => void = () => {}): Promise<WinterClient> {
   await ensureDaemonReachable({
     socketExists: () => existsSync(socketPath()),
     appBundlePresent,
-    launchApp: () => { Bun.spawnSync(["open", "-g", "-b", "com.norma.app"]); },
+    launchApp: () => { Bun.spawnSync(["open", "-g", "-b", "com.winter.app"]); },
     sleepMs: (ms) => Bun.sleep(ms),
     now: () => Date.now(),
-    noAutoLaunch: !!process.env.NORMA_NO_AUTOLAUNCH,
+    noAutoLaunch: !!process.env.WINTER_NO_AUTOLAUNCH,
   });
   // "no-app" falls through here unchanged: getToken() throws its existing dev-hint error below,
   // byte-identical to before this task (the daemon's actually-down error path is untouched).
-  return NormaClient.connect({ socketPath: socketPath(), token: await getToken(), clientName: name, onEvent });
+  return WinterClient.connect({ socketPath: socketPath(), token: await getToken(), clientName: name, onEvent });
 }
 
 /** Phase 4b Task 2: connect + call `plugin.revokeToken` + close, for
@@ -281,9 +281,9 @@ async function revokePluginTokenViaDaemon(pluginId: string): Promise<void> {
   }
 }
 
-// Canned prompt for `norma init`: surveys the project and writes/updates a NORMA.md at its root.
+// Canned prompt for `winter init`: surveys the project and writes/updates a WINTER.md at its root.
 export const INIT_PROMPT =
-  "Survey this project to understand it: read the README, the package manifest (package.json/pyproject/Cargo.toml/etc.), and skim the directory structure and a few key source files. Then write a concise NORMA.md at the project root capturing: what this project is, how to build/test/run it, and the key conventions a new contributor should follow. If a NORMA.md already exists, read it and UPDATE it rather than clobbering. Keep it tight and factual.";
+  "Survey this project to understand it: read the README, the package manifest (package.json/pyproject/Cargo.toml/etc.), and skim the directory structure and a few key source files. Then write a concise WINTER.md at the project root capturing: what this project is, how to build/test/run it, and the key conventions a new contributor should follow. If a WINTER.md already exists, read it and UPDATE it rather than clobbering. Keep it tight and factual.";
 
 // T5 — the dim "how to resume" hint printed after the Ink TUI exits (every Ink chat exit, not just a
 // resumed one — mirrors CC's own "you can resume this conversation" chrome). Pure + exported so
@@ -292,7 +292,7 @@ export const INIT_PROMPT =
 // module's `import.meta.main`-gated CLI dispatch. Uses the same raw DIM/RESET escapes (task-block.ts)
 // this file already writes with elsewhere, rather than a fresh Chalk instance, for one convention.
 export function formatResumeHint(sessionId: string): string {
-  return `${DIM}\nResume this session with:\n  norma resume ${sessionId}\n${RESET}`;
+  return `${DIM}\nResume this session with:\n  winter resume ${sessionId}\n${RESET}`;
 }
 
 // Chat mode Slice B1 Task 4: the TTY question_asked handler's per-question headline. `header` is
@@ -331,23 +331,23 @@ export function invisibleKeyCharWarning(key: string): string | null {
 // the client, the pinned-block/event machinery, the raw control-key listener, and the stall
 // watchdog ONCE, then either runs a SINGLE turn and exits (chat:false — `-p`, `resume id text`,
 // `init`; byte-identical to before on the non-TTY path, incl. exit codes + the bg grace-kill) or
-// LOOPS (chat:true — bare `norma`, `resume <id>` with no text): after each turn it erases the block
+// LOOPS (chat:true — bare `winter`, `resume <id>` with no text): after each turn it erases the block
 // and shows the `› ` composer, sends the next line, and watches again. ctrl+C / ctrl+D (EOF) tears
 // down cleanly (timers cleared, terminal restored, client closed).
 async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boolean; existingSessionId?: string; chat: boolean }): Promise<void> {
   const { promptOverride, forceAuto = false, existingSessionId, chat } = opts;
 
   // Ink TUI cutover (Phase 3a Task 6): the new Ink renderer owns the interactive chat TTY unless the
-  // NORMA_LEGACY_CLI escape hatch is set. Everything else — one-shot `-p`, piped/non-TTY, the escape
+  // WINTER_LEGACY_CLI escape hatch is set. Everything else — one-shot `-p`, piped/non-TTY, the escape
   // hatch — keeps the byte-identical legacy path below. Decided here (not just at the connect point)
   // because the legacy-only resize handler further down would otherwise paint the pinned block over
   // Ink's surface; `inkMode` gates it off. `bridge` is the connect-time `onEvent` sink that <App>
   // subscribes to (buffers attach-replay until the App mounts). Both are inert on the legacy path.
-  const inkMode = chat && !!process.stdout.isTTY && process.env.NORMA_LEGACY_CLI !== "1";
+  const inkMode = chat && !!process.stdout.isTTY && process.env.WINTER_LEGACY_CLI !== "1";
   const bridge: EventBridge | null = inkMode ? makeEventBridge() : null;
 
   // -p teardown: mirrors Claude Code's headless grace-kill. Any bg tasks still running when the
-  // turn completes get a grace period (NORMA_BG_PRINT_WAIT_MS, default 5000ms; 0 = poll until none
+  // turn completes get a grace period (WINTER_BG_PRINT_WAIT_MS, default 5000ms; 0 = poll until none
   // are running rather than racing a fixed timer) before we force-kill whatever remains. One-shot
   // (chat:false) only — chat mode leaves bg tasks running across turns and tears down via
   // teardownAndExit instead. Uses the enclosing closures (c/sessionId/wdTimer/spinnerTimer).
@@ -358,7 +358,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
     clearInterval(spinnerTimer); // stop the status-line spinner/elapsed tick — the turn is over
     const running = (await c.bgList(sessionId)).filter((t) => t.status === "running");
     if (running.length) {
-      const waitMs = Number(process.env.NORMA_BG_PRINT_WAIT_MS ?? 5000);
+      const waitMs = Number(process.env.WINTER_BG_PRINT_WAIT_MS ?? 5000);
       if (waitMs > 0) {
         await new Promise((r) => setTimeout(r, waitMs));
       } else {
@@ -378,7 +378,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
   // the composer, so it never reads argv[3] (in `resume <id>` chat, argv[3] is the SESSION id).
   const oneShotPrompt = promptOverride ?? process.argv[3];
   if (!chat && !oneShotPrompt) {
-    console.error('usage: norma -p "<prompt>" [--auto|--plan]');
+    console.error('usage: winter -p "<prompt>" [--auto|--plan]');
     process.exit(1);
   }
   const auto = forceAuto || process.argv.includes("--auto");
@@ -387,10 +387,10 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
   let policyInFlight = false; // in-flight guard — one setPolicy RPC at a time (repeat shift+tab ignored until it settles)
   const pending: string[] = []; // callIds awaiting a y/n on stdin, oldest first
   let sessionId = ""; // set below, before send() — turn_completed can only fire after that
-  // T5 resume replay: set ONLY on the Ink `norma resume <id>` route (see the `existingSessionId`
+  // T5 resume replay: set ONLY on the Ink `winter resume <id>` route (see the `existingSessionId`
   // branch below) — the seq `<App>`'s replay is expected to reach before it clears its "Resuming
   // conversation…" line. Left `undefined` on every other route (fresh session, legacy/
-  // NORMA_LEGACY_CLI chat resume, non-TTY, resumeOneShot) — mountTui/`<App>` treat that exactly like
+  // WINTER_LEGACY_CLI chat resume, non-TTY, resumeOneShot) — mountTui/`<App>` treat that exactly like
   // today (no resuming line, ever).
   let resumeTargetSeq: number | undefined;
   // TUI renderer T5 (status chrome): the resume route's per-session model/effort overrides + the
@@ -399,7 +399,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
   // which IS the daemon's resolution for an override-less session (engine.ts `meta.model || base`).
   let sessionModelOverride: string | undefined;
   let sessionEffortOverride: string | undefined;
-  let initialActivity: import("@norma/protocol").SessionActivity | undefined;
+  let initialActivity: import("@yanlinglabs/winter-protocol").SessionActivity | undefined;
   const wd: WatchdogState = { turnRunning: false, toolsInFlight: 0, approvalsPending: 0, lastEventAt: Date.now() };
   let wdTimer: ReturnType<typeof setInterval> | undefined; // one session-long stall poll; cleared on teardown
   let exiting = false; // guard to ensure a single exit path wins (stall watchdog vs endHeadlessTurn vs ctrl+C)
@@ -826,7 +826,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
         sessionId: string; scope: string; lastSeq: number; mode?: string;
         // T5 status chrome: the row's per-session model/effort overrides + derived activity
         // (SessionSummary fields the daemon already serves — methods.ts SessionListResult).
-        model?: string; effort?: string; activity?: import("@norma/protocol").SessionActivity;
+        model?: string; effort?: string; activity?: import("@yanlinglabs/winter-protocol").SessionActivity;
       }>;
     };
     const check = checkCodeSession(sessions, existingSessionId);
@@ -840,7 +840,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
     // 0 there replays the whole session so `<App>` can render the full transcript back (T5), with a
     // "Resuming conversation…" line shown until the replay catches up to `resumeTargetSeq` (the seq
     // this very attach() call returns — the daemon's current tip, regardless of the fromSeq it was
-    // asked to replay from). Every other route (legacy/NORMA_LEGACY_CLI chat resume, non-TTY,
+    // asked to replay from). Every other route (legacy/WINTER_LEGACY_CLI chat resume, non-TTY,
     // resumeOneShot) keeps attaching from the tip — attaching from 0 there would replay every
     // historical turn_completed event on this session, tripping endHeadlessTurn immediately
     // (unchanged concern from before this task; inkMode is false on all of those routes anyway).
@@ -852,7 +852,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
     sessionId = created.sessionId;
     if (!created.trusted) {
       const wantTrust = process.argv.includes("--trust")
-        || (process.stdout.isTTY && !process.argv.includes("--no-trust") && (await askYesNo(`Do you trust the files in ${cwd}? Norma may grant directory access declared there. [y/N] `)));
+        || (process.stdout.isTTY && !process.argv.includes("--no-trust") && (await askYesNo(`Do you trust the files in ${cwd}? Winter may grant directory access declared there. [y/N] `)));
       if (wantTrust) { await c.trustDir(cwd); console.log(`${DIM}trusted ${cwd}${RESET}`); }
     }
     await c.attach(sessionId);
@@ -868,15 +868,15 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
   // dangling legacy timers/listener and exit cleanly, exactly as the legacy chat teardown does.
   if (inkMode) {
     const { mountTui } = await import("./tui/mount");
-    // Welcome-banner data. Version: the unified @norma/core CORE_VERSION (also correct for a
+    // Welcome-banner data. Version: the unified @yanlinglabs/winter-core CORE_VERSION (also correct for a
     // compiled binary, which has no adjacent package.json to read). Model: the resolved provider
-    // model the daemon will use, read from settings.json (same source as `norma model`), best-effort
+    // model the daemon will use, read from settings.json (same source as `winter model`), best-effort
     // with an inert fallback so missing settings never blocks the interactive session.
     const version = CORE_VERSION;
     let model = "";
     let effort: string | undefined;
     try {
-      const s = loadSettings(join(resolveNormaHome(), "settings.json"));
+      const s = loadSettings(join(resolveWinterHome(), "settings.json"));
       model = s.provider.model;
       effort = s.provider.reasoningEffort; // T5 status chrome: the global effort half
     } catch { /* keep fallback */ }
@@ -929,7 +929,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
   // Stall watchdog: one session-long poll. If the turn is running with nothing in flight (no tool
   // executing, no approval awaiting a human) and no event has landed for thresholdMs, assume the
   // turn is wedged and abort. Between turns (chat) wd.turnRunning is false, so it never false-fires.
-  const thresholdMs = Number(process.env.NORMA_TURN_STALL_MS ?? 180000);
+  const thresholdMs = Number(process.env.WINTER_TURN_STALL_MS ?? 180000);
   wdTimer = setInterval(() => {
     if (isStalled(wd, Date.now(), thresholdMs)) {
       if (exiting) return;
@@ -991,7 +991,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
 //    switch statement's existing handling, untouched.
 //
 // Finding 4: the two "chat" outcomes reachable with NO existing session (bare / --auto / --plan)
-// require `isTTY` — a script piping into bare `norma` must keep seeing the original usage output,
+// require `isTTY` — a script piping into bare `winter` must keep seeing the original usage output,
 // not silently open a chat loop it can't drive. (`resume <id>` chat entry is pre-existing,
 // unflagged behavior and isn't gated here — see the fix report.)
 export type CliRoute =
@@ -1021,31 +1021,31 @@ export function routeCliInvocation(argv: string[], isTTY: boolean): CliRoute {
 
 // Plan-immunity Task 2, fix round 1 (whole-branch review, Important): the first pass gated
 // send/watch/resume but left EIGHT more session-targeted verbs reaching chat/dispatch sessions
-// with no check at all — proven live against a real daemon (`norma steer <chatId> "..."` injected
-// a real user_message into a chat session's JSONL; `norma steer <dispatchId> "..."` started a real
-// dispatch turn from the terminal; `norma bg peek <chatId> <task>` read chat output into the
+// with no check at all — proven live against a real daemon (`winter steer <chatId> "..."` injected
+// a real user_message into a chat session's JSONL; `winter steer <dispatchId> "..."` started a real
+// dispatch turn from the terminal; `winter bg peek <chatId> <task>` read chat output into the
 // terminal). Each verb's logic is pulled out of its `case` block into its own small function here —
 // client + params in, a plain discriminated result out, no console.log/process.exit inside — so the
-// gate is directly unit-testable with a fake `NormaClient` (`test/cli-verb-gates.test.ts`, same
+// gate is directly unit-testable with a fake `WinterClient` (`test/cli-verb-gates.test.ts`, same
 // recorded-calls double as tui/commands.test.ts's own `makeClient`) instead of only reachable by
 // hand through a real CLI invocation. Every `case` block below stays a thin, obviously-correct
 // wrapper: resolve argv, call the route function, print/exit on the result exactly as before this
 // fix — the console output strings are byte-identical to what each case block printed previously.
-export async function runAddDirRoute(c: NormaClient, sessionId: string, path: string, persist: boolean): Promise<{ ok: true; roots: string[] } | { ok: false; message: string }> {
+export async function runAddDirRoute(c: WinterClient, sessionId: string, path: string, persist: boolean): Promise<{ ok: true; roots: string[] } | { ok: false; message: string }> {
   const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
   const check = checkCodeSession(sessions, sessionId);
   if (!check.ok) return { ok: false, message: check.message };
   return { ok: true, roots: await c.addDir(sessionId, path, persist) };
 }
 
-export async function runCdRoute(c: NormaClient, sessionId: string, cwd: string): Promise<{ ok: true; cwd: string } | { ok: false; message: string }> {
+export async function runCdRoute(c: WinterClient, sessionId: string, cwd: string): Promise<{ ok: true; cwd: string } | { ok: false; message: string }> {
   const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
   const check = checkCodeSession(sessions, sessionId);
   if (!check.ok) return { ok: false, message: check.message };
   return { ok: true, cwd: await c.setCwd(sessionId, cwd) };
 }
 
-export async function runSteerRoute(c: NormaClient, sessionId: string, text: string): Promise<{ ok: true; injected: boolean } | { ok: false; message: string }> {
+export async function runSteerRoute(c: WinterClient, sessionId: string, text: string): Promise<{ ok: true; injected: boolean } | { ok: false; message: string }> {
   const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
   const check = checkCodeSession(sessions, sessionId);
   if (!check.ok) return { ok: false, message: check.message };
@@ -1053,7 +1053,7 @@ export async function runSteerRoute(c: NormaClient, sessionId: string, text: str
   return { ok: true, injected: r.injected };
 }
 
-export async function runInterruptRoute(c: NormaClient, sessionId: string): Promise<{ ok: true; wasRunning: boolean } | { ok: false; message: string }> {
+export async function runInterruptRoute(c: WinterClient, sessionId: string): Promise<{ ok: true; wasRunning: boolean } | { ok: false; message: string }> {
   const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
   const check = checkCodeSession(sessions, sessionId);
   if (!check.ok) return { ok: false, message: check.message };
@@ -1061,7 +1061,7 @@ export async function runInterruptRoute(c: NormaClient, sessionId: string): Prom
   return { ok: true, wasRunning: r.wasRunning };
 }
 
-export async function runCompactRoute(c: NormaClient, sessionId: string): Promise<{ ok: true; compacted: boolean; uptoSeq: number; summaryChars: number } | { ok: false; message: string }> {
+export async function runCompactRoute(c: WinterClient, sessionId: string): Promise<{ ok: true; compacted: boolean; uptoSeq: number; summaryChars: number } | { ok: false; message: string }> {
   const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
   const check = checkCodeSession(sessions, sessionId);
   if (!check.ok) return { ok: false, message: check.message };
@@ -1069,14 +1069,14 @@ export async function runCompactRoute(c: NormaClient, sessionId: string): Promis
   return { ok: true, ...r };
 }
 
-export async function runBgListRoute(c: NormaClient, sessionId: string): Promise<{ ok: true; tasks: Array<{ taskId: string; command: string; status: string; exitCode: number | null; startedAt: number }> } | { ok: false; message: string }> {
+export async function runBgListRoute(c: WinterClient, sessionId: string): Promise<{ ok: true; tasks: Array<{ taskId: string; command: string; status: string; exitCode: number | null; startedAt: number }> } | { ok: false; message: string }> {
   const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
   const check = checkCodeSession(sessions, sessionId);
   if (!check.ok) return { ok: false, message: check.message };
   return { ok: true, tasks: await c.bgList(sessionId) };
 }
 
-export async function runBgPeekRoute(c: NormaClient, sessionId: string, taskId: string): Promise<{ ok: true; chunk: string; status: string; exitCode: number | null } | { ok: false; message: string }> {
+export async function runBgPeekRoute(c: WinterClient, sessionId: string, taskId: string): Promise<{ ok: true; chunk: string; status: string; exitCode: number | null } | { ok: false; message: string }> {
   const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
   const check = checkCodeSession(sessions, sessionId);
   if (!check.ok) return { ok: false, message: check.message };
@@ -1084,7 +1084,7 @@ export async function runBgPeekRoute(c: NormaClient, sessionId: string, taskId: 
   return { ok: true, ...r };
 }
 
-export async function runBgKillRoute(c: NormaClient, sessionId: string, taskId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+export async function runBgKillRoute(c: WinterClient, sessionId: string, taskId: string): Promise<{ ok: true } | { ok: false; message: string }> {
   const { sessions } = (await c.listSessions()) as { sessions: Array<{ sessionId: string; mode?: string }> };
   const check = checkCodeSession(sessions, sessionId);
   if (!check.ok) return { ok: false, message: check.message };
@@ -1095,7 +1095,7 @@ export async function runBgKillRoute(c: NormaClient, sessionId: string, taskId: 
 // Guarded so `main.ts` can be imported (e.g. by tests, for INIT_PROMPT/runTurnSession) without
 // executing the CLI — import.meta.main is true only when this file is the entry point.
 if (import.meta.main) {
-  // Workflow worker subprocess (COMPILED path): the daemon self-spawns `<norma-core> __workflow-worker`
+  // Workflow worker subprocess (COMPILED path): the daemon self-spawns `<winter-core> __workflow-worker`
   // already wrapped in sandbox-exec; THIS process is the sandboxed worker. Route straight to the entry
   // and never fall through to daemon-connect / TUI. (In dev/test the runtime spawns the entry .ts
   // directly, so this branch is only exercised by the compiled binary.)
@@ -1106,18 +1106,18 @@ if (import.meta.main) {
 
   // Compiled-artifact probe (P8b-18): proves runtime-state.db is created/migrated INSIDE the
   // compiled binary with an injected FileSecretStore — never the Keychain, never a real home.
-  // Reached only by scripts/verify-runtime-state-compiled.ts. NORMA_HOME must be set to a temp dir
-  // by the caller; the probe refuses without it. Static, and importing from the `@norma/core`
+  // Reached only by scripts/verify-runtime-state-compiled.ts. WINTER_HOME must be set to a temp dir
+  // by the caller; the probe refuses without it. Static, and importing from the `@yanlinglabs/winter-core`
   // barrel exactly like `runWorkflowSubprocess` above — that is the import shape that survives
   // `bun build --compile` (a dynamic import keyed on a string does not resolve in $bunfs).
   //
   // POSITIONAL, not `argv.includes` (review F-11): `includes` matches the token anywhere, so
-  // `norma -p "__runtime-state-probe"` would boot the probe instead of running the prompt. `argv[2]`
+  // `winter -p "__runtime-state-probe"` would boot the probe instead of running the prompt. `argv[2]`
   // is the first user argument in BOTH the dev (`bun main.ts …`) and compiled ($bunfs) shapes —
   // the same index the CLI's own `process.argv.slice(2)` routing assumes below. The pre-existing
   // `__workflow-worker` branch above keeps its `includes` shape; it is not this batch's to change.
   if (process.argv[2] === "__runtime-state-probe") {
-    const result = await runRuntimeStateProbe({ home: process.env.NORMA_HOME });
+    const result = await runRuntimeStateProbe({ home: process.env.WINTER_HOME });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     process.exit(result.ok ? 0 : 1);
   }
@@ -1125,18 +1125,18 @@ if (import.meta.main) {
   // same argv[2] shape and the same reasons as `__runtime-state-probe` above. Resolves both runtime
   // ladders from THIS binary's execPath (the bundle rung is `<dirname(execPath)>/runtimes/…`).
   //
-  // Whole-branch review Nit 3: `home` used to be `process.env.NORMA_HOME ?? ""` — an unset
-  // NORMA_HOME probed a RELATIVE empty-string home (inert: no rung under it ever resolves, but a
-  // silently wrong answer rather than the CLI's own normal default). `resolveNormaHome()` is the
-  // same "env var or else `~/.norma`" fallback every OTHER command here already uses, and it is
-  // PURE (`process.env.NORMA_HOME ?? join(homedir(), ".norma")`, `norma-dir.ts`) — no directory
-  // creation, no side effect (that's `bootstrapNormaDir`'s separate job) — so calling it here does
+  // Whole-branch review Nit 3: `home` used to be `process.env.WINTER_HOME ?? ""` — an unset
+  // WINTER_HOME probed a RELATIVE empty-string home (inert: no rung under it ever resolves, but a
+  // silently wrong answer rather than the CLI's own normal default). `resolveWinterHome()` is the
+  // same "env var or else `~/.winter`" fallback every OTHER command here already uses, and it is
+  // PURE (`process.env.WINTER_HOME ?? join(homedir(), ".winter")`, `winter-dir.ts`) — no directory
+  // creation, no side effect (that's `bootstrapWinterDir`'s separate job) — so calling it here does
   // NOT touch the user's real home in a test: `scripts/verify-runtimes-compiled.ts` sets
-  // `NORMA_HOME` to a temp dir before spawning this route, so `resolveNormaHome()` returns that
-  // temp dir, never `~/.norma`, exactly as `__runtime-state-probe`'s own neighboring route already
+  // `WINTER_HOME` to a temp dir before spawning this route, so `resolveWinterHome()` returns that
+  // temp dir, never `~/.winter`, exactly as `__runtime-state-probe`'s own neighboring route already
   // relies on for the identical reason.
   if (process.argv[2] === "__runtimes-probe") {
-    const result = await runRuntimesProbe({ execPath: process.execPath, home: resolveNormaHome(), env: process.env });
+    const result = await runRuntimesProbe({ execPath: process.execPath, home: resolveWinterHome(), env: process.env });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     process.exit(result.ok ? 0 : 1);
   }
@@ -1149,7 +1149,7 @@ if (import.meta.main) {
     await runTurnSession({ chat: false }); // one-shot; never resolves normally — exits via process.exit()
   }
   if (route.kind === "chat" && route.existingSessionId === undefined) {
-    // bare `norma`, or `norma --auto`/`--plan` (Finding 3) → persistent chat mode on a fresh
+    // bare `winter`, or `winter --auto`/`--plan` (Finding 3) → persistent chat mode on a fresh
     // session (loops until ctrl+C/ctrl+D); Finding 4 — routeCliInvocation already gated this on
     // isTTY, so a non-TTY bare/--auto/--plan invocation falls through to the switch below instead.
     await runTurnSession({ chat: true });
@@ -1165,7 +1165,7 @@ if (import.meta.main) {
   case "-v": {
     // Handoff Task 2: thin dispatcher for routeCliInvocation's {kind:"version"} (the pure, tested
     // decision — both spellings land here because cmdKey is just argv[0] for non-daemon commands).
-    console.log(`norma ${CORE_VERSION}`);
+    console.log(`winter ${CORE_VERSION}`);
     process.exit(0);
   }
   case "daemon run": {
@@ -1188,8 +1188,8 @@ if (import.meta.main) {
   }
   case "ping": {
     const c = await connect("cli-ping");
-    const profileTag = resolveNormaProfile() === "dev" ? " (dev)" : "";
-    console.log(`${AQUA}◍ norma-core is up${profileTag}${RESET} ${DIM}(${socketPath()})${RESET}`);
+    const profileTag = resolveWinterProfile() === "dev" ? " (dev)" : "";
+    console.log(`${AQUA}◍ winter-core is up${profileTag}${RESET} ${DIM}(${socketPath()})${RESET}`);
     c.close();
     break;
   }
@@ -1222,19 +1222,19 @@ if (import.meta.main) {
     const c = await connect("cli-status");
     const s = await c.daemonStatus();
     const provider = s.provider ? `${s.provider.id} (${s.provider.model})` : "(none configured)";
-    const profileTag = resolveNormaProfile() === "dev" ? " (dev)" : "";
-    console.log(`${AQUA}norma-core v${s.version}${profileTag}${RESET} ${DIM}up ${formatElapsed(s.uptimeMs)} · ${s.socketPath}${RESET}`);
+    const profileTag = resolveWinterProfile() === "dev" ? " (dev)" : "";
+    console.log(`${AQUA}winter-core v${s.version}${profileTag}${RESET} ${DIM}up ${formatElapsed(s.uptimeMs)} · ${s.socketPath}${RESET}`);
     console.log(`${DIM}provider: ${provider} · sessions: ${s.sessionsCount} · plugins: ${s.pluginsCount}${RESET}`);
     c.close();
     break;
   }
   case "doctor": {
-    // WS-16 §15's diagnostics/repair. IN-PROCESS against NORMA_HOME, deliberately NOT an RPC: a
+    // WS-16 §15's diagnostics/repair. IN-PROCESS against WINTER_HOME, deliberately NOT an RPC: a
     // doctor whose first move is to reach the daemon is useless in exactly the state it exists for.
     // `runtime-state.db` is WAL, so the read-only half runs happily beside a live daemon; every
     // repair refuses while the lock is held, on the same probe `lock.ts` uses.
-    const { diagnoseRuntimeState, repairRuntimeState, isDaemonLockHeld, DAEMON_RUNNING_REFUSAL, diagnoseRuntimes, loadSettings } = await import("@norma/core");
-    const home = resolveNormaHome();
+    const { diagnoseRuntimeState, repairRuntimeState, isDaemonLockHeld, DAEMON_RUNNING_REFUSAL, diagnoseRuntimes, loadSettings } = await import("@yanlinglabs/winter-core");
+    const home = resolveWinterHome();
     const args = process.argv.slice(3);
     const flag = (name: string): string | undefined => {
       const i = args.indexOf(name);
@@ -1310,7 +1310,7 @@ if (import.meta.main) {
       : undefined;
     if (!op) {
       console.error(
-        "usage: norma doctor | norma doctor --repair rebuild-index" +
+        "usage: winter doctor | winter doctor --repair rebuild-index" +
           " | --repair quarantine-tail --session <id> | --repair relink-backend --session <id> --backend <uuid>" +
           " | --repair detach-backend --session <id> | --repair restore-backup --backup <path>",
       );
@@ -1336,11 +1336,11 @@ if (import.meta.main) {
     break;
   }
   case "send": {
-    // usage: norma send <sessionId|new> <text...>
+    // usage: winter send <sessionId|new> <text...>
     const args = process.argv.slice(3);
     const target = args[0];
     const text = args.slice(1).join(" ");
-    if (!target || !text) { console.error("usage: norma send <sessionId|new> <text…>"); process.exit(1); }
+    if (!target || !text) { console.error("usage: winter send <sessionId|new> <text…>"); process.exit(1); }
     const c = await connect("cli-send");
     let sessionId: string;
     if (target === "new") {
@@ -1366,7 +1366,7 @@ if (import.meta.main) {
   case "add-dir": {
     const sessionId = process.argv[3];
     const path = process.argv[4];
-    if (!sessionId || !path) { console.error("usage: norma add-dir <sessionId> <path> [--persist]"); process.exit(1); }
+    if (!sessionId || !path) { console.error("usage: winter add-dir <sessionId> <path> [--persist]"); process.exit(1); }
     const c = await connect("cli-add-dir");
     const result = await runAddDirRoute(c, sessionId, path, process.argv.includes("--persist"));
     if (!result.ok) { console.error(result.message); c.close(); process.exit(1); }
@@ -1377,8 +1377,8 @@ if (import.meta.main) {
   case "trust": {
     const arg = process.argv[3];
     if (arg === "--list") {
-      // Protocol has no daemon.trustList method (kept minimal) — read ~/.norma/trust.json directly.
-      const trustPath = join(resolveNormaHome(), "trust.json");
+      // Protocol has no daemon.trustList method (kept minimal) — read ~/.winter/trust.json directly.
+      const trustPath = join(resolveWinterHome(), "trust.json");
       let dirs: string[] = [];
       if (existsSync(trustPath)) {
         try {
@@ -1398,7 +1398,7 @@ if (import.meta.main) {
       else for (const d of dirs) console.log(d);
     } else if (arg === "remove") {
       const path = process.argv[4];
-      if (!path) { console.error("usage: norma trust remove <path>"); process.exit(1); }
+      if (!path) { console.error("usage: winter trust remove <path>"); process.exit(1); }
       const c = await connect("cli-trust-remove");
       const removed = await c.trustRemove(resolve(path));
       console.log(removed ? `${AQUA}untrusted ${resolve(path)}${RESET}` : `${DIM}already untrusted: ${resolve(path)}${RESET}`);
@@ -1409,7 +1409,7 @@ if (import.meta.main) {
       console.log(`${AQUA}trusted ${resolve(arg)}${RESET}`);
       c.close();
     } else {
-      console.error("usage: norma trust <dir> | norma trust --list | norma trust list | norma trust remove <path>");
+      console.error("usage: winter trust <dir> | winter trust --list | winter trust list | winter trust remove <path>");
       process.exit(1);
     }
     break;
@@ -1417,7 +1417,7 @@ if (import.meta.main) {
   case "cd": {
     const sessionId = process.argv[3];
     const cwd = process.argv[4];
-    if (!sessionId || !cwd) { console.error("usage: norma cd <sessionId> <path>"); process.exit(1); }
+    if (!sessionId || !cwd) { console.error("usage: winter cd <sessionId> <path>"); process.exit(1); }
     const c = await connect("cli-cd");
     const result = await runCdRoute(c, sessionId, cwd);
     if (!result.ok) { console.error(result.message); c.close(); process.exit(1); }
@@ -1428,7 +1428,7 @@ if (import.meta.main) {
   case "steer": {
     const sessionId = process.argv[3];
     const text = process.argv.slice(4).join(" ");
-    if (!sessionId || !text) { console.error("usage: norma steer <sessionId> <text…>"); process.exit(1); }
+    if (!sessionId || !text) { console.error("usage: winter steer <sessionId> <text…>"); process.exit(1); }
     const c = await connect("cli-steer");
     const result = await runSteerRoute(c, sessionId, text);
     if (!result.ok) { console.error(result.message); c.close(); process.exit(1); }
@@ -1438,7 +1438,7 @@ if (import.meta.main) {
   }
   case "interrupt": {
     const sessionId = process.argv[3];
-    if (!sessionId) { console.error("usage: norma interrupt <sessionId>"); process.exit(1); }
+    if (!sessionId) { console.error("usage: winter interrupt <sessionId>"); process.exit(1); }
     const c = await connect("cli-interrupt");
     const result = await runInterruptRoute(c, sessionId);
     if (!result.ok) { console.error(result.message); c.close(); process.exit(1); }
@@ -1448,7 +1448,7 @@ if (import.meta.main) {
   }
   case "compact": {
     const sid = process.argv[3];
-    if (!sid) { console.error("usage: norma compact <sessionId>"); process.exit(1); }
+    if (!sid) { console.error("usage: winter compact <sessionId>"); process.exit(1); }
     const c = await connect("cli-compact");
     const result = await runCompactRoute(c, sid);
     if (!result.ok) { console.error(result.message); c.close(); process.exit(1); }
@@ -1476,7 +1476,7 @@ if (import.meta.main) {
   }
   case "plugin": {
     const sub = process.argv[3];
-    const home = resolveNormaHome();
+    const home = resolveWinterHome();
     const settingsPath = join(home, "settings.json");
     const pluginsRoot = join(home, "plugins");
 
@@ -1484,7 +1484,7 @@ if (import.meta.main) {
       const c = await connect("cli-plugin-list");
       const res = await c.pluginsList();
       for (const p of res.plugins) {
-        const mcp = !p.hasMcp ? "no mcp" : p.mcpEnabled ? "mcp: enabled" : `mcp: DISABLED (norma plugin enable ${p.name} to allow — code execution)`;
+        const mcp = !p.hasMcp ? "no mcp" : p.mcpEnabled ? "mcp: enabled" : `mcp: DISABLED (winter plugin enable ${p.name} to allow — code execution)`;
         const flags = p.disabled ? " [disabled]" : "";
         const tierTag = p.tier ? ` ${DIM}[${p.tier}]${RESET}` : "";
         // Task 3: tier + consent state — "consented" (every required class recorded), "needs
@@ -1501,7 +1501,7 @@ if (import.meta.main) {
 
     if (sub === "install") {
       const url = process.argv[4];
-      if (!url) { console.error("usage: norma plugin install <git-url> [name]"); process.exit(1); }
+      if (!url) { console.error("usage: winter plugin install <git-url> [name]"); process.exit(1); }
       let installed: { name: string; target: string };
       try {
         installed = installPlugin({ url, name: process.argv[5], pluginsRoot });
@@ -1509,26 +1509,26 @@ if (import.meta.main) {
         console.error((err as Error).message);
         process.exit(1);
       }
-      const { PluginStore } = await import("@norma/core");
-      const info = new PluginStore({ normaHome: home }).list().find((p) => p.name === installed.name);
+      const { PluginStore } = await import("@yanlinglabs/winter-core");
+      const info = new PluginStore({ winterHome: home }).list().find((p) => p.name === installed.name);
       console.log(`${AQUA}installed ${installed.name}${RESET}  skills: ${info?.skills.join(", ") || "(none)"}`);
       // hasMcp alone misses a manifest-only plugin (contributes.mcpServers, no .mcp.json) — that
       // installs with hasMcp:false, so also check requiredConsents (installNeedsConsentHint).
-      if (info && installNeedsConsentHint(info)) console.log(`this plugin requests exec/etc — run ${AQUA}norma plugin enable ${installed.name}${RESET} to review and consent`);
+      if (info && installNeedsConsentHint(info)) console.log(`this plugin requests exec/etc — run ${AQUA}winter plugin enable ${installed.name}${RESET} to review and consent`);
       break; // NEVER touches settings
     }
 
     if (sub === "enable") {
       const name = process.argv[4];
-      if (!name) { console.error("usage: norma plugin enable <name>"); process.exit(1); }
+      if (!name) { console.error("usage: winter plugin enable <name>"); process.exit(1); }
       if (!existsSync(join(pluginsRoot, name))) { console.error(`no such plugin: ${name}`); process.exit(1); }
 
       // Direct PluginStore read (not the daemon RPC) — mirrors `install` above and keeps `enable`
       // usable without a running daemon, exactly like it was pre-4a. `consents` comes straight
       // from the settings file we're about to (maybe) write back to.
-      const { loadSettings, saveSettings, PluginStore } = await import("@norma/core");
+      const { loadSettings, saveSettings, PluginStore } = await import("@yanlinglabs/winter-core");
       const settings = loadSettings(settingsPath);
-      const info = new PluginStore({ normaHome: home, consents: settings.plugins?.consents }).list().find((p) => p.name === name);
+      const info = new PluginStore({ winterHome: home, consents: settings.plugins?.consents }).list().find((p) => p.name === name);
       if (!info) { console.error(`no such plugin: ${name}`); process.exit(1); }
 
       const missing = missingConsents(info.requiredConsents, info.consented);
@@ -1536,7 +1536,7 @@ if (import.meta.main) {
         // No silent consent in scripts (design spec §1) — an unattended `enable` of a plugin with
         // outstanding exec/tcc/hardware consent refuses rather than guessing.
         if (!isTTY) {
-          console.error(`exec consent requires an interactive terminal — run: norma plugin enable ${name}`);
+          console.error(`exec consent requires an interactive terminal — run: winter plugin enable ${name}`);
           process.exit(1);
         }
         for (const line of buildConsentBlock(info)) console.log(line);
@@ -1562,9 +1562,9 @@ if (import.meta.main) {
 
     if (sub === "disable") {
       const name = process.argv[4];
-      if (!name) { console.error("usage: norma plugin disable <name>"); process.exit(1); }
+      if (!name) { console.error("usage: winter plugin disable <name>"); process.exit(1); }
       if (!existsSync(join(pluginsRoot, name))) { console.error(`no such plugin: ${name}`); process.exit(1); }
-      const { loadSettings, saveSettings } = await import("@norma/core");
+      const { loadSettings, saveSettings } = await import("@yanlinglabs/winter-core");
       const settings = stripPluginConsents(setPluginEnabled(loadSettings(settingsPath), name, false), name);
       saveSettings(settingsPath, settings);
       // Phase 4b Task 2: best-effort revoke of the plugin's daemon-side token (Tier-2 platform
@@ -1578,14 +1578,14 @@ if (import.meta.main) {
 
     if (sub === "remove") {
       const name = process.argv[4];
-      if (!name) { console.error("usage: norma plugin remove <name>"); process.exit(1); }
+      if (!name) { console.error("usage: winter plugin remove <name>"); process.exit(1); }
       try {
         removePluginDir(pluginsRoot, name);
       } catch (err) {
         console.error((err as Error).message);
         process.exit(1);
       }
-      const { loadSettings, saveSettings } = await import("@norma/core");
+      const { loadSettings, saveSettings } = await import("@yanlinglabs/winter-core");
       saveSettings(settingsPath, removePluginFromSettings(loadSettings(settingsPath), name));
       // Phase 4b Task 2: same best-effort token revoke as disable (see comment there) — removing
       // the plugin dir must not silently leave a stale, still-valid token in the daemon's sqlite.
@@ -1597,7 +1597,7 @@ if (import.meta.main) {
 
     if (sub === "restart") {
       const name = process.argv[4];
-      if (!name) { console.error("usage: norma plugin restart <name>"); process.exit(1); }
+      if (!name) { console.error("usage: winter plugin restart <name>"); process.exit(1); }
       const c = await connect(`cli-plugin-restart-${name}`);
       try {
         await c.restartPlugin(name);
@@ -1611,7 +1611,7 @@ if (import.meta.main) {
       process.exit(0);
     }
 
-    console.error("usage: norma plugin list | install <git-url> [name] | enable <name> | disable <name> | remove <name> | restart <name>");
+    console.error("usage: winter plugin list | install <git-url> [name] | enable <name> | disable <name> | remove <name> | restart <name>");
     process.exit(1);
   }
   case "bg": {
@@ -1619,7 +1619,7 @@ if (import.meta.main) {
     const bgSessionId = process.argv[4];
     const bgTaskId = process.argv[5];
     if (!bgSessionId || (bgSub !== "list" && !bgTaskId)) {
-      console.error("usage: norma bg list <session> | bg peek <session> <taskId> | bg kill <session> <taskId>");
+      console.error("usage: winter bg list <session> | bg peek <session> <taskId> | bg kill <session> <taskId>");
       process.exit(1);
     }
     const c = await connect("cli-bg");
@@ -1638,7 +1638,7 @@ if (import.meta.main) {
       if (!result.ok) { console.error(result.message); c.close(); process.exit(1); }
       console.log(`${AQUA}killed ${bgTaskId}${RESET}`);
     } else {
-      console.error("usage: norma bg list <session> | bg peek <session> <taskId> | bg kill <session> <taskId>");
+      console.error("usage: winter bg list <session> | bg peek <session> <taskId> | bg kill <session> <taskId>");
       c.close();
       process.exit(1);
     }
@@ -1646,12 +1646,12 @@ if (import.meta.main) {
     break;
   }
   case "routines": {
-    // usage: norma routines [list] | routines create "<spec>" [--policy auto|plan] -- <prompt…>
+    // usage: winter routines [list] | routines create "<spec>" [--policy auto|plan] -- <prompt…>
     //        | routines delete <id> | routines enable <id> | routines disable <id>
     // Argument validation happens BEFORE connecting (mirrors `bg`'s fail-fast usage check just
     // above) — a bad invocation never opens a daemon socket at all.
-    const routinesUsage = 'usage: norma routines [list] | routines create "<spec>" [--policy auto|plan] -- <prompt…> | routines delete <id> | routines enable <id> | routines disable <id>';
-    const createUsage = 'usage: norma routines create "<spec>" [--policy auto|plan] -- <prompt…>';
+    const routinesUsage = 'usage: winter routines [list] | routines create "<spec>" [--policy auto|plan] -- <prompt…> | routines delete <id> | routines enable <id> | routines disable <id>';
+    const createUsage = 'usage: winter routines create "<spec>" [--policy auto|plan] -- <prompt…>';
     const routinesSub = process.argv[3];
 
     if (routinesSub === "create") {
@@ -1684,7 +1684,7 @@ if (import.meta.main) {
 
     if (routinesSub === "delete") {
       const id = process.argv[4];
-      if (!id) { console.error("usage: norma routines delete <id>"); process.exit(1); }
+      if (!id) { console.error("usage: winter routines delete <id>"); process.exit(1); }
       const c = await connect("cli-routines");
       const { removed } = await c.routinesDelete(id);
       if (!removed) {
@@ -1699,7 +1699,7 @@ if (import.meta.main) {
 
     if (routinesSub === "enable" || routinesSub === "disable") {
       const id = process.argv[4];
-      if (!id) { console.error(`usage: norma routines ${routinesSub} <id>`); process.exit(1); }
+      if (!id) { console.error(`usage: winter routines ${routinesSub} <id>`); process.exit(1); }
       const c = await connect("cli-routines");
       try {
         const { routine } = await c.routinesUpdate({ id, patch: { enabled: routinesSub === "enable" } });
@@ -1726,7 +1726,7 @@ if (import.meta.main) {
     process.exit(1);
   }
   case "memory": {
-    // usage: norma memory [list] [--project] | show <name> [--project] | rm <name> [--project]
+    // usage: winter memory [list] [--project] | show <name> [--project] | rm <name> [--project]
     // Argument validation (parseMemoryArgs) happens BEFORE connecting — mirrors `routines`' own
     // fail-fast usage check just above: a bad invocation never opens a daemon socket.
     const route = parseMemoryArgs(process.argv.slice(3), process.cwd());
@@ -1754,7 +1754,7 @@ if (import.meta.main) {
   }
   case "watch": {
     const sessionId = process.argv[3];
-    if (!sessionId) { console.error("usage: norma watch <sessionId>"); process.exit(1); }
+    if (!sessionId) { console.error("usage: winter watch <sessionId>"); process.exit(1); }
     const c = await connect("cli-watch", (e) => {
       if (e.type === "user_message") console.log(`${AQUA}❯${RESET} [${e.clientName}] ${e.text}`);
       else console.log(`${DIM}· ${e.type}${"clientName" in e ? ` (${e.clientName})` : ""}${RESET}`);
@@ -1771,13 +1771,13 @@ if (import.meta.main) {
   }
   case "daemon install": {
     const { installDaemon } = await import("./launchd");
-    // process.execPath = the bun binary in dev, the compiled `norma` binary in production.
+    // process.execPath = the bun binary in dev, the compiled `winter` binary in production.
     const binary = process.execPath;
     if (binary.endsWith("/bun")) {
-      console.error("daemon install requires the compiled norma binary (Task 16); in dev use: norma daemon run");
+      console.error("daemon install requires the compiled winter binary (Task 16); in dev use: winter daemon run");
       process.exit(1);
     }
-    await installDaemon(binary, resolveNormaHome());
+    await installDaemon(binary, resolveWinterHome());
     console.log(`${AQUA}installed launchd agent${RESET} — daemon starts at login and stays alive`);
     break;
   }
@@ -1793,7 +1793,7 @@ if (import.meta.main) {
     break;
   }
   case "login": {
-    const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, writeOpenAiApiKey, writeAnthropicApiKey, WEB_SEARCH_API_KEY_SECRET, EXA_API_KEY_SECRET, profileDisplayName } = await import("@norma/core");
+    const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, writeOpenAiApiKey, writeAnthropicApiKey, WEB_SEARCH_API_KEY_SECRET, EXA_API_KEY_SECRET, profileDisplayName } = await import("@yanlinglabs/winter-core");
     console.log(`${AQUA}${profileDisplayName()} login${RESET}`);
     const secrets = new KeychainSecretStore();
     // P8c-10: the official leg's own credential — same shape as --api-key below (prefix check,
@@ -1818,12 +1818,12 @@ if (import.meta.main) {
       // ...'`) is untouched here and remains a follow-up — that message flows through
       // engine.ts into an `agent_error` SessionEvent PERSISTED to the session JSONL, and can become
       // a parent-model-visible tool_result via a dispatched child's errorMessage. Catching a bad key
-      // at `norma login` time is strictly better than fixing it after the fact, but does not make
+      // at `winter login` time is strictly better than fixing it after the fact, but does not make
       // the provider sink itself safe against a key that reaches it some other way.
       const invisibleWarning = invisibleKeyCharWarning(key);
       if (invisibleWarning) { console.error(invisibleWarning); process.exit(1); }
       await writeOpenAiApiKey(secrets, key);
-      console.log(`${AQUA}API key stored in Keychain${RESET} — set provider type in ~/.norma/settings.json (openai-compatible)`);
+      console.log(`${AQUA}API key stored in Keychain${RESET} — set provider type in ~/.winter/settings.json (openai-compatible)`);
       break;
     }
     // 4g Task 6: web_search's Brave Search API key. Mirrors the --api-key branch above exactly
@@ -1866,7 +1866,7 @@ if (import.meta.main) {
     break;
   }
   case "logout": {
-    const { KeychainSecretStore, CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, clearCredentialMaterial, ANTHROPIC_CREDENTIAL_SECRET_NAME } = await import("@norma/core");
+    const { KeychainSecretStore, CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, clearCredentialMaterial, ANTHROPIC_CREDENTIAL_SECRET_NAME } = await import("@yanlinglabs/winter-core");
     const secrets = new KeychainSecretStore();
     // P8c-10: `--anthropic` clears ONLY the official leg's own credential — Codex sign-out
     // (the bare command, unchanged) must not touch it, and this flag must not touch Codex's.
@@ -1887,8 +1887,8 @@ if (import.meta.main) {
     break;
   }
   case "provider": {
-    const { loadSettings, resolveNormaHome } = await import("@norma/core");
-    const s = loadSettings(join(resolveNormaHome(), "settings.json"));
+    const { loadSettings, resolveWinterHome } = await import("@yanlinglabs/winter-core");
+    const s = loadSettings(join(resolveWinterHome(), "settings.json"));
     console.log(`${AQUA}${s.provider.type}${RESET} ${DIM}model ${s.provider.model}${RESET}`);
     break;
   }
@@ -1898,8 +1898,8 @@ if (import.meta.main) {
     // "changing models must NOT require a daemon restart") is that a running daemon picks the
     // new value up on its NEXT turn via providers/manager.ts's live model resolver — no restart,
     // no RPC round-trip needed here at all.
-    const { loadSettings, saveSettings, resolveNormaHome, setProviderModel, setReasoningEffort, setAdvisorModel, CODEX_MODELS } = await import("@norma/core");
-    const settingsPath = join(resolveNormaHome(), "settings.json");
+    const { loadSettings, saveSettings, resolveWinterHome, setProviderModel, setReasoningEffort, setAdvisorModel, CODEX_MODELS } = await import("@yanlinglabs/winter-core");
+    const settingsPath = join(resolveWinterHome(), "settings.json");
     const settings = loadSettings(settingsPath);
     const action = parseModelArgs(process.argv.slice(3));
 
@@ -1920,7 +1920,7 @@ if (import.meta.main) {
       }
       // Winter Phase 8d (P8d-8, Task 4.3): the D30 advisor line — "auto" is the honest label for
       // an unset override (the router applies its own per-family default, never a slug this CLI
-      // invents), mirroring `norma model --advisor auto`'s own clearing spelling.
+      // invents), mirroring `winter model --advisor auto`'s own clearing spelling.
       console.log(`${DIM}advisor: ${settings.runtimes?.advisorModel ?? "auto"}${RESET}`);
       process.exit(0);
     }
@@ -1965,22 +1965,22 @@ if (import.meta.main) {
     // settings.outputStyle, live, on the session's next turn — same live-getter precedent as the
     // provider model).
     const { parseOutputStyleArgs } = await import("./output-style-cli");
-    const { loadSettings, saveSettings, resolveNormaHome, setOutputStyle, OutputStyleStore, TrustStore } = await import("@norma/core");
+    const { loadSettings, saveSettings, resolveWinterHome, setOutputStyle, OutputStyleStore, TrustStore } = await import("@yanlinglabs/winter-core");
     const action = parseOutputStyleArgs(process.argv.slice(3));
-    const home = resolveNormaHome();
+    const home = resolveWinterHome();
     const settingsPath = join(home, "settings.json");
 
     if (action.action === "help") {
-      console.log("Usage: norma output-style [name]\n  (no arg)  list available styles\n  <name>    set the active output style");
+      console.log("Usage: winter output-style [name]\n  (no arg)  list available styles\n  <name>    set the active output style");
       break;
     }
 
     // loadSettings throws its own helpful error (mirrors `case "model"` above, which loads
-    // unguarded the same way) if settings.json is missing/unparseable — a Norma install always
+    // unguarded the same way) if settings.json is missing/unparseable — a Winter install always
     // has one, so this never fabricates a fallback Settings object; a missing/invalid file fails
-    // the exact same way `norma model` would.
+    // the exact same way `winter model` would.
     const settings = loadSettings(settingsPath);
-    const store = new OutputStyleStore({ normaHome: home, trust: new TrustStore(join(home, "trust.json")) });
+    const store = new OutputStyleStore({ winterHome: home, trust: new TrustStore(join(home, "trust.json")) });
     const cwd = process.cwd();
     const current = settings.outputStyle ?? "default";
 
@@ -2004,22 +2004,22 @@ if (import.meta.main) {
   }
   case "workflow": {
     // CC-parity phase 3 (Workflows), Track C Task C3. `list`/`save` are file-direct (WorkflowStore,
-    // C1) — mirrors `case "output-style"` just above: reading/writing `.norma/workflows/*.js`
+    // C1) — mirrors `case "output-style"` just above: reading/writing `.winter/workflows/*.js`
     // never needs the daemon up, exactly like an output-style switch never needing a restart.
     // `run` is the one exception: workflows actually EXECUTE in the daemon (WorkflowRuntime,
-    // core/src/workflows/runtime.ts, C2), so it goes through NormaClient/connect() like every
+    // core/src/workflows/runtime.ts, C2), so it goes through WinterClient/connect() like every
     // other daemon-RPC case (`memory`, `routines`, …) instead of touching files directly.
     const { parseWorkflowArgs } = await import("./workflow-cli");
     const action = parseWorkflowArgs(process.argv.slice(3));
 
     if (action.action === "help") {
-      console.log("Usage: norma workflow [list] | run <name> [json-args] | save <name> [file]\n  (no arg)     list saved workflows (+ running runs, if a daemon is already up)\n  run <name>   run a saved workflow; json-args (a JSON string) seeds its `args` binding\n  save <name>  save a workflow script from <file> (or stdin, if omitted) to ~/.norma/workflows/<name>.js");
+      console.log("Usage: winter workflow [list] | run <name> [json-args] | save <name> [file]\n  (no arg)     list saved workflows (+ running runs, if a daemon is already up)\n  run <name>   run a saved workflow; json-args (a JSON string) seeds its `args` binding\n  save <name>  save a workflow script from <file> (or stdin, if omitted) to ~/.winter/workflows/<name>.js");
       break;
     }
 
-    const { WorkflowStore, TrustStore } = await import("@norma/core");
-    const home = resolveNormaHome();
-    const store = new WorkflowStore({ normaHome: home, trust: new TrustStore(join(home, "trust.json")) });
+    const { WorkflowStore, TrustStore } = await import("@yanlinglabs/winter-core");
+    const home = resolveWinterHome();
+    const store = new WorkflowStore({ winterHome: home, trust: new TrustStore(join(home, "trust.json")) });
     const cwd = process.cwd();
 
     if (action.action === "list") {
@@ -2029,7 +2029,7 @@ if (import.meta.main) {
 
       // Best-effort daemon augmentation, ONLY if a daemon is ALREADY up (a direct existsSync
       // check — never connect()'s own autolaunch: unlike `run`, a plain `list` must not have the
-      // side effect of spawning Norma.app). workflow.list is session-scoped server-side
+      // side effect of spawning Winter.app). workflow.list is session-scoped server-side
       // (WorkflowRegistry.list(sessionId) filters strictly to that session's own runs), so this
       // creates a session the same way `run` does below; wrapped in try/catch because the
       // file-direct saved list above already answered the primary ask — a down/flaked daemon must
@@ -2093,14 +2093,14 @@ if (import.meta.main) {
     break;
   }
   case "init": {
-    await runTurnSession({ promptOverride: INIT_PROMPT, forceAuto: true, chat: false }); // force auto: writes NORMA.md without approval prompts
+    await runTurnSession({ promptOverride: INIT_PROMPT, forceAuto: true, chat: false }); // force auto: writes WINTER.md without approval prompts
     break;
   }
   case "resume": {
     const sid = process.argv[3];
     if (!sid) {
       // picker: list resumable sessions. Plan-immunity Task 2: this is a PICKER (same shape as the
-      // TUI's `/sessions` — its own inline comment is the same phrase), not the plain `norma
+      // TUI's `/sessions` — its own inline comment is the same phrase), not the plain `winter
       // sessions` inventory, so it HIDES non-code rows (`filterCodeSessions`) rather than marking
       // them — showing a row here that `resume <id>` would immediately refuse below is the
       // shown-but-broken shape this slice keeps closing. See session-mode.ts's file doc.
@@ -2132,11 +2132,11 @@ if (import.meta.main) {
     break;
   }
   case "provider-smoke": {
-    const { loadSettings, resolveNormaHome, createProvider, KeychainSecretStore } = await import("@norma/core");
-    const s = loadSettings(join(resolveNormaHome(), "settings.json"));
+    const { loadSettings, resolveWinterHome, createProvider, KeychainSecretStore } = await import("@yanlinglabs/winter-core");
+    const s = loadSettings(join(resolveWinterHome(), "settings.json"));
     const active = await createProvider(s, new KeychainSecretStore());
     const promptIdx = process.argv.indexOf("--prompt");
-    const prompt = promptIdx > 0 ? process.argv[promptIdx + 1]! : "Reply with exactly: norma provider smoke OK";
+    const prompt = promptIdx > 0 ? process.argv[promptIdx + 1]! : "Reply with exactly: winter provider smoke OK";
     console.log(`${DIM}provider=${active.provider.id} model=${active.model}${RESET}`);
     let text = "";
     for await (const e of active.provider.streamTurn({
@@ -2150,7 +2150,7 @@ if (import.meta.main) {
     process.exit(text.length > 0 ? 0 : 1);
   }
   default:
-    console.log(`norma ${CORE_VERSION} — commands:
+    console.log(`winter ${CORE_VERSION} — commands:
   daemon run | daemon install | daemon uninstall | daemon status
   ping | sessions | status | quota | send <sessionId|new> <text> | watch <sessionId> | add-dir <sessionId> <path> [--persist] | cd <sessionId> <path>
   steer <sessionId> <text> | interrupt <sessionId> | compact <sessionId>
@@ -2166,7 +2166,7 @@ if (import.meta.main) {
     | routines delete <id> | routines enable <id> | routines disable <id>       manage scheduled routines
   memory [list] [--project] | show <name> [--project] | rm <name> [--project]  manage saved memory facts
   login [--api-key] [--anthropic-key] [--web-search-key] [--exa-key] | logout [--anthropic] | provider | provider-smoke [--prompt <text>]
-  init                                            generate/update NORMA.md by surveying the project
+  init                                            generate/update WINTER.md by surveying the project
   -p "<prompt>" [--auto|--plan] [--trust|--no-trust]   headless agent turn (asks for tool approval unless --auto/--plan)`);
   }
 }

@@ -1,4 +1,4 @@
-import { OFFICE_COMMAND_ACTIONS, PANEL_COMMAND_ARGS_MAX_JSON_BYTES } from "@norma/protocol";
+import { OFFICE_COMMAND_ACTIONS, PANEL_COMMAND_ARGS_MAX_JSON_BYTES } from "@yanlinglabs/winter-protocol";
 
 // ================================================================================================
 // office-agent-tools T1 (task-1-brief.md; design
@@ -73,7 +73,7 @@ export const OFFICE_WRITE_ACTIONS = OFFICE_COMMAND_ACTIONS.filter(
  * ## §A — what H + nR actually counts, every constant named and cited
  *
  *  1. **The helper spawn/handshake, WITH its retry loop** — not one attempt.
- *     `OfficeHelperSupervisor.Configuration` (`apple/Norma/Sources/AppShell/OfficeHelperSupervisor.swift:399-401`):
+ *     `OfficeHelperSupervisor.Configuration` (`apple/Winter/Sources/AppShell/OfficeHelperSupervisor.swift:399-401`):
  *     `handshakeTimeout: TimeInterval = 30.0` (the bound on ONE attempt — spawn, poll for the socket
  *     file, connect, `hello`/`helloOk`; `attemptOnce`, same file, lines 549-663, and its own
  *     comment at lines 613-620 records the fix that makes the whole attempt — not just the connect —
@@ -90,7 +90,7 @@ export const OFFICE_WRITE_ACTIONS = OFFICE_COMMAND_ACTIONS.filter(
  *     **R = 30 000 ms**.
  *  3. **How many requests a verb actually makes, cold.** Spec §3 step 2's open-or-adopt applies to
  *     EVERY verb, not only `info` — every verb pays for at least one `open`
- *     (`OfficeRuntime.Driver.open`, `apple/Norma/Sources/AppShell/OfficeRuntime.swift:1415`, a real
+ *     (`OfficeRuntime.Driver.open`, `apple/Winter/Sources/AppShell/OfficeRuntime.swift:1415`, a real
  *     `async throws` request/reply call, hence R-bounded). A read/info verb then issues its own
  *     query (this file's Task 1 ships no such Driver method yet — task 2+ will add one — but it will
  *     be a second request/reply call riding the SAME `OfficeHelperClient`, hence the SAME R): **2

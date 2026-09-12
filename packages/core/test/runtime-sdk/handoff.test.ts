@@ -15,12 +15,12 @@ import { join } from "node:path";
 import type { HandoffBarrier, HandoffOutcome, HandoffPlan, HandoffResumeTarget, RuntimeKind, RuntimeSelection, SelectionInput } from "@yanlinglabs/winter-runtime-sdk";
 import { planAndApplySwitch, registerHandoffParticipants, type HandoffDeps } from "../../src/runtime-sdk/handoff";
 import { openRuntimeStateDb, RuntimeSessionRecords } from "../../src/runtime-state";
-import type { NormaRuntimeSdk } from "../../src/runtime-sdk/create";
+import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import type { LegSession, WinterSessionDrivers } from "../../src/runtime-sdk/session-driver";
 import type { Settings } from "../../src/settings";
 
 async function withRs<T>(fn: (rs: ReturnType<typeof openRuntimeStateDb>, records: RuntimeSessionRecords) => Promise<T> | T): Promise<T> {
-  const home = mkdtempSync(join(tmpdir(), "norma-handoff-"));
+  const home = mkdtempSync(join(tmpdir(), "winter-handoff-"));
   const rs = openRuntimeStateDb(home);
   try {
     return await fn(rs, new RuntimeSessionRecords(rs));
@@ -48,12 +48,12 @@ function seedRecord(records: RuntimeSessionRecords, sessionId: string): void {
 }
 
 function fakeRuntime(opts: {
-  selectRuntimeFor: NormaRuntimeSdk["selectRuntimeFor"];
-  buildSelectionInput?: NormaRuntimeSdk["buildSelectionInput"];
-}): NormaRuntimeSdk {
+  selectRuntimeFor: WinterRuntimeSdk["selectRuntimeFor"];
+  buildSelectionInput?: WinterRuntimeSdk["buildSelectionInput"];
+}): WinterRuntimeSdk {
   const never = (): never => { throw new Error("not reached by this test"); };
   return {
-    sdk: {} as NormaRuntimeSdk["sdk"], // never touched: the barrier is injected directly (HandoffDeps.barrier)
+    sdk: {} as WinterRuntimeSdk["sdk"], // never touched: the barrier is injected directly (HandoffDeps.barrier)
     spawnHookFor: never, officialPeer: never, officialPeerSync: never, claudeExecutableFor: never,
     selectRuntimeFor: opts.selectRuntimeFor,
     buildSelectionInput: opts.buildSelectionInput,
@@ -71,7 +71,7 @@ function fakeRuntime(opts: {
  * `persisted` field on this call always echoed the current leg back, and the barrier was never
  * reached). Throws if `input.persisted` is set — a call shaped that way must never reach this fake.
  */
-function freshOnlySelector(forModel: (model: string | undefined) => RuntimeSelection | { refused: true; reason: "runtime-unavailable"; detail: string }): NormaRuntimeSdk["selectRuntimeFor"] {
+function freshOnlySelector(forModel: (model: string | undefined) => RuntimeSelection | { refused: true; reason: "runtime-unavailable"; detail: string }): WinterRuntimeSdk["selectRuntimeFor"] {
   return async (input) => {
     if (input.persisted !== undefined) throw new Error("planAndApplySwitch must decide the destination FRESH — it must never pass `persisted` to selectRuntimeFor");
     return forModel(input.model);
@@ -419,7 +419,7 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
 });
 
 describe("registerHandoffParticipants: selectionInputFor wiring", () => {
-  test("selectionInputFor delegates to NormaRuntimeSdk.buildSelectionInput, with mode from the record's session and persisted from the barrier's own args", async () => {
+  test("selectionInputFor delegates to WinterRuntimeSdk.buildSelectionInput, with mode from the record's session and persisted from the barrier's own args", async () => {
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1");
       const fakeSelectionInput: SelectionInput = {
@@ -450,7 +450,7 @@ describe("registerHandoffParticipants: selectionInputFor wiring", () => {
     });
   });
 
-  test("omits selectionInputFor when the runtime has no buildSelectionInput (a hand-built NormaRuntimeSdk test double)", () => {
+  test("omits selectionInputFor when the runtime has no buildSelectionInput (a hand-built WinterRuntimeSdk test double)", () => {
     const runtime = fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")) });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let registered: any;

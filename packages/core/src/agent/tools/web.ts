@@ -11,7 +11,7 @@ const DEFAULT_SEARCH_RESULTS = 5;
 const MAX_SEARCH_RESULTS = 10;
 
 /** Keychain secret name for the Brave Search API key (4g Task 6) — shared between the daemon's
- *  `registerWebTools` wiring (packages/core/src/daemon.ts) and the CLI's `norma login
+ *  `registerWebTools` wiring (packages/core/src/daemon.ts) and the CLI's `winter login
  *  --web-search-key` (packages/cli/src/main.ts), same precedent as providers/manager.ts's
  *  OPENAI_API_KEY_SECRET: ONE exported const so the two call sites can never drift apart on the
  *  literal string. */
@@ -323,7 +323,7 @@ function rawAuthorityHost(raw: string): string | null {
   return host.normalize("NFKC").replace(/\u3002/g, ".").toLowerCase();
 }
 
-/** Norma's ONLY sanctioned network egress (spec 4g §4.3) — bash stays sandboxed (network denied).
+/** Winter's ONLY sanctioned network egress (spec 4g §4.3) — bash stays sandboxed (network denied).
  *  v1 SSRF posture: literal private/loopback/link-local hosts rejected; DNS-rebinding is out of
  *  scope (documented). Response bytes are DATA, never instructions.
  *
@@ -348,7 +348,7 @@ function rawAuthorityHost(raw: string): string | null {
  *     than a latent one.
  *  2. `rawAuthorityHost(raw)` — the host AS WRITTEN, under BOTH radix readings (see
  *     `ipv4Interpretations`). This is the leg that closes the class above, and it is what keeps the
- *     daemon's verdict identical to the phone's (`apple/NormaChatKit/.../SSRFGuard.swift`, whose
+ *     daemon's verdict identical to the phone's (`apple/WinterChatKit/.../SSRFGuard.swift`, whose
  *     `Foundation.URL` canonicalizes nothing and so has always had to parse).
  *
  *  This only ever TIGHTENS: every host the old string checks refused is still refused, with the same
@@ -751,7 +751,7 @@ function indexOfAsciiCI(haystack: string, needleLower: string, from: number, unt
  *      20,000     180 KB   1457 ms      0.5 ms
  *      40,000     360 KB   6011 ms      0.9 ms
  *
- *  Ported back from the phone's `apple/NormaChatKit/Sources/NormaChatKit/HtmlToText.swift`
+ *  Ported back from the phone's `apple/WinterChatKit/Sources/WinterChatKit/HtmlToText.swift`
  *  (`stripTags`), where the same shape cost 36 s under ICU. Output is byte-identical — the 10,000-doc
  *  ×2 adversarial differential in `html-to-text-differential.test.ts` runs against a frozen oracle
  *  whose final step is literally this regex, and `cleaner-vectors.json` regenerates unchanged.
@@ -883,7 +883,7 @@ export function extractTitle(html: string): string {
 /** Reads a Response body up to `capBytes`, cancelling the underlying stream once the cap is hit —
  *  truncation happens DURING collection (never read-then-slice), so a multi-GB response can't OOM
  *  the daemon before the cap applies. Mirrors bash.ts's MAX_CAPTURE streaming-truncation pattern —
- *  Norma's only network egress gets the same discipline bash's output capture already has. */
+ *  Winter's only network egress gets the same discipline bash's output capture already has. */
 async function readCapped(res: Response, capBytes: number): Promise<{ text: string; bytesRead: number }> {
   if (!res.body) {
     const text = await res.text();
@@ -1000,13 +1000,13 @@ export function registerWebTools(r: ToolRegistry, deps: WebToolDeps = {}): void 
  *  `ToolDefinition` objects rather than two copies. Nothing about either registration changed.
  *
  *  WHY `web` IS A CAPABILITY SERVER AT ALL: every mode disallows the SDK's built-in
- *  `WebSearch`/`WebFetch` in 8b — they carry neither Norma's Brave/Exa keys nor its dangerous-domain
+ *  `WebSearch`/`WebFetch` in 8b — they carry neither Winter's Brave/Exa keys nor its dangerous-domain
  *  floor — so code keeps these two, daemon-owned, over MCP. */
 export function webToolDefs(deps: WebToolDeps = {}): ToolDefinition[] {
   return [{
     name: "web_fetch",
     description:
-      "Fetch a URL (http/https) and return a preview of its readable text content. Norma's only network-capable tool — bash has no network. The full converted page is saved to a file (its path is in the result) — use read/grep/spawn_agent on that file for anything beyond the preview. Fetch is read-only GET.",
+      "Fetch a URL (http/https) and return a preview of its readable text content. Winter's only network-capable tool — bash has no network. The full converted page is saved to a file (its path is in the result) — use read/grep/spawn_agent on that file for anything beyond the preview. Fetch is read-only GET.",
     // url only — no `prompt` (CC's web_fetch takes an optional page-digest prompt). Deliberate spec
     // deviation: the save-to-tmp result shape below already gives the model read/grep/spawn_agent
     // access to the FULL saved page, so a fetch-time digest prompt is redundant. Also no `max_bytes`:
@@ -1089,7 +1089,7 @@ export function webToolDefs(deps: WebToolDeps = {}): ToolDefinition[] {
   }, {
     name: "web_search",
     description:
-      "Search the web (Brave Search) and return a numbered list of results (title, url, description). Norma's only search tool — pair with web_fetch to read a result's full page. Requires a stored Brave Search API key (norma login --web-search-key).",
+      "Search the web (Brave Search) and return a numbered list of results (title, url, description). Winter's only search tool — pair with web_fetch to read a result's full page. Requires a stored Brave Search API key (winter login --web-search-key).",
     args: z.object({
       query: z.string().min(1),
       // Default 5, hard-clamped to 10 below — caller-tunable but never unbounded (same DoS
@@ -1107,7 +1107,7 @@ export function webToolDefs(deps: WebToolDeps = {}): ToolDefinition[] {
           // No `<key>` placeholder (branch review FIX 6): the CLI's --web-search-key branch
           // ignores a positional argv value and always PROMPTS via readSecret.
           throw new Error(
-            "web_search needs an API key — store one with: norma login --web-search-key (Brave Search API)",
+            "web_search needs an API key — store one with: winter login --web-search-key (Brave Search API)",
           );
         }
 
@@ -1135,7 +1135,7 @@ export function webToolDefs(deps: WebToolDeps = {}): ToolDefinition[] {
           //
           // Whole-branch re-review FIX (search.ts's identical twin — see its comment for the full
           // reasoning): stderr is NOT operator-only — launchd.ts redirects it to
-          // ~/.norma/logs/core.err.log, which the daemon's own read/grep tools can open (only
+          // ~/.winter/logs/core.err.log, which the daemon's own read/grep tools can open (only
           // dirs.runDir is denied). Redact the literal key substring before logging; `replaceAll`
           // is sufficient — verified live that Bun embeds the rejected header value byte-for-byte,
           // with no escaping, across every char class that reaches this catch.

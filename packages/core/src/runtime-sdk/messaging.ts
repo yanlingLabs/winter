@@ -21,7 +21,7 @@
 //  * `push` only. Session delivery lands in the host queue (right), but `handle.messaging` is then
 //    undefined, and the adapter's `childDelivery` answers a typed `unavailable` for every child
 //    ("a child is only addressable through its owner"), while `canSubscribeIdle` answers `false`,
-//    so `notify_when_idle` against a Norma session is refused. Two live surfaces lost.
+//    so `notify_when_idle` against a Winter session is refused. Two live surfaces lost.
 //  * `query.messaging` raw. Children and idle work, but a delivered message goes over the control
 //    pipe into the spawned child's own messaging runtime — which surface map §2.5 records as
 //    answering `messaging_unavailable` ("no messaging runtime is registered in that process, which
@@ -61,8 +61,8 @@ import type {
   RuntimeSdk,
   SerializedRuntimeAddress,
 } from "@yanlinglabs/winter-runtime-sdk";
-import type { NormaRuntimeSdk } from "./create";
-import { NORMA_PEER_VERSIONS } from "./versions";
+import type { WinterRuntimeSdk } from "./create";
+import { WINTER_PEER_VERSIONS } from "./versions";
 
 /** The router's own `LiveSessionStatus`, which its barrel does not re-export (`messaging/sessions.d.ts`
  *  declares it, `index.d.ts` omits it). Same declaration, not a widening. */
@@ -78,7 +78,7 @@ const UNSTATED_SELECTION = {
   modelRef: "unstated/unstated",
   family: "unstated",
   authFamily: "custom",
-  sdkVersion: NORMA_PEER_VERSIONS.winterAgentSdk,
+  sdkVersion: WINTER_PEER_VERSIONS.winterAgentSdk,
   reason: "attached without a persisted runtime selection; the session's own record is authoritative",
 } as const;
 
@@ -91,8 +91,8 @@ const LIVE_CAPABILITIES = { message: true, resume: true, notifyWhenIdle: true, r
 /** The session facts a caller may state at attach. Everything here has a correct answer when it is
  *  absent — an attach that states only the four pinned members is legal and is what a test uses. */
 export interface WinterSessionAttachment {
-  /** Norma's OWN session id (the product id the phone and the Mac app address). Never the address:
-   *  it is carried so a host-side map can go from a Norma session to its live `Query` — which is
+  /** Winter's OWN session id (the product id the phone and the Mac app address). Never the address:
+   *  it is carried so a host-side map can go from a Winter session to its live `Query` — which is
    *  what Task 13's `TaskStop` walks to reach a child through its owner's facet. */
   sessionId: string;
   /** The BACKEND (Winter) session id — `Options.sessionId`, the id the runtime reports at
@@ -251,7 +251,7 @@ function bridgedFacet(
  * then the durable directory row. The reverse would advertise a receiver in the directory that this
  * process cannot yet deliver to.
  */
-export function attachWinterSession(runtime: NormaRuntimeSdk, session: WinterSessionAttachment): WinterSessionAttachHandle {
+export function attachWinterSession(runtime: WinterRuntimeSdk, session: WinterSessionAttachment): WinterSessionAttachHandle {
   const parsed: RuntimeAddress = buildSessionAddress(session.backendSessionId);
   const address = serializeRuntimeAddress(parsed) as SerializedRuntimeAddress;
   const generation = session.generation ?? 1;
@@ -282,7 +282,7 @@ export function attachWinterSession(runtime: NormaRuntimeSdk, session: WinterSes
     parsed,
     runtimeKind: "winter-agent",
     objectKind: "session",
-    // P8b-1: every mode is a spawned `winter` child in 8b, so every Norma session is a
+    // P8b-1: every mode is a spawned `winter` child in 8b, so every Winter session is a
     // `winter-session`. `winter-thread` becomes reachable only if path (b) ever lands.
     transport: "winter-session",
     ...(session.displayName === undefined ? {} : { displayName: session.displayName }),
@@ -299,7 +299,7 @@ export function attachWinterSession(runtime: NormaRuntimeSdk, session: WinterSes
     // `backendSessionId` is the router's COLD-RESUME source: with a handle gone and an id present,
     // its Winter adapter opens `peers.winter.query({ prompt, options: { resume: <id> } })` — a whole
     // second `winter` process, spawned from inside a delivery, that the daemon never tracked, never
-    // budgeted in `dispose()`'s shutdown grace and never gave a projector to. Norma's session
+    // budgeted in `dispose()`'s shutdown grace and never gave a projector to. Winter's session
     // lifecycle is the DAEMON's (P8b-24: the next `send`/`steer` resumes, host-driven), so a parked
     // row answers the honest non-retryable `unavailable` — "no transcript to resume" — instead. The
     // id itself is not lost: 8a's `runtime_sessions` record is where it lives for the product.
@@ -364,7 +364,7 @@ const UNSTATED_OFFICIAL_SELECTION = {
   modelRef: "unstated/unstated",
   family: "unstated",
   authFamily: "custom",
-  sdkVersion: NORMA_PEER_VERSIONS.claudeAgentSdk ?? "unstated",
+  sdkVersion: WINTER_PEER_VERSIONS.claudeAgentSdk ?? "unstated",
   reason: "attached without a persisted runtime selection; the session's own record is authoritative",
 } as const;
 
@@ -377,7 +377,7 @@ const LIVE_OFFICIAL_CAPABILITIES = { message: true, resume: false, notifyWhenIdl
 /** The session facts M6b's attach may state. Mirrors `WinterSessionAttachment`'s own shape, minus
  *  everything that assumes a `Query.messaging` facet — this leg has none. */
 export interface OfficialSessionAttachment {
-  /** Norma's own session id. */
+  /** Winter's own session id. */
   sessionId: string;
   /** The BACKEND (official runtime) session id — the facet target and the directory address. */
   backendSessionId: string;
@@ -416,7 +416,7 @@ export interface OfficialSessionAttachHandle {
  * Structurally simpler than the Winter door because `AttachedOfficialSession` is `push` and nothing
  * else — there is no `Query.messaging` facet on this leg to wrap (this function's own header note).
  */
-export function attachOfficialSession(runtime: NormaRuntimeSdk, session: OfficialSessionAttachment): OfficialSessionAttachHandle {
+export function attachOfficialSession(runtime: WinterRuntimeSdk, session: OfficialSessionAttachment): OfficialSessionAttachHandle {
   const parsed: RuntimeAddress = buildSessionAddress(session.backendSessionId);
   const address = serializeRuntimeAddress(parsed) as SerializedRuntimeAddress;
   const generation = session.generation ?? 1;
@@ -531,12 +531,12 @@ export async function releaseAllHeld(
  * Task 13's `task_stop` reaches a child through its OWNING session's facet — "a child engine has no
  * facet surface of its own" (surface map §9.2) — and the only registry of live facets is the one
  * `attachWinterSession` writes into. The address construction lives here so no other module has to
- * know that a Norma session is addressed by its backend id.
+ * know that a Winter session is addressed by its backend id.
  *
  * The facet that comes back is the WRAPPER from `attachWinterSession`: `steerChild`/`resumeChild`
  * reach the real `Query.messaging` untouched, and only `deliver` is re-pointed at the host queue.
  */
-export function attachedFacetFor(runtime: Pick<NormaRuntimeSdk, "sdk">, backendSessionId: string): SessionMessagingFacet | undefined {
+export function attachedFacetFor(runtime: Pick<WinterRuntimeSdk, "sdk">, backendSessionId: string): SessionMessagingFacet | undefined {
   const address = serializeRuntimeAddress(buildSessionAddress(backendSessionId)) as SerializedRuntimeAddress;
   return runtime.sdk.messaging.winterAdapter.sessions.get(address)?.messaging;
 }
@@ -547,12 +547,12 @@ export function attachedFacetFor(runtime: Pick<NormaRuntimeSdk, "sdk">, backendS
  * ⚠️ WHY `directory.recover()` IS NOT ENOUGH ON ITS OWN. The router's recovery marks a previously
  * live row `status: "unavailable"` and KEEPS its `backendSessionId`, and `deliverIntoSession`
  * refuses only `"archived"` — so every session row from the last boot stays cold-resumable from
- * inside a delivery. Today nothing actually spawns, because Norma supplies no `resumeOptions` and
+ * inside a delivery. Today nothing actually spawns, because Winter supplies no `resumeOptions` and
  * the SDK cannot resolve a `winter` executable without being handed one. That is safety by accident
  * of an unresolvable binary, which is the same shape CLAUDE.md calls out for `reasoning_item` ("an
  * accident of a missing protocol variant, not policy"). This makes it policy.
  *
- * A Norma session is resumed by its DRIVER, from the 8a `runtime_sessions` record — which keeps its
+ * A Winter session is resumed by its DRIVER, from the 8a `runtime_sessions` record — which keeps its
  * own `backendSessionId` and is untouched here — on the next `send`/`steer` (P8b-24). The directory
  * row's copy exists only to let the router resume behind the daemon's back, so a row this process
  * has not attached does not get one.
@@ -560,7 +560,7 @@ export function attachedFacetFor(runtime: Pick<NormaRuntimeSdk, "sdk">, backendS
  * Never throws: a directory that will not answer costs the sweep, never the boot.
  */
 export async function parkRecoveredSessions(
-  runtime: Pick<NormaRuntimeSdk, "sdk">,
+  runtime: Pick<WinterRuntimeSdk, "sdk">,
   log?: (line: string) => void,
 ): Promise<number> {
   let parked = 0;

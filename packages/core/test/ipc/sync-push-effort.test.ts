@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { validateSyncMeta, effortsForModel } from "../../src/ipc/sync";
 import { CLIENT_EFFORTS, REASONING_EFFORTS } from "../../src/settings";
@@ -26,7 +26,7 @@ import type { ModelInfo } from "../../src/providers/types";
 //     `sync.config` advertises, so the daemon never accepts here what it refuses there;
 //   * DROP-AND-LOG on refusal, never a failed push — verbatim the `model` half's precedent
 //     (ipc/sync.ts): the events are the irreplaceable part, an override is a hint the user re-sets;
-//   * a Norma-level TIER is ALWAYS dropped here. `sync.push` is chat-only fail-closed
+//   * a Winter-level TIER is ALWAYS dropped here. `sync.push` is chat-only fail-closed
 //     (ipc/sync.ts:19-20 — every verb resolves the target's mode and refuses anything that isn't
 //     exactly "chat", absent included), and a tier is code-sessions-only (`clientEffortEligible`),
 //     so NO session reachable through this surface may ever hold one. This is the one rule that is
@@ -112,7 +112,7 @@ describe("sync.push meta.effort — the second ingress (provider-correctness T6)
   async function boot(over: { models?: ModelInfo[]; liveModel?: () => string } = {}): Promise<{
     store: SessionStore; socketPath: string; harnessToken: string;
   }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-sync-effort-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-sync-effort-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));

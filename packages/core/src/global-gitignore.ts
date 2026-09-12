@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
 /** The user's GLOBAL git excludes. git honors `core.excludesfile`, else `$XDG_CONFIG_HOME/git/ignore`
- *  (default `~/.config/git/ignore`). We target the XDG default — Norma manages only its OWN personal
+ *  (default `~/.config/git/ignore`). We target the XDG default — Winter manages only its OWN personal
  *  patterns there, never a repo's `.gitignore`. */
 function defaultGlobalGitignorePath(): string {
   const xdg = process.env.XDG_CONFIG_HOME;
@@ -32,9 +32,9 @@ export function ensureGlobalGitignore(patterns: string[], opts: { path?: string 
   }
 }
 
-/** The personal `.norma/` patterns Norma manages in the global excludes (shared config stays committable). */
-export const NORMA_PERSONAL_IGNORES = [
-  "**/.norma/settings.local.json",
-  "**/.norma/permissions.local.json",
-  "**/.norma/worktrees/",
+/** The personal `.winter/` patterns Winter manages in the global excludes (shared config stays committable). */
+export const WINTER_PERSONAL_IGNORES = [
+  "**/.winter/settings.local.json",
+  "**/.winter/permissions.local.json",
+  "**/.winter/worktrees/",
 ];

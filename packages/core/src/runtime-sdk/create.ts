@@ -15,8 +15,8 @@
 //  2. `trackQuery`/`untrack`/`dispose` — G-14's ordering. Every live `Query` ends BEFORE the router
 //     disposes and, in `daemon.ts`, before the 8a spine closes: a draining child's last frames
 //     write delivery receipts into `runtime-state.db`, and a closed store loses them.
-//  3. The settings-derived options. Norma's hard rule is that no setting may require a restart, but
-//     `createRuntimeSdk` takes PLAIN VALUES for retention and the advisor (Norma map §8.3). The two
+//  3. The settings-derived options. Winter's hard rule is that no setting may require a restart, but
+//     `createRuntimeSdk` takes PLAIN VALUES for retention and the advisor (Winter map §8.3). The two
 //     doors this file uses to keep them live are a getter-backed retention object (the router reads
 //     the property at recovery time, not at construction) and a resolver closure for the advisor
 //     model (re-read on every call). Both are noted at their definitions.
@@ -30,14 +30,14 @@ import type { PermissionClassLabel } from "@yanlinglabs/winter-agent-sdk/messagi
 import type { SecretStore } from "../auth/secret-store";
 import { retentionFromSettings } from "../runtime-state/retention";
 import { winterOptionsFromSettings, type Settings } from "../settings";
-import { NORMA_BRAND } from "./brand";
+import { CORE_BRAND } from "./brand";
 import { resolveWinterExecutable, type WinterExecutableUnavailable } from "./executable";
 import { resolveClaudeExecutable, ClaudeExecutableUnavailable } from "./official-executable";
 import { credentialPresenceFrom, keychainSeamFromSecretStore } from "./keychain";
 import { routerInputShape } from "./official-capabilities";
 import { familyListingFromCatalog } from "./provider-selection";
 import { releaseAllHeld } from "./messaging";
-import { NORMA_PEER_VERSIONS, REQUIRED_CLAUDE_AGENT_SDK } from "./versions";
+import { WINTER_PEER_VERSIONS, REQUIRED_CLAUDE_AGENT_SDK } from "./versions";
 
 /**
  * P8c-1's own alias for the peer this daemon injects at `RuntimeSdkPeers.claude` — the router's own
@@ -75,7 +75,7 @@ export type SessionMode = "code" | "dispatch" | "chat";
  * How long `dispose()` waits for ONE live session to end before it aborts that one.
  *
  * 300 ms, AND THE NUMBER IS ARITHMETIC, not taste (P8b-32). The whole of teardown has to fit inside
- * `DaemonSupervisor.gracefulExitTimeout` — 5.0 s as of P8d-6, `apple/Norma/Sources/App/DaemonSupervisor.swift`
+ * `DaemonSupervisor.gracefulExitTimeout` — 5.0 s as of P8d-6, `apple/Winter/Sources/App/DaemonSupervisor.swift`
  * — after which the app SIGKILLs the daemon; a teardown that overruns is killed mid-drain, so
  * `lock.release()` never runs, the socket file is left on disk, and the supervisor drops to
  * `.connectOnly` on the next launch. That 5.0 s only reaches this budget because P8d-6 PAIRED the
@@ -102,8 +102,8 @@ export interface WinterSpawnHook {
   spawnClaudeCodeProcess?: SpawnClaudeCodeProcess;
 }
 
-export interface NormaRuntimeSdkDeps {
-  /** The daemon's `NORMA_HOME`. Winter's home is the SAME directory under `NORMA_BRAND`. */
+export interface WinterRuntimeSdkDeps {
+  /** The daemon's `WINTER_HOME`. Winter's home is the SAME directory under `CORE_BRAND`. */
   home: string;
   /** THE LIVE settings holder — never a boot snapshot. `null` on a daemon whose settings.json
    *  would not parse (the daemon runs with the agent disabled rather than refusing to start). */
@@ -121,7 +121,7 @@ export interface NormaRuntimeSdkDeps {
    * `settings.runtimes.advisorModel` LIVE and applies the D30 per-family defaults internally, so
    * nothing here re-derives that precedence. `advisorFrom` (below) ALWAYS wires this into
    * `RuntimeSdkOptions.advisor` — never conditional on whether a reviewer is configured, per the
-   * no-restart rule (Norma map §8.3) — so a settings edit that later configures a reviewer takes
+   * no-restart rule (Winter map §8.3) — so a settings edit that later configures a reviewer takes
    * effect on this daemon's very next official-leg advisor call, no restart. `undefined` only in a
    * test/harness that does not care about the advisor at all; with no reviewer wired the resolver
    * answers `undefined`, WS-06 §4's ordinary "no reviewer resolvable" tool error, never a throw.
@@ -138,7 +138,7 @@ export interface NormaRuntimeSdkDeps {
    * asks the attached handle's facet first; with no handle and no declaration it answers `unknown`,
    * and since the router's D2 an unknown class FAILS CLOSED — the message is held rather than
    * delivered under a guessed class. That is correct for a live session whose class this process
-   * genuinely cannot read, and wrong for a session Norma itself launched and then parked: its
+   * genuinely cannot read, and wrong for a session Winter itself launched and then parked: its
    * approval policy is a fact the daemon has.
    *
    * UNWIRED IN TASK 12 ON PURPOSE: the per-session policy lives with the session driver, which is
@@ -151,7 +151,7 @@ export interface NormaRuntimeSdkDeps {
   log?: (line: string) => void;
 }
 
-export interface NormaRuntimeSdkOverrides {
+export interface WinterRuntimeSdkOverrides {
   /** Test seam for `SHUTDOWN_QUERY_GRACE_MS`. */
   grace?: number;
   /** Test seam for the router factory — a spy wraps it to capture the `RuntimeSdkOptions` this
@@ -164,7 +164,7 @@ export interface NormaRuntimeSdkOverrides {
   officialPeer?: () => Promise<OfficialPeer | undefined>;
   /** Test seam for M4's version guard — a fake "installed version" so a unit test can drive a
    *  mismatch without an actual mismatched `node_modules` tree. Defaults to
-   *  `NORMA_PEER_VERSIONS.claudeAgentSdk` (the real installed manifest's own version, or absent). */
+   *  `WINTER_PEER_VERSIONS.claudeAgentSdk` (the real installed manifest's own version, or absent). */
   installedClaudeAgentSdkVersion?: () => string | undefined;
 }
 
@@ -174,7 +174,7 @@ export interface NormaRuntimeSdkOverrides {
  * RESOLVED ONCE, BEFORE `createRuntimeSdk` — the router needs `peers.claude` AT CONSTRUCTION (its
  * own `hasClaudePeer`/version-matrix checks read it there), so "lazy" here means "resolved on the
  * daemon's own boot path rather than baked into a compiled artifact's import graph", not "deferred
- * past this function's own async body" (`createNormaRuntimeSdk` is already async — Task 1.1's own
+ * past this function's own async body" (`createWinterRuntimeSdk` is already async — Task 1.1's own
  * note). A FAILED import (the optional platform package genuinely absent, or `@anthropic-ai/sdk` /
  * `@modelcontextprotocol/sdk` / `zod` peer mismatch) is logged ONCE, here, and answered as
  * `undefined` — a Winter-only daemon process is a normal outcome, never a crash.
@@ -188,7 +188,7 @@ async function resolveOfficialPeer(load: () => Promise<unknown>, log?: (line: st
   }
 }
 
-export interface NormaRuntimeSdk {
+export interface WinterRuntimeSdk {
   /** The router handle itself. Every later lane reaches `query`/`messaging`/`directory` here. */
   readonly sdk: RuntimeSdk;
   /**
@@ -305,7 +305,7 @@ function retentionFrom(settings: () => Settings | null | undefined): RuntimeDire
 
 /**
  * P8d-8: ALWAYS an `advisor` key — never conditional on `settings.runtimes.advisorModel` (the
- * no-restart rule, Norma map §8.3: whether the router's `advisor` OPTION KEY exists is fixed at
+ * no-restart rule, Winter map §8.3: whether the router's `advisor` OPTION KEY exists is fixed at
  * construction, so a resolver must always be passed and read settings live, rather than the key
  * itself growing/shrinking as a setting changes on a running daemon). `deps.advisorReviewer` is
  * `daemon.ts`'s already-built `advisorReviewerFor(...)` resolver, which does its own live settings
@@ -313,7 +313,7 @@ function retentionFrom(settings: () => Settings | null | undefined): RuntimeDire
  * wired (a harness that does not care) the resolver answers `undefined` on every call, WS-06 §4's
  * ordinary "no reviewer resolvable" case.
  */
-function advisorFrom(deps: NormaRuntimeSdkDeps): { advisor: NonNullable<RuntimeSdkOptions["advisor"]> } {
+function advisorFrom(deps: WinterRuntimeSdkDeps): { advisor: NonNullable<RuntimeSdkOptions["advisor"]> } {
   const resolveReviewer: ReviewerResolver = () => deps.advisorReviewer?.();
   return { advisor: { resolveReviewer } };
 }
@@ -344,18 +344,18 @@ function endWithin(sessionId: string, abort: AbortController, end: () => Promise
   });
 }
 
-export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides: NormaRuntimeSdkOverrides = {}): Promise<NormaRuntimeSdk> {
+export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrides: WinterRuntimeSdkOverrides = {}): Promise<WinterRuntimeSdk> {
   const factory = overrides.createRuntimeSdk ?? createRouterSdk;
   // P8c-1: resolved BEFORE the factory call — the router reads `peers.claude`/`hasClaudePeer` at
   // construction, so the import has to have already settled by the time `factory(...)` runs. This
   // function is already async (the note every 8b doc comment above makes), so nothing here changes
   // the daemon's own boot shape.
   const officialModuleRaw = await resolveOfficialPeer(overrides.officialPeer ?? (() => import("@anthropic-ai/claude-agent-sdk")), deps.log);
-  // Fix round 1 (M4): a Norma-side version guard beside the router's own `assertVersionMatrix` —
+  // Fix round 1 (M4): a Winter-side version guard beside the router's own `assertVersionMatrix` —
   // this one fires BEFORE `peers.claude`/`peerVersions.claudeAgentSdk` ever reach the router, so a
   // mismatched install degrades to "the official leg is unavailable" (Winter entirely unaffected)
   // rather than whatever the router's own matrix check does with a peer it was never declared for.
-  const installedClaudeAgentSdkVersion = (overrides.installedClaudeAgentSdkVersion ?? (() => NORMA_PEER_VERSIONS.claudeAgentSdk))();
+  const installedClaudeAgentSdkVersion = (overrides.installedClaudeAgentSdkVersion ?? (() => WINTER_PEER_VERSIONS.claudeAgentSdk))();
   const claudeAgentSdkVersionMismatch = officialModuleRaw !== undefined && installedClaudeAgentSdkVersion !== undefined && installedClaudeAgentSdkVersion !== REQUIRED_CLAUDE_AGENT_SDK;
   if (claudeAgentSdkVersionMismatch) {
     deps.log?.(`the installed @anthropic-ai/claude-agent-sdk is ${installedClaudeAgentSdkVersion}, but this daemon pins ${REQUIRED_CLAUDE_AGENT_SDK} — the official leg is unavailable until they match (Winter unaffected)`);
@@ -380,14 +380,14 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
     // `claudeAgentSdk` is present only when `officialModule` itself resolved — never a stray key
     // for a peer this handle just declared unavailable (import failure OR M4's version mismatch).
     peerVersions: {
-      winterAgentSdk: NORMA_PEER_VERSIONS.winterAgentSdk,
+      winterAgentSdk: WINTER_PEER_VERSIONS.winterAgentSdk,
       ...(officialModule === undefined ? {} : { claudeAgentSdk: installedClaudeAgentSdkVersion }),
     },
     // Required even though the Winter leg resolves its own credentials runtime-side (surface map
     // §1.3): the field has no `?`, and the official leg is the only caller.
     keychain: keychainSeamFromSecretStore(deps.secrets),
     // R-1. Resolved once here, through the injected peer's own `resolveBrand`.
-    brand: NORMA_BRAND,
+    brand: CORE_BRAND,
     // P8c-3: the ladder's answer AT CONSTRUCTION TIME. Omitted (never a bare "claude") when it does
     // not resolve — the door then refuses ONLY a session that selects the official leg
     // (`claude_executable_unavailable`), and every Winter session proceeds unaffected. A later
@@ -399,7 +399,7 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
     capabilities: deps.capabilities,
     // Lane 3b (P8d-17 root cause): WITHOUT this, `RuntimeSdkOptions.toInputShape` stays `undefined`
     // and the router's OWN `officialCapabilityServers` early-returns for EVERY official-leg session
-    // (its own doc: "WITHOUT `toInputShape` THIS IS A WINTER-LEG-ONLY DOOR") — because Norma's
+    // (its own doc: "WITHOUT `toInputShape` THIS IS A WINTER-LEG-ONLY DOOR") — because Winter's
     // construction-level `capabilities` above is `[]` on purpose (P8b-36), the early-return is a
     // SILENT no-op rather than the throw a non-empty `capabilities` would get. That skips building
     // `winterMcpServerDescriptor`'s standing server on the official leg entirely: SendMessage/
@@ -407,13 +407,13 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
     // registrations, so `officialToolAliases`'s redirects have no target and a bare `advisor` call
     // is refused "No such tool available" before `resolveReviewer()` ever runs. `routerInputShape`
     // is the SAME JSON-Schema→zod-shape bridge `official-capabilities.ts`'s own per-session
-    // `officialCapabilityServersFor` already uses for Norma's OWN capability tools — reused here,
+    // `officialCapabilityServersFor` already uses for Winter's OWN capability tools — reused here,
     // never a second copy, for the router's construction-time door.
     toInputShape: routerInputShape,
     // §1.6: this is what fills `SeamContext.winterHome`, so the barrier and every later seam
     // resolve under the daemon's OWN home. Without it they fall back to
-    // `resolveWinterHome(undefined, brand)` — which is `~/.norma` for a daemon booted on a temp
-    // home with no `NORMA_HOME` in its environment, i.e. every test. `participants` is 8c's Task
+    // `resolveWinterHome(undefined, brand)` — which is `~/.winter` for a daemon booted on a temp
+    // home with no `WINTER_HOME` in its environment, i.e. every test. `participants` is 8c's Task
     // 1.3/lane 4 concern; this handle passes none yet.
     handoff: {
       winterHome: deps.home,
@@ -442,7 +442,7 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
     // P8c-1/P8c-2: the official branch's deployment-wide policy. `remoteConfig: "deny"` is R-7b-11's
     // own default (a session's own child never fetches remote feature configuration); `claudeOauth`
     // is left at the router's own default gate (D14/P8c-2: the official leg ships Code-only,
-    // API-key auth, with Claude OAuth closed) — Norma states the auth-family gate at SELECTION time
+    // API-key auth, with Claude OAuth closed) — Winter states the auth-family gate at SELECTION time
     // (`claudeOauthApproved: false` on every `SelectionInput`, Task 1.3) rather than here twice.
     // `permissionMode: "default"` is the DEPLOYMENT floor a session with no other policy gets; a
     // live session's own `runtime.official.options.permissionMode` (Task 1.2) overrides it per the

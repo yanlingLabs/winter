@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -63,7 +63,7 @@ describe("session.dispatch get-or-create RPC (Phase 7 dispatch mode Task 2)", ()
   afterEach(() => { stop?.(); stop = undefined; });
 
   async function boot(): Promise<{ store: SessionStore; socketPath: string; harnessToken: string }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-dispatch-rpc-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-dispatch-rpc-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -123,8 +123,8 @@ describe("session.dispatch get-or-create RPC (Phase 7 dispatch mode Task 2)", ()
   // `safeParse` the raw value, and every no-argument method's schema is `z.object({})`, which
   // REJECTS `undefined`. Result: `-32602 invalid params: (root)` for a perfectly legal frame.
   //
-  // That is exactly what killed the orb (`NormaClient` omitted the key for `session.dispatch`), and
-  // the same shape still lives in the TS CLI client and the phone's `NormaSessionClient`. Fixing it
+  // That is exactly what killed the orb (`WinterClient` omitted the key for `session.dispatch`), and
+  // the same shape still lives in the TS CLI client and the phone's `WinterSessionClient`. Fixing it
   // in each client protects only clients that update; normalizing HERE protects every client,
   // including already-shipped ones. Verified safe by sweeping all 76 `*Params` schemas: ZERO accept
   // `undefined` today, so this cannot flip any currently-SUCCEEDING call — it only converts the
@@ -137,7 +137,7 @@ describe("session.dispatch get-or-create RPC (Phase 7 dispatch mode Task 2)", ()
 
     // `TestClient.request` drops an undefined `params` in JSON.stringify — the frame really does
     // go out as {"jsonrpc":"2.0","id":N,"method":"session.dispatch"}, byte-identical to what
-    // NormaKit used to send.
+    // WinterKit used to send.
     const res = await c.request(METHODS.sessionDispatch);
     expect(res.error).toBeUndefined();
     expect(typeof res.result.sessionId).toBe("string");
@@ -197,7 +197,7 @@ describe("chat mode (Chat Mode Slice A Task 1)", () => {
   afterEach(() => { stop?.(); stop = undefined; });
 
   async function boot(): Promise<{ store: SessionStore; socketPath: string; harnessToken: string; remoteToken: string }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-chat-mode-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-chat-mode-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));

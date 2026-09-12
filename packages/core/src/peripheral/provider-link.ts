@@ -1,4 +1,4 @@
-import { encodeLine, METHODS, SessionEvent, type ConnWriter, type NewSessionEvent } from "@norma/protocol";
+import { encodeLine, METHODS, SessionEvent, type ConnWriter, type NewSessionEvent } from "@yanlinglabs/winter-protocol";
 
 /** Bridges `PeripheralBroker`'s `pushToProvider` dependency (a plain data-in/bool-out function,
  *  injected at broker-construction time in daemon.ts, long before any socket connections exist)

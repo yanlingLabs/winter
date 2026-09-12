@@ -53,7 +53,7 @@ describe("officeCapability", () => {
     const h = harness();
     const server = officeCapability(h.session, { office: h.deps });
     expect(server.type).toBe("sdk");
-    expect(server.name).toBe("norma__office");
+    expect(server.name).toBe("winter__office");
     expect(isWinterMcpServerInstance(server.instance)).toBe(true);
     expect((server.instance as WinterMcpServerInstance).listTools().map((t) => t.name).sort())
       .toEqual(["docs", "sheets", "slides"]);

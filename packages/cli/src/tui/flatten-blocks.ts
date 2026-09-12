@@ -149,7 +149,7 @@ export function flattenBlock(block: Block, opts: FlattenOpts): string[] {
     }
 
     case "interrupted":
-      return flowLines(ansi.dim("  ⎿  Interrupted · What should Norma do instead?"), columns);
+      return flowLines(ansi.dim("  ⎿  Interrupted · What should Winter do instead?"), columns);
 
     default: {
       const _exhaustive: never = block;

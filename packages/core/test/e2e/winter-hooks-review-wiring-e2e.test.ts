@@ -14,7 +14,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { FakeProvider } from "../../src/agent/fake-provider";
@@ -72,7 +72,7 @@ class TestClient {
 
 describeWithWinterBinary("daemon.ts's hooksFor wiring — the BashReviewer reaches a real winter child", (bin) => {
   test("a PreToolUse deny from daemon.ts's OWN BashReviewer blocks a real Bash call end to end", async () => {
-    const home = join(realpathSync(mkdtempSync(join(tmpdir(), "norma-hooks-wiring-"))), ".norma");
+    const home = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-hooks-wiring-"))), ".winter");
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 2,
@@ -83,7 +83,7 @@ describeWithWinterBinary("daemon.ts's hooksFor wiring — the BashReviewer reach
     // `session.create` accepts the `winter-test/p5checkpoint` model verbatim, unrelated to this
     // provider's OWN (irrelevant) reviewer model.
     const reviewProvider = new FakeProvider([[
-      { type: "text_delta", delta: '{"verdict":"unsafe","reason":"norma-hooks-wiring-test-forced-unsafe"}' },
+      { type: "text_delta", delta: '{"verdict":"unsafe","reason":"winter-hooks-wiring-test-forced-unsafe"}' },
       { type: "done", stopReason: "end_turn" },
     ]], []);
     const daemon: RunningDaemon = await startDaemon({
@@ -94,7 +94,7 @@ describeWithWinterBinary("daemon.ts's hooksFor wiring — the BashReviewer reach
     const client = await TestClient.connect(daemon.socketPath);
     await client.hello(daemon.tokens.harness, "e2e");
 
-    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-hooks-wiring-cwd-")));
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-hooks-wiring-cwd-")));
     const target = join(cwd, "target.txt");
     writeFileSync(target, "before"); // the p5checkpoint double reads this before writing
     const { sessionId: sid } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, {
@@ -112,7 +112,7 @@ describeWithWinterBinary("daemon.ts's hooksFor wiring — the BashReviewer reach
     // The reviewer's own reason, not the command's stdout — only reachable if daemon.ts's
     // constructed BashReviewer (over the FakeProvider injected as `agentProvider`) actually ran.
     expect(bashResult!.isError).toBe(true);
-    expect(bashResult!.output).toContain("norma-hooks-wiring-test-forced-unsafe");
+    expect(bashResult!.output).toContain("winter-hooks-wiring-test-forced-unsafe");
     expect(reviewProvider.requests.length).toBeGreaterThan(0);
 
     client.close();

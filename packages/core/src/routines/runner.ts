@@ -10,7 +10,7 @@ import type { RoutineRunner } from "./scheduler";
 // `agent_error` with no `code` at all (an older log, or one of engine.ts's two synthetic
 // agent_error emit sites — "no cwd" / context cap — which have no provider code to carry).
 // Phase 8d task 2.4: the message-prefix producer this fallback was originally paired with
-// (`providers/openai-compatible.ts`'s `mapHttpError`) is gone — Norma's internal model calls now
+// (`providers/openai-compatible.ts`'s `mapHttpError`) is gone — Winter's internal model calls now
 // run over `@yanlinglabs/winter-provider-runtime` adapters (`providers/runtime-provider.ts`), whose
 // own error messages are NOT guaranteed to start with "HTTP 429". This fallback is therefore a
 // carry of unverified reach on today's provider layer, not a tripwire with a live producer to
@@ -18,7 +18,7 @@ import type { RoutineRunner } from "./scheduler";
 const QUOTA_ERROR_PREFIX = "HTTP 429";
 
 /** Builds the RoutineRunner the daemon wires into makeRoutineScheduler — `runHeadless` reuses the
- *  SAME internal path `norma -p` drives (session create → post the prompt as a user_message → one
+ *  SAME internal path `winter -p` drives (session create → post the prompt as a user_message → one
  *  engine.runTurn → read the final assistant text back off the session log), just in-process
  *  instead of over the IPC socket (the scheduler already lives inside the daemon).
  *
@@ -26,7 +26,7 @@ const QUOTA_ERROR_PREFIX = "HTTP 429";
  *  sessions list") — T3 superseded T2's fallback: `origin` is now a real, additive session-meta
  *  field (`SessionCreateParams.origin` → the sqlite `sessions.origin` column → `SessionStore.list()`
  *  rows), passed straight through at `createSession`. The session-TITLE stamp T2 shipped stays —
- *  belt-and-suspenders, not replaced: the title is what a human sees in `norma sessions`/`resume`
+ *  belt-and-suspenders, not replaced: the title is what a human sees in `winter sessions`/`resume`
  *  (`session_titled`), the `origin` meta field is the machine-readable record another program can
  *  filter/query on (e.g. "list every session this routine ever fired"). Neither overwrites the
  *  other — titles.ts's SessionTitler still never touches an already-titled session (`maybeTitle`'s
@@ -76,7 +76,7 @@ export function makeDaemonRoutineRunner(deps: {
       const events = deps.store.read(sessionId);
       // Main-thread only — a routine prompt that itself spawns subagents surfaces their results
       // through the main thread's own assistant_message (spawn_agent's normal tool_result bridge),
-      // exactly like a `norma -p` turn.
+      // exactly like a `winter -p` turn.
       const mainEvents = events.filter((e) => !("threadId" in e) || e.threadId === "main");
       const lastError = [...mainEvents].reverse().find((e) => e.type === "agent_error");
       if (lastError && lastError.type === "agent_error") {

@@ -1,7 +1,7 @@
 // P8b Task 16 — the two integration tripwires the caps and policy lanes could not run alone.
 //
 // (b) Task 9's `CAPABILITY_TOOL_MODES` (what `disallowedTools` is built from) and Task 7's
-//     `NORMA_CAPABILITY_TOOLS` (what the servers actually serve, and P8b-37's structural filter)
+//     `WINTER_CAPABILITY_TOOLS` (what the servers actually serve, and P8b-37's structural filter)
 //     landed in different lanes. A name in one and not the other is a `disallowedTools` entry that
 //     denies nothing, or a tool served to a mode that never sees it — silently, in either direction.
 // (n9) The projector opens a child thread with the spawning `tool_use.id`, and Task 13's persisted
@@ -10,7 +10,7 @@
 //     `BackgroundAgentRegistry` adapter.)
 import { expect, test } from "bun:test";
 import { CAPABILITY_TOOL_MODES } from "../../src/runtime-sdk/mode-options";
-import { NORMA_CAPABILITY_TOOLS } from "../../src/capabilities";
+import { WINTER_CAPABILITY_TOOLS } from "../../src/capabilities";
 import { createProjector } from "../../src/projector";
 import { openRuntimeStateDb, RuntimeChildren } from "../../src/runtime-state";
 import { FakeCheckpoints } from "../projector/harness";
@@ -18,14 +18,14 @@ import { withTempHome } from "../runtime-state/support";
 
 const MODES = ["code", "dispatch", "chat"] as const;
 
-test("CAPABILITY_TOOL_MODES (policy) and NORMA_CAPABILITY_TOOLS (caps) name the SAME tools", () => {
-  expect(Object.keys(CAPABILITY_TOOL_MODES).sort()).toEqual(Object.keys(NORMA_CAPABILITY_TOOLS).sort());
+test("CAPABILITY_TOOL_MODES (policy) and WINTER_CAPABILITY_TOOLS (caps) name the SAME tools", () => {
+  expect(Object.keys(CAPABILITY_TOOL_MODES).sort()).toEqual(Object.keys(WINTER_CAPABILITY_TOOLS).sort());
 });
 
 test("…and expose each to the SAME modes", () => {
-  for (const name of Object.keys(NORMA_CAPABILITY_TOOLS)) {
+  for (const name of Object.keys(WINTER_CAPABILITY_TOOLS)) {
     const policy: readonly string[] = CAPABILITY_TOOL_MODES[name]?.modes ?? [];
-    const caps: readonly string[] = NORMA_CAPABILITY_TOOLS[name as keyof typeof NORMA_CAPABILITY_TOOLS].modes;
+    const caps: readonly string[] = WINTER_CAPABILITY_TOOLS[name as keyof typeof WINTER_CAPABILITY_TOOLS].modes;
     for (const mode of MODES) {
       expect({ name, mode, policy: policy.includes(mode), caps: caps.includes(mode) })
         .toEqual({ name, mode, policy: caps.includes(mode), caps: caps.includes(mode) });

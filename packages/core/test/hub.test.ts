@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "../src/sessions/store";
 import { SessionHub, type HubClient } from "../src/sessions/hub";
-import type { SessionEvent } from "@norma/protocol";
+import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 
 function fakeClient(name: string): HubClient & { received: SessionEvent[] } {
   const received: SessionEvent[] = [];
@@ -12,7 +12,7 @@ function fakeClient(name: string): HubClient & { received: SessionEvent[] } {
 }
 
 function setup() {
-  const store = new SessionStore(mkdtempSync(join(tmpdir(), "norma-hub-")));
+  const store = new SessionStore(mkdtempSync(join(tmpdir(), "winter-hub-")));
   return { store, hub: new SessionHub(store) };
 }
 
@@ -287,7 +287,7 @@ describe("SessionHub", () => {
   });
 
   test("the change memo is BOUNDED — eviction costs one redundant re-statement, never a missed change", () => {
-    const store = new SessionStore(mkdtempSync(join(tmpdir(), "norma-hub-")));
+    const store = new SessionStore(mkdtempSync(join(tmpdir(), "winter-hub-")));
     const hub = new SessionHub(store, 2); // cap injected so the eviction path is testable in 3 sessions
     const ids = [store.createSession("global"), store.createSession("global"), store.createSession("global")];
     for (const id of ids) expect(hub.emitActivity(id, "background")).not.toBeNull();

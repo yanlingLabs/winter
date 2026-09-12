@@ -8,16 +8,16 @@ import { PluginStore, pluginMcpEligible, type PluginConsentRecord } from "../../
  * Phase 4a gate (design spec §9): "legacy plugin untouched; a manifest plugin with exec consents
  * installs/enables with the full consent block." ONE chained flow, tmp-home fixtures, three parts:
  *
- *   (1) a legacy plugin.json-only plugin (skills + .mcp.json, no norma-plugin.json) — skills
+ *   (1) a legacy plugin.json-only plugin (skills + .mcp.json, no winter-plugin.json) — skills
  *       listed, MCP inert until enabled, enabling flips mcpEnabled/pluginMcpEligible true with
  *       ZERO consents involved anywhere in the chain; the shared PluginInfo fields match the
  *       exact pre-4a shape (see git show 9f941eb^:packages/core/src/agent/plugins.ts).
- *   (2) a norma-plugin.json manifest plugin (tier capability, contributes.mcpServers, a tcc
+ *   (2) a winter-plugin.json manifest plugin (tier capability, contributes.mcpServers, a tcc
  *       permission) — requiredConsents derives to ["exec","tcc"]; enabled-without-consent is
  *       excluded from MCP eligibility; writing both consent records flips it eligible AND
  *       produces the manifestServers the daemon would hand to McpManager.startPlugins; deleting
- *       the consent record (what `norma plugin disable` does — Task 3) flips it back off.
- *   (3) a plugin shipping a malformed norma-plugin.json — falls back to the legacy load path with
+ *       the consent record (what `winter plugin disable` does — Task 3) flips it back off.
+ *   (3) a plugin shipping a malformed winter-plugin.json — falls back to the legacy load path with
  *       a warning logged, and still loads (never bricks).
  *
  * This file pins the PluginStore / pluginMcpEligible CONTRACT the daemon's real wiring runs on
@@ -32,12 +32,12 @@ import { PluginStore, pluginMcpEligible, type PluginConsentRecord } from "../../
  */
 
 function home(): string {
-  return mkdtempSync(join(tmpdir(), "norma-4a-gate-"));
+  return mkdtempSync(join(tmpdir(), "winter-4a-gate-"));
 }
 
 /** Mirrors daemon.ts's enabledPlugins derivation exactly (source of truth: daemon.ts) — the list
  *  of { name, manifestServers } McpManager.startPlugins would actually receive. */
-function wouldStartPlugins(normaHome: string, plugins: ReturnType<PluginStore["list"]>) {
+function wouldStartPlugins(winterHome: string, plugins: ReturnType<PluginStore["list"]>) {
   return plugins.filter(pluginMcpEligible).map((p) => ({ name: p.name, manifestServers: p.manifestServers }));
 }
 
@@ -59,7 +59,7 @@ describe("4a gate (spec §9): legacy plugin untouched; manifest plugin consent l
     });
 
     test("skills listed, MCP inert until enabled — no consents dep supplied anywhere", () => {
-      const [p] = new PluginStore({ normaHome: h }).list();
+      const [p] = new PluginStore({ winterHome: h }).list();
       if (!p) throw new Error("expected one plugin");
       expect(p.skills).toEqual(["greet"]);
       expect(p.hasMcp).toBe(true);
@@ -69,7 +69,7 @@ describe("4a gate (spec §9): legacy plugin untouched; manifest plugin consent l
     });
 
     test("enable -> mcpEnabled + pluginMcpEligible true, ZERO consents involved", () => {
-      const [p] = new PluginStore({ normaHome: h, plugins: { enabled: [name] } }).list();
+      const [p] = new PluginStore({ winterHome: h, plugins: { enabled: [name] } }).list();
       if (!p) throw new Error("expected one plugin");
       expect(p.mcpEnabled).toBe(true);
       expect(p.requiredConsents).toEqual([]); // legacy: nothing is ever required
@@ -79,7 +79,7 @@ describe("4a gate (spec §9): legacy plugin untouched; manifest plugin consent l
     });
 
     test("PluginInfo shared fields equal the pre-4a shape (name/skills/hasMcp/mcpEnabled/disabled)", () => {
-      const [p] = new PluginStore({ normaHome: h, plugins: { enabled: [name] } }).list();
+      const [p] = new PluginStore({ winterHome: h, plugins: { enabled: [name] } }).list();
       if (!p) throw new Error("expected one plugin");
       // Pre-4a PluginInfo was exactly { name, description?, version?, skills, hasMcp, mcpEnabled,
       // disabled } (git show 9f941eb^:packages/core/src/agent/plugins.ts) — these five fields
@@ -100,10 +100,10 @@ describe("4a gate (spec §9): legacy plugin untouched; manifest plugin consent l
   });
 
   // ---------------------------------------------------------------------------------------
-  // (2) norma-plugin.json manifest plugin: tier capability, contributes.mcpServers,
+  // (2) winter-plugin.json manifest plugin: tier capability, contributes.mcpServers,
   //     permissions.tcc — full consent lifecycle (unconsented -> consented -> disabled).
   // ---------------------------------------------------------------------------------------
-  describe("(2) norma-plugin.json manifest plugin — consent lifecycle", () => {
+  describe("(2) winter-plugin.json manifest plugin — consent lifecycle", () => {
     let h: string;
     const name = "manifest-demo";
     const server = { name: "srv", command: "node", args: ["server.js"] };
@@ -112,7 +112,7 @@ describe("4a gate (spec §9): legacy plugin untouched; manifest plugin consent l
       h = home();
       const dir = join(h, "plugins", name);
       mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, "norma-plugin.json"), JSON.stringify({
+      writeFileSync(join(dir, "winter-plugin.json"), JSON.stringify({
         id: name, tier: "capability",
         permissions: { tcc: ["accessibility"] },
         contributes: { mcpServers: [server] },
@@ -120,7 +120,7 @@ describe("4a gate (spec §9): legacy plugin untouched; manifest plugin consent l
     });
 
     test("requiredConsents derives to [exec, tcc]", () => {
-      const [p] = new PluginStore({ normaHome: h }).list();
+      const [p] = new PluginStore({ winterHome: h }).list();
       if (!p) throw new Error("expected one plugin");
       expect(p.tier).toBe("capability");
       expect(p.legacy).toBe(false);
@@ -128,7 +128,7 @@ describe("4a gate (spec §9): legacy plugin untouched; manifest plugin consent l
     });
 
     test("enabled WITHOUT consent -> pluginMcpEligible FALSE (daemon excludes it from MCP start)", () => {
-      const [p] = new PluginStore({ normaHome: h, plugins: { enabled: [name] } }).list();
+      const [p] = new PluginStore({ winterHome: h, plugins: { enabled: [name] } }).list();
       if (!p) throw new Error("expected one plugin");
       expect(p.mcpEnabled).toBe(true);
       expect(p.consented).toEqual([]);
@@ -138,7 +138,7 @@ describe("4a gate (spec §9): legacy plugin untouched; manifest plugin consent l
 
     test("consent records written for BOTH classes -> pluginMcpEligible TRUE, daemon would receive manifestServers", () => {
       const consents: Record<string, PluginConsentRecord> = { [name]: { exec: Date.now(), tcc: Date.now() } };
-      const [p] = new PluginStore({ normaHome: h, plugins: { enabled: [name] }, consents }).list();
+      const [p] = new PluginStore({ winterHome: h, plugins: { enabled: [name] }, consents }).list();
       if (!p) throw new Error("expected one plugin");
       expect(p.consented.sort()).toEqual(["exec", "tcc"]);
       expect(pluginMcpEligible(p)).toBe(true);
@@ -146,11 +146,11 @@ describe("4a gate (spec §9): legacy plugin untouched; manifest plugin consent l
     });
 
     test("disable-equivalent (consent record deleted) -> pluginMcpEligible FALSE again", () => {
-      // `norma plugin disable` deletes the plugin's whole consent record (plugin-cli.ts's
+      // `winter plugin disable` deletes the plugin's whole consent record (plugin-cli.ts's
       // stripPluginConsents, Task 3's fresh-consent rule) — simulated here at the settings shape
       // this core-only test file can see directly: no entry for `name` in consents at all.
       const consents: Record<string, PluginConsentRecord> = {};
-      const [p] = new PluginStore({ normaHome: h, plugins: { enabled: [name] }, consents }).list();
+      const [p] = new PluginStore({ winterHome: h, plugins: { enabled: [name] }, consents }).list();
       if (!p) throw new Error("expected one plugin");
       expect(p.consented).toEqual([]);
       expect(pluginMcpEligible(p)).toBe(false);
@@ -159,18 +159,18 @@ describe("4a gate (spec §9): legacy plugin untouched; manifest plugin consent l
   });
 
   // ---------------------------------------------------------------------------------------
-  // (3) malformed norma-plugin.json -> legacy load + warning, never bricks.
+  // (3) malformed winter-plugin.json -> legacy load + warning, never bricks.
   // ---------------------------------------------------------------------------------------
-  describe("(3) malformed norma-plugin.json", () => {
+  describe("(3) malformed winter-plugin.json", () => {
     test("falls back to legacy load with a warning logged; the plugin still loads (skills live)", () => {
       const h = home();
       const name = "malformed-demo";
       const dir = join(h, "plugins", name);
       mkdirSync(join(dir, "skills", "hi"), { recursive: true });
       writeFileSync(join(dir, "skills", "hi", "SKILL.md"), "---\nname: hi\ndescription: hi\n---\nbody");
-      writeFileSync(join(dir, "norma-plugin.json"), "{not json");
+      writeFileSync(join(dir, "winter-plugin.json"), "{not json");
       const logs: string[] = [];
-      const [p] = new PluginStore({ normaHome: h, log: (m) => logs.push(m) }).list();
+      const [p] = new PluginStore({ winterHome: h, log: (m) => logs.push(m) }).list();
       if (!p) throw new Error("expected one plugin");
       expect(p.legacy).toBe(true);
       expect(p.name).toBe(name);

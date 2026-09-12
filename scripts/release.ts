@@ -1,5 +1,5 @@
 /**
- * Norma release pipeline (release-pipeline T2 core + T3 DMG/appcast/cask/publish). Chains:
+ * Winter release pipeline (release-pipeline T2 core + T3 DMG/appcast/cask/publish). Chains:
  *   preflight -> [version bump] -> build (Developer ID + hardened runtime, T1's canonical
  *   override invocation) -> verify nested signatures -> zip -> notarize -> staple -> re-zip
  *   the stapled app -> spctl/stapler gates -> DMG (stage+hdiutil+codesign+notarize+staple+
@@ -25,8 +25,9 @@
  * Whole-branch review fix (F1/F2, see .superpowers/sdd/progress-release.md): the appcast
  * `<item>` insert decision is `appcastInsertPlan` (release-lib.ts, unit-tested) — under
  * --dry-run it writes ONLY a preview at out/release/<v>-dryrun/appcast-preview.xml, mirroring
- * cask's out/ render; the TRACKED releases/appcast.xml is written only from inside the
- * publish tail's `if (!DRY_RUN)` block, never before. The insert is also idempotent: an
+ * cask's out/ render; the TRACKED releases/winter/appcast.xml (P9b-9's Winter feed; the frozen
+ * pre-rename releases/appcast.xml is never touched by this pipeline) is written only from
+ * inside the publish tail's `if (!DRY_RUN)` block, never before. The insert is also idempotent: an
  * `<item>` whose `<sparkle:version>` already matches the release version is skipped rather than
  * duplicated, so --resume-publish after a partial failure (or a stray re-run) can't double-
  * insert or get blocked by a self-inflicted dirty tree.
@@ -34,9 +35,9 @@
  * T1 findings this script carries (see .superpowers/sdd/task-11-report.md):
  *  - CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO is REQUIRED — without it Xcode injects
  *    get-task-allow=true and notarization silently auto-rejects.
- *  - The "Embed norma-core" postCompileScript now signs with --options runtime --timestamp
- *    (apple/Norma/project.yml, committed) so the nested binary carries hardened runtime too.
- *  - NormaHelper's embedded codesign identifier becomes "NormaHelper" (not "com.norma.helper")
+ *  - The "Embed winter-core" postCompileScript now signs with --options runtime --timestamp
+ *    (apple/Winter/project.yml, committed) so the nested binary carries hardened runtime too.
+ *  - WinterHelper's embedded codesign identifier becomes "WinterHelper" (not "com.winter.helper")
  *    under this override set — confirmed harmless (Label-based launchd matching, team-based
  *    peer trust) — not fixed here, out of scope.
  *
@@ -52,7 +53,7 @@
  * inside-out signing since signing a container after its contents change invalidates the
  * container's own seal), preserving each one's existing entitlements as-is (extracted then
  * reapplied; Autoupdate is the only one with a real entitlement — see resignPreserving below),
- * then re-signing Sparkle.framework and finally the outer Norma.app so their seals pick up the
+ * then re-signing Sparkle.framework and finally the outer Winter.app so their seals pick up the
  * changed nested content.
  */
 import { execSync } from "node:child_process";
@@ -70,7 +71,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { FORMAT, ROOT, readCanonical } from "./version-lib";
 import {
   GH_REPO,
@@ -98,13 +99,13 @@ import { resolveInstalledWinterPackage } from "./stage-runtimes";
 import { createHash } from "node:crypto";
 
 // Winter Phase 8d (P8d-2): Anthropic's team identity on the embedded, UNMODIFIED `claude` binary —
-// NEVER Norma's own TEAM_ID below (claude is verified, never re-signed). Controller measurement M1.
+// NEVER Winter's own TEAM_ID below (claude is verified, never re-signed). Controller measurement M1.
 const CLAUDE_TEAM_ID = "Q6L2SF6YDW";
 
 const TEAM_ID = "37N77U9RSZ";
 const NOTARY_PROFILE = "norma-notary";
-const APPLE_DIR = join(ROOT, "apple", "Norma");
-// Matches apple/Norma/project.yml's deploymentTarget / LSMinimumSystemVersion / MACOSX_DEPLOYMENT_TARGET.
+const APPLE_DIR = join(ROOT, "apple", "Winter");
+// Matches apple/Winter/project.yml's deploymentTarget / LSMinimumSystemVersion / MACOSX_DEPLOYMENT_TARGET.
 const MIN_SYSTEM = "26.0";
 // Sparkle CLI tools (sign_update, generate_keys) — same dist + version as scripts/sparkle-feed-gate.ts
 // (T6's adaptation note: must match Package.resolved, not project.yml's `from:` floor).
@@ -246,18 +247,18 @@ console.log("Preflight: OK");
 // 1b. Resolve the signing identity ONCE, up front — every codesign --sign call below (app
 //     resign, its nested/embedded binaries, DMG) uses this same resolved SHA-1 hash, never a
 //     display name, so no legal/company name needs to live in this repo and every signature
-//     comes from the exact same, unambiguous identity. `NORMA_SIGN_IDENTITY` is an escape hatch
+//     comes from the exact same, unambiguous identity. `WINTER_SIGN_IDENTITY` is an escape hatch
 //     (e.g. a differently-provisioned keychain in CI) that skips the `security find-identity`
 //     lookup entirely.
 // ---------------------------------------------------------------------------
-const signIdentityEnv = process.env.NORMA_SIGN_IDENTITY;
+const signIdentityEnv = process.env.WINTER_SIGN_IDENTITY;
 const SIGN_IDENTITY = resolveSigningIdentity({
   envOverride: signIdentityEnv,
   identitiesOutput: signIdentityEnv ? "" : sh(`security find-identity -v -p codesigning`),
   teamId: TEAM_ID,
 });
 console.log(
-  `Signing identity resolved: ${SIGN_IDENTITY}${signIdentityEnv ? " (NORMA_SIGN_IDENTITY override)" : ""}`,
+  `Signing identity resolved: ${SIGN_IDENTITY}${signIdentityEnv ? " (WINTER_SIGN_IDENTITY override)" : ""}`,
 );
 
 // ---------------------------------------------------------------------------
@@ -312,7 +313,7 @@ sh(`xcodegen generate`, APPLE_DIR);
 
 console.log("Building Release (Developer ID, org team 37N77U9RSZ, hardened runtime)...");
 sh(
-  `xcodebuild -project Norma.xcodeproj -scheme Norma -destination 'platform=macOS' -configuration Release ` +
+  `xcodebuild -project Winter.xcodeproj -scheme Winter -destination 'platform=macOS' -configuration Release ` +
     // arm64-only: IrohLib ships no x86_64 slice (universal link fails), and the macOS 26 floor
     // leaves no supported Intel audience anyway.
     `ARCHS=arm64 ` +
@@ -321,7 +322,7 @@ sh(
     `-derivedDataPath "${dd}" build`,
   APPLE_DIR,
 );
-const app = join(dd, "Build", "Products", "Release", "Norma.app");
+const app = join(dd, "Build", "Products", "Release", "Winter.app");
 if (!existsSync(app)) fail(`build did not produce ${app}`);
 console.log(`Built: ${app}`);
 
@@ -378,24 +379,24 @@ function assertSigned(path: string, label: string) {
     fail(`${label}: missing secure timestamp (notarization will reject this):\n${out}`);
   }
 }
-assertSigned(app, "Norma.app");
-assertSigned(join(app, "Contents", "Resources", "norma-core"), "norma-core");
-assertSigned(join(app, "Contents", "MacOS", "NormaHelper"), "NormaHelper");
+assertSigned(app, "Winter.app");
+assertSigned(join(app, "Contents", "Resources", "winter-core"), "winter-core");
+assertSigned(join(app, "Contents", "MacOS", "WinterHelper"), "WinterHelper");
 assertSigned(sparkleFramework, "Sparkle.framework");
 for (const target of nestedSparkleHelpers) {
   if (existsSync(target)) assertSigned(target, `Sparkle.framework nested helper (${target.split("/").pop()})`);
 }
 
 // --- Winter Phase 8d: the two embedded runtimes (P8d-1/P8d-2) --------------
-// `winter` is embed-time RE-SIGNED under Norma's own team identity (embed-runtimes.sh) — it fits
+// `winter` is embed-time RE-SIGNED under Winter's own team identity (embed-runtimes.sh) — it fits
 // `assertSigned`'s existing generic check (TeamIdentifier=TEAM_ID + a secure timestamp) exactly,
-// same as norma-core/NormaHelper above.
+// same as winter-core/WinterHelper above.
 const embeddedRuntimesDir = join(app, "Contents", "Resources", "runtimes");
 const embeddedWinterPath = join(embeddedRuntimesDir, "winter");
 assertSigned(embeddedWinterPath, "winter (embedded runtime)");
 
 // `claude` is embedded UNMODIFIED (P8d-2: never re-signed, never patched) — it does NOT fit
-// `assertSigned`'s generic check, which asserts NORMA'S OWN team identity; this binary is signed by
+// `assertSigned`'s generic check, which asserts WINTER'S OWN team identity; this binary is signed by
 // Anthropic (CLAUDE_TEAM_ID), and the checks that matter for an untouched vendor artifact are
 // different: a real, unbroken Developer ID signature (`--verify --strict`, not just "some
 // TeamIdentifier + timestamp field is present"), THAT specific team, and — the check `assertSigned`
@@ -454,7 +455,7 @@ if (!row16Identity.strong) {
 
 // Row 16 ("identical versioned artifact", P8d-2/P8d-26): the strongest form of this check
 // verifies PROVENANCE — that the embedded winter came from a build of the SDK checkout named by
-// NORMA_WINTER_SDK_CHECKOUT actually sitting at the pinned tag, and that a rebuild from it
+// WINTER_SDK_CHECKOUT actually sitting at the pinned tag, and that a rebuild from it
 // SUCCEEDS — never hash equality of that rebuild against the staged binary. Measured on the
 // controller's own release rehearsal (P8d-26): a fresh `bun build --compile` of the SAME pinned
 // tag hashes differently from the staged build every time — `bun build --compile` is not
@@ -466,14 +467,14 @@ if (!row16Identity.strong) {
 // provenance could not be established either way. Both hashes are always logged AND written into
 // a `row16.json` record beside the release artifacts (informational — a mismatch there is
 // EXPECTED and non-fatal). Only possible when a real SDK checkout is available
-// (NORMA_WINTER_SDK_CHECKOUT), since the sole other rung (`build-winter.ts`'s own default
+// (WINTER_SDK_CHECKOUT), since the sole other rung (`build-winter.ts`'s own default
 // `../winter-agent-sdk` sibling) is Winter-repo-scoped and not assumed present on a release
 // machine. Without a checkout this falls back to trusting the `winterPreSign` hash
 // `stage-runtimes.ts` itself recorded at staging time — a documented WEAKER check (it cannot
 // detect a compromised STAGING step, only a compromised EMBED step after it) — UNCHANGED by
 // P8d-26, since this rung already never compared hashes it couldn't independently reproduce.
-if (process.env.NORMA_WINTER_SDK_CHECKOUT) {
-  const checkout = process.env.NORMA_WINTER_SDK_CHECKOUT;
+if (process.env.WINTER_SDK_CHECKOUT) {
+  const checkout = process.env.WINTER_SDK_CHECKOUT;
   console.log(`Row 16: rebuilding winter from ${checkout} to verify provenance (pinned-tag checkout + a successful rebuild — hash equality is NOT the check, P8d-26)...`);
   const freshWinterOut = join(OUT, "winter-row16-rebuild");
   let rebuildSucceeded = true;
@@ -502,15 +503,15 @@ if (process.env.NORMA_WINTER_SDK_CHECKOUT) {
   );
 } else {
   console.log(
-    `Row 16: NORMA_WINTER_SDK_CHECKOUT not set — trusting the winterPreSign hash stage-runtimes.ts recorded at ` +
+    `Row 16: WINTER_SDK_CHECKOUT not set — trusting the winterPreSign hash stage-runtimes.ts recorded at ` +
       `staging time (${embeddedVersions.checksums.winterPreSign}) rather than reproducing a fresh build. This is a ` +
       `WEAKER check: it cannot detect a compromised staging step, only a compromised embed step after it. Set ` +
-      `NORMA_WINTER_SDK_CHECKOUT to the pinned-tag winter-agent-sdk checkout for the full row-16 proof.`,
+      `WINTER_SDK_CHECKOUT to the pinned-tag winter-agent-sdk checkout for the full row-16 proof.`,
   );
 }
 
 // --- Office (office-plumbing wave) ------------------------------------------
-// NormaOfficeHelper is Norma's own compiled binary (like NormaHelper above), embedded at
+// WinterOfficeHelper is Winter's own compiled binary (like WinterHelper above), embedded at
 // Contents/MacOS/ — TeamIdentifier + secure timestamp checked and enrolled in HARDENING_PINS below,
 // same as every other component this repo compiles. The vendored LibreOffice product-set (T2) is
 // NOT this repo's own build output — 66 dylibs, individually re-signed depth-first at embed time —
@@ -520,7 +521,7 @@ if (process.env.NORMA_WINTER_SDK_CHECKOUT) {
 // NOT added to HARDENING_PINS — that array asserts hardened-runtime ENTITLEMENTS, a decision this
 // repo makes only about code IT compiles; LibreOffice's own dylibs carry whatever entitlements the
 // from-source build gave them.
-assertSigned(join(app, "Contents", "MacOS", "NormaOfficeHelper"), "NormaOfficeHelper");
+assertSigned(join(app, "Contents", "MacOS", "WinterOfficeHelper"), "WinterOfficeHelper");
 assertSigned(
   join(app, "Contents", "Resources", "LibreOffice", "Frameworks", "libmergedlo.dylib"),
   "LibreOffice (libmergedlo.dylib, team-ID probe only)",
@@ -528,9 +529,9 @@ assertSigned(
 // office-editable Task 1's dispatch note, discharged here: the helper's own sandbox profile,
 // verified as its own pin — the release blocker's enforcement point. `office-helper.sb` is a bare
 // SBPL text file, never a Mach-O (assertSigned's TeamIdentifier/Timestamp probe does not apply to
-// it), embedded by project.yml's "Embed NormaOfficeHelper" postCompileScript at
+// it), embedded by project.yml's "Embed WinterOfficeHelper" postCompileScript at
 // Contents/Resources/office-helper.sb — a SIBLING of Contents/Resources/LibreOffice, never inside
-// NormaOfficeHelper's own bundle (it is a bare `type: tool` product with no Resources directory of
+// WinterOfficeHelper's own bundle (it is a bare `type: tool` product with no Resources directory of
 // its own). This is the EXACT path `main.swift`'s `resolveSandboxProfilePath()` reads by default —
 // the only resolution production ever takes (no `--sandbox-profile` override outside DEBUG) — and
 // the helper is fail-closed on a missing/unreadable profile (that file's own `fail(...)` call at
@@ -552,7 +553,7 @@ assertSigned(
 //      cost, not add coverage.
 //   3. VERBATIM — M4 (whole-branch review, fix round 2; tightened fix round 3, F3): (1) and (2)
 //      both prove things RELATIVE TO WHAT WAS SIGNED — neither has any opinion on whether the
-//      embedded copy equals the repository source at apple/Norma/Sources/OfficeHelper/office-helper
+//      embedded copy equals the repository source at apple/Winter/Sources/OfficeHelper/office-helper
 //      .sb. A stale project.yml build-phase reference (e.g. a cached copy, or a bad merge that left
 //      a weaker profile on disk pre-embed) would copy happily, sign happily, and pass both checks
 //      above while shipping a materially weaker sandbox. Fix round 2's own first cut here checked
@@ -572,10 +573,10 @@ if (!existsSync(officeSandboxProfile)) {
   fail(
     `office-helper.sb not found at ${officeSandboxProfile} — the office helper's own sandbox profile ` +
       `was not embedded into this build. resolveSandboxProfilePath() resolves exactly this path by ` +
-      `default in production (no --sandbox-profile override outside DEBUG); NormaOfficeHelper refuses ` +
+      `default in production (no --sandbox-profile override outside DEBUG); WinterOfficeHelper refuses ` +
       `to boot without it (fail-closed, main.swift). A release built this way does not ship a weaker ` +
       `office feature — it ships NO office feature: every open silently fails. Check project.yml's ` +
-      `"Embed NormaOfficeHelper" postCompileScript actually ran for this configuration.`,
+      `"Embed WinterOfficeHelper" postCompileScript actually ran for this configuration.`,
   );
 }
 const officeSandboxProfileSourcePath = join(APPLE_DIR, "Sources", "OfficeHelper", "office-helper.sb");
@@ -589,7 +590,7 @@ if (!officeSandboxProfileEmbedded.equals(officeSandboxProfileSource)) {
       `file is unmodified SINCE SIGNING; it has no opinion on whether the embedded copy equals the ` +
       `repo source, so a stale build-phase reference to an old/weaker profile would sign and verify ` +
       `successfully while shipping a containment regression. Check project.yml's "Embed ` +
-      `NormaOfficeHelper" postCompileScript is copying from ${officeSandboxProfileSourcePath}, not a ` +
+      `WinterOfficeHelper" postCompileScript is copying from ${officeSandboxProfileSourcePath}, not a ` +
       `stale cached copy.`,
   );
 }
@@ -615,11 +616,11 @@ for (const lib of ["libEGL.dylib", "libGLESv2.dylib", "libcef_sandbox.dylib", "l
   assertSigned(join(cefFramework, "Libraries", lib), `CEF framework library (${lib})`);
 }
 const CEF_HELPERS = [
-  "Norma Helper",
-  "Norma Helper (Alerts)",
-  "Norma Helper (GPU)",
-  "Norma Helper (Plugin)",
-  "Norma Helper (Renderer)",
+  "Winter Helper",
+  "Winter Helper (Alerts)",
+  "Winter Helper (GPU)",
+  "Winter Helper (Plugin)",
+  "Winter Helper (Renderer)",
 ];
 for (const name of CEF_HELPERS) {
   assertSigned(join(app, "Contents", "Frameworks", `${name}.app`), `CEF helper (${name})`);
@@ -633,30 +634,30 @@ for (const name of CEF_HELPERS) {
 // `allow-jit` on the Renderer, and exactly nothing on everything else. "Applied too widely" is
 // checked as carefully as "missing", because that is the direction that silently weakens
 // hardening — and `com.apple.security.cs.disable-library-validation` is the specific creep this
-// exists to stop. Norma.app is in the list deliberately (Task 5 review, Minor): it `dlopen`s the
+// exists to stop. Winter.app is in the list deliberately (Task 5 review, Minor): it `dlopen`s the
 // same CEF framework via `LoadInMain` from Task 6 onward, so it is the most plausible place for
 // that entitlement to be added "just to make it work" — Task 5 measured that it does not need it.
 //
-// Non-`cs.*` keys are tolerated: Xcode injects `com.apple.application-identifier` into NormaHelper
-// (measured: `37N77U9RSZ.com.norma.helper`), which is identity bookkeeping, not a hardening
+// Non-`cs.*` keys are tolerated: Xcode injects `com.apple.application-identifier` into WinterHelper
+// (measured: `37N77U9RSZ.com.winter.helper`), which is identity bookkeeping, not a hardening
 // relaxation. Sparkle's own nested helpers are deliberately OUT of scope — they are third-party
 // and `resignPreservingEntitlements` preserves whatever they ship with, by design.
 const JIT = "com.apple.security.cs.allow-jit";
 /// The helpers that legitimately carry `allow-jit` — the two Chromium runs a JIT in. Kept in
-/// lockstep with `apple/Norma/project.yml`'s `CEFHelperRenderer`/`CEFHelperGPU` blocks, both of
+/// lockstep with `apple/Winter/project.yml`'s `CEFHelperRenderer`/`CEFHelperGPU` blocks, both of
 /// which point at the SAME `Support/CEFHelperJit.entitlements` for the same anti-drift reason.
-const CEF_JIT_HELPERS = ["Norma Helper (Renderer)", "Norma Helper (GPU)"];
+const CEF_JIT_HELPERS = ["Winter Helper (Renderer)", "Winter Helper (GPU)"];
 const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
-  { path: app, label: "Norma.app", expect: [] },
-  { path: join(app, "Contents", "MacOS", "NormaHelper"), label: "NormaHelper", expect: [] },
-  { path: join(app, "Contents", "Resources", "norma-core"), label: "norma-core", expect: [] },
-  // office-plumbing wave — Norma's own compiled binary, same posture as NormaHelper/norma-core
+  { path: app, label: "Winter.app", expect: [] },
+  { path: join(app, "Contents", "MacOS", "WinterHelper"), label: "WinterHelper", expect: [] },
+  { path: join(app, "Contents", "Resources", "winter-core"), label: "winter-core", expect: [] },
+  // office-plumbing wave — Winter's own compiled binary, same posture as WinterHelper/winter-core
   // above (no hardened-runtime relaxation of any kind). The vendored LibreOffice product-set is
   // deliberately NOT enrolled here — see the team-ID-only probe on libmergedlo.dylib above this
   // array, and that probe's own comment for why.
-  { path: join(app, "Contents", "MacOS", "NormaOfficeHelper"), label: "NormaOfficeHelper", expect: [] },
-  // Winter Phase 8d (P8d-2) — `winter` is re-signed at embed time under Norma's own team identity
-  // (embed-runtimes.sh), same posture as norma-core/NormaHelper above. `claude` is deliberately
+  { path: join(app, "Contents", "MacOS", "WinterOfficeHelper"), label: "WinterOfficeHelper", expect: [] },
+  // Winter Phase 8d (P8d-2) — `winter` is re-signed at embed time under Winter's own team identity
+  // (embed-runtimes.sh), same posture as winter-core/WinterHelper above. `claude` is deliberately
   // NOT enrolled here: it is embedded UNMODIFIED (Anthropic's own signature, never re-signed), so
   // this entitlements-relaxation check — which only has an opinion about code THIS repo signs —
   // does not apply to it; its identity/checksum are verified separately, above this array.
@@ -667,7 +668,7 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   // with `--use-angle=swiftshader`. Under the hardened runtime and without `allow-jit` it
   // crash-looped, `exit_code=9`, with the crash report reading
   // `"termination": {"namespace":"CODESIGNING","indicator":"Invalid Page"}`. Chrome 151 ships
-  // `allow-jit` on both of these helpers and on neither of the other three; so does Norma.
+  // `allow-jit` on both of these helpers and on neither of the other three; so does Winter.
   ...CEF_HELPERS.map((name) => ({
     path: join(app, "Contents", "Frameworks", `${name}.app`),
     label: `CEF helper (${name})`,
@@ -684,14 +685,14 @@ for (const pin of HARDENING_PINS) {
         `  expected: ${want.length ? want.join(", ") : "(none)"}\n` +
         `  found:    ${found.length ? found.join(", ") : "(none)"}\n` +
         `  Every com.apple.security.cs.* entitlement is a deliberate, evidence-backed decision here —\n` +
-        `  see apple/Norma/project.yml's CEFHelperRenderer / CEFHelperGPU blocks. Do not "fix" this by\n` +
+        `  see apple/Winter/project.yml's CEFHelperRenderer / CEFHelperGPU blocks. Do not "fix" this by\n` +
         `  editing the expectation; justify the entitlement or remove it.`,
     );
   }
 }
 console.log(
   "Signatures verified: codesign --verify --deep --strict PASS; TeamIdentifier + secure timestamp confirmed on " +
-    "app + norma-core + NormaHelper + NormaOfficeHelper + Sparkle.framework + its nested helpers + CEF framework + " +
+    "app + winter-core + WinterHelper + WinterOfficeHelper + Sparkle.framework + its nested helpers + CEF framework + " +
     "its 5 libraries + the 5 CEF helpers + the vendored LibreOffice's libmergedlo.dylib (identity probe only — " +
     `not part of the entitlements roster below); hardened-runtime entitlements pinned across all ${HARDENING_PINS.length} ` +
     `components this ` +
@@ -707,7 +708,7 @@ console.log(
 // 4b. Licence notices (panel-cef Task 5). CEF and Chromium are BSD-3-Clause, whose second
 //     condition requires a BINARY redistribution to reproduce the copyright notice and
 //     disclaimer "in the documentation and/or other materials provided with the distribution".
-//     Norma is Apache-2.0 and stays cleanly so by shipping theirs inside the app bundle.
+//     Winter is Apache-2.0 and stays cleanly so by shipping theirs inside the app bundle.
 //
 //     This gate exists because the alternative is trusting that a postCompileScript ran. That
 //     script is `basedOnDependencyAnalysis: false` and its copy is easy to break silently — a
@@ -761,7 +762,7 @@ for (const n of OFFICE_NOTICES) {
     fail(
       `${n.label} missing from the built app at ${p}\n` +
         `  This is an MPL-2.0/LGPL redistribution obligation, not an optional resource.\n` +
-        `  Check apple/Norma/project.yml's "Embed LibreOffice (signed)" phase.`,
+        `  Check apple/Winter/project.yml's "Embed LibreOffice (signed)" phase.`,
     );
   }
   const bytes = statSync(p).size;
@@ -780,7 +781,7 @@ for (const n of NOTICES) {
     fail(
       `${n.label} missing from the built app at ${p}\n` +
         `  This is a BSD-3-Clause redistribution obligation, not an optional resource.\n` +
-        `  Check apple/Norma/project.yml's "Embed CEF + Chromium licence notices" phase.`,
+        `  Check apple/Winter/project.yml's "Embed CEF + Chromium licence notices" phase.`,
     );
   }
   const bytes = statSync(p).size;
@@ -802,7 +803,7 @@ console.log("Licence notices verified in Contents/Resources/Licenses.");
 // 5. ditto zip for notarization submission.
 // ---------------------------------------------------------------------------
 console.log("Creating zip for notarization submission...");
-const zipPath = join(OUT, `Norma-${version}.zip`);
+const zipPath = join(OUT, `Winter-${version}.zip`);
 rmSync(zipPath, { force: true });
 sh(`ditto -c -k --sequesterRsrc --keepParent "${app}" "${zipPath}"`);
 
@@ -891,14 +892,14 @@ for (const op of dmgStagePlan(app)) {
   else symlinkSync(op.source, dest);
 }
 
-const dmgPath = join(OUT, `Norma-${version}.dmg`);
+const dmgPath = join(OUT, `Winter-${version}.dmg`);
 rmSync(dmgPath, { force: true });
 console.log("Creating DMG (hdiutil)...");
-sh(`hdiutil create -volname "Norma" -srcfolder "${dmgStage}" -ov -format UDZO "${dmgPath}"`);
+sh(`hdiutil create -volname "Winter" -srcfolder "${dmgStage}" -ov -format UDZO "${dmgPath}"`);
 
 console.log("Signing DMG...");
 sh(`codesign --sign "${SIGN_IDENTITY}" --timestamp "${dmgPath}"`);
-assertSigned(dmgPath, "Norma.dmg");
+assertSigned(dmgPath, "Winter.dmg");
 
 console.log("Submitting DMG for notarization (second submission this release; can take 1-15 minutes)...");
 const dmgSubmission = notarizeSubmit(dmgPath);
@@ -945,7 +946,7 @@ if (!existsSync(join(SPARKLE_TOOLS, "bin", "sign_update"))) {
 }
 const SIGN_UPDATE = join(SPARKLE_TOOLS, "bin", "sign_update");
 const GENERATE_KEYS = join(SPARKLE_TOOLS, "bin", "generate_keys");
-const DRY_RUN_TEST_KEY_ACCOUNT = "norma-release-dry-run-test";
+const DRY_RUN_TEST_KEY_ACCOUNT = "winter-release-dry-run-test";
 
 function signAppcastEnclosure(zipFile: string): { edSignature: string; length: number; testKey: boolean } {
   const hasProdKey = probe(`security find-generic-password -s "https://sparkle-project.org"`).ok;
@@ -1010,12 +1011,21 @@ function assertValidXml(xml: string, label: string) {
 // own tree-clean preflight. `appcastInsertPlan` (release-lib.ts, unit-tested) decides target +
 // action; only `preview` is ever actually written here — the `repo` write is deferred to the
 // publish tail below.
-const appcastPath = join(ROOT, "releases", "appcast.xml");
+//
+// P9b-9: this is the NEW Winter feed (`releases/winter/appcast.xml`), not the frozen `releases/
+// appcast.xml` (the pre-rename feed — byte-identical after 9b; its terminal entry is 9c's handoff
+// release, never written by this pipeline again).
+const appcastPath = join(ROOT, "releases", "winter", "appcast.xml");
+// Repo-relative form of appcastPath, used everywhere this script probes/stages/commits the
+// tracked file by path (git operates relative to ROOT) — computed once so the git-status probe,
+// `git add`, and the resume log all name the SAME (renamed) feed instead of the frozen
+// `releases/appcast.xml` (F1 fix-wave, P9b fix-wave item 1).
+const appcastRel = relative(ROOT, appcastPath);
 const appcastPreviewPath = join(OUT, "appcast-preview.xml");
 const appcastXml = readFileSync(appcastPath, "utf8");
 const item = appcastItem({
   version,
-  zipName: `Norma-${version}.zip`,
+  zipName: `Winter-${version}.zip`,
   edSignature: signResult.edSignature,
   length: signResult.length,
   beta: BETA,
@@ -1034,8 +1044,8 @@ if (appcastPlan.action === "insert") {
   assertValidXml(appcastPlan.updatedXml!, "appcast (with new item)");
 }
 if (appcastPlan.target === "preview") {
-  // --dry-run: releases/appcast.xml is NEVER touched (F1) — preview only, mirroring the cask's
-  // out/ render (section 11, below).
+  // --dry-run: releases/winter/appcast.xml (appcastPath) is NEVER touched (F1) — preview only,
+  // mirroring the cask's out/ render (section 11, below).
   if (appcastPlan.action === "insert") {
     writeFileSync(appcastPreviewPath, appcastPlan.updatedXml!);
     console.log(
@@ -1046,23 +1056,23 @@ if (appcastPlan.target === "preview") {
     console.log(`Appcast already carries ${version} — skipping insert (dry-run: ${appcastPath} NOT touched).`);
   }
 }
-// appcastPlan.target === "repo" (a real, non-dry-run run): the actual releases/appcast.xml
+// appcastPlan.target === "repo" (a real, non-dry-run run): the actual releases/winter/appcast.xml
 // write is deferred to the publish tail (section 12, inside `if (!DRY_RUN)`) — see F1 above.
 
 // ---------------------------------------------------------------------------
-// 11. Cask: render packaging/norma.rb.tmpl with this release's version/sha256(DMG)/url into
-//     out/release/<v>/norma.rb — per-release build output; only the .tmpl is committed.
+// 11. Cask: render packaging/winter.rb.tmpl with this release's version/sha256(DMG)/url into
+//     out/release/<v>/winter.rb — per-release build output; only the .tmpl is committed.
 // ---------------------------------------------------------------------------
 console.log("Rendering Homebrew cask...");
 const dmgSha256 = sh(`shasum -a 256 "${dmgPath}"`).trim().split(/\s+/)[0]!;
-const caskTmplPath = join(ROOT, "packaging", "norma.rb.tmpl");
+const caskTmplPath = join(ROOT, "packaging", "winter.rb.tmpl");
 const caskTmpl = readFileSync(caskTmplPath, "utf8");
 const caskRendered = caskFrom(caskTmpl, {
   version,
   sha256: dmgSha256,
-  url: `https://github.com/${GH_REPO}/releases/download/v${version}/Norma-${version}.dmg`,
+  url: `https://github.com/${GH_REPO}/releases/download/v${version}/Winter-${version}.dmg`,
 });
-const caskOutPath = join(OUT, "norma.rb");
+const caskOutPath = join(OUT, "winter.rb");
 writeFileSync(caskOutPath, caskRendered);
 console.log(`Cask rendered: ${caskOutPath} (sha256 ${dmgSha256})`);
 
@@ -1206,10 +1216,10 @@ sh(`git push origin v${version}`);
 
 if (guard.action === "publish") {
   console.log(`Publishing v${version}...`);
-  const notes = `Norma ${version}${BETA ? " (beta)" : ""}\n\nSigned Sparkle appcast entry: releases/appcast.xml.`;
+  const notes = `Winter ${version}${BETA ? " (beta)" : ""}\n\nSigned Sparkle appcast entry: ${appcastRel}.`;
   const notesPath = join(OUT, "release-notes.md");
   writeFileSync(notesPath, notes);
-  sh(`gh release create v${version} --title "Norma ${version}" --notes-file "${notesPath}" "${zipPath}" "${dmgPath}"`);
+  sh(`gh release create v${version} --title "Winter ${version}" --notes-file "${notesPath}" "${zipPath}" "${dmgPath}"`);
 } else {
   // guard.action === "resume": upload only whatever assets aren't already on the release.
   console.log(`Resuming publish of v${version}...`);
@@ -1228,7 +1238,7 @@ if (guard.action === "publish") {
   }
 }
 
-// Appcast write + commit+push. The actual releases/appcast.xml write lives HERE — inside
+// Appcast write + commit+push. The actual releases/winter/appcast.xml write lives HERE — inside
 // `!DRY_RUN`, past every abort/exit above (F1 fix, see section 10) — never earlier. Resume-safe
 // both ways: `appcastPlan.action === "skip"` means a prior attempt already wrote this version's
 // <item> (F2 fix — re-running never appends a duplicate), so nothing to write here either; the
@@ -1240,13 +1250,13 @@ if (appcastPlan.action === "insert") {
 } else {
   console.log(`Appcast already carries ${version} — skipping insert (resume-safe).`);
 }
-const appcastDirty = probe(`git status --porcelain -- releases/appcast.xml`).stdout.trim() !== "";
+const appcastDirty = probe(`git status --porcelain -- ${appcastRel}`).stdout.trim() !== "";
 if (appcastDirty) {
-  sh(`git add releases/appcast.xml`);
+  sh(`git add ${appcastRel}`);
   sh(`git commit -m "chore(releases): appcast entry for v${version}"`);
   sh(`git push`);
 } else {
-  console.log("  (resume) releases/appcast.xml already committed — nothing to do");
+  console.log(`  (resume) ${appcastRel} already committed — nothing to do`);
 }
 
 // Tag creation moved BEFORE `gh release create` (see comment there) — by this point the tag is

@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { ERR, SessionEvent, SESSION_TITLE_MAX_CHARS, type SyncConfigResult, type SyncHeadsResult, type SyncMemoryResult, type SyncPullParams, type SyncPullResult, type SyncPushParams, type SyncPushResult } from "@norma/protocol";
+import { ERR, SessionEvent, SESSION_TITLE_MAX_CHARS, type SyncConfigResult, type SyncHeadsResult, type SyncMemoryResult, type SyncPullParams, type SyncPullResult, type SyncPushParams, type SyncPushResult } from "@yanlinglabs/winter-protocol";
 import { resolveModelAlias } from "../agent/model-aliases";
 import { assistantMemoryDirFor } from "../agent/memory-dir";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
@@ -242,7 +242,7 @@ export interface SyncMetaEffortContext {
  *    * DROPPED, NOT FATAL, for exactly the model half's reason, and with the same non-destructive
  *      consequence: the batch lands in full and the column keeps whatever it had, so a bad push can
  *      never overwrite a good effort with a broken one.
- *    * A NORMA-LEVEL TIER IS ALWAYS DROPPED HERE, and this is the one rule stricter than
+ *    * A WINTER-LEVEL TIER IS ALWAYS DROPPED HERE, and this is the one rule stricter than
  *      `session.setEffort`'s. It is DERIVED, not invented: `sync.push` is chat-only fail-closed
  *      (this file's invariant 1 — every verb resolves the target's mode and refuses anything that
  *      isn't exactly "chat"), and a tier is code-sessions-only (`clientEffortEligible`,
@@ -284,7 +284,7 @@ export function validateSyncMeta(
       // dropped, and the override would be un-clearable through this surface.
       out.effort = null;
     } else if (isClientEffort(meta.effort)) {
-      effortCtx.onDroppedEffort?.(meta.effort, "a Norma-level tier, offered on code sessions only — sync.push is chat-only");
+      effortCtx.onDroppedEffort?.(meta.effort, "a Winter-level tier, offered on code sessions only — sync.push is chat-only");
     } else {
       // The pushed model wins; it landed in the same atomic `meta` and is already validated.
       const model = out.model ?? effortCtx.model ?? "";
@@ -617,7 +617,7 @@ export interface SyncConfigContext {
    *  string, never nullable (see `SyncConfigResult`'s own doc comment). */
   liveModel?(): string;
   /** The provider's live reasoning effort, off the SAME `live()` resolver `liveModel` reads (a
-   *  `LiveModelSelection` carries both) — so a `norma model --effort` edit is visible on the very
+   *  `LiveModelSelection` carries both) — so a `winter model --effort` edit is visible on the very
    *  next `sync.config` with no daemon restart, exactly like the model beside it.
    *
    *  Absent, or a resolved `undefined`, degrades to `""` — which is the honest report of an UNSET
@@ -676,13 +676,13 @@ export function effortsForModel(_modelId: string): string[] {
   return [...REASONING_EFFORTS];
 }
 
-/** The NORMA-LEVEL effort tiers this daemon offers (provider-correctness T5) — `sync.config`'s
+/** The WINTER-LEVEL effort tiers this daemon offers (provider-correctness T5) — `sync.config`'s
  *  `clientEfforts`, and the deliberate counterpart to `effortsForModel` above.
  *
  *  TWO FUNCTIONS, NEVER ONE. `effortsForModel` answers "what will the endpoint accept for this
  *  model" and is the SAME source `session.setEffort` validates a wire effort against — the identity
  *  that keeps the daemon from ever advertising something it refuses, or refusing something it
- *  advertises. This answers a different question: "what extra levels does NORMA offer, that it
+ *  advertises. This answers a different question: "what extra levels does WINTER offer, that it
  *  translates away before a request exists". Folding a tier into the first list would break that
  *  identity in the worst direction — the daemon would advertise `ultra` and then 400 on it, which
  *  is exactly the bug (a phone-side mock offering `ultra`) that the catalogue field was added to fix.
@@ -697,12 +697,12 @@ export function clientEfforts(): string[] {
 /** Everything a freshly-paired phone needs to run its OWN standalone chat (the `phone-always-local`
  *  design decision): the Exa key, the user's additions to the dangerous-domains list, the daemon's
  *  current default model and effort, and the provider's whole model catalogue. Every field is read
- *  HERE, at call time — nothing is cached across calls, so a Keychain rotation or a `norma model`
+ *  HERE, at call time — nothing is cached across calls, so a Keychain rotation or a `winter model`
  *  edit is visible on the very next `sync.config`, no daemon restart (the same "hot" contract every
  *  other settings-backed getter in this codebase already keeps).
  *
  *  "Hot" is exact about its scope (T3 review m2): the model/effort SELECTION re-reads settings.json
- *  every call, so `norma model … --effort …` lands with no restart. The CATALOGUE tracks the engine's
+ *  every call, so `winter model … --effort …` lands with no restart. The CATALOGUE tracks the engine's
  *  boot-bound provider instance — a settings.json edit that changes `provider.type` still needs a
  *  restart (providers/manager.ts says so), and until then this reports the old provider's lineup.
  *
@@ -732,7 +732,7 @@ export async function syncConfig(ctx: SyncConfigContext): Promise<SyncConfigResu
   const defaultEffort = ctx.liveEffort?.() ?? "";
   const models = (ctx.knownModels?.() ?? []).map((m) => ({ id: m.id, efforts: effortsForModel(m.id) }));
   // provider-correctness T5 — a SEPARATE field, never merged into `models[].efforts`. Not a
-  // per-model projection either: a tier is a Norma product decision with no API meaning, so it
+  // per-model projection either: a tier is a Winter product decision with no API meaning, so it
   // rides once for the whole daemon. Constant today; served rather than baked into the client for
   // the same reason the catalogue is — a tier the Mac stops offering must disappear from every
   // paired device on its next connect, with no app release.
@@ -796,14 +796,14 @@ function truncateUtf8(buf: Buffer, maxBytes: number): string {
  *  file already uses.
  *
  *  The errno CODE rides the message; the errno's own `message` does NOT, because it embeds the
- *  absolute path (`/Users/<name>/.norma/…`) and this error is serialized to a paired phone. The code
+ *  absolute path (`/Users/<name>/.winter/…`) and this error is serialized to a paired phone. The code
  *  alone is what makes the failure diagnosable. */
 function memoryReadFailure(code: string | undefined): SyncRpcError {
   return new SyncRpcError(ERR.INTERNAL, `sync.memory could not read the assistant memory bucket (${code ?? "unknown"})`);
 }
 
-export function syncMemory(normaHome: string, cursor: number): SyncMemoryResult {
-  const dir = assistantMemoryDirFor({ normaHome });
+export function syncMemory(winterHome: string, cursor: number): SyncMemoryResult {
+  const dir = assistantMemoryDirFor({ winterHome });
   let names: string[];
   try {
     names = readdirSync(dir, { withFileTypes: true })

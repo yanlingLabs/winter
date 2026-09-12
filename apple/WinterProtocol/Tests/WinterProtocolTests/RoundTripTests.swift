@@ -1,0 +1,385 @@
+import XCTest
+@testable import WinterProtocol
+
+final class RoundTripTests: XCTestCase {
+    func fixtureURLs() throws -> [URL] {
+        let urls = Bundle.module.urls(forResourcesWithExtension: "json", subdirectory: "Fixtures") ?? []
+        XCTAssertEqual(urls.count, 69, "expected 69 fixtures — regenerate via pnpm protocol:generate")
+        return urls
+    }
+
+    /// Gate (c): every TS-generated fixture decodes, re-encodes, and decodes to an equal value.
+    func testAllFixturesRoundTrip() throws {
+        for url in try fixtureURLs() {
+            let data = try Data(contentsOf: url)
+            let decoded = try JSONDecoder().decode(SessionEvent.self, from: data)
+            let reencoded = try JSONEncoder().encode(decoded)
+            let redecoded = try JSONDecoder().decode(SessionEvent.self, from: reencoded)
+            XCTAssertEqual(decoded, redecoded, "round-trip mismatch for \(url.lastPathComponent)")
+
+            let obj = try JSONSerialization.jsonObject(with: reencoded) as? [String: Any]
+            XCTAssertNotNil(obj?["type"] as? String, "re-encoded JSON lost the type discriminator for \(url.lastPathComponent)")
+        }
+    }
+
+    func testUnknownDiscriminatorFailsLoudly() throws {
+        let bad = #"{"type":"mystery","seq":1,"sessionId":"s","ts":0}"#.data(using: .utf8)!
+        XCTAssertThrowsError(try JSONDecoder().decode(SessionEvent.self, from: bad))
+    }
+
+    func testThreadStartedDescriptionOptional() throws {
+        let with = #"{"type":"thread_started","seq":9,"sessionId":"s","ts":5,"threadId":"th_1","parentThreadId":"main","agentType":"general-purpose","prompt":"go","description":"explore auth module"}"#
+        guard case .threadStarted(let v) = try JSONDecoder().decode(SessionEvent.self, from: Data(with.utf8)) else { return XCTFail() }
+        XCTAssertEqual(v.description, "explore auth module")
+
+        let without = #"{"type":"thread_started","seq":9,"sessionId":"s","ts":5,"threadId":"th_1","parentThreadId":"main","agentType":"general-purpose","prompt":"go"}"#
+        guard case .threadStarted(let v2) = try JSONDecoder().decode(SessionEvent.self, from: Data(without.utf8)) else { return XCTFail() }
+        XCTAssertNil(v2.description)
+    }
+
+    /// Task-graph fields (4h-ii-d, CC parity) — additive guarantee both directions: a payload
+    /// WITH owner/blocks/blockedBy/metadata decodes and re-encodes losslessly (via the
+    /// TS-generated `task_with_graph_fields.json` fixture, synced from packages/protocol), and
+    /// the OLD-shape `task_updated.json` fixture (predates these fields) still decodes with all
+    /// four nil — mirrors `testThreadStartedDescriptionOptional`'s with/without pattern above.
+    func testTaskGraphFieldsOptional() throws {
+        guard let withURL = Bundle.module.url(forResource: "task_with_graph_fields", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing task_with_graph_fields.json fixture")
+        }
+        let withData = try Data(contentsOf: withURL)
+        guard case .taskUpdated(let with) = try JSONDecoder().decode(SessionEvent.self, from: withData) else { return XCTFail() }
+        XCTAssertEqual(with.task.owner, "researcher")
+        XCTAssertEqual(with.task.blocks, ["5", "6"])
+        XCTAssertEqual(with.task.blockedBy, ["2"])
+        XCTAssertEqual(with.task.metadata?["priority"], .string("high"))
+        XCTAssertEqual(with.task.metadata?["sprint"], .number(12))
+
+        let reencoded = try JSONEncoder().encode(SessionEvent.taskUpdated(with))
+        guard case .taskUpdated(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(with, redecoded)
+
+        guard let withoutURL = Bundle.module.url(forResource: "task_updated", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing task_updated.json fixture")
+        }
+        let withoutData = try Data(contentsOf: withoutURL)
+        guard case .taskUpdated(let without) = try JSONDecoder().decode(SessionEvent.self, from: withoutData) else { return XCTFail() }
+        XCTAssertNil(without.task.owner)
+        XCTAssertNil(without.task.blocks)
+        XCTAssertNil(without.task.blockedBy)
+        XCTAssertNil(without.task.metadata)
+    }
+
+    /// Winter Phase 8c (P8c-5) — the runtime-annotation fields on `session_created` are additive/
+    /// optional, same with/without pattern as `testTaskGraphFieldsOptional` above: the (now
+    /// extended) `session_created.json` fixture carries all three, and the untouched
+    /// `session_created_with_mode.json` fixture (predates them) still decodes with all three nil.
+    func testSessionCreatedRuntimeAnnotationOptional() throws {
+        guard let withURL = Bundle.module.url(forResource: "session_created", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing session_created.json fixture")
+        }
+        let withData = try Data(contentsOf: withURL)
+        guard case .sessionCreated(let with) = try JSONDecoder().decode(SessionEvent.self, from: withData) else { return XCTFail() }
+        XCTAssertEqual(with.runtimeKind, "winter-agent")
+        XCTAssertEqual(with.providerId, "openai")
+        XCTAssertEqual(with.modelRef, "gpt-5.6-sol")
+
+        let reencoded = try JSONEncoder().encode(SessionEvent.sessionCreated(with))
+        guard case .sessionCreated(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(with, redecoded)
+
+        guard let withoutURL = Bundle.module.url(forResource: "session_created_with_mode", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing session_created_with_mode.json fixture")
+        }
+        let withoutData = try Data(contentsOf: withoutURL)
+        guard case .sessionCreated(let without) = try JSONDecoder().decode(SessionEvent.self, from: withoutData) else { return XCTFail() }
+        XCTAssertNil(without.runtimeKind)
+        XCTAssertNil(without.providerId)
+        XCTAssertNil(without.modelRef)
+    }
+
+    /// Phase 5e T1 (reviewer maturity — the WinterKit-trap task): the NEW `tool_review` variant
+    /// decodes with its verdict/toolName/reason/summary intact — this is what proves the exhaustive
+    /// switches + codec were actually synced, not just that the union compiles.
+    func testToolReviewDecodes() throws {
+        guard let url = Bundle.module.url(forResource: "tool_review", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing tool_review.json fixture")
+        }
+        let data = try Data(contentsOf: url)
+        guard case .toolReview(let v) = try JSONDecoder().decode(SessionEvent.self, from: data) else { return XCTFail() }
+        XCTAssertEqual(v.toolName, "bash")
+        XCTAssertEqual(v.verdict, "unsafe")
+        XCTAssertFalse(v.reason.isEmpty)
+        XCTAssertFalse(v.summary.isEmpty)
+    }
+
+    /// Phase 5e T1: `approval_requested.reviewerReason` is additive/optional — mirrors
+    /// `testThreadStartedDescriptionOptional`/`testTaskGraphFieldsOptional`'s with/without pattern,
+    /// via the TS-generated `approval_requested_with_reviewer_reason.json` fixture (present) vs the
+    /// pre-existing `approval_requested.json` (predates this field, absent).
+    func testApprovalRequestedReviewerReasonOptional() throws {
+        guard let withURL = Bundle.module.url(forResource: "approval_requested_with_reviewer_reason", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing approval_requested_with_reviewer_reason.json fixture")
+        }
+        let withData = try Data(contentsOf: withURL)
+        guard case .approvalRequested(let with) = try JSONDecoder().decode(SessionEvent.self, from: withData) else { return XCTFail() }
+        XCTAssertEqual(with.reviewerReason, "recursive delete outside the session cwd")
+
+        guard let withoutURL = Bundle.module.url(forResource: "approval_requested", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing approval_requested.json fixture")
+        }
+        let withoutData = try Data(contentsOf: withoutURL)
+        guard case .approvalRequested(let without) = try JSONDecoder().decode(SessionEvent.self, from: withoutData) else { return XCTFail() }
+        XCTAssertNil(without.reviewerReason)
+    }
+
+    /// task-16 (Stalled roster verb, CC-parity follow-up): `ThreadCompleted.stopReason` is a plain
+    /// `String` (not a Swift enum) — see this struct's own field in SessionEvent.swift — so adding
+    /// the new "stalled" wire value needs no case addition and breaks no exhaustive switch. This
+    /// proves the new VALUE decodes intact via the TS-generated `thread_completed_stalled.json`
+    /// fixture (testAllFixturesRoundTrip above already covers its generic round-trip; this asserts
+    /// the specific stopReason content, mirroring testToolReviewDecodes' new-variant pattern
+    /// adapted for a new-value-not-variant case).
+    func testThreadCompletedStalledDecodes() throws {
+        guard let url = Bundle.module.url(forResource: "thread_completed_stalled", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing thread_completed_stalled.json fixture")
+        }
+        let data = try Data(contentsOf: url)
+        guard case .threadCompleted(let v) = try JSONDecoder().decode(SessionEvent.self, from: data) else { return XCTFail() }
+        XCTAssertEqual(v.stopReason, "stalled")
+    }
+
+    /// task-30 (push-notification track — the final CC-parity tool item, and another
+    /// WinterKit-trap task like `tool_review` above): the NEW `notification_requested` variant
+    /// decodes with its title/message intact — proves the exhaustive switches + codec were synced.
+    func testNotificationRequestedDecodes() throws {
+        guard let url = Bundle.module.url(forResource: "notification_requested", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing notification_requested.json fixture")
+        }
+        let data = try Data(contentsOf: url)
+        guard case .notificationRequested(let v) = try JSONDecoder().decode(SessionEvent.self, from: data) else { return XCTFail() }
+        XCTAssertEqual(v.title, "Winter")
+        XCTAssertFalse(v.message.isEmpty)
+    }
+
+    /// followups T3 (ChatEngine as a second `turn_completed` producer): `contextTokens` is
+    /// additive/optional — mirrors `testThreadStartedDescriptionOptional`'s with/without pattern.
+    /// Fix-round-1 (review): the "with" half now loads the TS-generated
+    /// `turn_completed_with_contextTokens.json` fixture (`packages/protocol/scripts/generate.ts`)
+    /// rather than a hand-written JSON literal — a literal ties nothing to the TS schema, so a
+    /// future rename/drift there would leave this test green while a real daemon-emitted event
+    /// silently stopped matching. `inputTokens` (900) deliberately != `contextTokens` (300) in that
+    /// fixture, so it encodes the max-not-sum distinction, not just a present/absent one. The
+    /// "without" half re-uses the pre-existing `turn_completed.json` fixture to prove an OLDER
+    /// event (predating this field) still decodes.
+    func testTurnCompletedContextTokensOptional() throws {
+        guard let withURL = Bundle.module.url(forResource: "turn_completed_with_contextTokens", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing turn_completed_with_contextTokens.json fixture")
+        }
+        let withData = try Data(contentsOf: withURL)
+        guard case .turnCompleted(let v) = try JSONDecoder().decode(SessionEvent.self, from: withData) else { return XCTFail() }
+        XCTAssertEqual(v.contextTokens, 300)
+        XCTAssertEqual(v.inputTokens, 900, "inputTokens keeps its billing (summed) meaning — untouched by this field")
+
+        // Round-trips losslessly: re-encoding a present contextTokens must not drop it.
+        let reencoded = try JSONEncoder().encode(SessionEvent.turnCompleted(v))
+        guard case .turnCompleted(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(v, redecoded)
+        let obj = try JSONSerialization.jsonObject(with: reencoded) as? [String: Any]
+        XCTAssertEqual((obj?["contextTokens"] as? NSNumber)?.intValue, 300)
+
+        guard let withoutURL = Bundle.module.url(forResource: "turn_completed", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing turn_completed.json fixture")
+        }
+        let withoutData = try Data(contentsOf: withoutURL)
+        guard case .turnCompleted(let without) = try JSONDecoder().decode(SessionEvent.self, from: withoutData) else { return XCTFail() }
+        XCTAssertNil(without.contextTokens)
+        // Re-encoding an ABSENT contextTokens must not invent the key (encodeIfPresent semantics) —
+        // load-bearing for byte-verbatim replication of an older/absent-field event.
+        let withoutReencoded = try JSONEncoder().encode(SessionEvent.turnCompleted(without))
+        let withoutObj = try JSONSerialization.jsonObject(with: withoutReencoded) as? [String: Any]
+        XCTAssertNil(withoutObj?["contextTokens"], "an absent contextTokens must stay absent on re-encode")
+    }
+
+    /// SP-approvals T4: `approval_requested.options` is additive/optional — mirrors
+    /// `testApprovalRequestedReviewerReasonOptional`'s with/without pattern, via the TS-generated
+    /// `approval_requested_with_options.json` fixture (present, one rule-bearing option + one bare
+    /// allow_once option) vs. the pre-existing `approval_requested.json` (predates this field,
+    /// absent). Checks CONTENT, not just the fixture-count tripwire above — proves `ApprovalOption`
+    /// decodes id/label/rule/scope correctly, not merely that the union still compiles.
+    func testApprovalRequestedOptionsOptional() throws {
+        guard let withURL = Bundle.module.url(forResource: "approval_requested_with_options", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing approval_requested_with_options.json fixture")
+        }
+        let withData = try Data(contentsOf: withURL)
+        guard case .approvalRequested(let with) = try JSONDecoder().decode(SessionEvent.self, from: withData) else { return XCTFail() }
+        guard let options = with.options else { return XCTFail("expected options to be present") }
+        XCTAssertEqual(options.count, 2)
+        XCTAssertEqual(options[0], SessionEvent.ApprovalOption(id: "allow_once", label: "Allow once", rule: nil, scope: nil))
+        XCTAssertEqual(options[1], SessionEvent.ApprovalOption(id: "allow_project", label: "Always allow \"git push\" in this project", rule: "Bash(git push:*)", scope: "project"))
+
+        let reencoded = try JSONEncoder().encode(SessionEvent.approvalRequested(with))
+        guard case .approvalRequested(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(with, redecoded)
+
+        guard let withoutURL = Bundle.module.url(forResource: "approval_requested", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing approval_requested.json fixture")
+        }
+        let withoutData = try Data(contentsOf: withoutURL)
+        guard case .approvalRequested(let without) = try JSONDecoder().decode(SessionEvent.self, from: withoutData) else { return XCTFail() }
+        XCTAssertNil(without.options)
+    }
+
+    /// B2 Task 2: `panel_command.args` is additive/optional, and the fixture-count tripwire above
+    /// CANNOT catch a mirror that forgot it — an unknown JSON key is dropped on decode and not
+    /// re-encoded, so `testAllFixturesRoundTrip`'s decoded == redecoded assertion holds perfectly
+    /// while the payload is silently lost. (Verified, not assumed: with `args` missing from
+    /// `PanelCommand`, that test failed on the COUNT alone and passed every round-trip.) This one
+    /// checks CONTENT, the `testApprovalRequestedOptionsOptional` pattern one method up.
+    func testPanelCommandArgsDecodeOpaquely() throws {
+        guard let withURL = Bundle.module.url(forResource: "panel_command_type", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing panel_command_type.json fixture")
+        }
+        guard case .panelCommand(let with) = try JSONDecoder().decode(SessionEvent.self, from: try Data(contentsOf: withURL)) else { return XCTFail() }
+        XCTAssertEqual(with.action, "type")
+        XCTAssertEqual(with.args?["selector"], .string("#search"))
+        XCTAssertEqual(with.args?["text"], .string("winter"))
+        XCTAssertEqual(with.deadlineMs, 15000)
+
+        let reencoded = try JSONEncoder().encode(SessionEvent.panelCommand(with))
+        guard case .panelCommand(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(with, redecoded)
+        XCTAssertEqual(redecoded.args?.count, 2, "args must survive a re-encode, not just a decode")
+
+        // The other direction: a verb with no payload (and the whole Plan A-era shape) still decodes.
+        guard let withoutURL = Bundle.module.url(forResource: "panel_command_back", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing panel_command_back.json fixture")
+        }
+        guard case .panelCommand(let without) = try JSONDecoder().decode(SessionEvent.self, from: try Data(contentsOf: withoutURL)) else { return XCTFail() }
+        XCTAssertNil(without.args)
+        XCTAssertNil(without.url)
+        XCTAssertEqual(without.action, "back")
+    }
+
+    /// B2 Task 2 — THE TOLERANCE STORY, pinned where it actually lives: `PanelCommand.action` is a
+    /// plain `String` (SessionEvent.swift), so a verb this build has never heard of decodes rather
+    /// than throwing. That matters because the TS `action` enum grows over time and the Mac app is
+    /// released separately from the daemon; WinterKit's own half of the story (a decode failure
+    /// degrades to `.unknownEvent` instead of killing the stream — `parseServerLine`, wrapped in
+    /// `try?`) is pinned in `ServerMessageTests`. Layer 2 protects the connection; only this layer
+    /// protects the command itself.
+    func testUnknownPanelCommandVerbStillDecodes() throws {
+        // `##"…"##`, not `#"…"#`: the payload contains a CSS id selector, and the two characters
+        // `"#` would otherwise close a single-pound raw string mid-literal.
+        let future = ##"{"type":"panel_command","seq":3,"sessionId":"s1","ts":0,"commandId":"c9","tabId":"t1","action":"drag","args":{"from":"#a"},"deadlineMs":5000}"##
+        guard case .panelCommand(let v) = try JSONDecoder().decode(SessionEvent.self, from: Data(future.utf8)) else {
+            return XCTFail("an unknown verb must decode — a Swift enum here would drop the command")
+        }
+        XCTAssertEqual(v.action, "drag")
+        XCTAssertEqual(v.args?["from"], .string("#a"))
+    }
+
+    /// office-agent-tools T1 — the first OFFICE verb on the wire, decoded through the exact same
+    /// `PanelCommand` type the browser verbs above use. This is the evidence for T1's no-kit-tag
+    /// claim, made concrete rather than argued from the type declaration alone: a namespaced action
+    /// string (`office.sheets.read`) this build's Swift source has never spelled out ANYWHERE decodes
+    /// with no `WinterProtocol` change, for the identical reason `testUnknownPanelCommandVerbStillDecodes`
+    /// above already proves for `"drag"` — `PanelCommand.action` stayed a plain `String` through B2's
+    /// own 1-to-9 verb growth (its own doc comment: "this type deliberately did not have to change for
+    /// it"), and T1 spends exactly that design margin rather than extending it.
+    ///
+    /// The second fact this fixture is the ONLY one that pins: `tabId` absent. Every browser
+    /// `panel_command` fixture carries one; an office command addresses a document by `path` (in
+    /// `args`), not an existing panel tab (design doc §3) — so this is also live proof that
+    /// `PanelCommand.tabId` staying optional (unchanged by this task) was the right call, not merely
+    /// a convenient one.
+    func testOfficeVerbDecodesWithNoProtocolChange() throws {
+        guard let url = Bundle.module.url(forResource: "panel_command_office", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing panel_command_office.json fixture")
+        }
+        guard case .panelCommand(let v) = try JSONDecoder().decode(SessionEvent.self, from: try Data(contentsOf: url)) else {
+            return XCTFail("an office verb must decode through the same PanelCommand type as a browser verb")
+        }
+        XCTAssertEqual(v.action, "office.sheets.read")
+        XCTAssertNil(v.tabId, "an office command addresses a document by path, not an existing tab")
+        XCTAssertEqual(v.args?["path"], .string("/tmp/fixture.ods"))
+        XCTAssertEqual(v.args?["sheet"], .string("Sheet1"))
+        XCTAssertEqual(v.args?["range"], .string("A1:B2"))
+        XCTAssertEqual(v.deadlineMs, 35000)
+
+        let reencoded = try JSONEncoder().encode(SessionEvent.panelCommand(v))
+        guard case .panelCommand(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(v, redecoded)
+        XCTAssertEqual(redecoded.args?.count, 3, "args must survive a re-encode, not just a decode")
+    }
+
+    /// diff-tabs T4: `tool_result.fileDiff` is additive/optional — mirrors
+    /// `testTurnCompletedContextTokensOptional`'s with/without + absent-stays-absent pattern, via
+    /// the TS-generated `tool_result_with_file_diff.json` fixture (present) vs. the pre-existing
+    /// `tool_result.json` (predates this field, absent). Checks CONTENT, not just the fixture-count
+    /// tripwire above — proves `FileDiffSummary` decodes path/added/removed/diffId correctly, not
+    /// merely that the struct compiles.
+    func testToolResultFileDiffOptional() throws {
+        guard let withURL = Bundle.module.url(forResource: "tool_result_with_file_diff", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing tool_result_with_file_diff.json fixture")
+        }
+        let withData = try Data(contentsOf: withURL)
+        guard case .toolResult(let with) = try JSONDecoder().decode(SessionEvent.self, from: withData) else { return XCTFail() }
+        XCTAssertEqual(with.fileDiff, SessionEvent.FileDiffSummary(path: "/tmp/fixture.swift", added: 198, removed: 33, diffId: "d1f2e3"))
+
+        // Round-trips losslessly: re-encoding a present fileDiff must not drop it.
+        let reencoded = try JSONEncoder().encode(SessionEvent.toolResult(with))
+        guard case .toolResult(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(with, redecoded)
+        let obj = try JSONSerialization.jsonObject(with: reencoded) as? [String: Any]
+        XCTAssertEqual((obj?["fileDiff"] as? [String: Any])?["diffId"] as? String, "d1f2e3")
+
+        guard let withoutURL = Bundle.module.url(forResource: "tool_result", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing tool_result.json fixture")
+        }
+        let withoutData = try Data(contentsOf: withoutURL)
+        guard case .toolResult(let without) = try JSONDecoder().decode(SessionEvent.self, from: withoutData) else { return XCTFail() }
+        XCTAssertNil(without.fileDiff)
+        // Re-encoding an ABSENT fileDiff must not invent the key (encodeIfPresent semantics) —
+        // load-bearing for byte-verbatim replication of an older/absent-field event.
+        let withoutReencoded = try JSONEncoder().encode(SessionEvent.toolResult(without))
+        let withoutObj = try JSONSerialization.jsonObject(with: withoutReencoded) as? [String: Any]
+        XCTAssertNil(withoutObj?["fileDiff"], "an absent fileDiff must stay absent on re-encode")
+    }
+
+    /// diff-tabs T4: `PanelTabKind.diff` is a NEW ENUM CASE (not just a new field) on the wire's
+    /// CLOSED panel-tab-kind enum — this proves the mirror actually added the case with the right
+    /// content, mirroring `testToolReviewDecodes`'s new-variant-content-check style adapted for a
+    /// new-case-not-variant change (`testAllFixturesRoundTrip` above already proves it decodes at
+    /// all — a missing case fails that test's decode, loudly). `panel_tab_opened.diffId` is
+    /// additive/optional alongside it — with/without via the TS-generated `panel_tab_opened_diff
+    /// .json` fixture vs. the pre-existing `panel_tab_opened.json` (predates both, kind stays
+    /// `.web`, diffId absent).
+    func testPanelTabOpenedDiffKindAndDiffIdOptional() throws {
+        guard let withURL = Bundle.module.url(forResource: "panel_tab_opened_diff", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing panel_tab_opened_diff.json fixture")
+        }
+        let withData = try Data(contentsOf: withURL)
+        guard case .panelTabOpened(let with) = try JSONDecoder().decode(SessionEvent.self, from: withData) else { return XCTFail() }
+        XCTAssertEqual(with.kind, .diff)
+        XCTAssertEqual(with.diffId, "d1f2e3")
+
+        let reencoded = try JSONEncoder().encode(SessionEvent.panelTabOpened(with))
+        guard case .panelTabOpened(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }
+        XCTAssertEqual(with, redecoded)
+        let obj = try JSONSerialization.jsonObject(with: reencoded) as? [String: Any]
+        XCTAssertEqual(obj?["kind"] as? String, "diff")
+        XCTAssertEqual(obj?["diffId"] as? String, "d1f2e3")
+
+        guard let withoutURL = Bundle.module.url(forResource: "panel_tab_opened", withExtension: "json", subdirectory: "Fixtures") else {
+            return XCTFail("missing panel_tab_opened.json fixture")
+        }
+        let withoutData = try Data(contentsOf: withoutURL)
+        guard case .panelTabOpened(let without) = try JSONDecoder().decode(SessionEvent.self, from: withoutData) else { return XCTFail() }
+        XCTAssertEqual(without.kind, .web)
+        XCTAssertNil(without.diffId)
+        // Re-encoding an ABSENT diffId must not invent the key (encodeIfPresent semantics).
+        let withoutReencoded = try JSONEncoder().encode(SessionEvent.panelTabOpened(without))
+        let withoutObj = try JSONSerialization.jsonObject(with: withoutReencoded) as? [String: Any]
+        XCTAssertNil(withoutObj?["diffId"], "an absent diffId must stay absent on re-encode")
+    }
+}

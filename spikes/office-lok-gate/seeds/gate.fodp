@@ -17,7 +17,7 @@
       <draw:page draw:name="Slide1">
         <draw:rect draw:style-name="GateRect" svg:x="1cm" svg:y="1cm" svg:width="8cm" svg:height="4cm">
           <draw:text-box>
-            <text:p>NORMA GATE</text:p>
+            <text:p>WINTER GATE</text:p>
           </draw:text-box>
         </draw:rect>
       </draw:page>

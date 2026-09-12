@@ -207,10 +207,10 @@ export function setSessionDirs(
 }
 
 /**
- * T5's write-hook lock marker (design doc §1: "each entry locks independently the moment Norma
+ * T5's write-hook lock marker (design doc §1: "each entry locks independently the moment Winter
  * successfully writes inside it"). Idempotent both ways — an absent path or an already-locked entry
  * is a silent no-op, never a throw — because the caller is a write hook firing on every successful
- * write, not a user action: a write landing in a directory Norma has already locked (the common
+ * write, not a user action: a write landing in a directory Winter has already locked (the common
  * case — most writes land in an already-active root) must cost nothing and never surface an error
  * the write itself didn't have.
  *

@@ -1,10 +1,10 @@
 /** Phase 3d Task 1 — the pure in-chat slash-command registry + runners. Each runner mirrors ONE
  *  main.ts subcommand route's client calls + output wording (cited in commands.ts per-runner);
- *  this file drives them through a fake `NormaClient` that only records calls + returns canned
+ *  this file drives them through a fake `WinterClient` that only records calls + returns canned
  *  results, following app.test.tsx's `fakeClient()` precedent (recorded calls array, no real I/O)
  *  — except `/model`, which (like its main.ts route) never touches the client at all: it reads/
- *  writes `settings.json` directly under `NORMA_HOME` (an env var this suite points at a tmpdir
- *  per test so it never touches the real `~/.norma`). */
+ *  writes `settings.json` directly under `WINTER_HOME` (an env var this suite points at a tmpdir
+ *  per test so it never touches the real `~/.winter`). */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -17,12 +17,12 @@ import {
 import type { ChoiceRequest } from "../../src/tui/choice-menu";
 import { formatRoutineLine } from "../../src/routines-cli";
 import { formatMemoryList } from "../../src/memory-cli";
-import type { NormaClient } from "../../src/client";
+import type { WinterClient } from "../../src/client";
 
 // ---- fake client (mirrors test/tui/app.test.tsx's fakeClient — recorded calls, canned results) ----
 type Impl = Record<string, (...args: unknown[]) => unknown>;
 
-function makeClient(impl: Impl): { client: NormaClient; calls: { method: string; args: unknown[] }[] } {
+function makeClient(impl: Impl): { client: WinterClient; calls: { method: string; args: unknown[] }[] } {
   const calls: { method: string; args: unknown[] }[] = [];
   const client: Record<string, unknown> = {};
   for (const [name, fn] of Object.entries(impl)) {
@@ -31,10 +31,10 @@ function makeClient(impl: Impl): { client: NormaClient; calls: { method: string;
       return Promise.resolve(fn(...args));
     };
   }
-  return { client: client as unknown as NormaClient, calls };
+  return { client: client as unknown as WinterClient, calls };
 }
 
-function makeCtx(client: NormaClient, overrides: Partial<Omit<CommandCtx, "client" | "appendNote">> = {}) {
+function makeCtx(client: WinterClient, overrides: Partial<Omit<CommandCtx, "client" | "appendNote">> = {}) {
   const notes: string[] = [];
   const ctx: CommandCtx = {
     client,
@@ -171,7 +171,7 @@ describe("runners — mirror main.ts's routes", () => {
     const { ctx, notes } = makeCtx(client);
     await runCommand(ctx, "/status");
     expect(calls).toEqual([{ method: "daemonStatus", args: [] }]);
-    expect(notes[0]).toContain("norma-core v0.0.1");
+    expect(notes[0]).toContain("winter-core v0.0.1");
     expect(notes[0]).toContain("1m 1s");
     expect(notes[0]).toContain("(none configured)");
     expect(notes[0]).toContain("sessions: 2");
@@ -224,7 +224,7 @@ describe("runners — mirror main.ts's routes", () => {
   });
 
   // Plan-immunity Task 2: the TUI is CODE-ONLY (mode×surface matrix) — /sessions is the resume
-  // PICKER, so it HIDES non-code rows entirely rather than marking them (contrast `norma sessions`,
+  // PICKER, so it HIDES non-code rows entirely rather than marking them (contrast `winter sessions`,
   // a plain inventory — see session-mode.ts's file doc). Absent mode = code (the R-slice
   // convention); "code" explicit also counts.
   test("/sessions — hides chat/dispatch/cowork rows, keeps absent-mode and explicit-code rows", async () => {
@@ -443,7 +443,7 @@ describe("runners — mirror main.ts's routes", () => {
     expect(notes).toEqual(["(no memory facts)"]);
   });
 
-  // CC-parity phase 3 (Workflows) Track C Task C4: /workflows mirrors `norma workflow`'s CLI shape
+  // CC-parity phase 3 (Workflows) Track C Task C4: /workflows mirrors `winter workflow`'s CLI shape
   // (main.ts `case "workflow"`, C3) — no-arg lists saved (WorkflowStore, via workflowList's
   // `.saved`) then running (`.running`) under a "running:" header; `run <name> [json]` / `stop
   // <runId>` mirror /bg's sub-token dispatch, forwarding to client.workflowRun/workflowStop.
@@ -803,20 +803,20 @@ describe("runCommand — saved-workflow /name dispatch (CC-parity phase 3 Track 
   });
 });
 
-describe("/model — mirrors `case \"model\"` (direct settings.json I/O under NORMA_HOME, no client)", () => {
+describe("/model — mirrors `case \"model\"` (direct settings.json I/O under WINTER_HOME, no client)", () => {
   let home: string;
   let prevHome: string | undefined;
 
   beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), "norma-cli-cmd-model-"));
+    home = mkdtempSync(join(tmpdir(), "winter-cli-cmd-model-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } }));
-    prevHome = process.env.NORMA_HOME;
-    process.env.NORMA_HOME = home;
+    prevHome = process.env.WINTER_HOME;
+    process.env.WINTER_HOME = home;
   });
 
   afterEach(() => {
-    if (prevHome === undefined) delete process.env.NORMA_HOME;
-    else process.env.NORMA_HOME = prevHome;
+    if (prevHome === undefined) delete process.env.WINTER_HOME;
+    else process.env.WINTER_HOME = prevHome;
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -911,15 +911,15 @@ describe("B2 — /model (no args) opens the model picker when openChoice is wire
   let prevHome: string | undefined;
 
   beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), "norma-cli-cmd-choice-"));
+    home = mkdtempSync(join(tmpdir(), "winter-cli-cmd-choice-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } }));
-    prevHome = process.env.NORMA_HOME;
-    process.env.NORMA_HOME = home;
+    prevHome = process.env.WINTER_HOME;
+    process.env.WINTER_HOME = home;
   });
 
   afterEach(() => {
-    if (prevHome === undefined) delete process.env.NORMA_HOME;
-    else process.env.NORMA_HOME = prevHome;
+    if (prevHome === undefined) delete process.env.WINTER_HOME;
+    else process.env.WINTER_HOME = prevHome;
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -992,15 +992,15 @@ describe("B2 — /output-style (no args) opens the style picker when openChoice 
   let prevHome: string | undefined;
 
   beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), "norma-cli-cmd-style-choice-"));
+    home = mkdtempSync(join(tmpdir(), "winter-cli-cmd-style-choice-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } }));
-    prevHome = process.env.NORMA_HOME;
-    process.env.NORMA_HOME = home;
+    prevHome = process.env.WINTER_HOME;
+    process.env.WINTER_HOME = home;
   });
 
   afterEach(() => {
-    if (prevHome === undefined) delete process.env.NORMA_HOME;
-    else process.env.NORMA_HOME = prevHome;
+    if (prevHome === undefined) delete process.env.WINTER_HOME;
+    else process.env.WINTER_HOME = prevHome;
     rmSync(home, { recursive: true, force: true });
   });
 

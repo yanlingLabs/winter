@@ -37,13 +37,13 @@ function goodVersionsJson(overrides: Partial<Record<string, unknown>> = {}): str
   });
 }
 
-/** Builds `<resources>/norma-core` + `<resources>/runtimes/{winter,claude-official/{claude,VERSIONS.json}}`
- *  under a fresh mkdtemp "Resources" dir, returns the `execPath` (the `norma-core` path) a real
+/** Builds `<resources>/winter-core` + `<resources>/runtimes/{winter,claude-official/{claude,VERSIONS.json}}`
+ *  under a fresh mkdtemp "Resources" dir, returns the `execPath` (the `winter-core` path) a real
  *  daemon would report. `claude` is a REAL executable shell script (the probe spawns it for
  *  `--version`); `winter` is a plain chmod'd file (the probe must never spawn it). */
 function bundleFixture(opts: { versionsJson?: string | null } = {}): { execPath: string; resources: string } {
   const resources = tempDir("runtimes-probe-resources-");
-  const execPath = join(resources, "norma-core");
+  const execPath = join(resources, "winter-core");
   writeFileSync(execPath, "not a real daemon\n");
   const runtimesDir = join(resources, "runtimes");
   const claudeDir = join(runtimesDir, "claude-official");
@@ -83,7 +83,7 @@ describe("runRuntimesProbe (P8d-1 bundle layout, real fs, no daemon)", () => {
     // (`verify-runtimes-compiled.ts`) is what asserts `source === "bundle"` for both — there is no
     // `node_modules` inside `$bunfs` for the package door to find anything through.
     const home = tempDir("runtimes-probe-home-empty-");
-    const execPath = join(tempDir("runtimes-probe-resources-empty-"), "norma-core");
+    const execPath = join(tempDir("runtimes-probe-resources-empty-"), "winter-core");
     // P9a fix wave, M1 collateral: never depend on this tree's ambient node_modules (m1's
     // local-pack residue) for a test titled "nothing staged anywhere" — inject the miss.
     const result = await runRuntimesProbe({ execPath, home, env: {}, resolvePlatformPackageBin: () => undefined });
@@ -106,7 +106,7 @@ describe("runRuntimesProbe (P8d-1 bundle layout, real fs, no daemon)", () => {
     mkdirSync(join(home, "runtimes", "bin"), { recursive: true });
     writeFileSync(join(home, "runtimes", "bin", "winter"), "fake\n");
     chmodSync(join(home, "runtimes", "bin", "winter"), 0o755);
-    const execPath = join(tempDir("runtimes-probe-resources-homewinter-"), "norma-core");
+    const execPath = join(tempDir("runtimes-probe-resources-homewinter-"), "winter-core");
 
     const result = await runRuntimesProbe({ execPath, home, env: {} });
     expect(result.winter.source).toBe("home");
@@ -126,7 +126,7 @@ describe("runRuntimesProbe (P8d-1 bundle layout, real fs, no daemon)", () => {
     const result = await runRuntimesProbe({
       execPath: unusedExecPath,
       home,
-      env: { NORMA_WINTER_EXECUTABLE: envWinter, NORMA_CLAUDE_EXECUTABLE: envClaude },
+      env: { WINTER_RUNTIME_EXECUTABLE: envWinter, WINTER_CLAUDE_EXECUTABLE: envClaude },
     });
     expect(result.winter.path).toBe(envWinter);
     expect(result.winter.source).toBe("env");

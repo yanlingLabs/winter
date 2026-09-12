@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { buildSeatbeltProfile, sandboxAvailable } from "./sandbox";
 import { OutputCoalescer } from "./bg-coalescer";
-import type { NewSessionEvent } from "@norma/protocol";
+import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 
 const RING_CAP = 1024 * 1024; // 1 MiB in-memory ring per task
 const FILE_CAP = 64 * 1024 * 1024; // generous per-task output-FILE byte cap (the ring stays 1MiB)
@@ -102,7 +102,7 @@ export class BackgroundTaskRegistry {
     } else {
       const writable = [...new Set([realCwd, ...roots.map((r) => realpathSync(r)), scratch])];
       // SP-approvals final review: buildSeatbeltProfile now ALSO denies writing
-      // "<root>/.norma/permissions.local.json" for every one of these writable roots,
+      // "<root>/.winter/permissions.local.json" for every one of these writable roots,
       // automatically — no extra option to pass here (see that function's own doc comment,
       // sandbox.ts, for the full rationale — same shape bash.ts's foreground spawn gets).
       const profile = buildSeatbeltProfile({ cwd: realCwd, writableRoots: writable.filter((r) => r !== realCwd), allowNetwork });

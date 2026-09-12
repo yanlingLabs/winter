@@ -7,7 +7,7 @@ import { dirname } from "node:path";
  *  cannot override it — a caller-supplied `ts` field is silently clobbered).
  *
  *  mkdir-safe: the parent directory is created (recursive) lazily on first successful write,
- *  not in the constructor — so a broken NORMA_HOME never surfaces as a constructor throw, only
+ *  not in the constructor — so a broken WINTER_HOME never surfaces as a constructor throw, only
  *  as a logged write failure the next time append() is called.
  *
  *  Write errors (mkdir or the append itself) are logged to stderr and swallowed, never thrown:

@@ -1,5 +1,5 @@
 // Phase 3d Task 1 — the pure in-chat slash-command registry + runners that back the 3d
-// autocomplete menu (later tasks). Pure module apart from each runner's own I/O (a NormaClient RPC,
+// autocomplete menu (later tasks). Pure module apart from each runner's own I/O (a WinterClient RPC,
 // or — for /model only — direct settings.json read/write, exactly like its main.ts route): no
 // React/Ink imports here, no Date.now/Math.random.
 //
@@ -8,23 +8,23 @@
 // 3d-task-1-brief.md reading list (packages/cli/src/main.ts).
 import { join } from "node:path";
 import {
-  CODEX_MODELS, OutputStyleStore, TrustStore, loadSettings, resolveNormaHome, saveSettings,
+  CODEX_MODELS, OutputStyleStore, TrustStore, loadSettings, resolveWinterHome, saveSettings,
   setOutputStyle, setProviderModel, setReasoningEffort, setAdvisorModel,
-} from "@norma/core";
-import type { Settings } from "@norma/core";
+} from "@yanlinglabs/winter-core";
+import type { Settings } from "@yanlinglabs/winter-core";
 import { parseModelArgs, validateEffort, validateModelSlug, validateAdvisorSlug } from "../model-cli";
 import { parseOutputStyleArgs } from "../output-style-cli";
 import { formatElapsed, formatTokens } from "../task-display";
 import { formatRoutineLine } from "../routines-cli";
 import { formatMemoryList } from "../memory-cli";
 import { filterCodeSessions } from "../session-mode";
-import type { NormaClient } from "../client";
+import type { WinterClient } from "../client";
 // Type-only (erased at compile time — this module stays free of any runtime React/Ink dependency,
 // per the file doc): the picker request shape lives beside the component that renders it.
 import type { ChoiceRequest } from "./choice-menu";
 
 export interface CommandCtx {
-  client: NormaClient;
+  client: WinterClient;
   sessionId: string;
   cwd: string;
   appendNote(text: string): void;
@@ -68,7 +68,7 @@ async function runHelp(ctx: CommandCtx): Promise<void> {
 }
 
 /** Mirrors main.ts `case "compact"` (~:1039): `client.compact(sessionId)`, then the same
- *  compacted/"nothing to compact yet" branch and wording (minus the `norma compact` exit-code
+ *  compacted/"nothing to compact yet" branch and wording (minus the `winter compact` exit-code
  *  path, which has no meaning inside a running chat). */
 async function runCompact(ctx: CommandCtx): Promise<void> {
   const r = await ctx.client.compact(ctx.sessionId);
@@ -79,7 +79,7 @@ async function runCompact(ctx: CommandCtx): Promise<void> {
  *  and writes `settings.json` directly (spec: model switches must not require a daemon restart;
  *  the daemon's live model resolver in providers/manager.ts picks the new value up on its next
  *  turn). Reuses model-cli.ts's parseModelArgs/validateModelSlug/validateEffort — the exact same
- *  pure parse/validate functions main.ts's route calls — and @norma/core's
+ *  pure parse/validate functions main.ts's route calls — and @yanlinglabs/winter-core's
  *  loadSettings/saveSettings/setProviderModel/setReasoningEffort/CODEX_MODELS, the same helpers.
  *  No arg -> "show" (lists CODEX_MODELS marking the active one, mirroring the route's `*` marker);
  *  an arg -> switches (mirrors the route's write path + "takes effect next turn" note). */
@@ -91,7 +91,7 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
     return;
   }
 
-  const settingsPath = join(resolveNormaHome(), "settings.json");
+  const settingsPath = join(resolveWinterHome(), "settings.json");
   const settings = loadSettings(settingsPath);
 
   if (action.kind === "show") {
@@ -163,7 +163,7 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
  *  confirmation note), just fed by a selection instead of a typed slug. Settings are re-read at
  *  PICK time, not captured at open time — the picker may sit open across other writes. */
 function applyModelPick(ctx: CommandCtx, slug: string): void {
-  const settingsPath = join(resolveNormaHome(), "settings.json");
+  const settingsPath = join(resolveWinterHome(), "settings.json");
   const settings = loadSettings(settingsPath);
   const err = validateModelSlug(settings.provider.type, slug);
   if (err) { ctx.appendNote(err); return; }
@@ -176,10 +176,10 @@ function applyModelPick(ctx: CommandCtx, slug: string): void {
 /** Mirrors main.ts `case "output-style"` (~:1546): NO client/daemon RPC at all — same
  *  no-daemon-restart precedent as /model above (the daemon's live style resolver re-resolves
  *  settings.outputStyle on the session's next turn). Reuses output-style-cli.ts's
- *  parseOutputStyleArgs — the exact same pure parser main.ts's route calls — and @norma/core's
+ *  parseOutputStyleArgs — the exact same pure parser main.ts's route calls — and @yanlinglabs/winter-core's
  *  loadSettings/saveSettings/setOutputStyle/OutputStyleStore, the same helpers. Uses `ctx.cwd`
  *  (not `process.cwd()`) for the store's trust-gated project lookup — same substitution as
- *  /skills and /mcp above, since a project's `.norma/output-styles/` is resolved relative to the
+ *  /skills and /mcp above, since a project's `.winter/output-styles/` is resolved relative to the
  *  session's tracked cwd, not the CLI process's own. No arg -> list (marks the active style);
  *  `--help`/`-h` -> usage note; a name -> sets it (validated via store.resolve, same
  *  unknown-name rejection as the route). */
@@ -192,10 +192,10 @@ async function runOutputStyle(ctx: CommandCtx, argText: string): Promise<void> {
     return;
   }
 
-  const home = resolveNormaHome();
+  const home = resolveWinterHome();
   const settingsPath = join(home, "settings.json");
   const settings = loadSettings(settingsPath);
-  const store = new OutputStyleStore({ normaHome: home, trust: new TrustStore(join(home, "trust.json")) });
+  const store = new OutputStyleStore({ winterHome: home, trust: new TrustStore(join(home, "trust.json")) });
   const current = settings.outputStyle ?? "default";
 
   if (action.action === "list") {
@@ -228,10 +228,10 @@ async function runOutputStyle(ctx: CommandCtx, argText: string): Promise<void> {
  *  settings/store read at pick time, the same store.resolve validation and unknown-name note, the
  *  identical confirmation note). */
 function applyOutputStylePick(ctx: CommandCtx, name: string): void {
-  const home = resolveNormaHome();
+  const home = resolveWinterHome();
   const settingsPath = join(home, "settings.json");
   const settings = loadSettings(settingsPath);
-  const store = new OutputStyleStore({ normaHome: home, trust: new TrustStore(join(home, "trust.json")) });
+  const store = new OutputStyleStore({ winterHome: home, trust: new TrustStore(join(home, "trust.json")) });
   if (!store.resolve(name, ctx.cwd)) {
     ctx.appendNote(`Unknown output style: ${name}\nAvailable: ${store.list(ctx.cwd).map((s) => s.name).join(", ")}`);
     return;
@@ -246,7 +246,7 @@ async function runStatus(ctx: CommandCtx): Promise<void> {
   const s = await ctx.client.daemonStatus();
   const provider = s.provider ? `${s.provider.id} (${s.provider.model})` : "(none configured)";
   ctx.appendNote([
-    `norma-core v${s.version} up ${formatElapsed(s.uptimeMs)} · ${s.socketPath}`,
+    `winter-core v${s.version} up ${formatElapsed(s.uptimeMs)} · ${s.socketPath}`,
     `provider: ${provider} · sessions: ${s.sessionsCount} · plugins: ${s.pluginsCount}`,
   ].join("\n"));
 }
@@ -270,7 +270,7 @@ async function runQuota(ctx: CommandCtx): Promise<void> {
  *  Plan-immunity Task 2 (mode×surface matrix): the TUI is CODE-ONLY, and /sessions is the
  *  interactive resume PICKER — it feeds directly into resuming INTO this same TUI, which can only
  *  ever attach to a code session — so this HIDES chat/dispatch/cowork rows entirely
- *  (`filterCodeSessions`, session-mode.ts). Contrast `norma sessions` (main.ts), a plain inventory
+ *  (`filterCodeSessions`, session-mode.ts). Contrast `winter sessions` (main.ts), a plain inventory
  *  listing that MARKS non-code rows instead of hiding them — see that module's file doc for the
  *  full picker-vs-inventory distinction. */
 async function runSessions(ctx: CommandCtx): Promise<void> {
@@ -433,7 +433,7 @@ async function runMemory(ctx: CommandCtx): Promise<void> {
   ctx.appendNote(formatMemoryList(facts).join("\n"));
 }
 
-/** CC-parity phase 3 (Workflows) Track C Task C4: mirrors `norma workflow`'s CLI shape
+/** CC-parity phase 3 (Workflows) Track C Task C4: mirrors `winter workflow`'s CLI shape
  *  (workflow-cli.ts / main.ts `case "workflow"`, C3) inside the TUI. No sub-token -> list: saved
  *  workflows (`client.workflowList`'s `.saved` — the same `WorkflowStore` scan the CLI's
  *  file-direct `list` reads, C1) then running runs (`.running`) under a "running:" header — same
@@ -503,9 +503,9 @@ async function runWorkflows(ctx: CommandCtx, argText: string): Promise<void> {
  *  session-targeted headless verb in this codebase carries a client-side `checkCodeSession` gate
  *  extracted into its own route function plus a `cli-verb-gates.test.ts` case (main.ts's
  *  plan-immunity fix round), and that gate's vocabulary is NARROWER than activity participation —
- *  it hides cowork, which participates fully — so a headless `norma background <id>` would need a
+ *  it hides cowork, which participates fully — so a headless `winter background <id>` would need a
  *  new gate predicate rather than the existing one. T8 (dispatch's management verbs) and T9
- *  (`norma agents`) are the plan's own homes for that surface.
+ *  (`winter agents`) are the plan's own homes for that surface.
  *
  *  `off` is how the RPC's clearing half is reachable from the shell at all; no sub-token means the
  *  verb's own value, the overwhelmingly common case (`/bg`'s "a bare verb reads naturally as the
@@ -619,7 +619,7 @@ export function helpText(): string {
 }
 
 /** CC-parity phase 3 (Workflows) Track C Task C4: after a REGISTRY miss, `cmd` might name a SAVED
- *  workflow rather than an unknown built-in — e.g. `/triage`, after a `norma workflow save
+ *  workflow rather than an unknown built-in — e.g. `/triage`, after a `winter workflow save
  *  triage ...` (C3) or a Workflow-tool save (agent/tools/workflow.ts). `client.workflowRun`
  *  resolves `name` server-side via `WorkflowStore` IN THE SESSION'S OWN cwd (protocol/methods.ts's
  *  `WorkflowRunParams` doc comment) — same resolution chain `/workflows run <name>` above and the

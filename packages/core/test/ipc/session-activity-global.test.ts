@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
@@ -13,7 +13,7 @@ import { TokenAuthority } from "../../src/auth/tokens";
 // session-activity-hygiene T9 (the core half): the GLOBAL fan-out of `session_activity`.
 //
 // T4 shipped the transient on the per-session path only (`emitActivity` → `broadcastTransient` →
-// `fanOut`), which reaches ONLY clients attached to that session. The whole subject of `norma
+// `fanOut`), which reaches ONLY clients attached to that session. The whole subject of `winter
 // agents` is sessions nobody has open — and `manage_session`'s own description already promises the
 // change is "announced live to the user's open windows", which for an unattached session reached
 // exactly zero clients.
@@ -107,7 +107,7 @@ describe("session_activity global fan-out (session-activity-hygiene T9)", () => 
     store: SessionStore; hub: SessionHub; socketPath: string;
     harnessToken: string; remoteToken: string; running: Set<string>;
   }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-activity-global-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-activity-global-"));
     const store = new SessionStore(home);
     const hub = new SessionHub(store);
     const socketPath = join(home, "core.sock");

@@ -1,6 +1,11 @@
 export { startDaemon, CORE_VERSION, type RunningDaemon } from "./daemon";
-export { bootstrapNormaDir, resolveNormaHome } from "./norma-dir";
-export { resolveNormaProfile, keychainService, profileDisplayName, type NormaProfile } from "./profile";
+export { bootstrapWinterDir, resolveWinterHome } from "./winter-dir";
+export { resolveWinterProfile, keychainService, profileDisplayName, type WinterProfile } from "./profile";
+export {
+  LEGACY_LAUNCHD_LABEL, LEGACY_HOME_DIR, LEGACY_DEV_HOME_DIR, LEGACY_HOME_ENV, LEGACY_PROFILE_ENV,
+  LEGACY_TMPDIR_ENV, LEGACY_KEYCHAIN_SERVICE, LEGACY_KEYCHAIN_SERVICE_DEV, LEGACY_CLI_LINK,
+  LEGACY_DEV_WRAPPER_NAMES, LEGACY_PROJECT_DIR, LEGACY_INSTRUCTIONS_FILE,
+} from "./legacy-names";
 export { FileSecretStore, KeychainSecretStore } from "./auth/secret-store";
 export { TOKEN_NAMES } from "./auth/tokens";
 export {
@@ -9,7 +14,7 @@ export {
   workflowsEnabledFrom, keywordTriggerEnabledFrom,
   type Settings,
 } from "./settings";
-// Winter Phase 8d (Task 4.3): `norma model --advisor <slug>` validates against the SAME pinned
+// Winter Phase 8d (Task 4.3): `winter model --advisor <slug>` validates against the SAME pinned
 // catalog `session.setModel`'s handler consults (`catalogRowsFor`, `runtime-sdk/provider-
 // selection.ts`) — the CLI runs with no live daemon/RPC for this command (direct settings.json
 // read/write, `case "model"`'s own doc comment), so the STATIC compiled-in catalog, not a
@@ -52,10 +57,10 @@ export {
   type CredentialMaterial, type ApiKeyMaterial, type OauthMaterial, type BearerMaterial, type CredentialMigrationReport,
 } from "./auth/credential-material";
 export { runLoginFlow } from "./providers/pkce";
-// P8c-10: `norma login --anthropic-key` (cli/main.ts) writes through this door.
+// P8c-10: `winter login --anthropic-key` (cli/main.ts) writes through this door.
 export { writeAnthropicApiKey, ANTHROPIC_CREDENTIAL_SECRET_NAME } from "./runtime-sdk/keychain";
 export { CODEX, CODEX_MODELS, DEFAULT_CODEX_MODEL } from "./providers/codex-config";
-// WS-16 §15's `norma doctor` runs IN-PROCESS against NORMA_HOME — no RPC, because the whole point
+// WS-16 §15's `winter doctor` runs IN-PROCESS against WINTER_HOME — no RPC, because the whole point
 // is to work when the daemon does not — so the CLI reaches these two through the package barrel.
 export {
   diagnoseRuntimeState,

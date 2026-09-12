@@ -12,7 +12,7 @@
  * existing importer (`runtime-sdk/keychain.ts`, `ipc/server.ts`, `cli/main.ts`, tests, `index.ts`)
  * keeps working unchanged — this file is an implementation detail, not a new public import path.
  *
- * These are migration-source / `norma logout`-blank-target ONLY now. Nothing writes them going
+ * These are migration-source / `winter logout`-blank-target ONLY now. Nothing writes them going
  * forward except `logout`'s blank; nothing reads them except the migration and the read-only
  * fallbacks in `CodexAuthStore.load()` / `readOpenAiApiKey`.
  */

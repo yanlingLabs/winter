@@ -19,12 +19,12 @@ import {
 import { OPENAI_API_KEY_SECRET } from "../../src/providers/manager";
 
 function store(): FileSecretStore {
-  return new FileSecretStore(mkdtempSync(join(tmpdir(), "norma-cred-material-")));
+  return new FileSecretStore(mkdtempSync(join(tmpdir(), "winter-cred-material-")));
 }
 
 // -------------------------------------------------------------------------------------------
 // mirror of winter-agent-sdk v0.0.4 keychain-store.ts coerceMaterial — the child's parser; not
-// exported. Copied here (api-key + oauth arms only, the only two Norma ever writes) so this test
+// exported. Copied here (api-key + oauth arms only, the only two Winter ever writes) so this test
 // verifies the ACTUAL contract the spawned child enforces, independent of our own module's
 // internal validation, which could drift from the child's without anyone noticing.
 // -------------------------------------------------------------------------------------------
@@ -47,7 +47,7 @@ function coerceMaterial(value: unknown): CredentialMaterial | undefined {
             ...(typeof v.idToken === "string" ? { idToken: v.idToken } : {}),
           }
         : undefined;
-    // (bearer / aws / gcp arms omitted — Norma never writes them)
+    // (bearer / aws / gcp arms omitted — Winter never writes them)
     default:
       return undefined;
   }

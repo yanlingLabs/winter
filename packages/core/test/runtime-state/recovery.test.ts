@@ -82,7 +82,7 @@ interface Harness {
   leases: RuntimeLeases;
   children: RuntimeChildren;
   /** EVERY run goes through here, so no test can forget `tempScanRoot` and send step 8's scan at
-   *  the real `/private/tmp/norma-<uid>` on the developer's machine. */
+   *  the real `/private/tmp/winter-<uid>` on the developer's machine. */
   run(over?: Partial<RecoveryDeps>): Promise<RecoveryReport>;
   attempts(): AttemptRow[];
 }

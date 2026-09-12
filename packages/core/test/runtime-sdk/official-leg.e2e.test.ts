@@ -8,17 +8,17 @@
 // The SECOND describe block (P8c-14) is the follow-on: a REAL `startDaemon`, a real NDJSON client,
 // `session.create`/`session.send`/`session.interrupt` over the wire — proving `session-driver.ts`'s
 // leg dispatch end to end. `startDaemon`'s own `officialConnectionOverride` test opt (fix round 1,
-// M2 — NEVER an ambient env var; the deleted `NORMA_OFFICIAL_TEST_BASE_URL` hatch was one) redirects
+// M2 — NEVER an ambient env var; the deleted `WINTER_OFFICIAL_TEST_BASE_URL` hatch was one) redirects
 // the real credential path to the loopback fake without touching the `api-key` family's own
 // env-allowlist shape, the same "a value only a test constructs" spirit as `winter-test/<name>`.
 //
 // `describeWithClaudeRuntime` skips without the optional platform package and THROWS under
-// `NORMA_CLAUDE_REQUIRE_RUNTIME=1` (P8c-9).
+// `WINTER_CLAUDE_REQUIRE_RUNTIME=1` (P8c-9).
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import type { ReviewerResolver } from "@yanlinglabs/winter-agent-sdk/tools";
 import { ApprovalBroker } from "../../src/agent/approvals";
@@ -34,7 +34,7 @@ import { writeCredentialMaterial } from "../../src/auth/credential-material";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { FakeProvider } from "../../src/agent/fake-provider";
 import { BashReviewer } from "../../src/agent/reviewer";
-import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "../../src/runtime-sdk/create";
+import { createWinterRuntimeSdk, type WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import { credentialRefFor, ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
 import { sessionHooksFor, type SessionHooksDeps } from "../../src/runtime-sdk/hooks";
 import { attachOfficialSession } from "../../src/runtime-sdk/messaging";
@@ -117,11 +117,11 @@ class MemCheckpoints implements CheckpointStore {
 interface World {
   home: string;
   cwd: string;
-  runtime: NormaRuntimeSdk;
+  runtime: WinterRuntimeSdk;
   events: SessionEvent[];
   session: OfficialSession;
   backendSessionId: string;
-  /** m1: the CHILD's own hermetic `HOME` — distinct from `home` (NORMA_HOME) above. Before this,
+  /** m1: the CHILD's own hermetic `HOME` — distinct from `home` (WINTER_HOME) above. Before this,
    *  nothing in this file ever gave the spawned `claude` process a `HOME` at all, so it silently
    *  inherited the real machine's `$HOME` and every "never touches `~/.claude`" assertion was
    *  checking the wrong directory (m1: `hermeticOfficialHome` was exported and unused). */
@@ -169,7 +169,7 @@ async function buildWorld(
   // family's own variable set does not include — WS-14 §12; see `official-options.ts`'s header).
   await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-e2e-material" });
   const credentialRef = credentialRefFor("anthropic")!;
-  const runtime = await createNormaRuntimeSdk({
+  const runtime = await createWinterRuntimeSdk({
     home,
     settings: () => null,
     secrets,
@@ -186,8 +186,8 @@ async function buildWorld(
 
   const trust = new TrustStore(join(home, "trust.json"));
   trust.trust(cwd);
-  const skills = new SkillStore({ normaHome: home, trust });
-  const assembler = new ContextAssembler({ normaHome: home, trust, skills });
+  const skills = new SkillStore({ winterHome: home, trust });
+  const assembler = new ContextAssembler({ winterHome: home, trust, skills });
 
   const sessionId = opts.sessionId ?? "s_official_e2e";
   const registry = new ToolRegistry();
@@ -202,7 +202,7 @@ async function buildWorld(
 
   const backendSessionId = crypto.randomUUID();
 
-  // m1: a hermetic HOME for the CHILD process, distinct from `home` (NORMA_HOME) above — passed
+  // m1: a hermetic HOME for the CHILD process, distinct from `home` (WINTER_HOME) above — passed
   // through `officialInputFor`'s own `env` door (`minimalOsEnvironment` reads `env.HOME`), the same
   // door a production daemon has (`officialInputFor`'s `deps.env ?? process.env`). Everything else
   // in `process.env` (PATH in particular — the child needs a real one to execute at all) still
@@ -302,7 +302,7 @@ async function waitFor(events: SessionEvent[], pred: (e: SessionEvent) => boolea
  * router's own `Promise.race([sink.record(...), timeout])`): by the time `session.send()`'s own
  * promise resolves the row is USUALLY already there, but this is never assumed.
  */
-async function officialChildPidOf(runtime: NormaRuntimeSdk, sessionId: string, timeoutMs = 10_000): Promise<number> {
+async function officialChildPidOf(runtime: WinterRuntimeSdk, sessionId: string, timeoutMs = 10_000): Promise<number> {
   const address = serializeRuntimeAddress(buildSessionAddress(sessionId));
   const t0 = Date.now();
   for (;;) {
@@ -351,7 +351,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       expect(String(auth)).not.toContain("sk-e2e");
 
       // m1: the OBSERVED `CLAUDE_CONFIG_DIR`/spool a fresh-spool launch actually used
-      // (`officialSpoolRoot(winterHome)` — WS-14 §1 profile 1) lives under NORMA_HOME (`w.home`,
+      // (`officialSpoolRoot(winterHome)` — WS-14 §1 profile 1) lives under WINTER_HOME (`w.home`,
       // the router's own `winterHome`, per `create.ts`'s `handoff: { winterHome: deps.home }`) —
       // never under the child's hermetic `HOME`. The real `claude` CLI writing into it (a real file
       // on disk, not merely a configured option) is the actual proof CLAUDE_CONFIG_DIR took effect.
@@ -366,14 +366,14 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
   }, 60_000);
 
   // Fix round 1 (item 0): router 0.0.3's `createApprovalBridge` is now wired for real
-  // (`official-options.ts`) — a capability tool call reaches Norma's OWN approval flow, not the
+  // (`official-options.ts`) — a capability tool call reaches Winter's OWN approval flow, not the
   // router's fixed fail-closed default. Two shapes: the APPROVE path (policy "auto", which
   // `gate.evaluate`'s own "auto" column allows without a card) and the DENY path (policy
   // "dont-ask", which never prompts and denies outright — same `canUseToolFor` semantics as the
   // Winter leg, proven byte-identical in `approval-bridge.test.ts`).
   test("a capability tool call SUCCEEDS through the real approval bridge (policy auto)", async () => {
     const turns: AnthropicTurnScript[] = [
-      { blocks: [{ type: "tool_use", id: "call_1", name: "mcp__norma__probe__probe", jsonChunks: [JSON.stringify({ note: "hi" })] }], stopReason: "tool_use" },
+      { blocks: [{ type: "tool_use", id: "call_1", name: "mcp__winter__probe__probe", jsonChunks: [JSON.stringify({ note: "hi" })] }], stopReason: "tool_use" },
       { blocks: [{ type: "text", chunks: ["done"] }], stopReason: "end_turn" },
     ];
     await withAnthropicLoopback(turns, async (fake) => {
@@ -383,7 +383,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
       const call = w.events.find((e) => e.type === "tool_call") as (SessionEvent & { name?: string }) | undefined;
       const result = w.events.find((e) => e.type === "tool_result") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
-      expect(call?.name).toBe("mcp__norma__probe__probe");
+      expect(call?.name).toBe("mcp__winter__probe__probe");
       expect(result?.isError).toBe(false);
       expect(result?.output).toContain("probed: hi");
     });
@@ -391,7 +391,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
 
   test("a capability tool call is DENIED through the real approval bridge (policy plan)", async () => {
     const turns: AnthropicTurnScript[] = [
-      { blocks: [{ type: "tool_use", id: "call_1", name: "mcp__norma__probe__probe", jsonChunks: [JSON.stringify({ note: "hi" })] }], stopReason: "tool_use" },
+      { blocks: [{ type: "tool_use", id: "call_1", name: "mcp__winter__probe__probe", jsonChunks: [JSON.stringify({ note: "hi" })] }], stopReason: "tool_use" },
       { blocks: [{ type: "text", chunks: ["done"] }], stopReason: "end_turn" },
     ];
     await withAnthropicLoopback(turns, async (fake) => {
@@ -509,7 +509,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       const runDir = join(w.home, "run");
       mkdirSync(runDir, { recursive: true });
       const probePath = join(runDir, "probe.txt");
-      const SENTINEL = "NORMA_CONTROL_PLANE_SENTINEL_9f3d1a";
+      const SENTINEL = "WINTER_CONTROL_PLANE_SENTINEL_9f3d1a";
       writeFileSync(probePath, SENTINEL);
       turns[0] = PLACEHOLDER_TURN("Read", [JSON.stringify({ file_path: probePath })]);
       await w.session.send("read that file for me and tell me what it says");
@@ -580,7 +580,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     ]], []);
     const reviewer = new BashReviewer({ provider: { provider: reviewProvider, model: "fake-1" } });
     const turns: AnthropicTurnScript[] = [
-      { blocks: [{ type: "tool_use", id: "call_1", name: "Bash", jsonChunks: [JSON.stringify({ command: "echo hi > /tmp/norma-p8c-m4-should-not-run" })] }], stopReason: "tool_use" },
+      { blocks: [{ type: "tool_use", id: "call_1", name: "Bash", jsonChunks: [JSON.stringify({ command: "echo hi > /tmp/winter-p8c-m4-should-not-run" })] }], stopReason: "tool_use" },
       DONE_TURN,
     ];
     await withAnthropicLoopback(turns, async (fake) => {
@@ -602,8 +602,8 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
 
   test("8d MEASURED: a Bash read OUTSIDE cwd is ALLOWED on this leg — no sandbox denies it (unlike Winter's own seatbelt)", async () => {
     // MEASURED, not assumed (this test's premise going in was the OPPOSITE): `sandboxConfigFor(home)`
-    // (reused verbatim on this leg) denies only `<home>/run`/`<home>/runtimes` — Norma's own
-    // philosophy is unrestricted reads otherwise (CLAUDE.md: "the sole read denial is ~/.norma/run").
+    // (reused verbatim on this leg) denies only `<home>/run`/`<home>/runtimes` — Winter's own
+    // philosophy is unrestricted reads otherwise (CLAUDE.md: "the sole read denial is ~/.winter/run").
     // The real 0.3.250 CLI's own default sandbox (`Options.sandbox`, reused from `sandboxConfigFor`)
     // does NOT additionally fence Bash to the working directory the way `agent/sandbox.ts`'s
     // seatbelt profile does for the retired engine — an out-of-cwd `cat` SUCCEEDS end to end, and its
@@ -614,7 +614,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     // own; `sandboxConfigFor`'s current denyRead/denyWrite lists (`<home>/run`, `<home>/runtimes`)
     // are the daemon control plane ONLY, never a project-boundary fence.
     const outsideDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-outside-"));
-    const SENTINEL = "NORMA_8D_OUTSIDE_CWD_SENTINEL_7c2b";
+    const SENTINEL = "WINTER_8D_OUTSIDE_CWD_SENTINEL_7c2b";
     writeFileSync(join(outsideDir, "secret.txt"), SENTINEL);
     const turns: AnthropicTurnScript[] = [PLACEHOLDER_TURN("Bash", [JSON.stringify({ command: "cat /placeholder" })]), DONE_TURN];
     await withAnthropicLoopback(turns, async (fake) => {
@@ -665,7 +665,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       async runFor(event, extra) { calls.push({ event, extra }); return []; },
     };
     const turns: AnthropicTurnScript[] = [
-      { blocks: [{ type: "tool_use", id: "call_1", name: "mcp__norma__probe__probe", jsonChunks: [JSON.stringify({ note: "8d-post" })] }], stopReason: "tool_use" },
+      { blocks: [{ type: "tool_use", id: "call_1", name: "mcp__winter__probe__probe", jsonChunks: [JSON.stringify({ note: "8d-post" })] }], stopReason: "tool_use" },
       DONE_TURN,
     ];
     await withAnthropicLoopback(turns, async (fake) => {
@@ -673,9 +673,9 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto", { hookFacade });
       await w.session.send("use the probe tool");
       await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
-      const post = calls.find((c) => c.event === "post-tool" && c.extra.toolName === "mcp__norma__probe__probe");
+      const post = calls.find((c) => c.event === "post-tool" && c.extra.toolName === "mcp__winter__probe__probe");
       expect(post).toBeDefined();
-      expect(post?.extra).toMatchObject({ toolName: "mcp__norma__probe__probe", isError: false, threadId: "main" });
+      expect(post?.extra).toMatchObject({ toolName: "mcp__winter__probe__probe", isError: false, threadId: "main" });
       expect(String(post?.extra.output)).toContain("probed: 8d-post");
     });
   }, 60_000);
@@ -735,14 +735,14 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
   // Round 2 left this UNPROVEN with the diagnosis "something beyond resolveReviewer/
   // connectionOverride must register the official leg's own standing-server tool (`advisor`) with
   // the real 0.3.250 CLI before the model can call it at all" — correct as far as it went. Lane 3b
-  // found the EXACT mechanism, Norma-side, and fixed it:
+  // found the EXACT mechanism, Winter-side, and fixed it:
   //
   // The router's own `officialCapabilityServers` (index.js, called from `openOfficialLeg` on EVERY
   // official-leg session) builds the STANDING server (`winterMcpServerDescriptor` —
   // SendMessage/ListAgents/ReadNotifications/advisor's canonical `mcp__<brand>__<tool>`
   // registrations) ONLY when `RuntimeSdkOptions.toInputShape` (a CONSTRUCTION-time field) is set.
   // `create.ts` never set it. Its own early-return is SILENT rather than a throw specifically
-  // because Norma's construction-level `capabilities` list is `[]` on purpose (P8b-36 — Norma's
+  // because Winter's construction-level `capabilities` list is `[]` on purpose (P8b-36 — Winter's
   // capability tools ride the PER-SESSION `officialCapabilityServersFor` door instead): `if
   // (deps.toInputShape === undefined) { if (deps.capabilities === undefined) return; throw … }`,
   // and an empty array normalizes to `undefined` one level up (`capabilityDescriptors`). So the
@@ -755,10 +755,10 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
   // brief: `additionalDisallowedTools`/deny rules never touch it; there is nothing to deny).
   //
   // THE FIX (`create.ts`, `official-capabilities.ts`): `official-capabilities.ts`'s own
-  // `routerInputShape` (the JSON-Schema → zod-shape bridge Norma's PER-SESSION capability tools
+  // `routerInputShape` (the JSON-Schema → zod-shape bridge Winter's PER-SESSION capability tools
   // already use) is now exported and threaded into `createRouterSdk({..., toInputShape:
-  // routerInputShape})` at construction. MEASURED, AFTER: `mcp__norma__advisor`,
-  // `mcp__norma__send_message`, `mcp__norma__list_agents` and `mcp__norma__read_notifications` all
+  // routerInputShape})` at construction. MEASURED, AFTER: `mcp__winter__advisor`,
+  // `mcp__winter__send_message`, `mcp__winter__list_agents` and `mcp__winter__read_notifications` all
   // now appear in the model-facing tool list, and a scripted bare `advisor` tool_use — via
   // `officialToolAliases`'s redirect, now pointed at a REAL registered target — reaches
   // `resolveReviewer()` and, once a credential is staged for F3's sync presence gate, the reviewer's
@@ -821,10 +821,10 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       // (2) the standing server's tool list — the brand-qualified advisor name is present now.
       const messagesReq = fake.requests.find((r) => r.path === "/v1/messages" && r.body.length > 0);
       const toolNames = (JSON.parse(messagesReq!.body) as { tools?: Array<{ name?: string }> }).tools?.map((t) => t.name) ?? [];
-      expect(toolNames).toContain("mcp__norma__advisor");
-      expect(toolNames).toContain("mcp__norma__send_message");
-      expect(toolNames).toContain("mcp__norma__list_agents");
-      expect(toolNames).toContain("mcp__norma__read_notifications");
+      expect(toolNames).toContain("mcp__winter__advisor");
+      expect(toolNames).toContain("mcp__winter__send_message");
+      expect(toolNames).toContain("mcp__winter__list_agents");
+      expect(toolNames).toContain("mcp__winter__read_notifications");
       // The bare alias name itself is never advertised (the CLI advertises the REGISTERED/canonical
       // name; `officialToolAliases`'s redirect is what lets the model call the bare name anyway).
       expect(toolNames).not.toContain("advisor");
@@ -967,7 +967,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       // window): abort() alone never moves the router's official Query off "live" — the router does
       // not appear to treat that signal as "the child died". See this describe block's own P8d-18
       // comment for the full blocker (no host-injectable spawn proxy exists in router 0.0.3 to drive
-      // a REAL exit/disconnect event from Norma's side; a bare OS-level kill was already measured
+      // a REAL exit/disconnect event from Winter's side; a bare OS-level kill was already measured
       // unreliable — the child could not be reliably located as a direct process child).
       expect(w.session.state).toBe("live");
     } finally {
@@ -975,11 +975,11 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     }
   }, 60_000);
 
-  // Lane 3b (item C, WS-17 §8 row 4): TWO official sessions sharing ONE spool (one NORMA_HOME, so
+  // Lane 3b (item C, WS-17 §8 row 4): TWO official sessions sharing ONE spool (one WINTER_HOME, so
   // both are `officialSpoolRoot(home)`-identical fresh-spool launches) AND one child HOME (so a
   // PLANTED `~/.claude` is the SAME file for both) — SendMessage A->B delivered, and the planted
   // file byte-identical (content + mtime) after both ran. Enabled by item A's fix: before it, a
-  // bare `SendMessage` reached the CLI's own NATIVE tool, never `mcp__norma__send_message`/the
+  // bare `SendMessage` reached the CLI's own NATIVE tool, never `mcp__winter__send_message`/the
   // messaging port, so this row could not have been proven at all.
   test("WS-17 §8 row 4: two official sessions, one spool, one child HOME — SendMessage A->B delivered; a planted ~/.claude untouched", async () => {
     const home = mkdtempSync(join(tmpdir(), "p8d-row4-home-"));
@@ -989,7 +989,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     // Both sessions run under `policy: "auto"` (a prompting, non-bypass policy) — `"prompts"` is
     // the correct fixed class. Without SOME classifier, WS-10 §13's receiver-class-unknown rule
     // fails closed to `held` rather than guessing (measured first, before this was added).
-    const runtime = await createNormaRuntimeSdk({ home, settings: () => null, secrets, capabilities: [], sessionPermissionClass: () => "prompts" });
+    const runtime = await createWinterRuntimeSdk({ home, settings: () => null, secrets, capabilities: [], sessionPermissionClass: () => "prompts" });
     const officialPeer = await runtime.officialPeer();
     if (officialPeer === undefined) throw new Error("unreachable: the suite is skipped without a bed");
 
@@ -997,15 +997,15 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     const claudeDir = join(hermetic.home, ".claude");
     mkdirSync(claudeDir, { recursive: true });
     const plantedFile = join(claudeDir, "marker.json");
-    writeFileSync(plantedFile, JSON.stringify({ sentinel: "NORMA_ROW4_PLANT_9f21" }));
+    writeFileSync(plantedFile, JSON.stringify({ sentinel: "WINTER_ROW4_PLANT_9f21" }));
     const before = { content: readFileSync(plantedFile, "utf8"), mtimeMs: statSync(plantedFile).mtimeMs };
 
     const trust = new TrustStore(join(home, "trust.json"));
     const cwd = join(home, "work");
     mkdirSync(cwd, { recursive: true });
     trust.trust(cwd);
-    const skills = new SkillStore({ normaHome: home, trust });
-    const assembler = new ContextAssembler({ normaHome: home, trust, skills });
+    const skills = new SkillStore({ winterHome: home, trust });
+    const assembler = new ContextAssembler({ winterHome: home, trust, skills });
     const policy = "auto" as const;
 
     const eventsFor = new Map<string, SessionEvent[]>();
@@ -1147,7 +1147,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     const secrets = new FileSecretStore(join(home, "secrets"));
     const rs1 = openRuntimeStateDb(home);
     const directory1 = createSqliteRuntimeDirectoryStore(rs1);
-    const runtime1 = await createNormaRuntimeSdk({ home, settings: () => null, secrets, capabilities: [], directoryStore: directory1, sessionPermissionClass: () => "prompts" });
+    const runtime1 = await createWinterRuntimeSdk({ home, settings: () => null, secrets, capabilities: [], directoryStore: directory1, sessionPermissionClass: () => "prompts" });
 
     const parentAddress = serializeRuntimeAddress(buildSessionAddress("row5-p"));
     const childAddress = serializeRuntimeAddress(buildChildAddress("row5-p", "row5-c"));
@@ -1183,7 +1183,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     // ── "the daemon restarts" — a NEW handle, over the SAME db file ─────────────────────────────
     const rs2 = openRuntimeStateDb(home);
     const directory2 = createSqliteRuntimeDirectoryStore(rs2);
-    const runtime2 = await createNormaRuntimeSdk({ home, settings: () => null, secrets, capabilities: [], directoryStore: directory2, sessionPermissionClass: () => "prompts" });
+    const runtime2 = await createWinterRuntimeSdk({ home, settings: () => null, secrets, capabilities: [], directoryStore: directory2, sessionPermissionClass: () => "prompts" });
 
     // The child row survived the restart (row 6's own proof, re-confirmed here for the OFFICIAL
     // side rather than a Winter one — `PersistedWinterChild`/`RuntimeChildren` is the Winter-only
@@ -1353,7 +1353,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
   // manually-seeded row. So both tests below use the SAME proven shape the original row 4 test
   // does: TWO real spawned sessions, A's own turn issuing the NATIVE `SendMessage` tool call.
   interface Row4Pair {
-    runtime: NormaRuntimeSdk;
+    runtime: WinterRuntimeSdk;
     home: string;
     eventsFor: Map<string, SessionEvent[]>;
     makeSession: (sessionId: string, baseUrl: string) => OfficialSession;
@@ -1365,7 +1365,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     const secrets = new FileSecretStore(join(home, "secrets"));
     await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: `sk-test-${prefix}` });
     const credentialRef = credentialRefFor("anthropic")!;
-    const runtime = await createNormaRuntimeSdk({ home, settings: () => null, secrets, capabilities: [], sessionPermissionClass: () => "prompts" });
+    const runtime = await createWinterRuntimeSdk({ home, settings: () => null, secrets, capabilities: [], sessionPermissionClass: () => "prompts" });
     const officialPeer = await runtime.officialPeer();
     if (officialPeer === undefined) throw new Error("unreachable: the suite is skipped without a bed");
 
@@ -1374,8 +1374,8 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     const cwd = join(home, "work");
     mkdirSync(cwd, { recursive: true });
     trust.trust(cwd);
-    const skills = new SkillStore({ normaHome: home, trust });
-    const assembler = new ContextAssembler({ normaHome: home, trust, skills });
+    const skills = new SkillStore({ winterHome: home, trust });
+    const assembler = new ContextAssembler({ winterHome: home, trust, skills });
     const policy = "auto" as const;
     const eventsFor = new Map<string, SessionEvent[]>();
     let seq = 0;
@@ -1650,7 +1650,7 @@ describeWithClaudeRuntime("the official leg through startDaemon + IPC (P8c-14)",
   let fakeClose: (() => Promise<void>) | undefined;
   let requests: Array<{ path: string; headers: Record<string, string> }> = [];
 
-  const WINTER_BIN = process.env.NORMA_WINTER_EXECUTABLE ?? join(import.meta.dir, "../../../../dist/winter");
+  const WINTER_BIN = process.env.WINTER_RUNTIME_EXECUTABLE ?? join(import.meta.dir, "../../../../dist/winter");
 
   const writeSettings = (): void => {
     writeFileSync(join(home, "settings.json"), JSON.stringify({
@@ -1661,7 +1661,7 @@ describeWithClaudeRuntime("the official leg through startDaemon + IPC (P8c-14)",
   };
 
   beforeAll(async () => {
-    home = realpathSync(mkdtempSync(join(tmpdir(), "norma-p8c14-e2e-")));
+    home = realpathSync(mkdtempSync(join(tmpdir(), "winter-p8c14-e2e-")));
     writeSettings();
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-daemon-e2e" });
@@ -1747,9 +1747,9 @@ describeWithClaudeRuntime("the official leg through startDaemon + IPC (P8c-14)",
     }
   }, 60_000);
 
-  test("a Claude model with NO anthropic material is a typed refusal naming norma login --anthropic-key", async () => {
+  test("a Claude model with NO anthropic material is a typed refusal naming winter login --anthropic-key", async () => {
     // A fresh home with the SAME winter/claude executables but no stored credential at all.
-    const bareHome = realpathSync(mkdtempSync(join(tmpdir(), "norma-p8c14-bare-")));
+    const bareHome = realpathSync(mkdtempSync(join(tmpdir(), "winter-p8c14-bare-")));
     writeFileSync(join(bareHome, "settings.json"), JSON.stringify({
       schemaVersion: 2,
       provider: { type: "openai-compatible", model: "winter-test/unused", baseUrl: "http://127.0.0.1:9/v1" },

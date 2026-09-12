@@ -3,14 +3,14 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startDaemon, FileSecretStore, FakeProvider, MemoryStore, type RunningDaemon } from "@norma/core";
-import { NormaClient } from "../src/client";
-import { encodeLine, METHODS, PROTOCOL_VERSION } from "@norma/protocol";
+import { startDaemon, FileSecretStore, FakeProvider, MemoryStore, type RunningDaemon } from "@yanlinglabs/winter-core";
+import { WinterClient } from "../src/client";
+import { encodeLine, METHODS, PROTOCOL_VERSION } from "@yanlinglabs/winter-protocol";
 import { WINTER_BIN, testWithWinterBinary as sessionTest } from "./helpers/winter-binary";
 
 // Fix wave 2 (CLI, Winter Phase 8b): every `session.create` spawns a `winter` child, so the tests
-// below that CREATE a session run as `sessionTest` — `test` when `NORMA_WINTER_EXECUTABLE` names a
-// built binary, `test.skip` otherwise (a FAIL at import under `NORMA_WINTER_REQUIRE_BINARY=1`, CI).
+// below that CREATE a session run as `sessionTest` — `test` when `WINTER_RUNTIME_EXECUTABLE` names a
+// built binary, `test.skip` otherwise (a FAIL at import under `WINTER_RUNTIME_REQUIRE_BINARY=1`, CI).
 // Tests a bare daemon can serve (status, trust, plugins, routines, memory, skills) stay plain `test`.
 //
 // The settings seed points every session at the in-process `winter-test/echo` double (selected by
@@ -25,7 +25,7 @@ const WINTER_SEED = (): Record<string, unknown> => ({
   ...(WINTER_BIN ? { runtimes: { winterExecutable: WINTER_BIN, winterIdleTimeoutSec: 10 } } : {}),
 });
 
-describe("NormaClient", () => {
+describe("WinterClient", () => {
   let daemon: RunningDaemon;
   afterEach(() => daemon?.stop());
 
@@ -35,7 +35,7 @@ describe("NormaClient", () => {
   // `winter-test/echo` double for it). Pass explicit `null` (Task 6 tests) to force a deterministic
   // no-provider daemon regardless of host state; the seed still names the child's double.
   async function boot(provider?: FakeProvider | null, settingsOverrides?: Record<string, unknown>): Promise<string> {
-    const home = mkdtempSync(join(tmpdir(), "norma-cli-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-cli-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({ ...WINTER_SEED(), ...(settingsOverrides ?? {}) }));
     daemon = await startDaemon({
       home,
@@ -48,7 +48,7 @@ describe("NormaClient", () => {
   sessionTest("connect + hello + create + attach + send + receive own event", async () => {
     await boot();
     const events: any[] = [];
-    const client = await NormaClient.connect({
+    const client = await WinterClient.connect({
       socketPath: daemon.socketPath,
       token: daemon.tokens.harness,
       clientName: "cli-test",
@@ -64,7 +64,7 @@ describe("NormaClient", () => {
 
   test("bad token raises a clear error", async () => {
     await boot();
-    await expect(NormaClient.connect({
+    await expect(WinterClient.connect({
       socketPath: daemon.socketPath, token: "wrong", clientName: "x", onEvent: () => {},
     })).rejects.toThrow(/invalid token/);
   });
@@ -72,10 +72,10 @@ describe("NormaClient", () => {
   sessionTest("client can add a directory and receive directory_added", async () => {
     await boot();
     const events: any[] = [];
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cli", onEvent: (e) => events.push(e) });
-    const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "norma-cli-cwd-")) });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cli", onEvent: (e) => events.push(e) });
+    const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "winter-cli-cwd-")) });
     await client.attach(sessionId);
-    const extra = mkdtempSync(join(tmpdir(), "norma-cli-extra-"));
+    const extra = mkdtempSync(join(tmpdir(), "winter-cli-extra-"));
     const roots = await client.addDir(sessionId, extra);
     expect(roots).toContain(realpathSync(extra));
     await new Promise((r) => setTimeout(r, 30));
@@ -90,7 +90,7 @@ describe("NormaClient", () => {
   // other RPCs above (no bg-agent fixture is reachable through this file's plain `startDaemon`).
   sessionTest("sendToThread/agentStop against an unknown agent reject with a clear error (client-side round-trip)", async () => {
     await boot();
-    const client = await NormaClient.connect({
+    const client = await WinterClient.connect({
       socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cli", onEvent: () => {},
     });
     const { sessionId } = await client.createSession("global");
@@ -102,8 +102,8 @@ describe("NormaClient", () => {
 
   sessionTest("createSession returns trusted; trustDir makes a later create trusted", async () => {
     await boot();
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "t", onEvent: () => {} });
-    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-cli-trust-")));
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "t", onEvent: () => {} });
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-cli-trust-")));
     const first = await client.createSession("global", { cwd });
     expect(first.trusted).toBe(false);
     expect(await client.trustDir(cwd)).toBe(true);
@@ -115,8 +115,8 @@ describe("NormaClient", () => {
   sessionTest("bg client methods round-trip", async () => {
     if (process.platform !== "darwin") { return; }
     await boot();
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "bg", onEvent: () => {} });
-    const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "norma-cli-bg-")), approvalPolicy: "auto" });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "bg", onEvent: () => {} });
+    const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "winter-cli-bg-")), approvalPolicy: "auto" });
     // no tasks yet:
     expect((await client.bgList(sessionId)).length).toBe(0);
     expect((await client.bgKillAll(sessionId)).killed).toBe(0);
@@ -125,8 +125,8 @@ describe("NormaClient", () => {
 
   sessionTest("steer/interrupt client methods round-trip", async () => {
     await boot();
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "si", onEvent: () => {} });
-    const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "norma-si-")), approvalPolicy: "auto" });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "si", onEvent: () => {} });
+    const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "winter-si-")), approvalPolicy: "auto" });
     // idle interrupt → wasRunning:false
     expect((await client.interrupt(sessionId)).wasRunning).toBe(false);
     // steer with no running turn → injected:false (starts a turn)
@@ -139,8 +139,8 @@ describe("NormaClient", () => {
   // with the engine. The client-side round-trip is the rejection reaching the caller intact.
   sessionTest("compact client method round-trip (the Winter leg refuses typed: not supported on this leg)", async () => {
     await boot();
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cc", onEvent: () => {} });
-    const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "norma-cc-")), approvalPolicy: "auto" });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cc", onEvent: () => {} });
+    const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "winter-cc-")), approvalPolicy: "auto" });
     await expect(client.compact(sessionId)).rejects.toThrow(/not supported on (the Winter|this runtime) leg/);
     client.close();
   });
@@ -148,11 +148,11 @@ describe("NormaClient", () => {
   // 5c T3 review regression: since T1, EVERY skills.list response carries the shipped
   // writing-skills builtin (source:"builtin") — this must survive listSkills' SkillsListResult
   // validation (client.ts throws "invalid result from server" on any unparseable element, and
-  // z.array() fails wholesale on one), which is exactly how `norma skills` and /skills broke when
+  // z.array() fails wholesale on one), which is exactly how `winter skills` and /skills broke when
   // the wire schema's source enum lagged behind core's SkillMeta.
   test("listSkills client method round-trip: the always-present builtin passes the VALIDATED client path", async () => {
     await boot();
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "sk", onEvent: () => {} });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "sk", onEvent: () => {} });
     const skills = await client.listSkills(process.cwd()); // throws if any element fails schema validation
     expect(skills).toEqual([{ name: "writing-skills", description: expect.any(String), source: "builtin", path: expect.any(String) }]);
     client.close();
@@ -160,7 +160,7 @@ describe("NormaClient", () => {
 
   test("pluginsList client method round-trip (no plugins installed)", async () => {
     await boot();
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "pl", onEvent: () => {} });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "pl", onEvent: () => {} });
     expect(await client.pluginsList()).toEqual({ ok: true, plugins: [] });
     client.close();
   });
@@ -174,8 +174,8 @@ describe("NormaClient", () => {
   // empty list (the child owns tasks — the recorded 8c carry), both through the validated schemas.
   sessionTest("askUserRespond + taskList client methods round-trip (nothing pending; the child owns tasks on the Winter leg)", async () => {
     await boot(null);
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "aq", onEvent: () => {} });
-    const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "norma-aq-")), approvalPolicy: "auto" });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "aq", onEvent: () => {} });
+    const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "winter-aq-")), approvalPolicy: "auto" });
     const answered = await client.askUserRespond({ sessionId, callId: "q-never-asked", answers: { "Pick one": "B" } });
     expect(answered).toEqual({ ok: true, alreadyResolved: true });
     const list = await client.taskList({ sessionId });
@@ -193,8 +193,8 @@ describe("NormaClient", () => {
   // `question-bridge.test.ts` on the Winter leg.
   sessionTest("askUserRespond forwards optional notes on the wire (accepted by the daemon's param schema)", async () => {
     await boot(null);
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "aqn", onEvent: () => {} });
-    const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "norma-aqn-")), approvalPolicy: "auto" });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "aqn", onEvent: () => {} });
+    const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "winter-aqn-")), approvalPolicy: "auto" });
     const result = await client.askUserRespond({
       sessionId, callId: "q-never-asked", answers: { "Pick one": "B" }, notes: { "Pick one": "went with B because it's simpler" },
     });
@@ -206,7 +206,7 @@ describe("NormaClient", () => {
   // while a turn is in flight — a freshly created session is idle, so `completed`.
   sessionTest("threadList client method round-trip (main thread reported from the driver; idle ⇒ completed)", async () => {
     await boot();
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "th", onEvent: () => {} });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "th", onEvent: () => {} });
     const { sessionId } = await client.createSession("global");
     expect(await client.threadList({ sessionId })).toEqual({ ok: true, threads: [{ threadId: "main", status: "completed" }] });
     client.close();
@@ -214,7 +214,7 @@ describe("NormaClient", () => {
 
   sessionTest("daemonStatus client method round-trip (no provider configured)", async () => {
     await boot(null);
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "ds", onEvent: () => {} });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "ds", onEvent: () => {} });
     const before = await client.daemonStatus();
     expect(before).toMatchObject({ socketPath: daemon.socketPath, provider: null, sessionsCount: 0, pluginsCount: 0 });
     expect(typeof before.version).toBe("string");
@@ -227,7 +227,7 @@ describe("NormaClient", () => {
 
   test("daemonStatus reports the configured provider", async () => {
     await boot(new FakeProvider([]));
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "dsp", onEvent: () => {} });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "dsp", onEvent: () => {} });
     const status = await client.daemonStatus();
     expect(status.provider).toEqual({ id: "fake", model: "fake-1" });
     client.close();
@@ -235,16 +235,16 @@ describe("NormaClient", () => {
 
   test("quotaState client method round-trip (no provider → inert ok state)", async () => {
     await boot(null);
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "qs", onEvent: () => {} });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "qs", onEvent: () => {} });
     expect(await client.quotaState()).toEqual({ kind: "ok", inputTokens: 0, outputTokens: 0 });
     client.close();
   });
 
   test("trustList/trustRemove client methods round-trip", async () => {
     await boot(null);
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "tr", onEvent: () => {} });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "tr", onEvent: () => {} });
     expect(await client.trustList()).toEqual([]);
-    const dir = realpathSync(mkdtempSync(join(tmpdir(), "norma-cli-trustlist-")));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-cli-trustlist-")));
     await client.trustDir(dir);
     expect(await client.trustList()).toEqual([dir]);
     expect(await client.trustRemove(dir)).toBe(true);
@@ -254,18 +254,18 @@ describe("NormaClient", () => {
   });
 
   // Phase 4b Task 2: the CLI-facing wrapper over the harness-role plugin.revokeToken RPC (used by
-  // `norma plugin disable/remove`). `plugin_tokens` lives in the daemon's own sqlite, which this
+  // `winter plugin disable/remove`). `plugin_tokens` lives in the daemon's own sqlite, which this
   // test doesn't have direct access to (RunningDaemon doesn't expose SessionStore) — but the
   // handler is idempotent for a never-minted id, so the round-trip is fully exercisable without it.
   test("pluginRevokeToken client method round-trips (idempotent on a never-minted id)", async () => {
     await boot(null);
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "prt", onEvent: () => {} });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "prt", onEvent: () => {} });
     expect(await client.pluginRevokeToken("never-minted-plugin")).toEqual({ ok: true });
     client.close();
   });
 
   // Final-review Fix 1: the CLI-facing wrapper over the harness/admin-role plugin.restart RPC
-  // (used by `norma plugin restart <id>`). A `FakeProvider` daemon DOES wire a real
+  // (used by `winter plugin restart <id>`). A `FakeProvider` daemon DOES wire a real
   // PluginSupervisor (daemon.ts only builds one `if (agentProvider)`) but this fixture home has no
   // plugins directory, so the supervisor tracks nothing — restarting an id it never saw is exactly
   // `plugin.restart`'s typed NOT_FOUND path (ipc/server.ts), fully exercisable without a real
@@ -273,7 +273,7 @@ describe("NormaClient", () => {
   // is covered at the ipc/server.ts level (core/test/server.test.ts) with an injected fake spawn.
   test("restartPlugin client method rejects a plugin id the supervisor has never tracked", async () => {
     await boot(new FakeProvider([]));
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "rsp", onEvent: () => {} });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "rsp", onEvent: () => {} });
     await expect(client.restartPlugin("never-existed")).rejects.toThrow(/unknown plugin/);
     client.close();
   });
@@ -283,7 +283,7 @@ describe("NormaClient", () => {
   // peripheral/hardware). Mirrors the shape of the plugin-lifecycle round-trip tests above.
   test("routines client methods round-trip: create, list, update, delete", async () => {
     await boot(null);
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "routines", onEvent: () => {} });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "routines", onEvent: () => {} });
 
     const { routine } = await client.routinesCreate({ spec: "every 30m", prompt: "check inbox" });
     expect(routine.spec).toBe("every 30m");
@@ -304,7 +304,7 @@ describe("NormaClient", () => {
 
   test("routinesCreate rejects an invalid spec", async () => {
     await boot(null);
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "routines-bad", onEvent: () => {} });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "routines-bad", onEvent: () => {} });
     await expect(client.routinesCreate({ spec: "not a spec", prompt: "x" })).rejects.toThrow();
     client.close();
   });
@@ -313,7 +313,7 @@ describe("NormaClient", () => {
   // (its MemoryStore is wired unconditionally, same daemon.ts precedent as RoutineStore above).
   // No `memoryWrite` client method exists (write is tool-only, per the brief — CLI/slash only
   // list/show/rm), so this seeds the fact directly through a second `MemoryStore` instance
-  // pointed at the SAME normaHome: both are stateless fact-file readers/writers over the same
+  // pointed at the SAME winterHome: both are stateless fact-file readers/writers over the same
   // directory, no in-process cache to desync (memory.ts's own `list`/`read` re-read from disk on
   // every call) — the daemon's own instance sees whatever this one writes.
   //
@@ -323,11 +323,11 @@ describe("NormaClient", () => {
   // wrote. Files-backed RPC coverage lives in core's own daemon-memory-rpc.test.ts.
   test("memoryList/memoryRead/memoryDelete round-trip against a real daemon", async () => {
     const home = await boot(null, { memory: { enabled: false } });
-    const seed = new MemoryStore({ normaHome: home, trust: { isTrusted: () => true } });
+    const seed = new MemoryStore({ winterHome: home, trust: { isTrusted: () => true } });
     const wrote = await seed.write("user", { name: "captain", description: "prefers concise replies", type: "user", body: "Sam prefers short answers." }, { source: "rpc" });
     expect(wrote.ok).toBe(true);
 
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "memory", onEvent: () => {} });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "memory", onEvent: () => {} });
 
     const { facts } = await client.memoryList("user");
     expect(facts).toEqual([{ name: "captain", description: "prefers concise replies", type: "user" }]);
@@ -344,18 +344,18 @@ describe("NormaClient", () => {
 
   test("memoryRead rejects an invalid name", async () => {
     await boot(null);
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "memory-bad", onEvent: () => {} });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "memory-bad", onEvent: () => {} });
     await expect(client.memoryRead("user", "Not A Valid Slug")).rejects.toThrow();
     client.close();
   });
 
-  sessionTest("init prompt reaches the session (canned NORMA.md-generation prompt)", async () => {
+  sessionTest("init prompt reaches the session (canned WINTER.md-generation prompt)", async () => {
     const { INIT_PROMPT } = await import("../src/main");
-    expect(INIT_PROMPT).toMatch(/NORMA\.md/i);
+    expect(INIT_PROMPT).toMatch(/WINTER\.md/i);
     await boot();
     const events: any[] = [];
-    const client = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "init", onEvent: (e) => events.push(e) });
-    const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "norma-init-")), approvalPolicy: "auto" });
+    const client = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "init", onEvent: (e) => events.push(e) });
+    const { sessionId } = await client.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "winter-init-")), approvalPolicy: "auto" });
     await client.attach(sessionId);
     await client.send(sessionId, INIT_PROMPT);
     await new Promise((r) => setTimeout(r, 40));
@@ -365,11 +365,11 @@ describe("NormaClient", () => {
 
   sessionTest("resume continues an existing session (no new session)", async () => {
     await boot();
-    const c1 = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "a", onEvent: () => {} });
+    const c1 = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "a", onEvent: () => {} });
     const { sessionId } = await c1.createSession("global", { cwd: mkdtempSync(join(tmpdir(), "r-")), approvalPolicy: "auto" });
     await c1.attach(sessionId); await c1.send(sessionId, "first"); c1.close();
     const seen: any[] = [];
-    const c2 = await NormaClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "b", onEvent: (e) => seen.push(e) });
+    const c2 = await WinterClient.connect({ socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "b", onEvent: (e) => seen.push(e) });
     const tip = (await c2.listSessions()).sessions.find((r: any) => r.sessionId === sessionId)!.lastSeq;
     await c2.attach(sessionId, tip); await c2.send(sessionId, "second");
     await new Promise((r) => setTimeout(r, 50));
@@ -382,8 +382,8 @@ describe("NormaClient", () => {
   // session-activity-hygiene T9 (amendment): `session.list` has always SENT `cwd` — `store.list()`
   // selects it and the handler returns rows verbatim — but `SessionListResult` never declared it, and
   // `validated()`'s safeParse strips every undeclared key. So the field reached the wire and died at
-  // this client, silently: `norma agents` could not show a cwd column for data the daemon was already
-  // putting on the socket. (Swift's own `NormaClient.listSessions()` reads `s["cwd"]` off the raw
+  // this client, silently: `winter agents` could not show a cwd column for data the daemon was already
+  // putting on the socket. (Swift's own `WinterClient.listSessions()` reads `s["cwd"]` off the raw
   // JSON and has been consuming it all along — the TS schema was the odd one out.)
   //
   // This is a LIVE round-trip on purpose: a schema unit test would pass the day the daemon stopped
@@ -391,10 +391,10 @@ describe("NormaClient", () => {
   // Only both ends at once prove the value survives.
   sessionTest("session.list round-trips `cwd` through the client's schema validation (T9)", async () => {
     await boot();
-    const client = await NormaClient.connect({
+    const client = await WinterClient.connect({
       socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cli-cwd", onEvent: () => {},
     });
-    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-cli-listcwd-")));
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-cli-listcwd-")));
     const { sessionId } = await client.createSession("global", { cwd });
     const withCwd = (await client.listSessions()).sessions.find((s: { sessionId: string }) => s.sessionId === sessionId);
     expect(withCwd!.cwd).toBe(cwd);
@@ -418,7 +418,7 @@ describe("NormaClient", () => {
   // would satisfy a create-only assertion while telling a picker nothing it did not already know.
   sessionTest("session.list round-trips `approvalPolicy` through the client's schema validation (mac-chat-parity T4)", async () => {
     await boot();
-    const client = await NormaClient.connect({
+    const client = await WinterClient.connect({
       socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cli-policy", onEvent: () => {},
     });
     const policyOf = async (id: string) =>
@@ -455,12 +455,12 @@ describe("NormaClient", () => {
   // time, not trusted from that now-stale column.
   sessionTest("session.list round-trips `dirs` through the client's schema validation, cwd kept an alias (working-directories T3)", async () => {
     const home = await boot();
-    const client = await NormaClient.connect({
+    const client = await WinterClient.connect({
       socketPath: daemon.socketPath, token: daemon.tokens.harness, clientName: "cli-dirs", onEvent: () => {},
     });
 
     // (1) A genuinely pre-branch-style row: `cwd` set at create time, `dirs` column forced NULL.
-    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-cli-listdirs-")));
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-cli-listdirs-")));
     const { sessionId } = await client.createSession("global", { cwd });
     const raw = new Database(join(home, "sessions", "index.db"));
     raw.run("UPDATE sessions SET dirs = NULL WHERE session_id = ?", [sessionId]);
@@ -476,7 +476,7 @@ describe("NormaClient", () => {
     // `locked: true` (T1's `deriveFromCwd`), and `setPrimary` correctly REFUSES over a locked
     // primary (T2) — this proves the write path on a session where it's actually legal to write.
     const { sessionId: bareId } = await client.createSession("global");
-    const newPrimary = realpathSync(mkdtempSync(join(tmpdir(), "norma-cli-listdirs-2-")));
+    const newPrimary = realpathSync(mkdtempSync(join(tmpdir(), "winter-cli-listdirs-2-")));
     const written = await client.sessionSetDirs({ sessionId: bareId, op: "setPrimary", path: newPrimary });
     expect(written.dirs).toEqual([{ path: newPrimary, locked: false }]);
     const afterWrite = (await client.listSessions()).sessions.find((s: { sessionId: string }) => s.sessionId === bareId);
@@ -492,9 +492,9 @@ describe("NormaClient", () => {
   });
 });
 
-describe("NormaClient against a hostile/fake server", () => {
+describe("WinterClient against a hostile/fake server", () => {
   test("skips unknown future event types and times out hung requests", async () => {
-    const sock = join(mkdtempSync(join(tmpdir(), "norma-fake-")), "fake.sock");
+    const sock = join(mkdtempSync(join(tmpdir(), "winter-fake-")), "fake.sock");
     Bun.listen({
       unix: sock,
       socket: {
@@ -513,7 +513,7 @@ describe("NormaClient against a hostile/fake server", () => {
       },
     });
     const events: any[] = [];
-    const client = await NormaClient.connect({
+    const client = await WinterClient.connect({
       socketPath: sock, token: "t", clientName: "fc", timeoutMs: 200, onEvent: (e) => events.push(e),
     });
     await new Promise((r) => setTimeout(r, 50));
@@ -523,7 +523,7 @@ describe("NormaClient against a hostile/fake server", () => {
     client.close();
   });
 
-  // orb-regressions fix round 1 (2026-07-29), review finding I1 — the TS twin of the NormaKit bug.
+  // orb-regressions fix round 1 (2026-07-29), review finding I1 — the TS twin of the WinterKit bug.
   //
   // `request(method, params?)` builds `encodeLine({jsonrpc, id, method, params})`, and
   // `JSON.stringify` DROPS a key whose value is `undefined` — so a params-less call emitted
@@ -535,7 +535,7 @@ describe("NormaClient against a hostile/fake server", () => {
   // both Swift suites stayed green. Pinned on the WIRE (not end-to-end against a daemon) so this
   // stays RED for a CLI-only regression even though the daemon now normalizes `params ?? {}` too.
   test("a params-less request still puts an empty params object on the wire", async () => {
-    const sock = join(mkdtempSync(join(tmpdir(), "norma-fake-params-")), "fake.sock");
+    const sock = join(mkdtempSync(join(tmpdir(), "winter-fake-params-")), "fake.sock");
     const lines: any[] = [];
     Bun.listen({
       unix: sock,
@@ -555,7 +555,7 @@ describe("NormaClient against a hostile/fake server", () => {
         },
       },
     });
-    const client = await NormaClient.connect({ socketPath: sock, token: "t", clientName: "v", timeoutMs: 500, onEvent: () => {} });
+    const client = await WinterClient.connect({ socketPath: sock, token: "t", clientName: "v", timeoutMs: 500, onEvent: () => {} });
 
     await client.listSessions();                 // the one live params-less caller
     await client.request(METHODS.sessionDispatch); // a no-argument method with a real z.object({})
@@ -574,7 +574,7 @@ describe("NormaClient against a hostile/fake server", () => {
   });
 
   test("client rejects a malformed result for a validated method", async () => {
-    const sock = join(mkdtempSync(join(tmpdir(), "norma-fake2-")), "fake.sock");
+    const sock = join(mkdtempSync(join(tmpdir(), "winter-fake2-")), "fake.sock");
     Bun.listen({
       unix: sock,
       socket: {
@@ -590,7 +590,7 @@ describe("NormaClient against a hostile/fake server", () => {
         },
       },
     });
-    const client = await NormaClient.connect({ socketPath: sock, token: "t", clientName: "v", timeoutMs: 500, onEvent: () => {} });
+    const client = await WinterClient.connect({ socketPath: sock, token: "t", clientName: "v", timeoutMs: 500, onEvent: () => {} });
     await expect(client.createSession("global")).rejects.toThrow(/invalid result/);
     client.close();
   });

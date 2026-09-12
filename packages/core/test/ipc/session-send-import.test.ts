@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -87,7 +87,7 @@ async function boot(winter: WinterSessionDrivers, store: SessionStore, home: str
 
 describe("session.send — the P8c-6 engine-era import door", () => {
   test("an engine-era session is imported ONCE, then the send proceeds on the newly-resumable leg", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-send-import-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-send-import-"));
     const store = new SessionStore(home);
     const sessionId = store.createSession("global");
     const sent: string[] = [];
@@ -118,7 +118,7 @@ describe("session.send — the P8c-6 engine-era import door", () => {
   });
 
   test("a live/resumable session never triggers an import attempt", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-send-import-live-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-send-import-live-"));
     const store = new SessionStore(home);
     const sessionId = store.createSession("global");
     const sent: string[] = [];
@@ -140,7 +140,7 @@ describe("session.send — the P8c-6 engine-era import door", () => {
   });
 
   test("no importLegacy hook wired: an engine-era session keeps the ordinary permanent refusal", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-send-import-none-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-send-import-none-"));
     const store = new SessionStore(home);
     const sessionId = store.createSession("global");
     const table = fakeTable({ leg: { current: "engine" }, sent: [] });
@@ -157,7 +157,7 @@ describe("session.send — the P8c-6 engine-era import door", () => {
   });
 
   test("m1 (whole-branch review): the attachment check runs BEFORE the import attempt — a client attached elsewhere never triggers it", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-send-import-attach-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-send-import-attach-"));
     const store = new SessionStore(home);
     const sessionIdA = store.createSession("global");
     const sessionIdB = store.createSession("global");
@@ -185,7 +185,7 @@ describe("session.send — the P8c-6 engine-era import door", () => {
   });
 
   test("an import failure is refused typed, never a silent fall-through to the log-only path", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-send-import-fail-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-send-import-fail-"));
     const store = new SessionStore(home);
     const sessionId = store.createSession("global");
     const table = fakeTable({ leg: { current: "engine" }, sent: [] });

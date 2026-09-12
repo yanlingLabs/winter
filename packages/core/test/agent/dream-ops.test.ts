@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MAX_FILES, MAX_FILE_BYTES, MAX_OPS, RESERVED_FILES, applyOps, validateOps, type DreamOp } from "../../src/agent/dream-ops";
 
-function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "norma-dreamops-"))); }
+function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "winter-dreamops-"))); }
 
 describe("dream-ops: validateOps", () => {
   test("valid mixed list parses", () => {

@@ -1,7 +1,7 @@
 /**
  * Vendors CEF (Chromium Embedded Framework)'s prebuilt macOS arm64 distribution into
- * apple/Norma/vendor/cef/ (gitignored -- ~332MB uncompressed). Run once after cloning, or
- * whenever CEF_VERSION below is deliberately bumped. `apple/Norma/project.yml`'s Norma target
+ * apple/Winter/vendor/cef/ (gitignored -- ~332MB uncompressed). Run once after cloning, or
+ * whenever CEF_VERSION below is deliberately bumped. `apple/Winter/project.yml`'s Winter target
  * carries a preBuildScripts check that fails the Xcode build loudly, naming this exact command,
  * if the vendored tree is missing.
  *
@@ -21,8 +21,8 @@
  * turning up nothing in either one) alongside the `Release/` framework itself. The only things
  * standard adds are `tests/` (cefsimple/cefclient/ceftests sample sources -- read for Task 1's
  * spike/pump research, but Plan B1 explicitly VENDORS the ~100 lines of pump code it needs
- * into NormaCEF rather than depending on `tests/` living on disk) and a second `Debug/`
- * framework copy Norma never ships. Nothing downstream of this script -- the wrapper build,
+ * into WinterCEF rather than depending on `tests/` living on disk) and a second `Debug/`
+ * framework copy Winter never ships. Nothing downstream of this script -- the wrapper build,
  * the ObjC++ bridge, the app's own headers -- touches `tests/`. So minimal is the only artifact
  * this script, or any future contributor, needs: 125MB compressed instead of 284MB.
  *
@@ -66,7 +66,7 @@ const ARTIFACT_TYPE = "minimal";
 // branch review, Minor): index.json alone would let a CDN-level compromise able to swap the
 // tarball also swap the manifest's sha1 to match, defeating that check silently. Recorded from
 // docs/research/2026-08-09-cef-spike.md's own verified download of this exact artifact; matches
-// apple/NormaKit/vendor/fetch-iroh.sh's IROH_ZIP_SHA256 convention (a literal, not a live fetch).
+// apple/WinterKit/vendor/fetch-iroh.sh's IROH_ZIP_SHA256 convention (a literal, not a live fetch).
 // Checked against index.json's live value BEFORE downloading (the "belt"); the actual download
 // is then checked against index.json's value same as before (the "braces") -- two independent
 // layers, not collapsed into one, so a mismatch names which layer disagreed.
@@ -74,7 +74,7 @@ const PINNED_SHA1 = "9686f8f6ef1343aa813af2c200db29f8b95abe7f";
 const BASE_URL = "https://cef-builds.spotifycdn.com";
 const INDEX_URL = `${BASE_URL}/index.json`;
 
-const VENDOR_DIR = join(ROOT, "apple", "Norma", "vendor", "cef");
+const VENDOR_DIR = join(ROOT, "apple", "Winter", "vendor", "cef");
 const STAMP_PATH = join(VENDOR_DIR, ".vendored-version");
 // Top-level dirs copied verbatim from the extracted distribution into VENDOR_DIR: the
 // idempotency check (vendoredPathsPresent, below) and the extraction step key off this same
@@ -82,7 +82,7 @@ const STAMP_PATH = join(VENDOR_DIR, ".vendored-version");
 // than this list, though: it's these dirs present AND STAMP_PATH present with a matching
 // version/type (see alreadyVendored) -- a run killed mid-copy can leave dirs complete-looking
 // but no stamp, and only the stamp proves the copy that produced them finished and was
-// verified. apple/Norma/project.yml's build-gate script is hand-kept in sync with BOTH halves
+// verified. apple/Winter/project.yml's build-gate script is hand-kept in sync with BOTH halves
 // of that (dirs + stamp) since YAML can't import this list directly -- if either list changes,
 // update the other by hand (Task 2 whole-branch review, Important: the gate originally checked
 // dirs only and false-passed exactly this partial-tree state).
@@ -90,8 +90,8 @@ const COPY_DIRS = ["Release", "include", "libcef_dll"];
 // Top-level FILES copied verbatim, and REQUIRED -- an absent one aborts the vendor rather than
 // being skipped. Both are licence obligations, not conveniences (panel-cef Task 5): CEF and
 // Chromium are BSD-3-Clause, whose binary-redistribution clause requires the copyright notice
-// and disclaimer to travel "with the distribution", so apple/Norma/project.yml copies both of
-// these into Norma.app/Contents/Resources/Licenses/ and scripts/release.ts gates their presence
+// and disclaimer to travel "with the distribution", so apple/Winter/project.yml copies both of
+// these into Winter.app/Contents/Resources/Licenses/ and scripts/release.ts gates their presence
 // in the built artifact. LICENSE.txt was previously copied best-effort (`if (existsSync(src))`);
 // a silently-skipped licence file is exactly the failure a licence gate must not have, so the
 // copy below now fails closed for every entry here.
@@ -228,9 +228,9 @@ console.log(
 
 // ---------------------------------------------------------------------------
 // Download, verify, extract, place. Everything transient lives under one temp dir that is
-// always removed on the way out, success or failure (mirrors apple/NormaKit/vendor/fetch-iroh.sh).
+// always removed on the way out, success or failure (mirrors apple/WinterKit/vendor/fetch-iroh.sh).
 // ---------------------------------------------------------------------------
-const tmp = mkdtempSync(join(tmpdir(), "norma-cef-"));
+const tmp = mkdtempSync(join(tmpdir(), "winter-cef-"));
 // fail() calls process.exit(), which does NOT unwind the stack -- the `finally` below never
 // runs on that path (release.ts's signAppcastEnclosure documents the same trap). Every fail()
 // called from inside this try must go through here first, or a failure leaks up to ~125MB of
@@ -312,13 +312,13 @@ try {
   }
   for (const f of COPY_FILES) {
     const src = join(distRoot, f);
-    // Fail closed, not best-effort: these are the BSD-3-Clause notices Norma.app must ship
+    // Fail closed, not best-effort: these are the BSD-3-Clause notices Winter.app must ship
     // (see COPY_FILES). A missing one here would otherwise surface as an app-bundle build
     // failure much later, or -- worse, before Task 5 added the downstream gates -- as a
     // silently unattributed release.
     if (!existsSync(src)) {
       failTmp(
-        `extracted ${ARTIFACT_TYPE} distribution is missing "${f}" -- Norma.app is required to\n` +
+        `extracted ${ARTIFACT_TYPE} distribution is missing "${f}" -- Winter.app is required to\n` +
           `ship this notice (BSD-3-Clause binary redistribution). CEF's top-level layout may have\n` +
           `changed upstream; do not work around this by dropping the file from COPY_FILES.`,
       );

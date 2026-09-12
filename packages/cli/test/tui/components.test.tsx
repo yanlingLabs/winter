@@ -121,7 +121,7 @@ describe("CommittedTranscript — interrupted block (g)", () => {
   test("exact wording", () => {
     const items: Block[] = [{ kind: "interrupted" }];
     const { lastFrame } = render(<CommittedTranscript items={items} />);
-    expect(lastFrame() ?? "").toContain("Interrupted · What should Norma do instead?");
+    expect(lastFrame() ?? "").toContain("Interrupted · What should Winter do instead?");
   });
 });
 

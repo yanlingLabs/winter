@@ -224,10 +224,10 @@ describe("computer tool", () => {
   test("an act failure surfaces as an isError tool_result with the message", async () => {
     const reg = new ToolRegistry();
     registerComputerTool(reg);
-    const cu = fakeCu({ ok: false, kind: "unavailable", message: "computer use unavailable — Norma.app not running" });
+    const cu = fakeCu({ ok: false, kind: "unavailable", message: "computer use unavailable — Winter.app not running" });
     const out = await run(reg, { action: "ax_snapshot" }, ctx({ computerUse: cu.service }));
     expect(out.isError).toBe(true);
-    expect(out.output).toBe("computer use unavailable — Norma.app not running");
+    expect(out.output).toBe("computer use unavailable — Winter.app not running");
   });
 
   test("no computerUse wired → typed error", async () => {

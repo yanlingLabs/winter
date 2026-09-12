@@ -13,12 +13,12 @@ import { afterAll, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { SessionEvent } from "@norma/protocol";
+import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { PermissionGate } from "../../src/agent/gate";
 import { QuestionBroker } from "../../src/agent/questions";
 import { FileSecretStore } from "../../src/auth/secret-store";
-import { createNormaRuntimeSdk } from "../../src/runtime-sdk/create";
+import { createWinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import { createWinterSessionDrivers } from "../../src/runtime-sdk/session-driver";
 import { openRuntimeStateDb, ProjectionCheckpoints, RuntimeSessionRecords } from "../../src/runtime-state";
 import { SessionHub } from "../../src/sessions/hub";
@@ -33,8 +33,8 @@ describeWithWinterBinary("item 10 probe: MCP image content through a capability 
   afterAll(async () => { for (const c of cleanups.reverse()) await c(); });
 
   test("a text+image callTool result: what the child forwards (tool_result output; the child's transcript)", async () => {
-    const home = realpathSync(mkdtempSync(join(tmpdir(), "norma-winter-image-probe-")));
-    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-winter-image-cwd-")));
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-image-probe-")));
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-image-cwd-")));
     const store = new SessionStore(home);
     const hub = new SessionHub(store);
     const rs = openRuntimeStateDb(home);
@@ -42,7 +42,7 @@ describeWithWinterBinary("item 10 probe: MCP image content through a capability 
     const checkpoints = new ProjectionCheckpoints(rs);
     const settings = { runtimes: { winterExecutable: bin, winterIdleTimeoutSec: 10 } } as unknown as Settings;
     const secrets = new FileSecretStore(join(home, "secrets.json"));
-    const runtime = await createNormaRuntimeSdk({ home, settings: () => settings, secrets, capabilities: [] });
+    const runtime = await createWinterRuntimeSdk({ home, settings: () => settings, secrets, capabilities: [] });
     const calls: Array<{ name: string; args: unknown }> = [];
     const drivers = createWinterSessionDrivers({
       home, settings: () => settings, runtime, records, checkpoints, store, hub, secrets,
