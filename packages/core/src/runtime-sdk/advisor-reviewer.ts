@@ -131,11 +131,17 @@ function openAiFamilyReviewer(secrets: SecretStore, settings: () => Settings | u
  * in 8d — this is a small, self-contained adapter local to the advisor's own concern, never a second,
  * independently-drifting copy of `RuntimeBackedProvider`).
  */
-function claudeFamilyReviewer(secrets: SecretStore, targetModel: string): AdvisorReviewer {
+function claudeFamilyReviewer(secrets: SecretStore, targetModel: string, connectionOverride?: () => { anthropicBaseUrl?: string } | undefined): AdvisorReviewer {
   const adapter = createAnthropicMessagesAdapter();
   const ref = credentialRefFor("anthropic");
+  // P8d-17: TEST-ONLY (never a production `daemon.ts` wiring, never an ambient env var — the same
+  // "a value only a test constructs" spirit as `official-options.ts`'s own `officialConnectionOverride`
+  // and the Winter leg's `winter-test/<name>` double). `local: true` is required for the loopback
+  // baseUrl to pass provider-runtime's own endpoint policy (the SAME reason
+  // `createOpenAiCompatibleRuntimeProvider`'s own header states for its identical declaration).
+  const override = connectionOverride?.();
   const context: ProviderContext = {
-    connection: { providerId: "anthropic" },
+    connection: { providerId: "anthropic", ...(override?.anthropicBaseUrl === undefined ? {} : { baseUrl: override.anthropicBaseUrl, local: true }) },
     credentials: credentialStoreOverSecretStore(secrets),
     authRef: ref ?? { kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME },
     stallTimeoutMs: 60_000,
@@ -175,6 +181,13 @@ export function advisorReviewerFor(deps: {
   secrets: SecretStore;
   familyOf: (model: string) => AdvisorFamily;
   sessionModel: () => string | undefined;
+  /**
+   * P8d-17 (controller ruling): TEST-ONLY (never a production `daemon.ts` wiring, never an ambient
+   * env var — mirrors `official-options.ts`'s own `officialConnectionOverride` pattern). Redirects the
+   * Claude-family reviewer's own HTTP call at a loopback Anthropic fake, so a real official-leg
+   * session's `advisor` tool call can be proven to reach a scripted reviewer end to end.
+   */
+  connectionOverride?: () => { anthropicBaseUrl?: string } | undefined;
 }): ReviewerResolver {
   return () => {
     const explicit = winterOptionsFromSettings(deps.settings()).advisorModel;
@@ -182,7 +195,7 @@ export function advisorReviewerFor(deps: {
     if (targetModel === undefined) return undefined;
     const family = deps.familyOf(targetModel);
     if (family === "openai") return { provider: openAiFamilyReviewer(deps.secrets, deps.settings, targetModel), model: targetModel };
-    if (family === "claude") return { provider: claudeFamilyReviewer(deps.secrets, targetModel), model: targetModel };
+    if (family === "claude") return { provider: claudeFamilyReviewer(deps.secrets, targetModel, deps.connectionOverride), model: targetModel };
     // "other": 8d states no provider-runtime mapping for a third family (see this module's header).
     return undefined;
   };

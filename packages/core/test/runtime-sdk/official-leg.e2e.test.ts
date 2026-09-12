@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@norma/protocol";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
+import type { ReviewerResolver } from "@yanlinglabs/winter-agent-sdk/tools";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { PermissionGate } from "../../src/agent/gate";
 import { QuestionBroker } from "../../src/agent/questions";
@@ -139,7 +140,7 @@ const probeDef: ToolDefinition = {
 
 async function buildWorld(
   selection: RuntimeSelection, secretsDir: string, baseUrl: string, policy: "auto" | "dont-ask" | "plan" = "auto",
-  opts: { reviewer?: BashReviewer; mode?: "code" | "chat"; hookFacade?: SessionHooksDeps["hookFacade"] } = {},
+  opts: { reviewer?: BashReviewer; mode?: "code" | "chat"; hookFacade?: SessionHooksDeps["hookFacade"]; advisorReviewer?: ReviewerResolver } = {},
 ): Promise<World> {
   const mode = opts.mode ?? "code";
   const home = mkdtempSync(join(tmpdir(), "p8c-official-e2e-"));
@@ -158,6 +159,7 @@ async function buildWorld(
     settings: () => null,
     secrets,
     capabilities: [],
+    ...(opts.advisorReviewer === undefined ? {} : { advisorReviewer: opts.advisorReviewer }),
   });
   const officialPeer = await runtime.officialPeer();
   if (officialPeer === undefined) throw new Error("unreachable: the suite is skipped without a bed");
@@ -670,6 +672,89 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       console.warn(`[8d official-leg] MEASURED: post-tool hook calls for a control-plane-denied Read: ${postToolCalls.length} (expected 0 — the deny happens before the tool ever runs)`);
       expect(postToolCalls).toHaveLength(0);
     });
+  }, 60_000);
+
+  // ── P8d-17: the OFFICIAL leg's own `advisor` tool call reaching advisorReviewerFor — MEASURED ──
+  //
+  // The seam itself (`advisorReviewerFor`'s new `connectionOverride`, `advisor-reviewer.ts`) is
+  // built, wired into `buildWorld` (an `advisorReviewer` this session's `NormaRuntimeSdk` is
+  // constructed WITH — every other `buildWorld` call in this file omits it), and typechecks.
+  //
+  // MEASURED, NOT ASSUMED: scripting a `tool_use` named "advisor" (parameterless, per the SDK's own
+  // `ADVISOR_DEFINITION`: "the built-in name IS the bare name... on the official branch") and
+  // sending it to the real 0.3.250 binary produces `<tool_use_error>Error: No such tool available:
+  // advisor</tool_use_error>` — the model's own call is REFUSED before it ever reaches
+  // `resolveReviewer()` (confirmed: the Anthropic loopback saw exactly ONE request, the main turn's
+  // own scripted `tool_use`, never a second request for the advisor's own `generate()` call).
+  //
+  // Diagnosed one level further (bounded): the router's own `official/aliases.ts`
+  // (`ALIASED_BUILTINS`/`officialToolAliases`) states a `toolAliases` table redirecting
+  // `SendMessage`/`ListAgents`/`ReadNotifications`/`advisor` to their canonical registered names, and
+  // that table is NOT re-exported from the package's public barrel (its `exports` map has one entry,
+  // `"."` — the same gap `official-capabilities.ts`'s own header documents for
+  // `createApprovalBridge`). Threading a hand-built equivalent onto the outer `Options.toolAliases`
+  // (the `sdk.query()` call in `official-session.ts`'s `open()`) did NOT change the outcome — still
+  // refused — which is consistent with `ALIASED_BUILTINS`'s own row for advisor being an IDENTITY
+  // mapping (`{builtin: "advisor", tool: "advisor"}`, unlike the other three), meaning no alias was
+  // ever the missing piece here. That attempted fix was REVERTED (unverified for the other three
+  // rows too, and a production wiring change must not ship unverified) — this file records the
+  // measurement rather than a fix that could not be confirmed to work.
+  //
+  // UNPROVEN, WITH THE EXACT BLOCKER: something beyond `resolveReviewer`/`connectionOverride` must
+  // register the official leg's own standing-server tool (`advisor`) with the real 0.3.250 CLI before
+  // the model can call it at all — no code path in `official-options.ts`/`official-session.ts` builds
+  // such a registration today (`officialInputFor`'s own `mcpServers` covers ONLY Norma's capability
+  // servers, never the router's native standing-server tools). Diagnosing that mechanism needs
+  // reading router-internal code beyond what this lane's briefs sanctioned; recorded as a carry.
+  test("P8d-17 MEASURED: the official leg's real binary refuses the bare 'advisor' tool call — resolveReviewer/connectionOverride are never reached", async () => {
+    const turns: AnthropicTurnScript[] = [
+      { blocks: [{ type: "tool_use", id: "call_1", name: "advisor", jsonChunks: ["{}"] }], stopReason: "tool_use" },
+      DONE_TURN,
+    ];
+    let anthropicCallCount = 0;
+    const { startFake } = await import("@yanlinglabs/winter-provider-conformance");
+    const fake = await startFake({
+      routes: [{
+        path: "*",
+        handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            anthropicCallCount += 1;
+            return (await import("@yanlinglabs/winter-provider-conformance")).anthropicFake.anthropicTurnResponse(turns[Math.min(anthropicCallCount - 1, turns.length - 1)]!);
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    try {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const { advisorReviewerFor, familyOfModel } = await import("../../src/runtime-sdk/advisor-reviewer");
+      let reviewerGenerateCalled = false;
+      const advisorReviewer = advisorReviewerFor({
+        settings: () => undefined,
+        secrets: new FileSecretStore(secretsDir),
+        familyOf: familyOfModel,
+        sessionModel: () => "claude-sonnet-5",
+        connectionOverride: () => ({ anthropicBaseUrl: fake.url }),
+      });
+      const wrappedResolver = () => {
+        const resolved = advisorReviewer();
+        if (resolved === undefined) return undefined;
+        return { ...resolved, provider: { generate: async (i: Parameters<typeof resolved.provider.generate>[0]) => { reviewerGenerateCalled = true; return resolved.provider.generate(i); } } };
+      };
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto", { advisorReviewer: wrappedResolver });
+      await w.session.send("please consult the advisor before you answer");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      const result = w.events.find((e) => e.type === "tool_result" && (w.events.find((c) => c.type === "tool_call" && (c as { callId?: string }).callId === (e as { callId?: string }).callId) as { name?: string } | undefined)?.name === "advisor") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
+      console.warn(`[P8d-17] MEASURED: advisor tool_result = ${JSON.stringify(result)}; reviewer's own generate() was called: ${reviewerGenerateCalled}; anthropic loopback saw ${anthropicCallCount} request(s)`);
+      expect(result?.isError).toBe(true);
+      expect(result?.output).toContain("No such tool available");
+      expect(reviewerGenerateCalled).toBe(false); // the call never reaches our reviewer at all
+      // Two requests reach the loopback (the scripted tool_use, then the model's own continuation
+      // after seeing the tool error) — never a THIRD for a reviewer generate() call that never fires.
+      expect(anthropicCallCount).toBe(2);
+    } finally {
+      await fake.close();
+    }
   }, 60_000);
 });
 
