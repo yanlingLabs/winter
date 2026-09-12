@@ -1177,7 +1177,22 @@ if (import.meta.main) {
     // lock, which unlinks the socket — the clean-quit path. (SIGKILL/crash still leave a stale
     // socket, which is why the supervisor's socketExists is also now a liveness probe, not a
     // presence check.)
-    const daemon = await startDaemon();
+    // Phase 9c Migration B: the boot hook inside `startDaemon` throws a typed `MigrationRefused`
+    // (code `home_half_migrated`) BEFORE creating anything on disk when the home is mid-migration —
+    // print the operator-facing message and exit cleanly rather than an uncaught-exception stack
+    // trace; the daemon never auto-resumes on its own (`winter migrate --resume`/`--rollback` is
+    // the door).
+    let daemon: Awaited<ReturnType<typeof startDaemon>>;
+    try {
+      daemon = await startDaemon();
+    } catch (err) {
+      const { MigrationRefused } = await import("@yanlinglabs/winter-core");
+      if (err instanceof MigrationRefused) {
+        console.error(err.message);
+        process.exit(1);
+      }
+      throw err;
+    }
     // AWAITED (P8a Task 12): `stop()` is synchronous up to the runtime-state drain, and the tail it
     // hands back is what releases the lock (→ unlinks the socket). `process.exit(0)` on the same
     // line would kill the process mid-drain and leave the stale socket this handler exists to avoid.
@@ -1233,7 +1248,10 @@ if (import.meta.main) {
     // doctor whose first move is to reach the daemon is useless in exactly the state it exists for.
     // `runtime-state.db` is WAL, so the read-only half runs happily beside a live daemon; every
     // repair refuses while the lock is held, on the same probe `lock.ts` uses.
-    const { diagnoseRuntimeState, repairRuntimeState, isDaemonLockHeld, DAEMON_RUNNING_REFUSAL, diagnoseRuntimes, loadSettings } = await import("@yanlinglabs/winter-core");
+    const {
+      diagnoseRuntimeState, repairRuntimeState, isDaemonLockHeld, DAEMON_RUNNING_REFUSAL, diagnoseRuntimes, loadSettings,
+      diagnoseMigration, formatMigrationDoctorLines, legacyHomeFor, legacyKeychainServiceFor, LegacyKeychainSecretStore,
+    } = await import("@yanlinglabs/winter-core");
     const home = resolveWinterHome();
     const args = process.argv.slice(3);
     const flag = (name: string): string | undefined => {
@@ -1282,6 +1300,24 @@ if (import.meta.main) {
         console.log(`  ${AQUA}bundle:${RESET} ${DIM}${report.bundle.error}${RESET}`);
       }
     };
+    // Phase 9c Migration B (Task M Step 10): read-only, same "never crash the diagnostic tool"
+    // posture as `printRuntimesSection` above — a Keychain read failure degrades to one honest
+    // line rather than aborting the whole command.
+    const printMigrationSection = async (): Promise<void> => {
+      const profile = resolveWinterProfile();
+      const legacyHome = legacyHomeFor(profile);
+      try {
+        const report = await diagnoseMigration({
+          home,
+          legacyHome,
+          legacyKeychainService: legacyKeychainServiceFor(profile),
+          legacyStore: new LegacyKeychainSecretStore(profile),
+        });
+        for (const line of formatMigrationDoctorLines(report)) console.log(`${AQUA}${line}${RESET}`);
+      } catch (err) {
+        console.log(`${AQUA}migration:${RESET} ${DIM}unavailable (${err instanceof Error ? err.message : "unknown error"})${RESET}`);
+      }
+    };
     // `--repair` with nothing after it must reach the usage branch, not silently run a diagnosis.
     const repair = args.includes("--repair") ? (flag("--repair") ?? "") : undefined;
     if (repair === undefined) {
@@ -1296,6 +1332,7 @@ if (import.meta.main) {
         }
       }
       await printRuntimesSection();
+      await printMigrationSection();
       break;
     }
     const session = flag("--session");
@@ -2149,6 +2186,37 @@ if (import.meta.main) {
     }
     process.exit(text.length > 0 ? 0 : 1);
   }
+  case "migrate": {
+    // WS-16 §18 Migration B — the same real machinery the daemon's own boot hook runs (never a
+    // second copy of it). `runMigrateCommand` is provable outside this argv switch (main.test.ts's
+    // own header); this case is a thin wrapper over real deps.
+    const { KeychainSecretStore: To, LegacyKeychainSecretStore, resolveWinterHome: home, resolveWinterProfile: profileOf, isDaemonLockHeld } = await import("@yanlinglabs/winter-core");
+    const { runMigrateCommand } = await import("./commands/migrate");
+    const profile = profileOf();
+    const code = await runMigrateCommand({
+      home: home(),
+      profile,
+      argv: process.argv.slice(3),
+      secretsTo: new To(),
+      legacySecrets: new LegacyKeychainSecretStore(profile),
+      isDaemonLockHeld,
+      log: (l) => console.log(l),
+      error: (l) => console.error(l),
+      confirm: (p) => askYesNo(p),
+    });
+    process.exit(code);
+  }
+  case "migrate-project": {
+    const { runMigrateProjectCommand } = await import("./commands/migrate-project");
+    const code = await runMigrateProjectCommand({
+      argv: process.argv.slice(3),
+      cwd: process.cwd(),
+      log: (l) => console.log(l),
+      error: (l) => console.error(l),
+      confirm: (p) => askYesNo(p),
+    });
+    process.exit(code);
+  }
   default:
     console.log(`winter ${CORE_VERSION} — commands:
   daemon run | daemon install | daemon uninstall | daemon status
@@ -2167,6 +2235,8 @@ if (import.meta.main) {
   memory [list] [--project] | show <name> [--project] | rm <name> [--project]  manage saved memory facts
   login [--api-key] [--anthropic-key] [--web-search-key] [--exa-key] | logout [--anthropic] | provider | provider-smoke [--prompt <text>]
   init                                            generate/update WINTER.md by surveying the project
+  migrate [--from <legacyHome>] [--status|--resume|--rollback] [--yes]        Migration B: copy a legacy home into this one
+  migrate-project [dir] [--yes]                   convert one project's legacy instructions file / project dir to WINTER.md/.winter
   -p "<prompt>" [--auto|--plan] [--trust|--no-trust]   headless agent turn (asks for tool approval unless --auto/--plan)`);
   }
 }

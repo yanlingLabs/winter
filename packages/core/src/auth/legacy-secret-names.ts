@@ -28,3 +28,35 @@ export const CODEX_SECRET_NAMES = {
   account: "codex-account-id",
   expires: "codex-expires-at",
 } as const;
+
+/**
+ * Phase 9c Migration B (P9c-14): every Keychain secret name the migrator copies from the LEGACY
+ * service to the CURRENT one, by known name — `SecretStore` has no enumeration, so this is the
+ * complete inventory `migration/migrate-b.ts` walks. Verbatim COPIES of the literals declared
+ * canonically elsewhere (`CREDENTIAL_MATERIAL_NAMES`/`ANTHROPIC_CREDENTIAL_SECRET_NAME` — the
+ * material records; `TOKEN_NAMES` — the remote/harness/admin tokens; `OPENAI_API_KEY_SECRET` +
+ * `CODEX_SECRET_NAMES` above — the pre-material raw records; `WEB_SEARCH_API_KEY_SECRET` +
+ * `EXA_API_KEY_SECRET` — the two tool keys), repeated as string literals rather than imported so
+ * this LEAF module's import graph stays exactly as narrow as the file header above requires. A
+ * name drifting in exactly one of those modules without a matching edit here is caught by
+ * `migration/migrate-b.test.ts`'s own literal-parity assertion, not by a shared import.
+ *
+ * `LEGACY_CONFIG_KEY_SERVICE` (`legacy-names.ts`) names a whole SERVICE, not an item in this list —
+ * it is deliberately never read here: P9c-14 protects it from migration entirely.
+ */
+export const MIGRATION_B_SECRET_NAMES: readonly string[] = [
+  "openai:default",
+  "codex-oauth:default",
+  "anthropic:default",
+  "harness-token",
+  "admin-token",
+  "remote-token",
+  "openai-api-key",
+  "codex-access-token",
+  "codex-refresh-token",
+  "codex-id-token",
+  "codex-account-id",
+  "codex-expires-at",
+  "web-search-api-key",
+  "exa-api-key",
+] as const;

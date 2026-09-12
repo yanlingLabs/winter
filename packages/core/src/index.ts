@@ -1,12 +1,12 @@
 export { startDaemon, CORE_VERSION, type RunningDaemon } from "./daemon";
-export { bootstrapWinterDir, resolveWinterHome } from "./winter-dir";
+export { bootstrapWinterDir, resolveWinterHome, isDefaultWinterHome } from "./winter-dir";
 export { resolveWinterProfile, keychainService, profileDisplayName, type WinterProfile } from "./profile";
 export {
   LEGACY_LAUNCHD_LABEL, LEGACY_HOME_DIR, LEGACY_DEV_HOME_DIR, LEGACY_HOME_ENV, LEGACY_PROFILE_ENV,
   LEGACY_TMPDIR_ENV, LEGACY_KEYCHAIN_SERVICE, LEGACY_KEYCHAIN_SERVICE_DEV, LEGACY_CLI_LINK,
   LEGACY_DEV_WRAPPER_NAMES, LEGACY_PROJECT_DIR, LEGACY_INSTRUCTIONS_FILE,
 } from "./legacy-names";
-export { FileSecretStore, KeychainSecretStore } from "./auth/secret-store";
+export { FileSecretStore, KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 export { TOKEN_NAMES } from "./auth/tokens";
 export {
   loadSettings, saveSettings, loadPermissionDirs, addLocalDir,
@@ -67,10 +67,13 @@ export {
   repairRuntimeState,
   isDaemonLockHeld,
   DAEMON_RUNNING_REFUSAL,
+  diagnoseMigration,
+  formatMigrationDoctorLines,
   type Finding,
   type FindingKind,
   type RepairOp,
   type RepairResult,
+  type MigrationDoctorReport,
 } from "./runtime-state/doctor";
 export { FakeProvider } from "./agent/fake-provider";
 export { ToolRegistry, type ToolDefinition, type ToolContext, type ToolOutcome } from "./agent/tools/registry";
@@ -113,3 +116,36 @@ export { Compactor, SUMMARIZE_INSTRUCTION } from "./agent/compactor";
 export { bashLooksSafe, BashReviewer, REVIEW_INSTRUCTION, type ReviewVerdict } from "./agent/reviewer";
 export { McpManager, type McpServerStatus, type McpServerConfig } from "./agent/mcp/manager";
 export { WorktreeManager, type ActiveWorktree } from "./agent/worktree";
+// Phase 9c Migration B (WS-16 §18) — the `winter migrate`/`winter migrate-project` CLI commands'
+// only door into the migrator; see `migration/migrate-b.ts`'s own header for the module layout.
+export {
+  MIGRATION_B_SECRET_NAMES,
+  MigrationRefused,
+  isPristineHome,
+  describeHomePristineness,
+  legacyHomeFor,
+  planMigrationB,
+  readMigrationManifest,
+  resumeMigrationB,
+  rollbackMigrationB,
+  runMigrationB,
+  type MigrationDeps,
+  type MigrationEntryStatus,
+  type MigrationFileEntry,
+  type MigrationKeychainEntry,
+  type MigrationManifest,
+  type PristineCheck,
+  type MigrationPlan,
+  type MigrationPlanFileEntry,
+} from "./migration/migrate-b";
+export { LegacyKeychainSecretStore, legacyKeychainServiceFor } from "./migration/legacy-keychain-store";
+export { rekeySettings, type RekeyChange, type RekeyResult } from "./migration/rekey-settings";
+export {
+  ProjectMigrationRefused,
+  planProjectMigration,
+  runProjectMigration,
+  WINTER_INSTRUCTIONS_FILE,
+  WINTER_PROJECT_DIR,
+  type ProjectMigrationPlan,
+  type ProjectMigrationStep,
+} from "./migration/project-files";

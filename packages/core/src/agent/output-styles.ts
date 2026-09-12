@@ -2,6 +2,8 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { TrustStore } from "./trust";
 import { neutralizeReminderTags } from "./context";
+import { LEGACY_PROJECT_DIR, resolveLegacyProjectDir, resolveLegacyProjectPath } from "./legacy-project-files";
+import type { Settings } from "../settings";
 
 /** A fully-resolved output style ready to inject. `body` is neutralized + byte-capped for FILE
  *  styles; built-in bodies are trusted constants. `keepCodingInstructions: true` augments the base
@@ -11,6 +13,11 @@ export interface ResolvedStyle {
   description: string;
   body: string;
   keepCodingInstructions: boolean;
+  /** Review M1 (P9c-4): set ONLY when this style was read through the legacy project fallback —
+   *  the full path of the legacy file actually used, for `ContextAssembler`'s combined per-turn
+   *  deprecation notice. Absent for every built-in/user/non-fallback project style (every pre-9c
+   *  caller/test keeps its exact prior shape — this is a purely additive field). */
+  legacyPath?: string;
 }
 
 // Overlay bodies — each ASSUMES Winter's base SYSTEM_PROMPT is still present (keepCodingInstructions:
@@ -91,7 +98,19 @@ function parseStyleFile(path: string, fallbackName: string, cap: number): Resolv
  */
 export class OutputStyleStore {
   private readonly cap: number;
-  constructor(private readonly deps: { winterHome: string; trust: Pick<TrustStore, "isTrusted">; caps?: { bodyBytes?: number } }) {
+  constructor(
+    private readonly deps: {
+      winterHome: string;
+      trust: Pick<TrustStore, "isTrusted">;
+      caps?: { bodyBytes?: number };
+      /** Phase 9c (P9c-4): live settings getter for the legacy project output-styles dir's read-only
+       *  fallback (project-scoped only — the user-level `<winterHome>/output-styles/` dir is
+       *  already covered by Migration B's wholesale home copy, so it has no separate legacy
+       *  counterpart to fall back to). Absent means "never falls back", same convention as
+       *  `ContextAssembler`'s own `legacySettings` dep. */
+      legacySettings?: () => Settings | null;
+    },
+  ) {
     this.cap = deps.caps?.bodyBytes ?? DEFAULT_BODY_CAP;
   }
 
@@ -104,16 +123,34 @@ export class OutputStyleStore {
     // than relying on the `${name}.md` suffix to accidentally neuter it into "..md"/"...md".
     if (!/^[A-Za-z0-9_-]+$/.test(name)) return null;
     if (cwd && this.deps.trust.isTrusted(cwd)) {
-      const p = parseStyleFile(join(cwd, ".winter", "output-styles", `${name}.md`), name, this.cap);
-      if (p) return p;
+      const { path, usedLegacy } = this.resolveStylePath(cwd, name);
+      const p = parseStyleFile(path, name, this.cap);
+      if (p) {
+        if (usedLegacy) {
+          console.error(`output-style: reading legacy project style from ${path} — run \`winter migrate-project\` to convert`);
+          return { ...p, legacyPath: path };
+        }
+        return p;
+      }
     }
     const u = parseStyleFile(join(this.deps.winterHome, "output-styles", `${name}.md`), name, this.cap);
     if (u) return u;
     return BUILTIN_OUTPUT_STYLES.find((s) => s.name === name) ?? null;
   }
 
+  /** Winter-named project style path, or its legacy counterpart when the flag is on and the Winter
+   *  one is absent. `legacySettings` absent (see the constructor dep's own doc) never falls back. */
+  private resolveStylePath(cwd: string, name: string): { path: string; usedLegacy: boolean } {
+    const winterPath = join(cwd, ".winter", "output-styles", `${name}.md`);
+    if (!this.deps.legacySettings) return { path: winterPath, usedLegacy: false };
+    return resolveLegacyProjectPath(winterPath, join(cwd, LEGACY_PROJECT_DIR, "output-styles", `${name}.md`), this.deps.legacySettings());
+  }
+
   /** All resolvable styles for the CLI: built-ins ∪ user files ∪ project files (if trusted),
-   *  deduped by name closest-wins (project > user > built-in). */
+   *  deduped by name closest-wins (project > user > built-in). A legacy project output-styles
+   *  directory is included ONLY when the Winter-named one does not exist at all (same
+   *  file-vs-file fallback rule `resolve()` applies per style, generalized to "the whole dir is
+   *  absent" for a directory listing — see `legacy-project-files.ts`'s directory doc comment). */
   list(cwd: string | null): { name: string; description: string }[] {
     const out = new Map<string, string>();
     for (const s of BUILTIN_OUTPUT_STYLES) out.set(s.name, s.description);
@@ -127,7 +164,12 @@ export class OutputStyleStore {
       }
     };
     scan(join(this.deps.winterHome, "output-styles"));           // user overrides built-in
-    if (cwd && this.deps.trust.isTrusted(cwd)) scan(join(cwd, ".winter", "output-styles")); // project overrides user
+    if (cwd && this.deps.trust.isTrusted(cwd)) {
+      const winterDir = join(cwd, ".winter", "output-styles");
+      const legacyDir = join(cwd, LEGACY_PROJECT_DIR, "output-styles");
+      const dir = this.deps.legacySettings ? resolveLegacyProjectDir(winterDir, legacyDir, this.deps.legacySettings()).dir : winterDir;
+      scan(dir); // project overrides user
+    }
     return [...out].map(([name, description]) => ({ name, description }));
   }
 }

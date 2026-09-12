@@ -26,6 +26,10 @@ import { openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION, RuntimeStateUnavailab
 import { ALLOWED_TRANSITIONS, RuntimeSessionRecords } from "./records";
 import { RuntimeLeases, type LeaseRow } from "./leases";
 import { rollbackMemoryKeyMigration } from "./migrations/memory-keys";
+import { readMigrationManifest } from "../migration/manifest";
+import { describeHomePristineness } from "../migration/migrate-b";
+import { MIGRATION_B_SECRET_NAMES } from "../auth/legacy-secret-names";
+import type { SecretStore } from "../auth/secret-store";
 
 export type FindingKind =
   | "db-missing"
@@ -859,4 +863,96 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
     applied: true,
     detail: `restored ${dest} from ${backupPath} (${statSync(dest).size} bytes); ${snapshot ? `the replaced file is at ${snapshot}` : "there was no file to replace"}`,
   };
+}
+
+// ── Migration B rows (P9c, Task M Step 10) ──────────────────────────────────────────────────────
+//
+// Same read-only posture as the rest of this file: `readMigrationManifest` only parses JSON off
+// disk, and `legacyStore.get(name)` is called purely to test PRESENCE — the count is the only thing
+// that ever leaves this function; a secret's VALUE never reaches the returned report, a log line, or
+// anywhere else. Callers pass a real `LegacyKeychainSecretStore` in production and a fake in tests
+// (this file itself constructs neither — see `migration/legacy-keychain-store.ts`).
+
+export interface MigrationDoctorReport {
+  /** `"complete"` / `"in-progress"` mirror the manifest's own status; `"absent"` means no manifest
+   *  was ever written at `home` (Migration B has never run there). */
+  status: "complete" | "in-progress" | "absent";
+  finishedAt?: string;
+  legacyHome: string;
+  legacyHomePresent: boolean;
+  /** The Keychain service `legacyStore` reads from, for the row's own text — never used to
+   *  construct a store here. */
+  legacyKeychainService: string;
+  /** How many of `MIGRATION_B_SECRET_NAMES` still answer non-null under `legacyKeychainService` —
+   *  a count, never the names or values themselves. */
+  legacyKeychainRemaining: number;
+  /**
+   * Review M2: WHY auto-migration never ran, when it looks like it should have. Full path of the
+   * first entry `describeHomePristineness(home)` found — only computed when `legacyHomePresent &&
+   * status === "absent"` (a legacy home sitting right there, but no manifest ever written): once
+   * migration has actually run (or is running), `home` is expected to have content, and pristine-
+   * ness stops being interesting. `undefined` when `home` IS pristine (nothing to explain) or the
+   * check was skipped.
+   */
+  homeNotPristineReason?: string;
+}
+
+export async function diagnoseMigration(input: {
+  home: string;
+  legacyHome: string;
+  legacyKeychainService: string;
+  legacyStore: SecretStore;
+}): Promise<MigrationDoctorReport> {
+  const manifest = readMigrationManifest(input.home);
+  const status: MigrationDoctorReport["status"] = manifest?.status === "complete" || manifest?.status === "in-progress" ? manifest.status : "absent";
+  const legacyHomePresent = existsSync(input.legacyHome);
+  // Skip the 14 Bun.secrets.get calls (one macOS consent dialog EACH, the first time) when there is
+  // nothing to report anyway: a machine that never had a legacy home and never ran Migration B has
+  // no legacy Keychain items to find, by construction — `winter doctor` would otherwise touch the
+  // Keychain on every single run, forever, for a count that can only ever come back zero.
+  let legacyKeychainRemaining = 0;
+  if (legacyHomePresent || status !== "absent") {
+    for (const name of MIGRATION_B_SECRET_NAMES) {
+      if ((await input.legacyStore.get(name)) !== null) legacyKeychainRemaining++;
+    }
+  }
+  // Review M2: only worth explaining when there's a live mystery — a legacy home sits right there,
+  // but Migration B never ran at all. `homedirOverride`/profile play no part here: `winter doctor`
+  // reports against whatever `home` it was actually given.
+  const homeNotPristineReason = legacyHomePresent && status === "absent" ? describeHomePristineness(input.home).reason : undefined;
+  return {
+    status,
+    finishedAt: manifest?.finishedAt,
+    legacyHome: input.legacyHome,
+    legacyHomePresent,
+    legacyKeychainService: input.legacyKeychainService,
+    homeNotPristineReason,
+    legacyKeychainRemaining,
+  };
+}
+
+/** Renders `diagnoseMigration`'s report as the doctor's three lines (Task M Step 10, verbatim
+ *  shapes): a migration status line, a legacy-home-present line (only when relevant), and a legacy-
+ *  keychain-remaining line (only when non-zero) — kept here, not duplicated in the CLI, so the exact
+ *  wording has one source. */
+export function formatMigrationDoctorLines(report: MigrationDoctorReport): string[] {
+  const lines: string[] = [];
+  if (report.status === "complete") {
+    lines.push(`migration: complete${report.finishedAt ? ` ${report.finishedAt}` : ""} from ${report.legacyHome}`);
+  } else if (report.status === "in-progress") {
+    lines.push("migration: IN PROGRESS — run `winter migrate --resume` or `winter migrate --rollback`");
+  } else {
+    lines.push("migration: absent");
+  }
+  if (report.legacyHomePresent) {
+    lines.push(`legacy home present: ${report.legacyHome} (safe to remove after verifying Winter)`);
+  }
+  // Review M2: WHY it never auto-migrated, with a path forward.
+  if (report.homeNotPristineReason) {
+    lines.push(`this home is not pristine (found ${report.homeNotPristineReason}) — legacy data at ${report.legacyHome} was never migrated; run \`winter migrate --from ${report.legacyHome}\``);
+  }
+  if (report.legacyKeychainRemaining > 0) {
+    lines.push(`legacy keychain items remaining: ${report.legacyKeychainRemaining} under ${report.legacyKeychainService}`);
+  }
+  return lines;
 }

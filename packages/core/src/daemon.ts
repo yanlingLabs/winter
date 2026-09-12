@@ -1,8 +1,12 @@
 import { join } from "node:path";
-import { mkdirSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { bootstrapWinterDir, resolveWinterHome } from "./winter-dir";
+import { bootstrapWinterDir, resolveWinterHome, isDefaultWinterHome } from "./winter-dir";
 import { acquireLock, type Lock } from "./lock";
+import { resolveWinterProfile } from "./profile";
+import { describeHomePristineness, legacyHomeFor, planMigrationB, runMigrationB, MigrationRefused } from "./migration/migrate-b";
+import { manifestFileState } from "./migration/manifest";
+import { LegacyKeychainSecretStore } from "./migration/legacy-keychain-store";
 import { TokenAuthority } from "./auth/tokens";
 import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 import { migrateLegacyCredentialMaterial } from "./auth/credential-material";
@@ -287,12 +291,92 @@ export async function startDaemon(opts: {
   /** TEST ONLY (fix round 1, M2) — threaded straight into `WinterLegDeps.officialConnectionOverride`;
    *  a production caller never sets this. See that field's own doc for why it exists at all. */
   officialConnectionOverride?: WinterLegDeps["officialConnectionOverride"];
+  /**
+   * Phase 9c Migration B (WS-16 §18) — TEST SEAM for the boot hook below. Passing this object AT
+   * ALL is what turns migration on for a caller that ALSO supplies its own `secrets`: without it, a
+   * caller supplying `secrets` stays migration-inert no matter what exists on the real machine —
+   * which is what keeps every pre-9c daemon-boot test (none of which passes this) off the
+   * developer's real legacy home and real legacy Keychain service. A true production caller (no
+   * `secrets` override at all) needs neither field: both default to the real profile-derived legacy
+   * home (`legacyHomeFor`) and a real `LegacyKeychainSecretStore`.
+   */
+  migration?: {
+    legacyHome?: string;
+    legacySecrets?: SecretStore;
+    /** TEST ONLY (P9c-15) — overrides `isDefaultWinterHome`'s `homedir()` call, so a test can prove
+     *  the "home resolves to the default" branch actually runs its migration WITHOUT the test home
+     *  ever literally being the developer's real `~/.winter[-dev]`. A production caller never sets
+     *  this; the real boot hook always checks against the real home directory. */
+    homedirOverride?: () => string;
+  };
 } = {}): Promise<RunningDaemon> {
   const startedAt = Date.now();
-  const dirs = bootstrapWinterDir(opts.home ?? resolveWinterHome());
-  const lock: Lock = await acquireLock(dirs.lockPath, dirs.socketPath);
+  const home = opts.home ?? resolveWinterHome();
+  const profile = resolveWinterProfile();
+
+  // ── Migration B boot hook (P9c, WS-16 §18) ──────────────────────────────────────────────────
+  // Runs BEFORE `bootstrapWinterDir` creates a single directory and before the lock is taken: a
+  // refusal here must leave nothing on disk to clean up, and a successful migration must land its
+  // files before anything else touches `home`.
+  //
+  // A manifest that is in-progress (a previous run was interrupted) OR simply unreadable/corrupt
+  // (fail-closed: a torn manifest is evidence of an interruption too, never evidence nothing
+  // happened) refuses typed — the daemon NEVER auto-resumes, because the operator may be mid
+  // `winter migrate --rollback`.
+  const manifestState = manifestFileState(home);
+  if (manifestState.kind === "unreadable" || (manifestState.kind === "parsed" && manifestState.manifest.status === "in-progress")) {
+    throw new MigrationRefused("home_half_migrated", "migration: half-migrated home — run `winter migrate --resume` or `winter migrate --rollback`");
+  }
 
   const secrets = opts.secrets ?? new KeychainSecretStore();
+
+  let legacyHome: string | undefined;
+  let legacySecrets: SecretStore | undefined;
+  if (opts.migration) {
+    legacyHome = opts.migration.legacyHome ?? legacyHomeFor(profile);
+    legacySecrets = opts.migration.legacySecrets;
+  } else if (opts.secrets === undefined) {
+    // Real production boot only — see this option's own doc comment above for the test-isolation
+    // argument. `secrets` was just resolved to a REAL KeychainSecretStore two lines up in this
+    // branch, so `legacySecrets` below is its exact legacy-service counterpart.
+    legacyHome = legacyHomeFor(profile);
+    legacySecrets = new LegacyKeychainSecretStore(profile);
+  }
+  if (legacyHome !== undefined && legacySecrets !== undefined && existsSync(join(legacyHome, "settings.json"))) {
+    // P9c-15: auto-migration fires ONLY when `home` resolves to the PROFILE'S OWN DEFAULT home
+    // (`~/.winter` dist, `~/.winter-dev` dev) — regardless of how `home` got here (`opts.home`,
+    // `WINTER_HOME`, or the default). A real (compiled or `bun`-run) daemon spawned against a temp
+    // or custom `WINTER_HOME` with no injected `secrets` — a binary-backed e2e test, `verify:
+    // workflow`/`verify:runtime-state`/`verify:runtimes`, a live-gate script, a developer's ad-hoc
+    // `WINTER_HOME=/tmp/x winter daemon run` — would otherwise find the REAL legacy home pristine
+    // and migrate the user's REAL data (and REAL Keychain items) into a throwaway directory. This
+    // check is IN ADDITION TO `isPristineHome` below, never a replacement for it.
+    if (!isDefaultWinterHome(home, profile, opts.migration?.homedirOverride)) {
+      console.error(`migration: ${home} is not the default home for the ${profile} profile — auto-migration skipped; run \`winter migrate --from ${legacyHome}\` to migrate it by hand`);
+    } else {
+      const check = describeHomePristineness(home);
+      if (check.pristine) {
+        const plan = await planMigrationB({ legacyHome, home, profile });
+        const manifest = await runMigrationB(plan, { from: legacySecrets, to: secrets, log: (line) => console.error(`migration: ${line}`) });
+        const filesMoved = manifest.entries.filter((e) => e.status === "copied" || e.status === "rekeyed").length;
+        const rekeyed = manifest.entries.filter((e) => e.status === "rekeyed").length;
+        const kcCopied = manifest.keychain.filter((k) => k.status === "copied").length;
+        const kcSkipped = manifest.keychain.filter((k) => k.status === "skipped-existing").length;
+        console.error(`migration: ${filesMoved} files, ${kcCopied + kcSkipped} keychain items (${kcCopied} copied, ${kcSkipped} skipped-existing), settings rekeyed ${rekeyed} — from ${legacyHome}`);
+      } else {
+        // A legacy home exists, but this home already has content of its own (not pristine) — never
+        // auto-migrate over it (P9c-10). One line so an operator isn't left wondering why the legacy
+        // home was never picked up; `winter migrate --from <legacyHome>` is the explicit door.
+        // Review M2: names the actual offending entry, not just "not pristine" — the same reason
+        // `winter doctor`'s migration row surfaces.
+        console.error(`migration: a legacy home was found at ${legacyHome}, but ${home} is not pristine (${check.reason}) — skipping (run \`winter migrate --from ${legacyHome}\` manually if you want it copied)`);
+      }
+    }
+  }
+
+  const dirs = bootstrapWinterDir(home);
+  const lock: Lock = await acquireLock(dirs.lockPath, dirs.socketPath);
+
   const authority = new TokenAuthority(secrets);
   const tokens = await authority.ensureTokens();
 
@@ -409,7 +493,7 @@ export async function startDaemon(opts: {
   // trust gate). Resolution itself (name -> ResolvedStyle, incl. the slug-guard against a
   // project-supplied name escaping the output-styles dir) lives in OutputStyleStore.resolve — this is
   // just the name lookup.
-  const outputStyleStore = new OutputStyleStore({ winterHome, trust: trustStore });
+  const outputStyleStore = new OutputStyleStore({ winterHome, trust: trustStore, legacySettings: () => settings });
   const outputStyleFor = (cwd?: string | null): string | undefined => projectSettings.effective(projectRootOf(cwd ?? null))?.outputStyle;
   // CC-parity phase 3 (Workflows, Track C Task C2): built unconditionally, same "no engine
   // dependency" precedent as `outputStyleStore` just above — workflow.list's "saved" section and
@@ -476,6 +560,14 @@ export async function startDaemon(opts: {
       if (!s) { console.error(`output-style: unknown style "${name}" — using default`); return null; }
       return s;
     },
+    // Phase 9c (P9c-4): the SAME reassignable `settings` holder every other hot getter here reads —
+    // a settings-watcher reload swaps a NEW object into this binding, so this always sees the
+    // current value, never a boot snapshot.
+    legacySettings: () => settings,
+    // Review M1 (P9c-4): the SAME `projectSettings` instance every other permissions/dangerous-
+    // domains getter above reads, at the SAME repo-root resolution (`projectRootOf`, fix-wave B I1)
+    // — a settings-overlay legacy fallback folds into the assembler's one combined notice.
+    legacySettingsOverlayPathsFor: (cwd: string | null) => projectSettings.legacyOverlayPathsUsed(projectRootOf(cwd)),
   });
   // T2 (design doc "migration importer"): one-time-per-fact, idempotent best-effort import of
   // Phase 5b's MemoryStore facts into MEMDIR files, run at boot whenever memory.enabled's
