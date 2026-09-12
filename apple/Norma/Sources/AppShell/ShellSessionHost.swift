@@ -2410,6 +2410,20 @@ final class ShellSessionHost: ObservableObject {
     /// menu for one round trip on every entry.
     @Published private(set) var newChatCatalogue: SyncConfigSnapshot = .empty
 
+    /// Winter Phase 8d (P8d-8, fix round 1): the new-chat page's own cached D30 advisor value —
+    /// there is no session/`FieldStateAdapter` on this page, so `newChatCatalogue`'s exact
+    /// "snapshot, refreshed exactly when about to be read" convention is mirrored here rather than
+    /// reading `settings.json` synchronously from the chip's computed property (the review finding
+    /// this fix round addresses for `WindowContentView`'s live-session twin applies identically
+    /// here). `nil` = unset ("Automatic") or not yet read.
+    @Published private(set) var newChatAdvisorModel: String? = nil
+
+    func setNewChatAdvisorModel(_ model: String?) {
+        if AppModel.writeAdvisorModelToSettings(model) {
+            newChatAdvisorModel = model
+        }
+    }
+
     func setNewChatModel(_ model: String?) {
         newChatModelPick = .some(model)
         // Fix round 1: the held effort is validated against the MODEL, so changing the model can
@@ -2464,7 +2478,9 @@ final class ShellSessionHost: ObservableObject {
                              effortChangeInFlight: false,
                              onOpen: { [weak self] in self?.refreshNewChatCatalogue() },
                              onSetModel: { [weak self] in self?.setNewChatModel($0) },
-                             onSetEffort: { [weak self] in self?.setNewChatEffort($0) })
+                             onSetEffort: { [weak self] in self?.setNewChatEffort($0) },
+                             advisorModel: newChatAdvisorModel,
+                             onSetAdvisorModel: { [weak self] in self?.setNewChatAdvisorModel($0) })
     }
 
     /// The page chip's catalogue fetch — fired when the menu is about to be read, the same
@@ -2472,6 +2488,10 @@ final class ShellSessionHost: ObservableObject {
     /// buttons follow. `try?`, same posture as `refreshModelCatalogue`: a hiccup leaves the previous
     /// snapshot in place rather than blanking the picker out from under the user.
     private func refreshNewChatCatalogue() {
+        // Winter Phase 8d (P8d-8, fix round 1): the advisor read is local file I/O, not an RPC —
+        // no `Task`/round trip needed, so it runs synchronously right here rather than waiting on
+        // the catalogue fetch below. Co-located because both fire from the SAME `onOpen`.
+        newChatAdvisorModel = AppModel.readAdvisorModelFromSettings()
         guard let client = managementClient else { return }
         Task { @MainActor [weak self] in
             guard let snapshot = try? await client.syncConfig() else { return }

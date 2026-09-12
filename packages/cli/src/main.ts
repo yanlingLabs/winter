@@ -1238,8 +1238,19 @@ if (import.meta.main) {
     const printRuntimesSection = async (): Promise<void> => {
       let settings: Settings | undefined;
       try { settings = loadSettings(join(home, "settings.json")); } catch { settings = undefined; }
-      const report = await diagnoseRuntimes({ execPath: process.execPath, home, env: process.env, settings });
+      // Fix round 1 (Minor): `doctor` must NEVER crash — `diagnoseRuntimes` is Lane 1's own code
+      // (a stub today), and a bug or an unanticipated throw in it must degrade to one honest line
+      // rather than take down every OTHER section this command prints (the findings loop above
+      // already ran and printed by the time this executes). Mirrors this function's own settings
+      // guard just above — a diagnostic that can crash the diagnostic tool defeats its own purpose.
       console.log(`${AQUA}runtimes${RESET}`);
+      let report: Awaited<ReturnType<typeof diagnoseRuntimes>>;
+      try {
+        report = await diagnoseRuntimes({ execPath: process.execPath, home, env: process.env, settings });
+      } catch (err) {
+        console.log(`  ${DIM}unavailable (${err instanceof Error ? err.message : "unknown error"})${RESET}`);
+        return;
+      }
       const legLine = (label: string, leg: { resolved?: { path: string; source: string }; error?: string; installedWrapper?: string; platformPackage?: string }): void => {
         if (leg.resolved) {
           const extras = [

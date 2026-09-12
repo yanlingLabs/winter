@@ -16,12 +16,11 @@
  *      compiled code this repo does not own.
  *   2. **`REMOTE_ALLOWED_METHODS`** (`ipc/server.ts`) — a remote (iOS) client CAN reach
  *      `session.create`/`session.setModel` for every mode `REMOTE_ELIGIBLE_SESSION_MODES` names
- *      (`code`/`dispatch`/`chat`, `ipc/server.ts:575` — Chat Slice C lifted chat's remote gate,
- *      SP3.4 added remote session.create). The exact SET is duplicated here as a literal (not
- *      imported: `REMOTE_ELIGIBLE_SESSION_MODES` is `ipc/server.ts`-private, and re-exporting a
- *      constant from an already-large 8d file purely for this generator was judged not worth the
- *      touch) — a drift test (`test/capability-matrix.test.ts`) pins this generator's OWN output
- *      against a fresh run, so a future change to that set fails the SAME way any other drift does.
+ *      (`code`/`dispatch`/`chat` — Chat Slice C lifted chat's remote gate, SP3.4 added remote
+ *      session.create). Winter Phase 8d fix round 1: `REMOTE_ELIGIBLE_SESSION_MODES` is now
+ *      EXPORTED from `ipc/server.ts` and imported directly here — Norma's own capability-matrix
+ *      generator is an in-repo consumer with no dependency-direction problem, unlike the CLI
+ *      surface rule below.
  *   3. **The mode tool registry** (`runtime-sdk/mode-options.ts`'s `disallowedToolsFor`) — chat's
  *      own exclusions (the Winter built-ins chat has never offered, `CHAT_DISALLOWED_BUILTINS`)
  *      are read here and folded into chat's `reason` text, so "chat is implemented on the Winter
@@ -42,6 +41,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { disallowedToolsFor } from "../src/runtime-sdk/mode-options";
+import { REMOTE_ELIGIBLE_SESSION_MODES } from "../src/ipc/server";
 
 export type CapabilityMode = "code" | "dispatch" | "chat";
 export type CapabilityRuntime = "winter-agent" | "claude-agent";
@@ -62,21 +62,21 @@ export interface CapabilityMatrix {
   rows: CapabilityMatrixRow[];
 }
 
-/** `ipc/server.ts:575`'s `REMOTE_ELIGIBLE_SESSION_MODES` literal — see this file's own header for
- *  why it is copied rather than imported. */
-const REMOTE_ELIGIBLE_MODES: readonly CapabilityMode[] = ["code", "dispatch", "chat"];
-
-/** `packages/cli/src/session-mode.ts`'s own top-of-file doc, copied for the same reason
- *  (cross-package import direction: `cli` depends on `core`, never the reverse) — the TUI/CLI is
- *  code-only; dispatch and chat are "apps [+ orb]" only. */
+/** `packages/cli/src/session-mode.ts`'s own top-of-file doc, copied as a literal (genuine
+ *  cross-package import direction: `cli` depends on `core`, never the reverse — `core` cannot
+ *  import from `cli`) — the TUI/CLI is code-only; dispatch and chat are "apps [+ orb]" only. This
+ *  is the ONE remaining duplicated literal (fix round 1 retired the other, `REMOTE_ELIGIBLE_
+ *  SESSION_MODES`, by exporting it from `ipc/server.ts` instead); the drift test still pins this
+ *  one so a future edit to `session-mode.ts`'s rule without updating this generator fails loud. */
 const CLI_REACHABLE_MODES: readonly CapabilityMode[] = ["code"];
 
 /** Every surface reaches every mode except the CLI's own code-only carve-out above. Mac (the app +
- *  the orb) and iOS-remote (`REMOTE_ELIGIBLE_MODES`) agree exactly: both offer all three modes. */
+ *  the orb) and iOS-remote (the imported `REMOTE_ELIGIBLE_SESSION_MODES`) agree exactly: both
+ *  offer all three modes. */
 function surfaceReachesMode(surface: CapabilitySurface, mode: CapabilityMode): boolean {
   if (surface === "cli") return CLI_REACHABLE_MODES.includes(mode);
   if (surface === "mac") return true;
-  return REMOTE_ELIGIBLE_MODES.includes(mode); // ios-remote
+  return REMOTE_ELIGIBLE_SESSION_MODES.has(mode); // ios-remote
 }
 
 function surfaceUnreachableReason(surface: CapabilitySurface, mode: CapabilityMode): string {

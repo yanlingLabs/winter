@@ -440,14 +440,16 @@ struct WindowContentView<Accessory: View>: View {
             modelChangeInFlight: adapter.modelChangeInFlight,
             effortChangeInFlight: adapter.effortChangeInFlight,
             runtimeKind: row?.runtimeKind,
-            onOpen: { adapter.onRefreshModelCatalogue() },
+            // Winter Phase 8d (fix round 1): `onOpen` now refreshes advisorModel TOO —
+            // `FieldStateAdapter.advisorModel` is a CACHE (`refreshAdvisorModel()`'s own doc),
+            // never read from settings.json synchronously here. Fixes the review finding that this
+            // computed property (evaluated on every `body` pass) used to do a blocking file read
+            // on every render, not just when the menu was actually about to be shown.
+            onOpen: { adapter.onRefreshModelCatalogue(); adapter.refreshAdvisorModel() },
             onSetModel: { adapter.applyModelSelection($0) },
             onSetEffort: { adapter.applyEffortSelection($0) },
-            // Winter Phase 8d (P8d-8, Task 4.2): read fresh at EVERY render, same "a snapshot,
-            // refreshed exactly when it is about to be read" posture `onOpen` documents for the
-            // catalogue — local file I/O, not an RPC, so there is no separate refresh event to wire.
-            advisorModel: AppModel.readAdvisorModelFromSettings(),
-            onSetAdvisorModel: { AppModel.writeAdvisorModelToSettings($0) })
+            advisorModel: adapter.advisorModel,
+            onSetAdvisorModel: { adapter.applyAdvisorModelSelection($0) })
     }
 
     // MARK: - Task 6 (2e-iii): width-responsive sidebar layout

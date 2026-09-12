@@ -592,7 +592,7 @@ extension AppModel {
     /// "first write creates it" the CLI's own `saveSettings` already does for a fresh home).
     /// Returns `false` (writing nothing) on any parse/encode/I-O failure — never a partial file.
     @discardableResult
-    static func writeAdvisorModelToSettings(_ model: String?) -> Bool {
+    nonisolated static func writeAdvisorModelToSettings(_ model: String?) -> Bool {
         let url = URL(fileURLWithPath: NormaPaths.settingsPath(home: AppProfile.normaHome))
         var obj: [String: Any]
         if let data = try? Data(contentsOf: url), let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {

@@ -572,7 +572,11 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
  *  being one of these three. remote-chat-gate.test.ts proves this with a synthetic cowork-shaped
  *  row written directly to the store (no protocol/session.create support exists for it — that's the
  *  point: refusal is the gate's default, not an opt-in list of blocked modes to maintain). */
-const REMOTE_ELIGIBLE_SESSION_MODES = new Set(["code", "dispatch", "chat"]);
+// Winter Phase 8d (Task 4.4 fix round 1): exported so `packages/core/scripts/capability-matrix.ts`
+// reads this SAME set for its ios-remote surface-reachability row instead of a duplicated literal
+// — the capability matrix is a Norma-repo-internal consumer (no dependency-direction problem, the
+// reason `session-mode.ts`'s own copy stays a literal — see that file's own comment).
+export const REMOTE_ELIGIBLE_SESSION_MODES = new Set(["code", "dispatch", "chat"]);
 
 /** Guards every REMOTE_ALLOWED_METHODS handler that takes a bare `sessionId` and could target a
  *  session whose `mode` keeps it Mac-local — see REMOTE_ELIGIBLE_SESSION_MODES just above for
@@ -1990,8 +1994,16 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
               throw new RpcFailure(ERR.INVALID_PARAMS, outcome.reason, { code: "handoff_lossy_fork" });
             case "blocked":
               throw new RpcFailure(ERR.INTERNAL, outcome.reason, { code: "handoff_blocked" });
-            case "same-runtime":
+            // Fix round 1 (item 5, Lane 2's handoff m5 change): a turn is running and the switch's
+            // OWN continuation now commits the model preference itself, exactly once, when it
+            // settles to "resumed" — this RPC must NOT also write it now. Writing here too would
+            // either double-write the same value or (worse) write a preference the deferred plan
+            // has not actually landed yet, ahead of the runtime migration it's gating. Returns the
+            // same bare `{}` `session.setModel` always returns on acceptance — deferred is not a
+            // refusal, it is accepted input whose effect is merely not-yet-applied.
             case "deferred":
+              return {};
+            case "same-runtime":
             case "resumed":
               break; // the ordinary store write below still applies
           }

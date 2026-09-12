@@ -881,6 +881,34 @@ final class FieldStateAdapter: ObservableObject {
     /// switch test asserts on for no benefit.
     var onRefreshModelCatalogue: () -> Void = {}
 
+    /// Winter Phase 8d (P8d-8, fix round 1): the D30 advisor setting, CACHED here rather than read
+    /// synchronously from `settings.json` on every render — `WindowContentView.composerModelControl`
+    /// (a computed property evaluated on every `body` pass) used to call
+    /// `AppModel.readAdvisorModelFromSettings()` directly, a blocking file read on the render path.
+    /// Same "snapshot, refreshed exactly when about to be read" convention as `modelCatalogue`
+    /// above: `refreshAdvisorModel()` below re-reads it, called from the SAME `onOpen` that
+    /// refreshes the catalogue (the composer chip's popover opens both together). `nil` = unset
+    /// ("Automatic") or not yet read.
+    @Published var advisorModel: String? = nil
+
+    /// Re-reads `advisorModel` from disk. Local file I/O, not an RPC — no in-flight flag, no
+    /// `Task`, unlike `onRefreshModelCatalogue`'s wirer-supplied closure (which needs a live
+    /// `NormaClient` per surface): this needs nothing surface-specific, so it lives directly on the
+    /// adapter rather than behind a second per-surface callback slot.
+    func refreshAdvisorModel() {
+        advisorModel = AppModel.readAdvisorModelFromSettings()
+    }
+
+    /// Writes the setting and updates the cached value on success, so the picker's own selection
+    /// reads back immediately rather than waiting for the menu to reopen. `nil` clears it
+    /// ("Automatic"). A failed write (see `AppModel.writeAdvisorModelToSettings`'s own doc) leaves
+    /// the cache untouched — the picker keeps showing the value that is actually on disk.
+    func applyAdvisorModelSelection(_ model: String?) {
+        if AppModel.writeAdvisorModelToSettings(model) {
+            advisorModel = model
+        }
+    }
+
     /// True while a `session.setEffort` RPC is in flight. A SEPARATE flag from `modelChangeInFlight`
     /// for the same reason that one is separate from `policyChangeInFlight`: model and effort are
     /// independent axes and independent affordances ("two different things, just like the CLI").
