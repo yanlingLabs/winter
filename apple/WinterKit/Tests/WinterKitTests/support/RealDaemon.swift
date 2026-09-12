@@ -49,7 +49,7 @@ struct RealDaemon {
 
     /// bun's resolution of a bare specifier like `@yanlinglabs/winter-core` walks up from the SPAWNED
     /// PROCESS'S CWD looking for `node_modules/@yanlinglabs/winter-core` — it does not consult the repo root.
-    /// In this pnpm workspace, `node_modules/@winter/{core,protocol}` (symlinks into
+    /// In this pnpm workspace, `node_modules/@yanlinglabs/winter-{core,protocol}` (symlinks into
     /// `packages/{core,protocol}`) exist ONLY under `packages/cli` — verified empirically:
     /// `bun -e 'import ... from "@yanlinglabs/winter-core"'` fails with "Cannot find module '@yanlinglabs/winter-core'"
     /// when run with the repo root as cwd, and succeeds when run from `packages/cli`. This is
