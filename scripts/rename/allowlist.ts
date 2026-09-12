@@ -158,6 +158,30 @@ export const RENAME_ALLOWLIST: readonly AllowlistEntry[] = [
     files: ["packages/core/src/legacy-names.ts", "apple/Winter/Sources/App/LegacyNames.swift"],
     why: "P9b-6 — the one module per language that spells the OLD names for 9c's migrator and the two legacy launchd/wrapper teardowns",
   },
+  {
+    id: "deprecated-norma-cask",
+    // Phase 9c (P9c-5): the tap keeps a `norma` cask marked deprecate! with replacement_cask "winter" —
+    // its template, and the publisher that PUTs `Casks/norma.rb`, must spell the old cask name.
+    regex: /norma|Norma/g,
+    files: ["packaging/norma-deprecated.rb", "scripts/publish-tap.ts", "scripts/publish-tap.test.ts"],
+    why: "the deprecated `norma` Homebrew cask (P9c-5) — user-facing continuity for existing brew installs; the winter cask replaces it",
+  },
+  {
+    id: "migration-user-docs",
+    // Phase 9c: the user-facing migration story ("Coming from Norma?", the 0.111.0 release notes) has to
+    // name the product users are coming from, its home directory and its cask. Prose only — never code.
+    regex: /norma|Norma/g,
+    files: ["README.md", "releases/notes/*.md"],
+    why: "user-facing migration documentation (Phase 9c) must name Norma, ~/.norma and the norma cask so users recognise what is being migrated",
+  },
+  {
+    id: "old-scheme-comments",
+    // Phase 9c (P9c-2): the version code explains what the pre-rename `#.#.###` scheme was and that
+    // `norma-final` keeps its own copy of the old regex — comments only, next to the new FORMAT.
+    regex: /Norma(?= #\.#\.###| scheme| is now Winter)|Norma's `#\.#\.###`|norma-final/g,
+    files: ["scripts/version-lib.ts", "scripts/release.ts", "packages/core/test/version-consistency.test.ts"],
+    why: "comments contrasting the new #.###.# scheme with the pre-rename one and naming the norma-final branch (P9c-2)",
+  },
 ];
 
 /**
