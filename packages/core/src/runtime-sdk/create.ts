@@ -34,6 +34,7 @@ import { NORMA_BRAND } from "./brand";
 import { resolveWinterExecutable, type WinterExecutableUnavailable } from "./executable";
 import { resolveClaudeExecutable, ClaudeExecutableUnavailable } from "./official-executable";
 import { credentialPresenceFrom, keychainSeamFromSecretStore } from "./keychain";
+import { routerInputShape } from "./official-capabilities";
 import { familyListingFromCatalog } from "./provider-selection";
 import { releaseAllHeld } from "./messaging";
 import { NORMA_PEER_VERSIONS, REQUIRED_CLAUDE_AGENT_SDK } from "./versions";
@@ -391,6 +392,19 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
     // 8a's durable store when the spine opened; the router's in-memory default when it did not.
     directoryStore: deps.directoryStore,
     capabilities: deps.capabilities,
+    // Lane 3b (P8d-17 root cause): WITHOUT this, `RuntimeSdkOptions.toInputShape` stays `undefined`
+    // and the router's OWN `officialCapabilityServers` early-returns for EVERY official-leg session
+    // (its own doc: "WITHOUT `toInputShape` THIS IS A WINTER-LEG-ONLY DOOR") — because Norma's
+    // construction-level `capabilities` above is `[]` on purpose (P8b-36), the early-return is a
+    // SILENT no-op rather than the throw a non-empty `capabilities` would get. That skips building
+    // `winterMcpServerDescriptor`'s standing server on the official leg entirely: SendMessage/
+    // ListAgents/ReadNotifications/advisor never get their canonical `mcp__<brand>__<tool>`
+    // registrations, so `officialToolAliases`'s redirects have no target and a bare `advisor` call
+    // is refused "No such tool available" before `resolveReviewer()` ever runs. `routerInputShape`
+    // is the SAME JSON-Schema→zod-shape bridge `official-capabilities.ts`'s own per-session
+    // `officialCapabilityServersFor` already uses for Norma's OWN capability tools — reused here,
+    // never a second copy, for the router's construction-time door.
+    toInputShape: routerInputShape,
     // §1.6: this is what fills `SeamContext.winterHome`, so the barrier and every later seam
     // resolve under the daemon's OWN home. Without it they fall back to
     // `resolveWinterHome(undefined, brand)` — which is `~/.norma` for a daemon booted on a temp

@@ -131,7 +131,22 @@ export const jsonSchemaToZodShape: InputShapeFactory = (schema) => {
  *  more loosely (`properties?: Record<string, unknown>`) than this file's own recursive shape needs
  *  to walk them — this is the ONE cast point, at the seam, rather than threading `unknown` through
  *  every recursive call above. */
-const routerInputShape: RouterInputShapeFactory = (schema) => jsonSchemaToZodShape(schema as unknown as JsonSchemaObject);
+/**
+ * Lane 3b (P8d-17 root cause): this is ALSO the CONSTRUCTION-level `RuntimeSdkOptions.toInputShape`
+ * bridge `create.ts` must forward — see that file's own `advisorFrom`-adjacent wiring. Exported (was
+ * a private const) because without it, `deps.toInputShape` inside the router's own
+ * `officialCapabilityServers` stays `undefined` forever and — since Norma's construction-level
+ * `capabilities` list is `[]` on purpose (P8b-36, capability tools ride the PER-SESSION
+ * `officialCapabilityServersFor` door instead) — the router's own early-return fires SILENTLY for
+ * EVERY official-leg session: `winterMcpServerDescriptor` (the STANDING server — SendMessage,
+ * ListAgents, ReadNotifications, advisor) is never built, and `officialToolAliases`'s redirect
+ * targets (`mcp__<brand>__advisor`, etc.) never exist to redirect to. MEASURED (the real 0.3.250
+ * binary, `test/runtime-sdk/official-leg.e2e.test.ts`'s P8d-17 test): the official leg's tool list
+ * carries bare `SendMessage`/`ListAgents` — the underlying CLI's OWN native subagent-messaging
+ * tools, untouched by Winter's canonical implementation — and NOTHING containing "advisor" or
+ * "notification" at all, consistent with this diagnosis and not with a stripped/denied tool.
+ */
+export const routerInputShape: RouterInputShapeFactory = (schema) => jsonSchemaToZodShape(schema as unknown as JsonSchemaObject);
 
 export type { OfficialMcpModule } from "@yanlinglabs/winter-runtime-sdk";
 

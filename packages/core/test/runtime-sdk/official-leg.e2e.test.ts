@@ -675,39 +675,40 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     });
   }, 60_000);
 
-  // ── P8d-17: the OFFICIAL leg's own `advisor` tool call reaching advisorReviewerFor — MEASURED ──
+  // ── P8d-17 (Lane 3b): the OFFICIAL leg's own `advisor` tool call — ROOT-CAUSED AND FIXED ──
   //
-  // The seam itself (`advisorReviewerFor`'s new `connectionOverride`, `advisor-reviewer.ts`) is
-  // built, wired into `buildWorld` (an `advisorReviewer` this session's `NormaRuntimeSdk` is
-  // constructed WITH — every other `buildWorld` call in this file omits it), and typechecks.
+  // Round 2 left this UNPROVEN with the diagnosis "something beyond resolveReviewer/
+  // connectionOverride must register the official leg's own standing-server tool (`advisor`) with
+  // the real 0.3.250 CLI before the model can call it at all" — correct as far as it went. Lane 3b
+  // found the EXACT mechanism, Norma-side, and fixed it:
   //
-  // MEASURED, NOT ASSUMED: scripting a `tool_use` named "advisor" (parameterless, per the SDK's own
-  // `ADVISOR_DEFINITION`: "the built-in name IS the bare name... on the official branch") and
-  // sending it to the real 0.3.250 binary produces `<tool_use_error>Error: No such tool available:
-  // advisor</tool_use_error>` — the model's own call is REFUSED before it ever reaches
-  // `resolveReviewer()` (confirmed: the Anthropic loopback saw exactly ONE request, the main turn's
-  // own scripted `tool_use`, never a second request for the advisor's own `generate()` call).
+  // The router's own `officialCapabilityServers` (index.js, called from `openOfficialLeg` on EVERY
+  // official-leg session) builds the STANDING server (`winterMcpServerDescriptor` —
+  // SendMessage/ListAgents/ReadNotifications/advisor's canonical `mcp__<brand>__<tool>`
+  // registrations) ONLY when `RuntimeSdkOptions.toInputShape` (a CONSTRUCTION-time field) is set.
+  // `create.ts` never set it. Its own early-return is SILENT rather than a throw specifically
+  // because Norma's construction-level `capabilities` list is `[]` on purpose (P8b-36 — Norma's
+  // capability tools ride the PER-SESSION `officialCapabilityServersFor` door instead): `if
+  // (deps.toInputShape === undefined) { if (deps.capabilities === undefined) return; throw … }`,
+  // and an empty array normalizes to `undefined` one level up (`capabilityDescriptors`). So the
+  // standing server was never built for ANY official-leg session, for all four aliased builtins —
+  // not advisor alone. MEASURED (this test, before the fix): the official leg's tool list carried
+  // bare `SendMessage`/`ListAgents` (the underlying CLI's OWN native subagent-messaging tools,
+  // confirmed unrelated to Winter's canonical implementation) and NOTHING containing "advisor" or
+  // "notification" anywhere — not even the alias's own redirect target — which is what a genuinely
+  // unregistered tool looks like, as opposed to a denied/stripped one (ruling out (3) from the
+  // brief: `additionalDisallowedTools`/deny rules never touch it; there is nothing to deny).
   //
-  // Diagnosed one level further (bounded): the router's own `official/aliases.ts`
-  // (`ALIASED_BUILTINS`/`officialToolAliases`) states a `toolAliases` table redirecting
-  // `SendMessage`/`ListAgents`/`ReadNotifications`/`advisor` to their canonical registered names, and
-  // that table is NOT re-exported from the package's public barrel (its `exports` map has one entry,
-  // `"."` — the same gap `official-capabilities.ts`'s own header documents for
-  // `createApprovalBridge`). Threading a hand-built equivalent onto the outer `Options.toolAliases`
-  // (the `sdk.query()` call in `official-session.ts`'s `open()`) did NOT change the outcome — still
-  // refused — which is consistent with `ALIASED_BUILTINS`'s own row for advisor being an IDENTITY
-  // mapping (`{builtin: "advisor", tool: "advisor"}`, unlike the other three), meaning no alias was
-  // ever the missing piece here. That attempted fix was REVERTED (unverified for the other three
-  // rows too, and a production wiring change must not ship unverified) — this file records the
-  // measurement rather than a fix that could not be confirmed to work.
-  //
-  // UNPROVEN, WITH THE EXACT BLOCKER: something beyond `resolveReviewer`/`connectionOverride` must
-  // register the official leg's own standing-server tool (`advisor`) with the real 0.3.250 CLI before
-  // the model can call it at all — no code path in `official-options.ts`/`official-session.ts` builds
-  // such a registration today (`officialInputFor`'s own `mcpServers` covers ONLY Norma's capability
-  // servers, never the router's native standing-server tools). Diagnosing that mechanism needs
-  // reading router-internal code beyond what this lane's briefs sanctioned; recorded as a carry.
-  test("P8d-17 MEASURED: the official leg's real binary refuses the bare 'advisor' tool call — resolveReviewer/connectionOverride are never reached", async () => {
+  // THE FIX (`create.ts`, `official-capabilities.ts`): `official-capabilities.ts`'s own
+  // `routerInputShape` (the JSON-Schema → zod-shape bridge Norma's PER-SESSION capability tools
+  // already use) is now exported and threaded into `createRouterSdk({..., toInputShape:
+  // routerInputShape})` at construction. MEASURED, AFTER: `mcp__norma__advisor`,
+  // `mcp__norma__send_message`, `mcp__norma__list_agents` and `mcp__norma__read_notifications` all
+  // now appear in the model-facing tool list, and a scripted bare `advisor` tool_use — via
+  // `officialToolAliases`'s redirect, now pointed at a REAL registered target — reaches
+  // `resolveReviewer()` and, once a credential is staged for F3's sync presence gate, the reviewer's
+  // own `generate()` call, whose text comes back verbatim in the tool result. PINNED below.
+  test("P8d-17 FIXED+PROVEN: toInputShape wired at construction registers the standing server; a bare 'advisor' call reaches resolveReviewer()/generate() end to end", async () => {
     const turns: AnthropicTurnScript[] = [
       { blocks: [{ type: "tool_use", id: "call_1", name: "advisor", jsonChunks: ["{}"] }], stopReason: "tool_use" },
       DONE_TURN,
@@ -728,15 +729,29 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     });
     try {
       const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const secretsForAdvisor = new FileSecretStore(secretsDir);
+      // Lane 3b: an anthropic credential must be PRESENT for `advisorReviewerFor`'s claude-family
+      // branch to resolve at all (F3's sync `credentialPresenceCache` gate) — absent, it answers
+      // `undefined` and the tool reports "no reviewer model is resolvable", never reaching
+      // `generate()`. This is a SEPARATE credential write from `buildWorld`'s own official-leg
+      // session credential (both point at the same loopback fake either way).
+      await writeCredentialMaterial(secretsForAdvisor, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-advisor-p8d17" });
       const { advisorReviewerFor, familyOfModel } = await import("../../src/runtime-sdk/advisor-reviewer");
       let reviewerGenerateCalled = false;
       const advisorReviewer = advisorReviewerFor({
         settings: () => undefined,
-        secrets: new FileSecretStore(secretsDir),
+        secrets: secretsForAdvisor,
         familyOf: familyOfModel,
         sessionModel: () => "claude-sonnet-5",
         connectionOverride: () => ({ anthropicBaseUrl: fake.url }),
       });
+      // Warm F3's background credential-presence cache (cold-start honesty: the FIRST call answers
+      // `undefined` synchronously and fires the probe) BEFORE the session can ever call this
+      // resolver for real — mirrors `advisor-reviewer.test.ts`'s own `waitForResolved` poll.
+      {
+        const t0 = Date.now();
+        while (advisorReviewer() === undefined && Date.now() - t0 < 2000) await Bun.sleep(5);
+      }
       const wrappedResolver = () => {
         const resolved = advisorReviewer();
         if (resolved === undefined) return undefined;
@@ -746,13 +761,30 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       await w.session.send("please consult the advisor before you answer");
       await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
       const result = w.events.find((e) => e.type === "tool_result" && (w.events.find((c) => c.type === "tool_call" && (c as { callId?: string }).callId === (e as { callId?: string }).callId) as { name?: string } | undefined)?.name === "advisor") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
-      console.warn(`[P8d-17] MEASURED: advisor tool_result = ${JSON.stringify(result)}; reviewer's own generate() was called: ${reviewerGenerateCalled}; anthropic loopback saw ${anthropicCallCount} request(s)`);
-      expect(result?.isError).toBe(true);
-      expect(result?.output).toContain("No such tool available");
-      expect(reviewerGenerateCalled).toBe(false); // the call never reaches our reviewer at all
-      // Two requests reach the loopback (the scripted tool_use, then the model's own continuation
-      // after seeing the tool error) — never a THIRD for a reviewer generate() call that never fires.
-      expect(anthropicCallCount).toBe(2);
+      console.warn(`[P8d-17] PROVEN: advisor tool_result = ${JSON.stringify(result)}; reviewer's own generate() was called: ${reviewerGenerateCalled}; anthropic loopback saw ${anthropicCallCount} request(s)`);
+
+      // (2) the standing server's tool list — the brand-qualified advisor name is present now.
+      const messagesReq = fake.requests.find((r) => r.path === "/v1/messages" && r.body.length > 0);
+      const toolNames = (JSON.parse(messagesReq!.body) as { tools?: Array<{ name?: string }> }).tools?.map((t) => t.name) ?? [];
+      expect(toolNames).toContain("mcp__norma__advisor");
+      expect(toolNames).toContain("mcp__norma__send_message");
+      expect(toolNames).toContain("mcp__norma__list_agents");
+      expect(toolNames).toContain("mcp__norma__read_notifications");
+      // The bare alias name itself is never advertised (the CLI advertises the REGISTERED/canonical
+      // name; `officialToolAliases`'s redirect is what lets the model call the bare name anyway).
+      expect(toolNames).not.toContain("advisor");
+
+      // (4) the model's bare 'advisor' tool_use, through the alias, reaches a REAL registered
+      // tool, which calls `resolveReviewer()` and then the reviewer's own `generate()` — whose
+      // scripted text ("done") comes back verbatim in the tool result. Pinned shape:
+      // `{"advice": <reviewer text>, "model": <resolved reviewer model>}`, `isError: false`.
+      expect(result?.isError).toBe(false);
+      expect(result?.output).toBe(JSON.stringify({ advice: "done", model: "claude-fable-5.1" }));
+      expect(reviewerGenerateCalled).toBe(true);
+      // Three requests reach the loopback: the main turn's scripted tool_use, the reviewer's own
+      // `generate()` call (through `connectionOverride`), and the model's continuation after seeing
+      // the tool result.
+      expect(anthropicCallCount).toBe(3);
     } finally {
       await fake.close();
     }
