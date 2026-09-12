@@ -18,6 +18,12 @@ import {
 } from "../../src/migration/migrate-b";
 import { completeMarkerPath, manifestPath, rolledBackManifestPath } from "../../src/migration/manifest";
 import { FileSecretStore } from "../../src/auth/secret-store";
+import { CODEX_SECRET_NAMES, OPENAI_API_KEY_SECRET } from "../../src/auth/legacy-secret-names";
+import { CREDENTIAL_MATERIAL_NAMES } from "../../src/auth/credential-material";
+import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
+import { TOKEN_NAMES } from "../../src/auth/tokens";
+import { WEB_SEARCH_API_KEY_SECRET } from "../../src/agent/tools/web";
+import { EXA_API_KEY_SECRET } from "../../src/agent/tools/search";
 import { LEGACY_DEV_HOME_DIR, LEGACY_HOME_DIR, LEGACY_HOME_ENV, LEGACY_WINTER_EXECUTABLE_ENV } from "../../src/legacy-names";
 
 const dirs: string[] = [];
@@ -139,7 +145,30 @@ describe("runMigrationB — copy + manifest (Step 1)", () => {
 });
 
 describe("MIGRATION_B_SECRET_NAMES — literal parity with the canonical secret-name constants", () => {
-  test("contains exactly the pinned 14 names", () => {
+  test("is set-equal to the ACTUAL canonical constants declared elsewhere — a real drift tripwire, not a second hand-typed list", () => {
+    const canonical = [
+      CREDENTIAL_MATERIAL_NAMES.openai,
+      CREDENTIAL_MATERIAL_NAMES.codexOauth,
+      ANTHROPIC_CREDENTIAL_SECRET_NAME,
+      TOKEN_NAMES.harness,
+      TOKEN_NAMES.admin,
+      TOKEN_NAMES.remote,
+      OPENAI_API_KEY_SECRET,
+      CODEX_SECRET_NAMES.access,
+      CODEX_SECRET_NAMES.refresh,
+      CODEX_SECRET_NAMES.id,
+      CODEX_SECRET_NAMES.account,
+      CODEX_SECRET_NAMES.expires,
+      WEB_SEARCH_API_KEY_SECRET,
+      EXA_API_KEY_SECRET,
+    ];
+    expect([...MIGRATION_B_SECRET_NAMES].sort()).toEqual([...canonical].sort());
+    // Sanity: the canonical list itself is exactly 14 distinct names — proves this test isn't
+    // vacuously passing on two empty (or duplicate-collapsed) arrays.
+    expect(new Set(canonical).size).toBe(14);
+  });
+
+  test("contains exactly the pinned 14 literal names (global-constraints.md, verbatim)", () => {
     expect([...MIGRATION_B_SECRET_NAMES].sort()).toEqual(
       [
         "openai:default",

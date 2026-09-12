@@ -32,6 +32,36 @@ describe("diagnoseMigration / formatMigrationDoctorLines", () => {
     expect(formatMigrationDoctorLines(report)).toEqual(["migration: absent"]);
   });
 
+  test("absent + no legacy home present: never reads the Keychain at all (avoids a consent dialog for nothing)", async () => {
+    const parent = tempDir();
+    let reads = 0;
+    const spyingStore = { get: async (_n: string) => { reads++; return null; }, set: async () => {} };
+    await diagnoseMigration({
+      home: join(parent, "home"),
+      legacyHome: join(parent, "legacy"),
+      legacyKeychainService: "com.example.legacy",
+      legacyStore: spyingStore,
+    });
+    expect(reads).toBe(0);
+  });
+
+  test("absent status but a legacy home IS present: still counts the Keychain (there's something worth reporting)", async () => {
+    const parent = tempDir();
+    const legacyHome = join(parent, "legacy");
+    mkdirSync(legacyHome, { recursive: true }); // present, but no Migration B run ever happened
+    const legacySecrets = new FileSecretStore(join(parent, "legacy-secrets"));
+    await legacySecrets.set("openai-api-key", "sk-x");
+    const report = await diagnoseMigration({
+      home: join(parent, "home"),
+      legacyHome,
+      legacyKeychainService: "com.example.legacy",
+      legacyStore: legacySecrets,
+    });
+    expect(report.status).toBe("absent");
+    expect(report.legacyHomePresent).toBe(true);
+    expect(report.legacyKeychainRemaining).toBe(1);
+  });
+
   test("complete: after a real migration, reports complete + the legacy home line + the keychain-remaining line, values never included", async () => {
     const parent = tempDir();
     const legacyHome = join(parent, "legacy");

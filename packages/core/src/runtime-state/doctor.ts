@@ -895,15 +895,22 @@ export async function diagnoseMigration(input: {
 }): Promise<MigrationDoctorReport> {
   const manifest = readMigrationManifest(input.home);
   const status: MigrationDoctorReport["status"] = manifest?.status === "complete" || manifest?.status === "in-progress" ? manifest.status : "absent";
+  const legacyHomePresent = existsSync(input.legacyHome);
+  // Skip the 14 Bun.secrets.get calls (one macOS consent dialog EACH, the first time) when there is
+  // nothing to report anyway: a machine that never had a legacy home and never ran Migration B has
+  // no legacy Keychain items to find, by construction — `winter doctor` would otherwise touch the
+  // Keychain on every single run, forever, for a count that can only ever come back zero.
   let legacyKeychainRemaining = 0;
-  for (const name of MIGRATION_B_SECRET_NAMES) {
-    if ((await input.legacyStore.get(name)) !== null) legacyKeychainRemaining++;
+  if (legacyHomePresent || status !== "absent") {
+    for (const name of MIGRATION_B_SECRET_NAMES) {
+      if ((await input.legacyStore.get(name)) !== null) legacyKeychainRemaining++;
+    }
   }
   return {
     status,
     finishedAt: manifest?.finishedAt,
     legacyHome: input.legacyHome,
-    legacyHomePresent: existsSync(input.legacyHome),
+    legacyHomePresent,
     legacyKeychainService: input.legacyKeychainService,
     legacyKeychainRemaining,
   };
