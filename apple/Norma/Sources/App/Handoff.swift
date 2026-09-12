@@ -50,16 +50,39 @@ struct HandoffDeps {
     /// Unregisters Norma's own "launch at login" `SMAppService.mainApp` registration.
     var unregisterLoginItem: () throws -> Void
     /// Unregisters the privileged `com.norma.helper` `SMAppService.daemon` registration.
+    /// Fire-and-forget (`.live` fires `HelperClient.unregister()`'s underlying `async throws`
+    /// call on an unstructured `Task` and returns immediately, same posture as
+    /// `unregisterLoginItem`'s `SMLoginItem.disable()`) — review r0, Minor m1: the buffer that
+    /// keeps this safe is `launch`'s own bounded wait right below, which gives that `Task` real
+    /// wall-clock time to actually reach `SMAppService` before `terminateSelf` ends the process.
     var unregisterHelper: () throws -> Void
     /// Gracefully stops Norma's own daemon, if one happens to be running under this process's
     /// supervision. See `AppDelegate.boot()`'s wiring comment for why this is very often a
-    /// correct no-op (there is usually nothing left to stop by the time the handoff runs).
+    /// correct no-op (there is usually nothing left to stop by the time the handoff runs) —
+    /// review r0, Minor m4: concretely, `.live` is a no-op until the `DaemonSupervisor` it wraps
+    /// has itself been `.start()`ed, which `AppDelegate.boot()` deliberately never does for the
+    /// one it builds for this closure (nothing to stop on the common path) — so do not go looking
+    /// for a real kill signal inside `DaemonSupervisor.stop()` here; there isn't one to find.
     var stopDaemon: () -> Void
-    /// Launches the installed Winter.app. `.live` posts the one-time handoff notice (Step 3) and
-    /// blocks (bounded) until `NSWorkspace`'s own launch-completion handler fires, so by the time
-    /// `performHandoffIfNeeded` calls `terminateSelf` right after, Winter's launch has already
-    /// been confirmed (or the bound elapsed) — see `.live`'s own doc for why `terminateSelf`
-    /// itself stays a single, unconditional call with no async choreography of its own.
+    /// Whether the OS currently reports notifications as deliverable (`.authorized` or
+    /// `.provisional`) — checked SYNCHRONOUSLY: `.live` bridges `UNUserNotificationCenter`'s
+    /// completion-handler API via a short, bounded semaphore wait, so `deliverHandoffNotice`'s
+    /// decision is made and acted on BEFORE `launch` even starts, with no race between an async
+    /// authorization check and the process quitting (review r0, Major M2).
+    var notificationsAuthorized: () -> Bool
+    /// Posts Step 3's one-time notice via the app's existing `SystemNotificationPoster` seam —
+    /// used when `notificationsAuthorized()` is true.
+    var postNotificationNotice: () -> Void
+    /// Shows Step 3's one-time notice as an `NSAlert` — used when `notificationsAuthorized()` is
+    /// false, so the notice is never silently dropped just because the user never granted
+    /// notification permission (review r0, Major M2). `.live` bounds it to 15s so an alert the
+    /// user never dismisses cannot hang the handoff.
+    var showNoticeAlert: () -> Void
+    /// Launches the installed Winter.app. `.live` blocks (bounded) until `NSWorkspace`'s own
+    /// launch-completion handler fires, so by the time `performHandoffIfNeeded` calls
+    /// `terminateSelf` right after, Winter's launch has already been confirmed (or the bound
+    /// elapsed) — see `.live`'s own doc for why `terminateSelf` itself stays a single,
+    /// unconditional call with no async choreography of its own.
     var launch: (_ dest: URL) throws -> Void
     /// Quits Norma. Called last, after everything above has succeeded.
     var terminateSelf: () -> Void
@@ -99,13 +122,14 @@ func performHandoffIfNeeded(deps: HandoffDeps) -> HandoffOutcome {
     // make `HandoffOutcome`'s `Equatable` conformance flicker depending on filesystem timing.
     let dest = deps.applicationsDir.appendingPathComponent("Winter.app", isDirectory: true)
 
-    // Teardown + launch + quit — identical in both the fresh-install and already-current paths;
-    // only the final outcome value differs, decided by the caller below.
+    // Teardown + notice + launch + quit — identical in both the fresh-install and already-current
+    // paths; only the final outcome value differs, decided by the caller below.
     func teardownLaunchAndQuit() -> String? {
         do {
             try deps.unregisterLoginItem()
             try deps.unregisterHelper()
             deps.stopDaemon()
+            deliverHandoffNotice(deps: deps)
             try deps.launch(dest)
         } catch {
             return "\(error)"
@@ -148,13 +172,29 @@ func versionAtLeast(_ a: String, _ b: String) -> Bool {
 }
 
 /// Step 3's one-time notice, verbatim — kept as named constants (rather than inlined into
-/// `.live.launch`'s body) specifically so `HandoffTests` can assert on the exact copy through
-/// this same seam without standing up a real `UNUserNotificationCenter`.
+/// `.live`'s delivery closures) specifically so `HandoffTests` can assert on the exact copy
+/// through this same seam without standing up a real `UNUserNotificationCenter`/`NSAlert`.
 enum HandoffNotice {
     static let title = "Norma is now Winter"
     static let body =
         "Winter has been installed in Applications and opened; your sessions and settings move " +
         "over on its first start. You can delete Norma."
+}
+
+/// Review r0, Major M2: delivers Step 3's notice through whichever of the two `HandoffDeps`
+/// closures actually reaches the user — `SystemNotificationPoster` silently drops a post when
+/// notifications were never authorized, which would make "Norma is now Winter" vanish with no
+/// fallback. Called BEFORE `launch` (not folded into it): `notificationsAuthorized()` and
+/// whichever delivery closure runs are both synchronous/bounded in `.live`, so by the time this
+/// returns the notice has already been posted or shown — nothing here needs `launch`'s own wait
+/// as a buffer (unlike `unregisterHelper`'s genuinely fire-and-forget `Task`, see that field's
+/// own doc).
+func deliverHandoffNotice(deps: HandoffDeps) {
+    if deps.notificationsAuthorized() {
+        deps.postNotificationNotice()
+    } else {
+        deps.showNoticeAlert()
+    }
 }
 
 // -----------------------------------------------------------------------------------------------
@@ -178,6 +218,9 @@ extension HandoffDeps {
         unregisterLoginItem: { fatalError("neverHandoff.unregisterLoginItem is unreachable — embeddedWinterURL is always nil") },
         unregisterHelper: { fatalError("neverHandoff.unregisterHelper is unreachable — embeddedWinterURL is always nil") },
         stopDaemon: { fatalError("neverHandoff.stopDaemon is unreachable — embeddedWinterURL is always nil") },
+        notificationsAuthorized: { fatalError("neverHandoff.notificationsAuthorized is unreachable — embeddedWinterURL is always nil") },
+        postNotificationNotice: { fatalError("neverHandoff.postNotificationNotice is unreachable — embeddedWinterURL is always nil") },
+        showNoticeAlert: { fatalError("neverHandoff.showNoticeAlert is unreachable — embeddedWinterURL is always nil") },
         launch: { _ in fatalError("neverHandoff.launch is unreachable — embeddedWinterURL is always nil") },
         terminateSelf: { fatalError("neverHandoff.terminateSelf is unreachable — embeddedWinterURL is always nil") },
         disabled: true
@@ -196,9 +239,17 @@ extension HandoffDeps {
             installedVersion: liveInstalledVersion,
             copyBundle: liveCopyBundle,
             verifySignature: liveVerifySignature,
-            unregisterLoginItem: { try SMLoginItem().disable() },
+            // review r0, Minor m2: goes through the app's existing `LoginItemController` (the same
+            // controller the menu bar's login-item checkbox drives), not a bare `SMLoginItem()`
+            // instantiated here a second time — `LoginItemController.setEnabled(false)` is that
+            // controller's own "disable" verb (`disable()` itself isn't a method on it; `setEnabled`
+            // is the seam it exposes — see `LoginItem.swift`).
+            unregisterLoginItem: { LoginItemController(service: SMLoginItem()).setEnabled(false) },
             unregisterHelper: { HelperClient().unregister() },
             stopDaemon: {},
+            notificationsAuthorized: liveNotificationsAuthorized,
+            postNotificationNotice: { SystemNotificationPoster().post(title: HandoffNotice.title, body: HandoffNotice.body) },
+            showNoticeAlert: liveShowNoticeAlert,
             launch: liveLaunch,
             terminateSelf: { NSApp.terminate(nil) },
             disabled: ProcessInfo.processInfo.environment["NORMA_HANDOFF_DISABLED"] == "1"
@@ -234,13 +285,26 @@ extension HandoffDeps {
     }
 
     /// Copy to a staging sibling, then atomically swap it over `dest` — a crash or kill mid-copy
-    /// never leaves a half-written `Winter.app` at the real destination. A stale staging leftover
-    /// from a previous, interrupted attempt is removed first.
-    private static func liveCopyBundle(_ src: URL, _ dest: URL) throws {
+    /// never leaves a half-written `Winter.app` at the real destination. Review r0, Minor m3:
+    /// EVERY `.Winter.app.staging-*` entry in the applications dir is removed first, not only the
+    /// one matching this process's own pid — a prior attempt that crashed under a DIFFERENT pid
+    /// (e.g. an earlier, since-relaunched Norma) would otherwise leave its own staging leftover
+    /// behind forever, un-swept by any later attempt. Internal, not `private`: this is the one
+    /// `.live` closure `HandoffTests` calls DIRECTLY (against a temp dir, never a real
+    /// `/Applications`) to prove the stale-cleanup sweep for real, rather than through a fake —
+    /// `HandoffDeps.live` as a whole cannot be evaluated from a test (`liveApplicationsDir()`
+    /// touches the real `/Applications`/`~/Applications`), so this one pure-filesystem piece is
+    /// carved out on its own.
+    static func liveCopyBundle(_ src: URL, _ dest: URL) throws {
         let fm = FileManager.default
-        let staging = dest.deletingLastPathComponent()
-            .appendingPathComponent(".Winter.app.staging-\(ProcessInfo.processInfo.processIdentifier)")
-        try? fm.removeItem(at: staging)
+        let applicationsDir = dest.deletingLastPathComponent()
+        let stalePrefix = ".Winter.app.staging-"
+        if let existingEntries = try? fm.contentsOfDirectory(atPath: applicationsDir.path) {
+            for name in existingEntries where name.hasPrefix(stalePrefix) {
+                try? fm.removeItem(at: applicationsDir.appendingPathComponent(name))
+            }
+        }
+        let staging = applicationsDir.appendingPathComponent("\(stalePrefix)\(ProcessInfo.processInfo.processIdentifier)")
         try fm.copyItem(at: src, to: staging)
         defer { try? fm.removeItem(at: staging) }
         if fm.fileExists(atPath: dest.path) {
@@ -266,16 +330,40 @@ extension HandoffDeps {
         }
     }
 
-    /// Posts the one-time handoff notice (Step 3) THEN triggers the real launch — reusing
-    /// `SystemNotificationPoster` (`Sources/Model/NotificationPoster.swift`), the existing
-    /// `UNUserNotificationCenter` seam the push-notification track already ships and already
-    /// exercises the entitlement/authorization path this needs, rather than standing up a second
-    /// one. Posted here (not inside `terminateSelf`) so the async `add(_:)` call has the launch's
-    /// own completion wait (bounded, up to 10s) to actually reach the notification center before
-    /// `terminateSelf` ends the process right after this returns.
-    private static func liveLaunch(_ dest: URL) throws {
-        SystemNotificationPoster().post(title: HandoffNotice.title, body: HandoffNotice.body)
+    /// Review r0, Major M2: whether the OS reports notifications as deliverable, checked
+    /// SYNCHRONOUSLY by bridging `getNotificationSettings`'s completion handler through a short,
+    /// bounded (3s) semaphore wait — same "block the caller, bound the wait" shape `liveLaunch`
+    /// below already uses for `NSWorkspace`'s own completion handler. `.provisional` counts as
+    /// deliverable (silent, unbannered delivery — still reaches the user, unlike a dropped post).
+    private static func liveNotificationsAuthorized() -> Bool {
+        let semaphore = DispatchSemaphore(value: 0)
+        var authorized = false
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            authorized = settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional
+            semaphore.signal()
+        }
+        _ = semaphore.wait(timeout: .now() + 3)
+        return authorized
+    }
 
+    /// Review r0, Major M2: the non-blocking-to-the-USER fallback when notifications aren't
+    /// authorized — an `NSAlert.runModal()` bounded by a 15s `Timer`-scheduled `NSApp.abortModal()`
+    /// so an alert the user never dismisses cannot hang the handoff (the call itself blocks the
+    /// calling thread until the modal session ends, same as `liveShowNoticeAlert`'s caller already
+    /// expects from `deliverHandoffNotice` running before `launch`, not concurrently with it).
+    private static func liveShowNoticeAlert() {
+        let alert = NSAlert()
+        alert.messageText = HandoffNotice.title
+        alert.informativeText = HandoffNotice.body
+        alert.alertStyle = .informational
+        let timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { _ in
+            NSApp.abortModal()
+        }
+        alert.runModal()
+        timer.invalidate()
+    }
+
+    private static func liveLaunch(_ dest: URL) throws {
         let semaphore = DispatchSemaphore(value: 0)
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true

@@ -62,7 +62,8 @@ final class HandoffTests: XCTestCase {
         recorder: HandoffRecorder,
         embeddedWinterURL: URL?,
         applicationsDir: URL,
-        disabled: Bool = false
+        disabled: Bool = false,
+        notificationsAuthorized: Bool = true
     ) -> HandoffDeps {
         HandoffDeps(
             embeddedWinterURL: embeddedWinterURL,
@@ -81,6 +82,9 @@ final class HandoffTests: XCTestCase {
             unregisterLoginItem: { recorder.record("unregisterLoginItem") },
             unregisterHelper: { recorder.record("unregisterHelper") },
             stopDaemon: { recorder.record("stopDaemon") },
+            notificationsAuthorized: { notificationsAuthorized },
+            postNotificationNotice: { recorder.record("postNotificationNotice") },
+            showNoticeAlert: { recorder.record("showNoticeAlert") },
             launch: { _ in
                 recorder.record("launch")
                 if let e = recorder.launchError { throw e }
@@ -127,7 +131,8 @@ final class HandoffTests: XCTestCase {
         let dest = appsDir.appendingPathComponent("Winter.app", isDirectory: true)
         XCTAssertEqual(outcome, .installed(dest))
         XCTAssertEqual(recorder.calls, [
-            "copyBundle", "verifySignature", "unregisterLoginItem", "unregisterHelper", "stopDaemon", "launch", "terminateSelf",
+            "copyBundle", "verifySignature", "unregisterLoginItem", "unregisterHelper", "stopDaemon",
+            "postNotificationNotice", "launch", "terminateSelf",
         ])
         XCTAssertEqual(realInstalledVersion(dest), "0.111.0", "the real copy must actually land the embedded bundle's content at dest")
     }
@@ -147,8 +152,8 @@ final class HandoffTests: XCTestCase {
         let dest = appsDir.appendingPathComponent("Winter.app", isDirectory: true)
         XCTAssertEqual(outcome, .alreadyCurrent(dest))
         XCTAssertEqual(recorder.calls, [
-            "unregisterLoginItem", "unregisterHelper", "stopDaemon", "launch", "terminateSelf",
-        ], "an already-current dest must still tear down, launch, and quit — never re-copy")
+            "unregisterLoginItem", "unregisterHelper", "stopDaemon", "postNotificationNotice", "launch", "terminateSelf",
+        ], "an already-current dest must still tear down, notify, launch, and quit — never re-copy")
     }
 
     func testDestStrictlyNewerThanEmbeddedIsAlsoAlreadyCurrent() {
@@ -244,8 +249,69 @@ final class HandoffTests: XCTestCase {
 
         guard case .failed(let message) = outcome else { return XCTFail("expected .failed, got \(outcome)") }
         XCTAssertTrue(message.contains("could not launch"))
-        XCTAssertEqual(recorder.calls, ["copyBundle", "verifySignature", "unregisterLoginItem", "unregisterHelper", "stopDaemon", "launch"])
+        XCTAssertEqual(recorder.calls, [
+            "copyBundle", "verifySignature", "unregisterLoginItem", "unregisterHelper", "stopDaemon", "postNotificationNotice", "launch",
+        ])
         XCTAssertFalse(recorder.calls.contains("terminateSelf"), "must never quit Norma after a failed launch")
+    }
+
+    // MARK: - stale-staging cleanup sweeps every pid's leftover, not just this process's own (review r0, Minor m3)
+
+    func testLiveCopyBundleRemovesEveryStaleStagingEntryNotJustCurrentPid() throws {
+        let appsDir = tempDir.appendingPathComponent("Applications", isDirectory: true)
+        try FileManager.default.createDirectory(at: appsDir, withIntermediateDirectories: true)
+        // Two planted leftovers under DIFFERENT (fake, definitely-not-our) pids — simulating two
+        // earlier, crashed handoff attempts under earlier Norma processes.
+        let staleOne = appsDir.appendingPathComponent(".Winter.app.staging-99999", isDirectory: true)
+        let staleTwo = appsDir.appendingPathComponent(".Winter.app.staging-1", isDirectory: true)
+        try FileManager.default.createDirectory(at: staleOne, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: staleTwo, withIntermediateDirectories: true)
+        // A sibling that merely starts with the same prefix-looking text but isn't a staging dir
+        // at all must be left alone — the sweep is a real Winter.app install, not a wildcard wipe
+        // of the whole Applications dir.
+        let unrelated = appsDir.appendingPathComponent("SomeOtherApp.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: unrelated, withIntermediateDirectories: true)
+
+        let embedded = makeFakeBundle(named: "embedded/Winter.app", version: "0.111.0")
+        let dest = appsDir.appendingPathComponent("Winter.app", isDirectory: true)
+
+        try HandoffDeps.liveCopyBundle(embedded, dest)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staleOne.path), "a stale staging dir under a DIFFERENT pid must be swept")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staleTwo.path), "every stale staging dir must be swept, not just one")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unrelated.path), "an unrelated sibling must never be touched")
+        XCTAssertEqual(realInstalledVersion(dest), "0.111.0", "the real copy must still land the embedded bundle's content at dest")
+        // No leftover staging dir for THIS run either — swapped into dest and cleaned up.
+        let remainingEntries = try FileManager.default.contentsOfDirectory(atPath: appsDir.path)
+        XCTAssertFalse(remainingEntries.contains { $0.hasPrefix(".Winter.app.staging-") }, "this run's own staging dir must not survive either")
+    }
+
+    // MARK: - the notice must never silently vanish (review r0, Major M2)
+
+    func testNotificationsAuthorizedPostsViaPosterNeverTheAlert() {
+        let embedded = makeFakeBundle(named: "embedded/Winter.app", version: "0.111.0")
+        let appsDir = tempDir.appendingPathComponent("Applications", isDirectory: true)
+        try! FileManager.default.createDirectory(at: appsDir, withIntermediateDirectories: true)
+        let recorder = HandoffRecorder()
+        let deps = makeDeps(recorder: recorder, embeddedWinterURL: embedded, applicationsDir: appsDir, notificationsAuthorized: true)
+
+        _ = performHandoffIfNeeded(deps: deps)
+
+        XCTAssertTrue(recorder.calls.contains("postNotificationNotice"))
+        XCTAssertFalse(recorder.calls.contains("showNoticeAlert"), "authorized notifications must never fall back to the alert")
+    }
+
+    func testNotificationsNotAuthorizedShowsTheAlertNeverThePoster() {
+        let embedded = makeFakeBundle(named: "embedded/Winter.app", version: "0.111.0")
+        let appsDir = tempDir.appendingPathComponent("Applications", isDirectory: true)
+        try! FileManager.default.createDirectory(at: appsDir, withIntermediateDirectories: true)
+        let recorder = HandoffRecorder()
+        let deps = makeDeps(recorder: recorder, embeddedWinterURL: embedded, applicationsDir: appsDir, notificationsAuthorized: false)
+
+        _ = performHandoffIfNeeded(deps: deps)
+
+        XCTAssertTrue(recorder.calls.contains("showNoticeAlert"), "the notice must never silently vanish when notifications aren't authorized")
+        XCTAssertFalse(recorder.calls.contains("postNotificationNotice"))
     }
 
     // MARK: - versionAtLeast (pure)
