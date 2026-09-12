@@ -2,11 +2,12 @@ import { winterOptionsFromSettings, type Settings } from "../settings";
 import type { Mode as SessionMode } from "../agent/tools/registry";
 
 /** Which leg a session's RECORD describes. `"winter"` = it has (or will have) a Winter transcript
- *  and can be resumed; `"engine"` = an engine-ERA record — a pre-8b row 8a's boot backfill wrote
- *  with no backend id — which nothing can run any more (P8b-22's typed refusal). No new record is
- *  ever written with the `engine` shape since the retirement; the value survives as the name of
- *  that history. */
-export type SessionLeg = "engine" | "winter";
+ *  and can be resumed; `"official"` = P8c: the record's `runtimeKind` says `claude-agent` — a
+ *  spawned `claude` child, resumed through the router's own official adapter rather than Winter's;
+ *  `"engine"` = an engine-ERA record — a pre-8b row 8a's boot backfill wrote with no backend id —
+ *  which nothing can run any more (P8b-22's typed refusal). No new record is ever written with the
+ *  `engine` shape since the retirement; the value survives as the name of that history. */
+export type SessionLeg = "engine" | "winter" | "official";
 
 /** Task 17: the engine is retired — the answer is `winter` for every mode. The signature and the
  *  door stay so a settings file's (ignored) `winterLeg.<mode>: false` is read through the ONE
@@ -31,10 +32,15 @@ export function legForNewSession(mode: SessionMode, settings: Settings | null | 
  * `selection.reason` is stamped with a human-readable account of the leg at creation (what a host
  * renders for "why is this session on that runtime"); it is NEVER parsed. Routing reads this.
  *
- * Deliberately NOT a function of `runtimeKind`: 8a records every session — engine sessions included
- * — as `"winter-agent"`, because that is the only runtime kind this daemon hosts.
+ * P8c-14: NOW a function of `runtimeKind` for exactly one value — `"claude-agent"` is the official
+ * leg's own record, unambiguous and never written for a Winter session (8a records every OTHER
+ * session as `"winter-agent"`, engine sessions included, because Winter was the only runtime kind
+ * this daemon hosted before 8c). A `claude-agent` record therefore reports `"official"` regardless
+ * of `backendSessionId` (P8c-1's own creation transaction sets it in the SAME write, but this
+ * predicate must not need to know that to be correct); everything else keeps the pre-8c rule.
  */
-export function sessionLegOf(record: { backendSessionId?: string } | undefined): SessionLeg | undefined {
+export function sessionLegOf(record: { backendSessionId?: string; runtimeKind?: string } | undefined): SessionLeg | undefined {
   if (record === undefined) return undefined;
+  if (record.runtimeKind === "claude-agent") return "official";
   return typeof record.backendSessionId === "string" && record.backendSessionId.length > 0 ? "winter" : "engine";
 }

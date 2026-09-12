@@ -130,11 +130,40 @@ jobs:
       - name: Make the winter binary executable
         run: chmod +x dist/winter
 
+      # P8c-9: the official leg's real-runtime proofs (`describeWithClaudeRuntime`) must not
+      # silently skip in CI — `bun install` resolves the optional platform package for macOS
+      # runners on its own (verified: no extra registry config needed), and this step fails loudly
+      # BEFORE the test run if that resolution somehow did not happen, rather than the run quietly
+      # skipping every official-leg test and going green on nothing.
+      # Fix round 1 (M3): a bare `node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude`
+      # path assertion assumes bun's own isolated-linker layout hoists the platform package to
+      # `packages/core`'s own `node_modules` — measured (checkpoint a): it does NOT. bun nests an
+      # optional dependency under ITS DECLARING PACKAGE's own `node_modules`, so this resolves the
+      # platform package THROUGH THE WRAPPER's own `require`, the SAME two-step `createRequire`
+      # chain `official-executable.ts`'s package door and the test bed
+      # (`test/helpers/claude-runtime.ts`) already use — never a guessed filesystem path.
+      - name: Verify the official runtime platform package installed
+        working-directory: packages/core
+        run: |
+          bun -e '
+          import { createRequire } from "node:module";
+          import { existsSync } from "node:fs";
+          import { dirname, join } from "node:path";
+          const req = createRequire(import.meta.url);
+          const wrapperPkgJson = req.resolve("@anthropic-ai/claude-agent-sdk/package.json");
+          const inside = createRequire(wrapperPkgJson);
+          const platformPkgJson = inside.resolve(`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/package.json`);
+          const claudeBin = join(dirname(platformPkgJson), "claude");
+          if (!existsSync(claudeBin)) { console.error("the platform package resolved but carries no claude binary at", claudeBin); process.exit(1); }
+          console.log("official runtime resolved:", claudeBin);
+          '
+
       - name: Test
         working-directory: packages/core
         env:
           NORMA_WINTER_EXECUTABLE: ${{ github.workspace }}/dist/winter
           NORMA_WINTER_REQUIRE_BINARY: "1"
+          NORMA_CLAUDE_REQUIRE_RUNTIME: "1"
         run: bun test
 
   # cli's non-TUI tests (`test/*.ts` only — `test/tui/**` renders the Ink transcript through
@@ -171,6 +200,7 @@ jobs:
         env:
           NORMA_WINTER_EXECUTABLE: ${{ github.workspace }}/dist/winter
           NORMA_WINTER_REQUIRE_BINARY: "1"
+          NORMA_CLAUDE_REQUIRE_RUNTIME: "1"
         run: bun test test/*.ts
 
   # P8b-9: `bun test` does not typecheck — bun strips types and runs. So `tsc` had been RED on `main`

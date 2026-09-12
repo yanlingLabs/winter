@@ -70,7 +70,7 @@ import { SettingsWatcher } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "./runtime-sdk/create";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
-import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
+import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
 import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
 import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord, type CapabilitySession } from "./capabilities";
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
@@ -255,6 +255,9 @@ export async function startDaemon(opts: {
    *  present, is threaded into EngineConfig.provider.live (no-restart model resolution) — tests
    *  that inject a provider directly and don't care about live resolution just omit it. */
   agentProvider?: { provider: Provider; model: string; live?: () => { model: string; reasoningEffort?: string } } | null;
+  /** TEST ONLY (fix round 1, M2) — threaded straight into `WinterLegDeps.officialConnectionOverride`;
+   *  a production caller never sets this. See that field's own doc for why it exists at all. */
+  officialConnectionOverride?: WinterLegDeps["officialConnectionOverride"];
 } = {}): Promise<RunningDaemon> {
   const startedAt = Date.now();
   const dirs = bootstrapNormaDir(opts.home ?? resolveNormaHome());
@@ -1031,6 +1034,7 @@ export async function startDaemon(opts: {
     // LIVE per incarnation from the same holder and the same `TrustStore` the McpManager consults.
     extraMcpServers: (session) => configuredMcpServersFor({ settings, cwd: session.cwd, trusted: (dir) => trustStore.isTrusted(dir) }),
     log: (line) => console.error(`winter-leg: ${line}`),
+    ...(opts.officialConnectionOverride === undefined ? {} : { officialConnectionOverride: opts.officialConnectionOverride }),
   });
   /** A deleted session takes its Winter child (bounded `end()`, out of the table) AND its runtime
    *  rows with it — the reaper's 600 s grace is shorter than the 900 s idle timer, so without the
