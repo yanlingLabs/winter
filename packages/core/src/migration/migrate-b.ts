@@ -56,7 +56,9 @@ export class MigrationRefused extends Error {
   }
 }
 
-/** `legacyHomeFor` — `$NORMA_HOME` if set, else `~/.norma` / `~/.norma-dev` per profile. */
+/** `legacyHomeFor` — the legacy home override env var if set, else the legacy dist/dev home
+ *  directory name under the user's home, per profile (`legacy-names.ts`'s `LEGACY_HOME_ENV` /
+ *  `LEGACY_HOME_DIR` / `LEGACY_DEV_HOME_DIR`). */
 export function legacyHomeFor(profile: WinterProfile, env: NodeJS.ProcessEnv = process.env): string {
   const override = env[LEGACY_HOME_ENV];
   if (override) return override;
