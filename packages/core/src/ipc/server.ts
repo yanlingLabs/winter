@@ -68,7 +68,11 @@ import type { PermissionRules } from "../agent/permission-rules";
 import { repoRootFor } from "../agent/memory-dir";
 import type { QuestionBroker } from "../agent/questions";
 import type { TaskStore } from "../agent/task-store";
-import type { PlanBroker } from "../agent/plans";
+// P8c integration: widened from the concrete `PlanBroker` class (agent/plans.ts) to this
+// structural interface so `runtime-sdk/plan-bridge.ts`'s `planBridgeFor(deps)` — a plain object,
+// not a `PlanBroker` instance — can satisfy `opts.plans` (a plan object cannot satisfy a class type
+// that carries private members). `PlanBridge` is the exact shape `plan-bridge.ts` exports.
+import type { PlanBridge } from "../runtime-sdk/plan-bridge";
 import type { SessionDirectories } from "../agent/dirs";
 import type { TrustStore } from "../agent/trust";
 import type { BackgroundTaskRegistry } from "../agent/bg-registry";
@@ -300,7 +304,7 @@ export interface IpcServerOptions {
   hooks?: HookRegistry;
   questions?: QuestionBroker; // in-flight ask_user questions; ask_user.respond
   tasks?: TaskStore;         // session task lists; task.list
-  plans?: PlanBroker;        // in-flight exit_plan_mode plans; plan.respond
+  plans?: PlanBridge;        // in-flight exit_plan_mode plans; plan.respond
   peripheral?: PeripheralBroker; // lease machinery; peripheral.* verbs (Phase 2f)
   providerLink?: ProviderLink;   // bridges PeripheralBroker.call()'s pushToProvider to the live
                                   // provider connection this server tracks (Phase 2f)
