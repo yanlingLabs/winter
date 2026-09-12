@@ -70,6 +70,7 @@ import { RoutineAuditLog } from "./routines/audit";
 import { makeApply } from "./settings-apply";
 import { SettingsWatcher } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
+import { restampStep } from "./runtime-state/recovery";
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "./runtime-sdk/create";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
@@ -77,7 +78,7 @@ import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
 import { planBridgeFor, type PlanBridge } from "./runtime-sdk/plan-bridge";
 import { importEngineEraSession } from "./runtime-sdk/import-legacy";
 import { registerHandoffParticipants, planAndApplySwitch } from "./runtime-sdk/handoff";
-import { sinksFor } from "./runtime-sdk/sinks";
+import { createSinkCallStore, sinksFor } from "./runtime-sdk/sinks";
 import { sessionHooksFor } from "./runtime-sdk/hooks";
 import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord, type CapabilitySession } from "./capabilities";
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
@@ -985,8 +986,17 @@ export async function startDaemon(opts: {
         `runtime-sdk: directory recovery — ${recovered.entriesLoaded} entr(ies), ${recovered.staleMarked} stale, ` +
           `${recovered.cursorsRestored} cursor(s), ${recovered.heldMessagesFound} held, ${parked} parked`,
       );
+      // P8d-11 (ruling: 8b task-12 option (b)): step 10 ran LATE by design — the router handle is
+      // built after §13 — so the boot-time attempt row says `skipped`; re-stamp it with the real
+      // outcome so `norma doctor` reads one honest step 10.
+      if (runtime?.lastRecovery.step10AttemptId !== undefined) {
+        restampStep(runtime.db.db, runtime.lastRecovery.step10AttemptId, 10, "ok", { entriesLoaded: recovered.entriesLoaded, staleMarked: recovered.staleMarked });
+      }
     } catch (err) {
       console.error(`runtime-sdk: directory recovery failed (${(err as Error)?.name ?? "unknown"}) — messaging starts without it`);
+      if (runtime?.lastRecovery.step10AttemptId !== undefined) {
+        restampStep(runtime.db.db, runtime.lastRecovery.step10AttemptId, 10, "failed", { errorName: (err as Error)?.name ?? "unknown" });
+      }
     }
   }
 
@@ -1133,10 +1143,15 @@ export async function startDaemon(opts: {
     notifyFallback: (title, message) => notifyHeadless(title, message),
     cwdFor: (sid) => { try { return store.meta(sid).cwd ?? undefined; } catch { return undefined; } },
     log: { info: (m) => console.error(`sinks: ${m}`), error: (m) => console.error(`sinks: ${m}`) },
+    // P8d-13: the durable dedupe half (`runtime_sink_calls`), so a restarted daemon never re-fires
+    // a side effect for a call id it already served; absent only when the runtime spine is offline.
+    ...(runtime === undefined ? {} : { durable: createSinkCallStore(runtime.db) }),
   });
   hub.addObserver((event) => {
-    if (event.type === "tool_call") sinks.onToolCall(event);
-    else if (event.type === "tool_result") sinks.onToolResult(event);
+    // P8d-13: the generation scopes the durable key `(session, generation, callId)`.
+    const generation = runtime?.records.get(event.sessionId)?.generation;
+    if (event.type === "tool_call") sinks.onToolCall({ ...event, generation });
+    else if (event.type === "tool_result") sinks.onToolResult({ ...event, generation });
   });
   const winterDrivers: WinterSessionDrivers = createWinterSessionDrivers({
     home: normaHome,

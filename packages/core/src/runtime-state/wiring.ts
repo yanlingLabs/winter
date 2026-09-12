@@ -38,14 +38,16 @@ export const RUNTIME_SWEEP_INTERVAL_MS = 60 * 60_000;
 /**
  * How long teardown waits for queued §16 deletions before it closes the handle anyway.
  *
- * MUST STAY UNDER THE APP'S GRACE PERIOD. `DaemonSupervisor.gracefulExitTimeout` (2.0 s,
+ * MUST STAY UNDER THE APP'S GRACE PERIOD. `DaemonSupervisor.gracefulExitTimeout` (5.0 s since Winter
+ * Phase 8d's P8d-6 — the quit runs behind `.terminateLater`, so macOS's own ~5 s window no longer binds;
  * `apple/Norma/Sources/App/DaemonSupervisor.swift`) is how long the app waits after SIGTERM before
  * escalating to SIGKILL — so a drain budgeted above that would be force-killed mid-drain, losing the
  * deletion it was waiting for AND the `lock.release()` behind it, which is what unlinks the socket.
- * A stale socket sends the supervisor into `.connectOnly` on the next launch. 1500 ms leaves the
- * rest of teardown room inside the 2 s and still covers a drain that is, in practice, microtasks.
+ * A stale socket sends the supervisor into `.connectOnly` on the next launch. 3500 ms leaves the
+ * rest of teardown room inside the 5 s and still covers a drain that is, in practice, microtasks
+ * (P8d-6: raised from 1500 ms together with the app's grace — never change one side alone).
  */
-export const RUNTIME_SHUTDOWN_DRAIN_MS = 1_500;
+export const RUNTIME_SHUTDOWN_DRAIN_MS = 3_500;
 
 /** The `schema_meta` key that makes §17 phase 5 a ONE-TIME relocation (P8b-17 writes it, 8a only
  *  read it). Written when a run finishes with NOTHING LEFT TO DO — no collision to clear, no
