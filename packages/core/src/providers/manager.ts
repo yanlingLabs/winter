@@ -4,8 +4,7 @@ import { readOpenAiApiKey } from "../auth/credential-material";
 import { OPENAI_API_KEY_SECRET } from "../auth/legacy-secret-names";
 import { loadSettings, type Settings } from "../settings";
 import type { Provider } from "./types";
-import { OpenAICompatibleProvider } from "./openai-compatible";
-import { CodexAuthStore, CodexOAuthProvider } from "./codex-oauth";
+import { createCodexOauthRuntimeProvider, createOpenAiCompatibleRuntimeProvider } from "./runtime-provider";
 import { QuotaManager, withQuota } from "./quota";
 import { CODEX_MODELS, DEFAULT_CODEX_MODEL } from "./codex-config";
 
@@ -114,11 +113,20 @@ export async function createProvider(settings: Settings, secrets: SecretStore, s
   let inner: Provider;
   const providerType = settings.provider.type;
   if (providerType === "codex-oauth") {
-    inner = new CodexOAuthProvider({ authStore: new CodexAuthStore(secrets) });
+    // P8c lane 5: onto the `@yanlinglabs/winter-provider-runtime` codex-oauth adapter — credential
+    // resolution (and, on a 401, refresh write-back) goes through `credential-store.ts`'s
+    // `CredentialStore`, which reads/writes the SAME `codex-oauth:default` material record the
+    // spawned Winter child does (`runtime-provider.ts`'s own header). No eager credential check
+    // here — matches the pre-existing `CodexOAuthProvider` construction, which never touched the
+    // secret store at construction time either; a missing/invalid credential surfaces as a typed
+    // `auth` error from the FIRST `streamTurn()` call, same as before.
+    inner = createCodexOauthRuntimeProvider(secrets);
   } else {
+    // Fail-fast, unchanged: `createProvider` itself throws before anything is constructed when no
+    // key is stored (manager.test.ts pins this exact message).
     const apiKey = await readOpenAiApiKey(secrets);
     if (!apiKey) throw new Error("no API key stored — run: norma login --api-key");
-    inner = new OpenAICompatibleProvider({ baseUrl: settings.provider.baseUrl, apiKey });
+    inner = createOpenAiCompatibleRuntimeProvider(secrets, settings.provider.baseUrl);
   }
   const liveModel = buildLiveModelResolver(providerType, settings, settingsPath);
   return { provider: withQuota(inner, quota), model: settings.provider.model, quota, liveModel };
