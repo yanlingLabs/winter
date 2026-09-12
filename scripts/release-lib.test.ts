@@ -366,6 +366,19 @@ describe("nameScanPlan (panel-cef Task 5 — §11b's exclusion, expressed in the
     // Not a blanket filename match anywhere in the bundle.
     expect(m("Contents/Resources/language-subtag-registry.xml")).toBe(false);
   });
+
+  test("NAME_SCAN_EXCLUSIONS matches the embedded Winter.app whole (Lane H review r0, Major M1)", () => {
+    const m = (p: string) => NAME_SCAN_EXCLUSIONS.some((re) => re.test(p));
+    expect(m("Contents/Resources/Winter.app")).toBe(true);
+    expect(m("Contents/Resources/Winter.app/Contents/Info.plist")).toBe(true);
+    expect(m("Contents/Resources/Winter.app/Contents/Resources/runtimes/winter")).toBe(true);
+    // Not a blanket prefix match — a sibling merely starting with "Winter.app" must not sneak in.
+    expect(m("Contents/Resources/WinterX.app/Contents/Info.plist")).toBe(false);
+    expect(m("Contents/Resources/WinterX.app")).toBe(false);
+    // Unrelated paths are unaffected by this rule.
+    expect(m("Contents/Resources")).toBe(false);
+    expect(m("Contents/MacOS/Norma")).toBe(false);
+  });
 });
 
 describe("appcastInsertPlan", () => {

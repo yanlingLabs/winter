@@ -181,6 +181,18 @@ export const NAME_SCAN_EXCLUSIONS: readonly RegExp[] = [
   // links. Anchored to this ONE file, not a directory — every other file in liblangtag/, and
   // every other file in the LibreOffice tree, stays fully scanned.
   /^Contents\/Resources\/LibreOffice\/Resources\/liblangtag\/language-subtag-registry\.xml$/,
+  // Winter Phase 9c, Lane H (review r0, Major M1) — a FOURTH rationale, but the same shape as the
+  // CEF/Monaco/LibreOffice rules above: `--embed-winter` (release.ts §3a) places a separately
+  // built, signed, notarized, and ALREADY identity-scanned Winter.app under
+  // `Contents/Resources/`. It carries its own embedded copies of the same third-party trees this
+  // guard already exempts elsewhere in THIS bundle (its own CEF/Monaco/LibreOffice, if it embeds
+  // any) — scanning it a second time here would either re-trip the exact false positives the
+  // three rules above exist to silence (this bundle's own exemptions don't reach INTO a nested
+  // bundle's paths) or, worse, scan hundreds of MB of already-vetted bytes for no new coverage.
+  // Directory-anchored (`(\/|$)`) exactly like the vs/ rule above: the whole nested bundle is
+  // pruned as one excluded node, while a sibling merely starting with "Winter.app" (e.g. a
+  // hypothetical "Winter.appX") does not accidentally match.
+  /^Contents\/Resources\/Winter\.app(\/|$)/,
 ];
 
 export interface NameScanPlanInputs {
