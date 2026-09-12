@@ -110,6 +110,12 @@ export type RuntimeSessionPatch = Partial<
     // plus the marker itself.
     | "compatibilityLevel"
     | "importedFrom"
+    // Winter Phase 8c (P8c-14/Task 4.1): a certified handoff's OWN write — the destination leg's
+    // `confirmInit` patches both together (never one without the other: a `runtimeKind` naming a
+    // leg the `selection` doesn't agree with is exactly the "two copies of D13 would drift" shape
+    // P8c-12 warns about), and reverts both together if `confirmInit` ends up refusing after all.
+    | "runtimeKind"
+    | "selection"
   >
 >;
 
@@ -287,6 +293,8 @@ const PATCH_COLUMNS: ReadonlyArray<readonly [keyof RuntimeSessionPatch, string]>
   ["lastVerifiedWinterConsumer", "last_verified_winter_consumer"],
   ["compatibilityLevel", "compatibility_level"],
   ["importedFrom", "imported_from"],
+  ["runtimeKind", "runtime_kind"],
+  ["selection", "selection_json"],
 ];
 
 const DUPLICATE_BACKEND_ID = /UNIQUE constraint failed: runtime_sessions\.backend_session_id/;
@@ -296,7 +304,7 @@ const DUPLICATE_BACKEND_ID = /UNIQUE constraint failed: runtime_sessions\.backen
  *  `transcriptHealth` a NULL is a refusal the schema would raise, and for `capabilities` an
  *  undefined used to serialise as `[]`, which silently emptied a list the caller never mentioned.
  *  Emptying the list is still available, and says so: `capabilities: []`. */
-const NON_NULLABLE_PATCH_KEYS: ReadonlySet<keyof RuntimeSessionPatch> = new Set<keyof RuntimeSessionPatch>(["transcriptHealth", "capabilities", "compatibilityLevel"]);
+const NON_NULLABLE_PATCH_KEYS: ReadonlySet<keyof RuntimeSessionPatch> = new Set<keyof RuntimeSessionPatch>(["transcriptHealth", "capabilities", "compatibilityLevel", "runtimeKind", "selection"]);
 
 function fromRow(row: SessionRow): RuntimeSessionRecord {
   return {
@@ -448,7 +456,11 @@ export class RuntimeSessionRecords {
         if (!(key in patch)) continue;
         if (patch[key] === undefined && NON_NULLABLE_PATCH_KEYS.has(key)) continue;
         sets.push(`${column} = ?`);
-        values.push(key === "capabilities" ? JSON.stringify(patch.capabilities ?? []) : (patch[key] as string | undefined) ?? null);
+        values.push(
+          key === "capabilities" ? JSON.stringify(patch.capabilities ?? [])
+          : key === "selection" ? JSON.stringify(patch.selection)
+          : (patch[key] as string | undefined) ?? null,
+        );
       }
       values.push(winterSessionId);
       try {
