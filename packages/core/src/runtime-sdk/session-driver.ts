@@ -433,6 +433,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       try { assertNoCapabilityCollision(extra, capabilities); } catch (err) {
         throw new WinterLegRefusal("winter_leg_unavailable", err instanceof Error ? err.message : String(err));
       }
+      // P8d-8 (D30), computed ONCE (review Minor fix): `runtimes.advisorModel` when the user set
+      // one, else Norma's own D30 default for this session's model family.
+      const advisorModel = winterOptionsFromSettings(settings).advisorModel ?? d30DefaultModel(model);
       return buildWinterOptions({
         mode,
         policy: live.approvalPolicy,
@@ -458,10 +461,10 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // P8d-8 (D30): a LIVE read at every incarnation — `runtimes.advisorModel` when the user set
         // one, else Norma's own D30 default for this session's model family (`advisor-reviewer.ts`'s
         // `d30DefaultModel`), so `Options.advisor.model` is ALWAYS explicit rather than depending on
-        // the child's own internal default resolution (the M5 gap this task diagnosed).
-        ...((winterOptionsFromSettings(settings).advisorModel ?? d30DefaultModel(model)) === undefined
-          ? {}
-          : { advisorModel: winterOptionsFromSettings(settings).advisorModel ?? d30DefaultModel(model) }),
+        // the child's own internal default resolution (the M5 gap this task diagnosed). Computed
+        // ONCE (review Minor fix) — the prior form called both `winterOptionsFromSettings` and
+        // `d30DefaultModel` twice for the identical value.
+        ...(advisorModel === undefined ? {} : { advisorModel }),
       });
     };
 

@@ -8,14 +8,22 @@
 // protocol -> Winter") -> `session.setModel` to a Claude model on the real Anthropic protocol with
 // `confirmLossy: true` -> observe the barrier -> `resumed` or the exact refusal.
 //
-// MEASURED, NOT ASSUMED (see the single test's own body for the verbatim outcome): Norma's own
-// `provider-selection.ts#providerSelectionFor` resolves a BARE catalog-recognised model id (a
-// canonical Claude id has no `openai`/`codex-oauth` row in the pinned catalog — only `anthropic`
-// does) to the "anthropic" provider REGARDLESS of `settings.provider.type` — the provider TYPE
-// selects the CONNECTION Norma configures for `openai-compatible`/`codex-oauth`, never a routing
-// vote for an id the catalog already recognises under a different, credentialed provider. This is
-// the honest, load-bearing reason the construction's own premise ("expect the Winter leg") may not
-// hold in Norma's actual selection order — recorded as the measurement, not papered over.
+// MEASURED, NOT ASSUMED (see the single test's own body for the verbatim outcome), CORRECTED
+// ATTRIBUTION (review fix F4 — the round-1 header named the wrong function): `session-driver.ts`'s
+// `create()` calls `decideRuntime()` FIRST, which — because `catalogRowsFor("claude-sonnet-5")` is
+// non-empty (bail-out #4 does not fire) — consults the ROUTER's OWN `selectRuntimeFor` (the real
+// `selectRuntime`, fed `familyListingFromCatalog()` + `credentialPresenceFrom`). THAT call is what
+// decides "claude-agent" here, because a real `anthropic:default` credential is configured (this
+// construction needs one for a servable Claude destination to exist at all) — and `create()` then
+// returns via `createOfficial` (session-driver.ts:778) BEFORE it ever reaches the WINTER-branch code
+// at line ~793 that builds `Options.provider` through `provider-selection.ts#providerSelectionFor`.
+// That function is a DIFFERENT, later-stage helper (it only runs for a session the router already
+// decided is on the Winter leg) and was NEVER REACHED in this test at all — it played no part in the
+// outcome. Controller ruling P8d-20: the construction is UNSATISFIABLE AS SPECIFIED — a servable
+// Claude destination needs the exact Anthropic credential that routes the SOURCE session to the
+// official leg too, so "a Claude catalog model id under a custom provider row, expected to land on
+// the Winter leg" cannot coexist with "a genuine resumed destination" in this deployment's own
+// selection order. Recorded as the measurement, not papered over.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -146,7 +154,7 @@ describeWithWinterBinary("P8d-9 -- the bounded cross-runtime resumed attempt", (
       });
       await client!.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
       const createdLeg = d.winter.legOf(sessionId);
-      console.warn(`[p8d9] MEASURED: session.create with a Claude catalog model id under an openai-compatible provider row landed on leg="${createdLeg}" (the construction's own premise was "expect the Winter leg", D13 — see this file's header for why Norma's own provider-selection order may not honour that premise for a bare, catalog-recognised id).`);
+      console.warn(`[p8d9] MEASURED: session.create with a Claude catalog model id under an openai-compatible provider row landed on leg="${createdLeg}" (the construction's own premise was "expect the Winter leg", D13 — see this file's header, corrected per review F4: the router's OWN selectRuntimeFor, via decideRuntime, made this call BEFORE providerSelectionFor's Winter-branch code is ever reached — P8d-20: unsatisfiable as specified).`);
 
       if (createdLeg === "official") {
         // MEASURED: the construction's premise did not hold — Norma's `providerSelectionFor`
@@ -154,7 +162,7 @@ describeWithWinterBinary("P8d-9 -- the bounded cross-runtime resumed attempt", (
         // `settings.provider.type`, so `decideRuntime` routed straight to the official leg at
         // CREATE time. There is no Winter-leg source session to attempt a handoff FROM — this is
         // the exact, honest blocker; the attempt stops here (ONE attempt, per the brief).
-        console.warn("[p8d9] STOPPED (measured, not a bug): the source session is already on the official leg — no cross-runtime handoff to attempt. See the file header for the provider-selection mechanism this reveals.");
+        console.warn("[p8d9] STOPPED (measured, not a bug): the source session is already on the official leg — no cross-runtime handoff to attempt. P8d-20: unsatisfiable as specified — see the file header.");
         expect(createdLeg).toBe("official"); // pin the measured fact
         rmSync(cwd, { recursive: true, force: true });
         return;
