@@ -50,6 +50,7 @@ import type { SessionStore } from "../sessions/store";
 import { winterOptionsFromSettings, type Settings } from "../settings";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import type { NormaRuntimeSdk, SessionMode } from "./create";
+import { clearSession } from "./diff-attach";
 import { credentialPresenceFrom, credentialRefFor } from "./keychain";
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
 import { attachOfficialSession, attachWinterSession } from "./messaging";
@@ -891,12 +892,16 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     async evict(sessionId) {
       const session = drivers.get(sessionId);
       drivers.delete(sessionId);
+      // M5 (whole-branch review): `diff-attach.ts`'s pending map is per-session and in-memory —
+      // an evicted session's own PostToolUse attachments (a call whose matching `tool_result`
+      // never made it into the log before eviction) must not linger forever under a dead id.
+      clearSession(sessionId);
       if (session === undefined) return;
       try { await session.end(); } catch (err) { log(`evicting ${sessionId}: end failed (${err instanceof Error ? err.name : "unknown"})`); }
     },
     list: () => [...drivers.values()],
     async endAll() {
-      await Promise.all([...drivers.values()].map((s) => s.end().catch(() => {})));
+      await Promise.all([...drivers.entries()].map(([sessionId, s]) => s.end().catch(() => {}).finally(() => clearSession(sessionId))));
     },
   };
 }
