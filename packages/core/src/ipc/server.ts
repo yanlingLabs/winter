@@ -61,6 +61,7 @@ import type { ChildrenRpc } from "../runtime-sdk/children-rpc";
 import type { NormaRuntimeSdk } from "../runtime-sdk/create";
 import { WinterLegRefusal, type LegSession, type WinterSessionDrivers } from "../runtime-sdk/session-driver";
 import { readWinterTasks } from "../runtime-sdk/tasks-reader";
+import { ImportLegacySessionError } from "../runtime-sdk/import-legacy";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import { resolveModelAlias } from "../agent/model-aliases";
 import type { ApprovalBroker } from "../agent/approvals";
@@ -189,6 +190,18 @@ export interface IpcServerOptions {
    * always behaved.
    */
   winter?: WinterSessionDrivers;
+  /**
+   * Winter Phase 8c (P8c-6): the engine-era IMPORT door — `runtime-sdk/import-legacy.ts`'s
+   * `importEngineEraSession`, bound to this daemon's home/store/records by the caller (`daemon.ts`).
+   * `session.send`'s ONLY caller: a session whose record is engine-era (`opts.winter.legOf(id) ===
+   * "engine"`) gets exactly one import attempt before this door's own `session_predates_winter_leg`
+   * refusal would otherwise be permanent.
+   *
+   * `undefined` on a server built without one (a bare test server, or a daemon whose runtime spine
+   * did not open): an engine-era session's `session.send` falls straight through to the existing
+   * typed refusal, unchanged from before this task.
+   */
+  importLegacy?: { importSession(sessionId: string): Promise<{ backendSessionId: string; entries: number }> };
   // session-activity-hygiene T8: hands the caller THE bound activity derivation this server stamps
   // `session.list` with, once, at construction. Called exactly once, synchronously, from inside
   // startIpcServer.
@@ -1529,6 +1542,32 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           if (winterSession !== undefined) {
             try {
               const sent = await winterSession.send(p.text, socket.data.clientName);
+              return { seq: sent.seq };
+            } catch (err) { rpcFromWinterRefusal(err); }
+          }
+        }
+        // Winter Phase 8c (P8c-6): the engine-era IMPORT door — ONE chance, right here, before the
+        // permanent refusal below. `opts.winter.legOf` (not `isRunnableLeg`, which the block above
+        // already checked and found false) is read again explicitly so this branch fires ONLY for
+        // the exact case P8c-6 names: a RECORDED engine-era session, never a record-less one
+        // (`session_unrecorded` stays `refuseIfPredatesWinterLeg`'s to raise) and never a session
+        // already runnable (which the block above would have handled and returned from already).
+        if (opts.winter !== undefined && opts.importLegacy !== undefined && opts.winter.legOf(p.sessionId) === "engine") {
+          try {
+            await opts.importLegacy.importSession(p.sessionId);
+          } catch (err) {
+            const detail = err instanceof ImportLegacySessionError ? err.message : (err instanceof Error ? err.name : "unknown");
+            throw new RpcFailure(ERR.INTERNAL, `this session could not be imported to continue on the Winter leg (${detail})`, { code: "session_import_failed" });
+          }
+          // The record is now "winter" — the SAME attach+ensure+send path the ordinary Winter
+          // branch above runs, over the transcript the import just wrote.
+          if (hub.attachedSession(socket.data.hubClient) !== p.sessionId) {
+            throw new Error(`client ${socket.data.clientName} not attached to ${p.sessionId}`);
+          }
+          const imported = await ensureWinterSession(p.sessionId);
+          if (imported !== undefined) {
+            try {
+              const sent = await imported.send(p.text, socket.data.clientName);
               return { seq: sent.seq };
             } catch (err) { rpcFromWinterRefusal(err); }
           }

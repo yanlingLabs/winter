@@ -38,6 +38,21 @@ describe("runtime-state.db", () => {
       db.run("PRAGMA journal_mode = WAL");
       db.run(`CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
       db.run(`CREATE TABLE memory_key_manifest (old_key TEXT PRIMARY KEY, new_key TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('planned','moved','rolled-back')), planned_at TEXT NOT NULL, moved_at TEXT)`);
+      // Winter Phase 8c: schema v5 adds a column to `runtime_sessions`, and a REAL v1 database always
+      // has this table (migration 1 creates it) — this fixture omitted it because no migration
+      // between v1 and v4 ever touched it, which stopped being true the moment one did. Minimal but
+      // faithful: same columns/constraints as migration 1's own CREATE TABLE, no rows.
+      db.run(`CREATE TABLE runtime_sessions (
+        winter_session_id TEXT PRIMARY KEY, runtime_kind TEXT NOT NULL CHECK (runtime_kind IN ('winter-agent','claude-agent')),
+        backend_session_id TEXT UNIQUE, provider_id TEXT NOT NULL, model_ref TEXT NOT NULL, connection_ref TEXT, auth_ref TEXT,
+        backend_root TEXT NOT NULL, active_local_write_root TEXT, active_local_write_root_kind TEXT CHECK (active_local_write_root_kind IN ('official-spool','sdk-resume-staging')),
+        effective_temp_dir TEXT, transcript_project_key TEXT NOT NULL, memory_project_key TEXT NOT NULL, temp_project_key TEXT NOT NULL,
+        transcript_dialect TEXT NOT NULL DEFAULT 'claude-code-jsonl', transcript_health TEXT NOT NULL CHECK (transcript_health IN ('clean','mirror-lagging','repair-required','unsupported')),
+        compatibility_level TEXT NOT NULL CHECK (compatibility_level IN ('conversation','agent-state','full-filesystem')), conformance_corpus_version TEXT NOT NULL,
+        last_verified_claude_consumer TEXT, last_verified_winter_consumer TEXT, sdk_version TEXT, engine_version TEXT, provider_catalog_version TEXT, provider_adapter_version TEXT,
+        version_provenance TEXT NOT NULL CHECK (version_provenance IN ('recorded','legacy-unknown')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_projected_cursor TEXT,
+        parent_winter_session_id TEXT, capabilities_json TEXT NOT NULL DEFAULT '[]',
+        state TEXT NOT NULL CHECK (state IN ('creating','ready','running','idle','exited','failed','unavailable','archived')), generation INTEGER NOT NULL DEFAULT 0, selection_json TEXT NOT NULL)`);
       for (const r of rows) db.run("INSERT INTO memory_key_manifest (old_key, new_key, status, planned_at, moved_at) VALUES (?, ?, ?, ?, NULL)", [r.old_key, r.new_key, r.status, "2026-09-01T00:00:00.000Z"]);
       db.run("PRAGMA user_version = 1");
       db.close();

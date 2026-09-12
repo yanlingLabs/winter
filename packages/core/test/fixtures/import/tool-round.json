@@ -1,0 +1,14 @@
+{
+  "opts": { "sessionId": "s_golden2", "backendSessionId": "be-golden2", "cwd": "/tmp/golden2", "version": "unknown" },
+  "events": [
+    { "type": "session_created", "sessionId": "s_golden2", "seq": 1, "ts": 2000, "scope": "work" },
+    { "type": "user_message", "sessionId": "s_golden2", "seq": 2, "ts": 2001, "threadId": "main", "text": "list the files here", "clientName": "cli" },
+    { "type": "turn_started", "sessionId": "s_golden2", "seq": 3, "ts": 2002, "threadId": "main" },
+    { "type": "assistant_message", "sessionId": "s_golden2", "seq": 4, "ts": 2003, "threadId": "main", "text": "Sure, let me check." },
+    { "type": "tool_call", "sessionId": "s_golden2", "seq": 5, "ts": 2004, "threadId": "main", "callId": "call_1", "name": "Bash", "argsJson": "{\"command\":\"ls\"}" },
+    { "type": "tool_result", "sessionId": "s_golden2", "seq": 6, "ts": 2005, "threadId": "main", "callId": "call_1", "output": "a.txt\nb.txt", "isError": false },
+    { "type": "assistant_message", "sessionId": "s_golden2", "seq": 7, "ts": 2006, "threadId": "main", "text": "There are two files: a.txt and b.txt." },
+    { "type": "turn_completed", "sessionId": "s_golden2", "seq": 8, "ts": 2007, "threadId": "main", "stopReason": "end_turn", "inputTokens": 20, "outputTokens": 15 },
+    { "type": "reasoning_item", "sessionId": "s_golden2", "seq": 9, "ts": 2008, "threadId": "main", "itemJson": "{\"opaque\":true}" }
+  ]
+}
