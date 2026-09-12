@@ -63,6 +63,8 @@ import { WinterLegRefusal, type LegSession, type WinterSessionDrivers } from "..
 import { readWinterTasks } from "../runtime-sdk/tasks-reader";
 import { ImportLegacySessionError } from "../runtime-sdk/import-legacy";
 import type { PlanSwitchOutcome } from "../runtime-sdk/handoff";
+import type { RuntimeSessionRecords } from "../runtime-state/records";
+import { loadCatalog, CLAUDE_FAMILY_ID } from "@yanlinglabs/winter-provider-catalog";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import { resolveModelAlias } from "../agent/model-aliases";
 import type { ApprovalBroker } from "../agent/approvals";
@@ -218,6 +220,23 @@ export interface IpcServerOptions {
    * model change only, never a leg decision.
    */
   handoff?: { planAndApplySwitch(sessionId: string, model: string | null, confirmLossy: boolean): Promise<PlanSwitchOutcome> };
+  /**
+   * Winter Phase 8d (P8d-7, Task 4.1): a read-only door onto the 8a runtime-state record —
+   * `RuntimeSessionRecords.get`, bound to this daemon's own store by the caller (`daemon.ts`, the
+   * SAME `runtime.records` `handoff`'s own `HandoffDeps.records` already names). `session.list` is
+   * this door's only reader today: `record.providerId` (WS-16 §4, stamped on BOTH legs by
+   * `session-driver.ts`'s `create()`) is a finer-grained fact than `legOf`'s `runtimeKind` — "which
+   * PROVIDER served this session", not just "which leg".
+   *
+   * A narrow `Pick`, not the whole `RuntimeSessionRecords` class: this file has no business with
+   * `create`/`transition`/the rest of that surface, and a narrow type is what keeps a future method
+   * added there from silently becoming reachable here too.
+   *
+   * `undefined` on a server built without one (a bare test server, or a daemon whose runtime-state
+   * spine did not open): `providerId` stays absent on every row, exactly like `runtimeKind` does
+   * when `opts.winter` itself is undefined.
+   */
+  records?: Pick<RuntimeSessionRecords, "get">;
   // session-activity-hygiene T8: hands the caller THE bound activity derivation this server stamps
   // `session.list` with, once, at construction. Called exactly once, synchronously, from inside
   // startIpcServer.
@@ -608,6 +627,29 @@ function assertEffortSelectable(effort: string, model: string, mode: string | un
     const forModel = model ? `by model '${model}'` : "by the configured provider";
     throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${effort}' is not accepted ${forModel} — supported: ${allowed.join(", ")}`);
   }
+}
+
+/**
+ * Winter Phase 8d (P8d-7, Task 4.1): is `model` a row of the pinned catalog's `claude` family
+ * (`CLAUDE_FAMILY_ID`, `@yanlinglabs/winter-provider-catalog`)? The ONE fact `session.create`/
+ * `session.dispatch` need to decide whether `runtimeKind` is KNOWABLE at create time — never a
+ * string-prefix test (a `claude-*` id is exactly the kind of guess P8d-7 forbids: a `baseUrl`
+ * override or a reseller alias could name a non-Claude model that way, or a Claude row could be
+ * addressed by a bare alias that doesn't start with "claude" at all).
+ *
+ * Mirrors `runtime-sdk/provider-selection.ts`'s `catalogRowsFor` MATCH PREDICATE exactly (a row's
+ * `key`, `upstreamId`, `canonicalModelId`, or any `aliases` entry) — deliberately NOT a call to that
+ * function, because `catalogRowsFor` returns only `{key, providerId}` and this needs `modelFamily`,
+ * which is a different field on the same underlying row. `provider-selection.ts` is not this lane's
+ * file to extend in Phase 8d (Winter Phase 8d lane map): duplicating the four-way identity match
+ * here — never the family answer itself, which is read straight off the row — is the cost of that
+ * boundary, not a second source of truth for "what the catalog says a model's family is".
+ */
+function isClaudeCatalogModel(model: string): boolean {
+  return loadCatalog().models.some((m) =>
+    (m.key === model || m.upstreamId === model || m.canonicalModelId === model || m.aliases.includes(model))
+    && m.modelFamily === CLAUDE_FAMILY_ID,
+  );
 }
 
 /** followups batch T2: the ONE model-resolution+selection rule, shared verbatim by
@@ -1288,17 +1330,31 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (opts.winter !== undefined) {
           try { opts.winter.assertAvailable(p.mode ?? "code"); } catch (err) { rpcFromWinterRefusal(err); }
         }
-        // Winter Phase 8c (P8c-5): `runtimeKind` is knowable HERE and only here — `opts.winter`
-        // (this daemon's one runtime-sdk facade, pre-8c-lane1-merge scope) is defined precisely
-        // when a session runs the Winter leg; the 8a runtime record `winter.create()` mints just
-        // below does not exist yet, so this is the ONE fact this call site can honestly stamp on
-        // the seq-1 event. `modelRef` rides the ALREADY-RESOLVED `model` local (set above, before
-        // the effort check) — never the caller's raw, possibly-aliased `p.model`. `providerId` has
-        // no producer in this phase (see store.ts's doc comment on the parameter) and is
-        // deliberately omitted, not set to a guess.
+        // Winter Phase 8c (P8c-5), AMENDED Phase 8d (P8d-7, M7): `runtimeKind` is stamped HERE and
+        // only here — the 8a runtime record `winter.create()` mints just below does not exist yet,
+        // so this is the ONE call site that can honestly stamp the seq-1 event. Phase 8c stamped
+        // "winter-agent" unconditionally whenever `opts.winter` existed, which was a LIE for a
+        // session the driver goes on to run on the official leg (M7 measured this: `session.create`/
+        // `session.dispatch` stamped it even for a Claude catalog model with an official peer
+        // available). P8d-7's fix: stamp "winter-agent" only when the leg is ACTUALLY knowable as
+        // Winter from here — no official peer present, OR the resolved model is not a row of the
+        // catalog's `claude` family (`isClaudeCatalogModel`, never a string-prefix test) — and OMIT
+        // the field otherwise (an official peer present AND a Claude-family model: `decideRuntime`
+        // inside `winter.create()` below may yet route this to the official leg, and this call site
+        // has no way to ask the router without duplicating its own async decision). `undefined`
+        // model counts as "not a Claude catalog model" — `decideRuntime`'s own bail-out #3 never
+        // consults the selector for an unset model, so the Winter leg is exactly what runs. Never a
+        // guess either way: an omitted field means "ask `session.list`'s `legOf` once the record
+        // exists", not "unknown forever". `modelRef` rides the ALREADY-RESOLVED `model` local (set
+        // above, before the effort check) — never the caller's raw, possibly-aliased `p.model`.
+        // `providerId` has no producer on THIS event in this phase (P8d-7: `session.list` is the
+        // truthful source, from the record) and is deliberately omitted, not set to a guess.
+        const officialPeerPresent = opts.runtimeSdk?.officialPeerSync() !== undefined;
+        const knowsWinterLeg = opts.winter !== undefined
+          && (!officialPeerPresent || model === undefined || !isClaudeCatalogModel(model));
         const sessionId = opts.store.createSession(p.scope, {
           cwd, approvalPolicy, origin: p.origin, mode: p.mode, model, effort: p.effort,
-          ...(opts.winter !== undefined ? { runtimeKind: "winter-agent" as const } : {}),
+          ...(knowsWinterLeg ? { runtimeKind: "winter-agent" as const } : {}),
           ...(model !== undefined ? { modelRef: model } : {}),
         });
         // THE CREATION TRANSACTION (WS-16 §6, P8b-14): the record allocates the backend uuid and
@@ -1414,9 +1470,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // the event log, so this is a live fact rather than a stored column.
           const leg = opts.winter?.legOf(s.sessionId);
           const runtimeKind = leg === "official" ? "claude-agent" as const : leg === "winter" ? "winter-agent" as const : undefined;
-          if (!participatesInActivity(s.mode)) return { ...s, signals, ...(runtimeKind === undefined ? {} : { runtimeKind }) };
+          // Winter Phase 8d (P8d-7, Task 4.1): `providerId` — the SAME record `legOf` above reads
+          // (WS-16 §4's `RuntimeSessionRecord.providerId`, stamped on both legs by
+          // `session-driver.ts`'s `create()`), never re-decided here. A finer-grained fact than
+          // `runtimeKind` ("which provider", not just "which leg") — absent when this daemon has no
+          // runtime-state door wired (`opts.records`) or the session has no record at all (engine-era,
+          // or a phone-owned row `sync.push` materialised).
+          const providerId = opts.records?.get(s.sessionId)?.providerId;
+          const rowFields = { ...(runtimeKind === undefined ? {} : { runtimeKind }), ...(providerId === undefined ? {} : { providerId }) };
+          if (!participatesInActivity(s.mode)) return { ...s, signals, ...rowFields };
           const dirs = opts.store.dirs(s.sessionId);
-          return { ...s, activity: deriveActivity(s, s.sessionId, now), dirs, cwd: dirs[0]?.path, signals, ...(runtimeKind === undefined ? {} : { runtimeKind }) };
+          return { ...s, activity: deriveActivity(s, s.sessionId, now), dirs, cwd: dirs[0]?.path, signals, ...rowFields };
         });
         // Chat mode Slice C: chat sessions are now visible to remote too. A mode outside
         // REMOTE_ELIGIBLE_SESSION_MODES (Mac-local-only — e.g. a future cowork surface) stays
@@ -1440,10 +1504,13 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // refuse typed BEFORE the row exists, persist the record + start the child after it, roll
         // the row back on a refusal. (`winter` is undefined only on a bare test server.)
         if (opts.winter !== undefined) { try { opts.winter.assertAvailable("dispatch"); } catch (err) { rpcFromWinterRefusal(err); } }
-        // Winter Phase 8c (P8c-5): same reasoning as session.create above — `runtimeKind` is
-        // knowable here (opts.winter's presence) and nowhere later in this transaction; dispatch
-        // takes no model param, so `modelRef` stays unset (the dispatch singleton always uses the
-        // live/boot default model).
+        // Winter Phase 8c (P8c-5), amended Phase 8d (P8d-7): same reasoning as `session.create`
+        // above, but dispatch takes no model param — `model` is always `undefined` here, which is
+        // exactly the P8d-7 "not a Claude catalog model" case, so `runtimeKind` stays knowable and
+        // unconditional on `opts.winter`'s presence, unlike `session.create`'s own conditional (that
+        // call site's `officialPeerPresent`/Claude-catalog check never has anything to bite on for a
+        // request that never named a model). `modelRef` stays unset (the dispatch singleton always
+        // uses the live/boot default model).
         const sessionId = opts.store.createSession("global", {
           cwd: homedir(), approvalPolicy: "auto", origin: "dispatch", mode: "dispatch",
           ...(opts.winter !== undefined ? { runtimeKind: "winter-agent" as const } : {}),
