@@ -138,7 +138,7 @@ export const RENAME_ALLOWLIST: readonly AllowlistEntry[] = [
     // binary documents whose paragraphs/slide titles say NORMA GATE / NORMA PAGE TWO / Norma T6 Slide
     // One|Two|Three; the tests that read, type into, save and re-open them assert those bytes (and a
     // case-insensitive `find: "norma"` against them). The expectations mirror the fixtures verbatim.
-    regex: /NORMA( INC)*( GATE(WAY)?| PAGE TWO)?|Norma T6 Slide (One|Two|Three)|"norma"/g, // bare NORMA + "NORMA INC…" = the replace drill's find/replaceWith/asserted results
+    regex: /NORMA( INC)*( GATE(WAY)?| PAGE TWO)?|Norma T6 Slide|"norma"/g, // bare NORMA + "NORMA INC…" = the replace drill's find/replaceWith/asserted results
     files: ["apple/Winter/Tests/WinterAppTests/**"],
     why: "expectations that mirror binary Office fixture content byte-for-byte (P9b-29)",
   },
