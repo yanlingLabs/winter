@@ -561,6 +561,7 @@ describe("repairRuntimeState — WS-16 §15 explicit, recoverable repairs", () =
         { kind: "relink-backend", winterSessionId: id, backendSessionId: "11111111-2222-4333-8444-555555555555" },
         { kind: "detach-backend", winterSessionId: id },
         { kind: "restore-backup", backupPath: join(home, "runtimes", "backups", "nope.db") },
+        { kind: "memory-keys-rollback" },
       ] as const) {
         const refused = await repairRuntimeState(home, op);
         expect(refused.applied).toBe(false);
@@ -922,6 +923,81 @@ describe("latestRecoveryAttempts — P8d-11's attempt view", () => {
   test("a home with no runtime spine reports no attempts, never throws", async () => {
     await withTempHome(async (home) => {
       expect(latestRecoveryAttempts(home)).toEqual([]);
+    });
+  });
+});
+
+describe("memory-keys-migration finding + memory-keys-rollback repair (P8d-11)", () => {
+  /** A `moved` manifest row plus the file layout it describes — the destination holds the entry,
+   *  the source does not — without going through `planMemoryKeyMigration`/`applyMemoryKeyMigration`
+   *  at all: those are exhaustively covered by `memory-keys.test.ts`, and this file's own job is
+   *  `doctor.ts`'s wiring (the finding's counts, the repair's door, the daemon-lock gate above). */
+  function seedMovedEntry(home: string, oldKey: string, newKey: string, entry = "memory"): void {
+    mkdirSync(join(home, "projects", newKey, entry), { recursive: true });
+    writeFileSync(join(home, "projects", newKey, entry, "MEMORY.md"), "alpha");
+    withDb(home, (rs) => {
+      rs.db.run(
+        "INSERT INTO memory_key_manifest (old_key, entry, new_key, status, planned_at, moved_at, record_ids) VALUES (?, ?, ?, 'moved', ?, ?, '[]')",
+        [oldKey, entry, newKey, ISO(), ISO()],
+      );
+    });
+  }
+
+  test("diagnoseRuntimeState reports the manifest state, repairable only while something is `moved`", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      seedMovedEntry(home, "old-a", "new-a");
+
+      const findings = await diagnoseRuntimeState(home);
+      const finding = findings.find((f) => f.kind === "memory-keys-migration");
+      expect(finding?.detail).toContain("1 moved");
+      expect(finding?.repairable).toEqual(["memory-keys-rollback"]);
+    });
+  });
+
+  test("a home that never touched the migration reports no memory-keys-migration finding at all", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      const findings = await diagnoseRuntimeState(home);
+      expect(findings.find((f) => f.kind === "memory-keys-migration")).toBeUndefined();
+    });
+  });
+
+  test("memory-keys-rollback rolls the entry back, is idempotent, and the finding's repairable set empties once nothing is `moved`", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      seedMovedEntry(home, "old-b", "new-b");
+
+      const result = await repairRuntimeState(home, { kind: "memory-keys-rollback" });
+      expect(result.applied).toBe(true);
+      expect(result.detail).toContain("1 entrie(s) rolled back");
+      expect(existsSync(join(home, "projects", "old-b", "memory", "MEMORY.md"))).toBe(true);
+      expect(existsSync(join(home, "projects", "new-b", "memory"))).toBe(false);
+
+      const again = await repairRuntimeState(home, { kind: "memory-keys-rollback" });
+      expect(again).toEqual({ applied: false, detail: "no relocated memory-key entries to roll back" });
+
+      const findings = await diagnoseRuntimeState(home);
+      const finding = findings.find((f) => f.kind === "memory-keys-migration")!;
+      expect(finding.detail).toContain("1 rolled back");
+      expect(finding.repairable).toEqual([]);
+    });
+  });
+
+  test("a torn rollback (a′) is surfaced as a mid-undo count, never silently dropped", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      seedMovedEntry(home, "old-c", "new-c");
+      withDb(home, (rs) => {
+        rs.db.run("UPDATE memory_key_manifest SET status = 'undoing', undo_target = 'rolled-back' WHERE old_key = 'old-c'");
+      });
+
+      const findings = await diagnoseRuntimeState(home);
+      const finding = findings.find((f) => f.kind === "memory-keys-migration")!;
+      expect(finding.detail).toContain("mid-undo");
+      // Never offered as a repair here — that row belongs to the next daemon boot, not to this
+      // read-only-by-design diagnosis.
+      expect(finding.repairable).toEqual([]);
     });
   });
 });

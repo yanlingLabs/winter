@@ -10,7 +10,7 @@ const homes: string[] = [];
 const home = () => { const h = mkdtempSync(join(tmpdir(), "norma-8a-")); homes.push(h); bootstrapNormaDir(h); return h; };
 afterEach(() => { for (const h of homes.splice(0)) rmSync(h, { recursive: true, force: true }); });
 
-const CURRENT_TABLES = ["directory_cursors", "directory_entries", "global_message_receipts", "global_messages", "held_messages", "idle_subscriptions", "memory_key_manifest", "name_leases", "projection_applied", "runtime_children", "runtime_generations", "runtime_handoffs", "runtime_projection_cursors", "runtime_recovery_attempts", "runtime_sessions", "schema_meta", "transcript_dialects"].sort();
+const CURRENT_TABLES = ["directory_cursors", "directory_entries", "global_message_receipts", "global_messages", "held_messages", "idle_subscriptions", "memory_key_manifest", "name_leases", "projection_applied", "runtime_children", "runtime_generations", "runtime_handoffs", "runtime_projection_cursors", "runtime_recovery_attempts", "runtime_sessions", "runtime_sink_calls", "schema_meta", "transcript_dialects"].sort();
 
 describe("runtime-state.db", () => {
   test("opens, migrates to the current schema, and reports integrity", () => {

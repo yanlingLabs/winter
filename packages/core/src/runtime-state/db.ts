@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-export const RUNTIME_STATE_SCHEMA_VERSION = 5;
+export const RUNTIME_STATE_SCHEMA_VERSION = 6;
 
 export class RuntimeStateUnavailableError extends Error {
   constructor(public readonly path: string, public readonly reason: "missing" | "corrupt" | "newer-schema" | "unmigrated", cause?: unknown) {
@@ -147,6 +147,38 @@ const MIGRATIONS: ReadonlyArray<{ version: number; up: (db: Database) => void }>
     const cols = db.query("PRAGMA table_info(runtime_sessions)").all() as Array<{ name: string }>;
     if (!cols.some((c) => c.name === "imported_from")) {
       db.run(`ALTER TABLE runtime_sessions ADD COLUMN imported_from TEXT CHECK (imported_from IS NULL OR imported_from IN ('engine-era'))`);
+    }
+  } },
+  // Schema v6 (Winter Phase 8d) bundles two unrelated additions under ONE version bump (P8d's own
+  // rule: bump the schema constant once for the phase, not once per table it touches):
+  //
+  //  1. P8d-13's durable half of the sink dedupe (`runtime-sdk/sinks.ts`'s own header): the
+  //     in-memory `seen` set there protects a LIVE session against a re-handed accepted message,
+  //     but does not survive a daemon restart. `runtime_sink_calls` is the crash-durable half,
+  //     keyed by the SAME triple the router's own generation model uses (a session can run more
+  //     than one generation across its life, and a replayed call from an EARLIER generation must
+  //     not collide with the same `call_id` minted fresh in a later one).
+  //  2. The memory-key rollback door's own crash safety (`migrations/memory-keys.ts`'s
+  //     `rollbackMemoryKeyMigration`): `undo_target` lets a resumed rollback's `undoing` row settle
+  //     to `rolled-back` — never `undoEntries`' own `planned` — by recording, ALONGSIDE the
+  //     in-flight direction the `undoing` status already carries, which of the two callers declared
+  //     it. Nullable: every `undoing` row that predates this column (there are none in production —
+  //     the status itself shipped in schema v4 of this same branch — but a replayed fixture can
+  //     still produce one) reads back `undefined`, which `finishUndo` treats as `"planned"`,
+  //     preserving `undoEntries`' own behaviour exactly.
+  //
+  //  `CREATE TABLE IF NOT EXISTS` / the column-existence check are BOTH required by the same test
+  //  shape v5's own comment names: a fixture that builds a fully-current store and then rewinds only
+  //  ONE table (plus `user_version`) to an older shape replays every migration from that version
+  //  forward against data that, apart from the one table it deliberately reverted, already has this
+  //  step applied.
+  { version: 6, up: (db) => {
+    db.run(
+      `CREATE TABLE IF NOT EXISTS runtime_sink_calls (winter_session_id TEXT NOT NULL, generation INTEGER NOT NULL, call_id TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (winter_session_id, generation, call_id))`,
+    );
+    const cols = db.query("PRAGMA table_info(memory_key_manifest)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "undo_target")) {
+      db.run(`ALTER TABLE memory_key_manifest ADD COLUMN undo_target TEXT CHECK (undo_target IS NULL OR undo_target IN ('planned', 'rolled-back'))`);
     }
   } },
 ];

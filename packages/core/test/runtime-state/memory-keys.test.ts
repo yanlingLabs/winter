@@ -1566,3 +1566,142 @@ describe("memory-key migration — a torn UNDO", () => {
     });
   });
 });
+
+// ── P8d-11: the memory-key rollback door (the 8b M-4 obligations) ──────────────────────────────────
+describe("memory-key migration — the rollback door's own torn window (a′)", () => {
+  /** A `fs` whose rename-BACK (the Nth one) performs the real rename and then dies — the rollback
+   *  door's own mirror of `tornAfterRename()` above, for the direction `rollbackMemoryKeyMigration`
+   *  runs in. */
+  function dieAfterNthRenameBack(n: number): MemoryKeyFs {
+    let renames = 0;
+    return {
+      existsSync, statSync, readdirSync: (p, o) => readdirSync(p, o),
+      mkdirSync: (p, o) => { mkdirSync(p, o); }, rmdirSync: (p) => { rmdirSync(p); },
+      renameSync: (from, to) => {
+        renameSync(from, to);
+        renames += 1;
+        if (renames === n) throw new Error("simulated crash between the rollback's rename-back and its manifest commit");
+      },
+    };
+  }
+
+  test("a crash mid-rollback leaves an `undoing` row (never a bare `moved` one), and the next boot's repair FINISHES IT AS A ROLLBACK", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        applyMemoryKeyMigration({ rs, home }, planMemoryKeyMigration({ rs, home, records, store }));
+        expect(manifestEntries(rs).map((r) => r.status)).toEqual(["moved"]);
+
+        // THE CRASH: the rename-back lands for real, the process dies before `rolled-back` commits.
+        // `rollbackMemoryKeyMigration` itself never throws (unlike `applyMemoryKeyMigration`'s own
+        // torn-apply window) — `finishUndo`'s try/catch is what makes the rest of the rollback safe
+        // to keep running over other projects, so the crash surfaces as a report, not an exception.
+        const result = rollbackMemoryKeyMigration({ rs, home, fs: dieAfterNthRenameBack(1) });
+        expect(result).toEqual({ rolledBack: 0, failures: [] });
+
+        // The declared-but-unfinished state, and it says WHICH direction: `undo_target` is
+        // `'rolled-back'`, never `undoEntries`' own `'planned'` — this is the fact a′ exists to
+        // record. The file is already home; the row has not caught up yet.
+        expect(existsSync(join(home, "projects", a.oldKey, "memory", "MEMORY.md"))).toBe(true);
+        const row = rs.db.query<{ status: string; undo_target: string | null }, []>(
+          "SELECT status, undo_target FROM memory_key_manifest WHERE entry = 'memory'",
+        ).get();
+        expect(row).toEqual({ status: "undoing", undo_target: "rolled-back" });
+
+        // THE NEXT BOOT'S REPAIR settles it — AS A COMPLETED ROLLBACK, not as `undoEntries`' own
+        // `planned` resting state (which would silently re-arm the project for the next `apply`).
+        expect(reconcileMemoryKeyManifest({ rs, home, records })).toEqual([]); // nothing left to rename
+        expect(manifestEntries(rs).map((r) => r.status)).toEqual(["rolled-back"]);
+        expect(records.get(a.sessionId)!.memoryProjectKey).toBe(a.oldKey);
+        expect(memoryKeyRelocations(rs).size).toBe(0);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("a′ ruling: the rollback completes and `runtimes.migrations.memoryKeys` is left exactly as the user set it — this door never writes settings, only files and manifest rows", async () => {
+    // Not a settings test (this file never reads settings.json at all) — a structural pin that
+    // `rollbackMemoryKeyMigration`'s deps carry nothing settings-shaped for the door to touch, so
+    // the ruling holds by construction rather than by a convention someone could forget.
+    await withTempHome(async (home) => {
+      const rs = openRuntimeStateDb(home);
+      try {
+        const result = rollbackMemoryKeyMigration({ rs, home });
+        expect(Object.keys(result)).toEqual(["rolledBack", "failures"]);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+});
+
+describe("memory-key migration — a shrunk entry set after a rollback (b)", () => {
+  test("(b) a re-plan after a rollback whose entry set SHRANK drops the vanished entry's `rolled-back` row before apply's stale-row pre-check", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+      const vanishing = "0f2a1c00-0000-4000-8000-000000000000.jsonl";
+      writeFileSync(join(home, "projects", a.oldKey, vanishing), "{}\n");
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        applyMemoryKeyMigration({ rs, home }, planMemoryKeyMigration({ rs, home, records, store }));
+        expect(manifestEntries(rs).map((r) => r.entry).sort()).toEqual([vanishing, "memory"]);
+
+        expect(rollbackMemoryKeyMigration({ rs, home })).toEqual({ rolledBack: 2, failures: [] });
+        expect(manifestEntries(rs).map((r) => r.status)).toEqual(["rolled-back", "rolled-back"]);
+
+        // THE SHRINK: the user deletes the vanishing entry's rolled-back copy by hand — it is gone
+        // from both ends now (never migrated again, never restored).
+        rmSync(join(home, "projects", a.oldKey, vanishing));
+
+        // Without the fix, `apply`'s stale-row pre-check throws `MemoryKeyNotPlannedError` for the
+        // WHOLE project — including `memory`, which this re-plan handles perfectly well — because
+        // `manifestRowsFor(oldKey)` still returns the vanished entry's `rolled-back` row alongside
+        // it. `pruneVanishedRollbacks` runs at the TOP of `planMemoryKeyMigration`, before it derives
+        // anything else, so the row is gone by the time THIS SAME CALL returns.
+        const plan = planMemoryKeyMigration({ rs, home, records, store });
+        expect(manifestEntries(rs).find((r) => r.entry === vanishing)).toBeUndefined();
+        expect(plan.moves).toEqual([{ oldKey: a.oldKey, newKey: a.newKey, cwd: a.cwd, entries: ["memory"] }]);
+        expect(applyMemoryKeyMigration({ rs, home }, plan)).toEqual({ moved: 1, movedEntries: 1, refused: [] });
+        expect(readFileSync(join(home, "projects", a.newKey, "memory", "MEMORY.md"), "utf8")).toBe("alpha");
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  test("(b) a `rolled-back` row still present at the NEW key (mid-flight, not truly vanished) is left alone", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const a = seedProject(home, store, "a", "alpha");
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        applyMemoryKeyMigration({ rs, home }, planMemoryKeyMigration({ rs, home, records, store }));
+        rs.db.run("UPDATE memory_key_manifest SET status = 'rolled-back' WHERE entry = 'memory'");
+        // Gone from the OLD side (never actually renamed back — a hand-forged row) but STILL at the
+        // new key: `pruneVanishedRollbacks` must not discard the only record of where it is.
+        expect(existsSync(join(home, "projects", a.newKey, "memory"))).toBe(true);
+
+        planMemoryKeyMigration({ rs, home, records, store });
+        expect(manifestEntries(rs).find((r) => r.entry === "memory")?.status).toBe("rolled-back");
+      } finally {
+        rs.close();
+      }
+    });
+  });
+});
