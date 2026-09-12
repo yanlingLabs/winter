@@ -356,9 +356,14 @@ extension HandoffDeps {
         alert.messageText = HandoffNotice.title
         alert.informativeText = HandoffNotice.body
         alert.alertStyle = .informational
-        let timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { _ in
+        // `runModal()` pumps the run loop in the modal-panel mode, which does NOT service a timer
+        // scheduled in `.default` only (`Timer.scheduledTimer` registers there) — the same trap the
+        // rest of this app avoids with `.common` (OfficeTileCanvasView, BrowserRuntime, OrbFollower).
+        // Registered in `.common` so the 15 s bound really fires while the alert is up (review r1).
+        let timer = Timer(timeInterval: 15, repeats: false) { _ in
             NSApp.abortModal()
         }
+        RunLoop.main.add(timer, forMode: .common)
         alert.runModal()
         timer.invalidate()
     }
