@@ -59,7 +59,7 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     const req = createRequire(import.meta.url);
     const pkgPath = req.resolve("@yanlinglabs/winter-agent-sdk/package.json");
     const pkg = require(pkgPath) as { version: string };
-    expect(pkg.version).toBe("0.0.4");
+    expect(pkg.version).toBe("0.0.5"); // 0.0.4 → 0.0.5 (P9a pin flip): `git diff v0.0.4 v0.0.5 -- packages/runtime/src/provider/keychain-store.ts` is EMPTY — coerceMaterial unchanged, mirror re-verified
   });
 
 

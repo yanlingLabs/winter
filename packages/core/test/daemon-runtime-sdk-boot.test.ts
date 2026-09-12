@@ -78,12 +78,15 @@ describe("daemon boot — the Winter handle", () => {
   test("spawnHookFor on a real daemon refuses in the typed way when no binary is configured", async () => {
     await withTempHome(async (home) => {
       const before = process.env.NORMA_WINTER_EXECUTABLE;
-      delete process.env.NORMA_WINTER_EXECUTABLE;
+      // P9a fix wave (M1 class): a dev checkout now HAS a winter on the ladder's last rung (the
+      // installed platform package), so "nothing configured" is no longer a refusal in this tree.
+      // An EXPLICIT env path that is missing on disk is the deterministic refusal (P8b-2: an explicit
+      // path is authoritative and never falls through) — the daemon's own answer, no ambient tree.
+      process.env.NORMA_WINTER_EXECUTABLE = join(home, "missing-winter");
       try {
         const d = await boot(home);
         const hook = d.runtimeSdk?.spawnHookFor("chat");
-        // A dev checkout has no `winter` beside `process.execPath` and none under the temp home, so
-        // the daemon's own answer is the refusal — never a throw, and never a silent fallback.
+        // The refusal — never a throw, and never a silent fallback to another binary.
         expect(hook).toBeInstanceOf(Error);
         expect((hook as { code?: string }).code).toBe("winter_executable_unavailable");
       } finally {
