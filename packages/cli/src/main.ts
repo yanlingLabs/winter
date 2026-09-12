@@ -1248,7 +1248,10 @@ if (import.meta.main) {
     // doctor whose first move is to reach the daemon is useless in exactly the state it exists for.
     // `runtime-state.db` is WAL, so the read-only half runs happily beside a live daemon; every
     // repair refuses while the lock is held, on the same probe `lock.ts` uses.
-    const { diagnoseRuntimeState, repairRuntimeState, isDaemonLockHeld, DAEMON_RUNNING_REFUSAL, diagnoseRuntimes, loadSettings } = await import("@yanlinglabs/winter-core");
+    const {
+      diagnoseRuntimeState, repairRuntimeState, isDaemonLockHeld, DAEMON_RUNNING_REFUSAL, diagnoseRuntimes, loadSettings,
+      diagnoseMigration, formatMigrationDoctorLines, legacyHomeFor, legacyKeychainServiceFor, LegacyKeychainSecretStore,
+    } = await import("@yanlinglabs/winter-core");
     const home = resolveWinterHome();
     const args = process.argv.slice(3);
     const flag = (name: string): string | undefined => {
@@ -1297,6 +1300,24 @@ if (import.meta.main) {
         console.log(`  ${AQUA}bundle:${RESET} ${DIM}${report.bundle.error}${RESET}`);
       }
     };
+    // Phase 9c Migration B (Task M Step 10): read-only, same "never crash the diagnostic tool"
+    // posture as `printRuntimesSection` above — a Keychain read failure degrades to one honest
+    // line rather than aborting the whole command.
+    const printMigrationSection = async (): Promise<void> => {
+      const profile = resolveWinterProfile();
+      const legacyHome = legacyHomeFor(profile);
+      try {
+        const report = await diagnoseMigration({
+          home,
+          legacyHome,
+          legacyKeychainService: legacyKeychainServiceFor(profile),
+          legacyStore: new LegacyKeychainSecretStore(profile),
+        });
+        for (const line of formatMigrationDoctorLines(report)) console.log(`${AQUA}${line}${RESET}`);
+      } catch (err) {
+        console.log(`${AQUA}migration:${RESET} ${DIM}unavailable (${err instanceof Error ? err.message : "unknown error"})${RESET}`);
+      }
+    };
     // `--repair` with nothing after it must reach the usage branch, not silently run a diagnosis.
     const repair = args.includes("--repair") ? (flag("--repair") ?? "") : undefined;
     if (repair === undefined) {
@@ -1311,6 +1332,7 @@ if (import.meta.main) {
         }
       }
       await printRuntimesSection();
+      await printMigrationSection();
       break;
     }
     const session = flag("--session");

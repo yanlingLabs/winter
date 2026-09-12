@@ -67,10 +67,13 @@ export {
   repairRuntimeState,
   isDaemonLockHeld,
   DAEMON_RUNNING_REFUSAL,
+  diagnoseMigration,
+  formatMigrationDoctorLines,
   type Finding,
   type FindingKind,
   type RepairOp,
   type RepairResult,
+  type MigrationDoctorReport,
 } from "./runtime-state/doctor";
 export { FakeProvider } from "./agent/fake-provider";
 export { ToolRegistry, type ToolDefinition, type ToolContext, type ToolOutcome } from "./agent/tools/registry";
