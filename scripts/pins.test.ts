@@ -48,22 +48,16 @@ function lockedVersion(name: string): string {
   return m[1]!;
 }
 
-describe("CI's winter-agent-sdk pin is DERIVED from versions.ts, never a bare literal (P8d-16, P9a-8)", () => {
-  test("no literal 'ref: v<digits>' checkout of winter-agent-sdk remains — it must be an expression", () => {
-    // A bare `ref: v0.0.4`-shaped literal anywhere in the file is exactly the drift class this
-    // test exists to catch; the fixed form below is the only way this pin may be spelled.
-    expect(CI_YML).not.toMatch(/ref:\s*v\d+\.\d+\.\d+\s*$/m);
+describe("CI takes winter from the installed platform package ONLY (P9a-8, since the 0.0.5 pin flip)", () => {
+  test("no literal 'ref: v<digits>' checkout of winter-agent-sdk, no FALLBACK block, no `versions` job remain", () => {
+    expect(CI_YML).not.toMatch(/ref:\s*v\d+\.\d+\.\d+/);
+    expect(CI_YML).not.toContain("FALLBACK");
+    expect(CI_YML).not.toContain("needs.versions");
+    expect(CI_YML).not.toMatch(/^  versions:$/m);
   });
-
-  test("the pinned-tag checkout ref (now only inside each job's dated P9a-8 FALLBACK block) is derived from the SAME versions job output everywhere it appears", () => {
-    const refOccurrences = CI_YML.match(/ref:\s*v\$\{\{\s*needs\.versions\.outputs\.winter-agent-sdk\s*\}\}/g) ?? [];
-    // test-core + test-cli + verify's own FALLBACK checkout = 3 today; drops to 0 (and this whole
-    // describe block's remaining relevance) at the 0.0.5 pin flip, when the FALLBACK blocks go.
-    expect(refOccurrences.length).toBeGreaterThanOrEqual(1);
-  });
-
-  test("the versions job itself reads REQUIRED_WINTER_AGENT_SDK out of versions.ts, not a re-typed literal", () => {
-    expect(CI_YML).toContain("REQUIRED_WINTER_AGENT_SDK");
+  test("every job that needs winter fails loudly when the platform package did not install (never a silent skip)", () => {
+    const checks = CI_YML.match(/did not install — bun install is the ONLY winter source/g) ?? [];
+    expect(checks.length).toBe(3);
   });
 });
 

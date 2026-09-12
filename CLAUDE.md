@@ -53,14 +53,12 @@ NORMA_HOME=~/.norma-dev NORMA_PROFILE=dev bun src/main.ts daemon run   # dev dae
 # `settings.runtimes.winterExecutable` → `$NORMA_WINTER_EXECUTABLE` →
 # `<dirname(execPath)>/runtimes/winter` (never reachable in Debug) → `<NORMA_HOME>/runtimes/bin/winter`
 # → (P9a-9) the installed npm platform package `@yanlinglabs/winter-agent-sdk-darwin-arm64`, an
-# OPTIONAL dependency of the wrapper that `bun install` resolves on darwin-arm64 ONCE IT IS
-# PUBLISHED (the wrapper is pinned to a specific winter-agent-sdk version — `versions.ts`'s
-# `REQUIRED_WINTER_AGENT_SDK` — and this rung only ever resolves a package matching that EXACT
-# pin). AS OF THE 0.0.4 PIN this package is still unpublished (`private: true`, 404 on npm), so
-# this rung is unreachable today and the `dist/winter` build below is still required for a working
-# dev daemon; once Norma's pin flips to a published version (a controller-only step, after the SDK
-# repo's own platform-package publish — see the winter-agent-sdk repo's own release process), a
-# PLAIN `bun install` becomes enough on its own and a dev daemon can simply be:
+# OPTIONAL dependency of the wrapper that `bun install` resolves on darwin-arm64 (published since
+# SDK v0.0.5; the wrapper pins the EXACT matching version, and the rung REFUSES a package whose
+# version differs from `versions.ts`'s `REQUIRED_WINTER_AGENT_SDK` — a mixed pair is never spawned).
+# bun's isolated linker nests it under the WRAPPER's own node_modules, which is why the resolver
+# dual-hops through `@yanlinglabs/winter-agent-sdk/package.json` (P9a fix wave C1). So a PLAIN
+# `bun install` is enough on its own and a dev daemon can simply be:
 NORMA_HOME=~/.norma-dev NORMA_PROFILE=dev bun src/main.ts daemon run
 # The npm binary is AD-HOC signed and its bytes change on every publish, so every fresh `bun
 # install` re-triggers the ONE-TIME-PER-BINARY Keychain consent dialog below. `dist/winter`
