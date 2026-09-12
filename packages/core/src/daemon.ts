@@ -470,7 +470,7 @@ export async function startDaemon(opts: {
   // trust gate). Resolution itself (name -> ResolvedStyle, incl. the slug-guard against a
   // project-supplied name escaping the output-styles dir) lives in OutputStyleStore.resolve — this is
   // just the name lookup.
-  const outputStyleStore = new OutputStyleStore({ winterHome, trust: trustStore });
+  const outputStyleStore = new OutputStyleStore({ winterHome, trust: trustStore, legacySettings: () => settings });
   const outputStyleFor = (cwd?: string | null): string | undefined => projectSettings.effective(projectRootOf(cwd ?? null))?.outputStyle;
   // CC-parity phase 3 (Workflows, Track C Task C2): built unconditionally, same "no engine
   // dependency" precedent as `outputStyleStore` just above — workflow.list's "saved" section and

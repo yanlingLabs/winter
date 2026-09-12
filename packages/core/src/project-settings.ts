@@ -1,6 +1,7 @@
 import { lstatSync, type Stats } from "node:fs";
 import { join } from "node:path";
-import { readRawSettings, Settings } from "./settings";
+import { readRawSettings, Settings, legacyProjectFilesReadEnabled } from "./settings";
+import { LEGACY_PROJECT_DIR } from "./legacy-names";
 
 /** Keys never taken from a project/local overlay (top level only): `provider` is an exfil/MITM
  *  line and a provider-type change requires a daemon restart; `plugins` consent is its own
@@ -100,6 +101,12 @@ interface ResolverCacheEntry {
   trusted: boolean;
   projectSig: string;
   localSig: string;
+  // Phase 9c (P9c-4): the legacy project dir's own file signatures — needed IN THE CACHE KEY
+  // because while `projectSig`/`localSig` read "absent" (the Winter-named files don't exist), the
+  // effective settings are being read through these instead; without them here, editing the legacy
+  // overlay file while purely on the fallback path would serve a stale cached merge forever.
+  legacyProjectSig: string;
+  legacyLocalSig: string;
   effective: Settings;
 }
 
@@ -147,13 +154,33 @@ export class ProjectSettingsResolver {
     // agent-controlled space — lstat only refuses to follow the FINAL path component, and
     // `.winter` is an earlier component once joined with a filename, so checking the files alone
     // can never catch a swapped parent. Only trust the per-file lstats when it's a real directory.
-    const dotNormaLstat = lstatOrNull(dotWinter);
-    const dotWinterOk = !!dotNormaLstat && dotNormaLstat.isDirectory();
+    const dotWinterLstat = lstatOrNull(dotWinter);
+    const dotWinterOk = !!dotWinterLstat && dotWinterLstat.isDirectory();
     const projectSig = fileSig(dotWinterOk ? lstatOrNull(projectPath) : null);
     const localSig = fileSig(dotWinterOk ? lstatOrNull(localPath) : null);
 
+    // Phase 9c (P9c-4): the legacy project dir, file-by-file — a legacy overlay file is only ever
+    // consulted when its Winter-named counterpart is absent (`projectSig`/`localSig` === "absent")
+    // AND `legacy.readLegacyProjectFiles` is on. Same symlink-safety shape as `.winter` above: a
+    // symlinked legacy dir is treated as absent, never followed. `legacyProjectFilesReadEnabled`
+    // reads `base` directly — no separate settings dep needed, `effective()` already has it.
+    const legacyOn = legacyProjectFilesReadEnabled(base);
+    const dotLegacy = join(cwd, LEGACY_PROJECT_DIR);
+    const dotLegacyLstat = legacyOn ? lstatOrNull(dotLegacy) : null;
+    const dotLegacyOk = !!dotLegacyLstat && dotLegacyLstat.isDirectory();
+    const legacyProjectPath = join(dotLegacy, "settings.json");
+    const legacyLocalPath = join(dotLegacy, "settings.local.json");
+    const useLegacyProject = legacyOn && dotLegacyOk && projectSig === "absent";
+    const useLegacyLocal = legacyOn && dotLegacyOk && localSig === "absent";
+    const legacyProjectSig = fileSig(useLegacyProject ? lstatOrNull(legacyProjectPath) : null);
+    const legacyLocalSig = fileSig(useLegacyLocal ? lstatOrNull(legacyLocalPath) : null);
+
     const cached = this.cache.get(cwd);
-    if (cached && cached.baseRef === base && cached.trusted === trusted && cached.projectSig === projectSig && cached.localSig === localSig) {
+    if (
+      cached && cached.baseRef === base && cached.trusted === trusted &&
+      cached.projectSig === projectSig && cached.localSig === localSig &&
+      cached.legacyProjectSig === legacyProjectSig && cached.legacyLocalSig === legacyLocalSig
+    ) {
       return cached.effective;
     }
 
@@ -163,6 +190,10 @@ export class ProjectSettingsResolver {
       const raw = readRawSettings(projectPath);
       if (raw) overlays.push(raw);
       else cacheable = false; // torn read — don't pin this under the current (torn) signature
+    } else if (trusted && useLegacyProject && legacyProjectSig !== "absent") {
+      const raw = readRawSettings(legacyProjectPath);
+      if (raw) overlays.push(raw);
+      else cacheable = false;
     }
     // fix-wave A1: settings.local.json is trust-gated too, exactly like the project file just
     // above — a repo can `git add -f` a `.winter/settings.local.json` (gitignore is advisory, a
@@ -175,10 +206,14 @@ export class ProjectSettingsResolver {
       const raw = readRawSettings(localPath);
       if (raw) overlays.push(raw);
       else cacheable = false;
+    } else if (trusted && useLegacyLocal && legacyLocalSig !== "absent") {
+      const raw = readRawSettings(legacyLocalPath);
+      if (raw) overlays.push(raw);
+      else cacheable = false;
     }
 
     const effective = mergeSettings(base, overlays); // overlays.length === 0 -> returns base verbatim
-    if (cacheable) this.cache.set(cwd, { baseRef: base, trusted, projectSig, localSig, effective });
+    if (cacheable) this.cache.set(cwd, { baseRef: base, trusted, projectSig, localSig, legacyProjectSig, legacyLocalSig, effective });
     else this.cache.delete(cwd);
     return effective;
   }
