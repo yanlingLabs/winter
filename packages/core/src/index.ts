@@ -113,3 +113,34 @@ export { Compactor, SUMMARIZE_INSTRUCTION } from "./agent/compactor";
 export { bashLooksSafe, BashReviewer, REVIEW_INSTRUCTION, type ReviewVerdict } from "./agent/reviewer";
 export { McpManager, type McpServerStatus, type McpServerConfig } from "./agent/mcp/manager";
 export { WorktreeManager, type ActiveWorktree } from "./agent/worktree";
+// Phase 9c Migration B (WS-16 §18) — the `winter migrate`/`winter migrate-project` CLI commands'
+// only door into the migrator; see `migration/migrate-b.ts`'s own header for the module layout.
+export {
+  MIGRATION_B_SECRET_NAMES,
+  MigrationRefused,
+  isPristineHome,
+  legacyHomeFor,
+  planMigrationB,
+  readMigrationManifest,
+  resumeMigrationB,
+  rollbackMigrationB,
+  runMigrationB,
+  type MigrationDeps,
+  type MigrationEntryStatus,
+  type MigrationFileEntry,
+  type MigrationKeychainEntry,
+  type MigrationManifest,
+  type MigrationPlan,
+  type MigrationPlanFileEntry,
+} from "./migration/migrate-b";
+export { LegacyKeychainSecretStore, legacyKeychainServiceFor } from "./migration/legacy-keychain-store";
+export { rekeySettings, type RekeyChange, type RekeyResult } from "./migration/rekey-settings";
+export {
+  ProjectMigrationRefused,
+  planProjectMigration,
+  runProjectMigration,
+  WINTER_INSTRUCTIONS_FILE,
+  WINTER_PROJECT_DIR,
+  type ProjectMigrationPlan,
+  type ProjectMigrationStep,
+} from "./migration/project-files";
