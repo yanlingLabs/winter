@@ -159,7 +159,7 @@ export interface OfficialInputDeps {
 /** `winterSystemPromptFor`'s memory-bucket choice, verbatim (chat/dispatch share `_assistant`; code
  *  is per-project) — so the official leg's `autoMemoryDirectory` is the SAME directory the Winter
  *  leg's MEMDIR resolves to for this session (WS-14 §2: "identical for both branches"). */
-function autoMemoryDirectoryFor(input: OfficialSessionInput, home: string): string {
+export function autoMemoryDirectoryFor(input: OfficialSessionInput, home: string): string {
   const opts: MemoryDirOptions = { normaHome: home };
   return input.mode === "dispatch" || input.mode === "chat" ? assistantMemoryDirFor(opts) : memoryDirFor(input.cwd, opts);
 }
