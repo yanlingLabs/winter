@@ -31,8 +31,11 @@ import { capabilityServer, type CapabilityServerRecord } from "../../src/capabil
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { writeCredentialMaterial } from "../../src/auth/credential-material";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
+import { FakeProvider } from "../../src/agent/fake-provider";
+import { BashReviewer } from "../../src/agent/reviewer";
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "../../src/runtime-sdk/create";
 import { credentialRefFor, ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
+import { sessionHooksFor } from "../../src/runtime-sdk/hooks";
 import type { OfficialInputDeps, OfficialSessionInput } from "../../src/runtime-sdk/official-options";
 import { startOfficialSession, type OfficialSession } from "../../src/runtime-sdk/official-session";
 import { createProjector, type CheckpointStore } from "../../src/projector";
@@ -134,7 +137,10 @@ const probeDef: ToolDefinition = {
   run: (args) => `probed: ${(args as { note: string }).note}`,
 };
 
-async function buildWorld(selection: RuntimeSelection, secretsDir: string, baseUrl: string, policy: "auto" | "dont-ask" | "plan" = "auto"): Promise<World> {
+async function buildWorld(
+  selection: RuntimeSelection, secretsDir: string, baseUrl: string, policy: "auto" | "dont-ask" | "plan" = "auto",
+  opts: { reviewer?: BashReviewer } = {},
+): Promise<World> {
   const home = mkdtempSync(join(tmpdir(), "p8c-official-e2e-"));
   const cwd = join(home, "work");
   mkdirSync(cwd, { recursive: true });
@@ -180,6 +186,14 @@ async function buildWorld(selection: RuntimeSelection, secretsDir: string, baseU
   // passes through; only `HOME` is overridden.
   const hermetic = hermeticOfficialHome();
 
+  // M4 (ruling P8c-19): the SAME `hooks.ts` builder the Winter leg uses, its `.official` half —
+  // see `hooks.ts`'s own header for why that value is safe to hand the official leg unmodified.
+  // Only built when a test asks for a reviewer — every other `buildWorld` caller keeps running with
+  // no `Options.hooks` at all, byte-identical to before this fix wave.
+  const hooks = opts.reviewer === undefined
+    ? undefined
+    : sessionHooksFor({ sessionId, roots: [cwd], reviewer: opts.reviewer, policy: () => policy }).official;
+
   const inputDeps: OfficialInputDeps = {
     home,
     selection,
@@ -198,6 +212,7 @@ async function buildWorld(selection: RuntimeSelection, secretsDir: string, baseU
     },
     policy,
     env: { ...process.env, HOME: hermetic.home },
+    ...(hooks === undefined ? {} : { hooks }),
   };
 
   const sessionInput: OfficialSessionInput = { sessionId, mode: "code", cwd };
@@ -356,6 +371,37 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
 
   // Fix round 1, M1: per-incarnation AbortController + runtime.trackQuery/untrack — mirrors
   // `create.test.ts`'s own Winter shutdown proof, on the official leg.
+  //
+  // Fix wave m3 — MEASURED (not assumed) against the real 0.3.250 binary, with instrumented probes:
+  //
+  //  1. The PRECONDITION race the review named: `official-session.ts`'s `beginAndPush` increments
+  //     `inFlight` SYNCHRONOUSLY inside `send()` (before any `await` that could let a response
+  //     land), so `turnRunning` is ALREADY `true` the instant `send()`'s own promise resolves — the
+  //     original 30ms `Bun.sleep` before checking it was pure risk, not insurance: on a quiet
+  //     machine the WHOLE turn (request, streamed response, `inFlight` back to 0) could complete
+  //     inside those 30ms, racing an already-finished turn. Dropping the sleep and reading
+  //     `turnRunning` in the SAME synchronous continuation `send()` resolves into removes the race
+  //     outright — nothing else can run before this line.
+  //
+  //  2. A SECOND, previously-undiagnosed race in the POSTCONDITION, found by instrumenting this
+  //     exact test: `dispose()`'s own `SHUTDOWN_QUERY_GRACE_MS` is 300ms, and — measured — a
+  //     300-word streamed turn through the real spawned CLI routinely has NOT resolved by then, so
+  //     `dispose()` takes `endWithin`'s TIMEOUT branch: it calls `abort.abort()` and resolves
+  //     IMMEDIATELY, without waiting for `run()`'s async iteration to actually notice the abort and
+  //     run its `finally` (which is what flips `state` off `"live"`) — `create.ts`'s own contract is
+  //     "aborts stragglers", never "waits out stragglers". Measured propagation lag after the abort
+  //     signal: consistently ~100ms, whether the turn's response arrives naturally or is held back
+  //     with `delayFirstResponseMs` (holding it 2000ms still flipped `state` at ~400ms after
+  //     `dispose()` started, NOT at the 2000ms mark — the abort is genuinely fast; it just is not
+  //     SYNCHRONOUS with `dispose()`'s own promise settling). So asserting `state` in the same tick
+  //     `dispose()` resolves was never a sound proof of "ends the child" — it happened to pass only
+  //     when the turn's natural completion beat the 300ms grace outright.
+  //
+  //  The fix for both: hold the loopback's first byte well past the grace window (so the precondition
+  //  and the abort path are exercised deterministically, never racing how fast 300 chunks happen to
+  //  stream), and bound the POSTCONDITION with a short poll instead of a same-tick assertion — proving
+  //  "ends the child, no orphan" the way it is actually true: eventually, within a small bounded
+  //  window, not synchronously with `dispose()`'s own return.
   test("M1: daemon shutdown (runtime.dispose) with a live official turn ends the child, no orphan", async () => {
     const longText = Array.from({ length: 300 }, (_, i) => `word-${i} `);
     const turns: AnthropicTurnScript[] = [{ blocks: [{ type: "text", chunks: longText }], stopReason: "end_turn" }];
@@ -363,13 +409,129 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
       const w = await buildWorld(selectionFor(), secretsDir, fake.url);
       await w.session.send("say a whole lot");
-      await Bun.sleep(30); // let the turn actually start before shutdown races it
+      // No sleep: `inFlight` was already incremented SYNCHRONOUSLY by `send()`'s own `beginAndPush`
+      // call, before this line ever runs — nothing else gets a turn to decrement it first.
       expect(w.session.turnRunning).toBe(true);
-      // `dispose()` is what a daemon `stop()` calls — it must resolve within its own bounded grace
-      // even though a turn is still in flight, and never leave the session `live` afterwards.
-      // Idempotent (create.ts's own contract), so `afterEach`'s own cleanup call is a safe no-op.
+      // `dispose()` is what a daemon `stop()` calls — it must return within its own bounded grace
+      // even though a turn is still in flight (measured: it does, via the abort path below), and
+      // the session must eventually leave `"live"` — never orphan the child. Idempotent (create.ts's
+      // own contract), so `afterEach`'s own cleanup call afterward is a safe no-op.
       await w.runtime.dispose();
+      // Bounded poll, not a same-tick assertion (see this test's own header — measured ~100ms of
+      // abort-propagation lag past `dispose()`'s own return; 5s is a generous multiple of that,
+      // nowhere near the SDK's own end-to-end turn/teardown budget this test's 60s timeout allows).
+      const deadline = Date.now() + 5_000;
+      while (w.session.state === "live" && Date.now() < deadline) await Bun.sleep(25);
       expect(w.session.state).not.toBe("live");
+    }, { delayFirstResponseMs: 2_000 });
+  }, 60_000);
+
+  // ── Fix wave C1 (whole-branch review): the control-plane fence, MEASURED on the real binary ──
+  //
+  // `withAnthropicLoopback`'s `turns` array is captured BY REFERENCE in the fake's request handler
+  // (it indexes `turns[...]` live, at request time, never a snapshot taken up front) — so each test
+  // below scripts a PLACEHOLDER turn to satisfy the call signature, then overwrites `turns[0]` with
+  // the real absolute path once `buildWorld` has minted this run's `home`/`cwd`, before calling
+  // `session.send`. The fake sees only the overwritten script.
+  const PLACEHOLDER_TURN = (name: string, jsonChunks: string[]): AnthropicTurnScript => (
+    { blocks: [{ type: "tool_use", id: "call_1", name, jsonChunks }], stopReason: "tool_use" }
+  );
+  const DONE_TURN: AnthropicTurnScript = { blocks: [{ type: "text", chunks: ["done"] }], stopReason: "end_turn" };
+
+  test("C1: a Read of <home>/run/probe.txt is DENIED — the sentinel content reaches no event", async () => {
+    const turns: AnthropicTurnScript[] = [PLACEHOLDER_TURN("Read", [JSON.stringify({ file_path: "/placeholder" })]), DONE_TURN];
+    await withAnthropicLoopback(turns, async (fake) => {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto");
+      const runDir = join(w.home, "run");
+      mkdirSync(runDir, { recursive: true });
+      const probePath = join(runDir, "probe.txt");
+      const SENTINEL = "NORMA_CONTROL_PLANE_SENTINEL_9f3d1a";
+      writeFileSync(probePath, SENTINEL);
+      turns[0] = PLACEHOLDER_TURN("Read", [JSON.stringify({ file_path: probePath })]);
+      await w.session.send("read that file for me and tell me what it says");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      const result = w.events.find((e) => e.type === "tool_result") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
+      expect(result).toBeDefined();
+      expect(result?.isError).toBe(true);
+      for (const e of w.events) expect(JSON.stringify(e)).not.toContain(SENTINEL);
+    });
+  }, 60_000);
+
+  test("C1: a Read of an ordinary cwd file still works (the fence is narrow, not a blanket read denial)", async () => {
+    const CONTENT = "ordinary cwd content, unrelated to the control plane";
+    const turns: AnthropicTurnScript[] = [PLACEHOLDER_TURN("Read", [JSON.stringify({ file_path: "/placeholder" })]), DONE_TURN];
+    await withAnthropicLoopback(turns, async (fake) => {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto");
+      const target = join(w.cwd, "ordinary.txt");
+      writeFileSync(target, CONTENT);
+      turns[0] = PLACEHOLDER_TURN("Read", [JSON.stringify({ file_path: target })]);
+      await w.session.send("read that file for me and tell me what it says");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      const result = w.events.find((e) => e.type === "tool_result") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
+      expect(result?.isError).toBe(false);
+      expect(result?.output).toContain(CONTENT);
+    });
+  }, 60_000);
+
+  async function expectRuntimesWriteDenied(policy: "auto" | "dont-ask"): Promise<void> {
+    const turns: AnthropicTurnScript[] = [PLACEHOLDER_TURN("Write", [JSON.stringify({ file_path: "/placeholder", content: "x" })]), DONE_TURN];
+    await withAnthropicLoopback(turns, async (fake) => {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, policy);
+      const runtimesDir = join(w.home, "runtimes");
+      mkdirSync(runtimesDir, { recursive: true }); // exists beforehand so a denial can't be mistaken for ENOENT
+      const target = join(runtimesDir, "should-not-exist.txt");
+      turns[0] = PLACEHOLDER_TURN("Write", [JSON.stringify({ file_path: target, content: "should never land on disk" })]);
+      await w.session.send("write that file for me");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      const result = w.events.find((e) => e.type === "tool_result") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
+      expect(result).toBeDefined();
+      expect(result?.isError).toBe(true);
+      expect(existsSync(target)).toBe(false);
+    });
+  }
+
+  test("C1: a Write into <home>/runtimes/ is DENIED under policy auto", async () => {
+    await expectRuntimesWriteDenied("auto");
+  }, 60_000);
+
+  test("C1: a Write into <home>/runtimes/ is DENIED under policy dont-ask", async () => {
+    await expectRuntimesWriteDenied("dont-ask");
+  }, 60_000);
+
+  // ── Fix wave M4 (ruling P8c-19): the bash reviewer reaches the official leg's Options.hooks ──
+  //
+  // Mirrors `test/e2e/winter-hooks-review-wiring-e2e.test.ts`'s own Winter-leg proof: a `Bash` call
+  // whose command trips `bashLooksSafe` to false (a shell redirect, `>`) must reach `bashReviewerHook`
+  // under `auto` policy; the hook calls the SAME `BashReviewer` (over a `FakeProvider` scripted to
+  // answer "unsafe"); a `PreToolUse` deny must block the call end to end on the REAL 0.3.250 binary —
+  // the resulting `tool_result` must carry the FAKE reviewer's own reason text, which is only
+  // possible if `sessionHooksFor(...).official` (this fix wave's own change) actually reached
+  // `Options.hooks` on this leg, not the pre-fix-wave `undefined`.
+  test("M4: the bash reviewer (sessionHooksFor(...).official) blocks an unsafe Bash call on the real binary", async () => {
+    const reviewProvider = new FakeProvider([[
+      { type: "text_delta", delta: '{"verdict":"unsafe","reason":"official-leg-hooks-forced-unsafe"}' },
+      { type: "done", stopReason: "end_turn" },
+    ]], []);
+    const reviewer = new BashReviewer({ provider: { provider: reviewProvider, model: "fake-1" } });
+    const turns: AnthropicTurnScript[] = [
+      { blocks: [{ type: "tool_use", id: "call_1", name: "Bash", jsonChunks: [JSON.stringify({ command: "echo hi > /tmp/norma-p8c-m4-should-not-run" })] }], stopReason: "tool_use" },
+      DONE_TURN,
+    ];
+    await withAnthropicLoopback(turns, async (fake) => {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto", { reviewer });
+      await w.session.send("run that shell command for me");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      const result = w.events.find((e) => e.type === "tool_result") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
+      expect(result).toBeDefined();
+      // The reviewer's own reason, not the command's stdout — only reachable if the official leg's
+      // Options.hooks actually carried the bash-reviewer PreToolUse group.
+      expect(result?.isError).toBe(true);
+      expect(result?.output).toContain("official-leg-hooks-forced-unsafe");
+      expect(reviewProvider.requests.length).toBeGreaterThan(0);
     });
   }, 60_000);
 });
