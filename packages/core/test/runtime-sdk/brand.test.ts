@@ -1,10 +1,14 @@
-// The brand is validated by the SDK's OWN `resolveBrand`, not by a mirror of its rules here: the
-// rules live in one place (`sdk/src/brand.ts`) and a copy in a test would rot the first time the
-// SDK tightened one.
-import { describe, expect, test } from "bun:test";
-import { mcpToolName, resolveBrand, resolveWinterHome, WINTER_BRAND, type BrandProfile } from "@yanlinglabs/winter-agent-sdk";
+// P9b-7: the daemon's brand is the SDK's OWN `WINTER_BRAND`, plus exactly three fields. Validated
+// by the SDK's OWN `resolveBrand`, not by a mirror of its rules here: the rules live in one place
+// (`sdk/src/brand.ts`) and a copy in a test would rot the first time the SDK tightened one.
+import { afterEach, describe, expect, test } from "bun:test";
+import {
+  mcpToolName, resolveBrand, resolveWinterHome as sdkResolveWinterHome, WINTER_BRAND,
+  type BrandProfile,
+} from "@yanlinglabs/winter-agent-sdk";
 import { keychainService } from "../../src/profile";
 import { buildCoreBrand, CORE_BRAND } from "../../src/runtime-sdk/brand";
+import { resolveWinterHome } from "../../src/winter-dir";
 
 /** The fourteen fields `BrandProfile` has (surface map §1.5 / global constraints). */
 const FIELDS: Array<keyof BrandProfile> = [
@@ -12,6 +16,9 @@ const FIELDS: Array<keyof BrandProfile> = [
   "keychainService", "mcpServerName", "presetName", "processLabel", "codexOriginator",
   "tempRootName", "pluginManifestDir", "contactUrl",
 ];
+
+/** The ONLY fields `buildCoreBrand` overrides from `WINTER_BRAND` (P9b-7's own contract). */
+const OVERRIDDEN_FIELDS: ReadonlyArray<keyof BrandProfile> = ["packageName", "keychainService", "contactUrl"];
 
 describe("CORE_BRAND", () => {
   test("all fourteen fields are present, string, and non-empty — and there are no others", () => {
@@ -31,63 +38,89 @@ describe("CORE_BRAND", () => {
     expect(v.ok).toBe(true);
   });
 
-  test("it is Winter's identity, not Winter's — every field differs where identity lives", () => {
-    expect(CORE_BRAND.productName).toBe("Winter");
-    expect(CORE_BRAND.homeDirName).toBe(".winter");
-    expect(CORE_BRAND.mcpServerName).toBe("winter");
-    // CLAUDE.md hard rule: `originator: "winter"` is a deliberate ToS decision, never first-party.
-    expect(CORE_BRAND.codexOriginator).toBe("winter");
-    expect(CORE_BRAND.homeDirName).not.toBe(WINTER_BRAND.homeDirName);
-    expect(CORE_BRAND.mcpServerName).not.toBe(WINTER_BRAND.mcpServerName);
+  // THE DELTA SET (P9b-7): under the "dist" profile, exactly `{packageName, contactUrl}` differ
+  // from `WINTER_BRAND` — nothing else. Every other field is taken from the SDK's own defaults
+  // verbatim, which is the whole point of spreading `WINTER_BRAND` rather than re-deriving it.
+  test("dist: packageName and contactUrl differ from WINTER_BRAND, and NOTHING else does", () => {
+    const dist = buildCoreBrand("dist");
+    const differing = FIELDS.filter((f) => dist[f] !== WINTER_BRAND[f]);
+    const expected: Array<keyof BrandProfile> = ["contactUrl", "packageName"];
+    expect(differing.sort()).toEqual(expected.sort());
+    expect(dist.packageName).toBe("winter-core");
+    expect(dist.contactUrl).toBe("https://github.com/yanlingLabs/norma");
+    expect(dist.keychainService).toBe(WINTER_BRAND.keychainService);
+    expect(dist.keychainService).toBe("com.winter.core");
+  });
+
+  // Under "dev", `keychainService` ADDITIONALLY differs — the dev/dist split the SDK's own default
+  // has no notion of, and `auth/secret-store.ts`'s `SERVICE` resolves the identical way.
+  test("dev: additionally keychainService differs, at exactly com.winter.core.dev", () => {
+    const dev = buildCoreBrand("dev");
+    const differing = FIELDS.filter((f) => dev[f] !== WINTER_BRAND[f]);
+    expect(differing.sort()).toEqual([...OVERRIDDEN_FIELDS].sort());
+    expect(dev.keychainService).toBe("com.winter.core.dev");
+    expect(dev.keychainService).toBe(keychainService("dev"));
+    expect(resolveBrand(dev).ok).toBe(true);
+  });
+
+  test("mcpToolName produces the P8b-12 capability names", () => {
+    expect(mcpToolName(CORE_BRAND, "x")).toBe("mcp__winter__x");
+    expect(mcpToolName(CORE_BRAND, "sessions__list_sessions")).toBe("mcp__winter__sessions__list_sessions");
+    expect(mcpToolName(CORE_BRAND, "computer__computer")).toBe("mcp__winter__computer__computer");
+  });
+
+  // P9b-7's own consequence: the daemon takes the SDK's `presetName` as-is (never overridden), and
+  // it is the SDK's own value, not the bare brand token — see mode-options.ts's own consumer.
+  test("presetName is the SDK's own winter_code, not the bare brand token", () => {
+    expect(CORE_BRAND.presetName).toBe("winter_code");
   });
 
   test("envPrefix carries its trailing underscore (ENV_PREFIX_RE requires it)", () => {
     expect(CORE_BRAND.envPrefix).toBe("WINTER_");
-    // The negative half: the Interfaces block's `"WINTER"` is refused by the SDK itself.
     expect(resolveBrand({ ...CORE_BRAND, envPrefix: "WINTER" }).ok).toBe(false);
-  });
-
-  // P8b-12's literal. `mcpToolName` is TWO-arg on the installed SDK (`brand.d.ts:111`), so the
-  // canonical `mcp__winter__<server>__<tool>` name is produced by joining the server key and the
-  // tool with `__` in the single `tool` argument. Tasks 6-7's `capabilityToolName` must do the
-  // same. Both forms are asserted so the shape is unambiguous in the record.
-  test("mcpToolName produces the P8b-12 capability names", () => {
-    expect(mcpToolName(CORE_BRAND, "sessions__list_sessions")).toBe("mcp__winter__sessions__list_sessions");
-    expect(mcpToolName(CORE_BRAND, "list_sessions")).toBe("mcp__winter__list_sessions");
-    expect(mcpToolName(CORE_BRAND, "computer__computer")).toBe("mcp__winter__computer__computer");
   });
 
   test("keychainService is profile-aware and equals the daemon's own", () => {
     expect(buildCoreBrand("dist").keychainService).toBe(keychainService("dist"));
-    expect(buildCoreBrand("dist").keychainService).toBe("com.winter.core");
     expect(buildCoreBrand("dev").keychainService).toBe(keychainService("dev"));
-    expect(buildCoreBrand("dev").keychainService).toBe("com.winter.core.dev");
     // The default (what CORE_BRAND itself froze at module load) follows the process's profile.
     expect(CORE_BRAND.keychainService).toBe(keychainService());
-    expect(resolveBrand(buildCoreBrand("dev")).ok).toBe(true);
-  });
-
-  // The module-load half of the rule above. `CORE_BRAND` is `buildCoreBrand()` evaluated once at
-  // import, and `keychainService()`'s own default parameter reads `WINTER_PROFILE` off `process.env`
-  // at that moment — so a process started under the dev profile gets `com.winter.core.dev` in the
-  // brand, by the same mechanism (and with the same set-it-before-the-import caveat) that
-  // `auth/secret-store.ts`'s `SERVICE` has always had. Asserted through the equality above rather
-  // than by spawning a second process: a subprocess spawn is not available in every sandbox this
-  // suite runs in, and the identity `CORE_BRAND.keychainService === keychainService()` is the
-  // whole claim.
-  test("the daemon's secret store and the brand name the SAME service", () => {
     expect(CORE_BRAND.keychainService).toBe(keychainService(undefined));
   });
 
-  // THE ALIGNMENT 8b rests on: a Winter-branded Winter session resolves its home from the daemon's
-  // OWN variable, so `home` and `winterHome` are one directory (surface map §6.5).
-  test("resolveWinterHome under this brand reads WINTER_HOME / WINTER_PROFILE", () => {
-    expect(resolveWinterHome({ WINTER_HOME: "/x" }, CORE_BRAND)).toBe("/x");
-    // An explicit home wins over the dev profile, exactly as the daemon's own resolution does.
-    expect(resolveWinterHome({ WINTER_HOME: "/x", WINTER_PROFILE: "dev" }, CORE_BRAND)).toBe("/x");
-    expect(resolveWinterHome({ WINTER_PROFILE: "dev" }, CORE_BRAND).endsWith("/.winter-dev")).toBe(true);
-    expect(resolveWinterHome({}, CORE_BRAND).endsWith("/.winter")).toBe(true);
-    // And it is NOT Winter's home — the G-13 failure mode this brand exists to prevent.
-    expect(resolveWinterHome({ WINTER_HOME: "/w" }, CORE_BRAND)).not.toBe("/w");
+  // THE HOME ALIGNMENT (P9b-7's own point): a Winter-branded Winter session resolves its home from
+  // the SAME env var and default core's own resolver does, so the daemon's home and Winter's home
+  // are ONE directory. Asserted by comparing the SDK's own resolver (given CORE_BRAND) against
+  // core's own `resolveWinterHome()` (`../winter-dir.ts`) under the SAME env, rather than by
+  // duplicating the SDK's resolution rules here.
+  describe("resolveWinterHome under CORE_BRAND equals core's own resolver", () => {
+    const savedHome = process.env.WINTER_HOME;
+    const savedProfile = process.env.WINTER_PROFILE;
+    afterEach(() => {
+      if (savedHome === undefined) delete process.env.WINTER_HOME; else process.env.WINTER_HOME = savedHome;
+      if (savedProfile === undefined) delete process.env.WINTER_PROFILE; else process.env.WINTER_PROFILE = savedProfile;
+    });
+
+    test("under a temp WINTER_HOME", () => {
+      delete process.env.WINTER_PROFILE;
+      process.env.WINTER_HOME = "/tmp/some-winter-home-for-brand-test";
+      expect(sdkResolveWinterHome(undefined, CORE_BRAND)).toBe(resolveWinterHome());
+      expect(resolveWinterHome()).toBe("/tmp/some-winter-home-for-brand-test");
+    });
+
+    // Every real entry point sets `WINTER_HOME` and `WINTER_PROFILE` TOGETHER under the dev profile
+    // (CLAUDE.md's own dev command: `WINTER_HOME=~/.winter-dev WINTER_PROFILE=dev …`) — so this is
+    // the alignment that actually holds in production. NOT tested here: `WINTER_PROFILE=dev` ALONE,
+    // with no explicit `WINTER_HOME`. Core's own `resolveWinterHome()` (`../winter-dir.ts`) reads
+    // only `WINTER_HOME`, with no profile-derived `-dev` suffix of its own — a gap that predates
+    // this rename (confirmed against this same file's own pre-rename ancestor, identically
+    // profile-blind under its own old name) and is out of this lane's scope to fix; see the
+    // report's concerns.
+    test("under WINTER_PROFILE=dev with the matching explicit WINTER_HOME", () => {
+      process.env.WINTER_HOME = "/tmp/some-winter-dev-home-for-brand-test";
+      process.env.WINTER_PROFILE = "dev";
+      expect(sdkResolveWinterHome(undefined, CORE_BRAND)).toBe(resolveWinterHome());
+      expect(resolveWinterHome()).toBe("/tmp/some-winter-dev-home-for-brand-test");
+    });
   });
 });

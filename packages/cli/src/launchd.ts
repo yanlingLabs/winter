@@ -1,12 +1,7 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { writeFileSync, unlinkSync, existsSync } from "node:fs";
-import { resolveWinterProfile, type WinterProfile } from "@yanlinglabs/winter-core";
-
-/** Kept ONLY for the legacy teardown of the historical dist agent (`migrateFromLaunchdAgent`
- *  below) — never used for new installs. Active call sites derive the label from the current
- *  profile via `launchdLabel()` instead. */
-export const LAUNCHD_LABEL = "com.winter.core";
+import { LEGACY_LAUNCHD_LABEL, resolveWinterProfile, type WinterProfile } from "@yanlinglabs/winter-core";
 
 /** Resolves the profile at CALL time (default param, not a module-level snapshot) so a settings
  *  change mid-process — or simply different callers under different envs — is always honored. */
@@ -90,18 +85,25 @@ export interface MigrateLaunchdDeps {
   bootout?: (label: string) => Promise<void>;
 }
 
-/** Lifecycle T4: tears down the OLD `com.winter.core` launchd agent (superseded by the app's
- * `DaemonSupervisor` embedding winter-core directly). A leftover `KeepAlive` agent would otherwise
+/** Lifecycle T4: tears down the HISTORICAL `LEGACY_LAUNCHD_LABEL` KeepAlive launchd agent — a
+ * pre-profiles, pre-rename install that predates BOTH the dev/dist profile split and this app's own
+ * `DaemonSupervisor` embedding winter-core directly. A leftover `KeepAlive` agent would otherwise
  * relaunch a daemon the app just killed, defeating the app↔daemon lifecycle coupling entirely — so
  * this must run before/at app-driven daemon supervision starts. No-op if the plist was never
  * installed (fresh installs, or a machine already migrated). NEVER throws: a failed bootout/unlink
- * (e.g. permissions, already gone) must not block the app from starting. */
+ * (e.g. permissions, already gone) must not block the app from starting.
+ *
+ * `LEGACY_LAUNCHD_LABEL` (`legacy-names.ts`, P9b-6) names the OLD pre-rename install — NOT today's
+ * CURRENT dist label (`launchdLabel("dist")`). The rename made those two strings different again
+ * after the mechanical pass briefly collapsed them onto the same literal; this teardown must keep
+ * targeting the pre-rename install regardless, mirroring the Swift `LaunchdMigrationDeps.live`
+ * hardcoding the same historical literal independently. */
 export async function migrateFromLaunchdAgent(deps: MigrateLaunchdDeps = {}): Promise<void> {
-  // Deliberately NOT `plistPath()` — that now resolves the CURRENT profile's label/path, but this
-  // teardown targets the historical dist-only agent, which predates profiles and was always filed
-  // under the literal `com.winter.core` regardless of what profile is running today (mirrors the
-  // Swift `LaunchdMigrationDeps.live` hardcoding the same literal independently).
-  const path = deps.plistPath ?? join(homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+  // Deliberately NOT `plistPath()` — that resolves the CURRENT profile's label/path, but this
+  // teardown targets the historical pre-rename agent, which predates profiles and was always filed
+  // under the literal `LEGACY_LAUNCHD_LABEL` regardless of what profile (or product name) is
+  // running today.
+  const path = deps.plistPath ?? join(homedir(), "Library", "LaunchAgents", `${LEGACY_LAUNCHD_LABEL}.plist`);
   const exists = deps.exists ?? existsSync;
   const remove = deps.remove ?? unlinkSync;
   const bootout = deps.bootout ?? (async (label: string) => {
@@ -109,7 +111,7 @@ export async function migrateFromLaunchdAgent(deps: MigrateLaunchdDeps = {}): Pr
   });
   try {
     if (!exists(path)) return; // never installed (or already migrated) — nothing to do
-    await bootout(LAUNCHD_LABEL);
+    await bootout(LEGACY_LAUNCHD_LABEL);
     remove(path);
   } catch (error) {
     console.error(`[launchd] migrateFromLaunchdAgent failed (non-fatal): ${error}`);

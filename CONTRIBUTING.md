@@ -38,7 +38,7 @@ column.
 
 ```sh
 git clone https://github.com/yanlingLabs/norma.git
-cd winter
+cd norma  # the GitHub repo itself is renamed separately (9c) — a fresh clone still lands here
 bun install
 ```
 
@@ -186,7 +186,6 @@ never pass either one; a security test pins that.
   a deliberate terms-of-service decision. Don't "fix" it to a first-party value.
 - The Sparkle public key in `apple/Winter/project.yml` is the production key. Its private half exists
   only in one login Keychain and is committed nowhere.
-- `winter/` at the repo root is a dead Phase-0 scaffold. The real app is `apple/Winter`.
 
 ## Sending a pull request
 

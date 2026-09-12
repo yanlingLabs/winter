@@ -108,6 +108,7 @@ describe("createWinterRuntimeSdk — the options it hands the router", () => {
     expect(handle.sdk.brand.mcpServerName).toBe("winter");
     expect(handle.sdk.brand.homeDirName).toBe(".winter");
     expect(opts.brand).toBe(CORE_BRAND);
+    expect(opts.brand!.presetName).toBe("winter_code");
   });
 
   test("a Winter-only host (the official peer fails to load): no claude peer, Winter unaffected (P8b-4)", async () => {

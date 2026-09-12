@@ -1,6 +1,6 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { resolveWinterHome } from "../winter-dir";
 
 /** Append-only JSONL audit trail for the routine scheduler (phase 5 routines, design doc §2:
  *  "every fire/defer/error appends an audit line to ~/.winter/routines-audit.jsonl"). Mirrors
@@ -35,5 +35,7 @@ export class RoutineAuditLog {
  *  bootstrapped winterHome-relative path instead (mirrors routines/store.ts's openRoutineStore
  *  default, which is likewise only for standalone/no-daemon-wiring use). */
 export function defaultRoutinesAuditPath(): string {
-  return join(homedir(), ".winter", "routines-audit.jsonl");
+  // P9b-12: routed through the resolver rather than hardcoding `~/.winter` — a `WINTER_HOME`
+  // override must move this file with everything else.
+  return join(resolveWinterHome(), "routines-audit.jsonl");
 }

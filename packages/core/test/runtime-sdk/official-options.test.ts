@@ -72,7 +72,8 @@ describe("minimalOsEnvironment", () => {
       // None of these belong in a supervised child's environment (§3: "a REPLACEMENT built from an
       // allowlist; nothing is inherited").
       SECRET_TOKEN: "sk-should-never-appear",
-      WINTER_HOME: "/Users/x/.winter",
+      // Pre-rename this set two distinct env keys — the daemon's own home var, and WINTER_HOME (the SDK's
+      // brand-derived home); the rename makes them the same key, so it is written once now.
       WINTER_HOME: "/Users/x/.winter",
       ANTHROPIC_API_KEY: "sk-also-never",
       RANDOM_VAR: "whatever",

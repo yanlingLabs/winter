@@ -1010,7 +1010,11 @@ function assertValidXml(xml: string, label: string) {
 // own tree-clean preflight. `appcastInsertPlan` (release-lib.ts, unit-tested) decides target +
 // action; only `preview` is ever actually written here — the `repo` write is deferred to the
 // publish tail below.
-const appcastPath = join(ROOT, "releases", "appcast.xml");
+//
+// P9b-9: this is the NEW Winter feed (`releases/winter/appcast.xml`), not the frozen `releases/
+// appcast.xml` (the pre-rename feed — byte-identical after 9b; its terminal entry is 9c's handoff
+// release, never written by this pipeline again).
+const appcastPath = join(ROOT, "releases", "winter", "appcast.xml");
 const appcastPreviewPath = join(OUT, "appcast-preview.xml");
 const appcastXml = readFileSync(appcastPath, "utf8");
 const item = appcastItem({

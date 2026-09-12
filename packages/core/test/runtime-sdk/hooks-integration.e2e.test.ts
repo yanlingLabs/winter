@@ -31,7 +31,9 @@ async function drive(bin: string, opts: {
       hooks: opts.hooks,
       env: {
         PATH: process.env.PATH ?? "/usr/bin:/bin",
-        HOME: opts.home, TMPDIR: opts.home, WINTER_HOME: opts.home, WINTER_HOME: opts.home,
+        // Pre-rename this set two distinct env keys — the daemon's own home var, and WINTER_HOME (the SDK's
+        // brand-derived home); the rename makes them the same key, so it is written once now.
+        HOME: opts.home, TMPDIR: opts.home, WINTER_HOME: opts.home,
         WINTER_PROFILE: "test", WINTER_TEST_PROVIDER: opts.provider,
       },
     },

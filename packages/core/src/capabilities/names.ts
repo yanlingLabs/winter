@@ -32,9 +32,16 @@
 // DERIVES each name from the declared server through the router's own path and asserts the two
 // agree, so the table can never again describe names the router does not register.
 //
-// R-1 PINS THE NAMESPACE TO `winter`, NEVER `winter`: `CORE_BRAND.mcpServerName` is `"winter"`, and
-// the Mac/iOS renderers key tool rows on Winter's names (P8b-25). `mcpToolName` is TWO-ARG — it
-// takes the brand and the WHOLE tool token — so the `<server>__<tool>` join happens here.
+// R-1's NAMESPACE IS `winter` (`CORE_BRAND.mcpServerName`) — the daemon's OWN brand namespace, not a
+// foreign one being avoided. Pre-rename this pinned the daemon to its OWN old brand token,
+// deliberately never `winter` (the SDK's own reserved brand name), to keep the two apart; since
+// P9b-7 the daemon's brand equals the SDK's `WINTER_BRAND` except three fields, so `mcpServerName` is genuinely
+// `"winter"` for both sides now — that reason no longer exists. The invariant that still matters,
+// narrower but load-bearing, is `capabilityServerName`'s own: a capability server's `winter__<key>`
+// name can never equal the bare brand name `"winter"` itself, which the router reserves for its
+// standing messaging server — the `__<key>` suffix guarantees that. The Mac/iOS renderers key tool
+// rows on Winter's names (P8b-25). `mcpToolName` is TWO-ARG — it takes the brand and the WHOLE tool
+// token — so the `<server>__<tool>` join happens here.
 import { mcpToolName } from "@yanlinglabs/winter-agent-sdk";
 import { CORE_BRAND } from "../runtime-sdk/brand";
 import type { SessionMode } from "../runtime-sdk/create";

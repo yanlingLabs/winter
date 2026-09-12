@@ -1,6 +1,11 @@
 export { startDaemon, CORE_VERSION, type RunningDaemon } from "./daemon";
 export { bootstrapWinterDir, resolveWinterHome } from "./winter-dir";
 export { resolveWinterProfile, keychainService, profileDisplayName, type WinterProfile } from "./profile";
+export {
+  LEGACY_LAUNCHD_LABEL, LEGACY_HOME_DIR, LEGACY_DEV_HOME_DIR, LEGACY_HOME_ENV, LEGACY_PROFILE_ENV,
+  LEGACY_TMPDIR_ENV, LEGACY_KEYCHAIN_SERVICE, LEGACY_KEYCHAIN_SERVICE_DEV, LEGACY_CLI_LINK,
+  LEGACY_DEV_WRAPPER_NAMES, LEGACY_PROJECT_DIR, LEGACY_INSTRUCTIONS_FILE,
+} from "./legacy-names";
 export { FileSecretStore, KeychainSecretStore } from "./auth/secret-store";
 export { TOKEN_NAMES } from "./auth/tokens";
 export {

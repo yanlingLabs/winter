@@ -150,7 +150,7 @@ export function assistantText(frame: AssistantFrame): string {
  * matching `tool_result` block carries as `tool_use_id` — the linkage the Mac/phone transcripts
  * fold on, and the projector's idempotency source id.
  *
- * `name` is the WINTER name (ruling P8b-25): the `SessionEvent` surface keeps Winter's tool
+ * `name` is the HOST name (ruling P8b-25): the `SessionEvent` surface keeps the host's tool
  * vocabulary because the Mac and iOS renderers key their tool rows on it and every past session in
  * `session.history` spells it that way. `renameTool` is the one translation point and it reads the
  * SHARED table, `runtime-sdk/tool-names.ts` — the same one the approval bridge gates by, so the
