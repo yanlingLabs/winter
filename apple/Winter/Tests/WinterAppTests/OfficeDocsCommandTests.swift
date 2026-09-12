@@ -152,10 +152,10 @@ final class OfficeDocsCommandTests: XCTestCase {
     // MARK: - Fixture facts, established once and cited by every drill below
 
     /// `two-page.odt`'s own body, read directly out of its `content.xml` before any of this code
-    /// runs: three paragraphs — "WINTER GATE", "office stage A embed probe", "WINTER PAGE TWO" — the
+    /// runs: three paragraphs — "NORMA GATE", "office stage A embed probe", "NORMA PAGE TWO" — the
     /// third on a second page. Verified with
     /// `unzip -p two-page.odt content.xml | sed 's/<[^>]*>/|/g'`, not assumed from the filename.
-    private static let twoPageParagraphs = ["WINTER GATE", "office stage A embed probe", "WINTER PAGE TWO"]
+    private static let twoPageParagraphs = ["NORMA GATE", "office stage A embed probe", "NORMA PAGE TWO"]
 
     private func openLive(_ fixture: String, as destName: String? = nil)
         async throws -> (path: String, host: ShellSessionHost, runtime: OfficeRuntime) {
@@ -271,8 +271,8 @@ final class OfficeDocsCommandTests: XCTestCase {
     /// `replace` end to end, with the count, the SAVED BYTES, and placement.
     ///
     /// The placement half matters as much as the count: "GATE" appears in paragraph 1 only, so after
-    /// replacing it with "GATEWAY" the saved `content.xml` must show "WINTER GATEWAY" — in the FIRST
-    /// paragraph, before "office stage A embed probe" — and paragraph 3's own "WINTER PAGE TWO" must
+    /// replacing it with "GATEWAY" the saved `content.xml` must show "NORMA GATEWAY" — in the FIRST
+    /// paragraph, before "office stage A embed probe" — and paragraph 3's own "NORMA PAGE TWO" must
     /// be untouched. A replace that rewrote the wrong paragraph, or flattened the document, passes a
     /// contains-check and fails this one.
     func testLiveDocsReplaceReportsTheCountAndTheSavedBytesShowItInTheRightParagraph() async throws {
@@ -285,10 +285,10 @@ final class OfficeDocsCommandTests: XCTestCase {
                       "\"GATE\" occurs exactly once in this fixture: \(result)")
 
         let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
-        XCTAssertTrue(contentXML.contains("WINTER GATEWAY"), "the saved file must carry the replacement: \(path)")
-        XCTAssertTrue(contentXML.contains("WINTER PAGE TWO"),
+        XCTAssertTrue(contentXML.contains("NORMA GATEWAY"), "the saved file must carry the replacement: \(path)")
+        XCTAssertTrue(contentXML.contains("NORMA PAGE TWO"),
                       "paragraph 3 must be untouched — this replace had no business there")
-        let replaced = try XCTUnwrap(contentXML.range(of: "WINTER GATEWAY"))
+        let replaced = try XCTUnwrap(contentXML.range(of: "NORMA GATEWAY"))
         let probe = try XCTUnwrap(contentXML.range(of: "office stage A embed probe"))
         XCTAssertTrue(replaced.lowerBound < probe.lowerBound,
                       "the replacement must be in the FIRST paragraph, where the match was — not merely somewhere")
@@ -298,7 +298,7 @@ final class OfficeDocsCommandTests: XCTestCase {
     /// defaults `TransliterationFlags` to `IGNORE_CASE` (`svl/source/items/srchitem.cxx:93-107`, read
     /// at the pinned SHA), and the research's recommended argument payload set neither
     /// `TransliterateFlags` nor `AlgorithmType2`. Shipped that way, the engine would match
-    /// case-INSENSITIVELY while our own count is literal and case-sensitive: `find:"winter"` would
+    /// case-INSENSITIVELY while our own count is literal and case-sensitive: `find:"norma"` would
     /// count 0, the engine would replace 2, ruling 1's cross-check would fire — **after** the user's
     /// document had already been rewritten.
     ///
@@ -312,7 +312,7 @@ final class OfficeDocsCommandTests: XCTestCase {
         XCTAssertTrue(before.ok, "\(before)")
 
         let result = await send(command("office.docs.replace",
-                                        args: ["path": path, "find": "winter", "replaceWith": "SHOULD NOT APPEAR"],
+                                        args: ["path": path, "find": "norma", "replaceWith": "SHOULD NOT APPEAR"],
                                         sessionId: "S1", commandId: "pcmd_replace_case"), through: host)
         XCTAssertTrue(result.ok, "a zero-match replace is a legitimate answer, not a failure: \(result)")
         XCTAssertTrue((result.result ?? "").contains("nothing to replace"),
@@ -321,8 +321,8 @@ final class OfficeDocsCommandTests: XCTestCase {
         let savedXML = try readODFEntry(atPath: path, entry: "content.xml")
         XCTAssertFalse(savedXML.contains("SHOULD NOT APPEAR"),
                        "a case-insensitive engine match would have written this — the search must be case-sensitive")
-        XCTAssertTrue(savedXML.contains("WINTER GATE"), "the original text must survive untouched")
-        XCTAssertTrue(savedXML.contains("WINTER PAGE TWO"), "so must the other occurrence")
+        XCTAssertTrue(savedXML.contains("NORMA GATE"), "the original text must survive untouched")
+        XCTAssertTrue(savedXML.contains("NORMA PAGE TWO"), "so must the other occurrence")
 
         // **Unchanged is asserted on the TEXT, not on content.xml's bytes — measured, not assumed.**
         // A first version of this drill asserted byte-identical `content.xml` and FAILED: every
@@ -339,23 +339,23 @@ final class OfficeDocsCommandTests: XCTestCase {
     }
 
     /// Multiple occurrences, counted by us and cross-checked against the engine's boolean — and the
-    /// harder half: `replaceWith` CONTAINING `find`. Replacing "WINTER" with "WINTER INC" leaves
-    /// plenty of "WINTER"s behind, so any verification written as "no occurrences of `find` remain"
+    /// harder half: `replaceWith` CONTAINING `find`. Replacing "NORMA" with "NORMA INC" leaves
+    /// plenty of "NORMA"s behind, so any verification written as "no occurrences of `find` remain"
     /// would be wrong here. The implementation verifies by full expected-text equality instead, which
     /// this drill is the live proof of.
     func testLiveDocsReplaceHandlesMultipleOccurrencesAndAReplacementContainingTheSearchText() async throws {
         let (path, host, _) = try await openLive("two-page.odt")
         let result = await send(command("office.docs.replace",
-                                        args: ["path": path, "find": "WINTER", "replaceWith": "WINTER INC"],
+                                        args: ["path": path, "find": "NORMA", "replaceWith": "NORMA INC"],
                                         sessionId: "S1", commandId: "pcmd_replace_multi"), through: host)
         XCTAssertTrue(result.ok, "\(result)")
         XCTAssertTrue((result.result ?? "").contains("replaced 2 occurrences"),
-                      "\"WINTER\" occurs in paragraphs 1 and 3: \(result)")
+                      "\"NORMA\" occurs in paragraphs 1 and 3: \(result)")
 
         let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
-        XCTAssertTrue(contentXML.contains("WINTER INC GATE"), "paragraph 1 must be replaced: \(contentXML.prefix(0))")
-        XCTAssertTrue(contentXML.contains("WINTER INC PAGE TWO"), "paragraph 3 must be replaced too")
-        XCTAssertFalse(contentXML.contains("WINTER INC INC"),
+        XCTAssertTrue(contentXML.contains("NORMA INC GATE"), "paragraph 1 must be replaced: \(contentXML.prefix(0))")
+        XCTAssertTrue(contentXML.contains("NORMA INC PAGE TWO"), "paragraph 3 must be replaced too")
+        XCTAssertFalse(contentXML.contains("NORMA INC INC"),
                        "the replacement must not have been applied to its own output")
     }
 
@@ -372,11 +372,11 @@ final class OfficeDocsCommandTests: XCTestCase {
         XCTAssertTrue(result.ok, "\(result)")
 
         let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
-        XCTAssertTrue(contentXML.contains("PREFIXMARKER WINTER GATE"),
+        XCTAssertTrue(contentXML.contains("PREFIXMARKER NORMA GATE"),
                       "insert at:start must land at the very beginning of the first paragraph, not merely somewhere")
         let marker = try XCTUnwrap(contentXML.range(of: "PREFIXMARKER"))
         let probe = try XCTUnwrap(contentXML.range(of: "office stage A embed probe"))
-        let pageTwo = try XCTUnwrap(contentXML.range(of: "WINTER PAGE TWO"))
+        let pageTwo = try XCTUnwrap(contentXML.range(of: "NORMA PAGE TWO"))
         XCTAssertTrue(marker.lowerBound < probe.lowerBound && probe.lowerBound < pageTwo.lowerBound,
                       "the rest of the document must survive, in order, after the insert")
         // The reversed-text signature specifically: each character pushed the previous one right.
@@ -386,7 +386,7 @@ final class OfficeDocsCommandTests: XCTestCase {
 
     /// **The placement drill for `append`** — at the END, as its own NEW paragraph, after the
     /// fixture's last one. "at the end" and "as a new paragraph" are two separate claims and both are
-    /// asserted: the marker comes after "WINTER PAGE TWO" in the saved bytes, and it does not appear
+    /// asserted: the marker comes after "NORMA PAGE TWO" in the saved bytes, and it does not appear
     /// glued onto it.
     func testLiveDocsAppendLandsAsANewParagraphAfterEverythingElse() async throws {
         let (path, host, _) = try await openLive("two-page.odt")
@@ -399,9 +399,9 @@ final class OfficeDocsCommandTests: XCTestCase {
 
         let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
         XCTAssertTrue(contentXML.contains("SUFFIXMARKER"), "the saved file must carry the appended text")
-        XCTAssertFalse(contentXML.contains("WINTER PAGE TWOSUFFIXMARKER"),
+        XCTAssertFalse(contentXML.contains("NORMA PAGE TWOSUFFIXMARKER"),
                        "append must start a NEW paragraph, not continue the last one")
-        let pageTwo = try XCTUnwrap(contentXML.range(of: "WINTER PAGE TWO"))
+        let pageTwo = try XCTUnwrap(contentXML.range(of: "NORMA PAGE TWO"))
         let marker = try XCTUnwrap(contentXML.range(of: "SUFFIXMARKER"))
         XCTAssertTrue(pageTwo.lowerBound < marker.lowerBound,
                       "the appended paragraph must come AFTER the document's own last one")
@@ -419,7 +419,7 @@ final class OfficeDocsCommandTests: XCTestCase {
         XCTAssertTrue((result.result ?? "").contains("now has 3 paragraphs"),
                       "insert must NOT add a paragraph: \(result)")
         let contentXML = try readODFEntry(atPath: path, entry: "content.xml")
-        XCTAssertTrue(contentXML.contains("WINTER PAGE TWO AND MORE"),
+        XCTAssertTrue(contentXML.contains("NORMA PAGE TWO AND MORE"),
                       "insert at the end must continue the last paragraph: \(path)")
     }
 
@@ -617,7 +617,7 @@ final class OfficeDocsCommandTests: XCTestCase {
     /// (`PanelEditorTab.swift:125`). So there is no refusal to pin — there is an obligation to prove
     /// the write actually works, on Word's own bytes rather than ODF's.
     ///
-    /// `gate.docx`'s body is "WINTER GATE" / "office stage A embed probe" (read from its own
+    /// `gate.docx`'s body is "NORMA GATE" / "office stage A embed probe" (read from its own
     /// `word/document.xml`), so the same placement standard applies: the appended paragraph must come
     /// AFTER both, in the saved OOXML part.
     func testLiveDocsWritesWordDocumentsExactlyLikeODF() async throws {
@@ -629,8 +629,8 @@ final class OfficeDocsCommandTests: XCTestCase {
 
         let documentXML = try readODFEntry(atPath: path, entry: "word/document.xml")
         XCTAssertTrue(documentXML.contains("DOCXMARKER"), "the saved .docx must carry the appended text")
-        XCTAssertTrue(documentXML.contains("WINTER GATE"), "the original body must survive")
-        let gate = try XCTUnwrap(documentXML.range(of: "WINTER GATE"))
+        XCTAssertTrue(documentXML.contains("NORMA GATE"), "the original body must survive")
+        let gate = try XCTUnwrap(documentXML.range(of: "NORMA GATE"))
         let probe = try XCTUnwrap(documentXML.range(of: "office stage A embed probe"))
         let marker = try XCTUnwrap(documentXML.range(of: "DOCXMARKER"))
         XCTAssertTrue(gate.lowerBound < probe.lowerBound && probe.lowerBound < marker.lowerBound,
@@ -648,7 +648,7 @@ final class OfficeDocsCommandTests: XCTestCase {
         XCTAssertTrue(result.ok, "\(result)")
         XCTAssertTrue((result.result ?? "").contains("replaced 1 occurrence"), "\(result)")
         let documentXML = try readODFEntry(atPath: path, entry: "word/document.xml")
-        XCTAssertTrue(documentXML.contains("WINTER GATEWAY"), "the saved .docx must carry the replacement")
+        XCTAssertTrue(documentXML.contains("NORMA GATEWAY"), "the saved .docx must carry the replacement")
     }
 
 
@@ -1287,7 +1287,7 @@ final class OfficeDocsCommandTests: XCTestCase {
     func testLiveAWriteToAnExistingDocumentDoesNotClaimToHaveCreatedIt() async throws {
         let (path, host, _) = try await openLive("two-page.odt", as: "already-here.odt")
         let result = await send(command("office.docs.replace",
-                                        args: ["path": path, "find": "WINTER GATE", "replaceWith": "WINTER GATEWAY"],
+                                        args: ["path": path, "find": "NORMA GATE", "replaceWith": "NORMA GATEWAY"],
                                         sessionId: "S1", commandId: "pcmd_existing_replace"), through: host)
         XCTAssertTrue(result.ok, "\(result)")
         let text = (result.result ?? "").lowercased()

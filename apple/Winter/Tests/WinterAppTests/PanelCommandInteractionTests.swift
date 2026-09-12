@@ -355,7 +355,7 @@ final class PanelCommandInteractionTests: XCTestCase {
         XCTAssertEqual(transcript().last?.params["text"] as? String, "winter")
         XCTAssertEqual(sent.count, 1)
         XCTAssertEqual(sent.first?.ok, true)
-        XCTAssertTrue(sent.first?.result?.contains("typed 5 characters") == true, "\(sent)")
+        XCTAssertTrue(sent.first?.result?.contains("typed 6 characters") == true, "\(sent)")
         XCTAssertTrue(sent.first?.result?.contains("name=\"q\"") == true, "\(sent)")
     }
 
