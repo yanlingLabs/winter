@@ -28,7 +28,11 @@ export function bundleRuntimePath(execPath: string, entry: RuntimeBundleEntry): 
   return join(dirname(execPath), RUNTIME_BUNDLE_LAYOUT[entry]);
 }
 
-/** P8d-3's record. Versions and checksums ONLY — never a path under a home, never a credential. */
+/** P8d-3's record. Versions and checksums ONLY — never a path under a home, never a credential.
+ *  P9a-8: `winterSource` names WHICH ladder rung produced the embedded `winter` — the installed
+ *  npm platform package (the strong row-16 identity check, `row16IdentityCheck`) or a from-source
+ *  build of the pinned-tag checkout (the weaker `row16ProvenanceCheck`, rehearsal/dry-run only).
+ *  Optional so an 8d-staged bundle (written before this field existed) still parses. */
 export interface VersionsJson {
   schema: 1;
   winterAgentSdk: string;
@@ -37,6 +41,16 @@ export interface VersionsJson {
   claudeCode: string;
   checksums: { winterPreSign: string; claude: string };
   stagedAt: string;
+  winterSource?: "platform-package" | "checkout-build";
+}
+
+const WINTER_SOURCES = ["platform-package", "checkout-build"] as const;
+
+/** An absent `winterSource` is an 8d-staged bundle, from before this field existed — those were
+ *  ALWAYS a from-source build (there was no other rung yet), so `"checkout-build"` is the correct
+ *  default, never `"platform-package"`. */
+export function winterSourceOf(v: VersionsJson): "platform-package" | "checkout-build" {
+  return v.winterSource ?? "checkout-build";
 }
 
 const SHA256_RE = /^[0-9a-f]{64}$/;
@@ -69,6 +83,13 @@ export function parseVersionsJson(text: string): VersionsJson {
     if (typeof x !== "string" || !SHA256_RE.test(x)) throw new Error(`VERSIONS.json: checksums.${k} must be lowercase sha256 hex`);
     return x;
   };
+  let winterSource: VersionsJson["winterSource"];
+  if (v.winterSource !== undefined) {
+    if (typeof v.winterSource !== "string" || !(WINTER_SOURCES as readonly string[]).includes(v.winterSource)) {
+      throw new Error(`VERSIONS.json: winterSource must be one of ${WINTER_SOURCES.join(", ")} (got ${JSON.stringify(v.winterSource)})`);
+    }
+    winterSource = v.winterSource as VersionsJson["winterSource"];
+  }
   const out: VersionsJson = {
     schema: 1,
     winterAgentSdk: str("winterAgentSdk"),
@@ -77,6 +98,7 @@ export function parseVersionsJson(text: string): VersionsJson {
     claudeCode: str("claudeCode"),
     checksums: { winterPreSign: sha("winterPreSign"), claude: sha("claude") },
     stagedAt: str("stagedAt"),
+    ...(winterSource === undefined ? {} : { winterSource }),
   };
   const mismatches: string[] = [];
   if (out.winterAgentSdk !== REQUIRED_WINTER_AGENT_SDK) mismatches.push(`winterAgentSdk ${out.winterAgentSdk} (pinned ${REQUIRED_WINTER_AGENT_SDK})`);
