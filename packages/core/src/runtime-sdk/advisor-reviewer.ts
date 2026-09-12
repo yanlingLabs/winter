@@ -67,6 +67,25 @@ function firstSlotCanonicalIdFor(familyId: "gpt" | "claude"): string | undefined
 }
 
 /**
+ * Review fix F1: `advisorReviewerFor`'s `sessionModel` deriving the D30 default is only correct when
+ * it reports THIS resolver's own family — and the ONE caller of this resolver (`daemon.ts`, feeding
+ * `RuntimeSdkOptions.advisor` for the OFFICIAL leg) has a single, deployment-wide instance serving
+ * every official-leg session, which by D13-2 is ALWAYS Claude-family (Anthropic-protocol, credentialed
+ * Claude models route straight to this leg; no other family can land here at all). Wiring
+ * `sessionModel` to `settings.provider.model` — the WINTER leg's own default-provider model, which on
+ * a Codex/OpenAI-primary install is an openai-family model — therefore fed `d30DefaultModel` the WRONG
+ * family and silently resolved an OpenAI reviewer for a Claude-only leg. This is the fix: a
+ * `sessionModel` for this ONE known-Claude-only caller that reports the Claude family unconditionally,
+ * never reading `settings.provider` at all. (The "else the session's own model" rung of D30's table
+ * stays reachable for a FUTURE non-Claude-family official-leg session — see this module's own header
+ * — this export just states the one thing this deployment can promise TODAY: every session on this
+ * leg is Claude-family, so its placeholder session-model IS a Claude-family model, unconditionally.)
+ */
+export function officialLegDefaultSessionModel(): string | undefined {
+  return firstSlotCanonicalIdFor("claude");
+}
+
+/**
  * D30's table, shared by both legs so they can never state two different defaults for the same
  * family: unset -> a gpt session's reviewer is "astra" (`gpt-6-astra`), a claude session's is "fable"
  * (`claude-fable-5-1`), any OTHER family falls through to the session's own model (which then most
@@ -166,16 +185,49 @@ function claudeFamilyReviewer(secrets: SecretStore, targetModel: string, connect
  * no-restart rule lives inside this closure, not at the call site).
  *
  * SYNCHRONOUS BY CONTRACT (`ReviewerResolver = () => ResolvedReviewer | undefined`): this function
- * decides WHETHER a reviewer resolves and WHICH model it reports without touching the Keychain — the
- * credential is read (and the HTTP-capable provider actually built) only inside the returned
- * `AdvisorReviewer.generate()`, which IS async. A model whose family this file cannot serve (or one
- * with genuinely no credential at all) reports `undefined` here, exactly like the SDK's own
- * `resolveReviewer` does for its "nothing to ask" case — never a throw, and never a reviewer that
- * `generate()` then always fails for a wrong reason. (A credential that exists at `resolveReviewer()`
- * time but goes missing before `generate()` runs is WS-06 §4's ordinary "reviewer unavailable" tool
- * error — this file makes no promise stronger than that, matching the SDK's own R6-G note on
- * `credentialEpoch`: presence here is a snapshot, not a lock.)
+ * decides WHETHER a reviewer resolves and WHICH model it reports WITHOUT a live Keychain read —
+ * credential PRESENCE is checked against `credentialPresenceCache`'s sync, background-refreshed
+ * snapshot (review fix F3), and a family with no configured credential reports `undefined` here,
+ * exactly like the SDK's own `resolveReviewer` does for its "nothing to ask" case — never a throw.
+ * The credential's actual VALUE is still read (and the HTTP-capable provider actually built) only
+ * inside the returned `AdvisorReviewer.generate()`, which IS async — so a credential that was present
+ * at `resolveReviewer()` time but goes missing (or was a cold-cache false-negative promoted to
+ * true moments later) before `generate()` runs is WS-06 §4's ordinary "reviewer unavailable" tool
+ * error, never a crash; presence here is a snapshot, not a lock (matching the SDK's own R6-G note on
+ * `credentialEpoch`).
  */
+/**
+ * Review fix F3: a SYNCHRONOUS "is this credential material present" cache, refreshed in the
+ * background — the same "a synchronous answer over an asynchronous fact" shape
+ * `winter-agent-sdk`'s own `production-wiring.ts`/`session-provider.ts` uses for its identical
+ * credential-gate problem (`credentialPresent`, read during the M5 diagnosis). `ReviewerResolver` is
+ * pinned SYNCHRONOUS (`() => ResolvedReviewer | undefined`), so a real Keychain read cannot happen
+ * inside `resolveReviewer()` itself — this cache is what lets the resolver answer `undefined` for a
+ * family with no configured credential WITHOUT ever awaiting inside the call.
+ *
+ * COLD-START HONESTY: a name probed for the first time answers `false` (absent) synchronously and
+ * fires a background probe; the NEXT call after that probe lands reads the real answer. This can
+ * under-report "present" for one call right after this resolver is first built (or after a fresh
+ * material write) — recorded rather than hidden, and it fails toward "no reviewer" (WS-06 §4's own
+ * safe default), never toward inventing a provider for a credential that turns out absent.
+ */
+function credentialPresenceCache(secrets: SecretStore): (name: string) => boolean {
+  const cache = new Map<string, boolean>();
+  const inFlight = new Set<string>();
+  const refresh = (name: string): void => {
+    if (inFlight.has(name)) return;
+    inFlight.add(name);
+    void readCredentialMaterial(secrets, name)
+      .then((m) => cache.set(name, m !== null))
+      .catch(() => cache.set(name, false))
+      .finally(() => inFlight.delete(name));
+  };
+  return (name: string): boolean => {
+    refresh(name);
+    return cache.get(name) ?? false;
+  };
+}
+
 export function advisorReviewerFor(deps: {
   settings: () => Settings | undefined;
   secrets: SecretStore;
@@ -189,13 +241,22 @@ export function advisorReviewerFor(deps: {
    */
   connectionOverride?: () => { anthropicBaseUrl?: string } | undefined;
 }): ReviewerResolver {
+  const hasCredential = credentialPresenceCache(deps.secrets);
   return () => {
     const explicit = winterOptionsFromSettings(deps.settings()).advisorModel;
     const targetModel = explicit ?? d30DefaultModel(deps.sessionModel());
     if (targetModel === undefined) return undefined;
     const family = deps.familyOf(targetModel);
-    if (family === "openai") return { provider: openAiFamilyReviewer(deps.secrets, deps.settings, targetModel), model: targetModel };
-    if (family === "claude") return { provider: claudeFamilyReviewer(deps.secrets, targetModel, deps.connectionOverride), model: targetModel };
+    // Review fix F3: "no credential for the target family" is `undefined`, checked HERE (sync, from
+    // the cache above) — never inside `generate()`, and never a live Keychain read in this function.
+    if (family === "openai") {
+      if (!hasCredential(CREDENTIAL_MATERIAL_NAMES.codexOauth) && !hasCredential(CREDENTIAL_MATERIAL_NAMES.openai)) return undefined;
+      return { provider: openAiFamilyReviewer(deps.secrets, deps.settings, targetModel), model: targetModel };
+    }
+    if (family === "claude") {
+      if (!hasCredential(ANTHROPIC_CREDENTIAL_SECRET_NAME)) return undefined;
+      return { provider: claudeFamilyReviewer(deps.secrets, targetModel, deps.connectionOverride), model: targetModel };
+    }
     // "other": 8d states no provider-runtime mapping for a third family (see this module's header).
     return undefined;
   };
