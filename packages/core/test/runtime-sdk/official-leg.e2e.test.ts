@@ -362,11 +362,25 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       const spoolRoot = officialConfigDirFor(w.home);
       expect(existsSync(spoolRoot)).toBe(true);
       expect(statSync(spoolRoot).mode & 0o777).toBe(0o700);
+      // P9c-1 Step 4(b): no subscription-style credential file was ever written into this leg's
+      // own config dir — an api-key session never logs in, so nothing should ever create one.
+      expect(existsSync(join(spoolRoot, ".credentials.json"))).toBe(false);
 
       // m1: `~/.claude` is never created under the CHILD's own (hermetic) HOME — before this fix
       // the child had no HOME of its own (it silently inherited the real machine's `$HOME`), so this
       // assertion checked the wrong directory and passed for the wrong reason.
       expect(existsSync(join(w.hermetic.home, ".claude"))).toBe(false);
+
+      // P9c-1 Step 4(a): the REAL 0.3.250 binary's own init message reports the pinned credential
+      // source — MEASURED here (this world's own `explicitCredentials` names `ANTHROPIC_API_KEY`
+      // explicitly, per `buildWorld`'s own header, even though its `selectionFor()` records
+      // `authFamily: "custom"` for the loopback-redirect escape hatch: `AUTH_FAMILY_VARIABLES`
+      // (the installed router package's own table) admits `ANTHROPIC_BASE_URL` only for
+      // `console-oauth`/cloud/`custom` families, never for a real `api-key` one — so a genuine
+      // `authFamily: "api-key"` session cannot be redirected to a loopback fake at all, and this is
+      // the closest real-binary proof of Step 4(a) achievable without a real Anthropic key: the
+      // OBSERVED credential source for a real `ANTHROPIC_API_KEY` env var, on the real binary).
+      expect(w.session.init?.apiKeySource).toBe("ANTHROPIC_API_KEY");
     });
   }, 60_000);
 
@@ -1781,6 +1795,57 @@ describeWithClaudeRuntime("the official leg through startDaemon + IPC (P8c-14)",
     } finally {
       await bareDaemon.stop();
       rmSync(bareHome, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  // P9c-1 Step 4(c): a FAKE, syntactically-valid subscription-shaped credential file sitting
+  // nearby proves nothing here reads it — Winter's own selection (`session-driver.ts`'s
+  // `decideRuntime`) decides purely off ITS OWN secrets store (`credentialPresenceFrom`), never off
+  // anything under `.claude/`, so the refusal is IDENTICAL to the "NO anthropic material" test
+  // above regardless of this planted file's presence. `process.env.HOME` is saved/restored around
+  // the daemon's own lifetime (the same pattern `sessions.test.ts`'s own negative case uses) so the
+  // planted file sits under a throwaway hermetic HOME, never the real machine's `~/.claude` — never
+  // read, but also never at risk of being written to it.
+  test("a planted FAKE ~/.claude/.credentials.json + NO Anthropic key material still refuses BEFORE spawn (no fallback to the subscription path)", async () => {
+    const homeBefore = process.env.HOME;
+    const hermetic = hermeticOfficialHome("p9c1-row-c");
+    const claudeDir = join(hermetic.home, ".claude");
+    mkdirSync(claudeDir, { recursive: true });
+    // Syntactically valid, structurally OAuth-shaped — and explicitly FAKE (never a real token).
+    writeFileSync(join(claudeDir, ".credentials.json"), JSON.stringify({
+      claudeAiOauth: { accessToken: "FAKE-not-a-real-token-9c1", refreshToken: "FAKE-not-a-real-refresh-9c1", expiresAt: 4102444800000, scopes: ["user:inference"] },
+    }));
+    process.env.HOME = hermetic.home;
+
+    const bareHome = realpathSync(mkdtempSync(join(tmpdir(), "winter-p9c1-rowc-")));
+    writeFileSync(join(bareHome, "settings.json"), JSON.stringify({
+      schemaVersion: 2,
+      provider: { type: "openai-compatible", model: "winter-test/unused", baseUrl: "http://127.0.0.1:9/v1" },
+      runtimes: { winterExecutable: WINTER_BIN, claudeExecutable: claudeRuntimeForTests()!.executable, winterIdleTimeoutSec: 10 },
+    }, null, 2));
+    const bareSecrets = new FileSecretStore(join(bareHome, "test-secrets")); // no anthropic material written
+    const bareDaemon = await startDaemon({ home: bareHome, secrets: bareSecrets, agentProvider: null });
+    try {
+      if ("unavailable" in bareDaemon.runtimeState) throw bareDaemon.runtimeState.unavailable;
+      const bareClient = await TestClient.connect(bareDaemon.socketPath);
+      try {
+        await bareClient.hello(bareDaemon.tokens.harness, "e2e");
+        let caught: { rpc?: { data?: { code?: string }; message?: string } } | undefined;
+        try {
+          await bareClient.call(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: CATALOG_CLAUDE_MODEL });
+        } catch (err) {
+          caught = err as typeof caught;
+        }
+        expect(caught).toBeDefined();
+        expect(caught?.rpc?.data?.code).toBe("runtime_selection_refused");
+      } finally {
+        bareClient.close();
+      }
+    } finally {
+      await bareDaemon.stop();
+      rmSync(bareHome, { recursive: true, force: true });
+      if (homeBefore === undefined) delete process.env.HOME; else process.env.HOME = homeBefore;
+      cleanupHermeticOfficialHomes();
     }
   }, 60_000);
 });

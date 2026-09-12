@@ -444,3 +444,77 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
     expect(h.types()).toContain("turn_completed");
   });
 });
+
+// ── Phase 9c (P9c-1), Step 5 — the documented forceLoginOrgUUID / managed-policy failure mode ──
+//
+// CARRY (the brief's own wording): a managed `forceLoginOrgUUID` deployment cannot be reproduced
+// without a managed Mac, so this is the unit-level proof on a SCRIPTED child exit — the real
+// binary's own text is never something this suite can generate.
+describe("P9c-1 (Step 5) — a pre-init exit naming a managed auth-policy block", () => {
+  test("forceLoginOrgUUID in the raw process error -> official_auth_blocked_by_policy, not the generic pre-init crash", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    const crash = new Error("Claude Code is configured with forceLoginOrgUUID and refuses environment credentials at startup");
+    crash.name = "ProcessError";
+    h.q().fail(crash);
+    await h.settled();
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string; message?: string }) | undefined;
+    expect(err?.code).toBe("official_auth_blocked_by_policy");
+    expect(err?.message).toContain("forceLoginOrgUUID");
+  });
+
+  test("\"environment credential\" (the digest's second phrase) also matches", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    const crash = new Error("this deployment blocks environment credential injection at startup");
+    crash.name = "ProcessError";
+    h.q().fail(crash);
+    await h.settled();
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string }) | undefined;
+    expect(err?.code).toBe("official_auth_blocked_by_policy");
+  });
+
+  test("an ordinary pre-init crash unrelated to a managed policy is left to the existing generic handling", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    const crash = new Error("connection reset by peer");
+    crash.name = "ProcessError";
+    h.q().fail(crash);
+    await h.settled();
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string }) | undefined;
+    expect(err).toBeDefined();
+    expect(err?.code).not.toBe("official_auth_blocked_by_policy");
+  });
+
+  test("a match AFTER init (a turn already started) never retroactively refuses — the phrase only matters pre-init", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID));
+    await h.settled();
+    const crash = new Error("forceLoginOrgUUID mentioned mid-turn, unrelated to startup");
+    crash.name = "ProcessError";
+    h.q().fail(crash);
+    await h.settled();
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string }) | undefined;
+    expect(err?.code).not.toBe("official_auth_blocked_by_policy");
+  });
+});
+
+// ── Phase 9c (P9c-1) — apiKeySource observability on OfficialInitFacts ─────────────────────────
+describe("P9c-1 — apiKeySource observability on OfficialInitFacts", () => {
+  test("session.init?.apiKeySource mirrors the init frame's own field, regardless of family", async () => {
+    const h = harness(); // default selection: authFamily "custom" (never asserted on)
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "ANTHROPIC_API_KEY" }));
+    await h.settled();
+    expect(h.session.init?.apiKeySource).toBe("ANTHROPIC_API_KEY");
+  });
+
+  test("absent from the frame -> undefined, never invented", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID)); // no apiKeySource field at all
+    await h.settled();
+    expect(h.session.init?.apiKeySource).toBeUndefined();
+  });
+});

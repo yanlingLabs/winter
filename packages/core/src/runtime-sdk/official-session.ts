@@ -33,6 +33,10 @@ export interface OfficialInitFacts {
   sessionId?: string;
   model?: string;
   tools: string[];
+  /** Phase 9c (P9c-1): the SDK init message's own `apiKeySource` — captured for observability
+   *  (and what Step 3's assertion, above, reads) regardless of auth family; `undefined` only when
+   *  the field itself was absent from the frame (never invented as a pass). */
+  apiKeySource?: string;
 }
 
 /** M6a: the structural subset of 8a's `RuntimeSessionRecords` this driver writes — the same shape
@@ -165,6 +169,37 @@ export class OfficialAuthSourceRefused extends Error {
     super(`the official runtime's init message reported apiKeySource=${apiKeySource}, not the pinned ANTHROPIC_API_KEY; runtimes.official.subscriptionAuth is off (P9c-1's shipped default), so this session refuses before any turn runs`);
     this.name = "OfficialAuthSourceRefused";
   }
+}
+
+/**
+ * Phase 9c (P9c-1, Step 5 — the documented failure mode): a managed `forceLoginOrgUUID` deployment
+ * BLOCKS environment credentials (`ANTHROPIC_API_KEY` included) at the vendor CLI's own startup,
+ * before it ever reaches `system/init` (the digest's own fact #5) — so this leg's child exits
+ * before `sawInit`, and the raw process error is the ONLY place the reason is visible. Surfaced
+ * typed, with the captured line, rather than left as an undifferentiated pre-init crash (the
+ * existing `!inc.sawInit && isExpectedEndError(err)` branch, which says only "exited before
+ * init"). CANNOT be proven end to end without a managed Mac (no fixture reproduces a real
+ * `forceLoginOrgUUID` deployment) — carried, with the unit-level proof on a scripted child exit
+ * (`official-session.test.ts`).
+ */
+export class OfficialAuthBlockedByPolicy extends Error {
+  readonly code = "official_auth_blocked_by_policy" as const;
+  constructor(readonly capturedLine: string) {
+    super(`the official runtime exited before reporting init, naming a managed-settings credential block (forceLoginOrgUUID / "environment credential"): ${capturedLine}`);
+    this.name = "OfficialAuthBlockedByPolicy";
+  }
+}
+
+/** The digest's own two phrases (fact #5) — matched case-insensitively against the raw error's
+ *  `message` (the only place a pre-init CLI exit's own explanation can live: no `system/init` ever
+ *  arrived for the projector to fold into a structured frame). Returns the matched message verbatim
+ *  (the "captured line" `OfficialAuthBlockedByPolicy` names), or `undefined` when neither phrase
+ *  appears — never a false positive on an ordinary pre-init crash (a dead loopback fake, a killed
+ *  process) that merely shares `isExpectedEndError`'s class. */
+function managedAuthPolicyBlockLine(err: unknown): string | undefined {
+  const text = err instanceof Error ? err.message : typeof err === "string" ? err : undefined;
+  if (text === undefined) return undefined;
+  return /forceLoginOrgUUID/i.test(text) || /environment credential/i.test(text) ? text : undefined;
 }
 
 interface Incarnation {
@@ -423,6 +458,7 @@ class OfficialSessionImpl implements OfficialSession {
             ...(reportedId === undefined ? {} : { sessionId: reportedId }),
             ...(typeof msg.model === "string" ? { model: msg.model } : {}),
             tools: Array.isArray(msg.tools) ? (msg.tools as unknown[]).filter((t): t is string => typeof t === "string") : [],
+            ...(typeof msg.apiKeySource === "string" ? { apiKeySource: msg.apiKeySource } : {}),
           };
         }
         let batch: ProjectedBatch;
@@ -440,7 +476,14 @@ class OfficialSessionImpl implements OfficialSession {
         if (isResultFrame(msg)) this.onResult();
       }
     } catch (err) {
-      if (this.ending && this.inFlight === 0 && isExpectedEndError(err)) {
+      const policyBlockLine = !inc.sawInit && isExpectedEndError(err) ? managedAuthPolicyBlockLine(err) : undefined;
+      if (policyBlockLine !== undefined) {
+        // Phase 9c (P9c-1, Step 5): distinguish this from the undifferentiated pre-init crash
+        // branch below — the reason is visible ONLY here, in the raw process error's own text.
+        const refusal = new OfficialAuthBlockedByPolicy(policyBlockLine);
+        this.log(`the official child for ${this.sessionId} exited before init: ${refusal.message}`);
+        this.safeAppend({ type: "agent_error", sessionId: this.sessionId, threadId: MAIN_THREAD, message: refusal.message, code: refusal.code });
+      } else if (this.ending && this.inFlight === 0 && isExpectedEndError(err)) {
         // deliberate end, nothing running
       } else if (!inc.sawInit && isExpectedEndError(err)) {
         this.log(`the official child for ${this.sessionId} exited before init (${(err as Error).name})`);
