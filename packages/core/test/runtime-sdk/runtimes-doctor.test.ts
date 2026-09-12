@@ -1,7 +1,9 @@
 // Winter Phase 8d (fix round 1, Major-1) — `diagnoseRuntimes` against real fs in a mkdtemp tree,
-// same shape as `runtimes-probe.test.ts` (no injectable seams besides `settings` itself — the spine
-// contract is `{ execPath, home, env, settings }`). READ-ONLY: never spawns anything real; fake
-// `winter`/`claude` files are plain chmod'd text (never executed by the doctor).
+// same shape as `runtimes-probe.test.ts` (the spine contract is `{ execPath, home, env, settings }`,
+// plus — P9a fix wave, M1 collateral — the optional `resolvePlatformPackageBin` seam threaded
+// through to `resolveWinterExecutable`'s P9a-9 rung, so "nothing staged" assertions never depend on
+// this tree's ambient node_modules). READ-ONLY: never spawns anything real; fake `winter`/`claude`
+// files are plain chmod'd text (never executed by the doctor).
 import { afterAll, describe, expect, test } from "bun:test";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -85,7 +87,9 @@ describe("diagnoseRuntimes (norma doctor's runtimes section, fix round 1 Major-1
   test("nothing configured and nothing staged anywhere: typed reasons, never a throw, bundle omitted", async () => {
     const home = tempDir("runtimes-doctor-home-empty-");
     const execPath = join(tempDir("runtimes-doctor-resources-empty-"), "norma-core");
-    const report = await diagnoseRuntimes({ execPath, home, env: {}, settings: undefined });
+    // P9a fix wave, M1 collateral: never depend on this tree's ambient node_modules (m1's
+    // local-pack residue) for a test titled "nothing staged anywhere" — inject the miss.
+    const report = await diagnoseRuntimes({ execPath, home, env: {}, settings: undefined, resolvePlatformPackageBin: () => undefined });
 
     expect(report.winter.resolved).toBeUndefined();
     expect(report.winter.error).toBeDefined();

@@ -31,6 +31,11 @@ export async function diagnoseRuntimes(input: {
   home: string;
   env: Record<string, string | undefined>;
   settings: Settings | undefined;
+  /** P9a fix wave (M1 collateral): test seam for the P9a-9 platform-package rung, threaded
+   *  straight through to `resolveWinterExecutable`; defaults to its own default
+   *  (`resolvePlatformPackageWinter`) — never a behaviour change for the real `norma doctor`
+   *  route, which never sets this. */
+  resolvePlatformPackageBin?: () => string | undefined;
 }): Promise<RuntimesReport> {
   // The SAME settings door every real Winter-leg/official-leg consumer reads
   // (`create.ts`'s own `winterOptionsFromSettings(deps.settings()).{winterExecutable,claudeExecutable}`)
@@ -47,6 +52,7 @@ export async function diagnoseRuntimes(input: {
       execPath: input.execPath,
       home: input.home,
       exists: safeExists,
+      ...(input.resolvePlatformPackageBin === undefined ? {} : { resolvePlatformPackageBin: input.resolvePlatformPackageBin }),
     });
     if (resolution.ok) winter.resolved = { path: resolution.path, source: resolution.source };
     else winter.error = resolution.error.message;
