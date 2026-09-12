@@ -71,6 +71,7 @@ import { makeApply } from "./settings-apply";
 import { SettingsWatcher } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "./runtime-sdk/create";
+import { advisorReviewerFor, familyOfModel } from "./runtime-sdk/advisor-reviewer";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
 import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
@@ -950,6 +951,19 @@ export async function startDaemon(opts: {
       // live facet for — a parked (`resumable`) Winter session answers `unavailable` instead of
       // holding its mail forever, and is never cold-resumed behind the daemon's back.
       sessionPermissionClass: sessionPermissionClassFor({ records: () => runtime?.records, store }),
+      // P8d-8 (D30): the OFFICIAL leg's ONE reviewer resolver, ALWAYS wired (never conditional on
+      // whether `runtimes.advisorModel` is set — `advisorReviewerFor` reads that setting live
+      // itself). `sessionModel` is a best-effort fallback for the D30 default's "else the session's
+      // own model" rung — `advisor-reviewer.ts`'s own header records why a single daemon-wide getter
+      // cannot disambiguate between two CONCURRENT official-leg sessions on different models, and why
+      // that is a non-issue today (the official leg serves Claude-family models only, D13-2, so the
+      // default is always "claude -> fable" regardless of which session asked).
+      advisorReviewer: advisorReviewerFor({
+        settings: () => settings ?? undefined,
+        secrets,
+        familyOf: familyOfModel,
+        sessionModel: () => settings?.provider?.model,
+      }),
       log: (line) => console.error(`runtime-sdk: ${line}`),
     });
   } catch (err) {
