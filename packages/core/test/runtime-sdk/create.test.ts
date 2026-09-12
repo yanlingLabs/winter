@@ -320,12 +320,14 @@ describe("spawnHookFor — P8b-1's one topology site", () => {
 describe("the shutdown budget (P8b-32)", () => {
   // THE WHOLE POINT OF THE NUMBER. Teardown is sequential in `daemon.ts`'s `stop()` — this grace,
   // then 8a's deletion drain — and the sum must fit inside `DaemonSupervisor.gracefulExitTimeout`
-  // (2.0 s), past which the app SIGKILLs the daemon, `lock.release()` never runs and the socket file
-  // is left on disk. Asserted so that editing EITHER constant trips a test.
-  test("300 ms, and 300 + 8a's 1500 ms drain is inside the app's 2.0 s SIGKILL grace", () => {
+  // (5.0 s since Winter Phase 8d's P8d-6 — the app's quit runs behind `.terminateLater`, so macOS's
+  // own ~5 s window no longer binds; it was 2.0 s before), past which the app SIGKILLs the daemon,
+  // `lock.release()` never runs and the socket file is left on disk. Asserted so that editing EITHER
+  // constant trips a test — the two moved TOGETHER in 8d (1500→3500 ms beside 2.0→5.0 s).
+  test("300 ms, and 300 + the 3500 ms drain is inside the app's 5.0 s SIGKILL grace (P8d-6)", () => {
     expect(SHUTDOWN_QUERY_GRACE_MS).toBe(300);
-    expect(RUNTIME_SHUTDOWN_DRAIN_MS).toBe(1_500);
-    expect(SHUTDOWN_QUERY_GRACE_MS + RUNTIME_SHUTDOWN_DRAIN_MS).toBeLessThan(2_000);
+    expect(RUNTIME_SHUTDOWN_DRAIN_MS).toBe(3_500);
+    expect(SHUTDOWN_QUERY_GRACE_MS + RUNTIME_SHUTDOWN_DRAIN_MS).toBeLessThan(5_000);
   });
 });
 
