@@ -46,9 +46,12 @@ jobs:
         run: bun test ${{ matrix.args }}
 
   # Winter Phase 8d (P8d-16): the ONE place this workflow reads the pinned winter-agent-sdk
-  # version, rather than hardcoding it in BOTH the tag `ref:` AND the uploaded-artifact `name:`
-  # below (it drifted from `versions.ts`'s own `REQUIRED_WINTER_AGENT_SDK` once already, in 8c's
-  # spine) — `scripts/pins.test.ts` is the tripwire that a literal never creeps back into either.
+  # version, rather than hardcoding it in multiple places (it drifted from `versions.ts`'s own
+  # `REQUIRED_WINTER_AGENT_SDK` once already, in 8c's spine) — `scripts/pins.test.ts` is the
+  # tripwire that a literal never creeps back in. P9a-8: since the `winter-binary` job's own
+  # upload-artifact `name:` is gone, this output's only remaining consumer is the `ref:` in each
+  # job's FALLBACK checkout of the SDK repo — dated, removed at the 0.0.5 pin flip alongside them
+  # (this job itself stays: `test-core`/`test-cli`/`verify` still need the version output).
   versions:
     name: read pinned versions
     runs-on: macos-latest
@@ -70,63 +73,16 @@ jobs:
           VERSION=$(bun -e 'import { REQUIRED_WINTER_AGENT_SDK } from "./packages/core/src/runtime-sdk/versions"; console.log(REQUIRED_WINTER_AGENT_SDK);')
           echo "winter-agent-sdk=${VERSION}" >> "$GITHUB_OUTPUT"
 
-  # P8b-2: build the `winter` runtime binary the daemon spawns, FROM THE PINNED TAG.
-  #
-  # Not a dependency resolution against a sibling `src` (the shape the router just retired) and not
-  # an npm install either: the platform package that would carry a prebuilt binary is `private` and
-  # is not published, so the only honest way to get the exact peer this daemon is pinned to is to
-  # check that tag out and compile it. `build-winter.ts` refuses any other commit.
-  #
-  # `bun-version` is PINNED, not `latest`: the SDK's `build-runtime.ts` compiles with
-  # `bun build --compile`, so the bun on the runner is part of the artifact. A floating `latest`
-  # would make a pinned-tag build vary with whenever the job happened to run.
-  winter-binary:
-    name: build winter (pinned tag)
-    runs-on: macos-latest
-    needs: versions
-    steps:
-      - uses: actions/checkout@v4
-
-      # actions/checkout paths must live INSIDE the workspace, so the SDK lands in a dot-dir here
-      # rather than beside the repo. Public repository — no token. `fetch-depth: 0` because
-      # build-winter.ts proves the checkout with `git tag --points-at HEAD`, which needs the tag
-      # objects present locally.
-      - uses: actions/checkout@v4
-        with:
-          repository: yanlingLabs/winter-agent-sdk
-          ref: v${{ needs.versions.outputs.winter-agent-sdk }}
-          path: .winter-agent-sdk
-          fetch-depth: 0
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.3.14"
-
-      # This repo's own install: build-winter.ts reads REQUIRED_WINTER_AGENT_SDK out of
-      # packages/core/src/runtime-sdk/versions.ts, which imports SDK_VERSION from the npm package.
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      # The SDK checkout is pnpm-managed (never `bun install` there — it rewrites the manifest).
-      - name: Install the SDK checkout's dependencies
-        working-directory: .winter-agent-sdk
-        run: pnpm install --frozen-lockfile
-
-      - name: Build dist/winter
-        env:
-          NORMA_WINTER_SDK_CHECKOUT: ${{ github.workspace }}/.winter-agent-sdk
-        run: bun run build:winter
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: winter-v${{ needs.versions.outputs.winter-agent-sdk }}
-          path: dist/winter
-          if-no-files-found: error
-          retention-days: 7
+  # P9a-8: the `winter-binary` job (P8b-2: build winter from the pinned-tag SDK checkout, upload
+  # as an artifact, every consumer downloads it) is DELETED — winter's source is now the installed
+  # npm platform package (`@yanlinglabs/winter-agent-sdk-darwin-arm64`, an optional dependency of
+  # the wrapper `bun install` already resolves). UNTIL the pin flips to a published v0.0.5+
+  # (M3: 404 today — the package is not published at the current v0.0.4 pin), `bun install` alone
+  # does NOT bring it, so each job below that needs `winter` carries its own FALLBACK steps
+  # (dated 2026-09-12, P9a-8 — remove them, and the `versions` job's `winter-agent-sdk` output they
+  # are the only remaining consumer of, at the pin flip): build `dist/winter` from the pinned-tag
+  # checkout, exactly as this job used to, ONLY when `bun install` did not bring the platform
+  # package. `test-core`/`test-cli`/`verify` no longer download an uploaded artifact.
 
   # core is split OUT of the matrix above rather than given `needs:` on it, so the other three
   # entries stay independent of the winter build: a broken/slow SDK checkout must not hold up the
@@ -137,7 +93,7 @@ jobs:
   test-core:
     name: test · core
     runs-on: macos-latest
-    needs: [versions, winter-binary]
+    needs: [versions]
     steps:
       - uses: actions/checkout@v4
 
@@ -148,13 +104,57 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: winter-v${{ needs.versions.outputs.winter-agent-sdk }}
-          path: dist
+      # P9a-8: does `bun install` above already carry a usable winter (the installed npm platform
+      # package)? Not yet at the current v0.0.4 pin (M3: the package is not published) — this check
+      # is what the FALLBACK steps below key off, and what turns itself into a no-op the moment the
+      # pin flips to a published v0.0.5+.
+      - name: Check for the installed winter platform package (P9a-8)
+        id: winter-package
+        working-directory: packages/core
+        run: |
+          BIN=$(bun -e '
+          import { resolvePlatformPackageWinter } from "./src/runtime-sdk/executable";
+          console.log(resolvePlatformPackageWinter() ?? "");
+          ')
+          echo "bin=${BIN}" >> "$GITHUB_OUTPUT"
+          if [ -n "$BIN" ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
 
-      - name: Make the winter binary executable
-        run: chmod +x dist/winter
+      - name: Use the installed platform package's winter (P9a-8 — the strong row-16 path)
+        if: steps.winter-package.outputs.present == 'true'
+        run: |
+          mkdir -p dist
+          cp "${{ steps.winter-package.outputs.bin }}" dist/winter
+          chmod +x dist/winter
+
+      # FALLBACK (dated 2026-09-12, P9a-8 — remove this block, and pnpm/action-setup above it,
+      # once the winter-agent-sdk pin flips to a published v0.0.5+): the platform package is
+      # `private` and not published at the current v0.0.4 pin, so `bun install` cannot bring it —
+      # build `dist/winter` from the pinned-tag SDK checkout instead, exactly as the retired
+      # `winter-binary` job used to.
+      - uses: pnpm/action-setup@v4
+        if: steps.winter-package.outputs.present != 'true'
+        with:
+          version: 10
+
+      - name: Checkout winter-agent-sdk at the pinned tag (FALLBACK — remove at the 0.0.5 pin flip)
+        if: steps.winter-package.outputs.present != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: yanlingLabs/winter-agent-sdk
+          ref: v${{ needs.versions.outputs.winter-agent-sdk }}
+          path: .winter-agent-sdk
+          fetch-depth: 0
+
+      - name: Install the SDK checkout's dependencies (FALLBACK — remove at the 0.0.5 pin flip)
+        if: steps.winter-package.outputs.present != 'true'
+        working-directory: .winter-agent-sdk
+        run: pnpm install --frozen-lockfile
+
+      - name: Build dist/winter from the checkout (FALLBACK — remove at the 0.0.5 pin flip)
+        if: steps.winter-package.outputs.present != 'true'
+        env:
+          NORMA_WINTER_SDK_CHECKOUT: ${{ github.workspace }}/.winter-agent-sdk
+        run: bun run build:winter
 
       # P8c-9: the official leg's real-runtime proofs (`describeWithClaudeRuntime`) must not
       # silently skip in CI — `bun install` resolves the optional platform package for macOS
@@ -202,7 +202,7 @@ jobs:
   test-cli:
     name: test · cli
     runs-on: macos-latest
-    needs: [versions, winter-binary]
+    needs: [versions]
     steps:
       - uses: actions/checkout@v4
 
@@ -213,13 +213,52 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: winter-v${{ needs.versions.outputs.winter-agent-sdk }}
-          path: dist
+      # P9a-8: see test-core's identical block for the full explanation — dated 2026-09-12, remove
+      # this check + the FALLBACK steps below (and pnpm/action-setup) once the winter-agent-sdk pin
+      # flips to a published v0.0.5+.
+      - name: Check for the installed winter platform package (P9a-8)
+        id: winter-package
+        working-directory: packages/core
+        run: |
+          BIN=$(bun -e '
+          import { resolvePlatformPackageWinter } from "./src/runtime-sdk/executable";
+          console.log(resolvePlatformPackageWinter() ?? "");
+          ')
+          echo "bin=${BIN}" >> "$GITHUB_OUTPUT"
+          if [ -n "$BIN" ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
 
-      - name: Make the winter binary executable
-        run: chmod +x dist/winter
+      - name: Use the installed platform package's winter (P9a-8 — the strong row-16 path)
+        if: steps.winter-package.outputs.present == 'true'
+        run: |
+          mkdir -p dist
+          cp "${{ steps.winter-package.outputs.bin }}" dist/winter
+          chmod +x dist/winter
+
+      # FALLBACK (dated 2026-09-12, P9a-8 — remove at the 0.0.5 pin flip).
+      - uses: pnpm/action-setup@v4
+        if: steps.winter-package.outputs.present != 'true'
+        with:
+          version: 10
+
+      - name: Checkout winter-agent-sdk at the pinned tag (FALLBACK — remove at the 0.0.5 pin flip)
+        if: steps.winter-package.outputs.present != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: yanlingLabs/winter-agent-sdk
+          ref: v${{ needs.versions.outputs.winter-agent-sdk }}
+          path: .winter-agent-sdk
+          fetch-depth: 0
+
+      - name: Install the SDK checkout's dependencies (FALLBACK — remove at the 0.0.5 pin flip)
+        if: steps.winter-package.outputs.present != 'true'
+        working-directory: .winter-agent-sdk
+        run: pnpm install --frozen-lockfile
+
+      - name: Build dist/winter from the checkout (FALLBACK — remove at the 0.0.5 pin flip)
+        if: steps.winter-package.outputs.present != 'true'
+        env:
+          NORMA_WINTER_SDK_CHECKOUT: ${{ github.workspace }}/.winter-agent-sdk
+        run: bun run build:winter
 
       - name: Test
         working-directory: packages/cli
@@ -355,7 +394,7 @@ jobs:
   verify:
     name: verify (workflow, runtime-state, runtimes)
     runs-on: macos-latest
-    needs: [versions, winter-binary]
+    needs: [versions]
     steps:
       - uses: actions/checkout@v4
 
@@ -366,13 +405,47 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: winter-v${{ needs.versions.outputs.winter-agent-sdk }}
-          path: dist
+      # P9a-8: `verify:runtimes` (below) resolves winter through its OWN ladder (the installed
+      # platform package, else dist/winter, else a real checkout build — `verify-runtimes-
+      # compiled.ts`'s own Step 3), so this job's job is only to make SURE `dist/winter` exists as
+      # that fallback's fallback — the same check + FALLBACK build as test-core/test-cli (dated
+      # 2026-09-12, P9a-8 — remove this check + the steps below, and pnpm/action-setup, at the
+      # 0.0.5 pin flip; `verify:runtimes` itself needs no further change then).
+      - name: Check for the installed winter platform package (P9a-8)
+        id: winter-package
+        working-directory: packages/core
+        run: |
+          BIN=$(bun -e '
+          import { resolvePlatformPackageWinter } from "./src/runtime-sdk/executable";
+          console.log(resolvePlatformPackageWinter() ?? "");
+          ')
+          echo "bin=${BIN}" >> "$GITHUB_OUTPUT"
+          if [ -n "$BIN" ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; fi
 
-      - name: Make the winter binary executable
-        run: chmod +x dist/winter
+      - uses: pnpm/action-setup@v4
+        if: steps.winter-package.outputs.present != 'true'
+        with:
+          version: 10
+
+      - name: Checkout winter-agent-sdk at the pinned tag (FALLBACK — remove at the 0.0.5 pin flip)
+        if: steps.winter-package.outputs.present != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: yanlingLabs/winter-agent-sdk
+          ref: v${{ needs.versions.outputs.winter-agent-sdk }}
+          path: .winter-agent-sdk
+          fetch-depth: 0
+
+      - name: Install the SDK checkout's dependencies (FALLBACK — remove at the 0.0.5 pin flip)
+        if: steps.winter-package.outputs.present != 'true'
+        working-directory: .winter-agent-sdk
+        run: pnpm install --frozen-lockfile
+
+      - name: Build dist/winter from the checkout (FALLBACK — remove at the 0.0.5 pin flip)
+        if: steps.winter-package.outputs.present != 'true'
+        env:
+          NORMA_WINTER_SDK_CHECKOUT: ${{ github.workspace }}/.winter-agent-sdk
+        run: bun run build:winter
 
       - name: verify:workflow
         run: bun run verify:workflow

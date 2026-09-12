@@ -6,7 +6,7 @@
  *   gates) -> appcast enclosure signing + item insertion -> cask render -> --dry-run stops
  *   here (skip-list only) -> publish tail (gh release, appcast commit/push, git tag/push).
  *
- * Usage: bun run scripts/release.ts --dry-run [--beta] [--no-bump] [--resume-publish]
+ * Usage: bun run scripts/release.ts --dry-run [--beta] [--no-bump] [--resume-publish] [--allow-checkout-winter]
  *
  * `--beta` threads into `appcastItem`'s `<sparkle:channel>beta</sparkle:channel>` element.
  * `--dry-run` NEVER publishes (no gh release/upload, no appcast commit/push, no tags) — it
@@ -16,7 +16,11 @@
  * downgrades the production-Sparkle-key and gh-auth preflight checks to warnings; every other
  * check (identity, notary profile, clean tree, tag collision) still hard-fails regardless of
  * --dry-run. `--resume-publish` (non-dry-run only): an existing release is expected — upload
- * only assets missing from it and skip the appcast commit/tag if already done.
+ * only assets missing from it and skip the appcast commit/tag if already done. `--allow-checkout-
+ * winter` (P9a-8): without it, a non-dry-run release REQUIRES the strong row-16 identity path
+ * (the embedded winter's checksum equals the currently-installed npm platform package's own
+ * `bin/winter`) — pass it to allow the weaker checkout-build provenance path instead (loud,
+ * printed in the summary either way).
  *
  * Whole-branch review fix (F1/F2, see .superpowers/sdd/progress-release.md): the appcast
  * `<item>` insert decision is `appcastInsertPlan` (release-lib.ts, unit-tested) — under
@@ -81,12 +85,16 @@ import {
   nameScanPlan,
   publishGuard,
   resolveSigningIdentity,
+  row16Gate,
+  row16IdentityCheck,
   row16ProvenanceCheck,
   verifyVersionsJsonAgainstPins,
 } from "./release-lib";
 import { CODEX_MODELS_VERIFIED } from "../packages/core/src/providers/codex-config";
+import { winterSourceOf } from "../packages/core/src/runtime-sdk/bundle-layout";
 import { REQUIRED_WINTER_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
 import { buildWinter } from "./build-winter";
+import { resolveInstalledWinterPackage } from "./stage-runtimes";
 import { createHash } from "node:crypto";
 
 // Winter Phase 8d (P8d-2): Anthropic's team identity on the embedded, UNMODIFIED `claude` binary —
@@ -108,6 +116,12 @@ const DRY_RUN = argv.includes("--dry-run");
 const BETA = argv.includes("--beta");
 const NO_BUMP = argv.includes("--no-bump");
 const RESUME_PUBLISH = argv.includes("--resume-publish");
+// P9a-8: a non-dry-run release REQUIRES the strong row-16 identity path (the embedded winter came
+// from the installed npm platform package, checksum-verified) — this flag is the loud, printed
+// escape hatch that keeps the weaker checkout-build provenance path available for a REHEARSAL
+// before the platform package is published (or on a machine with no installed copy to verify
+// against). Never silent: every use is echoed in the summary line below.
+const ALLOW_CHECKOUT_WINTER = argv.includes("--allow-checkout-winter");
 
 function fail(msg: string): never {
   console.error(`\nFAIL: ${msg}\n`);
@@ -414,6 +428,29 @@ if (!versionsCheck.ok) {
 }
 const embeddedVersions = versionsCheck.versions!;
 console.log(`Embedded runtimes verified: winter re-signed (TeamIdentifier=${TEAM_ID}), claude untouched (TeamIdentifier=${CLAUDE_TEAM_ID}, hardened runtime, checksum matches VERSIONS.json).`);
+
+// Row 16 STRONG (P9a-8): a literal checksum equality against the CURRENTLY installed npm platform
+// package — meaningful only when the embed's own VERSIONS.json records winterSource=platform-
+// package (`row16IdentityCheck`, release-lib.ts). A non-dry-run release REQUIRES this path unless
+// `--allow-checkout-winter` is passed (loud, printed here and in the summary) — the escape hatch
+// for a rehearsal, or a release machine with no installed copy of the platform package to verify
+// the embed against. This runs ALONGSIDE (never instead of) the pre-existing provenance check
+// below, which stays the relevant check for a `checkout-build` embed either way.
+const installedWinterPackage = resolveInstalledWinterPackage();
+const row16Identity = row16IdentityCheck({
+  versionsJsonText: readFileSync(embeddedVersionsPath, "utf8"),
+  platformPackageBinPath: installedWinterPackage?.binPath,
+  embeddedPreSignSha256: embeddedVersions.checksums.winterPreSign,
+});
+console.log(row16Identity.detail);
+const row16IdentityGate = row16Gate({ identity: row16Identity, dryRun: DRY_RUN, allowCheckoutWinter: ALLOW_CHECKOUT_WINTER });
+if (!row16IdentityGate.proceed) fail(row16IdentityGate.failure!);
+if (!row16Identity.strong) {
+  console.log(
+    `Row 16 (identity): proceeding on the WEAKER checkout-build path` +
+      `${ALLOW_CHECKOUT_WINTER ? " (--allow-checkout-winter)" : " (--dry-run rehearsal)"}.`,
+  );
+}
 
 // Row 16 ("identical versioned artifact", P8d-2/P8d-26): the strongest form of this check
 // verifies PROVENANCE — that the embedded winter came from a build of the SDK checkout named by
@@ -1145,6 +1182,7 @@ Artifacts:
   App notarization: ${submission.id} (${submission.status})
   DMG notarization: ${dmgSubmission.id} (${dmgSubmission.status})
   Appcast enclosure signature: ${signResult.testKey ? "EPHEMERAL TEST KEY [DRY-RUN: test key — NOT publishable]" : "production key"}
+  Row 16 (winter source): winterSource=${winterSourceOf(embeddedVersions)}, strong=${row16Identity.strong}${!row16Identity.strong && ALLOW_CHECKOUT_WINTER ? " (--allow-checkout-winter)" : ""}
 
 DRY RUN: publish skipped —
 ${guard.lines.map((l) => `  - ${l}`).join("\n")}
@@ -1214,4 +1252,8 @@ if (appcastDirty) {
 // Tag creation moved BEFORE `gh release create` (see comment there) — by this point the tag is
 // already on origin; nothing left to do for it here.
 
+console.log(
+  `Row 16 (winter source): winterSource=${winterSourceOf(embeddedVersions)}, strong=${row16Identity.strong}` +
+    `${!row16Identity.strong && ALLOW_CHECKOUT_WINTER ? " (--allow-checkout-winter)" : ""}`,
+);
 console.log(`\nPublished v${version}: https://github.com/${GH_REPO}/releases/tag/v${version}\n`);
