@@ -413,7 +413,20 @@ export const Settings = z.object({
     // reads this HOT (`handoffCrossRuntimeEnabled(deps.settings())`), never a boot snapshot, same
     // as every other setting in this file.
     handoff: z.object({ crossRuntime: z.boolean().default(false) }).prefault({}),
+    // Phase 9c (P9c-1, the user's ruling on WS-00 §8 #1): the official leg authenticates ONLY with
+    // Anthropic API-key material the user supplied to Winter. `subscriptionAuth: false` (the
+    // default, and the ONLY shipped value until Anthropic approves subscription auth for Winter's
+    // Agent SDK integration) means the spawned `claude` child gets a Winter-owned
+    // `CLAUDE_CONFIG_DIR`, an env scrubbed of every auth-injecting variable except the one the
+    // credential plan names, and a per-session assertion on the SDK's reported `apiKeySource`.
+    // Read HOT (`official-options.ts`), never a boot snapshot.
+    official: z.object({ subscriptionAuth: z.boolean().default(false) }).prefault({}),
   }).optional(),
+  // Phase 9c (P9c-4, the user's ruling on WS-00 §8 #7): Winter reads a project's unconverted legacy
+  // `NORMA.md` / `.norma/` READ-ONLY when the Winter-named file/dir is absent and this is true —
+  // with a visible per-project deprecation notice; `winter migrate-project` converts. Default ON,
+  // indefinitely, until a later release flips the default. Read HOT, never a boot snapshot.
+  legacy: z.object({ readNormaProjectFiles: z.boolean().default(true) }).prefault({}),
 });
 export type Settings = z.infer<typeof Settings>;
 
