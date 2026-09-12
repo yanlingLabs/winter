@@ -241,7 +241,32 @@ export class ImportLegacySessionError extends Error {
  * leg — `ipc/server.ts`'s own call site only ever reaches this once, on the `session_predates_
  * winter_leg` branch.
  */
-export async function importEngineEraSession(deps: ImportLegacyDeps, sessionId: string): Promise<{ backendSessionId: string; entries: number }> {
+/**
+ * m2 (whole-branch review): TWO concurrent `session.send`s on the SAME engine-era session both
+ * read `sessionLegOf(record) === "engine"` before either has written anything — `ipc/server.ts`'s
+ * own gate re-checks the leg, not any in-flight state, so nothing there serialises them. Without
+ * this map both calls would run `doImport` — converting the log and appending a SECOND backend
+ * transcript, or (once the first's `records.transition` has landed) the second's own transition
+ * throwing straight into `session_import_failed`. Keyed by the PRODUCT session id (never the
+ * backend uuid, which does not exist until a call is already inside `doImport`): a second caller
+ * for the same id awaits the FIRST's promise and gets its exact result, one real import either way.
+ * Cleared once the promise settles (success or failure) — a later, non-concurrent call on an
+ * already-imported session must reach `doImport` fresh and get its ordinary
+ * "not an engine-era session" refusal, not a memoized success from a previous era.
+ */
+const inFlight = new Map<string, Promise<{ backendSessionId: string; entries: number }>>();
+
+export function importEngineEraSession(deps: ImportLegacyDeps, sessionId: string): Promise<{ backendSessionId: string; entries: number }> {
+  const existing = inFlight.get(sessionId);
+  if (existing !== undefined) return existing;
+  const promise = doImport(deps, sessionId).finally(() => {
+    inFlight.delete(sessionId);
+  });
+  inFlight.set(sessionId, promise);
+  return promise;
+}
+
+async function doImport(deps: ImportLegacyDeps, sessionId: string): Promise<{ backendSessionId: string; entries: number }> {
   const record = deps.records.get(sessionId);
   if (record === undefined) {
     throw new ImportLegacySessionError(`importEngineEraSession: no runtime record for ${sessionId}`);
