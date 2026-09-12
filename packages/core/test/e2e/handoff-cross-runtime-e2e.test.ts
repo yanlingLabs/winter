@@ -14,13 +14,34 @@
 // files does is move a SINGLE session between the two legs, which is this file's whole point.
 //
 // MEASUREMENT, NOT AN ASSUMED OUTCOME: the barrier's real behaviour against the real runtimes was
-// unmeasured before this file. Every branch below is a real `expect` on a typed shape, whichever
-// branch the real barrier takes — resumed, a lossy confirmation round-trip, or a genuine
-// blocked/lossy-fork-offered refusal recorded as the measured behaviour (never forced).
+// unmeasured before this file. Round 3's own measurement found the P8c BUG this file originally
+// pinned — `planAndApplySwitch` never reached the barrier at all, because its destination decision
+// passed `persisted: record.selection` to `selectRuntimeFor`, and the router's own
+// `SELECTION_RULES.persisted` returns a persisted selection BY IDENTITY, so the decided leg always
+// equalled the recorded one. `runtime-sdk/handoff.ts`'s fix: the destination is now decided FRESH
+// (no `persisted`), and `selectionInputFor` is registered so `barrier.plan()` reviews the persisted
+// selection's servability against this deployment's real catalog/credentials.
+//
+// THIS FILE'S OWN MEASURED FINDING, POST-FIX: the barrier IS now reached (asserted directly below,
+// via a spy on `runtimeSdkInternals(sdk).barrier.plan` — never inferred from a message string
+// alone) — but for THIS fixture's source leg, `barrier.plan()`'s own servability review refuses
+// before `execute()` is ever called. The reason is structural, not a bug in the fix: this file's
+// Winter-leg session runs on a `winter-test/<double>` model (the SAME idiom `winter-code-e2e.test.ts`
+// and every other real-child Winter e2e use, to avoid the network/real keys on that leg), and
+// `providerSelectionFor`'s own header (`runtime-sdk/provider-selection.ts`) is explicit that
+// "`winter-test/<name>` … is not a catalog provider and must never be resolved against one" — so
+// `familyListingFromCatalog()` (what `NormaRuntimeSdk.buildSelectionInput` feeds the barrier) can
+// never contain it, and the router's `reviewPersistedSelection` refuses outright
+// (`review.kind === "fresh-refused"`) the instant it tries to re-resolve the persisted model against
+// today's catalog to sanity-check it. A REAL `resumed` round-trip needs a Winter-leg session on a
+// genuine catalog-listed, credentialed, non-Anthropic-protocol provider instead of the test double —
+// a heavier fixture than this file builds; recorded here as the honest limit of this measurement,
+// never forced to a resume it did not earn.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runtimeSdkInternals, type RuntimeKind, type SessionKey } from "@yanlinglabs/winter-runtime-sdk";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@norma/protocol";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { writeCredentialMaterial } from "../../src/auth/credential-material";
@@ -136,7 +157,7 @@ describeWithWinterBinary("cross-runtime handoff (P8c, the phase's key proof)", (
       rmSync(home, { recursive: true, force: true });
     });
 
-    test("Winter -> Claude -> Winter: session.setModel's handoff attempt against the REAL router (measured, not assumed)", async () => {
+    test("Winter -> Claude: session.setModel's handoff attempt REACHES the barrier against the REAL router (measured, not assumed)", async () => {
       const d = daemon!;
       if ("unavailable" in d.runtimeState) throw d.runtimeState.unavailable;
       const rt = d.runtimeState;
@@ -149,9 +170,25 @@ describeWithWinterBinary("cross-runtime handoff (P8c, the phase's key proof)", (
       await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
       expect(d.winter.legOf(sessionId)).toBe("winter");
       const beforeSelection = rt.records.get(sessionId)?.selection;
+      const beforeModel = d.sessions.meta(sessionId).model;
       const PRIOR_USER_TEXT = "remember the number 8c-42";
       await client.call(METHODS.sessionSend, { sessionId, text: PRIOR_USER_TEXT });
       await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 45_000);
+
+      // ── Spy on the REAL router's barrier — direct proof the fix reaches it, never inferred ──
+      // from an error message alone. `runtimeSdkInternals` resolves the SAME object the router's
+      // own factory built for THIS `daemon.runtimeSdk!.sdk` (a Symbol-keyed lookup, `sdk.ts`'s own
+      // doc) — a plain, mutable property, so wrapping `.plan` here observes the exact call
+      // `runtime-sdk/handoff.ts`'s `planAndApplySwitch` makes through `barrierFor(deps)`.
+      const internals = runtimeSdkInternals(d.runtimeSdk!.sdk);
+      expect(internals).toBeDefined();
+      const realBarrier = internals!.barrier;
+      const originalPlan = realBarrier.plan.bind(realBarrier);
+      const planCalls: Array<{ session: SessionKey; to: RuntimeKind }> = [];
+      realBarrier.plan = async (session, to) => {
+        planCalls.push({ session, to });
+        return originalPlan(session, to);
+      };
 
       // ── Step 2: session.setModel to the Claude catalog model — the handoff attempt ─────────
       let caught: RpcErrorLike | undefined;
@@ -162,41 +199,42 @@ describeWithWinterBinary("cross-runtime handoff (P8c, the phase's key proof)", (
       }
 
       // ══════════════════════════════════════════════════════════════════════════════════════
-      // MEASURED FINDING (this test's whole point): against the REAL router, this call throws
-      // NOTHING and never migrates the runtime. `planAndApplySwitch` (runtime-sdk/handoff.ts)
-      // calls `runtime.selectRuntimeFor({ mode, model, persisted: record.selection })` to decide
-      // whether the requested model needs a different leg — but the router's compiled
-      // `selectRuntime` (dist/index.js) returns `input.persisted` VERBATIM, unconditionally, the
-      // instant `persisted` is set (`if (input.persisted !== undefined) return input.persisted;`
-      // — before `requested.model` is ever consulted). This is DOCUMENTED router policy, not a
-      // fluke: `SELECTION_RULES.persisted` — "the selection persisted at session creation wins; a
-      // change is the certified handoff or a visible fork, never a silent rewrite (WS-00 §2,
-      // D13)". Since every session past creation HAS a persisted selection, `legOfRuntimeKind
-      // (decided.runtimeKind) === currentLeg` in `planAndApplySwitch` is ALWAYS true for an
-      // EXISTING session, so it always returns `{kind: "same-runtime"}` and the barrier
-      // (`registerHandoffParticipants`'s whole reason to exist) is NEVER even consulted.
+      // MEASURED, POST-FIX (this test's whole point): the barrier IS now consulted — proven
+      // directly by the spy above, not by message-matching. `planAndApplySwitch`'s FRESH decision
+      // for `CATALOG_CLAUDE_MODEL` (no `persisted`) correctly lands on `claude-agent`, differs from
+      // the recorded `winter-agent` leg, and reaches `barrier.plan(session, "claude-agent")` — this
+      // call was structurally impossible before the fix (the destination decision always echoed
+      // the recorded leg back, per `SELECTION_RULES.persisted`).
       //
-      // The router's own compiled code shows the function meant for exactly this comparison:
-      // `reviewPersistedSelection` (index.js ~1945), which weighs `persisted` against a FRESH
-      // decision and reports `unchanged`/`changed`/`fresh-refused` — the barrier's OWN `plan()`
-      // calls it internally via `selectionInputFor` (index.js ~3842-3843). `handoff.ts`'s own
-      // header comment says `selectionInputFor` is "DELIBERATELY LEFT UNREGISTERED" because
-      // `planSwitch` "already runs the REAL servability check via `runtime.selectRuntimeFor`" —
-      // that premise is what this measurement disproves: `selectRuntimeFor` is the wrong function
-      // for this decision once a persisted selection exists.
-      //
-      // This is a bug for `runtime-sdk/handoff.ts` to fix (out of this integration task's file
-      // scope — daemon.ts wiring only); reported in full in this round's report.
+      // What the barrier's own `plan()` reports for THIS session, though, is a typed REFUSAL —
+      // before `execute()` is ever reached — and it is a real, structural one, not a fluke:
+      // `selectionInputFor` (registered by this fix) reviews the persisted selection against
+      // `NormaRuntimeSdk.buildSelectionInput`'s real, pinned `familyListingFromCatalog()`, and this
+      // session's persisted model is `winter-test/echo` — a test double `provider-selection.ts`
+      // documents as deliberately UNRESOLVABLE against the real catalog ("must never be resolved
+      // against one"). The router's `reviewPersistedSelection` therefore cannot even re-derive a
+      // fresh candidate for the persisted model to sanity-check it, and reports `fresh-refused`.
+      // See this file's header comment for the full account and why a genuine `resumed` round trip
+      // needs a heavier fixture than this one (a catalog-listed, non-Anthropic-protocol Winter
+      // provider) that this file does not build.
       // ══════════════════════════════════════════════════════════════════════════════════════
-      expect(caught).toBeUndefined();
-      expect(d.winter.legOf(sessionId)).toBe("winter"); // no migration happened
+      expect(planCalls).toEqual([{ session: { projectKey: expect.any(String), sessionId: expect.any(String) }, to: "claude-agent" }]);
+      expect(caught).toBeDefined();
+      expect(caught!.rpc?.data).toMatchObject({ code: "runtime_selection_refused" });
+      // The barrier-specific phrasing (`reviewSelectionFor`'s own `fresh-refused` branch) — distinct
+      // from the EARLIER `refused` branch a fresh `selectRuntimeFor` call alone could produce (e.g.
+      // `runtime-unavailable`/`claude-oauth-not-approved`), which never reaches the barrier at all.
+      expect(caught!.rpc?.message).toContain("persisted selection is no longer servable");
+
+      // Nothing migrated, and nothing was even WRITTEN: `refused` stops `session.setModel` before
+      // its ordinary store write (ipc/server.ts's switch), unlike the pre-fix bug where the write
+      // ran regardless and left the model column pointing at a leg the session never actually ran
+      // on. Both assertions below would have FAILED against the pre-fix code (the model column DID
+      // change there, verbatim to CATALOG_CLAUDE_MODEL, even though nothing migrated).
+      expect(d.winter.legOf(sessionId)).toBe("winter");
       const afterSelection = rt.records.get(sessionId)?.selection;
-      expect(afterSelection).toEqual(beforeSelection); // the record's selection is untouched
-      // The ORDINARY preference write still ran (session.setModel's non-handoff behaviour, below
-      // the handoff gate in ipc/server.ts) — the store now names the Claude model even though the
-      // runtime serving it never changed. This divergence (model column vs. actual runtime) is the
-      // concrete, observable shape of the bug above.
-      expect(d.sessions.meta(sessionId).model).toBe(CATALOG_CLAUDE_MODEL);
+      expect(afterSelection).toEqual(beforeSelection);
+      expect(d.sessions.meta(sessionId).model).toBe(beforeModel);
 
       // A turn on this session still runs on the WINTER double (never reaches the Anthropic
       // loopback) — the leg genuinely never moved, not merely "the record says so".
@@ -206,10 +244,14 @@ describeWithWinterBinary("cross-runtime handoff (P8c, the phase's key proof)", (
       expect(requests.length).toBe(requestsBefore); // zero NEW requests reached the loopback fake
 
       console.warn(
-        "[handoff-cross-runtime-e2e] MEASURED: session.setModel to a different-family model on an " +
-        "EXISTING session never triggers a real handoff against the real router — selectRuntimeFor's " +
-        "persisted-selection short-circuit (SELECTION_RULES.persisted) answers before the barrier is " +
-        "ever consulted. See this test's own header comment and this round's report for the fix pointer.",
+        "[handoff-cross-runtime-e2e] MEASURED (post-fix): session.setModel's fresh destination " +
+        "decision now DIFFERS from the recorded leg and reaches barrier.plan() (spied above) — the " +
+        "P8c bug is fixed. For THIS fixture, the barrier's own servability review then typed-refuses " +
+        "(runtime_selection_refused: \"persisted selection is no longer servable\") because the " +
+        "source session's winter-test/<double> model is deliberately unresolvable against the real " +
+        "catalog (provider-selection.ts). A genuine resumed/lossy-fork/blocked round trip needs a " +
+        "catalog-listed, credentialed Winter provider on the source leg instead — see this file's " +
+        "header comment.",
       );
 
       rmSync(cwd, { recursive: true, force: true });
