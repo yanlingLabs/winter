@@ -66,8 +66,16 @@ function isBareName(value: string): boolean {
  * runner has no darwin package at all — a LEGITIMATE skip, never a throw). A platform package whose
  * OWN version disagrees with the wrapper's THROWS instead — a mixed pair is not the pinned artifact
  * (WS-02 §6), and staying silent about it would let a session run against an unpinned binary.
+ *
+ * Exported (not just used as this file's own default) so `scripts/stage-runtimes.ts` can resolve
+ * the SAME binary through the SAME `createRequire(import.meta.url)` — rooted at THIS module's own
+ * location, `packages/core/src/runtime-sdk/`, which is what lets it find
+ * `packages/core/node_modules/@anthropic-ai/claude-agent-sdk` regardless of where the CALLING
+ * script sits (bun's isolated linker nests this optional dependency under `packages/core`'s own
+ * `node_modules`, never hoisted to the repo root — a `createRequire` rooted in a repo-root script
+ * would walk right past it).
  */
-function resolveClaudeAgentSdkPackageDir(): string | undefined {
+export function resolveClaudeAgentSdkPackageDir(): string | undefined {
   const req = createRequire(import.meta.url);
   let wrapperPackageJson: string;
   try {

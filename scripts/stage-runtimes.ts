@@ -20,10 +20,10 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { buildWinter } from "./build-winter";
 import { RUNTIME_BUNDLE_LAYOUT, type VersionsJson } from "../packages/core/src/runtime-sdk/bundle-layout";
+import { resolveClaudeAgentSdkPackageDir } from "../packages/core/src/runtime-sdk/official-executable";
 import { REQUIRED_CLAUDE_AGENT_SDK, REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../packages/core/src/runtime-sdk/versions";
 
 /** `RUNTIME_BUNDLE_LAYOUT` entries are spelled relative to the bundle's `runtimes/` root
@@ -60,30 +60,25 @@ export function buildVersionsJson(input: { claudeCode: string; winterPreSignSha2
 }
 
 /**
- * THE CI STEP'S EXACT CHAIN (`.github/workflows/ci.yml`'s "Verify the official runtime platform
- * package installed", the same two-step resolution `official-executable.ts`'s package door and
- * `test/helpers/claude-runtime.ts` already use): resolve the WRAPPER package's own
- * `package.json`, then resolve the platform package AS A DEPENDENCY OF THAT PACKAGE — never a
- * guessed `node_modules` path, so a stray version elsewhere on the machine can never be picked up
- * ahead of the pinned wrapper. Returns `undefined` when the optional platform package is not
- * installed (a legitimate skip on a non-darwin/arm64 host), never a throw.
+ * THE CI STEP'S EXACT CHAIN, by DELEGATION rather than re-implementation: `official-executable.ts`
+ * exports `resolveClaudeAgentSdkPackageDir` precisely so this script (and anything else outside
+ * `packages/core`) resolves the platform package through the SAME `createRequire(import.meta.url)`
+ * — rooted at THAT module's own location — as the real daemon ladder and
+ * `.github/workflows/ci.yml`'s "Verify the official runtime platform package installed" step.
+ *
+ * Rooting matters: bun's isolated linker nests this optional dependency under `packages/core`'s
+ * own `node_modules`, never hoisted to the repo root, so a `createRequire` rooted at THIS script's
+ * own location (`<repo>/scripts/`) would walk right past it — measured empirically staging this
+ * very script before this fix (`stage-runtimes: no claude binary found` on a machine where the
+ * package plainly IS installed, one directory over). Returns `undefined` when the optional
+ * platform package is not installed at all (a legitimate skip on a non-darwin/arm64 host); a
+ * version-mismatched platform package THROWS (WS-02 §6) — surfaced by `stageRuntimes` as-is, since
+ * staging on top of a mismatched pair is exactly the failure this must not paper over.
  */
 export function resolveInstalledClaudeBinary(): string | undefined {
-  const req = createRequire(import.meta.url);
-  let wrapperPkgJson: string;
-  try {
-    wrapperPkgJson = req.resolve("@anthropic-ai/claude-agent-sdk/package.json");
-  } catch {
-    return undefined;
-  }
-  const inside = createRequire(wrapperPkgJson);
-  let platformPkgJson: string;
-  try {
-    platformPkgJson = inside.resolve(`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/package.json`);
-  } catch {
-    return undefined;
-  }
-  const bin = join(dirname(platformPkgJson), "claude");
+  const dir = resolveClaudeAgentSdkPackageDir();
+  if (dir === undefined) return undefined;
+  const bin = join(dir, "claude");
   return existsSync(bin) ? bin : undefined;
 }
 
