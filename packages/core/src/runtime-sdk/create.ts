@@ -22,10 +22,10 @@
 //     model (re-read on every call). Both are noted at their definitions.
 import { existsSync } from "node:fs";
 import * as winter from "@yanlinglabs/winter-agent-sdk";
-import type { McpSdkServerConfigWithInstance, SpawnClaudeCodeProcess } from "@yanlinglabs/winter-agent-sdk";
+import type { McpSdkServerConfigWithInstance, SessionKey, SpawnClaudeCodeProcess } from "@yanlinglabs/winter-agent-sdk";
 import type { AdvisorReviewer, ReviewerResolver } from "@yanlinglabs/winter-agent-sdk/tools";
 import { createRuntimeSdk as createRouterSdk, D14_CLAUDE_OAUTH_APPROVED_DEFAULT, isSelectionRefusal, selectionVersionsFrom, selectRuntime, SelectionRefusedError } from "@yanlinglabs/winter-runtime-sdk";
-import type { OfficialSdkModule, RuntimeDirectoryEntry, RuntimeDirectoryOptions, RuntimeDirectoryStore, RuntimeSdk, RuntimeSdkOptions, RuntimeSelection, SelectionRefusal } from "@yanlinglabs/winter-runtime-sdk";
+import type { OfficialSdkModule, RuntimeDirectoryEntry, RuntimeDirectoryOptions, RuntimeDirectoryStore, RuntimeKind, RuntimeSdk, RuntimeSdkOptions, RuntimeSelection, SelectionInput, SelectionRefusal } from "@yanlinglabs/winter-runtime-sdk";
 import type { PermissionClassLabel } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { SecretStore } from "../auth/secret-store";
 import { retentionFromSettings } from "../runtime-state/retention";
@@ -46,6 +46,23 @@ import { NORMA_PEER_VERSIONS } from "./versions";
  * for a type that exists only to describe an injected module.
  */
 export type OfficialPeer = OfficialSdkModule;
+
+/**
+ * P8c-14 (Neighbours' contracts, for lane 4): the router's `HandoffParticipants` +
+ * `HandoffBarrierDeps.selectionInputFor`, bundled into ONE registration call — a LOCAL shape,
+ * never imported from the router: `HandoffParticipants`/`HandoffSourceOwner`/
+ * `HandoffDestinationRuntime` live in `store/handoff-barrier.d.ts`, which `dist/index.d.ts`'s own
+ * barrel does not re-export (`package.json`'s `exports` map has exactly one entry, `"."`, same gap
+ * `official-capabilities.ts`'s header documents for `createApprovalBridge`). The two members
+ * structurally satisfy the router's own `HandoffBarrierDeps.participants`/`.selectionInputFor`
+ * fields regardless — `createRuntimeSdk`'s parameter type is already imported (`RuntimeSdkOptions`),
+ * so TypeScript checks the object literal built below against ITS real, unexported field types.
+ */
+export interface HandoffParticipants {
+  source?(session: SessionKey, from: RuntimeKind): unknown;
+  destination?(session: SessionKey, to: RuntimeKind): unknown;
+  selectionInputFor?: (args: { session: SessionKey; from: RuntimeKind; to: RuntimeKind; persisted: RuntimeSelection }) => SelectionInput | Promise<SelectionInput>;
+}
 
 /** `RuntimeDirectoryRetention` is not on the router's barrel; this is the same type. */
 type RuntimeDirectoryRetention = NonNullable<RuntimeDirectoryOptions["retention"]>;
@@ -173,6 +190,11 @@ export interface NormaRuntimeSdk {
    * the API shape the Interfaces block fixes, not a live import each time.
    */
   officialPeer(): Promise<OfficialPeer | undefined>;
+  /** P8c-14: the SAME already-resolved value `officialPeer()` answers, without the `Promise`
+   *  wrapper — `session-driver.ts`'s official-leg assembly must stay SYNCHRONOUS up to
+   *  `drivers.set` (the same racing-resume invariant the Winter path already has), and awaiting a
+   *  Promise that is in fact already settled would still cost a microtask inside that window. */
+  officialPeerSync(): OfficialPeer | undefined;
   /**
    * P8c-3: THE ONE SITE for the official leg's executable ladder, re-resolved on EVERY call — same
    * hot-settings posture as `spawnHookFor`. Returns the typed `ClaudeExecutableUnavailable` rather
@@ -188,6 +210,17 @@ export interface NormaRuntimeSdk {
    * value its own `refusal` field carries.
    */
   selectRuntimeFor(input: { mode: SessionMode; model?: string; persisted?: RuntimeSelection }): Promise<RuntimeSelection | SelectionRefusal>;
+  /**
+   * P8c-14 (Neighbours' contracts, for lane 4): registers the live handoff participants + the
+   * fresh-selection reviewer, AFTER construction — `createRuntimeSdk({ handoff })` is fixed at
+   * construction time, but the daemon's session-driver table (where a `HandoffSourceOwner`/
+   * `HandoffDestinationRuntime` for a given session actually lives) exists only once THIS handle
+   * has already returned. The router reads `handoff.participants`/`.selectionInputFor` lazily, at
+   * handoff time, never at construction — so a mutable holder the constructor's own delegating
+   * closures read from is sufficient; calling this more than once REPLACES the previous
+   * registration (the last caller wins, same as any other hot-settings door in this file).
+   */
+  registerHandoffParticipants(p: HandoffParticipants): void;
   /**
    * Register a live session so shutdown can end it — GRACEFULLY FIRST, THEN BY FORCE.
    *
@@ -300,6 +333,11 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
     execPath: process.execPath,
     exists: (p) => existsSync(p),
   });
+  // P8c-14: the mutable holder `registerHandoffParticipants` (below) writes into; the router reads
+  // `handoff.participants`/`.selectionInputFor` lazily at handoff time, so a delegating closure
+  // here is enough — nothing calls a handoff before lane 4 registers, and this handle simply has
+  // no participants until then (the router's own barrier reports "no participant" for either side).
+  const handoffParticipants: { current: HandoffParticipants | undefined } = { current: undefined };
   const sdk = factory({
     // A `claude` peer is injected ONLY when the import actually resolved (P8c-1) — the namespace is
     // injected as an INSTANCE, same as `winter`; the router never imports either SDK by name.
@@ -326,7 +364,30 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
     // `resolveWinterHome(undefined, brand)` — which is `~/.norma` for a daemon booted on a temp
     // home with no `NORMA_HOME` in its environment, i.e. every test. `participants` is 8c's Task
     // 1.3/lane 4 concern; this handle passes none yet.
-    handoff: { winterHome: deps.home },
+    handoff: {
+      winterHome: deps.home,
+      participants: {
+        source: (session, from) => handoffParticipants.current?.source?.(session, from),
+        destination: (session, to) => handoffParticipants.current?.destination?.(session, to),
+      } as NonNullable<RuntimeSdkOptions["handoff"]>["participants"],
+      selectionInputFor: (args) => {
+        const fn = handoffParticipants.current?.selectionInputFor;
+        if (fn !== undefined) return fn(args);
+        // Unregistered (no lane-4 wiring yet, or a Winter-only test): the honest "unreviewed"
+        // answer this deployment's OWN `selectRuntimeFor` would give for the session's PERSISTED
+        // family — never a synthesized credential/catalog view (`HandoffBarrierDeps.
+        // selectionInputFor`'s own doc: "ABSENT MEANS UNREVIEWED, NOT ASSUMED-FINE").
+        return {
+          mode: "code",
+          requested: {},
+          families: { active: undefined, families: [] },
+          credentials: { byProvider: {} },
+          hasClaudePeer: officialModule !== undefined,
+          claudeOauthApproved: D14_CLAUDE_OAUTH_APPROVED_DEFAULT,
+          persisted: args.persisted,
+        };
+      },
+    },
     // P8c-1/P8c-2: the official branch's deployment-wide policy. `remoteConfig: "deny"` is R-7b-11's
     // own default (a session's own child never fetches remote feature configuration); `claudeOauth`
     // is left at the router's own default gate (D14/P8c-2: the official leg ships Code-only,
@@ -392,6 +453,9 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
       });
       return resolution.ok ? { pathToClaudeCodeExecutable: resolution.path } : resolution.error;
     },
+    officialPeerSync(): OfficialPeer | undefined {
+      return officialModule;
+    },
     officialPeer(): Promise<OfficialPeer | undefined> {
       // Already resolved above; this is the accessor's own contract (a `Promise`, never a live
       // re-import) — see `officialModule`'s own doc comment.
@@ -424,6 +488,9 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
         if (typeof err === "object" && err !== null && isSelectionRefusal(err)) return err;
         throw err;
       }
+    },
+    registerHandoffParticipants(p: HandoffParticipants): void {
+      handoffParticipants.current = p;
     },
     trackQuery(sessionId: string, abort: AbortController, end: () => Promise<void>): void {
       if (disposing !== undefined) {

@@ -20,6 +20,7 @@ import type { NewSessionEvent, SessionEvent } from "@norma/protocol";
 import { createOfficialInputStream, isOfficialQuery, type OfficialInputStream, type RouterOfficialInput, type RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import { MAIN_THREAD, ProjectorRefusedError, classifyThrown, createProjector, type CheckpointStore, type ProjectedBatch, type Projector, type ProtocolSdkMessage } from "../projector";
 import type { NormaRuntimeSdk, SessionMode } from "./create";
+import type { SessionApprovalPolicy } from "../agent/gate";
 import { OfficialCredentialPlanRefused, officialInputFor, OfficialProjectKeyTooDeep, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 
@@ -45,7 +46,12 @@ export interface OfficialSessionDeps {
   /** Builds `OfficialSessionInput` for the CURRENT turn — re-read live, same posture as
    *  `WinterSessionDeps.options`. */
   sessionInput: () => OfficialSessionInput;
-  inputDeps: OfficialInputDeps;
+  /** Rebuilt on EVERY incarnation (same "re-read the session's LIVE facts" posture as
+   *  `WinterSessionDeps.options`) — `policy` in particular must not be a stale snapshot: a
+   *  `session.setPolicy` between incarnations has to reach the NEXT open(). May be async (same
+   *  `T | Promise<T>` shape as `WinterSessionDeps.options`) — a real credential-presence read is
+   *  async, and this is the one door session-driver.ts has to build one per incarnation. */
+  inputDeps: () => OfficialInputDeps | Promise<OfficialInputDeps>;
   projector: (generation: number) => Projector;
   append: (event: NewSessionEvent) => SessionEvent;
   broadcast: (event: NewSessionEvent) => void;
@@ -75,7 +81,10 @@ export interface OfficialSession {
   /** No live model switch exists on `OfficialQuery` (WS-14's seam: `interrupt()` is its only
    *  member) — takes effect on the NEXT incarnation, via `sessionInput()`'s own live re-read. */
   setModel(model?: string): Promise<void>;
-  setPolicy(): Promise<void>;
+  /** Same signature as `WinterSession.setPolicy` (so both satisfy `LegSession`); a no-op today —
+   *  see this member's own doc comment above `setModel` for why. A resumed incarnation re-reads
+   *  the session's live policy through `sessionInput()`/`officialInputFor`'s own broker build. */
+  setPolicy(policy: SessionApprovalPolicy): Promise<void>;
   end(): Promise<void>;
   /** UNMEASURED — see `steer`'s own note; today a delivery while `resumable` is simply held, same
    *  as Winter's `heldDeliveries`, but no messaging attachment exists on this leg yet (carry). */
@@ -208,7 +217,7 @@ class OfficialSessionImpl implements OfficialSession {
     return Promise.resolve();
   }
 
-  async setPolicy(): Promise<void> {
+  async setPolicy(_policy: SessionApprovalPolicy): Promise<void> {
     // No live permission-mode switch on `OfficialQuery` either — same posture as `setModel`.
     return Promise.resolve();
   }
@@ -235,7 +244,8 @@ class OfficialSessionImpl implements OfficialSession {
     this.opening = (async () => {
       this.assertNotEnded();
       await this.lastDone;
-      const built = officialInputFor(this.deps.sessionInput(), this.deps.inputDeps);
+      const inputDeps = await this.deps.inputDeps();
+      const built = officialInputFor(this.deps.sessionInput(), inputDeps);
       if (built instanceof ClaudeExecutableUnavailable || built instanceof OfficialProjectKeyTooDeep || built instanceof OfficialCredentialPlanRefused) throw built;
       const stream = createOfficialInputStream();
       const generation = this.gen + 1;
@@ -250,7 +260,7 @@ class OfficialSessionImpl implements OfficialSession {
           // `Options.sessionId` (must be a valid UUID; carried, never checked, for a RESUME, which
           // is a Task 1.2 carry: multi-incarnation resume is unmeasured against this runtime).
           sessionId: this.backendSessionId,
-          ...(this.deps.inputDeps.provider === undefined ? {} : { provider: this.deps.inputDeps.provider }),
+          ...(inputDeps.provider === undefined ? {} : { provider: inputDeps.provider }),
           runtime: { selection: this.deps.selection, sessionId: this.sessionId, official: built.input },
         },
       });

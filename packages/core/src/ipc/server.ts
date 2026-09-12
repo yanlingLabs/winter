@@ -59,8 +59,7 @@ import { SessionHub, type HubClient } from "../sessions/hub";
 import type { ModelInfo } from "../providers/types";
 import type { ChildrenRpc } from "../runtime-sdk/children-rpc";
 import type { NormaRuntimeSdk } from "../runtime-sdk/create";
-import { WinterLegRefusal, type WinterSessionDrivers } from "../runtime-sdk/session-driver";
-import type { WinterSession } from "../runtime-sdk/winter-session";
+import { WinterLegRefusal, type LegSession, type WinterSessionDrivers } from "../runtime-sdk/session-driver";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import { resolveModelAlias } from "../agent/model-aliases";
 import type { ApprovalBroker } from "../agent/approvals";
@@ -382,7 +381,11 @@ class RpcFailure extends Error { constructor(public code: number, message: strin
  *  can branch on. Anything else is rethrown untouched. */
 function rpcFromWinterRefusal(err: unknown): never {
   if (err instanceof WinterLegRefusal) {
-    const invalid = err.code === "session_predates_winter_leg" || err.code === "not_supported_on_winter_leg";
+    // P8c-14: the official leg's two typed refusals are client-actionable in the same shape as
+    // `session_predates_winter_leg` (the caller can fix its own input — install the executable,
+    // configure a credential, pick a servable model) rather than a daemon-internal fault.
+    const invalid = err.code === "session_predates_winter_leg" || err.code === "not_supported_on_winter_leg"
+      || err.code === "claude_executable_unavailable" || err.code === "runtime_selection_refused";
     throw new RpcFailure(invalid ? ERR.INVALID_PARAMS : ERR.INTERNAL, err.message, { code: err.code });
   }
   const code = (err as { code?: unknown } | null)?.code;
@@ -623,12 +626,22 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   }
   const hub = opts.hub ?? new SessionHub(opts.store);
 
-  /** P8b Task 16: the session's live Winter driver, resuming one when its record says "winter"
-   *  (a daemon restart, an idle timeout). `undefined` ⇒ the engine's, exactly as today. A typed
-   *  refusal on the resume path (the binary is gone) becomes the RPC error. */
-  async function ensureWinterSession(sessionId: string): Promise<WinterSession | undefined> {
+  /** P8b Task 16 / P8c-14: the session's live driver (Winter OR official), resuming one when its
+   *  record says so (a daemon restart, an idle timeout). `undefined` ⇒ the engine's, exactly as
+   *  today. A typed refusal on the resume path (the binary is gone, a selection refusal) becomes
+   *  the RPC error. */
+  async function ensureWinterSession(sessionId: string): Promise<LegSession | undefined> {
     if (opts.winter === undefined) return undefined;
     try { return await opts.winter.ensure(sessionId); } catch (err) { rpcFromWinterRefusal(err); }
+  }
+
+  /** P8c-14: `session.send`/`session.interrupt`/`session.compact` gate on this BEFORE resuming —
+   *  a leg the driver table can actually run a turn on, never `"engine"` (P8b-22's own refusal)
+   *  and never `undefined` (no record at all). Widened from a bare `=== "winter"` string check the
+   *  moment `legOf` could answer `"official"` too — the two legs share every one of these doors. */
+  function isRunnableLeg(sessionId: string): boolean {
+    const leg = opts.winter?.legOf(sessionId);
+    return leg === "winter" || leg === "official";
   }
 
   /** P8b-22: a session that CANNOT run on the Winter leg gets a typed refusal — never a crash,
@@ -1488,7 +1501,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // and is resumed here — takes its own path. The attachment check mirrors `hub.send`'s own
         // (same message, same plain Error → INTERNAL), and the driver appends the `user_message`
         // under this client's name exactly as `hub.send` would, then begins the turn (P8b-5).
-        if (opts.winter !== undefined && (opts.winter.get(p.sessionId) !== undefined || opts.winter.legOf(p.sessionId) === "winter")) {
+        if (opts.winter !== undefined && (opts.winter.get(p.sessionId) !== undefined || isRunnableLeg(p.sessionId))) {
           // The attachment check FIRST (the same condition and message `hub.send` throws for), so a
           // client attached elsewhere can never trigger a resume-spawn that is then refused.
           if (hub.attachedSession(socket.data.hubClient) !== p.sessionId) {
@@ -1531,7 +1544,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         {
           const live = opts.winter?.get(p.sessionId);
           if (live !== undefined) return { ok: true, ...(await live.interrupt()) };
-          if (opts.winter?.legOf(p.sessionId) === "winter") return { ok: true, wasRunning: false };
+          if (isRunnableLeg(p.sessionId)) return { ok: true, wasRunning: false };
         }
         if (!opts.engine) return { ok: true, wasRunning: false };
         return { ok: true, ...opts.engine.interrupt(p.sessionId) };
@@ -1540,8 +1553,8 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const p = parseParams(SessionCompactParams, params);
         // P8b Task 16 (ledger:30): Winter's `Query` has no compaction control at 0.0.4 — a typed
         // "not supported on this leg", never a silent `compacted: false` (SDK 0.0.4 carry).
-        if (opts.winter?.get(p.sessionId) !== undefined || opts.winter?.legOf(p.sessionId) === "winter") {
-          throw new RpcFailure(ERR.INVALID_PARAMS, "session.compact is not supported on the Winter leg (the child compacts on its own; SDK 0.0.4 carry)", { code: "not_supported_on_winter_leg" });
+        if (opts.winter?.get(p.sessionId) !== undefined || isRunnableLeg(p.sessionId)) {
+          throw new RpcFailure(ERR.INVALID_PARAMS, "session.compact is not supported on this runtime leg (the child compacts on its own; SDK 0.0.4 carry)", { code: "not_supported_on_winter_leg" });
         }
         return { ok: true, compacted: false, uptoSeq: 0, summaryChars: 0 };
       }
