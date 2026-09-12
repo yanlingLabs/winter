@@ -39,6 +39,7 @@ import { credentialRefFor, ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/ru
 import { sessionHooksFor, type SessionHooksDeps } from "../../src/runtime-sdk/hooks";
 import { attachOfficialSession } from "../../src/runtime-sdk/messaging";
 import { createSqliteRuntimeDirectoryStore, openRuntimeStateDb } from "../../src/runtime-state";
+import { processStartedAt } from "../../src/runtime-state/leases";
 import { buildChildAddress, buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { OfficialInputDeps, OfficialSessionInput } from "../../src/runtime-sdk/official-options";
 import { startOfficialSession, type OfficialSession } from "../../src/runtime-sdk/official-session";
@@ -1274,6 +1275,25 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       const pid = await officialChildPidOf(w.runtime, w.session.sessionId);
       console.warn(`[9a MEASURED] official child pid = ${pid}, generation before crash = ${generationBeforeCrash}`);
       expect(() => process.kill(pid, 0)).not.toThrow(); // sanity: genuinely alive before the kill
+
+      // P9a fix wave, n1: `officialChildPidOf` returns a bare pid, and a pid is recyclable — WS-14
+      // §9 warns against trusting one alone for a RECOVERY decision, but says nothing against a
+      // TEST killing whatever currently holds it milliseconds after reading it. Still, the row
+      // carries `processIdentity.startedAt` right here for free, so cross-check it before the kill:
+      // the OS's own `processStartedAt(pid)` (via `ps -o lstart=`, second-granularity) must land
+      // close to the moment the router's spawn-proxy record sink observed this same child, which a
+      // pid recycled from some unrelated, long-gone process would not.
+      const recordedEntry = await w.runtime.sdk.directory.get(serializeRuntimeAddress(buildSessionAddress(w.session.sessionId)));
+      const recordedStartedAt = recordedEntry?.processIdentity?.startedAt;
+      const observedStartedAt = processStartedAt(pid);
+      console.warn(`[9a MEASURED] processIdentity.startedAt recorded="${recordedStartedAt}" observed(ps)="${observedStartedAt}"`);
+      expect(observedStartedAt).not.toBe("unknown");
+      if (recordedStartedAt !== undefined) {
+        const driftMs = Math.abs(new Date(observedStartedAt).getTime() - new Date(recordedStartedAt).getTime());
+        console.warn(`[9a MEASURED] startedAt drift = ${driftMs}ms (recorded-vs-observed, same process expected well under 10s)`);
+        expect(driftMs).toBeLessThan(10_000);
+      }
+
       process.kill(pid, "SIGKILL");
 
       // (d) no orphan: the OS agrees the pid is gone, within a bounded window.
