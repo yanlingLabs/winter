@@ -67,6 +67,19 @@ describe("winter migrate — --status", () => {
     expect(await runMigrateCommand(status.deps)).toBe(0);
     expect(status.lines.join("\n")).toContain("complete");
   });
+
+  test("review Minor: --status also prints the destination home path, not just the legacy source", async () => {
+    const parent = tempDir();
+    const legacyHome = join(parent, "legacy");
+    seedLegacyHome(legacyHome);
+    const { deps } = baseDeps({ argv: ["--from", legacyHome, "--yes"] });
+    expect(await runMigrateCommand(deps)).toBe(0);
+    const status = baseDeps({ argv: ["--status"], home: deps.home });
+    expect(await runMigrateCommand(status.deps)).toBe(0);
+    const summary = status.lines.join("\n");
+    expect(summary).toContain(legacyHome);
+    expect(summary).toContain(deps.home); // the destination home — the Minor review ask
+  });
 });
 
 describe("winter migrate — refuses every writing action while the daemon is running", () => {

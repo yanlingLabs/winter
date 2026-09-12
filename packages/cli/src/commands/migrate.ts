@@ -42,7 +42,9 @@ function statusLine(name: string, statuses: readonly string[]): string {
 
 function printManifestSummary(manifest: MigrationManifest, log: (line: string) => void): void {
   const finished = manifest.finishedAt ? ` finished ${manifest.finishedAt}` : "";
-  log(`migration: ${manifest.status}${finished} — from ${manifest.legacyHome}`);
+  // Review Minor: names BOTH ends of the copy — the destination home the manifest lives under,
+  // not just where it came from. `--status` (and every other command that calls this) all show it.
+  log(`migration: ${manifest.status}${finished} — from ${manifest.legacyHome} into ${manifest.home}`);
   log(statusLine("files", manifest.entries.map((e) => e.status)));
   log(statusLine("keychain", manifest.keychain.map((k) => k.status)));
 }
