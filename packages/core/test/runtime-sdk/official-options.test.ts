@@ -12,6 +12,7 @@ import { PermissionGate } from "../../src/agent/gate";
 import { QuestionBroker } from "../../src/agent/questions";
 import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { assistantMemoryDirFor, memoryDirFor } from "../../src/agent/memory-dir";
+import { controlPlaneDenyRules, disallowedToolsFor, sandboxConfigFor } from "../../src/runtime-sdk/mode-options";
 import {
   autoMemoryDirectoryFor,
   minimalOsEnvironment,
@@ -176,5 +177,66 @@ describe("officialInputFor — official_project_key_too_deep", () => {
     const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
     const result = officialInputFor(input, minimalDeps());
     expect(result).not.toBeInstanceOf(OfficialProjectKeyTooDeep);
+  });
+});
+
+// ── officialInputFor — the control-plane fence (fix wave C1) ──────────────────────────────────
+//
+// C1 (whole-branch review): `officialInputFor`'s built `options` carried NO `settings.permissions
+// .deny`, NO `settings.sandbox`, and NO `additionalDisallowedTools` — the router's own containment
+// floor guards only the vendor `.claude` dir, so an official child could read `<home>/run` and
+// `<home>/runtimes` and write into `<home>/runtimes` with nothing on this leg refusing it, unlike
+// `mode-options.ts`'s `buildWinterOptions`. These tests pin that the SAME shared builders
+// (`controlPlaneDenyRules`/`sandboxConfigFor`/`disallowedToolsFor` — never a second, hand-copied
+// implementation) now reach `options`, so the two legs cannot drift apart silently.
+//
+// The MEASURED half of C1 — whether the official runtime's own `Tool(specifier)` rule matcher
+// actually honors `controlPlaneDenyRules`'s `//`-anchored absolute forms — is NOT re-provable as a
+// pure unit test (there is no in-process matcher to call, per `mode-options.ts`'s own comment on
+// `fsRootAnchored`: "the matcher is not exported from the installed package"). That proof lives in
+// `official-leg.e2e.test.ts`'s "C1: ..." tests, against the real 0.3.250 binary: a Read of
+// `<home>/run/probe.txt` is denied, an ordinary cwd Read still works, and a Write into
+// `<home>/runtimes/` is denied under both `auto` and `dont-ask` — all with `controlPlaneDenyRules`'s
+// rules UNCHANGED, no second anchoring scheme needed (measured, not assumed).
+describe("officialInputFor — the control-plane fence (C1)", () => {
+  function optionsFor(mode: OfficialSessionInput["mode"], home = "/Users/x/.norma-test-home"): Record<string, unknown> {
+    const input: OfficialSessionInput = { sessionId: "s_1", mode, cwd: "/Users/x/repo" };
+    const result = officialInputFor(input, minimalDeps({ home }));
+    if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
+    return result.input.options as unknown as Record<string, unknown>;
+  }
+
+  test("settings.permissions.deny is EXACTLY controlPlaneDenyRules(home) — the same builder Winter uses", () => {
+    const home = "/Users/x/.norma-test-home";
+    const options = optionsFor("code", home);
+    const settings = options.settings as { permissions?: { deny?: string[] } } | undefined;
+    expect(settings?.permissions?.deny).toEqual(controlPlaneDenyRules(home));
+    // Non-vacuous: this is a real list of rules, not an accidentally-empty array satisfying `toEqual`.
+    expect(settings?.permissions?.deny?.length).toBeGreaterThan(0);
+  });
+
+  test("settings.sandbox is EXACTLY sandboxConfigFor(home) — same real directory paths, no globs", () => {
+    const home = "/Users/x/.norma-test-home";
+    const options = optionsFor("code", home);
+    const settings = options.settings as { sandbox?: unknown } | undefined;
+    expect(settings?.sandbox).toEqual(sandboxConfigFor(home));
+  });
+
+  test("additionalDisallowedTools is EXACTLY disallowedToolsFor(mode) — varies per mode like the Winter leg", () => {
+    const codeOptions = optionsFor("code");
+    const chatOptions = optionsFor("chat");
+    expect(codeOptions.additionalDisallowedTools).toEqual(disallowedToolsFor("code"));
+    expect(chatOptions.additionalDisallowedTools).toEqual(disallowedToolsFor("chat"));
+    // Chat's list is a strict superset (chat additionally excludes the SDK's own web/fs/shell
+    // built-ins) — a real, mode-sensitive difference, not two copies of the same literal.
+    expect((chatOptions.additionalDisallowedTools as string[]).length).toBeGreaterThan((codeOptions.additionalDisallowedTools as string[]).length);
+  });
+
+  test("a DIFFERENT home produces DIFFERENT rules — the fence is keyed off the real session home, not a constant", () => {
+    const a = optionsFor("code", "/Users/x/.norma-test-home");
+    const b = optionsFor("code", "/Users/y/.norma-other-home");
+    const denyA = (a.settings as { permissions?: { deny?: string[] } }).permissions?.deny;
+    const denyB = (b.settings as { permissions?: { deny?: string[] } }).permissions?.deny;
+    expect(denyA).not.toEqual(denyB);
   });
 });

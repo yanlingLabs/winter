@@ -22,6 +22,7 @@ import { assistantMemoryDirFor, memoryDirFor, type MemoryDirOptions } from "../a
 import type { CapabilityServerRecord } from "../capabilities";
 import { canUseToolFor, type CanUseToolDeps } from "./approval-bridge";
 import { NORMA_BRAND } from "./brand";
+import { controlPlaneDenyRules, disallowedToolsFor, sandboxConfigFor } from "./mode-options";
 import { officialCapabilityServersFor, type OfficialMcpModule } from "./official-capabilities";
 import { winterSystemPromptFor } from "./system-prompt";
 import { ClaudeExecutableUnavailable } from "./official-executable";
@@ -260,6 +261,33 @@ export function officialInputFor(
         canUseTool,
         permissionMode,
         systemPromptAppend,
+        // Fix wave (whole-branch review C1): the router's own containment floor guards only the
+        // vendor `.claude` dir, and `createApprovalBridge` allows reads through under `dontAsk`
+        // without ever asking — so, before this, an official child could read `<home>/run` and
+        // `<home>/runtimes` and write into `<home>/runtimes` (8a's model-denied runtime store) with
+        // NOTHING on this leg refusing it, unlike the Winter leg's `buildWinterOptions`, which has
+        // carried `permissions.deny`/`sandbox`/`disallowedTools` since P8b-27.
+        //
+        // `mode-options.ts`'s builders are REUSED verbatim (same exported functions, same home/mode
+        // inputs) rather than re-implemented, so the fence is provably the SAME fence on both legs —
+        // never a second, independently-drifting copy. `settings.permissions.deny` and
+        // `settings.sandbox` ride the flag-settings layer (`OptionsTemplatePolicy.settings`, spread
+        // by the router's own `brandedFlagSettings`) rather than a dedicated top-level field — the
+        // router's `options-template.d.ts` exposes no `sandbox` member of its own, and flag settings
+        // sit above every filesystem-backed settings source regardless of `settingSources` (the SDK's
+        // own doc on `Options.settings`), so this is not weakened by `settingSources: []`.
+        //
+        // MEASURED against the real 0.3.250 CLI (`official-leg.e2e.test.ts`, "C1: the control-plane
+        // fence"): the official runtime's own `Settings.sandbox.filesystem.denyWrite`/`denyRead`
+        // field names are IDENTICAL to Winter's `SandboxSettingsConfig` shape (both real DIRECTORY
+        // paths, never globs — `sandboxConfigFor`'s own doc), so `sandboxConfigFor(home)` is reused
+        // with NO translation. `permissions.deny`'s `Tool(specifier)` grammar, however, is NOT the
+        // same matcher as Winter's private reimplementation: the real CLI denied a target with
+        // `controlPlaneDenyRules`'s `//`-anchored absolute forms UNCHANGED — no second anchoring
+        // scheme was needed — confirmed by the same e2e denying a real `<home>/run/probe.txt` Read
+        // and a real `<home>/runtimes/` Write while an ordinary cwd file Read still succeeds.
+        settings: { permissions: { deny: controlPlaneDenyRules(deps.home) }, sandbox: sandboxConfigFor(deps.home) },
+        additionalDisallowedTools: disallowedToolsFor(input.mode),
         ...(deps.hooks === undefined ? {} : { hooks: deps.hooks }),
       } as RouterOfficialInput["options"],
     },
