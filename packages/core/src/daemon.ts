@@ -251,6 +251,26 @@ function buildLeasePolicy(deps: {
   };
 }
 
+/** `plugin__<pluginId>__<name>` → its two halves (P8c integration round 2, `capabilityDeps.external`
+ *  below) — the exact inverse of `ipc/server.ts`'s `tool.register` handler's own
+ *  `` `plugin__${pluginId}__${p.name}` `` template. Splits on the FIRST `__` after the `plugin__`
+ *  prefix: `pluginId` is a raw plugin-directory name that `agent/plugin-manifest.ts#loadManifest`
+ *  only WARNS about (not rejects) containing `__`, while `ToolRegisterParams`'s wire schema REJECTS
+ *  `__` in a tool `name` outright (`protocol/methods.ts`'s "Safe tool-name charset" comment) — so a
+ *  first-`__` split can only misparse a pluginId that already carries the exact collision hazard
+ *  `unregisterByPrefix` names as a known, documented risk elsewhere. Returns `undefined` for
+ *  anything not shaped `plugin__x__y` (never throws). */
+export function pluginToolNameParts(fullName: string): { pluginId: string; name: string } | undefined {
+  const PREFIX = "plugin__";
+  if (!fullName.startsWith(PREFIX)) return undefined;
+  const rest = fullName.slice(PREFIX.length);
+  const sep = rest.indexOf("__");
+  if (sep < 0) return undefined;
+  const pluginId = rest.slice(0, sep);
+  const name = rest.slice(sep + 2);
+  return pluginId && name ? { pluginId, name } : undefined;
+}
+
 export async function startDaemon(opts: {
   home?: string;
   secrets?: SecretStore;
@@ -877,6 +897,36 @@ export async function startDaemon(opts: {
     // Fix wave (review F7): the `lsp` tool over the SAME `let lspManager` holder the registry
     // door and `settings-apply.ts`'s hot `lsp.enabled` flip reassign — read per call.
     lsp: { lsp: () => lspManager ?? undefined },
+    // P8c integration round 2: the `external` capability server's real source
+    // (`capabilities/external.ts`'s own header names the design). `sharedRegistry` is the SAME
+    // `ToolRegistry` `tool.register` (ipc/server.ts) writes `plugin__<pluginId>__<name>` rows into
+    // — read live per session build, never a boot snapshot (a plugin registering mid-daemon-life
+    // reaches the NEXT session built, matching every other capability's "session keeps what it
+    // started with" contract). `null` (no agent provider) reads as zero tools, same as every other
+    // capability closure over `sharedRegistry`/`lspManager` in this object.
+    external: {
+      tools: (session) => {
+        if (!sharedRegistry) return [];
+        return sharedRegistry.listByPrefix("plugin__").flatMap((spec) => {
+          const parsed = pluginToolNameParts(spec.name);
+          if (!parsed) return [];
+          return [{
+            pluginId: parsed.pluginId,
+            name: parsed.name,
+            description: spec.description,
+            ...(spec.parameters === undefined ? {} : { parameters: spec.parameters as Record<string, unknown> }),
+            async invoke(argsJson: string) {
+              const args = JSON.parse(argsJson) as Record<string, unknown>;
+              const outcome = await sharedRegistry!.execute(spec.name, args, {
+                cwd: session.cwd, roots: session.roots, sessionId: session.sessionId,
+                tmpDir: session.tmpDir, outDir: session.outDir, mode: session.mode,
+              });
+              return outcome.isError ? { ok: false as const, message: outcome.output } : { ok: true as const, resultJson: outcome.output };
+            },
+          }];
+        });
+      },
+    },
   };
   /** THE door Task 16's session driver opens: one session in, its servers out — already keyed by
    *  name, i.e. already in `Options.mcpServers` shape (the child derives each tool's wire name from

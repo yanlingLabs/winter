@@ -372,6 +372,20 @@ export class ToolRegistry {
     return this.toSpec(d, mode);
   }
 
+  /** P8c integration round 2: every registered tool whose NAME starts with `prefix`, rendered the
+   *  SAME way `specFor`/`specs()` render one (`toSpec`: `rawParameters ?? z.toJSONSchema(...)`) —
+   *  a READ-ONLY enumeration `capabilities/external.ts`'s `norma__external` server uses to
+   *  advertise plugin-contributed tools (`plugin__<pluginId>__<name>`, `tool.register`'s own
+   *  namespacing, `ipc/server.ts`) from the SAME definitions the shared registry already holds,
+   *  never a second copy. Mirrors `specFor`'s scope check; never touches deferral bookkeeping
+   *  (`isDeferred`/`externalCountActive`) — this is a listing, not a call, and plugin-registered
+   *  defs carry no `scope` in practice today regardless. */
+  listByPrefix(prefix: string, cwd?: string | null, mode?: Mode): ToolSpec[] {
+    return [...this.defs.values()]
+      .filter((d) => d.name.startsWith(prefix) && (!d.scope || (!!cwd && isWithin(cwd, d.scope))))
+      .map((d) => this.toSpec(d, mode));
+  }
+
   has(name: string): boolean { return this.defs.has(name); }
 
   /** Idempotent, never throws: true iff `name` was present and is now removed. No memoized/

@@ -19,14 +19,20 @@
 // capability servers are built (mirrors every other capability's session-lifetime contract, and
 // `capabilityServer`'s own "session keeps what it started with" design).
 //
-// **Wiring the real source is a carry, flagged in the lane report**: `daemon.ts` (not Lane 3's) is
-// where a real `pluginToolDefs()`/`tools()` implementation would read the daemon-wide
-// `PluginSupervisor` + whatever tracks each plugin's manifest-declared tool facts (name,
-// description, JSON-schema parameters, declared modes) and turn each into one `ExternalToolSource`
-// below, with `invoke` closing over `supervisor.invoke(pluginId, name, argsJson)`. Until that
-// wiring lands, `deps.tools()` returning `[]` (the default an absent caller gets) makes this server
-// register with zero tools — inert, not broken, exactly like every OTHER capability server's
-// "kept, advertising nothing" contract (`capabilities/index.ts`'s own doc comment).
+// **The real source is wired (P8c integration round 2, `daemon.ts`).** `agent/tools/registry.ts`
+// gained a read-only `listByPrefix(prefix)` (a listing, not a write, so it does not collide with
+// the "no lane owns registry.ts" constraint that held through the lane phase); `daemon.ts` reads
+// `sharedRegistry.listByPrefix("plugin__")`, splits each `plugin__<pluginId>__<name>` back into its
+// two halves (`tool.register`'s own namespacing), and builds one `ExternalToolSource` per row whose
+// `invoke` closes over `sharedRegistry.execute(fullName, args, ctx)` — the SAME dispatch
+// `capabilityServer`'s own private-registry `callTool` uses for every other capability (MAX_OUTPUT
+// truncation, the same invalid-argument wording, throw→isError), which in turn reaches the
+// unchanged `tool.register` handler's `run()` closure (`supervisor.invoke(pluginId, name,
+// argsJson)`) — one plugin-RPC path, never a second. `deps.tools` takes the session (widened from a
+// zero-arg factory) so that `ctx` can be session-scoped rather than a placeholder. An absent/no-op
+// `daemon.ts` wiring (a test harness with no `sharedRegistry`) still reads as `[]` — inert, not
+// broken, matching every OTHER capability server's "kept, advertising nothing" contract
+// (`capabilities/index.ts`'s own doc comment).
 //
 // SNAPSHOT AT SESSION-BUILD TIME: a plugin that registers a tool AFTER a session's servers were
 // already built never appears in that already-running session (documented, matches every other
@@ -68,8 +74,15 @@ export interface ExternalToolSource {
 
 export interface ExternalCapabilityDeps {
   /** Every plugin-contributed tool alive right now — see this module's header for the snapshot
-   *  contract and the real-wiring carry. Absent (or omitted by a caller) reads as `() => []`. */
-  tools?(): readonly ExternalToolSource[];
+   *  contract. Absent (or omitted by a caller) reads as `() => []`.
+   *
+   *  P8c integration round 2: takes the session so a real `daemon.ts` wiring can build each
+   *  source's `invoke` closure with a session-scoped `ToolContext` (the shared `ToolRegistry`'s
+   *  `execute()` requires one) — the real-wiring carry this module's header names is now closed.
+   *  Existing callers built against the old zero-arg shape (`tools: () => sources`) keep compiling
+   *  unchanged: a function declaring FEWER parameters than a call site offers is always assignable
+   *  to a slot expecting more (TS's ordinary function-arity variance), so this is additive. */
+  tools?(session: CapabilitySession): readonly ExternalToolSource[];
 }
 
 /** A permissive passthrough schema — core never re-validates plugin-supplied argument shapes
@@ -77,7 +90,7 @@ export interface ExternalCapabilityDeps {
 const PASSTHROUGH_ARGS = z.object({}).passthrough();
 
 export function externalCapability(session: CapabilitySession, deps: ExternalCapabilityDeps): McpSdkServerConfigWithInstance {
-  const sources = deps.tools?.() ?? [];
+  const sources = deps.tools?.(session) ?? [];
   const defs: ToolDefinition[] = sources.map((source) => ({
     name: source.name,
     description: source.description,
