@@ -143,6 +143,38 @@ describe("daemon.ts boot hook — Migration B (P9c-15: default-home gate)", () =
     expect((caught as MigrationRefused).code).toBe("home_half_migrated");
   });
 
+  test("(b2) fix wave M1 (review Minor): an UNREADABLE manifest refuses with the flavour-specific 'move it aside' advice, never the --resume wording", async () => {
+    const parent = tempParent();
+    const home = join(parent, "home"); // non-default — proves the refusal fires regardless
+    const legacyHome = join(parent, "legacy");
+    seedLegacyHome(legacyHome);
+    mkdirSync(join(home, "migration"), { recursive: true });
+    writeFileSync(join(home, "migration", "manifest.json"), "{ this is not valid json");
+
+    let caught: unknown;
+    try {
+      daemon = await startDaemon({
+        home,
+        secrets: new FileSecretStore(join(parent, "secrets")),
+        migration: { legacyHome, legacySecrets: new FileSecretStore(join(parent, "legacy-secrets")) },
+        agentProvider: null,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    daemon = undefined; // startDaemon never returned a handle to stop
+    expect(caught).toBeInstanceOf(MigrationRefused);
+    expect((caught as MigrationRefused).code).toBe("home_half_migrated");
+    const message = (caught as MigrationRefused).message;
+    expect(message).toContain(join(home, "migration", "manifest.json"));
+    expect(message).toContain("manifest.json.bad");
+    expect(message).toContain("winter migrate --rollback");
+    // The unreadable flavour never suggests `--resume` — there is nothing readable to resume from
+    // (rollbackMigrationB's own doc comment: rollback needs a readable manifest too, but stays a
+    // valid second step once files are known to have already been copied).
+    expect(message).not.toContain("--resume");
+  });
+
   test("(c) a NON-pristine default-resolved home with a legacy home present boots normally, migrates nothing, and logs exactly one 'not pristine' line", async () => {
     const parent = tempParent();
     const home = join(parent, ".winter"); // resolves as default under homedirOverride, below

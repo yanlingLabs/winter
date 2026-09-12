@@ -39,7 +39,7 @@ import {
 import { rekeySettings } from "./rekey-settings";
 
 export { MIGRATION_B_SECRET_NAMES } from "../auth/legacy-secret-names";
-export { readMigrationManifest } from "./manifest";
+export { readMigrationManifest, manifestFileState, manifestPath } from "./manifest";
 export type { MigrationEntryStatus, MigrationFileEntry, MigrationKeychainEntry, MigrationManifest } from "./manifest";
 
 /** Thrown by `planMigrationB` (destination not pristine, P9c-10), the daemon boot hook
@@ -464,6 +464,16 @@ export async function resumeMigrationB(home: string, deps: MigrationDeps): Promi
  * next time that store opens — never a second copy of the guard the OTHER two statuses get. Never
  * touches the legacy home. Ends with the working `manifest.json`/`COMPLETE` cleared and a final
  * `status: "rolled-back"` copy at `manifest.rolled-back.json`, inside the same `migration/` directory.
+ *
+ * Fix wave M1 (review Minor) — RULING: rollback needs a READABLE manifest. `readMigrationManifest`
+ * (below) reads absent and unreadable/corrupt alike as `null`, so an UNREADABLE manifest hits the
+ * exact same `nothing_to_rollback` refusal as no manifest at all — there is no partial-entry
+ * fallback to salvage from a manifest this function cannot even parse. The daemon boot hook's
+ * `unreadable` refusal message (`daemon.ts`) therefore never points an operator at `--rollback` as
+ * the FIRST move for that flavour — moving the corrupt file aside and re-running from scratch is;
+ * `--rollback` only helps once files are known to have already been copied. `winter migrate
+ * --status` is the one place that surfaces the `unreadable` state explicitly (via
+ * `manifestFileState`, not `readMigrationManifest`), rather than reporting it as "never run".
  */
 export async function rollbackMigrationB(home: string, deps: { log: (line: string) => void }): Promise<MigrationManifest> {
   const manifest = readMigrationManifest(home);

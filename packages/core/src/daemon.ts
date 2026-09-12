@@ -5,7 +5,7 @@ import { bootstrapWinterDir, resolveWinterHome, isDefaultWinterHome } from "./wi
 import { acquireLock, type Lock } from "./lock";
 import { resolveWinterProfile } from "./profile";
 import { describeHomePristineness, legacyHomeFor, planMigrationB, runMigrationB, MigrationRefused } from "./migration/migrate-b";
-import { manifestFileState } from "./migration/manifest";
+import { manifestFileState, manifestPath } from "./migration/manifest";
 import { LegacyKeychainSecretStore } from "./migration/legacy-keychain-store";
 import { TokenAuthority } from "./auth/tokens";
 import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
@@ -323,8 +323,22 @@ export async function startDaemon(opts: {
   // (fail-closed: a torn manifest is evidence of an interruption too, never evidence nothing
   // happened) refuses typed — the daemon NEVER auto-resumes, because the operator may be mid
   // `winter migrate --rollback`.
+  //
+  // Fix wave M1 (review Minor): the two flavours get DIFFERENT operator advice, because `--resume`
+  // is only useful when there is a manifest to resume FROM — an unreadable manifest has nothing
+  // `resumeMigrationB`/`rollbackMigrationB` can parse (both need a READABLE manifest; see
+  // `rollbackMigrationB`'s own doc comment in migrate-b.ts), so pointing an operator at `--resume`
+  // there is a dead end. The unreadable case instead tells them to move the corrupt file aside and
+  // let the migration re-run from scratch on what is then, again, a pristine home — `--rollback`
+  // stays available too, for the case where files were already copied before the manifest tore.
   const manifestState = manifestFileState(home);
-  if (manifestState.kind === "unreadable" || (manifestState.kind === "parsed" && manifestState.manifest.status === "in-progress")) {
+  if (manifestState.kind === "unreadable") {
+    throw new MigrationRefused(
+      "home_half_migrated",
+      `migration: move ${manifestPath(home)} aside (e.g. to manifest.json.bad), then restart — the migration re-runs from scratch on a pristine home, or run \`winter migrate --rollback\` if files were already copied`,
+    );
+  }
+  if (manifestState.kind === "parsed" && manifestState.manifest.status === "in-progress") {
     throw new MigrationRefused("home_half_migrated", "migration: half-migrated home — run `winter migrate --resume` or `winter migrate --rollback`");
   }
 

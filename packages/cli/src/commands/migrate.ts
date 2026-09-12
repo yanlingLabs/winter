@@ -7,8 +7,9 @@ import {
   MigrationRefused,
   isPristineHome,
   legacyHomeFor,
+  manifestFileState,
+  manifestPath,
   planMigrationB,
-  readMigrationManifest,
   resumeMigrationB,
   rollbackMigrationB,
   runMigrationB,
@@ -54,12 +55,21 @@ export async function runMigrateCommand(deps: MigrateCommandDeps): Promise<numbe
   const yes = deps.argv.includes("--yes");
 
   if (deps.argv.includes("--status")) {
-    const manifest = readMigrationManifest(deps.home);
-    if (!manifest) {
+    // Fix wave M1 (review Minor): `readMigrationManifest` reads absent AND unreadable/corrupt alike
+    // as `null` (by design — see its own doc comment), which would make `--status` report an
+    // unreadable manifest as "never run Migration B" — actively misleading, since a manifest DOES
+    // exist there, it just doesn't parse. `manifestFileState` is the fail-closed variant that keeps
+    // the two apart; `--status` is the one place that surfaces "unreadable" explicitly.
+    const state = manifestFileState(deps.home);
+    if (state.kind === "absent") {
       deps.log(`migration: none (${deps.home} has never run Migration B)`);
       return 0;
     }
-    printManifestSummary(manifest, deps.log);
+    if (state.kind === "unreadable") {
+      deps.log(`migration: unreadable — ${manifestPath(deps.home)} exists but does not parse as a migration manifest`);
+      return 0;
+    }
+    printManifestSummary(state.manifest, deps.log);
     return 0;
   }
 
