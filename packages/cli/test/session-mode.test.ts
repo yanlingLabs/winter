@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   checkCodeSession, filterCodeSessions, isCodeMode, nonCodeRefusalMessage, sessionModeMarker,
+  sessionRuntimeMarker,
 } from "../src/session-mode";
 
 // Plan-immunity Task 2 (mode×surface matrix — ledger .superpowers/sdd/2026-07-28-plan-immunity/
@@ -62,6 +63,18 @@ describe("sessionModeMarker — `norma sessions`' inventory tag (MARKS, never hi
   test("cowork / any future-or-unknown mode -> generic app-only marker, not hidden and not blank", () => {
     expect(sessionModeMarker("cowork")).toBe(" [cowork — app only]");
     expect(sessionModeMarker("some-future-mode")).toBe(" [some-future-mode — app only]");
+  });
+});
+
+// Winter Phase 8d (Task 4.3): `norma sessions`' runtime tag — the RAW wire value, never a display
+// label (that's the Mac app's job, WS-14 §14) — and blank whenever the daemon doesn't know.
+describe("sessionRuntimeMarker — `norma sessions`' runtime tag", () => {
+  test("absent -> no marker", () => {
+    expect(sessionRuntimeMarker(undefined)).toBe("");
+  });
+  test("winter-agent / claude-agent -> the raw wire value, verbatim", () => {
+    expect(sessionRuntimeMarker("winter-agent")).toBe(" · winter-agent");
+    expect(sessionRuntimeMarker("claude-agent")).toBe(" · claude-agent");
   });
 });
 

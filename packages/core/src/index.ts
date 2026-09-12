@@ -5,10 +5,16 @@ export { FileSecretStore, KeychainSecretStore } from "./auth/secret-store";
 export { TOKEN_NAMES } from "./auth/tokens";
 export {
   loadSettings, saveSettings, loadPermissionDirs, addLocalDir,
-  REASONING_EFFORTS, setProviderModel, setReasoningEffort, setOutputStyle, memoryEnabledFrom,
+  REASONING_EFFORTS, setProviderModel, setReasoningEffort, setOutputStyle, setAdvisorModel, memoryEnabledFrom,
   workflowsEnabledFrom, keywordTriggerEnabledFrom,
   type Settings,
 } from "./settings";
+// Winter Phase 8d (Task 4.3): `norma model --advisor <slug>` validates against the SAME pinned
+// catalog `session.setModel`'s handler consults (`catalogRowsFor`, `runtime-sdk/provider-
+// selection.ts`) — the CLI runs with no live daemon/RPC for this command (direct settings.json
+// read/write, `case "model"`'s own doc comment), so the STATIC compiled-in catalog, not a
+// `sync.config` round trip, is the only thing it can validate against without one.
+export { catalogRowsFor } from "./runtime-sdk/provider-selection";
 export { runWorkflowSubprocess } from "./workflows/subprocess-entry";
 // P8b-18: reached only by the CLI's static `__runtime-state-probe` argv route, which imports it
 // from THIS barrel — the same shape `runWorkflowSubprocess` above uses, and the only shape that
