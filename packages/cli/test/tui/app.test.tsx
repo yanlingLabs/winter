@@ -827,11 +827,14 @@ describe("App — @-file mention index lifecycle (Phase 3d T3)", () => {
       await wait();
       stdin.write("\r");
       await wait();
-      // The long tmpdir path can hard-wrap onto its own line at 80 columns, so check the note's
-      // pieces independently rather than one contiguous "cwd → <path>" substring.
+      // The long tmpdir path can hard-wrap onto its own line at 80 columns (P9b: the "winter-"
+      // prefix is one character longer than this file's own pre-rename prefix, which is enough to
+      // move the wrap point mid-word) — strip ANSI codes AND newlines before checking, so the
+      // match survives wherever the terminal happens to break the line.
       const cdFrame = lastFrame() ?? "";
+      const cdFrameUnwrapped = cdFrame.replace(/\x1b\[[0-9;]*m/g, "").replace(/\n/g, "");
       expect(cdFrame).toContain("cwd → ");
-      expect(cdFrame).toContain(redirected); // runCd's note landed first
+      expect(cdFrameUnwrapped).toContain(redirected); // runCd's note landed first
 
       stdin.write("@onlyin"); // the FIRST "@"-trigger, AFTER the /cd
       await wait(100); // real fs readdir
