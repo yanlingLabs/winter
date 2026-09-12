@@ -37,11 +37,11 @@
  *  that shape). */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { Box, Text, useInput, useStdin } from "ink";
 import { Chalk } from "chalk";
 import wrapAnsi from "wrap-ansi";
+import { resolveWinterHome } from "@yanlinglabs/winter-core";
 import type { ApprovalPolicy } from "@yanlinglabs/winter-protocol";
 import { footerKeyAction } from "../keys";
 import type { FooterSelection } from "../task-block";
@@ -92,7 +92,9 @@ const DELETE_SEQS = new Set(["\x1b[3~", "\x1b[3^", "\x1b[3$"]);
 const ansi = new Chalk({ level: 3 });
 
 function defaultHistoryPath(): string {
-  return join(homedir(), ".winter", "history.jsonl");
+  // P9b-12: routed through the resolver (mirrors `main.ts`'s `socketPath()`) rather than
+  // hardcoding `~/.winter` — a `WINTER_HOME` override must move this file with everything else.
+  return join(resolveWinterHome(), "history.jsonl");
 }
 
 /** Phase 3d T2 — pure predicate: is the `/`-slash-command menu open for this `InputState`, and if

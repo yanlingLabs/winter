@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { renderPlist, LAUNCHD_LABEL, migrateFromLaunchdAgent, launchdLabel } from "../src/launchd";
+import { LEGACY_LAUNCHD_LABEL } from "@yanlinglabs/winter-core";
+import { renderPlist, migrateFromLaunchdAgent, launchdLabel } from "../src/launchd";
 
 describe("renderPlist", () => {
   test("contains label, program arguments, keepalive, and log paths", () => {
@@ -7,7 +8,7 @@ describe("renderPlist", () => {
       binaryPath: "/usr/local/bin/winter",
       winterHome: "/Users/me/.winter",
     });
-    expect(xml).toContain(`<string>${LAUNCHD_LABEL}</string>`);
+    expect(xml).toContain(`<string>${launchdLabel()}</string>`);
     expect(xml).toContain("<string>/usr/local/bin/winter</string>");
     expect(xml).toContain("<string>daemon</string>");
     expect(xml).toContain("<string>run</string>");
@@ -28,9 +29,9 @@ describe("renderPlist", () => {
 });
 
 describe("migrateFromLaunchdAgent", () => {
-  const fakePath = "/fake/Library/LaunchAgents/com.winter.core.plist";
+  const fakePath = `/fake/Library/LaunchAgents/${LEGACY_LAUNCHD_LABEL}.plist`;
 
-  test("unloads an existing com.winter.core plist: bootout(label) then remove(path)", async () => {
+  test("unloads an existing legacy plist: bootout(label) then remove(path)", async () => {
     let bootoutLabel: string | undefined;
     let removedPath: string | undefined;
 
@@ -41,10 +42,15 @@ describe("migrateFromLaunchdAgent", () => {
       remove: (p) => { removedPath = p; },
     });
 
-    expect(bootoutLabel).toBe(LAUNCHD_LABEL);
+    expect(bootoutLabel).toBe(LEGACY_LAUNCHD_LABEL);
     expect(removedPath).toBe(fakePath);
   });
 
+  // The historical agent's label (`LEGACY_LAUNCHD_LABEL`, `legacy-names.ts`) is NOT today's CURRENT
+  // dist label (`launchdLabel("dist")`): the rename made those two strings different again after
+  // briefly (and only textually) colliding. This teardown must keep targeting the pre-rename
+  // literal regardless of WINTER_PROFILE, or of the product's own name — imported, never
+  // hardcoded (the residue test forbids the legacy literal outside `legacy-names.ts`).
   test("keeps the historical literal label regardless of WINTER_PROFILE", async () => {
     const prev = process.env.WINTER_PROFILE;
     process.env.WINTER_PROFILE = "dev";
@@ -59,7 +65,8 @@ describe("migrateFromLaunchdAgent", () => {
     } finally {
       if (prev === undefined) delete process.env.WINTER_PROFILE; else process.env.WINTER_PROFILE = prev;
     }
-    expect(bootoutLabel).toBe("com.winter.core");
+    expect(bootoutLabel).toBe(LEGACY_LAUNCHD_LABEL);
+    expect(bootoutLabel).not.toBe(launchdLabel("dist"));
   });
 
   test("no-ops when the plist is absent: no bootout, no remove call, never throws", async () => {
