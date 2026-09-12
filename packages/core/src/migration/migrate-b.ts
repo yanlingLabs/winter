@@ -388,12 +388,17 @@ export async function resumeMigrationB(home: string, deps: MigrationDeps): Promi
 }
 
 /**
- * Undoes a migration: removes every destination file this run actually wrote (`copied`/`rekeyed`/
- * `rebuilt` entries) — but ONLY when the destination's current content still hashes to the value
- * this run recorded, so a file the daemon has since written through (a new session, a settings
- * edit) is left alone and reported, never silently destroyed. Never touches the legacy home. Ends
- * with the working `manifest.json`/`COMPLETE` cleared and a final `status: "rolled-back"` copy at
- * `manifest.rolled-back.json`, inside the same `migration/` directory.
+ * Undoes a migration: removes every destination file this run actually wrote (`copied`/`rekeyed`
+ * entries) — but ONLY when the destination's current content still hashes to the value this run
+ * recorded, so a file the daemon has since written through (a new session, a settings edit) is left
+ * alone and reported, never silently destroyed. `rebuilt` entries (e.g. `sessions/index.db`) carry
+ * no recorded hash — migration never wrote them in the first place, so a `rebuilt`-entry dest that
+ * exists at rollback time can only be something the DAEMON later rebuilt from real session data, and
+ * it is deleted UNCONDITIONALLY (no hash guard is possible with nothing to compare against). This is
+ * non-destructive by construction: the same rebuild runs again, from the same untouched JSONL, the
+ * next time that store opens — never a second copy of the guard the OTHER two statuses get. Never
+ * touches the legacy home. Ends with the working `manifest.json`/`COMPLETE` cleared and a final
+ * `status: "rolled-back"` copy at `manifest.rolled-back.json`, inside the same `migration/` directory.
  */
 export async function rollbackMigrationB(home: string, deps: { log: (line: string) => void }): Promise<MigrationManifest> {
   const manifest = readMigrationManifest(home);

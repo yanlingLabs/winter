@@ -388,6 +388,21 @@ describe("resume + rollback (Step 2)", () => {
     expect(readFileSync(touched!.dest, "utf8")).toBe("modified by the daemon after migration");
   });
 
+  test("rollbackMigrationB deletes a 'rebuilt' entry's dest UNCONDITIONALLY when the daemon has since created it — there is no recorded hash to guard against overwrite", async () => {
+    const legacyHome = tempDir();
+    const home = tempDir();
+    const plan = await seedTo(legacyHome, home);
+    const manifest = await runMigrationB(plan, noopDeps());
+    const rebuilt = manifest.entries.find((e) => e.status === "rebuilt");
+    expect(rebuilt).toBeDefined();
+    expect(existsSync(rebuilt!.dest)).toBe(false); // migration never wrote it
+    // Simulate the daemon having since opened sessions/index.db and rebuilt it for real.
+    writeFileSync(rebuilt!.dest, "a real sqlite index the daemon rebuilt after migration");
+
+    await rollbackMigrationB(home, { log: () => {} });
+    expect(existsSync(rebuilt!.dest)).toBe(false); // removed unconditionally — non-destructive by construction (the store rebuilds it again from the untouched JSONL)
+  });
+
   test("rollbackMigrationB refuses when there is no manifest at all", async () => {
     const home = tempDir();
     let caught: unknown;
