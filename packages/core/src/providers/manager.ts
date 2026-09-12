@@ -120,7 +120,9 @@ export async function createProvider(settings: Settings, secrets: SecretStore, s
     // here — matches the pre-existing `CodexOAuthProvider` construction, which never touched the
     // secret store at construction time either; a missing/invalid credential surfaces as a typed
     // `auth` error from the FIRST `streamTurn()` call, same as before.
-    inner = createCodexOauthRuntimeProvider(secrets);
+    // P8d-13: the ONE wiring line for the subscription-quota carry — `quota` already exists above
+    // (constructed before the provider-type branch), so this is the door, not a new one.
+    inner = createCodexOauthRuntimeProvider(secrets, undefined, (info) => quota.noteSubscriptionQuota(info));
   } else {
     // Fail-fast, unchanged: `createProvider` itself throws before anything is constructed when no
     // key is stored (manager.test.ts pins this exact message).

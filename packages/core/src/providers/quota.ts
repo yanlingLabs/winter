@@ -10,6 +10,15 @@ export class QuotaManager {
   private limitedUntil = 0;
   private listeners: ((s: QuotaState) => void)[] = [];
   private totals = { inputTokens: 0, outputTokens: 0 };
+  /** P8d-13's carry item: R6-B `rate_limit`/`kind:"subscription-quota"` info (`{info: Record<string,
+   *  unknown>}`, provider-runtime's own shape — Norma reports it verbatim, never re-shapes it) from
+   *  the codex adapter (`runtime-provider.ts`'s `translateEvents`). Distinct from `limitedUntil`
+   *  above on purpose: an HTTP 429 (`noteRateLimit`) is a concrete backoff deadline this manager
+   *  ENFORCES (`waitIfLimited` blocks the next `streamTurn` on it); a subscription-quota frame is
+   *  informational — the provider is not refusing anything, it is reporting how much of the
+   *  account's window is left — so it is exposed for a future status view to read and never feeds
+   *  `waitIfLimited`. */
+  private lastSubscriptionQuota: { info: Record<string, unknown>; at: number } | undefined;
 
   constructor(opts: { maxConcurrent?: number; maxRetries?: number } = {}) {
     this.maxConcurrent = opts.maxConcurrent ?? 4;
@@ -40,6 +49,16 @@ export class QuotaManager {
     this.totals.outputTokens += outputTokens;
   }
   usage(): { inputTokens: number; outputTokens: number } { return { ...this.totals }; }
+
+  /** Records the LATEST subscription-quota snapshot the provider has reported — never merged or
+   *  accumulated with a previous one (it's a point-in-time reading of the account's own remaining
+   *  window, not a delta). */
+  noteSubscriptionQuota(info: Record<string, unknown>): void {
+    this.lastSubscriptionQuota = { info, at: Date.now() };
+  }
+  subscriptionQuota(): { info: Record<string, unknown>; at: number } | undefined {
+    return this.lastSubscriptionQuota ? { ...this.lastSubscriptionQuota } : undefined;
+  }
 
   async acquire(): Promise<void> {
     if (this.active < this.maxConcurrent) { this.active++; return; }
