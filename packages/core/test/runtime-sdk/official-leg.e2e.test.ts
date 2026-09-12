@@ -35,7 +35,7 @@ import { FakeProvider } from "../../src/agent/fake-provider";
 import { BashReviewer } from "../../src/agent/reviewer";
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "../../src/runtime-sdk/create";
 import { credentialRefFor, ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
-import { sessionHooksFor } from "../../src/runtime-sdk/hooks";
+import { sessionHooksFor, type SessionHooksDeps } from "../../src/runtime-sdk/hooks";
 import type { OfficialInputDeps, OfficialSessionInput } from "../../src/runtime-sdk/official-options";
 import { startOfficialSession, type OfficialSession } from "../../src/runtime-sdk/official-session";
 import { createProjector, type CheckpointStore } from "../../src/projector";
@@ -139,8 +139,9 @@ const probeDef: ToolDefinition = {
 
 async function buildWorld(
   selection: RuntimeSelection, secretsDir: string, baseUrl: string, policy: "auto" | "dont-ask" | "plan" = "auto",
-  opts: { reviewer?: BashReviewer } = {},
+  opts: { reviewer?: BashReviewer; mode?: "code" | "chat"; hookFacade?: SessionHooksDeps["hookFacade"] } = {},
 ): Promise<World> {
+  const mode = opts.mode ?? "code";
   const home = mkdtempSync(join(tmpdir(), "p8c-official-e2e-"));
   const cwd = join(home, "work");
   mkdirSync(cwd, { recursive: true });
@@ -168,7 +169,7 @@ async function buildWorld(
 
   const registry = new ToolRegistry();
   registry.register(probeDef);
-  const capSession = { sessionId: "s_official_e2e", mode: "code" as const, cwd, roots: [cwd] };
+  const capSession = { sessionId: "s_official_e2e", mode, cwd, roots: [cwd] };
   const probeServer = capabilityServer({ key: "probe", defs: [probeDef] }, capSession);
   const capabilities: CapabilityServerRecord = { [probeServer.name]: probeServer };
 
@@ -188,11 +189,15 @@ async function buildWorld(
 
   // M4 (ruling P8c-19): the SAME `hooks.ts` builder the Winter leg uses, its `.official` half —
   // see `hooks.ts`'s own header for why that value is safe to hand the official leg unmodified.
-  // Only built when a test asks for a reviewer — every other `buildWorld` caller keeps running with
-  // no `Options.hooks` at all, byte-identical to before this fix wave.
-  const hooks = opts.reviewer === undefined
+  // Only built when a test asks for a reviewer OR a hook facade — every other `buildWorld` caller
+  // keeps running with no `Options.hooks` at all, byte-identical to before this fix wave.
+  const hooks = opts.reviewer === undefined && opts.hookFacade === undefined
     ? undefined
-    : sessionHooksFor({ sessionId, roots: [cwd], reviewer: opts.reviewer, policy: () => policy }).official;
+    : sessionHooksFor({
+        sessionId, roots: [cwd], policy: () => policy,
+        ...(opts.reviewer === undefined ? {} : { reviewer: opts.reviewer }),
+        ...(opts.hookFacade === undefined ? {} : { hookFacade: opts.hookFacade }),
+      }).official;
 
   const inputDeps: OfficialInputDeps = {
     home,
@@ -215,18 +220,18 @@ async function buildWorld(
     ...(hooks === undefined ? {} : { hooks }),
   };
 
-  const sessionInput: OfficialSessionInput = { sessionId, mode: "code", cwd };
+  const sessionInput: OfficialSessionInput = { sessionId, mode, cwd };
 
   const session = startOfficialSession({
     sessionId,
     backendSessionId,
-    mode: "code",
+    mode,
     runtime,
     selection,
     sessionInput: () => sessionInput,
     inputDeps: () => inputDeps,
     projector: (generation) => createProjector({
-      sessionId, mode: "code", generation, runtimeKind: "claude-agent",
+      sessionId, mode, generation, runtimeKind: "claude-agent",
       nextSeq: () => ++seq,
       checkpoint: checkpoints,
       now: () => new Date().toISOString(),
@@ -532,6 +537,138 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       expect(result?.isError).toBe(true);
       expect(result?.output).toContain("official-leg-hooks-forced-unsafe");
       expect(reviewProvider.requests.length).toBeGreaterThan(0);
+    });
+  }, 60_000);
+
+  // ── Phase 8d Task 3.2 — remaining official-leg measurements (WS-17 §8, real binary) ──────────
+
+  test("8d MEASURED: a Bash read OUTSIDE cwd is ALLOWED on this leg — no sandbox denies it (unlike Winter's own seatbelt)", async () => {
+    // MEASURED, not assumed (this test's premise going in was the OPPOSITE): `sandboxConfigFor(home)`
+    // (reused verbatim on this leg) denies only `<home>/run`/`<home>/runtimes` — Norma's own
+    // philosophy is unrestricted reads otherwise (CLAUDE.md: "the sole read denial is ~/.norma/run").
+    // The real 0.3.250 CLI's own default sandbox (`Options.sandbox`, reused from `sandboxConfigFor`)
+    // does NOT additionally fence Bash to the working directory the way `agent/sandbox.ts`'s
+    // seatbelt profile does for the retired engine — an out-of-cwd `cat` SUCCEEDS end to end, and its
+    // content reaches the ordinary `tool_result` event. This is the exact "denial shape" measurement
+    // Task 3.2 asked for: on the official leg, filesystem containment for Bash is `permissions.deny`
+    // (named paths) ONLY — there is no path-independent out-of-cwd fence — so a deployment relying on
+    // Bash confinement to cwd for the official leg needs an explicit `permissions.deny` rule of its
+    // own; `sandboxConfigFor`'s current denyRead/denyWrite lists (`<home>/run`, `<home>/runtimes`)
+    // are the daemon control plane ONLY, never a project-boundary fence.
+    const outsideDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-outside-"));
+    const SENTINEL = "NORMA_8D_OUTSIDE_CWD_SENTINEL_7c2b";
+    writeFileSync(join(outsideDir, "secret.txt"), SENTINEL);
+    const turns: AnthropicTurnScript[] = [PLACEHOLDER_TURN("Bash", [JSON.stringify({ command: "cat /placeholder" })]), DONE_TURN];
+    await withAnthropicLoopback(turns, async (fake) => {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto");
+      const target = join(outsideDir, "secret.txt");
+      turns[0] = PLACEHOLDER_TURN("Bash", [JSON.stringify({ command: `cat ${target}` })]);
+      await w.session.send("cat that file for me");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      const result = w.events.find((e) => e.type === "tool_result") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
+      expect(result).toBeDefined();
+      expect(result?.isError).toBe(false);
+      expect(result?.output).toContain(SENTINEL);
+      console.warn(`[8d official-leg] MEASURED: an out-of-cwd Bash read is ALLOWED on the official leg (policy=auto, no seatbelt-equivalent fence) — isError=${result?.isError}`);
+      rmSync(outsideDir, { recursive: true, force: true });
+    });
+  }, 60_000);
+
+  test("8d: additionalDisallowedTools is HONOURED by the real binary — a chat-mode session's system/init.tools never advertises Bash, a code-mode one does", async () => {
+    const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+    await withAnthropicLoopback([DONE_TURN], async (fake) => {
+      const codeWorld = await buildWorld(selectionFor(), secretsDir, fake.url, "auto", { mode: "code" });
+      await codeWorld.session.send("hi");
+      await waitFor(codeWorld.events, (e) => e.type === "turn_completed", 45_000);
+      expect(codeWorld.session.init?.tools).toContain("Bash");
+    });
+    await withAnthropicLoopback([DONE_TURN], async (fake) => {
+      const chatWorld = await buildWorld(selectionFor(), secretsDir, fake.url, "auto", { mode: "chat" });
+      await chatWorld.session.send("hi");
+      await waitFor(chatWorld.events, (e) => e.type === "turn_completed", 45_000);
+      expect(chatWorld.session.init?.tools).toBeDefined();
+      expect(chatWorld.session.init?.tools).not.toContain("Bash");
+    });
+  }, 90_000);
+
+  // ── PostToolUse / PostToolUseFailure fire on the official binary (Task 3.2) ──────────────────
+  //
+  // `hooks.ts`'s `pluginPostToolUseHook`/`pluginPostToolUseFailureHook` are already measured on the
+  // WINTER leg (P8c-7's own `hooks-measure.e2e.test.ts`); M4 above proves the official leg's
+  // PreToolUse group (the bash reviewer) fires on the REAL 0.3.250 binary, but nothing yet measures
+  // whether the SAME binary's PostToolUse/PostToolUseFailure events reach a plugin-shaped
+  // `HookFacadeLike` on this leg — this is that measurement, with the PINNED payload shape
+  // `pluginPostToolUseHook`/`pluginPostToolUseFailureHook` build (`toolName`, `argsJson`, `output`,
+  // `isError`, `threadId`).
+  test("8d: PostToolUse fires (with the real tool output) for a SUCCEEDED call, on the real binary", async () => {
+    const calls: Array<{ event: string; extra: Record<string, unknown> }> = [];
+    const hookFacade: SessionHooksDeps["hookFacade"] = {
+      async runFor(event, extra) { calls.push({ event, extra }); return []; },
+    };
+    const turns: AnthropicTurnScript[] = [
+      { blocks: [{ type: "tool_use", id: "call_1", name: "mcp__norma__probe__probe", jsonChunks: [JSON.stringify({ note: "8d-post" })] }], stopReason: "tool_use" },
+      DONE_TURN,
+    ];
+    await withAnthropicLoopback(turns, async (fake) => {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto", { hookFacade });
+      await w.session.send("use the probe tool");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      const post = calls.find((c) => c.event === "post-tool" && c.extra.toolName === "mcp__norma__probe__probe");
+      expect(post).toBeDefined();
+      expect(post?.extra).toMatchObject({ toolName: "mcp__norma__probe__probe", isError: false, threadId: "main" });
+      expect(String(post?.extra.output)).toContain("probed: 8d-post");
+    });
+  }, 60_000);
+
+  test("8d: PostToolUseFailure fires (isError: true) for a call that RAN and failed, on the real binary", async () => {
+    // A Bash command that RUNS (passes every permission check) and then fails at execution — NOT the
+    // C1 control-plane fence: a call the fence denies never runs at all, so PostToolUse/
+    // PostToolUseFailure never fire for it either (measured separately, below) — this is `hooks.ts`'s
+    // OWN documented rule for a PreToolUse deny, and the control-plane fence is functionally the same
+    // "never ran" shape. `cat` of a path that genuinely does not exist is the honest "ran, failed" case.
+    const calls: Array<{ event: string; extra: Record<string, unknown> }> = [];
+    const hookFacade: SessionHooksDeps["hookFacade"] = {
+      async runFor(event, extra) { calls.push({ event, extra }); return []; },
+    };
+    const turns: AnthropicTurnScript[] = [PLACEHOLDER_TURN("Bash", [JSON.stringify({ command: "cat /this/path/genuinely/does/not/exist/8d" })]), DONE_TURN];
+    await withAnthropicLoopback(turns, async (fake) => {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto", { hookFacade });
+      await w.session.send("run that shell command for me");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      const result = w.events.find((e) => e.type === "tool_result") as (SessionEvent & { isError?: boolean }) | undefined;
+      expect(result?.isError).toBe(true); // the call genuinely ran and failed (not denied)
+      const postToolCalls = calls.filter((c) => c.event === "post-tool");
+      const failed = postToolCalls.find((c) => c.extra.isError === true);
+      console.warn(`[8d official-leg] PostToolUse/PostToolUseFailure calls observed for the failing Bash call: ${JSON.stringify(postToolCalls.map((c) => ({ isError: c.extra.isError, toolName: c.extra.toolName })))}`);
+      expect(failed).toBeDefined();
+      expect(failed?.extra).toMatchObject({ toolName: "Bash", isError: true, threadId: "main" });
+    });
+  }, 60_000);
+
+  test("8d MEASURED: the C1 control-plane fence denies BEFORE the tool runs — neither PostToolUse nor PostToolUseFailure fire for it", async () => {
+    const calls: Array<{ event: string; extra: Record<string, unknown> }> = [];
+    const hookFacade: SessionHooksDeps["hookFacade"] = {
+      async runFor(event, extra) { calls.push({ event, extra }); return []; },
+    };
+    const turns: AnthropicTurnScript[] = [PLACEHOLDER_TURN("Read", [JSON.stringify({ file_path: "/placeholder" })]), DONE_TURN];
+    await withAnthropicLoopback(turns, async (fake) => {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto", { hookFacade });
+      const runDir = join(w.home, "run");
+      mkdirSync(runDir, { recursive: true });
+      const probePath = join(runDir, "probe-8d.txt");
+      writeFileSync(probePath, "denied content");
+      turns[0] = PLACEHOLDER_TURN("Read", [JSON.stringify({ file_path: probePath })]);
+      await w.session.send("read that file for me");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      const result = w.events.find((e) => e.type === "tool_result") as (SessionEvent & { isError?: boolean }) | undefined;
+      expect(result?.isError).toBe(true); // the fence still denies it (C1, re-confirmed)
+      const postToolCalls = calls.filter((c) => c.event === "post-tool");
+      console.warn(`[8d official-leg] MEASURED: post-tool hook calls for a control-plane-denied Read: ${postToolCalls.length} (expected 0 — the deny happens before the tool ever runs)`);
+      expect(postToolCalls).toHaveLength(0);
     });
   }, 60_000);
 });
