@@ -790,24 +790,135 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     }
   }, 60_000);
 
-  // P8d-18 (controller ruling): a TEST-ONLY crash seam (`onIncarnationStart` on
-  // `OfficialSessionDeps`, `official-session.ts`) was added so a test can grab each incarnation's own
-  // `AbortController` and simulate the crash `run()`'s own `finally` block needs to leave `state`
-  // at `"resumable"` (a deliberate `end()` is terminal for this leg — see that file's header).
+  // P8d-18 (controller ruling; Lane 3b re-measured, STILL UNPROVEN): a TEST-ONLY crash seam
+  // (`onIncarnationStart` on `OfficialSessionDeps`, `official-session.ts`) was added so a test can
+  // grab each incarnation's own `AbortController` and simulate the crash `run()`'s own `finally`
+  // block needs to leave `state` at `"resumable"` (a deliberate `end()` is terminal for this leg —
+  // see that file's header).
   //
-  // UNPROVEN, WITH THE EXACT BLOCKER (two approaches tried, both measured, neither reliable within
-  // this round's time box): (1) calling `.abort()` on the incarnation's own controller did not move
-  // `state` off `"live"` within 10s, live or with a request held open by a slow-responding fake —
-  // the router's official `Query` does not appear to treat that signal as "the child died". (2) the
-  // spawned `claude` process's own argv0 is rewritten to the short name "claude" (confirmed via
-  // `pgrep -P <pid> -l` at one point during debugging), so SIGKILL-by-PID (the same technique
-  // `winter-chat-e2e.test.ts` uses for the Winter binary) was attempted next — but a direct child of
-  // this test process named exactly "claude" could not be found at the moment a request was
-  // provably in flight at the loopback fake (`pgrep -P <thisPid> -x claude` returned empty even while
-  // a response was held open), which is itself a genuine unresolved puzzle about where the official
-  // leg's own HTTP call actually originates from (in-process vs. a short-lived subprocess) — pinning
-  // that down needs router-internal reading beyond this round's sanctioned scope. Recorded as a
-  // carry; the `onIncarnationStart` seam stays in place for whoever picks this up next.
+  // Round 2's two approaches (abort-by-controller, SIGKILL-by-PID) both measured unreliable. Lane
+  // 3b tried the brief's suggested "one remaining honest path" — driving a REAL upstream failure
+  // through the loopback fake, never touching a PID or the AbortController's own signal semantics —
+  // plus an independent, longer re-measurement of abort() with a request PROVABLY held open (two
+  // tests below). BOTH land on the SAME conclusion, now measured twice from two different angles:
+  //
+  //   (1) abort(): re-confirmed — 25s with a request genuinely in flight, `state` never leaves
+  //       "live". The router's official `Query` does not treat that signal as "the child died".
+  //   (2) a malformed/truncated upstream response mid-turn: the real `claude` 0.3.250 process is
+  //       ROBUST to it — one retry, then an in-band `agent_error`, turn completes, session stays
+  //       "live". Not a crash at all, from any angle this lane could drive externally.
+  //
+  // THE SHARPENED BLOCKER: `OfficialAdapter.spawnProxy` (the router's own process-exit surface —
+  // `OfficialSpawnedProcess.on("exit"|"error", …)`, exactly "the router's own crash/exit handling"
+  // the brief points at) is built INTERNALLY by `createRuntimeSdk` (`createOfficialAdapter(context)`
+  // called with no options, per that SDK's own doc comment) — router 0.0.3's `RuntimeSdkOptions`/
+  // `RouterOfficialPolicy`/`OfficialLegDeps` expose NO field a host can supply its own spawn proxy
+  // through. So there is no HOST-SIDE seam onto the actual exit event at all today; the only two
+  // externally-drivable failure classes (an aborted signal, a broken upstream connection) are both
+  // measured NOT to reach it. Unblocking this needs either a router 0.0.4 carry (a host-injectable
+  // `spawnProxy`, mirroring the Winter leg's own `spawnClaudeCodeProcess` hook) or literally killing
+  // the real OS process — which needs the process to be reliably locatable as a child in the first
+  // place, and round 2 already measured that unreliable. Recorded as a carry; the
+  // `onIncarnationStart` seam stays in place for whoever picks this up next.
+
+  // Lane 3b (item B): the ONE remaining honest path per the brief — not PID-hunting, not driving
+  // the AbortController (both already measured unreliable) — is to make the REAL upstream
+  // connection die mid-turn (a malformed HTTP response the real `claude` process cannot parse) and
+  // see whether the router's own `Query` treats THAT as "the child died", moving `state` off
+  // `"live"` on its own. Diagnostic only (kept even if it lands on "still live" — either answer is
+  // the measurement item B asks for).
+  test("P8d-18 (lane 3b): a malformed upstream response mid-turn — does the router's own Query end/error, moving state off 'live'?", async () => {
+    let requestNum = 0;
+    const { startFake, anthropicFake } = await import("@yanlinglabs/winter-provider-conformance");
+    const fake = await startFake({
+      routes: [{
+        path: "*",
+        handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            requestNum += 1;
+            if (requestNum === 1) return anthropicFake.anthropicTurnResponse({ blocks: [{ type: "text", chunks: ["hello"] }], stopReason: "end_turn" });
+            // Second turn: headers announce an SSE stream, but the body is neither valid SSE nor
+            // valid JSON, and the connection is torn down immediately after — the shape a real
+            // upstream connection reset produces, not a well-formed provider error frame.
+            return new Response("not-sse-not-json-garbage\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    try {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8d18-official-e2e-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto");
+      await w.session.send("say hello");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      expect(w.session.state).toBe("live"); // sanity: the first, well-formed turn leaves it live
+      await w.session.send("say something else");
+      // No well-formed turn_completed/agent_error is guaranteed here — poll `state` directly for up
+      // to 20s rather than waiting on an event that a genuine crash path might never emit.
+      const t0 = Date.now();
+      while (w.session.state === "live" && Date.now() - t0 < 20_000) await Bun.sleep(50);
+      console.warn(`[P8d-18][3b] MEASURED: state after a malformed mid-turn upstream response = "${w.session.state}" (requests seen: ${requestNum}); events: ${JSON.stringify(w.events.map((e) => e.type))}`);
+      // PINNED, against the real 0.3.250 binary: a malformed/truncated upstream response is fully
+      // absorbed (one retry, then an in-band `agent_error`) without ending the generation — NOT the
+      // crash seam either. If a future pinned version starts treating this as fatal, this assertion
+      // is the tripwire that says so.
+      expect(w.session.state).toBe("live");
+    } finally {
+      await fake.close();
+    }
+  }, 60_000);
+
+  // Lane 3b (item B), second honest attempt: re-measure `.abort()` on the incarnation's OWN
+  // `AbortController` (the `onIncarnationStart` seam already in place) with a request PROVABLY held
+  // open at the fake (so abort has something real to interrupt) and a LONGER poll window than
+  // round 2's 10s, since a real spawned process's teardown may simply be slower than that.
+  test("P8d-18 (lane 3b): re-measure — abort() on the incarnation's own AbortController while a request is held open", async () => {
+    const { startFake, stalledResponse } = await import("@yanlinglabs/winter-provider-conformance");
+    let requestNum = 0;
+    const fake = await startFake({
+      routes: [{
+        path: "*",
+        handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            requestNum += 1;
+            if (requestNum === 1) {
+              const { anthropicFake } = await import("@yanlinglabs/winter-provider-conformance");
+              return anthropicFake.anthropicTurnResponse({ blocks: [{ type: "text", chunks: ["hello"] }], stopReason: "end_turn" });
+            }
+            return stalledResponse(30_000); // held open well past this test's own timeout
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    try {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8d18-official-e2e-secrets2-"));
+      let capturedAbort: AbortController | undefined;
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto", { onIncarnationStart: (a) => { capturedAbort = a; } });
+      await w.session.send("say hello");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      expect(capturedAbort).toBeDefined();
+      await w.session.send("this one will be held open by the fake"); // resolves fast (just pushes into the stream); the TURN never completes on its own
+      // Give the fake time to actually receive the second request (so abort() has something live
+      // to interrupt) before firing it.
+      const t0req = Date.now();
+      while (requestNum < 2 && Date.now() - t0req < 10_000) await Bun.sleep(20);
+      expect(requestNum).toBeGreaterThanOrEqual(2);
+      capturedAbort!.abort();
+      const t0 = Date.now();
+      while (w.session.state === "live" && Date.now() - t0 < 25_000) await Bun.sleep(50);
+      console.warn(`[P8d-18][3b] MEASURED: state ${(Date.now() - t0)}ms after abort() = "${w.session.state}"`);
+      // PINNED (re-confirms round 2, independently, with a request PROVABLY held open and a longer
+      // window): abort() alone never moves the router's official Query off "live" — the router does
+      // not appear to treat that signal as "the child died". See this describe block's own P8d-18
+      // comment for the full blocker (no host-injectable spawn proxy exists in router 0.0.3 to drive
+      // a REAL exit/disconnect event from Norma's side; a bare OS-level kill was already measured
+      // unreliable — the child could not be reliably located as a direct process child).
+      expect(w.session.state).toBe("live");
+    } finally {
+      await fake.close();
+    }
+  }, 60_000);
 });
 
 test("claude runtime bed resolves on this machine (sanity: the platform package really installed)", () => {
