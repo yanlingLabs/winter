@@ -1177,7 +1177,22 @@ if (import.meta.main) {
     // lock, which unlinks the socket — the clean-quit path. (SIGKILL/crash still leave a stale
     // socket, which is why the supervisor's socketExists is also now a liveness probe, not a
     // presence check.)
-    const daemon = await startDaemon();
+    // Phase 9c Migration B: the boot hook inside `startDaemon` throws a typed `MigrationRefused`
+    // (code `home_half_migrated`) BEFORE creating anything on disk when the home is mid-migration —
+    // print the operator-facing message and exit cleanly rather than an uncaught-exception stack
+    // trace; the daemon never auto-resumes on its own (`winter migrate --resume`/`--rollback` is
+    // the door).
+    let daemon: Awaited<ReturnType<typeof startDaemon>>;
+    try {
+      daemon = await startDaemon();
+    } catch (err) {
+      const { MigrationRefused } = await import("@yanlinglabs/winter-core");
+      if (err instanceof MigrationRefused) {
+        console.error(err.message);
+        process.exit(1);
+      }
+      throw err;
+    }
     // AWAITED (P8a Task 12): `stop()` is synchronous up to the runtime-state drain, and the tail it
     // hands back is what releases the lock (→ unlinks the socket). `process.exit(0)` on the same
     // line would kill the process mid-drain and leave the stale socket this handler exists to avoid.
@@ -2149,6 +2164,37 @@ if (import.meta.main) {
     }
     process.exit(text.length > 0 ? 0 : 1);
   }
+  case "migrate": {
+    // WS-16 §18 Migration B — the same real machinery the daemon's own boot hook runs (never a
+    // second copy of it). `runMigrateCommand` is provable outside this argv switch (main.test.ts's
+    // own header); this case is a thin wrapper over real deps.
+    const { KeychainSecretStore: To, LegacyKeychainSecretStore, resolveWinterHome: home, resolveWinterProfile: profileOf, isDaemonLockHeld } = await import("@yanlinglabs/winter-core");
+    const { runMigrateCommand } = await import("./commands/migrate");
+    const profile = profileOf();
+    const code = await runMigrateCommand({
+      home: home(),
+      profile,
+      argv: process.argv.slice(3),
+      secretsTo: new To(),
+      legacySecrets: new LegacyKeychainSecretStore(profile),
+      isDaemonLockHeld,
+      log: (l) => console.log(l),
+      error: (l) => console.error(l),
+      confirm: (p) => askYesNo(p),
+    });
+    process.exit(code);
+  }
+  case "migrate-project": {
+    const { runMigrateProjectCommand } = await import("./commands/migrate-project");
+    const code = await runMigrateProjectCommand({
+      argv: process.argv.slice(3),
+      cwd: process.cwd(),
+      log: (l) => console.log(l),
+      error: (l) => console.error(l),
+      confirm: (p) => askYesNo(p),
+    });
+    process.exit(code);
+  }
   default:
     console.log(`winter ${CORE_VERSION} — commands:
   daemon run | daemon install | daemon uninstall | daemon status
@@ -2167,6 +2213,8 @@ if (import.meta.main) {
   memory [list] [--project] | show <name> [--project] | rm <name> [--project]  manage saved memory facts
   login [--api-key] [--anthropic-key] [--web-search-key] [--exa-key] | logout [--anthropic] | provider | provider-smoke [--prompt <text>]
   init                                            generate/update WINTER.md by surveying the project
+  migrate [--from <legacyHome>] [--status|--resume|--rollback] [--yes]        Migration B: copy a legacy home into this one
+  migrate-project [dir] [--yes]                   convert one project's legacy instructions file / project dir to WINTER.md/.winter
   -p "<prompt>" [--auto|--plan] [--trust|--no-trust]   headless agent turn (asks for tool approval unless --auto/--plan)`);
   }
 }

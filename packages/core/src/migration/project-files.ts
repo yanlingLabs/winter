@@ -33,7 +33,7 @@ export interface ProjectMigrationPlan {
   dir: string;
   gitTracked: boolean;
   steps: ProjectMigrationStep[];
-  /** Preview of what `.norma/settings.json`'s string values would rewrite to — computed even when
+  /** Preview of what the legacy project dir's `settings.json` string values would rewrite to — computed even when
    *  `steps` is empty for neither file/dir, so `--status`-style tooling can show it independent of
    *  whether a move actually happens. Empty when no legacy settings.json exists or it fails to parse. */
   settingsChanges: RekeyChange[];

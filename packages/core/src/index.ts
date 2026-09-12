@@ -6,7 +6,7 @@ export {
   LEGACY_TMPDIR_ENV, LEGACY_KEYCHAIN_SERVICE, LEGACY_KEYCHAIN_SERVICE_DEV, LEGACY_CLI_LINK,
   LEGACY_DEV_WRAPPER_NAMES, LEGACY_PROJECT_DIR, LEGACY_INSTRUCTIONS_FILE,
 } from "./legacy-names";
-export { FileSecretStore, KeychainSecretStore } from "./auth/secret-store";
+export { FileSecretStore, KeychainSecretStore, type SecretStore } from "./auth/secret-store";
 export { TOKEN_NAMES } from "./auth/tokens";
 export {
   loadSettings, saveSettings, loadPermissionDirs, addLocalDir,
