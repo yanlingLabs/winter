@@ -2418,9 +2418,20 @@ final class ShellSessionHost: ObservableObject {
     /// here). `nil` = unset ("Automatic") or not yet read.
     @Published private(set) var newChatAdvisorModel: String? = nil
 
+    /// Whole-branch review Major 2: `AppModel.writeAdvisorModelToSettings` now refuses (returns
+    /// `false`) rather than clobbering an unparseable settings.json — this page's OWN visible
+    /// surface for that refusal, rendered the SAME way `newChatCreate`'s `.failed` banner is
+    /// (`NewChatPage.swift`) but kept as a SEPARATE property: this is a picker-write failure, not
+    /// a session-create failure, and `newChatCreate`'s other states drive real create-flow gates
+    /// (`sendFirstChatMessage`'s own guard) that an unrelated failure must never perturb.
+    @Published private(set) var newChatAdvisorError: String? = nil
+
     func setNewChatAdvisorModel(_ model: String?) {
         if AppModel.writeAdvisorModelToSettings(model) {
             newChatAdvisorModel = model
+            newChatAdvisorError = nil
+        } else {
+            newChatAdvisorError = "the advisor setting could not be saved — settings.json could not be read"
         }
     }
 

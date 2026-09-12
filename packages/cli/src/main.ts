@@ -1124,8 +1124,19 @@ if (import.meta.main) {
   // Winter Phase 8d: the compiled-binary runtimes probe (`scripts/verify-runtimes-compiled.ts`) —
   // same argv[2] shape and the same reasons as `__runtime-state-probe` above. Resolves both runtime
   // ladders from THIS binary's execPath (the bundle rung is `<dirname(execPath)>/runtimes/…`).
+  //
+  // Whole-branch review Nit 3: `home` used to be `process.env.NORMA_HOME ?? ""` — an unset
+  // NORMA_HOME probed a RELATIVE empty-string home (inert: no rung under it ever resolves, but a
+  // silently wrong answer rather than the CLI's own normal default). `resolveNormaHome()` is the
+  // same "env var or else `~/.norma`" fallback every OTHER command here already uses, and it is
+  // PURE (`process.env.NORMA_HOME ?? join(homedir(), ".norma")`, `norma-dir.ts`) — no directory
+  // creation, no side effect (that's `bootstrapNormaDir`'s separate job) — so calling it here does
+  // NOT touch the user's real home in a test: `scripts/verify-runtimes-compiled.ts` sets
+  // `NORMA_HOME` to a temp dir before spawning this route, so `resolveNormaHome()` returns that
+  // temp dir, never `~/.norma`, exactly as `__runtime-state-probe`'s own neighboring route already
+  // relies on for the identical reason.
   if (process.argv[2] === "__runtimes-probe") {
-    const result = await runRuntimesProbe({ execPath: process.execPath, home: process.env.NORMA_HOME ?? "", env: process.env });
+    const result = await runRuntimesProbe({ execPath: process.execPath, home: resolveNormaHome(), env: process.env });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     process.exit(result.ok ? 0 : 1);
   }

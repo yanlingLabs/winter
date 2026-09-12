@@ -591,14 +591,29 @@ extension AppModel {
     /// (every field in `Settings` is optional, so an empty object is a valid file — the same
     /// "first write creates it" the CLI's own `saveSettings` already does for a fresh home).
     /// Returns `false` (writing nothing) on any parse/encode/I-O failure — never a partial file.
+    ///
+    /// Whole-branch review Major 2: a settings.json that EXISTS and was readable but does not
+    /// parse as a JSON object (hand-edited, truncated, or from a future/incompatible schema) is
+    /// NOT "no settings.json yet" — conflating the two used to fall through to `obj = [:]` and
+    /// atomically REPLACE that file with `{"runtimes":{"advisorModel":…}}`, which the daemon's
+    /// settings-watcher then hot-loads, silently resetting every OTHER setting in it. The fresh
+    /// object is only ever the honest "there is genuinely nothing there yet" case
+    /// (`Data(contentsOf:)` itself failing, e.g. ENOENT) — a file that exists but fails to parse
+    /// refuses the write entirely instead. Callers surface `false` to the user (`ComposerModelChip`'s
+    /// wirers: `FieldStateAdapter.applyAdvisorModelSelection` sets `modelChangeError`, the
+    /// existing "Couldn't switch model" alert; `ShellSessionHost.setNewChatAdvisorModel` sets its
+    /// own `newChatAdvisorError`, rendered the same way `newChatCreate`'s failure banner is).
     @discardableResult
     nonisolated static func writeAdvisorModelToSettings(_ model: String?) -> Bool {
         let url = URL(fileURLWithPath: NormaPaths.settingsPath(home: AppProfile.normaHome))
         var obj: [String: Any]
-        if let data = try? Data(contentsOf: url), let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        if let data = try? Data(contentsOf: url) {
+            guard let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return false // exists, unparseable/not-an-object — refuse rather than clobber it
+            }
             obj = parsed
         } else {
-            obj = [:]
+            obj = [:] // genuinely no file yet — the honest "first write creates it" case
         }
         var runtimes = obj["runtimes"] as? [String: Any] ?? [:]
         let trimmed = model?.trimmingCharacters(in: .whitespacesAndNewlines)
