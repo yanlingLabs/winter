@@ -15,7 +15,7 @@
 // `describeWithClaudeRuntime` skips without the optional platform package and THROWS under
 // `NORMA_CLAUDE_REQUIRE_RUNTIME=1` (P8c-9).
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@norma/protocol";
@@ -37,6 +37,9 @@ import { BashReviewer } from "../../src/agent/reviewer";
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "../../src/runtime-sdk/create";
 import { credentialRefFor, ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
 import { sessionHooksFor, type SessionHooksDeps } from "../../src/runtime-sdk/hooks";
+import { attachOfficialSession } from "../../src/runtime-sdk/messaging";
+import { createSqliteRuntimeDirectoryStore, openRuntimeStateDb } from "../../src/runtime-state";
+import { buildChildAddress, buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { OfficialInputDeps, OfficialSessionInput } from "../../src/runtime-sdk/official-options";
 import { startOfficialSession, type OfficialSession } from "../../src/runtime-sdk/official-session";
 import { createProjector, type CheckpointStore } from "../../src/projector";
@@ -918,6 +921,252 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     } finally {
       await fake.close();
     }
+  }, 60_000);
+
+  // Lane 3b (item C, WS-17 §8 row 4): TWO official sessions sharing ONE spool (one NORMA_HOME, so
+  // both are `officialSpoolRoot(home)`-identical fresh-spool launches) AND one child HOME (so a
+  // PLANTED `~/.claude` is the SAME file for both) — SendMessage A->B delivered, and the planted
+  // file byte-identical (content + mtime) after both ran. Enabled by item A's fix: before it, a
+  // bare `SendMessage` reached the CLI's own NATIVE tool, never `mcp__norma__send_message`/the
+  // messaging port, so this row could not have been proven at all.
+  test("WS-17 §8 row 4: two official sessions, one spool, one child HOME — SendMessage A->B delivered; a planted ~/.claude untouched", async () => {
+    const home = mkdtempSync(join(tmpdir(), "p8d-row4-home-"));
+    const secrets = new FileSecretStore(join(home, "secrets"));
+    await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-row4" });
+    const credentialRef = credentialRefFor("anthropic")!;
+    // Both sessions run under `policy: "auto"` (a prompting, non-bypass policy) — `"prompts"` is
+    // the correct fixed class. Without SOME classifier, WS-10 §13's receiver-class-unknown rule
+    // fails closed to `held` rather than guessing (measured first, before this was added).
+    const runtime = await createNormaRuntimeSdk({ home, settings: () => null, secrets, capabilities: [], sessionPermissionClass: () => "prompts" });
+    const officialPeer = await runtime.officialPeer();
+    if (officialPeer === undefined) throw new Error("unreachable: the suite is skipped without a bed");
+
+    const hermetic = hermeticOfficialHome("row4"); // ONE child HOME, shared by A and B
+    const claudeDir = join(hermetic.home, ".claude");
+    mkdirSync(claudeDir, { recursive: true });
+    const plantedFile = join(claudeDir, "marker.json");
+    writeFileSync(plantedFile, JSON.stringify({ sentinel: "NORMA_ROW4_PLANT_9f21" }));
+    const before = { content: readFileSync(plantedFile, "utf8"), mtimeMs: statSync(plantedFile).mtimeMs };
+
+    const trust = new TrustStore(join(home, "trust.json"));
+    const cwd = join(home, "work");
+    mkdirSync(cwd, { recursive: true });
+    trust.trust(cwd);
+    const skills = new SkillStore({ normaHome: home, trust });
+    const assembler = new ContextAssembler({ normaHome: home, trust, skills });
+    const policy = "auto" as const;
+
+    const eventsFor = new Map<string, SessionEvent[]>();
+    let seq = 0;
+
+    const makeSession = (sessionId: string, baseUrl: string) => {
+      const events: SessionEvent[] = [];
+      eventsFor.set(sessionId, events);
+      const checkpoints = new MemCheckpoints();
+      const sessionInput: OfficialSessionInput = { sessionId, mode: "code", cwd };
+      const inputDeps: OfficialInputDeps = {
+        home,
+        selection: selectionFor(),
+        explicitCredentials: [{ variable: "ANTHROPIC_API_KEY", ref: credentialRef }],
+        explicitConnectionEnv: { ANTHROPIC_BASE_URL: baseUrl },
+        claudeExecutableFor: () => ({ path: claudeRuntimeForTests()!.executable }),
+        officialPeer,
+        assembler,
+        capabilities: {},
+        canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy, emit: () => {} },
+        policy,
+        env: { ...process.env, HOME: hermetic.home }, // the SAME child HOME for both sessions
+      };
+      return startOfficialSession({
+        sessionId,
+        backendSessionId: crypto.randomUUID(),
+        mode: "code",
+        runtime,
+        selection: selectionFor(),
+        sessionInput: () => sessionInput,
+        inputDeps: () => inputDeps,
+        projector: (generation) => createProjector({
+          sessionId, mode: "code", generation, runtimeKind: "claude-agent",
+          nextSeq: () => ++seq, checkpoint: checkpoints, now: () => new Date().toISOString(), log: { warn: () => {} },
+        }),
+        append: (e) => { const stamped = { ...e, seq: (e as { seq?: number }).seq ?? ++seq } as SessionEvent; events.push(stamped); return stamped; },
+        broadcast: (e) => { events.push(e as unknown as SessionEvent); },
+        log: () => {},
+        messaging: { attach: attachOfficialSession },
+      });
+    };
+
+    const { startFake, anthropicFake } = await import("@yanlinglabs/winter-provider-conformance");
+    const DONE = (text: string): AnthropicTurnScript => ({ blocks: [{ type: "text", chunks: [text] }], stopReason: "end_turn" });
+    let bTurns = 0;
+    // MEASURED (Lane 3b diagnosis): the delivered text never appears as a persisted `user_message`
+    // event in B's own event log at all — delivery pushes a RENDERED, ATTRIBUTED envelope
+    // (`<agent-message from="session:row4-a" message-id="..." sender-permission-class="prompts">
+    // ...<summary>...</summary>...hello from A...</agent-message>`, `renderAttributedTurn`'s own
+    // format — WS-10 §12) straight into B's prompt stream, bypassing `OfficialSession.deliver()`'s
+    // `appendUser` call. So this test asserts on the REAL wire evidence (B's own second model
+    // request body) rather than an event that never gets emitted — itself a finding: an official-leg
+    // delivery leaves no trace in the RECEIVER's own persisted transcript (carry, out of this row's
+    // scope — WS-17 §8 asks only whether delivery happens, not whether it is journaled).
+    let secondRequestBody: string | undefined;
+    const fakeB = await startFake({
+      routes: [{
+        path: "*", handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            bTurns += 1;
+            if (bTurns === 2) secondRequestBody = recorded.body;
+            return anthropicFake.anthropicTurnResponse(DONE(bTurns === 1 ? "hi, I'm B" : "got your message"));
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    let aTurns = 0;
+    const fakeA = await startFake({
+      routes: [{
+        path: "*", handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            aTurns += 1;
+            // `to` must be the CANONICAL serialized address (`session:<id>`) — `resolveTarget`'s own
+            // algorithm (winter-agent-sdk's messaging/resolution.ts) only matches a BARE string
+            // against the caller's own children by id/name or a peer's `name` field; a bare
+            // top-level sibling session id with no `name` set resolves nowhere ("not_found",
+            // measured first).
+            if (aTurns === 1) return anthropicFake.anthropicTurnResponse({ blocks: [{ type: "tool_use", id: "call_sm", name: "SendMessage", jsonChunks: [JSON.stringify({ to: "session:row4-b", message: "hello from A" })] }], stopReason: "tool_use" });
+            return anthropicFake.anthropicTurnResponse(DONE("sent"));
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+
+    try {
+      // B first, so it is LIVE + attached (a messaging receiver) before A ever calls SendMessage.
+      const sessionB = makeSession("row4-b", fakeB.url);
+      await sessionB.send("hello");
+      await waitFor(eventsFor.get("row4-b")!, (e) => e.type === "turn_completed", 45_000);
+
+      const sessionA = makeSession("row4-a", fakeA.url);
+      await sessionA.send("please message B for me");
+      await waitFor(eventsFor.get("row4-a")!, (e) => e.type === "turn_completed", 45_000);
+
+      const aResult = eventsFor.get("row4-a")!.find((e) => e.type === "tool_result") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
+      console.warn(`[row4] MEASURED: A's SendMessage tool_result = ${JSON.stringify(aResult)}`);
+      expect(aResult?.isError).not.toBe(true);
+      expect(aResult?.output).toContain('"status":"queued"');
+
+      // The delivery pushes straight into B's prompt stream as a RENDERED, ATTRIBUTED envelope
+      // (MEASURED: it never becomes a persisted `user_message` event in B's own log at all — see
+      // this test's own header comment) — so wait for B's SECOND real model request (its own reply
+      // to it) and assert on the wire body directly, the only place the delivery is observable.
+      const t0 = Date.now();
+      while (secondRequestBody === undefined && Date.now() - t0 < 45_000) await Bun.sleep(20);
+      expect(secondRequestBody).toBeDefined();
+      // The body is still JSON-encoded text at this point, so the envelope's own quotes are
+      // escaped (`\"`) inside it — match the escaped form rather than a literal `"`.
+      expect(secondRequestBody).toContain("agent-message from=\\\"session:row4-a\\\"");
+      expect(secondRequestBody).toContain("hello from A");
+      await waitFor(eventsFor.get("row4-b")!, (e) => eventsFor.get("row4-b")!.filter((x) => x.type === "turn_completed").length >= 2, 45_000);
+
+      // The planted `~/.claude` file: byte-identical (content AND mtime) after BOTH sessions ran —
+      // proving neither the config-dir redirect nor the messaging round-trip touches it.
+      const after = { content: readFileSync(plantedFile, "utf8"), mtimeMs: statSync(plantedFile).mtimeMs };
+      expect(after).toEqual(before);
+    } finally {
+      await fakeA.close();
+      await fakeB.close();
+      await runtime.dispose();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  // Lane 3b (item C, WS-17 §8 row 5): a parent with a COMPLETED (exited) child, a NEW runtime
+  // handle over the SAME durable directory db, the parent re-attached ("resumed"), then a NATIVE
+  // SendMessage addressed at the exited child — measured at the router's own messaging seam
+  // (`runtime.sdk.messaging.sendDetailed`, the exact call the standing server's `send_message`
+  // handler makes) rather than through a second real spawned CLI, mirroring row 6's own precedent
+  // of proving PERSISTENCE/ROUTING directly rather than re-proving a real spawn item A/row 4 already
+  // did. `messaging.ts`'s own header states the official leg's `coldResume` only ever calls
+  // `peers.winter.query(...)` — there is no official-runtime cold-resume path in router 0.0.3 at
+  // all — so the a-priori expectation is the SECOND half of this row's own either/or: a typed
+  // refusal, not an actual resume. This test PINS whichever the real router does, verbatim.
+  test("WS-17 §8 row 5: a parent's native SendMessage to its COMPLETED official child, across a directory restart", async () => {
+    const home = mkdtempSync(join(tmpdir(), "p8d-row5-home-"));
+    const secrets = new FileSecretStore(join(home, "secrets"));
+    const rs1 = openRuntimeStateDb(home);
+    const directory1 = createSqliteRuntimeDirectoryStore(rs1);
+    const runtime1 = await createNormaRuntimeSdk({ home, settings: () => null, secrets, capabilities: [], directoryStore: directory1, sessionPermissionClass: () => "prompts" });
+
+    const parentAddress = serializeRuntimeAddress(buildSessionAddress("row5-p"));
+    const childAddress = serializeRuntimeAddress(buildChildAddress("row5-p", "row5-c"));
+
+    // The parent, LIVE, attached — this writes the parent's own directory row.
+    const parentDelivered: string[] = [];
+    const parentHandle1 = attachOfficialSession(runtime1, { sessionId: "row5-p", backendSessionId: "be-row5-p", deliver: (t) => parentDelivered.push(t), mode: "code" });
+    await parentHandle1.ready;
+
+    // Manually seed a COMPLETED child row — the shape `attachOfficialSession` itself would have left
+    // behind had a real child session run and then exited (row 4 + item A already prove a REAL
+    // official child registers and messages correctly while live; this row is about what happens
+    // to a NO-LONGER-LIVE one).
+    await directory1.upsert({
+      address: childAddress,
+      parsed: buildChildAddress("row5-p", "row5-c"),
+      runtimeKind: "claude-agent",
+      objectKind: "agent",
+      transport: "claude-child",
+      status: "exited",
+      mode: "code",
+      generation: 1,
+      selection: selectionFor(),
+      parentAddress,
+      backendSessionId: "be-row5-c",
+      capabilities: { message: true, resume: false, notifyWhenIdle: false, reply: false },
+      updatedAt: new Date().toISOString(),
+    });
+
+    parentHandle1.detach();
+    await runtime1.dispose();
+
+    // ── "the daemon restarts" — a NEW handle, over the SAME db file ─────────────────────────────
+    const rs2 = openRuntimeStateDb(home);
+    const directory2 = createSqliteRuntimeDirectoryStore(rs2);
+    const runtime2 = await createNormaRuntimeSdk({ home, settings: () => null, secrets, capabilities: [], directoryStore: directory2, sessionPermissionClass: () => "prompts" });
+
+    // The child row survived the restart (row 6's own proof, re-confirmed here for the OFFICIAL
+    // side rather than a Winter one — `PersistedWinterChild`/`RuntimeChildren` is the Winter-only
+    // door; this is the router's own cross-runtime directory instead).
+    const rows = await directory2.load();
+    const reloadedChild = rows.find((r) => r.address === childAddress);
+    expect(reloadedChild).toBeDefined();
+    expect(reloadedChild?.status).toBe("exited");
+    expect(reloadedChild?.parentAddress).toBe(parentAddress);
+
+    // "parent resume" — the daemon re-attaches the parent's official session under the NEW handle
+    // (same session/backend ids; a real daemon would do this from `session.create`'s own resume
+    // path — this test skips spawning the real CLI, per this row's own header comment).
+    const parentHandle2 = attachOfficialSession(runtime2, { sessionId: "row5-p", backendSessionId: "be-row5-p", deliver: (t) => parentDelivered.push(t), mode: "code" });
+    await parentHandle2.ready;
+
+    // THE NATIVE SendMessage, addressed at the completed child — through the SAME seam the
+    // standing server's real `send_message` tool handler calls.
+    const outcome = await runtime2.sdk.messaging.sendDetailed({
+      from: buildSessionAddress("row5-p"),
+      to: childAddress,
+      body: "please resume and confirm",
+      originToolCallId: "call_row5_native",
+    });
+    console.warn(`[row5] MEASURED: native SendMessage to a completed official child = ${JSON.stringify(outcome)}`);
+
+    // PINNED, against the real router 0.0.3: no official-runtime cold-resume path exists
+    // (`messaging.ts`'s own header — `coldResume` only ever calls `peers.winter.query`), so this is
+    // the row's "or the router's refusal verbatim" branch, not an actual resume.
+    expect(outcome.outcome.status).not.toBe("resumed_and_delivered");
+    expect(["unavailable", "refused", "not_found", "held"]).toContain(outcome.outcome.status);
+
+    parentHandle2.detach();
+    await runtime2.dispose();
+    rmSync(home, { recursive: true, force: true });
   }, 60_000);
 });
 
