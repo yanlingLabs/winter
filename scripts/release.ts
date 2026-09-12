@@ -8,6 +8,13 @@
  *
  * Usage: bun run scripts/release.ts --dry-run [--beta] [--no-bump] [--resume-publish] [--allow-checkout-winter]
  *
+ * Winter Phase 9c (P9c-2): `--no-bump` is REQUIRED for the first Winter release. VERSION already
+ * carries 0.111.0 (the first `#.###.#` version — see version-lib.ts) at the moment this repo's
+ * first Winter release is cut; a default (bumping) run would ship 0.111.1 instead of 0.111.0. The
+ * default bump mode stays `--patch` for every release after that — this script never special-cases
+ * "first release" itself, the operator does, by passing --no-bump exactly once. `--help`/`-h`
+ * prints this same guidance and exits before preflight.
+ *
  * `--beta` threads into `appcastItem`'s `<sparkle:channel>beta</sparkle:channel>` element.
  * `--dry-run` NEVER publishes (no gh release/upload, no appcast commit/push, no tags) — it
  * still builds, notarizes (app AND dmg — two real submissions), staples, signs the appcast
@@ -72,7 +79,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, relative } from "node:path";
-import { FORMAT, ROOT, readCanonical } from "./version-lib";
+import { ROOT, nextVersion, readCanonical } from "./version-lib";
 import {
   GH_REPO,
   NAME_SCAN_EXCLUSIONS,
@@ -123,6 +130,33 @@ const RESUME_PUBLISH = argv.includes("--resume-publish");
 // before the platform package is published (or on a machine with no installed copy to verify
 // against). Never silent: every use is echoed in the summary line below.
 const ALLOW_CHECKOUT_WINTER = argv.includes("--allow-checkout-winter");
+
+if (argv.includes("--help") || argv.includes("-h")) {
+  console.log(`Winter release pipeline — scripts/release.ts
+
+Usage:
+  bun run scripts/release.ts --dry-run --no-bump   # full rehearsal, never publishes
+  bun run scripts/release.ts                       # real release (bumps version first, --patch)
+
+Flags:
+  --dry-run                Build/sign/notarize/staple/render everything for real; never publishes
+                            (no gh release, no appcast commit, no tag).
+  --beta                   Marks the appcast <item> with <sparkle:channel>beta</sparkle:channel>.
+  --no-bump                Release at VERSION's CURRENT value instead of bumping first.
+                            REQUIRED for the first Winter release: VERSION already carries 0.111.0
+                            (P9c-2) at that moment, and a default run would bump to 0.111.1 before
+                            releasing — --no-bump is what makes 0.111.0 itself the shipped version.
+                            Every release after that goes back to the default (bumping) invocation.
+  --resume-publish          An existing release is expected — upload only assets missing from it,
+                            skip the appcast commit/tag if a prior attempt already did them.
+  --allow-checkout-winter   Non-dry-run only: allow the weaker checkout-build Row 16 provenance
+                            path instead of requiring checksum equality against the installed
+                            platform package (rehearsal / no installed copy to verify against).
+  --help, -h                Print this message and exit (before preflight — no identity/notary/
+                            gh checks run).
+`);
+  process.exit(0);
+}
 
 function fail(msg: string): never {
   console.error(`\nFAIL: ${msg}\n`);
@@ -208,13 +242,22 @@ const pre = preflight({
       // still owns resume semantics, including aborting when the RELEASE is missing.
       if (RESUME_PUBLISH) return null;
       // Check the tag for the version this run will actually RELEASE: preVersion under
-      // --no-bump, else the post-bump next patch. Checking v<preVersion> unconditionally made
+      // --no-bump, else the post-bump next patch (via version-lib's own `nextVersion`, P9c-2 —
+      // never re-derived here, so this speculative check can't silently drift from the real bump
+      // step's own #.###.# ceiling/rollover rules). Checking v<preVersion> unconditionally made
       // every second bumping release fail — after a successful release the tree legitimately
-      // sits at the last-released version, whose tag always exists. (Patch 999 rollover is
-      // bump-version's concern; the guard then re-checks conservatively on the raw string.)
-      const m = preVersion.match(FORMAT);
-      const releasing =
-        NO_BUMP || !m ? preVersion : `${m[1]}.${m[2]}.${String(Number(m[3]) + 1).padStart(3, "0")}`;
+      // sits at the last-released version, whose tag always exists. A patch already at its
+      // #.###.# ceiling makes `nextVersion` throw here too; caught and treated as "can't predict
+      // it, fall back to preVersion" — the real bump step below throws the same error loudly
+      // moments later, which is the right place for that failure to surface.
+      let releasing = preVersion;
+      if (!NO_BUMP) {
+        try {
+          releasing = nextVersion(preVersion, "--patch");
+        } catch {
+          // let the real bump step (section 2) raise this — same reasoning as above.
+        }
+      }
       const out = probe(`git tag -l v${releasing}`).stdout.trim();
       if (out === "") return null;
       const line = `tag v${releasing} already exists — bump the version or delete the stale tag`;
@@ -1216,7 +1259,15 @@ sh(`git push origin v${version}`);
 
 if (guard.action === "publish") {
   console.log(`Publishing v${version}...`);
-  const notes = `Winter ${version}${BETA ? " (beta)" : ""}\n\nSigned Sparkle appcast entry: ${appcastRel}.`;
+  // P9c-2: a hand-authored body at releases/notes/<version>.md wins when present (the first
+  // Winter release ships one — "Norma is now Winter" + the migration paragraph + the API-key-only
+  // note for Claude models + the #.###.# scheme, see releases/notes/0.111.0.md); every other
+  // release falls back to the same terse default this pipeline has always generated. Neither path
+  // is new plumbing — --notes-file already took a path; only WHICH file it names changed.
+  const handAuthoredNotesPath = join(ROOT, "releases", "notes", `${version}.md`);
+  const notes = existsSync(handAuthoredNotesPath)
+    ? readFileSync(handAuthoredNotesPath, "utf8")
+    : `Winter ${version}${BETA ? " (beta)" : ""}\n\nSigned Sparkle appcast entry: ${appcastRel}.`;
   const notesPath = join(OUT, "release-notes.md");
   writeFileSync(notesPath, notes);
   sh(`gh release create v${version} --title "Winter ${version}" --notes-file "${notesPath}" "${zipPath}" "${dmgPath}"`);
