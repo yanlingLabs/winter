@@ -39,6 +39,9 @@ bun src/main.ts                      # interactive TUI (Ink)
 # com.winter.core.dev; the global `winter-dev` command (installed by the dev app's menu) is an
 # env-setting bun wrapper. The distribution app owns `winter` (symlink installed from the app /
 # brew) on ~/.winter, keychain com.winter.core. Explicit WINTER_HOME always wins over both defaults.
+# LEGACY TRAP (Phase 9b): a stale global `norma-dev` wrapper exports `NORMA_HOME`/`NORMA_PROFILE`,
+# which this CLI no longer reads — it would run as the DIST profile on `~/.winter`. Use `winter-dev`
+# (installed by the Winter Dev app's menu). `~/.norma-dev` is untouched until Migration B (9c).
 # TWO TRAPS: (1) plain `winter` is the DIST CLI — with a dead socket it AUTO-LAUNCHES the dist app
 # (`open -g -b com.winter.app`), so never use it for dev/test work: use `winter-dev`, or a temp
 # WINTER_HOME with a manually-spawned `daemon run`. (2) Debug builds do NOT embed winter-core —
@@ -106,7 +109,6 @@ bun run scripts/release.ts                       # real release (bumps version f
 - `apple/WinterKit` — Swift client for the daemon socket.
 - `apple/Winter` — the menu-bar app (xcodegen `project.yml`, no committed pbxproj). Embeds `winter-core` and `WinterHelper` in Release builds.
 - `scripts/release.ts` + `scripts/release-lib.ts` — the release pipeline; `packaging/winter.rb.tmpl` is the Homebrew cask template it renders.
-- `winter/` at the repo root is a Phase-0 Xcode scaffold leftover — **not** the real app. The real app is `apple/Winter`.
 - `docs/superpowers/` is git-ignored (private design docs); don't reference it from committed code.
 - The iOS companion lives in a **sibling repo** (`../norma-ios`) and consumes `WinterProtocol` + `WinterSessionKit` as a remote SPM package pinned to a **git tag of this repo** (`v-*-kitN`, exposed via the root `Package.swift`). Editing Swift kit sources here does nothing for the phone until commit → push → new kit tag → `norma-ios/project.yml` `revision:` bump + `xcodegen generate`.
 
