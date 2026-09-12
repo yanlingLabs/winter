@@ -54,7 +54,7 @@ import { credentialPresenceFrom, credentialRefFor } from "./keychain";
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
 import { attachWinterSession } from "./messaging";
 import { buildWinterOptions, permissionModeFor } from "./mode-options";
-import { providerSelectionFor, testProviderNameFor } from "./provider-selection";
+import { catalogRowsFor, providerSelectionFor, testProviderNameFor } from "./provider-selection";
 import { normaSessions } from "./sessions";
 import { NORMA_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
@@ -196,6 +196,15 @@ export interface WinterLegDeps {
   /** Test seams. */
   idleTimeoutMs?: () => number;
   endGraceMs?: number;
+  /**
+   * TEST ONLY — never set by production `daemon.ts` wiring (fix round 1, M2): the ONLY way an
+   * official-leg e2e reaches a loopback fake is a real `anthropic:default` credential PLUS this
+   * override, injected the same way `startDaemon`'s own test callers already inject a fake
+   * provider — never an ambient env var (the deleted `NORMA_OFFICIAL_TEST_BASE_URL` hatch). Mirrors
+   * the `winter-test/<name>` double's own shape: a value only a test constructs, threaded through
+   * an explicit parameter, inert unless a caller supplies one.
+   */
+  officialConnectionOverride?: () => { explicitConnectionEnv?: Readonly<Record<string, string>>; authFamily?: RuntimeSelection["authFamily"] } | undefined;
 }
 
 export interface WinterSessionDrivers {
@@ -485,12 +494,14 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     const meta = deps.store.meta(sessionId);
     const mode = modeOf(meta.mode);
     const cwd = winterCwdOf(sessionId, meta.cwd);
-    // TEST-ONLY (see `NORMA_OFFICIAL_TEST_BASE_URL` below): the LIVE query's own selection is
-    // widened to `custom` so the env-allowlist's family-shape check does not itself refuse
-    // `ANTHROPIC_BASE_URL` — never the PERSISTED record, which keeps the router's real decision.
-    const selection: RuntimeSelection = process.env.NORMA_OFFICIAL_TEST_BASE_URL === undefined
+    // TEST-ONLY (see `officialConnectionOverride` on `WinterLegDeps`): the LIVE query's own
+    // selection is widened to the injected `authFamily` (a loopback needs `custom` so the
+    // env-allowlist's family-shape check does not itself refuse `ANTHROPIC_BASE_URL`) — never the
+    // PERSISTED record, which keeps the router's real decision.
+    const connectionOverride = deps.officialConnectionOverride?.();
+    const selection: RuntimeSelection = connectionOverride?.authFamily === undefined
       ? persistedSelection
-      : { ...persistedSelection, authFamily: "custom" };
+      : { ...persistedSelection, authFamily: connectionOverride.authFamily };
 
     let claimedInBatch = 0;
     const append = (event: Parameters<SessionHub["append"]>[1]) => {
@@ -542,14 +553,17 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // provider's `authRef` to inject `ANTHROPIC_API_KEY` at spawn.
       const credentials = await credentialPresenceFrom(deps.secrets);
       const provider = providerSelectionFor(live.model, credentials);
-      // TEST-ONLY (never set by `daemon.ts`): a loopback fake needs `ANTHROPIC_BASE_URL` beside
-      // the key, which the `api-key` family's own variable set does not include (WS-14 §12) — the
-      // SAME reason the router's own door-bed test forces `authFamily: "custom"`. Gated by an env
-      // var only a test process would ever export, same spirit as the `winter-test/` double.
-      const testBaseUrl = process.env.NORMA_OFFICIAL_TEST_BASE_URL;
-      const testOverrides = testBaseUrl === undefined || provider?.providerId === undefined ? {} : {
+      // TEST-ONLY (`WinterLegDeps.officialConnectionOverride`, fix round 1 M2 — never an ambient
+      // env var, never set by production `daemon.ts` wiring): a loopback fake needs
+      // `ANTHROPIC_BASE_URL` beside the key, which the `api-key` family's own variable set does
+      // not include (WS-14 §12) — the SAME reason the router's own door-bed test widens to
+      // `authFamily: "custom"` (done above, in `assembleOfficial`). `custom` needs the credential
+      // named explicitly too (`officialCredentialPlan` refuses to guess it for that family), so
+      // this still derives the REAL keychain ref for the provider the router actually selected —
+      // only the CONNECTION is test-injected, never the credential material.
+      const testOverrides = connectionOverride === undefined || provider?.providerId === undefined ? {} : {
         explicitCredentials: [{ variable: "ANTHROPIC_API_KEY", ref: credentialRefFor(provider.providerId) ?? provider.authRef! }],
-        explicitConnectionEnv: { ANTHROPIC_BASE_URL: testBaseUrl },
+        ...(connectionOverride.explicitConnectionEnv === undefined ? {} : { explicitConnectionEnv: connectionOverride.explicitConnectionEnv }),
       };
       return {
         home: deps.home,
@@ -618,7 +632,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
 
   /**
    * P8c-14: the router's decision for a NEW session, or `undefined` when the selector must not be
-   * consulted at all. THREE deliberate bail-outs, each preserving today's Winter-only behaviour
+   * consulted at all. FOUR deliberate bail-outs, each preserving today's Winter-only behaviour
    * byte-for-byte rather than risking a regression on a case the selector was never meant to judge:
    *
    *   1. No `selectRuntimeFor` on the handle — a partial test double (`session-driver.test.ts`'s
@@ -634,14 +648,24 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
    *      — which would turn "no model configured yet" into a hard `session.create` failure for
    *      every mode. Once a model-picker UI sets `meta.model` explicitly (8d), this bail-out stops
    *      firing for that session.
+   *   4. (Fix round 1, M5) The model has NO ROW IN THE PINNED CATALOG AT ALL —
+   *      `catalogRowsFor(model).length === 0` — e.g. a custom `provider.baseUrl` endpoint's own
+   *      model id, which `providerSelectionFor`'s own doc calls "served by no inventory provider …
+   *      letting the child's own catalog-first selection answer, never a host-side throw". The
+   *      selector has NOTHING to route on for a name it does not recognise at all — this is exactly
+   *      that same "the child decides" case, not the D13 "we know the family, we lack the
+   *      credential" refusal, so it keeps today's literal too. A model the catalog DOES recognise
+   *      (e.g. a Claude model) but no provider can serve is NOT this bail-out — that stays a real,
+   *      typed `runtime_selection_refused` (bail-out 4 checks the catalog, not the credential map).
    *
-   * Outside those three cases the router's answer — including a REFUSAL — is honoured: a Claude
+   * Outside those four cases the router's answer — including a REFUSAL — is honoured: a Claude
    * model with no configured credential is `runtime_selection_refused`, never a silent Winter
    * fallback (D13's own "never a substitution").
    */
   const decideRuntime = async (mode: SessionMode, model: string | undefined): Promise<RuntimeSelection | undefined> => {
     if (typeof deps.runtime?.selectRuntimeFor !== "function") return undefined;
     if (model === undefined || testProviderNameFor(model) !== undefined) return undefined;
+    if (catalogRowsFor(model).length === 0) return undefined;
     const decided = await deps.runtime.selectRuntimeFor({ mode, model });
     if (isSelectionRefusal(decided)) throw new WinterLegRefusal("runtime_selection_refused", decided.detail);
     return decided;

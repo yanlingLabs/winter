@@ -36,7 +36,7 @@ import { resolveClaudeExecutable, ClaudeExecutableUnavailable } from "./official
 import { credentialPresenceFrom, keychainSeamFromSecretStore } from "./keychain";
 import { familyListingFromCatalog } from "./provider-selection";
 import { releaseAllHeld } from "./messaging";
-import { NORMA_PEER_VERSIONS } from "./versions";
+import { NORMA_PEER_VERSIONS, REQUIRED_CLAUDE_AGENT_SDK } from "./versions";
 
 /**
  * P8c-1's own alias for the peer this daemon injects at `RuntimeSdkPeers.claude` — the router's own
@@ -151,6 +151,10 @@ export interface NormaRuntimeSdkOverrides {
    *  shaped like `OfficialSdkModule` without a real platform binary anywhere on disk. Defaults to
    *  `import("@anthropic-ai/claude-agent-sdk")`. */
   officialPeer?: () => Promise<OfficialPeer | undefined>;
+  /** Test seam for M4's version guard — a fake "installed version" so a unit test can drive a
+   *  mismatch without an actual mismatched `node_modules` tree. Defaults to
+   *  `NORMA_PEER_VERSIONS.claudeAgentSdk` (the real installed manifest's own version, or absent). */
+  installedClaudeAgentSdkVersion?: () => string | undefined;
 }
 
 /**
@@ -326,7 +330,17 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
   // construction, so the import has to have already settled by the time `factory(...)` runs. This
   // function is already async (the note every 8b doc comment above makes), so nothing here changes
   // the daemon's own boot shape.
-  const officialModule = await resolveOfficialPeer(overrides.officialPeer ?? (() => import("@anthropic-ai/claude-agent-sdk")), deps.log);
+  const officialModuleRaw = await resolveOfficialPeer(overrides.officialPeer ?? (() => import("@anthropic-ai/claude-agent-sdk")), deps.log);
+  // Fix round 1 (M4): a Norma-side version guard beside the router's own `assertVersionMatrix` —
+  // this one fires BEFORE `peers.claude`/`peerVersions.claudeAgentSdk` ever reach the router, so a
+  // mismatched install degrades to "the official leg is unavailable" (Winter entirely unaffected)
+  // rather than whatever the router's own matrix check does with a peer it was never declared for.
+  const installedClaudeAgentSdkVersion = (overrides.installedClaudeAgentSdkVersion ?? (() => NORMA_PEER_VERSIONS.claudeAgentSdk))();
+  const claudeAgentSdkVersionMismatch = officialModuleRaw !== undefined && installedClaudeAgentSdkVersion !== undefined && installedClaudeAgentSdkVersion !== REQUIRED_CLAUDE_AGENT_SDK;
+  if (claudeAgentSdkVersionMismatch) {
+    deps.log?.(`the installed @anthropic-ai/claude-agent-sdk is ${installedClaudeAgentSdkVersion}, but this daemon pins ${REQUIRED_CLAUDE_AGENT_SDK} — the official leg is unavailable until they match (Winter unaffected)`);
+  }
+  const officialModule = claudeAgentSdkVersionMismatch ? undefined : officialModuleRaw;
   const claudeExecutableResolution = resolveClaudeExecutable({
     setting: winterOptionsFromSettings(deps.settings()).claudeExecutable,
     env: process.env,
@@ -343,8 +357,12 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
     // injected as an INSTANCE, same as `winter`; the router never imports either SDK by name.
     peers: { winter, ...(officialModule === undefined ? {} : { claude: officialModule }) },
     // P8b-4: host-declared, and the ONLY probe that answers inside a compiled `$bunfs` binary.
-    // `NORMA_PEER_VERSIONS.claudeAgentSdk` is present only when the peer resolved (`versions.ts`).
-    peerVersions: NORMA_PEER_VERSIONS,
+    // `claudeAgentSdk` is present only when `officialModule` itself resolved — never a stray key
+    // for a peer this handle just declared unavailable (import failure OR M4's version mismatch).
+    peerVersions: {
+      winterAgentSdk: NORMA_PEER_VERSIONS.winterAgentSdk,
+      ...(officialModule === undefined ? {} : { claudeAgentSdk: installedClaudeAgentSdkVersion }),
+    },
     // Required even though the Winter leg resolves its own credentials runtime-side (surface map
     // §1.3): the field has no `?`, and the official leg is the only caller.
     keychain: keychainSeamFromSecretStore(deps.secrets),

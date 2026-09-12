@@ -123,6 +123,8 @@ interface Incarnation {
   stream: OfficialInputStream;
   projector: Projector;
   query: AsyncIterable<unknown> & { interrupt(): Promise<unknown> };
+  /** M1: the same controller `Options.abortController` carries — `runtime.trackQuery`'s own key. */
+  abort: AbortController;
   done: Promise<void>;
   sawInit: boolean;
 }
@@ -250,6 +252,11 @@ class OfficialSessionImpl implements OfficialSession {
       const stream = createOfficialInputStream();
       const generation = this.gen + 1;
       const projector = this.deps.projector(generation);
+      // Fix round 1 (M1): ONE `AbortController` per incarnation, the SAME one Winter sessions
+      // carry — `runtime.trackQuery` is what makes G-14's "every live Query ends BEFORE the
+      // router disposes" true for this leg too; without it a daemon `stop()` never learns this
+      // child exists and a live official turn outlives the daemon.
+      const abort = new AbortController();
       const routerQuery = this.deps.runtime.sdk.query({
         prompt: stream,
         options: {
@@ -260,17 +267,21 @@ class OfficialSessionImpl implements OfficialSession {
           // `Options.sessionId` (must be a valid UUID; carried, never checked, for a RESUME, which
           // is a Task 1.2 carry: multi-incarnation resume is unmeasured against this runtime).
           sessionId: this.backendSessionId,
+          abortController: abort,
           ...(inputDeps.provider === undefined ? {} : { provider: inputDeps.provider }),
           runtime: { selection: this.deps.selection, sessionId: this.sessionId, official: built.input },
         },
       });
       if (!isOfficialQuery(routerQuery)) throw new Error(`the router opened ${this.sessionId} on the wrong leg (expected the official leg)`);
-      const inc: Incarnation = { stream, projector, query: routerQuery, sawInit: false, done: Promise.resolve() };
+      const inc: Incarnation = { stream, projector, query: routerQuery, abort, sawInit: false, done: Promise.resolve() };
       this.inc = inc;
       this.gen = generation;
       this.ending = false;
       this.inFlight = 0;
       this.stateValue = "live";
+      // Tracked BEFORE the iteration starts (`winter-session.ts`'s own precedent) — a shutdown
+      // landing between the spawn and the first frame must still end this child.
+      this.deps.runtime.trackQuery(this.sessionId, abort, () => this.end());
       inc.done = this.run(inc);
       this.lastDone = inc.done;
     })().finally(() => { this.opening = undefined; });
@@ -320,6 +331,7 @@ class OfficialSessionImpl implements OfficialSession {
       }
     } finally {
       try { inc.projector.flush(); } catch { /* checkpoint store may already be closed */ }
+      this.deps.runtime.untrack(this.sessionId);
       this.inFlight = 0;
       this.settleIdle();
       if (this.inc === inc) this.inc = undefined;

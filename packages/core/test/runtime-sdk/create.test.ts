@@ -68,6 +68,9 @@ async function build(
   // environment has `@anthropic-ai/claude-agent-sdk` installed, so most tests exercise the REAL
   // import. A test of the Winter-only shape injects `() => Promise.resolve(undefined)` explicitly.
   officialPeer?: () => Promise<unknown>,
+  // M4's test seam: a fake "installed version" string, to drive the version guard without an
+  // actually-mismatched node_modules tree.
+  installedClaudeAgentSdkVersion?: () => string | undefined,
 ): Promise<{ handle: NormaRuntimeSdk; opts: RuntimeSdkOptions; disposeOrder: string[] }> {
   const { createRuntimeSdk } = await import("@yanlinglabs/winter-runtime-sdk");
   const disposeOrder: string[] = [];
@@ -75,6 +78,7 @@ async function build(
   const handle = await createNormaRuntimeSdk(deps(extra), {
     ...(grace === undefined ? {} : { grace }),
     ...(officialPeer === undefined ? {} : { officialPeer: officialPeer as () => Promise<never> }),
+    ...(installedClaudeAgentSdkVersion === undefined ? {} : { installedClaudeAgentSdkVersion }),
     createRuntimeSdk: (opts) => {
       captured = opts;
       const real = createRuntimeSdk(opts);
@@ -110,7 +114,9 @@ describe("createNormaRuntimeSdk — the options it hands the router", () => {
     expect(opts.peers.winter).toBeDefined();
     expect(opts.peers.claude).toBeUndefined();
     expect("claude" in opts.peers).toBe(false);
-    expect(opts.peerVersions).toBe(NORMA_PEER_VERSIONS);
+    // No longer an identity check (M4: peerVersions is now built fresh so `claudeAgentSdk` can be
+    // omitted independently of the module-level constant) — the winterAgentSdk VALUE still matches.
+    expect(opts.peerVersions?.winterAgentSdk).toBe(NORMA_PEER_VERSIONS.winterAgentSdk);
     // `vendoredOfficialRuntime` is independent of the peer MODULE import (it is the executable
     // ladder, `official-executable.ts`) — a failed peer import must not disturb it either way.
     expect(await handle.officialPeer()).toBeUndefined();
@@ -123,6 +129,23 @@ describe("createNormaRuntimeSdk — the options it hands the router", () => {
     expect(opts.peers.claude).toBeDefined();
     expect(opts.peerVersions?.claudeAgentSdk).toBe(REQUIRED_CLAUDE_AGENT_SDK);
     expect(await handle.officialPeer()).toBe(opts.peers.claude);
+  });
+
+  test("M4: an installed @anthropic-ai/claude-agent-sdk version that does NOT match REQUIRED_CLAUDE_AGENT_SDK -- official leg unavailable, Winter unaffected", async () => {
+    const lines: string[] = [];
+    const { opts, handle } = await build({ log: (line) => lines.push(line) }, undefined, undefined, () => "0.3.999-not-the-pin");
+    expect(opts.peers.winter).toBeDefined();
+    expect(opts.peers.claude).toBeUndefined();
+    expect(opts.peerVersions?.claudeAgentSdk).toBeUndefined();
+    expect(opts.peerVersions?.winterAgentSdk).toBe(NORMA_PEER_VERSIONS.winterAgentSdk);
+    expect(await handle.officialPeer()).toBeUndefined();
+    expect(lines.some((l) => l.includes("0.3.999-not-the-pin") && l.includes(REQUIRED_CLAUDE_AGENT_SDK))).toBe(true);
+  });
+
+  test("M4: no installed version at all (the optional peer genuinely absent) does not trip the version guard", async () => {
+    const { opts } = await build({}, undefined, () => Promise.resolve(undefined), () => undefined);
+    expect(opts.peers.claude).toBeUndefined();
+    expect(opts.peerVersions?.claudeAgentSdk).toBeUndefined();
   });
 
   test("the official permission class is forwarded to both adapters when declared", async () => {

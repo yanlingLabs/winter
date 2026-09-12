@@ -19,7 +19,7 @@ export function testProviderNameFor(model: string | undefined): string | undefin
 
 /** Every catalog row whose id, upstream id, canonical id or alias is `model`. Memoised through
  *  `loadCatalog`, which is itself memoised for the life of the process. */
-function catalogRowsFor(model: string): Array<{ key: string; providerId: string }> {
+export function catalogRowsFor(model: string): Array<{ key: string; providerId: string }> {
   const catalog = loadCatalog();
   return catalog.models.filter((m) =>
     m.key === model || m.upstreamId === model || m.canonicalModelId === model || m.aliases.includes(model),

@@ -11,7 +11,7 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { writeCredentialMaterial } from "../../src/auth/credential-material";
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "../../src/runtime-sdk/create";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
-import { familyListingFromCatalog } from "../../src/runtime-sdk/provider-selection";
+import { catalogRowsFor, familyListingFromCatalog } from "../../src/runtime-sdk/provider-selection";
 
 describe("familyListingFromCatalog + the router's own selectRuntime", () => {
   test("claude-sonnet-5 + hasClaudePeer + an anthropic api-key credential + code mode -> claude-agent (D13-2)", () => {
@@ -107,6 +107,16 @@ describe("familyListingFromCatalog + the router's own selectRuntime", () => {
     }
     const refusal = ((result as { refusal?: unknown } | null)?.refusal ?? result) as object | undefined;
     expect(refusal !== undefined && isSelectionRefusal(refusal)).toBe(true);
+  });
+
+  // Fix round 1, M5: `decideRuntime`'s fourth bail-out (session-driver.ts) reads `catalogRowsFor`
+  // directly, never `selectRuntime` — this pins the REAL catalog answer that bail-out depends on.
+  test("M5: a model with NO row in the pinned catalog at all (a custom-endpoint model id) — decideRuntime's own bail-out condition", () => {
+    expect(catalogRowsFor("my-custom-finetune-id-nobody-published")).toEqual([]);
+  });
+
+  test("M5: a CATALOG-KNOWN model (claude-sonnet-5) always has at least one row — decideRuntime does NOT bail out on it", () => {
+    expect(catalogRowsFor("claude-sonnet-5").length).toBeGreaterThan(0);
   });
 });
 
