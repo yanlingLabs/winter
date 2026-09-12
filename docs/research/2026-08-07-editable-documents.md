@@ -247,7 +247,7 @@ It buys three things raw LOKit does not give:
 
 ## 4. The licence table, for the record
 
-Winter is **Apache-2.0** (`packages/*/package.json`), public at `github.com/yanlingLabs/norma`. An earlier draft of this note assumed proprietary and called AGPL a blocker — wrong, but the licence still decides the engine, just differently.
+Winter is **Apache-2.0** (`packages/*/package.json`), public at `github.com/yanlingLabs/winter`. An earlier draft of this note assumed proprietary and called AGPL a blocker — wrong, but the licence still decides the engine, just differently.
 
 | Engine | Licence | Effect on Winter |
 | --- | --- | --- |

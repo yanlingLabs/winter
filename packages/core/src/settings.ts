@@ -423,20 +423,20 @@ export const Settings = z.object({
     official: z.object({ subscriptionAuth: z.boolean().default(false) }).optional(),
   }).optional(),
   // Phase 9c (P9c-4, the user's ruling on WS-00 §8 #7): Winter reads a project's unconverted legacy
-  // `NORMA.md` / `.norma/` READ-ONLY when the Winter-named file/dir is absent and this is true —
+  // instructions file / project dir (`legacy-names.ts`'s `LEGACY_INSTRUCTIONS_FILE` / `LEGACY_PROJECT_DIR`) READ-ONLY when the Winter-named file/dir is absent and this is true —
   // with a visible per-project deprecation notice; `winter migrate-project` converts. Default ON,
   // indefinitely, until a later release flips the default. Read HOT, never a boot snapshot.
   // OPTIONAL (not prefaulted) for the same reason `runtimes` is: a prefaulted block becomes REQUIRED on
   // the inferred `Settings` type and breaks every hand-built settings literal. Absent block = default
-  // ON; readers go through `legacyReadNormaProjectFilesEnabled()` below, never the raw block.
-  legacy: z.object({ readNormaProjectFiles: z.boolean().default(true) }).optional(),
+  // ON; readers go through `legacyProjectFilesReadEnabled()` below, never the raw block.
+  legacy: z.object({ readLegacyProjectFiles: z.boolean().default(true) }).optional(),
 });
 export type Settings = z.infer<typeof Settings>;
 
-/** Phase 9c (P9c-4): the ONE reader of `legacy.readNormaProjectFiles` — absent block or absent key
+/** Phase 9c (P9c-4): the ONE reader of `legacy.readLegacyProjectFiles` — absent block or absent key
  *  means ON (the shipped default); only an explicit `false` turns the legacy read-only fallback off. */
-export function legacyReadNormaProjectFilesEnabled(settings: Settings | null | undefined): boolean {
-  return settings?.legacy?.readNormaProjectFiles ?? true;
+export function legacyProjectFilesReadEnabled(settings: Settings | null | undefined): boolean {
+  return settings?.legacy?.readLegacyProjectFiles ?? true;
 }
 
 /** Phase 9c (P9c-1): the ONE reader of `runtimes.official.subscriptionAuth` — absent means OFF
