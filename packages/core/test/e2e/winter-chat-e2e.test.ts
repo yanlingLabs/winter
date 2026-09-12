@@ -19,7 +19,11 @@
 //       resumed child runs it first, with exactly one turn_started, before the new text
 //   (j) P8b-39: a send held behind an INTERRUPTED turn is not auto-run; the next send runs it first
 //   (f) a pre-8b session row (no record) is backfilled at boot as an engine-era record (no backend id)
-//   (g) send/steer to that engine-era record → session_predates_winter_leg (P8b-22)
+//   (g) P8c-6 (integration round 3 update — P8b-22's own "permanently refused" premise is now
+//       stale): daemon.ts wires `importLegacy` into every real boot, so `session.send` on that
+//       engine-era record now imports it ONE-SHOT instead of refusing — the record moves onto the
+//       Winter leg and the send succeeds; a later `session.steer` no longer sees
+//       `session_predates_winter_leg` either, because the record is no longer engine-era by then.
 //   (tripwires) chat's init.tools = exactly the allowed built-ins ∪ chat's capability tools; a
 //       code-shaped child advertises BASE ∪ MCP ∪ its capability tools minus the ToolSearch/
 //       WaitForMcpServers half `toolSearchEnabled` excludes
@@ -498,17 +502,30 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     expect(rt.records.list().filter((r) => sessionLegOf(r) === "winter").length).toBeGreaterThan(0);
   }, 30_000);
 
-  test("(g) session.send/steer to that engine-era record → session_predates_winter_leg; history stays readable", async () => {
+  test("(g) P8c-6: session.send on that engine-era record IMPORTS it (daemon.ts's importLegacy wiring, round 3) — no longer a permanent refusal", async () => {
     expect(sessionLegOf(record(engineSid))).toBe("engine");
     await client.call(METHODS.sessionAttach, { sessionId: engineSid, fromSeq: 0 });
-    const refused = await client.request(METHODS.sessionSend, { sessionId: engineSid, text: "hello?" });
-    expect(refused.error).toBeDefined();
-    expect(refused.error!.data).toEqual({ code: "session_predates_winter_leg" });
-    const steerRefused = await client.request(METHODS.sessionSteer, { sessionId: engineSid, text: "hello?" });
-    expect(steerRefused.error?.data).toEqual({ code: "session_predates_winter_leg" });
-    // history stays readable, and nothing was appended by the refusal
-    expect(daemon!.sessions.read(engineSid).filter((e) => e.type === "user_message")).toEqual([]);
-    expect(winterChildren(bin)).toEqual([]);
+    // The one-shot import door (ipc/server.ts's session.send case, wired to a real
+    // importEngineEraSession by daemon.ts as of P8c integration round 3): succeeds outright rather
+    // than the pre-P8c-6 typed refusal — this fixture's own header comment named this premise as
+    // now-stale.
+    const sent = await client.call<{ seq: number }>(METHODS.sessionSend, { sessionId: engineSid, text: "hello?" });
+    expect(sent.seq).toBeGreaterThan(0);
+    // The record is no longer engine-era: the import gave it a real backend transcript on the
+    // Winter leg (the settings-wide `provider.model: "gpt-x"` this suite otherwise never resolves
+    // to a real double is irrelevant here — the RPC's own success is the import door's contract;
+    // whatever the resumed child does with an unrecognized model surfaces later, as an async
+    // turn_completed/agent_error event, never as this RPC failing).
+    expect(sessionLegOf(record(engineSid))).not.toBe("engine");
+    expect(record(engineSid)?.backendSessionId).toBeDefined();
+    // The user_message the import's own send appended is now really there — the OPPOSITE of the
+    // pre-P8c-6 "nothing was appended by the refusal" assertion this case used to make.
+    expect(daemon!.sessions.read(engineSid).some((e) => e.type === "user_message" && (e as { text?: string }).text === "hello?")).toBe(true);
+    // session.steer no longer carries the STALE `session_predates_winter_leg` code either, now that
+    // the record is resumable — whatever it answers (a live query may or may not exist yet), it is
+    // never that specific code.
+    const steerResult = await client.request(METHODS.sessionSteer, { sessionId: engineSid, text: "hello?" });
+    expect((steerResult.error?.data as { code?: string } | undefined)?.code).not.toBe("session_predates_winter_leg");
   }, 30_000);
 
   test("(tripwire) a code-shaped child advertises BASE ∪ MCP ∪ its capability tools, minus the ToolSearch/WaitForMcpServers half toolSearchEnabled excludes", async () => {
