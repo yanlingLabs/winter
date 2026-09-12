@@ -133,6 +133,22 @@ final class HelperClient: ObservableObject {
         refreshStatus()
     }
 
+    /// Unregisters the daemon (Winter Phase 9c handoff: `AppDelegate.boot()`'s
+    /// `HandoffDeps.live.unregisterHelper`) — `SMAppService.unregister()` is `async throws`; this
+    /// method fires it on an unstructured `Task` and logs on failure, same posture as
+    /// `SMLoginItem.disable()` in `LoginItem.swift`. Best-effort: there is no UI surface here to
+    /// report a failed unregister against, and by the time this is called Norma is already
+    /// handing off to Winter regardless.
+    func unregister() {
+        Task {
+            do {
+                try await service.unregister()
+            } catch {
+                NSLog("[HelperClient] unregister failed: \(error)")
+            }
+        }
+    }
+
     // MARK: - XPC calls (NormaHelperProtocol)
 
     /// Lazy + invalidation-resilient: `invalidationHandler`/`interruptionHandler` both nil out

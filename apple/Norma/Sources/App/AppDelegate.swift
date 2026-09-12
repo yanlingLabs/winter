@@ -55,6 +55,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// launchctl bootout/plist-remove never runs from a test process; a test overrides this with an
     /// ordering/call-count spy instead — see `AppLifecycleTests.testMigrationRunsBeforeSupervisorSocketProbe`.
     var launchdMigrationOverride: (() -> Void)?
+    /// Winter Phase 9c (Lane H) test seam: overrides the `HandoffDeps` `boot()`'s very first line
+    /// drives `performHandoffIfNeeded` with — set BEFORE calling `boot()`. `nil` (production)
+    /// resolves to `.live`, or to `.neverHandoff` under `isRunningUnitTests` (see `boot()`) — same
+    /// belt-and-suspenders posture as `daemonSupervisorDeps`/`.neverSupervise` above.
+    var handoffDepsOverride: HandoffDeps?
     /// App shell T1: the ONE app window, for the process lifetime (spec §1 / ruling R2). `nil`
     /// until the first summon, and never nil'd again: the shell hides on close rather than being
     /// destroyed, so this ref outlives every close. `summonAppWindow(navigatingTo:)` below is the
@@ -876,6 +881,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// daemon token must not prevent the orb from appearing).
     @discardableResult
     func boot() -> Bool {
+        // Winter Phase 9c (Lane H handoff): MUST run before EVERYTHING else in boot() — the
+        // launchd migration, the daemon supervisor's socket probe/spawn, Sparkle's updater, the AX
+        // prompt, the real AppModel connection — because a successful handoff (`.installed`/
+        // `.alreadyCurrent`) terminates Norma outright, and none of that machinery should so much
+        // as construct first. `handoffDepsOverride` lets a test drive this with fakes; production
+        // resolves to `.live`, gated `!isRunningUnitTests` — same belt-and-suspenders posture as
+        // `DaemonSupervisorDeps.neverSupervise` below: even a Release-configuration test run that
+        // DID embed a Winter.app must never actually install/launch/terminate from a test host
+        // (`.live.embeddedWinterURL` would ALSO read nil there in practice, since no test host
+        // bundle carries a `Contents/Resources/Winter.app` — this gate is the belt, that's the
+        // suspenders). The one piece `.live` cannot supply itself is a real `DaemonSupervisor` to
+        // stop — constructed here with `.start()` deliberately never called: on the common path
+        // (a fresh Winter.app-carrying install, or the previous Norma instance already stopped its
+        // own daemon on quit) there is nothing left running to stop anyway; a daemon orphaned by an
+        // earlier abnormal crash is a pre-existing `DaemonSupervisor` limitation (it only ever
+        // manages what it itself spawned), unchanged by this lane.
+        var handoffDeps = handoffDepsOverride ?? (Self.isRunningUnitTests ? .neverHandoff : .live)
+        if handoffDepsOverride == nil && !Self.isRunningUnitTests {
+            let handoffSupervisor = DaemonSupervisor(deps: .live)
+            handoffDeps.stopDaemon = handoffSupervisor.stop
+        }
+        switch performHandoffIfNeeded(deps: handoffDeps) {
+        case .installed, .alreadyCurrent:
+            return true // Norma is terminating (or already did) — nothing below this point should run.
+        case .noEmbeddedWinter:
+            break
+        case .failed(let message):
+            NSLog("[AppDelegate] Winter handoff failed, continuing as Norma: \(message)")
+            if !Self.isRunningUnitTests {
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "Couldn't install Winter"
+                    alert.informativeText = message
+                    alert.alertStyle = .warning
+                    alert.runModal()
+                }
+            }
+        }
+
         // Lifecycle T6 (T4 review finding 5f): migration MUST run before the supervisor's
         // socket-exists probe just below — a leftover `com.norma.core` KeepAlive launchd agent
         // would otherwise relaunch a daemon the app just killed, permanently defeating "app quit ->
