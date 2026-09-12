@@ -55,6 +55,12 @@ NORMA_WINTER_EXECUTABLE="$PWD/../../dist/winter" NORMA_HOME=~/.norma-dev NORMA_P
 # reads Norma's Keychain items itself, so macOS shows ONE consent dialog per credential item — click "Always Allow" or the
 # turn stalls until the CLI's 180 s watchdog aborts it. Credentials are JSON "material" records (`openai:default`,
 # `codex-oauth:default`; see packages/core/src/auth/credential-material.ts) — the raw legacy records are migrated at boot.
+# FOURTH TRAP (Phase 8c): a Code session on a Claude catalog model routes to the OFFICIAL leg, which needs (1) the Claude
+# platform runtime — `bun install` fetches `@anthropic-ai/claude-agent-sdk-darwin-arm64`; the ladder is `runtimes.claudeExecutable`
+# → `$NORMA_CLAUDE_EXECUTABLE` → `<dirname(execPath)>/claude` → node_modules — and (2) an Anthropic API key material
+# (`norma login --anthropic-key`); without either the session refuses typed (`claude_executable_unavailable` /
+# `runtime_selection_refused`). Winter-leg sessions are unaffected. Cross-runtime handoff via `session.setModel` is fenced
+# by `runtimes.handoff.crossRuntime` (default false).
 
 # Versioning — never edit versions by hand; VERSION file (#.#.### format) is canonical
 bun run version:bump                 # +0.0.001 (also --minor / --major)
@@ -70,7 +76,7 @@ bun run scripts/release.ts                       # real release (bumps version f
 ### Monorepo layout
 
 - `packages/protocol` — the contract. Zod schemas for every JSON-RPC method and `SessionEvent` variant. `generate.ts` emits a JSON schema + canonical fixtures consumed by the Swift side.
-- `packages/core` — the daemon. Agent loop (`src/agent/engine.ts`), tools (`src/agent/tools/`), providers (`src/providers/` — OpenAI-compatible API + Codex OAuth), event-sourced sessions (`src/sessions/`), plugin supervisor (`src/plugins/`), settings hot-reload (`src/settings-watcher.ts`), routines/scheduling (`src/routines/`).
+- `packages/core` — the daemon. Every session runs through the Winter runtime SDK (`src/runtime-sdk/` — `create.ts` builds the one router handle; `session-driver.ts` dispatches a session to the Winter child or, for Claude catalog models in Code mode with an Anthropic key, the official Claude Agent SDK leg; `official-*.ts` is that leg), the SDK-message→SessionEvent projector (`src/projector/`), per-session capability servers (`src/capabilities/`), tool definitions (`src/agent/tools/`), the provider layer for the daemon's own internal model calls (`src/providers/` on `@yanlinglabs/winter-provider-runtime`; Codex OAuth login), event-sourced sessions (`src/sessions/`), plugin supervisor (`src/plugins/`), settings hot-reload (`src/settings-watcher.ts`), routines/scheduling (`src/routines/`). The old `AgentEngine` is gone (Winter Phase 8b).
 - `packages/core/src/workflows/` — the workflows runtime: model-authored JS orchestration scripts run in a **sandboxed subprocess** (the daemon self-spawns its own binary as `__workflow-worker` under a macOS seatbelt; NDJSON stdio bridge). Dev and compiled paths differ — `bun run verify:workflow` is the compiled-binary proof and must stay green.
 - `packages/cli` — the `norma` command: Ink/React TUI, headless `-p` mode, daemon lifecycle (launchd).
 - `packages/plugin-sdk` — what third-party plugins build against. Plugins are separate processes granted narrow, user-consented capabilities; `examples/battery-limiter` is the complete reference plugin.
@@ -114,7 +120,7 @@ Every session is an append-only JSONL of `SessionEvent`s (each carrying `seq`/`s
 
 ### Tool surface
 
-Tool design deliberately tracks Claude Code's shape (see `norma-vs-cc-tools.md` at repo root for the live comparison): file-based memory (a MEMDIR of markdown files written with normal write/edit — no dedicated memory tools), unrestricted reads (no path fence on read/glob/grep/ls; the sole read denial is `~/.norma/run`), out-of-root writes via an approval flow (grant denylist protects `~/.norma`), a single multi-purpose `lsp` tool (the `norma__lsp` capability server on the Winter leg; auto-diagnostics-after-edit was the ENGINE's post-edit hook and is a carry until the child's `Options.hooks` PostToolUse path is measured), multimodal `read` (images/PDF/notebooks), and subagents with no wall-clock timeout — a progress-stall watchdog instead.
+Tool design deliberately tracks Claude Code's shape (see `norma-vs-cc-tools.md` at repo root for the live comparison): file-based memory (a MEMDIR of markdown files written with normal write/edit — no dedicated memory tools), unrestricted reads (no path fence on read/glob/grep/ls; the sole read denial is `~/.norma/run`), out-of-root writes via an approval flow (grant denylist protects `~/.norma`), a single multi-purpose `lsp` tool (the `norma__lsp` capability server; auto-diagnostics-after-edit, the bash reviewer, plugin pre/post hooks and the diff-tab producer ride `Options.hooks` on BOTH legs since Phase 8c — `src/runtime-sdk/hooks.ts`), multimodal `read` (images/PDF/notebooks), and subagents with no wall-clock timeout — a progress-stall watchdog instead.
 
 ## Hard rules
 
