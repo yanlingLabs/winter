@@ -54,3 +54,21 @@ export const LEGACY_PROJECT_DIR = ".norma";
  *  `winter migrate-project`; Global Constraints bullet 1 — there is deliberately NO legacy-read
  *  fallback for this file until 9c. */
 export const LEGACY_INSTRUCTIONS_FILE = "NORMA.md";
+
+/** The pre-rename `runtimes.winterExecutable` override env var (`NORMA_WINTER_EXECUTABLE`).
+ *  Migration B's settings re-key input ONLY (`migration/rekey-settings.ts`) — never read by a live
+ *  executable resolver (that ladder reads `WINTER_RUNTIME_EXECUTABLE`, never this). */
+export const LEGACY_WINTER_EXECUTABLE_ENV = "NORMA_WINTER_EXECUTABLE";
+
+/** The pre-rename `runtimes.claudeExecutable` override env var (`NORMA_CLAUDE_EXECUTABLE`).
+ *  Migration B's settings re-key input ONLY — never read by a live resolver (that ladder reads
+ *  `WINTER_CLAUDE_EXECUTABLE`, never this). */
+export const LEGACY_CLAUDE_EXECUTABLE_ENV = "NORMA_CLAUDE_EXECUTABLE";
+
+/** The pre-rename protocol Keychain service holding the daemon's own config-encryption key
+ *  (P9c-14, the user's ruling: this service is PROTECTED and must never be migrated — a copied key
+ *  would let a process presenting the new identity decrypt material sealed under the old one,
+ *  collapsing a boundary the rename is supposed to preserve). Migration B's exclusion input only:
+ *  `MIGRATION_B_SECRET_NAMES` never includes a name resolved through this service, and nothing in
+ *  `migration/**` may construct a `SecretStore` bound to it. */
+export const LEGACY_CONFIG_KEY_SERVICE = "com.norma.config-key";
