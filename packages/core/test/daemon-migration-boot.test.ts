@@ -178,6 +178,44 @@ describe("daemon.ts boot hook — Migration B (P9c-15: default-home gate)", () =
     expect(migrationLines[0]).not.toContain("winter migrate --from");
   });
 
+  test("(d) fix wave C3 (P9c-17): a residual throw during Migration B becomes a typed migration_failed refusal, not a crash — and the manifest is left in-progress for --resume", async () => {
+    const parent = tempParent();
+    const home = join(parent, ".winter"); // resolves as default under homedirOverride, below
+    const legacyHome = join(parent, "legacy");
+    seedLegacyHome(legacyHome);
+
+    // The destination-existence check (`to.get`) inside `migrateOneSecret` is NOT individually
+    // wrapped (only `from.get`/`to.set` are, per the per-item non-fatal contract) — a store that
+    // throws there is exactly the kind of residual failure the daemon-level wrap exists to catch,
+    // never a crash-loop.
+    const throwingSecrets = {
+      get: async (): Promise<string | null> => { throw new Error("keychain daemon unreachable"); },
+      set: async (): Promise<void> => {},
+    };
+
+    let caught: unknown;
+    try {
+      daemon = await startDaemon({
+        home,
+        secrets: throwingSecrets,
+        migration: { legacyHome, legacySecrets: new FileSecretStore(join(parent, "legacy-secrets")), homedirOverride: () => parent },
+        agentProvider: null,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    daemon = undefined; // startDaemon never returned a handle to stop
+    expect(caught).toBeInstanceOf(MigrationRefused);
+    expect((caught as MigrationRefused).code).toBe("migration_failed");
+    expect((caught as MigrationRefused).message).toContain("winter migrate --resume");
+
+    // The file phase ran to completion (and was written to disk) before the keychain phase hit the
+    // throwing store — the manifest is genuinely in-progress on disk, exactly what `winter migrate
+    // --resume`/`--rollback` expects to find.
+    const manifest = readMigrationManifest(home);
+    expect(manifest?.status).toBe("in-progress");
+  });
+
   test("a caller that supplies `secrets` without `migration` is migration-inert even when a legacy home would otherwise qualify", async () => {
     const parent = tempParent();
     const home = join(parent, "home");

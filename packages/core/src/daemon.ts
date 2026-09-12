@@ -357,7 +357,26 @@ export async function startDaemon(opts: {
       const check = describeHomePristineness(home);
       if (check.pristine) {
         const plan = await planMigrationB({ legacyHome, home, profile });
-        const manifest = await runMigrationB(plan, { from: legacySecrets, to: secrets, log: (line) => console.error(`migration: ${line}`) });
+        // Fix wave C3 (P9c-17, Critical): most per-item failures are already absorbed inside
+        // `runMigrationB` itself (a single Keychain item never aborts the run — see
+        // `migrateOneSecret`), but this catches whatever residual throw still gets through (a
+        // thrown SecretStore on the unwrapped destination existence-check, an fs error mid-copy,
+        // …). The manifest is written to disk after EVERY step, so whatever ran before the throw is
+        // already durably "in-progress" on disk — `winter migrate --resume`/`--rollback` stays the
+        // door. Converting to ONE typed refusal here is what stops the daemon from crash-looping on
+        // an uncaught exception (the CLI's `daemon run` prints `MigrationRefused.message` and exits
+        // cleanly; see `packages/cli/src/main.ts`'s `case "daemon run"`).
+        let manifest;
+        try {
+          manifest = await runMigrationB(plan, { from: legacySecrets, to: secrets, log: (line) => console.error(`migration: ${line}`) });
+        } catch (err) {
+          if (err instanceof MigrationRefused) throw err;
+          const detail = err instanceof Error ? err.message : String(err);
+          throw new MigrationRefused(
+            "migration_failed",
+            `migration: failed (${detail}) — the home is left half-migrated; run \`winter migrate --resume\` or \`winter migrate --rollback\``,
+          );
+        }
         const filesMoved = manifest.entries.filter((e) => e.status === "copied" || e.status === "rekeyed").length;
         const rekeyed = manifest.entries.filter((e) => e.status === "rekeyed").length;
         const kcCopied = manifest.keychain.filter((k) => k.status === "copied").length;

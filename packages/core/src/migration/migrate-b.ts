@@ -43,17 +43,28 @@ export { readMigrationManifest } from "./manifest";
 export type { MigrationEntryStatus, MigrationFileEntry, MigrationKeychainEntry, MigrationManifest } from "./manifest";
 
 /** Thrown by `planMigrationB` (destination not pristine, P9c-10), the daemon boot hook
- *  (`home_half_migrated`), and the resume/rollback guards below (nothing to act on). `code` is
- *  intentionally a superset of the two names the Interfaces block pins — the extra codes are
- *  internal-only refusals that were never meant to be part of the daemon's typed boot refusal. */
+ *  (`home_half_migrated`, and — fix wave C3, P9c-17 — `migration_failed` for a residual throw the
+ *  daemon converts rather than crash-looping on), and the resume/rollback guards below (nothing to
+ *  act on). `code` is intentionally a superset of the two names the Interfaces block pins — the
+ *  extra codes are internal-only refusals that were never meant to be part of the daemon's typed
+ *  boot refusal. */
 export class MigrationRefused extends Error {
   constructor(
-    public readonly code: "destination_not_pristine" | "home_half_migrated" | "nothing_to_resume" | "nothing_to_rollback",
+    public readonly code: "destination_not_pristine" | "home_half_migrated" | "nothing_to_resume" | "nothing_to_rollback" | "migration_failed",
     message: string,
   ) {
     super(message);
     this.name = "MigrationRefused";
   }
+}
+
+/** Fix wave C3: the tag used in the "keychain unavailable" log line — the error's `name` (for a real
+ *  `Error`) or `code` (for a Node-style errno object), NEVER `err.message`, which could echo a
+ *  Keychain-provided value on some store implementations. */
+function errorTag(err: unknown): string {
+  if (err instanceof Error) return err.name || "Error";
+  if (err && typeof err === "object" && "code" in err) return String((err as { code: unknown }).code);
+  return "unknown";
 }
 
 /** `legacyHomeFor` — the legacy home override env var if set, else the legacy dist/dev home
@@ -338,15 +349,26 @@ async function executeFileEntry(plan: MigrationPlanFileEntry): Promise<Migration
   return { src, dest, sha256: "", bytes: 0, status };
 }
 
-async function migrateOneSecret(name: string, deps: Pick<MigrationDeps, "from" | "to">, fromService: string, toService: string): Promise<MigrationKeychainEntry> {
+async function migrateOneSecret(name: string, deps: Pick<MigrationDeps, "from" | "to" | "log">, fromService: string, toService: string): Promise<MigrationKeychainEntry> {
   // Check the DESTINATION first — P9c-10 never overwrites an existing destination item, and this
   // also means an already-present item's legacy value is never even read.
   const existing = await deps.to.get(name);
   if (existing !== null) return { name, from: fromService, to: toService, status: "skipped-existing" };
-  const value = await deps.from.get(name);
-  if (value === null) return { name, from: fromService, to: toService, status: "absent" };
-  await deps.to.set(name, value);
-  return { name, from: fromService, to: toService, status: "copied" };
+  // P9c-17 (fix wave C3, Critical): a Keychain failure reading the LEGACY item or writing the
+  // destination item is per-item and non-fatal — one refused item must never abort the whole
+  // migration run. Recorded exactly like a genuine absence (the pinned `MigrationKeychainStatus`
+  // union has no separate "failed" state); the distinct log line is what preserves the failure for
+  // an operator. Never logs `err.message` — only `name` and the error's own `name`/`code` — a
+  // Keychain error message can echo back material on some store implementations.
+  try {
+    const value = await deps.from.get(name);
+    if (value === null) return { name, from: fromService, to: toService, status: "absent" };
+    await deps.to.set(name, value);
+    return { name, from: fromService, to: toService, status: "copied" };
+  } catch (err) {
+    deps.log(`keychain unavailable: ${name} (${errorTag(err)})`);
+    return { name, from: fromService, to: toService, status: "absent" };
+  }
 }
 
 function freshManifest(plan: MigrationPlan): MigrationManifest {
