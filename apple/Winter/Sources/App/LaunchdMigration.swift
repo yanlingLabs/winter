@@ -2,18 +2,18 @@ import Darwin
 import Foundation
 
 // -----------------------------------------------------------------------------------------------
-// Lifecycle T6 (T4 review finding 5f): tears down the OLD `com.norma.core` launchd `KeepAlive`
-// agent (`packages/cli/src/launchd.ts`'s pre-rename `installDaemon`) — superseded by
+// Lifecycle T6 (T4 review finding 5f): tears down the OLD `LegacyNames.launchdAgentLabel` launchd
+// `KeepAlive` agent (`packages/cli/src/launchd.ts`'s pre-rename `installDaemon`) — superseded by
 // `DaemonSupervisor` embedding winter-core directly (Task 2). A leftover KeepAlive agent would
 // otherwise relaunch a daemon the app just killed, permanently defeating "app quit -> daemon
 // quit" for that user, so this MUST complete before `DaemonSupervisor.start()`'s socket-exists
 // probe — see the call site (`AppDelegate.boot()`, which runs this first, before constructing the
 // supervisor).
 //
-// Winter Phase 9b (P9b-6): this teardown targets the HISTORICAL launchd label from BEFORE the
-// Norma->Winter rename, not this app's current identity — `LegacyNames.launchdAgentLabel` is
-// `"com.norma.core"` deliberately, never rewritten to `"com.winter.core"`. A machine that never
-// ran a pre-rename build simply has no such agent installed, and this stays a no-op for it.
+// Winter Phase 9b (P9b-6): this teardown targets the HISTORICAL pre-rename literal held in
+// `LegacyNames.launchdAgentLabel`, never today's `com.winter.core` — this app's OWN current
+// identity is never what this teardown is looking for. A machine that never ran a pre-rename
+// build simply has no such agent installed, and this stays a no-op for it.
 // -----------------------------------------------------------------------------------------------
 
 private let launchdAgentLabel = LegacyNames.launchdAgentLabel

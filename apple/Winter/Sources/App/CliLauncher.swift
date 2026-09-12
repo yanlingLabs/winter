@@ -77,14 +77,14 @@ final class CliLauncher {
         return home.appendingPathComponent(".local/bin/winter-dev")
     }
 
-    /// One-time migration: earlier dev builds installed the wrapper under a legacy Norma-era name
-    /// (`LegacyNames.devWrapperNames` — `norma`, before this app's own dev/dist split even
-    /// existed, and `norma-dev` after it). `norma` now belongs to the DISTRIBUTION app's own
-    /// symlink (its post-rename successor `winter` does likewise; see `CliInstaller`), so this
-    /// only ever removes a sibling under a LEGACY name, never the current `winter`/`winter-dev`.
-    /// Removes a sibling iff its content proves it was our own bun wrapper (starts with the
-    /// historical exec line) — a user-owned or dist-owned file under either legacy name is never
-    /// touched.
+    /// One-time migration: earlier dev builds installed the wrapper under one of
+    /// `LegacyNames.devWrapperNames`'s pre-rename names (the bare product name, before this app's
+    /// own dev/dist split even existed, and its dev-suffixed successor after it). The bare name
+    /// now belongs to the DISTRIBUTION app's own symlink (its post-rename successor does likewise;
+    /// see `CliInstaller`), so this only ever removes a sibling under a LEGACY name, never the
+    /// current dev-wrapper install name. Removes a sibling iff its content proves it was our own
+    /// bun wrapper (starts with the historical exec line) — a user-owned or dist-owned file under
+    /// either legacy name is never touched.
     static func removeLegacyDevWrapper(besides installPath: URL) {
         let directory = installPath.deletingLastPathComponent()
         for name in LegacyNames.devWrapperNames {
