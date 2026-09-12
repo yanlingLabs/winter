@@ -238,33 +238,30 @@ describe("createNormaRuntimeSdk — retention (G-12)", () => {
   });
 });
 
-describe("createNormaRuntimeSdk — the advisor", () => {
-  test("no advisorModel ⇒ NO advisor key at all (the router's default standing advisor)", async () => {
+describe("createNormaRuntimeSdk — the advisor (P8d-8: ALWAYS an advisor key, never conditional)", () => {
+  test("no advisorReviewer wired ⇒ the advisor key IS still present, and its resolver answers undefined", async () => {
     settings = null;
     const { opts } = await build();
-    expect("advisor" in opts).toBe(false);
-    expect(opts.advisor).toBeUndefined();
+    expect("advisor" in opts).toBe(true);
+    expect(opts.advisor).toBeDefined();
+    expect(opts.advisor?.resolveReviewer()).toBeUndefined();
   });
 
-  test("a blank advisorModel is absent, like every other key in the block", async () => {
-    settings = withRuntimes({ retention: { deliveriesDays: 30, nameLeasesDays: 7 }, migrations: { memoryKeys: false }, winterLeg: { chat: false, dispatch: false, code: false }, advisorModel: "   ", winterIdleTimeoutSec: 900 });
-    const { opts } = await build();
-    expect("advisor" in opts).toBe(false);
-  });
-
-  test("an advisorModel ⇒ a resolver that NAMES that model, re-read live", async () => {
-    settings = withRuntimes({ retention: { deliveriesDays: 30, nameLeasesDays: 7 }, migrations: { memoryKeys: false }, winterLeg: { chat: false, dispatch: false, code: false }, advisorModel: "winter-test/echo", winterIdleTimeoutSec: 900 });
+  test("a wired advisorReviewer is delegated to VERBATIM, on every call — no round-tripping through settings.runtimes.advisorModel here (that precedence now lives in advisor-reviewer.ts)", async () => {
+    settings = withRuntimes({ retention: { deliveriesDays: 30, nameLeasesDays: 7 }, migrations: { memoryKeys: false }, winterLeg: { chat: false, dispatch: false, code: false }, winterIdleTimeoutSec: 900 });
     const generate = async (): Promise<{ kind: string }> => ({ kind: "text" });
-    const { opts } = await build({ advisorReviewer: () => ({ generate }) });
+    let live = "winter-test/echo";
+    const { opts } = await build({ advisorReviewer: () => ({ provider: { generate }, model: live }) });
     expect(opts.advisor).toBeDefined();
     expect(opts.advisor?.resolveReviewer()).toEqual({ provider: { generate }, model: "winter-test/echo" });
 
-    // Hot: the model the resolver names follows settings.json with no restart.
-    settings = withRuntimes({ retention: { deliveriesDays: 30, nameLeasesDays: 7 }, migrations: { memoryKeys: false }, winterLeg: { chat: false, dispatch: false, code: false }, advisorModel: "winter-test/other", winterIdleTimeoutSec: 900 });
+    // Hot: `deps.advisorReviewer` is called fresh every time, so whatever IT reads live (settings,
+    // in `advisor-reviewer.ts`'s real implementation) reaches the router with no restart.
+    live = "winter-test/other";
     expect(opts.advisor?.resolveReviewer()?.model).toBe("winter-test/other");
   });
 
-  test("with no reviewer wired the resolver answers undefined — never a throw (8b's actual state)", async () => {
+  test("with no reviewer wired the resolver answers undefined — never a throw", async () => {
     settings = withRuntimes({ retention: { deliveriesDays: 30, nameLeasesDays: 7 }, migrations: { memoryKeys: false }, winterLeg: { chat: false, dispatch: false, code: false }, advisorModel: "winter-test/echo", winterIdleTimeoutSec: 900 });
     const { opts } = await build();
     expect(opts.advisor?.resolveReviewer()).toBeUndefined();

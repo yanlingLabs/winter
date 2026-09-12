@@ -72,6 +72,7 @@ import { SettingsWatcher } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { restampStep } from "./runtime-state/recovery";
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "./runtime-sdk/create";
+import { advisorReviewerFor, familyOfModel, officialLegDefaultSessionModel } from "./runtime-sdk/advisor-reviewer";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
 import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
@@ -951,6 +952,23 @@ export async function startDaemon(opts: {
       // live facet for — a parked (`resumable`) Winter session answers `unavailable` instead of
       // holding its mail forever, and is never cold-resumed behind the daemon's back.
       sessionPermissionClass: sessionPermissionClassFor({ records: () => runtime?.records, store }),
+      // P8d-8 (D30): the OFFICIAL leg's ONE reviewer resolver, ALWAYS wired (never conditional on
+      // whether `runtimes.advisorModel` is set — `advisorReviewerFor` reads that setting live
+      // itself). `sessionModel` (review fix F1) is NEVER `settings.provider.model` — that is the
+      // WINTER leg's own default-provider model (openai/codex on a non-Anthropic-primary install),
+      // and feeding it here silently resolved an OpenAI reviewer on a Claude-only leg.
+      // `officialLegDefaultSessionModel()` states the one fact this deployment can promise instead:
+      // every session on THIS leg is Claude-family (D13-2 — no other family can route here at all),
+      // so the D30 default is unconditionally "claude -> fable" regardless of which session asked
+      // (`advisor-reviewer.ts`'s own header records why a single daemon-wide getter cannot
+      // disambiguate between concurrent official-leg sessions on different models, and why that is a
+      // non-issue today for exactly this reason).
+      advisorReviewer: advisorReviewerFor({
+        settings: () => settings ?? undefined,
+        secrets,
+        familyOf: familyOfModel,
+        sessionModel: officialLegDefaultSessionModel,
+      }),
       log: (line) => console.error(`runtime-sdk: ${line}`),
     });
   } catch (err) {

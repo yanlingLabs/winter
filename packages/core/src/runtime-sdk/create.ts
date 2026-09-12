@@ -34,6 +34,7 @@ import { NORMA_BRAND } from "./brand";
 import { resolveWinterExecutable, type WinterExecutableUnavailable } from "./executable";
 import { resolveClaudeExecutable, ClaudeExecutableUnavailable } from "./official-executable";
 import { credentialPresenceFrom, keychainSeamFromSecretStore } from "./keychain";
+import { routerInputShape } from "./official-capabilities";
 import { familyListingFromCatalog } from "./provider-selection";
 import { releaseAllHeld } from "./messaging";
 import { NORMA_PEER_VERSIONS, REQUIRED_CLAUDE_AGENT_SDK } from "./versions";
@@ -110,16 +111,21 @@ export interface NormaRuntimeSdkDeps {
   /** Tasks 6–7's capability servers. `[]` is valid and is what Task 5 passes. */
   capabilities: readonly McpSdkServerConfigWithInstance[];
   /**
-   * Who reviews, when `settings.runtimes.advisorModel` names a model.
+   * P8d-8 (D30): the router's ONE `ReviewerResolver` for the OFFICIAL leg — `daemon.ts` builds this
+   * from `advisor-reviewer.ts`'s `advisorReviewerFor(...)`, which already reads
+   * `settings.runtimes.advisorModel` LIVE and applies the D30 per-family defaults internally, so
+   * nothing here re-derives that precedence. `advisorFrom` (below) ALWAYS wires this into
+   * `RuntimeSdkOptions.advisor` — never conditional on whether a reviewer is configured, per the
+   * no-restart rule (Norma map §8.3) — so a settings edit that later configures a reviewer takes
+   * effect on this daemon's very next official-leg advisor call, no restart. `undefined` only in a
+   * test/harness that does not care about the advisor at all; with no reviewer wired the resolver
+   * answers `undefined`, WS-06 §4's ordinary "no reviewer resolvable" tool error, never a throw.
    *
-   * NOT WIRED IN 8b, and the honest reason is worth stating: on a Winter-only host the router's
-   * `advisor` option is forwarded only into the official leg (surface map §1.8), and the Winter
-   * leg's advisor is configured through its own `Options.advisor` instead — so this option is inert
-   * either way in this phase. The seam exists so that the shape is right and the model name is
-   * already flowing; with no reviewer the resolver answers `undefined`, which is WS-06 §4's
-   * ordinary "no reviewer resolvable" tool error and never a throw.
+   * WINTER-LEG SESSIONS DO NOT USE THIS FIELD: their own advisor is configured per-session through
+   * `Options.advisor.model` (`mode-options.ts`/`session-driver.ts`), which needs no provider built on
+   * the daemon side — the spawned child resolves the reviewer's OWN provider itself.
    */
-  advisorReviewer?: (model: string) => AdvisorReviewer;
+  advisorReviewer?: ReviewerResolver;
   /**
    * WS-10 §13's inbound class for a session this process holds NO live facet for (Task 12).
    *
@@ -293,25 +299,17 @@ function retentionFrom(settings: () => Settings | null | undefined): RuntimeDire
 }
 
 /**
- * `settings.runtimes.advisorModel` set ⇒ an `advisor` option whose resolver NAMES that model;
- * unset ⇒ no `advisor` key at all, which is the router's own default standing advisor.
- *
- * The model is re-read inside the resolver, so changing it on a running daemon takes effect at the
- * next review. WHETHER the key exists is fixed at construction, though — the router takes a plain
- * value (Norma map §8.3) — so going from "no advisorModel" to "an advisorModel" on a running daemon
- * does not grow the key. Recorded as a known limit; it costs nothing today because the option is
- * inert on a Winter-only host (see `advisorReviewer` above).
+ * P8d-8: ALWAYS an `advisor` key — never conditional on `settings.runtimes.advisorModel` (the
+ * no-restart rule, Norma map §8.3: whether the router's `advisor` OPTION KEY exists is fixed at
+ * construction, so a resolver must always be passed and read settings live, rather than the key
+ * itself growing/shrinking as a setting changes on a running daemon). `deps.advisorReviewer` is
+ * `daemon.ts`'s already-built `advisorReviewerFor(...)` resolver, which does its own live settings
+ * read and D30 default derivation — this function only ever delegates to it verbatim; with none
+ * wired (a harness that does not care) the resolver answers `undefined` on every call, WS-06 §4's
+ * ordinary "no reviewer resolvable" case.
  */
-function advisorFrom(deps: NormaRuntimeSdkDeps): { advisor?: NonNullable<RuntimeSdkOptions["advisor"]> } {
-  // `winterOptionsFromSettings` is THE door every Winter-leg consumer reads the `runtimes` block
-  // through (fix wave F3 retired this file's own temporary copy of it).
-  const model = winterOptionsFromSettings(deps.settings()).advisorModel;
-  if (model === undefined) return {};
-  const resolveReviewer: ReviewerResolver = () => {
-    const live = winterOptionsFromSettings(deps.settings()).advisorModel ?? model;
-    const provider = deps.advisorReviewer?.(live);
-    return provider === undefined ? undefined : { provider, model: live };
-  };
+function advisorFrom(deps: NormaRuntimeSdkDeps): { advisor: NonNullable<RuntimeSdkOptions["advisor"]> } {
+  const resolveReviewer: ReviewerResolver = () => deps.advisorReviewer?.();
   return { advisor: { resolveReviewer } };
 }
 
@@ -394,6 +392,19 @@ export async function createNormaRuntimeSdk(deps: NormaRuntimeSdkDeps, overrides
     // 8a's durable store when the spine opened; the router's in-memory default when it did not.
     directoryStore: deps.directoryStore,
     capabilities: deps.capabilities,
+    // Lane 3b (P8d-17 root cause): WITHOUT this, `RuntimeSdkOptions.toInputShape` stays `undefined`
+    // and the router's OWN `officialCapabilityServers` early-returns for EVERY official-leg session
+    // (its own doc: "WITHOUT `toInputShape` THIS IS A WINTER-LEG-ONLY DOOR") — because Norma's
+    // construction-level `capabilities` above is `[]` on purpose (P8b-36), the early-return is a
+    // SILENT no-op rather than the throw a non-empty `capabilities` would get. That skips building
+    // `winterMcpServerDescriptor`'s standing server on the official leg entirely: SendMessage/
+    // ListAgents/ReadNotifications/advisor never get their canonical `mcp__<brand>__<tool>`
+    // registrations, so `officialToolAliases`'s redirects have no target and a bare `advisor` call
+    // is refused "No such tool available" before `resolveReviewer()` ever runs. `routerInputShape`
+    // is the SAME JSON-Schema→zod-shape bridge `official-capabilities.ts`'s own per-session
+    // `officialCapabilityServersFor` already uses for Norma's OWN capability tools — reused here,
+    // never a second copy, for the router's construction-time door.
+    toInputShape: routerInputShape,
     // §1.6: this is what fills `SeamContext.winterHome`, so the barrier and every later seam
     // resolve under the daemon's OWN home. Without it they fall back to
     // `resolveWinterHome(undefined, brand)` — which is `~/.norma` for a daemon booted on a temp

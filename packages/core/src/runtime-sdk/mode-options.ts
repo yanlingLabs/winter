@@ -199,6 +199,17 @@ export interface WinterOptionsInput {
    * whether to build one; this builder never constructs `SessionHooksDeps` itself.
    */
   hooks?: Options["hooks"];
+  /**
+   * P8d-8 (D30): the WINTER leg's own advisor target model, ALREADY RESOLVED by the caller
+   * (`session-driver.ts`'s `optionsFor`, from `winterOptionsFromSettings(settings()).advisorModel ??
+   * d30DefaultModel(model)` — a LIVE read at every incarnation, never a boot snapshot). Set verbatim
+   * onto `Options.advisor.model`, which the SDK's own doc says "wins over its own settings.advisor.model"
+   * — so this is Norma's deterministic 8d workaround for the M5 gap (`advisor-reviewer.ts`'s own
+   * header), never conditional on whether `runtimes.advisorModel` itself is set. Absent only when the
+   * session has no model at all yet (`d30DefaultModel` falls through to the caller's `model`, itself
+   * possibly `undefined`) — in which case no `advisor` key is set and the child's own default applies.
+   */
+  advisorModel?: string;
 }
 
 /**
@@ -432,6 +443,7 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
   if (input.outputStyle !== undefined) options.outputStyle = input.outputStyle;
   if (input.policy === "bypass") options.allowDangerouslySkipPermissions = true;
   if (input.hooks !== undefined) options.hooks = input.hooks;
+  if (input.advisorModel !== undefined) options.advisor = { model: input.advisorModel };
   const provider = providerSelectionFor(input.model, input.credentials);
   if (provider) options.provider = input.connection === undefined ? provider : { ...provider, connection: input.connection };
   // P8b-36: the session's own servers, spread under their own names (see `capabilities` above).

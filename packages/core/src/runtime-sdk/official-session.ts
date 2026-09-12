@@ -74,6 +74,17 @@ export interface OfficialSessionDeps {
   /** M6a: where `records.setTranscriptHealth` lands. Absent in a unit test that does not care. */
   records?: OfficialSessionRecords;
   log?: (line: string) => void;
+  /**
+   * P8d-18 (controller ruling): TEST-ONLY crash seam — called with EACH incarnation's own
+   * `AbortController` right after `open()` creates it. A test that wants to measure multi-incarnation
+   * resume calls `.abort()` on it directly, WITHOUT going through the deliberate `end()` path (which
+   * is terminal for this leg — see `run()`'s own `finally` block: only an abort/crash nobody asked
+   * for, `this.ending` still false, leaves `stateValue` at `"resumable"` rather than `"ended"`). Never
+   * set by production `daemon.ts` wiring — the router's own child process is what crashes for real;
+   * this is the one door a test has to simulate that without reaching into the router's spawn
+   * internals.
+   */
+  onIncarnationStart?: (abort: AbortController) => void;
 }
 
 export interface OfficialSession {
@@ -297,6 +308,7 @@ class OfficialSessionImpl implements OfficialSession {
       // router disposes" true for this leg too; without it a daemon `stop()` never learns this
       // child exists and a live official turn outlives the daemon.
       const abort = new AbortController();
+      this.deps.onIncarnationStart?.(abort); // P8d-18: test-only crash seam, see this field's own doc
       const routerQuery = this.deps.runtime.sdk.query({
         prompt: stream,
         options: {
