@@ -42,9 +42,10 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runtimeSdkInternals, type RuntimeKind, type SessionKey } from "@yanlinglabs/winter-runtime-sdk";
+import { openaiResponsesFake } from "@yanlinglabs/winter-provider-conformance/fakes";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@norma/protocol";
 import { FileSecretStore } from "../../src/auth/secret-store";
-import { writeCredentialMaterial } from "../../src/auth/credential-material";
+import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/auth/credential-material";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
@@ -52,6 +53,13 @@ import { claudeRuntimeForTests, describeWithClaudeRuntime, type AnthropicTurnScr
 
 const CATALOG_CLAUDE_MODEL = "claude-sonnet-5"; // the same pinned-catalog id official-leg.e2e.test.ts uses
 const WINTER_DOUBLE_MODEL = "winter-test/echo";
+// Fix wave item 2: a REAL catalog-listed, credentialed Winter provider — `provider-selection.ts`'s
+// `catalogRowsFor` lists it under providerId "openai", and its family ("gpt") is non-Claude, so
+// D28 always routes it to the Winter runtime regardless of peer/credential (selection.test.ts's own
+// "a non-Claude family (openai) always routes to winter-agent" case) — exactly the heavier fixture
+// this file's OWN header names as what a genuine resumed/lossy-fork/blocked round trip needs,
+// instead of the `winter-test/<double>` idiom the FIRST describe block below is stuck with.
+const CATALOG_OPENAI_MODEL = "openai/gpt-5.4";
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -120,7 +128,9 @@ describeWithWinterBinary("cross-runtime handoff (P8c, the phase's key proof)", (
       writeFileSync(join(home, "settings.json"), JSON.stringify({
         schemaVersion: 2,
         provider: { type: "openai-compatible", model: WINTER_DOUBLE_MODEL, baseUrl: "http://127.0.0.1:9/v1" },
-        runtimes: { winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable, winterIdleTimeoutSec: 10 },
+        // Fix wave (C2 / ruling P8c-18): the fence defaults OFF in production; THIS file's whole
+        // job is measuring the real barrier, so it opts in explicitly.
+        runtimes: { winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable, winterIdleTimeoutSec: 10, handoff: { crossRuntime: true } },
       }, null, 2));
       const secrets = new FileSecretStore(join(home, "test-secrets"));
       await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-handoff-e2e" });
@@ -252,6 +262,228 @@ describeWithWinterBinary("cross-runtime handoff (P8c, the phase's key proof)", (
         "catalog (provider-selection.ts). A genuine resumed/lossy-fork/blocked round trip needs a " +
         "catalog-listed, credentialed Winter provider on the source leg instead — see this file's " +
         "header comment.",
+      );
+
+      rmSync(cwd, { recursive: true, force: true });
+    }, 120_000);
+  });
+});
+
+// Fix wave item 2 — the C2 proof attempt: a Winter-leg session on `CATALOG_OPENAI_MODEL` (a real,
+// catalog-listed, credentialed provider — never a `winter-test/<double>`) handed off to
+// `CATALOG_CLAUDE_MODEL` on the official leg. Both providers point at LOOPBACK FAKES
+// (`openaiResponsesFake` / `anthropicFake`), never the network. The barrier's REAL outcome is
+// measured, not assumed — this test branches on whichever typed shape the router actually reports
+// and asserts that shape, rather than forcing one.
+describeWithWinterBinary("cross-runtime handoff on a REAL catalog provider (fix wave item 2)", (winterBin) => {
+  describeWithClaudeRuntime("openai (Winter) -> claude (official) -> openai (Winter), on real catalog rows", () => {
+    let home: string;
+    let daemon: RunningDaemon | undefined;
+    let client: TestClient;
+    let openaiFakeRef: Awaited<ReturnType<typeof openaiResponsesFake.startOpenAiResponsesFake>> | undefined;
+    let openaiFakeUrl = "";
+    let openaiFakeClose: (() => Promise<void>) | undefined;
+    let anthropicFakeUrl = "";
+    let anthropicFakeClose: (() => Promise<void>) | undefined;
+    const anthropicRequests: Array<{ path: string; body: string }> = [];
+    const anthropicScript: AnthropicTurnScript = { blocks: [{ type: "text", chunks: ["hello from the official leg (real catalog handoff)"] }], stopReason: "end_turn" };
+
+    beforeAll(async () => {
+      home = realpathSync(mkdtempSync(join(tmpdir(), "norma-handoff-real-")));
+
+      // ── The openai loopback (the Winter leg's real, catalog-listed provider) ────────────────
+      const openaiFake = await openaiResponsesFake.startOpenAiResponsesFake({
+        scenarios: {},
+        // Every model hits this — the point is proving the CONNECTION reaches the loopback, not
+        // scripting a particular model id the child happens to put on the wire.
+        unknownModel: async () => openaiResponsesFake.responsesStream({ text: ["hello from the winter leg (real openai catalog row)"] }),
+      });
+      openaiFakeRef = openaiFake;
+      openaiFakeUrl = openaiFake.url;
+      openaiFakeClose = () => openaiFake.close();
+
+      // ── The anthropic loopback (the official leg's destination) ────────────────────────────
+      const { startFake, anthropicFake } = await import("@yanlinglabs/winter-provider-conformance");
+      const anthropicFakeServer = await startFake({
+        routes: [{
+          path: "*",
+          handler: async (_req, recorded) => {
+            anthropicRequests.push({ path: recorded.path, body: recorded.body });
+            if (recorded.path === "/v1/messages" && recorded.method === "POST") return anthropicFake.anthropicTurnResponse(anthropicScript);
+            return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+          },
+        }],
+      });
+      anthropicFakeUrl = anthropicFakeServer.url;
+      anthropicFakeClose = () => anthropicFakeServer.close();
+
+      writeFileSync(join(home, "settings.json"), JSON.stringify({
+        schemaVersion: 2,
+        // `session.create`'s own model wins over this default — carried only because `Settings`
+        // requires `provider` to be present at all (same as every other e2e fixture in this repo).
+        provider: { type: "openai-compatible", model: CATALOG_OPENAI_MODEL, baseUrl: openaiFakeUrl },
+        runtimes: {
+          winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable, winterIdleTimeoutSec: 10,
+          handoff: { crossRuntime: true },
+        },
+      }, null, 2));
+
+      const secrets = new FileSecretStore(join(home, "test-secrets"));
+      await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test" });
+      await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-handoff-real" });
+
+      daemon = await startDaemon({
+        home, secrets, agentProvider: null,
+        officialConnectionOverride: () => ({ explicitConnectionEnv: { ANTHROPIC_BASE_URL: anthropicFakeUrl }, authFamily: "custom" }),
+      });
+      if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
+      client = await TestClient.connect(daemon.socketPath);
+      await client.hello(daemon.tokens.harness, "e2e");
+    });
+
+    afterAll(async () => {
+      try { client?.close(); } catch { /* closed */ }
+      const stopping = daemon?.stop();
+      daemon = undefined;
+      await stopping;
+      await openaiFakeClose?.();
+      await anthropicFakeClose?.();
+      rmSync(home, { recursive: true, force: true });
+    });
+
+    test("session.setModel's REAL barrier outcome for a catalog-listed Winter provider, measured end to end", async () => {
+      const d = daemon!;
+      if ("unavailable" in d.runtimeState) throw d.runtimeState.unavailable;
+      const rt = d.runtimeState;
+      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-handoff-real-cwd-")));
+
+      // ── Step 1: a Winter-leg session on the REAL catalog openai row, one completed turn ─────
+      const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, {
+        scope: "e2e", mode: "code", model: CATALOG_OPENAI_MODEL, cwd,
+      });
+      await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+      expect(d.winter.legOf(sessionId)).toBe("winter");
+      expect(rt.records.get(sessionId)?.providerId).toBe("openai");
+      const beforeGeneration = rt.records.get(sessionId)?.generation;
+      const PRIOR_USER_TEXT = "remember the number 8c-42";
+      await client.call(METHODS.sessionSend, { sessionId, text: PRIOR_USER_TEXT });
+      await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 45_000);
+      const openaiRequestsAfterFirstTurn = openaiFakeRef!.requests.length;
+      expect(openaiRequestsAfterFirstTurn).toBeGreaterThan(0); // the child's own request reached the openai loopback
+
+      // ── Spy on the REAL router's barrier — direct proof the fix reaches it ───────────────────
+      const internals = runtimeSdkInternals(d.runtimeSdk!.sdk);
+      expect(internals).toBeDefined();
+      const realBarrier = internals!.barrier;
+      const originalPlan = realBarrier.plan.bind(realBarrier);
+      const planCalls: Array<{ session: SessionKey; to: RuntimeKind }> = [];
+      realBarrier.plan = async (session, to) => {
+        planCalls.push({ session, to });
+        return originalPlan(session, to);
+      };
+
+      // ── Step 2: session.setModel to the Claude catalog model — the handoff attempt ───────────
+      let caught: RpcErrorLike | undefined;
+      try {
+        await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL });
+      } catch (err) {
+        caught = err as RpcErrorLike;
+      }
+
+      // The fence is enabled and the model is servable both ways, so the destination decision MUST
+      // differ from the recorded leg and MUST reach the barrier — this much is not in question;
+      // what the barrier does next is THIS test's actual measurement.
+      expect(planCalls).toEqual([{ session: { projectKey: expect.any(String), sessionId: expect.any(String) }, to: "claude-agent" }]);
+
+      let measuredOutcome: string;
+      if (caught === undefined) {
+        // No RPC error: the outcome was `same-runtime` (impossible here — the legs differ),
+        // `deferred` (no turn was running, so also not expected), or `resumed`.
+        const legAfter = d.winter.legOf(sessionId);
+        if (legAfter === "official") {
+          measuredOutcome = "resumed";
+          expect(rt.records.get(sessionId)?.runtimeKind).toBe("claude-agent");
+          expect(rt.records.get(sessionId)?.generation).toBeGreaterThan(beforeGeneration ?? -1);
+
+          // Continuity: the NEXT turn on the official leg must reach the anthropic loopback
+          // carrying the PRIOR user text — proof the router actually moved the conversation, not
+          // just the record's own leg column.
+          const anthropicRequestsBefore = anthropicRequests.length;
+          await client.call(METHODS.sessionSend, { sessionId, text: "what number did I ask you to remember?" });
+          await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 45_000);
+          expect(anthropicRequests.length).toBeGreaterThan(anthropicRequestsBefore);
+          const lastAnthropicBody = anthropicRequests[anthropicRequests.length - 1]!.body;
+          expect(lastAnthropicBody).toContain(PRIOR_USER_TEXT);
+
+          // Switch back: Claude -> the Winter openai row, and complete a turn there.
+          await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_OPENAI_MODEL });
+          expect(d.winter.legOf(sessionId)).toBe("winter");
+          const openaiRequestsBeforeReturn = openaiFakeRef!.requests.length;
+          await client.call(METHODS.sessionSend, { sessionId, text: "still there?" });
+          await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 45_000);
+          expect(openaiFakeRef!.requests.length).toBeGreaterThan(openaiRequestsBeforeReturn);
+        } else {
+          measuredOutcome = `unexpected-success-leg:${legAfter}`;
+        }
+      } else {
+        const code = caught.rpc?.data?.code;
+        if (code === "handoff_confirmation_required") {
+          measuredOutcome = "confirmation_required";
+          expect(caught.rpc?.data?.warnings).toBeDefined();
+          let secondCaught: RpcErrorLike | undefined;
+          try {
+            await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL, confirmLossy: true });
+          } catch (err) {
+            secondCaught = err as RpcErrorLike;
+          }
+          if (secondCaught === undefined) {
+            measuredOutcome += "->resumed-after-confirm";
+            expect(d.winter.legOf(sessionId)).toBe("official");
+          } else {
+            measuredOutcome += `->${secondCaught.rpc?.data?.code ?? "unknown"}-after-confirm`;
+            expect(secondCaught.rpc?.data?.code).toBeDefined();
+            expect(["handoff_lossy_fork", "handoff_blocked"]).toContain(secondCaught.rpc!.data!.code as string);
+          }
+        } else if (code === "handoff_lossy_fork") {
+          measuredOutcome = "lossy_fork";
+          expect(caught.rpc?.message).toBeDefined();
+        } else if (code === "handoff_blocked") {
+          measuredOutcome = "blocked";
+          expect(caught.rpc?.message).toBeDefined();
+        } else if (code === "runtime_selection_refused") {
+          // MEASURED (fix wave item 2's own real finding): `planAndApplySwitch` reports this when
+          // the barrier's OWN `plan()` returns `selection.kind === "refused"` — a REAL, already-
+          // coded `PlanSwitchOutcome` branch (`handoff.ts`), not a bug. The router's
+          // `reviewSelectionFor` (compiled into `@yanlinglabs/winter-runtime-sdk`) refuses a
+          // handoff `to: "claude-agent"` outright whenever a FRESH decision over the PERSISTED
+          // family would not itself route to `claude-agent` — which is true of every non-Claude
+          // family (`D28: a non-Claude family routes to the Winter runtime`, unconditionally). An
+          // `openai`-family session therefore can NEVER "hand off" to the official runtime: there
+          // is no Claude-runtime-servable state to move, because the persisted family itself isn't
+          // Claude — this is a genuine cross-FAMILY refusal, not a cross-RUNTIME one, and it is
+          // categorically different from this file's FIRST describe block's refusal (a
+          // `winter-test/<double>` the catalog cannot name at all). A `resumed` round trip needs
+          // the SOURCE session's PERSISTED family to already be "claude" (a Claude-family model
+          // temporarily hosted on Winter for lack of a servable Anthropic-protocol row) — every
+          // Claude-family catalog row Norma's OWN credential inventory can serve is Anthropic-
+          // protocol, which D13-2 routes straight to the official runtime the instant a peer and a
+          // credential both exist, so this deployment has no way to construct that fixture; recorded
+          // here as the honest, measured limit — see this test's own `console.warn` below.
+          measuredOutcome = "refused:runtime_selection_refused (cross-family, not cross-runtime — the barrier's own D28 sanity check)";
+          expect(caught.rpc?.message).toContain("does not serve");
+          expect(d.winter.legOf(sessionId)).toBe("winter"); // nothing moved
+        } else {
+          // A refusal this test did not expect (`session_predates_winter_leg`, `handoff_disabled`)
+          // — fail loudly with the real detail rather than silently accepting an unplanned shape.
+          throw new Error(`unexpected session.setModel refusal: code=${code ?? "none"} message=${caught.rpc?.message ?? "none"}`);
+        }
+      }
+
+      console.warn(
+        `[handoff-cross-runtime-e2e] fix wave item 2 MEASURED outcome for a REAL catalog-listed ` +
+        `Winter provider (openai) -> claude: "${measuredOutcome}". barrier.plan() was reached ` +
+        `(spied above) with to="claude-agent"; the openai loopback saw the child's own requests ` +
+        `(${openaiRequestsAfterFirstTurn} before the handoff attempt).`,
       );
 
       rmSync(cwd, { recursive: true, force: true });

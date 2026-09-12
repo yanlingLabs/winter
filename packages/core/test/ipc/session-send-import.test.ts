@@ -156,6 +156,34 @@ describe("session.send — the P8c-6 engine-era import door", () => {
     }
   });
 
+  test("m1 (whole-branch review): the attachment check runs BEFORE the import attempt — a client attached elsewhere never triggers it", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-send-import-attach-"));
+    const store = new SessionStore(home);
+    const sessionIdA = store.createSession("global");
+    const sessionIdB = store.createSession("global");
+    const legRef = { current: "engine" as "engine" | "winter" | undefined };
+    const table = fakeTable({ leg: legRef, sent: [] });
+    let importCalls = 0;
+    const importLegacy = {
+      importSession: async (id: string) => { importCalls++; legRef.current = "winter"; return { backendSessionId: "be-imported", entries: 1 }; },
+    };
+    const { server, c } = await boot(table, store, home, importLegacy);
+    try {
+      // Attached to session A, never B — sending to the engine-era session B must be refused for
+      // attachment BEFORE the (expensive, mutating) import ever runs.
+      await c.request(METHODS.sessionAttach, { sessionId: sessionIdA, fromSeq: 0 });
+      const res = await c.request(METHODS.sessionSend, { sessionId: sessionIdB, text: "hi" });
+      expect(res.error).toBeDefined();
+      expect(res.error?.message).toContain("not attached");
+      expect(res.error?.message).toContain(sessionIdB);
+      expect(importCalls).toBe(0);
+    } finally {
+      c.close();
+      server.stop();
+      store.close();
+    }
+  });
+
   test("an import failure is refused typed, never a silent fall-through to the log-only path", async () => {
     const home = mkdtempSync(join(tmpdir(), "norma-send-import-fail-"));
     const store = new SessionStore(home);

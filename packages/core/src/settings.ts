@@ -404,6 +404,15 @@ export const Settings = z.object({
     }).prefault({}),
     advisorModel: z.string().optional(),
     winterIdleTimeoutSec: z.number().int().min(10).default(DEFAULT_WINTER_IDLE_TIMEOUT_SEC),
+    // Fix wave (whole-branch review C2 / ruling P8c-18): a `session.setModel` whose FRESH
+    // destination decision names a DIFFERENT runtime leg than the session's recorded one is a
+    // cross-runtime HANDOFF (`runtime-sdk/handoff.ts`) — a real round-trip against the live
+    // barrier is still unmeasured in production (only a typed refusal has been proven end to end,
+    // `handoff-cross-runtime-e2e.test.ts`'s own header). Default OFF: production stays on today's
+    // "never actually reaches the barrier" behaviour until the measurement lands; `handoff.ts`
+    // reads this HOT (`handoffCrossRuntimeEnabled(deps.settings())`), never a boot snapshot, same
+    // as every other setting in this file.
+    handoff: z.object({ crossRuntime: z.boolean().default(false) }).prefault({}),
   }).optional(),
 });
 export type Settings = z.infer<typeof Settings>;
@@ -414,6 +423,17 @@ export type Settings = z.infer<typeof Settings>;
  *  settings-reader (daemon.ts, re-reads settings.json per call, mtime-cached — same pattern as
  *  providers/manager.ts's `liveModel`) and this file's own tests exercise the SAME decision. */
 export const hooksEnabledFrom = (s: Settings): boolean => s.hooks?.enabled !== false;
+
+/** Fix wave (C2 / P8c-18): the ONE door `runtime-sdk/handoff.ts` reads before letting a
+ *  `session.setModel` cross a runtime leg. Absent block OR absent field both mean OFF (the
+ *  schema's own `.default(false)` only materializes once `runtimes` itself is present — same
+ *  "an absent block is not unknown" rule `winterOptionsFromSettings` states for its own siblings),
+ *  so a home that has never touched `runtimes` gets the safe default without this function lying
+ *  about what the raw block says. Deliberately total (`null`/`undefined` settings both answer
+ *  `false`) for the same boot-degraded-to-`settings=null` reason every getter here is total. */
+export function handoffCrossRuntimeEnabled(s: Settings | null | undefined): boolean {
+  return s?.runtimes?.handoff?.crossRuntime === true;
+}
 
 /** What the Winter leg actually runs with, for a home whose `runtimes` block may not exist at all. */
 export interface WinterOptions {

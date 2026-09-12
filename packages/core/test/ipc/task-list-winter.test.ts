@@ -52,7 +52,7 @@ class TestClient {
  * recorded leg but no live driver. This fake keeps them independently controllable so a test can
  * exercise the case the taskList fix is about: `legOf` says "winter" while `get` says undefined.
  */
-function tableWith(opts: { live?: Set<string>; recordedLeg?: Map<string, "winter" | "engine"> }): WinterSessionDrivers {
+function tableWith(opts: { live?: Set<string>; recordedLeg?: Map<string, "winter" | "official" | "engine"> }): WinterSessionDrivers {
   const live = opts.live ?? new Set<string>();
   const recordedLeg = opts.recordedLeg ?? new Map<string, "winter" | "engine">();
   const never = (): never => { throw new Error("not reached by this test"); };
@@ -144,6 +144,29 @@ describe("task.list over the Winter leg reads the session's own task_updated his
     // exactly the resumed/idle-session shape the pre-fix `opts.winter?.get(id) !== undefined`
     // guard alone missed, falling through to the empty legacy path.
     const table = tableWith({ live: new Set(), recordedLeg: new Map([[sessionId, "winter"]]) });
+    const { server, c } = await boot(table, store, home);
+    try {
+      const res = await c.request(METHODS.taskList, { sessionId });
+      expect(res.error).toBeUndefined();
+      expect(res.result).toEqual({ ok: true, tasks: [{ id: "1", subject: "write the plan", status: "pending" }] });
+    } finally {
+      c.close();
+      server.stop();
+      store.close();
+    }
+  });
+
+  test("M3 (whole-branch review): an IDLE OFFICIAL-leg session (recorded leg, no live driver) still returns its folded tasks", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-task-list-official-"));
+    const store = new SessionStore(home);
+    const sessionId = store.createSession("global");
+    store.append(sessionId, {
+      type: "task_updated", sessionId, threadId: "main",
+      task: { id: "1", subject: "write the plan", status: "pending" },
+    });
+    // The pre-fix condition (`legOf(id) === "winter"`) missed the official leg entirely — this is
+    // that same idle/resumed shape (review r1's own fix for Winter), one leg over.
+    const table = tableWith({ live: new Set(), recordedLeg: new Map([[sessionId, "official"]]) });
     const { server, c } = await boot(table, store, home);
     try {
       const res = await c.request(METHODS.taskList, { sessionId });

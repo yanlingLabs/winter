@@ -1,3 +1,4 @@
+import { takeFileDiff } from "../runtime-sdk/diff-attach";
 import type { ProjectedEvent, ProtocolSdkMessage } from "./types";
 
 /**
@@ -190,6 +191,13 @@ export function toolResultOutput(block: ContentBlock): string {
  * mis-fold in this file that would be invisible in every unit test that only feeds declared shapes.
  * `interrupted: true` (the in-flight block an interrupt cancels, `[interrupted]`) is likewise an
  * error result, not a success.
+ *
+ * M5 (whole-branch review): `fileDiff` is taken here — `takeFileDiff(sessionId, callId)`
+ * (`runtime-sdk/diff-attach.ts`) — the ONE place a `tool_result` event is emitted for a completed
+ * call, so it is also the one place the hooks lane's PostToolUse-produced diff summary (attached
+ * under the SAME sessionId/toolUseId) can be handed to the persisted event. A take is destructive
+ * (`diff-attach.ts`'s own doc), so a replayed `tool_result` never re-attaches a diff — the summary
+ * rides the event exactly once, the same turn it was produced on.
  */
 export function toolResults(frame: UserFrame, sessionId: string, threadId: string): ProjectedEvent[] {
   const out: ProjectedEvent[] = [];
@@ -198,7 +206,8 @@ export function toolResults(frame: UserFrame, sessionId: string, threadId: strin
     const callId = str(b.tool_use_id);
     if (callId === undefined || callId.length === 0) continue;
     const isError = b.is_error === true || b.denied === true || b.interrupted === true;
-    out.push({ type: "tool_result", sessionId, threadId, callId, output: toolResultOutput(b), isError });
+    const fileDiff = takeFileDiff(sessionId, callId);
+    out.push({ type: "tool_result", sessionId, threadId, callId, output: toolResultOutput(b), isError, ...(fileDiff === undefined ? {} : { fileDiff }) });
   }
   return out;
 }

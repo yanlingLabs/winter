@@ -54,8 +54,9 @@ import type {
 import { runtimeSdkInternals } from "@yanlinglabs/winter-runtime-sdk";
 import type { HandoffParticipants, NormaRuntimeSdk, SessionMode } from "./create";
 import { RuntimeSessionRecords, type RuntimeSessionRecord } from "../runtime-state/records";
+import { handoffCrossRuntimeEnabled, type Settings } from "../settings";
 import { sessionLegOf } from "./leg";
-import { testProviderNameFor } from "./provider-selection";
+import { catalogRowsFor, testProviderNameFor } from "./provider-selection";
 import type { LegSession, WinterSessionDrivers } from "./session-driver";
 
 export interface HandoffDeps {
@@ -63,6 +64,9 @@ export interface HandoffDeps {
   winter: WinterSessionDrivers;
   records: RuntimeSessionRecords;
   store: { meta(sessionId: string): { mode?: string; cwd?: string | null } };
+  /** Fix wave (C2 / P8c-18): the LIVE settings holder — read hot, at call time, in
+   *  `planAndApplySwitch`, never a boot snapshot (`winterOptionsFromSettings`'s own pattern). */
+  settings: () => Settings | null | undefined;
   log?: (line: string) => void;
   /**
    * Test seam: a fake `{plan, execute}` in place of `runtimeSdkInternals(runtime.sdk)?.barrier`.
@@ -205,7 +209,7 @@ export function registerHandoffParticipants(deps: HandoffDeps): void {
 
 export type PlanSwitchOutcome =
   | { kind: "same-runtime" } // an ordinary in-runtime model change — the caller's existing path
-  | { kind: "refused"; code: "runtime_selection_refused" | "session_predates_winter_leg"; detail: string }
+  | { kind: "refused"; code: "runtime_selection_refused" | "session_predates_winter_leg" | "handoff_disabled"; detail: string }
   | { kind: "confirmation_required"; warnings: string[] }
   | { kind: "deferred" } // a turn is running; the switch is applied when it settles
   | { kind: "resumed"; selection: RuntimeSelection }
@@ -257,6 +261,12 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
   // `session.create` already does for the same models). Without this bail-out the fresh decision
   // below would hard-refuse a plain, same-leg model change that never asked to move anything.
   if (testProviderNameFor(model) !== undefined) return { kind: "same-runtime" };
+  // M1 (whole-branch review): mirrors `session-driver.ts`'s `decideRuntime` bail-out #4 — a model
+  // with NO row in the pinned catalog AT ALL (a BYO/custom `provider.baseUrl` endpoint's own model
+  // id) has nothing for the selector to route on; without this bail-out a plain, off-catalog model
+  // change on an EXISTING session would hard-refuse through the selector instead of keeping its
+  // ordinary in-runtime behaviour, which is what `session.create` already does for the same models.
+  if (catalogRowsFor(model).length === 0) return { kind: "same-runtime" };
   const mode = modeOf(deps.store.meta(sessionId).mode);
   // FRESH — no `persisted`. `SELECTION_RULES.persisted` returns a persisted selection BY IDENTITY,
   // so passing `record.selection` here (the pre-fix shape) made `decided.runtimeKind` always equal
@@ -269,6 +279,20 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
   }
   if (legOfRuntimeKind(decided.runtimeKind) === currentLeg) {
     return { kind: "same-runtime" };
+  }
+  // C2 fence (whole-branch review / ruling P8c-18): a cross-runtime handoff's real behaviour
+  // against the live barrier is unmeasured in production (this file's header + the e2e's own —
+  // only a typed refusal has been proven end to end). Refuse BEFORE any barrier call and BEFORE
+  // `session.setModel`'s own store write (this return short-circuits both), typed, so a deployment
+  // that has not opted in never executes an unconfirmed cross-runtime switch. Read HOT, at call
+  // time, per this file's own `HandoffDeps.settings` doc — never a boot snapshot. Same-runtime
+  // model changes (the branch above) are entirely unaffected.
+  if (!handoffCrossRuntimeEnabled(deps.settings())) {
+    return {
+      kind: "refused",
+      code: "handoff_disabled",
+      detail: `moving this session from the ${currentLeg} runtime to ${legOfRuntimeKind(decided.runtimeKind)} is disabled (settings.runtimes.handoff.crossRuntime is off)`,
+    };
   }
   const sessionKey = sessionKeyFor(record);
   if (sessionKey === undefined) {

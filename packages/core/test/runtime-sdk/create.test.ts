@@ -43,9 +43,11 @@ afterEach(async () => {
 });
 
 /** A settings object with just the block under test — `runtimes` is `.optional()`, so `null` (no
- *  settings at all) is a case every consumer must answer for and several tests below use it. */
-function withRuntimes(runtimes: NonNullable<Settings["runtimes"]>): Settings {
-  return { schemaVersion: 2, runtimes } as unknown as Settings;
+ *  settings at all) is a case every consumer must answer for and several tests below use it.
+ *  `handoff` (fix wave, C2/P8c-18) defaults in here — none of this file's own cases are about that
+ *  setting, so every call site naming a `runtimes` block before it existed keeps compiling. */
+function withRuntimes(runtimes: Omit<NonNullable<Settings["runtimes"]>, "handoff"> & { handoff?: NonNullable<Settings["runtimes"]>["handoff"] }): Settings {
+  return { schemaVersion: 2, runtimes: { handoff: { crossRuntime: false }, ...runtimes } } as unknown as Settings;
 }
 
 function deps(extra: Partial<NormaRuntimeSdkDeps> = {}): NormaRuntimeSdkDeps {

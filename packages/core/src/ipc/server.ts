@@ -1572,6 +1572,14 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // (`session_unrecorded` stays `refuseIfPredatesWinterLeg`'s to raise) and never a session
         // already runnable (which the block above would have handled and returned from already).
         if (opts.winter !== undefined && opts.importLegacy !== undefined && opts.winter.legOf(p.sessionId) === "engine") {
+          // m1 (whole-branch review): the attachment check FIRST — mirrors the ordinary Winter
+          // branch just above (same condition and message `hub.send` throws for), so a client
+          // attached elsewhere can never trigger the import (an expensive, MUTATING conversion
+          // that writes a whole new backend transcript) before being refused for exactly the
+          // reason that branch already refuses an ordinary send.
+          if (hub.attachedSession(socket.data.hubClient) !== p.sessionId) {
+            throw new Error(`client ${socket.data.clientName} not attached to ${p.sessionId}`);
+          }
           try {
             await opts.importLegacy.importSession(p.sessionId);
           } catch (err) {
@@ -1580,9 +1588,6 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           }
           // The record is now "winter" — the SAME attach+ensure+send path the ordinary Winter
           // branch above runs, over the transcript the import just wrote.
-          if (hub.attachedSession(socket.data.hubClient) !== p.sessionId) {
-            throw new Error(`client ${socket.data.clientName} not attached to ${p.sessionId}`);
-          }
           const imported = await ensureWinterSession(p.sessionId);
           if (imported !== undefined) {
             try {
@@ -1772,7 +1777,14 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // TaskStore path. Same shape as `session.compact`/`session.interrupt`'s own leg check just
         // above: a RECORDED "winter" leg (`legOf`) reads the folded history too, live driver or
         // not; only an engine-era session (or no `winter` at all) takes the legacy fallback.
-        if (opts.winter?.get(p.sessionId) !== undefined || opts.winter?.legOf(p.sessionId) === "winter") {
+        //
+        // Fix wave M3 (whole-branch review): `legOf(id) === "winter"` alone missed the OFFICIAL
+        // leg entirely — an idle official-leg session (no live driver) fell through to the empty
+        // legacy fallback exactly like the pre-review-r1 bug this comment describes for Winter.
+        // `isRunnableLeg` (this file's own siblings, `session.send`/`session.compact` above) is the
+        // ONE "a leg the driver table can actually run a turn on" predicate; both legs' task
+        // graphs live the same way (the child's own in-memory store, folded from `task_updated`).
+        if (opts.winter?.get(p.sessionId) !== undefined || isRunnableLeg(p.sessionId)) {
           return { ok: true, tasks: readWinterTasks(opts.store, p.sessionId) };
         }
         return { ok: true, tasks: opts.tasks?.list(p.sessionId) ?? [] };

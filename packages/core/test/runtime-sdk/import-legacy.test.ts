@@ -147,6 +147,49 @@ describe("importEngineEraSession", () => {
     });
   });
 
+  test("m2 (whole-branch review): two concurrent imports of the SAME session run the conversion ONCE", async () => {
+    await withTempHome(async (home) => {
+      const store = new SessionStore(home);
+      mkdirSync(join(home, "work-m2"), { recursive: true });
+      const cwd = join(home, "work-m2", "proj");
+      mkdirSync(cwd, { recursive: true });
+      const sid = store.createSession("work-m2", { cwd, model: "gpt-5.4" });
+      store.append(sid, { type: "user_message", sessionId: sid, threadId: "main", text: "hello", clientName: "cli" });
+      store.append(sid, { type: "assistant_message", sessionId: sid, threadId: "main", text: "hi there" });
+
+      const rs = openRuntimeStateDb(home);
+      try {
+        backfillNativeSessions({ rs, store, home, providerId: "codex-oauth" });
+        const records = new RuntimeSessionRecords(rs);
+        expect(sessionLegOf(records.get(sid))).toBe("engine");
+
+        let appendCalls = 0;
+        const compatStore = {
+          append: async (): Promise<void> => {
+            appendCalls++;
+            // Yield so the SECOND concurrent call's own read of the record races the first's
+            // write — exactly the shape the in-flight map exists to close (without it, both calls
+            // would see `sessionLegOf === "engine"` before either has transitioned the record).
+            await Bun.sleep(20);
+          },
+        };
+        const deps = { home, store, records, compatStore };
+        const [a, b] = await Promise.all([importEngineEraSession(deps, sid), importEngineEraSession(deps, sid)]);
+
+        expect(appendCalls).toBe(1); // ONE real conversion, never two backend transcripts
+        expect(a).toEqual(b); // both callers got the SAME result
+        expect(sessionLegOf(records.get(sid))).toBe("winter");
+        expect(records.get(sid)!.backendSessionId).toBe(a.backendSessionId);
+
+        // A LATER, non-concurrent call on the now-imported session gets its ordinary refusal — the
+        // in-flight entry must have been cleared once the promise settled, not memoized forever.
+        await expect(importEngineEraSession(deps, sid)).rejects.toThrow(ImportLegacySessionError);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
   test("refuses a session that has no runtime record", async () => {
     await withTempHome(async (home) => {
       const store = new SessionStore(home);
