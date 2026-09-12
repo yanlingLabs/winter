@@ -1,5 +1,5 @@
 export { startDaemon, CORE_VERSION, type RunningDaemon } from "./daemon";
-export { bootstrapWinterDir, resolveWinterHome } from "./winter-dir";
+export { bootstrapWinterDir, resolveWinterHome, isDefaultWinterHome } from "./winter-dir";
 export { resolveWinterProfile, keychainService, profileDisplayName, type WinterProfile } from "./profile";
 export {
   LEGACY_LAUNCHD_LABEL, LEGACY_HOME_DIR, LEGACY_DEV_HOME_DIR, LEGACY_HOME_ENV, LEGACY_PROFILE_ENV,

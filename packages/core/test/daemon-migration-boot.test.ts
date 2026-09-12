@@ -5,6 +5,15 @@
 // unlike `test/runtime-state/support.ts`'s `withTempHome`, which pre-bootstraps and would make
 // every scenario here "not pristine" before it even starts), and both Keychain sides are
 // `FileSecretStore`s — this file never touches `Bun.secrets` or any real home.
+//
+// P9c-15: auto-migration additionally requires `home` to resolve to the profile's OWN DEFAULT home
+// (`~/.winter` dist, `~/.winter-dev` dev) — a real safety ruling made AFTER a review found that any
+// real daemon spawned against a temp/custom `WINTER_HOME` with no injected `secrets` (a binary-
+// backed e2e test, `verify:workflow`, a live-gate script, a developer's ad-hoc `WINTER_HOME=/tmp/x
+// winter daemon run`) would otherwise auto-migrate the user's REAL legacy home into a throwaway
+// directory. `opts.migration.homedirOverride` is the ONLY way this file ever makes a temp `home`
+// register as "the default" — it overrides `isDefaultWinterHome`'s `homedir()` call, so the real
+// home directory is never consulted, let alone touched, by anything below.
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,6 +23,7 @@ import { FileSecretStore } from "../src/auth/secret-store";
 import { MigrationRefused } from "../src/migration/migrate-b";
 import { readMigrationManifest } from "../src/migration/manifest";
 import { TOKEN_NAMES } from "../src/auth/tokens";
+import { isDefaultWinterHome } from "../src/winter-dir";
 
 const dirs: string[] = [];
 function tempParent(): string {
@@ -38,10 +48,48 @@ function seedLegacyHome(legacyHome: string, extra?: (root: string) => void): voi
   extra?.(legacyHome);
 }
 
-describe("daemon.ts boot hook — Migration B (P9c)", () => {
-  test("(a) pristine home + a legacy home present -> migrates before serving, and a pre-existing legacy remote-token wins over a freshly-minted one", async () => {
+function captureConsoleError(): { lines: string[]; restore: () => void } {
+  const lines: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+  return { lines, restore: () => { console.error = original; } };
+}
+
+describe("daemon.ts boot hook — Migration B (P9c-15: default-home gate)", () => {
+  test("(a) a NON-default pristine home with a legacy home present never auto-migrates, and logs exactly one line naming the default-home gate", async () => {
     const parent = tempParent();
-    const home = join(parent, "home"); // deliberately never bootstrapped before this call
+    // `home` is an ordinary temp dir — never the resolved default for ANY profile — even though it
+    // is otherwise perfectly pristine and a legacy home sits right there with a real settings.json.
+    const home = join(parent, "home");
+    const legacyHome = join(parent, "legacy");
+    seedLegacyHome(legacyHome);
+
+    const capture = captureConsoleError();
+    try {
+      daemon = await startDaemon({
+        home,
+        secrets: new FileSecretStore(join(parent, "secrets")),
+        migration: { legacyHome, legacySecrets: new FileSecretStore(join(parent, "legacy-secrets")) },
+        agentProvider: null,
+      });
+    } finally {
+      capture.restore();
+    }
+
+    expect(readMigrationManifest(home)).toBeNull(); // nothing migrated
+    const migrationLines = capture.lines.filter((l) => l.startsWith("migration:"));
+    expect(migrationLines.length).toBe(1);
+    expect(migrationLines[0]).toContain("not the default home");
+    expect(migrationLines[0]).toContain(home);
+    expect(migrationLines[0]).toContain("winter migrate --from");
+  });
+
+  test("(a2) with homedirOverride making `home` resolve as the default, migration proceeds end to end — proves the gate is additive, not a silent replacement for isPristineHome", async () => {
+    const parent = tempParent();
+    // `home` = <parent>/.winter, and homedirOverride makes `homedir()` resolve to `parent` — so
+    // `isDefaultWinterHome(home, "dist", homedirOverride)` is true WITHOUT ever consulting the real
+    // home directory (the daemon's ambient profile is "dist" — no WINTER_PROFILE set in this suite).
+    const home = join(parent, ".winter");
     const legacyHome = join(parent, "legacy");
     seedLegacyHome(legacyHome);
 
@@ -51,7 +99,7 @@ describe("daemon.ts boot hook — Migration B (P9c)", () => {
     daemon = await startDaemon({
       home,
       secrets: new FileSecretStore(join(parent, "secrets")),
-      migration: { legacyHome, legacySecrets },
+      migration: { legacyHome, legacySecrets, homedirOverride: () => parent },
       agentProvider: null,
     });
 
@@ -68,9 +116,9 @@ describe("daemon.ts boot hook — Migration B (P9c)", () => {
     expect(daemon.settings()).not.toBeNull();
   });
 
-  test("(b) an in-progress manifest refuses typed (home_half_migrated), and never auto-resumes", async () => {
+  test("(b) an in-progress manifest refuses typed (home_half_migrated) BEFORE the default-home gate is even consulted, and never auto-resumes", async () => {
     const parent = tempParent();
-    const home = join(parent, "home");
+    const home = join(parent, "home"); // non-default — proves the refusal fires regardless
     const legacyHome = join(parent, "legacy");
     seedLegacyHome(legacyHome);
     mkdirSync(join(home, "migration"), { recursive: true });
@@ -95,9 +143,9 @@ describe("daemon.ts boot hook — Migration B (P9c)", () => {
     expect((caught as MigrationRefused).code).toBe("home_half_migrated");
   });
 
-  test("(c) a non-pristine home with a legacy home present boots normally, migrates nothing, and logs exactly one migration line", async () => {
+  test("(c) a NON-pristine default-resolved home with a legacy home present boots normally, migrates nothing, and logs exactly one 'not pristine' line", async () => {
     const parent = tempParent();
-    const home = join(parent, "home");
+    const home = join(parent, ".winter"); // resolves as default under homedirOverride, below
     const legacyHome = join(parent, "legacy");
     seedLegacyHome(legacyHome);
     // Give `home` content of its own BEFORE boot — a top-level file outside the bootstrap set is
@@ -107,22 +155,20 @@ describe("daemon.ts boot hook — Migration B (P9c)", () => {
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, "not-part-of-a-fresh-home.txt"), "already has content");
 
-    const lines: string[] = [];
-    const originalError = console.error;
-    console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+    const capture = captureConsoleError();
     try {
       daemon = await startDaemon({
         home,
         secrets: new FileSecretStore(join(parent, "secrets")),
-        migration: { legacyHome, legacySecrets: new FileSecretStore(join(parent, "legacy-secrets")) },
+        migration: { legacyHome, legacySecrets: new FileSecretStore(join(parent, "legacy-secrets")), homedirOverride: () => parent },
         agentProvider: null,
       });
     } finally {
-      console.error = originalError;
+      capture.restore();
     }
 
     expect(readMigrationManifest(home)).toBeNull(); // nothing migrated
-    const migrationLines = lines.filter((l) => l.startsWith("migration:"));
+    const migrationLines = capture.lines.filter((l) => l.startsWith("migration:"));
     expect(migrationLines.length).toBe(1);
     expect(migrationLines[0]).toContain("not pristine");
   });
@@ -134,5 +180,27 @@ describe("daemon.ts boot hook — Migration B (P9c)", () => {
     // real legacyHomeFor()/LegacyKeychainSecretStore in this branch.
     daemon = await startDaemon({ home, secrets: new FileSecretStore(join(parent, "secrets")), agentProvider: null });
     expect(readMigrationManifest(home)).toBeNull();
+  });
+});
+
+describe("isDefaultWinterHome (P9c-15) — pure predicate, a fake homedir only, NEVER the real ~", () => {
+  test("recognises the dist default (~/.winter) under a fake home directory", () => {
+    expect(isDefaultWinterHome("/fake/home/.winter", "dist", () => "/fake/home")).toBe(true);
+    expect(isDefaultWinterHome("/fake/home/.winter-dev", "dist", () => "/fake/home")).toBe(false);
+  });
+
+  test("recognises the dev default (~/.winter-dev) under a fake home directory", () => {
+    expect(isDefaultWinterHome("/fake/home/.winter-dev", "dev", () => "/fake/home")).toBe(true);
+    expect(isDefaultWinterHome("/fake/home/.winter", "dev", () => "/fake/home")).toBe(false);
+  });
+
+  test("a custom/temp home is never the default, for either profile", () => {
+    expect(isDefaultWinterHome("/tmp/some-random-dir", "dist", () => "/fake/home")).toBe(false);
+    expect(isDefaultWinterHome("/tmp/some-random-dir", "dev", () => "/fake/home")).toBe(false);
+  });
+
+  test("path.resolve semantics: a trailing slash or a redundant segment still matches", () => {
+    expect(isDefaultWinterHome("/fake/home/.winter/", "dist", () => "/fake/home")).toBe(true);
+    expect(isDefaultWinterHome("/fake/home/foo/../.winter", "dist", () => "/fake/home")).toBe(true);
   });
 });

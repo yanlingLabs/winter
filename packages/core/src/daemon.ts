@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { bootstrapWinterDir, resolveWinterHome } from "./winter-dir";
+import { bootstrapWinterDir, resolveWinterHome, isDefaultWinterHome } from "./winter-dir";
 import { acquireLock, type Lock } from "./lock";
 import { resolveWinterProfile } from "./profile";
 import { isPristineHome, legacyHomeFor, planMigrationB, runMigrationB, MigrationRefused } from "./migration/migrate-b";
@@ -300,7 +300,15 @@ export async function startDaemon(opts: {
    * `secrets` override at all) needs neither field: both default to the real profile-derived legacy
    * home (`legacyHomeFor`) and a real `LegacyKeychainSecretStore`.
    */
-  migration?: { legacyHome?: string; legacySecrets?: SecretStore };
+  migration?: {
+    legacyHome?: string;
+    legacySecrets?: SecretStore;
+    /** TEST ONLY (P9c-15) — overrides `isDefaultWinterHome`'s `homedir()` call, so a test can prove
+     *  the "home resolves to the default" branch actually runs its migration WITHOUT the test home
+     *  ever literally being the developer's real `~/.winter[-dev]`. A production caller never sets
+     *  this; the real boot hook always checks against the real home directory. */
+    homedirOverride?: () => string;
+  };
 } = {}): Promise<RunningDaemon> {
   const startedAt = Date.now();
   const home = opts.home ?? resolveWinterHome();
@@ -335,7 +343,17 @@ export async function startDaemon(opts: {
     legacySecrets = new LegacyKeychainSecretStore(profile);
   }
   if (legacyHome !== undefined && legacySecrets !== undefined && existsSync(join(legacyHome, "settings.json"))) {
-    if (isPristineHome(home)) {
+    // P9c-15: auto-migration fires ONLY when `home` resolves to the PROFILE'S OWN DEFAULT home
+    // (`~/.winter` dist, `~/.winter-dev` dev) — regardless of how `home` got here (`opts.home`,
+    // `WINTER_HOME`, or the default). A real (compiled or `bun`-run) daemon spawned against a temp
+    // or custom `WINTER_HOME` with no injected `secrets` — a binary-backed e2e test, `verify:
+    // workflow`/`verify:runtime-state`/`verify:runtimes`, a live-gate script, a developer's ad-hoc
+    // `WINTER_HOME=/tmp/x winter daemon run` — would otherwise find the REAL legacy home pristine
+    // and migrate the user's REAL data (and REAL Keychain items) into a throwaway directory. This
+    // check is IN ADDITION TO `isPristineHome` below, never a replacement for it.
+    if (!isDefaultWinterHome(home, profile, opts.migration?.homedirOverride)) {
+      console.error(`migration: ${home} is not the default home for the ${profile} profile — auto-migration skipped; run \`winter migrate --from ${legacyHome}\` to migrate it by hand`);
+    } else if (isPristineHome(home)) {
       const plan = await planMigrationB({ legacyHome, home, profile });
       const manifest = await runMigrationB(plan, { from: legacySecrets, to: secrets, log: (line) => console.error(`migration: ${line}`) });
       const filesMoved = manifest.entries.filter((e) => e.status === "copied" || e.status === "rekeyed").length;
