@@ -1,0 +1,14 @@
+{
+  "opts": { "sessionId": "s_golden1", "backendSessionId": "be-golden1", "cwd": "/tmp/golden1", "version": "unknown" },
+  "events": [
+    { "type": "session_created", "sessionId": "s_golden1", "seq": 1, "ts": 1000, "scope": "work" },
+    { "type": "user_message", "sessionId": "s_golden1", "seq": 2, "ts": 1001, "threadId": "main", "text": "What is 2+2?", "clientName": "cli" },
+    { "type": "turn_started", "sessionId": "s_golden1", "seq": 3, "ts": 1002, "threadId": "main" },
+    { "type": "assistant_message", "sessionId": "s_golden1", "seq": 4, "ts": 1003, "threadId": "main", "text": "4" },
+    { "type": "turn_completed", "sessionId": "s_golden1", "seq": 5, "ts": 1004, "threadId": "main", "stopReason": "end_turn", "inputTokens": 10, "outputTokens": 2 },
+    { "type": "user_message", "sessionId": "s_golden1", "seq": 6, "ts": 1005, "threadId": "main", "text": "And 3+3?", "clientName": "cli" },
+    { "type": "turn_started", "sessionId": "s_golden1", "seq": 7, "ts": 1006, "threadId": "main" },
+    { "type": "assistant_message", "sessionId": "s_golden1", "seq": 8, "ts": 1007, "threadId": "main", "text": "6" },
+    { "type": "turn_completed", "sessionId": "s_golden1", "seq": 9, "ts": 1008, "threadId": "main", "stopReason": "end_turn", "inputTokens": 12, "outputTokens": 2 }
+  ]
+}

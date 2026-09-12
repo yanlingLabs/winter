@@ -61,6 +61,8 @@ import type { ChildrenRpc } from "../runtime-sdk/children-rpc";
 import type { NormaRuntimeSdk } from "../runtime-sdk/create";
 import { WinterLegRefusal, type LegSession, type WinterSessionDrivers } from "../runtime-sdk/session-driver";
 import { readWinterTasks } from "../runtime-sdk/tasks-reader";
+import { ImportLegacySessionError } from "../runtime-sdk/import-legacy";
+import type { PlanSwitchOutcome } from "../runtime-sdk/handoff";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import { resolveModelAlias } from "../agent/model-aliases";
 import type { ApprovalBroker } from "../agent/approvals";
@@ -193,6 +195,29 @@ export interface IpcServerOptions {
    * always behaved.
    */
   winter?: WinterSessionDrivers;
+  /**
+   * Winter Phase 8c (P8c-6): the engine-era IMPORT door — `runtime-sdk/import-legacy.ts`'s
+   * `importEngineEraSession`, bound to this daemon's home/store/records by the caller (`daemon.ts`).
+   * `session.send`'s ONLY caller: a session whose record is engine-era (`opts.winter.legOf(id) ===
+   * "engine"`) gets exactly one import attempt before this door's own `session_predates_winter_leg`
+   * refusal would otherwise be permanent.
+   *
+   * `undefined` on a server built without one (a bare test server, or a daemon whose runtime spine
+   * did not open): an engine-era session's `session.send` falls straight through to the existing
+   * typed refusal, unchanged from before this task.
+   */
+  importLegacy?: { importSession(sessionId: string): Promise<{ backendSessionId: string; entries: number }> };
+  /**
+   * Winter Phase 8c (Task 4.1, WS-13 §8.2): `session.setModel`'s defer-and-confirm runtime switch —
+   * `runtime-sdk/handoff.ts`'s `planAndApplySwitch`, bound to this daemon's runtime handle/driver
+   * table/records by the caller (`daemon.ts`, which also calls `registerHandoffParticipants` once at
+   * boot — this hook and that registration share the SAME `HandoffDeps`, constructed together).
+   *
+   * `undefined` on a server built without one (a bare test server, or a daemon whose runtime spine
+   * did not open): `session.setModel` falls straight through to its pre-8c behaviour — an in-runtime
+   * model change only, never a leg decision.
+   */
+  handoff?: { planAndApplySwitch(sessionId: string, model: string | null, confirmLossy: boolean): Promise<PlanSwitchOutcome> };
   // session-activity-hygiene T8: hands the caller THE bound activity derivation this server stamps
   // `session.list` with, once, at construction. Called exactly once, synchronously, from inside
   // startIpcServer.
@@ -1382,13 +1407,16 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // browser-runtime spec §4's T5 correction). Stamped OUTSIDE the participation gate below
           // on purpose; `makeSessionSignalsDeriver` carries the argument for why.
           const signals = deriveSignals(s.sessionId, selfSessionId);
-          // `activity`/`dirs`/the `cwd` alias stay INSIDE the gate, unchanged: those are the
-          // lifecycle label and the working-directory set, and chat/dispatch have neither. A row
-          // therefore legitimately carries signals and no label, which is exactly what the app
-          // needs and what test/ipc/session-list-signals.test.ts pins.
-          if (!participatesInActivity(s.mode)) return { ...s, signals };
+          // Winter Phase 8c (P8c-14/Task 4.2): the RECORDED leg, mode-blind and outside the
+          // activity-participation gate on the same reasoning `signals` above is — a chat/dispatch
+          // session is on some runtime leg too, and a picker choosing whether to offer a handoff
+          // needs to know which one regardless of mode. `legOf` reads the runtime-state record, not
+          // the event log, so this is a live fact rather than a stored column.
+          const leg = opts.winter?.legOf(s.sessionId);
+          const runtimeKind = leg === "official" ? "claude-agent" as const : leg === "winter" ? "winter-agent" as const : undefined;
+          if (!participatesInActivity(s.mode)) return { ...s, signals, ...(runtimeKind === undefined ? {} : { runtimeKind }) };
           const dirs = opts.store.dirs(s.sessionId);
-          return { ...s, activity: deriveActivity(s, s.sessionId, now), dirs, cwd: dirs[0]?.path, signals };
+          return { ...s, activity: deriveActivity(s, s.sessionId, now), dirs, cwd: dirs[0]?.path, signals, ...(runtimeKind === undefined ? {} : { runtimeKind }) };
         });
         // Chat mode Slice C: chat sessions are now visible to remote too. A mode outside
         // REMOTE_ELIGIBLE_SESSION_MODES (Mac-local-only — e.g. a future cowork surface) stays
@@ -1533,6 +1561,32 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           if (winterSession !== undefined) {
             try {
               const sent = await winterSession.send(p.text, socket.data.clientName);
+              return { seq: sent.seq };
+            } catch (err) { rpcFromWinterRefusal(err); }
+          }
+        }
+        // Winter Phase 8c (P8c-6): the engine-era IMPORT door — ONE chance, right here, before the
+        // permanent refusal below. `opts.winter.legOf` (not `isRunnableLeg`, which the block above
+        // already checked and found false) is read again explicitly so this branch fires ONLY for
+        // the exact case P8c-6 names: a RECORDED engine-era session, never a record-less one
+        // (`session_unrecorded` stays `refuseIfPredatesWinterLeg`'s to raise) and never a session
+        // already runnable (which the block above would have handled and returned from already).
+        if (opts.winter !== undefined && opts.importLegacy !== undefined && opts.winter.legOf(p.sessionId) === "engine") {
+          try {
+            await opts.importLegacy.importSession(p.sessionId);
+          } catch (err) {
+            const detail = err instanceof ImportLegacySessionError ? err.message : (err instanceof Error ? err.name : "unknown");
+            throw new RpcFailure(ERR.INTERNAL, `this session could not be imported to continue on the Winter leg (${detail})`, { code: "session_import_failed" });
+          }
+          // The record is now "winter" — the SAME attach+ensure+send path the ordinary Winter
+          // branch above runs, over the transcript the import just wrote.
+          if (hub.attachedSession(socket.data.hubClient) !== p.sessionId) {
+            throw new Error(`client ${socket.data.clientName} not attached to ${p.sessionId}`);
+          }
+          const imported = await ensureWinterSession(p.sessionId);
+          if (imported !== undefined) {
+            try {
+              const sent = await imported.send(p.text, socket.data.clientName);
               return { seq: sent.seq };
             } catch (err) { rpcFromWinterRefusal(err); }
           }
@@ -1835,6 +1889,33 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // either, so the value is stored freely, same as spawn_agent's own fallback for that case.
         if (model !== null) {
           model = resolveModelSelection(model, opts.engine?.knownModels() ?? []);
+        }
+        // Winter Phase 8c (Task 4.1): a model that resolves to a DIFFERENT runtime leg than the
+        // session's record is a HANDOFF, not a plain write — `planAndApplySwitch` is the one place
+        // that decides. `same-runtime`/`deferred`/`resumed` all still want the ordinary store write
+        // below (the model preference is valid input either way — only the RUNTIME MIGRATION's own
+        // outcome differs); `refused`/`confirmation_required`/`lossy_fork`/`blocked` stop here,
+        // typed, with NOTHING written — the caller's model preference never took effect.
+        if (opts.handoff !== undefined) {
+          const outcome = await opts.handoff.planAndApplySwitch(p.sessionId, model, p.confirmLossy ?? false);
+          switch (outcome.kind) {
+            case "refused":
+              throw new RpcFailure(ERR.INVALID_PARAMS, outcome.detail, { code: outcome.code });
+            case "confirmation_required":
+              throw new RpcFailure(
+                ERR.INVALID_PARAMS,
+                "this model change would move the session to a different runtime and may lose in-flight provider state; resend with confirmLossy to proceed",
+                { code: "handoff_confirmation_required", warnings: outcome.warnings },
+              );
+            case "lossy_fork":
+              throw new RpcFailure(ERR.INVALID_PARAMS, outcome.reason, { code: "handoff_lossy_fork" });
+            case "blocked":
+              throw new RpcFailure(ERR.INTERNAL, outcome.reason, { code: "handoff_blocked" });
+            case "same-runtime":
+            case "deferred":
+            case "resumed":
+              break; // the ordinary store write below still applies
+          }
         }
         try {
           opts.store.setModel(p.sessionId, model);

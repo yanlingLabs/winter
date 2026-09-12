@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
-export const RUNTIME_STATE_SCHEMA_VERSION = 4;
+export const RUNTIME_STATE_SCHEMA_VERSION = 5;
 
 export class RuntimeStateUnavailableError extends Error {
   constructor(public readonly path: string, public readonly reason: "missing" | "corrupt" | "newer-schema" | "unmigrated", cause?: unknown) {
@@ -128,6 +128,26 @@ const MIGRATIONS: ReadonlyArray<{ version: number; up: (db: Database) => void }>
     db.run(`INSERT INTO memory_key_manifest (old_key, entry, new_key, status, planned_at, moved_at, record_ids)
             SELECT old_key, entry, new_key, status, planned_at, moved_at, record_ids FROM memory_key_manifest_v3`);
     db.run(`DROP TABLE memory_key_manifest_v3`);
+  } },
+  // Schema v5 (Winter Phase 8c, P8c-6): a record whose Winter transcript was IMPORTED from an
+  // engine-era log (`session.send`'s import door, `runtime-sdk/import-legacy.ts`) is marked so a
+  // later reader (a doctor report, a "why did this session's history start mid-conversation"
+  // question) can tell "converted" from "always native". Nullable and additive — every existing row
+  // reads back `undefined` (never native), which is the correct historical answer for a row this
+  // migration predates.
+  { version: 5, up: (db) => {
+    // Column-existence-checked, unlike every other migration's `ALTER`/rename-recreate: this is the
+    // first migration in the ladder that ADDS A COLUMN to `runtime_sessions`, a table no earlier
+    // step ever rebuilds — so a test fixture that fully builds a CURRENT store and then only rewinds
+    // `user_version` (several of runtime-state's own migration tests do exactly this, to replay the
+    // ladder against otherwise-real data) reaches this step with the column already present. Every
+    // migration before this one is naturally idempotent under that pattern because it renames its
+    // target table away and rebuilds it from scratch on every run; a bare `ADD COLUMN` has no such
+    // built-in idempotence, so it checks first.
+    const cols = db.query("PRAGMA table_info(runtime_sessions)").all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === "imported_from")) {
+      db.run(`ALTER TABLE runtime_sessions ADD COLUMN imported_from TEXT CHECK (imported_from IS NULL OR imported_from IN ('engine-era'))`);
+    }
   } },
 ];
 
