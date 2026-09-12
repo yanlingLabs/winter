@@ -35,10 +35,6 @@ brew tap yanlingLabs/winter
 brew install --cask winter
 ```
 
-The `winter` cask lands with the first Winter release; until then the tap still ships the app
-under its pre-rename cask and command name — see the tap's current formula for the exact
-`brew install --cask` invocation.
-
 Or grab the latest `.dmg` from [Releases](https://github.com/yanlingLabs/winter/releases/latest),
 open it, and drag Winter to your Applications folder.
 
@@ -53,8 +49,27 @@ That's the whole setup. She's in your menu bar, and `winter` works in any termin
 [models, reasoning effort and search keys](#bringing-your-own-ai) are further down. (Newer Homebrew
 may ask you to trust the tap once: `brew trust yanlingLabs/winter`.)
 
+## Coming from Norma?
+
+Winter is the project formerly called Norma — same app, same daemon, nothing about your setup
+needs redoing. If you already have Norma installed, its next update *is* the handoff release: it
+carries Winter.app inside it, installs and registers Winter as your menu-bar app, and retires
+itself, with no separate download. The first time Winter boots, it migrates your existing
+`~/.norma` home into `~/.winter` on its own — sessions, settings, memory, and Keychain items are
+copied over, never deleted from the old home and never overwritten in the new one. You can check on
+it any time with `winter migrate --status`.
+
+If you installed via Homebrew, `brew install --cask norma` is deprecated in favor of `winter` —
+switch your tap reference:
+
+```sh
+brew tap yanlingLabs/winter
+brew install --cask winter
+```
+
 ## Table of contents
 
+- [Coming from Norma?](#coming-from-norma)
 - [The three modes](#the-three-modes) · [Surfaces](#surfaces-where-you-talk-to-her)
 - [What she can actually do](#what-she-can-actually-do) · [Memory](#memory-that-you-can-read)
 - [Background sessions](#background-sessions-and-multiple-harnesses) · [Extending Winter](#extending-winter)
@@ -207,6 +222,16 @@ winter model              # list what's available
 winter model sol          # set the default
 ```
 
+Code mode can also run on Claude models — `fable`, `opus`, `sonnet`, `haiku` — with your own
+Anthropic API key:
+
+```sh
+winter login --anthropic-key    # paste an Anthropic API key
+```
+
+Signing in with a claude.ai subscription instead of a key isn't supported yet — that door stays
+shut by default until it's had more scrutiny.
+
 Optional search keys:
 
 ```sh
@@ -320,7 +345,8 @@ inspiration from Claude Code's permission model and tool shape — but a coding 
 Winter's three modes, not the product. The product is the whole assistant.
 
 **Does it need a subscription?** It needs *a* model. Either your existing ChatGPT account or an
-OpenAI API key. Winter itself is free and open source.
+OpenAI API key, with an Anthropic API key as an option for Claude models in Code mode. Winter
+itself is free and open source.
 
 **Does my data go through your servers?** There is no Winter backend, no account and no telemetry.
 Model calls go to your provider. Your phone connects to your Mac directly; when a direct connection
