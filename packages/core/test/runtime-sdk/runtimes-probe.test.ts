@@ -122,7 +122,9 @@ describe("runRuntimesProbe (P8d-1 bundle layout, real fs, no daemon)", () => {
       home,
       env: { NORMA_WINTER_EXECUTABLE: envWinter, NORMA_CLAUDE_EXECUTABLE: envClaude },
     });
-    expect(result.winter).toEqual({ path: envWinter, source: "env", executable: true, signature: result.winter.signature });
+    expect(result.winter.path).toBe(envWinter);
+    expect(result.winter.source).toBe("env");
+    expect(result.winter.executable).toBe(true);
     expect(result.claude.path).toBe(envClaude);
     expect(result.claude.source).toBe("env");
     expect(result.claude.version).toBe("9.9.9 (env)");
