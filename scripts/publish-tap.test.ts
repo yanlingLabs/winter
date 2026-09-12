@@ -6,7 +6,17 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { commitMessageFor, currentSha, publishFile, putArgsFor, TAP_REPO, tapPlan, type GhRunner } from "./publish-tap";
+import {
+  commitMessageFor,
+  currentSha,
+  findUnfilledTemplateSlot,
+  publishFile,
+  putArgsFor,
+  renderDryRunEntry,
+  TAP_REPO,
+  tapPlan,
+  type GhRunner,
+} from "./publish-tap";
 
 const temps: string[] = [];
 afterAll(() => {
@@ -127,5 +137,57 @@ describe("publishFile", () => {
     publishFile(runner, { repoPath: "Casks/norma.rb", localPath });
 
     expect(calls[1]).toEqual(putArgsFor("Casks/norma.rb", "cask \"norma\" do\nend\n", undefined));
+  });
+
+  // Fix wave M3 (whole-branch review, Major): a file that still carries an unfilled `{{slot}}`
+  // (packaging/norma-deprecated.rb, verbatim in this repo, before the controller hand-fills it)
+  // must never publish literally — no network call at all, not even the sha lookup.
+  test("refuses (before any network call) when the file still contains an unfilled {{slot}}", () => {
+    const localPath = tempFile('cask "norma" do\n  version "{{version}}"\n  sha256 "{{sha256}}"\nend\n');
+    const calls: string[][] = [];
+    const runner: GhRunner = (args) => {
+      calls.push(args);
+      return "";
+    };
+    expect(() => publishFile(runner, { repoPath: "Casks/norma.rb", localPath })).toThrow(/Casks\/norma\.rb/);
+    expect(() => publishFile(runner, { repoPath: "Casks/norma.rb", localPath })).toThrow(/\{\{version\}\}/);
+    expect(calls).toHaveLength(0); // never even reached the sha lookup
+  });
+});
+
+describe("findUnfilledTemplateSlot", () => {
+  test("finds the first {{slot}} placeholder", () => {
+    expect(findUnfilledTemplateSlot('version "{{version}}"\nsha256 "{{sha256}}"')).toBe("{{version}}");
+  });
+  test("undefined once every slot has been filled in", () => {
+    expect(findUnfilledTemplateSlot('version "0.2.015"\nsha256 "deadbeef"')).toBeUndefined();
+  });
+  test("a Ruby string-interpolation `#{...}` is not a template slot (different delimiter)", () => {
+    expect(findUnfilledTemplateSlot('url "https://example.com/#{version}/x.dmg"')).toBeUndefined();
+  });
+});
+
+describe("renderDryRunEntry — fix wave M3 (whole-branch review, Major)", () => {
+  test("prints the full content when there is no unfilled slot", () => {
+    const localPath = tempFile('cask "winter" do\nend\n');
+    const entry = renderDryRunEntry({ repoPath: "Casks/winter.rb", localPath });
+    expect(entry).toContain("Casks/winter.rb");
+    expect(entry).toContain('cask "winter" do');
+    expect(entry).not.toContain("REFUSED");
+  });
+
+  test("prints a REFUSED line naming the file and the slot — never the literal template content — when a slot is unfilled", () => {
+    const localPath = tempFile('cask "norma" do\n  version "{{version}}"\nend\n');
+    const entry = renderDryRunEntry({ repoPath: "Casks/norma.rb", localPath });
+    expect(entry).toContain("Casks/norma.rb");
+    expect(entry).toContain("REFUSED");
+    expect(entry).toContain("{{version}}");
+    expect(entry).not.toContain('cask "norma" do'); // the raw unfilled content is never printed
+  });
+
+  test("prints the 'missing on disk' note when the file does not exist yet — never a false refusal", () => {
+    const entry = renderDryRunEntry({ repoPath: "Casks/winter.rb", localPath: join(tmpdir(), "winter-publish-tap-test-does-not-exist", "winter.rb") });
+    expect(entry).toContain("missing on disk");
+    expect(entry).not.toContain("REFUSED");
   });
 });

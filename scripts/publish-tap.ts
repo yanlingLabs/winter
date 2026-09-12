@@ -44,6 +44,19 @@ export function tapPlan(version: string): TapFile[] {
   ];
 }
 
+/** Matches an un-substituted `{{slot_name}}` template placeholder — the exact shape
+ *  `packaging/norma-deprecated.rb`'s own header names (`{{version}}`, `{{sha256}}`) for the
+ *  controller to hand-fill before a real handoff-release publish. */
+const TEMPLATE_SLOT_RE = /\{\{[a-z0-9_]+\}\}/;
+
+/** Fix wave M3 (whole-branch review, Major): the first still-unfilled template slot in `content`,
+ *  or `undefined` once every slot has been replaced. `packaging/norma-deprecated.rb` ships in this
+ *  repo with `{{version}}`/`{{sha256}}` literally in place — a `--dry-run` or `--publish` before the
+ *  controller hand-fills them must never treat that text as ready-to-ship cask content. */
+export function findUnfilledTemplateSlot(content: string): string | undefined {
+  return content.match(TEMPLATE_SLOT_RE)?.[0];
+}
+
 /** Runs `gh` with the given args and returns its stdout. Thrown on a nonzero exit — mirrors
  *  `gh`'s own behaviour, so a fake test runner can `throw` to simulate any failure (a 404 on a
  *  not-yet-existing cask included) without needing to shape a fake exit code. */
@@ -94,15 +107,40 @@ export function putArgsFor(repoPath: string, content: string, sha: string | unde
 
 /** Reads `file.localPath`, fetches its current tap `sha` (if any), and PUTs it. The one function
  *  that actually publishes a single file — `main`'s `--publish` branch calls this twice, once per
- *  `tapPlan()` entry, with the real `gh` runner; the test calls it with a fake one. */
+ *  `tapPlan()` entry, with the real `gh` runner; the test calls it with a fake one. Fix wave M3
+ *  (whole-branch review, Major): refuses BEFORE any network call when `content` still contains an
+ *  unfilled `{{slot}}` — this is the defense-in-depth check; `main`'s `--publish` branch also
+ *  preflights the WHOLE plan before touching either file, so a bad second file never lands after a
+ *  good first one already published. */
 export function publishFile(runner: GhRunner, file: TapFile): void {
   const content = readFileSync(file.localPath, "utf8");
+  const slot = findUnfilledTemplateSlot(content);
+  if (slot) {
+    throw new Error(`refusing to publish ${file.repoPath} (from ${file.localPath}): still contains an unfilled template slot ${slot} — fill it in before publishing`);
+  }
   const sha = currentSha(runner, file.repoPath);
   runner(putArgsFor(file.repoPath, content, sha));
 }
 
 function realGhRunner(args: string[]): string {
   return execFileSync("gh", args, { encoding: "utf8" });
+}
+
+/** What `--dry-run` prints for ONE file: its full content, a "missing on disk" note, or — fix wave
+ *  M3, Critical — a REFUSAL naming the still-unfilled slot, so a rehearsal never quietly shows
+ *  literal `{{version}}` text as though it were ready-to-ship cask content. Pure (no console I/O),
+ *  so the refusal path is unit-testable without a real release build on disk. */
+export function renderDryRunEntry(file: TapFile): string {
+  const header = `--- ${file.repoPath}  (from ${file.localPath}) ---`;
+  if (!existsSync(file.localPath)) {
+    return `${header}\n  (missing on disk — run a rehearsal or a real release first to produce this file)\n`;
+  }
+  const content = readFileSync(file.localPath, "utf8");
+  const slot = findUnfilledTemplateSlot(content);
+  if (slot) {
+    return `${header}\n  REFUSED: still contains an unfilled template slot ${slot} — fill it in before publishing.\n`;
+  }
+  return `${header}\n${content}`;
 }
 
 if (import.meta.main) {
@@ -119,23 +157,30 @@ if (import.meta.main) {
 
   if (dryRun) {
     console.log(`Tap: ${TAP_REPO}\n`);
+    let refused = false;
     for (const f of files) {
-      console.log(`--- ${f.repoPath}  (from ${f.localPath}) ---`);
-      if (!existsSync(f.localPath)) {
-        console.log("  (missing on disk — run a rehearsal or a real release first to produce this file)\n");
-        continue;
-      }
-      console.log(readFileSync(f.localPath, "utf8"));
+      const entry = renderDryRunEntry(f);
+      console.log(entry);
+      if (entry.includes("REFUSED:")) refused = true;
     }
     console.log(`DRY RUN: would PUT the above to ${TAP_REPO}. No network calls made.`);
-    process.exit(0);
+    // Fix wave M3: a dry run that found an unfilled slot exits nonzero too — it is a refusal, not a
+    // clean preview, even though (per this mode's own contract) it never makes a network call.
+    process.exit(refused ? 1 : 0);
   }
 
   // --publish: CONTROLLER-ONLY (this lane never runs this branch — see the file header and
   // scripts/publish-tap.test.ts, which exercises this exact logic with a fake GhRunner instead).
+  // Fix wave M3: preflight the WHOLE plan (existence AND template-slot completeness) before
+  // touching either file — so a bad second file is caught before a good first one is published.
   for (const f of files) {
     if (!existsSync(f.localPath)) {
       console.error(`FAIL: ${f.localPath} does not exist — nothing to publish for ${f.repoPath}`);
+      process.exit(1);
+    }
+    const slot = findUnfilledTemplateSlot(readFileSync(f.localPath, "utf8"));
+    if (slot) {
+      console.error(`FAIL: ${f.localPath} (for ${f.repoPath}) still contains an unfilled template slot ${slot} — fill it in before publishing.`);
       process.exit(1);
     }
   }
