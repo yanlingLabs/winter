@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Thanks for taking the time. If this is a **security** problem, please close this and
-        [report it privately](https://github.com/yanlingLabs/norma/security/advisories/new) instead.
+        [report it privately](https://github.com/yanlingLabs/winter/security/advisories/new) instead.
 
   - type: textarea
     id: what-happened

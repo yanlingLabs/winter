@@ -160,12 +160,12 @@ end
     const rendered = caskFrom(tmpl, {
       version: "0.2.002",
       sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      url: "https://github.com/yanlingLabs/norma/releases/download/v0.2.002/Winter-0.2.002.dmg",
+      url: "https://github.com/yanlingLabs/winter/releases/download/v0.2.002/Winter-0.2.002.dmg",
     });
     expect(rendered).toContain('version "0.2.002"');
     expect(rendered).toContain('sha256 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"');
     expect(rendered).toContain(
-      'url "https://github.com/yanlingLabs/norma/releases/download/v0.2.002/Winter-0.2.002.dmg"',
+      'url "https://github.com/yanlingLabs/winter/releases/download/v0.2.002/Winter-0.2.002.dmg"',
     );
     expect(rendered).toContain('name "Winter 0.2.002"');
     expect(rendered).not.toContain("{{");

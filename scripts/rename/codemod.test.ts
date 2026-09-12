@@ -59,12 +59,18 @@ describe("explicit map (P9b-8) — host/runtime vocabulary and SDK collisions", 
 });
 
 describe("protection (P9b-5) — external infrastructure survives", () => {
-  test("GitHub URLs, release assets, the raw feed", () => {
+  test("GitHub URLs, release assets, the raw feed — protected ONLY inside the frozen legacy feed since 9c (P9c-6)", () => {
     const s = 'url: "https://github.com/yanlingLabs/norma/releases/download/v1/Norma-1.zip" GH_REPO = "yanlingLabs/norma" raw.githubusercontent.com/yanlingLabs/norma/main/releases/appcast.xml';
-    const r = rw(s);
-    expect(r.out).toBe('url: "https://github.com/yanlingLabs/norma/releases/download/v1/Winter-1.zip" GH_REPO = "yanlingLabs/norma" raw.githubusercontent.com/yanlingLabs/norma/main/releases/appcast.xml');
-    expect(r.residue.every((x) => x.permittedBy === "gh-repo")).toBe(true);
-    expect(r.residue).toHaveLength(3);
+    // Phase 9c renamed the GitHub repo to `yanlingLabs/winter`; in any ordinary file the old path
+    // is now residue the codemod RENAMES (GitHub redirects it, but nothing live may spell it).
+    const live = rw(s);
+    expect(live.out).toBe('url: "https://github.com/yanlingLabs/winter/releases/download/v1/Winter-1.zip" GH_REPO = "yanlingLabs/winter" raw.githubusercontent.com/yanlingLabs/winter/main/releases/appcast.xml');
+    expect(live.residue.filter((x) => x.permittedBy === "gh-repo")).toHaveLength(0);
+    // The byte-frozen legacy feed keeps its historical enclosure URLs verbatim.
+    const r = rw(s, "releases/appcast.xml");
+    expect(r.out).toBe(s);
+    expect(r.residue.every((x) => x.permittedBy === "gh-repo" || x.permittedBy === "frozen-norma-feed")).toBe(true);
+    expect(r.residue.length).toBeGreaterThanOrEqual(3);
   });
   test("the iOS repo name after a slash survives; the iOS bundle id renames", () => {
     const r = rw("../norma-ios yanlingLabs/norma-ios com.yanlinglabs.norma-ios");

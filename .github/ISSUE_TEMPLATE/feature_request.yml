@@ -5,9 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Check the [roadmap](https://github.com/yanlingLabs/norma#roadmap) first — a fair bit is
+        Check the [roadmap](https://github.com/yanlingLabs/winter#roadmap) first — a fair bit is
         already planned. If your idea is more of an open question than a request, the
-        [discussions](https://github.com/yanlingLabs/norma/discussions) board is a better home.
+        [discussions](https://github.com/yanlingLabs/winter/discussions) board is a better home.
 
   - type: textarea
     id: problem

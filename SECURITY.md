@@ -11,7 +11,7 @@ within one version of `main`. Fixes ship in a new release rather than as patches
 
 | Version | Supported |
 | --- | --- |
-| Latest [release](https://github.com/yanlingLabs/norma/releases/latest) | ✅ |
+| Latest [release](https://github.com/yanlingLabs/winter/releases/latest) | ✅ |
 | Anything older | ❌ |
 
 ## Reporting a vulnerability
@@ -20,7 +20,7 @@ within one version of `main`. Fixes ship in a new release rather than as patches
 
 Report it privately through GitHub:
 
-**[→ Report a vulnerability](https://github.com/yanlingLabs/norma/security/advisories/new)**
+**[→ Report a vulnerability](https://github.com/yanlingLabs/winter/security/advisories/new)**
 
 (Repository → *Security* → *Advisories* → *Report a vulnerability*.)
 

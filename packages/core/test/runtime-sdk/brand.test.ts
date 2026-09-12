@@ -47,7 +47,7 @@ describe("CORE_BRAND", () => {
     const expected: Array<keyof BrandProfile> = ["contactUrl", "packageName"];
     expect(differing.sort()).toEqual(expected.sort());
     expect(dist.packageName).toBe("winter-core");
-    expect(dist.contactUrl).toBe("https://github.com/yanlingLabs/norma");
+    expect(dist.contactUrl).toBe("https://github.com/yanlingLabs/winter");
     expect(dist.keychainService).toBe(WINTER_BRAND.keychainService);
     expect(dist.keychainService).toBe("com.winter.core");
   });

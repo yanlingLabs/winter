@@ -14,7 +14,7 @@
  * (the svp/headless VCL backend, the same shape iOS's own LibreOffice port uses) builds and runs
  * cleanly on macOS arm64 from stock upstream `LibreOffice/core` master, with ZERO source
  * patches. See the release notes at
- * https://github.com/yanlingLabs/norma/releases/tag/vendor-libreoffice-20260819 for the full
+ * https://github.com/yanlingLabs/winter/releases/tag/vendor-libreoffice-20260819 for the full
  * probe, the six-fixture pixel-hash proof, and the licensing inventory this script's LICENSES/
  * bundle is sourced from. scripts/build-libreoffice.ts documents the from-source recipe that
  * produced the artifact this script fetches (informational -- not run in CI).
@@ -28,7 +28,7 @@
  * upstream distributor of a headless macOS LibreOffice build -- TDF's own dmg doesn't ship one
  * (see the GO header above). The artifact this script fetches was built and packaged by hand
  * (per scripts/build-libreoffice.ts's documented recipe) and uploaded as a release asset on a
- * dedicated, non-app `vendor-libreoffice-20260819` GitHub release in this repo (yanlingLabs/norma)
+ * dedicated, non-app `vendor-libreoffice-20260819` GitHub release in this repo (yanlingLabs/winter)
  * -- deliberately NOT part of the v#.#.### app-release lineage scripts/release.ts manages, and
  * created with --latest=false so it never displaces an app release as the repo's "Latest".
  *
@@ -116,13 +116,13 @@ import { ROOT } from "./version-lib";
 // -r2 asset was left published, unmodified (a GitHub release asset is maintainer-replaceable at
 // the same URL -- re-publishing scrubbed bytes under the same name is exactly the silent-swap
 // hazard the ASSET_URL comment below warns about); flagged on both release pages as an open item.
-const GH_REPO = "yanlingLabs/norma";
+const GH_REPO = "yanlingLabs/winter";
 const RELEASE_TAG = "vendor-libreoffice-20260822-r4";
 const ASSET_NAME = "libreoffice-headless-macos-arm64-11482c8f-r4.tar.zst";
 const ASSET_URL = buildAssetUrl({ repo: GH_REPO, tag: RELEASE_TAG, assetName: ASSET_NAME });
 // Hand-pinned at package time from an independent `shasum -a 256` of the actual uploaded file,
 // then re-verified against a fresh public download before being transcribed here (see the
-// release notes at https://github.com/yanlingLabs/norma/releases/tag/vendor-libreoffice-20260822
+// release notes at https://github.com/yanlingLabs/winter/releases/tag/vendor-libreoffice-20260822
 // for that verification run). See header comment for why this single pin (not a belt-and-braces
 // live check) is nonetheless load-bearing here.
 const PINNED_SHA256 = "0113f0e7781f66c7299fc83e2aaf399a11d81847f8490b67281e4b463ac21b42";

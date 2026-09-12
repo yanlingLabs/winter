@@ -17,7 +17,7 @@
 //    the SDK's own default has no notion of a dev/dist split; `auth/secret-store.ts`'s `SERVICE`
 //    resolves the same way, from the same `WINTER_PROFILE`, so the daemon's secret store and its own
 //    brand never disagree about which Keychain service a session's credentials live under.
-//  - `contactUrl: "https://github.com/yanlingLabs/norma"` — a protected literal (Global Constraints
+//  - `contactUrl: "https://github.com/yanlingLabs/winter"` — a protected literal (Global Constraints
 //    P9b-5): the SDK's own `contactUrl` points at ITS repo (`winter-agent-sdk`), which is not where
 //    a report about THIS daemon's behaviour belongs. Flips only if the user's own repo is ever
 //    renamed, never as a mechanical consequence of a brand change.
@@ -56,7 +56,7 @@ export function buildCoreBrand(profile?: WinterProfile): BrandProfile {
     packageName: "winter-core",
     keychainService: keychainService(profile),
     // `resolveBrand` parses this with `new URL` and requires `https:` (and no control bytes).
-    contactUrl: "https://github.com/yanlingLabs/norma",
+    contactUrl: "https://github.com/yanlingLabs/winter",
   };
 }
 

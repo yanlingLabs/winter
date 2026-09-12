@@ -10,7 +10,7 @@
  *
  * Every fact below is transcribed from primary sources recorded during development -- private
  * SDD process docs, not committed in this repo. See the release notes at
- * https://github.com/yanlingLabs/norma/releases/tag/vendor-libreoffice-20260819 and git history
+ * https://github.com/yanlingLabs/winter/releases/tag/vendor-libreoffice-20260819 and git history
  * for the evidence and reasoning behind each step; this file carries only the actions, in the
  * order they were actually run.
  *

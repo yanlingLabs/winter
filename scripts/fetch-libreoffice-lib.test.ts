@@ -61,8 +61,8 @@ describe("parseStampJson", () => {
 
 describe("buildAssetUrl", () => {
   test("builds the exact GitHub release-asset download URL", () => {
-    expect(buildAssetUrl({ repo: "yanlingLabs/norma", tag: PIN.tag, assetName: PIN.assetName })).toBe(
-      `https://github.com/yanlingLabs/norma/releases/download/${PIN.tag}/${PIN.assetName}`,
+    expect(buildAssetUrl({ repo: "yanlingLabs/winter", tag: PIN.tag, assetName: PIN.assetName })).toBe(
+      `https://github.com/yanlingLabs/winter/releases/download/${PIN.tag}/${PIN.assetName}`,
     );
   });
 });

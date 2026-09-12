@@ -6,7 +6,7 @@ not wired into any Xcode target.
 **Original result (against the official, dmg-packaged LibreOffice): NO-GO.** `lok_init_2()`
 crashed on macOS (AppKit main-thread violation inside VCL's Aqua backend, on a thread LOK spawns
 internally) — a confirmed, then-open upstream gap (tdf#145127). See git history and the release
-notes at https://github.com/yanlingLabs/norma/releases/tag/vendor-libreoffice-20260819 for the
+notes at https://github.com/yanlingLabs/winter/releases/tag/vendor-libreoffice-20260819 for the
 full investigation.
 
 **That verdict was later overturned.** A from-scratch native macOS arm64 build with

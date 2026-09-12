@@ -7,12 +7,12 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/yanlingLabs/norma/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/yanlingLabs/norma/actions/workflows/ci.yml/badge.svg?branch=main"></a>
-  <a href="https://github.com/yanlingLabs/norma/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/yanlingLabs/norma?label=release&color=2E9484"></a>
+  <a href="https://github.com/yanlingLabs/winter/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/yanlingLabs/winter/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/yanlingLabs/winter/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/yanlingLabs/winter?label=release&color=2E9484"></a>
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-blue.svg"></a>
   <img alt="Platform: macOS 26+" src="https://img.shields.io/badge/platform-macOS%2026%2B-lightgrey.svg">
-  <a href="https://github.com/yanlingLabs/norma/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/yanlingLabs/norma/total?color=555"></a>
-  <a href="https://github.com/yanlingLabs/norma/discussions"><img alt="Discussions" src="https://img.shields.io/github/discussions/yanlingLabs/norma"></a>
+  <a href="https://github.com/yanlingLabs/winter/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/yanlingLabs/winter/total?color=555"></a>
+  <a href="https://github.com/yanlingLabs/winter/discussions"><img alt="Discussions" src="https://img.shields.io/github/discussions/yanlingLabs/winter"></a>
 </p>
 
 ---
@@ -31,7 +31,7 @@ sessions over an encrypted direct link — no cloud in the middle.
 ## Install
 
 ```sh
-brew tap yanlingLabs/norma
+brew tap yanlingLabs/winter
 brew install --cask winter
 ```
 
@@ -39,7 +39,7 @@ The `winter` cask lands with the first Winter release; until then the tap still 
 under its pre-rename cask and command name — see the tap's current formula for the exact
 `brew install --cask` invocation.
 
-Or grab the latest `.dmg` from [Releases](https://github.com/yanlingLabs/norma/releases/latest),
+Or grab the latest `.dmg` from [Releases](https://github.com/yanlingLabs/winter/releases/latest),
 open it, and drag Winter to your Applications folder.
 
 Requires **macOS 26 or later** on Apple silicon. Then point her at the model you already pay for:
@@ -51,7 +51,7 @@ winter login --api-key    # or paste an OpenAI API key
 
 That's the whole setup. She's in your menu bar, and `winter` works in any terminal. Details on
 [models, reasoning effort and search keys](#bringing-your-own-ai) are further down. (Newer Homebrew
-may ask you to trust the tap once: `brew trust yanlingLabs/norma`.)
+may ask you to trust the tap once: `brew trust yanlingLabs/winter`.)
 
 ## Table of contents
 
@@ -311,7 +311,7 @@ because the app depends on three large vendored artifacts that are fetched, not 
 - An explicit compaction tool for Dispatch, so long-running orchestration compacts on purpose rather
   than whenever the context happens to overflow
 
-Ideas and disagreement welcome in [Discussions](https://github.com/yanlingLabs/norma/discussions).
+Ideas and disagreement welcome in [Discussions](https://github.com/yanlingLabs/winter/discussions).
 
 ## FAQ
 

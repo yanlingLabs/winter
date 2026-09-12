@@ -59,19 +59,23 @@ const FILES_OFFICE_FIXTURE_TESTS = [
 export const RENAME_ALLOWLIST: readonly AllowlistEntry[] = [
   {
     id: "gh-repo",
-    // `yanlingLabs/norma` as a repo path: GH_REPO, every github.com / raw.githubusercontent.com URL
-    // (release assets, the Iroh xcframework binaryTarget, cask url/homepage, the brand contactUrl).
-    // NOT `yanlingLabs/norma-ios` (own entry) and not a longer name.
+    // The PRE-9c repo path `yanlingLabs/norma`. The GitHub repo was renamed to `yanlingLabs/winter`
+    // in Phase 9c (P9c-6) and every live reference flipped; GitHub redirects the old path, so ONLY
+    // the byte-frozen legacy feed (its historical enclosure URLs) and the codemod's own tests may
+    // still spell it. NOT `yanlingLabs/norma-ios` (own entry) and not a longer name.
     regex: /yanlingLabs\/norma(?![A-Za-z0-9_-])/g,
-    why: "the GitHub repo name — user-owned rename (WS-01 §8); URLs must keep resolving (SwiftPM, casks, the feed)",
+    files: ["releases/appcast.xml", "scripts/rename/codemod.test.ts"],
+    why: "the pre-rename GitHub repo path, kept only in the frozen legacy feed's historical enclosure URLs (redirected by GitHub) and the codemod's tests (P9c-6)",
   },
   {
     id: "ios-repo",
-    // The iOS sibling's repo/checkout name (`yanlingLabs/norma-ios`, `../norma-ios`, `norma-ios/project.yml`,
-    // bare `norma-ios` in prose). The iOS app's OWN bundle id `com.yanlinglabs.norma-ios` is preceded by
-    // a dot, so it is NOT protected and renames to `com.yanlinglabs.winter-ios` (P9b-11).
+    // The iOS sibling's LOCAL CHECKOUT name (`../norma-ios`, `norma-ios/project.yml`, bare `norma-ios`
+    // in prose). Its GitHub repo is `yanlingLabs/winter-ios` since Phase 9c (P9c-6); the checkout
+    // directory keeps its name until the user renames it. The iOS app's OWN bundle id
+    // `com.yanlinglabs.norma-ios` is preceded by a dot, so it is NOT protected and renamed to
+    // `com.yanlinglabs.winter-ios` (P9b-11).
     regex: /(?<![A-Za-z0-9_.])norma-ios(?![A-Za-z0-9_])/g,
-    why: "the iOS sibling's GitHub/checkout name — user-owned rename (WS-01 §3 target `winter-ios`)",
+    why: "the iOS sibling's local checkout directory name — user-owned directory rename (the repo itself is `winter-ios` since 9c)",
   },
   {
     id: "infra-keychain",
@@ -136,13 +140,6 @@ export const RENAME_ALLOWLIST: readonly AllowlistEntry[] = [
     regex: /norma-dev|NORMA_HOME|NORMA_PROFILE|\.norma-dev|Norma\.app|com\.norma\.(app|core)|~\/\.norma(?![A-Za-z0-9_-])/g,
     files: ["CLAUDE.md"],
     why: "the dev-guide trap naming the stale `norma-dev` wrapper/env names, and the hard rule naming the live Norma install until 9c (P9b-13; whole-branch review)",
-  },
-  {
-    id: "contributing-clone-dir",
-    // `git clone …/norma.git` (protected URL) still creates a `norma/` directory until the user renames the repo.
-    regex: /(?<=cd )norma(?![A-Za-z0-9_-])/g,
-    files: ["CONTRIBUTING.md"],
-    why: "the clone directory that the protected repo URL produces — flips with the GitHub rename",
   },
   {
     id: "office-fixture-content",

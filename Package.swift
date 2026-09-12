@@ -5,7 +5,7 @@ import PackageDescription
 //
 // SwiftPM resolves `<repo-root>/Package.swift` for a REMOTE git dependency, but Winter's real
 // Swift manifests live under `apple/` (apple/WinterProtocol, apple/WinterKit). Without a root
-// manifest a remote consumer — the closed-source `yanlingLabs/norma-ios` app — cannot resolve
+// manifest a remote consumer — the closed-source `yanlingLabs/winter-ios` app — cannot resolve
 // this repo at all. This thin umbrella exposes ONLY the iOS-consumable products
 // (`WinterProtocol` + `WinterSessionKit` + `WinterChatKit`) by pathing its targets into the
 // existing sources.
@@ -30,7 +30,7 @@ let package = Package(
         .target(name: "WinterProtocol", path: "apple/WinterProtocol/Sources/WinterProtocol"),
         .binaryTarget(
             name: "Iroh",
-            url: "https://github.com/yanlingLabs/norma/releases/download/iroh-xcframework-v1.1.0/IrohLib.xcframework.zip",
+            url: "https://github.com/yanlingLabs/winter/releases/download/iroh-xcframework-v1.1.0/IrohLib.xcframework.zip",
             checksum: "56cc44535cb91af503d7f4c6c8548b08467a1daa6ddd6e7aa2cd5a5430f5c765"
         ),
         .target(

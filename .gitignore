@@ -58,7 +58,7 @@ apple/Winter/vendor/monaco/
 # (--enable-headless, svp VCL backend, zero source patches) — ~488MB unpacked, ~154MiB
 # compressed; too large to commit. Fetched + sha256-verified via scripts/fetch-libreoffice.ts
 # from a dedicated GitHub release asset (vendor-libreoffice-20260819, pinned there — see its own
-# release notes at https://github.com/yanlingLabs/norma/releases/tag/vendor-libreoffice-20260819
+# release notes at https://github.com/yanlingLabs/winter/releases/tag/vendor-libreoffice-20260819
 # for the full probe/build/licensing story). GO — proves tdf#145127 does not block a native macOS
 # headless embed. Wired into project.yml's "Check LibreOffice vendored" preBuildScripts gate,
 # same as vendor/cef and vendor/monaco above — a build fails loudly naming the fetch command if

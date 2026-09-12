@@ -3,8 +3,8 @@
 Thanks for wanting to help. This document is the practical stuff: how to get a working build, how to
 run the tests, and the handful of rules that will save you a wasted afternoon.
 
-**Before anything nontrivial, [open an issue](https://github.com/yanlingLabs/norma/issues) or start a
-[discussion](https://github.com/yanlingLabs/norma/discussions).** Winter has a lot of load-bearing
+**Before anything nontrivial, [open an issue](https://github.com/yanlingLabs/winter/issues) or start a
+[discussion](https://github.com/yanlingLabs/winter/discussions).** Winter has a lot of load-bearing
 structure that isn't obvious from a diff, and it's much easier to point you at it before you write
 the code than after.
 
@@ -37,8 +37,8 @@ column.
 ## First build
 
 ```sh
-git clone https://github.com/yanlingLabs/norma.git
-cd norma  # the GitHub repo itself is renamed separately (9c) — a fresh clone still lands here
+git clone https://github.com/yanlingLabs/winter.git
+cd winter
 bun install
 ```
 

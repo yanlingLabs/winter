@@ -52,7 +52,7 @@ an appointed representative at an online or offline event.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the
 maintainers privately. The fastest private channel is GitHub's
-[private report form](https://github.com/yanlingLabs/norma/security/advisories/new) — it reaches the
+[private report form](https://github.com/yanlingLabs/winter/security/advisories/new) — it reaches the
 maintainers only, and is not public. All complaints will be reviewed and investigated promptly and
 fairly.
 

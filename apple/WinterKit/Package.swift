@@ -24,7 +24,7 @@ let package = Package(
         // below instead — see vendor/README.md.
         .binaryTarget(
             name: "Iroh",
-            url: "https://github.com/yanlingLabs/norma/releases/download/iroh-xcframework-v1.1.0/IrohLib.xcframework.zip",
+            url: "https://github.com/yanlingLabs/winter/releases/download/iroh-xcframework-v1.1.0/IrohLib.xcframework.zip",
             checksum: "56cc44535cb91af503d7f4c6c8548b08467a1daa6ddd6e7aa2cd5a5430f5c765"
         ),
         // .binaryTarget(name: "Iroh", path: "vendor/IrohLib.xcframework"),

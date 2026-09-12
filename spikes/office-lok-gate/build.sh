@@ -3,7 +3,7 @@
 # History: this spike originally proved NO-GO against the official, dmg-packaged LibreOffice
 # (see git history and ./README.md). That verdict was later overturned by a from-scratch native
 # build (--enable-headless) -- see the release notes at
-# https://github.com/yanlingLabs/norma/releases/tag/vendor-libreoffice-20260819 for the full
+# https://github.com/yanlingLabs/winter/releases/tag/vendor-libreoffice-20260819 for the full
 # story, and ./README.md for how this spike fits into it today.
 set -euo pipefail
 cd "$(dirname "$0")"
