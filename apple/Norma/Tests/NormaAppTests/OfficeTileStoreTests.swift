@@ -1,6 +1,6 @@
 import Combine
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// office-plumbing Task 6 — `OfficeTileStore`: the app-side pixel pool. Mirrors `TileCacheTests`'
 /// own shape (LRU, generation bookkeeping) wherever the two caches agree, and adds what is NEW here:

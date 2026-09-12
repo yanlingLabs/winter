@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { NewSessionEvent } from "@norma/protocol";
-import { OFFICE_COMMAND_ACTIONS } from "@norma/protocol";
+import type { NewSessionEvent } from "@winter/protocol";
+import { OFFICE_COMMAND_ACTIONS } from "@winter/protocol";
 import { PanelCommandRegistry } from "../../src/panel/commands";
 import {
   OFFICE_COMMAND_ACTIONS as REEXPORTED_OFFICE_COMMAND_ACTIONS,
@@ -93,9 +93,9 @@ describe("office-commands: the read/write partition and the deadline tripwire", 
   // scalar constant like this repo has for shared fixtures (dangerous-domains.json,
   // cleaner-vectors.json), so this comment names EXACTLY what to re-read if that ever changes:
   //   verify with: grep -n "handshakeTimeout\|maxAttempts\|backoff" \
-  //     apple/Norma/Sources/AppShell/OfficeHelperSupervisor.swift        (Configuration, lines 399-401)
+  //     apple/Winter/Sources/AppShell/OfficeHelperSupervisor.swift        (Configuration, lines 399-401)
   //   verify with: grep -n "requestTimeout: configuration.handshakeTimeout" \
-  //     apple/Norma/Sources/AppShell/OfficeHelperSupervisor.swift        (line 658)
+  //     apple/Winter/Sources/AppShell/OfficeHelperSupervisor.swift        (line 658)
   // If any of those four values changes, this test's constants below must be updated BY HAND to
   // match — nothing enforces that automatically, which is exactly why the citation is precise enough
   // to re-check by hand too.

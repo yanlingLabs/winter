@@ -1,6 +1,6 @@
 import AppKit
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// browser-runtime T4: **the view side of the ownership inversion** (spec §2).
 ///
@@ -81,7 +81,7 @@ final class PanelViewportTests: XCTestCase {
         return window
     }
 
-    /// What `NormaCEFCreateBrowser` does as far as the view tree is concerned: parent a two-deep
+    /// What `WinterCEFCreateBrowser` does as far as the view tree is concerned: parent a two-deep
     /// spine into the container with the keystroke-taking view at the bottom, mirroring the shape the
     /// spike dumped live. The box is how a test reaches the view CEF would have made.
     private final class DeepViewBox {
@@ -169,7 +169,7 @@ final class PanelViewportTests: XCTestCase {
     /// **Dismantling a viewport reaches CEF not at all** — the commit where "closing is no longer the
     /// view's business" becomes true.
     ///
-    /// What stood in `dismantleNSView` cleared the three observers and called `NormaCEFCloseBrowser`,
+    /// What stood in `dismantleNSView` cleared the three observers and called `WinterCEFCloseBrowser`,
     /// justified as keeping a switched-away tab from leaving a live renderer behind. A switched-away
     /// tab is now SUPPOSED to leave one behind: that is the inversion, and it is what makes a tab
     /// switch a container swap instead of a page reload. Stopping is `BrowserLifecycleEngine`'s

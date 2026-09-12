@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { NewSessionEvent } from "@norma/protocol";
+import type { NewSessionEvent } from "@winter/protocol";
 import { PanelCommandRegistry } from "../../src/panel/commands";
 
 type NewPanelCommand = Extract<NewSessionEvent, { type: "panel_command" }>;

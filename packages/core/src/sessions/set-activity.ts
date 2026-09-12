@@ -1,4 +1,4 @@
-import type { SessionActivity } from "@norma/protocol";
+import type { SessionActivity } from "@winter/protocol";
 import type { ActivityDeriver, ActivityRow } from "./activity";
 import { participatesInActivity } from "./activity";
 
@@ -45,7 +45,7 @@ export const ACTIVITY_MODE_REFUSAL = "activity states apply to code and cowork s
 
 /** activity-verb-semantics ruling 1: an ARCHIVED session is IMMUTABLE except through resume, and the
  *  refusal NAMES the one door out. Exported as a constant for the same reason the sentence above is:
- *  the RPC, dispatch's `manage_session` and the `norma agents` roster all reach this state machine,
+ *  the RPC, dispatch's `manage_session` and the `winter agents` roster all reach this state machine,
  *  and a near-identical hand-written sentence at each door is how three remedies start pointing at
  *  three different remedies. */
 export const ARCHIVED_IMMUTABLE_REFUSAL = "session is archived — resume it first";

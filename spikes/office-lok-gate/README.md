@@ -22,7 +22,7 @@ end of that section).
 ## Files
 
 - `main.c` — the spike itself. Plain C, `#define LOK_USE_UNSTABLE_API` before including the
-  vendored headers (`apple/Norma/Sources/OfficeKit/include/`). Deliberately does NOT include
+  vendored headers (`apple/Winter/Sources/OfficeKit/include/`). Deliberately does NOT include
   `LibreOfficeKitEnums.h` (it isn't plain-C-safe as vendored — see the gate report's Layout Facts
   section); the two tile-mode constants it needs are transcribed with a citation instead.
 - `build.sh` — `clang`, no hardened runtime, ad-hoc/linker signature (a hardened-runtime binary
@@ -30,9 +30,9 @@ end of that section).
   failure).
 - `seeds/gate.fod{s,t,p}` — hand-written flat-ODF seed documents (plain XML, colored content near
   the origin) used to generate the six committed fixtures
-  (`apple/Norma/Tests/NormaAppTests/Fixtures/office/gate.{xlsx,ods,pptx,odp,docx,odt}`) via the
+  (`apple/Winter/Tests/WinterAppTests/Fixtures/office/gate.{xlsx,ods,pptx,odp,docx,odt}`) via the
   **official, mounted, read-only** `soffice --headless --convert-to` — never installed to
-  `/Applications`, never touching `~/.norma*`.
+  `/Applications`, never touching `~/.winter*`.
 
 ## Reproducing the ORIGINAL NO-GO (historical — does not match today's vendored tree)
 
@@ -48,15 +48,15 @@ tree). That is not what the script does anymore — see its own header. Today
 # Historical shape (no longer produced by fetch-libreoffice.ts):
 mkdir -p /tmp/lok-gate-profile
 HOME=/tmp/lok-gate-home LANG=en_US.UTF-8 spikes/office-lok-gate/out/office-lok-gate \
-  "$(pwd)/apple/Norma/vendor/libreoffice/program/Frameworks" \
+  "$(pwd)/apple/Winter/vendor/libreoffice/program/Frameworks" \
   /tmp/lok-gate-profile \
-  "$(pwd)/apple/Norma/Tests/NormaAppTests/Fixtures/office/gate.xlsx" \
+  "$(pwd)/apple/Winter/Tests/WinterAppTests/Fixtures/office/gate.xlsx" \
   /tmp/gate-tile.png /tmp/gate-tile.raw
 # Result at the time: exit 134 (SIGABRT), an NSInternalInconsistencyException stack trace — the
 # gate's ORIGINAL, correct result against the Aqua-backed official dmg.
 ```
 
-Against TODAY's vendored tree (`apple/Norma/vendor/libreoffice/product-set/Frameworks`), this
+Against TODAY's vendored tree (`apple/Winter/vendor/libreoffice/product-set/Frameworks`), this
 spike's `lok_init_2()` call SUCCEEDS — measured, not merely expected: the re-cut verification
 ran this spike UNMODIFIED against the fully-rebuilt product-set and all six pinned tile SHA-256s
 MATCHED (recut-report, "Hash table vs gate pins"). `main.c` takes its install path from argv[1]

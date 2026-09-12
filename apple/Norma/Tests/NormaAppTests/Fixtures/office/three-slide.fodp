@@ -55,7 +55,7 @@
 
     <draw:page draw:name="T6Slide1" draw:style-name="dp1" draw:master-page-name="Default" presentation:presentation-page-layout-name="AL1T0">
       <draw:frame presentation:style-name="Default-title" draw:layer="layout" svg:width="25.199cm" svg:height="2.629cm" svg:x="1.4cm" svg:y="0.628cm" presentation:class="title">
-        <draw:text-box><text:p>Norma T6 Slide One</text:p></draw:text-box>
+        <draw:text-box><text:p>Winter T6 Slide One</text:p></draw:text-box>
       </draw:frame>
       <draw:frame presentation:style-name="Default-outline1" draw:layer="layout" svg:width="25.199cm" svg:height="9.134cm" svg:x="1.4cm" svg:y="3.685cm" presentation:class="outline">
         <draw:text-box><text:list text:style-name="ML1"><text:list-item><text:p>first bullet</text:p></text:list-item></text:list></draw:text-box>
@@ -64,7 +64,7 @@
 
     <draw:page draw:name="T6Slide2" draw:style-name="dp1" draw:master-page-name="Default" presentation:presentation-page-layout-name="AL1T0">
       <draw:frame presentation:style-name="Default-title" draw:layer="layout" svg:width="25.199cm" svg:height="2.629cm" svg:x="1.4cm" svg:y="0.628cm" presentation:class="title">
-        <draw:text-box><text:p>Norma T6 Slide Two</text:p></draw:text-box>
+        <draw:text-box><text:p>Winter T6 Slide Two</text:p></draw:text-box>
       </draw:frame>
       <draw:frame presentation:style-name="Default-outline1" draw:layer="layout" svg:width="25.199cm" svg:height="9.134cm" svg:x="1.4cm" svg:y="3.685cm" presentation:class="outline">
         <draw:text-box><text:list text:style-name="ML1"><text:list-item><text:p>second bullet</text:p></text:list-item></text:list></draw:text-box>
@@ -73,7 +73,7 @@
 
     <draw:page draw:name="T6Slide3" draw:style-name="dp1" draw:master-page-name="Default" presentation:presentation-page-layout-name="AL1T0">
       <draw:frame presentation:style-name="Default-title" draw:layer="layout" svg:width="25.199cm" svg:height="2.629cm" svg:x="1.4cm" svg:y="0.628cm" presentation:class="title">
-        <draw:text-box><text:p>Norma T6 Slide Three</text:p></draw:text-box>
+        <draw:text-box><text:p>Winter T6 Slide Three</text:p></draw:text-box>
       </draw:frame>
       <draw:frame presentation:style-name="Default-outline1" draw:layer="layout" svg:width="25.199cm" svg:height="9.134cm" svg:x="1.4cm" svg:y="3.685cm" presentation:class="outline">
         <draw:text-box><text:list text:style-name="ML1"><text:list-item><text:p>third bullet</text:p></text:list-item></text:list></draw:text-box>

@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import NormaChatKit
+@testable import WinterChatKit
 
 final class DangerousDomainsTests: XCTestCase {
     /// The shipped list is a hand-mirrored copy of `packages/core/src/agent/dangerous-domains.ts`;

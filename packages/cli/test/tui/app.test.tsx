@@ -16,8 +16,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cleanup, render } from "ink-testing-library";
-import { METHODS } from "@norma/protocol";
-import { CORE_VERSION } from "@norma/core";
+import { METHODS } from "@winter/protocol";
+import { CORE_VERSION } from "@winter/core";
 import { App, bottomBarRows } from "../../src/tui/app";
 import { makeEventBridge } from "../../src/tui/event-bridge";
 import type { AgentRow } from "../../src/tui/state";
@@ -130,14 +130,14 @@ describe("App (fullscreen shell)", () => {
     expect(frame).toContain(COMPOSER_CURSOR); // composer still rendered below it (invisible-prompt invariant)
   });
 
-  test("(d) welcome banner is the first line: bold Norma + version, then model · cwd", async () => {
+  test("(d) welcome banner is the first line: bold Winter + version, then model · cwd", async () => {
     const bridge = makeEventBridge();
     const { lastFrame } = render(
       <App client={fakeClient()} bridge={bridge} sessionId="s" cwd="/work/proj" initialPolicy="ask" version="0.0.1" model="gpt-5-codex" />,
     );
     await wait();
     const frame = lastFrame() ?? "";
-    expect(frame).toContain("Norma");
+    expect(frame).toContain("Winter");
     expect(frame).toContain("v0.0.1");
     expect(frame).toContain("gpt-5-codex · /work/proj");
   });
@@ -149,7 +149,7 @@ describe("App (fullscreen shell)", () => {
     const lines = (lastFrame() ?? "").split("\n");
 
     expect(lines).toHaveLength(23); // rows-1 (HARD CONSTRAINT 1: outputHeight < stdout.rows)
-    expect(lines[0]).toContain("Norma"); // welcome header rides the top of the log
+    expect(lines[0]).toContain("Winter"); // welcome header rides the top of the log
     expect(lines.at(-1)).toContain(FOOTER_HINT); // footer is the very last row
 
     // The composer sits at the frame BOTTOM (pushed down by the flexGrow transcript region), not
@@ -612,7 +612,7 @@ describe("App — Home/End transcript jumps on an empty composer (3c whole-branc
     stdin.write("\x1b[H"); // Home, empty composer -> transcript top
     await wait();
     const frame = lastFrame() ?? "";
-    expect(frame.split("\n")[0]).toContain("Norma"); // the welcome header — the very first log line
+    expect(frame.split("\n")[0]).toContain("Winter"); // the welcome header — the very first log line
     expect(frame).toContain("HE-1"); // oldest transcript lines in view
     expect(frame).not.toContain("HE-39");
 
@@ -641,7 +641,7 @@ describe("App — Home/End transcript jumps on an empty composer (3c whole-branc
     let frame = lastFrame() ?? "";
     expect(frame).toContain("\x1b[7ma\x1b[27m"); // inverse cursor sits ON "a" (cursor really moved to 0)
     expect(frame).toContain("TX-39"); // still at the bottom — did not jump to the top
-    expect(frame.split("\n")[0]).not.toContain("Norma"); // top of the log NOT in view
+    expect(frame.split("\n")[0]).not.toContain("Winter"); // top of the log NOT in view
 
     stdin.write("\x1b[F"); // End with text -> cursor back to the end, still no scroll
     await wait();
@@ -793,7 +793,7 @@ describe("App — slash-command wiring (Phase 3d T2: onRunCommand + local_note)"
 
 describe("App — @-file mention index lifecycle (Phase 3d T3)", () => {
   test("(x1) the first '@'-trigger builds the real file index against the session's cwd, and matches appear once it resolves", async () => {
-    const root = mkdtempSync(join(tmpdir(), "norma-app-file-index-"));
+    const root = mkdtempSync(join(tmpdir(), "winter-app-file-index-"));
     writeFileSync(join(root, "alpha.ts"), "");
     writeFileSync(join(root, "beta.md"), "");
     try {
@@ -814,8 +814,8 @@ describe("App — @-file mention index lifecycle (Phase 3d T3)", () => {
   });
 
   test("(x2) a '/cd' issued BEFORE the first '@' redirects the index build to the daemon-confirmed new cwd", async () => {
-    const original = mkdtempSync(join(tmpdir(), "norma-app-file-index-orig-"));
-    const redirected = mkdtempSync(join(tmpdir(), "norma-app-file-index-new-"));
+    const original = mkdtempSync(join(tmpdir(), "winter-app-file-index-orig-"));
+    const redirected = mkdtempSync(join(tmpdir(), "winter-app-file-index-new-"));
     writeFileSync(join(original, "onlyinoriginal.ts"), "");
     writeFileSync(join(redirected, "onlyinredirected.ts"), "");
     try {
@@ -906,7 +906,7 @@ describe("App — command + mention e2e wiring (Phase 3d T4)", () => {
   });
 
   test("(T4-b) '@' mention: type + Tab-complete + Enter composes the FULL text with the path inline and really sends it", async () => {
-    const root = mkdtempSync(join(tmpdir(), "norma-app-help-e2e-"));
+    const root = mkdtempSync(join(tmpdir(), "winter-app-help-e2e-"));
     writeFileSync(join(root, "target.ts"), "");
     try {
       const bridge = makeEventBridge();
@@ -1197,7 +1197,7 @@ describe("App — headless sanity (Phase 3d T4)", () => {
     expect(proc.exitCode).toBe(0);
     // Handoff Task 2: the header is now version-bearing (the Phase 1b-ii-d fossil is gone) —
     // main.test.ts pins the exact form; this test's job stays exit-0 + usage-not-hang.
-    expect(proc.stdout.toString()).toContain(`norma ${CORE_VERSION} — commands:`);
+    expect(proc.stdout.toString()).toContain(`winter ${CORE_VERSION} — commands:`);
   });
 });
 
@@ -1626,17 +1626,17 @@ describe("bottomBarLayout — B2: pickerRows are counted (essential, like chrome
 });
 
 describe("App — B2 the /model bottom picker end-to-end", () => {
-  // Same temp-NORMA_HOME discipline as commands.test.ts's /model suite — never ~/.norma.
+  // Same temp-WINTER_HOME discipline as commands.test.ts's /model suite — never ~/.winter.
   const withTempHome = async (fn: (home: string) => Promise<void>) => {
-    const home = mkdtempSync(join(tmpdir(), "norma-tui-b2-picker-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-tui-b2-picker-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } }));
-    const prevHome = process.env.NORMA_HOME;
-    process.env.NORMA_HOME = home;
+    const prevHome = process.env.WINTER_HOME;
+    process.env.WINTER_HOME = home;
     try {
       await fn(home);
     } finally {
-      if (prevHome === undefined) delete process.env.NORMA_HOME;
-      else process.env.NORMA_HOME = prevHome;
+      if (prevHome === undefined) delete process.env.WINTER_HOME;
+      else process.env.WINTER_HOME = prevHome;
       rmSync(home, { recursive: true, force: true });
     }
   };
@@ -1740,11 +1740,11 @@ describe("App — T5 status chrome end-to-end (live sources, zero daemon changes
   });
 
   test("(sc3) the footer shows the mount model; /model switches it IMMEDIATELY (live through the CommandCtx callback)", async () => {
-    // Same temp-NORMA_HOME discipline as commands.test.ts's /model suite — never ~/.norma.
-    const home = mkdtempSync(join(tmpdir(), "norma-tui-t5-model-"));
+    // Same temp-WINTER_HOME discipline as commands.test.ts's /model suite — never ~/.winter.
+    const home = mkdtempSync(join(tmpdir(), "winter-tui-t5-model-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } }));
-    const prevHome = process.env.NORMA_HOME;
-    process.env.NORMA_HOME = home;
+    const prevHome = process.env.WINTER_HOME;
+    process.env.WINTER_HOME = home;
     try {
       const bridge = makeEventBridge();
       const client = fakeClient();
@@ -1763,8 +1763,8 @@ describe("App — T5 status chrome end-to-end (live sources, zero daemon changes
       expect(frame).toContain("gpt-5.6-luna (high)"); // THE PIN: the footer segment flipped, same frame
       expect(client.calls).toEqual([]); // /model never touches the client (settings.json route)
     } finally {
-      if (prevHome === undefined) delete process.env.NORMA_HOME;
-      else process.env.NORMA_HOME = prevHome;
+      if (prevHome === undefined) delete process.env.WINTER_HOME;
+      else process.env.WINTER_HOME = prevHome;
       rmSync(home, { recursive: true, force: true });
     }
   });

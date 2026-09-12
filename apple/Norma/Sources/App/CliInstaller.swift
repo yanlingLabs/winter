@@ -1,49 +1,49 @@
 import AppKit
 import Foundation
-import NormaKit
+import WinterKit
 
 enum CliInstallAction: Equatable {
     case install, repair, alreadyInstalled
     case refuseForeign(String)
 }
 
-/// Distribution-build installer for the global `norma` command:
-/// `/usr/local/bin/norma -> <Norma.app>/Contents/Resources/norma-core`. The app-bundle path is
+/// Distribution-build installer for the global `winter` command:
+/// `/usr/local/bin/winter -> <Winter.app>/Contents/Resources/winter-core`. The app-bundle path is
 /// stable across Sparkle updates, so the symlink survives them. Pure decision core + thin
 /// effectful shell; the admin fallback (osascript "with administrator privileges") runs only
 /// when the direct filesystem write fails.
 ///
 /// DEV builds never call any of the effectful entry points here (`install()`/
 /// `offerOnFirstLaunchIfNeeded()` short-circuit, and `MenuBarController` never mounts the menu
-/// item that would fire `install()`) — dev's own CLI story is `CliLauncher`'s `norma-dev` wrapper
-/// (Task 6). This is the DISTRIBUTION app's `norma` command (Task 7).
+/// item that would fire `install()`) — dev's own CLI story is `CliLauncher`'s `winter-dev` wrapper
+/// (Task 6). This is the DISTRIBUTION app's `winter` command (Task 7).
 @MainActor
 enum CliInstaller {
-    static let linkPath = "/usr/local/bin/norma"
+    static let linkPath = "/usr/local/bin/winter"
 
     static var expectedTarget: String {
         // Belt-and-suspenders: `Bundle.main.resourceURL` is only nil for a malformed/non-bundle
         // process, which never happens for a real, launched app bundle — unreachable in practice,
         // but a guarded fallback costs nothing and can't crash.
-        guard let url = Bundle.main.resourceURL else { return "/Applications/Norma.app/Contents/Resources/norma-core" }
-        return url.appendingPathComponent("norma-core").path
+        guard let url = Bundle.main.resourceURL else { return "/Applications/Winter.app/Contents/Resources/winter-core" }
+        return url.appendingPathComponent("winter-core").path
     }
 
     /// Pure decision: what to do given the current state of the destination path.
     ///
-    /// Spec rule (dev/dist-split design §3): the installer refuses to overwrite a `norma` that is
-    /// not a symlink into a Norma.app — surfacing it instead of touching it. A non-symlink real
+    /// Spec rule (dev/dist-split design §3): the installer refuses to overwrite a `winter` that is
+    /// not a symlink into a Winter.app — surfacing it instead of touching it. A non-symlink real
     /// file at `linkPath` is unconditionally foreign (we never create plain files there). A symlink
-    /// is ours to repair ONLY when it points somewhere shaped like `Norma.app/Contents/Resources/
-    /// norma-core` — covering a stale/moved app location (old path, renamed volume) as well as an
+    /// is ours to repair ONLY when it points somewhere shaped like `Winter.app/Contents/Resources/
+    /// winter-core` — covering a stale/moved app location (old path, renamed volume) as well as an
     /// exact-match already-installed link — never a symlink pointing anywhere else. A foreign
-    /// symlink (e.g. a user's own `norma -> ~/mytools/norma`) is user data we did not create and
+    /// symlink (e.g. a user's own `winter -> ~/mytools/winter`) is user data we did not create and
     /// must never silently delete; refusing + surfacing it is the only safe move.
     static func plan(existingDestination: String?, isSymlink: Bool, symlinkTarget: String?, expectedTarget: String) -> CliInstallAction {
         guard let dest = existingDestination else { return .install }
         guard isSymlink else { return .refuseForeign(dest) }
         if let target = symlinkTarget, target == expectedTarget { return .alreadyInstalled }
-        guard let target = symlinkTarget, target.contains("Norma.app/Contents/Resources/norma-core") else {
+        guard let target = symlinkTarget, target.contains("Winter.app/Contents/Resources/winter-core") else {
             return .refuseForeign(dest)
         }
         return .repair
@@ -74,7 +74,7 @@ enum CliInstaller {
         case .refuseForeign(let path):
             // Surfaces what the disabled menu title only alludes to ("see logs") — makes that
             // claim actually true.
-            OrbDebug.log("CliInstaller: refusing to overwrite foreign norma at \(path) (not a symlink into a Norma.app)")
+            OrbDebug.log("CliInstaller: refusing to overwrite foreign winter at \(path) (not a symlink into a Winter.app)")
             return action
         case .install, .repair:
             let fm = FileManager.default
@@ -98,7 +98,7 @@ enum CliInstaller {
         try? p.run(); p.waitUntilExit()
     }
 
-    /// True when a WORKING `norma` resolves anywhere on PATH (covers brew's cask-linked binary).
+    /// True when a WORKING `winter` resolves anywhere on PATH (covers brew's cask-linked binary).
     ///
     /// DD branch review (I2): a GUI app launched via LaunchServices does NOT inherit the user's
     /// shell PATH — it gets LaunchServices' own minimal `/usr/bin:/bin:/usr/sbin:/sbin`, which
@@ -107,25 +107,25 @@ enum CliInstaller {
     /// check dead in production: `PATH` is always PRESENT (never nil), so the old `?? "…"` fallback
     /// — sized for the nil case — never actually ran. Fixed by always scanning PATH's own dirs
     /// PLUS the hardcoded brew locations, regardless of what PATH already contains.
-    static func normaOnPath(pathVar: String? = ProcessInfo.processInfo.environment["PATH"], extraDirs: [String] = ["/usr/local/bin", "/opt/homebrew/bin"]) -> Bool {
+    static func winterOnPath(pathVar: String? = ProcessInfo.processInfo.environment["PATH"], extraDirs: [String] = ["/usr/local/bin", "/opt/homebrew/bin"]) -> Bool {
         let pathDirs = (pathVar ?? "").split(separator: ":").map(String.init)
         let dirs = Set(pathDirs + extraDirs)
         return dirs.contains { dir in
-            FileManager.default.isExecutableFile(atPath: "\(dir)/norma")
+            FileManager.default.isExecutableFile(atPath: "\(dir)/winter")
         }
     }
 
-    /// First-launch offer (dist only): once per NORMA_HOME, and only when no norma is on PATH.
+    /// First-launch offer (dist only): once per WINTER_HOME, and only when no winter is on PATH.
     static func offerOnFirstLaunchIfNeeded() {
         guard !AppProfile.isDev else { return }
-        let marker = URL(fileURLWithPath: NormaPaths.homeDirectory()).appendingPathComponent("app-state/cli-install-offered")
+        let marker = URL(fileURLWithPath: WinterPaths.homeDirectory()).appendingPathComponent("app-state/cli-install-offered")
         guard !FileManager.default.fileExists(atPath: marker.path) else { return }
         try? FileManager.default.createDirectory(at: marker.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? Data().write(to: marker)
-        guard !normaOnPath() else { return }
+        guard !winterOnPath() else { return }
         let alert = NSAlert()
-        alert.messageText = "Install the norma command?"
-        alert.informativeText = "Adds `norma` to /usr/local/bin so you can use Norma from the terminal. You can do this later from the menu bar."
+        alert.messageText = "Install the winter command?"
+        alert.informativeText = "Adds `winter` to /usr/local/bin so you can use Winter from the terminal. You can do this later from the menu bar."
         alert.addButton(withTitle: "Install")
         alert.addButton(withTitle: "Not Now")
         if alert.runModal() == .alertFirstButtonReturn { install() }

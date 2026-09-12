@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { openRoutineStore, type RoutineStore } from "../../src/routines/store";
 
 function makeStore(): { store: RoutineStore; dir: string } {
-  const dir = mkdtempSync(join(tmpdir(), "norma-routines-"));
+  const dir = mkdtempSync(join(tmpdir(), "winter-routines-"));
   return { store: openRoutineStore(join(dir, "routines.db")), dir };
 }
 
@@ -167,7 +167,7 @@ describe("RoutineStore — recordDefer backoff progression", () => {
 
 describe("openRoutineStore — path handling", () => {
   test("creates the parent directory for an injected path", () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-routines-parent-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-routines-parent-"));
     const nested = join(dir, "nested", "sub", "routines.db");
     const store = openRoutineStore(nested);
     const routine = store.create({ spec: "every 1h", prompt: "a" });

@@ -1,4 +1,4 @@
-;; Office Stage B Task 1 — NormaOfficeHelper's own seatbelt.
+;; Office Stage B Task 1 — WinterOfficeHelper's own seatbelt.
 ;;
 ;; Applied by main.swift via `sandbox_init_with_parameters`, FIRST — before LibreOfficeKit ever
 ;; loads (`lok_init_2`, inside `LOKBridge.init`) and before the socket ever binds
@@ -102,7 +102,7 @@
 ;; it: bare+embedded-root OPENS CLEANLY; bundled+standalone-root HANGS. Install root is irrelevant.
 ;;
 ;; Fix-round-2 I1 residual (security re-review) — **the sentence that WAS here next asserted a
-;; specific MECHANISM for that result** ("`NSBundle.main`'s own resolution … finds Norma.app's real
+;; specific MECHANISM for that result** ("`NSBundle.main`'s own resolution … finds Winter.app's real
 ;; bundle identity ONLY for the bundled exec, which is what makes `+[NSApplication initialize]`
 ;; behave like a real windowed app … the bare exec has no such identity to find, and takes a
 ;; different, non-blocking path") **as flat fact, with no cell that actually traces it.** The 2x2
@@ -183,8 +183,8 @@
 ;; deputy concern to be exploitable; this profile accepts that open question rather than concealing
 ;; it, because launchservicesd is independently proven NECESSARY (Experiment C) and no narrower fix
 ;; was found (Experiment A failed; Experiment B named the true trigger but not a safe, comparably-
-;; scoped code change — restructuring `NormaOfficeHelper`'s own bundle identity to avoid inheriting
-;; Norma.app's is a materially bigger change than this fix round's own scope, and belongs in a
+;; scoped code change — restructuring `WinterOfficeHelper`'s own bundle identity to avoid inheriting
+;; Winter.app's is a materially bigger change than this fix round's own scope, and belongs in a
 ;; dedicated follow-up, not an improvised addition here).
 ;;
 ;; Fix-round-3 (convergence re-review) F4 — **this section's own "open question" was never updated

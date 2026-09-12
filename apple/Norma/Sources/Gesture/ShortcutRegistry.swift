@@ -23,7 +23,7 @@ protocol ShortcutHotkeyReloading: AnyObject {
 @MainActor
 final class ShortcutRegistry: ShortcutHotkeyReloading {
     /// Fired on the main queue when one of the registered hotkeys is pressed. `AppDelegate` wires
-    /// this straight to NormaKit's `client.shortcutInvoke(pluginId:shortcutId:)`.
+    /// this straight to WinterKit's `client.shortcutInvoke(pluginId:shortcutId:)`.
     var onFire: ((_ pluginId: String, _ shortcutId: String) -> Void)?
 
     private var handlerRef: EventHandlerRef?

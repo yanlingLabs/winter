@@ -618,7 +618,7 @@ describe("repairRuntimeState — WS-16 §15 explicit, recoverable repairs", () =
     });
   });
 
-  test("restore-backup refuses a backup written by a newer Norma", async () => {
+  test("restore-backup refuses a backup written by a newer Winter", async () => {
     await withTempHome(async (home) => {
       let backup = "";
       withDb(home, (rs) => {
@@ -633,7 +633,7 @@ describe("repairRuntimeState — WS-16 §15 explicit, recoverable repairs", () =
       // It would pass quick_check and then refuse to OPEN — a restore that "succeeds" into an
       // unusable store, caught while the current file is still intact (review r1, minor 7).
       expect(result.applied).toBe(false);
-      expect(result.detail).toContain("newer Norma");
+      expect(result.detail).toContain("newer Winter");
     });
   });
 

@@ -1,9 +1,9 @@
 import XCTest
 import CryptoKit
 import AppKit
-@testable import Norma
+@testable import Winter
 
-/// Office Stage A Task 3 — LOK boots for real. Spawns the REAL, compiled `NormaOfficeHelper`
+/// Office Stage A Task 3 — LOK boots for real. Spawns the REAL, compiled `WinterOfficeHelper`
 /// binary and drives it over the real socket protocol against the vendored LibreOffice tree
 /// (`--lok-root`, for fast iteration — one test uses the app-embedded root instead, see
 /// `testEmbeddedRootBootsAgainstTheRealBuiltAppAndBundleStaysUntouched`).
@@ -46,14 +46,14 @@ final class OfficeHelperLiveTests: XCTestCase {
     // MARK: - Repo-relative paths (same `#filePath`-climbing precedent as
     // `CliLauncher.defaultRepoRoot`/`OfficeHelperLiveSmokeTests`)
 
-    /// `#filePath` for this file is `<repoRoot>/apple/Norma/Tests/NormaAppTests/OfficeHelperLiveTests.swift`.
+    /// `#filePath` for this file is `<repoRoot>/apple/Winter/Tests/WinterAppTests/OfficeHelperLiveTests.swift`.
     private static var repoRoot: URL {
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0..<5 { url = url.deletingLastPathComponent() }
         return url
     }
     private static var vendorProductSetRoot: URL {
-        repoRoot.appendingPathComponent("apple/Norma/vendor/libreoffice/product-set", isDirectory: true)
+        repoRoot.appendingPathComponent("apple/Winter/vendor/libreoffice/product-set", isDirectory: true)
     }
     /// Office Stage B Task 1 — the checked-in seatbelt profile SOURCE, passed via `--sandbox-profile`
     /// (DEBUG-only override, mirrors `--lok-root` exactly) so the standalone `BUILT_PRODUCTS_DIR`
@@ -62,10 +62,10 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// deliberately — that test's whole point is exercising `resolveSandboxProfilePath()`'s own
     /// DEFAULT (no-override) resolution against the real embedded `Contents/Resources/office-helper.sb`.
     private static var repoSandboxProfilePath: URL {
-        repoRoot.appendingPathComponent("apple/Norma/Sources/OfficeHelper/office-helper.sb", isDirectory: false)
+        repoRoot.appendingPathComponent("apple/Winter/Sources/OfficeHelper/office-helper.sb", isDirectory: false)
     }
     private static var fixturesRoot: URL {
-        repoRoot.appendingPathComponent("apple/Norma/Tests/NormaAppTests/Fixtures/office", isDirectory: true)
+        repoRoot.appendingPathComponent("apple/Winter/Tests/WinterAppTests/Fixtures/office", isDirectory: true)
     }
     private static var spikeDirectory: URL {
         repoRoot.appendingPathComponent("spikes/office-lok-gate", isDirectory: true)
@@ -75,7 +75,7 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// test asserts against THIS file's value, never a hardcoded second copy of the hash.
     private static var versionPinBuildId: String? {
         guard let content = try? String(
-            contentsOf: repoRoot.appendingPathComponent("apple/Norma/vendor/libreoffice/VERSION-PIN"),
+            contentsOf: repoRoot.appendingPathComponent("apple/Winter/vendor/libreoffice/VERSION-PIN"),
             encoding: .utf8) else { return nil }
         for line in content.split(separator: "\n", omittingEmptySubsequences: true) {
             if line.hasPrefix("LIBREOFFICE_CORE_COMMIT=") {
@@ -133,7 +133,7 @@ final class OfficeHelperLiveTests: XCTestCase {
         func linesSnapshot() -> [String] { lock.lock(); defer { lock.unlock() }; return lines }
     }
 
-    /// Spawns the REAL `NormaOfficeHelper` binary and completes the `hello` handshake, exactly the
+    /// Spawns the REAL `WinterOfficeHelper` binary and completes the `hello` handshake, exactly the
     /// sequence `OfficeHelperSupervisor.attemptOnce` runs in production (duplicated here rather
     /// than reused: the supervisor is `@MainActor`-bound and owns retry/backoff policy this test
     /// has no use for — this is the same "drive the wire protocol directly" shape
@@ -176,9 +176,9 @@ final class OfficeHelperLiveTests: XCTestCase {
         noSandbox: Bool = false
     ) async throws -> LiveHelper {
         let resolvedHelperURL = helperURL ?? Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: resolvedHelperURL.path),
-                      "NormaOfficeHelper was not built into this run (\(resolvedHelperURL.path)) — "
+                      "WinterOfficeHelper was not built into this run (\(resolvedHelperURL.path)) — "
                         + "add it to the scheme's build list and re-run.")
 
         let resolvedStateDir = stateDir ?? makeScratchDirectory()
@@ -360,7 +360,7 @@ final class OfficeHelperLiveTests: XCTestCase {
 
     /// **Fix round 1 (review F4) — the drift tripwire `officeReadWriteExtensions` itself cannot
     /// have.** `PanelEditorTab.swift`'s own header explains why a compile-time parity test against
-    /// `OfficeSaveFormat` cannot exist: the app target has no visibility into `NormaOfficeHelper`'s
+    /// `OfficeSaveFormat` cannot exist: the app target has no visibility into `WinterOfficeHelper`'s
     /// module (`OfficeDocumentBridge`'s own header in `OfficeHelperServer.swift`). This is the
     /// EMPIRICAL substitute the review names instead — a live assertion, against the REAL vendored
     /// LOK, that `saveAs` genuinely fails `unsupportedFormat` for `xlsm`/`odg`. `saveAsOnDedicatedThread`'s
@@ -947,7 +947,7 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// missing 2x2 (bundled/bare executable x standalone/embedded root, against a PRE-widening
     /// profile) and found root irrelevant — bare+embedded opens cleanly, bundled+standalone hangs.
     /// Bundling is the PROVEN trigger (the 2x2 above). **`NSBundle.main`'s own path-climbing
-    /// resolution finding Norma.app's real bundle identity only for the bundled exec, and THAT
+    /// resolution finding Winter.app's real bundle identity only for the bundled exec, and THAT
     /// being what makes `+[NSApplication initialize]` attempt real WindowServer/TCC/LaunchServices
     /// connections at all, is a plausible but UNTESTED mechanism hypothesis for WHY** — fix-round-2
     /// (security re-review, I1 residual) caught this stated as flat fact with no cell actually
@@ -972,9 +972,9 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// reintroduced) but inverted, since here "true today" is success, not failure.
     func testImpressAndWriterDocumentsOpenSuccessfullyViaTheEmbeddedInstallRootMatchingCalcAndTheStandaloneLokRoot() async throws {
         let appBundleURL = Bundle.main.bundleURL
-        let embeddedHelperURL = appBundleURL.appendingPathComponent("Contents/MacOS/NormaOfficeHelper")
+        let embeddedHelperURL = appBundleURL.appendingPathComponent("Contents/MacOS/WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: embeddedHelperURL.path),
-                      "NormaOfficeHelper was not embedded into this run's built app — this pin goes "
+                      "WinterOfficeHelper was not embedded into this run's built app — this pin goes "
                         + "live the moment a Debug build embeds it.")
 
         // Calc — a FRESH helper's FIRST document, via the embedded root — must keep working.
@@ -1004,10 +1004,10 @@ final class OfficeHelperLiveTests: XCTestCase {
 
     func testEmbeddedRootBootsAgainstTheRealBuiltAppAndBundleStaysUntouched() async throws {
         let appBundleURL = Bundle.main.bundleURL
-        let embeddedHelperURL = appBundleURL.appendingPathComponent("Contents/MacOS/NormaOfficeHelper")
+        let embeddedHelperURL = appBundleURL.appendingPathComponent("Contents/MacOS/WinterOfficeHelper")
         let embeddedLOKRoot = appBundleURL.appendingPathComponent("Contents/Resources/LibreOffice")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: embeddedHelperURL.path),
-                      "NormaOfficeHelper was not embedded into this run's built app (\(embeddedHelperURL.path)) "
+                      "WinterOfficeHelper was not embedded into this run's built app (\(embeddedHelperURL.path)) "
                         + "— the app target's postCompileScripts did not run for this build.")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: embeddedLOKRoot.appendingPathComponent("Frameworks").path),
                       "LibreOffice was not embedded into this run's built app (\(embeddedLOKRoot.path)).")
@@ -1163,8 +1163,8 @@ final class OfficeHelperLiveTests: XCTestCase {
     /// outcome — prints what actually happened either way (the advisor's own decision rule: "run
     /// with and without, disclose, don't ask"). A mirror of `LOKBridge.configureFontconfig`'s
     /// shape, not a call into it (that method is `private` inside a DIFFERENT target this test
-    /// bundle does not link — see LOKBridge.swift's own header for why NormaOfficeHelperFixture/
-    /// NormaAppTests stay LOK-symbol-free). **T3 review F1**: this mirror was updated alongside the
+    /// bundle does not link — see LOKBridge.swift's own header for why WinterOfficeHelperFixture/
+    /// WinterAppTests stay LOK-symbol-free). **T3 review F1**: this mirror was updated alongside the
     /// real method — see `LOKBridge.configureFontconfig`'s own header for what changed and why
     /// (own explicit `<dir>` list skipping `/System/Library/AssetsV2`, `<include>` of `conf.d`
     /// only, the 4 alias blocks inlined) — kept in sync so this test still exercises the SAME
@@ -1557,16 +1557,16 @@ final class OfficeHelperLiveTests: XCTestCase {
 
     /// The REAL-bridge counterpart to `OfficeSupervisorTests
     /// .testMulticastInvalidationReachesBothSubscribersWithPerConnectionSeqAndCloseByNonOwnerIsRefused`
-    /// (that test's own trigger is `NormaOfficeHelperFixture`'s synthetic `--mode multicastInvalidate`
+    /// (that test's own trigger is `WinterOfficeHelperFixture`'s synthetic `--mode multicastInvalidate`
     /// hook — proves the WIRE-LEVEL fan-out mechanics without booting real LOK). This test proves the
     /// same fan-out against a REAL edit: connection A opens+stages the document and subscribes;
     /// connection B (never the opener) subscribes to the SAME doc; a REAL keystroke posted on A's
     /// connection must multicast its `.invalidated` push to BOTH.
     func testMulticastInvalidationFromARealEditReachesBothSubscribersAgainstTheRealBridge() async throws {
         try skipUnlessVendorPresent()
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run — add it to the scheme's build list.")
+                      "WinterOfficeHelper was not built into this run — add it to the scheme's build list.")
         let stateDir = makeScratchDirectory()
         let socketPath = stateDir.appendingPathComponent("office.sock").path
         let token = "officelive-multicast-\(UUID().uuidString.prefix(8))"
@@ -1786,7 +1786,7 @@ final class OfficeHelperLiveTests: XCTestCase {
             XCTAssertEqual(pixels.count, TileMath.bytesPerTile, "\(key): tile byte count")
         }
         // At least the origin tile (which the six-format matrix already knows carries real
-        // "NORMA GATE" content) must be non-blank; edge tiles at this viewport's far corners may
+        // "WINTER GATE" content) must be non-blank; edge tiles at this viewport's far corners may
         // legitimately be blank if gate.xlsx's content doesn't reach that far — asserting non-blank
         // on the ORIGIN tile specifically is the honest, content-aware version of "non-blank."
         let originKey = TileKey(part: 0, zoomPPT: 1000, tileX: 0, tileY: 0)
@@ -2255,7 +2255,7 @@ final class OfficeHelperLiveTests: XCTestCase {
         // Deliberately NOT `makeScratchDirectory()` — this run's whole point is a human (or an
         // agent's own Read-tool image view) looking at the PNGs AFTER the test finishes, and
         // `tearDown()` deletes every `scratchDirs` entry the moment this test method returns.
-        let dumpDir = URL(fileURLWithPath: "/tmp/norma-livegate4-fix2-probe-pngs", isDirectory: true)
+        let dumpDir = URL(fileURLWithPath: "/tmp/winter-livegate4-fix2-probe-pngs", isDirectory: true)
         try? FileManager.default.createDirectory(at: dumpDir, withIntermediateDirectories: true)
         for (label, key) in [("origin-baseline", originKey), ("just-past-edge", justPastKey), ("far-past-edge", farPastKey)] {
             guard let pixels = pixelsByKey[key] else {
@@ -2381,7 +2381,7 @@ final class OfficeHelperLiveTests: XCTestCase {
 
             // Dumped bytes — the fixture's own seed text must survive the round trip.
             let sharedStrings = try readOOXMLEntry(atPath: savedPath, entry: "xl/sharedStrings.xml")
-            XCTAssertTrue(sharedStrings.contains("NORMA GATE"), "xlsx: seed text must survive the save")
+            XCTAssertTrue(sharedStrings.contains("WINTER GATE"), "xlsx: seed text must survive the save")
 
             // Reopen as a genuinely valid, re-loadable xlsx — not merely non-empty bytes.
             let reopenHelper = try await spawnLiveHelper()
@@ -2439,7 +2439,7 @@ final class OfficeHelperLiveTests: XCTestCase {
             // (`word/document.xml` existing AT ALL is itself the assertion that the DOCX export
             // filter ran: the failure this fixes produced no output file whatsoever.)
             let documentXML = try readOOXMLEntry(atPath: savedPath, entry: "word/document.xml")
-            XCTAssertTrue(documentXML.contains("NORMA GATE"), "docx: seed text must survive the save")
+            XCTAssertTrue(documentXML.contains("WINTER GATE"), "docx: seed text must survive the save")
             XCTAssertTrue(documentXML.contains("<w:body"), "docx: the saved part must be real "
                           + "WordprocessingML, not an ODF/other payload under a .docx name")
 
@@ -2681,7 +2681,7 @@ final class OfficeHelperLiveTests: XCTestCase {
     ///
     /// Three scenarios, each targeting a specific formula-bar design question (this task's own
     /// report records what each one actually found and the resulting wiring decision):
-    /// 1. **Full → empty → full** — click A1 ("NORMA GATE", real content) → click B2 (genuinely
+    /// 1. **Full → empty → full** — click A1 ("WINTER GATE", real content) → click B2 (genuinely
     ///    empty, per `two-sheet.ods`'s own seed) → click B1 (the number 42): does 19 fire on
     ///    EVERY cell move, including onto an empty cell? If it never fires there, a naive store
     ///    would leave stale content on screen against a fresh, empty cell's own ref unless the
@@ -2696,7 +2696,7 @@ final class OfficeHelperLiveTests: XCTestCase {
     ///    at its `"EMPTY"` sentinel (Task 5's own finding for in-cell edit mode)? This is the
     ///    brief's own "type → content updates" drill leg.
     ///
-    /// A1's/B1's own distinctive seed content ("NORMA GATE", "42") is the cross-check: whatever
+    /// A1's/B1's own distinctive seed content ("WINTER GATE", "42") is the cross-check: whatever
     /// type=19 sends must contain them verbatim, or this is not really the formula bar's own
     /// content.
     func testProbeInvestigatesWhetherCellFormulaCallbacksExistForTheFormulaBarsContent() async throws {
@@ -2713,7 +2713,7 @@ final class OfficeHelperLiveTests: XCTestCase {
         _ = try await helper.client.open(docId: docId, path: calcPath)
         try? await Task.sleep(nanoseconds: 500_000_000)
 
-        // --- Scenario 1+2: full (A1, "NORMA GATE") -> empty (B2) -> full (B1, 42). Column width
+        // --- Scenario 1+2: full (A1, "WINTER GATE") -> empty (B2) -> full (B1, 42). Column width
         // ~1280 twips (two-sheet.ods's own co1 style, 0.889in), row height ~256 twips (ro1,
         // 0.178in) — B2 sits in row 2 (y > 256), B1 in row 1 (y < 256), matching the fixture's own
         // seed content read directly off its content.xml.

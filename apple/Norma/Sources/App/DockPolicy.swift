@@ -8,8 +8,8 @@ import AppKit
 /// convention below stays absolute) — goes through `apply`, never through a raw
 /// `NSApp.setActivationPolicy`.
 ///
-/// Why a seam and not the after-each-case restore alone: `NormaAppTests` is HOSTED IN the real
-/// Norma.app, and xcodebuild's parallel testing runs many host clones. Any clone killed or
+/// Why a seam and not the after-each-case restore alone: `WinterAppTests` is HOSTED IN the real
+/// Winter.app, and xcodebuild's parallel testing runs many host clones. Any clone killed or
 /// cancelled mid-case — or promoted by late async work after its final case — used to EXIT while
 /// promoted, leaving a dead process's stale Dock tile behind (dozens per suite iteration; they
 /// vanish on a tap because the process is gone). `HarnessTeardownObserver`'s after-each-case

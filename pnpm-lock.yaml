@@ -20,22 +20,22 @@ importers:
 
   examples/battery-limiter:
     dependencies:
-      '@norma/plugin-sdk':
+      '@winter/plugin-sdk':
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
 
   examples/sample-echo:
     dependencies:
-      '@norma/plugin-sdk':
+      '@winter/plugin-sdk':
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
 
   packages/cli:
     dependencies:
-      '@norma/core':
+      '@winter/core':
         specifier: workspace:*
         version: link:../core
-      '@norma/protocol':
+      '@winter/protocol':
         specifier: workspace:*
         version: link:../protocol
       chalk:
@@ -69,7 +69,7 @@ importers:
 
   packages/core:
     dependencies:
-      '@norma/protocol':
+      '@winter/protocol':
         specifier: workspace:*
         version: link:../protocol
       unpdf:
@@ -81,7 +81,7 @@ importers:
 
   packages/plugin-sdk:
     dependencies:
-      '@norma/protocol':
+      '@winter/protocol':
         specifier: workspace:*
         version: link:../protocol
 

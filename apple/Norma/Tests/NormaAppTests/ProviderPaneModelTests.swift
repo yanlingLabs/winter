@@ -1,21 +1,21 @@
 import XCTest
-import NormaKit
-@testable import Norma
+import WinterKit
+@testable import Winter
 
 /// BYOK T2: `ProviderPaneModel`'s save flow — entered form values reach `configureProvider(...)`
 /// verbatim, a successful save fires the injected `onConfigured` closure (the daemon-restart hook,
 /// wired by `AppDelegate` in production) and refreshes the status row, and a thrown server error
 /// surfaces as `saveErrorText` without crashing or firing `onConfigured`. Drives a real (actor)
-/// `NormaClient` over the same scripted-transport double every other async pane-model test in this
+/// `WinterClient` over the same scripted-transport double every other async pane-model test in this
 /// target uses (`FeedScriptedTransport`/`feedLineJSON`/`feedWaitUntil`, `SessionFeedTests.swift`) —
 /// same posture as `MemoryPaneModelTests`/`PluginManagerModelAsyncTests`, no new client seam.
 @MainActor
 final class ProviderPaneModelTests: XCTestCase {
-    /// Opens + hellos a scripted `NormaClient`, mirroring `MemoryPaneModelTests.connectedClient()`
+    /// Opens + hellos a scripted `WinterClient`, mirroring `MemoryPaneModelTests.connectedClient()`
     /// exactly (send count 1 == `protocol.hello`).
-    private func connectedClient() async throws -> (NormaClient, FeedScriptedTransport) {
+    private func connectedClient() async throws -> (WinterClient, FeedScriptedTransport) {
         let t = FeedScriptedTransport()
-        let client = NormaClient(makeTransport: { t }, token: "tok", clientName: "provider-pane-test")
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "provider-pane-test")
         async let c: Void = client.connect()
         await feedWaitUntil { !t.sent.isEmpty }
         let hello = feedLineJSON(t.sent[0])
@@ -62,7 +62,7 @@ final class ProviderPaneModelTests: XCTestCase {
     }
 
     /// An empty (whitespace-trimmed) model field must be omitted from the wire params entirely —
-    /// same "omit, never null" convention `NormaClient.configureProvider` itself documents — so the
+    /// same "omit, never null" convention `WinterClient.configureProvider` itself documents — so the
     /// server falls back to its own default rather than receiving an explicit empty string.
     func testSaveOmitsModelFieldWhenLeftEmpty() async throws {
         let (client, t) = try await connectedClient()
@@ -112,7 +112,7 @@ final class ProviderPaneModelTests: XCTestCase {
     /// `canSave` gating — pure/synchronous, no RPC involved. An empty API key blocks Save
     /// regardless of the (defaulted, non-empty) base URL; a whitespace-only base URL blocks it too.
     func testCanSaveRequiresNonEmptyApiKeyAndBaseUrl() {
-        let client = NormaClientTestFactory.make()
+        let client = WinterClientTestFactory.make()
         let model = ProviderPaneModel(client: client)
 
         XCTAssertFalse(model.canSave, "empty apiKey must block save even with the default baseUrl")

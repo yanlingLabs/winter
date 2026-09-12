@@ -49,7 +49,7 @@ describe("filterCodeSessions", () => {
   });
 });
 
-describe("sessionModeMarker — `norma sessions`' inventory tag (MARKS, never hides)", () => {
+describe("sessionModeMarker — `winter sessions`' inventory tag (MARKS, never hides)", () => {
   test("code (absent or explicit) -> no marker", () => {
     expect(sessionModeMarker(undefined)).toBe("");
     expect(sessionModeMarker("code")).toBe("");
@@ -66,9 +66,9 @@ describe("sessionModeMarker — `norma sessions`' inventory tag (MARKS, never hi
   });
 });
 
-// Winter Phase 8d (Task 4.3): `norma sessions`' runtime tag — the RAW wire value, never a display
+// Winter Phase 8d (Task 4.3): `winter sessions`' runtime tag — the RAW wire value, never a display
 // label (that's the Mac app's job, WS-14 §14) — and blank whenever the daemon doesn't know.
-describe("sessionRuntimeMarker — `norma sessions`' runtime tag", () => {
+describe("sessionRuntimeMarker — `winter sessions`' runtime tag", () => {
   test("absent -> no marker", () => {
     expect(sessionRuntimeMarker(undefined)).toBe("");
   });
@@ -79,8 +79,8 @@ describe("sessionRuntimeMarker — `norma sessions`' runtime tag", () => {
 });
 
 describe("nonCodeRefusalMessage — attach/send/watch/resume refusal wording", () => {
-  test("chat -> points at the Norma app", () => {
-    expect(nonCodeRefusalMessage("chat")).toBe("chat sessions live in the Norma app");
+  test("chat -> points at the Winter app", () => {
+    expect(nonCodeRefusalMessage("chat")).toBe("chat sessions live in the Winter app");
   });
   test("dispatch -> points at the orb and the app", () => {
     expect(nonCodeRefusalMessage("dispatch")).toBe("dispatch lives in the orb and the app");
@@ -116,7 +116,7 @@ describe("checkCodeSession — shared attach/send/watch gate", () => {
 
   test("chat session -> refused with the chat-specific message", () => {
     const r = checkCodeSession(rows, "s-chat");
-    expect(r).toEqual({ ok: false, message: "chat sessions live in the Norma app" });
+    expect(r).toEqual({ ok: false, message: "chat sessions live in the Winter app" });
   });
 
   test("dispatch session -> refused with the dispatch-specific message", () => {

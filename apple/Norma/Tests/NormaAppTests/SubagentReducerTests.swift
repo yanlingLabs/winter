@@ -1,6 +1,6 @@
 import XCTest
-@testable import Norma
-import NormaProtocol
+@testable import Winter
+import WinterProtocol
 
 /// 2e-ii Task 3: the reducer's child-thread tracking — spec §2 table, Swift column (lifecycle +
 /// active spans; NO token fields, tokens are CLI-only). All timestamps are event.ts.

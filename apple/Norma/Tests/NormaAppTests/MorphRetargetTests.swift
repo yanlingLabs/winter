@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Regression coverage for review finding I1: `expandToField()` used to guard on
 /// `surface == .orb` only, so a re-summon that arrived mid-collapse (`surface` is still

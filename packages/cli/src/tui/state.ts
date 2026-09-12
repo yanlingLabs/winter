@@ -1,4 +1,4 @@
-/** Pure app-state reducer for the Ink TUI (Phase 3a Task 2) — THE HEART: composes Norma's existing
+/** Pure app-state reducer for the Ink TUI (Phase 3a Task 2) — THE HEART: composes Winter's existing
  *  tested reducers (`subagent-state.ts`'s `updateSubagents`, `task-block.ts`'s `upsertTask`) into
  *  ONE `TuiState` that every Ink component (Tasks 3-6) renders from. Every wire event in main.ts's
  *  interactive switch (packages/cli/src/main.ts:493-680) has an equivalent transition here.
@@ -37,12 +37,12 @@
  *  needs to call a LIVE child stalled before the daemon's watchdog kills it. Routing them here was
  *  mandatory rather than cosmetic: `tool_call` was already fed, so an unfed `tool_result` left the
  *  in-flight counter permanently climbing and every child mid-tool would have been mislabelled.
- *  (`norma -p`'s main.ts feeds this reducer every event already, so it needed no equivalent change.)
+ *  (`winter -p`'s main.ts feeds this reducer every event already, so it needed no equivalent change.)
  *
  *  PURE: `nowMs` is the caller's injected clock (App.tsx will tick it); `reduce` itself never calls
  *  `Date.now()`. ZERO Ink/React import — unit-testable in isolation (state.test.ts). */
 
-import type { ApprovalOption, ApprovalPolicy, SessionActivity, Task } from "@norma/protocol";
+import type { ApprovalOption, ApprovalPolicy, SessionActivity, Task } from "@winter/protocol";
 import { updateSubagents, type CliSubagent } from "../subagent-state";
 import { subagentTokens } from "../subagent-display";
 import { upsertTask } from "../task-block";
@@ -557,17 +557,17 @@ export function reduce(s: TuiState, e: WireEvent, nowMs: number): TuiState {
     // transcript. CLI-only — no Swift-lockstep twin; the -p path (main.ts) has no lease branch, so
     // headless output is unchanged.
     case "lease_granted": {
-      const text = `⌘ Norma acquired ${cuClassLabel(str(e.class))} control`;
+      const text = `⌘ Winter acquired ${cuClassLabel(str(e.class))} control`;
       return { ...s, committed: [...s.committed, { kind: "note", text }] };
     }
 
     case "lease_lost": {
-      const text = `⌘ Norma released ${cuClassLabel(str(e.class))} control (${str(e.reason)})`;
+      const text = `⌘ Winter released ${cuClassLabel(str(e.class))} control (${str(e.reason)})`;
       return { ...s, committed: [...s.committed, { kind: "note", text }] };
     }
 
     // task-30 (push-notification track): a minimal one-liner — the app's own delivery (native
-    // UNUserNotificationCenter alert, SessionModel.apply in the Norma target) is where the real
+    // UNUserNotificationCenter alert, SessionModel.apply in the Winter target) is where the real
     // "notification" happens; the CLI just needs a visible trace in the transcript, same class as
     // the CU lease notes above.
     case "notification_requested": {

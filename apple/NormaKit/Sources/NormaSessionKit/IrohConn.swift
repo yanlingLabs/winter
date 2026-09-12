@@ -1,15 +1,15 @@
 import Foundation
 import os
-import NormaProtocol
+import WinterProtocol
 import IrohLib
 
 /// One accepted phone connection over an iroh QUIC bidirectional stream, adapted to the
 /// gateway's frame-oriented `RemoteConn`. Owns its own `LengthPrefix` framing: `inbound`
 /// yields one whole de-framed frame per element; `send(_:)` wraps one frame and writes it.
 ///
-/// SP3 Task 2: extracted verbatim from `IrohListener.swift` (NormaKit) into `NormaSessionKit` so
+/// SP3 Task 2: extracted verbatim from `IrohListener.swift` (WinterKit) into `WinterSessionKit` so
 /// both sides of the transport can share ONE adapter — the Mac's `IrohListener` (accept side,
-/// still in NormaKit) and the new phone-side `IrohDialer` (this package) both produce one of
+/// still in WinterKit) and the new phone-side `IrohDialer` (this package) both produce one of
 /// these. No behavior changed by the move.
 ///
 /// LIFETIME (Task 0 ARC finding): the FFI `Connection` / `BiStream` / stream halves MUST be
@@ -21,7 +21,7 @@ import IrohLib
 /// freshly-opened bidi stream, `send(_:)` does not reliably flush until the OPENING side (the
 /// phone) has transmitted at least one byte on that stream — a `send()` attempted first, before
 /// the phone has sent anything at all, can hang indefinitely (reproduced via a throwaway
-/// diagnostic in `IrohListenerTests` during this task; not something NormaKit's Swift code
+/// diagnostic in `IrohListenerTests` during this task; not something WinterKit's Swift code
 /// controls). Every response path in this codebase already reads the phone's first frame before
 /// ever sending back (`Gateway.handle`, `PairingManager.handleConnection`,
 /// `PairingRouter`'s `sendNotPairedRejection`) for the wire protocol's own "phone always speaks
@@ -59,10 +59,10 @@ public final class IrohConn: RemoteConn, @unchecked Sendable {
     /// Purely-synchronous close bookkeeping (no `await` inside the critical section — G6).
     private let closed = OSAllocatedUnfairLock(initialState: false)
 
-    /// `public` (SP3 Task 2): both `IrohListener` (NormaKit, accept side) and `IrohDialer`
-    /// (NormaSessionKit, phone-dial side) construct this cross-module, so the initializer must be
+    /// `public` (SP3 Task 2): both `IrohListener` (WinterKit, accept side) and `IrohDialer`
+    /// (WinterSessionKit, phone-dial side) construct this cross-module, so the initializer must be
     /// visible outside this file's module — it was `internal` pre-move, when both constructors
-    /// lived in the same NormaKit module.
+    /// lived in the same WinterKit module.
     ///
     /// - Parameter ownedEndpoint: pass the phone's own dialing `Endpoint` here when constructing
     ///   from a dial (see the `ownedEndpoint` property's own doc comment on why) — `nil` (the

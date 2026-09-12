@@ -13,14 +13,14 @@ import Foundation
 ///
 /// **Deliberately depends on nothing else in this repo — not even `Dispatch` in its own PUBLIC
 /// surface (`Scheduling` is a plain closure struct).** This file is compiled into THREE separate
-/// targets: `NormaOfficeHelper` and `NormaOfficeHelperFixture` (both already sweep all of
-/// `Sources/OfficeHelper`), and `NormaAppTests` — via a direct `sources:` entry in project.yml
+/// targets: `WinterOfficeHelper` and `WinterOfficeHelperFixture` (both already sweep all of
+/// `Sources/OfficeHelper`), and `WinterAppTests` — via a direct `sources:` entry in project.yml
 /// mirroring `HelperSources/SMCController.swift`'s own precedent (a single non-Sources/AppShell
 /// file added straight to the test bundle) — so that CADENCE (arm/fire/re-fire/cancel) can be
 /// proven with an INJECTED clock: no real LOK, no socket, no subprocess, no wall-clock sleep, the
 /// house norm for a 60s timer. `OfficeDocumentBridge`/`OfficeDocumentEvent`/anything LOK-adjacent
-/// all live behind the bridging header or in `NormaAppTests`-invisible modules — a dependency on
-/// any of them here would make this file impossible to add to `NormaAppTests` at all, and cadence
+/// all live behind the bridging header or in `WinterAppTests`-invisible modules — a dependency on
+/// any of them here would make this file impossible to add to `WinterAppTests` at all, and cadence
 /// would be provable only live (real LOK, real wall-clock waits) — precisely what this split
 /// exists to avoid. See `OfficeHelperServer`'s own wiring for how the real docId/bridge/push
 /// machinery is layered back on top of this.

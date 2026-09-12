@@ -10,7 +10,7 @@ import {
 
 /** A local git repo with a minimal plugin layout, suitable for `git clone` off a plain path. */
 function makePluginFixtureRepo(): string {
-  const src = mkdtempSync(join(tmpdir(), "norma-plugin-src-"));
+  const src = mkdtempSync(join(tmpdir(), "winter-plugin-src-"));
   mkdirSync(join(src, "skills", "greet"), { recursive: true });
   writeFileSync(join(src, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: hi\n---\nbody");
   writeFileSync(join(src, "plugin.json"), JSON.stringify({ name: "ignored-manifest-name", version: "1.0.0" }));
@@ -26,7 +26,7 @@ function makePluginFixtureRepo(): string {
 describe("installPlugin", () => {
   test("clones a local fixture repo into <pluginsRoot>/<name>; a second install of the same name is refused", () => {
     const repo = makePluginFixtureRepo();
-    const pluginsRoot = mkdtempSync(join(tmpdir(), "norma-plugins-root-"));
+    const pluginsRoot = mkdtempSync(join(tmpdir(), "winter-plugins-root-"));
 
     const result = installPlugin({ url: repo, pluginsRoot });
     expect(result.name).toBe(basename(repo)); // derived from the repo's dirname (no override given)
@@ -38,8 +38,8 @@ describe("installPlugin", () => {
 
   test("an explicit name is honored and NEVER touches settings.json", () => {
     const repo = makePluginFixtureRepo();
-    const pluginsRoot = mkdtempSync(join(tmpdir(), "norma-plugins-root-"));
-    const settingsPath = join(pluginsRoot, "..", "settings.json"); // sibling of pluginsRoot, mirrors ~/.norma layout
+    const pluginsRoot = mkdtempSync(join(tmpdir(), "winter-plugins-root-"));
+    const settingsPath = join(pluginsRoot, "..", "settings.json"); // sibling of pluginsRoot, mirrors ~/.winter layout
 
     const result = installPlugin({ url: repo, name: "demo", pluginsRoot });
     expect(result.name).toBe("demo");
@@ -49,7 +49,7 @@ describe("installPlugin", () => {
 
   test("a traversal name is refused before any clone is attempted", () => {
     const repo = makePluginFixtureRepo();
-    const pluginsRoot = mkdtempSync(join(tmpdir(), "norma-plugins-root-"));
+    const pluginsRoot = mkdtempSync(join(tmpdir(), "winter-plugins-root-"));
     expect(() => installPlugin({ url: repo, name: "../escaped", pluginsRoot })).toThrow(/invalid plugin name/);
     expect(existsSync(join(pluginsRoot, "..", "escaped"))).toBe(false);
   });

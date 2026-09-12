@@ -9,7 +9,7 @@ import { FakeProvider } from "../../src/agent/fake-provider";
 import type { ModelInfo, Provider, ProviderEvent, TurnRequest } from "../../src/providers/types";
 
 function setup(script: ProviderEvent[][]) {
-  const home = mkdtempSync(join(tmpdir(), "norma-titles-home-"));
+  const home = mkdtempSync(join(tmpdir(), "winter-titles-home-"));
   const store = new SessionStore(home);
   const hub = new SessionHub(store);
   const provider = new FakeProvider(script);
@@ -52,7 +52,7 @@ class HangingProvider implements Provider {
 }
 
 /** A provider that resolves successfully after a short real delay — used to prove a malformed
- *  NORMA_TITLE_TIMEOUT_MS env value falls back to the documented default instead of NaN-ing
+ *  WINTER_TITLE_TIMEOUT_MS env value falls back to the documented default instead of NaN-ing
  *  setTimeout into an instant timeout. Mirrors dreamer-gates.test.ts's DelayedProvider. */
 class DelayedProvider implements Provider {
   readonly id = "delayed";
@@ -93,7 +93,7 @@ describe("SessionTitler", () => {
   });
 
   test("provider error → resolves without throwing, no event", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-titles-home-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-titles-home-"));
     const store = new SessionStore(home);
     const hub = new SessionHub(store);
     const titler = new SessionTitler({ provider: { provider: new ThrowingProvider(), model: "fake-1" }, store, hub });
@@ -127,7 +127,7 @@ describe("SessionTitler", () => {
 
   describe("carried-over review fix: timeout aborts the in-flight provider call", () => {
     test("timeoutMs elapses -> maybeTitle resolves without throwing, no event, provider's request.signal is aborted", async () => {
-      const home = mkdtempSync(join(tmpdir(), "norma-titles-home-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-titles-home-"));
       const store = new SessionStore(home);
       const hub = new SessionHub(store);
       const provider = new HangingProvider();
@@ -143,11 +143,11 @@ describe("SessionTitler", () => {
       expect(store.read(sessionId).filter((e) => e.type === "session_titled").length).toBe(0);
     });
 
-    test("malformed NORMA_TITLE_TIMEOUT_MS env value falls back to the default instead of NaN-ing an instant timeout", async () => {
-      const original = process.env.NORMA_TITLE_TIMEOUT_MS;
+    test("malformed WINTER_TITLE_TIMEOUT_MS env value falls back to the default instead of NaN-ing an instant timeout", async () => {
+      const original = process.env.WINTER_TITLE_TIMEOUT_MS;
       try {
-        process.env.NORMA_TITLE_TIMEOUT_MS = "not-a-number";
-        const home = mkdtempSync(join(tmpdir(), "norma-titles-home-"));
+        process.env.WINTER_TITLE_TIMEOUT_MS = "not-a-number";
+        const home = mkdtempSync(join(tmpdir(), "winter-titles-home-"));
         const store = new SessionStore(home);
         const hub = new SessionHub(store);
         const provider = new DelayedProvider(30); // resolves in 30ms — fine under the real default, fatal under NaN
@@ -162,8 +162,8 @@ describe("SessionTitler", () => {
         expect(events.length).toBe(1);
         expect((events[0] as any).title).toBe("Fixing the login flow");
       } finally {
-        if (original === undefined) delete process.env.NORMA_TITLE_TIMEOUT_MS;
-        else process.env.NORMA_TITLE_TIMEOUT_MS = original;
+        if (original === undefined) delete process.env.WINTER_TITLE_TIMEOUT_MS;
+        else process.env.WINTER_TITLE_TIMEOUT_MS = original;
       }
     });
   });

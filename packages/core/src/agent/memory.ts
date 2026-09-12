@@ -125,24 +125,24 @@ export function serializeIndex(entries: IndexEntry[]): string {
  * never throw — every failure mode is a typed `MemoryResult`/empty array, not an exception.
  */
 export class MemoryStore {
-  private readonly normaHome: string;
+  private readonly winterHome: string;
   private readonly trust: Pick<TrustStore, "isTrusted">;
   private readonly nowMs: () => number;
   /** Single-writer chain: every write()/delete() appends `.then(op)` here so mutations to the
    *  same (or different) scope's MEMORY.md never race. */
   private queue: Promise<unknown> = Promise.resolve();
 
-  constructor(deps: { normaHome: string; trust: Pick<TrustStore, "isTrusted">; nowMs?: () => number }) {
-    this.normaHome = deps.normaHome;
+  constructor(deps: { winterHome: string; trust: Pick<TrustStore, "isTrusted">; nowMs?: () => number }) {
+    this.winterHome = deps.winterHome;
     this.trust = deps.trust;
     this.nowMs = deps.nowMs ?? Date.now;
   }
 
-  /** user → `~/.norma/memory`; project → `<cwd>/.norma/memory`, gated on a trusted `cwd`. */
+  /** user → `~/.winter/memory`; project → `<cwd>/.winter/memory`, gated on a trusted `cwd`. */
   private resolveRoot(scope: MemoryScope, cwd?: string): MemoryResult<string> {
-    if (scope === "user") return { ok: true, value: join(this.normaHome, "memory") };
+    if (scope === "user") return { ok: true, value: join(this.winterHome, "memory") };
     if (!cwd || !this.trust.isTrusted(cwd)) return { ok: false, error: PROJECT_TRUST_ERROR, kind: "trust" };
-    return { ok: true, value: join(cwd, ".norma", "memory") };
+    return { ok: true, value: join(cwd, ".winter", "memory") };
   }
 
   list(scope: MemoryScope, cwd?: string): MemoryResult<MemoryFactMeta[]> {
@@ -177,10 +177,10 @@ export class MemoryStore {
   }
 
   private appendAudit(line: MemoryAuditLine): void {
-    // Audit ALWAYS lands under normaHome regardless of scope — a project-scope mutation is still
+    // Audit ALWAYS lands under winterHome regardless of scope — a project-scope mutation is still
     // recorded centrally, never inside the (possibly untrusted-later, shared, or gitignored)
     // project directory.
-    const auditPath = join(this.normaHome, "memory", "audit.jsonl");
+    const auditPath = join(this.winterHome, "memory", "audit.jsonl");
     mkdirSync(dirname(auditPath), { recursive: true });
     // Built field-by-field (not a spread of `line`) so fact bodies can never leak in here,
     // structurally, no matter what a future caller passes. This is the SINGLE point of truth for
@@ -273,7 +273,7 @@ export class MemoryStore {
   /** Newest LAST (file/append order) — caller slices further if it wants newest-first. Corrupt
    *  lines (bad JSON, or missing required fields) are skipped, never thrown. */
   auditTail(limit?: number): MemoryAuditLine[] {
-    const auditPath = join(this.normaHome, "memory", "audit.jsonl");
+    const auditPath = join(this.winterHome, "memory", "audit.jsonl");
     let raw: string;
     try { raw = readFileSync(auditPath, "utf8"); } catch { return []; }
     const out: MemoryAuditLine[] = [];

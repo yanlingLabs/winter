@@ -1,8 +1,8 @@
-// Semantic color theme for the TUI (Claude-Code-shaped keys, Norma's own accent).
+// Semantic color theme for the TUI (Claude-Code-shaped keys, Winter's own accent).
 // Values are hex strings suitable for Ink `color`/`backgroundColor` props and
 // for building `chalk.hex(...)` instances in the markdown/highlight pipeline.
 export const theme = {
-  accent: "#73BFFF", // Norma blue — replaces CC's brand key everywhere it appears
+  accent: "#73BFFF", // Winter blue — replaces CC's brand key everywhere it appears
   text: "#FFFFFF",
   subtle: "#505050",
   inactive: "#999999",

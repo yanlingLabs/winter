@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// office-plumbing Task 9 — the Office Harness's own drill-plan pins, in `EditorPlumbingTests`'
 /// style (`testTheStageADrillScriptCarriesEveryDrillInOrder`'s own rigor): step count, every drill
@@ -268,8 +268,8 @@ final class OfficeHarnessScriptTests: XCTestCase {
     /// `PanelTabKind` zod enum, read directly from source, must equal Swift's `PanelTabKind` cases
     /// exactly, in declaration order.
     func testPanelTabKindMatchesTheProtocolsOwnWireEnumExactly() throws {
-        // `#filePath` for this file is `<repoRoot>/apple/Norma/Tests/NormaAppTests/OfficeHarnessScriptTests.swift`
-        // — five `deletingLastPathComponent()` hops (the filename, NormaAppTests, Tests, Norma, apple)
+        // `#filePath` for this file is `<repoRoot>/apple/Winter/Tests/WinterAppTests/OfficeHarnessScriptTests.swift`
+        // — five `deletingLastPathComponent()` hops (the filename, WinterAppTests, Tests, Winter, apple)
         // reach `<repoRoot>`, the same climbing depth every other live-binary test in this suite uses.
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0..<5 { url = url.deletingLastPathComponent() }

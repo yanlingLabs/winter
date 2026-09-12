@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Wave-8 gate item 2 (bug report, screenshot-evidenced): a two-finger vertical drag over the
 /// expanded field failed to scroll the inline reply's `ScrollView` — `OrbWindowController`'s

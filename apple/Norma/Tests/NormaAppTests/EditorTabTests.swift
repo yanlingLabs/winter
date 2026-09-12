@@ -1,7 +1,7 @@
 import AppKit
-import NormaKit
+import WinterKit
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// editor-product Task 5 — **the code tab: a viewport onto the session's one editor.**
 ///
@@ -98,7 +98,7 @@ final class EditorTabTests: XCTestCase {
 
     /// The bridge messages the runtime has sent and **not yet been answered for**, by wire type,
     /// read out of the recorded CDP payloads rather than counted. `EditorBridgeOutbound.javascript`
-    /// is `window.normaEditor.dispatch({"type":…})`, and the params are JSON, so the type appears
+    /// is `window.winterEditor.dispatch({"type":…})`, and the params are JSON, so the type appears
     /// with its quotes escaped.
     ///
     /// Outstanding, not historical: `EditorCEFRecorder.answerNextCDP` REMOVES the entry it answers
@@ -258,9 +258,9 @@ final class EditorTabTests: XCTestCase {
     /// pin that is supposed to be reading the real call site.
     private func shellPanelCodeOnly() throws -> String {
         let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // NormaAppTests
+            .deletingLastPathComponent()   // WinterAppTests
             .deletingLastPathComponent()   // Tests
-            .deletingLastPathComponent()   // Norma
+            .deletingLastPathComponent()   // Winter
             .appendingPathComponent("Sources/AppShell/ShellPanel.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
         return source.split(separator: "\n", omittingEmptySubsequences: false)
@@ -310,9 +310,9 @@ final class EditorTabTests: XCTestCase {
     /// task's own edit replaced.
     private func shellSessionHostCodeOnly() throws -> String {
         let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // NormaAppTests
+            .deletingLastPathComponent()   // WinterAppTests
             .deletingLastPathComponent()   // Tests
-            .deletingLastPathComponent()   // Norma
+            .deletingLastPathComponent()   // Winter
             .appendingPathComponent("Sources/AppShell/ShellSessionHost.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
         return source.split(separator: "\n", omittingEmptySubsequences: false)
@@ -555,7 +555,7 @@ final class EditorTabTests: XCTestCase {
     func testARealMissingFileBecomesFileNotFoundAndNeverAModel() async {
         let harness = makeRuntime(files: nil)
         boot(harness)
-        let missing = NSTemporaryDirectory() + "norma-editor-tab-tests-\(UUID().uuidString)/gone.ts"
+        let missing = NSTemporaryDirectory() + "winter-editor-tab-tests-\(UUID().uuidString)/gone.ts"
 
         await harness.runtime.openFile(missing)
 

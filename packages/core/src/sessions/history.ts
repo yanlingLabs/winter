@@ -1,4 +1,4 @@
-import type { SessionEvent } from "@norma/protocol";
+import type { SessionEvent } from "@winter/protocol";
 import type { SessionStore } from "./store";
 
 /** The 10 persisted, phone-foldable event types history is allowed to return. Allowlist, never a

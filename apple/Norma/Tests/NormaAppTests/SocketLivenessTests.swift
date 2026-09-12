@@ -1,6 +1,6 @@
 import Darwin
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Whole-branch review regression: `DaemonSupervisorDeps.live`'s `socketExists` is a Unix-socket
 /// LIVENESS probe (`unixSocketIsLive`), not a file-presence check. The bug it guards against: a
@@ -10,7 +10,7 @@ import XCTest
 /// `acquireLock` unlinks the stale file → healthy.
 ///
 /// These tests operate ONLY on sockets under a per-test temp dir — never the real
-/// `~/.norma/run/core.sock`.
+/// `~/.winter/run/core.sock`.
 final class SocketLivenessTests: XCTestCase {
     private var tempDir: String!
 
@@ -92,7 +92,7 @@ final class SocketLivenessTests: XCTestCase {
         XCTAssertTrue(FileManager.default.createFile(atPath: stale, contents: Data()))
         var spawned = 0
         let s = DaemonSupervisor(deps: .init(
-            bundledDaemonPath: { "/x/norma-core" },
+            bundledDaemonPath: { "/x/winter-core" },
             socketExists: { unixSocketIsLive(path: stale) }, // the real .live probe, over the stale file
             isDevEnv: { false },
             spawn: { _ in spawned += 1; return FakeDaemonProcess() },
@@ -111,7 +111,7 @@ final class SocketLivenessTests: XCTestCase {
         defer { close(server); unlink(live) }
         var spawned = 0
         let s = DaemonSupervisor(deps: .init(
-            bundledDaemonPath: { "/x/norma-core" },
+            bundledDaemonPath: { "/x/winter-core" },
             socketExists: { unixSocketIsLive(path: live) },
             isDevEnv: { false },
             spawn: { _ in spawned += 1; return FakeDaemonProcess() },

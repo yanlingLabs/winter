@@ -1,6 +1,6 @@
 import XCTest
 import SwiftUI
-@testable import Norma
+@testable import Winter
 
 /// office-live-ux Job 1 — **stopping a turn from the app.**
 ///
@@ -90,8 +90,8 @@ final class ComposerStopButtonTests: XCTestCase {
 
     // MARK: - Layer 2: the card's own derivation, through its real initialiser
 
-    private func card(stop: ComposerStopControl?, draft: String) -> NormaComposerCard {
-        NormaComposerCard(
+    private func card(stop: ComposerStopControl?, draft: String) -> WinterComposerCard {
+        WinterComposerCard(
             text: .constant(draft),
             onSubmit: {},
             mode: .constant(.code),

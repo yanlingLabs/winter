@@ -45,7 +45,7 @@ own `Package.swift` wires this as two targets combined into one product:
 
 We mirror that shape here: `.binaryTarget(name: "Iroh", ...)` +
 `.target(name: "IrohLib", dependencies: ["Iroh"], path: "vendor/IrohLibSwift", ...)`.
-NormaKit and the test target then depend on `"IrohLib"` and `import IrohLib`,
+WinterKit and the test target then depend on `"IrohLib"` and `import IrohLib`,
 exactly as the brief intended — the deviation is purely in how that target gets
 assembled, not in the resulting import surface.
 
@@ -69,7 +69,7 @@ only) `CoreWLAN` linked — mirrored from upstream's `IrohLib` target
 ## How `Iroh` (the binaryTarget) is consumed (SP3 Task 3)
 
 `Package.swift`'s `Iroh` binaryTarget is what a REMOTE SPM consumer (the future
-private iOS app, resolving `NormaKit` as a package dependency over the network,
+private iOS app, resolving `WinterKit` as a package dependency over the network,
 with no `vendor/` checkout of its own) actually downloads. Two forms exist:
 
 **Default — `url:`/`checksum:` (what's committed):**

@@ -212,5 +212,5 @@ export class RoutineStore {
 }
 
 export function openRoutineStore(path?: string): RoutineStore {
-  return new RoutineStore(path ?? join(homedir(), ".norma", "routines.db"));
+  return new RoutineStore(path ?? join(homedir(), ".winter", "routines.db"));
 }

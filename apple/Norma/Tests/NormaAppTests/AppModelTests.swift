@@ -1,11 +1,11 @@
 import XCTest
-import NormaProtocol
-import NormaKit
-@testable import Norma
+import WinterProtocol
+import WinterKit
+@testable import Winter
 
-/// Minimal scripted transport for app-level tests (NormaTransport is public;
-/// NormaKit's own test helpers aren't exported, so we keep a local double).
-final class AppScriptedTransport: NormaTransport, @unchecked Sendable {
+/// Minimal scripted transport for app-level tests (WinterTransport is public;
+/// WinterKit's own test helpers aren't exported, so we keep a local double).
+final class AppScriptedTransport: WinterTransport, @unchecked Sendable {
     let incoming: AsyncStream<TransportEvent>
     private let cont: AsyncStream<TransportEvent>.Continuation
     private let lock = NSLock()

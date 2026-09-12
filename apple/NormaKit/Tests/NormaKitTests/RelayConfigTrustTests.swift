@@ -1,9 +1,9 @@
 import XCTest
-import NormaProtocol
-@testable import NormaKit
+import WinterProtocol
+@testable import WinterKit
 
 /// SP2b Task 6 Step 4: proves the bundled, committed `relay-config.signed.json` actually verifies
-/// against `RelayConfigTrust.productionPublicKey` — i.e. `RemoteAccessCoordinator` (apple/Norma)
+/// against `RelayConfigTrust.productionPublicKey` — i.e. `RemoteAccessCoordinator` (apple/Winter)
 /// will NOT silently fall back to direct-only relays at runtime because of a signing mistake.
 ///
 /// Uses ONLY public data: the signed config and its embedded signature are exactly what ships in
@@ -12,17 +12,17 @@ import NormaProtocol
 /// `scripts/sign-relay-config.ts --generate`).
 final class RelayConfigTrustTests: XCTestCase {
 
-    /// `apple/NormaKit/Tests/NormaKitTests/RelayConfigTrustTests.swift` -> repo root -> the app's
+    /// `apple/WinterKit/Tests/WinterKitTests/RelayConfigTrustTests.swift` -> repo root -> the app's
     /// bundled resource. Mirrors `RealDaemon.cliPackageDir`'s own `#filePath`-relative technique
     /// for finding a path outside this package without hardcoding an absolute one.
     private static var bundledResourceURL: URL {
         URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent() // .../NormaKitTests/RelayConfigTrustTests.swift -> .../NormaKitTests
-            .deletingLastPathComponent() // .../NormaKitTests -> .../Tests
-            .deletingLastPathComponent() // .../Tests -> .../NormaKit
-            .deletingLastPathComponent() // .../NormaKit -> .../apple
+            .deletingLastPathComponent() // .../WinterKitTests/RelayConfigTrustTests.swift -> .../WinterKitTests
+            .deletingLastPathComponent() // .../WinterKitTests -> .../Tests
+            .deletingLastPathComponent() // .../Tests -> .../WinterKit
+            .deletingLastPathComponent() // .../WinterKit -> .../apple
             .deletingLastPathComponent() // .../apple -> repo root
-            .appendingPathComponent("apple/Norma/Resources/relay-config.signed.json")
+            .appendingPathComponent("apple/Winter/Resources/relay-config.signed.json")
     }
 
     private func loadBundledSignedConfig() throws -> SignedRelayConfig {

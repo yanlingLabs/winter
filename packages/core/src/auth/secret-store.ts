@@ -8,10 +8,10 @@ export interface SecretStore {
 }
 
 // DD branch review rider: resolved ONCE at module load (unlike `launchdLabel()`'s call-time
-// `resolveNormaProfile()` default param) — deliberate, but it means `NORMA_PROFILE` must be set
-// in the environment BEFORE this module is first imported. Mutating `process.env.NORMA_PROFILE`
+// `resolveWinterProfile()` default param) — deliberate, but it means `WINTER_PROFILE` must be set
+// in the environment BEFORE this module is first imported. Mutating `process.env.WINTER_PROFILE`
 // afterward is inert; `SERVICE` will not re-resolve. This is why a launchd-installed dev daemon
-// MUST have `NORMA_PROFILE` baked into its plist's `EnvironmentVariables` (see
+// MUST have `WINTER_PROFILE` baked into its plist's `EnvironmentVariables` (see
 // `packages/cli/src/launchd.ts` `renderPlist`) rather than relying on any later mutation.
 const SERVICE = keychainService();
 

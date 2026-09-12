@@ -1,8 +1,8 @@
 import XCTest
 import SwiftUI
-import NormaProtocol
-import NormaKit
-@testable import Norma
+import WinterProtocol
+import WinterKit
+@testable import Winter
 
 /// Task 2 (2d-iii): the two PURE helpers behind the pending-interaction cards —
 /// `questionAnswers(for:selections:otherTexts:)` (UI selection state → the answers dict the

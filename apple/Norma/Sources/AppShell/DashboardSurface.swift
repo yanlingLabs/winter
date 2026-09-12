@@ -1,4 +1,4 @@
-import NormaKit
+import WinterKit
 import SwiftUI
 
 // -----------------------------------------------------------------------------------------------
@@ -8,7 +8,7 @@ import SwiftUI
 // `ShellNavigation.swift`), rendered by `ShellRootView.detail` exactly like `.mode`/`.session`.
 //
 // `DashboardWiring` is unchanged in KIND from its `DashboardWindowController`-era self — still
-// injection-only DATA/CLOSURES, never a `NormaClient` directly (the design review's own verified
+// injection-only DATA/CLOSURES, never a `WinterClient` directly (the design review's own verified
 // finding: pane moves are RE-HOSTING, not rewrites) — only WHO builds it and HOW OFTEN changed:
 // `AppDelegate.summonAppWindow` now builds it once, for the process lifetime (alongside
 // `ShellSessionHost`), where `DashboardWindowController.init` used to rebuild it fresh every time
@@ -42,7 +42,7 @@ enum DashboardPane: String, CaseIterable, Identifiable, Equatable {
 
 /// One named group in the sidebar — the "iOS-settings-informed groups + the Mac group" structure
 /// spec §4 calls for (R5: "the Mac AUTHORS the structure... Mac-only group appended"). iOS's own
-/// 4-section settings sheet (`norma-ios/Norma/App/SettingsView.swift`: "Your Mac", "OpenAI
+/// 4-section settings sheet (`norma-ios/Winter/App/SettingsView.swift`: "Your Mac", "OpenAI
 /// Account", "About") has no dashboard to mirror wholesale — it INFORMS three of these five names
 /// (Devices ~ "Your Mac", Provider ~ "OpenAI Account", This Mac ~ "About"); Memory and Automations
 /// are Mac-only additions with no phone analogue at all (the phone has no memory/plugin/workflow
@@ -143,7 +143,7 @@ final class DashboardSelectionModel: ObservableObject {
 
 // MARK: - Mountable-pane contract (spec §B / §4)
 
-/// The injected bundle every pane is built from — DATA or a CLOSURE, never a `NormaClient` itself
+/// The injected bundle every pane is built from — DATA or a CLOSURE, never a `WinterClient` itself
 /// (mirrors `SessionDirectory`'s own `lister` closure convention). Built ONCE, in
 /// `AppDelegate.summonAppWindow` (the one place that closes over the real client, alongside
 /// `ShellSessionHost`) — `DashboardWindowController.init`'s old role, now discharged at the shell's
@@ -170,8 +170,8 @@ struct DashboardWiring {
     // Task 7: the Mac-group additions (spec §4) — every one of these is an existing controller's
     // own action/state, newly SURFACED as a dashboard row rather than reachable from the menu bar
     // only; none of them is a new daemon/protocol capability.
-    /// `AppProfile.isDev` — `CliInstallerPane` reads this to decide between the dev `norma-dev`
-    /// wrapper story (`CliLauncher`) and the distribution `norma` symlink installer (`CliInstaller`),
+    /// `AppProfile.isDev` — `CliInstallerPane` reads this to decide between the dev `winter-dev`
+    /// wrapper story (`CliLauncher`) and the distribution `winter` symlink installer (`CliInstaller`),
     /// the SAME branch `MenuBarController.install()` already makes for the menu item.
     let isDevProfile: Bool
     /// `CliInstaller.currentPlan()` — a read-only probe, never installs anything by itself (same

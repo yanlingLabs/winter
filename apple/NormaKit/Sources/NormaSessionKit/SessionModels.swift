@@ -1,14 +1,14 @@
 import Foundation
-import NormaProtocol
+import WinterProtocol
 
-/// A decoded live/replay frame the UI consumes — `NormaSessionClient.events` yields these in
+/// A decoded live/replay frame the UI consumes — `WinterSessionClient.events` yields these in
 /// applied order. `json` is the frame payload as an opaque JSON tree (an event frame's payload is a
 /// `SessionEvent`; the client never re-types it, the UI does). `seq`/`streamID` are `nil` for
 /// non-event frames, present for events.
 ///
-/// The `json` type is `NormaProtocol`'s `SessionEvent.JSONValue` (the protocol-level JSON tree),
-/// NOT `NormaKit.JSONValue`: `NormaSessionKit` links only `NormaProtocol`, and naming a top-level
-/// `JSONValue` here would collide with `NormaKit.JSONValue` inside the `NormaKit` target that also
+/// The `json` type is `WinterProtocol`'s `SessionEvent.JSONValue` (the protocol-level JSON tree),
+/// NOT `WinterKit.JSONValue`: `WinterSessionKit` links only `WinterProtocol`, and naming a top-level
+/// `JSONValue` here would collide with `WinterKit.JSONValue` inside the `WinterKit` target that also
 /// imports this module.
 public struct SessionEnvelope: Sendable, Equatable {
     public let sessionID: String
@@ -66,7 +66,7 @@ public enum ApprovalState: Sendable, Equatable {
 /// past the deadline, the host has already failed the approval closed (`by:"timeout"`). Optional:
 /// `nil` means "never treat as locally expired" (always send and let the host answer).
 ///
-/// `optionId` (SP-approvals T4): which `ApprovalOption` (`NormaProtocol.SessionEvent.
+/// `optionId` (SP-approvals T4): which `ApprovalOption` (`WinterProtocol.SessionEvent.
 /// ApprovalOption`, carried on the triggering `approval_requested`/`approval.list` entry) the
 /// caller chose, by `id` — e.g. "allow_project" to persist a rule alongside this answer. `nil`
 /// (the default) means a plain approve/deny with no rule offered/chosen, identical to the wire
@@ -89,13 +89,13 @@ public struct ApprovalAnswer: Sendable, Equatable {
     }
 }
 
-/// Surfaced on `NormaSessionClient.gaps` when a stream's held-live buffer overflows — a replay
+/// Surfaced on `WinterSessionClient.gaps` when a stream's held-live buffer overflows — a replay
 /// batch that can no longer complete, i.e. the client is genuinely too far behind to catch up
 /// in-stream. The consumer (T8's iOS Code-mode model) reacts by re-handshaking with a snapshot
 /// resume for `(sessionID, streamID)`; the client stops applying that stream's events until then.
 /// NOT fired for benign forward seq jumps (T5 conformance fix): the gateway filters harness
 /// bookkeeping events that still consume daemon seqs, so holes between received content seqs are
-/// normal on the reliable, ordered transport — see `NormaSessionClient.applyEvent`'s contract
+/// normal on the reliable, ordered transport — see `WinterSessionClient.applyEvent`'s contract
 /// comment. Real loss/staleness is handled at the handshake via the `.snapshotRequired` verdict.
 public struct GapSignal: Sendable, Equatable {
     public let sessionID: String
@@ -113,7 +113,7 @@ public struct GapSignal: Sendable, Equatable {
     }
 }
 
-/// Surfaced on `NormaSessionClient.persistErrors` when a `CursorStore.advance` throws AFTER its
+/// Surfaced on `WinterSessionClient.persistErrors` when a `CursorStore.advance` throws AFTER its
 /// event was yielded (T4 review minor 1). The failure direction is safe — the cursor stays behind,
 /// so the event is re-delivered (and deduped) on the next resume, never skipped — but a PERSISTENT
 /// write failure (disk full, bad perms) would silently defeat crash-durability forever, so it must
@@ -136,7 +136,7 @@ public struct CursorPersistFailure: Sendable, Equatable {
     }
 }
 
-/// Errors `NormaSessionClient` throws.
+/// Errors `WinterSessionClient` throws.
 public enum SessionClientError: Error, Equatable {
     /// `handshake` waited past its first-frame read deadline without a `helloAck` (a silent conn).
     case handshakeTimeout
@@ -155,7 +155,7 @@ public enum SessionClientError: Error, Equatable {
     ///
     /// `data` is the JSON-RPC error object's OPTIONAL third member, carried verbatim (Chat Slice D
     /// T12 / whole-branch WB-C1). It is not decoration: `sync.push` answers a base-seq mismatch with
-    /// `ERR.DIVERGED` whose `data.lastSeq` is the daemon's own head, and `NormaChatKit.SyncClient`
+    /// `ERR.DIVERGED` whose `data.lastSeq` is the daemon's own head, and `WinterChatKit.SyncClient`
     /// branches on THAT number — `0` means "the daemon holds nothing, re-push from seq 1", `> 0` is a
     /// real branch point that forks. The Mac gateway was fixed to relay `data` through
     /// (`Gateway.handleRpc`); dropping it HERE would put the phone back where it started, and the
@@ -170,8 +170,8 @@ public enum SessionClientError: Error, Equatable {
 
 // MARK: - JSONValue accessors
 
-/// `NormaProtocol`'s `SessionEvent.JSONValue` ships no ergonomic accessors (unlike
-/// `NormaKit.JSONValue`); `NormaSessionKit` adds the few it needs to read RPC results/params
+/// `WinterProtocol`'s `SessionEvent.JSONValue` ships no ergonomic accessors (unlike
+/// `WinterKit.JSONValue`); `WinterSessionKit` adds the few it needs to read RPC results/params
 /// without a full typed decode.
 extension SessionEvent.JSONValue {
     public subscript(key: String) -> SessionEvent.JSONValue? {

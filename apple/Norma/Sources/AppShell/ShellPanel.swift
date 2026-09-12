@@ -917,7 +917,7 @@ func panelTabDisplayTitle(_ tab: PanelTab) -> String {
 /// So the fold's answer for a live background tab is "whatever the URL was called at commit", and
 /// it stays that way until the user shows the tab. The LIVE model has had the real title the whole
 /// time: `OnTitleChange` → `NotifyState` → the state channel → `PanelWebTabModel.title`, parked or
-/// not (`NormaCEF.mm`). This is the one line that prefers it.
+/// not (`WinterCEF.mm`). This is the one line that prefers it.
 ///
 /// **`PanelWebTabModels.existing` is the liveness test, deliberately** — not
 /// `BrowserRuntime.isLive(tabId:)`. The strip must not reach for the app's one global runtime to

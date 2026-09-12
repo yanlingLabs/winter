@@ -1,16 +1,16 @@
 import Foundation
 import os
-import NormaProtocol
+import WinterProtocol
 import IrohLib
 
 /// Reusable phone-side iroh dial (SP3 Task 2): binds an iroh endpoint from the phone's own
 /// identity secret, dials the Mac by its bare `EndpointID`, verifies the peer actually reached is
 /// who was promised, opens the bidi stream, and wraps it in an `IrohConn` — the SAME adapter the
-/// Mac's `IrohListener` (accept side, still in NormaKit) hands to the gateway, so both directions
+/// Mac's `IrohListener` (accept side, still in WinterKit) hands to the gateway, so both directions
 /// of this transport speak the identical `RemoteConn` contract.
 ///
-/// Lifted from `norma-fake-phone`'s hand-rolled `--attach` reconnect dial
-/// (`Sources/norma-fake-phone/main.swift:171-189`), which stays as its own hand-rolled copy for
+/// Lifted from `winter-fake-phone`'s hand-rolled `--attach` reconnect dial
+/// (`Sources/winter-fake-phone/main.swift:171-189`), which stays as its own hand-rolled copy for
 /// now — SP3 Task 5 switches that CLI over to calling this instead. `PhonePairingClient`'s own
 /// production (non-test) dial path resolves the Mac the identical way (bare `macEndpointID`, no
 /// direct address, no relay by default) — this is that same proven shape, generalized into a
@@ -58,7 +58,7 @@ public enum IrohDialer {
     ///     the bare-id dial below (no `relayUrl` hint) is exactly what discovery needs.
     ///   - connectTimeout: bounds dialing + opening the bidi stream. iroh-ffi's generated async
     ///     calls ignore Swift task cancellation (this codebase's established, repeatedly-verified
-    ///     finding — see `PhonePairingClient`/`IrohE2ETests`/`norma-fake-phone`'s own identical
+    ///     finding — see `PhonePairingClient`/`IrohE2ETests`/`winter-fake-phone`'s own identical
     ///     `withTimeout` idioms), so this is a first-wins race between two UNSTRUCTURED tasks,
     ///     never a `withThrowingTaskGroup` (which awaits every child on scope exit and would hang
     ///     right along with a stuck one).

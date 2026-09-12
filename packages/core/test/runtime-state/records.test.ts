@@ -101,7 +101,7 @@ describe("RuntimeSessionRecords", () => {
           newRecord(home, "s_opt", {
             capabilities: ["messaging", "handoff"],
             connectionRef: "conn_1",
-            effectiveTempDir: "/private/tmp/norma-501/s_opt",
+            effectiveTempDir: "/private/tmp/winter-501/s_opt",
             parentWinterSessionId: "s_parent",
             lastVerifiedClaudeConsumer: "2.0.1",
           }),

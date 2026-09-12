@@ -1,7 +1,7 @@
 {
   "id": "sample-echo",
   "name": "Sample Echo",
-  "description": "Reference Tier-2 (platform) plugin for @norma/plugin-sdk — echoes text back through a real supervised child process and offers a delay tool for kill/restart testing.",
+  "description": "Reference Tier-2 (platform) plugin for @winter/plugin-sdk — echoes text back through a real supervised child process and offers a delay tool for kill/restart testing.",
   "version": "0.0.1",
   "tier": "platform",
   "permissions": { "exec": true },

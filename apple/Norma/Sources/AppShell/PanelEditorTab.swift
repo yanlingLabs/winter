@@ -1,6 +1,6 @@
 import AppKit
 import Combine
-import NormaKit
+import WinterKit
 import SwiftUI
 
 // MARK: - Metrics
@@ -76,7 +76,7 @@ func editorTabSessionRoots(sessionId: String?, rows: [SessionSummary]) -> Editor
 /// **Wire safety, not UX.** Calling `ShellSessionHost.openFilesTab(sessionId:)` mints a
 /// `panel_tab_opened kind:"files"` event into the session's OWN log, and that log replicates
 /// BYTE-VERBATIM to a phone (no re-encode) — including to a phone whose currently-pinned
-/// `NormaProtocol` carries a CLOSED `PanelTabKind` enum that has never seen `"files"` and fails to
+/// `WinterProtocol` carries a CLOSED `PanelTabKind` enum that has never seen `"files"` and fails to
 /// decode it. The whole branch's no-Swift-kit-tag ruling rests on that string never reaching a
 /// session a phone might replay, which is why the control this gates must render as genuinely
 /// ABSENT — not merely disabled — on any session `editorTabSessionRoots` does not resolve to
@@ -90,7 +90,7 @@ func panelFilesDoorShown(sessionId: String?, rows: [SessionSummary]) -> Bool {
 
 /// **Office Stage B Task 9 — the formats with a genuine, WORKING save story.** Started life as an
 /// exact mirror of `LOKBridge.OfficeSaveFormat`'s own six cases, as a second, INTENTIONAL copy: the
-/// app target has no visibility into `NormaOfficeHelper`'s own module (`OfficeSaveFormat` lives in
+/// app target has no visibility into `WinterOfficeHelper`'s own module (`OfficeSaveFormat` lives in
 /// `Sources/OfficeHelper`, excluded from the app's own sources sweep — `OfficeDocumentBridge`'s own
 /// header in `OfficeHelperServer.swift` explains why), so there is no way to import it directly.
 /// Read this as the boundary `officeDocumentIsReadOnlyFormat` draws, not as a router — nothing
@@ -365,7 +365,7 @@ func editorViewportPlan(targetPath: String?,
 
 /// PURE: what the CHROME row calls the file — the last two path components, `fileDiffChipDisplayPath`
 /// verbatim rather than a second implementation of the same rule. It is the same rule for the same
-/// reason (design spec §3's "like the `norma v2/core` example": enough to disambiguate the dozen
+/// reason (design spec §3's "like the `winter v2/core` example": enough to disambiguate the dozen
 /// `index.ts`es a real project has, short enough for one row), and two copies of it would drift the
 /// moment one of them learned about `~`.
 ///

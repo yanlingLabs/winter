@@ -1,8 +1,8 @@
 import XCTest
 import SwiftUI
-import NormaProtocol
-import NormaKit
-@testable import Norma
+import WinterProtocol
+import WinterKit
+@testable import Winter
 
 /// Task 10 (Chat Slice D): the header's model menu (`WindowContentView`'s `modelMenuButton`/
 /// `modelMenuContent`, beside the existing ⋯ policy picker). Same PURE-HELPER idiom as
@@ -165,13 +165,13 @@ final class ModelPickerTests: XCTestCase {
     // `AppModel.setSessionModel` itself, all resolve through.
 
     /// Each of `HandoffRpcCode`'s four wire codes maps to its own `ModelChangeOutcome` case, and a
-    /// plain success maps to `.ok` — proved against a REAL `NormaClient` over a scripted
+    /// plain success maps to `.ok` — proved against a REAL `WinterClient` over a scripted
     /// transport (not a stub of `applyModelChange` itself), so this also pins the wire shape:
     /// `confirmLossy` defaults `false` and the confirm-sheet's resend sets it `true`.
     @MainActor
     func testApplyModelChangeMapsEachHandoffCodeAndPlainSuccess() async throws {
         let t = AppScriptedTransport()
-        let client = NormaClient(makeTransport: { t }, token: "tok", clientName: "apply-model-change-test")
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "apply-model-change-test")
         let connectTask = Task { try? await client.connect() }
         await waitUntilSent(t, 1)
         let hello = lineJSON(t.sent[0])
@@ -228,7 +228,7 @@ final class ModelPickerTests: XCTestCase {
 
     // MARK: - T1 deferred item, closed: listSessions() → SessionSummary.model, end to end
 
-    /// Proves `model` genuinely threads from the wire through `NormaKit.listSessions()` into
+    /// Proves `model` genuinely threads from the wire through `WinterKit.listSessions()` into
     /// `AppModel.directory.rows` — not merely decoded and dropped. Mirrors
     /// `PolicyMenuTests.testOrbUpdateIsChatSessionTracksARealDirectoryRoundTrip`'s "real scripted
     /// round trip, not a hand-fed array" posture, EXCEPT the directory's own boot-time
@@ -727,7 +727,7 @@ final class ModelPickerTests: XCTestCase {
     }
 
     /// `sync.config` reaches the app model — the catalogue the pickers read, over a HARNESS
-    /// connection (the method is role-agnostic; NormaKit had no wrapper at all before T6).
+    /// connection (the method is role-agnostic; WinterKit had no wrapper at all before T6).
     @MainActor
     func testAppModelFetchesTheModelCatalogue() async throws {
         let t = AppScriptedTransport()
@@ -893,9 +893,9 @@ final class ModelPickerTests: XCTestCase {
 // MARK: - Winter Phase 8d (P8d-8, fix round 1): AppModel.readAdvisorModelFromSettings /
 // writeAdvisorModelToSettings — the D30 advisor setting's direct-file-I/O door (`AppModel`'s own
 // doc: the SAME pattern `UpdaterCoordinator.readChannelFromSettings()` already uses,
-// `UpdaterCoordinatorTests.testReadChannelFromSettingsFile`'s own `setenv("NORMA_HOME", …)` +
+// `UpdaterCoordinatorTests.testReadChannelFromSettingsFile`'s own `setenv("WINTER_HOME", …)` +
 // temp-dir technique reused verbatim here). Both functions resolve the settings path through
-// `AppProfile.normaHome`, which reads the SAME raw `NORMA_HOME` env var `NormaPaths.
+// `AppProfile.winterHome`, which reads the SAME raw `WINTER_HOME` env var `WinterPaths.
 // homeDirectory()` reads (via `getenv`, not `ProcessInfo.environment` — `AppProfile.swift`'s own
 // doc explains why both must agree), so overriding the env var redirects both functions at once.
 //
@@ -939,23 +939,23 @@ final class AdvisorSettingsTests: XCTestCase {
 
     func testReadOfAMissingSettingsFileIsNil() throws {
         let dir = try tempHome()
-        setenv("NORMA_HOME", dir.path, 1)
-        defer { unsetenv("NORMA_HOME") }
+        setenv("WINTER_HOME", dir.path, 1)
+        defer { unsetenv("WINTER_HOME") }
         XCTAssertNil(AppModel.readAdvisorModelFromSettings(), "no settings.json at all -> nil, never a guess")
     }
 
     func testReadOfAMissingAdvisorKeyIsNil() throws {
         let dir = try tempHome()
-        setenv("NORMA_HOME", dir.path, 1)
-        defer { unsetenv("NORMA_HOME") }
+        setenv("WINTER_HOME", dir.path, 1)
+        defer { unsetenv("WINTER_HOME") }
         try write(Self.realisticFixture, to: dir) // no runtimes.advisorModel key at all
         XCTAssertNil(AppModel.readAdvisorModelFromSettings())
     }
 
     func testReadReturnsTheStoredAdvisorModelVerbatim() throws {
         let dir = try tempHome()
-        setenv("NORMA_HOME", dir.path, 1)
-        defer { unsetenv("NORMA_HOME") }
+        setenv("WINTER_HOME", dir.path, 1)
+        defer { unsetenv("WINTER_HOME") }
         try write(#"{"schemaVersion":2,"runtimes":{"advisorModel":"claude-fable-5"}}"#, to: dir)
         XCTAssertEqual(AppModel.readAdvisorModelFromSettings(), "claude-fable-5")
     }
@@ -964,8 +964,8 @@ final class AdvisorSettingsTests: XCTestCase {
     /// (settings.ts): a blank string is never surfaced as a model id.
     func testReadOfABlankStoredValueIsNil() throws {
         let dir = try tempHome()
-        setenv("NORMA_HOME", dir.path, 1)
-        defer { unsetenv("NORMA_HOME") }
+        setenv("WINTER_HOME", dir.path, 1)
+        defer { unsetenv("WINTER_HOME") }
         try write(#"{"schemaVersion":2,"runtimes":{"advisorModel":"   "}}"#, to: dir)
         XCTAssertNil(AppModel.readAdvisorModelFromSettings())
     }
@@ -975,8 +975,8 @@ final class AdvisorSettingsTests: XCTestCase {
     /// (`Settings.parse`'s own shape) — never a whole-block replace.
     func testWritePreservesSiblingRuntimesKeysAndUnrelatedTopLevelKeys() throws {
         let dir = try tempHome()
-        setenv("NORMA_HOME", dir.path, 1)
-        defer { unsetenv("NORMA_HOME") }
+        setenv("WINTER_HOME", dir.path, 1)
+        defer { unsetenv("WINTER_HOME") }
         try write(Self.realisticFixture, to: dir)
 
         XCTAssertTrue(AppModel.writeAdvisorModelToSettings("gpt-5.6-astra"))
@@ -1009,8 +1009,8 @@ final class AdvisorSettingsTests: XCTestCase {
     /// `nil` clears the key entirely (never writes an empty string) — the picker's "Automatic" row.
     func testWriteNilClearsTheKeyEntirely() throws {
         let dir = try tempHome()
-        setenv("NORMA_HOME", dir.path, 1)
-        defer { unsetenv("NORMA_HOME") }
+        setenv("WINTER_HOME", dir.path, 1)
+        defer { unsetenv("WINTER_HOME") }
         try write(#"{"schemaVersion":2,"runtimes":{"advisorModel":"claude-fable-5","winterExecutable":"/x"}}"#, to: dir)
 
         XCTAssertTrue(AppModel.writeAdvisorModelToSettings(nil))
@@ -1023,13 +1023,13 @@ final class AdvisorSettingsTests: XCTestCase {
     }
 
     /// A blank/whitespace-only string clears the key exactly like `nil` — "auto"'s own spelling in
-    /// `norma model --advisor auto` maps to `nil` before this function ever sees it, but the
+    /// `winter model --advisor auto` maps to `nil` before this function ever sees it, but the
     /// function itself must not special-case that: a blank string arriving by any other path
     /// (a future caller) gets the identical blank-is-absent treatment `settings.ts` documents.
     func testWriteBlankStringClearsTheKeyLikeNil() throws {
         let dir = try tempHome()
-        setenv("NORMA_HOME", dir.path, 1)
-        defer { unsetenv("NORMA_HOME") }
+        setenv("WINTER_HOME", dir.path, 1)
+        defer { unsetenv("WINTER_HOME") }
         try write(#"{"schemaVersion":2,"runtimes":{"advisorModel":"claude-fable-5"}}"#, to: dir)
 
         XCTAssertTrue(AppModel.writeAdvisorModelToSettings("   "))
@@ -1044,8 +1044,8 @@ final class AdvisorSettingsTests: XCTestCase {
     /// no OTHER top-level key invented.
     func testWriteOnAFreshHomeWithNoSettingsFileCreatesOne() throws {
         let dir = try tempHome()
-        setenv("NORMA_HOME", dir.path, 1)
-        defer { unsetenv("NORMA_HOME") }
+        setenv("WINTER_HOME", dir.path, 1)
+        defer { unsetenv("WINTER_HOME") }
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("settings.json").path))
 
         XCTAssertTrue(AppModel.writeAdvisorModelToSettings("claude-opus-5"))
@@ -1065,8 +1065,8 @@ final class AdvisorSettingsTests: XCTestCase {
     /// resetting every other setting in the file).
     func testWriteOnAnUnparseableSettingsFileLeavesItByteIdenticalAndReportsFalse() throws {
         let dir = try tempHome()
-        setenv("NORMA_HOME", dir.path, 1)
-        defer { unsetenv("NORMA_HOME") }
+        setenv("WINTER_HOME", dir.path, 1)
+        defer { unsetenv("WINTER_HOME") }
         let malformed = #"{"schemaVersion": 2, "provider": { unterminated"#
         try write(malformed, to: dir)
         let before = try Data(contentsOf: dir.appendingPathComponent("settings.json"))
@@ -1083,8 +1083,8 @@ final class AdvisorSettingsTests: XCTestCase {
     /// as truncated JSON from this function's point of view, and must refuse identically.
     func testWriteOnASettingsFileWhoseRootIsNotAnObjectLeavesItUntouchedAndReportsFalse() throws {
         let dir = try tempHome()
-        setenv("NORMA_HOME", dir.path, 1)
-        defer { unsetenv("NORMA_HOME") }
+        setenv("WINTER_HOME", dir.path, 1)
+        defer { unsetenv("WINTER_HOME") }
         try write(#"["not", "an", "object"]"#, to: dir)
         let before = try Data(contentsOf: dir.appendingPathComponent("settings.json"))
 
@@ -1101,8 +1101,8 @@ final class AdvisorSettingsTests: XCTestCase {
     /// string-replace would not.
     func testWrittenFileStaysShapeCompatibleWithTheDaemonsSettingsSchema() throws {
         let dir = try tempHome()
-        setenv("NORMA_HOME", dir.path, 1)
-        defer { unsetenv("NORMA_HOME") }
+        setenv("WINTER_HOME", dir.path, 1)
+        defer { unsetenv("WINTER_HOME") }
         try write(Self.realisticFixture, to: dir)
 
         XCTAssertTrue(AppModel.writeAdvisorModelToSettings("gpt-5.6-luna"))

@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// app-shell T8 (spec §3): `fileRendersAsText` is the one PURE decision behind `FileViewer` — the
 /// rest of that view (the `QLPreviewView` embedding, the Open-in-default-app/Reveal-in-Finder

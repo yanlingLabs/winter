@@ -1,11 +1,11 @@
 import Foundation
 import Combine
-import NormaProtocol
+import WinterProtocol
 
 /// Pure, AppKit-free state machine backing the Mac's pairing QR sheet (SP2b Task 5). Lives in
-/// NormaKit (not the app target) specifically so it's testable in `NormaKitTests` — the app has
+/// WinterKit (not the app target) specifically so it's testable in `WinterKitTests` — the app has
 /// no unit-test bundle for this feature (SP2b T5 global constraint: "the app-side coordinator/
-/// views get NO unit tests ... ALL testable logic goes in the NormaKit model"). The app's
+/// views get NO unit tests ... ALL testable logic goes in the WinterKit model"). The app's
 /// `PairingSheetView` only ever reads `state` and forwards taps to `confirmTapped`/`denyTapped`/
 /// `regenerate` — it owns no state of its own beyond the label `TextField`'s live text.
 ///

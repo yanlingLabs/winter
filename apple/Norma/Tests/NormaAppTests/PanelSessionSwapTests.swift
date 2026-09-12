@@ -1,10 +1,10 @@
 import XCTest
-import NormaProtocol
-@testable import Norma
+import WinterProtocol
+@testable import Winter
 
 /// panel-shell T9: proves `PanelTabsBySession`'s session-keyed swap semantics — the brief's three
 /// scenarios, verbatim in name and assertion. `PanelTabOpened`/`PanelTabNavigated` etc. expose no
-/// public memberwise init outside the NormaProtocol module (only `Codable`'s synthesized
+/// public memberwise init outside the WinterProtocol module (only `Codable`'s synthesized
 /// `init(from:)` is public — see `PanelTabFoldTests.ev(_:)`'s own doc comment for the same fact),
 /// so — exactly like that sibling file — events here are built by decoding wire JSON, never by
 /// calling an enum case with the struct's field names as labels.

@@ -1,4 +1,4 @@
-#import "NormaCEF.h"
+#import "WinterCEF.h"
 
 #import <Cocoa/Cocoa.h>
 #import <objc/runtime.h>
@@ -28,7 +28,7 @@
 #include "include/cef_devtools_message_observer.h"
 #include "include/cef_parser.h"
 #include "include/cef_registration.h"
-// editor-plumbing Task 2 — the `norma-editor://` scheme. `cef_resource_handler.h` and
+// editor-plumbing Task 2 — the `winter-editor://` scheme. `cef_resource_handler.h` and
 // `cef_response.h` both arrive transitively through `cef_scheme.h`; named because this file
 // IMPLEMENTS `CefResourceHandler` and `CefSchemeHandlerFactory`.
 #include "include/cef_resource_handler.h"
@@ -42,13 +42,13 @@
 // under XCTest) and the scheme's own registration, which is shared verbatim with the five helper
 // processes' `CefApp` (see that header for why they are a different class and must not be a
 // different scheme list).
-#import "NormaCEFAssetResolve.h"
+#import "WinterCEFAssetResolve.h"
 // editor-plumbing Task 3 — the `cefQuery` router's configuration, which the RENDERER processes
-// construct from the same function (`NormaEditorScheme.h`'s `NormaSubprocessApp`). Named here
+// construct from the same function (`WinterEditorScheme.h`'s `WinterSubprocessApp`). Named here
 // rather than taken transitively through that header because this file implements the BROWSER side:
 // `CefMessageRouterBrowserSide::Handler`, below.
-#include "NormaEditorBridge.h"
-#include "NormaEditorScheme.h"
+#include "WinterEditorBridge.h"
+#include "WinterEditorScheme.h"
 
 // panel-cef Task 6a — CEF driven from the run loop SwiftUI already owns.
 //
@@ -84,7 +84,7 @@
 //      perf-probe task, 2026-08-18, instrumented copy + CDP, no code shipped from the probe) went
 //      looking for that frame specifically and DISPROVED it:
 //
-//        - Every CEF page in Norma — the editor AND a blank web tab alike — renders
+//        - Every CEF page in Winter — the editor AND a blank web tab alike — renders
 //          `requestAnimationFrame` at a hard, page-content-independent **30.0 Hz** on this
 //          120 Hz-capable display, whether `kMaxTimerDelay` is 33 ms OR 16 ms. The 16 ms run
 //          verified the override actually took effect first (idle `DoWork` rate measured 60/s,
@@ -128,8 +128,8 @@
 //      off-screen. It
 //      calls `window_info.SetAsChild(...)` and sets `window_info.runtime_style =
 //      CEF_RUNTIME_STYLE_ALLOY` immediately after (both in `CreateBrowserNow`);
-//      `CefSettings.windowless_rendering_enabled` is never set in `NormaCEFInitialize` (defaults
-//      false); `SetAsWindowless` appears nowhere in this codebase; and `NormaClient` never
+//      `CefSettings.windowless_rendering_enabled` is never set in `WinterCEFInitialize` (defaults
+//      false); `SetAsWindowless` appears nowhere in this codebase; and `WinterClient` never
 //      overrides `CefClient::GetRenderHandler()`, so there is no OSR paint handler installed even
 //      in principle. `CefBrowserSettings.windowless_frame_rate` — the field a leading hypothesis
 //      going into the follow-up task suspected, since it defaults to 30 — governs (per this repo's
@@ -298,7 +298,7 @@ namespace {
 // stderr. Launched by LaunchServices this goes nowhere; launched by explicit path from a terminal —
 // the only way this branch's dev app is ever started — it is the diagnostic channel for
 // `LoadInMain`, `CefInitialize` and the versioned-framework resource paths, none of which had ever
-// run inside Norma before Task 6a.
+// run inside Winter before Task 6a.
 //
 // **Task 6b: URLs are logged in DEBUG BUILDS ONLY, and never in a shipped one.** Every call site
 // below that would name a page splits into a `#if DEBUG` arm carrying the URL and a release arm
@@ -306,11 +306,11 @@ namespace {
 // not a privacy guarantee — it is one `open -W` or one crash-reporter capture away from being
 // false — and a user's browsing history is exactly the class of data this repo keeps off disk by
 // construction (provider `encrypted_content` has the same rule). Chromium's own logging is closed
-// off separately, at `CefSettings.log_severity`/`log_file` in `NormaCEFInitialize`.
+// off separately, at `CefSettings.log_severity`/`log_file` in `WinterCEFInitialize`.
 void Log(const char *fmt, ...) {
   va_list args;
   va_start(args, fmt);
-  fprintf(stderr, "NormaCEF: ");
+  fprintf(stderr, "WinterCEF: ");
   vfprintf(stderr, fmt, args);
   fprintf(stderr, "\n");
   va_end(args);
@@ -332,7 +332,7 @@ const int32_t kTimerDelayPlaceholder = INT_MAX;
 // CEF's own: "The maximum number of milliseconds we're willing to wait between calls to DoWork()".
 const int64_t kMaxTimerDelay = 1000 / 30;  // 30fps
 
-// How many 10 ms message-loop turns `NormaCEFShutdown` is willing to drive after the sweep, waiting
+// How many 10 ms message-loop turns `WinterCEFShutdown` is willing to drive after the sweep, waiting
 // for every close to complete. Named rather than inline because the shutdown line now reports the
 // turns actually used against it — see that function for what has been measured at what N.
 const int kShutdownDrainTurns = 50;
@@ -354,7 +354,7 @@ std::vector<CefRefPtr<CefBrowser>> g_browsers;
 /// A browser creation requested before `OnContextInitialized`. `parent` is WEAK on purpose: a
 /// panel tab torn down while the request is queued must not keep a dead view alive, and must not
 /// get a browser parented into it either — the replay skips entries whose parent has gone.
-@interface NormaCEFPendingBrowser : NSObject
+@interface WinterCEFPendingBrowser : NSObject
 @property(nonatomic, weak) NSView *parent;
 @property(nonatomic, copy) NSString *url;
 /// editor-product Task 4 — carried through the queue so a browser replayed from
@@ -363,10 +363,10 @@ std::vector<CefRefPtr<CefBrowser>> g_browsers;
 @property(nonatomic) uint32_t backgroundColorARGB;
 @end
 
-@implementation NormaCEFPendingBrowser
+@implementation WinterCEFPendingBrowser
 @end
 
-static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
+static NSMutableArray<WinterCEFPendingBrowser *> *g_pending = nil;
 
 // ---------------------------------------------------------------------------
 // The OTHER creation window: CEF's own queue, where our parent handle is RAW
@@ -386,7 +386,7 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 ///
 /// At the user's live gate that gap was fatal. A panel tab dismantled inside it released the
 /// container, `CreateHostWindow()` messaged a deallocated object, and the browser process died —
-/// taking the app with it. Crash report `Norma-2026-08-10-130829.ips`, thread `CrBrowserMain`,
+/// taking the app with it. Crash report `Winter-2026-08-10-130829.ips`, thread `CrBrowserMain`,
 /// `EXC_BAD_ACCESS` at `0x0`, symbolicated against CEF's own `release_symbols` dSYM:
 /// `ZombieObjectCrash` ← `-[CrZombie forwardingTargetForSelector:]` ← `___forwarding___` ←
 /// `CefBrowserPlatformDelegateNativeMac::CreateHostWindow()` ← `AlloyBrowserHostImpl::CreateInternal`
@@ -394,14 +394,14 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 /// domain that fails DNS, so the tab was created and torn down in quick succession.
 ///
 /// Holding the view here, for exactly the length of the creation, is what closes that window. The
-/// record is owned by the `NormaClient` built for this one browser, so the retain lasts precisely as
+/// record is owned by the `WinterClient` built for this one browser, so the retain lasts precisely as
 /// long as CEF holds that client: dropped in `OnAfterCreated`, and dropped anyway if CEF abandons
 /// the creation without ever calling it.
-@interface NormaCEFBrowserCreation : NSObject
+@interface WinterCEFBrowserCreation : NSObject
 @property(nonatomic, strong) NSView *parent;
 /// The container was dismantled while this creation was still inside CEF's own queue.
 ///
-/// `NormaCEFCloseBrowser` can prune `g_pending` — our queue — but has nothing to cancel in CEF's:
+/// `WinterCEFCloseBrowser` can prune `g_pending` — our queue — but has nothing to cancel in CEF's:
 /// it looks for a browser to close and there is none yet, so it closes nothing and returns. Without
 /// this flag the browser arrives afterwards, parented into a view nothing is showing, and never
 /// closes: `DoClose` answers `true`, so completing a close is the host's job, and the host no longer
@@ -410,7 +410,7 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 @property(nonatomic) BOOL abandoned;
 @end
 
-@implementation NormaCEFBrowserCreation
+@implementation WinterCEFBrowserCreation
 /// **The retained view is released on the MAIN thread, whichever thread let go of this record.**
 ///
 /// By the time a creation settles, `parent` is an `NSView` with a SwiftUI-built subtree and possibly
@@ -435,7 +435,7 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 // Task 6b: the per-tab bridge — live state, the two observers, and the dedupe memory
 // ---------------------------------------------------------------------------
 
-@interface NormaCEFBrowserState ()
+@interface WinterCEFBrowserState ()
 @property(nonatomic, copy) NSString *url;
 @property(nonatomic, copy) NSString *title;
 @property(nonatomic) BOOL isLoading;
@@ -443,7 +443,7 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 @property(nonatomic) BOOL canGoForward;
 @end
 
-@implementation NormaCEFBrowserState
+@implementation WinterCEFBrowserState
 @end
 
 /// Everything Task 6b tracks about one panel tab's browser, hung off the CONTAINER VIEW rather
@@ -460,8 +460,8 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 ///
 /// Attached with `objc_setAssociatedObject`, so its lifetime is the view's and there is no global
 /// table to leak or to sweep.
-@interface NormaCEFTabBridge : NSObject
-@property(nonatomic, copy) void (^stateObserver)(NormaCEFBrowserState *);
+@interface WinterCEFTabBridge : NSObject
+@property(nonatomic, copy) void (^stateObserver)(WinterCEFBrowserState *);
 @property(nonatomic, copy) void (^navigationObserver)(NSString *, NSString *);
 /// Where a popup this browser asks for goes — a new panel tab, in THIS tab's session. Keyed on the
 /// container like everything else here, which is what makes "the session the popup came from"
@@ -482,18 +482,18 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 @property(nonatomic) BOOL canGoBack;
 @property(nonatomic) BOOL canGoForward;
 /// The last (url, title) pair handed to `navigationObserver`, or seeded from the daemon's own
-/// record by `NormaCEFSeedTabState`. Consecutive duplicates are suppressed against this.
+/// record by `WinterCEFSeedTabState`. Consecutive duplicates are suppressed against this.
 @property(nonatomic, copy) NSString *lastReportedURL;
 @property(nonatomic, copy) NSString *lastReportedTitle;
 /// The browser creation currently in flight for this container, if any — **WEAK, necessarily**.
 /// The record retains the container (that is the crash fix) and the container owns this bridge, so
 /// a strong link here would close a cycle that releases neither, ever. The record's owner is the
-/// `NormaClient` CEF holds; this handle exists only so `NormaCEFCloseBrowser` can find a creation BY
+/// `WinterClient` CEF holds; this handle exists only so `WinterCEFCloseBrowser` can find a creation BY
 /// PARENT VIEW and mark it abandoned, and it zeroes itself the moment the creation settles.
-@property(nonatomic, weak) NormaCEFBrowserCreation *creation;
+@property(nonatomic, weak) WinterCEFBrowserCreation *creation;
 @end
 
-@implementation NormaCEFTabBridge
+@implementation WinterCEFTabBridge
 - (instancetype)init {
   if ((self = [super init])) {
     _url = @"";
@@ -514,14 +514,14 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 /// messaging that pointer is not a nil-check away from safe: Chromium replaces deallocated ObjC
 /// objects with `CrZombie`s in the browser process, so the FIRST message is a deliberate crash of
 /// the whole app. That is the live-gate crash this record was added for
-/// (`Norma-2026-08-10-152114.ips`, `CrBrowserMain`, `ZombieObjectCrash` under a late
+/// (`Winter-2026-08-10-152114.ips`, `CrBrowserMain`, `ZombieObjectCrash` under a late
 /// `OnTitleChange`), and the same hazard sat under every other caller of that handle: the chrome
 /// verbs' `BrowserForParent` walk and the three close paths' `removeFromSuperview`.
 ///
 /// Keyed by `CefBrowser::GetIdentifier()` in `g_open_browsers`, filled in `OnAfterCreated` and
 /// dropped in `OnBeforeClose` — **the same two callbacks that keep `g_browsers` honest, one line
 /// apart in each**, which is the whole reason the two collections cannot drift.
-@interface NormaCEFOpenBrowser : NSObject
+@interface WinterCEFOpenBrowser : NSObject
 /// CEF's own view — the one `SetAsChild` parented into the container.
 ///
 /// **Strong on purpose, and released at close INITIATION rather than at `OnBeforeClose`.** Both
@@ -529,7 +529,7 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 ///
 ///   * Strong, because the close path's own `[hostView removeFromSuperview]` can drop the last
 ///     reference. Anything that reads this afterwards must get a real object or `nil`, never a
-///     pointer into freed memory — the `CrZombie` crash `NormaCEFOpenBrowser` was added for.
+///     pointer into freed memory — the `CrZombie` crash `WinterCEFOpenBrowser` was added for.
 ///   * Released at close initiation, because **`-[CefBrowserHostView dealloc]` IS how a windowed
 ///     close completes.** It calls `AlloyBrowserHostImpl::WindowDestroyed()`, and once `DoClose`
 ///     has answered `true` that is the only remaining route to `DestroyBrowser()` and therefore to
@@ -542,18 +542,18 @@ static NSMutableArray<NormaCEFPendingBrowser *> *g_pending = nil;
 /// So `nil` here means "already handed back to AppKit by a close", and the close paths treat it
 /// exactly as they treat a browser with no record: nothing to detach.
 @property(nonatomic, strong) NSView *hostView;
-/// The tab this browser belongs to — the bridge its `NormaClient` was built with. Pointer identity
+/// The tab this browser belongs to — the bridge its `WinterClient` was built with. Pointer identity
 /// against a container's own bridge is how `BrowserForParent` maps a view to a browser without
 /// messaging any view at all.
-@property(nonatomic, strong) NormaCEFTabBridge *bridge;
+@property(nonatomic, strong) WinterCEFTabBridge *bridge;
 @end
 
-@implementation NormaCEFOpenBrowser
+@implementation WinterCEFOpenBrowser
 @end
 
 /// Browser identifier → its ObjC side, for exactly as long as the browser is open. Parallel to
 /// `g_browsers` and filled/drained beside it in the same two callbacks.
-static NSMutableDictionary<NSNumber *, NormaCEFOpenBrowser *> *g_open_browsers = nil;
+static NSMutableDictionary<NSNumber *, WinterCEFOpenBrowser *> *g_open_browsers = nil;
 
 namespace {
 
@@ -562,7 +562,7 @@ const char kTabBridgeKey = 'n';
 /// The bridge ALREADY attached to `container`, or `nil` — never creates one. For callers that are
 /// asking a question about a view rather than setting something up on it: creating a bridge on a
 /// view that never had one would attach state to a view on its way out.
-NormaCEFTabBridge *ExistingBridgeFor(NSView *container) {
+WinterCEFTabBridge *ExistingBridgeFor(NSView *container) {
   if (container == nil) {
     return nil;
   }
@@ -570,20 +570,20 @@ NormaCEFTabBridge *ExistingBridgeFor(NSView *container) {
 }
 
 /// The bridge for `container`, created on first use. `nil` only for a nil view.
-NormaCEFTabBridge *BridgeFor(NSView *container) {
+WinterCEFTabBridge *BridgeFor(NSView *container) {
   if (container == nil) {
     return nil;
   }
-  NormaCEFTabBridge *bridge = ExistingBridgeFor(container);
+  WinterCEFTabBridge *bridge = ExistingBridgeFor(container);
   if (bridge == nil) {
-    bridge = [[NormaCEFTabBridge alloc] init];
+    bridge = [[WinterCEFTabBridge alloc] init];
     objc_setAssociatedObject(container, &kTabBridgeKey, bridge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
   }
   return bridge;
 }
 
 /// The ObjC side of `browser`, or `nil` once it has been closed (or before it was ever created).
-NormaCEFOpenBrowser *OpenBrowserRecordFor(CefRefPtr<CefBrowser> browser) {
+WinterCEFOpenBrowser *OpenBrowserRecordFor(CefRefPtr<CefBrowser> browser) {
   if (!browser || g_open_browsers == nil) {
     return nil;
   }
@@ -604,10 +604,10 @@ NormaCEFOpenBrowser *OpenBrowserRecordFor(CefRefPtr<CefBrowser> browser) {
 /// Message ids are assigned by CEF and are per-browser (`ExecuteDevToolsMethod`'s own doc:
 /// "an incremental number ... based on previous values"), so the browser id is a necessary part of
 /// the key — two tabs can legitimately be waiting on the same number.
-static NSMutableDictionary<NSNumber *, NSMutableDictionary<NSNumber *, NormaCEFCDPCompletion> *>
+static NSMutableDictionary<NSNumber *, NSMutableDictionary<NSNumber *, WinterCEFCDPCompletion> *>
     *g_pending_cdp = nil;
 
-/// The DevTools observer registration for each open browser, filled beside its `NormaCEFOpenBrowser`
+/// The DevTools observer registration for each open browser, filled beside its `WinterCEFOpenBrowser`
 /// record in `RememberOpenBrowser` and dropped beside it in `ForgetOpenBrowser` — the same
 /// "one line apart, so the two collections cannot drift" discipline `g_browsers`/`g_open_browsers`
 /// already use.
@@ -618,7 +618,7 @@ static NSMutableDictionary<NSNumber *, NSMutableDictionary<NSNumber *, NormaCEFC
 /// Dropping the entry at `OnBeforeClose` is what unregisters, and the observer object dies with it.
 static std::map<int, CefRefPtr<CefRegistration>> g_cdp_registrations;
 
-/// A `{"message": …}` object — the shape `NormaCEFCDPCompletion` promises for every failure this
+/// A `{"message": …}` object — the shape `WinterCEFCDPCompletion` promises for every failure this
 /// bridge decides itself. Built with `NSJSONSerialization` rather than string concatenation for the
 /// obvious reason (a reason string with a quote in it would emit invalid JSON and the Swift parse
 /// would then report the wrong failure), and with Foundation rather than `CefWriteJSON` for a
@@ -635,11 +635,11 @@ NSString *CDPReasonJSON(NSString *message) {
 }
 
 /// Register a completion against the id CEF assigned its method call.
-void RememberPendingCDP(int browser_id, int message_id, NormaCEFCDPCompletion completion) {
+void RememberPendingCDP(int browser_id, int message_id, WinterCEFCDPCompletion completion) {
   if (g_pending_cdp == nil) {
     g_pending_cdp = [[NSMutableDictionary alloc] init];
   }
-  NSMutableDictionary<NSNumber *, NormaCEFCDPCompletion> *byMessage = g_pending_cdp[@(browser_id)];
+  NSMutableDictionary<NSNumber *, WinterCEFCDPCompletion> *byMessage = g_pending_cdp[@(browser_id)];
   if (byMessage == nil) {
     byMessage = [[NSMutableDictionary alloc] init];
     g_pending_cdp[@(browser_id)] = byMessage;
@@ -656,8 +656,8 @@ void RememberPendingCDP(int browser_id, int message_id, NormaCEFCDPCompletion co
 /// a DevTools front-end attached to the same browser, or an event message that reached
 /// `OnDevToolsMethodResult` for a call this app never made, has no completion to be owed one.
 void SettlePendingCDP(int browser_id, int message_id, BOOL ok, NSString *payloadJSON) {
-  NSMutableDictionary<NSNumber *, NormaCEFCDPCompletion> *byMessage = g_pending_cdp[@(browser_id)];
-  NormaCEFCDPCompletion completion = byMessage[@(message_id)];
+  NSMutableDictionary<NSNumber *, WinterCEFCDPCompletion> *byMessage = g_pending_cdp[@(browser_id)];
+  WinterCEFCDPCompletion completion = byMessage[@(message_id)];
   if (completion == nil) {
     return;
   }
@@ -676,7 +676,7 @@ void SettlePendingCDP(int browser_id, int message_id, BOOL ok, NSString *payload
 /// is followed by `OnBeforeClose`; a detach can precede either), and a fail-all that iterated the
 /// live map would let a re-entrant second sweep fire the same completions again.
 void FailAllPendingCDP(int browser_id, NSString *reason) {
-  NSMutableDictionary<NSNumber *, NormaCEFCDPCompletion> *byMessage = g_pending_cdp[@(browser_id)];
+  NSMutableDictionary<NSNumber *, WinterCEFCDPCompletion> *byMessage = g_pending_cdp[@(browser_id)];
   if (byMessage == nil || byMessage.count == 0) {
     return;
   }
@@ -685,7 +685,7 @@ void FailAllPendingCDP(int browser_id, NSString *reason) {
   Log("cdp-pending-failed (id=%d, %lu call(s), %s)", browser_id,
       static_cast<unsigned long>(byMessage.count), reason.UTF8String);
   for (NSNumber *messageId in [byMessage allKeys]) {
-    NormaCEFCDPCompletion completion = byMessage[messageId];
+    WinterCEFCDPCompletion completion = byMessage[messageId];
     if (completion != nil) {
       completion(NO, payload);
     }
@@ -701,7 +701,7 @@ void FailAllPendingCDP(int browser_id, NSString *reason) {
 /// and `OnDevToolsEvent` fires only while a domain's notifications are enabled, which nothing here
 /// enables (B2's verbs are all method calls). `OnDevToolsAgentAttached` is a fact with no consequence
 /// for a caller that is already waiting.
-class NormaCDPObserver : public CefDevToolsMessageObserver {
+class WinterCDPObserver : public CefDevToolsMessageObserver {
  public:
   /// A method call finished. `message_id` is the id `ExecuteDevToolsMethod` returned to the caller,
   /// which is the whole correlation: `result` is the protocol's `"result"` dictionary on success and
@@ -745,14 +745,14 @@ class NormaCDPObserver : public CefDevToolsMessageObserver {
   }
 
  private:
-  IMPLEMENT_REFCOUNTING(NormaCDPObserver);
+  IMPLEMENT_REFCOUNTING(WinterCDPObserver);
 };
 
 // ---------------------------------------------------------------------------
 // editor-plumbing Task 3: the editor bridge — `window.cefQuery` → one Swift block
 // ---------------------------------------------------------------------------
 
-/// The ONE handler block, registered by `NormaCEFSetBridgeHandler`. One per process, like the
+/// The ONE handler block, registered by `WinterCEFSetBridgeHandler`. One per process, like the
 /// pre-shutdown hook: the editor is a single feature of a single app, and a per-browser registry
 /// would only move the "which browser is this?" question the handler has to answer anyway (see
 /// that function's header doc for why answering it is a caller obligation and not optional).
@@ -765,39 +765,39 @@ void (^g_bridge_handler)(int browserId, uint64_t queryId, const char *requestJSO
 /// life span of the router" (`cef_message_router.h`) and this app creates one router per browser —
 /// its `IdGenerator` restarts at 1 in each — so two tabs legitimately produce the same number.
 /// That is exactly why the id handed OUT is this file's own monotonic one and not CEF's.
-struct NormaCEFBridgeQuery {
+struct WinterCEFBridgeQuery {
   CefRefPtr<CefMessageRouterBrowserSide::Callback> callback;
   const void *handler = nullptr;
   int64_t routerQueryId = 0;
 };
 
 /// The queries in flight, and the counter that names them. **A lock rather than "it is all on the
-/// UI thread anyway"**: `NormaCEFBridgeRespondCall` is an exported C entry point whose callers this
+/// UI thread anyway"**: `WinterCEFBridgeRespondCall` is an exported C entry point whose callers this
 /// file does not control, and the map is the one place a wrong answer would be a use-after-free
 /// rather than a wrong pixel. The lock is never held across a `Callback` method.
 ///
 /// Ids start at 1: `++` before use, so 0 is never a live query and a zero-initialised variable
 /// cannot accidentally name one.
 std::mutex g_bridge_mutex;
-std::map<uint64_t, NormaCEFBridgeQuery> g_bridge_queries;
+std::map<uint64_t, WinterCEFBridgeQuery> g_bridge_queries;
 uint64_t g_bridge_last_query_id = 0;
 
 /// The error code every refusal carries into the page's `onFailure`. **Deliberately not -1**, which
 /// is the router's own code for "canceled" (`kCanceledErrorCode`, `cef_message_router.cc`) and is
-/// what an UNHANDLED query gets. The page can therefore tell "Norma refused this" from "this query
+/// what an UNHANDLED query gets. The page can therefore tell "Winter refused this" from "this query
 /// died with its context".
-const int kNormaCEFBridgeFailureCode = 1;
+const int kWinterCEFBridgeFailureCode = 1;
 
 /// The browser-side query handler — one per client, i.e. one per browser.
 ///
 /// `cef_message_router.h`: "All methods will be executed on the browser process UI thread", which
-/// under Norma's external pump is the main thread. The hop to the Swift block is still a
+/// under Winter's external pump is the main thread. The hop to the Swift block is still a
 /// `dispatch_async` rather than a direct call: it takes the handler out of CEF's own callback
 /// frame, so a handler that answers inline, closes the tab or runs JavaScript cannot re-enter the
 /// router from inside `OnQuery`.
-class NormaEditorBridgeHandler : public CefMessageRouterBrowserSide::Handler {
+class WinterEditorBridgeHandler : public CefMessageRouterBrowserSide::Handler {
  public:
-  NormaEditorBridgeHandler() = default;
+  WinterEditorBridgeHandler() = default;
 
   /// "Return true to handle the query or false to propagate the query to other registered handlers,
   /// if any. If no handlers return true from this method then the query will be automatically
@@ -812,7 +812,7 @@ class NormaEditorBridgeHandler : public CefMessageRouterBrowserSide::Handler {
   ///     Task 5 registers a handler that is EVERY query, and in the unit-test host it always is.
   ///   * **a persistent query** → answered `Failure` and `true`. Persistent registrations stay
   ///     alive until the page cancels them, the context dies, or `Callback::Failure` runs (the
-  ///     header's conditions A-C), and nothing in Norma's protocol is a subscription: every message
+  ///     header's conditions A-C), and nothing in Winter's protocol is a subscription: every message
   ///     is one request and one reply. Refusing it out loud beats letting the page accumulate
   ///     callbacks this file would then have to reap.
   bool OnQuery(CefRefPtr<CefBrowser> browser,
@@ -829,7 +829,7 @@ class NormaEditorBridgeHandler : public CefMessageRouterBrowserSide::Handler {
       return false;
     }
     if (persistent) {
-      callback->Failure(kNormaCEFBridgeFailureCode,
+      callback->Failure(kWinterCEFBridgeFailureCode,
                         "the editor bridge answers one reply per query — persistent queries are "
                         "not supported");
       return true;
@@ -844,7 +844,7 @@ class NormaEditorBridgeHandler : public CefMessageRouterBrowserSide::Handler {
     {
       std::lock_guard<std::mutex> lock(g_bridge_mutex);
       queryId = ++g_bridge_last_query_id;
-      g_bridge_queries[queryId] = NormaCEFBridgeQuery{callback, this, query_id};
+      g_bridge_queries[queryId] = WinterCEFBridgeQuery{callback, this, query_id};
     }
 
     // **The size and the sender, never the bytes** — not even in DEBUG, which is stricter than this
@@ -858,7 +858,7 @@ class NormaEditorBridgeHandler : public CefMessageRouterBrowserSide::Handler {
         // The block was cleared between the store above and this turn. The query is still owed an
         // answer — an unanswered callback is a runtime error by the router's own contract — so it
         // is refused rather than dropped.
-        NormaCEFBridgeRespondCall(
+        WinterCEFBridgeRespondCall(
             queryId, false,
             CDPReasonJSON(@"the editor bridge stopped listening before this query was answered")
                 .UTF8String);
@@ -878,7 +878,7 @@ class NormaEditorBridgeHandler : public CefMessageRouterBrowserSide::Handler {
   /// So this drops the entry and answers nothing. It is not an edge case: an editor tab that
   /// navigates, a renderer that dies, and a browser that closes with a save in flight all arrive
   /// here, and each one would otherwise leave this file holding a callback into a context that no
-  /// longer exists — which a later `NormaCEFBridgeRespondCall` would then try to answer.
+  /// longer exists — which a later `WinterCEFBridgeRespondCall` would then try to answer.
   ///
   /// The lookup is a scan rather than a second index. The map holds the queries IN FLIGHT — a
   /// handful at most, since each is one editor round trip — and a reverse index would be a second
@@ -898,7 +898,7 @@ class NormaEditorBridgeHandler : public CefMessageRouterBrowserSide::Handler {
   }
 
  private:
-  DISALLOW_COPY_AND_ASSIGN(NormaEditorBridgeHandler);
+  DISALLOW_COPY_AND_ASSIGN(WinterEditorBridgeHandler);
 };
 
 /// **The second half of every close, and the one that actually finishes it.**
@@ -924,7 +924,7 @@ class NormaEditorBridgeHandler : public CefMessageRouterBrowserSide::Handler {
 ///   1. This runs AFTER `CloseBrowser(true)`, never before. Released first, the header says
 ///      `DoClose` is not called at all ("will not be called if the browser's host window/view has
 ///      already been destroyed") — which would silently retire a pin, a log line and the one
-///      decision that keeps CEF from sending `performClose:` to Norma's window.
+///      decision that keeps CEF from sending `performClose:` to Winter's window.
 ///   2. The record lets go BEFORE the last reference drops. `OnBeforeClose` can arrive re-entrantly
 ///      inside the `dealloc` this function triggers, and `ForgetOpenBrowser` would then release the
 ///      record's reference to a view that is already inside its own `dealloc`.
@@ -937,7 +937,7 @@ void CompleteCloseByReleasingHostView(int browser_id) {
   if (g_open_browsers == nil) {
     return;
   }
-  NormaCEFOpenBrowser *record = g_open_browsers[@(browser_id)];
+  WinterCEFOpenBrowser *record = g_open_browsers[@(browser_id)];
   NSView *hostView = record.hostView;
   if (hostView == nil) {
     return;  // no record, or an earlier close already handed the view back
@@ -950,7 +950,7 @@ void CompleteCloseByReleasingHostView(int browser_id) {
   // The last reference here — but NOT the last one anywhere: `-removeFromSuperview` autoreleases
   // the view, so the `dealloc` (→ `WindowDestroyed()` → … → `OnBeforeClose`) lands when the
   // enclosing autorelease pool pops, not on this line. Measured at +290 ms on the panel-tab path,
-  // one run-loop turn later; `NormaCEFShutdown` has to open a pool of its own because at quit
+  // one run-loop turn later; `WinterCEFShutdown` has to open a pool of its own because at quit
   // nothing ever pops the outer one.
   hostView = nil;
 }
@@ -959,21 +959,21 @@ void CompleteCloseByReleasingHostView(int browser_id) {
 /// a CEF window handle to an `NSView`** — and the only moment where doing so is provably safe: the
 /// creation has just completed, so CEF's view exists and is a subview of the parent the creation
 /// record is still retaining. Every later user reads the strong reference taken here instead of
-/// asking CEF again; see `NormaCEFOpenBrowser` for the crash that made that the rule.
-void RememberOpenBrowser(CefRefPtr<CefBrowser> browser, NormaCEFTabBridge *bridge) {
+/// asking CEF again; see `WinterCEFOpenBrowser` for the crash that made that the rule.
+void RememberOpenBrowser(CefRefPtr<CefBrowser> browser, WinterCEFTabBridge *bridge) {
   if (!browser || !browser->GetHost()) {
     return;
   }
   if (g_open_browsers == nil) {
     g_open_browsers = [[NSMutableDictionary alloc] init];
   }
-  NormaCEFOpenBrowser *record = [[NormaCEFOpenBrowser alloc] init];
+  WinterCEFOpenBrowser *record = [[WinterCEFOpenBrowser alloc] init];
   record.hostView = CAST_CEF_WINDOW_HANDLE_TO_NSVIEW(browser->GetHost()->GetWindowHandle());
   record.bridge = bridge;
   g_open_browsers[@(browser->GetIdentifier())] = record;
 
   // B2 Task 3 — the CDP reply channel, registered HERE rather than lazily at the first
-  // `NormaCEFExecuteCDP`, for two reasons. **Lifetime**: filled and drained beside the record above,
+  // `WinterCEFExecuteCDP`, for two reasons. **Lifetime**: filled and drained beside the record above,
   // so "registered for exactly as long as the browser is open" is structural rather than a rule
   // someone maintains. **Ordering**: a registration made inside the call it is meant to hear the
   // reply to would be a race with no upside.
@@ -983,7 +983,7 @@ void RememberOpenBrowser(CefRefPtr<CefBrowser> browser, NormaCEFTabBridge *bridg
   // detached", `cef_devtools_message_observer.h`) and no event messages are delivered unless a domain
   // has been enabled, which nothing here enables.
   g_cdp_registrations[browser->GetIdentifier()] =
-      browser->GetHost()->AddDevToolsMessageObserver(new NormaCDPObserver());
+      browser->GetHost()->AddDevToolsMessageObserver(new WinterCDPObserver());
   Log("cdp-observer-registered (id=%d)", browser->GetIdentifier());
 }
 
@@ -996,7 +996,7 @@ void ForgetOpenBrowser(CefRefPtr<CefBrowser> browser) {
   // B2 Task 3, beside the removal above. The FAIL comes first and the unregister second: dropping
   // the registration destroys the observer, and an observer that is gone can deliver nothing to a
   // call still sitting in the pending map. In practice the close that brought us here has already
-  // failed these (`NormaCEFCloseBrowser`); this is the belt for a browser destroyed by a route this
+  // failed these (`WinterCEFCloseBrowser`); this is the belt for a browser destroyed by a route this
   // app did not initiate — CEF's own shutdown sweep, chiefly.
   //
   // **A RENDERER CRASH IS NOT ONE OF THOSE ROUTES, stated because the obvious reading is wrong.**
@@ -1021,11 +1021,11 @@ void ForgetOpenBrowser(CefRefPtr<CefBrowser> browser) {
 /// Push the live snapshot to whoever is watching. Main thread by construction — CEF's UI thread IS
 /// the main thread under the external pump — so the observer runs synchronously and SwiftUI's
 /// `@Published` writes stay on the main actor.
-void NotifyState(NormaCEFTabBridge *bridge) {
+void NotifyState(WinterCEFTabBridge *bridge) {
   if (bridge == nil || bridge.stateObserver == nil) {
     return;
   }
-  NormaCEFBrowserState *state = [[NormaCEFBrowserState alloc] init];
+  WinterCEFBrowserState *state = [[WinterCEFBrowserState alloc] init];
   state.url = bridge.url ?: @"";
   state.title = bridge.title ?: @"";
   state.isLoading = bridge.isLoading;
@@ -1040,7 +1040,7 @@ void NotifyState(NormaCEFTabBridge *bridge) {
 // The external message pump
 // ---------------------------------------------------------------------------
 
-@class NormaCEFPumpHandler;
+@class WinterCEFPumpHandler;
 
 namespace {
 
@@ -1068,7 +1068,7 @@ class ExternalPump {
 
   static ExternalPump *instance_;
   NSTimer *timer_ = nil;
-  NormaCEFPumpHandler *handler_ = nil;
+  WinterCEFPumpHandler *handler_ = nil;
   bool is_active_ = false;
   bool reentrancy_detected_ = false;
 };
@@ -1080,12 +1080,12 @@ ExternalPump *ExternalPump::instance_ = nullptr;
 /// The timer's Objective-C target and the thread-hop landing pad — CEF's own `EventHandler`
 /// (`main_message_loop_external_pump_mac.mm`), which exists for the same reason: `NSTimer` and
 /// `performSelector:onThread:` both need an ObjC receiver, and the pump is C++.
-@interface NormaCEFPumpHandler : NSObject
+@interface WinterCEFPumpHandler : NSObject
 - (void)timerTimeout:(id)obj;
 - (void)scheduleWork:(id)obj;
 @end
 
-@implementation NormaCEFPumpHandler
+@implementation WinterCEFPumpHandler
 - (void)timerTimeout:(id)obj {
   if (auto *pump = ExternalPump::Get()) {
     pump->OnTimerTimeout();
@@ -1103,7 +1103,7 @@ namespace {
 void ExternalPump::Create() {
   if (!instance_) {
     instance_ = new ExternalPump();
-    instance_->handler_ = [[NormaCEFPumpHandler alloc] init];
+    instance_->handler_ = [[WinterCEFPumpHandler alloc] init];
   }
 }
 
@@ -1213,13 +1213,13 @@ bool ExternalPump::PerformMessageLoopWork() {
 
 void CreateBrowserNow(NSView *parent, const std::string &url, uint32_t backgroundColorARGB);
 void ReplayPendingBrowsers();
-void CloseAbandonedBrowser(CefRefPtr<CefBrowser> browser, NormaCEFBrowserCreation *creation);
+void CloseAbandonedBrowser(CefRefPtr<CefBrowser> browser, WinterCEFBrowserCreation *creation);
 
 /// **Hand a URL to the container's "open this as a new panel tab" channel.** Returns whether it was
 /// taken — `false` means there is nowhere to route it (no bridge, no observer, or nothing to open),
 /// and the caller decides what to do instead.
 ///
-/// The channel is the one `OnBeforePopup` already uses (`NormaCEFSetPopupObserver`), reused rather
+/// The channel is the one `OnBeforePopup` already uses (`WinterCEFSetPopupObserver`), reused rather
 /// than paralleled: it is registered on the CONTAINER VIEW, so the block it runs is the tab's own
 /// and carries the tab's captured session, and everything downstream — `PanelURLPolicy.mayOpenTab`,
 /// `ShellSessionHost.openPanelTab`, `panel.openTab` — is the daemon-minted tab door every other
@@ -1233,11 +1233,11 @@ void CloseAbandonedBrowser(CefRefPtr<CefBrowser> browser, NormaCEFBrowserCreatio
 /// Synchronous, no thread hop, exactly as `OnBeforePopup` calls it — CEF's UI thread IS the main
 /// thread under the external pump, and what the block does is a policy check plus an RPC enqueue.
 ///
-/// Takes the BRIDGE rather than the browser: both callers are `NormaClient` methods, and the client
-/// carries its own tab (`NormaClient::Tab()`). Deriving it from the browser here meant asking CEF
+/// Takes the BRIDGE rather than the browser: both callers are `WinterClient` methods, and the client
+/// carries its own tab (`WinterClient::Tab()`). Deriving it from the browser here meant asking CEF
 /// for a window handle and messaging the view behind it, which is the zombie crash described on
-/// `NormaCEFOpenBrowser`.
-bool RouteURLToNewPanelTab(NormaCEFTabBridge *bridge, const std::string &url) {
+/// `WinterCEFOpenBrowser`.
+bool RouteURLToNewPanelTab(WinterCEFTabBridge *bridge, const std::string &url) {
   if (url.empty()) {
     return false;
   }
@@ -1265,7 +1265,7 @@ void CopyToGeneralPasteboard(const std::string &text) {
   [pasteboard setString:value forType:NSPasteboardTypeString];
 }
 
-/// Norma's own context-menu commands. `MENU_ID_USER_FIRST`..`MENU_ID_USER_LAST` is the range CEF
+/// Winter's own context-menu commands. `MENU_ID_USER_FIRST`..`MENU_ID_USER_LAST` is the range CEF
 /// reserves for the embedder — "All user-defined command ids should be between MENU_ID_USER_FIRST
 /// and MENU_ID_USER_LAST" (`cef_context_menu_handler.h`) — and staying inside it is what keeps
 /// `OnContextMenuCommand`'s `default: return false` able to hand every OTHER id back to CEF's own
@@ -1279,7 +1279,7 @@ constexpr int kMenuIdCopyImageAddress = MENU_ID_USER_FIRST + 2;
 /// un-root-caused first-load failure in 23 runs, with every structural cause excluded by control,
 /// and recommended wiring `OnLoadError`/`OnLoadEnd` rather than assuming the first page appears.
 /// Here they log; Task 6b is where a visible retry belongs, alongside the chrome that would host it.
-class NormaClient : public CefClient,
+class WinterClient : public CefClient,
                     public CefLifeSpanHandler,
                     public CefLoadHandler,
                     public CefDisplayHandler,
@@ -1290,7 +1290,7 @@ class NormaClient : public CefClient,
   /// the tab that creation belongs to. See `CreateBrowserNow` for why the client — rather than a
   /// table, an arrival order or a walk up the view hierarchy — is what maps `OnAfterCreated` back to
   /// its parent view.
-  NormaClient(NormaCEFBrowserCreation *creation, NormaCEFTabBridge *bridge)
+  WinterClient(WinterCEFBrowserCreation *creation, WinterCEFTabBridge *bridge)
       : creation_(creation), bridge_(bridge) {}
 
   /// **The tab this client's browser belongs to — and the whole callback-side zombie fix.**
@@ -1299,14 +1299,14 @@ class NormaClient : public CefClient,
   /// and walking up the superview chain looking for the associated bridge. That is a message to a
   /// view nothing guarantees is alive: a tab torn down while the renderer still has updates in
   /// flight leaves CEF answering with a freed pointer, and the first `[v superview]` on it killed
-  /// the browser process — and the app — at the user's live gate (`Norma-2026-08-10-152114.ips`,
+  /// the browser process — and the app — at the user's live gate (`Winter-2026-08-10-152114.ips`,
   /// `ZombieObjectCrash` under `OnTitleChange`, during rapid tab switching, where every switch
   /// closes one browser mid-navigation and reloads another).
   ///
   /// The client already knows the answer with no lookup at all: it is built per browser, from the
   /// creation that named the container. Nothing here touches a view, so nothing here can touch a
   /// dead one. `nil` after `OnBeforeClose`, which is the last callback CEF promises.
-  NormaCEFTabBridge *Tab() const { return bridge_; }
+  WinterCEFTabBridge *Tab() const { return bridge_; }
 
   CefRefPtr<CefLifeSpanHandler> GetLifeSpanHandler() override { return this; }
   CefRefPtr<CefLoadHandler> GetLoadHandler() override { return this; }
@@ -1356,7 +1356,7 @@ class NormaClient : public CefClient,
   ///
   /// The condition is satisfied structurally rather than by a check: this override returns `false`
   /// — CEF's own default, "allow the navigation" — for every navigation, and it is the ONLY thing
-  /// it does. Norma's navigation policy lives on the Swift side (`PanelURLPolicy`) and its two
+  /// it does. Winter's navigation policy lives on the Swift side (`PanelURLPolicy`) and its two
   /// cancel-shaped decisions are elsewhere (`OnBeforePopup`, `OnOpenURLFromTab`), so there is no
   /// path through this method that refuses a navigation and would therefore have to skip the call.
   ///
@@ -1399,10 +1399,10 @@ class NormaClient : public CefClient,
   /// **The cancel is unconditional and must stay that way.** `true` means "cancel the popup". With
   /// `false` — the base class's default — a native-hosted Alloy parent gets "a native popup window"
   /// of CEF's own (`cef_life_span_handler.h`): a top-level Chromium window outside the panel,
-  /// outside every chrome verb, and outside Norma's window management. `DoClose` answers `true`,
+  /// outside every chrome verb, and outside Winter's window management. `DoClose` answers `true`,
   /// i.e. the HOST completes every close, so for a window the host does not know exists nothing ever
   /// does — a single `target="_blank"` would strand a window and its renderer process for the life
-  /// of the app. The return is `NormaCEFPopupsAreCancelledSoCEFNeverCreatesAWindow()` rather than a
+  /// of the app. The return is `WinterCEFPopupsAreCancelledSoCEFNeverCreatesAWindow()` rather than a
   /// bare literal for the same reason `DoClose`'s is: a test can read the VALUE, which a binary
   /// string scan structurally cannot.
   ///
@@ -1419,7 +1419,7 @@ class NormaClient : public CefClient,
   /// **Only a GESTURED popup is routed** — `user_gesture` is true for a clicked link or a
   /// `window.open` inside a click handler, false for one fired by a timer or `DOMContentLoaded`,
   /// which is the classic ad-popup shape. The ungestured case is cancelled and logged, i.e. exactly
-  /// today's behaviour. The reason to keep that line is stronger for Norma than for a browser: a
+  /// today's behaviour. The reason to keep that line is stronger for Winter than for a browser: a
   /// panel tab is APPEND-ONLY SESSION STATE (`panel_tab_opened` in a log that is never
   /// auto-deleted), so an unwanted popup tab is permanent litter in the user's history rather than a
   /// window they close and forget. The cost is the honest one — an OAuth-style `window.open` issued
@@ -1454,7 +1454,7 @@ class NormaClient : public CefClient,
                      bool *no_javascript_access) override {
     CEF_REQUIRE_UI_THREAD();
     NSString *url = [NSString stringWithUTF8String:target_url.ToString().c_str()] ?: @"";
-    NormaCEFTabBridge *bridge = Tab();
+    WinterCEFTabBridge *bridge = Tab();
     // `target_url` "may be empty if not specified with the request" (`cef_life_span_handler.h`) —
     // `window.open()` with no argument. There is no address to open a tab at, so it is cancelled
     // like any other unroutable popup rather than opening a blank one.
@@ -1486,7 +1486,7 @@ class NormaClient : public CefClient,
           (bridge != nil && bridge.popupObserver != nil) ? 1 : 0);
 #endif
     }
-    return NormaCEFPopupsAreCancelledSoCEFNeverCreatesAWindow();  // YES = cancel the popup
+    return WinterCEFPopupsAreCancelledSoCEFNeverCreatesAWindow();  // YES = cancel the popup
   }
 
   // MARK: CefRequestHandler — ⌘-click and middle-click
@@ -1508,7 +1508,7 @@ class NormaClient : public CefClient,
   ///     i.e. plain ⌘-click and plain middle-click;
   ///   * `CEF_WOD_NEW_FOREGROUND_TAB` — "Shift key + Middle mouse button or meta/ctrl key while
   ///     clicking", i.e. ⌘⇧-click;
-  ///   * `CEF_WOD_NEW_WINDOW` — "Shift key while clicking". Norma has no second browser window to
+  ///   * `CEF_WOD_NEW_WINDOW` — "Shift key while clicking". Winter has no second browser window to
   ///     put it in and never will (a panel browser lives in the shell's window, which is why
   ///     `OnBeforePopup` cancels), so it becomes a tab. That is a real difference from Chrome,
   ///     stated rather than hidden;
@@ -1519,7 +1519,7 @@ class NormaClient : public CefClient,
   /// **`CEF_WOD_CURRENT_TAB` and everything else return `false` and are untouched** — including
   /// `CEF_WOD_SAVE_TO_DISK` (alt-click), which needs a `CefDownloadHandler` this build does not
   /// have, `CEF_WOD_OFF_THE_RECORD`, `CEF_WOD_NEW_PICTURE_IN_PICTURE` and `CEF_WOD_NEW_SPLIT_VIEW`
-  /// (Chrome-product surfaces with no Norma equivalent), and `CEF_WOD_SINGLETON_TAB` /
+  /// (Chrome-product surfaces with no Winter equivalent), and `CEF_WOD_SINGLETON_TAB` /
   /// `CEF_WOD_SWITCH_TO_TAB`, which mean "reuse the tab already showing this URL" — a lookup
   /// nothing here can do, and answering them with a NEW tab would be a wrong answer rather than a
   /// missing one.
@@ -1591,12 +1591,12 @@ class NormaClient : public CefClient,
     // The creation is over, so CEF is done with the raw parent handle: `CreateHostWindow()` has
     // already run (it is a step of the very call that ends in this callback). Dropping the record
     // releases the retain that carried the view across the gap.
-    NormaCEFBrowserCreation *creation = creation_;
+    WinterCEFBrowserCreation *creation = creation_;
     creation_ = nil;
 
     if (creation.abandoned) {
       // The panel tab was dismantled while this creation was still inside CEF's own queue, where
-      // `NormaCEFCloseBrowser` had nothing it could cancel. Closing here is what keeps that from
+      // `WinterCEFCloseBrowser` had nothing it could cancel. Closing here is what keeps that from
       // leaving a live browser — and a live renderer process — parented into a detached view that
       // nothing will ever close again.
       //
@@ -1627,12 +1627,12 @@ class NormaClient : public CefClient,
     Log("browser created (id=%d, live browsers=%zu)", browser->GetIdentifier(), g_browsers.size());
   }
 
-  /// **`true` — and the default of `false` closes NORMA'S OWN WINDOW.**
+  /// **`true` — and the default of `false` closes WINTER'S OWN WINDOW.**
   ///
   /// Found at the user's live gate: closing a panel tab, or clicking Cowork in the sidebar with a
   /// tab open, made the whole app window vanish. The process survived (menu-bar orb still working,
   /// no crash report) — it was the window dying, not the app, and both triggers are the same event:
-  /// something calls `NormaCEFCloseBrowser`, which calls `CloseBrowser(true)`. (Then, SwiftUI
+  /// something calls `WinterCEFCloseBrowser`, which calls `CloseBrowser(true)`. (Then, SwiftUI
   /// dismantling the panel's `PanelCEFView`; since browser-runtime T4, `BrowserRuntime.stop` — the
   /// caller moved, the mechanism below did not.)
   ///
@@ -1644,7 +1644,7 @@ class NormaClient : public CefClient,
   ///    notification to the browser's TOP-LEVEL PARENT WINDOW (e.g. WM_CLOSE on Windows,
   ///    **performClose: on OS X** ...)"
   ///
-  /// The top-level parent window of a browser parented into `ShellPanel` is Norma's app window. So
+  /// The top-level parent window of a browser parented into `ShellPanel` is Winter's app window. So
   /// CEF was faithfully doing what an embedder that OWNS a window per browser wants — `cefsimple`
   /// and `cefclient` both return `false` for exactly that reason — and what an embedder hosting a
   /// browser inside a shared window it owns must never allow.
@@ -1657,7 +1657,7 @@ class NormaClient : public CefClient,
   ///    proceeding with window/view hierarchy tear-down), otherwise the browser will be left in a
   ///    partially closed state that interferes with proper functioning."
   ///
-  /// Norma needs no notification at all — the tab is already gone from the UI by the time this
+  /// Winter needs no notification at all — the tab is already gone from the UI by the time this
   /// runs; the close was initiated BY that tear-down. **The obligation is discharged by
   /// `CompleteCloseByReleasingHostView`, which RELEASES CEF's host view** — read that function,
   /// because everything about why this returns `true` safely lives there.
@@ -1680,10 +1680,10 @@ class NormaClient : public CefClient,
   ///
   ///   * The body must not be REPLACED (e.g. pasted from `cefsimple`/`cefclient`, both of which
   ///     return false). The log literal below is what a replacement would take with it, and
-  ///     `testTheBrowserClientOverridesDoCloseSoCEFCannotCloseNormasWindow` scans the built binary
+  ///     `testTheBrowserClientOverridesDoCloseSoCEFCannotCloseWintersWindow` scans the built binary
   ///     for it.
   ///   * The ANSWER must not be FLIPPED. That is why this returns
-  ///     `NormaCEFDoCloseIsHandledByHost()` — an exported single source of truth a test can call
+  ///     `WinterCEFDoCloseIsHandledByHost()` — an exported single source of truth a test can call
   ///     and read directly — rather than a bare `true`. A string scan cannot see a return value:
   ///     the first version of this pin searched for "DoClose->true", which is emitted by a `Log`
   ///     statement with zero coupling to the `return`, so changing only the return kept the test
@@ -1697,7 +1697,7 @@ class NormaClient : public CefClient,
   bool DoClose(CefRefPtr<CefBrowser> browser) override {
     CEF_REQUIRE_UI_THREAD();
     Log("browser close handled by the host (DoClose->true, id=%d)", browser->GetIdentifier());
-    return NormaCEFDoCloseIsHandledByHost();
+    return WinterCEFDoCloseIsHandledByHost();
   }
 
   /// **The last callback CEF promises for this browser** — "immediately before the browser object is
@@ -1715,7 +1715,7 @@ class NormaClient : public CefClient,
   /// Landing them is the deliberate answer, for three reasons:
   ///
   ///   * On the panel-tab path there is nothing to land on. `BrowserRuntime.stop` clears all three
-  ///     observers BEFORE it calls `NormaCEFCloseBrowser` (as `PanelCEFView.dismantleNSView` did
+  ///     observers BEFORE it calls `WinterCEFCloseBrowser` (as `PanelCEFView.dismantleNSView` did
   ///     before browser-runtime T4 moved that sequence, in the same order and for the same reason),
   ///     so a late update writes to an object nobody is watching — precisely the "somewhere to land
   ///     harmlessly" the container-keyed bridge was designed for.
@@ -1783,7 +1783,7 @@ class NormaClient : public CefClient,
   }
 
   /// The body of the callback above, and **the seam its pin calls**
-  /// (`NormaCEFTabAfterOneClientCallbackWithNoViewAnywhere`).
+  /// (`WinterCEFTabAfterOneClientCallbackWithNoViewAnywhere`).
   ///
   /// The split is not decoration. The override itself is unreachable from any test in this repo,
   /// and not because of the arguments: `CEF_REQUIRE_UI_THREAD()` expands to `DCHECK(CefCurrentlyOn(
@@ -1793,7 +1793,7 @@ class NormaClient : public CefClient,
   /// a null call, not a test. Everything BELOW that line needs no browser, no frame and no view, so
   /// it is the part a test can run — and the part the zombie fix is about.
   void ApplyLoadingState(bool isLoading, bool canGoBack, bool canGoForward) {
-    NormaCEFTabBridge *bridge = Tab();
+    WinterCEFTabBridge *bridge = Tab();
     if (bridge == nil) {
       return;
     }
@@ -1803,7 +1803,7 @@ class NormaClient : public CefClient,
     NotifyState(bridge);
   }
 
-  /// **THE PRODUCER `panel.reportNavigation` never had.** See `NormaCEFSetNavigationObserver`'s
+  /// **THE PRODUCER `panel.reportNavigation` never had.** See `WinterCEFSetNavigationObserver`'s
   /// header doc for why `OnLoadEnd` + `IsMain()` is precisely "committed top-level navigation" in
   /// CEF's own words, and which three classes of event it excludes by contract rather than by a
   /// filter maintained here.
@@ -1815,7 +1815,7 @@ class NormaClient : public CefClient,
       return;
     }
     NSString *url = [NSString stringWithUTF8String:frame->GetURL().ToString().c_str()] ?: @"";
-    NormaCEFTabBridge *bridge = Tab();
+    WinterCEFTabBridge *bridge = Tab();
     if (bridge != nil) {
       bridge.url = url;
       // **Only a title that belongs to THIS document may be written down.** A page with no
@@ -1824,7 +1824,7 @@ class NormaClient : public CefClient,
       // is what makes the cache safe; see `titleURL`.
       NSString *title = [bridge.titleURL isEqualToString:url] ? (bridge.title ?: @"") : @"";
       // Consecutive-duplicate suppression, seeded across browser lifetimes by
-      // `NormaCEFSeedTabState`. A reload, or a re-created browser landing back on the
+      // `WinterCEFSeedTabState`. A reload, or a re-created browser landing back on the
       // page the daemon already recorded, adds nothing to the log.
       const BOOL isRepeat = [url isEqualToString:bridge.lastReportedURL ?: @""] &&
                             [title isEqualToString:bridge.lastReportedTitle ?: @""];
@@ -1873,7 +1873,7 @@ class NormaClient : public CefClient,
     if (!frame->IsMain()) {
       return;
     }
-    NormaCEFTabBridge *bridge = Tab();
+    WinterCEFTabBridge *bridge = Tab();
     if (bridge == nil) {
       return;
     }
@@ -1893,7 +1893,7 @@ class NormaClient : public CefClient,
   /// — an untitled page inheriting the previous page's name. Only the pairing fixes both.
   void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString &title) override {
     CEF_REQUIRE_UI_THREAD();
-    NormaCEFTabBridge *bridge = Tab();
+    WinterCEFTabBridge *bridge = Tab();
     if (bridge == nil) {
       return;
     }
@@ -1938,7 +1938,7 @@ class NormaClient : public CefClient,
   /// allowlist HERE, in C++, which is a second copy of `PanelURLPolicy` in a second language with
   /// no compile-time coupling to the first. This repo has been bitten by exactly that shape more
   /// than once (the `TRANSIENT_EVENT_TYPES` hand-copy; the field caps that agreed on the number and
-  /// disagreed on the unit), and `NormaCEF.h` already states the rule for this file: scheme policy
+  /// disagreed on the unit), and `WinterCEF.h` already states the rule for this file: scheme policy
   /// lives in Swift, in one place, because a C seam that second-guesses its caller makes the real
   /// policy impossible to locate. The cost is honest and small: the item appears, the door refuses
   /// it, nothing opens — the same outcome a `javascript:` popup already has, and the same one Chrome
@@ -1982,7 +1982,7 @@ class NormaClient : public CefClient,
     size_t at = 0;
     if (onALink) {
       // These two labels are `__cstring` literals in the built product and are what
-      // `testTheContextMenuOFFERSNormasOwnLinkAndImageItems` scans for. They are the items
+      // `testTheContextMenuOFFERSWintersOwnLinkAndImageItems` scans for. They are the items
       // themselves, not a log beside them.
       model->InsertItemAt(at++, kMenuIdOpenLinkInNewTab, "Open Link in New Tab");
       model->InsertItemAt(at++, kMenuIdCopyLinkAddress, "Copy Link Address");
@@ -2039,7 +2039,7 @@ class NormaClient : public CefClient,
   /// The router is per CLIENT, i.e. per browser, which is the shape `cef_message_router.h` names
   /// second in its own guidance: "It can be useful to have multiple browser-side routers with
   /// different client-provided Handler instances when implementing different behaviors on a
-  /// per-browser basis." Norma's behaviour is per browser in exactly that sense — a query means
+  /// per-browser basis." Winter's behaviour is per browser in exactly that sense — a query means
   /// something only in the tab that sent it — and the per-browser router is what makes
   /// `OnQueryCanceled` able to say WHICH browser's query died without a lookup.
   ///
@@ -2048,9 +2048,9 @@ class NormaClient : public CefClient,
   /// and `CefString`'s assignment goes through `cef_string_utf8_to_utf16` — a libcef entry point,
   /// which in this app is an entry in `libcef_dll_dylib.cc`'s function-pointer table
   /// (`g_libcef_pointers = {0}` until `CefScopedLibraryLoader` fills it). **The unit-test host
-  /// constructs a real `NormaClient` with CEF never loaded** —
-  /// `NormaCEFClientInstallsTheClickAndMenuHandlers` and
-  /// `NormaCEFTabAfterOneClientCallbackWithNoViewAnywhere` both do, and both are load-bearing pins —
+  /// constructs a real `WinterClient` with CEF never loaded** —
+  /// `WinterCEFClientInstallsTheClickAndMenuHandlers` and
+  /// `WinterCEFTabAfterOneClientCallbackWithNoViewAnywhere` both do, and both are load-bearing pins —
   /// so a config built in the constructor is a call through a null pointer in every test run of the
   /// whole app suite. `OnAfterCreated` cannot be reached without a live CEF, and it is the browser
   /// process UI thread, which is where `AddHandler` is documented to be called from. It is also what
@@ -2063,7 +2063,7 @@ class NormaClient : public CefClient,
     if (bridge_router_) {
       return;
     }
-    bridge_router_ = CefMessageRouterBrowserSide::Create(NormaCEFEditorBridgeRouterConfig());
+    bridge_router_ = CefMessageRouterBrowserSide::Create(WinterCEFEditorBridgeRouterConfig());
     if (!bridge_router_) {
       // `Create` only returns null for a config with an empty function name, which the shared
       // config cannot produce — logged rather than asserted because a browser with no bridge is a
@@ -2081,7 +2081,7 @@ class NormaClient : public CefClient,
   /// which is why the retain cannot outlive CEF's interest in the raw handle: CEF releases the
   /// client, ARC releases the record, the record releases the view. That covers the path no
   /// callback covers — a creation CEF abandons internally, for which no `OnAfterCreated` ever comes.
-  NormaCEFBrowserCreation *creation_ = nil;
+  WinterCEFBrowserCreation *creation_ = nil;
 
   /// The tab this browser belongs to — see `Tab()` for what it replaced and why. **Strong**, and an
   /// ObjC pointer member of a C++ class is exactly that under ARC, which is what `creation_` above
@@ -2089,7 +2089,7 @@ class NormaClient : public CefClient,
   /// `IMPLEMENT_REFCOUNTING`'s `delete this` runs it when CEF drops the last reference to the
   /// client. Cleared in `OnBeforeClose` so it is released with the browser rather than with the
   /// client, which CEF may hold for longer.
-  NormaCEFTabBridge *bridge_ = nil;
+  WinterCEFTabBridge *bridge_ = nil;
 
   /// editor-plumbing Task 3 — the editor bridge's browser half.
   ///
@@ -2100,19 +2100,19 @@ class NormaClient : public CefClient,
   /// explicitly. A client whose browser never reached `OnAfterCreated` (an abandoned creation, a
   /// client built by a test seam) holds a null router and an idle handler, and destroys both
   /// without touching CEF.
-  NormaEditorBridgeHandler bridge_handler_;
+  WinterEditorBridgeHandler bridge_handler_;
   CefRefPtr<CefMessageRouterBrowserSide> bridge_router_;
 
-  IMPLEMENT_REFCOUNTING(NormaClient);
-  DISALLOW_COPY_AND_ASSIGN(NormaClient);
+  IMPLEMENT_REFCOUNTING(WinterClient);
+  DISALLOW_COPY_AND_ASSIGN(WinterClient);
 };
 
 // ---------------------------------------------------------------------------
-// editor-plumbing Task 2 — the `norma-editor://` scheme handler
+// editor-plumbing Task 2 — the `winter-editor://` scheme handler
 // ---------------------------------------------------------------------------
 
 /// The one directory this scheme serves — the app bundle's `Contents/Resources/EditorAssets`, set
-/// by `NormaCEFRegisterEditorAssetRoot`.
+/// by `WinterCEFRegisterEditorAssetRoot`.
 ///
 /// **Written on the main thread, read on the IO thread**, which is why there is a lock rather than
 /// a bare `std::string`: `CefSchemeHandlerFactory`'s own header says "the methods of this class
@@ -2129,15 +2129,15 @@ std::string EditorAssetRoot() {
 }
 
 /// The page shell's origin, which is what every asset response allows. Spelled out rather than
-/// composed from `kNormaEditorSchemeName` at runtime because it is a fixed string in a header
+/// composed from `kWinterEditorSchemeName` at runtime because it is a fixed string in a header
 /// value, and a composed one would only be checkable by reading the code that composed it.
-const char kNormaEditorAppOrigin[] = "norma-editor://app";
+const char kWinterEditorAppOrigin[] = "winter-editor://app";
 
 /// Where a host lands inside the ONE asset root. Two hosts, one tree:
 ///
-///   * `assets` IS the root — `norma-editor://assets/vs/loader.js` → `<root>/vs/loader.js`, which
+///   * `assets` IS the root — `winter-editor://assets/vs/loader.js` → `<root>/vs/loader.js`, which
 ///     is exactly where the "Embed Monaco editor assets" phase puts the vendored `vs/`.
-///   * `app` is the page shell's own directory — `norma-editor://app/editor.html` →
+///   * `app` is the page shell's own directory — `winter-editor://app/editor.html` →
 ///     `<root>/app/editor.html`. Giving the shell its own host (and therefore its own ORIGIN) is
 ///     what makes its relative URLs resolve inside it, and what the scheme's CORS treatment is for:
 ///     the page fetches Monaco cross-origin from `assets` and the handler answers with an
@@ -2233,9 +2233,9 @@ bool ReadWholeEditorAsset(const char *path, std::string &out) {
 /// true either way. Returning false would cancel the request outright and give the page a network
 /// error rather than a status it can reason about, and leaving it unhandled would fall through to
 /// whatever default the scheme has (none).
-class NormaEditorSchemeHandler : public CefResourceHandler {
+class WinterEditorSchemeHandler : public CefResourceHandler {
  public:
-  NormaEditorSchemeHandler() = default;
+  WinterEditorSchemeHandler() = default;
 
   bool Open(CefRefPtr<CefRequest> request, bool &handle_request, CefRefPtr<CefCallback> callback)
       override {
@@ -2267,11 +2267,11 @@ class NormaEditorSchemeHandler : public CefResourceHandler {
       // guesses, which is a decoding bug waiting for the first file that has one.
       response->SetCharset("utf-8");
     }
-    // The page shell (`norma-editor://app`) loads Monaco from `norma-editor://assets` — two
+    // The page shell (`winter-editor://app`) loads Monaco from `winter-editor://assets` — two
     // origins, so worker and `fetch` loads across them are CORS requests and need this answer. Set
     // on every hit rather than only on cross-origin ones: it is inert for a same-origin load, and a
     // conditional would need to know the initiator, which this handler has no reason to inspect.
-    response->SetHeaderByName("Access-Control-Allow-Origin", kNormaEditorAppOrigin, true);
+    response->SetHeaderByName("Access-Control-Allow-Origin", kWinterEditorAppOrigin, true);
     response_length = static_cast<int64_t>(data_.size());
   }
 
@@ -2331,7 +2331,7 @@ class NormaEditorSchemeHandler : public CefResourceHandler {
     // relied on here. This is the guarantee; the canonicalisation is a coincidence of the path a
     // request happened to take (`CefSchemeHandlerFactory::Create` documents being reachable from a
     // `CefURLRequest` with no browser at all).
-    char *resolved = NormaCEFEditorAssetResolve(root.c_str(), (subdirectory + path).c_str());
+    char *resolved = WinterCEFEditorAssetResolve(root.c_str(), (subdirectory + path).c_str());
     if (resolved == nullptr) {
       return;
     }
@@ -2351,40 +2351,40 @@ class NormaEditorSchemeHandler : public CefResourceHandler {
   bool text_ = false;
   bool found_ = false;
 
-  IMPLEMENT_REFCOUNTING(NormaEditorSchemeHandler);
-  DISALLOW_COPY_AND_ASSIGN(NormaEditorSchemeHandler);
+  IMPLEMENT_REFCOUNTING(WinterEditorSchemeHandler);
+  DISALLOW_COPY_AND_ASSIGN(WinterEditorSchemeHandler);
 };
 
 /// A handler per request, and no state of its own — the root lives in one place
 /// (`g_editor_root`) so that re-registering it cannot leave a stale copy behind in a factory.
-class NormaEditorSchemeFactory : public CefSchemeHandlerFactory {
+class WinterEditorSchemeFactory : public CefSchemeHandlerFactory {
  public:
-  NormaEditorSchemeFactory() = default;
+  WinterEditorSchemeFactory() = default;
 
   CefRefPtr<CefResourceHandler> Create(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
                                        const CefString &scheme_name,
                                        CefRefPtr<CefRequest> request) override {
-    return new NormaEditorSchemeHandler();
+    return new WinterEditorSchemeHandler();
   }
 
  private:
-  IMPLEMENT_REFCOUNTING(NormaEditorSchemeFactory);
-  DISALLOW_COPY_AND_ASSIGN(NormaEditorSchemeFactory);
+  IMPLEMENT_REFCOUNTING(WinterEditorSchemeFactory);
+  DISALLOW_COPY_AND_ASSIGN(WinterEditorSchemeFactory);
 };
 
-class NormaApp : public CefApp, public CefBrowserProcessHandler {
+class WinterApp : public CefApp, public CefBrowserProcessHandler {
  public:
-  NormaApp() = default;
+  WinterApp() = default;
 
   CefRefPtr<CefBrowserProcessHandler> GetBrowserProcessHandler() override { return this; }
 
   /// editor-plumbing Task 2 — the BROWSER process's half of the scheme registration. The other
-  /// half is `NormaSubprocessApp` in `NormaEditorScheme.h`, which the five helper bundles' shared
+  /// half is `WinterSubprocessApp` in `WinterEditorScheme.h`, which the five helper bundles' shared
   /// `main` hands to `CefExecuteProcess`: CEF requires the same scheme list in every process, and
   /// this app class is reachable from exactly one of them. Both call the same function so the
   /// flags cannot drift — read that header for what each flag buys and what breaks without it.
   void OnRegisterCustomSchemes(CefRawPtr<CefSchemeRegistrar> registrar) override {
-    NormaCEFRegisterEditorScheme(registrar);
+    WinterCEFRegisterEditorScheme(registrar);
   }
 
   /// **Works around an upstream CEF/Chromium crash that killed the browser process deterministically
@@ -2402,7 +2402,7 @@ class NormaApp : public CefApp, public CefBrowserProcessHandler {
   /// `tabs::TabInterface::GetFromContents` is **Chrome's tab-strip abstraction**
   /// (`//chrome/browser/ui/tabs`). A CEF browser is not a Chrome `Tab`, so the lookup yields null
   /// and `OnSoftNavigation` dereferences it at `+0x10` — a Chrome-browser-only observer running in
-  /// an embedding where the object it assumes cannot exist. Nothing in Norma is on that stack: the
+  /// an embedding where the object it assumes cannot exist. Nothing in Winter is on that stack: the
   /// only frames of ours are the pump driving `CefDoMessageLoopWork`, which is how ALL CEF work runs.
   ///
   /// A "soft navigation" is the SPA case — `history.pushState` treated as a navigation for metrics.
@@ -2411,7 +2411,7 @@ class NormaApp : public CefApp, public CefBrowserProcessHandler {
   ///
   /// We cannot patch Chromium, so we remove the TRIGGER. Both flags are metrics/perf-timeline
   /// heuristics with no effect on what a page renders or how it navigates; disabling them costs a
-  /// `soft-navigation` PerformanceEntry that nothing in Norma consumes. **Revisit on every CEF
+  /// `soft-navigation` PerformanceEntry that nothing in Winter consumes. **Revisit on every CEF
   /// bump** — this is upstream's bug to fix, and the switch should come out when it is.
   ///
   /// Browser process only: the header (`cef_app.h:203-205`) warns that editing a non-browser
@@ -2452,11 +2452,11 @@ class NormaApp : public CefApp, public CefBrowserProcessHandler {
   }
 
  private:
-  IMPLEMENT_REFCOUNTING(NormaApp);
-  DISALLOW_COPY_AND_ASSIGN(NormaApp);
+  IMPLEMENT_REFCOUNTING(WinterApp);
+  DISALLOW_COPY_AND_ASSIGN(WinterApp);
 };
 
-CefRefPtr<NormaApp> g_app;
+CefRefPtr<WinterApp> g_app;
 
 void CreateBrowserNow(NSView *parent, const std::string &url, uint32_t backgroundColorARGB) {
   CefWindowInfo window_info;
@@ -2470,12 +2470,12 @@ void CreateBrowserNow(NSView *parent, const std::string &url, uint32_t backgroun
   window_info.runtime_style = CEF_RUNTIME_STYLE_ALLOY;
 
   // **The handle above is RAW and the call below does not block.** The record holds the parent view
-  // for the length of the creation — see `NormaCEFBrowserCreation` for the crash that happens when
+  // for the length of the creation — see `WinterCEFBrowserCreation` for the crash that happens when
   // nothing does. The container's bridge takes a weak handle to it so that a tab dismantled
-  // mid-creation can still find this creation and mark it abandoned (`NormaCEFCloseBrowser`).
-  NormaCEFBrowserCreation *creation = [[NormaCEFBrowserCreation alloc] init];
+  // mid-creation can still find this creation and mark it abandoned (`WinterCEFCloseBrowser`).
+  WinterCEFBrowserCreation *creation = [[WinterCEFBrowserCreation alloc] init];
   creation.parent = parent;
-  NormaCEFTabBridge *bridge = BridgeFor(parent);
+  WinterCEFTabBridge *bridge = BridgeFor(parent);
   bridge.creation = creation;
   Log("creation-retains-parent-view (CreateBrowser does not block and its parent handle is raw)");
 
@@ -2490,15 +2490,15 @@ void CreateBrowserNow(NSView *parent, const std::string &url, uint32_t backgroun
   //
   // The container's BRIDGE goes in with it, for the callback side of the same argument: every
   // display and load callback needs the tab, and the only other way to reach it from a callback is
-  // to message the view behind CEF's window handle — the zombie crash `NormaClient::Tab()`
+  // to message the view behind CEF's window handle — the zombie crash `WinterClient::Tab()`
   // describes.
   CefBrowserSettings browser_settings;
   // editor-product Task 4 — the white-flash fix's first half. `backgroundColorARGB` is ALREADY the
-  // `cef_color_t` bit layout (`NormaCEF.h`'s own contract: `0x00000000` is "no override", an
+  // `cef_color_t` bit layout (`WinterCEF.h`'s own contract: `0x00000000` is "no override", an
   // `0xFFrrggbb` paints the browser that color before its first real paint), so this is a direct
   // assignment rather than a conversion.
   browser_settings.background_color = backgroundColorARGB;
-  CefRefPtr<NormaClient> client = new NormaClient(creation, bridge);
+  CefRefPtr<WinterClient> client = new WinterClient(creation, bridge);
   if (!CefBrowserHost::CreateBrowser(window_info, client, CefString(url), browser_settings, nullptr,
                                      nullptr)) {
     // Refused outright — CEF posted nothing, so no `OnAfterCreated` is coming and nothing else would
@@ -2509,19 +2509,19 @@ void CreateBrowserNow(NSView *parent, const std::string &url, uint32_t backgroun
 }
 
 /// Close a browser whose panel tab was dismantled while CEF was still creating it, then release the
-/// view the creation was holding — **in that order**. Reaching here means `NormaCEFCloseBrowser`
-/// ran during the one window it cannot act in; see `NormaCEFBrowserCreation.abandoned`.
+/// view the creation was holding — **in that order**. Reaching here means `WinterCEFCloseBrowser`
+/// ran during the one window it cannot act in; see `WinterCEFBrowserCreation.abandoned`.
 ///
-/// Same two-step close as `NormaCEFCloseBrowser`, for the same reason: `DoClose` answers `true`, so
+/// Same two-step close as `WinterCEFCloseBrowser`, for the same reason: `DoClose` answers `true`, so
 /// completing the close is ours — read that function's comment. The `IsValid` guard covers the
 /// browser having been closed already between `OnAfterCreated` and this turn, which
-/// `NormaCEFCloseAllBrowsers` does on the shutdown path.
+/// `WinterCEFCloseAllBrowsers` does on the shutdown path.
 ///
 /// The host view comes from the browser's own record rather than from CEF's window handle, and that
 /// matters precisely because of the case the `IsValid` guard does NOT cover: a shutdown sweep that
 /// has already released this browser's view but whose `OnBeforeClose` has not landed yet leaves
-/// `IsValid` true and the handle pointing at freed memory (`NormaCEFOpenBrowser`).
-void CloseAbandonedBrowser(CefRefPtr<CefBrowser> browser, NormaCEFBrowserCreation *creation) {
+/// `IsValid` true and the handle pointing at freed memory (`WinterCEFOpenBrowser`).
+void CloseAbandonedBrowser(CefRefPtr<CefBrowser> browser, WinterCEFBrowserCreation *creation) {
   CEF_REQUIRE_UI_THREAD();
   if (browser && browser->IsValid() && browser->GetHost()) {
     browser->GetHost()->CloseBrowser(true);
@@ -2536,9 +2536,9 @@ void ReplayPendingBrowsers() {
   if (g_pending == nil) {
     return;
   }
-  NSArray<NormaCEFPendingBrowser *> *pending = [g_pending copy];
+  NSArray<WinterCEFPendingBrowser *> *pending = [g_pending copy];
   [g_pending removeAllObjects];
-  for (NormaCEFPendingBrowser *request in pending) {
+  for (WinterCEFPendingBrowser *request in pending) {
     NSView *parent = request.parent;
     if (parent == nil) {
       Log("dropping queued browser — its panel tab went away before the context came up");
@@ -2555,17 +2555,17 @@ void ReplayPendingBrowsers() {
 /// live ObjC pointers compared. Nothing is messaged.
 ///
 /// It used to ask CEF for every open browser's window handle and send `isDescendantOf:` to whatever
-/// came back. That is the zombie hazard `NormaCEFOpenBrowser` describes, and this was its widest
+/// came back. That is the zombie hazard `WinterCEFOpenBrowser` describes, and this was its widest
 /// exposure: every chrome verb — back, forward, reload, stop, load — walks this list, and the list
 /// contains OTHER tabs' browsers, including ones already mid-close whose host view has been detached
 /// and freed.
 CefRefPtr<CefBrowser> BrowserForParent(NSView *parent) {
-  NormaCEFTabBridge *bridge = ExistingBridgeFor(parent);
+  WinterCEFTabBridge *bridge = ExistingBridgeFor(parent);
   if (bridge == nil) {
     return nullptr;
   }
   for (auto &browser : g_browsers) {
-    NormaCEFOpenBrowser *open = OpenBrowserRecordFor(browser);
+    WinterCEFOpenBrowser *open = OpenBrowserRecordFor(browser);
     if (open != nil && open.bridge == bridge) {
       return browser;
     }
@@ -2575,20 +2575,20 @@ CefRefPtr<CefBrowser> BrowserForParent(NSView *parent) {
 
 }  // namespace
 
-/// Runs `CefShutdown` at the process's real point of no return. See `NormaCEFShutdown`.
-@interface NormaCEFTerminationObserver : NSObject
+/// Runs `CefShutdown` at the process's real point of no return. See `WinterCEFShutdown`.
+@interface WinterCEFTerminationObserver : NSObject
 - (void)applicationWillTerminate:(NSNotification *)note;
 @end
 
-@implementation NormaCEFTerminationObserver
+@implementation WinterCEFTerminationObserver
 - (void)applicationWillTerminate:(NSNotification *)note {
-  NormaCEFShutdown();
+  WinterCEFShutdown();
 }
 @end
 
-static NormaCEFTerminationObserver *g_termination_observer = nil;
+static WinterCEFTerminationObserver *g_termination_observer = nil;
 
-/// live-gate fix H. See `NormaCEFSetPreShutdownHook` in the header for what it is for and why it is
+/// live-gate fix H. See `WinterCEFSetPreShutdownHook` in the header for what it is for and why it is
 /// a hook rather than a second `willTerminate` observer.
 static void (^g_pre_shutdown_hook)(void) = nil;
 
@@ -2598,9 +2598,9 @@ static void (^g_pre_shutdown_hook)(void) = nil;
 
 // INTERNAL, not part of the header's surface (whole-branch review F9). It was exported with a
 // caller obligation nobody had — "nothing else in this header may be called before this returns
-// YES" — which is discharged here instead: `NormaCEFInitialize` below is its only caller, and
+// YES" — which is discharged here instead: `WinterCEFInitialize` below is its only caller, and
 // every other entry point guards on `g_initialized`.
-static BOOL NormaCEFLoadLibrary(void) {
+static BOOL WinterCEFLoadLibrary(void) {
   if (g_library_loaded) {
     return YES;
   }
@@ -2627,7 +2627,7 @@ static BOOL NormaCEFLoadLibrary(void) {
   return YES;
 }
 
-BOOL NormaCEFInitialize(int argc,
+BOOL WinterCEFInitialize(int argc,
                         char **argv,
                         const char *rootCachePath,
                         const char *subprocessPath) {
@@ -2640,7 +2640,7 @@ BOOL NormaCEFInitialize(int argc,
     Log("REFUSED: %s", g_last_error.c_str());
     return NO;
   }
-  if (!NormaCEFLoadLibrary()) {
+  if (!WinterCEFLoadLibrary()) {
     return NO;
   }
 
@@ -2654,9 +2654,9 @@ BOOL NormaCEFInitialize(int argc,
   settings.no_sandbox = false;                   // the helpers' CEF_USE_SANDBOX half is in project.yml
   CefString(&settings.root_cache_path).FromString(rootCachePath);
   // Set explicitly rather than left to CEF's default derivation. CEF documents the default as
-  // "Contents/Frameworks/<app> Helper.app/…" derived from the bundle — and Norma's CFBundleName is
-  // "Norma Dev" in Debug while the helper bundles are named "Norma Helper" in every configuration
-  // (PRODUCT_NAME, config-independent). Deriving would look for a "Norma Dev Helper.app" that does
+  // "Contents/Frameworks/<app> Helper.app/…" derived from the bundle — and Winter's CFBundleName is
+  // "Winter Dev" in Debug while the helper bundles are named "Winter Helper" in every configuration
+  // (PRODUCT_NAME, config-independent). Deriving would look for a "Winter Dev Helper.app" that does
   // not exist. Chromium appends its own per-role suffix — " (Renderer)", " (GPU)", … — to whatever
   // base path it is given, so the four suffixed bundles are still reached from this one setting.
   CefString(&settings.browser_subprocess_path).FromString(subprocessPath);
@@ -2687,7 +2687,7 @@ BOOL NormaCEFInitialize(int argc,
   settings.log_severity = LOGSEVERITY_DISABLE;
 #endif
 
-  g_app = new NormaApp();
+  g_app = new WinterApp();
 
   const bool ok = CefInitialize(main_args, settings, g_app.get(), nullptr);
   if (!ok) {
@@ -2700,7 +2700,7 @@ BOOL NormaCEFInitialize(int argc,
   Log("CefInitialize ok; context initialized synchronously = %s",
       g_context_initialized ? "yes" : "no");
 
-  // editor-plumbing Task 2 — the `norma-editor://` scheme's FACTORY, which is the browser-process
+  // editor-plumbing Task 2 — the `winter-editor://` scheme's FACTORY, which is the browser-process
   // half of the scheme and the only half that can be registered here. Its other half —
   // `AddCustomScheme`, in every process including the five helpers — has already run by now:
   // `CefApp::OnRegisterCustomSchemes` fires from inside `CefInitialize` above.
@@ -2713,16 +2713,16 @@ BOOL NormaCEFInitialize(int argc,
   // The result is logged because it is a `bool` nothing else would ever look at: a false here means
   // the whole editor surface silently serves nothing, with no other symptom until a page fails to
   // load in Task 5's harness.
-  const bool scheme_ok = CefRegisterSchemeHandlerFactory(kNormaEditorScheme, CefString(),
-                                                         new NormaEditorSchemeFactory());
-  Log("%s scheme handler factory registered = %s", kNormaEditorScheme, scheme_ok ? "yes" : "no");
+  const bool scheme_ok = CefRegisterSchemeHandlerFactory(kWinterEditorScheme, CefString(),
+                                                         new WinterEditorSchemeFactory());
+  Log("%s scheme handler factory registered = %s", kWinterEditorScheme, scheme_ok ? "yes" : "no");
 
   // The shutdown guarantee lives HERE, with the thing it guards, rather than in a line of
   // AppDelegate that could be deleted without anything failing to compile. It is registered only
   // once CEF is actually up, so a build that never starts CEF never arms it.
   //
   // **This block is now the WHOLE real-quit teardown guarantee.** The whole-branch review's F7 fix
-  // deleted `NormaApplication`'s `-terminate:` override — it destroyed browsers on quit-cancel too,
+  // deleted `WinterApplication`'s `-terminate:` override — it destroyed browsers on quit-cancel too,
   // blanking the panel permanently — which leaves exactly one path from a real quit to
   // `CefShutdown`: this subscription. Deleting these six lines compiles, links, and leaves the
   // suite green while the app quits without ever shutting CEF down.
@@ -2734,7 +2734,7 @@ BOOL NormaCEFInitialize(int argc,
   // start CEF cannot observe that). If you change this message, change that needle with it — the
   // coupling is deliberate and is written at both ends.
   if (g_termination_observer == nil) {
-    g_termination_observer = [[NormaCEFTerminationObserver alloc] init];
+    g_termination_observer = [[WinterCEFTerminationObserver alloc] init];
     [[NSNotificationCenter defaultCenter] addObserver:g_termination_observer
                                              selector:@selector(applicationWillTerminate:)
                                                  name:NSApplicationWillTerminateNotification
@@ -2744,20 +2744,20 @@ BOOL NormaCEFInitialize(int argc,
   return YES;
 }
 
-BOOL NormaCEFIsInitialized(void) {
+BOOL WinterCEFIsInitialized(void) {
   return g_initialized ? YES : NO;
 }
 
-const char *NormaCEFLastError(void) {
+const char *WinterCEFLastError(void) {
   return g_last_error.c_str();
 }
 
-// editor-plumbing Task 2. Defined from the C++ constant in `NormaEditorScheme.h` — the scheme name
+// editor-plumbing Task 2. Defined from the C++ constant in `WinterEditorScheme.h` — the scheme name
 // is written ONCE, and the Swift-facing symbol, the browser process's `AddCustomScheme` and the
 // helpers' cannot say different things.
-const char *const kNormaEditorScheme = kNormaEditorSchemeName;
+const char *const kWinterEditorScheme = kWinterEditorSchemeName;
 
-void NormaCEFRegisterEditorAssetRoot(const char *absolutePath) {
+void WinterCEFRegisterEditorAssetRoot(const char *absolutePath) {
   {
     std::lock_guard<std::mutex> lock(g_editor_root_mutex);
     g_editor_root = absolutePath != nullptr ? absolutePath : "";
@@ -2773,7 +2773,7 @@ void NormaCEFRegisterEditorAssetRoot(const char *absolutePath) {
 #endif
 }
 
-void NormaCEFCreateBrowser(NSView *parent, const char *url, uint32_t backgroundColorARGB) {
+void WinterCEFCreateBrowser(NSView *parent, const char *url, uint32_t backgroundColorARGB) {
   if (!g_initialized || g_shutting_down || parent == nil) {
     return;
   }
@@ -2789,7 +2789,7 @@ void NormaCEFCreateBrowser(NSView *parent, const char *url, uint32_t backgroundC
   if (g_pending == nil) {
     g_pending = [[NSMutableArray alloc] init];
   }
-  NormaCEFPendingBrowser *request = [[NormaCEFPendingBrowser alloc] init];
+  WinterCEFPendingBrowser *request = [[WinterCEFPendingBrowser alloc] init];
   request.parent = parent;
   request.url = [NSString stringWithUTF8String:target.c_str()];
   request.backgroundColorARGB = backgroundColorARGB;
@@ -2805,8 +2805,8 @@ void NormaCEFCreateBrowser(NSView *parent, const char *url, uint32_t backgroundC
 // Task 6b: the observers, the dedupe seed, and the chrome's verbs
 // ---------------------------------------------------------------------------
 
-void NormaCEFSetStateObserver(NSView *parent, void (^observer)(NormaCEFBrowserState *state)) {
-  NormaCEFTabBridge *bridge = BridgeFor(parent);
+void WinterCEFSetStateObserver(NSView *parent, void (^observer)(WinterCEFBrowserState *state)) {
+  WinterCEFTabBridge *bridge = BridgeFor(parent);
   bridge.stateObserver = observer;
   // Deliver the current snapshot immediately rather than waiting for the next CEF callback. A plain
   // tab switch does not re-register this any more — since browser-runtime T4 the observers stay
@@ -2819,16 +2819,16 @@ void NormaCEFSetStateObserver(NSView *parent, void (^observer)(NormaCEFBrowserSt
   }
 }
 
-void NormaCEFSetNavigationObserver(NSView *parent, void (^observer)(NSString *url, NSString *title)) {
+void WinterCEFSetNavigationObserver(NSView *parent, void (^observer)(NSString *url, NSString *title)) {
   BridgeFor(parent).navigationObserver = observer;
 }
 
-void NormaCEFSetPopupObserver(NSView *parent, void (^observer)(NSString *url)) {
+void WinterCEFSetPopupObserver(NSView *parent, void (^observer)(NSString *url)) {
   BridgeFor(parent).popupObserver = observer;
 }
 
-void NormaCEFSeedTabState(NSView *parent, const char *url, const char *title) {
-  NormaCEFTabBridge *bridge = BridgeFor(parent);
+void WinterCEFSeedTabState(NSView *parent, const char *url, const char *title) {
+  WinterCEFTabBridge *bridge = BridgeFor(parent);
   NSString *seedURL = url != nullptr ? [NSString stringWithUTF8String:url] : @"";
   NSString *seedTitle = title != nullptr ? [NSString stringWithUTF8String:title] : @"";
   // The dedupe memory (effect 1) and the displayed values (effect 2) — see the header doc.
@@ -2843,31 +2843,31 @@ void NormaCEFSeedTabState(NSView *parent, const char *url, const char *title) {
   bridge.titleURL = seedURL;
 }
 
-void NormaCEFGoBack(NSView *parent) {
+void WinterCEFGoBack(NSView *parent) {
   if (auto browser = BrowserForParent(parent)) {
     browser->GoBack();
   }
 }
 
-void NormaCEFGoForward(NSView *parent) {
+void WinterCEFGoForward(NSView *parent) {
   if (auto browser = BrowserForParent(parent)) {
     browser->GoForward();
   }
 }
 
-void NormaCEFReload(NSView *parent) {
+void WinterCEFReload(NSView *parent) {
   if (auto browser = BrowserForParent(parent)) {
     browser->Reload();
   }
 }
 
-void NormaCEFStopLoad(NSView *parent) {
+void WinterCEFStopLoad(NSView *parent) {
   if (auto browser = BrowserForParent(parent)) {
     browser->StopLoad();
   }
 }
 
-void NormaCEFLoadURL(NSView *parent, const char *url) {
+void WinterCEFLoadURL(NSView *parent, const char *url) {
   if (url == nullptr || *url == '\0') {
     return;
   }
@@ -2884,10 +2884,10 @@ void NormaCEFLoadURL(NSView *parent, const char *url) {
 // B2 Task 3: the CDP door
 // ---------------------------------------------------------------------------
 
-void NormaCEFExecuteCDP(NSView *parent,
+void WinterCEFExecuteCDP(NSView *parent,
                         const char *method,
                         const char *paramsJSON,
-                        NormaCEFCDPCompletion completion) {
+                        WinterCEFCDPCompletion completion) {
   if (completion == nil) {
     // Nobody to answer. Deliberately NOT "run it anyway": every verb this door serves exists for its
     // reply, so a call with no completion is a caller bug, and running it would hide the bug behind a
@@ -2897,7 +2897,7 @@ void NormaCEFExecuteCDP(NSView *parent,
   }
   // Copied once, here, so every exit below hands back the same block — a stack block escaping into
   // the pending map is the classic ARC hazard on this shape.
-  NormaCEFCDPCompletion answer = [completion copy];
+  WinterCEFCDPCompletion answer = [completion copy];
 
   if (method == nullptr || *method == '\0') {
     answer(NO, CDPReasonJSON(@"no DevTools method was named"));
@@ -2955,7 +2955,7 @@ void NormaCEFExecuteCDP(NSView *parent,
 // editor-plumbing Task 3: the editor bridge's two doors
 // ---------------------------------------------------------------------------
 
-int NormaCEFBrowserIdentifierForParent(NSView *parent) {
+int WinterCEFBrowserIdentifierForParent(NSView *parent) {
   // The header's standing promise, and here it is also what keeps the answer honest: with CEF never
   // loaded there are no browsers, so the only truthful answer is "none", and `BrowserForParent`
   // would walk an empty list to reach it anyway.
@@ -2969,17 +2969,17 @@ int NormaCEFBrowserIdentifierForParent(NSView *parent) {
   return browser ? browser->GetIdentifier() : 0;
 }
 
-void NormaCEFSetBridgeHandler(void (^handler)(int browserId, uint64_t queryId,
+void WinterCEFSetBridgeHandler(void (^handler)(int browserId, uint64_t queryId,
                                               const char *requestJSON)) {
   // Copied, like every other block this file stores: a stack block escaping into process-global
-  // state is the classic ARC hazard on this shape (`NormaCEFExecuteCDP` says the same).
+  // state is the classic ARC hazard on this shape (`WinterCEFExecuteCDP` says the same).
   g_bridge_handler = [handler copy];
   // No CEF guard, and no reach into the framework — this is plain process state, settable before
   // `CefInitialize` and in a host where CEF never starts at all. Queries simply do not arrive there.
   Log("editor bridge handler %s", handler != nil ? "registered" : "cleared");
 }
 
-void NormaCEFBridgeRespondCall(uint64_t queryId, bool success, const char *responseJSON) {
+void WinterCEFBridgeRespondCall(uint64_t queryId, bool success, const char *responseJSON) {
   CefRefPtr<CefMessageRouterBrowserSide::Callback> callback;
   {
     std::lock_guard<std::mutex> lock(g_bridge_mutex);
@@ -3004,13 +3004,13 @@ void NormaCEFBridgeRespondCall(uint64_t queryId, bool success, const char *respo
   if (success) {
     callback->Success(response);
   } else {
-    callback->Failure(kNormaCEFBridgeFailureCode, response);
+    callback->Failure(kWinterCEFBridgeFailureCode, response);
   }
   Log("bridge-query-answered (id=%llu, ok=%d, %zu byte(s))",
       static_cast<unsigned long long>(queryId), success ? 1 : 0, response.size());
 }
 
-NSString *NormaCEFPendingCDPTranscriptForOneBrowserWithNoCEFAnywhere(void) {
+NSString *WinterCEFPendingCDPTranscriptForOneBrowserWithNoCEFAnywhere(void) {
   // Ids far outside anything CEF hands out in this process, so a real browser cannot collide with
   // the fixture even if one is somehow open while a test runs.
   const int browserA = 910001;
@@ -3042,23 +3042,23 @@ NSString *NormaCEFPendingCDPTranscriptForOneBrowserWithNoCEFAnywhere(void) {
   return [fired componentsJoinedByString:@";"];
 }
 
-BOOL NormaCEFPopupsAreCancelledSoCEFNeverCreatesAWindow(void) {
+BOOL WinterCEFPopupsAreCancelledSoCEFNeverCreatesAWindow(void) {
   // Flipping this to NO does NOT "let popups through to somewhere else" — it hands CEF a window
-  // Norma has no handle on and, because `DoClose` says the host completes every close, nothing can
+  // Winter has no handle on and, because `DoClose` says the host completes every close, nothing can
   // ever close it. Popups reach the user as PANEL TABS (see `OnBeforePopup`); this answer is what
   // keeps CEF out of the window business while they do.
   // `CEFRuntimeTests.testPopupsAreStillCANCELLEDSoCEFNeverCreatesAWindowOfItsOwn` reads this value.
   return YES;
 }
 
-BOOL NormaCEFDoCloseIsHandledByHost(void) {
+BOOL WinterCEFDoCloseIsHandledByHost(void) {
   // Flipping this to NO re-opens the live-gate Critical: CEF would send `performClose:` to the
-  // browser's top-level parent window, which is Norma's own app window. `CEFRuntimeTests
-  // .testDoCloseAnswersThatTheHostHandlesTheCloseSoCEFNeverTouchesNormasWindow` reads this value.
+  // browser's top-level parent window, which is Winter's own app window. `CEFRuntimeTests
+  // .testDoCloseAnswersThatTheHostHandlesTheCloseSoCEFNeverTouchesWintersWindow` reads this value.
   return YES;
 }
 
-BOOL NormaCEFClientInstallsTheClickAndMenuHandlers(void) {
+BOOL WinterCEFClientInstallsTheClickAndMenuHandlers(void) {
   // **The two lines this asks about are the whole feature's on-switch, and a string scan cannot
   // see them.** Measured, not assumed: deleting only `GetRequestHandler` and
   // `GetContextMenuHandler` — leaving every override, every literal and every menu label in the
@@ -3070,15 +3070,15 @@ BOOL NormaCEFClientInstallsTheClickAndMenuHandlers(void) {
   // which is how CEF itself asks. That is what makes this different from the two constant answers
   // above: delete a getter and the base class's `nullptr` is what comes back.
   //
-  // Safe with CEF down (the unit-test host, always). `NormaClient` and every CEF interface it
+  // Safe with CEF down (the unit-test host, always). `WinterClient` and every CEF interface it
   // derives from are header-only, abstract and inline — the app already links without the
   // framework, which is `dlopen`ed — so nothing here reaches libcef, and the client is destroyed
   // by `CefRefPtr` on return without ever having been handed to a browser.
-  CefRefPtr<CefClient> client = new NormaClient(nil, nil);
+  CefRefPtr<CefClient> client = new WinterClient(nil, nil);
   return client->GetRequestHandler() != nullptr && client->GetContextMenuHandler() != nullptr;
 }
 
-NSObject *NormaCEFRecordAfterACloseHandsTheHostViewBack(NSView *hostView) {
+NSObject *WinterCEFRecordAfterACloseHandsTheHostViewBack(NSView *hostView) {
   // A record filled the way `RememberOpenBrowser` fills one, minus the single line that needs a
   // `CefBrowser`: the cast of CEF's window handle. Everything the close reads — the dictionary, the
   // key, the strong `hostView` — is the production shape.
@@ -3089,9 +3089,9 @@ NSObject *NormaCEFRecordAfterACloseHandsTheHostViewBack(NSView *hostView) {
   // (`testTheRuntimeRefusesToStartCEFUnderXCTest`), so no real browser can collide with it, and the
   // key is removed again below either way.
   const int kSeamBrowserId = -424242;
-  NormaCEFOpenBrowser *record = [[NormaCEFOpenBrowser alloc] init];
+  WinterCEFOpenBrowser *record = [[WinterCEFOpenBrowser alloc] init];
   record.hostView = hostView;
-  record.bridge = [[NormaCEFTabBridge alloc] init];
+  record.bridge = [[WinterCEFTabBridge alloc] init];
   g_open_browsers[@(kSeamBrowserId)] = record;
 
   // The production close's second half, verbatim — the same function all three close paths call.
@@ -3103,15 +3103,15 @@ NSObject *NormaCEFRecordAfterACloseHandsTheHostViewBack(NSView *hostView) {
   return record;
 }
 
-NSObject *NormaCEFTabAfterOneClientCallbackWithNoViewAnywhere(void) {
+NSObject *WinterCEFTabAfterOneClientCallbackWithNoViewAnywhere(void) {
   // A bridge with no container. That is the whole point: before this fix a callback could only
   // reach a tab THROUGH a view, so this object could not exist in a test at all.
-  NormaCEFTabBridge *bridge = [[NormaCEFTabBridge alloc] init];
-  CefRefPtr<NormaClient> client = new NormaClient(nil, bridge);
+  WinterCEFTabBridge *bridge = [[WinterCEFTabBridge alloc] init];
+  CefRefPtr<WinterClient> client = new WinterClient(nil, bridge);
   // The real body of `CefLoadHandler::OnLoadingStateChange`, called exactly as the override calls
   // it. The override cannot be called here — `CEF_REQUIRE_UI_THREAD()` reaches libcef through a
   // function-pointer table that is all zeroes until the framework is `dlopen`ed, and this host never
-  // loads it — which is why the body is a seam; see `NormaClient::ApplyLoadingState`.
+  // loads it — which is why the body is a seam; see `WinterClient::ApplyLoadingState`.
   //
   // The three values are deliberately not all `true`: `canGoBack = false` is the control, so a
   // stub that wrote constants instead of arguments would fail this rather than satisfy it.
@@ -3121,7 +3121,7 @@ NSObject *NormaCEFTabAfterOneClientCallbackWithNoViewAnywhere(void) {
   return bridge;
 }
 
-void NormaCEFCloseBrowser(NSView *parent) {
+void WinterCEFCloseBrowser(NSView *parent) {
   if (parent == nil) {
     return;
   }
@@ -3130,8 +3130,8 @@ void NormaCEFCloseBrowser(NSView *parent) {
   //
   // OURS — `g_pending`, everything asked for before `OnContextInitialized`. Pruned here, by parent.
   if (g_pending != nil) {
-    NSMutableArray<NormaCEFPendingBrowser *> *survivors = [[NSMutableArray alloc] init];
-    for (NormaCEFPendingBrowser *request in g_pending) {
+    NSMutableArray<WinterCEFPendingBrowser *> *survivors = [[NSMutableArray alloc] init];
+    for (WinterCEFPendingBrowser *request in g_pending) {
       if (request.parent != nil && request.parent != parent) {
         [survivors addObject:request];
       }
@@ -3143,7 +3143,7 @@ void NormaCEFCloseBrowser(NSView *parent) {
   // is MARKED instead: `OnAfterCreated` closes the browser the moment it arrives. Without this the
   // browser below finds nothing, this function returns having closed nothing, and the browser turns
   // up afterwards parented into a view the panel has already thrown away.
-  if (NormaCEFBrowserCreation *creation = ExistingBridgeFor(parent).creation) {
+  if (WinterCEFBrowserCreation *creation = ExistingBridgeFor(parent).creation) {
     creation.abandoned = YES;
     Log("creation-abandoned-in-CEFs-queue (its browser is closed the moment it arrives)");
   }
@@ -3154,7 +3154,7 @@ void NormaCEFCloseBrowser(NSView *parent) {
     // Order matters, and `DoClose` returning true is what makes this order safe.
     //
     // 1. `CloseBrowser(true)` starts CEF's close sequence. `DoClose` answers true, so CEF does NOT
-    //    send `performClose:` to Norma's app window — the defect this pair of changes fixes.
+    //    send `performClose:` to Winter's app window — the defect this pair of changes fixes.
     // 2. Returning true means CEF hands the completion back to us: "you are still required to
     //    complete the browser close as soon as possible ... or by proceeding with window/view
     //    hierarchy tear-down" (`cef_life_span_handler.h`). `CompleteCloseByReleasingHostView` IS
@@ -3165,7 +3165,7 @@ void NormaCEFCloseBrowser(NSView *parent) {
     // detach was optional on the panel-tab path, because B1 measured that with it deleted
     // `OnBeforeClose` still fired and `g_browsers` still drained — SwiftUI's release of the
     // container discharging the obligation. That was true, and it stopped being true the moment
-    // `NormaCEFOpenBrowser` started holding CEF's host view strongly (`51a43124`): SwiftUI's
+    // `WinterCEFOpenBrowser` started holding CEF's host view strongly (`51a43124`): SwiftUI's
     // release no longer reaches the view, because the record outlives the container. What B1
     // actually measured was never the DETACH — it was the RELEASE that the detach happened to
     // cause. Re-measured on the shipped code, the close stalled for the whole 12.3 s run with the
@@ -3177,7 +3177,7 @@ void NormaCEFCloseBrowser(NSView *parent) {
     // `GetWindowHandle()` here instead is what the fetch-before-close ordering used to be about —
     // it "is not guaranteed to answer once the close is under way" — and the ordering was never the
     // real hazard: the handle answers with a pointer to a view that a previous close (a shutdown
-    // sweep, or this tab closed twice) may already have released. See `NormaCEFOpenBrowser`.
+    // sweep, or this tab closed twice) may already have released. See `WinterCEFOpenBrowser`.
     // B2 Task 3: **fail every in-flight CDP call BEFORE the close starts.** This is the
     // deterministic one of the three fail points — the app decided this close, so it knows here and
     // now that no reply is coming. `OnBeforeClose` is the belt behind it and lands later (a close
@@ -3189,7 +3189,7 @@ void NormaCEFCloseBrowser(NSView *parent) {
   }
 }
 
-void NormaCEFCloseAllBrowsers(void) {
+void WinterCEFCloseAllBrowsers(void) {
   if (g_pending != nil) {
     [g_pending removeAllObjects];
   }
@@ -3199,36 +3199,36 @@ void NormaCEFCloseAllBrowsers(void) {
   // Iterate a COPY: OnBeforeClose can land during this loop and mutate g_browsers.
   std::vector<CefRefPtr<CefBrowser>> browsers = g_browsers;
   for (auto &browser : browsers) {
-    // Same two-step as NormaCEFCloseBrowser, and for the same reason: `DoClose` returns true, so
+    // Same two-step as WinterCEFCloseBrowser, and for the same reason: `DoClose` returns true, so
     // completing the close is ours to do. See its comment — including why the view comes from the
     // browser's record. This sweep is where that mattered most: it runs over EVERY open browser,
     // and a tab the user closed a moment before quitting is still one of them — with a host view
-    // `NormaCEFCloseBrowser` has already released, its `OnBeforeClose` still in flight. That record
+    // `WinterCEFCloseBrowser` has already released, its `OnBeforeClose` still in flight. That record
     // now reads `nil`, so this sweep skips it: nil, never a pointer into freed memory.
     //
     // Nothing is skipped that shouldn't be: a browser whose `OnBeforeClose` has run is no longer in
     // `g_browsers` at all, and one whose close is genuinely still to be started still has its view.
     //
-    // B2 Task 3: same fail-before-close as `NormaCEFCloseBrowser`, for the same reason. This sweep
-    // runs from `NormaCEFShutdown`, where the completions are the last thing anything will hear.
+    // B2 Task 3: same fail-before-close as `WinterCEFCloseBrowser`, for the same reason. This sweep
+    // runs from `WinterCEFShutdown`, where the completions are the last thing anything will hear.
     FailAllPendingCDP(browser->GetIdentifier(), @"the tab's browser was closed");
     browser->GetHost()->CloseBrowser(true);
     CompleteCloseByReleasingHostView(browser->GetIdentifier());
   }
 }
 
-void NormaCEFSetPreShutdownHook(void (^hook)(void)) {
+void WinterCEFSetPreShutdownHook(void (^hook)(void)) {
   g_pre_shutdown_hook = [hook copy];
 }
 
-void NormaCEFShutdown(void) {
+void WinterCEFShutdown(void) {
   if (!g_initialized) {
     // Never initialised: there is nothing to shut down, and calling CefShutdown would dispatch
     // through a dylib stub that was never resolved. This no-op is what makes the termination
     // wiring safe in every build — including the unit-test host, which never starts CEF.
     //
     // **And it does NOT set `g_did_shutdown`** (whole-branch review F10). That flag is what makes
-    // `NormaCEFInitialize` refuse forever and `NormaCEFRuntime.isRetryable` answer false, so
+    // `WinterCEFInitialize` refuse forever and `WinterCEFRuntime.isRetryable` answer false, so
     // latching it here would mean a call that did nothing at all permanently closed the door on
     // starting CEF. It is process-global and nothing resets it, so in the unit-test host the one
     // test that exercises this path was silently changing `isRetryable` for every test that ran
@@ -3280,7 +3280,7 @@ void NormaCEFShutdown(void) {
     if (g_pre_shutdown_hook != nil) {
       g_pre_shutdown_hook();
     }
-    NormaCEFCloseAllBrowsers();
+    WinterCEFCloseAllBrowsers();
   }
   // **MEASURED AT THE RUNTIME'S FULL WORLD (browser-runtime T7), not at one tab.** The 50×10 ms
   // bound was set when a quit meant one browser. The runtime's world was 8 browsers when this was
@@ -3293,7 +3293,7 @@ void NormaCEFShutdown(void) {
   // container itself ever dies.
   //
   // Measured with 8 live browsers, 7 of them parked (`SpikeCloseLeak`,
-  // `NORMA_SPIKE_CLOSE_BROWSERS=8`), and the parked pages' playback SAMPLED rather than assumed —
+  // `WINTER_SPIKE_CLOSE_BROWSERS=8`), and the parked pages' playback SAMPLED rather than assumed —
   // `PARK-AUDIO parked=7 playing=7 refused=0`, read off each tab's own model at quit, with
   // `--autoplay-policy=no-user-gesture-required` on the command line (without it a parked page in a
   // hidden window is the likeliest thing in the app to be refused autoplay, and the run says so
@@ -3345,7 +3345,7 @@ void NormaCEFShutdown(void) {
   //     browsers=0)` from inside `CefShutdown` — the pre-pool signature exactly, with the pool
   //     present. Cause: a browser whose container has been MOUNTED in a real window, which the
   //     harness's all-parked runs could not produce; reproduced at
-  //     `NORMA_SPIKE_CLOSE_MOUNTED=1` as `1 browser(s) still open, 50/50`.
+  //     `WINTER_SPIKE_CLOSE_MOUNTED=1` as `1 browser(s) still open, 50/50`.
   //   * **The hook above is NOT what fixed it, and that is the sharp part.** Unparenting inside
   //     this function leaves CEF's host view at a retain count of 17 (against 5 for a
   //     never-mounted one) — measured — and 1.5 s of spun run loop here only reaches 14. Nothing
@@ -3367,7 +3367,7 @@ void NormaCEFShutdown(void) {
   //
   //   * **Healthy quit, any number of browsers: N = 0.** Measured at 8 (7 parked, all with a live
   //     media element).
-  //   * **Quit racing an in-flight create: N = 0, measured.** `NORMA_SPIKE_CLOSE_RACE` puts K
+  //   * **Quit racing an in-flight create: N = 0, measured.** `WINTER_SPIKE_CLOSE_RACE` puts K
   //     creations into CEF's own queue in the same run-loop turn as the quit (K = 3, 3, 8 — with
   //     nothing in between that spins the run loop, which is a real hazard: the spike's own `ps`
   //     census defeated the first attempt by delivering the pump turns the creations were waiting
@@ -3395,6 +3395,6 @@ void NormaCEFShutdown(void) {
   CefShutdown();
 }
 
-BOOL NormaCEFDidShutdown(void) {
+BOOL WinterCEFDidShutdown(void) {
   return g_did_shutdown ? YES : NO;
 }

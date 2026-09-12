@@ -1,13 +1,13 @@
 import XCTest
-@testable import NormaKit
+@testable import WinterKit
 
 /// SP2b Task 3: `PairingStore` is the Mac's persisted paired-device allowlist — a JSON file under
-/// a temp dir for every test in this file (CLAUDE.md: tests must never touch the live `~/.norma`).
+/// a temp dir for every test in this file (CLAUDE.md: tests must never touch the live `~/.winter`).
 final class PairingStoreTests: XCTestCase {
 
     private func tempFileURL() -> URL {
         FileManager.default.temporaryDirectory
-            .appendingPathComponent("norma-pairing-store-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("winter-pairing-store-tests-\(UUID().uuidString)", isDirectory: true)
             .appendingPathComponent("paired-devices.json")
     }
 

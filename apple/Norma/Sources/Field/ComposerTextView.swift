@@ -19,19 +19,19 @@ import SwiftUI
 /// Task B (v1 field transplant, window choreography) adds back v1's `onContentHeightChange`
 /// (`TextField/ComposerTextView.swift:39,301-315`, verbatim measurement: laid-out text height
 /// via `NSLayoutManager.usedRect(for:)` plus the container's vertical insets, deduped to >0.5pt
-/// changes) so `NormaFieldView`'s composer pill can grow with typed/wrapped text instead of
+/// changes) so `WinterFieldView`'s composer pill can grow with typed/wrapped text instead of
 /// sitting fixed at `composerMinHeight`.
 struct ComposerTextView: NSViewRepresentable {
     /// Single source of truth for the text container's inset — `makeNSView` applies these exact
-    /// values to the real `NSTextView`, and `NormaFieldView`'s placeholder overlay (gate wave-3
-    /// text-alignment fix) reads the SAME constants so "Ask Norma…" starts flush with where the
+    /// values to the real `NSTextView`, and `WinterFieldView`'s placeholder overlay (gate wave-3
+    /// text-alignment fix) reads the SAME constants so "Ask Winter…" starts flush with where the
     /// real caret/first glyph renders instead of drifting off and overlapping it.
     static let textContainerInset = NSSize(width: 2, height: 4)
     static let lineFragmentPadding: CGFloat = 0
 
     /// The measured content height of a TWO-line draft at the composer's bound size — the
     /// threshold family for "has the draft grown past a couple of lines" checks
-    /// (`NormaFieldView.showsClearButton`). Derived from the live face so a ladder change
+    /// (`WinterFieldView.showsClearButton`). Derived from the live face so a ladder change
     /// moves it with the text it measures: heights jump a whole line at a time, so any
     /// consumer comparing `> twoLineContentHeight` fires exactly when the third line arrives,
     /// at every ladder.
@@ -46,7 +46,7 @@ struct ComposerTextView: NSViewRepresentable {
     /// Task 4 (`ChatWindowRootView`): that window is an opaque, normally-colored surface — NOT
     /// under the field's difference-blend LAW (see `textColor`'s doc above) — so its composer
     /// needs real adaptive text/insertion colors instead of the hardcoded `.white` the field
-    /// requires. Defaults `false` so the field's own call-site (`NormaFieldView.swift`) is
+    /// requires. Defaults `false` so the field's own call-site (`WinterFieldView.swift`) is
     /// byte-identical / zero behavior change; only the window opts in.
     var usesAdaptiveColors: Bool = false
     /// The typed text's point size. The default is BOUND to the user-message size (ruling
@@ -100,7 +100,7 @@ struct ComposerTextView: NSViewRepresentable {
         let textView = CommandTextView()
         textView.delegate = context.coordinator
         textView.font = Typography.sansNS(ofSize: fontSize)
-        // GATE-3 FIX (F2): this composer is rendered inside `NormaFieldView.composerOrResponseContent`,
+        // GATE-3 FIX (F2): this composer is rendered inside `WinterFieldView.composerOrResponseContent`,
         // which is wrapped in `.modifier(GlassForegroundLegibility())` — `.blendMode(.difference)`
         // against the glass surface beneath (see that type + `GlassChromeColor`'s doc). Difference
         // inverts cleanly ONLY against a pure-white source (`white − bg = inverse(bg)`); v1's own
@@ -124,7 +124,7 @@ struct ComposerTextView: NSViewRepresentable {
             .font: textView.font ?? Typography.sansNS(ofSize: fontSize),
             .foregroundColor: usesAdaptiveColors ? NSColor.labelColor : NSColor.white
         ]
-        // The caret is NORMA'S accent (user call, 2026-08-07 — every cursor in the app one colour),
+        // The caret is WINTER'S accent (user call, 2026-08-07 — every cursor in the app one colour),
         // never `.controlAccentColor`: that is whatever the user picked in System Settings, so it
         // rendered in an unrelated colour (yellow, in the report that prompted this) and read as a
         // bug rather than a theme. SwiftUI text fields get the same colour from the shell's
@@ -204,7 +204,7 @@ struct ComposerTextView: NSViewRepresentable {
         //
         // The resting behaviour is deliberately unchanged — with the window, a button or a scroll
         // view as first responder the composer still claims, which is the premise `isTextEditing
-        // Focused` (`NormaComposerCard.swift`) is written against and `CardWiringTests` pins.
+        // Focused` (`WinterComposerCard.swift`) is written against and `CardWiringTests` pins.
         DispatchQueue.main.async { [weak textView] in
             guard let textView, let window = textView.window,
                   composerShouldClaimFirstResponder(current: window.firstResponder, composer: textView)
@@ -250,7 +250,7 @@ struct ComposerTextView: NSViewRepresentable {
 /// **Live-gate fix D: may the composer take first responder right now?**
 ///
 /// The composer is designed to hold `firstResponder` at rest — `isTextEditingFocused`
-/// (`NormaComposerCard.swift`) documents that as a standing fact the card-key routing has to work
+/// (`WinterComposerCard.swift`) documents that as a standing fact the card-key routing has to work
 /// around — and it does that by re-claiming on every mount and every SwiftUI update. That is right
 /// against the window, a button, or nothing at all. It is wrong against **another text input the
 /// user is in the middle of using**: the panel's URL field is a SwiftUI `TextField` in the same
@@ -283,7 +283,7 @@ func composerShouldClaimFirstResponder(current: NSResponder?, composer: NSView) 
 /// firstResponder change) — only when it returns `false`/`nil` (unconsumed) does the pre-existing
 /// Enter/Shift+Enter contract below run, verbatim. `onTypingRefocus` fires on every inserted
 /// character so typing while the chevron is virtually focused snaps focus back to the composer
-/// before the character lands (`NormaFieldView`'s wiring sets `adapter.focusedElement = .composer`).
+/// before the character lands (`WinterFieldView`'s wiring sets `adapter.focusedElement = .composer`).
 final class CommandTextView: NSTextView {
     var onSubmit: (() -> Void)?
     var onFocusKey: ((FieldFocusKey, _ caretAtFirstLine: Bool, _ caretAtLastLine: Bool) -> Bool)?

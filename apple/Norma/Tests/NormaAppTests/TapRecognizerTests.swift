@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 final class TapRecognizerTests: XCTestCase {
     func four(_ base: Float, spread: Float = 0.1) -> [TouchSample] {

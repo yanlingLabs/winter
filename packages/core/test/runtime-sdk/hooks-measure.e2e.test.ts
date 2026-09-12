@@ -18,7 +18,7 @@
 // child actually running it is whatever `Options.hooks` decides — which is precisely the seam this
 // file measures.
 //
-// SKIPS cleanly when `NORMA_WINTER_EXECUTABLE` is unset; `NORMA_WINTER_REQUIRE_BINARY=1` (CI) makes
+// SKIPS cleanly when `WINTER_RUNTIME_EXECUTABLE` is unset; `WINTER_RUNTIME_REQUIRE_BINARY=1` (CI) makes
 // a missing binary a FAILURE (P8b-2 contract, `describeWithWinterBinary`).
 import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -58,8 +58,8 @@ async function driveWithHooks(bin: string, hooks: Options["hooks"]): Promise<{
       hooks,
       env: {
         PATH: process.env.PATH ?? "/usr/bin:/bin",
-        HOME: home, TMPDIR: home, NORMA_HOME: home, WINTER_HOME: home,
-        NORMA_PROFILE: "test",
+        HOME: home, TMPDIR: home, WINTER_HOME: home, WINTER_HOME: home,
+        WINTER_PROFILE: "test",
         WINTER_TEST_PROVIDER: "lanec",
       },
     },

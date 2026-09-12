@@ -1,9 +1,9 @@
-import NormaKit
+import WinterKit
 import SwiftUI
 
 // -----------------------------------------------------------------------------------------------
 // Pure display helpers (Task 4, Phase 5c) — table-tested directly in `DashboardTests.swift`, no
-// `NormaClient`/SwiftUI involved, same posture as `memoryTypeBadge` (`MemoryPane.swift`) and this
+// `WinterClient`/SwiftUI involved, same posture as `memoryTypeBadge` (`MemoryPane.swift`) and this
 // directory's other pure pane helpers.
 // -----------------------------------------------------------------------------------------------
 
@@ -46,7 +46,7 @@ func skillsGroupedBySource(_ skills: [SkillMeta]) -> [(source: String, skills: [
 // -----------------------------------------------------------------------------------------------
 // SkillsPaneModel — the pane's live view-model (`@MainActor`/`ObservableObject`). Modeled directly
 // on `MemoryPaneModel` (Phase 5b Task 5, freshest reviewed precedent): owns the skill list + the
-// selected skill's detail/edit state, constructed around the raw `NormaClient`. App shell T7:
+// selected skill's detail/edit state, constructed around the raw `WinterClient`. App shell T7:
 // built once, for the process lifetime, by `AppDelegate.makeDashboardWiring` — replacing
 // `DashboardWindowController.init`'s old "fresh per dashboard window-open" role; harmless, since
 // `SkillsPane.task` already re-seeds it on appearance.
@@ -54,14 +54,14 @@ func skillsGroupedBySource(_ skills: [SkillMeta]) -> [(source: String, skills: [
 // Unlike Memory, there is no scope/cwd param to choose here: `skills.list`/`skills.read` resolve
 // against the connection's own cwd-less view (the dashboard has none), and `skills.write`/
 // `skills.delete` are server-confined to the self source regardless of any scope this pane could
-// pass — see `NormaClient+Methods.swift`'s Skills section header comment. Non-self skills are
+// pass — see `WinterClient+Methods.swift`'s Skills section header comment. Non-self skills are
 // READ-ONLY here: this pane must never offer Save/Delete for anything `isSelectedSelf` reports
 // `false` for (a "duplicate to self" affordance is explicitly OUT of scope, brief T4).
 // -----------------------------------------------------------------------------------------------
 
 @MainActor
 final class SkillsPaneModel: ObservableObject {
-    private let client: NormaClient
+    private let client: WinterClient
 
     @Published private(set) var skills: [SkillMeta] = []
     @Published var errorText: String?
@@ -80,7 +80,7 @@ final class SkillsPaneModel: ObservableObject {
     @Published private(set) var saving = false
     @Published private(set) var deleting = false
 
-    init(client: NormaClient) {
+    init(client: WinterClient) {
         self.client = client
     }
 
@@ -320,8 +320,8 @@ struct SkillsPane: View {
         .onTapGesture { Task { await model.select(skill.name) } }
     }
 
-    /// The "author: norma" marker (brief T4) — shown whenever `SkillMeta.author` is set (in
-    /// practice, always "norma": `SkillStore.writeSelf` stamps it on every self-authored skill).
+    /// The "author: winter" marker (brief T4) — shown whenever `SkillMeta.author` is set (in
+    /// practice, always "winter": `SkillStore.writeSelf` stamps it on every self-authored skill).
     private func authorMarker(_ author: String) -> some View {
         Text("author: \(author)")
             .font(Typography.badge(.semibold))

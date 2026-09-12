@@ -4,8 +4,8 @@ import Foundation
 /// viewport->tile-set mapping, and the invalidation-rect->tile-coordinates mapping. Zero LOK
 /// symbols, zero I/O, zero mutable state — every function is a pure, total function of its
 /// arguments, which is what makes the exhaustive table test in `TileMathTests.swift` possible.
-/// Lives in `Sources/OfficeWire` (compiled into `Norma`, `NormaOfficeHelper`, AND
-/// `NormaOfficeHelperFixture` via that directory's unconditional `sources` sweep in every one of
+/// Lives in `Sources/OfficeWire` (compiled into `Winter`, `WinterOfficeHelper`, AND
+/// `WinterOfficeHelperFixture` via that directory's unconditional `sources` sweep in every one of
 /// the three targets — see project.yml) because BOTH the app (computing which tiles a viewport
 /// needs, to drive `subscribeTiles`/`tileRequest`) and the helper (computing which cached tiles an
 /// invalidation rect touches) need the identical arithmetic — a client and server that derived
@@ -16,7 +16,7 @@ import Foundation
 ///
 /// - **Twips**: LOK's native document-space unit, 1/1440 inch, always an integer (`Int64` — a
 ///   large document's height in twips can exceed `Int32`).
-/// - **Points**: the typographic unit Norma's UI otherwise speaks in (`256pt` tiles, per the Tile
+/// - **Points**: the typographic unit Winter's UI otherwise speaks in (`256pt` tiles, per the Tile
 ///   Core spec). `twipsPerPoint = 20` (1440 twips/inch / 72pt/inch) is exact — no rounding needed
 ///   for twips<->points.
 /// - **zoomPPT**: pixels-per-twip x 10000, an integer (never a float — the brief's own reason:

@@ -1,4 +1,4 @@
-import type { SessionEvent, Task } from "@norma/protocol";
+import type { SessionEvent, Task } from "@winter/protocol";
 
 /**
  * `task.list` over the Winter leg (P8c-11, Task 2.3).

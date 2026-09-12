@@ -17,9 +17,9 @@ public enum OfficeHelperServerError: Error, CustomStringConvertible {
 }
 
 /// Task 3 — what `OfficeHelperServer` needs from something that can load/unload documents.
-/// `LOKBridge` (the real implementation, `NormaOfficeHelper` only) and `FakeOfficeDocumentBridge`
-/// (below, used by `NormaOfficeHelperFixture`'s spy binary) both conform — `OfficeHelperServer`
-/// itself never touches a LOK symbol, matching Task 2's own design: `NormaOfficeHelperFixture`
+/// `LOKBridge` (the real implementation, `WinterOfficeHelper` only) and `FakeOfficeDocumentBridge`
+/// (below, used by `WinterOfficeHelperFixture`'s spy binary) both conform — `OfficeHelperServer`
+/// itself never touches a LOK symbol, matching Task 2's own design: `WinterOfficeHelperFixture`
 /// links this file UNCHANGED and must keep building without the bridging header / LOK C symbols
 /// `LOKBridge.swift` needs (see project.yml: that one file is excluded from the fixture target).
 public protocol OfficeDocumentBridge: AnyObject {
@@ -389,7 +389,7 @@ public struct TilePaintResult: Equatable, Sendable {
     }
 }
 
-/// `NormaOfficeHelperFixture`'s bridge — behaves exactly like Task 2's own Stage-A bookkeeping
+/// `WinterOfficeHelperFixture`'s bridge — behaves exactly like Task 2's own Stage-A bookkeeping
 /// (every `open` "succeeds" with placeholder metadata nobody asserts on; `close` no-ops; nothing is
 /// ever pushed). `OfficeSupervisorTests` never calls `open`/`close` at all (its scenarios are
 /// handshake/death-detection, not document-shaped) — this exists so the fixture's `main.swift`
@@ -465,7 +465,7 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
     /// reproduce the RACE itself — that is `OfficeAutosaveSchedulerTests
     /// .testIsArmedReflectsADisarmThatHappensAfterAClosureCapturingItWasBuiltButBeforeThatClosureIsCalled`'s
     /// own job, the one piece of this fix reachable in-process at all (`FakeOfficeDocumentBridge` is
-    /// exercised only through a spawned subprocess — see `project.yml`'s `NormaAppTests`
+    /// exercised only through a spawned subprocess — see `project.yml`'s `WinterAppTests`
     /// `excludes:` comment). What this conformance DOES guarantee: any caller that hands it an
     /// already-false `isStillArmed` gets `nil` back and no file written, keeping this fake an
     /// honest stand-in for the real contract.
@@ -738,7 +738,7 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
     /// real sequence of verbs through the real wire without a real LOK. `fakeDocsText` starts as two
     /// paragraphs; `pages` is a constant, since page count is a layout fact no fake can honestly
     /// produce.
-    private var fakeDocsText = "NORMA GATE\nsecond paragraph"
+    private var fakeDocsText = "WINTER GATE\nsecond paragraph"
 
     public func docsInfo(docId: String) throws -> (pages: Int, paragraphs: Int, characters: Int) {
         lock.lock(); let isOpen = caches[docId] != nil; lock.unlock()
@@ -856,7 +856,7 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
 }
 
 /// Office Stage A Task 2 — the helper's Unix-socket listener plus per-connection protocol
-/// handler. Runs identically whether started from `NormaOfficeHelper`'s real `main.swift` or the
+/// handler. Runs identically whether started from `WinterOfficeHelper`'s real `main.swift` or the
 /// out-of-process test fixture's (`Tests/OfficeHelperFixtureSources/main.swift`): the fixture
 /// exists to drive THIS code's failure paths for real, over a real socket, not to reimplement
 /// them — so `OfficeSupervisorTests` proves something about the actual protocol handler, not
@@ -866,7 +866,7 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
 /// `documents`, which feeds the idle-exit accounting below and nothing else yet.
 ///
 /// **Raw POSIX sockets, not `NWListener`.** The app-side client already has a natural fit in
-/// NormaKit's `UnixSocketTransport` (`NWConnection` over `.unix(path:)`, precedented by the
+/// WinterKit's `UnixSocketTransport` (`NWConnection` over `.unix(path:)`, precedented by the
 /// daemon connection); the LISTENER side has no equivalent in-repo precedent, and Network.framework's
 /// local-endpoint-bind API for a Unix-domain listener is far less travelled than its connect-side
 /// API. `socket`/`bind`/`listen`/`accept` is the boring, well-understood way to own the passive
@@ -876,7 +876,7 @@ public final class FakeOfficeDocumentBridge: OfficeDocumentBridge {
 public final class OfficeHelperServer {
 
     /// Test-only behavior injection — see `Tests/OfficeHelperFixtureSources/main.swift`. Every
-    /// field defaults to "behave exactly like production," so `NormaOfficeHelper`'s real
+    /// field defaults to "behave exactly like production," so `WinterOfficeHelper`'s real
     /// `main.swift` never has to construct anything but `Hooks()`.
     public struct Hooks: Sendable {
         /// When true, every connection still reads and decodes frames — so `documents`/connection
@@ -995,7 +995,7 @@ public final class OfficeHelperServer {
                 /// `idle-exit-seconds` CLI-arg-override idiom exactly (never an environment
                 /// variable) — see `OfficeHelperSupervisor.Configuration.autosaveIntervalSeconds`'s
                 /// own header for the app-side half of that mirror. Production callers
-                /// (`NormaOfficeHelper`'s real `main.swift`, absent an explicit override) never pass
+                /// (`WinterOfficeHelper`'s real `main.swift`, absent an explicit override) never pass
                 /// anything but the default.
                 autosaveIntervalSeconds: TimeInterval = 60,
                 log: @escaping (String) -> Void = { message in
@@ -1987,7 +1987,7 @@ public final class OfficeHelperServer {
     /// that the vendored LibreOffice library installs `SIG_IGN` for `SIGPIPE` as an incidental side
     /// effect of its own C++ runtime init (inside `lok_init_2`, `LOKBridge`'s job) — never something
     /// THIS file arranged, and a version bump of that vendored library could silently remove it.
-    /// `NormaOfficeHelperFixture` links no LibreOffice code at all and had ZERO such protection.
+    /// `WinterOfficeHelperFixture` links no LibreOffice code at all and had ZERO such protection.
     /// Both `main.swift` entry points now call `signal(SIGPIPE, SIG_IGN)` explicitly, as the first
     /// thing they do, making this a deliberate guarantee of THIS codebase rather than an accident
     /// of a dependency — see either file's own comment. `EPIPE` is only ever OBSERVABLE by the

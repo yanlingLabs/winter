@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Office Stage B Task 7 — `OfficeAutosaveScheduler`, PURE cadence: no LOK, no socket, no
 /// subprocess, no wall-clock sleep. An injected `Scheduling` fake stands in for
@@ -155,7 +155,7 @@ final class OfficeAutosaveSchedulerTests: XCTestCase {
 
     /// **The core mechanism `OfficeHelperServer.performAutosaveFire`'s own fix relies on, isolated
     /// from everything helper/LOK-adjacent** (`FakeOfficeDocumentBridge`/`OfficeHelperServer` are
-    /// reachable only through a spawned subprocess — see `project.yml`'s own `NormaAppTests`
+    /// reachable only through a spawned subprocess — see `project.yml`'s own `WinterAppTests`
     /// `excludes:` comment — so THIS file, already compiled in-process, is where the closure-capture
     /// contract itself gets pinned). The review's own words: "an autosave fire racing ⌘S... the
     /// timer stays armed past placeAtomically/.clearAutosave because ModifiedStatus=false is a later

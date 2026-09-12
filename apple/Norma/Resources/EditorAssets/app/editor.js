@@ -1,7 +1,7 @@
 // editor-plumbing Task 4 — the Monaco host page.
 //
 // ONE editor instance, a table of models keyed by absolute path, and one entry point Swift calls:
-// `window.normaEditor.dispatch(message)`. Swift owns every file on disk; this page owns buffers,
+// `window.winterEditor.dispatch(message)`. Swift owns every file on disk; this page owns buffers,
 // view state and the dirty flag, and says so over the bridge (`bridge-protocol.js`).
 
 import { OUTBOUND_MESSAGE_TYPES, sendToSwift } from "./bridge-protocol.js";
@@ -9,15 +9,15 @@ import { OUTBOUND_MESSAGE_TYPES, sendToSwift } from "./bridge-protocol.js";
 // Everything Monaco loads hangs off the `assets` host, which is the SAME URL in both layouts this
 // page may be served under (see editor.html). The scheme is read off `location` rather than
 // written down, so the page never hardcodes its own origin — the one value that does differ if the
-// shell moves to `norma-editor://assets/app/editor.html`.
+// shell moves to `winter-editor://assets/app/editor.html`.
 const ASSETS_BASE = window.location.protocol + "//assets/";
 
-const THEME_NAME = "norma";
+const THEME_NAME = "winter";
 // `defineTheme` throws "Illegal theme base!" for anything outside this set (measured in the
 // vendored editor.main.js, not remembered) — so the base is validated rather than passed through.
 const BUILTIN_THEME_BASES = ["vs", "vs-dark", "hc-black", "hc-light"];
 
-// ALL page state, in one object, deliberately: Task 5 adds `normaEditorDebugState()` and this is
+// ALL page state, in one object, deliberately: Task 5 adds `winterEditorDebugState()` and this is
 // what it reads. `models` maps an absolute path to
 // `{ path, model, savedVersionId, viewState, dirty, applyingExternal, lastPull, listener }`.
 const page = {
@@ -32,7 +32,7 @@ let monaco = null;
 // Installed BEFORE Monaco loads so a message that arrives early is reported rather than thrown:
 // Swift's contract is to send nothing before `ready`, and if that is ever broken this is how it
 // shows up in a log instead of as a missing-property TypeError inside an injected script.
-window.normaEditor = { dispatch: dispatch };
+window.winterEditor = { dispatch: dispatch };
 
 /**
  * Task 5's window onto this page's model table — **data only, and not a bridge message.**
@@ -54,7 +54,7 @@ window.normaEditor = { dispatch: dispatch };
  * the editor itself, not of whichever model happens to be current — which is exactly what the
  * harness's view-state drill needs to prove survived a switch-away-and-back round trip.
  */
-window.normaEditorDebugState = function () {
+window.winterEditorDebugState = function () {
     const dirtyMap = {};
     page.models.forEach(function (entry, path) { dirtyMap[path] = entry.dirty; });
     // `page.editor` is null only before `boot()` completes, which is before the first `ready` — no
@@ -72,7 +72,7 @@ window.normaEditorDebugState = function () {
 
 // --- Monaco boot -------------------------------------------------------------------------------
 
-// The workers cannot be `new Worker("norma-editor://assets/...")` from this origin, so Monaco's own
+// The workers cannot be `new Worker("winter-editor://assets/...")` from this origin, so Monaco's own
 // documented shim is used: a blob: bootstrap that sets the worker's loader baseUrl and then
 // importScripts the real worker. This mirrors, deliberately, the blob editor.main.js builds for
 // itself in `defaultWorkerFactory` — the `Worker` is created from the blob, and everything after
@@ -92,13 +92,13 @@ window.MonacoEnvironment = {
 
 // NO `baseUrl` here, and that is load-bearing. The loader's own
 // `isAbsolutePath = /^((http:\/\/)|(https:\/\/)|(file:\/\/)|(\/))/` does not recognise a
-// norma-editor: URL as absolute, so it would PREPEND baseUrl to the already-absolute path this
+// winter-editor: URL as absolute, so it would PREPEND baseUrl to the already-absolute path this
 // rule produces — every module would be fetched from
-// `norma-editor://assets/vs/norma-editor://assets/vs/...`. baseUrl defaults to "" and stays inert
+// `winter-editor://assets/vs/winter-editor://assets/vs/...`. baseUrl defaults to "" and stays inert
 // (the loader only appends a slash to it when its length is non-zero).
 window.require.config({ paths: { vs: ASSETS_BASE + "vs" } });
 window.require(["vs/editor/editor.main"], boot, function (error) {
-    console.error("normaEditor: Monaco failed to load", error);
+    console.error("winterEditor: Monaco failed to load", error);
 });
 
 function boot() {
@@ -125,17 +125,17 @@ function boot() {
  * renders — `{ type, ...fields }` — never code: this function reads members off it and nothing
  * here evaluates anything.
  *
- * It NEVER throws. Swift injects `window.normaEditor.dispatch(<json>)` with no catch around it, so
+ * It NEVER throws. Swift injects `window.winterEditor.dispatch(<json>)` with no catch around it, so
  * one bad message must not take the bridge down with it.
  */
 function dispatch(message) {
     const type = message && typeof message === "object" ? message.type : null;
     if (OUTBOUND_MESSAGE_TYPES.indexOf(type) < 0) {
-        console.error("normaEditor: unknown message type:", type);
+        console.error("winterEditor: unknown message type:", type);
         return;
     }
     if (!page.editor) {
-        console.error("normaEditor: " + type + " arrived before the editor was ready — dropped");
+        console.error("winterEditor: " + type + " arrived before the editor was ready — dropped");
         return;
     }
     try {
@@ -163,7 +163,7 @@ function dispatch(message) {
                 break;
         }
     } catch (error) {
-        console.error("normaEditor: " + type + " failed", error);
+        console.error("winterEditor: " + type + " failed", error);
     }
 }
 
@@ -215,7 +215,7 @@ function openModel(path, language, text) {
         // Not an error worth refusing, but never a re-create: `createModel` THROWS on a URI that is
         // already registered, and silently replacing the buffer would discard unsaved edits.
         // Swift's way of saying "replace the text" is applyExternalContent.
-        console.warn("normaEditor: openModel for an already-open path — activating instead:", path);
+        console.warn("winterEditor: openModel for an already-open path — activating instead:", path);
         activateModel(path);
         return;
     }
@@ -249,7 +249,7 @@ function openModel(path, language, text) {
 function activateModel(path) {
     const entry = page.models.get(path);
     if (!entry) {
-        console.error("normaEditor: activateModel for a path that is not open:", path);
+        console.error("winterEditor: activateModel for a path that is not open:", path);
         return;
     }
     if (page.currentPath === path) {
@@ -271,7 +271,7 @@ function activateModel(path) {
 function closeModel(path) {
     const entry = page.models.get(path);
     if (!entry) {
-        console.error("normaEditor: closeModel for a path that is not open:", path);
+        console.error("winterEditor: closeModel for a path that is not open:", path);
         return;
     }
     if (entry.listener) {
@@ -294,7 +294,7 @@ function pullContent(path, seq) {
         // from "the file is empty", and Swift's save would then truncate a real file. A pull for a
         // path this page does not have is a bug on the Swift side; silence is the safe failure, and
         // Task 5 reads this line.
-        console.error("normaEditor: pullContent for a path that is not open — no answer sent:", path);
+        console.error("winterEditor: pullContent for a path that is not open — no answer sent:", path);
         return;
     }
     // Superseded FIRST, before anything below that can throw: a second pull supersedes the first
@@ -434,7 +434,7 @@ function pullContent(path, seq) {
 function applyExternalContent(path, text) {
     const entry = page.models.get(path);
     if (!entry) {
-        console.error("normaEditor: applyExternalContent for a path that is not open:", path);
+        console.error("winterEditor: applyExternalContent for a path that is not open:", path);
         return;
     }
     entry.applyingExternal = true;
@@ -506,12 +506,12 @@ function markSaved(path, seq) {
     // close/supersede — not a bug to alert on.
     const entry = page.models.get(path);
     if (!entry) {
-        console.warn("normaEditor: markSaved for a path that is not open:", path);
+        console.warn("winterEditor: markSaved for a path that is not open:", path);
         return;
     }
     const pull = entry.lastPull;
     if (!pull || pull.seq !== seq) {
-        console.warn("normaEditor: markSaved for an unknown or superseded pull — nothing cleared:",
+        console.warn("winterEditor: markSaved for an unknown or superseded pull — nothing cleared:",
                      path, seq);
         return;
     }

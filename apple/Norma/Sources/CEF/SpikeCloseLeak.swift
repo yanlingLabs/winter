@@ -21,9 +21,9 @@ import Foundation
 ///
 /// Two more observations ride along, because a mechanism claim wants a consequence:
 /// the container's own lifetime (SwiftUI releases it; the harness releases it the same way), and a
-/// census of `Norma Helper` child processes — the renderer whose audio the user could hear.
+/// census of `Winter Helper` child processes — the renderer whose audio the user could hear.
 ///
-/// **Entirely `#if DEBUG` and entirely env-gated** (`NORMA_SPIKE_CLOSE_LEAK=1`), the same shape
+/// **Entirely `#if DEBUG` and entirely env-gated** (`WINTER_SPIKE_CLOSE_LEAK=1`), the same shape
 /// Task 1's reparent spike used: with the variable unset nothing here is reachable, and
 /// `applicationDidFinishLaunching` hands the launch over *instead of* `boot()` rather than after
 /// it — this bundle runs from a scratch `derivedDataPath` and must not perform any of `boot()`'s
@@ -33,7 +33,7 @@ import Foundation
 enum SpikeCloseLeak {
     /// The whole gate. Read once per launch, before anything else happens.
     static var isRequested: Bool {
-        ProcessInfo.processInfo.environment["NORMA_SPIKE_CLOSE_LEAK"] == "1"
+        ProcessInfo.processInfo.environment["WINTER_SPIKE_CLOSE_LEAK"] == "1"
     }
 
     @MainActor
@@ -76,14 +76,14 @@ final class SpikeCloseLeakHarness {
     /// the pages are already loaded and their audio is a `data:` WAV built in the renderer, so
     /// nothing about the measurement needs it alive, and a `Process` child outlives its parent.
     private var pageServer: Process?
-    /// Containers created for the racing-create measurement (`NORMA_SPIKE_CLOSE_RACE`). Parked in
+    /// Containers created for the racing-create measurement (`WINTER_SPIKE_CLOSE_RACE`). Parked in
     /// the runtime's own parking window, so they are alive at quit like every other container.
     private var raceContainers: [PanelCEFContainerView] = []
     /// The loopback page URL once a server is up — the same page the racing creates use, since they
     /// run before `stopPageServer()`.
     private var pageURL: String?
 
-    private let deadline = TimeInterval(SpikeCloseLeakHarness.envInt("NORMA_SPIKE_CLOSE_DEADLINE", 12))
+    private let deadline = TimeInterval(SpikeCloseLeakHarness.envInt("WINTER_SPIKE_CLOSE_DEADLINE", 12))
     private var pollCount = 0
     private var closedAt: Date?
     private var verdictReported = false
@@ -96,7 +96,7 @@ final class SpikeCloseLeakHarness {
             contentRect: NSRect(x: 120, y: 120, width: 900, height: 640),
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
-        window.title = "Norma close-leak repro"
+        window.title = "Winter close-leak repro"
     }
 
     // MARK: Ledger
@@ -128,14 +128,14 @@ final class SpikeCloseLeakHarness {
         window.contentView?.addSubview(view)
         container = view
 
-        NormaCEFSetStateObserver(view) { [weak self] state in
+        WinterCEFSetStateObserver(view) { [weak self] state in
             guard let self, !self.loaded else { return }
             _ = state
         }
-        NormaCEFSetNavigationObserver(view) { [weak self] url, title in
+        WinterCEFSetNavigationObserver(view) { [weak self] url, title in
             self?.onNavigation(url: url, title: title)
         }
-        NormaCEFSetPopupObserver(view) { _ in }
+        WinterCEFSetPopupObserver(view) { _ in }
 
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -155,18 +155,18 @@ final class SpikeCloseLeakHarness {
             at: URL(fileURLWithPath: cache), withIntermediateDirectories: true)
         log("CEFINIT cache=\(cache)")
 
-        // **Not `NormaCEFRuntime.ensureInitialized()`** — that derives `root_cache_path` from the
+        // **Not `WinterCEFRuntime.ensureInitialized()`** — that derives `root_cache_path` from the
         // BUNDLE ID, which this Debug build shares with the user's live dev app, and Chromium takes
         // an EXCLUSIVE lock on it. Sharing it breaks whichever process loses the race, including
         // theirs. Same constraint, same answer, as Task 1's reparent spike. Everything downstream —
         // creation, observers, the close path — is the production API verbatim.
-        guard NormaCEFInitialize(CommandLine.argc, CommandLine.unsafeArgv, cache, helper) else {
-            fatal("CefInitialize failed: \(String(cString: NormaCEFLastError()))")
+        guard WinterCEFInitialize(CommandLine.argc, CommandLine.unsafeArgv, cache, helper) else {
+            fatal("CefInitialize failed: \(String(cString: WinterCEFLastError()))")
             return
         }
         log("CEFREADY")
         guard let container else { return }
-        NormaCEFCreateBrowser(container, page, 0) // no background override — not the editor
+        WinterCEFCreateBrowser(container, page, 0) // no background override — not the editor
     }
 
     private func onNavigation(url: String?, title: String?) {
@@ -180,23 +180,23 @@ final class SpikeCloseLeakHarness {
         }
     }
 
-    /// **`NORMA_SPIKE_CLOSE_MODE=quit`: the path the per-tab measurement never exercised.**
+    /// **`WINTER_SPIKE_CLOSE_MODE=quit`: the path the per-tab measurement never exercised.**
     ///
     /// Fix round 1. The first AFTER run closed both tabs before quitting, so
-    /// `NormaCEFCloseAllBrowsers` swept an EMPTY `g_browsers` and the `0 browser(s) still open` it
+    /// `WinterCEFCloseAllBrowsers` swept an EMPTY `g_browsers` and the `0 browser(s) still open` it
     /// printed said nothing at all about the drain. This mode quits with the tab open, which is what
-    /// a user does, and is the only way to find out whether `NormaCEFShutdown`'s bounded
+    /// a user does, and is the only way to find out whether `WinterCEFShutdown`'s bounded
     /// `CefDoMessageLoopWork` loop can finish a close whose real gate is an **ObjC autorelease pool
     /// drain** — `removeFromSuperview` autoreleases CEF's view into whatever pool is active, and the
     /// pool active during `applicationWillTerminate:` never drains, because the process exits first.
     /// CEF turns cannot pop an AppKit pool.
     ///
-    /// Everything measurable is in the `NormaCEF:` ledger the shutdown path prints itself: whether
+    /// Everything measurable is in the `WinterCEF:` ledger the shutdown path prints itself: whether
     /// `browser closed (id=…)` arrives BEFORE `shutting down (N browser(s) still open, M DoWork
     /// calls)`, and what N is.
     private func quitWithTheTabSTILLOPEN() {
         phase = "quitting"
-        let extra = max(Self.envInt("NORMA_SPIKE_CLOSE_BROWSERS", 1) - 1, 0)
+        let extra = max(Self.envInt("WINTER_SPIKE_CLOSE_BROWSERS", 1) - 1, 0)
         if extra == 0 && Self.raceCount == 0 {
             // T6's run, byte for byte — the default, so those archived ledgers stay reproducible.
             cefHostView = container?.subviews.first
@@ -214,7 +214,7 @@ final class SpikeCloseLeakHarness {
     /// T6 measured the quit path against a single browser in a visible window and fixed it there.
     /// The runtime's world is up to `BrowserLifecycleEngine.maxLiveBackstop` (24 since live-gate fix
     /// G replaced the count cap with a memory budget; it was 8 when this run was taken, which is why
-    /// `NORMA_SPIKE_CLOSE_BROWSERS` defaults the way it does), and all but the shown
+    /// `WINTER_SPIKE_CLOSE_BROWSERS` defaults the way it does), and all but the shown
     /// one live in `BrowserRuntime`'s hidden parking window with their containers held **strongly**
     /// by its `containers` map — a map nothing clears at quit (no quit path calls `stop`;
     /// `applicationWillTerminate` → `closeMainWindows()` reaches only `PanelViewport.dismantleNSView`,
@@ -223,14 +223,14 @@ final class SpikeCloseLeakHarness {
     /// question about `CompleteCloseByReleasingHostView`'s `-removeFromSuperview` — which severs
     /// that retain before the record drops its own — so it is a question to MEASURE, not to argue.
     ///
-    /// The creates go through `BrowserRuntime.shared.apply` rather than `NormaCEFCreateBrowser`
+    /// The creates go through `BrowserRuntime.shared.apply` rather than `WinterCEFCreateBrowser`
     /// directly: the parking window, the container registry, the model wiring and the URL policy are
     /// all part of what is being measured, and `.shared` specifically because a `static let` is what
     /// makes "still holding every container at `applicationWillTerminate`" structural.
     ///
     /// **That does not undo this harness's cache-path discipline.** The production driver's
-    /// `ensureInitialized` calls `NormaCEFRuntime.ensureInitialized()`, which passes the BUNDLE-ID
-    /// cache path the user's live dev app holds a Chromium lock on — but `NormaCEFInitialize`
+    /// `ensureInitialized` calls `WinterCEFRuntime.ensureInitialized()`, which passes the BUNDLE-ID
+    /// cache path the user's live dev app holds a Chromium lock on — but `WinterCEFInitialize`
     /// returns `YES` on its `g_initialized` short-circuit before reading it, so `CefInitialize` is
     /// never called a second time and no second profile lock is ever taken. CEF stays on the scratch
     /// profile `startCEF` brought it up on.
@@ -242,7 +242,7 @@ final class SpikeCloseLeakHarness {
             // `data:` New Tab page: real browsers and real renderers, without the media element.
             log("PARK-NOSERVER — parked browsers will load the built-in New Tab page (no audio)")
         }
-        // Empty-safe: `NORMA_SPIKE_CLOSE_RACE=3` with no `NORMA_SPIKE_CLOSE_BROWSERS` reaches here
+        // Empty-safe: `WINTER_SPIKE_CLOSE_RACE=3` with no `WINTER_SPIKE_CLOSE_BROWSERS` reaches here
         // with `count == 0`, and `(1...0)` is a range precondition failure, not an empty loop.
         parkedTabIds = (0..<count).map { "spike-park-\($0 + 1)" }
         let tabs = ["spike": parkedTabIds.map {
@@ -289,13 +289,13 @@ final class SpikeCloseLeakHarness {
         }
     }
 
-    /// **`NORMA_SPIKE_CLOSE_RACE=K`: quit while K creations are still inside CEF's own queue.**
+    /// **`WINTER_SPIKE_CLOSE_RACE=K`: quit while K creations are still inside CEF's own queue.**
     ///
     /// The tripwire's remaining unknown (T7 Q3): `shutting down (N…)` is claimed as a genuine
     /// tripwire, and that claim is only useful if the racing-create case has a stated expected N.
     ///
     /// The create is made DIRECTLY here, in the same run-loop turn as the quit, and that is the
-    /// point rather than a shortcut: `BrowserRuntime.create` defers its `NormaCEFCreateBrowser` by
+    /// point rather than a shortcut: `BrowserRuntime.create` defers its `WinterCEFCreateBrowser` by
     /// one main-queue turn (`startBrowser`), and at quit that turn never comes — the run loop is
     /// stopping, and `CefDoMessageLoopWork` drives CEF's loop, not GCD's. Going through `apply`
     /// would therefore measure nothing at all: the creation would die on the queue instead of being
@@ -303,7 +303,7 @@ final class SpikeCloseLeakHarness {
     ///
     /// The containers are parked in the runtime's own parking window, so they are alive at quit like
     /// every other one.
-    /// **`NORMA_SPIKE_CLOSE_MOUNTED=1`: quit with a runtime-owned browser MOUNTED IN A REAL WINDOW.**
+    /// **`WINTER_SPIKE_CLOSE_MOUNTED=1`: quit with a runtime-owned browser MOUNTED IN A REAL WINDOW.**
     ///
     /// live-gate fix H's instrument, and the thing every previous quit run was missing. T6 measured
     /// one browser in a plain window it created itself; T7 measured eight, seven parked and one in
@@ -317,9 +317,9 @@ final class SpikeCloseLeakHarness {
     /// through the production call, and leaves it there for the quit. Nothing else about the run
     /// changes, which is what makes a before/after comparison mean anything.
     private func mountOneInTheWindow() {
-        guard Self.envInt("NORMA_SPIKE_CLOSE_MOUNTED", 0) == 1 else { return }
+        guard Self.envInt("WINTER_SPIKE_CLOSE_MOUNTED", 0) == 1 else { return }
         guard let tabId = parkedTabIds.first, let host = window.contentView else {
-            log("MOUNT-SKIPPED no parked tab to mount (NORMA_SPIKE_CLOSE_BROWSERS must be >= 2)")
+            log("MOUNT-SKIPPED no parked tab to mount (WINTER_SPIKE_CLOSE_BROWSERS must be >= 2)")
             return
         }
         BrowserRuntime.shared.attachViewport(tabId: tabId, into: host)
@@ -353,7 +353,7 @@ final class SpikeCloseLeakHarness {
                 view.frame = parkingHost.bounds
                 parkingHost.addSubview(view)
                 raceContainers.append(view)
-                NormaCEFCreateBrowser(view, page, 0) // no background override — not the editor
+                WinterCEFCreateBrowser(view, page, 0) // no background override — not the editor
             }
             log("RACE-CREATE k=\(k) — quitting in this same turn, with the creations inside CEF's queue")
         }
@@ -373,7 +373,7 @@ final class SpikeCloseLeakHarness {
     /// re-binds exactly what create bound, so the read cannot disturb what it is measuring).
     ///
     /// Nothing is gated on the answer: the close measurement never depended on playback. This exists
-    /// so the sentence in `NormaCEF.mm`'s shutdown comment is a number rather than an assumption.
+    /// so the sentence in `WinterCEF.mm`'s shutdown comment is a number rather than an assumption.
     private func logParkedPlayback() {
         guard !parkedTabIds.isEmpty else { return }
         var playing = 0, refused = 0, other: [String] = []
@@ -462,7 +462,7 @@ final class SpikeCloseLeakHarness {
     // MARK: Phase 1 — the close under measurement
 
     /// **The production close, in the production order.** `BrowserRuntime.stop` clears the three
-    /// observers and calls `NormaCEFCloseBrowser`, then unparents and releases the container — the
+    /// observers and calls `WinterCEFCloseBrowser`, then unparents and releases the container — the
     /// same two halves, in the same order, that `PanelWebTab.dismantleNSView` + SwiftUI's release
     /// performed when this harness was written (browser-runtime T4 moved them). Both halves happen
     /// here, so a container still alive afterwards would be this harness's fault and is asserted
@@ -476,10 +476,10 @@ final class SpikeCloseLeakHarness {
         cefHostView = container.subviews.first
         log("PRECLOSE cefHostView=\(cefHostView.map { String(describing: type(of: $0)) } ?? "nil") helpers=\(Self.helperCensus())")
 
-        NormaCEFSetStateObserver(container, nil)
-        NormaCEFSetNavigationObserver(container, nil)
-        NormaCEFSetPopupObserver(container, nil)
-        NormaCEFCloseBrowser(container)
+        WinterCEFSetStateObserver(container, nil)
+        WinterCEFSetNavigationObserver(container, nil)
+        WinterCEFSetPopupObserver(container, nil)
+        WinterCEFCloseBrowser(container)
         log("CLOSE-CALLED")
 
         // SwiftUI's half: the representable's `NSView` goes away with the view tree.
@@ -531,7 +531,7 @@ final class SpikeCloseLeakHarness {
     // MARK: Phase 2 — the zombie drill
 
     /// **The exact case `51a43124` made the record's `hostView` strong for**: a shutdown sweep
-    /// (`NormaCEFCloseAllBrowsers`) landing on a browser a per-tab close already started but whose
+    /// (`WinterCEFCloseAllBrowsers`) landing on a browser a per-tab close already started but whose
     /// `OnBeforeClose` has not arrived. Before that fix the sweep read `GetWindowHandle()` and
     /// messaged a freed view — `CrZombie`, deliberate crash. Anything that weakens the close side
     /// has to survive this, so the harness runs it rather than reasoning about it: a second tab, the
@@ -544,26 +544,26 @@ final class SpikeCloseLeakHarness {
         window.contentView?.addSubview(view)
         drillContainer = view
         log("DRILL-CREATE")
-        NormaCEFCreateBrowser(view, writePage(), 0) // no background override — not the editor
+        WinterCEFCreateBrowser(view, writePage(), 0) // no background override — not the editor
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in self?.runDrill() }
     }
 
     private func runDrill() {
         guard let view = drillContainer else { return }
         log("DRILL-CLOSE helpers=\(Self.helperCensus())")
-        NormaCEFSetStateObserver(view, nil)
-        NormaCEFSetNavigationObserver(view, nil)
-        NormaCEFSetPopupObserver(view, nil)
-        NormaCEFCloseBrowser(view)
+        WinterCEFSetStateObserver(view, nil)
+        WinterCEFSetNavigationObserver(view, nil)
+        WinterCEFSetPopupObserver(view, nil)
+        WinterCEFCloseBrowser(view)
         view.removeFromSuperview()
         drillContainer = nil
         // Same turn: the record still exists (no OnBeforeClose yet) and the sweep will read it.
-        NormaCEFCloseAllBrowsers()
+        WinterCEFCloseAllBrowsers()
         log("DRILL-SWEEP-SAME-TURN survived")
         // And after a pool drain, when a released view has actually been freed — the harder half.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self else { return }
-            NormaCEFCloseAllBrowsers()
+            WinterCEFCloseAllBrowsers()
             self.log("DRILL-SWEEP-AFTER-DRAIN survived helpers=\(Self.helperCensus())")
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                 guard let self else { return }
@@ -575,7 +575,7 @@ final class SpikeCloseLeakHarness {
 
     // MARK: Plumbing
 
-    /// `Norma Helper` children of this process — the renderer whose audio the user could hear, plus
+    /// `Winter Helper` children of this process — the renderer whose audio the user could hear, plus
     /// GPU/network/utility. Measured with `ps` rather than inferred, and reported as
     /// `total(renderers)`.
     nonisolated static func helperCensus() -> String {
@@ -596,7 +596,7 @@ final class SpikeCloseLeakHarness {
             guard let space = trimmed.firstIndex(of: " ") else { continue }
             guard String(trimmed[trimmed.startIndex..<space]) == me else { continue }
             let command = String(trimmed[space...])
-            guard command.contains("Norma Helper") else { continue }
+            guard command.contains("Winter Helper") else { continue }
             total += 1
             if command.contains("--type=renderer") { renderers += 1 }
         }
@@ -618,7 +618,7 @@ final class SpikeCloseLeakHarness {
     /// loop is still turning and `NSApp.terminate` has not been called.
     private static let beatReplanDelay: TimeInterval = 0.05
 
-    /// **`NORMA_SPIKE_CLOSE_BEAT=1`: the fold that arrives mid-beat.**
+    /// **`WINTER_SPIKE_CLOSE_BEAT=1`: the fold that arrives mid-beat.**
     ///
     /// Fix H's quit door releases every browser view and then lets the run loop turn for 150 ms
     /// before terminating. Those turns are ordinary turns: a session fold, a Combine sink or the
@@ -638,9 +638,9 @@ final class SpikeCloseLeakHarness {
     /// print a clean shutdown for a run that measured nothing — this repo's recurring failure. The
     /// ledger therefore carries the fire's own timestamp, the latch's state as read at that instant,
     /// the container count either side of the call, and whether the browser exists afterwards; and
-    /// every one of those lines must appear BEFORE `NormaCEF: shutting down` in the same capture.
+    /// every one of those lines must appear BEFORE `WinterCEF: shutting down` in the same capture.
     private func armTheBeatReplan() {
-        guard Self.envInt("NORMA_SPIKE_CLOSE_BEAT", 0) == 1 else { return }
+        guard Self.envInt("WINTER_SPIKE_CLOSE_BEAT", 0) == 1 else { return }
         let timer = Timer(fire: Date().addingTimeInterval(Self.beatReplanDelay),
                           interval: 0, repeats: false) { _ in
             MainActor.assumeIsolated { SpikeCloseLeakHarness.shared?.replanDuringTheBeat() }
@@ -676,7 +676,7 @@ final class SpikeCloseLeakHarness {
 
     private func quit() {
         // live-gate fix I's instrument — armed BEFORE the door opens so its timer fires inside the
-        // beat that door starts, and a no-op unless `NORMA_SPIKE_CLOSE_BEAT=1`.
+        // beat that door starts, and a no-op unless `WINTER_SPIKE_CLOSE_BEAT=1`.
         armTheBeatReplan()
         // Lifecycle T4's one true-quit gate, armed from outside the menu bar — the same deliberate
         // bypass Task 1's spike documents. Every other `NSApp.terminate` is answered
@@ -688,7 +688,7 @@ final class SpikeCloseLeakHarness {
         // **The PRODUCTION quit door, not `NSApp.terminate` directly** (live-gate fix H). The menu
         // bar's Quit routes through this same method, and it is where the browser views are
         // unparented a run-loop beat before the terminate — which is the whole of what the
-        // `NORMA_SPIKE_CLOSE_MOUNTED=1` run measures. Calling `terminate` here would measure a path
+        // `WINTER_SPIKE_CLOSE_MOUNTED=1` run measures. Calling `terminate` here would measure a path
         // no user takes.
         delegate.quitReleasingBrowserViews()
     }
@@ -699,37 +699,37 @@ final class SpikeCloseLeakHarness {
     }
 
     /// `close` (default) — the per-tab close of §1. `quit` — quit with the tab still open, which is
-    /// the ONLY way to exercise `NormaCEFShutdown`'s drain; see `quitWithTheTabSTILLOPEN`.
+    /// the ONLY way to exercise `WinterCEFShutdown`'s drain; see `quitWithTheTabSTILLOPEN`.
     ///
     /// Three knobs ride on `quit`, all defaulting to T6's exact one-browser run so its archived
-    /// ledgers stay reproducible: `NORMA_SPIKE_CLOSE_BROWSERS=N` (total live browsers at quit — one
-    /// visible, the rest parked through `BrowserRuntime.shared`), `NORMA_SPIKE_CLOSE_RACE=K`
+    /// ledgers stay reproducible: `WINTER_SPIKE_CLOSE_BROWSERS=N` (total live browsers at quit — one
+    /// visible, the rest parked through `BrowserRuntime.shared`), `WINTER_SPIKE_CLOSE_RACE=K`
     /// (creations still inside CEF's own queue when the quit lands), and
-    /// `NORMA_SPIKE_CLOSE_MOUNTED=1` (live-gate fix H — one of the parked browsers is mounted in the
+    /// `WINTER_SPIKE_CLOSE_MOUNTED=1` (live-gate fix H — one of the parked browsers is mounted in the
     /// visible window through the production `attachViewport`, see `mountOneInTheWindow`), and
-    /// `NORMA_SPIKE_CLOSE_BEAT=1` (live-gate fix I — a re-plan fired inside the quit beat, see
+    /// `WINTER_SPIKE_CLOSE_BEAT=1` (live-gate fix I — a re-plan fired inside the quit beat, see
     /// `armTheBeatReplan`).
     fileprivate static var mode: String {
-        ProcessInfo.processInfo.environment["NORMA_SPIKE_CLOSE_MODE"] ?? "close"
+        ProcessInfo.processInfo.environment["WINTER_SPIKE_CLOSE_MODE"] ?? "close"
     }
 
-    fileprivate static var raceCount: Int { max(envInt("NORMA_SPIKE_CLOSE_RACE", 0), 0) }
+    fileprivate static var raceCount: Int { max(envInt("WINTER_SPIKE_CLOSE_RACE", 0), 0) }
 
-    /// Scratch Chromium profile — never `~/.norma*`, never the bundle-id path the user's live dev
+    /// Scratch Chromium profile — never `~/.winter*`, never the bundle-id path the user's live dev
     /// app holds an exclusive lock on. See `startCEF`.
     private static func cachePath() -> String {
-        if let explicit = ProcessInfo.processInfo.environment["NORMA_SPIKE_CEF_CACHE"], !explicit.isEmpty {
+        if let explicit = ProcessInfo.processInfo.environment["WINTER_SPIKE_CEF_CACHE"], !explicit.isEmpty {
             return explicit
         }
-        return NSTemporaryDirectory() + "norma-closeleak-cef"
+        return NSTemporaryDirectory() + "winter-closeleak-cef"
     }
 
-    /// A three-line copy of `NormaCEFRuntime.helperExecutablePath()` — private there, and copying it
+    /// A three-line copy of `WinterCEFRuntime.helperExecutablePath()` — private there, and copying it
     /// is right for spike code that must not widen a production surface.
     private static func helperExecutablePath() -> String? {
         let url = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/Frameworks/Norma Helper.app/Contents/MacOS", isDirectory: true)
-            .appendingPathComponent("Norma Helper", isDirectory: false)
+            .appendingPathComponent("Contents/Frameworks/Winter Helper.app/Contents/MacOS", isDirectory: true)
+            .appendingPathComponent("Winter Helper", isDirectory: false)
         return FileManager.default.isExecutableFile(atPath: url.path) ? url.path : nil
     }
 
@@ -742,7 +742,7 @@ final class SpikeCloseLeakHarness {
         let file = dir.appendingPathComponent("leak.html")
         try? Self.pageHTML.write(to: file, atomically: true, encoding: .utf8)
         // An absolute URL STRING (`file:///…`), because its caller hands it straight to
-        // `NormaCEFCreateBrowser`. Anything that wants the DIRECTORY must take it from
+        // `WinterCEFCreateBrowser`. Anything that wants the DIRECTORY must take it from
         // `pageDirectory()` — not by re-parsing this as a path. See `startPageServer`.
         return file.absoluteString
     }
@@ -751,7 +751,7 @@ final class SpikeCloseLeakHarness {
     /// directory without round-tripping a URL string through a path API.
     private static func pageDirectory() -> URL {
         URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("norma-closeleak-page", isDirectory: true)
+            .appendingPathComponent("winter-closeleak-page", isDirectory: true)
     }
 
     private static let pageHTML = #"""

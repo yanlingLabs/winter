@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 @MainActor
 final class ScaffoldTests: XCTestCase {

@@ -1,4 +1,4 @@
-import type { SessionEvent } from "@norma/protocol";
+import type { SessionEvent } from "@winter/protocol";
 import { createProjector } from "../../src/projector";
 import type { CheckpointStore, ProjectedBatch, ProjectionKey, Projector, ProjectorDeps, ProtocolSdkMessage } from "../../src/projector";
 

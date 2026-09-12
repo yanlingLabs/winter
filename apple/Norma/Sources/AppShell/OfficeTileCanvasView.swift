@@ -916,7 +916,7 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost, NSTextInputC
     /// WAITING for them further up: this view now implements `copy(_:)`/`cut(_:)`/`paste(_:)`/
     /// `undo(_:)`/`redo(_:)` directly (below, `NSMenuItemValidation` conformance alongside), so the
     /// SwiftUI-default Edit menu's own Copy/Cut/Paste/Undo/Redo items (`target: nil`, this app's own
-    /// `NormaApp: App` carries no `.commands` override, so SwiftUI's stock command set — including
+    /// `WinterApp: App` carries no `.commands` override, so SwiftUI's stock command set — including
     /// these five — is what actually ships) now find a REAL, validated target the instant this view
     /// is first responder. `performKeyEquivalent:` resolves the combo to that menu item's action
     /// BEFORE `keyDown:` is ever reached — the exact mechanism this header already documents for
@@ -1283,7 +1283,7 @@ final class OfficeTileCanvasView: NSView, OfficeDocumentCanvasHost, NSTextInputC
 
     /// No attributes — marked-text decoration (the underline) is drawn by LOK's own tile rendering
     /// (the live drill this file's `insertText` header cites proves it, pixel-for-pixel), never by an
-    /// `NSAttributedString` this view would have to composite on top — a SECOND, Norma-drawn
+    /// `NSAttributedString` this view would have to composite on top — a SECOND, Winter-drawn
     /// rendering of the same marked text was considered and rejected for exactly this reason: LOK's
     /// own model already contains it, so anything this view drew independently would double-render on
     /// the next incidental repaint.

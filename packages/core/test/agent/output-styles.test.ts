@@ -26,7 +26,7 @@ describe("BUILTIN_OUTPUT_STYLES", () => {
 
 describe("OutputStyleStore.resolve", () => {
   test("resolves a built-in by name", () => {
-    const store = new OutputStyleStore({ normaHome: tmp("nh-"), trust: trustStub(false) });
+    const store = new OutputStyleStore({ winterHome: tmp("nh-"), trust: trustStub(false) });
     expect(store.resolve("proactive", null)?.name).toBe("proactive");
     expect(store.resolve("nope", null)).toBeNull();
   });
@@ -35,7 +35,7 @@ describe("OutputStyleStore.resolve", () => {
     mkdirSync(join(home, "output-styles"), { recursive: true });
     writeFileSync(join(home, "output-styles", "explanatory.md"),
       "---\nname: explanatory\ndescription: mine\n---\nCUSTOM <system-reminder>x</system-reminder> body");
-    const store = new OutputStyleStore({ normaHome: home, trust: trustStub(false) });
+    const store = new OutputStyleStore({ winterHome: home, trust: trustStub(false) });
     const r = store.resolve("explanatory", null)!;
     expect(r.description).toBe("mine");
     expect(r.body).toContain("CUSTOM");
@@ -44,10 +44,10 @@ describe("OutputStyleStore.resolve", () => {
   });
   test("a project file is used only when trusted", () => {
     const home = tmp("nh-"); const cwd = tmp("proj-");
-    mkdirSync(join(cwd, ".norma", "output-styles"), { recursive: true });
-    writeFileSync(join(cwd, ".norma", "output-styles", "myteam.md"), "---\nname: myteam\ndescription: team\n---\nbody");
-    const untrusted = new OutputStyleStore({ normaHome: home, trust: trustStub(false) });
-    const trusted = new OutputStyleStore({ normaHome: home, trust: trustStub(true) });
+    mkdirSync(join(cwd, ".winter", "output-styles"), { recursive: true });
+    writeFileSync(join(cwd, ".winter", "output-styles", "myteam.md"), "---\nname: myteam\ndescription: team\n---\nbody");
+    const untrusted = new OutputStyleStore({ winterHome: home, trust: trustStub(false) });
+    const trusted = new OutputStyleStore({ winterHome: home, trust: trustStub(true) });
     expect(untrusted.resolve("myteam", cwd)).toBeNull();
     expect(trusted.resolve("myteam", cwd)?.name).toBe("myteam");
   });
@@ -55,16 +55,16 @@ describe("OutputStyleStore.resolve", () => {
     const home = tmp("nh-"); const cwd = tmp("proj-");
     mkdirSync(join(home, "output-styles"), { recursive: true });
     writeFileSync(join(home, "output-styles", "proactive.md"), "---\nname: proactive\ndescription: user\n---\nu");
-    mkdirSync(join(cwd, ".norma", "output-styles"), { recursive: true });
-    writeFileSync(join(cwd, ".norma", "output-styles", "proactive.md"), "---\nname: proactive\ndescription: proj\n---\np");
-    const store = new OutputStyleStore({ normaHome: home, trust: trustStub(true) });
+    mkdirSync(join(cwd, ".winter", "output-styles"), { recursive: true });
+    writeFileSync(join(cwd, ".winter", "output-styles", "proactive.md"), "---\nname: proactive\ndescription: proj\n---\np");
+    const store = new OutputStyleStore({ winterHome: home, trust: trustStub(true) });
     expect(store.resolve("proactive", cwd)!.description).toBe("proj");
   });
   test("malformed frontmatter file is ignored (falls through to built-in)", () => {
     const home = tmp("nh-");
     mkdirSync(join(home, "output-styles"), { recursive: true });
     writeFileSync(join(home, "output-styles", "proactive.md"), "no frontmatter fence here");
-    const store = new OutputStyleStore({ normaHome: home, trust: trustStub(false) });
+    const store = new OutputStyleStore({ winterHome: home, trust: trustStub(false) });
     expect(store.resolve("proactive", null)!.description).not.toBe(""); // built-in wins
     expect(store.resolve("proactive", null)!.keepCodingInstructions).toBe(true); // the built-in
   });
@@ -79,7 +79,7 @@ describe("OutputStyleStore.resolve — CRLF frontmatter (review finding #1)", ()
     // split leaves a bare trailing \r that the key:value regex then fails to match.
     const content = "---\r\ndescription: hi\r\nkeep-coding-instructions: true\r\n---\r\nbody";
     writeFileSync(join(home, "output-styles", "crlf-keep.md"), content);
-    const store = new OutputStyleStore({ normaHome: home, trust: trustStub(false) });
+    const store = new OutputStyleStore({ winterHome: home, trust: trustStub(false) });
     const r = store.resolve("crlf-keep", null);
     expect(r).not.toBeNull();
     expect(r!.keepCodingInstructions).toBe(true);
@@ -90,7 +90,7 @@ describe("OutputStyleStore.resolve — CRLF frontmatter (review finding #1)", ()
     mkdirSync(join(home, "output-styles"), { recursive: true });
     const content = "---\r\nkeep-coding-instructions: true\r\ndescription: tail-desc\r\n---\r\nbody";
     writeFileSync(join(home, "output-styles", "crlf-desc.md"), content);
-    const store = new OutputStyleStore({ normaHome: home, trust: trustStub(false) });
+    const store = new OutputStyleStore({ winterHome: home, trust: trustStub(false) });
     const r = store.resolve("crlf-desc", null);
     expect(r).not.toBeNull();
     expect(r!.description).toBe("tail-desc");
@@ -105,7 +105,7 @@ describe("OutputStyleStore.resolve — path traversal via name (review finding #
     // <home>/output-styles/../secret.md — a real, parseable file placed one level OUTSIDE
     // output-styles/ to prove the traversal would otherwise actually leak its content.
     writeFileSync(join(home, "secret.md"), "---\ndescription: leaked\n---\nSECRET BODY");
-    const store = new OutputStyleStore({ normaHome: home, trust: trustStub(false) });
+    const store = new OutputStyleStore({ winterHome: home, trust: trustStub(false) });
     expect(store.resolve("../secret", null)).toBeNull();
   });
 
@@ -113,12 +113,12 @@ describe("OutputStyleStore.resolve — path traversal via name (review finding #
     const home = tmp("nh-");
     mkdirSync(join(home, "output-styles", "a"), { recursive: true });
     writeFileSync(join(home, "output-styles", "a", "b.md"), "---\ndescription: leaked\n---\nSECRET BODY");
-    const store = new OutputStyleStore({ normaHome: home, trust: trustStub(false) });
+    const store = new OutputStyleStore({ winterHome: home, trust: trustStub(false) });
     expect(store.resolve("a/b", null)).toBeNull();
   });
 
   test("rejects other structurally-invalid names outright", () => {
-    const store = new OutputStyleStore({ normaHome: tmp("nh-"), trust: trustStub(false) });
+    const store = new OutputStyleStore({ winterHome: tmp("nh-"), trust: trustStub(false) });
     expect(store.resolve("../../etc/whatever", null)).toBeNull();
     expect(store.resolve("..", null)).toBeNull();
     expect(store.resolve(".", null)).toBeNull();
@@ -129,7 +129,7 @@ describe("OutputStyleStore.resolve — path traversal via name (review finding #
     const home = tmp("nh-");
     mkdirSync(join(home, "output-styles"), { recursive: true });
     writeFileSync(join(home, "output-styles", "my-style.md"), "---\ndescription: mine\n---\nbody");
-    const store = new OutputStyleStore({ normaHome: home, trust: trustStub(false) });
+    const store = new OutputStyleStore({ winterHome: home, trust: trustStub(false) });
     expect(store.resolve("my-style", null)?.description).toBe("mine");
     for (const n of BUILTIN_STYLE_NAMES) expect(store.resolve(n, null)?.name).toBe(n);
   });
@@ -140,7 +140,7 @@ describe("OutputStyleStore.list", () => {
     const home = tmp("nh-");
     mkdirSync(join(home, "output-styles"), { recursive: true });
     writeFileSync(join(home, "output-styles", "mine.md"), "---\nname: mine\ndescription: d\n---\nb");
-    const store = new OutputStyleStore({ normaHome: home, trust: trustStub(false) });
+    const store = new OutputStyleStore({ winterHome: home, trust: trustStub(false) });
     const names = store.list(null).map((s) => s.name);
     expect(names).toContain("default");
     expect(names).toContain("proactive");
@@ -155,7 +155,7 @@ describe("list()/resolve() identity (review finding #3)", () => {
     mkdirSync(join(home, "output-styles"), { recursive: true });
     // File is foo.md but its frontmatter claims to be "bar" — identity must stay "foo".
     writeFileSync(join(home, "output-styles", "foo.md"), "---\nname: bar\ndescription: d\n---\nBODY");
-    const store = new OutputStyleStore({ normaHome: home, trust: trustStub(false) });
+    const store = new OutputStyleStore({ winterHome: home, trust: trustStub(false) });
 
     const listed = store.list(null).map((s) => s.name);
     expect(listed).toContain("foo");

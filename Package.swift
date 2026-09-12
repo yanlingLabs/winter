@@ -3,31 +3,31 @@ import PackageDescription
 
 // ROOT UMBRELLA MANIFEST (SP3 Phase B enabler).
 //
-// SwiftPM resolves `<repo-root>/Package.swift` for a REMOTE git dependency, but Norma's real
-// Swift manifests live under `apple/` (apple/NormaProtocol, apple/NormaKit). Without a root
+// SwiftPM resolves `<repo-root>/Package.swift` for a REMOTE git dependency, but Winter's real
+// Swift manifests live under `apple/` (apple/WinterProtocol, apple/WinterKit). Without a root
 // manifest a remote consumer — the closed-source `yanlingLabs/norma-ios` app — cannot resolve
 // this repo at all. This thin umbrella exposes ONLY the iOS-consumable products
-// (`NormaProtocol` + `NormaSessionKit` + `NormaChatKit`) by pathing its targets into the
+// (`WinterProtocol` + `WinterSessionKit` + `WinterChatKit`) by pathing its targets into the
 // existing sources.
 //
-// Local Mac development and the Mac app keep using `apple/NormaKit/Package.swift` and
-// `apple/NormaProtocol/Package.swift` unchanged — those are separate packages resolved from
+// Local Mac development and the Mac app keep using `apple/WinterKit/Package.swift` and
+// `apple/WinterProtocol/Package.swift` unchanged — those are separate packages resolved from
 // their own directories and do not interfere with this one (no consumer depends on both).
 //
-// KEEP IN SYNC with `apple/NormaKit/Package.swift`: the `Iroh` binaryTarget url + checksum,
-// the `IrohLib` linkerSettings, and `NormaSessionKit`'s dependency list must match. When the
+// KEEP IN SYNC with `apple/WinterKit/Package.swift`: the `Iroh` binaryTarget url + checksum,
+// the `IrohLib` linkerSettings, and `WinterSessionKit`'s dependency list must match. When the
 // iroh xcframework is republished (scripts/publish-iroh-xcframework.ts), update BOTH manifests.
-// Likewise KEEP IN SYNC with `apple/NormaChatKit/Package.swift` for `NormaChatKit`'s deps.
+// Likewise KEEP IN SYNC with `apple/WinterChatKit/Package.swift` for `WinterChatKit`'s deps.
 let package = Package(
-    name: "norma",
+    name: "winter",
     platforms: [.macOS("26.0"), .iOS("26.0")],
     products: [
-        .library(name: "NormaProtocol", targets: ["NormaProtocol"]),
-        .library(name: "NormaSessionKit", targets: ["NormaSessionKit"]),
-        .library(name: "NormaChatKit", targets: ["NormaChatKit"]),
+        .library(name: "WinterProtocol", targets: ["WinterProtocol"]),
+        .library(name: "WinterSessionKit", targets: ["WinterSessionKit"]),
+        .library(name: "WinterChatKit", targets: ["WinterChatKit"]),
     ],
     targets: [
-        .target(name: "NormaProtocol", path: "apple/NormaProtocol/Sources/NormaProtocol"),
+        .target(name: "WinterProtocol", path: "apple/WinterProtocol/Sources/WinterProtocol"),
         .binaryTarget(
             name: "Iroh",
             url: "https://github.com/yanlingLabs/norma/releases/download/iroh-xcframework-v1.1.0/IrohLib.xcframework.zip",
@@ -36,7 +36,7 @@ let package = Package(
         .target(
             name: "IrohLib",
             dependencies: ["Iroh"],
-            path: "apple/NormaKit/vendor/IrohLibSwift",
+            path: "apple/WinterKit/vendor/IrohLibSwift",
             linkerSettings: [
                 .linkedFramework("SystemConfiguration"),
                 .linkedFramework("Network"),
@@ -44,16 +44,16 @@ let package = Package(
             ]
         ),
         .target(
-            name: "NormaSessionKit",
-            dependencies: ["NormaProtocol", "IrohLib"],
-            path: "apple/NormaKit/Sources/NormaSessionKit"
+            name: "WinterSessionKit",
+            dependencies: ["WinterProtocol", "IrohLib"],
+            path: "apple/WinterKit/Sources/WinterSessionKit"
         ),
         // Chat Slice D: the phone's standalone chat engine. No IrohLib — it must link without
         // the transport (a locally-running chat turn never talks to the Mac).
         .target(
-            name: "NormaChatKit",
-            dependencies: ["NormaProtocol"],
-            path: "apple/NormaChatKit/Sources/NormaChatKit"
+            name: "WinterChatKit",
+            dependencies: ["WinterProtocol"],
+            path: "apple/WinterChatKit/Sources/WinterChatKit"
         ),
     ]
 )

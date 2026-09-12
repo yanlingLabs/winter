@@ -2,15 +2,15 @@ import SwiftUI
 
 /// Task-3 fix wave (review finding, "full-body re-render per tick"): the fluid's own physics state
 /// used to live on the SHARED `MorphModel` (`morph.fluid` + `morph.fluidAcceleration`), observed
-/// by both this view AND `NormaFieldView` (the whole field body — glass geometry, composer/
+/// by both this view AND `WinterFieldView` (the whole field body — glass geometry, composer/
 /// response content, nav pill…). Since the sim advances on every render tick (~120/s while a turn
-/// is active), every one of those `@Published` writes re-ran `NormaFieldView`'s entire body too —
+/// is active), every one of those `@Published` writes re-ran `WinterFieldView`'s entire body too —
 /// a full-body re-render for a change nothing but this bubble needed to see, and a direct
 /// violation of this file's own local-animation-state convention (cf. `WorkingSpinnerGlyph`/
-/// `SheenText` in `NormaFieldView.swift`, which each scope their own animation state to
+/// `SheenText` in `WinterFieldView.swift`, which each scope their own animation state to
 /// themselves, never an ancestor). `FluidModel` is a dedicated, narrowly-scoped `ObservableObject`
 /// for exactly this state; the only things that ever observe it are `FluidOrbSlot` and
-/// `FluidOrbView` below — `NormaFieldView` holds a plain, non-`@ObservedObject` reference just to
+/// `FluidOrbView` below — `WinterFieldView` holds a plain, non-`@ObservedObject` reference just to
 /// pass one down (see that file's mount site, and its own new progress-fade comment).
 @MainActor
 final class FluidModel: ObservableObject {
@@ -163,9 +163,9 @@ struct FluidOrbView: View {
     /// pause decision, and `body`'s `.onChange` handlers below for every unpause path.
     @State private var paused = false
 
-    /// Norma blue — the working tint (task-level fill while a turn is running). A literal,
+    /// Winter blue — the working tint (task-level fill while a turn is running). A literal,
     /// undistorted color: this view renders OUTSIDE `GlassForegroundLegibility`'s difference
-    /// blend (see `NormaFieldView.composerMorphedContent`), so what's declared here is exactly
+    /// blend (see `WinterFieldView.composerMorphedContent`), so what's declared here is exactly
     /// what's drawn.
     ///
     /// Finding-4 (gate 2, "brighter fluid"): bumped noticeably more luminous from
@@ -356,9 +356,9 @@ struct FluidOrbView: View {
 }
 
 /// Task-3 fix wave: the ONLY thing that observes `FluidModel` other than `FluidOrbView` itself.
-/// `NormaFieldView` mounts this unconditionally (see its call site) and never touches `FluidModel`
+/// `WinterFieldView` mounts this unconditionally (see its call site) and never touches `FluidModel`
 /// at all — re-renders of THIS view are driven by `fluid.sim` changing (the ~120Hz tick, while
-/// active) and stay fully scoped to this leaf; `NormaFieldView`'s own body never re-runs because
+/// active) and stay fully scoped to this leaf; `WinterFieldView`'s own body never re-runs because
 /// of them, which is the whole point of this split (see `FluidModel`'s doc above).
 struct FluidOrbSlot: View {
     @ObservedObject var fluid: FluidModel

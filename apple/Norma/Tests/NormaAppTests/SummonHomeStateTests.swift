@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// GATE-3 FIX (round 3, F4): the summon home-state rule — `summonShowsComposer` decides, at the
 /// instant the surface flips orb→field, whether the COMPOSER takes the shell (v1's home-state

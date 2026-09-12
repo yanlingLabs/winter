@@ -1,5 +1,5 @@
 import Foundation
-import NormaProtocol
+import WinterProtocol
 
 /// office-agent-tools T1/T3/T4/T5/T6 (task-1/3/4/5/6-brief.md; design
 /// `docs/superpowers/specs/2026-08-22-office-agent-tools-design.md` §1, §2, §3, §6) — the office half
@@ -49,7 +49,7 @@ import NormaProtocol
 /// office-finish's two `batch` verbs), and a later task that gives
 /// one of them real behaviour needs only a new `case` in this file's `handle` switch — never a change
 /// to what COUNTS as an office action, and never a Swift protocol-type change either. T3's own two new
-/// verbs proved this AGAIN: no `packages/protocol` change, no NormaProtocol/NormaKit change — see the
+/// verbs proved this AGAIN: no `packages/protocol` change, no WinterProtocol/WinterKit change — see the
 /// task's own report for the kit-tag verdict.
 ///
 /// ## The refusal string is bounded on purpose
@@ -376,10 +376,10 @@ struct OfficeCommandConsumer {
                     let lifecycle = adopted
                         ? " If earlier cells in this call already applied before this failure, they "
                             + "are sitting unsaved in your own open tab right now — the tab is dirty, "
-                            + "and Norma will refuse further writes to this document until you save "
+                            + "and Winter will refuse further writes to this document until you save "
                             + "or discard those changes yourself."
                         : " If earlier cells in this call already applied before this failure, they "
-                            + "were discarded when Norma closed the document afterward — nothing from "
+                            + "were discarded when Winter closed the document afterward — nothing from "
                             + "this call persisted, and the next call will start fresh."
                     throw OfficeAgentBrokerError.writeFailed(path: path, reason: Self.message(for: error) + lifecycle)
                 }
@@ -802,10 +802,10 @@ struct OfficeCommandConsumer {
                     let lifecycle = adopted
                         ? " If an earlier attribute in this call already applied before this failure, "
                             + "it is sitting unsaved in your own open tab right now — the tab is dirty, "
-                            + "and Norma will refuse further writes to this document until you save or "
+                            + "and Winter will refuse further writes to this document until you save or "
                             + "discard those changes yourself."
                         : " If an earlier attribute in this call already applied before this failure, "
-                            + "it was discarded when Norma closed the document afterward — nothing from "
+                            + "it was discarded when Winter closed the document afterward — nothing from "
                             + "this call persisted, and the next call will start fresh."
                     throw OfficeAgentBrokerError.writeFailed(path: path, reason: Self.message(for: error) + lifecycle)
                 }
@@ -926,10 +926,10 @@ struct OfficeCommandConsumer {
                     let lifecycle = adopted
                         ? " If an earlier attribute in this call already applied before this failure, "
                             + "it is sitting unsaved in your own open tab right now — the tab is dirty, "
-                            + "and Norma will refuse further writes to this document until you save or "
+                            + "and Winter will refuse further writes to this document until you save or "
                             + "discard those changes yourself."
                         : " If an earlier attribute in this call already applied before this failure, "
-                            + "it was discarded when Norma closed the document afterward — nothing from "
+                            + "it was discarded when Winter closed the document afterward — nothing from "
                             + "this call persisted, and the next call will start fresh."
                     throw OfficeAgentBrokerError.writeFailed(path: path, reason: Self.message(for: error) + lifecycle)
                 }
@@ -1281,7 +1281,7 @@ struct OfficeCommandConsumer {
     /// immediate and specific, and this one is what actually makes the arithmetic total, because the
     /// daemon is not the only possible producer of a `panel_command` (`args` is
     /// `z.record(z.string(), z.unknown())` with only a byte cap). `Int(Double)` TRAPS outside `Int`'s
-    /// range — the class that aborted Norma.app from `sheets insert_rows at:1e30` and again from
+    /// range — the class that aborted Winter.app from `sheets insert_rows at:1e30` and again from
     /// `slides read slide:1e30`, both measured as SIGTRAPs. `docs.ts` did not exist during that
     /// sweep, so these two decoders are outside it by construction and are bounded on arrival rather
     /// than after a review. 1,000,000 is orders of magnitude past any real document's paragraph
@@ -1365,7 +1365,7 @@ struct OfficeCommandConsumer {
     private static let requiredPathRefusal = "this office verb needs a `path`."
     private static let requiredSheetRefusal = "`sheets read` needs a `sheet` naming which sheet to read."
     private static let requiredRangeRefusal = "`sheets read` needs a `range` in A1 notation (examples: \"A1\", \"A1:C10\")."
-    private static let hostGoneRefusal = "Norma's office runtime is no longer available."
+    private static let hostGoneRefusal = "Winter's office runtime is no longer available."
     // office-agent-tools T4
     private static let requiredValuesRefusal = "`sheets set` needs `values` — a rectangular grid of cell content."
     private static let requiredCountRefusal = "this office verb needs a positive `count`, at most "
@@ -1410,7 +1410,7 @@ struct OfficeCommandConsumer {
             "odp": "slides", "pptx": "slides",
         ]
         guard let owner = kindByExtension[ext] else {
-            return "Norma can't create \(name) — a new office document has to be one of "
+            return "Winter can't create \(name) — a new office document has to be one of "
                 + ".odt, .docx (text), .ods, .xlsx (spreadsheet), .odp or .pptx (presentation)."
         }
         guard owner != tool else { return nil }
@@ -1529,7 +1529,7 @@ struct OfficeCommandConsumer {
     /// daemon's validation as the only gate." That sentence became false the moment `requiredCount`
     /// four lines up gained a ceiling and this did not: `Int(Double)` TRAPS outside `Int`'s range,
     /// the daemon's `z.number().int().positive()` is not a bound (`Number.isInteger(1e30)` is
-    /// `true`), and `slides read path:"<in-fence>.pptx" slide:1e30` therefore aborted Norma.app —
+    /// `true`), and `slides read path:"<in-fence>.pptx" slide:1e30` therefore aborted Winter.app —
     /// from five live handlers (`read`/`set_text`/`delete_slide`/`reorder`/`add_slide`). A comment
     /// claiming a guard is not a guard; the ceiling below is.
     ///
@@ -1675,7 +1675,7 @@ struct OfficeCommandConsumer {
     private static let slidesLineSpacing115Refusal =
         "`slides format` has no `1.15` line spacing — LibreOffice's presentation editor only offers "
         + "`single`, `1.5` and `double`. (`docs format` does have `1.15`; this is a real difference "
-        + "between the two editors, not a Norma limitation.)"
+        + "between the two editors, not a Winter limitation.)"
     private static let slidesStyleUnsupportedRefusal =
         "`slides format` has no `style` — paragraph styles like `heading1` are a text-document "
         + "feature. A presentation's own \"styles\" are outline levels, which are a different thing "
@@ -1766,7 +1766,7 @@ struct OfficeCommandConsumer {
     private static func formatSheetsRead(sheet: String, range: String, formulas: Bool, rows: [[String]],
                                          displayRestoreVerified: Bool) -> (body: String, warning: String) {
         let header = "\(sheet)!\(range) (\(formulas ? "formulas" : "values")):"
-        let warning = displayRestoreVerified ? "" : "\n(Norma could not confirm it restored this "
+        let warning = displayRestoreVerified ? "" : "\n(Winter could not confirm it restored this "
             + "workbook's Show Formulas display mode after this read. These rows are correct, but a "
             + "later read of this workbook may return formula source where a value is expected — "
             + "reopen the file if a value ever comes back looking like \"=A1*2\".)"
@@ -2003,7 +2003,7 @@ struct OfficeCommandConsumer {
     private static func formatSheetsFormat(path: String, sheet: String, range: String, applied: [String]) -> String {
         let name = (path as NSString).lastPathComponent
         return "set \(applied.joined(separator: ", ")) on \(sheet)!\(range) in \(name) and saved. "
-            + "Norma posts formatting to LibreOffice without reading it back, so this reports what was "
+            + "Winter posts formatting to LibreOffice without reading it back, so this reports what was "
             + "requested, not a confirmed result — re-read the range if you need to be sure."
     }
 
@@ -2094,7 +2094,7 @@ struct OfficeCommandConsumer {
     /// `office.slides.format` — the same attributes on ONE slide's title or body placeholder.
     ///
     /// **`slide` is the numeric operand in the class that has aborted this app twice.** `Int(Double)`
-    /// TRAPS outside `Int`'s range and a trap takes Norma.app down with every open document's unsaved
+    /// TRAPS outside `Int`'s range and a trap takes Winter.app down with every open document's unsaved
     /// edits; `sheets insert_rows at:1e30` and `slides read slide:1e30` were both measured as
     /// SIGTRAPs. `oneBasedIndex` bounds it on arrival — and it is bounded HERE as well as in
     /// `slides.ts` because the daemon is not the only possible producer of a `panel_command`.
@@ -2186,13 +2186,13 @@ struct OfficeCommandConsumer {
             ?? "the whole document"
         var sentence = "set \(applied.joined(separator: ", ")) on \(target) in \(name) and saved."
         if !verifyAvailable {
-            sentence += " Norma could not read the formatting back afterwards, so this reports what was "
+            sentence += " Winter could not read the formatting back afterwards, so this reports what was "
                 + "requested rather than a confirmed result — the change may well have landed; re-read "
                 + "the document if you need to be sure."
         } else {
             let unconfirmed = applied.filter { !verified.contains($0) }
             if verified.isEmpty {
-                sentence += " Norma read the text back afterwards and could not confirm any of it — "
+                sentence += " Winter read the text back afterwards and could not confirm any of it — "
                     + "re-read the document before relying on this."
             } else {
                 // **The claim is EXISTENTIAL and the sentence says so.** The check asks whether the
@@ -2208,10 +2208,10 @@ struct OfficeCommandConsumer {
                 // wider the selection the weaker the guarantee, never the stronger.
                 let scope: String
                 if find == nil {
-                    scope = "somewhere in the document (Norma checks that the formatting is present "
+                    scope = "somewhere in the document (Winter checks that the formatting is present "
                         + "in what it re-read, not that it reached every paragraph)"
                 } else if occurrences > 1 {
-                    scope = "in at least one of the \(occurrences) occurrences (Norma cannot check "
+                    scope = "in at least one of the \(occurrences) occurrences (Winter cannot check "
                         + "each one separately)"
                 } else {
                     scope = "in the text it re-read"
@@ -2235,7 +2235,7 @@ struct OfficeCommandConsumer {
                                            applied: [String]) -> String {
         let name = (path as NSString).lastPathComponent
         var sentence = "set \(applied.joined(separator: ", ")) on slide \(slide)'s \(placeholder.rawValue) "
-            + "in \(name) and saved. Norma cannot read formatting back out of a presentation, so this "
+            + "in \(name) and saved. Winter cannot read formatting back out of a presentation, so this "
             + "reports what was requested, not a confirmed result — reopen the slide if you need to be sure."
         if applied.contains("align") {
             sentence += " Note that aligning a placeholder's text also re-anchors the text box itself, "
@@ -2351,11 +2351,11 @@ struct OfficeCommandConsumer {
         guard let (kind, verb) = parse(action) else {
             // Any string with the `office.` prefix that does not otherwise parse — still answered,
             // never dropped (this file's whole point).
-            return "the Mac app does not yet implement the office verb `\(quoted)` — Norma's office "
+            return "the Mac app does not yet implement the office verb `\(quoted)` — Winter's office "
                 + "tools (sheets/slides/docs) are still being built. Nothing was done."
         }
         return "the `\(brief(kind))` tool's `\(brief(verb))` verb is not implemented yet on this "
-            + "build of Norma — Stage C's office tools (sheets/slides/docs) are still being built. "
+            + "build of Winter — Stage C's office tools (sheets/slides/docs) are still being built. "
             + "Nothing was read from or written to the document."
     }
 

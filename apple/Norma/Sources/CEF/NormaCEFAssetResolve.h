@@ -1,18 +1,18 @@
-#ifndef NormaCEFAssetResolve_h
-#define NormaCEFAssetResolve_h
+#ifndef WinterCEFAssetResolve_h
+#define WinterCEFAssetResolve_h
 
 #include <stddef.h>
 
-/// editor-plumbing Task 2 — the `norma-editor://` scheme's PATH FENCE, and nothing else.
+/// editor-plumbing Task 2 — the `winter-editor://` scheme's PATH FENCE, and nothing else.
 ///
 /// **This file deliberately includes no CEF header, no AppKit header and no Objective-C.** It is
-/// the one piece of the scheme a test can execute: CEF never starts under XCTest (`NormaCEFRuntime`
+/// the one piece of the scheme a test can execute: CEF never starts under XCTest (`WinterCEFRuntime`
 /// refuses; `CEFRuntimeTests` pins that), so a fence written inside the resource handler would be
 /// unreachable by every test this repo can run, forever. Split out, it is a plain C function over
 /// two strings that the app suite calls directly — which is why the fence, and not the handler,
 /// is where the security property lives.
 ///
-/// THE PROPERTY. `NormaCEFEditorAssetResolve` answers a filesystem path only when that path is a
+/// THE PROPERTY. `WinterCEFEditorAssetResolve` answers a filesystem path only when that path is a
 /// real, existing file strictly INSIDE `assetsRoot` after full canonicalisation of both sides. Not
 /// "the URL looked harmless": `..`, percent-encoded `..`, and symlinks pointing out of the tree are
 /// all resolved away before the containment test runs, because each of them is a way for a
@@ -26,7 +26,7 @@
 ///   1. **Percent-decode `urlPath` — exactly once.** A single pass, never a loop: decoding twice is
 ///      the classic hole (`%252e%252e` survives one pass as `%2e%2e` and becomes `..` on the
 ///      second). A malformed escape (`%z`, a trailing `%`) and an encoded NUL (`%00`) are REFUSED
-///      rather than passed through literally — fail closed, and no asset Norma ships needs either.
+///      rather than passed through literally — fail closed, and no asset Winter ships needs either.
 ///   2. **Join** `assetsRoot` and the decoded path with exactly one separator.
 ///   3. **`realpath()` BOTH sides.** The root as well as the target: this checkout's own scratch
 ///      directories live under `/var/folders/...`, which is a symlink to `/private/var/...`, so an
@@ -56,10 +56,10 @@ extern "C" {
 
 /// The resolved absolute path (caller `free`s) iff `urlPath` names an existing file strictly inside
 /// `assetsRoot` after canonicalisation; NULL otherwise. NULL or empty arguments answer NULL.
-char *NormaCEFEditorAssetResolve(const char *assetsRoot, const char *urlPath);
+char *WinterCEFEditorAssetResolve(const char *assetsRoot, const char *urlPath);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* NormaCEFAssetResolve_h */
+#endif /* WinterCEFAssetResolve_h */

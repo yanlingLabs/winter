@@ -1,8 +1,8 @@
 /**
- * Vendors Monaco (the code editor VS Code is built on) into apple/Norma/vendor/monaco/
+ * Vendors Monaco (the code editor VS Code is built on) into apple/Winter/vendor/monaco/
  * (gitignored -- ~13MB uncompressed) the way scripts/fetch-cef.ts vendors CEF: pinned,
  * hash-verified, extracted, stamped for idempotency. Run once after cloning, or whenever
- * MONACO_VERSION below is deliberately bumped. apple/Norma/project.yml's Norma target carries
+ * MONACO_VERSION below is deliberately bumped. apple/Winter/project.yml's Winter target carries
  * a preBuildScripts check that fails the Xcode build loudly, naming this exact command, if the
  * vendored tree is missing.
  *
@@ -27,7 +27,7 @@
  * --- Artifact choice: min/vs only, not esm/dev/min-maps ---
  * The published package contains several build shapes (esm/, dev/, min/, min-maps/). Only
  * min/vs/ is vendored here: the minified AMD build that runs from static files via vs/loader.js
- * -- what the CEF-hosted local page loads (the `norma-editor://` custom scheme), no bundler in
+ * -- what the CEF-hosted local page loads (the `winter-editor://` custom scheme), no bundler in
  * between. package/LICENSE travels
  * with it for the same reason CEF's LICENSE.txt does: a licence obligation, not a convenience
  * (see the "Embed Monaco editor assets" phase in project.yml).
@@ -74,7 +74,7 @@ const MONACO_URL = `https://registry.npmjs.org/monaco-editor/-/monaco-editor-${M
 const MONACO_INTEGRITY =
   "sha512-GEQWEZmfkOGLdd3XK8ryrfWz3AIP8YymVXiPHEdewrUq7mh0qrKrfHLNCXcbB6sTnMLnOZ3ztSiKcciFUkIJwQ==";
 
-const VENDOR_DIR = join(ROOT, "apple", "Norma", "vendor", "monaco");
+const VENDOR_DIR = join(ROOT, "apple", "Winter", "vendor", "monaco");
 const STAMP_PATH = join(VENDOR_DIR, ".vendored-version");
 const VS_MARKER = join(VENDOR_DIR, "vs", "loader.js");
 const LICENSE_PATH = join(VENDOR_DIR, "LICENSE");
@@ -136,7 +136,7 @@ if (FORCE) {
 // Download, verify, extract, place. Everything transient lives under one temp dir that is
 // always removed on the way out, success or failure (mirrors scripts/fetch-cef.ts).
 // ---------------------------------------------------------------------------
-const tmp = mkdtempSync(join(tmpdir(), "norma-monaco-"));
+const tmp = mkdtempSync(join(tmpdir(), "winter-monaco-"));
 // fail() calls process.exit(), which does NOT unwind the stack -- the `finally` below never
 // runs on that path (same trap fetch-cef.ts documents). Every fail() called from inside this
 // try must go through here first, or a failure leaks a temp dir with a partial download.
@@ -205,7 +205,7 @@ try {
   }
   if (!existsSync(licenseSrc)) {
     failTmp(
-      `extracted package is missing "LICENSE" -- Norma.app is required to ship this notice.\n` +
+      `extracted package is missing "LICENSE" -- Winter.app is required to ship this notice.\n` +
         `Do not work around this by dropping the copy.`,
     );
   }
@@ -214,7 +214,7 @@ try {
   rmSync(VENDOR_DIR, { recursive: true, force: true });
   mkdirSync(VENDOR_DIR, { recursive: true });
   // ditto, not a plain recursive copy -- matches every other vendor/bundle copy in this
-  // codebase (fetch-cef.ts, project.yml's embed phases, apple/NormaKit/vendor/fetch-iroh.sh).
+  // codebase (fetch-cef.ts, project.yml's embed phases, apple/WinterKit/vendor/fetch-iroh.sh).
   execOrFail(
     `failed to copy "min/vs/" into the vendored tree -- check disk space and permissions at ${VENDOR_DIR}`,
     "ditto",

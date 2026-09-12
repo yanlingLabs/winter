@@ -53,7 +53,7 @@ describe("researchCapability: the server shape", () => {
     const h = harness();
     const server = researchCapability(h.session, { search: {}, readPage: { cache: new PageCache() } });
     expect(server.type).toBe("sdk");
-    expect(server.name).toBe("norma__research");
+    expect(server.name).toBe("winter__research");
     expect(isWinterMcpServerInstance(server.instance)).toBe(true);
     expect((server.instance as WinterMcpServerInstance).listTools().map((t) => t.name).sort())
       .toEqual(["ReadPage", "Search"]);

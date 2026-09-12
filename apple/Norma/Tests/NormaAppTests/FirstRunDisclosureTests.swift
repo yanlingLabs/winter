@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// BYOK T2 (spec §3): the first-run disclosure's UserDefaults gate — a seam-testable pure helper
 /// pair (`shouldShowFirstRunDisclosure`/`markFirstRunDisclosureShown`) rather than driving

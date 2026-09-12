@@ -1,5 +1,5 @@
 import Foundation
-import NormaKit
+import WinterKit
 import XCTest
 
 // MARK: - RealDaemon
@@ -28,7 +28,7 @@ enum RealDaemonError: Error, CustomStringConvertible {
 }
 
 /// SP2a Task 1: a real-daemon Swift test harness. Spawns the ACTUAL bun daemon (`startDaemon`
-/// from `@norma/core`) on a temp `NORMA_HOME`, with an EXPLICIT `FileSecretStore` — never the
+/// from `@winter/core`) on a temp `WINTER_HOME`, with an EXPLICIT `FileSecretStore` — never the
 /// live macOS Keychain, and never `packages/cli/src/main.ts`'s `daemon run` (whose CLI path
 /// defaults to `KeychainSecretStore`: reading that token from Swift is infeasible, and spawning
 /// it would touch the real, live daemon's Keychain entry — forbidden by this project's
@@ -37,7 +37,7 @@ enum RealDaemonError: Error, CustomStringConvertible {
 ///
 /// Used by SP2a's later tasks (the gateway gates + the E2E, Tasks 2 & 9) so those tests finally
 /// exercise the gateway's daemon-facing bridge client against REAL `hub.attach` semantics instead
-/// of a scripted/fake `NormaTransport`.
+/// of a scripted/fake `WinterTransport`.
 struct RealDaemon {
     let socketPath: String
     let harnessToken: String
@@ -47,11 +47,11 @@ struct RealDaemon {
     private let stdoutPath: String
     private let stderrPath: String
 
-    /// bun's resolution of a bare specifier like `@norma/core` walks up from the SPAWNED
-    /// PROCESS'S CWD looking for `node_modules/@norma/core` — it does not consult the repo root.
-    /// In this pnpm workspace, `node_modules/@norma/{core,protocol}` (symlinks into
+    /// bun's resolution of a bare specifier like `@winter/core` walks up from the SPAWNED
+    /// PROCESS'S CWD looking for `node_modules/@winter/core` — it does not consult the repo root.
+    /// In this pnpm workspace, `node_modules/@winter/{core,protocol}` (symlinks into
     /// `packages/{core,protocol}`) exist ONLY under `packages/cli` — verified empirically:
-    /// `bun -e 'import ... from "@norma/core"'` fails with "Cannot find module '@norma/core'"
+    /// `bun -e 'import ... from "@winter/core"'` fails with "Cannot find module '@winter/core'"
     /// when run with the repo root as cwd, and succeeds when run from `packages/cli`. This is
     /// exactly why the TS precedent (`daemon-sigterm.test.ts`) spawns with
     /// `cwd: join(import.meta.dir, "..")` — i.e. `packages/cli` — rather than the repo root. So
@@ -60,10 +60,10 @@ struct RealDaemon {
     private static var cliPackageDir: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent() // .../support/RealDaemon.swift -> .../support
-            .deletingLastPathComponent() // .../support -> .../NormaKitTests
-            .deletingLastPathComponent() // .../NormaKitTests -> .../Tests
-            .deletingLastPathComponent() // .../Tests -> .../NormaKit
-            .deletingLastPathComponent() // .../NormaKit -> .../apple
+            .deletingLastPathComponent() // .../support -> .../WinterKitTests
+            .deletingLastPathComponent() // .../WinterKitTests -> .../Tests
+            .deletingLastPathComponent() // .../Tests -> .../WinterKit
+            .deletingLastPathComponent() // .../WinterKit -> .../apple
             .deletingLastPathComponent() // .../apple -> repo root
             .appendingPathComponent("packages/cli")
     }
@@ -72,8 +72,8 @@ struct RealDaemon {
     /// token (this task's daemon.ts change exposes it on `RunningDaemon.tokens`) since Tasks 2 & 9
     /// need it for the gateway's daemon-facing bridge client, which authenticates as `"remote"`.
     private static let fixture = """
-    import { startDaemon, FileSecretStore } from "@norma/core";
-    const home = process.env.NORMA_HOME;
+    import { startDaemon, FileSecretStore } from "@winter/core";
+    const home = process.env.WINTER_HOME;
     const d = await startDaemon({ home, secrets: new FileSecretStore(home + "/secrets"), agentProvider: null });
     process.stdout.write(JSON.stringify({ socketPath: d.socketPath, harness: d.tokens.harness, remote: d.tokens.remote }) + "\\n");
     process.on("SIGTERM", async () => { await d.stop(); process.exit(0); });
@@ -93,8 +93,8 @@ struct RealDaemon {
     /// both an `assistant_delta` and a final `assistant_message` past the phone transport's hard
     /// 1 MiB de-framing limit, whose overflow silently ends the phone's inbound stream.
     static let streamingProviderFixture = """
-    import { startDaemon, FileSecretStore } from "@norma/core";
-    const home = process.env.NORMA_HOME;
+    import { startDaemon, FileSecretStore } from "@winter/core";
+    const home = process.env.WINTER_HOME;
     const CHUNKS = \(streamedChunksJSLiteral);
     const provider = {
       id: "conformance-fake",
@@ -137,7 +137,7 @@ struct RealDaemon {
         let remote: String
     }
 
-    /// Spawns the daemon on a temp `NORMA_HOME` and waits (asynchronously) for its ready line.
+    /// Spawns the daemon on a temp `WINTER_HOME` and waits (asynchronously) for its ready line.
     /// Throws if the fixture exits early or doesn't come up within the deadline. On ANY such throw
     /// it terminates the subprocess and removes the temp home + scratch files itself (the returned
     /// `RealDaemon`'s `stop()` is otherwise the only cleanup path). `fixtureOverride` is test-only —
@@ -151,10 +151,10 @@ struct RealDaemon {
         // `EXC_BREAKPOINT`/SIGTRAP inside `NWEndpoint.unix(path:)` (confirmed via a crash report:
         // `UnixSocketTransport.init(path:)` -> `NWConnection(to: NWEndpoint.unix(path:...))`)
         // when it tries to actually CONNECT to that overlong path. `/tmp` is short and stable, so
-        // `/tmp/norma-sp2a-<uuid>/run/core.sock` (~66 bytes) stays comfortably under the limit.
-        let home = "/tmp/norma-sp2a-\(UUID().uuidString)"
-        let stdoutPath = NSTemporaryDirectory() + "norma-sp2a-\(UUID().uuidString).stdout"
-        let stderrPath = NSTemporaryDirectory() + "norma-sp2a-\(UUID().uuidString).stderr"
+        // `/tmp/winter-sp2a-<uuid>/run/core.sock` (~66 bytes) stays comfortably under the limit.
+        let home = "/tmp/winter-sp2a-\(UUID().uuidString)"
+        let stdoutPath = NSTemporaryDirectory() + "winter-sp2a-\(UUID().uuidString).stdout"
+        let stderrPath = NSTemporaryDirectory() + "winter-sp2a-\(UUID().uuidString).stderr"
 
         guard FileManager.default.createFile(atPath: stdoutPath, contents: nil),
               FileManager.default.createFile(atPath: stderrPath, contents: nil) else {
@@ -170,7 +170,7 @@ struct RealDaemon {
         process.arguments = ["bun", "-e", fixtureOverride ?? Self.fixture]
         process.currentDirectoryURL = cliPackageDir
         var env = ProcessInfo.processInfo.environment
-        env["NORMA_HOME"] = home
+        env["WINTER_HOME"] = home
         process.environment = env
         process.standardOutput = stdoutHandle
         process.standardError = stderrHandle
@@ -180,7 +180,7 @@ struct RealDaemon {
         // Once the process is running, any failure BEFORE we return a RealDaemon (whose stop() is
         // the only cleanup path) must tear down the subprocess + temp home itself — otherwise a
         // slow/hung boot (.timedOut), a crashed fixture (.processExitedEarly), or a garbage line
-        // leaks a zombie bun process and a stale /tmp/norma-sp2a-<uuid> for the rest of the session.
+        // leaks a zombie bun process and a stale /tmp/winter-sp2a-<uuid> for the rest of the session.
         func cleanupPartial() {
             if process.isRunning { process.terminate(); process.waitUntilExit() }
             try? FileManager.default.removeItem(atPath: home)
@@ -222,7 +222,7 @@ struct RealDaemon {
     /// trust the very FIRST newline-terminated line as the hello, which broke the instant
     /// `startDaemon` (`packages/core/src/daemon.ts`, the 8b credential-material hotfix) started
     /// printing its OWN boot narration to stdout before ever returning — `credentials: …`,
-    /// `runtime-state: runtime recovery: …`, `runtime-sdk: directory recovery — …`, `norma-core …
+    /// `runtime-state: runtime recovery: …`, `runtime-sdk: directory recovery — …`, `winter-core …
     /// listening on …` all land on the SAME stdout stream, ahead of the fixture's
     /// `process.stdout.write(JSON.stringify(...))` call, which only runs after `startDaemon`
     /// resolves. ~29 tests across `RealDaemonTests`/`GatewayGateTests`/`IrohE2ETests`/
@@ -245,24 +245,24 @@ struct RealDaemon {
     /// Winter Phase 9a (P9a-11, Lane K): the "DIFFERENT, deeper failure class" this fix's own
     /// commit message carried forward (`CancellationError()`/`IrohError ConnectionLost
     /// (LocallyClosed)` on `FakePhoneConformanceTests`/`GatewayGateTests`/`IrohE2ETests`, 13 tests
-    /// by name, skipped in `ci.yml`'s `NORMAKIT_SKIP`) is CLASSIFIED, not fixed here — bisected
+    /// by name, skipped in `ci.yml`'s `WINTERKIT_SKIP`) is CLASSIFIED, not fixed here — bisected
     /// (this worktree, this fixture unchanged at every step) to `ed6ebeca6c1fce175ef0e818361fb3662b38d6ca`
     /// ("feat(core): Dispatch on the Winter leg — winterLeg.dispatch defaults to true", Task 17
     /// Step 1, pre-dating 8d entirely): `session.dispatch {}`'s default mode now mints on the
     /// Winter leg and requires a resolvable `winter` executable at create time — this fixture sets
-    /// no `NORMA_WINTER_EXECUTABLE` and stages no bundle/home binary (matching NormaKit's actual CI
+    /// no `WINTER_RUNTIME_EXECUTABLE` and stages no bundle/home binary (matching WinterKit's actual CI
     /// `swift` job, which never builds/installs one), so every one of the 13 tests that seeds a
     /// real session via `session.dispatch` fails there. Over `ScriptedRemoteConn`/`LoopbackListener`
     /// (`GatewayGateTests`) the failure surfaces as a plain `RpcError`/`CancellationError` from
-    /// `NormaClient`; over the REAL Iroh transport (`IrohE2ETests`, `FakePhoneConformanceTests`) the
+    /// `WinterClient`; over the REAL Iroh transport (`IrohE2ETests`, `FakePhoneConformanceTests`) the
     /// resulting local `close()` is what the Iroh FFI reports to the peer as `ConnectionLost
-    /// (LocallyClosed)` — confirmed by re-running with `NORMA_WINTER_EXECUTABLE` UNSET, which
+    /// (LocallyClosed)` — confirmed by re-running with `WINTER_RUNTIME_EXECUTABLE` UNSET, which
     /// reproduces `IrohError { kind: Stream, message: "ConnectionLost(LocallyClosed)" }` verbatim on
     /// `FakePhoneConformanceTests/testStreamingDeltasReachThePhone_...`. None of this is an Iroh FFI
-    /// bug or a NormaKit Swift bug — it is `packages/core`'s dispatch-mode default, out of this
-    /// lane's edit scope (`apple/NormaKit/**` only).
+    /// bug or a WinterKit Swift bug — it is `packages/core`'s dispatch-mode default, out of this
+    /// lane's edit scope (`apple/WinterKit/**` only).
     ///
-    /// Providing a REAL, resolvable `winter` binary (`NORMA_WINTER_EXECUTABLE` pointed at a signed
+    /// Providing a REAL, resolvable `winter` binary (`WINTER_RUNTIME_EXECUTABLE` pointed at a signed
     /// `dist/winter`) makes 8 of the 13 pass outright (measured: `IrohE2ETests` scenarios B/C's
     /// early phase, `FakePhoneConformanceTests` ×3, `GatewayGateTests` G2/G3/R1/T6b). The remaining
     /// 5 — `GatewayGateTests` G1/R2, `IrohE2ETests` scenarios C/D, `FakePhoneConformanceTests`'s
@@ -279,7 +279,7 @@ struct RealDaemon {
     /// `winter` via `bun install` alone, likely un-skipping the first 8 structurally; the remaining
     /// 5 need a `packages/core` fix (suppress turn-attempt noise for a fresh, credential-less
     /// dispatch-mode session used as a pure event-log seed, and/or restore an Winter-leg-honored
-    /// `agentProvider`-equivalent test seam) that is out of NormaKit's scope.
+    /// `agentProvider`-equivalent test seam) that is out of WinterKit's scope.
     private static func waitForFirstLine(
         process: Process, stdoutPath: String, stderrPath: String, timeoutSeconds: Double = 20
     ) async throws -> String {
@@ -328,7 +328,7 @@ struct RealDaemon {
 
     /// SIGTERM + wait — the fixture's own handler calls `d.stop()` for a clean socket/lock
     /// release (mirroring the TS `daemon-sigterm` precedent's shutdown path) — then removes the
-    /// temp `NORMA_HOME` and the redirected stdout/stderr scratch files. Idempotent: safe to call
+    /// temp `WINTER_HOME` and the redirected stdout/stderr scratch files. Idempotent: safe to call
     /// more than once (e.g. an explicit call plus a `defer` safety net).
     ///
     /// **The wait is BOUNDED, deliberately — do not restore `process.waitUntilExit()`.** That call
@@ -370,7 +370,7 @@ struct RealDaemon {
 
 /// TDD Step 1 for SP2a Task 1: this asserted RED (compile failure — `RealDaemon` didn't exist)
 /// before the harness above was written. It is the harness's OWN self-test, proving `start()`
-/// yields a live socket a real `UnixSocketTransport` + `NormaClient.connect(role:)` can hello
+/// yields a live socket a real `UnixSocketTransport` + `WinterClient.connect(role:)` can hello
 /// against, and that `stop()` cleans up — before Tasks 2 & 9 build gateway-gate tests on top of
 /// `RealDaemon.start()`.
 final class RealDaemonTests: XCTestCase {
@@ -383,12 +383,12 @@ final class RealDaemonTests: XCTestCase {
         XCTAssertFalse(daemon.remoteToken.isEmpty)
         XCTAssertNotEqual(daemon.harnessToken, daemon.remoteToken)
 
-        let client = NormaClient(
+        let client = WinterClient(
             makeTransport: { UnixSocketTransport(path: daemon.socketPath) },
             token: daemon.harnessToken,
             clientName: "real-daemon-self-test"
         )
-        // A successful return IS the hello-succeeded signal (NormaClient.connect's own contract).
+        // A successful return IS the hello-succeeded signal (WinterClient.connect's own contract).
         try await client.connect(role: "harness")
         await client.close()
 
@@ -397,13 +397,13 @@ final class RealDaemonTests: XCTestCase {
     }
 
     /// A fixture that prints garbage (not the expected JSON) must make `start()` THROW `badOutput`
-    /// AND clean up after itself — no leaked subprocess, no stale `/tmp/norma-sp2a-<uuid>` home.
+    /// AND clean up after itself — no leaked subprocess, no stale `/tmp/winter-sp2a-<uuid>` home.
     func testStartCleansUpOnBadOutput() async throws {
-        func normaTempDirCount() -> Int {
+        func winterTempDirCount() -> Int {
             let items = (try? FileManager.default.contentsOfDirectory(atPath: "/tmp")) ?? []
-            return items.filter { $0.hasPrefix("norma-sp2a-") }.count
+            return items.filter { $0.hasPrefix("winter-sp2a-") }.count
         }
-        let before = normaTempDirCount()
+        let before = winterTempDirCount()
 
         do {
             _ = try await RealDaemon.start(fixtureOverride: "process.stdout.write('not-json\\n');")
@@ -412,12 +412,12 @@ final class RealDaemonTests: XCTestCase {
             XCTAssertEqual(line, "not-json")
         }
         // Cleanup removes the temp home it created → count returns to baseline (no leak).
-        XCTAssertEqual(normaTempDirCount(), before, "start() must remove its temp home on failure")
+        XCTAssertEqual(winterTempDirCount(), before, "start() must remove its temp home on failure")
     }
 
     /// Winter Phase 8d (P8d-19, whole-branch review / Lane 1's new CI Swift job): reproduces the
     /// exact regression shape SYNTHETICALLY (no real daemon needed) — `startDaemon`'s real boot
-    /// narration (`credentials: …`, `runtime-state: runtime recovery: …`, `norma-core … listening
+    /// narration (`credentials: …`, `runtime-state: runtime recovery: …`, `winter-core … listening
     /// on …`, the 8b credential-material hotfix) lands on stdout BEFORE the fixture's own JSON
     /// hello line, and the pre-fix `waitForFirstLine` trusted the very first line blindly — which
     /// broke `RealDaemonTests`/`GatewayGateTests`/`IrohE2ETests`/`PairingE2ETests`/
@@ -428,12 +428,12 @@ final class RealDaemonTests: XCTestCase {
         console.log("credentials: openai absent, codex-oauth absent");
         console.log("runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt");
         console.log("runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked");
-        console.log("norma-core 0.2.014 listening on /tmp/does-not-exist/core.sock");
-        process.stdout.write(JSON.stringify({ socketPath: "/tmp/norma-p8d19-fake.sock", harness: "h", remote: "r" }) + "\\n");
+        console.log("winter-core 0.2.014 listening on /tmp/does-not-exist/core.sock");
+        process.stdout.write(JSON.stringify({ socketPath: "/tmp/winter-p8d19-fake.sock", harness: "h", remote: "r" }) + "\\n");
         """
         let daemon = try await RealDaemon.start(fixtureOverride: fixture)
         defer { daemon.stop() }
-        XCTAssertEqual(daemon.socketPath, "/tmp/norma-p8d19-fake.sock")
+        XCTAssertEqual(daemon.socketPath, "/tmp/winter-p8d19-fake.sock")
         XCTAssertEqual(daemon.harnessToken, "h")
         XCTAssertEqual(daemon.remoteToken, "r")
     }

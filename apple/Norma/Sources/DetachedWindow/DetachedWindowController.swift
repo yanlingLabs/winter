@@ -1,10 +1,10 @@
 import AppKit
-import NormaKit
+import WinterKit
 import SwiftUI
 
 /// Task 3 (2d-ii-b): one detached chat window end-to-end — a REAL, native-chrome `NSWindow`
 /// (native traffic lights, native resize, native Space/Mission-Control participation) hosting the
-/// shared `WindowContentView` on its OWN `SessionFeed` (its own `NormaClient`/socket, pinned to one
+/// shared `WindowContentView` on its OWN `SessionFeed` (its own `WinterClient`/socket, pinned to one
 /// session forever — spec's "harness-per-window"). Unlike the morph window
 /// (`OrbWindowController`'s `.window` surface — a borderless, self-drawn, morphing panel), this
 /// window NEVER morphs, so none of 2d-i's chrome-minimum constraints apply: it is a plain titled
@@ -82,11 +82,11 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
 
     /// - Parameters:
     ///   - frame: spawn exactly here (the morph window's frame at the moment of detach — task 4).
-    ///   - title: the session's first prompt, clipped to ~40 chars, else "Norma" (a11y + the
+    ///   - title: the session's first prompt, clipped to ~40 chars, else "Winter" (a11y + the
     ///     Dock-minimize label a native titled window shows).
     ///   - isChat: Plan-immunity (2026-07-28 design) — true only for a session pinned at
     ///     `mode:"chat"`. Defaulted `false` so every PRE-EXISTING caller (sidebar +New, ⌘-click
-    ///     detach, "Open Norma App") is unaffected; `AppDelegate.openSessionInNewDetachedWindow`'s
+    ///     detach, "Open Winter App") is unaffected; `AppDelegate.openSessionInNewDetachedWindow`'s
     ///     auto-derivation (`isChatSession(_:in:)`) and `handleWindowDetach`'s own derived value are
     ///     what pass `true` today — App shell T6 retired `createAndOpenChat()`/`openChat()`'s reopen
     ///     path, the pair that used to pass an explicit `true` here. Seeds `adapter.isChatSession`
@@ -142,7 +142,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
         // frame (~40×220 observed historically) on toolbar windows, but that's irrelevant here:
         // `minSize` is already 340×360, and a detached window never animates open from a tiny
         // frame (unlike the morph panel), so there's no tiny-frame collision to guard against.
-        let toolbar = NSToolbar(identifier: "norma.detached.toolbar")
+        let toolbar = NSToolbar(identifier: "winter.detached.toolbar")
         toolbar.displayMode = .iconOnly
         window.toolbar = toolbar
         window.toolbarStyle = .unified
@@ -307,7 +307,7 @@ final class DetachedWindowController: NSObject, NSWindowDelegate {
 
         // provider-correctness T6: the synced catalogue this window's pickers read. Fetched once at
         // construction — `sync.config` is a snapshot, never a subscription — and re-fetched on a
-        // session switch (`selectSession`), which is also when a `norma model --effort` edit made
+        // session switch (`selectSession`), which is also when a `winter model --effort` edit made
         // meanwhile becomes worth re-reading. A failure leaves `.empty`, which the pickers render as
         // "no rows offered" rather than as a guessed lineup.
         refreshModelCatalogue()

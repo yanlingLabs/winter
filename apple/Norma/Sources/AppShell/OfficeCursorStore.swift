@@ -16,7 +16,7 @@ import Combine
 /// the SAME hop `onInvalidated`/`OfficeTileStore.invalidate` already rely on, one `supervisor.client`
 /// callback registration below it. No internal locking, by construction, matching `OfficeTileStore`.
 final class OfficeCursorStore {
-    /// Everything Norma currently knows about ONE document's caret/selection/cell-cursor, folded
+    /// Everything Winter currently knows about ONE document's caret/selection/cell-cursor, folded
     /// from whichever of the five Task 5 `OfficeDocumentEvent` cases most recently arrived for it.
     ///
     /// **`part` fields are stamped at FOLD time from the reducer's own `DocumentEntry.activePart`**

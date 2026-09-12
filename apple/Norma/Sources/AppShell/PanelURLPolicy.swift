@@ -49,7 +49,7 @@ import Foundation
 /// command channel bypasses the address bar entirely: the daemon caps that field
 /// (`PANEL_URL_MAX_LENGTH`) but deliberately does **not** scheme-refine it — spec §3 states in as
 /// many words that "the consumer is where policy lands" — so before Task 3 a `javascript:` URL
-/// authored by a model would have gone straight into `NormaCEFLoadURL`.
+/// authored by a model would have gone straight into `WinterCEFLoadURL`.
 ///
 /// **It reuses door 1's function rather than adding a second one**, which is why door 1's own name
 /// now says "typed or authored". The agent is the same kind of producer the address bar is: an
@@ -65,13 +65,13 @@ import Foundation
 /// are not doors at all** (fix round 1; extended by B2 Task 5; N3/N4 added by whole-branch review,
 /// Minor-2). Four paths bypass this file entirely:
 ///
-///  1. **The CDP bridge** (`NormaCEFExecuteCDP`) can navigate — `Page.navigate` loads any URL, and a
+///  1. **The CDP bridge** (`WinterCEFExecuteCDP`) can navigate — `Page.navigate` loads any URL, and a
 ///     `Runtime.evaluate` assigning `location.href` does the same. What contains it is **producer
 ///     discipline, not policy**: every CDP method name, expression and `functionDeclaration` the app
 ///     sends is a literal written in `PanelCommandConsumer`, and the model-authored payload
 ///     (`panel_command.args`, read since Task 5) may only ever become a params VALUE whose meaning
 ///     is data — `DOM.querySelector`'s selector, `Input.insertText`'s text. That constraint is
-///     stated where it must be honoured (`NormaCEF.h`'s `NormaCEFExecuteCDP`, and
+///     stated where it must be honoured (`WinterCEF.h`'s `WinterCEFExecuteCDP`, and
 ///     `PanelCommandConsumer`'s own Task-5 header).
 ///  2. **`click`** (Task 5). A click on a link is a full navigation to wherever the page points,
 ///     performed by the renderer, reported to nobody in time to matter. It reaches no allowlist in

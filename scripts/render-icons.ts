@@ -10,8 +10,8 @@ import { join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
 const BRAND = join(ROOT, "assets", "brand");
-const SUPPORT = join(ROOT, "apple", "Norma", "Support");
-const MENUBAR = join(ROOT, "apple", "Norma", "Resources", "MenuBar");
+const SUPPORT = join(ROOT, "apple", "Winter", "Support");
+const MENUBAR = join(ROOT, "apple", "Winter", "Resources", "MenuBar");
 
 const idleSvg = readFileSync(join(BRAND, "scale-burst.svg"), "utf8");
 const FRAMES = 12; // pulse frames per cycle (also the ray count — see rayPaths())

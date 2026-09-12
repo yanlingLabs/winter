@@ -7,15 +7,15 @@ import XCTest
 /// Read straight from the repo, never copied into this package: a copy is a second source of truth
 /// that silently goes stale the moment the TS cleaner or the shipped dangerous-domain list changes,
 /// which is the exact drift these fixtures exist to catch. SwiftPM resource bundling can only carry
-/// files that live INSIDE the target directory, so this mirrors `apple/NormaProtocol`'s own
+/// files that live INSIDE the target directory, so this mirrors `apple/WinterProtocol`'s own
 /// fixture-locating habit one level down: a source-relative path off `#filePath`, which the compiler
 /// bakes in as the absolute path of THIS file at build time.
 enum ParityFixtures {
     /// `<repo>/packages/protocol/generated/fixtures`
     static let directory: URL = {
-        // #filePath == <repo>/apple/NormaChatKit/Tests/NormaChatKitTests/support/ParityFixtures.swift
+        // #filePath == <repo>/apple/WinterChatKit/Tests/WinterChatKitTests/support/ParityFixtures.swift
         var url = URL(fileURLWithPath: #filePath)
-        for _ in 0 ..< 6 { url.deleteLastPathComponent() } // support, NormaChatKitTests, Tests, NormaChatKit, apple, <repo>
+        for _ in 0 ..< 6 { url.deleteLastPathComponent() } // support, WinterChatKitTests, Tests, WinterChatKit, apple, <repo>
         return url.appending(path: "packages/protocol/generated/fixtures")
     }()
 

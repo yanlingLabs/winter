@@ -12,7 +12,7 @@ import IrohLib
 ///   `PhonePairingClient` doc comments on why a loopback listener with relays disabled is the only
 ///   deterministic sandboxed setup).
 /// - `.n0Default` — n0's public production relay fleet (`RelayMode.defaultMode()`). INTERIM
-///   cross-network rendezvous until Norma's own signed Oracle relay config is provisioned (SP2b T6
+///   cross-network rendezvous until Winter's own signed Oracle relay config is provisioned (SP2b T6
 ///   / `RemoteHost.Config.relayURLs`). Because both sides bind with `presetN0()` (which is
 ///   "relays + DISCOVERY" — see the vendored `presetN0()` doc), a Mac listener on `.n0Default`
 ///   both homes to an n0 relay AND publishes its current node address (home relay + candidate

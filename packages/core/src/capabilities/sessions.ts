@@ -1,7 +1,7 @@
 // The `sessions` capability server (P8b-12) — dispatch's orchestration and fleet-management
 // surface: `session_spawn`, `list_sessions`, `manage_session`.
 //
-// All three are `modes: ["dispatch"]` today and stay that way (`NORMA_CAPABILITY_TOOLS`), and since
+// All three are `modes: ["dispatch"]` today and stay that way (`WINTER_CAPABILITY_TOOLS`), and since
 // P8b-36 made the session — and therefore its mode — part of the server, that is ENFORCED HERE
 // rather than delegated: `capabilityServer` filters the defs by the session's mode (P8b-37), so a
 // chat or code session's `sessions` server advertises nothing and serves nothing. Task 9's per-mode

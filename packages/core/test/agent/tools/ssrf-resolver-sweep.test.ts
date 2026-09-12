@@ -4,7 +4,7 @@ import { ssrfGuard } from "../../../src/agent/tools/web";
 
 /**
  * The generator-INDEPENDENT safety net for `ssrfGuard` — ported from the phone side's
- * `apple/NormaChatKit/Tests/NormaChatKitTests/SSRFResolverSweepTests.swift`, which exists because the
+ * `apple/WinterChatKit/Tests/WinterChatKitTests/SSRFResolverSweepTests.swift`, which exists because the
  * same guard was bitten twice by the same failure mode: a differential is only ever as good as its
  * generator's imagination. Round 1's generator couldn't express bare authorities; round 2's couldn't
  * express non-canonical address spellings — and THAT gap was a fail-open (a URL that resolved to the

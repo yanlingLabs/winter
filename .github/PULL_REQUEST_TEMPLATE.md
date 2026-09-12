@@ -4,7 +4,7 @@
 
 ## Why
 
-<!-- The reasoning. Norma's code carries heavy "why" comments on purpose — a reviewer six months
+<!-- The reasoning. Winter's code carries heavy "why" comments on purpose — a reviewer six months
      from now needs to know what would break if this were undone. Same energy here. -->
 
 Closes #
@@ -15,7 +15,7 @@ Closes #
 
 - [ ] `bun test` in the packages I touched
 - [ ] `pnpm protocol:generate` re-run and committed (only if I changed `packages/protocol/src`)
-- [ ] `swift test` in `apple/NormaProtocol` and `apple/NormaKit` (only if I touched Swift or the protocol)
+- [ ] `swift test` in `apple/WinterProtocol` and `apple/WinterKit` (only if I touched Swift or the protocol)
 - [ ] The macOS app builds (only if I touched Swift or the protocol)
 - [ ] `bun run verify:workflow` (only if I touched the workflows runtime)
 

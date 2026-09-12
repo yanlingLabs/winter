@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// app-shell T8 (spec §3): the watcher's own SEAM — everything here is the PURE half (path→sessionId
 /// diffing, `handleRawPaths`' orchestration) driven directly with temp-dir fixtures. The real

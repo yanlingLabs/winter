@@ -1,15 +1,15 @@
 import Foundation
 import XCTest
-@testable import Norma
+@testable import Winter
 
-/// editor-plumbing Task 2: the `norma-editor://` scheme's path fence, executed for real.
+/// editor-plumbing Task 2: the `winter-editor://` scheme's path fence, executed for real.
 ///
 /// **This is the only part of the scheme a test in this repo can run.** CEF never starts under
-/// XCTest — the unit-test host IS `Norma.app` and `NormaCEFRuntime` refuses to start Chromium there
+/// XCTest — the unit-test host IS `Winter.app` and `WinterCEFRuntime` refuses to start Chromium there
 /// (`CEFRuntimeTests.testTheRuntimeRefusesToStartCEFUnderXCTest`) — so the resource handler, the
 /// factory and the scheme registration are all unreachable from here and are proved by Task 5's
 /// live harness instead. The fence was split into its own CEF-free translation unit
-/// (`Sources/CEF/NormaCEFAssetResolve.h/.mm`) precisely so that the one property worth a test —
+/// (`Sources/CEF/WinterCEFAssetResolve.h/.mm`) precisely so that the one property worth a test —
 /// "this scheme cannot be talked into serving a file outside the app's editor assets" — is not
 /// stranded behind a runtime the suite may never boot.
 ///
@@ -31,7 +31,7 @@ final class EditorPlumbingTests: XCTestCase {
         super.tearDown()
     }
 
-    /// A fresh directory the test owns, removed in `tearDown`. Never `~/.norma`, never the user's
+    /// A fresh directory the test owns, removed in `tearDown`. Never `~/.winter`, never the user's
     /// anything — this suite's standing rule.
     @discardableResult
     private func scratchDir(suffix: String = "") throws -> URL {
@@ -59,9 +59,9 @@ final class EditorPlumbingTests: XCTestCase {
 
     /// The fence itself, with its `malloc`/`free` contract discharged here so the cases read as
     /// `String?`. The C function is reached through the app target's bridging header
-    /// (`Support/NormaBridge.h`), the same seam `NormaCEFBrowserState` already arrives by.
+    /// (`Support/WinterBridge.h`), the same seam `WinterCEFBrowserState` already arrives by.
     private func resolved(_ root: String, _ urlPath: String) -> String? {
-        guard let raw = NormaCEFEditorAssetResolve(root, urlPath) else { return nil }
+        guard let raw = WinterCEFEditorAssetResolve(root, urlPath) else { return nil }
         defer { free(raw) }
         return String(cString: raw)
     }
@@ -119,7 +119,7 @@ final class EditorPlumbingTests: XCTestCase {
 
     /// Malformed escapes and an encoded NUL are REFUSED rather than passed through as literal
     /// bytes. A NUL in particular is the classic truncation trick against any C consumer of the
-    /// resolved path, and there is no asset Norma ships whose name needs a bare `%`.
+    /// resolved path, and there is no asset Winter ships whose name needs a bare `%`.
     func testAssetResolveRefusesMalformedEscapesAndEncodedNul() throws {
         let root = try scratchRootWithFile(at: "vs/loader.js")
 
@@ -178,7 +178,7 @@ final class EditorPlumbingTests: XCTestCase {
     }
 
     /// Degenerate inputs. An empty root is what the handler holds before
-    /// `NormaCEFRegisterEditorAssetRoot` has run, and it must resolve NOTHING rather than fall back
+    /// `WinterCEFRegisterEditorAssetRoot` has run, and it must resolve NOTHING rather than fall back
     /// to the process's working directory.
     func testAssetResolveRefusesEmptyAndAbsentRoots() throws {
         _ = try scratchRootWithFile(at: "vs/loader.js")
@@ -190,25 +190,25 @@ final class EditorPlumbingTests: XCTestCase {
 
     // MARK: - The scheme, as far as a CEF-less host can see it
 
-    /// `NormaCEFRegisterEditorAssetRoot` must be safe in a process where CEF never started — which
+    /// `WinterCEFRegisterEditorAssetRoot` must be safe in a process where CEF never started — which
     /// is every process this suite runs in, and also a shipped app that never opens a web tab.
-    /// `NormaCEF.h`'s standing contract ("EVERY function here is safe to call when CEF was never
+    /// `WinterCEF.h`'s standing contract ("EVERY function here is safe to call when CEF was never
     /// loaded or initialised") is the thing being pinned; idempotence is the brief's own word.
     ///
-    /// `kNormaEditorScheme` is checked here rather than in a case of its own because it is the same
+    /// `kWinterEditorScheme` is checked here rather than in a case of its own because it is the same
     /// claim: the Swift-facing surface of the scheme resolves, and says what the C++ side says. The
-    /// constant is DEFINED from `NormaEditorScheme.h`'s `kNormaEditorSchemeName` — the one string
+    /// constant is DEFINED from `WinterEditorScheme.h`'s `kWinterEditorSchemeName` — the one string
     /// the browser process and the five helpers both register — so this reads the far end of that
     /// chain from the only language that cannot see it directly.
     func testRegisteringTheEditorAssetRootIsSafeWithoutCEFAndIsIdempotent() throws {
-        XCTAssertEqual(String(cString: kNormaEditorScheme), "norma-editor",
+        XCTAssertEqual(String(cString: kWinterEditorScheme), "winter-editor",
                        "the Swift-facing scheme name must be the one the C++ side registers")
 
         let root = try scratchRootWithFile(at: "vs/loader.js")
-        NormaCEFRegisterEditorAssetRoot(root)
-        NormaCEFRegisterEditorAssetRoot(root)
-        NormaCEFRegisterEditorAssetRoot(nil)
-        XCTAssertFalse(NormaCEFIsInitialized(),
+        WinterCEFRegisterEditorAssetRoot(root)
+        WinterCEFRegisterEditorAssetRoot(root)
+        WinterCEFRegisterEditorAssetRoot(nil)
+        XCTAssertFalse(WinterCEFIsInitialized(),
                        "this suite must not have started CEF — the point of the call above")
     }
 
@@ -216,7 +216,7 @@ final class EditorPlumbingTests: XCTestCase {
     /// process's `CefApp`.** `CEFHelperSources/process_helper_mac.cc` passed `nullptr` to
     /// `CefExecuteProcess` from the day it was written, so `OnRegisterCustomSchemes` ran in exactly
     /// one process of six. CEF requires the identical scheme list in all of them (`cef_app.h`), and
-    /// a renderer that has not been told `norma-editor://` is STANDARD and SECURE gives the editor
+    /// a renderer that has not been told `winter-editor://` is STANDARD and SECURE gives the editor
     /// page no real origin, no secure context, and therefore no workers, no ES modules and no
     /// `fetch` — Monaco simply does not start.
     ///
@@ -236,7 +236,7 @@ final class EditorPlumbingTests: XCTestCase {
     ///     nullptr, nullptr)` with the include gone — fails this test **5 times, once per helper**,
     ///     with the app binary still passing. That is the realistic regression (a revert, a
     ///     dropped include, a helper target losing the header search path) and it is caught.
-    ///   * Changing ONLY the third argument, leaving `new NormaSubprocessApp()` constructed above
+    ///   * Changing ONLY the third argument, leaving `new WinterSubprocessApp()` constructed above
     ///     it, still passes: the class is instantiated, so the literal is still emitted. No scan of
     ///     a built binary can see what was passed to a call, and a host that must never start CEF
     ///     cannot observe the registration firing — the same limit
@@ -245,18 +245,18 @@ final class EditorPlumbingTests: XCTestCase {
     func testTheEditorSchemeIsCompiledIntoEveryProcessAndNotOnlyTheBrowser() throws {
         let app = Bundle.main.bundleURL
         var binaries: [(String, URL)] = [
-            ("Norma (browser process)", app.appendingPathComponent("Contents/MacOS/Norma"))
+            ("Winter (browser process)", app.appendingPathComponent("Contents/MacOS/Winter"))
         ]
         for suffix in ["", " (Alerts)", " (GPU)", " (Plugin)", " (Renderer)"] {
-            let name = "Norma Helper\(suffix)"
+            let name = "Winter Helper\(suffix)"
             binaries.append((name, app.appendingPathComponent(
                 "Contents/Frameworks/\(name).app/Contents/MacOS/\(name)")))
         }
 
         for (name, executable) in binaries {
             XCTAssertTrue(
-                Self.binaryCarries("norma-editor", at: executable),
-                "\(name) does not carry the `norma-editor` scheme literal — its process would not "
+                Self.binaryCarries("winter-editor", at: executable),
+                "\(name) does not carry the `winter-editor` scheme literal — its process would not "
                     + "register the scheme, and a renderer without it cannot run the editor page"
             )
         }
@@ -368,7 +368,7 @@ final class EditorPlumbingTests: XCTestCase {
             text: "let s = \"hi\"\n\tprint(s" + backslash + ") — ✅\u{01}"
         ).javascript
 
-        let expected = #"window.normaEditor.dispatch({"language":"swift","path":"/tmp/a b.swift","#
+        let expected = #"window.winterEditor.dispatch({"language":"swift","path":"/tmp/a b.swift","#
             + #""text":"let s = \"hi\"\n\tprint(s"# + backslash + backslash
             + #") — ✅"# + backslash + #"u0001","type":"openModel"})"#
         XCTAssertEqual(js, expected)
@@ -398,7 +398,7 @@ final class EditorPlumbingTests: XCTestCase {
 
         let js = EditorBridgeOutbound.markSaved(path: path, seq: 41).javascript
 
-        let expected = #"window.normaEditor.dispatch({"path":"/tmp/a "#
+        let expected = #"window.winterEditor.dispatch({"path":"/tmp/a "#
             + backslash + backslash          // the lone backslash, doubled
             + backslash + quote + "b"        // the opening quote, escaped
             + backslash + quote              // and the closing one
@@ -407,7 +407,7 @@ final class EditorPlumbingTests: XCTestCase {
 
         // It round-trips with the path intact — the escaping above belongs to the wire, not to the
         // value — and it carries exactly its three members.
-        let payload = String(js.dropFirst("window.normaEditor.dispatch(".count).dropLast())
+        let payload = String(js.dropFirst("window.winterEditor.dispatch(".count).dropLast())
         let object = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any])
         XCTAssertEqual(object["path"] as? String, path)
@@ -434,11 +434,11 @@ final class EditorPlumbingTests: XCTestCase {
 
         for (message, wireType, expectedFields) in cases {
             let js = message.javascript
-            XCTAssertTrue(js.hasPrefix("window.normaEditor.dispatch("),
+            XCTAssertTrue(js.hasPrefix("window.winterEditor.dispatch("),
                           "\(wireType) must go through the single entry point, got: \(js)")
             XCTAssertTrue(js.hasSuffix(")"), "\(wireType) must close the call")
 
-            let payload = String(js.dropFirst("window.normaEditor.dispatch(".count).dropLast())
+            let payload = String(js.dropFirst("window.winterEditor.dispatch(".count).dropLast())
             let object = try XCTUnwrap(
                 try JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any],
                 "\(wireType) must render a JSON OBJECT — the page's payload is DATA, never code")
@@ -476,7 +476,7 @@ final class EditorPlumbingTests: XCTestCase {
                       "they must be escaped, not dropped: \(js)")
 
         // Still valid JSON, and still the same text on the other side.
-        let payload = String(js.dropFirst("window.normaEditor.dispatch(".count).dropLast())
+        let payload = String(js.dropFirst("window.winterEditor.dispatch(".count).dropLast())
         let object = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any])
         XCTAssertEqual(object["text"] as? String, "a\u{2028}b\u{2029}c")
@@ -488,18 +488,18 @@ final class EditorPlumbingTests: XCTestCase {
     /// well-formed call, because a malformed one is a syntax error in the page with no reply path.
     func testSetThemeEmbedsTokensAsAnObjectAndFallsBackToAnEmptyOne() throws {
         let good = EditorBridgeOutbound.setTheme(tokensJSON: #"{"a":1}"#).javascript
-        XCTAssertEqual(good, #"window.normaEditor.dispatch({"tokens":{"a":1},"type":"setTheme"})"#)
+        XCTAssertEqual(good, #"window.winterEditor.dispatch({"tokens":{"a":1},"type":"setTheme"})"#)
 
         for bad in ["", "{", "not json", "[1,2]", #""a string""#] {
             let js = EditorBridgeOutbound.setTheme(tokensJSON: bad).javascript
-            XCTAssertEqual(js, #"window.normaEditor.dispatch({"tokens":{},"type":"setTheme"})"#,
+            XCTAssertEqual(js, #"window.winterEditor.dispatch({"tokens":{},"type":"setTheme"})"#,
                            "unparseable tokens (\(bad)) must still render one valid call")
         }
     }
 
     // MARK: - Task 3: the C surface of the bridge, as far as a CEF-less host can see it
 
-    /// `NormaCEF.h`'s standing contract — "EVERY function here is safe to call when CEF was never
+    /// `WinterCEF.h`'s standing contract — "EVERY function here is safe to call when CEF was never
     /// loaded or initialised" — applied to the bridge's two new doors, which is every process this
     /// suite runs in.
     ///
@@ -517,25 +517,25 @@ final class EditorPlumbingTests: XCTestCase {
     func testTheBridgeDoorsAreSafeWithNoCEFAndAnswerNothingForAQueryNobodyMinted() throws {
         // The typedef and the function must have the same shape — if either drifts this stops
         // compiling, which is the only way a C header's two halves can be held together.
-        let respond: NormaCEFBridgeRespond = NormaCEFBridgeRespondCall
+        let respond: WinterCEFBridgeRespond = WinterCEFBridgeRespondCall
 
         var delivered: [UInt64] = []
-        NormaCEFSetBridgeHandler { _, queryId, _ in delivered.append(queryId) }
-        defer { NormaCEFSetBridgeHandler(nil) }
+        WinterCEFSetBridgeHandler { _, queryId, _ in delivered.append(queryId) }
+        defer { WinterCEFSetBridgeHandler(nil) }
 
         // Ids far outside anything a live browser could have minted in this process — and no live
         // browser can exist here anyway.
         respond(910_001, true, #"{"ok":true}"#)
-        NormaCEFBridgeRespondCall(910_002, false, #"{"message":"no"}"#)
-        NormaCEFBridgeRespondCall(0, true, nil)
+        WinterCEFBridgeRespondCall(910_002, false, #"{"message":"no"}"#)
+        WinterCEFBridgeRespondCall(0, true, nil)
 
         XCTAssertTrue(delivered.isEmpty,
                       "answering an unknown query must not call the handler — it is a no-op")
-        XCTAssertFalse(NormaCEFIsInitialized(),
+        XCTAssertFalse(WinterCEFIsInitialized(),
                        "this suite must not have started CEF — the point of the calls above")
 
-        NormaCEFSetBridgeHandler(nil)
-        NormaCEFBridgeRespondCall(910_001, true, "{}")
+        WinterCEFSetBridgeHandler(nil)
+        WinterCEFBridgeRespondCall(910_001, true, "{}")
     }
 
     // MARK: - Task 3: the wire vocabulary, and the parity pin Task 4 lights up
@@ -610,14 +610,14 @@ final class EditorPlumbingTests: XCTestCase {
     func testTheJavaScriptSideSpeaksExactlyTheSameWireVocabulary() throws {
         let bundled = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Resources/EditorAssets/app/bridge-protocol.js")
-        // `#filePath` is this file at `apple/Norma/Tests/NormaAppTests/`; three deletions up is
-        // `apple/Norma`, where `Resources/` lives — the same computation `pageFile(named:)` below
+        // `#filePath` is this file at `apple/Winter/Tests/WinterAppTests/`; three deletions up is
+        // `apple/Winter`, where `Resources/` lives — the same computation `pageFile(named:)` below
         // makes; kept local here (rather than reading it back out of that helper) only because the
         // skip message below needs both candidate paths spelled out.
         let source = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // NormaAppTests
+            .deletingLastPathComponent()   // WinterAppTests
             .deletingLastPathComponent()   // Tests
-            .deletingLastPathComponent()   // Norma
+            .deletingLastPathComponent()   // Winter
             .appendingPathComponent("Resources/EditorAssets/app/bridge-protocol.js")
 
         let found = Self.pageFile(named: "bridge-protocol.js")
@@ -669,12 +669,12 @@ final class EditorPlumbingTests: XCTestCase {
     private static func pageFile(named name: String) -> URL? {
         let bundled = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Resources/EditorAssets/app/\(name)")
-        // `#filePath` is this file at `apple/Norma/Tests/NormaAppTests/`; three deletions up is
-        // `apple/Norma`, where `Resources/` lives.
+        // `#filePath` is this file at `apple/Winter/Tests/WinterAppTests/`; three deletions up is
+        // `apple/Winter`, where `Resources/` lives.
         let source = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // NormaAppTests
+            .deletingLastPathComponent()   // WinterAppTests
             .deletingLastPathComponent()   // Tests
-            .deletingLastPathComponent()   // Norma
+            .deletingLastPathComponent()   // Winter
             .appendingPathComponent("Resources/EditorAssets/app/\(name)")
         return [bundled, source].first { FileManager.default.fileExists(atPath: $0.path) }
     }
@@ -873,31 +873,31 @@ final class EditorPlumbingTests: XCTestCase {
     /// router at all?".
     ///
     /// **The needle is `cefQueryCancel`, and the obvious `cefQuery` is a TAUTOLOGY** — measured in
-    /// the fix round: `Norma.debug.dylib` carries three matches for it, one of which is this app's
+    /// the fix round: `Winter.debug.dylib` carries three matches for it, one of which is this app's
     /// own log format string `"editor bridge router created (window.cefQuery, id=%d)"`. Deleting
     /// the browser-side `Create` while leaving that `Log` line in place would have kept the app half
     /// of this test green, which is precisely the zero-coupling shape `DoClose`'s own pin was
     /// rewritten to avoid ("a string scan cannot see a return value"). `cefQueryCancel` appears
-    /// exactly once per binary, always from the router's config constructor; Norma names it only in
+    /// exactly once per binary, always from the router's config constructor; Winter names it only in
     /// comments, and comments do not compile in.
     ///
     /// Measured by mutation, not assumed. Deleting the single `CefMessageRouterRendererSide::Create`
-    /// call from `NormaSubprocessApp` (leaving the class, the member, the three overrides and every
+    /// call from `WinterSubprocessApp` (leaving the class, the member, the three overrides and every
     /// other line untouched) drops the literal from **all five helpers while the app keeps it** —
     /// this test then fails five times, once per renderer-capable process, which is exactly the
     /// regression it exists for. A renderer with no router installs no `window.cefQuery`, and the
     /// editor page's every message would fail with the router's own -1, silently, in a live run.
     ///
     /// What it does NOT prove is that the two sides agree — the config is shared through one
-    /// function (`NormaEditorBridge.h`) precisely because no scan of a binary could see a mismatch —
+    /// function (`WinterEditorBridge.h`) precisely because no scan of a binary could see a mismatch —
     /// nor that any callback is wired to anything. Task 5's live harness is the first execution.
     func testTheMessageRouterIsLinkedIntoTheBrowserProcessAndEveryRenderer() throws {
         let app = Bundle.main.bundleURL
         var binaries: [(String, URL)] = [
-            ("Norma (browser process)", app.appendingPathComponent("Contents/MacOS/Norma"))
+            ("Winter (browser process)", app.appendingPathComponent("Contents/MacOS/Winter"))
         ]
         for suffix in ["", " (Alerts)", " (GPU)", " (Plugin)", " (Renderer)"] {
-            let name = "Norma Helper\(suffix)"
+            let name = "Winter Helper\(suffix)"
             binaries.append((name, app.appendingPathComponent(
                 "Contents/Frameworks/\(name).app/Contents/MacOS/\(name)")))
         }
@@ -916,7 +916,7 @@ final class EditorPlumbingTests: XCTestCase {
     /// **The page reaches the built app, nested, and exactly once.**
     ///
     /// The first half is presence: without `EditorAssets/app/editor.html` beside `EditorAssets/vs/`
-    /// there is nothing for `norma-editor://app/editor.html` to serve, and the scheme's fence
+    /// there is nothing for `winter-editor://app/editor.html` to serve, and the scheme's fence
     /// answers 404 to a page that exists perfectly well in the source tree. The embed phase's `app/`
     /// copy is `[ -d ]`-guarded (it was wired a task before the directory existed), so a source tree
     /// that stopped being copied would fail nothing on its own.
@@ -956,7 +956,7 @@ final class EditorPlumbingTests: XCTestCase {
 
     /// **The page's debug seam exists and stays data-only.**
     ///
-    /// `normaEditorDebugState()` is how the live harness sees the model table at all: `page` is
+    /// `winterEditorDebugState()` is how the live harness sees the model table at all: `page` is
     /// module-scoped, so nothing outside `editor.js` can reach it, and the harness reads this global
     /// through CDP `Runtime.evaluate` with `returnByValue`. Two failures it guards:
     ///
@@ -971,14 +971,14 @@ final class EditorPlumbingTests: XCTestCase {
                                    "editor.js is in neither the built bundle nor the source tree")
         let code = Self.strippingJavaScriptComments(try String(contentsOf: source, encoding: .utf8))
 
-        XCTAssertTrue(code.contains("window.normaEditorDebugState"),
-                      "editor.js no longer exposes normaEditorDebugState — Task 5's harness reads "
+        XCTAssertTrue(code.contains("window.winterEditorDebugState"),
+                      "editor.js no longer exposes winterEditorDebugState — Task 5's harness reads "
                         + "the model table through it and has no other door to `page`")
         // `viewTop`/`position` are Task 1's addition (Stage B hygiene): the view-state drill's
         // round-trip assertion has no other door to what the live editor is actually showing.
         for member in ["paths", "current", "dirtyMap", "viewTop", "position"] {
             XCTAssertTrue(code.contains("\(member):"),
-                          "normaEditorDebugState must still answer `\(member)` — the harness's "
+                          "winterEditorDebugState must still answer `\(member)` — the harness's "
                             + "model-table assertions read it by name")
         }
         XCTAssertFalse(code.contains("return page;"),

@@ -40,17 +40,17 @@ function requestContent(provider: FakeProvider, callIndex: number): string {
 
 describe("Dreaming end-to-end (Task 5): teach / forget / tombstone-survival / temporal-revision / watermark", () => {
   test("a single dispatch session dreamed across 4 cycles tells the whole story", async () => {
-    const home = realpathSync(mkdtempSync(join(tmpdir(), "norma-dreamer-e2e-")));
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-dreamer-e2e-")));
     const store = new SessionStore(home);
     const dispatchId = store.createSession("global", { mode: "dispatch", origin: "dispatch" });
-    const dir = assistantMemoryDirFor({ normaHome: home });
+    const dir = assistantMemoryDirFor({ winterHome: home });
 
     // Pre-existing memories the bucket already carries INTO cycle 1 — seeded via the real
     // `applyOps` (not a bare writeFileSync) so MEMORY.md's index bookkeeping is genuine, exactly
     // as if an earlier (untested) dream had already written them.
     applyOps(dir, [
       { op: "write", file: "home.md", content: "---\nrevised: 2026-07-01\n---\nThe user's home address is 123 Main St, Springfield." },
-      { op: "write", file: "launch-week.md", content: "---\nrevised: 2026-07-14\n---\nNorma is launching this week (revised: 2026-07-14)." },
+      { op: "write", file: "launch-week.md", content: "---\nrevised: 2026-07-14\n---\nWinter is launching this week (revised: 2026-07-14)." },
     ]);
     expect(existsSync(join(dir, "home.md"))).toBe(true);
     expect(existsSync(join(dir, "launch-week.md"))).toBe(true);
@@ -60,8 +60,8 @@ describe("Dreaming end-to-end (Task 5): teach / forget / tombstone-survival / te
       // Cycle 1 (A - TEACH): the model writes two new memory files.
       [
         { type: "text_delta", delta: JSON.stringify({ ops: [
-          { op: "write", file: "alex.md", content: "---\nrevised: 2026-07-10\n---\nAlex is the user; he is building Norma, an agentic Mac assistant." },
-          { op: "write", file: "norma-project.md", content: "---\nrevised: 2026-07-10\n---\nNorma is Alex's agentic assistant project, in active development." },
+          { op: "write", file: "alex.md", content: "---\nrevised: 2026-07-10\n---\nAlex is the user; he is building Winter, an agentic Mac assistant." },
+          { op: "write", file: "winter-project.md", content: "---\nrevised: 2026-07-10\n---\nWinter is Alex's agentic assistant project, in active development." },
         ] }) },
         { type: "done", stopReason: "end_turn" },
       ],
@@ -81,7 +81,7 @@ describe("Dreaming end-to-end (Task 5): teach / forget / tombstone-survival / te
       // Cycle 4 (D - TEMPORAL REVISION): launch-week.md rewritten as past, with a newer revised date.
       [
         { type: "text_delta", delta: JSON.stringify({ ops: [
-          { op: "write", file: "launch-week.md", content: "---\nrevised: 2026-08-01\n---\nNorma launched the week of 2026-07-14; now in normal iteration." },
+          { op: "write", file: "launch-week.md", content: "---\nrevised: 2026-08-01\n---\nWinter launched the week of 2026-07-14; now in normal iteration." },
         ] }) },
         { type: "done", stopReason: "end_turn" },
       ],
@@ -98,31 +98,31 @@ describe("Dreaming end-to-end (Task 5): teach / forget / tombstone-survival / te
 
     // ---- Cycle 1 (A): TEACH ----
     fillSubstantive(store, dispatchId, 45, "cycle1");
-    store.append(dispatchId, { type: "user_message", sessionId: dispatchId, threadId: "main", text: "CYCLE1_MARKER my name is Alex and I'm building Norma", clientName: "test" });
+    store.append(dispatchId, { type: "user_message", sessionId: dispatchId, threadId: "main", text: "CYCLE1_MARKER my name is Alex and I'm building Winter", clientName: "test" });
     await dreamer.tick();
 
     expect(provider.requests).toHaveLength(1);
     expect(readFileSync(join(dir, "alex.md"), "utf8")).toContain("Alex is the user");
-    expect(readFileSync(join(dir, "norma-project.md"), "utf8")).toContain("Norma is Alex's agentic assistant project");
+    expect(readFileSync(join(dir, "winter-project.md"), "utf8")).toContain("Winter is Alex's agentic assistant project");
     const memoryAfterA = readFileSync(join(dir, "MEMORY.md"), "utf8");
     expect(memoryAfterA).toContain("alex.md");
-    expect(memoryAfterA).toContain("norma-project.md");
+    expect(memoryAfterA).toContain("winter-project.md");
 
     // Close the loop: what dreams write is what dispatch loads. Build a REAL ContextAssembler
     // over the SAME temp home, assistantDir pointing at this exact bucket, and confirm
     // assemble({memoryBucket:"assistant"}) surfaces both index lines (Task 1's assembler).
     const trust = new TrustStore(join(home, "trust.json"));
-    const skills = new SkillStore({ normaHome: home, trust });
+    const skills = new SkillStore({ winterHome: home, trust });
     const assembler = new ContextAssembler({
-      normaHome: home, trust, skills,
+      winterHome: home, trust, skills,
       memory: { enabled: () => true, dirFor: () => join(home, "projects", "unused", "memory"), assistantDir: () => dir },
     });
     const assembled = assembler.assemble({ cwd: null, memoryBucket: "assistant" });
     expect(assembled).toContain("Assistant memory index");
     expect(assembled).toContain("alex.md");
     expect(assembled).toContain("Alex is the user");
-    expect(assembled).toContain("norma-project.md");
-    expect(assembled).toContain("Norma is Alex's agentic assistant project");
+    expect(assembled).toContain("winter-project.md");
+    expect(assembled).toContain("Winter is Alex's agentic assistant project");
 
     // ---- Cycle 2 (B): FORGET ----
     currentNow += DREAM_MIN_SPACING_MS + 3_600_000; // > 2h spacing elapsed

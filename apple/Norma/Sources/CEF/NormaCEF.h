@@ -1,5 +1,5 @@
-#ifndef NormaCEF_h
-#define NormaCEF_h
+#ifndef WinterCEF_h
+#define WinterCEF_h
 
 #import <AppKit/AppKit.h>
 
@@ -9,7 +9,7 @@
 /// panel-cef Task 6a — the ENTIRE Swift-facing surface of the CEF embed.
 ///
 /// Plain Objective-C and `extern "C"`, deliberately: the implementation is Objective-C++
-/// (`NormaCEF.mm`) and every CEF type stays confined to it, so Swift never sees one and the
+/// (`WinterCEF.mm`) and every CEF type stays confined to it, so Swift never sees one and the
 /// bridging header never drags a C++ header into a Swift compile. Task 1 measured this shape
 /// working end to end (`docs/research/2026-08-09-cef-pump.md`, "The bridging seam is narrower than
 /// expected"), and it retires the spike's flagged "C API vs. C++-via-ObjC++" fork: the shim keeps
@@ -20,9 +20,9 @@
 /// undefined symbols — a measured cost of one build cycle in Task 1.
 ///
 /// EVERY function here is safe to call when CEF was never loaded or initialised. That is not a
-/// nicety: Debug/unit-test hosts never start CEF (`NormaCEFRuntime` refuses under XCTest), the
+/// nicety: Debug/unit-test hosts never start CEF (`WinterCEFRuntime` refuses under XCTest), the
 /// framework can fail to `dlopen`, and `CefInitialize` can fail — and none of those may take
-/// Norma down. Failure degrades to a placeholder plus a log line, never `exit()`. (`cefsimple`'s
+/// Winter down. Failure degrades to a placeholder plus a log line, never `exit()`. (`cefsimple`'s
 /// `return 1` shape is right for a sample whose only job is CEF, and wrong for a host app.)
 
 #ifdef __cplusplus
@@ -35,53 +35,53 @@ extern "C" {
 /// `CefScopedLibraryLoader::LoadInMain()` — the framework is NEVER linked directly, which
 /// `include/wrapper/cef_library_loader.h` documents as a requirement of the macOS sandbox
 /// implementation rather than a style choice. The loader used to be exported here as
-/// `NormaCEFLoadLibrary`, with a caller obligation ("nothing else in this header may be called
+/// `WinterCEFLoadLibrary`, with a caller obligation ("nothing else in this header may be called
 /// before this returns YES") that nobody had and nobody needed: every other entry point guards on
 /// initialisation, and this one loads the library on its own. It is `static` in the implementation
 /// now (whole-branch review F9).
 /// `argc`/`argv` are the process's real ones (`CommandLine.argc` / `CommandLine.unsafeArgv`), so
 /// Chromium's own command-line switches — `--remote-debugging-port`, `--disable-gpu`,
 /// `--use-angle=swiftshader`, `--enable-logging=stderr --v=1` — work exactly as they do for any
-/// Chromium app, with no Norma-side harness code to ship or gate.
+/// Chromium app, with no Winter-side harness code to ship or gate.
 ///
-/// Returns NO (and leaves `NormaCEFLastError` set) rather than aborting.
-BOOL NormaCEFInitialize(int argc,
+/// Returns NO (and leaves `WinterCEFLastError` set) rather than aborting.
+BOOL WinterCEFInitialize(int argc,
                         char **argv,
                         const char *rootCachePath,
                         const char *subprocessPath);
 
 /// YES once `CefInitialize` has succeeded. `CefShutdown` is terminal for a process — CEF cannot be
-/// re-initialised afterwards — so this never returns to NO; `NormaCEFDidShutdown` is the other half.
-BOOL NormaCEFIsInitialized(void);
+/// re-initialised afterwards — so this never returns to NO; `WinterCEFDidShutdown` is the other half.
+BOOL WinterCEFIsInitialized(void);
 
 /// The last failure reason, for the placeholder the panel shows instead of a page. Never NULL.
-const char *NormaCEFLastError(void);
+const char *WinterCEFLastError(void);
 
-/// editor-plumbing Task 2 — the `norma-editor://` scheme, spelled once for the Swift side.
+/// editor-plumbing Task 2 — the `winter-editor://` scheme, spelled once for the Swift side.
 ///
-/// `"norma-editor"`. Two hosts map into ONE on-disk root: `norma-editor://assets/...` is the root
+/// `"winter-editor"`. Two hosts map into ONE on-disk root: `winter-editor://assets/...` is the root
 /// itself (Monaco is embedded at `Contents/Resources/EditorAssets/vs`) and
-/// `norma-editor://app/...` is the page shell beside it (`.../EditorAssets/app`). They are separate
-/// ORIGINS on purpose — the shell is Norma's own code, the assets are vendored third-party bytes —
+/// `winter-editor://app/...` is the page shell beside it (`.../EditorAssets/app`). They are separate
+/// ORIGINS on purpose — the shell is Winter's own code, the assets are vendored third-party bytes —
 /// which is why the scheme is registered CORS-enabled and the handler answers with an
 /// `Access-Control-Allow-Origin` naming the shell.
-extern const char *const kNormaEditorScheme;
+extern const char *const kWinterEditorScheme;
 
-/// Point the `norma-editor://` scheme at the directory it serves — the app bundle's
+/// Point the `winter-editor://` scheme at the directory it serves — the app bundle's
 /// `Contents/Resources/EditorAssets`. Idempotent: calling it again replaces the root outright.
 ///
 /// **Nothing outside that directory is reachable through this scheme, ever.** The handler resolves
-/// every request through `NormaCEFEditorAssetResolve` (`NormaCEFAssetResolve.h`), which
+/// every request through `WinterCEFEditorAssetResolve` (`WinterCEFAssetResolve.h`), which
 /// canonicalises both sides and refuses anything landing outside the root — `..`, percent-encoded
 /// `..`, and symlinks pointing out of the tree included. The editor reads and writes the USER's
-/// files over the JS bridge, under Swift's control; the scheme is for Norma's own shipped assets
+/// files over the JS bridge, under Swift's control; the scheme is for Winter's own shipped assets
 /// and is not a filesystem door.
 ///
 /// Safe before CEF is up, and safe when CEF never comes up: the root is plain process state that
 /// the scheme handler consults on the IO thread. Until it is called the root is empty and the
 /// handler answers 404 to everything — the fail-closed default, deliberately not "the working
 /// directory".
-void NormaCEFRegisterEditorAssetRoot(const char *absolutePath);
+void WinterCEFRegisterEditorAssetRoot(const char *absolutePath);
 
 /// Create a browser as a child of `parent` and navigate it to `url`. If the CEF context is not up
 /// yet the request is QUEUED and replayed from `OnContextInitialized`; `parent` is held weakly, so
@@ -90,14 +90,14 @@ void NormaCEFRegisterEditorAssetRoot(const char *absolutePath);
 /// The queue is a CONTRACT, not a workaround: Task 1 measured
 /// `CefBrowserProcessHandler::OnContextInitialized` firing SYNCHRONOUSLY inside `CefInitialize` on
 /// every run, contrary to expectation — but that is timing, and creation is queued behind it
-/// anyway. (A `NormaCEFIsContextInitialized` predicate was exported for that finding and never
+/// anyway. (A `WinterCEFIsContextInitialized` predicate was exported for that finding and never
 /// called by anything; removed by whole-branch review F9, the state itself is read here.)
 ///
 /// **editor-product Task 4 — `backgroundColorARGB` is the browser's OWN background from the instant
 /// it exists**, packed `0xAARRGGBB`: the same bit layout CEF's `cef_color_t`/`CefColorSetARGB` use
 /// inside the framework, spelled as `uint32_t` rather than `cef_color_t` because this header stays
 /// framework-free (no CEF type may cross into the bridging header — the file's own opening note).
-/// Threaded into `CefBrowserSettings.background_color` (`NormaCEF.mm`'s create path), which documents
+/// Threaded into `CefBrowserSettings.background_color` (`WinterCEF.mm`'s create path), which documents
 /// its own contract: the alpha byte must be either fully opaque or fully transparent.
 ///
 ///   * `0x00000000` — **no override.** CEF falls back to its own `CefSettings.background_color`
@@ -107,7 +107,7 @@ void NormaCEFRegisterEditorAssetRoot(const char *absolutePath);
 ///     fix for the measured white flash: a Chromium page paints a flat white background by default
 ///     for the whole window between browser creation and its OWN first paint, which for the editor
 ///     (asset load + the Monaco AMD bootstrap) is on the order of a few hundred milliseconds.
-void NormaCEFCreateBrowser(NSView *parent, const char *url, uint32_t backgroundColorARGB);
+void WinterCEFCreateBrowser(NSView *parent, const char *url, uint32_t backgroundColorARGB);
 
 #pragma mark - Task 6b: the browser chrome's two channels
 
@@ -122,7 +122,7 @@ void NormaCEFCreateBrowser(NSView *parent, const char *url, uint32_t backgroundC
 ///     did not follow a `#section` jump would be visibly wrong;
 ///   * the other is what gets WRITTEN DOWN, forever, in a session log — and that is bounded to
 ///     committed top-level navigations precisely so it does NOT include the above.
-@interface NormaCEFBrowserState : NSObject
+@interface WinterCEFBrowserState : NSObject
 /// The main frame's current address — including same-page changes. NEVER persisted from here.
 @property(nonatomic, readonly, copy) NSString *url;
 /// The page's current title. May be empty (a page with no `<title>`).
@@ -139,7 +139,7 @@ void NormaCEFCreateBrowser(NSView *parent, const char *url, uint32_t backgroundC
 /// before the browser does — creation is asynchronous and may be queued behind
 /// `OnContextInitialized` — so a registration made at create time (`BrowserRuntime.wire`, before
 /// the create is even queued) is already in place whenever the browser finally arrives.
-void NormaCEFSetStateObserver(NSView *parent, void (^observer)(NormaCEFBrowserState *state));
+void WinterCEFSetStateObserver(NSView *parent, void (^observer)(WinterCEFBrowserState *state));
 
 /// Observe COMMITTED TOP-LEVEL NAVIGATIONS of the browser hosted by `parent` — the producer behind
 /// `panel.reportNavigation`, which had no caller at all from Plan A until this task.
@@ -161,9 +161,9 @@ void NormaCEFSetStateObserver(NSView *parent, void (^observer)(NormaCEFBrowserSt
 /// JSONL that is replayed on every session open and re-read whole by `panel.list`.
 ///
 /// Consecutive duplicates are suppressed: a reload, or any commit landing on the same url+title as
-/// the last one reported, does not fire again. `NormaCEFSeedTabState` below is what extends that
+/// the last one reported, does not fire again. `WinterCEFSeedTabState` below is what extends that
 /// suppression across a browser's whole lifetime rather than just one instance of it.
-void NormaCEFSetNavigationObserver(NSView *parent, void (^observer)(NSString *url, NSString *title));
+void WinterCEFSetNavigationObserver(NSView *parent, void (^observer)(NSString *url, NSString *title));
 
 /// Observe URLS THIS BROWSER WANTS OPENED IN A NEW PANEL TAB. Pass `nil` to stop observing.
 ///
@@ -178,10 +178,10 @@ void NormaCEFSetNavigationObserver(NSView *parent, void (^observer)(NSString *ur
 /// They are deliberately not three channels: the observer is what carries the tab's own session and
 /// the Swift-side scheme policy, and a second route would be a second place for either to be
 /// missing from. Every one of them is gated on a real user gesture (for 3, choosing the item IS the
-/// gesture) — see `OnBeforePopup` for the whole ruling on why, which is Norma-specific.
+/// gesture) — see `OnBeforePopup` for the whole ruling on why, which is Winter-specific.
 ///
 /// **This does not make CEF create anything.** `OnBeforePopup` still cancels every popup
-/// unconditionally (`NormaCEFPopupsAreCancelledSoCEFNeverCreatesAWindow` below is that answer, and
+/// unconditionally (`WinterCEFPopupsAreCancelledSoCEFNeverCreatesAWindow` below is that answer, and
 /// says what a `false` there would cost); this observer fires immediately BEFORE the cancel. So the
 /// popup CEF was asked for never exists, and what the user gets instead is an ordinary panel tab
 /// minted by the daemon — which is the only kind of tab that persists and the only kind the tab
@@ -202,7 +202,7 @@ void NormaCEFSetNavigationObserver(NSView *parent, void (^observer)(NSString *ur
 /// Called on the MAIN thread, synchronously from inside CEF's own callback — CEF's UI thread IS
 /// the main thread under the external pump, which is what lets `NotifyState` and the navigation
 /// observer do the same.
-void NormaCEFSetPopupObserver(NSView *parent, void (^observer)(NSString *url));
+void WinterCEFSetPopupObserver(NSView *parent, void (^observer)(NSString *url));
 
 /// Prime a tab with what the daemon ALREADY knows about it, before its browser is created. Two
 /// effects, both of which exist because **a tab's browser can be created more than once over that
@@ -224,7 +224,7 @@ void NormaCEFSetPopupObserver(NSView *parent, void (^observer)(NSString *url));
 ///
 /// Pass the URL the browser is actually being created at — not the tab's raw stored value, if the
 /// two differ because scheme policy refused it.
-void NormaCEFSeedTabState(NSView *parent, const char *url, const char *title);
+void WinterCEFSeedTabState(NSView *parent, const char *url, const char *title);
 
 #pragma mark - Task 6b: the chrome's verbs
 
@@ -233,19 +233,19 @@ void NormaCEFSeedTabState(NSView *parent, const char *url, const char *title);
 /// lives in Swift** (`PanelURLPolicy`), in one place, applied before anything reaches here. A C seam
 /// that silently second-guessed its caller would make the real policy impossible to locate.
 ///
-/// Two doors reach `NormaCEFLoadURL` since b2-agent-browser Task 3 — the panel's URL field and the
+/// Two doors reach `WinterCEFLoadURL` since b2-agent-browser Task 3 — the panel's URL field and the
 /// `panel_command` consumer — and they call the SAME policy function, which is what keeps "one
-/// place" true with two producers. `NormaCEFGoBack` likewise serves the back button and the agent's
+/// place" true with two producers. `WinterCEFGoBack` likewise serves the back button and the agent's
 /// `back` verb; it carries no url and so no policy.
-void NormaCEFGoBack(NSView *parent);
-void NormaCEFGoForward(NSView *parent);
-void NormaCEFReload(NSView *parent);
-void NormaCEFStopLoad(NSView *parent);
-void NormaCEFLoadURL(NSView *parent, const char *url);
+void WinterCEFGoBack(NSView *parent);
+void WinterCEFGoForward(NSView *parent);
+void WinterCEFReload(NSView *parent);
+void WinterCEFStopLoad(NSView *parent);
+void WinterCEFLoadURL(NSView *parent, const char *url);
 
 #pragma mark - B2 Task 3: the CDP door
 
-/// How `NormaCEFExecuteCDP` answers. **`payloadJSON` is ALWAYS a JSON OBJECT**, both ways round, so
+/// How `WinterCEFExecuteCDP` answers. **`payloadJSON` is ALWAYS a JSON OBJECT**, both ways round, so
 /// the Swift side has exactly one parse to write:
 ///
 ///   * `ok == YES` — the DevTools method's `"result"` dictionary, verbatim (`{}` when it has none);
@@ -257,7 +257,7 @@ void NormaCEFLoadURL(NSView *parent, const char *url);
 ///
 /// Called on the MAIN thread, like every other observer in this header (CEF's UI thread IS the main
 /// thread under the external pump).
-typedef void (^NormaCEFCDPCompletion)(BOOL ok, NSString *payloadJSON);
+typedef void (^WinterCEFCDPCompletion)(BOOL ok, NSString *payloadJSON);
 
 /// **Run one Chrome DevTools Protocol method against the browser hosted by `parent`** — B2's read
 /// verbs (`Runtime.evaluate` for page text, `Page.captureScreenshot` for a PNG) and, from Task 5,
@@ -281,7 +281,7 @@ typedef void (^NormaCEFCDPCompletion)(BOOL ok, NSString *payloadJSON);
 ///
 /// **One reply is delivered per call, exactly once** — the pending entry is erased before its
 /// completion runs, so a duplicate id, a re-entrant close and a detach racing a result cannot
-/// double-answer. `NormaCEFPendingCDPTranscriptForOneBrowserWithNoCEFAnywhere` produces that
+/// double-answer. `WinterCEFPendingCDPTranscriptForOneBrowserWithNoCEFAnywhere` produces that
 /// property rather than asserting it from a log line.
 ///
 /// Safe to call with CEF never loaded, like everything else in this header: it answers
@@ -290,7 +290,7 @@ typedef void (^NormaCEFCDPCompletion)(BOOL ok, NSString *payloadJSON);
 /// **What it deliberately does NOT do:** validate `method` or `paramsJSON` against any policy. The
 /// URL allowlist is `PanelURLPolicy`'s (Swift), the verb set is `PanelCommandConsumer`'s, and a C
 /// seam that second-guessed either would make the real policy impossible to locate — the same
-/// ruling `NormaCEFLoadURL` carries.
+/// ruling `WinterCEFLoadURL` carries.
 ///
 /// **THIS IS ITSELF A NAVIGATION DOOR, contained by PRODUCER DISCIPLINE rather than by policy — said
 /// out loud because the scheme allowlist does not reach it.** `Page.navigate` loads any URL, and so
@@ -315,30 +315,30 @@ typedef void (^NormaCEFCDPCompletion)(BOOL ok, NSString *payloadJSON);
 ///     (committed like an IME keystroke). Neither is ever evaluated.
 ///
 /// This function still validates none of it, deliberately, for the reason below.
-void NormaCEFExecuteCDP(NSView *parent,
+void WinterCEFExecuteCDP(NSView *parent,
                         const char *method,
                         const char *paramsJSON,
-                        NormaCEFCDPCompletion completion);
+                        WinterCEFCDPCompletion completion);
 
 #pragma mark - editor-plumbing Task 3: the editor page's bridge
 
 /// **The shape of an answer to one editor query**, and the type a Swift-side responder is stored
-/// as. `NormaCEFBridgeRespondCall` below has exactly this signature — the typedef is what lets the
+/// as. `WinterCEFBridgeRespondCall` below has exactly this signature — the typedef is what lets the
 /// Swift side hold the door as a value rather than name the function at every call site, the same
-/// service `NormaCEFCDPCompletion` performs for the CDP door's replies.
-typedef void (*NormaCEFBridgeRespond)(uint64_t queryId, bool success, const char *responseJSON);
+/// service `WinterCEFCDPCompletion` performs for the CDP door's replies.
+typedef void (*WinterCEFBridgeRespond)(uint64_t queryId, bool success, const char *responseJSON);
 
 /// **Register the ONE block every `window.cefQuery` from every page is delivered to.** Pass `NULL`
 /// to stop listening; there is one bridge per process, like the pre-shutdown hook, and registering
 /// again replaces it outright.
 ///
-/// `browserId` is `CefBrowser::GetIdentifier()` — the same number `NormaCEFExecuteCDP`'s registry
+/// `browserId` is `CefBrowser::GetIdentifier()` — the same number `WinterCEFExecuteCDP`'s registry
 /// keys on. `queryId` is THIS BRIDGE's own monotonic number, not CEF's: CEF's `query_id` is unique
-/// only "for the life span of the router" (`cef_message_router.h`) and Norma creates one router per
+/// only "for the life span of the router" (`cef_message_router.h`) and Winter creates one router per
 /// browser, so two tabs legitimately produce the same CEF id. `requestJSON` is the page's request
 /// string verbatim, valid only for the duration of the call — copy anything you keep.
 ///
-/// **Every delivered query MUST be answered exactly once** with `NormaCEFBridgeRespondCall`, or the
+/// **Every delivered query MUST be answered exactly once** with `WinterCEFBridgeRespondCall`, or the
 /// page's promise never settles and the browser side holds a CEF `Callback` for the life of the
 /// browser. That is not merely untidy: the router's own contract calls destroying an unanswered
 /// callback a runtime error. An answer for a query that has already been answered, or one that was
@@ -348,8 +348,8 @@ typedef void (*NormaCEFBridgeRespond)(uint64_t queryId, bool success, const char
 /// inside it — so a handler is free to re-enter this file (close the tab, run JS, answer inline).
 ///
 /// **THE EXPOSURE, STATED RATHER THAN IMPLIED: this puts `window.cefQuery` on EVERY page in EVERY
-/// Norma browser, not only the editor.** The renderer-side router registers it into every V8
-/// context unconditionally (`NormaEditorScheme.h` says why a URL filter there would be worse than
+/// Winter browser, not only the editor.** The renderer-side router registers it into every V8
+/// context unconditionally (`WinterEditorScheme.h` says why a URL filter there would be worse than
 /// the exposure), so an arbitrary site in a panel web tab can call it and this block will hear it.
 /// Containment is PRODUCER DISCIPLINE, exactly as it is for the CDP door above:
 ///
@@ -362,17 +362,17 @@ typedef void (*NormaCEFBridgeRespond)(uint64_t queryId, bool success, const char
 /// With no block registered — which is every process until the app installs one, and every unit
 /// test — queries are not stored at all: the router cancels them itself and the page's `onFailure`
 /// runs with CEF's own error code of -1.
-void NormaCEFSetBridgeHandler(void (^handler)(int browserId, uint64_t queryId, const char *requestJSON));
+void WinterCEFSetBridgeHandler(void (^handler)(int browserId, uint64_t queryId, const char *requestJSON));
 
 /// **Which browser is in this container?** `CefBrowser::GetIdentifier()` for the browser hosted by
 /// `parent`, or **0** when there is none — no browser yet, a browser already closed, CEF never
-/// loaded, or a view that never hosted one. Same number `NormaCEFSetBridgeHandler` delivers as
-/// `browserId` and `NormaCEFExecuteCDP`'s registry keys on.
+/// loaded, or a view that never hosted one. Same number `WinterCEFSetBridgeHandler` delivers as
+/// `browserId` and `WinterCEFExecuteCDP`'s registry keys on.
 ///
 /// **This is the missing half of the obligation stated 30 lines above.** That block requires a
 /// bridge handler to discriminate by `browserId` and refuse every query that is not its own — and
 /// until this existed the Swift side had no way to learn what its own is. Everything else in this
-/// header addresses a browser by its CONTAINER VIEW (`NormaCEFExecuteCDP`, the chrome verbs, all
+/// header addresses a browser by its CONTAINER VIEW (`WinterCEFExecuteCDP`, the chrome verbs, all
 /// three observers), for the good reason that a container exists before its browser does; the
 /// bridge is the one channel that speaks ids, because a query arrives from a page, not from a view.
 /// This is the translation between the two, and it is the whole of it.
@@ -388,7 +388,7 @@ void NormaCEFSetBridgeHandler(void (^handler)(int browserId, uint64_t queryId, c
 /// would accept every query in the process from a container that has no browser at all.
 ///
 /// Called on the MAIN thread, like everything else in this header, and safe with CEF never loaded.
-int NormaCEFBrowserIdentifierForParent(NSView *parent);
+int WinterCEFBrowserIdentifierForParent(NSView *parent);
 
 /// **Answer one query.** `success = true` runs the page's `onSuccess` with `responseJSON`;
 /// `success = false` runs its `onFailure`, carrying `responseJSON` as the error message (by
@@ -402,7 +402,7 @@ int NormaCEFBrowserIdentifierForParent(NSView *parent);
 /// condition: the query may have been cancelled by a navigation or a closed tab between delivery and
 /// this call, and both of those are ordinary. Safe with CEF never loaded, like everything else in
 /// this header — with no live query there is nothing to reach the framework for.
-void NormaCEFBridgeRespondCall(uint64_t queryId, bool success, const char *responseJSON);
+void WinterCEFBridgeRespondCall(uint64_t queryId, bool success, const char *responseJSON);
 
 /// **Test seam.** Drive the pending-CDP registry — the half of the CDP door that decides *which*
 /// completion a reply belongs to — with **no browser, no observer and no CEF anywhere**, and hand
@@ -422,7 +422,7 @@ void NormaCEFBridgeRespondCall(uint64_t queryId, bool success, const char *respo
 ///
 /// Never `nil`, leaves no process-global state behind (it drains what it registered), and reaches no
 /// framework symbol.
-NSString *NormaCEFPendingCDPTranscriptForOneBrowserWithNoCEFAnywhere(void);
+NSString *WinterCEFPendingCDPTranscriptForOneBrowserWithNoCEFAnywhere(void);
 
 /// The ONE answer `CefLifeSpanHandler::DoClose` gives, exported so a test can read the VALUE rather
 /// than infer it from a log string.
@@ -431,10 +431,10 @@ NSString *NormaCEFPendingCDPTranscriptForOneBrowserWithNoCEFAnywhere(void);
 /// — and `include/cef_life_span_handler.h` spells that out: "returning false from DoClose() will
 /// send the standard close notification to the browser's top-level parent window (... performClose:
 /// on OS X ...)". `cefsimple` and `cefclient` both return false because each OWNS an NSWindow per
-/// browser. Norma hosts the browser inside a window it owns and shares with the whole shell, so CEF
+/// browser. Winter hosts the browser inside a window it owns and shares with the whole shell, so CEF
 /// must never be allowed near it: at the user's live gate, closing a panel tab closed the app's
 /// window and demoted it out of the Dock, leaving only the menu-bar orb.
-BOOL NormaCEFDoCloseIsHandledByHost(void);
+BOOL WinterCEFDoCloseIsHandledByHost(void);
 
 /// The ONE answer `CefLifeSpanHandler::OnBeforePopup` gives, exported for exactly the reason the
 /// function above is: a test can read the VALUE instead of inferring it from a log string, and no
@@ -443,12 +443,12 @@ BOOL NormaCEFDoCloseIsHandledByHost(void);
 /// It must be YES — `true` from `OnBeforePopup` is "cancel the popup" (`cef_life_span_handler.h`).
 /// Routing popups into panel tabs did NOT change this and must never change it: with `false`, and
 /// a native-hosted Alloy parent, CEF "creates a native popup window" of its own — a top-level
-/// Chromium window outside the panel, outside every chrome verb, and outside Norma's window
+/// Chromium window outside the panel, outside every chrome verb, and outside Winter's window
 /// management. `DoClose` answers `true`, i.e. the HOST completes every close, so for a window the
 /// host does not know exists nothing ever does: one `target="_blank"` would strand a window and its
 /// renderer process for the life of the app. The tab route is the popup's destination; the cancel
 /// is what keeps CEF out of the window business, and the two are independent.
-BOOL NormaCEFPopupsAreCancelledSoCEFNeverCreatesAWindow(void);
+BOOL WinterCEFPopupsAreCancelledSoCEFNeverCreatesAWindow(void);
 
 /// YES when the browser client actually INSTALLS the two handlers behind ⌘-click / middle-click
 /// (`CefRequestHandler`) and the context menu (`CefContextMenuHandler`).
@@ -462,7 +462,7 @@ BOOL NormaCEFPopupsAreCancelledSoCEFNeverCreatesAWindow(void);
 /// That was measured, and it left all 18 CEF pins green until this existed.
 ///
 /// Safe to call with CEF down — see the implementation for why nothing here reaches the framework.
-BOOL NormaCEFClientInstallsTheClickAndMenuHandlers(void);
+BOOL WinterCEFClientInstallsTheClickAndMenuHandlers(void);
 
 /// Run ONE real browser-client callback against a tab that has **no view behind it at all**, and
 /// hand the tab back for the caller to read.
@@ -470,7 +470,7 @@ BOOL NormaCEFClientInstallsTheClickAndMenuHandlers(void);
 /// The question it answers is the callback-side half of the zombie crash: does a client callback
 /// find its tab through the reference it was BUILT with, or by casting CEF's window handle to an
 /// `NSView` and messaging it? The second answer is what killed the app at the user's live gate
-/// (`Norma-2026-08-10-152114.ips` — a late `OnTitleChange` for a browser whose panel tab had already
+/// (`Winter-2026-08-10-152114.ips` — a late `OnTitleChange` for a browser whose panel tab had already
 /// been torn down), and it cannot be distinguished by any string scan of the built product: the
 /// callback, its log lines and every symbol around it are identical either way.
 ///
@@ -478,12 +478,12 @@ BOOL NormaCEFClientInstallsTheClickAndMenuHandlers(void);
 /// anywhere, a client is constructed with it, and the body of `OnLoadingStateChange` is run: with
 /// the fix the tab comes back carrying `isLoading = YES`, `canGoBack = NO`, `canGoForward = YES`;
 /// with a lookup that needs a view — or with the reference no longer stored — it comes back
-/// untouched. Read the values through KVC (`NormaCEFTabBridge` is internal to the implementation),
+/// untouched. Read the values through KVC (`WinterCEFTabBridge` is internal to the implementation),
 /// as `CEFRuntimeTests` does.
 ///
 /// Never `nil`. Safe to call with CEF down — nothing on this path reaches the framework, which is
 /// itself a load-bearing property; see the implementation.
-NSObject *NormaCEFTabAfterOneClientCallbackWithNoViewAnywhere(void);
+NSObject *WinterCEFTabAfterOneClientCallbackWithNoViewAnywhere(void);
 
 /// **Test seam.** Run the second half of a close — the half that actually completes it — against a
 /// real open-browser record, and hand the record back.
@@ -499,7 +499,7 @@ NSObject *NormaCEFTabAfterOneClientCallbackWithNoViewAnywhere(void);
 /// identical whether the record lets go or keeps holding. So the answer is produced. `hostView` is
 /// filed in a record exactly as `RememberOpenBrowser` files one, the production
 /// `CompleteCloseByReleasingHostView` is run against it, and the record comes back for the caller
-/// to read `hostView` through KVC (`NormaCEFOpenBrowser` is internal to the implementation). It
+/// to read `hostView` through KVC (`WinterCEFOpenBrowser` is internal to the implementation). It
 /// must be `nil` — and since the seam holds no other reference, a caller whose own `weak` reference
 /// also went `nil` has watched the view actually deallocate, which is the event CEF is waiting for.
 /// Pass a view that is a subview of something to also exercise the detach.
@@ -513,7 +513,7 @@ NSObject *NormaCEFTabAfterOneClientCallbackWithNoViewAnywhere(void);
 ///
 /// Never `nil`. Safe to call with CEF down — nothing on this path reaches the framework — and it
 /// leaves no process-global state, because it also does what `OnBeforeClose` would do next.
-NSObject *NormaCEFRecordAfterACloseHandsTheHostViewBack(NSView *hostView);
+NSObject *WinterCEFRecordAfterACloseHandsTheHostViewBack(NSView *hostView);
 
 /// Close the browser hosted by `parent`, and cancel any creation still on its way to becoming one.
 /// Called from `BrowserRuntime.stop` (via `CEFDriver.closeBrowser`) — the ONLY production caller
@@ -523,27 +523,27 @@ NSObject *NormaCEFRecordAfterACloseHandsTheHostViewBack(NSView *hostView);
 /// implementation is more than a close: requests made before the CEF context came up are ours to
 /// drop, but a request already handed to `CefBrowserHost::CreateBrowser` is inside CEF's own queue,
 /// which does not block and offers no cancel. That one is MARKED, and the browser is closed the
-/// instant it is created — see `NormaCEFBrowserCreation` in the implementation for both halves and
+/// instant it is created — see `WinterCEFBrowserCreation` in the implementation for both halves and
 /// for the crash the same window produced before the parent view was retained across it.
-void NormaCEFCloseBrowser(NSView *parent);
+void WinterCEFCloseBrowser(NSView *parent);
 
 /// Close every live browser. REVERSIBLE — nothing here forecloses running CEF afterwards.
 ///
-/// **Called only from `NormaCEFShutdown` below.** Task 6a also called it from an
+/// **Called only from `WinterCEFShutdown` below.** Task 6a also called it from an
 /// `NSApplication -terminate:` override, on the reasoning that closing browsers is the harmless
 /// half of a quit; the whole-branch review (F7) found it is not. A terminate can be CANCELLED
 /// (⌘Q and a dock-tile quit both answer `.terminateCancel`), and the cancel path does NOT tear the
 /// panel's SwiftUI tree down when nothing is attached — so the browser was destroyed and its view
 /// never rebuilt, leaving a permanently blank panel. The override is gone; see
-/// `Sources/App/NormaApplication.mm` for the full ruling. Kept exported because it is one half of
+/// `Sources/App/WinterApplication.mm` for the full ruling. Kept exported because it is one half of
 /// the lifecycle this header describes and a future embedder-side caller is plausible; it has no
 /// caller outside this file today.
-void NormaCEFCloseAllBrowsers(void);
+void WinterCEFCloseAllBrowsers(void);
 
 /// **Run this immediately before the shutdown sweep — browser-runtime live-gate fix H.**
 ///
 /// The embedder's chance to let go of CEF's host views before the sweep releases them.
-/// `NormaCEFShutdown` completes each close by RELEASING the browser's host view, and that release
+/// `WinterCEFShutdown` completes each close by RELEASING the browser's host view, and that release
 /// only finishes the close if it is the LAST one; anything else still retaining the view turns the
 /// close into a stall the drain loop cannot fix.
 ///
@@ -555,20 +555,20 @@ void NormaCEFCloseAllBrowsers(void);
 /// (`AppDelegate.quitReleasingBrowserViews`, which carries the whole table). This covers a shutdown
 /// reached without passing through that door — a system logout, or any future embedder-side call.
 ///
-/// **A hook and not a notification observer, deliberately.** `NormaCEFInitialize` registers its own
-/// `NSApplicationWillTerminateNotification` observer (that is what calls `NormaCEFShutdown` at all),
+/// **A hook and not a notification observer, deliberately.** `WinterCEFInitialize` registers its own
+/// `NSApplicationWillTerminateNotification` observer (that is what calls `WinterCEFShutdown` at all),
 /// and the order in which two observers of the same notification run is undefined — so an embedder
 /// that "also observed willTerminate" would be relying on registration order to be correct. This is
 /// an explicit call at a defined point instead.
 ///
 /// Called on the main thread, at most once per process, and only on a real shutdown: a
-/// never-initialised or already-shut-down `NormaCEFShutdown` returns before reaching it. Passing
+/// never-initialised or already-shut-down `WinterCEFShutdown` returns before reaching it. Passing
 /// `nil` clears it. Replacing an existing hook replaces it outright — there is one embedder.
-void NormaCEFSetPreShutdownHook(void (^hook)(void));
+void WinterCEFSetPreShutdownHook(void (^hook)(void));
 
 /// `CefShutdown`, preceded by closing every browser and draining the pump. The POINT OF NO RETURN —
 /// CEF cannot be initialised again in this process, which is exactly why nothing calls it from
-/// `-terminate:` (a terminate can be cancelled). `NormaCEFInitialize` registers this against
+/// `-terminate:` (a terminate can be cancelled). `WinterCEFInitialize` registers this against
 /// `NSApplicationWillTerminateNotification` itself, so the guarantee lives with the thing it
 /// guards rather than in a line of `AppDelegate` that could be dropped — and AppKit posts that
 /// notification from inside `[NSApplication terminate:]` once the delegate has answered
@@ -594,19 +594,19 @@ void NormaCEFSetPreShutdownHook(void (^hook)(void));
 /// reachable in principle and has never been observed; expect 0 on every healthy quit.
 ///
 /// **A TRUE no-op if CEF was never initialised**: it does not run, and it does not record itself as
-/// having run — `NormaCEFDidShutdown` stays NO, so a process that merely passed through this call
+/// having run — `WinterCEFDidShutdown` stays NO, so a process that merely passed through this call
 /// (a unit-test host; a quit before any web tab existed) is not latched into "CEF is finished" and
-/// `NormaCEFInitialize` will still start. Safe to call twice.
-void NormaCEFShutdown(void);
+/// `WinterCEFInitialize` will still start. Safe to call twice.
+void WinterCEFShutdown(void);
 
-/// YES once `NormaCEFShutdown` has actually shut CEF down. Never YES for the never-initialised
+/// YES once `WinterCEFShutdown` has actually shut CEF down. Never YES for the never-initialised
 /// no-op above — that asymmetry is what keeps this from being process-global state a test can
 /// leak into every test that runs after it (`CEFRuntimeTests`), and what keeps
-/// `NormaCEFRuntime.isRetryable` honest.
-BOOL NormaCEFDidShutdown(void);
+/// `WinterCEFRuntime.isRetryable` honest.
+BOOL WinterCEFDidShutdown(void);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* NormaCEF_h */
+#endif /* WinterCEF_h */

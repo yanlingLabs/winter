@@ -1,15 +1,15 @@
 import Foundation
 import os
-import NormaProtocol
-import NormaSessionKit
+import WinterProtocol
+import WinterSessionKit
 import IrohLib
 
 /// The real iroh transport behind SP1's `RemoteListener` seam: the Mac binds an iroh
-/// endpoint on the private ALPN `computer.norma.rpc/1`, accepts inbound phone connections,
+/// endpoint on the private ALPN `computer.winter.rpc/1`, accepts inbound phone connections,
 /// and hands the gateway one `IrohConn` per authenticated peer. Each `IrohConn` adapts the
 /// accepted QUIC bidirectional stream to the gateway's frame-oriented `RemoteConn`
 /// contract, de-framing the raw byte stream into whole `WireEnvelope` frames via
-/// `NormaProtocol.LengthPrefix`.
+/// `WinterProtocol.LengthPrefix`.
 ///
 /// DEV-STUB PAIRING (SP2b seam): this listener accepts ANY peer that authenticates on the
 /// ALPN — there is no allowlist or pairing ceremony yet. That is why `IrohListener` is
@@ -24,7 +24,7 @@ public final class IrohListener: RemoteListener, @unchecked Sendable {
     /// The private ALPN this listener accepts — and ONLY this. A dialer negotiating any
     /// other protocol is rejected at accept (iroh fails ALPN negotiation for unadvertised
     /// protocols; `accept` re-checks defensively).
-    public static let defaultALPN = "computer.norma.rpc/1"
+    public static let defaultALPN = "computer.winter.rpc/1"
 
     public let connections: AsyncStream<RemoteConn>
     private let cont: AsyncStream<RemoteConn>.Continuation
@@ -47,7 +47,7 @@ public final class IrohListener: RemoteListener, @unchecked Sendable {
     ///
     /// - Parameters:
     ///   - secret: the 32-byte endpoint secret key (identity of this Mac).
-    ///   - alpn: the private ALPN to accept on. Defaults to `computer.norma.rpc/1`.
+    ///   - alpn: the private ALPN to accept on. Defaults to `computer.winter.rpc/1`.
     ///   - relayURLs: LEGACY relay seam — empty disables relays entirely (in-process / loopback /
     ///     same-LAN dev use), non-empty means custom relays by URL. Superseded by `relays` below;
     ///     retained so existing call sites (the hermetic loopback suite, the live-gate

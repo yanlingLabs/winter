@@ -1,7 +1,7 @@
 /** `EventBridge` (Phase 3a Task 6) — the seam between `client.ts`'s connect-time `onEvent` sink and
  *  `<App>`'s React subscription, WITHOUT touching `client.ts` (which the legacy path still shares).
  *
- *  `NormaClient.connect({ onEvent })` fixes its event callback at connect time; it is not an async
+ *  `WinterClient.connect({ onEvent })` fixes its event callback at connect time; it is not an async
  *  iterator. But `<App>` can only subscribe from a `useEffect`, which runs a tick AFTER the first
  *  render — and the session bootstrap (`attach`) can have already replayed events into `onEvent` by
  *  then. So the bridge BUFFERS every event pushed before a subscriber attaches and, on `subscribe`,
@@ -12,7 +12,7 @@
  *  — no ink/react import, so `main.ts` can construct the bridge on the shared path without pulling
  *  the Ink module graph onto the non-TTY branch. */
 
-import type { SessionEvent } from "@norma/protocol";
+import type { SessionEvent } from "@winter/protocol";
 
 export type EventBridge = {
   push(e: SessionEvent): void;

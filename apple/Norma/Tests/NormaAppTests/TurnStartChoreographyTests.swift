@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Coverage for the wave-3 gate item 2a/2b one-shot latches on `OrbWindowController`:
 /// `collapseOnTurnStart` (armed by `GlassRootView.submit()` on an idle-at-submit-time success,

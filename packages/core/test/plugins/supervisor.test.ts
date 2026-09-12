@@ -21,7 +21,7 @@ import {
 // -------------------------------------------------------------------------------------------
 
 function tmpRunDir(): string {
-  return mkdtempSync(join(tmpdir(), "norma-supervisor-"));
+  return mkdtempSync(join(tmpdir(), "winter-supervisor-"));
 }
 
 function fakePlugin(overrides: Partial<EligiblePlugin> = {}): EligiblePlugin {
@@ -90,7 +90,7 @@ function makeSupervisor(overrides: Partial<PluginSupervisorDeps> = {}) {
   const { settings, ...rest } = overrides;
   const supervisor = new PluginSupervisor({
     runDir: dir,
-    socketPath: "/tmp/norma-test.sock",
+    socketPath: "/tmp/winter-test.sock",
     mintToken: (id) => { const t = `tok_${id}_${mints.length}`; mints.push(t); return t; },
     spawn,
     now: () => Date.now(),
@@ -159,7 +159,7 @@ describe("circuitAfterFailure (pure)", () => {
 // -------------------------------------------------------------------------------------------
 
 describe("startAll / spawn", () => {
-  test("spawns the manifest entry with NORMA_PLUGIN_TOKEN/SOCKET/ID; status starts 'starting'", () => {
+  test("spawns the manifest entry with WINTER_PLUGIN_TOKEN/SOCKET/ID; status starts 'starting'", () => {
     const { supervisor, calls, mints } = makeSupervisor();
     const p = fakePlugin();
     supervisor.startAll([p]);
@@ -167,9 +167,9 @@ describe("startAll / spawn", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.cmd).toEqual(["bun", "index.ts"]);
     expect(calls[0]!.opts.cwd).toBe("/plugins/demo");
-    expect(calls[0]!.opts.env.NORMA_PLUGIN_TOKEN).toBe(mints[0]);
-    expect(calls[0]!.opts.env.NORMA_SOCKET).toBe("/tmp/norma-test.sock");
-    expect(calls[0]!.opts.env.NORMA_PLUGIN_ID).toBe("demo");
+    expect(calls[0]!.opts.env.WINTER_PLUGIN_TOKEN).toBe(mints[0]);
+    expect(calls[0]!.opts.env.WINTER_SOCKET).toBe("/tmp/winter-test.sock");
+    expect(calls[0]!.opts.env.WINTER_PLUGIN_ID).toBe("demo");
   });
 
   test("entry.cwd, when set, resolves relative to the plugin's own dir", () => {
@@ -178,11 +178,11 @@ describe("startAll / spawn", () => {
     expect(calls[0]!.opts.cwd).toBe(join("/plugins/demo", "sub"));
   });
 
-  test("NORMA_PLUGIN_DIR is always set to the plugin's directory (entry.cwd-safe)", () => {
+  test("WINTER_PLUGIN_DIR is always set to the plugin's directory (entry.cwd-safe)", () => {
     const { supervisor, calls } = makeSupervisor();
     const p = fakePlugin({ dir: "/plugins/demo", entry: { command: "bun", args: ["i.ts"], cwd: "sub" } });
     supervisor.startAll([p]);
-    expect(calls[0]!.opts.env.NORMA_PLUGIN_DIR).toBe("/plugins/demo");
+    expect(calls[0]!.opts.env.WINTER_PLUGIN_DIR).toBe("/plugins/demo");
   });
 
   test("startAll is idempotent — a second call for an already-tracked id does not spawn again", () => {
@@ -700,7 +700,7 @@ describe("reclaimOrphans", () => {
     writeOrphanPidFile(dir, "orphaned", 555);
     supervisor.startAll([orphaned, fresh]);
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.opts.env.NORMA_PLUGIN_ID).toBe("fresh");
+    expect(calls[0]!.opts.env.WINTER_PLUGIN_ID).toBe("fresh");
     expect(supervisor.status("orphaned")).toBe("starting");
     expect(supervisor.status("fresh")).toBe("starting");
   });

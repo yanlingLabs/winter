@@ -171,7 +171,7 @@ export interface AgentRegistry {
   markNotified(agentId: string): void;
   /**
    * "This child made progress" — the resettable window behind the no-wall-clock rule (CLAUDE.md;
-   * Norma map §10). A no-op on the in-memory registry, whose children are watched by
+   * Winter map §10). A no-op on the in-memory registry, whose children are watched by
    * `SubagentManager` instead.
    */
   progress(agentId: string): void;
@@ -333,7 +333,7 @@ export class BackgroundAgentRegistry implements AgentRegistry {
   }
 
   /** No watchdog here: this registry's children are engine threads, and `SubagentManager` owns
-   *  their progress window (Norma map §10). Present so the two implementations share one type. */
+   *  their progress window (Winter map §10). Present so the two implementations share one type. */
   progress(_agentId: string): void {}
 
   private findByName(sessionId: string, name: string): AgentEntry | undefined {
@@ -532,7 +532,7 @@ export function createPersistedChildren(deps: PersistedChildrenDeps): AgentRegis
     );
   };
 
-  /** A stop envelope the owning session's facet can carry. Norma sends no body the model wrote —
+  /** A stop envelope the owning session's facet can carry. Winter sends no body the model wrote —
    *  this is a control instruction, and it is attributed to the parent session itself. */
   const stopEnvelope = (parent: string, childId: string): GlobalAgentMessage => ({
     messageId: `stop:${encodeURIComponent(parent)}:${encodeURIComponent(childId)}:${now()}`,

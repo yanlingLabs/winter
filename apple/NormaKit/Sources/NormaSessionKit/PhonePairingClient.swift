@@ -2,7 +2,7 @@ import Foundation
 import os
 import Security
 import IrohLib
-import NormaProtocol
+import WinterProtocol
 
 /// Errors `PhonePairingClient` itself can throw — distinct from whatever `Endpoint.bind`/
 /// `Endpoint.connect`/`EndpointId.fromString` throw (those propagate unchanged).
@@ -31,7 +31,7 @@ public enum PhonePairingError: Error, Equatable {
 /// dials the Mac named in a scanned `QRPayload`, proves possession of the QR's `pairSecret`,
 /// surfaces the 4-word SAS for a human to compare, and returns once the Mac answers. Extracted
 /// from `PairingE2ETests.pairPhone`'s hand-rolled frames (SP2b Task 4 — see that file's own
-/// history) so both that test and `norma-fake-phone` share ONE real implementation of the wire
+/// history) so both that test and `winter-fake-phone` share ONE real implementation of the wire
 /// dance instead of two hand-rolled copies drifting apart.
 ///
 /// **Words before the answer.** `onWords` fires the instant this side has computed its own SAS
@@ -40,7 +40,7 @@ public enum PhonePairingError: Error, Equatable {
 /// both already known to the phone before it even dials.
 ///
 /// **Never logs** `qr.pairSecret`, the request/response payloads, or anything beyond the already
-/// -public SAS words (via `onWords`) and the return value — a caller (e.g. `norma-fake-phone`)
+/// -public SAS words (via `onWords`) and the return value — a caller (e.g. `winter-fake-phone`)
 /// is on its own recognizance not to print `endpointSecret` (the phone's own identity key, not
 /// the Mac's `pairSecret` — still never echoed back over the wire, but sensitive enough that a
 /// CLI must not casually print it either).
@@ -50,7 +50,7 @@ public enum PhonePairingError: Error, Equatable {
 /// (`PairingManager.handleConnection`'s own contract) — it is closed before `pair` returns
 /// (success or failure). Post-pairing traffic (a real `ClientHello`/`WireEnvelope` session) is a
 /// FRESH connection, same iroh identity (`endpointSecret`), dialed separately — exactly what
-/// `norma-fake-phone --attach` does.
+/// `winter-fake-phone --attach` does.
 public enum PhonePairingClient {
     /// Bounds the wait for the Mac's answer once the request is sent — comfortably past
     /// `PairingManager`'s own 120s confirm-timeout (SP2b global constraint) so a real human
@@ -70,9 +70,9 @@ public enum PhonePairingClient {
     /// v1 only ever requests this capability (mirrors `PairingManager.sessionCaps`).
     private static let sessionCaps = ["sessions"]
 
-    /// Real random bytes via `SecRandomCopyBytes` — a per-package copy of NormaKit's
-    /// `PairingManager.systemRandom` (SP3 Task 2: this file moved from NormaKit into
-    /// NormaSessionKit, which NormaKit itself depends on — the reverse dependency the original
+    /// Real random bytes via `SecRandomCopyBytes` — a per-package copy of WinterKit's
+    /// `PairingManager.systemRandom` (SP3 Task 2: this file moved from WinterKit into
+    /// WinterSessionKit, which WinterKit itself depends on — the reverse dependency the original
     /// `PairingManager.systemRandom($0)` call would have required is not possible, so this
     /// duplicates the same three-line `SecRandomCopyBytes` body instead of sharing it. Mirrors
     /// `MacIdentity.swift`'s own identical duplication of this exact snippet, for the same reason:

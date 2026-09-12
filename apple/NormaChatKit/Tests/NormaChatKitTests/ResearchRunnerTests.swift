@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import NormaChatKit
+@testable import WinterChatKit
 
 /// The ephemeral research sub-agent. Every test drives a SCRIPTED provider (no real model) and
 /// `ScriptedChatHTTP` (no network). The load-bearing properties: FetchPage is the ONLY tool

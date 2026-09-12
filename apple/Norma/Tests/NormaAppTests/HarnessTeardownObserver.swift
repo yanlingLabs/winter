@@ -1,11 +1,11 @@
 import XCTest
 import AppKit
-@testable import Norma
+@testable import Winter
 
 /// Rider 2 (as-m26, USER-MANDATED): the harness-wide dock-ghost teardown — now the DOCK SEAM's
 /// test half (the structural fix for the persisting ghost class).
 ///
-/// The suite's test host is the REAL Norma.app (`TEST_HOST`), and many cases exercise the
+/// The suite's test host is the REAL Winter.app (`TEST_HOST`), and many cases exercise the
 /// dock-presence machinery (`AppDelegate.syncDockPresence` → `DockPolicy.apply(.regular)`, the
 /// shell/detached promotion paths, the outputs-panel click-through doors). The first round of this
 /// observer only RESTORED the real activation policy after each case — which structurally cannot
@@ -24,7 +24,7 @@ import AppKit
 /// case by name instead of silently re-opening the ghost class.
 ///
 /// Registration: this class is the test bundle's `NSPrincipalClass`
-/// (`INFOPLIST_KEY_NSPrincipalClass` in `project.yml`'s NormaAppTests target — the target has no
+/// (`INFOPLIST_KEY_NSPrincipalClass` in `project.yml`'s WinterAppTests target — the target has no
 /// Info.plist file; its plist is build-generated, so the INFOPLIST_KEY_ setting is how the key
 /// reaches it). XCTest instantiates the principal class once at bundle load, BEFORE any test runs;
 /// `init()` captures the host's true at-launch activation policy, installs the recorder, and

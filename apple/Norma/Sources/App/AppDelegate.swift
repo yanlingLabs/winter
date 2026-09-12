@@ -1,7 +1,7 @@
 import AppKit
 import ApplicationServices
 import Combine
-import NormaKit
+import WinterKit
 import Sparkle
 
 @MainActor
@@ -13,7 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// — the app's MAIN feed client/socket (the daemon rule: THE provider = the most-recent-
     /// advertiser CONNECTION, so this must never be a second/detached-window client).
     private(set) var peripheralProvider: PeripheralProvider?
-    /// Task 4 (4c): owns the `com.norma.helper` SMAppService lifecycle + XPC connection — read by
+    /// Task 4 (4c): owns the `com.winter.helper` SMAppService lifecycle + XPC connection — read by
     /// both `hardwareBridge` (the approval gate) and the Dashboard's Peripheral pane (the
     /// helper-status row). Constructed unconditionally in `boot()` (its `status` read is safe
     /// anytime); only the real `register()` call is gated behind `!isRunningUnitTests` below.
@@ -22,13 +22,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// through `helperClient`'s XPC calls — composed into the SAME `onPeripheralEvent` hook
     /// `peripheralProvider` uses, alongside it, never replacing it.
     private(set) var hardwareBridge: HardwareBridge?
-    /// Lifecycle T4: owns the "Launch Norma at login" `SMAppService.mainApp` registration — read
+    /// Lifecycle T4: owns the "Launch Winter at login" `SMAppService.mainApp` registration — read
     /// by the menu-bar checkbox (`MenuBarController.loginItemItem`). Constructed unconditionally in
     /// `boot()` (`isEnabled`/`hasUserMadeChoice` are plain reads, safe anytime); the default-on
     /// first-launch `setEnabled(true)` call is gated behind `!isRunningUnitTests` below, same
     /// posture as `helper.register()`.
     private(set) var loginItemController: LoginItemController?
-    /// Lifecycle T6: owns the bundled `norma-core` daemon's supervised lifecycle — constructed in
+    /// Lifecycle T6: owns the bundled `winter-core` daemon's supervised lifecycle — constructed in
     /// `boot()` (production deps `.live` unless `daemonSupervisorDeps` below overrides them) and
     /// stopped in `applicationWillTerminate`.
     private(set) var daemonSupervisor: DaemonSupervisor?
@@ -36,7 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// gated `!isRunningUnitTests` (same posture as `daemonSupervisor`'s real spawn path), so no
     /// updater ever starts from the xctest host.
     private(set) var updaterController: SPUStandardUpdaterController?
-    /// Sparkle T3: the `SPUUpdaterDelegate` this controller drives — Norma-specific gating (idle
+    /// Sparkle T3: the `SPUUpdaterDelegate` this controller drives — Winter-specific gating (idle
     /// gate in T4, channels in T5) lives on this seam, not in the controller itself.
     private(set) var updaterCoordinator: UpdaterCoordinator?
     /// Sparkle T3 test seam: overrides the `UpdaterCoordinatorDeps` `boot()` constructs the
@@ -95,7 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// device). Constructed unconditionally in `boot()` (cheap — it does no I/O of its own; only
     /// touching its `RemoteHost` does), same posture as `peripheralProvider`/`helperClient`.
     private(set) var remoteAccessCoordinator: RemoteAccessCoordinator?
-    /// app-shell T8: the ONE app-lifetime FSEvents watcher on `<normaHome>/outputs/` (spec §3's
+    /// app-shell T8: the ONE app-lifetime FSEvents watcher on `<winterHome>/outputs/` (spec §3's
     /// post-review YAGNI ruling) — constructed unconditionally in `boot()` (cheap: it stores a path
     /// and touches nothing until `start()`), same posture as `remoteAccessCoordinator`/
     /// `peripheralProvider` above. Handed to `ShellSessionHost` at `summonAppWindow()`; T9's floating
@@ -134,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// never accumulates closed controllers.
     private(set) var detachedWindows: [DetachedWindowController] = []
 
-    /// Lifecycle T3: set to `true` ONLY by the menu-bar "Quit Norma" action (T4 wires that call
+    /// Lifecycle T3: set to `true` ONLY by the menu-bar "Quit Winter" action (T4 wires that call
     /// site) — the SOLE true-quit source. ⌘Q and the dock-tile "Quit" both route through
     /// `applicationShouldTerminate` below, but neither ever sets this: they're intercepted and
     /// treated as "close the main windows, demote to `.accessory`, keep the menu bar + daemon
@@ -274,7 +274,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.onOpenSessionDetached = { [weak self, weak controller] sessionId in
             guard let self else { return }
             let sourceFrame = controller?.currentFrame ?? NSRect(origin: .zero, size: chatWindowDefaultSize)
-            self.openSessionInNewDetachedWindow(sessionId, frame: sourceFrame.offsetBy(dx: 24, dy: -24), title: "Norma", sourceRows: controller?.directory.rows ?? [])
+            self.openSessionInNewDetachedWindow(sessionId, frame: sourceFrame.offsetBy(dx: 24, dy: -24), title: "Winter", sourceRows: controller?.directory.rows ?? [])
         }
     }
 
@@ -291,15 +291,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// ⌘-click, offset from the source window) override the centered-fallback default. `nil`
     /// (every other caller) keeps the original behavior — centered on the main screen — computed
     /// via the shared pure `centeredStandaloneFrame`. App shell T6: the ONE caller that used to
-    /// reuse this exact body for its own frame math, `openStandaloneNormaWindow()`, is retired —
+    /// reuse this exact body for its own frame math, `openStandaloneWinterWindow()`, is retired —
     /// its menu item now summons the app shell instead (see `AppDelegate.boot()`'s menu wiring).
-    /// Chat Mode Slice A (CM-T3): `title` widened from a fixed `"Norma"` to a defaulted parameter —
+    /// Chat Mode Slice A (CM-T3): `title` widened from a fixed `"Winter"` to a defaulted parameter —
     /// every PRE-EXISTING caller (orb's child-status circles, the sidebars' ⌘-click, and — until
     /// App shell T7 deleted that door along with the rest of `SessionsPane.swift` — the Dashboard's
-    /// SessionsPane row click) keeps the exact same "Norma" fallback, unchanged. App shell T6:
+    /// SessionsPane row click) keeps the exact same "Winter" fallback, unchanged. App shell T6:
     /// `openChat()`/`createAndOpenChat()`, the pair that used to pass something else (the session's
     /// own title, or "Chat"), are retired along with the menu entries that drove them — every
-    /// surviving caller now takes the "Norma" default again.
+    /// surviving caller now takes the "Winter" default again.
     ///
     /// Plan-immunity (2026-07-28 design; fix round 1): `isChat: Bool? = nil` — `nil` (every
     /// PRE-EXISTING caller: orb's child-status circles, sidebars' ⌘-click, and — until App shell
@@ -330,7 +330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `setPolicy` against a real chat session — the exact shown-but-broken bug this whole slice
     /// exists to close — so checking the source first, rather than hiding-by-default for an unknown
     /// mode, is the fix: it resolves the race with real data instead of guessing.
-    private func openSessionInNewDetachedWindow(_ sessionId: String, frame: NSRect? = nil, title: String = "Norma", isChat: Bool? = nil, sourceRows: [SessionSummary] = []) {
+    private func openSessionInNewDetachedWindow(_ sessionId: String, frame: NSRect? = nil, title: String = "Winter", isChat: Bool? = nil, sourceRows: [SessionSummary] = []) {
         guard let model = appModel,
               let (feed, session) = model.makeDetachedFeed(sessionId: sessionId) else {
             OrbDebug.log("openSessionInNewDetachedWindow: no appModel or makeDetachedFeed nil — spawn aborted")
@@ -371,7 +371,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             OrbDebug.log("onWindowDetach: no focused session or makeDetachedFeed nil — spawn aborted, window surface kept")
             return false
         }
-        let title = model.session.state.exchanges.first.map { String($0.prompt.prefix(40)) } ?? "Norma"
+        let title = model.session.state.exchanges.first.map { String($0.prompt.prefix(40)) } ?? "Winter"
         let isChat = DetachedWindowController.isChatSession(sid, in: model.directory.rows)
         // detached window VISIBLE first — the orb panel is still `.window` here
         spawnDetachedWindow(feed: feed, session: session, frame: frame, title: title, isChat: isChat)
@@ -394,8 +394,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // App shell T6 (the menu-bar retarget's funeral): `chatSessionToOpen(in:)`/`chatWindowTitle(_:)`
     // and the detached-window trio they backed — `openChat()`/`createAndOpenChat()` — are deleted
     // here. "Chat" now summons the app shell's chat landing (`AppDelegate.boot()`'s menu wiring)
-    // instead of spawning a detached window; nothing else ever called them. `openStandaloneNormaWindow()`
-    // (T1's report named this its own funeral) is deleted too — "Open Norma App" summons the shell,
+    // instead of spawning a detached window; nothing else ever called them. `openStandaloneWinterWindow()`
+    // (T1's report named this its own funeral) is deleted too — "Open Winter App" summons the shell,
     // and had no other caller once T1 retargeted the menu item and the dock's reopen path. `newChat()`
     // itself SURVIVES, below, with new innards (App shell T6 review fix) — see its own doc comment.
 
@@ -419,7 +419,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// App shell T1 — THE summon primitive (spec §1). Every path that wants the app window goes
-    /// through here: the dock icon (`applicationShouldHandleReopen`), the menu bar's "Open Norma
+    /// through here: the dock icon (`applicationShouldHandleReopen`), the menu bar's "Open Winter
     /// App" entry, and — as later tasks land them — the orb, the outputs panel, and every "open in
     /// app" affordance. The first call constructs the ONE controller (and, Task 7, the Dashboard's
     /// wiring alongside it); every later call focuses that same window (ruling R2: nothing ever
@@ -540,7 +540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Live-gate fix (2026-08-22), and the bug it closes was total, not cosmetic: on a freshly
     /// launched app the File menu did not exist at all, so ⌘S had nothing to bind to and the
     /// keystroke fell through the responder chain to the system beep. Measured on the running app
-    /// with the window up: the menu bar read `Apple, Norma Dev, Edit, View, Window, Help` — no
+    /// with the window up: the menu bar read `Apple, Winter Dev, Edit, View, Window, Help` — no
     /// File — and `View` held only `Enter Full Screen`, so BOTH of this app's injected sets (Save,
     /// and Zoom In/Out/Actual Size) were gone while SwiftUI's own stock items stood.
     ///
@@ -675,7 +675,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Task 7: builds the Dashboard's `DashboardWiring` — the one place that closes over the real
-    /// `NormaClient` and every controller a Mac-group pane surfaces, discharging
+    /// `WinterClient` and every controller a Mac-group pane surfaces, discharging
     /// `DashboardWindowController.init`'s old role (deleted this task) at the shell's own
     /// construction instead of a per-window-open one (see `DashboardWiring`'s own doc comment for
     /// why that lifetime shift is harmless). `peripheralProvider`/`helperClient` are the only two
@@ -759,7 +759,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @discardableResult
     private func spawnDetachedWindow(feed: SessionFeed, session: SessionModel, frame: NSRect, title: String, isChat: Bool = false) -> DetachedWindowController {
-        let detached = DetachedWindowController(feed: feed, session: session, frame: frame, title: title.isEmpty ? "Norma" : title, isChat: isChat)
+        let detached = DetachedWindowController(feed: feed, session: session, frame: frame, title: title.isEmpty ? "Winter" : title, isChat: isChat)
         registerDetachedWindow(detached)
         detached.show()
         return detached
@@ -781,8 +781,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // deleted afterwards; none of that may be pointed at them. Each needs `NSWindow`s and CEF
         // and nothing else. Mutually exclusive by construction (each gates on its own env var and
         // returns); with both variables unset this is two env reads and the app behaves
-        // identically. NORMA_SPIKE_REPARENT=1 → browser-runtime Task 1's reparenting spike;
-        // NORMA_SPIKE_CLOSE_LEAK=1 → Task 6's stalled-close repro.
+        // identically. WINTER_SPIKE_REPARENT=1 → browser-runtime Task 1's reparenting spike;
+        // WINTER_SPIKE_CLOSE_LEAK=1 → Task 6's stalled-close repro.
         if SpikeReparent.isRequested {
             SpikeReparent.start(delegate: self)
             return
@@ -792,7 +792,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         // editor-plumbing Task 5 — the editor bridge's proof harness, third on the same list and
-        // gated the same way (`NORMA_EDITOR_HARNESS=1`). It runs the whole Stage-A drill unattended
+        // gated the same way (`WINTER_EDITOR_HARNESS=1`). It runs the whole Stage-A drill unattended
         // and terminates with a JSON transcript, so it must not have `boot()`'s account-global side
         // effects underneath it either. The menu item below (`MenuBarController`) is the same
         // harness inside an ordinary run, for a human to watch.
@@ -801,7 +801,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         // office-plumbing Task 9 — the office harness's own unattended gate, same shape as the
-        // editor's own two lines above (`NORMA_OFFICE_HARNESS=1`). Stage A's exit gate: the real
+        // editor's own two lines above (`WINTER_OFFICE_HARNESS=1`). Stage A's exit gate: the real
         // helper, the real vendored LibreOffice, `ShellSessionHost`'s real production wiring — never
         // this process's own `boot()`, for the identical reason the editor's harness avoids it.
         if OfficeHarness.isRequested {
@@ -809,32 +809,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         #endif
-        // DD-T4: stamp NORMA_HOME + NORMA_PROFILE into this process's env BEFORE the first
-        // `NormaPaths` read (which happens inside `boot()` — `supervisor.start()`'s socket probe,
-        // `AppModel.production()`), so the app, NormaKit, and every spawned child (the bundled
-        // `norma-core` daemon inherits our env via `Process`'s nil-environment default) resolve one
+        // DD-T4: stamp WINTER_HOME + WINTER_PROFILE into this process's env BEFORE the first
+        // `WinterPaths` read (which happens inside `boot()` — `supervisor.start()`'s socket probe,
+        // `AppModel.production()`), so the app, WinterKit, and every spawned child (the bundled
+        // `winter-core` daemon inherits our env via `Process`'s nil-environment default) resolve one
         // identity. `setenv(…, 0)` never overwrites an explicit env, so tests/power users still win.
-        // Placed AFTER the unit-test guard so the xctest host launch never stamps `~/.norma-dev`.
+        // Placed AFTER the unit-test guard so the xctest host launch never stamps `~/.winter-dev`.
         AppProfile.bootstrapEnvironment()
         _ = boot()
         #if DEBUG
         // panel-cef Task 6a: the window half of the panel smoke door (`ShellRootView`'s `.onAppear`
         // owns the panel + tab half; read its comment for why the door exists at all — no
         // Accessibility TCC in the development environment, so no click can be synthesised, and
-        // Norma is `LSUIElement`: it opens NO window at launch and the only ways to get one are the
+        // Winter is `LSUIElement`: it opens NO window at launch and the only ways to get one are the
         // menu-bar item and a Finder reopen, both of which are clicks). Deferred one run-loop turn
         // so `boot()`'s window-less state is fully settled first, exactly as a real summon would be.
-        if ProcessInfo.processInfo.environment["NORMA_PANEL_SMOKE"] == "1" {
+        if ProcessInfo.processInfo.environment["WINTER_PANEL_SMOKE"] == "1" {
             DispatchQueue.main.async { [weak self] in self?.summonAppWindow(navigatingTo: .newChat) }
         }
         // office-agent Task 8: the headless gate's own door — summon the window ALREADY SHOWING a
         // named session, which is the one state the gate cannot otherwise reach.
         //
-        // Why this exists at all (the same reasoning `NORMA_PANEL_SMOKE` above carries, one step
+        // Why this exists at all (the same reasoning `WINTER_PANEL_SMOKE` above carries, one step
         // further): every `sheets`/`slides`/`docs` verb is gated by `officeReach` on the daemon
         // side, which requires a panel-capable harness ATTACHED TO THAT SESSION — and the app
-        // attaches to whatever session its window is showing. Norma is `LSUIElement`, so it opens
-        // no window at launch; `NORMA_PANEL_SMOKE` opens one at `.newChat`, which attaches to no
+        // attaches to whatever session its window is showing. Winter is `LSUIElement`, so it opens
+        // no window at launch; `WINTER_PANEL_SMOKE` opens one at `.newChat`, which attaches to no
         // session at all. `ShellDestination.session(_:)` is exactly the right destination and it
         // already exists, but its ONLY call site is `openOutputFileFromPanel` — a click door. There
         // is no URL scheme, no launch argument and no RPC that aims the app at a session, so
@@ -856,7 +856,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // there was no shell window at all. Re-arming until `appWindow` actually exists turns that
         // silent loss into an eventual success, and the retries are idempotent (`summonAppWindow`
         // re-summons an existing window rather than making a second one).
-        if let gateSession = ProcessInfo.processInfo.environment["NORMA_GATE_SESSION"], !gateSession.isEmpty {
+        if let gateSession = ProcessInfo.processInfo.environment["WINTER_GATE_SESSION"], !gateSession.isEmpty {
             var attemptsLeft = 40   // 40 × 500ms = 20s, comfortably past a cold boot
             func armSummon() {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -877,7 +877,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @discardableResult
     func boot() -> Bool {
         // Lifecycle T6 (T4 review finding 5f): migration MUST run before the supervisor's
-        // socket-exists probe just below — a leftover `com.norma.core` KeepAlive launchd agent
+        // socket-exists probe just below — a leftover `com.winter.core` KeepAlive launchd agent
         // would otherwise relaunch a daemon the app just killed, permanently defeating "app quit ->
         // daemon quit" for that user. `launchdMigrationOverride` lets a test drive this exact call
         // with a spy; `nil` (production) runs the real migration, gated the same
@@ -958,29 +958,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // A missing harness token means the daemon has never run — connecting would fail
         // hello forever. Boot the orb disconnected with an actionable menu line instead
-        // of a hopeless retry loop; the user relaunches after `norma daemon run`.
+        // of a hopeless retry loop; the user relaunches after `winter daemon run`.
         // Never touch the Keychain during unit tests either: the xctest host is not in the
         // token item's ACL, so SecItemCopyMatching blocks on a securityd consent dialog
         // (observed: testBootInstallsMenuBar hung 394s). Tests exercise the degraded path.
         let production = Self.isRunningUnitTests ? nil : (try? AppModel.production())
         // devfix (socket strand): the degraded fallback must still dial THIS profile's socket —
-        // same `AppProfile.normaHome` resolution as `AppModel.production()` above, not the bare
-        // `NormaPaths.socketPath()` (which would keep it pinned to the dist path for a dev app).
+        // same `AppProfile.winterHome` resolution as `AppModel.production()` above, not the bare
+        // `WinterPaths.socketPath()` (which would keep it pinned to the dist path for a dev app).
         let model = production ?? AppModel(
-            makeTransport: { UnixSocketTransport(path: NormaPaths.socketPath(home: AppProfile.normaHome)) },
+            makeTransport: { UnixSocketTransport(path: WinterPaths.socketPath(home: AppProfile.winterHome)) },
             token: AppModel.missingTokenSentinel
         )
         let tokenMissing = production == nil
         appModel = model
         OrbDebug.log("boot: axTrusted=\(axTrusted) tokenMissing=\(tokenMissing)")
 
-        // app-shell T8: the outputs watcher — profile-resolved through `AppProfile.normaHome`
-        // (never a literal `~/.norma`, the dev/dist profile-blindness class that shipped as a live
+        // app-shell T8: the outputs watcher — profile-resolved through `AppProfile.winterHome`
+        // (never a literal `~/.winter`, the dev/dist profile-blindness class that shipped as a live
         // bug once). Construction alone touches nothing real; the OS-level `start()` registration
         // is gated `!isRunningUnitTests` below, same posture as the daemon supervisor's real spawn
         // and Sparkle's updater construction — a bare `boot()` call from the dozens of existing
         // tests must register no real FSEventStream.
-        let outputs = OutputsWatcher(home: AppProfile.normaHome)
+        let outputs = OutputsWatcher(home: AppProfile.winterHome)
         outputsWatcher = outputs
         if !Self.isRunningUnitTests {
             outputs.start()
@@ -1011,7 +1011,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         peripheralProvider = peripheral
 
         // Task 4 (4c): the hardware bridge — battery charge-limit verbs, routed through
-        // `HelperClient`'s XPC connection to `NormaHelper`. Composed onto the SAME
+        // `HelperClient`'s XPC connection to `WinterHelper`. Composed onto the SAME
         // `onPeripheralEvent` hook `peripheral` uses below (both are side-observers of the raw
         // event stream fired for every `.session` event — see `AppModel.init`'s `feed.onEvent`),
         // never restructuring that plumbing. `HelperClient()`'s own init only reads
@@ -1045,7 +1045,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // other real-side-effect call in this method (Sparkle's updater construction,
         // `helper.register()`, `CliInstaller.offerOnFirstLaunchIfNeeded()` below); fire-and-forget
         // (`Task`) — nothing else in `boot()` depends on this completing, and both dev/dist
-        // profiles autostart identically, each against its own `NORMA_HOME`/pairing store.
+        // profiles autostart identically, each against its own `WINTER_HOME`/pairing store.
         if !Self.isRunningUnitTests {
             Task { [weak self] in
                 await self?.remoteAccessCoordinator?.startRemoteAccessIfPaired()
@@ -1201,7 +1201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // `HotkeyTrigger.shared`'s own registration above. Bindings are edited by the Task 4
             // shortcut-editor UI (not built yet); this just loads whatever's already persisted
             // (empty on a fresh install) and arms it. A fired hotkey pushes straight to the owning
-            // plugin via NormaKit's `shortcut.invoke` RPC (`shortcutInvoke`) — fire-and-forget from
+            // plugin via WinterKit's `shortcut.invoke` RPC (`shortcutInvoke`) — fire-and-forget from
             // the app's perspective, same posture as the menu bar's other client-call sites; a
             // failure (plugin not connected, unknown plugin, RPC error) is logged, not surfaced,
             // since there's no UI surface here to show it on.
@@ -1237,9 +1237,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             peripheral.registerPanicSurfaces()
             peripheral.startTCCPolling()
 
-            // Task 4 (4c): register the NormaHelper daemon with SMAppService at launch. A real
+            // Task 4 (4c): register the WinterHelper daemon with SMAppService at launch. A real
             // registration call (servicemanagementd round-trip) — same `!isRunningUnitTests` gate
-            // as above; the `NormaAppTests` bundle loader IS the real `Norma.app`, so an
+            // as above; the `WinterAppTests` bundle loader IS the real `Winter.app`, so an
             // ungated call here would attempt to register an actual privileged daemon from the
             // test process. Live approval (System Settings > Login Items) is Task 6's gate —
             // `helper.status` degrades to `.requiresApproval` until the user acts, which
@@ -1305,7 +1305,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let mb = MenuBarController(
             statusLine: { [weak model] in
-                tokenMissing ? "no daemon token — run `norma daemon run`, then relaunch"
+                tokenMissing ? "no daemon token — run `winter daemon run`, then relaunch"
                              : (model?.connectionSummary ?? "starting…")
             },
             toggleOrb: { [weak self] in
@@ -1316,9 +1316,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 TriggerHub.shared.fire(from: "menu")
             },
             openCli: { [weak self] in self?.cliLauncher.openCli() },
-            // App shell T1 (summon path): "Open Norma App" summons the ONE app window instead of
+            // App shell T1 (summon path): "Open Winter App" summons the ONE app window instead of
             // spawning a fresh-session detached window.
-            openNormaApp: { [weak self] in self?.summonAppWindow() },
+            openWinterApp: { [weak self] in self?.summonAppWindow() },
             // App shell T6 (the menu-bar retarget): every remaining menu path now summons+navigates
             // the SAME singleton instead of spawning its own window. "Chat" browses the chat mode's
             // landing (`.mode(.chat)`) — `openChat()`'s old open-newest-or-create detached-window
@@ -1365,7 +1365,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #if DEBUG
         // editor-plumbing Task 5 — wired BEFORE `install()`, which is where the menu is built, and
         // which is also what mounts the item at all (the hook being nil is the "do not mount"
-        // condition). Debug-only, and it opens the same harness `NORMA_EDITOR_HARNESS=1` runs
+        // condition). Debug-only, and it opens the same harness `WINTER_EDITOR_HARNESS=1` runs
         // unattended: same browser, same drill, same transcript, but the app keeps running and the
         // window stays up to read.
         mb.onOpenEditorHarness = { [weak self] in
@@ -1429,7 +1429,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak mb] _ in
             Task { @MainActor in mb?.refresh() }
         }
-        // DD-T7: dist-only first-launch offer for the `norma` command — late in launch, after the
+        // DD-T7: dist-only first-launch offer for the `winter` command — late in launch, after the
         // menu exists (`mb.install()` above), gated `!isRunningUnitTests` the same way as every
         // other real-side-effect call in this method (Sparkle's updater construction, the AX
         // prompt, etc.) since `offerOnFirstLaunchIfNeeded()` can show a real modal `NSAlert`.
@@ -1457,7 +1457,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// names the reason: `updaterQuitting` bypasses `editorQuitGate` entirely, so THIS is the only
     /// place an in-flight Sparkle install ever asks "would proceeding lose someone's unsaved work" —
     /// and since Stage B, office documents can hold exactly as much unsaved work as an editor model
-    /// can. Internal, not `private` — `AppLifecycleTests` (`@testable import Norma`) drives it
+    /// can. Internal, not `private` — `AppLifecycleTests` (`@testable import Winter`) drives it
     /// directly, the same door `testAppDelegateTeardownAllRuntimesClosureWalksBothRuntimeTables...`
     /// already opened for `editorQuitGate.teardownAllRuntimes`.
     func liveDirtyEditorsOrOfficeDocuments() -> Bool {
@@ -1541,13 +1541,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// **The quit door — live-gate fix H, and the one place the browser views get unparented while
     /// the app is still ALIVE.**
     ///
-    /// The user's real quit tripped `NormaCEF.mm`'s shutdown tripwire: `shutting down (2 browser(s)
+    /// The user's real quit tripped `WinterCEF.mm`'s shutdown tripwire: `shutting down (2 browser(s)
     /// still open, 50/50 drain turns, …)` with `browser closed` arriving from inside `CefShutdown`.
     /// A close completes when CEF's host view deallocates, and any browser whose container has ever
     /// been MOUNTED in a real window carries references that only drop after the unparent has been
     /// followed by ordinary run-loop turns.
     ///
-    /// **Measured, on the spike (`NORMA_SPIKE_CLOSE_MOUNTED=1 NORMA_SPIKE_CLOSE_BROWSERS=3`), as
+    /// **Measured, on the spike (`WINTER_SPIKE_CLOSE_MOUNTED=1 WINTER_SPIKE_CLOSE_BROWSERS=3`), as
     /// CEF's own host view's retain count at the instant the close releases it:**
     ///
     /// | when the containers are unparented | retain count | shutdown line |
@@ -1561,13 +1561,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// So it is not about how long you wait — nothing *inside* the terminate sequence releases them
     /// — it is about being outside it. Hence this: unparent, let the run loop turn, then terminate.
     ///
-    /// `NormaCEFSetPreShutdownHook` still exists and still does the same unparent, and the table
-    /// above is exactly why it is not enough on its own: it is the belt for a `NormaCEFShutdown`
+    /// `WinterCEFSetPreShutdownHook` still exists and still does the same unparent, and the table
+    /// above is exactly why it is not enough on its own: it is the belt for a `WinterCEFShutdown`
     /// reached without passing through here (a system logout, which arrives straight at
     /// `applicationShouldTerminate`, and any future embedder-side call). Those keep the residual;
     /// see spec §10 gate 10.
     ///
-    /// A Norma with no live browser terminates immediately — no timer, no delay, nothing to release.
+    /// A Winter with no live browser terminates immediately — no timer, no delay, nothing to release.
     ///
     /// **live-gate fix I: the beat this method buys is only worth having if nothing refills it.**
     /// The user's next real quit — eleven browsers — still ended `1 browser(s) still open, 50/50
@@ -1627,7 +1627,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Lifecycle T3: the source-aware termination gate (product spec — only the menu-bar "Quit
-    /// Norma" is a REAL quit). `terminateDecision` is the pure truth table (see its own doc).
+    /// Winter" is a REAL quit). `terminateDecision` is the pure truth table (see its own doc).
     /// Review fix: a system LOGOUT/RESTART/SHUTDOWN arrives through this SAME delegate call as a
     /// user ⌘Q — answering it `.terminateCancel` would BLOCK the user's logout indefinitely, so
     /// `systemQuitReasonProvider` (the Apple-Event quit-reason read, injectable seam above) is the
@@ -1686,11 +1686,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
 
-    /// Lifecycle T3: dock-tile / Finder relaunch while Norma is already running (LSUIElement apps
+    /// Lifecycle T3: dock-tile / Finder relaunch while Winter is already running (LSUIElement apps
     /// still receive `reopen` on a Finder double-click even with no dock tile to click). A main
     /// window is already open: return `true` and let AppKit's own default reopen handling bring it
     /// forward (including un-minimizing) — the dock icon is already showing in that case, nothing
-    /// else to promote. No main window open: open one ourselves (the same "Open Norma App"
+    /// else to promote. No main window open: open one ourselves (the same "Open Winter App"
     /// primitive the menu bar uses, which promotes the dock icon as a side effect of the window it
     /// shows) and return `false`, since AppKit has nothing left to do.
     ///
@@ -1710,7 +1710,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 /// Lifecycle T3: pure decision core for `applicationShouldTerminate` — no `NSApp`/AppleEvent
 /// reference, so the whole truth table is unit-testable without any AppKit state (see
 /// `AppLifecycleTests.testTerminateDecision`). `.terminateNow` iff `reallyQuitting` (set ONLY by
-/// the menu-bar "Quit Norma") OR `systemInitiated` (review fix: the quit Apple Event carries a
+/// the menu-bar "Quit Winter") OR `systemInitiated` (review fix: the quit Apple Event carries a
 /// logout/restart/shutdown reason — refusing THOSE would block the user's logout indefinitely)
 /// OR `updaterQuitting` (Sparkle whole-branch review fix: Sparkle's installer quits the host via
 /// a CANCELLABLE quit event with no kAEQuitReason — `AppDelegate.updaterQuitting`, armed by
@@ -1821,7 +1821,7 @@ func quitDirtyAlertFileList(dirtyPaths: [String]) -> String {
 /// gate entirely (`applicationShouldTerminate`'s `systemInitiated` axis answers `.terminateNow`
 /// straight from AppKit's own quit event, never through the menu-bar `quit:` closure this wires
 /// into) — an editor browser gets exactly the same residual-unclean-close exposure on logout that a
-/// web browser already has (`quitReleasingBrowserViews`'s own doc, "the belt for a `NormaCEFShutdown`
+/// web browser already has (`quitReleasingBrowserViews`'s own doc, "the belt for a `WinterCEFShutdown`
 /// reached without passing through here"; spec §10 gate 10), unchanged by this task.
 @MainActor
 struct EditorQuitGate {

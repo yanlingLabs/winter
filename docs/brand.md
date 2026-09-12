@@ -1,13 +1,13 @@
-# Norma Brand Style Guide
+# Winter Brand Style Guide
 
-The canonical definition of how Norma looks — colors, type, and the rules that keep two native apps on two platforms reading as one product.
+The canonical definition of how Winter looks — colors, type, and the rules that keep two native apps on two platforms reading as one product.
 
 **This document is the source of truth.** Two apps implement it:
 
 | | Catalog | Names them |
 | --- | --- | --- |
-| **Mac** | `apple/Norma/Assets.xcassets` | `apple/Norma/Sources/App/Theme.swift` |
-| **iOS** | `../norma-ios/Norma/Assets.xcassets` | `../norma-ios/Norma/App/Theme.swift` |
+| **Mac** | `apple/Winter/Assets.xcassets` | `apple/Winter/Sources/App/Theme.swift` |
+| **iOS** | `../norma-ios/Winter/Assets.xcassets` | `../norma-ios/Winter/App/Theme.swift` |
 
 The palette originated on iOS, derived from the Claude iOS app and tuned by hand; the Mac adopted it in the 2026-08-07 sidebar-brand pass. The iOS design gallery (`../norma-ios/docs/ios26-design-gallery/`) remains the **phone's** styling authority for layout, materials, and Liquid Glass. This document governs **color and type on both platforms** and nothing else.
 
@@ -100,7 +100,7 @@ The brand teal drives prominent controls, links, and `.tint(_:)`. It does **not*
 
 On Mac this has a specific mechanical consequence: **`ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME` is deliberately left unset.** A colorset named `AccentColor` becomes the app-wide control tint the moment that setting names it — retinting every system control as a silent side effect of adding the palette. Keep it unset.
 
-**Corollary, and it bit for real:** because that setting is unset, SwiftUI's `Color.accentColor` (and `.tint`'s default, and `.accentColor` in any form) resolves to **the user's own System Settings accent** — whatever they picked in General — not to Norma's teal. Code that wants the brand must name `Theme.accent`. Every accent-tinted piece of the Mac's approval and question cards was drawing in the Mac owner's personal accent until the 2026-08-12 transcript pass; `TranscriptBrandTests` now fails the suite on any `accentColor` in `ChatContent/`.
+**Corollary, and it bit for real:** because that setting is unset, SwiftUI's `Color.accentColor` (and `.tint`'s default, and `.accentColor` in any form) resolves to **the user's own System Settings accent** — whatever they picked in General — not to Winter's teal. Code that wants the brand must name `Theme.accent`. Every accent-tinted piece of the Mac's approval and question cards was drawing in the Mac owner's personal accent until the 2026-08-12 transcript pass; `TranscriptBrandTests` now fails the suite on any `accentColor` in `ChatContent/`.
 
 And an ancestor `.tint(_:)` does **not** rescue it — probed: with a system accent of `#FFC726`, `Color.accentColor` renders `#FFC727` even inside `.tint(Theme.accent)`, while `ShapeStyle.tint` renders `#2E9484`. `.tint` reaches `ShapeStyle.tint`, carets and selection; it does not reach `Color.accentColor`, which reads the system preference directly.
 
@@ -108,7 +108,7 @@ And an ancestor `.tint(_:)` does **not** rescue it — probed: with a system acc
 
 `#0B0B0B` on a `#181816` base. This is intentional, measured from Claude, and adopted on purpose: a semantic system fill *cannot* express "darker than background", which is exactly why this is an authored asset rather than `.quaternary`.
 
-Note this **differs from ChatGPT**, whose selected row is lighter than its pane. Where the two references disagree, Norma follows Claude — that is where the palette came from.
+Note this **differs from ChatGPT**, whose selected row is lighter than its pane. Where the two references disagree, Winter follows Claude — that is where the palette came from.
 
 ### 3.4 Contrast — a known limitation
 
@@ -136,7 +136,7 @@ Two consequences.
 
 ### 3.6 Diff colors — the one place colour carries meaning
 
-Everywhere else in Norma, colour is *surface*: § 3.4 records that this palette has had no danger and no success tone at all, which is why the transcript's failure lines are set in `.primary` and its status glyphs are shape-only. A diff is the exception, and not by preference — red and green **are** what the two columns mean, on every diff surface a person has ever read.
+Everywhere else in Winter, colour is *surface*: § 3.4 records that this palette has had no danger and no success tone at all, which is why the transcript's failure lines are set in `.primary` and its status glyphs are shape-only. A diff is the exception, and not by preference — red and green **are** what the two columns mean, on every diff surface a person has ever read.
 
 Four tokens, both schemes: a **foreground pair** (the transcript chip's `-N +M`, the diff tab's gutter numbers and `±` markers) and a **row-wash pair** (the full-row background tint on changed rows).
 
@@ -178,7 +178,7 @@ How visible the washes themselves are, against the plane they tint: added 1.085:
 
 ### 3.7 Panel kind tints
 
-**Mac-only** — the panel strip (`apple/Norma/Sources/AppShell/ShellPanel.swift`) has no iOS surface, so there is nothing on the phone for these to mirror, the same declared-exception class as § 1's four Mac-only tokens.
+**Mac-only** — the panel strip (`apple/Winter/Sources/AppShell/ShellPanel.swift`) has no iOS surface, so there is nothing on the phone for these to mirror, the same declared-exception class as § 1's four Mac-only tokens.
 
 Six soft washes, one per `PanelTabKind` (`web`/`document`/`code`/`note`/`diff`/`files`) — a single colorset per kind (`Theme.panelKindTint(_:)`'s own exhaustive switch, no `default:`), never two. Every stronger use is *derived* by scaling the one authored alpha: the group chip at `panelKindChipTintOpacityMultiplier` (2.0×), and the pill's hover/selected rungs at `panelKindPillHoverOpacityMultiplier` (1.6×) / `panelKindPillSelectedOpacityMultiplier` (2.4×). `Color.opacity(_:)` was measured to MULTIPLY an already-translucent colour's stored alpha (0.08 → 0.16 exactly) rather than replace or clamp it, which is what lets a single authored value scale correctly in both appearances.
 
@@ -222,7 +222,7 @@ Six soft washes, one per `PanelTabKind` (`web`/`document`/`code`/`note`/`diff`/`
 
 ### 3.8 The editor's Monaco theme (editor-product Task 4)
 
-`EditorTheme.tokensJSON(for:)` (`apple/Norma/Sources/AppShell/EditorTheme.swift`) is a Monaco `defineTheme` payload built entirely from tokens this document already names — no new hex is authored for the editor. `base` is Monaco's own builtin `vs` (light) / `vs-dark` (dark), `inherit: true` so everything this payload does NOT name still comes from that builtin. `EditorRuntime` sends it immediately once the page reports `ready`, and again on every system appearance change (`NSApp`'s own `effectiveAppearance`, the app's first non-SwiftUI reactor to it — every other surface adapts through `Color`/`Image`'s automatic machinery, which a Chromium page has none of).
+`EditorTheme.tokensJSON(for:)` (`apple/Winter/Sources/AppShell/EditorTheme.swift`) is a Monaco `defineTheme` payload built entirely from tokens this document already names — no new hex is authored for the editor. `base` is Monaco's own builtin `vs` (light) / `vs-dark` (dark), `inherit: true` so everything this payload does NOT name still comes from that builtin. `EditorRuntime` sends it immediately once the page reports `ready`, and again on every system appearance change (`NSApp`'s own `effectiveAppearance`, the app's first non-SwiftUI reactor to it — every other surface adapts through `Color`/`Image`'s automatic machinery, which a Chromium page has none of).
 
 **Chrome — five colors, all reused, none authored fresh:**
 
@@ -248,7 +248,7 @@ The five contrast figures are not new measurements — they are § 3.6's own "on
 
 **The light-mode `systemGreen` limitation carries over, unfixed, as § 3.6 already records it.** `2.11:1` is below the 4.5:1 body floor, and it is not a property of the editor or of this payload — it is Apple's `systemGreen` on `CardSurface`, true of every string literal in every code surface this app has, editor included. § 3.6's own ruling stands without amendment: "fixing the syntax palette is a separate change to a shared surface; tracked here, not fixed here."
 
-**The white flash — the OTHER half of this task, not a color-token question.** A Chromium page paints opaque white by default for the whole window between a browser existing and its own first paint — for the editor (asset load, the Monaco AMD bootstrap) on the order of a few hundred milliseconds, well before `setTheme` above could ever reach it. Two changes close that window rather than reduce it: the CEF browser's own `background_color` is set AT CREATION to `EditorTheme.cardSurfaceBackgroundARGB(for:)` — the scheme's `CardSurface`, opaque, packed `0xAARRGGBB` (`NormaCEF.h`'s `backgroundColorARGB` parameter — `0x00000000` is reserved as "no override" for every non-editor caller); `editor.html`'s body becomes `background: transparent`, so that browser-level color shows through instead of Chromium's own white until Monaco's first paint lands. Measured live (editor-product Task 4's harness run): with the branded theme sent immediately on `ready` (drill 1's `1.brand` step), a screenshot taken well into the run shows the editor already painted in `CardSurface`'s own tone, not white.
+**The white flash — the OTHER half of this task, not a color-token question.** A Chromium page paints opaque white by default for the whole window between a browser existing and its own first paint — for the editor (asset load, the Monaco AMD bootstrap) on the order of a few hundred milliseconds, well before `setTheme` above could ever reach it. Two changes close that window rather than reduce it: the CEF browser's own `background_color` is set AT CREATION to `EditorTheme.cardSurfaceBackgroundARGB(for:)` — the scheme's `CardSurface`, opaque, packed `0xAARRGGBB` (`WinterCEF.h`'s `backgroundColorARGB` parameter — `0x00000000` is reserved as "no override" for every non-editor caller); `editor.html`'s body becomes `background: transparent`, so that browser-level color shows through instead of Chromium's own white until Monaco's first paint lands. Measured live (editor-product Task 4's harness run): with the branded theme sent immediately on `ready` (drill 1's `1.brand` step), a screenshot taken well into the run shows the editor already painted in `CardSurface`'s own tone, not white.
 
 ---
 
@@ -260,8 +260,8 @@ Since the 2026-08-13 typography pass this section is the **type source of truth 
 
 | | Token file | Enforced by |
 | --- | --- | --- |
-| **Mac** | `apple/Norma/Sources/App/Typography.swift` (+ the serif bindings in `Theme.swift`) | `TypographyTests` — parses this section's tables AND sweeps every app source |
-| **iOS** | `../norma-ios/Norma/App/Typography.swift` (+ the serif bindings in its `Theme.swift`) | `TypographyTests` in `NormaTests` — transcription + the same sweep |
+| **Mac** | `apple/Winter/Sources/App/Typography.swift` (+ the serif bindings in `Theme.swift`) | `TypographyTests` — parses this section's tables AND sweeps every app source |
+| **iOS** | `../norma-ios/Winter/App/Typography.swift` (+ the serif bindings in its `Theme.swift`) | `TypographyTests` in `WinterTests` — transcription + the same sweep |
 
 ### 4.1 The parity law
 
@@ -273,7 +273,7 @@ The x-height facts stay recorded — as **accepted properties**, no longer as th
 - NY at 15.5 pt: x-height **7.3337** — within **0.48%** of SF at 14 pt
 - SF at 15.5 pt: x-height **8.1587** — at a shared point size the serif reads **~10% optically lighter** (−10.11%)
 
-That last line is the accepted property: at the shared ladder, Norma's serif reply reads ~10% lighter than the sans bubble beside it. Known, chosen — it is iOS's own rendered relationship, and matching it is the point. (An earlier pass sized the Mac's sans ladder lower to equalise x-heights; the ruling retired that — § 4.6.)
+That last line is the accepted property: at the shared ladder, Winter's serif reply reads ~10% lighter than the sans bubble beside it. Known, chosen — it is iOS's own rendered relationship, and matching it is the point. (An earlier pass sized the Mac's sans ladder lower to equalise x-heights; the ruling retired that — § 4.6.)
 
 Consequences, stated as law:
 
@@ -287,7 +287,7 @@ Serif may be used **only** for:
 1. **The wordmark** — the iOS drawer title, the Mac sidebar header (`Theme.wordmark`, both platforms).
 2. **The pairing-gate title** — iOS only (`Theme.serifTitle`).
 3. **The pairing words display** — iOS only (`Theme.pairingWords`).
-4. **Assistant prose in the transcript** — the reading face for what the assistant says. *Live on both platforms* (iOS from SP-chat; Mac from the 2026-08-12 chat-parity pass). The question card's question text is this binding too, by derivation — Norma asking is Norma speaking. So is the **orb field's inline reply** (ruled 2026-08-13: "the assistant reply should also use the same font the mac app uses font style and size") — `Typography.fieldAssistantMessage` wraps this face at the assistant role's size; same voice, one more surface, not a new binding.
+4. **Assistant prose in the transcript** — the reading face for what the assistant says. *Live on both platforms* (iOS from SP-chat; Mac from the 2026-08-12 chat-parity pass). The question card's question text is this binding too, by derivation — Winter asking is Winter speaking. So is the **orb field's inline reply** (ruled 2026-08-13: "the assistant reply should also use the same font the mac app uses font style and size") — `Typography.fieldAssistantMessage` wraps this face at the assistant role's size; same voice, one more surface, not a new binding.
 5. **The Mac new-chat greeting** (`Theme.greeting`) — added 2026-08-07. Not invented on a whim: the iOS gallery's typography file names "the home greeting" as a sanctioned serif moment alongside the wordmark; this entry *records* that shipped decision (its full defence lives on the token's own doc), which the list had failed to do until the 2026-08-13 typography pass.
 
 Everything else — user messages, tool output, lists, chrome, code — stays on the system sans by doing nothing.
@@ -330,7 +330,7 @@ iOS's serif ladder is semantic: body prose `.body` serif; H1–H2 `.title3` semi
 
 #### The question card (one ladder, two registers)
 
-The question is Norma asking, so its text is **binding #4 by derivation** on both platforms: on iOS by construction (`questionText ≡ assistantProse`), on the Mac by code (`QuestionCardType.question` *reads* `transcriptProseMetrics(.assistant).bodySize` — pinned as a derivation, never a copied number, by `InteractionCardTests`). The Mac steps are the iOS ratios against `.body` = 17, rounded to half points.
+The question is Winter asking, so its text is **binding #4 by derivation** on both platforms: on iOS by construction (`questionText ≡ assistantProse`), on the Mac by code (`QuestionCardType.question` *reads* `transcriptProseMetrics(.assistant).bodySize` — pinned as a derivation, never a copied number, by `InteractionCardTests`). The Mac steps are the iOS ratios against `.body` = 17, rounded to half points.
 
 | Role | iOS | Mac | Notes |
 | --- | --- | --- | --- |
@@ -448,7 +448,7 @@ The scale (§ 4.5) plus its mono variants and the named one-offs:
 | `shortcutKeyNS` | — | 11 | Shortcut recorder key-caps. |
 | `panelTabLabelNS` | — | 12 | The web panel's native tab label. |
 
-Block maths (`mathNS`) walks a real maths-face candidate list (STIX Two first) and **defaults to the assistant-prose body size by derivation** (`mathDefaultNS`) — display maths sits inside Norma's reply.
+Block maths (`mathNS`) walks a real maths-face candidate list (STIX Two first) and **defaults to the assistant-prose body size by derivation** (`mathDefaultNS`) — display maths sits inside Winter's reply.
 
 #### The serif registers (both platforms, `Theme`)
 
@@ -502,8 +502,8 @@ Tokenisation is a refactor: rendered output changes **only** where a row here re
 
 ### 4.8 Enforcement
 
-- **Mac** — `TypographyTests` (in `NormaAppTests`): `testEveryRoleMatchesTheTableInBrandMd` parses § 4.3/§ 4.5's Mac cells from this file and asserts them against the live tokens (both directions, with a minimum-row floor so a format change cannot green it vacuously); `testNoFontIsConstructedOutsideTheTokenFiles` sweeps `Sources/` recursively; `testTokenFileConstructionCountIsPinned` pins the number of constructions inside the token files. Plus the pre-existing `TranscriptBrandTests` ladders/x-height/serif pins and `InteractionCardTests`' derivation pins.
-- **iOS** — `TypographyTests` (in `NormaTests`): the doc table hand-transcribed (the § 1 palette pattern — the doc lives in this repo, so the phone asserts the transcription; updating the table means updating that test in the same change), the same recursive sweep, the same construction-count pin.
+- **Mac** — `TypographyTests` (in `WinterAppTests`): `testEveryRoleMatchesTheTableInBrandMd` parses § 4.3/§ 4.5's Mac cells from this file and asserts them against the live tokens (both directions, with a minimum-row floor so a format change cannot green it vacuously); `testNoFontIsConstructedOutsideTheTokenFiles` sweeps `Sources/` recursively; `testTokenFileConstructionCountIsPinned` pins the number of constructions inside the token files. Plus the pre-existing `TranscriptBrandTests` ladders/x-height/serif pins and `InteractionCardTests`' derivation pins.
+- **iOS** — `TypographyTests` (in `WinterTests`): the doc table hand-transcribed (the § 1 palette pattern — the doc lives in this repo, so the phone asserts the transcription; updating the table means updating that test in the same change), the same recursive sweep, the same construction-count pin.
 - **What the sweep cannot see** (each checked 2026-08-13): implicit `.init(` in argument position to a `Font`-typed parameter; `AttributeContainer.font = .body`-style implicit assignment; `.environment(\.font, …)` (none in either app); `.lineSpacing` literals outside the tokenised transcript surfaces; `.imageScale` (relative, no number; unused); `.minimumScaleFactor` (unused); Interface Builder files (neither repo has any); and omissions — a control that never sets a font renders the platform default. Multi-line `.font(` arguments are *forced* single-line rather than parsed.
 - Trailing comments are not stripped by the sweep — it over-flags rather than under-flags, by design. Write the reason on its own line.
 
@@ -511,7 +511,7 @@ Tokenisation is a refactor: rendered output changes **only** where a row here re
 
 ## 5. Mac sidebar metrics
 
-The sidebar's vocabulary, measured from the ChatGPT desktop reference. All are **tune-at-gate** constants in `apple/Norma/Sources/AppShell/ShellSidebar.swift`.
+The sidebar's vocabulary, measured from the ChatGPT desktop reference. All are **tune-at-gate** constants in `apple/Winter/Sources/AppShell/ShellSidebar.swift`.
 
 | Constant | Value | Note |
 | --- | --- | --- |

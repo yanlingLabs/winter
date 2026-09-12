@@ -1,7 +1,7 @@
 import AppKit
-import NormaKit
+import WinterKit
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// office-plumbing Task 6 — `PanelDocumentTabModel`/`PanelDocumentTabModels`: the registry, the pure
 /// viewport-plan/part-strip/door decisions, and the model's own lifecycle (lazy open, the
@@ -284,7 +284,7 @@ final class PanelDocumentTabTests: XCTestCase {
 
     // MARK: - T5 fix round, review Critical-1 — the app-abort regression tests
     //
-    // Every string below used to abort NORMA.APP ITSELF: Swift traps on `Int` overflow (only `&*`
+    // Every string below used to abort WINTER.APP ITSELF: Swift traps on `Int` overflow (only `&*`
     // wraps), in `-O` as well as debug, and `officeColumnIndex`'s `value * 26` was unchecked with
     // nothing upstream bounding the letter run. Measured before the fix against a verbatim copy of
     // the original — SIGTRAP (exit 133) on each — in `task-5-fixround-report.md` §2. An agent typo

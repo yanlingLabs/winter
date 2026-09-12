@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { SessionEvent } from "@norma/protocol";
+import type { SessionEvent } from "@winter/protocol";
 import { readWinterTasks, tasksFromEvents, type TaskEventSource } from "../../src/runtime-sdk/tasks-reader";
 
 const SESSION = "s_tasks_test";

@@ -1,9 +1,9 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// app-shell T8 (spec §3): the outputs box's pure plumbing — path convention, the code/cowork mode
 /// gate, and the recursive listing `ShellSessionHost`/`OutputsWatcher` both read through. All
-/// filesystem-touching tests use a temp directory (never `~/.norma` — the standing test rule);
+/// filesystem-touching tests use a temp directory (never `~/.winter` — the standing test rule);
 /// `OutputsWatcherTests` covers the watcher's own diffing/vanish-tolerance seam.
 final class OutputsBoxTests: XCTestCase {
     /// `realpath(3)` AFTER creating the directory — `FileManager.enumerator(at:)` (`listOutputFiles`
@@ -33,16 +33,16 @@ final class OutputsBoxTests: XCTestCase {
         XCTAssertEqual(outputsSessionPath(home: "/tmp/dd-home", sessionId: "s_1"), "/tmp/dd-home/outputs/s_1")
     }
 
-    /// Profile-resolution pin (spec §3 / the dev-dist-blindness class): a dev-profile `NORMA_HOME`
-    /// override must flow straight through to the outputs path, never a literal `~/.norma` — the
+    /// Profile-resolution pin (spec §3 / the dev-dist-blindness class): a dev-profile `WINTER_HOME`
+    /// override must flow straight through to the outputs path, never a literal `~/.winter` — the
     /// exact chain `AppDelegate.boot()`/`ShellSessionHost.refreshOutputFiles` both use
-    /// (`outputsRootPath(home: AppProfile.normaHome)`).
-    func testOutputsRootPathIsProfileResolvedThroughAppProfileNormaHome() {
-        setenv("NORMA_HOME", "/tmp/dd-outputs-dev-home", 1)
-        defer { unsetenv("NORMA_HOME") }
-        XCTAssertEqual(outputsRootPath(home: AppProfile.normaHome), "/tmp/dd-outputs-dev-home/outputs")
-        XCTAssertFalse(outputsRootPath(home: AppProfile.normaHome).contains(NSHomeDirectory() + "/.norma"),
-                       "must never fall back to the literal ~/.norma while an explicit override is set")
+    /// (`outputsRootPath(home: AppProfile.winterHome)`).
+    func testOutputsRootPathIsProfileResolvedThroughAppProfileWinterHome() {
+        setenv("WINTER_HOME", "/tmp/dd-outputs-dev-home", 1)
+        defer { unsetenv("WINTER_HOME") }
+        XCTAssertEqual(outputsRootPath(home: AppProfile.winterHome), "/tmp/dd-outputs-dev-home/outputs")
+        XCTAssertFalse(outputsRootPath(home: AppProfile.winterHome).contains(NSHomeDirectory() + "/.winter"),
+                       "must never fall back to the literal ~/.winter while an explicit override is set")
     }
 
     // MARK: - listOutputFiles (recursive, sorted, vanish-tolerant)

@@ -2,7 +2,7 @@ import AppKit
 import ObjectiveC
 
 /// TEST-BUNDLE-ONLY desktop hygiene: while the app suite runs, it must not hijack the machine it
-/// runs on. `NormaAppTests` is hosted IN the real Norma.app (`TEST_HOST`) and ~1718 cases drive the
+/// runs on. `WinterAppTests` is hosted IN the real Winter.app (`TEST_HOST`) and ~1718 cases drive the
 /// REAL AppKit surfaces — so a plain run used to steal the user's keyboard mid-sentence and paint
 /// orbs/shells/panels over whatever they were doing, once per case, for every mutation round.
 ///
@@ -78,7 +78,7 @@ enum HarnessQuiet {
         // `_Tt…` is a SWIFT-MANGLED name, not a private AppKit one — a Swift class that is
         // `private`/nested reaches the ObjC runtime mangled, and the app's own orb panel is exactly
         // that: `private final class KeyableNonActivatingPanel` arrives as
-        // `_TtC5NormaP33_<hash>25KeyableNonActivatingPanel`. Measured, not guessed (the orb pin
+        // `_TtC5WinterP33_<hash>25KeyableNonActivatingPanel`. Measured, not guessed (the orb pin
         // printed it). This clause must come FIRST: the blanket `_` rule below would otherwise
         // spare the single most-shown window in the whole suite.
         if windowClassName.hasPrefix("_Tt") { return true }

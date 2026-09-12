@@ -1,8 +1,8 @@
 import SwiftUI
-import NormaProtocol
+import WinterProtocol
 
 /// panel-shell T7: UI-drawn categories for a panel tab. A separate type from the wire's
-/// `SessionEvent.PanelTabKind` (NormaProtocol) — same cases, deliberately not reused directly
+/// `SessionEvent.PanelTabKind` (WinterProtocol) — same cases, deliberately not reused directly
 /// so the tab-content boundary below never depends on the protocol module. `init(_:)` converts the
 /// wire type to this one with an EXHAUSTIVE SWITCH, never a `rawValue` force-unwrap: the wire type
 /// is CLOSED by design (its own doc comment, `SessionEvent.swift`, explains why a tab's kind picks
@@ -32,7 +32,7 @@ enum PanelTabKind: String, Codable, Equatable {
 
 /// One tab in the panel — folded from the daemon's persisted `panel_tab_*` events (`foldPanelTabs`
 /// below), never constructed by a local UI action directly. `tabId` (never `id` on the wire,
-/// matching NormaProtocol/`packages/protocol/src/methods.ts`) is the daemon-minted identity; `id`
+/// matching WinterProtocol/`packages/protocol/src/methods.ts`) is the daemon-minted identity; `id`
 /// is a computed alias so this can be `Identifiable` for SwiftUI lists without a second stored
 /// property to keep in sync with it.
 struct PanelTab: Identifiable, Equatable {
@@ -90,7 +90,7 @@ struct PanelTabState: Equatable {
 ///
 /// `panelCommand` is deliberately absent from this switch, exactly as `panel_command` is absent
 /// from the TS switch — it is TRANSIENT (`SessionEvent.transientTypes`/`.isTransient`,
-/// NormaProtocol), never persisted, and carries no tab state; folding it would record the same
+/// WinterProtocol), never persisted, and carries no tab state; folding it would record the same
 /// navigation twice, once as intent and once as the reported fact. Every other `SessionEvent` case
 /// (including every OTHER transient — `assistantDelta`, `sessionActivity`, etc.) falls through the
 /// same `default` — this fold never needs to ASK "is this transient": it simply doesn't recognize

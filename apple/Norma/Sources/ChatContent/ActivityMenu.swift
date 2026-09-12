@@ -1,5 +1,5 @@
 import SwiftUI
-import NormaKit
+import WinterKit
 
 // MARK: - The pure decisions (driven directly by ShellChatSurfaceTests)
 

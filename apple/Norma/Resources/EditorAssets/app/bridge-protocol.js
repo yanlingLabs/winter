@@ -28,7 +28,7 @@ Object.freeze(OUTBOUND_MESSAGE_TYPES);
  * Send one message to Swift over CEF's message router.
  *
  * `window.cefQuery` is installed into every V8 context by the renderer-side router
- * (`NormaSubprocessApp`, Task 3), so it exists on any page in any Norma browser — the editor page
+ * (`WinterSubprocessApp`, Task 3), so it exists on any page in any Winter browser — the editor page
  * is simply the one that uses it. One request, one reply: `persistent: false` is not a default
  * being restated, it is the protocol (Task 3's handler refuses a persistent query out loud).
  *
@@ -38,11 +38,11 @@ Object.freeze(OUTBOUND_MESSAGE_TYPES);
  */
 export function sendToSwift(type, payload = {}) {
     if (INBOUND_MESSAGE_TYPES.indexOf(type) < 0) {
-        console.error("normaEditor: refusing to send an unknown message type:", type);
+        console.error("winterEditor: refusing to send an unknown message type:", type);
         return;
     }
     if (typeof window.cefQuery !== "function") {
-        console.error("normaEditor: window.cefQuery is missing — the bridge is not wired; dropped:", type);
+        console.error("winterEditor: window.cefQuery is missing — the bridge is not wired; dropped:", type);
         return;
     }
     window.cefQuery({
@@ -53,7 +53,7 @@ export function sendToSwift(type, payload = {}) {
         persistent: false,
         onSuccess: function () {},
         onFailure: function (code, message) {
-            console.error("normaEditor: " + type + " failed (code " + code + "):", message);
+            console.error("winterEditor: " + type + " failed (code " + code + "):", message);
         }
     });
 }

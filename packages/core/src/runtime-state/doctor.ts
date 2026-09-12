@@ -1,4 +1,4 @@
-// WS-16 §15's diagnostics and repair — what `norma doctor` runs.
+// WS-16 §15's diagnostics and repair — what `winter doctor` runs.
 //
 // TWO RULES SHAPE EVERY LINE HERE.
 //
@@ -228,7 +228,7 @@ export async function diagnoseRuntimeState(home: string): Promise<Finding[]> {
     if (!(e instanceof RuntimeStateUnavailableError)) throw e;
     // §14: an authoritative store that is missing or corrupt refuses runtime resume/routing — and
     // NOTHING further is inferred from the rebuildable index, so this is the only finding returned.
-    if (e.reason === "newer-schema") return [{ kind: "db-newer-schema", detail: `${e.path}: written by a newer Norma; this build will not open it`, repairable: [] }];
+    if (e.reason === "newer-schema") return [{ kind: "db-newer-schema", detail: `${e.path}: written by a newer Winter; this build will not open it`, repairable: [] }];
     if (e.reason === "missing") {
       // A home that has never run a daemon has no `runtimes/` at all, and therefore no backups
       // either — offering `restore-backup` there sends the operator hunting for a file that cannot
@@ -468,7 +468,7 @@ export interface RecoveryAttemptSummary {
 }
 
 /**
- * P8d-11: `norma doctor`'s read of the daemon's own `runtime_recovery_attempts` audit trail — the
+ * P8d-11: `winter doctor`'s read of the daemon's own `runtime_recovery_attempts` audit trail — the
  * one boot-level (`winter_session_id IS NULL`) row per step from the MOST RECENT boot, so an
  * operator sees today's recovery rather than every boot this home has ever done. `restampStep`
  * (`recovery.ts`) updates step 10's row IN PLACE once the late `sdk.directory.recover()` call
@@ -520,7 +520,7 @@ export function latestRecoveryAttempts(home: string): RecoveryAttemptSummary[] {
  *
  * Review r1 (Important 2): the type promised that and the code did not. `openRuntimeStateDb` refuses
  * a corrupt/newer/unmigrated store by THROWING, and the filesystem can refuse a write for a dozen
- * reasons (EACCES, ENOSPC, a read-only volume) — so `norma doctor --repair` printed a raw stack
+ * reasons (EACCES, ENOSPC, a read-only volume) — so `winter doctor --repair` printed a raw stack
  * trace in exactly the broken-home state the verb exists for. Unlike the recovery path, a message is
  * safe to carry here: nothing on this path ever touches a message body or a transcript body.
  */
@@ -756,7 +756,7 @@ function restoreBackup(home: string, backupPath: string): RepairResult {
     // Caught here, while the current file is still intact (review r1, minor 7).
     const version = probe.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
     if (version > RUNTIME_STATE_SCHEMA_VERSION)
-      return { applied: false, detail: `backup was written by a newer Norma (schema ${version} > ${RUNTIME_STATE_SCHEMA_VERSION}): ${backupPath}` };
+      return { applied: false, detail: `backup was written by a newer Winter (schema ${version} > ${RUNTIME_STATE_SCHEMA_VERSION}): ${backupPath}` };
   } catch (e) {
     return { applied: false, detail: `backup is not a readable database: ${e instanceof Error ? e.name : "unknown"}` };
   } finally {

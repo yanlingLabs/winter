@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// 2e-iii Task 4 / Task 6: the pure width engine — thresholds (780 right / 740 left-alone / 1000
 /// both), the user's mutual-exclusion rule below both-fit ("opening the left collapses the right"),

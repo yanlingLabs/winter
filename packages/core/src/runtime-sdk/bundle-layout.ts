@@ -1,10 +1,10 @@
 // Winter Phase 8d (ruling P8d-1): the ONE place the Release bundle's runtime layout is spelled.
 //
-// `Norma.app/Contents/Resources/` holds `norma-core` (the daemon — `process.execPath` in a compiled
+// `Winter.app/Contents/Resources/` holds `winter-core` (the daemon — `process.execPath` in a compiled
 // build), so `dirname(execPath)` is that directory and every runtime payload sits under its
 // `runtimes/` subtree (WS-02 §7.1's placement; final subpaths owned by the app project):
 //
-//   runtimes/winter                         # the pinned-tag `winter` build, re-signed under Norma's team identity
+//   runtimes/winter                         # the pinned-tag `winter` build, re-signed under Winter's team identity
 //   runtimes/claude-official/claude         # the UNMODIFIED Anthropic binary (signature preserved, never re-signed)
 //   runtimes/claude-official/VERSIONS.json  # { schema, winterAgentSdk, winterRuntimeSdk, officialSdk, claudeCode, checksums, stagedAt }
 //

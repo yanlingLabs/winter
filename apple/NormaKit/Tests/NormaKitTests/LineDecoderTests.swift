@@ -1,5 +1,5 @@
 import XCTest
-@testable import NormaKit
+@testable import WinterKit
 
 final class LineDecoderTests: XCTestCase {
     func testSplitsCompleteLines() throws {

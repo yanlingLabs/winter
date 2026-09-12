@@ -1,7 +1,7 @@
-import NormaKit
-import NormaProtocol
+import WinterKit
+import WinterProtocol
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// office-agent-tools T1 — `OfficeCommandConsumer`, the routing shell that refuses every office verb.
 ///
@@ -66,7 +66,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
     }
 
     /// Built as WIRE JSON and decoded, never with a memberwise initialiser — `PanelCommand`'s own
-    /// init is internal to NormaProtocol, and going through the real decode is the honest shape
+    /// init is internal to WinterProtocol, and going through the real decode is the honest shape
     /// anyway: it is exactly what `parseServerLine` hands the pump, and it keeps a fixture from
     /// describing a payload the daemon could not emit. (`PanelCommandConsumerTests.command(_:...)`'s
     /// own doc makes the identical argument; duplicated here rather than shared because the two test
@@ -246,7 +246,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
     /// TODAY sends this (the daemon only ever emits `office.<kind>.<verb>`, all 24 well-formed), but
     /// `action` decodes as a plain `String` with no shape guarantee (`SessionEvent.swift`), so this
     /// file must not assume its own parser succeeds — the same posture
-    /// `testUnknownPanelCommandVerbStillDecodes` (NormaProtocol) takes for the wire layer beneath it.
+    /// `testUnknownPanelCommandVerbStillDecodes` (WinterProtocol) takes for the wire layer beneath it.
     func testAMalformedOfficeActionStillAnswersRatherThanCrashing() {
         let consumer = makeConsumer()
         consumer.handle(command("office.onlyonepart"))
@@ -1029,7 +1029,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
     /// lifecycle branches — so neither branch was actually pinned, and swapping the two texts would
     /// have kept both green. This asserts the clause only the opened branch can produce, and asserts
     /// the adopted branch's own clause is ABSENT, which is what makes it a discriminator.
-    func testSheetsFormatPartialFailureOnADocumentNormaOpenedSaysNothingPersisted() async {
+    func testSheetsFormatPartialFailureOnADocumentWinterOpenedSaysNothingPersisted() async {
         let path = makeScratchFile()
         let world = makeSheetsWorld(
             workingDirs: [SessionDirEntry(path: (path as NSString).deletingLastPathComponent, locked: true)],
@@ -1041,11 +1041,11 @@ final class OfficeCommandConsumerTests: XCTestCase {
         await waitUntil { !self.sent.isEmpty }
         XCTAssertEqual(sent.first?.ok, false)
         let result = sent.first?.result ?? ""
-        XCTAssertTrue(result.contains("discarded when Norma closed the document afterward"),
+        XCTAssertTrue(result.contains("discarded when Winter closed the document afterward"),
                       "a document THIS call opened is closed on the way out, so nothing survives: \(result)")
         XCTAssertTrue(result.contains("nothing from this call persisted"), result)
         XCTAssertFalse(result.contains("your own open tab"),
-                       "the ADOPTED branch's own sentence must not appear on a document Norma opened "
+                       "the ADOPTED branch's own sentence must not appear on a document Winter opened "
                            + "itself — that would tell the model to go look at a tab that does not "
                            + "exist: \(result)")
     }
@@ -1077,7 +1077,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
                       "an ADOPTED document is not closed on failure — its changes are still in the "
                           + "user's tab: \(result)")
         XCTAssertTrue(result.contains("refuse further writes"), result)
-        XCTAssertFalse(result.contains("discarded when Norma closed the document"),
+        XCTAssertFalse(result.contains("discarded when Winter closed the document"),
                        "the OPENED branch's own sentence must not appear on an adopted document — it "
                            + "would tell the model its changes are gone when they are sitting dirty "
                            + "in front of the user: \(result)")
@@ -1134,7 +1134,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
     // ============================================================================================
 
     /// **T5 fix-round RE-REVIEW, the NEW Critical — the fifth door.** Every value below used to
-    /// reach `oneBasedIndex`'s unbounded `Int(Double)` and ABORT NORMA.APP, from five live slides
+    /// reach `oneBasedIndex`'s unbounded `Int(Double)` and ABORT WINTER.APP, from five live slides
     /// handlers, because `z.number().int().positive()` is not a bound (`Number.isInteger(1e30)` is
     /// `true`). Same shape, same blast radius, and same test posture as the `sheets` vectors in
     /// `PanelDocumentTabTests`: a trap is not catchable by XCTest, so if the ceiling is ever removed
@@ -1551,7 +1551,7 @@ final class OfficeCommandConsumerTests: XCTestCase {
 
     /// **The class this arc has now paid for three times, closed on arrival for `docs`.**
     /// `paragraphIndex`'s `Int(Double)` TRAPS outside `Int`'s range — a SIGTRAP that aborts
-    /// Norma.app and every open document's unsaved edits. The daemon's zod bounds these too, but
+    /// Winter.app and every open document's unsaved edits. The daemon's zod bounds these too, but
     /// `panel_command.args` is `z.record(z.string(), z.unknown())` with only a byte cap, so nothing
     /// between a tool's schema and this file types or bounds a value at all — and `docs.ts` did not
     /// exist during the sweep that closed the same door for `sheets` and `slides`.

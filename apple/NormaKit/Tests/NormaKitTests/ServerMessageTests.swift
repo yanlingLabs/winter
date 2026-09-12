@@ -1,6 +1,6 @@
 import XCTest
-import NormaProtocol
-@testable import NormaKit
+import WinterProtocol
+@testable import WinterKit
 
 final class ServerMessageTests: XCTestCase {
     func testResponseWithResult() throws {

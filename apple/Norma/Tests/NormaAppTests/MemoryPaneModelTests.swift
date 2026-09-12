@@ -1,21 +1,21 @@
 import XCTest
-import NormaKit
-@testable import Norma
+import WinterKit
+@testable import Winter
 
 /// Phase 5b T5 review: `MemoryPaneModel`'s async correctness fixes — the stale-select-response
 /// guard (Important: a slow `memory.read` resolving after a newer selection must never overwrite
 /// the newer fact's edit state, or Save would write fact A's body under B's name), the same-shape
-/// delete guard, and the `canSave` empty-field gating. Drives a real (actor) `NormaClient` over
+/// delete guard, and the `canSave` empty-field gating. Drives a real (actor) `WinterClient` over
 /// the SAME scripted-transport double every other async model test in this target uses
 /// (`FeedScriptedTransport`/`feedLineJSON`/`feedWaitUntil`, SessionFeedTests.swift) — same posture
 /// as `PluginManagerModelAsyncTests`, no new client seam.
 @MainActor
 final class MemoryPaneModelTests: XCTestCase {
-    /// Opens + hellos a scripted `NormaClient`, mirroring `PluginManagerModelAsyncTests.
+    /// Opens + hellos a scripted `WinterClient`, mirroring `PluginManagerModelAsyncTests.
     /// connectedClient()` exactly (send count 1 == `protocol.hello`).
-    private func connectedClient() async throws -> (NormaClient, FeedScriptedTransport) {
+    private func connectedClient() async throws -> (WinterClient, FeedScriptedTransport) {
         let t = FeedScriptedTransport()
-        let client = NormaClient(makeTransport: { t }, token: "tok", clientName: "memory-pane-test")
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "memory-pane-test")
         async let c: Void = client.connect()
         await feedWaitUntil { !t.sent.isEmpty }
         let hello = feedLineJSON(t.sent[0])

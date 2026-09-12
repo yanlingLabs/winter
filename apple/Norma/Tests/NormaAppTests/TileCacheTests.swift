@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Office Stage A Task 4 — the exhaustive, pure table test for `TileCache`: generation bookkeeping,
 /// LRU eviction (the brief's own "pool-LRU eviction test"), and the EMPTY-invalidation inversion

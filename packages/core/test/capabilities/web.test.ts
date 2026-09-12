@@ -17,7 +17,7 @@ import type { CapabilitySession } from "../../src/capabilities/server";
 const SID = "s_web";
 const KEY = "brave_test_key_do_not_leak";
 /** `web_fetch` saves its converted page here; the directory need not exist for a refused fetch. */
-const TMPDIR = "/tmp/norma-cap-web-tmp";
+const TMPDIR = "/tmp/winter-cap-web-tmp";
 
 const servers: Array<{ stop(closeActive?: boolean): void }> = [];
 afterEach(() => { for (const s of servers.splice(0)) s.stop(true); });
@@ -54,7 +54,7 @@ describe("webCapability: the server shape", () => {
     const h = harness();
     const server = webCapability(h.session, { web: {} });
     expect(server.type).toBe("sdk");
-    expect(server.name).toBe("norma__web");
+    expect(server.name).toBe("winter__web");
     expect(isWinterMcpServerInstance(server.instance)).toBe(true);
     expect((server.instance as WinterMcpServerInstance).listTools().map((t) => t.name).sort())
       .toEqual(["web_fetch", "web_search"]);
@@ -106,11 +106,11 @@ describe("webCapability: the Brave key never leaves the daemon (P8b-33)", () => 
 
     const h = harness({ fetchFn });
     expect(h.secretCalls).toEqual([]);
-    const res = await h.instance.callTool("web_search", { query: "norma daemon" });
+    const res = await h.instance.callTool("web_search", { query: "winter daemon" });
     expect(h.secretCalls).toEqual([WEB_SEARCH_API_KEY_SECRET]); // read at CALL time
     expect(seen.length).toBe(1);
     expect(seen[0]!.key).toBe(KEY);
-    expect(seen[0]!.url).toContain("q=norma%20daemon");
+    expect(seen[0]!.url).toContain("q=winter%20daemon");
     expect(JSON.stringify(res.content)).not.toContain(KEY);
     // The audit line names the query and the outcome — never the key.
     expect(JSON.stringify(h.audits)).not.toContain(KEY);

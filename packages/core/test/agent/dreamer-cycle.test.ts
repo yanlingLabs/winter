@@ -37,7 +37,7 @@ function firstInputContent(provider: FakeProvider): string {
 
 describe("Dreamer.tick", () => {
   test("1) event filtering: window carries only user_message/assistant_message/child_update text, never tool/reasoning/harness noise", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-filter-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-filter-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS - 3);
     store.append(dispatchId, { type: "user_message", sessionId: dispatchId, threadId: "main", text: "my name is Alex", clientName: "test" });
     store.append(dispatchId, { type: "assistant_message", sessionId: dispatchId, threadId: "main", text: "noted" });
@@ -69,7 +69,7 @@ describe("Dreamer.tick", () => {
   });
 
   test("2) request shape: hardcoded model/effort, no tools, exact instruction text", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-shape-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-shape-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
 
     const provider = okProvider();
@@ -88,10 +88,10 @@ describe("Dreamer.tick", () => {
   });
 
   test("3) prompt carries state: memory file content, tombstones, and today's date (from injected now()) all appear", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-state-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-state-");
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "alex.md"), "Alex builds Norma.\n");
-    writeFileSync(join(dir, "MEMORY.md"), "# Assistant memory index\n\n- [alex](alex.md) — Alex builds Norma.\n");
+    writeFileSync(join(dir, "alex.md"), "Alex builds Winter.\n");
+    writeFileSync(join(dir, "MEMORY.md"), "# Assistant memory index\n\n- [alex](alex.md) — Alex builds Winter.\n");
     writeFileSync(join(dir, "tombstones.md"), "- never remember the user's address\n");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
 
@@ -104,17 +104,17 @@ describe("Dreamer.tick", () => {
     await dreamer.tick();
 
     const content = firstInputContent(provider);
-    expect(content).toContain("Alex builds Norma.");
+    expect(content).toContain("Alex builds Winter.");
     expect(content).toContain("never remember the user's address");
     expect(content).toContain("2026-07-18");
   });
 
   test("4) ops applied + watermark: write op lands on disk, MEMORY.md lists it, watermarkSeq === lastSeq, lastDreamAt === now()", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-apply-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-apply-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
 
     const opsJson = JSON.stringify({
-      ops: [{ op: "write", file: "alex.md", content: "---\nrevised: 2026-07-18\n---\nAlex builds Norma." }],
+      ops: [{ op: "write", file: "alex.md", content: "---\nrevised: 2026-07-18\n---\nAlex builds Winter." }],
     });
     const fixedNow = 1_753_000_000_000;
     const provider = okProvider(opsJson);
@@ -124,7 +124,7 @@ describe("Dreamer.tick", () => {
     });
     await dreamer.tick();
 
-    expect(readFileSync(join(dir, "alex.md"), "utf8")).toBe("---\nrevised: 2026-07-18\n---\nAlex builds Norma.");
+    expect(readFileSync(join(dir, "alex.md"), "utf8")).toBe("---\nrevised: 2026-07-18\n---\nAlex builds Winter.");
     expect(readFileSync(join(dir, "MEMORY.md"), "utf8")).toContain("alex.md");
     const state = JSON.parse(readFileSync(join(dir, "dream-state.json"), "utf8")) as { watermarkSeq: number; lastDreamAt: number };
     expect(state.watermarkSeq).toBe(store.lastSeq(dispatchId));
@@ -132,7 +132,7 @@ describe("Dreamer.tick", () => {
   });
 
   test("5) empty ops is a valid dream: no memory content file written, watermark still advances", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-empty-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-empty-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
 
     const provider = okProvider('{"ops":[]}');
@@ -149,7 +149,7 @@ describe("Dreamer.tick", () => {
   });
 
   test("6) malformed (no JSON) response: watermark not advanced, no files written, tick does not throw", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-malformed-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-malformed-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
 
     const provider = okProvider("I have nothing worth keeping today.");
@@ -163,7 +163,7 @@ describe("Dreamer.tick", () => {
   });
 
   test("7) invalid ops (13 ops, over MAX_OPS): watermark not advanced", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-invalidops-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-invalidops-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
 
     const tooMany = { ops: Array.from({ length: 13 }, (_, i) => ({ op: "tombstone", text: `t${i}` })) };
@@ -178,7 +178,7 @@ describe("Dreamer.tick", () => {
   });
 
   test("8) window cap: transcript is trimmed to DREAM_WINDOW_MAX_CHARS, marked, and drops the OLDEST content first", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-cap-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-cap-");
     const big = "x".repeat(5000);
     for (let i = 0; i < 50; i++) {
       store.append(dispatchId, { type: "user_message", sessionId: dispatchId, threadId: "main", text: `${big}-${i}`, clientName: "test" });

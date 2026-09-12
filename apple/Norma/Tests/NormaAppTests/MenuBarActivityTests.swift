@@ -1,6 +1,6 @@
 import XCTest
-import NormaProtocol
-@testable import Norma
+import WinterProtocol
+@testable import Winter
 
 /// Task 5 (DD-T5): the menu-bar live icon's pure transition function + frame-name derivation.
 /// Event construction mirrors `SessionModelTests.ev(_:)`'s mechanics exactly (JSON envelope ->
@@ -34,8 +34,8 @@ final class MenuBarActivityTests: XCTestCase {
     func testEventMapping() {
         // assistant streaming ⇒ thinking. NOTE (adaptation point 1): the brief's guessed
         // "reasoning_summary_delta" type string does not exist on the wire the app decodes —
-        // NormaProtocol's SessionEvent has no dedicated reasoning-delta case at all (the daemon's
-        // opaque `reasoning_item` deliberately decodes as `.unknownEvent`/`NormaEvent.unknown`,
+        // WinterProtocol's SessionEvent has no dedicated reasoning-delta case at all (the daemon's
+        // opaque `reasoning_item` deliberately decodes as `.unknownEvent`/`WinterEvent.unknown`,
         // never reaching `MenuBarActivity.next`, per CLAUDE.md's "reasoning_item is opaque"
         // contract) — so "reasoning streaming" collapses to `assistantDelta` alone here.
         XCTAssertEqual(MenuBarActivity.next(after: .idle, event: assistantDelta()), .thinking)

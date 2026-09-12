@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// gate-feedback-1 FIX A / orb-scope Part 2: the terminal-chat AND turn-origin suppression gates on
 /// `GlassRootView`'s answer-arrival auto-reveal. Independent pure pieces get their own coverage:
@@ -31,7 +31,7 @@ final class AutoRevealSuppressionTests: XCTestCase {
 
     func testNonTerminalBundleIdsAreNotRecognized() {
         XCTAssertFalse(isTerminalBundleIdentifier("com.apple.finder"))
-        XCTAssertFalse(isTerminalBundleIdentifier("com.norma.app"))
+        XCTAssertFalse(isTerminalBundleIdentifier("com.winter.app"))
         XCTAssertFalse(isTerminalBundleIdentifier("com.apple.dt.Xcode"))
     }
 

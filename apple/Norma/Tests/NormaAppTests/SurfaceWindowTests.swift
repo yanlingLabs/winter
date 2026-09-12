@@ -1,6 +1,6 @@
 import AppKit
 import XCTest
-@testable import Norma
+@testable import Winter
 
 // Task 5 (pragmatic stabilization): `SurfaceWindowTests` drives the surface-window animation
 // driver's real 60Hz timers across a MainActor hop. Under FULL-SUITE contention (626 tests) tight

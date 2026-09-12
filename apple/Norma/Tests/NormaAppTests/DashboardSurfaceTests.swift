@@ -1,7 +1,7 @@
 import XCTest
 import AppKit
-import NormaKit
-@testable import Norma
+import WinterKit
+@testable import Winter
 
 /// App shell Task 7: the Dashboard re-hosted inside the shell (`AppShell/DashboardSurface.swift`).
 /// Pure pane-catalogue/group coverage (migrated from `DashboardTests.swift`, whose subject file —
@@ -13,8 +13,8 @@ import NormaKit
 /// button has). SwiftUI bodies (`DashboardSurface`/`*Pane`) are deliberately NOT exercised here,
 /// per this codebase's convention. `PairingSheetPresentationModel` has NO tests here either — the
 /// SP2b T5 constraint it inherits is explicit and documented at its own definition
-/// (`PairingSheetModel.swift`, NormaKit): "the app-side coordinator/views get NO unit tests... ALL
-/// testable logic goes in the NormaKit model," and `PairingSheetPresentationModel` is exactly that
+/// (`PairingSheetModel.swift`, WinterKit): "the app-side coordinator/views get NO unit tests... ALL
+/// testable logic goes in the WinterKit model," and `PairingSheetPresentationModel` is exactly that
 /// app-side coordinator, just re-homed from an untested `NSPanel` controller to an untested
 /// `ObservableObject`.
 @MainActor
@@ -97,10 +97,10 @@ final class DashboardSurfaceTests: XCTestCase {
     // CliInstallerPane.swift — one of the Mac-group additions, spec §4)
 
     func testCliInstallStatusTextCoversEveryAction() {
-        XCTAssertEqual(cliInstallStatusText(.install), "The `norma` command isn't installed yet.")
+        XCTAssertEqual(cliInstallStatusText(.install), "The `winter` command isn't installed yet.")
         XCTAssertTrue(cliInstallStatusText(.repair).localizedCaseInsensitiveContains("repair"))
         XCTAssertTrue(cliInstallStatusText(.alreadyInstalled).contains(CliInstaller.linkPath))
-        XCTAssertTrue(cliInstallStatusText(.refuseForeign("/usr/local/bin/norma")).contains("/usr/local/bin/norma"))
+        XCTAssertTrue(cliInstallStatusText(.refuseForeign("/usr/local/bin/winter")).contains("/usr/local/bin/winter"))
     }
 
     func testCliInstallButtonTitleCoversEveryAction() {
@@ -189,7 +189,7 @@ final class DashboardSurfaceTests: XCTestCase {
         var procs: [FakeDaemonProcess] = []
         let delegate = AppDelegate()
         delegate.daemonSupervisorDeps = DaemonSupervisorDeps(
-            bundledDaemonPath: { "/x/norma-core" },
+            bundledDaemonPath: { "/x/winter-core" },
             socketExists: { false },
             isDevEnv: { false },
             spawn: { _ in let p = FakeDaemonProcess(); procs.append(p); return p },

@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { DEFAULT_CODEX_MODEL } from "./providers/codex-config";
-import { ensureGlobalGitignore, NORMA_PERSONAL_IGNORES } from "./global-gitignore";
+import { ensureGlobalGitignore, WINTER_PERSONAL_IGNORES } from "./global-gitignore";
 
 /** Reasoning-effort slugs valid on the wire — measured LIVE against the Codex OAuth endpoint
  *  (2026-07-30), one model at a time, NOT read off the /models catalogue text. That distinction
@@ -28,17 +28,17 @@ import { ensureGlobalGitignore, NORMA_PERSONAL_IGNORES } from "./global-gitignor
  *  first, the same way "none" and "ultra" were verified for this list. */
 export const REASONING_EFFORTS = ["none", "low", "medium", "high", "xhigh", "max"] as const;
 
-/** NORMA-LEVEL effort tiers (provider-correctness T5) — selectable in Norma, **never on the wire**.
+/** WINTER-LEVEL effort tiers (provider-correctness T5) — selectable in Winter, **never on the wire**.
  *
  *  This is a STRICTLY DISJOINT vocabulary from `REASONING_EFFORTS` above, and the two live next to
  *  each other so nobody reads one without the other. `REASONING_EFFORTS` is what the endpoint's
- *  request validator accepts. A value here is a Norma product decision that is TRANSLATED to a wire
+ *  request validator accepts. A value here is a Winter product decision that is TRANSLATED to a wire
  *  effort (`wireEffort` below) before any request body exists, plus whatever local behaviour the
  *  tier names.
  *
  *  `ultra` belongs here precisely BECAUSE the wire refuses it — the same global `invalid_value`
  *  enum documented above. It was never a real API level; it was a catalogue misreading. What the
- *  user actually wanted from it (the thing that made it look real) is now what it means in Norma:
+ *  user actually wanted from it (the thing that made it look real) is now what it means in Winter:
  *  `max` on the wire, plus a proactive-delegation posture in the system prompt
  *  (`ULTRA_DELEGATION_INSTRUCTION`, agent/context.ts). Code sessions only — see
  *  `clientEffortEligible`.
@@ -60,13 +60,13 @@ const CLIENT_EFFORT_WIRE: Record<ClientEffort, (typeof REASONING_EFFORTS)[number
   ultra: "max",
 };
 
-/** Whether `effort` is a Norma-level tier rather than a wire effort. Undefined (no selection) is
+/** Whether `effort` is a Winter-level tier rather than a wire effort. Undefined (no selection) is
  *  not a tier. */
 export function isClientEffort(effort: string | undefined): effort is ClientEffort {
   return effort !== undefined && (CLIENT_EFFORTS as readonly string[]).includes(effort);
 }
 
-/** Translate a SELECTED effort (a wire effort, a Norma tier, or nothing) into what may go on the
+/** Translate a SELECTED effort (a wire effort, a Winter tier, or nothing) into what may go on the
  *  wire. TOTAL by construction: every result is either `undefined` or a member of
  *  `REASONING_EFFORTS`, so no caller downstream of this can hand a tier to a provider. Applied at
  *  `AgentEngine.resolveSel` — the one place a session's stored effort becomes a request field. */
@@ -147,8 +147,8 @@ export const Settings = z.object({
     enabled: z.boolean().optional(),
     model: z.string().optional(),
   }).optional(),
-  /** CC-parity output style: the active style NAME (built-in or a `.norma/output-styles/<name>.md`).
-   *  Absent or "default" → Norma's base prompt (today's behavior). Hot-reloaded; per-project via the
+  /** CC-parity output style: the active style NAME (built-in or a `.winter/output-styles/<name>.md`).
+   *  Absent or "default" → Winter's base prompt (today's behavior). Hot-reloaded; per-project via the
    *  ProjectSettingsResolver. */
   outputStyle: z.string().optional(),
   plugins: z.object({
@@ -167,7 +167,7 @@ export const Settings = z.object({
     /** PluginSupervisor lifecycle overrides (Phase 4b Task 3, spec §3 — all four values are
      *  spec-defaulted when omitted: registration timeout 10s, backoff cap 60s, circuit 5
      *  failures/10min). The invoke timeout (default 60s) and the SIGTERM→SIGKILL kill grace (5s)
-     *  are deliberately NOT here — spec pins the former to the `NORMA_PLUGIN_TOOL_TIMEOUT_MS` env
+     *  are deliberately NOT here — spec pins the former to the `WINTER_PLUGIN_TOOL_TIMEOUT_MS` env
      *  var and the latter isn't settings-overridable at all. */
     supervisor: z.object({
       registrationTimeoutMs: z.number().int().positive().optional(),
@@ -208,7 +208,7 @@ export const Settings = z.object({
      *  stream produces NO events for this long is aborted as stalled (its partial output is
      *  surfaced to the parent). ABSENT means the default 600000 (10 min — deliberately ≥ bash's
      *  own max per-call timeout, so a tool-bounded silent bash never falsely trips it; env
-     *  override: NORMA_SUBAGENT_STALL_TIMEOUT_MS). Hot, same live-getter semantics as timeoutMs
+     *  override: WINTER_SUBAGENT_STALL_TIMEOUT_MS). Hot, same live-getter semantics as timeoutMs
      *  above. */
     stallTimeoutMs: z.number().int().positive().optional(),
   }).optional(),
@@ -222,7 +222,7 @@ export const Settings = z.object({
   /** Computer use (Phase 5 CU). `enabled` is the capability opt-in: the `computer` tool is
    *  registered ONLY when true (the strongest reading of "full-auto CU requires explicit opt-in" —
    *  absent/false means CU does not exist for the session). `screenshotMaxDim` caps the longest
-   *  side of a captured screenshot (default 1280, Norma.app-side) to bound the base64 payload well
+   *  side of a captured screenshot (default 1280, Winter.app-side) to bound the base64 payload well
    *  under the NDJSON line limit and the model's image budget. The lease heartbeat/expiry reuse the
    *  `peripheral` block above. */
   computerUse: z.object({
@@ -286,7 +286,7 @@ export const Settings = z.object({
    *  `hooks.enabled` above, but read LIVE (hot, per [[no-daemon-restart-for-settings]]) by both
    *  daemon.ts's write-root join and context.ts's injection — a toggle takes effect on the
    *  session's NEXT tool call / turn, no restart. `directory` (absolute or `~/`-relative) replaces
-   *  the computed `~/.norma/projects/<key>/memory` path entirely (CC's own relocatable-directory
+   *  the computed `~/.winter/projects/<key>/memory` path entirely (CC's own relocatable-directory
    *  setting) — see memory-dir.ts's `memoryDirFor`. */
   memory: z
     .object({
@@ -361,7 +361,7 @@ export const Settings = z.object({
    *  completion on the leg it was created with, which is what makes flipping one safe at any moment.
    *
    *  `winterExecutable` overrides the `winter` binary lookup (P8b-2's first door, ahead of
-   *  `NORMA_WINTER_EXECUTABLE`, the bundle drop and `<NORMA_HOME>/runtimes/bin/winter`).
+   *  `WINTER_RUNTIME_EXECUTABLE`, the bundle drop and `<WINTER_HOME>/runtimes/bin/winter`).
    *  `advisorModel` names the model the router's advisor uses. Both are plain `z.string()` on
    *  purpose — NOT `.min(1)` — because an invalid `settings.json` costs the WHOLE FILE: boot
    *  degrades to `settings = null` and the agent is disabled (`daemon.ts`'s load catch), and a hot
@@ -392,7 +392,7 @@ export const Settings = z.object({
     winterExecutable: z.string().optional(),
     // P8c-3: the same blank-is-absent, restart-free ladder rung as `winterExecutable` above, for the
     // official leg's `claude` executable (`official-executable.ts`'s `resolveClaudeExecutable`,
-    // ahead of env `NORMA_CLAUDE_EXECUTABLE`, the 8d bundle drop and the dev-only package door).
+    // ahead of env `WINTER_CLAUDE_EXECUTABLE`, the 8d bundle drop and the dev-only package door).
     claudeExecutable: z.string().optional(),
     // Task 17 Step 4: the engine is retired — every mode runs on the Winter leg. The block stays
     // ACCEPTED for one release (the `migrations.memoryKeys` pattern): a `false` is read, logged
@@ -448,7 +448,7 @@ export interface WinterOptions {
 }
 
 /**
- * THE DOOR EVERY WINTER-LEG CONSUMER READS (`resolveWinterExecutable`, `createNormaRuntimeSdk`,
+ * THE DOOR EVERY WINTER-LEG CONSUMER READS (`resolveWinterExecutable`, `createWinterRuntimeSdk`,
  * `legForNewSession`, the idle timer), and the reason it exists rather than three lanes each
  * reaching into `settings.runtimes`.
  *
@@ -533,7 +533,7 @@ export function loadSettings(path: string): Settings {
     raw = JSON.parse(readFileSync(path, "utf8"));
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new Error(`settings file not found at ${path} — run \`norma daemon run\` once to initialize`);
+      throw new Error(`settings file not found at ${path} — run \`winter daemon run\` once to initialize`);
     }
     throw err;
   }
@@ -570,7 +570,7 @@ export function readRawSettings(path: string): Record<string, unknown> | null {
 }
 
 /** Pure `Settings -> Settings` provider-model transform (mirrors plugins/lifecycle.ts's
- *  `setPluginEnabled` pattern) — used by `norma model <slug>`. Preserves every other field,
+ *  `setPluginEnabled` pattern) — used by `winter model <slug>`. Preserves every other field,
  *  including `provider.reasoningEffort` if set. Validation (codex-oauth slug membership,
  *  non-empty for openai-compatible) is the CALLER's job — this never throws on the slug itself,
  *  only on whatever Settings.parse would already reject (e.g. an empty string, caught by the
@@ -588,7 +588,7 @@ export function setOutputStyle(settings: Settings, name: string | undefined): Se
   return next;
 }
 
-/** Pure `Settings -> Settings` reasoning-effort transform — used by `norma model --effort
+/** Pure `Settings -> Settings` reasoning-effort transform — used by `winter model --effort
  *  <level>` (effort-only or combined with a model change). `effort: undefined` clears it. */
 export function setReasoningEffort(settings: Settings, effort: (typeof REASONING_EFFORTS)[number] | undefined): Settings {
   return { ...settings, provider: { ...settings.provider, reasoningEffort: effort } };
@@ -596,7 +596,7 @@ export function setReasoningEffort(settings: Settings, effort: (typeof REASONING
 
 /**
  * Winter Phase 8d (P8d-8): pure `Settings -> Settings` transform for THE ONE D30 advisor
- * setting (`settings.runtimes.advisorModel`) — used by `norma model --advisor <slug|auto>`
+ * setting (`settings.runtimes.advisorModel`) — used by `winter model --advisor <slug|auto>`
  * (Task 4.3) and the Mac app's composer-chip picker (Swift side writes the JSON file directly,
  * same "no daemon RPC needed" posture this function's CLI caller takes). `model: undefined`
  * clears the override, mirroring `setReasoningEffort`'s own `effort: undefined` convention — the
@@ -642,18 +642,18 @@ function readDirs(path: string): string[] {
 
 /**
  * Merge additionalDirectories across scopes (Claude-Code-style). BOTH the COMMITTED
- * <projectDir>/.norma/settings.json AND the gitignored settings.local.json are honored ONLY when
+ * <projectDir>/.winter/settings.json AND the gitignored settings.local.json are honored ONLY when
  * `projectTrusted` — a repo can't silently widen the fence until the user trusts the folder.
  * fix-wave A2: settings.local.json used to be honored unconditionally ("gitignored, always"), but
  * gitignore is advisory, not a trust boundary — a repo can `git add -f` one, so it needs the same
- * gate the committed file gets (matches CC). Only the user's OWN ~/.norma/settings.json is always
+ * gate the committed file gets (matches CC). Only the user's OWN ~/.winter/settings.json is always
  * honored, trust-independent.
  */
 export function loadPermissionDirs(homeDir: string, projectDir?: string, projectTrusted = false): string[] {
   const sources = [join(homeDir, "settings.json")]; // user global — always
   if (projectDir && projectTrusted) {
-    sources.push(join(projectDir, ".norma", "settings.json"));      // committed — trust-gated
-    sources.push(join(projectDir, ".norma", "settings.local.json")); // local: a repo can force-commit one → also trust-gated (matches CC)
+    sources.push(join(projectDir, ".winter", "settings.json"));      // committed — trust-gated
+    sources.push(join(projectDir, ".winter", "settings.local.json")); // local: a repo can force-commit one → also trust-gated (matches CC)
   }
   const merged: string[] = [];
   for (const src of sources) {
@@ -667,9 +667,9 @@ export function loadPermissionDirs(homeDir: string, projectDir?: string, project
 
 /** Persist a runtime-granted directory to the project's local (gitignored) settings. */
 export function addLocalDir(projectDir: string, dir: string): void {
-  const dotNorma = join(projectDir, ".norma");
-  mkdirSync(dotNorma, { recursive: true });
-  const path = join(dotNorma, "settings.local.json");
+  const dotWinter = join(projectDir, ".winter");
+  mkdirSync(dotWinter, { recursive: true });
+  const path = join(dotWinter, "settings.local.json");
   let obj: any = {};
   if (existsSync(path)) {
     try {
@@ -682,5 +682,5 @@ export function addLocalDir(projectDir: string, dir: string): void {
   obj.permissions.additionalDirectories ??= [];
   if (!obj.permissions.additionalDirectories.includes(dir)) obj.permissions.additionalDirectories.push(dir);
   writeFileSync(path, JSON.stringify(obj, null, 2) + "\n");
-  ensureGlobalGitignore(NORMA_PERSONAL_IGNORES);
+  ensureGlobalGitignore(WINTER_PERSONAL_IGNORES);
 }

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { encodeLine, LineDecoder, METHODS, PROTOCOL_VERSION, ERR } from "@norma/protocol";
+import { encodeLine, LineDecoder, METHODS, PROTOCOL_VERSION, ERR } from "@winter/protocol";
 import { backoffDelayMs, createPlugin } from "../src/index";
 
 // -------------------------------------------------------------------------------------------
@@ -184,7 +184,7 @@ describe("createPlugin().serve()", () => {
 
   beforeEach(() => {
     cleanups = [];
-    tmpDir = mkdtempSync(join(tmpdir(), "norma-plugin-sdk-"));
+    tmpDir = mkdtempSync(join(tmpdir(), "winter-plugin-sdk-"));
     sockPath = join(tmpDir, "plugin.sock");
   });
   afterEach(() => {
@@ -366,24 +366,24 @@ describe("createPlugin().serve()", () => {
   });
 
   test("serve() rejects when socketPath/token/pluginId cannot be resolved (no opts, no env)", async () => {
-    const savedSocket = process.env.NORMA_SOCKET;
-    const savedToken = process.env.NORMA_PLUGIN_TOKEN;
-    const savedId = process.env.NORMA_PLUGIN_ID;
-    delete process.env.NORMA_SOCKET;
-    delete process.env.NORMA_PLUGIN_TOKEN;
-    delete process.env.NORMA_PLUGIN_ID;
+    const savedSocket = process.env.WINTER_SOCKET;
+    const savedToken = process.env.WINTER_PLUGIN_TOKEN;
+    const savedId = process.env.WINTER_PLUGIN_ID;
+    delete process.env.WINTER_SOCKET;
+    delete process.env.WINTER_PLUGIN_TOKEN;
+    delete process.env.WINTER_PLUGIN_ID;
     cleanups.push(() => {
-      if (savedSocket !== undefined) process.env.NORMA_SOCKET = savedSocket;
-      if (savedToken !== undefined) process.env.NORMA_PLUGIN_TOKEN = savedToken;
-      if (savedId !== undefined) process.env.NORMA_PLUGIN_ID = savedId;
+      if (savedSocket !== undefined) process.env.WINTER_SOCKET = savedSocket;
+      if (savedToken !== undefined) process.env.WINTER_PLUGIN_TOKEN = savedToken;
+      if (savedId !== undefined) process.env.WINTER_PLUGIN_ID = savedId;
     });
 
     const plugin = createPlugin({});
     await expect(plugin.serve({})).rejects.toThrow(/missing/);
   });
 
-  test("onShortcut: registers the shortcut ids declared in norma-plugin.json (plugin cwd)", async () => {
-    writeFileSync(join(tmpDir, "norma-plugin.json"), JSON.stringify({
+  test("onShortcut: registers the shortcut ids declared in winter-plugin.json (plugin cwd)", async () => {
+    writeFileSync(join(tmpDir, "winter-plugin.json"), JSON.stringify({
       id: "sample", tier: "platform",
       contributes: { shortcuts: [{ id: "toggle", description: "Toggle the thing" }] },
     }));
@@ -405,7 +405,7 @@ describe("createPlugin().serve()", () => {
 
   test("onShortcut with no manifest present never calls shortcut.register", async () => {
     const originalCwd = process.cwd();
-    process.chdir(tmpDir); // empty tmp dir — no norma-plugin.json
+    process.chdir(tmpDir); // empty tmp dir — no winter-plugin.json
     cleanups.push(() => process.chdir(originalCwd));
 
     const server = startFakeServer(sockPath);
@@ -420,13 +420,13 @@ describe("createPlugin().serve()", () => {
     expect(server.shortcuts()).toBeNull();
   });
 
-  test("NORMA_PLUGIN_DIR env var: manifest read from env var, not cwd, when set", async () => {
+  test("WINTER_PLUGIN_DIR env var: manifest read from env var, not cwd, when set", async () => {
     // Create manifest in a separate directory
-    const pluginDir = mkdtempSync(join(tmpdir(), "norma-plugin-env-"));
+    const pluginDir = mkdtempSync(join(tmpdir(), "winter-plugin-env-"));
     cleanups.push(() => {
-      try { unlinkSync(join(pluginDir, "norma-plugin.json")); } catch {}
+      try { unlinkSync(join(pluginDir, "winter-plugin.json")); } catch {}
     });
-    writeFileSync(join(pluginDir, "norma-plugin.json"), JSON.stringify({
+    writeFileSync(join(pluginDir, "winter-plugin.json"), JSON.stringify({
       id: "sample", tier: "platform",
       contributes: { shortcuts: [{ id: "cmd-a", description: "Command A" }, { id: "cmd-b" }] },
     }));
@@ -437,12 +437,12 @@ describe("createPlugin().serve()", () => {
     const plugin = createPlugin({ onShortcut: () => {} });
     cleanups.push(() => plugin.close());
 
-    // Serve with NORMA_PLUGIN_DIR pointing to the manifest, while cwd is tmpDir (which is empty)
-    const savedEnv = process.env.NORMA_PLUGIN_DIR;
-    process.env.NORMA_PLUGIN_DIR = pluginDir;
+    // Serve with WINTER_PLUGIN_DIR pointing to the manifest, while cwd is tmpDir (which is empty)
+    const savedEnv = process.env.WINTER_PLUGIN_DIR;
+    process.env.WINTER_PLUGIN_DIR = pluginDir;
     cleanups.push(() => {
-      if (savedEnv !== undefined) process.env.NORMA_PLUGIN_DIR = savedEnv;
-      else delete process.env.NORMA_PLUGIN_DIR;
+      if (savedEnv !== undefined) process.env.WINTER_PLUGIN_DIR = savedEnv;
+      else delete process.env.WINTER_PLUGIN_DIR;
     });
 
     await plugin.serve({ socketPath: sockPath, token: "tok", pluginId: "sample" });
@@ -488,7 +488,7 @@ describe("ctx.hardware (Phase 4c Task 5, spec §5)", () => {
 
   beforeEach(() => {
     cleanups = [];
-    tmpDir = mkdtempSync(join(tmpdir(), "norma-plugin-sdk-hw-"));
+    tmpDir = mkdtempSync(join(tmpdir(), "winter-plugin-sdk-hw-"));
     sockPath = join(tmpDir, "plugin.sock");
   });
   afterEach(() => {
@@ -573,11 +573,11 @@ describe("ctx.hardware (Phase 4c Task 5, spec §5)", () => {
   });
 
   test("typed failure: no_provider -> throws, tool result carries the code and message", async () => {
-    const { invoke } = await bootCallTool(() => ({ code: "no_provider", message: "hardware features require Norma.app" }));
+    const { invoke } = await bootCallTool(() => ({ code: "no_provider", message: "hardware features require Winter.app" }));
     const res = await invoke("getChargeLimit");
     expect(res.resultJson).toBeUndefined();
     expect(res.error).toContain("no_provider");
-    expect(res.error).toContain("hardware features require Norma.app");
+    expect(res.error).toContain("hardware features require Winter.app");
   });
 
   test("typed failure: timeout (scripted RESULT, not the SDK's own transport timeout) -> throws, tool result carries the code", async () => {
@@ -611,7 +611,7 @@ describe("Phase 4d-i Task 3: ctx.updateTile + onShortcut/onTileAction dispatch",
 
   beforeEach(() => {
     cleanups = [];
-    tmpDir = mkdtempSync(join(tmpdir(), "norma-plugin-sdk-4d-"));
+    tmpDir = mkdtempSync(join(tmpdir(), "winter-plugin-sdk-4d-"));
     sockPath = join(tmpDir, "plugin.sock");
   });
   afterEach(() => {

@@ -1,7 +1,7 @@
 // Builds the `winter` runtime binary from the SDK checkout AT THE PINNED TAG (P8b-2). The platform
 // package is private and not on npm, and a compiled $bunfs daemon cannot createRequire it anyway,
 // so the daemon always receives an explicit path. This script is how dev, tests and CI get one.
-//   bun run build:winter                     # -> dist/winter (from ../winter-agent-sdk or $NORMA_WINTER_SDK_CHECKOUT)
+//   bun run build:winter                     # -> dist/winter (from ../winter-agent-sdk or $WINTER_SDK_CHECKOUT)
 //   bun run build:winter --out <path>
 //   bun run build:winter --allow-untagged    # LOCAL EXPERIMENTS ONLY — never in CI
 //   bun run build:winter --sign <identity>   # P8d-14: sign the freshly-built dist/winter
@@ -15,11 +15,11 @@
 //
 // P8d-14 (8c carry): a dev `dist/winter` is ad-hoc-signed by `bun build --compile` itself
 // (`Identifier=a.out`, controller measurement M2), and an ad-hoc signature's identity changes on
-// every rebuild — which invalidates the Keychain ACL a prior `com.norma.core` consent grant was
+// every rebuild — which invalidates the Keychain ACL a prior `com.winter.core` consent grant was
 // scoped to, so a rebuilt dev binary re-prompts for EVERY credential item on its next run
 // (CLAUDE.md's "FIRST RUN AFTER A REBUILD" trap). `--sign <identity>` (or env
-// `NORMA_WINTER_SIGN_IDENTITY`) re-signs the freshly-built binary with a STABLE identifier
-// (`com.norma.winter` — the same identifier the Release embed step signs with, P8d-2) so the ACL
+// `WINTER_RUNTIME_SIGN_IDENTITY`) re-signs the freshly-built binary with a STABLE identifier
+// (`com.winter.runtime` — the same identifier the Release embed step signs with, P8d-2) so the ACL
 // survives rebuilds. `-` (ad-hoc) is explicitly ALLOWED here — this is a dev convenience, not the
 // release gate, and an ad-hoc identity still gets the stable `--identifier`, which is the part
 // that actually fixes the Keychain-reprompt trap; only the release pipeline requires a REAL team
@@ -43,13 +43,13 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { REQUIRED_WINTER_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
 
-/** P8d-14: `codesign --force --sign <identity> --identifier com.norma.winter --options runtime
+/** P8d-14: `codesign --force --sign <identity> --identifier com.winter.runtime --options runtime
  *  --timestamp <path>` — the same identifier/flags the Release "Embed runtimes" script uses
  *  (P8d-2), so `codesign -dvv` on a dev-signed `dist/winter` and a Release-embedded one both show
- *  `Identifier=com.norma.winter`. Exported so the test can assert the exact argv without shelling
+ *  `Identifier=com.winter.runtime`. Exported so the test can assert the exact argv without shelling
  *  out to a real `codesign` in a fixture. */
 export function signWinterArgs(identity: string, path: string): string[] {
-  return ["--force", "--sign", identity, "--identifier", "com.norma.winter", "--options", "runtime", "--timestamp", path];
+  return ["--force", "--sign", identity, "--identifier", "com.winter.runtime", "--options", "runtime", "--timestamp", path];
 }
 
 /**
@@ -102,9 +102,9 @@ export function assertBinaryDoesNotEmbedPath(binaryPath: string, checkoutPath: s
 }
 
 export async function buildWinter(opts: { checkout?: string; out?: string; allowUntagged?: boolean; sign?: string } = {}): Promise<string> {
-  const checkout = resolve(opts.checkout ?? process.env.NORMA_WINTER_SDK_CHECKOUT ?? resolve(import.meta.dir, "../../winter-agent-sdk"));
+  const checkout = resolve(opts.checkout ?? process.env.WINTER_SDK_CHECKOUT ?? resolve(import.meta.dir, "../../winter-agent-sdk"));
   const out = resolve(opts.out ?? resolve(import.meta.dir, "../dist/winter"));
-  if (!existsSync(resolve(checkout, "scripts/build-runtime.ts"))) throw new Error(`build-winter: no SDK checkout at ${checkout} (set NORMA_WINTER_SDK_CHECKOUT)`);
+  if (!existsSync(resolve(checkout, "scripts/build-runtime.ts"))) throw new Error(`build-winter: no SDK checkout at ${checkout} (set WINTER_SDK_CHECKOUT)`);
   const tag = `v${REQUIRED_WINTER_AGENT_SDK}`;
   const at = checkoutIsAtTag(checkout, tag);
   if (!at.ok && !opts.allowUntagged) throw new Error(`build-winter: ${checkout}'s HEAD carries '${at.found || "no tag"}', not ${tag}; check out the pinned tag (or pass --allow-untagged for a local experiment — it skips this gate entirely, wrong tags included, and never runs in CI)`);
@@ -139,7 +139,7 @@ export async function buildWinter(opts: { checkout?: string; out?: string; allow
     rmSync(tmpRoot, { recursive: true, force: true });
   }
 
-  const identity = opts.sign ?? process.env.NORMA_WINTER_SIGN_IDENTITY;
+  const identity = opts.sign ?? process.env.WINTER_RUNTIME_SIGN_IDENTITY;
   if (identity) {
     const cs = spawnSync("codesign", signWinterArgs(identity, out), { encoding: "utf8", stdio: "inherit" });
     if (cs.status !== 0) throw new Error(`build-winter: codesign exited ${cs.status}`);

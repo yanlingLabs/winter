@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// A clock and two schedulers under the test's thumb — the same shape `BrowserRuntimeTests` uses
 /// (each suite keeps its own copy, this suite's convention for doubles). Nothing here waits.
@@ -73,7 +73,7 @@ final class EditorFakeScheduler {
 final class EditorCEFRecorder {
     private(set) var log: [String] = []
     private(set) var createdURLs: [String] = []
-    /// editor-product Task 4 — the `backgroundColorARGB` `NormaCEFCreateBrowser` was called with,
+    /// editor-product Task 4 — the `backgroundColorARGB` `WinterCEFCreateBrowser` was called with,
     /// one per `createBrowser` call, same indices as `createdURLs`.
     private(set) var createdBackgroundColors: [UInt32] = []
     private(set) var registeredRoots: [String] = []
@@ -85,7 +85,7 @@ final class EditorCEFRecorder {
     var assetRoot: String? = "/fake/EditorAssets"
     var initialises = true
     var failure: String?
-    /// The ids `NormaCEFBrowserIdentifierForParent` answers, consumed in order; the last one repeats.
+    /// The ids `WinterCEFBrowserIdentifierForParent` answers, consumed in order; the last one repeats.
     var browserIds: [Int32] = [0, 0, 41]
 
     private var idIndex = 0
@@ -98,7 +98,7 @@ final class EditorCEFRecorder {
     }
 
     /// Answer the oldest outstanding CDP call, as CEF's door eventually does (its completion always
-    /// fires — `NormaCEF.h`).
+    /// fires — `WinterCEF.h`).
     @discardableResult
     func answerNextCDP(ok: Bool = true, payload: String = "{}") -> Bool {
         guard !cdp.isEmpty else { return false }
@@ -578,7 +578,7 @@ final class EditorRuntimeTests: XCTestCase {
 
     // MARK: Theme (editor-product Task 4)
 
-    /// The browser's OWN background (`NormaCEF.h`'s `backgroundColorARGB`) is set at the moment
+    /// The browser's OWN background (`WinterCEF.h`'s `backgroundColorARGB`) is set at the moment
     /// `prewarm()` creates it, from the INJECTED `colorScheme` — proving the seam that lets a test
     /// pin this without touching the real system appearance, and that light and dark really do
     /// resolve to different values (not a hardcoded constant that happens to compile).
@@ -613,7 +613,7 @@ final class EditorRuntimeTests: XCTestCase {
 
         XCTAssertEqual(harness.cef.cdp.count, 1, "ready with nothing queued sends exactly the theme")
         let expression = expressionOf(harness.cef.cdp[0].params)
-        XCTAssertTrue(expression.hasPrefix("window.normaEditor.dispatch({"),
+        XCTAssertTrue(expression.hasPrefix("window.winterEditor.dispatch({"),
                       "one call, one literal entry point, payload as data: \(expression)")
         XCTAssertTrue(expression.contains(#""type":"setTheme""#), expression)
         XCTAssertTrue(expression.contains(#""base":"vs-dark""#),
@@ -666,7 +666,7 @@ final class EditorRuntimeTests: XCTestCase {
         XCTAssertEqual(call.method, "Runtime.evaluate",
                        "the bridge is inbound-only — CDP is the ONLY way Swift speaks to the page")
         let expression = expressionOf(call.params)
-        XCTAssertTrue(expression.hasPrefix("window.normaEditor.dispatch({"),
+        XCTAssertTrue(expression.hasPrefix("window.winterEditor.dispatch({"),
                       "one call, one literal entry point, payload as data: \(expression)")
         XCTAssertTrue(expression.contains(#""type":"openModel""#), expression)
         XCTAssertTrue(expression.contains(#""text":"const a = 1;\n""#), expression)
@@ -797,7 +797,7 @@ final class EditorRuntimeTests: XCTestCase {
     // MARK: The one page URL
 
     func testTheProductAndTheHarnessOpenTheSamePage() {
-        XCTAssertEqual(EditorRuntime.pageURL, "norma-editor://app/editor.html")
+        XCTAssertEqual(EditorRuntime.pageURL, "winter-editor://app/editor.html")
         #if DEBUG
         XCTAssertEqual(EditorBridgeHarnessRun.pageURL, EditorRuntime.pageURL,
                        "two places writing this is two places for the scheme's URL shape to drift")

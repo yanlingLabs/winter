@@ -40,7 +40,7 @@ describe.if(isMac)("McpManager", () => {
     const mgr = new McpManager({ registry, trust: new TrustStore(join(realDir(), "trust.json")) });
     await mgr.startAll({
       good: { command: "bun", args: ["run", FIXTURE] },
-      dup: { command: "bun", args: ["run", FIXTURE], env: { NORMA_FAKE_DUP: "1" } },
+      dup: { command: "bun", args: ["run", FIXTURE], env: { WINTER_FAKE_DUP: "1" } },
     });
     // startAll must never throw regardless of one server's registration failure.
     expect(registry.has("mcp__good__echo")).toBe(true);
@@ -194,7 +194,7 @@ describe.if(isMac)("McpManager.startPlugins", () => {
   // -------------------------------------------------------------------------------------------
   // Task 4: manifest-declared mcpServers (design spec §2 — "mcpServers may now come from the
   // manifest instead of .mcp.json (both accepted; manifest wins on conflict)"). `manifestServers`
-  // is passed by the daemon from norma-plugin.json's `contributes.mcpServers`.
+  // is passed by the daemon from winter-plugin.json's `contributes.mcpServers`.
   // -------------------------------------------------------------------------------------------
   test("manifestServers present + .mcp.json also present → manifest list used, .mcp.json ignored entirely", async () => {
     const dir = pluginDir({ mcpServers: { legacy: { command: "/nonexistent-legacy-server" } } });
@@ -228,12 +228,12 @@ describe.if(isMac)("McpManager.startPlugins", () => {
     const trust = new TrustStore(join(realDir(), "trust.json"));
     const logs: string[] = [];
     const mgr = new McpManager({ registry, trust, log: (m) => logs.push(m) });
-    // NORMA_FAKE_DUP makes the fixture report two identically-named tools; observing the
+    // WINTER_FAKE_DUP makes the fixture report two identically-named tools; observing the
     // resulting collision-skip proves `env` reached the spawned process (args already proven by
     // ["run", FIXTURE] resolving to a connected server across every other test in this file).
     await mgr.startPlugins([{
       name: "demo", dir,
-      manifestServers: [{ name: "dup", command: "bun", args: ["run", FIXTURE], env: { NORMA_FAKE_DUP: "1" } }],
+      manifestServers: [{ name: "dup", command: "bun", args: ["run", FIXTURE], env: { WINTER_FAKE_DUP: "1" } }],
     }]);
     const st = mgr.list().find((s) => s.name === "demo:dup");
     expect(st?.status).toBe("connected");

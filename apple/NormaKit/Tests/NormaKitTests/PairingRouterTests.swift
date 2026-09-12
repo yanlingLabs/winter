@@ -1,8 +1,8 @@
 import XCTest
 import os
-import NormaProtocol
-import NormaSessionKit
-@testable import NormaKit
+import WinterProtocol
+import WinterSessionKit
+@testable import WinterKit
 
 /// SP2b Task 4: `PairingRouter` (PairingRouter.swift) is the SOLE membership gate standing in front
 /// of `Gateway` — every accepted connection is looked up by its authenticated `peerID` before it
@@ -15,7 +15,7 @@ final class PairingRouterTests: XCTestCase {
     // MARK: - Shared helpers (per-file copies, matching this codebase's test-double convention)
 
     private func makeRelayConfig() -> SignedRelayConfig {
-        SignedRelayConfig(config: RelayConfig(version: 1, relays: ["relay1.norma.dev"]), sig: Data(repeating: 7, count: 64))
+        SignedRelayConfig(config: RelayConfig(version: 1, relays: ["relay1.winter.dev"]), sig: Data(repeating: 7, count: 64))
     }
 
     /// A no-op, immediate `sleepHook` — mirrors `PairingManagerTests`' own convention so the
@@ -32,7 +32,7 @@ final class PairingRouterTests: XCTestCase {
 
     private func tempStoreURL() -> URL {
         FileManager.default.temporaryDirectory
-            .appendingPathComponent("norma-pairing-router-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("winter-pairing-router-tests-\(UUID().uuidString)", isDirectory: true)
             .appendingPathComponent("paired-devices.json")
     }
 

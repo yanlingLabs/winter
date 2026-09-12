@@ -7,8 +7,8 @@
 // machine and the push/hold/resume discipline (P8b-5/24/32/38), not the fold.
 import { describe, expect, test } from "bun:test";
 import type { Options, Query } from "@yanlinglabs/winter-agent-sdk";
-import type { NewSessionEvent, SessionEvent } from "@norma/protocol";
-import { SHUTDOWN_QUERY_GRACE_MS, type NormaRuntimeSdk } from "../../src/runtime-sdk/create";
+import type { NewSessionEvent, SessionEvent } from "@winter/protocol";
+import { SHUTDOWN_QUERY_GRACE_MS, type WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import { createProjector, type Projector } from "../../src/projector";
 import { createHostPromptQueue } from "../../src/runtime-sdk/prompt-queue";
 import {
@@ -152,7 +152,7 @@ function harness(overrides: Partial<Omit<WinterSessionDeps, "idleTimeoutMs">> & 
     sdk: { query: ({ prompt, options }: { prompt: AsyncIterable<string>; options: Options }) => { const q = new FakeQuery(prompt, options); queries.push(q); return q as unknown as Query; } },
     trackQuery: (_sid: string, abort: AbortController) => { tracked.push({ abort }); },
     untrack: () => { h.untracked++; },
-  } as unknown as NormaRuntimeSdk;
+  } as unknown as WinterRuntimeSdk;
   const idle = idleMs ?? 60_000;
   h.session = startWinterSession({
     sessionId: "s_x", backendSessionId: "be-x", mode: "chat", runtime,
@@ -209,9 +209,9 @@ describe("startWinterSession — one incarnation", () => {
   test("system/init records the facts and attaches messaging with the backend id and generation", async () => {
     const h = harness();
     await h.session.open();
-    h.q().emit(init(h.q().options, ["AskUserQuestion", "SendMessage", "mcp__norma__browser__browser"]));
+    h.q().emit(init(h.q().options, ["AskUserQuestion", "SendMessage", "mcp__winter__browser__browser"]));
     await h.settled();
-    expect(h.session.init).toEqual({ sessionId: "be-x", model: "winter-test/echo", tools: ["AskUserQuestion", "SendMessage", "mcp__norma__browser__browser"] });
+    expect(h.session.init).toEqual({ sessionId: "be-x", model: "winter-test/echo", tools: ["AskUserQuestion", "SendMessage", "mcp__winter__browser__browser"] });
     expect(h.attachments).toHaveLength(1);
     expect(h.attachments[0]!.session).toMatchObject({ sessionId: "s_x", backendSessionId: "be-x", mode: "chat", generation: 1 });
     expect(h.attachments[0]!.session.query).toBe(h.q() as unknown as Query);
@@ -509,7 +509,7 @@ describe("startWinterSession — one incarnation", () => {
   });
 
   test("fix wave (review F10), through the REAL persisted roster with fake timers: deltas re-arm the stall window, so a child streaming past ten windows is never stopped", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-winter-stall-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-stall-"));
     const rs = openRuntimeStateDb(home);
     let next = 1;
     const pending = new Map<number, { fn: () => void; ms: number }>();

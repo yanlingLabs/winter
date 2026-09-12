@@ -1,7 +1,7 @@
 import XCTest
-import NormaKit
-import NormaProtocol
-@testable import Norma
+import WinterKit
+import WinterProtocol
+@testable import Winter
 
 /// The `HelperCalling` stub — no ServiceManagement, no XPC. Deliberately NOT a real
 /// `HelperClient`: constructing one queries live `SMAppService` state (a backgroundtaskmanagementd
@@ -32,7 +32,7 @@ private final class StubHelper: HelperCalling {
 /// Task 4 (4c): `hardwarePlan` (the pure verb-switch/mapping core, `HardwareBridge.swift`) +
 /// `HardwareBridge.handle`'s respond wiring over a scripted transport with a stubbed helper. The
 /// XPC round-trip itself (`HelperClient.setChargeLimit`/`getChargeLimit` against a real
-/// `NormaHelper`) is LIVE-GATE territory (Task 6), never exercised here — mirrors how
+/// `WinterHelper`) is LIVE-GATE territory (Task 6), never exercised here — mirrors how
 /// `ChargeLimitPlanTests` covers `chargeLimitPlan` while `SMCController`'s IOKit surface stays
 /// untested.
 @MainActor
@@ -106,11 +106,11 @@ final class HardwareBridgeTests: XCTestCase {
         return String(data: data, encoding: .utf8)!
     }
 
-    /// Mirrors `PeripheralProviderTests.connectedProvider()` — a real `NormaClient` handshake over
+    /// Mirrors `PeripheralProviderTests.connectedProvider()` — a real `WinterClient` handshake over
     /// a scripted transport, so `handle()`'s `hardwareRespond` RPC bytes can be asserted on.
     private func connectedBridge(helper: StubHelper) async throws -> (HardwareBridge, FeedScriptedTransport) {
         let t = FeedScriptedTransport()
-        let client = NormaClient(makeTransport: { t }, token: "tok", clientName: "hardware-test")
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "hardware-test")
         async let c: Void = client.connect()
         await feedWaitUntil { !t.sent.isEmpty }
         let hello = feedLineJSON(t.sent[0])

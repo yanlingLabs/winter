@@ -3,7 +3,7 @@ import os
 
 /// The phone's per-stream replay cursor persistence seam (SP3 Task 4). One `Int` per
 /// `(hostID, sessionID, streamID)` — the last seq the client has **durably applied** (yielded to
-/// its consumer). `NormaSessionClient` reads these to build `ClientHello.resumes` on attach, and
+/// its consumer). `WinterSessionClient` reads these to build `ClientHello.resumes` on attach, and
 /// advances one **only after** the corresponding event has been emitted (durable-apply-then-advance):
 /// an in-memory counter that advanced before the yield would lose events on a crash between advance
 /// and apply.

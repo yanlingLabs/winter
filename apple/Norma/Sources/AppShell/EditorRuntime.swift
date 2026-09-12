@@ -83,9 +83,9 @@ struct EditorRuntimeState: Equatable {
 enum EditorRuntimeEvent: Equatable {
     /// "Have an editor ready" — the pre-warm. Idempotent by construction: only `idle` acts on it.
     case prewarmRequested
-    /// The answer from `NormaCEFBrowserIdentifierForParent`. **0 means the browser never came up**
+    /// The answer from `WinterCEFBrowserIdentifierForParent`. **0 means the browser never came up**
     /// and the runtime fails rather than registering — a client registered under 0 would match every
-    /// query in the process (`NormaCEF.h`, and `EditorBridgeHub.register`'s own guard).
+    /// query in the process (`WinterCEF.h`, and `EditorBridgeHub.register`'s own guard).
     case browserIdentified(Int32)
     /// The page's `ready`, arriving through the hub.
     case pageReady
@@ -181,7 +181,7 @@ enum EditorRuntimeReducer {
 
         case .prewarmRequested:
             // **Prewarm-once.** A second call while booting or ready is deliberately nothing at all,
-            // not a second `NormaCEFCreateBrowser` — a second browser in the same container is one
+            // not a second `WinterCEFCreateBrowser` — a second browser in the same container is one
             // nothing would ever close (`BrowserRuntime.create`'s own double-create guard, for the
             // identical reason). `failed` is terminal: recovery is teardown + a fresh runtime.
             guard state.phase == .idle else { return (next, []) }
@@ -432,10 +432,10 @@ protocol EditorViewportHost: AnyObject {
 @MainActor
 final class EditorRuntime: ObservableObject {
 
-    /// `norma-editor://app/editor.html` — the shell host, with Monaco on the sibling `assets` host.
+    /// `winter-editor://app/editor.html` — the shell host, with Monaco on the sibling `assets` host.
     /// **Written once, here**, now that the product creates editor browsers too: two places writing
     /// it is two places for the scheme's URL shape to drift from the one the asset root serves.
-    static let pageURL = "norma-editor://app/editor.html"
+    static let pageURL = "winter-editor://app/editor.html"
 
     /// The clock and the two ways this file defers work, borrowed wholesale from `BrowserRuntime`
     /// rather than copied — a second `Scheduler` with the same three members would be a second thing
@@ -455,7 +455,7 @@ final class EditorRuntime: ObservableObject {
         var ensureInitialized: @MainActor () -> Bool
         var failureReason: @MainActor () -> String?
         /// editor-product Task 4: the third argument is the browser's OWN background at creation,
-        /// `0xAARRGGBB` (`NormaCEF.h`'s `backgroundColorARGB`) — `EditorTheme.cardSurfaceBackgroundARGB`,
+        /// `0xAARRGGBB` (`WinterCEF.h`'s `backgroundColorARGB`) — `EditorTheme.cardSurfaceBackgroundARGB`,
         /// always fully opaque here (unlike `BrowserRuntime`'s ordinary web tabs, which pass `0` —
         /// "no override" — since an arbitrary site has no brand to anticipate).
         var createBrowser: (PanelCEFContainerView, String, UInt32) -> Void
@@ -475,22 +475,22 @@ final class EditorRuntime: ObservableObject {
                 }
                 return resources.path
             },
-            registerAssetRoot: { NormaCEFRegisterEditorAssetRoot($0) },
-            ensureInitialized: { NormaCEFRuntime.ensureInitialized() },
+            registerAssetRoot: { WinterCEFRegisterEditorAssetRoot($0) },
+            ensureInitialized: { WinterCEFRuntime.ensureInitialized() },
             failureReason: {
-                if case .failed(let reason) = NormaCEFRuntime.state { return reason }
+                if case .failed(let reason) = WinterCEFRuntime.state { return reason }
                 return nil
             },
-            createBrowser: { NormaCEFCreateBrowser($0, $1, $2) },
-            browserIdentifier: { NormaCEFBrowserIdentifierForParent($0) },
-            closeBrowser: { NormaCEFCloseBrowser($0) },
-            executeCDP: { NormaCEFRuntime.executeCDP(in: $0, method: $1, paramsJSON: $2, completion: $3) })
+            createBrowser: { WinterCEFCreateBrowser($0, $1, $2) },
+            browserIdentifier: { WinterCEFBrowserIdentifierForParent($0) },
+            closeBrowser: { WinterCEFCloseBrowser($0) },
+            executeCDP: { WinterCEFRuntime.executeCDP(in: $0, method: $1, paramsJSON: $2, completion: $3) })
     }
 
     /// How often the browser's id is asked for after creation, and for how long.
     ///
     /// **A poll rather than a callback, because there is no callback to have**: `CreateBrowser` does
-    /// not block (`NormaCEF.mm` says so in as many words) and the id exists only once CEF's
+    /// not block (`WinterCEF.mm` says so in as many words) and the id exists only once CEF's
     /// `OnAfterCreated` has run. The cadence is set against the ONE deadline that matters — the
     /// page's `ready`, measured at 234 ms in the Stage-A harness, and `ready` cannot be sent before
     /// the page has even been navigated to, which is itself after `OnAfterCreated`. 25 ms leaves an
@@ -1300,7 +1300,7 @@ final class EditorRuntime: ObservableObject {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
-        window.title = "Norma editor (hidden)"
+        window.title = "Winter editor (hidden)"
         hiddenWindowStorage = window
         return window
     }
@@ -1353,7 +1353,7 @@ final class EditorRuntime: ObservableObject {
         if browserId != 0 { hub.unregister(browserId: browserId) }
         driver.closeBrowser(container)
         container.removeFromSuperview()
-        // A fresh container for any later prewarm: `NormaCEFCloseBrowser` leaves this one empty, and
+        // A fresh container for any later prewarm: `WinterCEFCloseBrowser` leaves this one empty, and
         // re-using a view that has hosted a closed browser buys nothing over a new one.
         container = PanelCEFContainerView()
         hiddenWindowStorage?.close()
@@ -1464,7 +1464,7 @@ func editorOpenFailure(for error: Error) -> EditorOpenFailure {
 /// own nested modules and reported markers on it.
 ///
 /// It is a named function rather than a literal at the call site because it is a real decision with
-/// a real reason, and because a future need to override one language (a Norma-specific file type the
+/// a real reason, and because a future need to override one language (a Winter-specific file type the
 /// page's Monaco build does not register) has an obvious place to live.
 func editorLanguageHint(forPath path: String) -> String {
     _ = path

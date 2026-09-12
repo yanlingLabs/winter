@@ -1,8 +1,8 @@
 import XCTest
-import NormaProtocol
+import WinterProtocol
 
 /// Remote Gateway sub-project, Task 3: wire envelope + length framing + resume handshake types.
-/// Deliberately `import NormaProtocol` (NOT `@testable`) — these types are the public contract
+/// Deliberately `import WinterProtocol` (NOT `@testable`) — these types are the public contract
 /// Task 4 (gateway) and Task 5 (phone app) consume, so the tests exercise exactly what an
 /// external module sees.
 final class WireEnvelopeTests: XCTestCase {

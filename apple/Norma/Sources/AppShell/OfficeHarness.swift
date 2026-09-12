@@ -2,16 +2,16 @@
 import AppKit
 import CryptoKit
 import Foundation
-// office-agent-tools T9: drills 26-28 build `SessionEvent.PanelCommand`s (NormaProtocol) and seed
-// the session's working-directory fence with `SessionDirEntry` (NormaKit).
-import NormaKit
-import NormaProtocol
+// office-agent-tools T9: drills 26-28 build `SessionEvent.PanelCommand`s (WinterProtocol) and seed
+// the session's working-directory fence with `SessionDirEntry` (WinterKit).
+import WinterKit
+import WinterProtocol
 #if canImport(Darwin)
 import Darwin
 #endif
 
 /// office-plumbing Task 9 — **Stage A's live exit gate: the first end-to-end run of everything
-/// Tasks 1-8 built, against the REAL compiled `NormaOfficeHelper`, the REAL vendored LibreOffice, and
+/// Tasks 1-8 built, against the REAL compiled `WinterOfficeHelper`, the REAL vendored LibreOffice, and
 /// `ShellSessionHost`'s REAL production wiring — never a fixture, never a recorder-backed double.**
 ///
 /// **Mirrors `EditorBridgeHarness.swift`'s architecture, not its mechanics.** That file exists
@@ -30,10 +30,10 @@ import Darwin
 ///
 /// 1. **The second-copy dance, doubled.** Every path this harness touches — the six fixture copies,
 ///    the shared supervisor's state directory, both dedicated throwaway helpers' state directories —
-///    lives under ONE scratch root this run owns and deletes nothing outside of. `NORMA_OFFICE_STATE_
-///    PATH`/`NORMA_CEF_CACHE_PATH` are never read here: `ShellSessionHost.makeOfficeHelperSupervisor`
+///    lives under ONE scratch root this run owns and deletes nothing outside of. `WINTER_OFFICE_STATE_
+///    PATH`/`WINTER_CEF_CACHE_PATH` are never read here: `ShellSessionHost.makeOfficeHelperSupervisor`
 ///    is overridden with an EXPLICIT `socketDirectory`, which cannot fall back to the real default the
-///    way an unset env var could. `NORMA_CEF_CACHE_PATH` is still stamped defensively (this harness
+///    way an unset env var could. `WINTER_CEF_CACHE_PATH` is still stamped defensively (this harness
 ///    never starts CEF, but the hard rule is cheap insurance against a future call path that would).
 /// 2. **It never calls `boot()`.** Like `EditorBridgeHarness.start()`, this runs INSTEAD of `boot()` —
 ///    no daemon, no helper registration, no login item, no updater, no second orb. Drill 12's own
@@ -43,7 +43,7 @@ import Darwin
 ///    Stage A's 0-12 plus office-editable Task 10's own Stage B 13-25), not one chain.
 enum OfficeHarness {
     static var isRequested: Bool {
-        ProcessInfo.processInfo.environment["NORMA_OFFICE_HARNESS"] == "1"
+        ProcessInfo.processInfo.environment["WINTER_OFFICE_HARNESS"] == "1"
     }
 
     @MainActor
@@ -186,14 +186,14 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
     /// Deliberately ASCII and deliberately absent from every committed fixture — `27.baseline`
     /// asserts the pristine file does NOT already contain it, so a total no-op cannot pass the way
     /// the T8 gate's own `sheets.format` step once did against an already-bold A1.
-    static let t27Marker = "NORMA T9 AGENT SHEETS"
+    static let t27Marker = "WINTER T9 AGENT SHEETS"
 
     private var t28DocId = ""
     private var t28BaselineTileHash = ""
     private var t28BaselineFileDigest = ""
     private var t28CommandOk = false
     private var t28Repainted = false
-    static let t28Marker = "NORMA T9 AGENT DOCS"
+    static let t28Marker = "WINTER T9 AGENT DOCS"
 
     // MARK: - office-editable Task 10: Stage B drill state
 
@@ -242,10 +242,10 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
         self.delegate = delegate
         self.quitWhenDone = quitWhenDone
 
-        let root = ProcessInfo.processInfo.environment["NORMA_OFFICE_HARNESS_DIR"].map {
+        let root = ProcessInfo.processInfo.environment["WINTER_OFFICE_HARNESS_DIR"].map {
             URL(fileURLWithPath: $0, isDirectory: true)
         } ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("norma-office-harness-\(UUID().uuidString.prefix(8))", isDirectory: true)
+            .appendingPathComponent("winter-office-harness-\(UUID().uuidString.prefix(8))", isDirectory: true)
         scratchRoot = root
         fixturesScratchDir = root.appendingPathComponent("fixtures", isDirectory: true)
         sharedSupervisorStateDir = root.appendingPathComponent("shared-helper", isDirectory: true)
@@ -256,13 +256,13 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
 
         // Hard-rule insurance (this run never starts CEF, but the rule is cheap and unconditional —
         // see this type's own header, constraint 1).
-        setenv("NORMA_CEF_CACHE_PATH", root.appendingPathComponent("cef-cache", isDirectory: true).path, 1)
+        setenv("WINTER_CEF_CACHE_PATH", root.appendingPathComponent("cef-cache", isDirectory: true).path, 1)
 
         window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 1000, height: 760),
                           styleMask: [.titled, .closable, .resizable],
                           backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
-        window.title = "Norma office harness"
+        window.title = "Winter office harness"
         super.init()
         window.delegate = self
         buildWindow()
@@ -445,7 +445,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
 
     /// Safe from every state, including a run that never got past `0.setup`. Every helper process
     /// this run could possibly have spawned is force-killed here regardless of whether its own drill
-    /// passed — a step's failure must never leave a live `NormaOfficeHelper` process behind for the
+    /// passed — a step's failure must never leave a live `WinterOfficeHelper` process behind for the
     /// second-copy hygiene drills (or anything after them) to trip over.
     private func teardownEverything() {
         _ = host?.teardownAllOfficeRuntimesAndStopHelper()
@@ -462,7 +462,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
         dedicatedProcess10 = nil
 
         // office-editable Task 10 — drill 20's own dedicated, short-autosave-interval helper. A
-        // failed step anywhere in drill 20 must not leak a live NormaOfficeHelper process behind,
+        // failed step anywhere in drill 20 must not leak a live WinterOfficeHelper process behind,
         // same bar as every other dedicated spawn above.
         _ = t20Host?.teardownAllOfficeRuntimesAndStopHelper()
         t20Runtime = nil
@@ -705,9 +705,9 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
         let sessionHost = ShellSessionHost(directory: directory, makeFeed: { _ in nil })
         await directory.refresh()
         let stateDir = sharedSupervisorStateDir
-        // The REAL embedded path: THIS process is a genuinely built Norma.app (the harness runs
+        // The REAL embedded path: THIS process is a genuinely built Winter.app (the harness runs
         // inside it, never a bare xctest host), so `.production()`'s own `helperExecutableURL`
-        // already resolves to `Contents/MacOS/NormaOfficeHelper` with `Contents/Resources/
+        // already resolves to `Contents/MacOS/WinterOfficeHelper` with `Contents/Resources/
         // LibreOffice` as its real sibling — no `--lok-root` override needed or wanted; this is a
         // MORE end-to-end proof than the `--lok-root` shortcut the XCTest-only live tests use (their
         // host is the xctest bundle, which has no embedded LibreOffice of its own). Only
@@ -730,7 +730,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
     private func performBoot1() async -> (Bool, String) {
         let helperURL = OfficeHelperSupervisor.Configuration.production().helperExecutableURL
         guard FileManager.default.fileExists(atPath: helperURL.path) else {
-            return (false, "NormaOfficeHelper not embedded at \(helperURL.path) — this build never ran the embed phase")
+            return (false, "WinterOfficeHelper not embedded at \(helperURL.path) — this build never ran the embed phase")
         }
         let stateDir = throwawayHelper1StateDir
         let socketPath = stateDir.appendingPathComponent("office.sock").path
@@ -1352,7 +1352,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
     private func performSetup10() async -> (Bool, String) {
         let helperURL = OfficeHelperSupervisor.Configuration.production().helperExecutableURL
         guard FileManager.default.fileExists(atPath: helperURL.path) else {
-            return (false, "NormaOfficeHelper not embedded at \(helperURL.path)")
+            return (false, "WinterOfficeHelper not embedded at \(helperURL.path)")
         }
         let stateDir = throwawayHelper10StateDir
         let socketPath = stateDir.appendingPathComponent("office.sock").path
@@ -1428,7 +1428,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
             guard root.path.hasPrefix(scratchRoot.path) else {
                 return (false, "\(root.path) is not under the harness's own scratch root \(scratchRoot.path)")
             }
-            guard !root.path.contains(".norma") else { return (false, "\(root.path) touches a .norma path — collision risk") }
+            guard !root.path.contains(".winter") else { return (false, "\(root.path) touches a .winter path — collision risk") }
         }
         let sharedSocketPath = sharedSupervisorStateDir.appendingPathComponent("office.sock").path
         guard FileManager.default.fileExists(atPath: sharedSocketPath) else {
@@ -1437,7 +1437,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
                           + "the one check that proves a REAL socket lives under this run's own root")
         }
         return (true, "every scratch socket/state path used this run lives under \(scratchRoot.path); "
-                     + "none touch ~/.norma or ~/.norma-dev; office.sock genuinely exists at \(sharedSocketPath)")
+                     + "none touch ~/.winter or ~/.winter-dev; office.sock genuinely exists at \(sharedSocketPath)")
     }
 
     private func performUserCachesUntouched11() async -> (Bool, String) {
@@ -1454,7 +1454,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
     /// Cannot assert the regular-app set is EMPTY — any real machine already has Finder, Xcode, a
     /// browser, etc. running with `.regular` activation policy, and this harness's own host app may
     /// itself be `.regular` depending on when `DockPolicy.apply` ran. The drill's actual claim is
-    /// narrower: this run's own activity (opening six documents, spawning three NormaOfficeHelper
+    /// narrower: this run's own activity (opening six documents, spawning three WinterOfficeHelper
     /// processes, killing one) creates no NEW Dock-visible entry — diff against the `0.setup`
     /// baseline, don't assert emptiness against it.
     private func performNoDockPresence11() async -> (Bool, String) {
@@ -1464,7 +1464,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
             return (false, "new Dock-visible app(s) appeared during this run: "
                           + "\(newOnes.map { "\($0.bundleIdentifier ?? "?") (pid \($0.processIdentifier))" })")
         }
-        return (true, "no NEW Dock-visible app appeared during this run — every NormaOfficeHelper this run "
+        return (true, "no NEW Dock-visible app appeared during this run — every WinterOfficeHelper this run "
                      + "spawned is a bare `type: tool` product, never a nested .app bundle, and gets no Dock "
                      + "icon of its own (\(regularAppsNow.count) regular-activation-policy app(s) total, "
                      + "\(regularAppPidsBeforeRun.count) of them already present at 0.setup's own baseline)")
@@ -1509,7 +1509,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
 
     private func performWriteInFence13() async -> (Bool, String) {
         guard let (output, _) = await runSandboxProbe(kind: "write-inside-fence") else {
-            return (false, "the write-inside-fence probe never exited, or NormaOfficeHelper is not embedded")
+            return (false, "the write-inside-fence probe never exited, or WinterOfficeHelper is not embedded")
         }
         guard output.contains("PROBE_RESULT: write-inside-fence ok") else {
             return (false, "expected ok (sanity control: deny default must not deny EVERYTHING) — got: \(output)")
@@ -1521,7 +1521,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
         let outsideDir = scratchRoot.appendingPathComponent("t13-outside-\(UUID().uuidString.prefix(8))", isDirectory: true)
         try? FileManager.default.createDirectory(at: outsideDir, withIntermediateDirectories: true)
         guard let (output, _) = await runSandboxProbe(kind: "write-outside-fence", outsideDir: outsideDir) else {
-            return (false, "the write-outside-fence probe never exited, or NormaOfficeHelper is not embedded")
+            return (false, "the write-outside-fence probe never exited, or WinterOfficeHelper is not embedded")
         }
         guard output.contains("PROBE_RESULT: write-outside-fence denied") else {
             return (false, "expected denied — got: \(output)")
@@ -1541,7 +1541,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
 
     private func performNetworkDeny13() async -> (Bool, String) {
         guard let (output, _) = await runSandboxProbe(kind: "connect-outbound") else {
-            return (false, "the connect-outbound probe never exited, or NormaOfficeHelper is not embedded")
+            return (false, "the connect-outbound probe never exited, or WinterOfficeHelper is not embedded")
         }
         guard output.contains("PROBE_RESULT: connect-outbound denied") else {
             return (false, "expected denied — got: \(output)")
@@ -2014,7 +2014,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
         let docIdAfterSettle = runtime.stateSnapshot.documents[path]?.docId
         guard docIdAfterSettle == t19DocId else {
             return (false, "the document's own docId CHANGED after the save settled (\(t19DocId) -> "
-                          + "\(docIdAfterSettle ?? "nil")) — Norma's own write triggered a spurious "
+                          + "\(docIdAfterSettle ?? "nil")) — Winter's own write triggered a spurious "
                           + "self-reload, exactly what the .ours suppression machinery exists to prevent")
         }
         guard runtime.stateSnapshot.documentBanners[path] == nil else {
@@ -2030,7 +2030,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
     private func performSetup20() async -> (Bool, String) {
         let helperURL = OfficeHelperSupervisor.Configuration.production().helperExecutableURL
         guard FileManager.default.fileExists(atPath: helperURL.path) else {
-            return (false, "NormaOfficeHelper not embedded at \(helperURL.path)")
+            return (false, "WinterOfficeHelper not embedded at \(helperURL.path)")
         }
         let stateDir = scratchRoot.appendingPathComponent("drill20-helper", isDirectory: true)
         try? FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
@@ -2451,12 +2451,12 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
         guard drill20StateDir.path.hasPrefix(scratchRoot.path) else {
             return (false, "\(drill20StateDir.path) is not under the harness's own scratch root \(scratchRoot.path)")
         }
-        guard !drill20StateDir.path.contains(".norma") else { return (false, "\(drill20StateDir.path) touches a .norma path") }
+        guard !drill20StateDir.path.contains(".winter") else { return (false, "\(drill20StateDir.path) touches a .winter path") }
         guard FileManager.default.fileExists(atPath: drill20StateDir.path) else {
             return (false, "drill 20's own dedicated-helper state directory does not exist under this run's own root")
         }
         return (true, "drill 20's own dedicated-helper state directory lives under \(scratchRoot.path); "
-                     + "no Stage B path touches ~/.norma or ~/.norma-dev")
+                     + "no Stage B path touches ~/.winter or ~/.winter-dev")
     }
 
     private func performUserCachesUntouched25() async -> (Bool, String) {
@@ -2473,7 +2473,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
     // MARK: - office-agent-tools Task 9, drill 26: the agent's command channel
 
     /// Build a `SessionEvent.PanelCommand` **as wire JSON and decode it**, never with a memberwise
-    /// initialiser — `PanelCommand`'s own init is internal to NormaProtocol, and going through the
+    /// initialiser — `PanelCommand`'s own init is internal to WinterProtocol, and going through the
     /// real decode is the honest shape anyway: it is byte-for-byte what `parseServerLine` hands the
     /// live pump, so a drill cannot describe a payload the daemon could not emit. (Identical
     /// reasoning, and identical code, to `OfficeCommandConsumerTests.command(_:)`'s own doc — stated
@@ -2891,7 +2891,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
             guard path.hasPrefix(scratchRoot.path) else {
                 return (false, "\(path) is not under the harness's own scratch root \(scratchRoot.path)")
             }
-            guard !path.contains(".norma") else { return (false, "\(path) touches a .norma path") }
+            guard !path.contains(".winter") else { return (false, "\(path) touches a .winter path") }
         }
         // The out-of-fence target is "outside" only relative to the SESSION's working directories —
         // it is still inside this run's own scratch root, which is what the hard rule is about. Said
@@ -2899,7 +2899,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
         // conflates them would think this drill escaped its root.
         return (true, "all \(stageCPaths.count) Stage C path(s) live under \(scratchRoot.path); "
                      + "26's out-of-fence target is outside the SESSION's working directories but "
-                     + "still inside this run's own root — no Stage C path touches ~/.norma or ~/.norma-dev")
+                     + "still inside this run's own root — no Stage C path touches ~/.winter or ~/.winter-dev")
     }
 
     private func performUserCachesUntouched29() async -> (Bool, String) {
@@ -2941,8 +2941,8 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
 
     private static let sixFixtureNames = ["gate.xlsx", "gate.ods", "gate.pptx", "gate.odp", "gate.docx", "gate.odt"]
 
-    /// `#filePath` for this file is `<repoRoot>/apple/Norma/Sources/AppShell/OfficeHarness.swift` —
-    /// five `deletingLastPathComponent()` hops (the filename, AppShell, Sources, Norma, apple) reach
+    /// `#filePath` for this file is `<repoRoot>/apple/Winter/Sources/AppShell/OfficeHarness.swift` —
+    /// five `deletingLastPathComponent()` hops (the filename, AppShell, Sources, Winter, apple) reach
     /// `<repoRoot>`, the same climbing depth `OfficeHelperLiveTests`/`OfficeRuntimeLiveTests` already
     /// use from their own, differently-named-but-equally-deep location.
     private static var repoRoot: URL {
@@ -2951,10 +2951,10 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
         return url
     }
     private static var committedFixturesRoot: URL {
-        repoRoot.appendingPathComponent("apple/Norma/Tests/NormaAppTests/Fixtures/office", isDirectory: true)
+        repoRoot.appendingPathComponent("apple/Winter/Tests/WinterAppTests/Fixtures/office", isDirectory: true)
     }
     private static var versionPinURL: URL {
-        repoRoot.appendingPathComponent("apple/Norma/vendor/libreoffice/VERSION-PIN")
+        repoRoot.appendingPathComponent("apple/Winter/vendor/libreoffice/VERSION-PIN")
     }
     private static var versionPinBuildId: String? {
         guard let content = try? String(contentsOf: versionPinURL, encoding: .utf8) else { return nil }
@@ -2987,10 +2987,10 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
 
         let sharedStrings = extractDir.appendingPathComponent("xl/sharedStrings.xml")
         let original = try String(contentsOf: sharedStrings, encoding: .utf8)
-        let modified = original.replacingOccurrences(of: "NORMA GATE", with: "NORMA GATE T9 RELOADED")
+        let modified = original.replacingOccurrences(of: "WINTER GATE", with: "WINTER GATE T9 RELOADED")
         guard modified != original else {
             throw NSError(domain: "OfficeHarness", code: 1, userInfo: [
-                NSLocalizedDescriptionKey: "gate.xlsx's sharedStrings.xml no longer contains \"NORMA GATE\""])
+                NSLocalizedDescriptionKey: "gate.xlsx's sharedStrings.xml no longer contains \"WINTER GATE\""])
         }
         try modified.write(to: sharedStrings, atomically: true, encoding: .utf8)
 
@@ -3019,7 +3019,7 @@ final class OfficeHarnessRun: NSObject, NSWindowDelegate {
             throw NSError(domain: "OfficeHarness", code: 2, userInfo: [
                 NSLocalizedDescriptionKey: "content.xml has no </office:text> to anchor the edit on"])
         }
-        let marker = "<text:p>NORMA OFFICE HARNESS MIRROR-CASE MARKER</text:p>"
+        let marker = "<text:p>WINTER OFFICE HARNESS MIRROR-CASE MARKER</text:p>"
         let modified = original.replacingOccurrences(of: "</office:text>", with: marker + "</office:text>")
         precondition(modified != original)
         try modified.write(to: contentXML, atomically: true, encoding: .utf8)

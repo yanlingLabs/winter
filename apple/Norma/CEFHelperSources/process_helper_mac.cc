@@ -4,11 +4,11 @@
 // CEF's own `cmake/cef_variables.cmake:398-404` defines exactly these five suffixes as
 // `CEF_HELPER_APP_SUFFIXES`, measured in docs/research/2026-08-09-cef-spike.md, correction #1; an
 // earlier plan draft assumed four). Chromium's browser process picks which bundle to launch per
-// subprocess role by NAME (`Norma Helper.app`, `Norma Helper (GPU).app`, ...) — this file does not
+// subprocess role by NAME (`Winter Helper.app`, `Winter Helper (GPU).app`, ...) — this file does not
 // know or care which variant it was built as. All five do exactly the same three things.
 //
 // Deliberately outside `Sources/` (a sibling directory, matching `HelperSources/`'s precedent for
-// `NormaHelper`): the Norma app target's `sources: - path: Sources` is a recursive sweep, and a
+// `WinterHelper`): the Winter app target's `sources: - path: Sources` is a recursive sweep, and a
 // second `main()` compiled into that target would collide with `Sources/App/main.swift` at link.
 //
 // Verbatim shape from `process_helper_mac.cc`, as quoted by docs/research/2026-08-09-cef-spike.md
@@ -36,7 +36,7 @@
 
 // editor-plumbing Task 2 ADDS a FOURTH step, between 2 and 3: a `CefApp`. This main passed
 // `nullptr` from Task 4 until now, which was correct for an embedder with no custom schemes and
-// became wrong the moment `norma-editor://` existed. `cef_app.h`'s own comment on
+// became wrong the moment `winter-editor://` existed. `cef_app.h`'s own comment on
 // `OnRegisterCustomSchemes` — "called on the main thread for each process and the registered
 // schemes should be the same across all processes" — is a requirement, not advice: a custom scheme
 // registered only in the browser process is not a standard, secure scheme in any RENDERER, so the
@@ -44,15 +44,15 @@
 // and no `fetch`. Nothing in this repo can catch that (no test boots CEF); it would surface as a
 // blank editor in Task 5's live harness.
 //
-// The app class is shared with the browser process's own `NormaApp` through
-// `Sources/CEF/NormaEditorScheme.h` — one `AddCustomScheme` call with one set of flags, reached
+// The app class is shared with the browser process's own `WinterApp` through
+// `Sources/CEF/WinterEditorScheme.h` — one `AddCustomScheme` call with one set of flags, reached
 // from here via a HEADER_SEARCH_PATHS entry on the `CEFHelper` target template. See that header for
 // why the two processes have different app CLASSES but must not have different scheme LISTS.
 
 #include "include/cef_app.h"
 #include "include/wrapper/cef_library_loader.h"
 
-#include "NormaEditorScheme.h"
+#include "WinterEditorScheme.h"
 
 #if defined(CEF_USE_SANDBOX)
 #include "include/cef_sandbox_mac.h"
@@ -71,12 +71,12 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
-  // Constructed AFTER the loader, not before: `NormaSubprocessApp`'s reference counting is CEF's
+  // Constructed AFTER the loader, not before: `WinterSubprocessApp`'s reference counting is CEF's
   // (`IMPLEMENT_REFCOUNTING`), and this file never links the framework — it dlopens it above.
   // One app for every role this executable is dispatched to. It registers the scheme in all of
   // them and, in a renderer specifically, also carries the editor bridge's renderer-side router —
-  // installing `window.cefQuery` and routing its replies. See `NormaEditorScheme.h` for both.
+  // installing `window.cefQuery` and routing its replies. See `WinterEditorScheme.h` for both.
   CefMainArgs main_args(argc, argv);
-  CefRefPtr<CefApp> app(new NormaSubprocessApp());
+  CefRefPtr<CefApp> app(new WinterSubprocessApp());
   return CefExecuteProcess(main_args, app, nullptr);
 }

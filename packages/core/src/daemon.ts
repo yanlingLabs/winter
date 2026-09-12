@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { mkdirSync, realpathSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { bootstrapNormaDir, resolveNormaHome } from "./norma-dir";
+import { bootstrapWinterDir, resolveWinterHome } from "./winter-dir";
 import { acquireLock, type Lock } from "./lock";
 import { TokenAuthority } from "./auth/tokens";
 import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
@@ -71,7 +71,7 @@ import { makeApply } from "./settings-apply";
 import { SettingsWatcher } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { restampStep } from "./runtime-state/recovery";
-import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "./runtime-sdk/create";
+import { createWinterRuntimeSdk, type WinterRuntimeSdk } from "./runtime-sdk/create";
 import { advisorReviewerFor, familyOfModel, officialLegDefaultSessionModel } from "./runtime-sdk/advisor-reviewer";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
@@ -85,7 +85,7 @@ import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord,
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
 import { makeDaemonRoutineRunner } from "./routines/runner";
 import { makeRoutineScheduler } from "./routines/scheduler";
-import type { NewSessionEvent } from "@norma/protocol";
+import type { NewSessionEvent } from "@winter/protocol";
 import { CORE_VERSION } from "./version";
 
 export { CORE_VERSION } from "./version";
@@ -101,7 +101,7 @@ export interface RunningDaemon {
   // R-T3 whole-branch review FIX 1: the SAME ToolRegistry instance every `register*Tool(s)` call
   // inside the `if (agentProvider)` gate above populates (mirrored into `sharedRegistry`, then
   // threaded to ipc/server.ts's `registry` option) — exposed here too so a test that boots a REAL
-  // daemon (temp NORMA_HOME + injected FakeProvider, same precedent as server.test.ts/
+  // daemon (temp WINTER_HOME + injected FakeProvider, same precedent as server.test.ts/
   // remote-allowlist-parity.test.ts) can walk `registry.namesForMode(mode, ...)` against daemon.ts's
   // ACTUAL registration path instead of a hand-picked mirror of it (see
   // test/agent/mode-toolset-census.test.ts). `null` on a no-agentProvider daemon (opts.agentProvider
@@ -124,7 +124,7 @@ export interface RunningDaemon {
    * Exposed here for the same reason `runtimeState` is: a test that boots a REAL daemon needs to
    * assert against the handle daemon.ts actually built, not a hand-made mirror of it.
    */
-  runtimeSdk: NormaRuntimeSdk | undefined;
+  runtimeSdk: WinterRuntimeSdk | undefined;
   /**
    * P8b Task 5: THE SessionStore this daemon opened — the same instance `stop()` closes.
    *
@@ -171,7 +171,7 @@ export interface RunningDaemon {
    *      draining child appends its last events through it, so it must outlive step 2.
    *   4. `runtime.close()` — the §16 deletion drain (bounded) and `runtime-state.db`, which step 2's
    *      delivery receipts likewise write into.
-   *   5. `lock.release()` — unlinks the socket file, and `norma doctor`'s repairs check for its
+   *   5. `lock.release()` — unlinks the socket file, and `winter doctor`'s repairs check for its
    *      absence before touching it.
    *
    * The returned promise is present whenever EITHER the Winter handle or the runtime spine exists —
@@ -289,7 +289,7 @@ export async function startDaemon(opts: {
   officialConnectionOverride?: WinterLegDeps["officialConnectionOverride"];
 } = {}): Promise<RunningDaemon> {
   const startedAt = Date.now();
-  const dirs = bootstrapNormaDir(opts.home ?? resolveNormaHome());
+  const dirs = bootstrapWinterDir(opts.home ?? resolveWinterHome());
   const lock: Lock = await acquireLock(dirs.lockPath, dirs.socketPath);
 
   const secrets = opts.secrets ?? new KeychainSecretStore();
@@ -307,7 +307,7 @@ export async function startDaemon(opts: {
   // down (before any turn can run), so the tool never actually observes the unset holder.
   let activityDeriver: ActivityDeriver | undefined;
 
-  const normaHome = dirs.home;
+  const winterHome = dirs.home;
 
   // Loaded once, up front, so the settings-derived plugin consent (below) is available before
   // the SkillStore and PluginStore are built. A malformed settings.json degrades to `null` here
@@ -337,7 +337,7 @@ export async function startDaemon(opts: {
   // carries `{ unavailable }`, the failure is logged, and boot continues (nothing else in the
   // daemon depends on the spine in 8a). See `runtime-state/wiring.ts` for the whole sequence.
   const runtimeState = await startRuntimeState({
-    home: normaHome,
+    home: winterHome,
     store,
     settings: () => settings, // LIVE holder, re-read per sweep — never a boot snapshot
     log: (line) => console.error(`runtime-state: ${line}`),
@@ -360,7 +360,7 @@ export async function startDaemon(opts: {
     console.error(`empty-session boot sweep failed: ${(err as Error).message}`);
   }
 
-  const trustStore = new TrustStore(join(normaHome, "trust.json"));
+  const trustStore = new TrustStore(join(winterHome, "trust.json"));
   // Task 7 (CC project-folder-mechanics): the ONE cwd-keyed "effective settings" resolver for the
   // whole daemon — `base` reads the reassignable `settings` holder above LIVE (same hot-settings
   // shape as memoryEnabledHot/hooksEnabledHot below: a watcher-driven reload swaps in a NEW object
@@ -373,7 +373,7 @@ export async function startDaemon(opts: {
   const projectSettings = new ProjectSettingsResolver({ base: () => settings, trust: trustStore });
   // fix-wave B (I1): every per-project getter below resolves at the REPO ROOT, matching
   // `globalAllow`'s own `projectRoot` (engine.ts's `repoRootFor(cwd)`) — NOT the raw session cwd.
-  // Before this, a SUBDIRECTORY session read a DIFFERENT `.norma/settings.json` than
+  // Before this, a SUBDIRECTORY session read a DIFFERENT `.winter/settings.json` than
   // `globalAllow`/`editPathRules` did for the identical repo, so a repo-root settings.json was only
   // half-honored: `permissions.allow` picked it up, but `dangerousDomains.added` (and
   // reviewer/toolSearch/hooks/lsp) silently didn't — same-file keys diverging on which cwd they're
@@ -404,20 +404,20 @@ export async function startDaemon(opts: {
     emit: (event) => { hub.broadcastTransient(event.sessionId, event); },
   });
   // Output styles (CC-parity phase 2, Task 4): per-project effective outputStyle, repo-root-keyed
-  // via the SAME projectRootOf as every other getter here — a trusted project's `.norma/settings.json`
+  // via the SAME projectRootOf as every other getter here — a trusted project's `.winter/settings.json`
   // outputStyle applies; an untrusted project's is ignored (ProjectSettingsResolver.effective()'s own
   // trust gate). Resolution itself (name -> ResolvedStyle, incl. the slug-guard against a
   // project-supplied name escaping the output-styles dir) lives in OutputStyleStore.resolve — this is
   // just the name lookup.
-  const outputStyleStore = new OutputStyleStore({ normaHome, trust: trustStore });
+  const outputStyleStore = new OutputStyleStore({ winterHome, trust: trustStore });
   const outputStyleFor = (cwd?: string | null): string | undefined => projectSettings.effective(projectRootOf(cwd ?? null))?.outputStyle;
   // CC-parity phase 3 (Workflows, Track C Task C2): built unconditionally, same "no engine
   // dependency" precedent as `outputStyleStore` just above — workflow.list's "saved" section and
   // workflow.run's by-name resolution work even on a no-agentProvider daemon (only launching a
   // resolved/inline script needs the WorkflowRuntime below, which DOES require an engine).
-  const workflowStore = new WorkflowStore({ normaHome, trust: trustStore });
+  const workflowStore = new WorkflowStore({ winterHome, trust: trustStore });
   const pluginStore = new PluginStore({
-    normaHome, plugins: settings?.plugins, consents: settings?.plugins?.consents, log: (m) => console.error(m),
+    winterHome, plugins: settings?.plugins, consents: settings?.plugins?.consents, log: (m) => console.error(m),
   });
   // Built unconditionally (Phase 4b Task 4): shortcut.register/tile.update/provider.register are
   // plain latest-per-plugin storage, independent of whether an LLM provider (and thus a
@@ -432,7 +432,7 @@ export async function startDaemon(opts: {
   // but ALSO hot-rebuilt on lifecycle changes (unlike MCP servers today), matching Tier-2's
   // hotApplyStart/hotApplyStop precedent for "no restart needed" plugin changes.
   const hookRegistry = new HookRegistry();
-  const skillStore = new SkillStore({ normaHome, trust: trustStore, plugins: { disabled: settings?.plugins?.disabled ?? [] } });
+  const skillStore = new SkillStore({ winterHome, trust: trustStore, plugins: { disabled: settings?.plugins?.disabled ?? [] } });
   // File-based memory (MEMDIR, T1 — design doc `2026-07-15-file-based-memory-design.md`): a live
   // getter over the `settings` holder (assigned above; reassigned in place by the hot-settings
   // watcher below), read fresh by BOTH the write-root join (`sessionDirs`, just below) and the
@@ -452,10 +452,10 @@ export async function startDaemon(opts: {
   // moves the trees, and the next memory read has to follow them. Absent (no runtime store, or
   // nothing relocated) leaves the derivation exactly as it was.
   const memoryDirOf = (cwd: string): string =>
-    memoryDirFor(cwd, { normaHome, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) });
-  const memoryGlobalDirOf = (): string => globalMemoryDirFor({ normaHome, directory: settings?.memory?.directory });
+    memoryDirFor(cwd, { winterHome, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) });
+  const memoryGlobalDirOf = (): string => globalMemoryDirFor({ winterHome, directory: settings?.memory?.directory });
   const assembler = new ContextAssembler({
-    normaHome, trust: trustStore, skills: skillStore,
+    winterHome, trust: trustStore, skills: skillStore,
     memory: {
       enabled: memoryEnabledHot,
       dirFor: memoryDirOf,
@@ -463,7 +463,7 @@ export async function startDaemon(opts: {
       // `settings?.memory?.directory` (unlike `memoryDirOf`/`memoryGlobalDirOf` above): honoring
       // the relocation override would collapse this bucket into the project bucket and leak dream
       // memories into code sessions (see assistantMemoryDirFor's own doc comment).
-      assistantDir: () => assistantMemoryDirFor({ normaHome }),
+      assistantDir: () => assistantMemoryDirFor({ winterHome }),
     },
     // Output styles (CC-parity phase 2, Task 4): main-conversation only — assemble() itself skips
     // this resolver under a basePromptOverride (dispatch coordinators/subagents keep their own base;
@@ -489,26 +489,26 @@ export async function startDaemon(opts: {
   // — so a mid-session `memory.enabled` false→true flip no longer waits for a restart either.
   if (memoryEnabledHot()) {
     try {
-      migrateMemoryStore({ normaHome, trust: trustStore, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) });
+      migrateMemoryStore({ winterHome, trust: trustStore, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) });
     } catch (err) {
       console.error(`memory migration skipped: ${(err as Error).message}`);
     }
   }
   // Phase 5b Task 2: ONE MemoryStore for the whole daemon (fact-file CRUD is the single-writer
   // contract §4.8 requires — daemon RPCs (ipc/server.ts's memory.*) must share this exact
-  // instance, never open a second one). Built unconditionally, same "needs only normaHome/trust,
+  // instance, never open a second one). Built unconditionally, same "needs only winterHome/trust,
   // no provider" precedent as skillStore/assembler just above — a provider-disabled daemon (or a
   // future read-only RPC) can still serve memory state.
   //
   // T1 (file-based memory) supersedes this store's TOOL surface (memory_read/write/delete are
   // deleted — see agent/tools/memory.ts's removal) and, whenever `memory.enabled` (above) is on,
   // the assembler's OWN injection of this store's data (context.ts's legacy branch, which reads
-  // these exact `<normaHome>/memory/MEMORY.md` / `<cwd>/.norma/memory/MEMORY.md` paths, is skipped
+  // these exact `<winterHome>/memory/MEMORY.md` / `<cwd>/.winter/memory/MEMORY.md` paths, is skipped
   // in favor of the new per-project MEMDIR). T2 rewires the memory.* RPCs (below, `memoryFiles`)
   // to read/write MEMDIR files whenever `memory.enabled` is on, falling back to THIS store
   // unchanged when it's off — the store instance itself and its on-disk data stay untouched
   // either way (the escape hatch, and the migration importer's source, both need it intact).
-  const memoryStore = new MemoryStore({ normaHome, trust: trustStore });
+  const memoryStore = new MemoryStore({ winterHome, trust: trustStore });
   // Built unconditionally (needs only store, no provider) so the server's session.addDir /
   // setCwd handlers always have live roots to work with, even when the agent is disabled.
   const sessionDirs = new SessionDirectories((sid) => {
@@ -553,15 +553,15 @@ export async function startDaemon(opts: {
     // workdir-less relative fs-tool path resolves there — engine.test.ts's own "never the daemon's
     // cwd" pin) BEFORE this MEMDIR fold existed, and that pin must survive memory being enabled.
     if (!primary) {
-      roots.push(ensureOutdir(normaHome, sid));
+      roots.push(ensureOutdir(winterHome, sid));
       if (memoryEnabledHot()) {
-        const memDir = assistantMemoryDirFor({ normaHome });
+        const memDir = assistantMemoryDirFor({ winterHome });
         mkdirSync(memDir, { recursive: true });
         roots.push(memDir);
       }
       return roots;
     }
-    roots.push(...loadPermissionDirs(normaHome, primary, trustStore.isTrusted(primary)));
+    roots.push(...loadPermissionDirs(winterHome, primary, trustStore.isTrusted(primary)));
     // T1 write-root join (design doc: "the tmpDir pattern" — a plain, ungated, auto-provisioned
     // root, mirroring how `sessionTmpDir` needs no user approval either): whenever file-based
     // memory is enabled, the session's MEMDIR joins the SAME write-fence `roots` the `write`/`edit`
@@ -585,14 +585,14 @@ export async function startDaemon(opts: {
       mkdirSync(memDir, { recursive: true });
       roots.push(memDir);
     }
-    // working-directories T4: the session's own delivery folder — `<normaHome>/outputs/<sid>` —
+    // working-directories T4: the session's own delivery folder — `<winterHome>/outputs/<sid>` —
     // joins the SAME write-fence roots the MEMDIR just above does, and by the identical mechanism:
     // one more entry in this session-scoped list, no new fencing/grant machinery. Unlike the MEMDIR
     // this is NOT gated on a settings flag — the outputs dir is a core primitive, always available.
-    // Keyed by `sid` (this closure's own parameter, never a bare `~/.norma/outputs/` prefix), which
+    // Keyed by `sid` (this closure's own parameter, never a bare `~/.winter/outputs/` prefix), which
     // is exactly what keeps ANOTHER session's outputs dir OUT of this list — `grantDeniedPrefixes:
-    // [normaHome]` (below) still refuses it for every session but this one.
-    roots.push(ensureOutdir(normaHome, sid));
+    // [winterHome]` (below) still refuses it for every session but this one.
+    roots.push(ensureOutdir(winterHome, sid));
     return roots;
   });
 
@@ -662,7 +662,7 @@ export async function startDaemon(opts: {
 
   // SP-approvals Task 5: hoisted alongside `engine` — same "declared null/undefined above, assigned
   // inside the gate" shape as `dreamer`/`mcp`/etc below. PermissionRules itself needs no provider
-  // (only settings + normaHome), but has always been constructed inside the `if (agentProvider)`
+  // (only settings + winterHome), but has always been constructed inside the `if (agentProvider)`
   // gate next to the engine that consumes it (see the assignment site's own doc comment); declared
   // here so it's reachable AFTER the gate closes, where startIpcServer's opts (below) share this
   // SAME instance with the engine's own ask-policy rule-consult path — one mtime cache, not two
@@ -729,7 +729,7 @@ export async function startDaemon(opts: {
   // Boot-time hook-registry build (Phase 4f Task 2) — the SAME eligible-plugin projection
   // (`hookRegistryPlugins`, agent/plugins.ts) ipc/server.ts's lifecycle RPCs use to rebuild this
   // SAME `hookRegistry` instance hot, later, off a fresh `livePlugins()` read.
-  hookRegistry.rebuild(hookRegistryPlugins(allPlugins, normaHome));
+  hookRegistry.rebuild(hookRegistryPlugins(allPlugins, winterHome));
   const pluginSupervisor = new PluginSupervisor({
     runDir: dirs.runDir,
     socketPath: dirs.socketPath,
@@ -740,7 +740,7 @@ export async function startDaemon(opts: {
   });
   const spawnablePlugins = allPlugins
     .filter(pluginSpawnEligible)
-    .map((p) => ({ id: p.name, dir: join(normaHome, "plugins", p.name), entry: p.entry! }));
+    .map((p) => ({ id: p.name, dir: join(winterHome, "plugins", p.name), entry: p.entry! }));
   // Phase 4d-i Task 4: boot-time orphan-PID sweep, BEFORE startAll spawns the current set — a
   // plugin disabled or removed since the last run may have left its process running under a
   // stale <runDir>/plugins/<id>.pid; startAll/reclaimOrphans would never find it (they only look
@@ -752,9 +752,9 @@ export async function startDaemon(opts: {
 
   // Hoisted above the `if (agentProvider)` gate (4g Task 5) — registerWebTools below needs it, and
   // tool registration happens inside that gate. Built unconditionally regardless (same precedent as
-  // `peripheral`/`hardware` further down, which share this SAME instance): normaHome is ready at
+  // `peripheral`/`hardware` further down, which share this SAME instance): winterHome is ready at
   // line 135, and AuditLog's own constructor is cheap (mkdir is lazy, on first write — see audit.ts).
-  const audit = new AuditLog(join(normaHome, "audit.jsonl"));
+  const audit = new AuditLog(join(winterHome, "audit.jsonl"));
 
   // Peripheral lease v1 (Phase 2f) — HOISTED above the `if (agentProvider)` gate (phase 5 CU): the
   // ComputerUseService (built inside the gate) needs this broker to lease screenshot/ax-read/input-
@@ -769,7 +769,7 @@ export async function startDaemon(opts: {
     expiryMs: settings?.peripheral?.expiryMs,
     policy: buildLeasePolicy({ store, approvals: approvalBroker, hub }),
     // lease_granted/lease_lost are emitted on the REQUESTER's session (broadcastTransient scopes
-    // fan-out to that session's attached harnesses), but the provider connection (Norma.app) is
+    // fan-out to that session's attached harnesses), but the provider connection (Winter.app) is
     // rarely attached to the requesting session — it needs its own copy of these two event types
     // to track its active-lease set regardless of what it's attached to. peripheral_call_requested
     // already reaches the provider via pushToProvider; lease_granted/lease_lost did not, which
@@ -789,7 +789,7 @@ export async function startDaemon(opts: {
   // instance for the whole daemon (no risk of the tool and the scheduler racing on two separate
   // sqlite handles to the same file) — see the "Scheduled routines" block below, which reuses this
   // SAME `routineStore` rather than calling `openRoutineStore` a second time.
-  const routineStore = openRoutineStore(join(normaHome, "routines.db"));
+  const routineStore = openRoutineStore(join(winterHome, "routines.db"));
 
   // ── The Winter runtime handle (P8b Task 5) ────────────────────────────────────────────────────
   // THE ONE `createRuntimeSdk` for this daemon. It slots here because it needs everything above it
@@ -808,7 +808,7 @@ export async function startDaemon(opts: {
   // which case the router falls back to its own in-memory directory: messaging works for this
   // process's lifetime, receipts are not durable. That is the same "runtime routing degraded, boot
   // continues" posture the spine itself takes.
-  let runtimeSdk: NormaRuntimeSdk | undefined;
+  let runtimeSdk: WinterRuntimeSdk | undefined;
   // ── The daemon-owned capability servers (P8b Tasks 6-7, R-8-1, P8b-36) ────────────────────────
   // The router owns no tool; the DAEMON owns the capability tools. This bundle is the daemon-wide
   // HALF of that wiring — the instances, stores and closures the tools need, built once and shared —
@@ -880,7 +880,7 @@ export async function startDaemon(opts: {
         dirsOf: (sid) => store.dirs(sid),
       },
     },
-    // C-6: Norma's OWN web surface for chat/dispatch. `secret` is a CLOSURE — the Exa key is
+    // C-6: Winter's OWN web surface for chat/dispatch. `secret` is a CLOSURE — the Exa key is
     // read inside `run`, never here and never into `listTools()`. `dangerousDomainsAdded` is
     // the same shared getter every other consumer takes, so the floor is one list.
     research: {
@@ -938,13 +938,13 @@ export async function startDaemon(opts: {
   const buildSessionCapabilities = (session: CapabilitySession): CapabilityServerRecord =>
     buildCapabilitiesFor(session, capabilityDeps);
   try {
-    runtimeSdk = await createNormaRuntimeSdk({
-      home: normaHome,
+    runtimeSdk = await createWinterRuntimeSdk({
+      home: winterHome,
       settings: () => settings, // LIVE holder, never a boot snapshot
       secrets,
       directoryStore: runtime?.directory,
       // EMPTY ON PURPOSE (P8b-36) — this list is handle-wide and construction-time, which is
-      // exactly what a per-session capability set must not be. Norma's capability servers ride each
+      // exactly what a per-session capability set must not be. Winter's capability servers ride each
       // session's own `Options.mcpServers` instead (`buildSessionCapabilities` above). The field is
       // reserved for the official leg, which has no host in 8b.
       capabilities: [],
@@ -997,7 +997,7 @@ export async function startDaemon(opts: {
       // `backendSessionId`, and the router's only refusal before a cold resume is `archived` — so
       // every session from the last boot would still be resumable from inside a delivery, by a
       // spawn this daemon never tracked. Nothing is attached at this point in boot by construction,
-      // so the sweep parks them all. A Norma session is resumed by its DRIVER from the 8a record
+      // so the sweep parks them all. A Winter session is resumed by its DRIVER from the 8a record
       // (which keeps its own backend id), never by the messaging layer.
       const parked = await parkRecoveredSessions(runtimeSdk, (line) => console.error(`runtime-sdk: ${line}`));
       console.error(
@@ -1006,7 +1006,7 @@ export async function startDaemon(opts: {
       );
       // P8d-11 (ruling: 8b task-12 option (b)): step 10 ran LATE by design — the router handle is
       // built after §13 — so the boot-time attempt row says `skipped`; re-stamp it with the real
-      // outcome so `norma doctor` reads one honest step 10.
+      // outcome so `winter doctor` reads one honest step 10.
       if (runtime?.lastRecovery.step10AttemptId !== undefined) {
         restampStep(runtime.db.db, runtime.lastRecovery.step10AttemptId, 10, "ok", { entriesLoaded: recovered.entriesLoaded, staleMarked: recovered.staleMarked });
       }
@@ -1070,7 +1070,7 @@ export async function startDaemon(opts: {
           // The owning session's live facet — Task 16 attaches Winter sessions, and until then a
           // stop with no local `AbortController` is recorded and nothing is asked of the child.
           facetFor: (sessionId) => {
-            // A child's `parentWinterSessionId` is NORMA's session id; the router addresses a
+            // A child's `parentWinterSessionId` is WINTER's session id; the router addresses a
             // session by its BACKEND id (P8b Task 12), so the 8a record is the hop between them.
             // Nothing attaches until Task 16, so this answers `undefined` today and a stop with
             // no local controller is recorded without anything being asked of the child.
@@ -1079,7 +1079,7 @@ export async function startDaemon(opts: {
           },
           log: (line) => console.error(`children: ${line}`),
         });
-  // Fix wave (review row 4): session titles on the Winter leg. The titler stays on Norma's OWN
+  // Fix wave (review row 4): session titles on the Winter leg. The titler stays on Winter's OWN
   // provider layer (P8b-10 — never `sdk.query()`), so it needs `agentProvider`; a no-provider
   // daemon simply titles nothing, as before. `titles.enabled` is read LIVE at every fire (the
   // engine-era wiring was a boot snapshot; no setting may need a restart), `titles.model` stays the
@@ -1137,7 +1137,7 @@ export async function startDaemon(opts: {
   const hooksFor = (session: CapabilitySession) =>
     sessionHooksFor({
       sessionId: session.sessionId,
-      home: normaHome,
+      home: winterHome,
       roots: session.roots,
       tmpDir: session.tmpDir,
       hookFacade,
@@ -1178,8 +1178,8 @@ export async function startDaemon(opts: {
     }
   });
   const winterDrivers: WinterSessionDrivers = createWinterSessionDrivers({
-    home: normaHome,
-    profile: process.env.NORMA_PROFILE,
+    home: winterHome,
+    profile: process.env.WINTER_PROFILE,
     settings: () => settings, // LIVE holder
     runtime: runtimeSdk,
     records: runtime?.records,
@@ -1191,13 +1191,13 @@ export async function startDaemon(opts: {
     gate: new PermissionGate(),
     rootsOf: (sid) => sessionDirs.roots(sid),
     tmpDirOf: (sid) => sessionTmpDir(sid),
-    outDirOf: (sid) => ensureOutdir(normaHome, sid),
+    outDirOf: (sid) => ensureOutdir(winterHome, sid),
     // The SAME relocation-aware derivation the live memory path uses (`memoryDirOf` above), so the
     // record names the directory the session actually reads.
-    memoryKeyOf: (cwd) => memoryProjectKeyFor(cwd, { normaHome, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) }),
+    memoryKeyOf: (cwd) => memoryProjectKeyFor(cwd, { winterHome, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) }),
     // Task 17 Step 0(a): the SAME assembler the engine's `turn()` composes its instructions with —
-    // Norma's persona per mode, the `_assistant` bucket, the output style — so a Winter-leg session
-    // speaks as Norma.
+    // Winter's persona per mode, the `_assistant` bucket, the output style — so a Winter-leg session
+    // speaks as Winter.
     assembler,
     // Task 17 (P8b-15): Winter children land in the persisted roster (absent when the spine is offline).
     ...(bgAgents === undefined ? {} : { children: bgAgents }),
@@ -1223,7 +1223,7 @@ export async function startDaemon(opts: {
   // before `winterDrivers` existed) — see that block's own comment for why the cycle is broken here.
   winterDriversForPlanBridge = winterDrivers;
   // P8c integration round 3 (lane 4's NEEDS daemon.ts note): the ONE registration of the router's
-  // handoff participants (`create.ts`'s `NormaRuntimeSdk.registerHandoffParticipants`, lane 1's
+  // handoff participants (`create.ts`'s `WinterRuntimeSdk.registerHandoffParticipants`, lane 1's
   // hook) — the router reads `participants`/`selectionInputFor` LAZILY at handoff time, so this
   // must run once, after both `runtimeSdk` (the router handle — `HandoffDeps.runtime`) and
   // `winterDrivers` exist, and never inside an RPC case. Guarded on both existing: `runtime`
@@ -1242,7 +1242,7 @@ export async function startDaemon(opts: {
     runtime?.onSessionDeleted(sessionId);
   };
   /** Task 17: what the engine used to answer, over the driver table + the child roster. */
-  const grantDeniedPrefixes = [normaHome];
+  const grantDeniedPrefixes = [winterHome];
   const signals: EngineSignals = {
     isRunning: (sid) => winterDrivers.get(sid)?.turnRunning ?? false,
     hasBackgroundWork: (sid) => (bgAgents?.list(sid) ?? []).some((a) => a.status === "running"),
@@ -1250,7 +1250,7 @@ export async function startDaemon(opts: {
     activeTurnCount: () => winterDrivers.list().filter((d) => d.turnRunning).length,
     knownModels: () => agentProvider?.provider.models() ?? [],
     // engine.ts's `grantDenied`, verbatim: at/under a prefix, or an ANCESTOR of one (fence
-    // containment is subtree-based; granting an ancestor of ~/.norma/run would open the control plane).
+    // containment is subtree-based; granting an ancestor of ~/.winter/run would open the control plane).
     isGrantDenied: (dir) => {
       for (const p of grantDeniedPrefixes) {
         let cp: string;
@@ -1273,14 +1273,14 @@ export async function startDaemon(opts: {
     const registry = new ToolRegistry();
     sharedRegistry = registry;
     // Reads-unrestricted (user rule, memory/reads-unrestricted.md, task-10): read/ls/glob/grep get
-    // NO path fence — the ONE carve-out is denying `dirs.runDir` (~/.norma/run), the sole directory
-    // bootstrapNormaDir (norma-dir.ts) locks down to 0700; every other normaHome subdir (sessions,
+    // NO path fence — the ONE carve-out is denying `dirs.runDir` (~/.winter/run), the sole directory
+    // bootstrapWinterDir (winter-dir.ts) locks down to 0700; every other winterHome subdir (sessions,
     // memory, skills, agents, plugins, hooks, logs, settings.json) stays fully readable by design.
-    // Boot-constant: normaHome can't change within a daemon lifetime, and `run` already exists by
-    // this point (bootstrapNormaDir mkdir'd it above). This is belt-and-suspenders — today every
+    // Boot-constant: winterHome can't change within a daemon lifetime, and `run` already exists by
+    // this point (bootstrapWinterDir mkdir'd it above). This is belt-and-suspenders — today every
     // actual secret (harness/admin tokens, Codex OAuth tokens, web-search/OpenAI API keys) lives in
-    // the OS Keychain via `secrets` (KeychainSecretStore), never on disk under normaHome — but it's
-    // the real, deliberately-hardened boundary Norma draws around its own runtime material (the IPC
+    // the OS Keychain via `secrets` (KeychainSecretStore), never on disk under winterHome — but it's
+    // the real, deliberately-hardened boundary Winter draws around its own runtime material (the IPC
     // socket, the daemon lock file, plugin-supervisor PID files), so a prompt-injected turn can't
     // read the daemon's own control-plane files through the tool the daemon itself hosts.
     // P8a (WS-16 §10, whole-branch review M1): `runtimes/` joins `run/`. It holds the authoritative
@@ -1288,20 +1288,20 @@ export async function startDaemon(opts: {
     // spool and the resume-staging roots — i.e. router metadata today and MESSAGE BODIES the moment
     // 8b lands (`global_messages`/`held_messages` carry whole envelopes), plus 8c's staged
     // credentials. A model that could `read` the db file could read all of it around every seam this
-    // branch built. `norma doctor` is a separate CLI process and is unaffected by this denial.
+    // branch built. `winter doctor` is a separate CLI process and is unaffected by this denial.
     // hot-settings T2: getter over the live `settings` holder (was a boot-captured value) — a
     // later task's watcher reassigns `settings` in place; this closure re-reads it on the NEXT
     // enter_worktree/spawn isolation call, no WorktreeManager reconstruction needed.
-    // 4g Task 5: web_fetch — Norma's ONLY sanctioned network egress (bash's sandbox denies network
+    // 4g Task 5: web_fetch — Winter's ONLY sanctioned network egress (bash's sandbox denies network
     // by design). Shares the SAME `audit` appender instance as peripheral/hardware below (hoisted
     // above this gate for exactly this reason) — every call (success, ssrf-refusal, http error,
     // timeout) gets one `{kind:"network", tool:"web_fetch", url, outcome}` line on audit.jsonl.
     // 4g Task 6: web_search's Brave API key rides the SAME `secrets` store (KeychainSecretStore,
-    // built at the top of startDaemon) `norma login --web-search-key` writes into — one
+    // built at the top of startDaemon) `winter login --web-search-key` writes into — one
     // SecretStore instance, one Keychain, no separate store to keep in sync.
     // B1-T5: Search — chat's Exa-backed one-call web search (results + page excerpts in a single
     // request). Same `audit`/`secrets` instances as registerWebTools just above; its own keychain
-    // secret (EXA_API_KEY_SECRET) is `norma login --exa-key`'s write target, never web_search's.
+    // secret (EXA_API_KEY_SECRET) is `winter login --exa-key`'s write target, never web_search's.
     // Critical 1 fix (whole-branch review): `dangerousDomainsAdded` — the same shared getter every
     // other consumer of the effective dangerous-domain list uses below — so a Search result whose
     // url matches it is withheld before the model ever sees it (never a silent drop; see search.ts).
@@ -1412,7 +1412,7 @@ export async function startDaemon(opts: {
         const failed = log.some((e) => e.type === "agent_error") || signal.aborted;
         return { ok: !failed, result: last?.text ?? "" };
       },
-      runsDir: join(normaHome, "workflows-runs"),
+      runsDir: join(winterHome, "workflows-runs"),
     });
     // Deferred (rides ToolSearch like worktree/notebook/plan/schedule above) — a specialized
     // orchestration primitive, not needed in every turn. Session-type/settings gating (Task B3/B4,
@@ -1464,7 +1464,7 @@ export async function startDaemon(opts: {
     // FIX 3): the user's request was "deferred on dispatch" (narrowing bash/task_stop/computer/
     // AskQuestion/send_message's EXISTING toolset into dispatch), never "make task_stop immediate in
     // code", and CC parity (this repo's tool surface deliberately tracks Claude Code's shape — see
-    // norma-vs-cc-tools.md) has TaskStop deferred: one generic stop tool, no separate bash_kill
+    // winter-vs-cc-tools.md) has TaskStop deferred: one generic stop tool, no separate bash_kill
     // (removed; task_stop's bash-unify path is now the only way to kill a bg bash task) — that is
     // the ORIGINAL CC-parity clause this comment used to (mis)attribute to "stays immediate in
     // code" instead. Restored to `deferred: ["code", "dispatch"]` — deferred in BOTH modes it's
@@ -1497,7 +1497,7 @@ export async function startDaemon(opts: {
     // Computer use (Phase 5 CU): opt-in via settings.computerUse.enabled (the strongest reading of
     // "full-auto CU requires explicit opt-in" — absent/false, the `computer` tool does not exist).
     // The service holds leases on the SAME `peripheral` broker (hoisted above this gate) that
-    // Norma.app serves screenshot/ax-read/input-drive behind. reuses settings.peripheral.heartbeatMs.
+    // Winter.app serves screenshot/ax-read/input-drive behind. reuses settings.peripheral.heartbeatMs.
     // P8b Task 6: the `let` itself is HOISTED above the Winter runtime block (it is the holder the
     // `computer` capability server's getter reads — one service, one lease set, two doors); only
     // the construction stays here, unchanged.
@@ -1535,11 +1535,11 @@ export async function startDaemon(opts: {
     // working-directories T4: engine.ts's `EngineConfig.outDirOf` — read fresh per tool call
     // alongside `tmpDir` (executeCall), independent of `sessionDirs`/`rootsOverride` (see that
     // field's own doc comment for why: mirrors `tmpDir`'s own rootsOverride-independence).
-    const outDirOf = (sid: string) => ensureOutdir(normaHome, sid);
-    // diff-tabs Task 6: engine.ts's `EngineConfig.persistDiff` — same normaHome-closure shape as
+    const outDirOf = (sid: string) => ensureOutdir(winterHome, sid);
+    // diff-tabs Task 6: engine.ts's `EngineConfig.persistDiff` — same winterHome-closure shape as
     // outDirOf just above, action- rather than value-shaped (see persistDiff's own doc comment).
     const persistDiff = (sid: string, diffId: string, header: Omit<DiffHeader, "truncated">, patch: string) =>
-      writeDiff(normaHome, sid, diffId, header, patch);
+      writeDiff(winterHome, sid, diffId, header, patch);
     if (lspCfg?.enabled !== false) {
       lspManager = new LspManager({ idleShutdownMs: lspCfg?.idleShutdownMs });
     }
@@ -1572,12 +1572,12 @@ export async function startDaemon(opts: {
     // .mcp.json ... manifest wins on conflict") comes straight off PluginInfo — PluginStore.list()
     // already ran loadManifest once per plugin and carried contributes.mcpServers through as
     // p.manifestServers (undefined for legacy plugins and manifest plugins with no mcpServers
-    // declared). Re-reading norma-plugin.json here would risk a manifest that read fine moments
+    // declared). Re-reading winter-plugin.json here would risk a manifest that read fine moments
     // ago (hasManifestMcp true, gating eligibility) but fails to reparse on a second read —
     // silently falling back to the legacy .mcp.json path without ever disclosing that switch.
     const enabledPlugins = allPlugins
       .filter(pluginMcpEligible)
-      .map((p) => ({ name: p.name, dir: join(normaHome, "plugins", p.name), manifestServers: p.manifestServers }));
+      .map((p) => ({ name: p.name, dir: join(winterHome, "plugins", p.name), manifestServers: p.manifestServers }));
     await mcp.startPlugins(enabledPlugins);
 
     // Tier-2 platform plugins (Phase 4b Task 3, spec §3): PluginSupervisor owns process lifecycle
@@ -1656,13 +1656,13 @@ export async function startDaemon(opts: {
     // referenced by its old inline comment, now a shorthand) for what this class actually does.
     // Task 7: `globalAllow` now takes the `projectRoot` PermissionRules' own decision()/rulesFor()/
     // editPathRules() already have in scope, and resolves it through the SAME `projectSettings`
-    // instance above — a trusted project's OWN `.norma/settings.json` `permissions.allow` UNIONS
+    // instance above — a trusted project's OWN `.winter/settings.json` `permissions.allow` UNIONS
     // into this project's effective rules (mergeSettings, Task 5) on top of the global settings.json
     // value; `effective(null)` degrades to `settings` verbatim, so a null projectRoot (or an
     // untrusted/overlay-less one) reads byte-identically to the pre-Task-7 global-only getter.
     permissionRules = new PermissionRules({
       globalAllow: (projectRoot) => projectSettings.effective(projectRoot)?.permissions?.allow ?? ["Computer"],
-      normaHome,
+      winterHome,
     });
     // P8b Task 5, deliberately: `runtimeSdk` is NOT on this config. The engine never consumes the
     // Winter handle — P8b-13 decides the leg at `session.create` (`ipc/server.ts`, which has it) and
@@ -1686,7 +1686,7 @@ export async function startDaemon(opts: {
     dreamer = new Dreamer({
       provider: agentProvider,
       store,
-      dir: () => assistantMemoryDirFor({ normaHome }),
+      dir: () => assistantMemoryDirFor({ winterHome }),
       enabled: memoryEnabledHot,
       // P8b Task 17: a Winter-leg turn in flight is activity too (the drivers' host-side count).
       activeTurnCount: () => signals.activeTurnCount(),
@@ -1709,7 +1709,7 @@ export async function startDaemon(opts: {
         attachedCount: (sid) => hub.attachedCount(sid),
         turnRunning: (sid) => signals.isRunning(sid),
         bgWork: (sid) => signals.hasBackgroundWork(sid),
-        home: normaHome,
+        home: winterHome,
         enabled: cleanerEnabledHot,
         // P8a Task 12: the second sanctioned deletion path takes runtime state with it too, exactly
         // as the reaper's does (WS-16 §16) — and, since Task 16, the session's Winter child.
@@ -1759,7 +1759,7 @@ export async function startDaemon(opts: {
         await m?.stopAll();
       },
       // File-based memory hot-toggle (T3, design doc follow-up / task-23): the SAME boot-time call
-      // above (`migrateMemoryStore({ normaHome, trust: trustStore, directory, relocatedKey })`),
+      // above (`migrateMemoryStore({ winterHome, trust: trustStore, directory, relocatedKey })`),
       // re-run whenever `memory.enabled` flips false→true on THIS running daemon — closes T2's
       // "boot-time only" gap. `settings` here is read at the moment this closure actually RUNS
       // (fire-and-forget, deferred a tick past `apply()`'s synchronous `setLiveSettings` swap), so
@@ -1767,7 +1767,7 @@ export async function startDaemon(opts: {
       // call reflects the settings loaded at THAT time. Failures are logged by settings-apply.ts's
       // own `.catch` (this closure just re-throws/returns whatever `migrateMemoryStore` does);
       // never touches/deletes the old store either way (memory-migrate.ts's own contract).
-      migrateMemory: () => { migrateMemoryStore({ normaHome, trust: trustStore, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) }); },
+      migrateMemory: () => { migrateMemoryStore({ winterHome, trust: trustStore, directory: settings?.memory?.directory, relocatedKey: (k) => runtime?.relocatedMemoryKey(k) }); },
       // P8a Task 12: `runtimes.migrations.memoryKeys` flipped on a RUNNING daemon must migrate
       // without a restart (the project's standing no-restart-for-settings rule). The wiring's own
       // `schema_meta` marker is what keeps it a ONE-TIME relocation, so this is handed the new
@@ -1799,7 +1799,7 @@ export async function startDaemon(opts: {
   // `routines.maxConcurrent` below is ALREADY a getter over the live `settings` holder (hot-settings
   // T2 leaves it exactly as it already was — same shape `subagents.maxConcurrent`/`worktrees.baseRef`
   // above were just converted TO).
-  const routinesAudit = new RoutineAuditLog(join(normaHome, "routines-audit.jsonl"));
+  const routinesAudit = new RoutineAuditLog(join(winterHome, "routines-audit.jsonl"));
   // P8b Task 17: a routine fires as a NEW code session through the driver table (fix wave F9: the
   // runner's engine branch is gone with the engine).
   const routineRunner = makeDaemonRoutineRunner({ store, hub, winter: winterDrivers });
@@ -1816,7 +1816,7 @@ export async function startDaemon(opts: {
 
   // Hardware helper (Phase 4c Task 2, spec §5).  // Hardware helper (Phase 4c Task 2, spec §5). Built unconditionally, same precedent as
   // `peripheral` above — hardware access has nothing to do with whether an LLM provider is
-  // configured. Shares the SAME `providerLink`/`audit` instances as `peripheral`: Norma.app's one
+  // configured. Shares the SAME `providerLink`/`audit` instances as `peripheral`: Winter.app's one
   // provider connection doubles as the hardware provider, and `hardware.respond` (ipc/server.ts)
   // reuses `peripheral.isProvider()` to gate on that SAME connection identity rather than tracking
   // its own.
@@ -1890,7 +1890,7 @@ export async function startDaemon(opts: {
     // remove/setConsent) read+write settings.json and the plugins directory directly, and re-read
     // both fresh on every call (`livePlugins`, ipc/server.ts) instead of trusting `pluginStore`
     // above's boot-time snapshot.
-    normaHome,
+    winterHome,
     // BYOK T1: the SAME SecretStore instance `authority`/`createProvider` above already use (one
     // Keychain, no separate store to keep in sync) — lets `provider.configure` write the BYO
     // OpenAI API key server-side. Chat Slice D task 3: also `sync.config`'s ONLY route to the Exa
@@ -1981,15 +1981,15 @@ export async function startDaemon(opts: {
     // precedent as every other optional field in this object. `runtime` here is the 8a spine
     // (`.records`); `runtimeSdk` is the router handle `HandoffDeps.runtime` names.
     ...(runtime === undefined ? {} : {
-      importLegacy: { importSession: (sessionId: string) => importEngineEraSession({ home: normaHome, store, records: runtime.records }, sessionId) },
+      importLegacy: { importSession: (sessionId: string) => importEngineEraSession({ home: winterHome, store, records: runtime.records }, sessionId) },
     }),
     // `sdk` is captured into its own `const` before the closure below: `runtimeSdk` (outer scope)
     // is a `let` reassigned inside a try/catch above, so a narrowing on it does not persist into a
-    // nested arrow function — TS would otherwise still see `NormaRuntimeSdk | undefined` inside
+    // nested arrow function — TS would otherwise still see `WinterRuntimeSdk | undefined` inside
     // `planAndApplySwitch`'s call and refuse `runtime: sdk` against `HandoffDeps.runtime`'s
     // non-optional type. `runtime` (the 8a spine, unlike the router handle) IS a `const`, so
     // `runtime.records` needs no such capture.
-    ...(runtime === undefined || runtimeSdk === undefined ? {} : ((sdk: NormaRuntimeSdk) => ({
+    ...(runtime === undefined || runtimeSdk === undefined ? {} : ((sdk: WinterRuntimeSdk) => ({
       handoff: {
         planAndApplySwitch: (sessionId: string, model: string | null, confirmLossy: boolean) =>
           planAndApplySwitch({ runtime: sdk, winter: winterDrivers, records: runtime.records, store, settings: () => settings }, sessionId, model, confirmLossy),
@@ -1998,7 +1998,7 @@ export async function startDaemon(opts: {
     ...opts.server,
   });
 
-  console.error(`norma-core ${CORE_VERSION} listening on ${dirs.socketPath}`);
+  console.error(`winter-core ${CORE_VERSION} listening on ${dirs.socketPath}`);
   return {
     socketPath: dirs.socketPath,
     tokens,
@@ -2032,7 +2032,7 @@ export async function startDaemon(opts: {
       // Task 5 added a second, below: ending the live Winter sessions — so `store.close()` is on
       // the async tail now too; see `RunningDaemon.stop`'s doc for the whole order), and
       // `lock.release()` — which unlinks
-      // the socket, and whose absence is what `norma doctor`'s repairs check before touching this
+      // the socket, and whose absence is what `winter doctor`'s repairs check before touching this
       // file — happens strictly after the handle is closed. AWAIT IT in any path that then calls
       // `process.exit` (daemon.ts's own SIGTERM handler below, and cli/src/main.ts's `daemon run`),
       // or the process dies mid-drain with the lock still on disk.

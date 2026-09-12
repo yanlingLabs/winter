@@ -53,8 +53,8 @@ struct ShellRootView: View {
     /// width with no second "previous width" to keep in step.
     ///
     /// Plain `@State`, not `@SceneStorage`: this window is AppKit-owned and hosted directly via
-    /// `NSHostingView` (`AppWindowController.swift:215`) — `NormaApp`'s only `Scene` is an empty
-    /// `Settings {}` (`NormaApp.swift`), so there is no SwiftUI window-restoration scene for
+    /// `NSHostingView` (`AppWindowController.swift:215`) — `WinterApp`'s only `Scene` is an empty
+    /// `Settings {}` (`WinterApp.swift`), so there is no SwiftUI window-restoration scene for
     /// `@SceneStorage` to key off. Apple's own documented fallback for that case is to behave
     /// exactly like `@State` — so the wrapper would be inert here, and `PanelPresentation` (a plain
     /// struct) has no existing `RawRepresentable` bridging to invent one for just to carry it.
@@ -141,20 +141,20 @@ struct ShellRootView: View {
                 // unless the variable is set.
                 .onAppear {
                     let env = ProcessInfo.processInfo.environment
-                    guard env["NORMA_PANEL_SMOKE"] == "1" else { return }
+                    guard env["WINTER_PANEL_SMOKE"] == "1" else { return }
                     presentation.mode = .side
                     host?.openPanelTab(kind: .web) { sessionId in
                         nav.navigate(to: .session(sessionId))
                     }
                     // Task 6a fix pass: reproduce the LIVE-GATE DEFECT without a click. Closing a
                     // tab (and switching destination with one open — the same dismantle) was making
-                    // Norma's whole window disappear, because CEF's default `DoClose` sends
+                    // Winter's whole window disappear, because CEF's default `DoClose` sends
                     // `performClose:` to the browser's top-level parent window. `requestCloseTab` is
                     // the identical door the pill's × uses (editor-product Task 10 — a `.web` tab
                     // like this one is never dirty, so it passes straight through to the same
                     // `closePanelTab` this smoke test always exercised), so this reproduces the real
                     // path.
-                    if let after = env["NORMA_PANEL_SMOKE_CLOSE_AFTER"].flatMap(Double.init) {
+                    if let after = env["WINTER_PANEL_SMOKE_CLOSE_AFTER"].flatMap(Double.init) {
                         DispatchQueue.main.asyncAfter(deadline: .now() + after) {
                             guard let tabId = panelStore.tabs.first?.tabId else { return }
                             host?.requestCloseTab(tabId)
@@ -164,7 +164,7 @@ struct ShellRootView: View {
                     // open. It reaches the same dismantle by a different route — the panel's tab
                     // list is per-session, so leaving the session empties it and the content slot
                     // tears down — which is why one `DoClose` fix covers both.
-                    if let after = env["NORMA_PANEL_SMOKE_NAV_AFTER"].flatMap(Double.init) {
+                    if let after = env["WINTER_PANEL_SMOKE_NAV_AFTER"].flatMap(Double.init) {
                         DispatchQueue.main.asyncAfter(deadline: .now() + after) {
                             nav.navigate(to: .mode(.cowork))
                         }
@@ -172,7 +172,7 @@ struct ShellRootView: View {
                 }
                 // office-agent Task 8 — the SHELL half of the headless gate's door (the window half
                 // lives in `AppDelegate.applicationDidFinishLaunching`, exactly as
-                // `NORMA_PANEL_SMOKE`'s two halves are split, and for the same reason).
+                // `WINTER_PANEL_SMOKE`'s two halves are split, and for the same reason).
                 //
                 // Why both halves are needed, measured rather than assumed: the window half alone
                 // DOES attach the host to the named session — enough for `officeReach`, so every
@@ -192,13 +192,13 @@ struct ShellRootView: View {
                 // a `.document` tab is open re-enters the same panel dismantle the door above
                 // documents ("switching destination with one open — the same dismantle"). Measured:
                 // without this guard the window renders the document correctly (AX read back
-                // `nog-w/budget.xlsx` and the formula bar's `A1: NORMA GATE`) and then DISAPPEARS a
+                // `nog-w/budget.xlsx` and the formula bar's `A1: WINTER GATE`) and then DISAPPEARS a
                 // few seconds later, while the app itself stays alive and LibreOffice keeps
                 // servicing the document — a live window that evaporates mid-gate, which would read
                 // as a UI assertion failure with nothing wrong at the surface under test.
                 .onAppear {
                     let env = ProcessInfo.processInfo.environment
-                    guard let gateSession = env["NORMA_GATE_SESSION"], !gateSession.isEmpty else { return }
+                    guard let gateSession = env["WINTER_GATE_SESSION"], !gateSession.isEmpty else { return }
                     // IDEMPOTENT, not a one-shot latch — and the difference was measured, twice.
                     //
                     // A plain `fired` boolean deadlocks the door: the FIRST `.onAppear` can land
@@ -698,7 +698,7 @@ let shellAccountMenuGroups: [[DashboardPane]] = [
 /// PURE: the account row's label. A placeholder for the profile that does not exist yet — the row
 /// is shaped like Claude's account control (avatar + name + chevron) precisely so that profile can
 /// drop into it later without the pane changing shape again.
-let shellAccountRowTitle = "Norma"
+let shellAccountRowTitle = "Winter"
 
 /// The monogram avatar's diameter, and the account row's overall height. The row is given an
 /// EXPLICIT height because it is a `Menu` label: AppKit's menu machinery does not reliably honour
@@ -821,7 +821,7 @@ let shellSidebarWordmarkRowHeight: CGFloat = 38
 
 /// The gap between the nav block and the Recents section label. Reference-measured at ~44 pt, then
 /// pulled back to 32 on the user's eye — 44 separated the two blocks correctly but left the pane
-/// reading loose in Norma's shorter nav list, where there are five rows rather than the
+/// reading loose in Winter's shorter nav list, where there are five rows rather than the
 /// reference's seven. Still far above the original 14, which was the real problem.
 let shellSidebarSectionGap: CGFloat = 32
 
@@ -1033,7 +1033,7 @@ func shellSidebarRowIsSelected(_ row: ShellSidebarRow, destination: ShellDestina
 /// - **Recents** — flat, mode-agnostic, compact single-line rows; activity as a subtle dot
 ///   (`recentsActivityDotStyle` — the chips lost the glass); Move to CLI on the context menu,
 ///   the SAME `moveToCliOffered` gate + `ShellSessionHost.moveToCli` verb as the landings.
-/// - **Account row** — app glyph + "Norma" + chevron → the Dashboard (replaces the gear).
+/// - **Account row** — app glyph + "Winter" + chevron → the Dashboard (replaces the gear).
 ///
 /// custom-sidebar rework: the pane is FULLY CUSTOM-DRAWN — a `ScrollView`+`VStack` of hand-rolled
 /// rows (the `DashboardSurface` precedent, plus hover), NOT a `List`. Flat OPAQUE
@@ -1207,7 +1207,7 @@ struct ShellSidebar: View {
         .contentShape(Rectangle())
     }
 
-    /// sidebar-brand T4 (spec R1): the wordmark header row — Norma's ONE serif accent on the Mac
+    /// sidebar-brand T4 (spec R1): the wordmark header row — Winter's ONE serif accent on the Mac
     /// (`Theme.wordmark`: New York, the iOS serif allowlist's binding #1, restored here at a 20 pt
     /// Mac size register after the 2026-08-06 pass had dropped it).
     ///
@@ -1219,7 +1219,7 @@ struct ShellSidebar: View {
     /// in `ShellRootView`. The old always-visible inline search field died with this row.
     private var wordmarkRow: some View {
         HStack(spacing: 8) {
-            Text("Norma")
+            Text("Winter")
                 .font(Theme.wordmark)
                 .foregroundStyle(.primary)
                 .accessibilityAddTraits(.isHeader)
@@ -1239,7 +1239,7 @@ struct ShellSidebar: View {
         }
         // The wordmark row lives OUTSIDE the ScrollView, so it does not inherit the scroll
         // content's own 8 pt horizontal padding — its inset has to add up to the same figure the
-        // rows land on (8 + 10), or "Norma" sits ~8 pt further left than every glyph below it and
+        // rows land on (8 + 10), or "Winter" sits ~8 pt further left than every glyph below it and
         // reads as crowding the window edge (user call, 2026-08-07).
         .padding(.horizontal, shellSidebarContentInset)
         .frame(height: shellSidebarWordmarkRowHeight)
@@ -1310,7 +1310,7 @@ struct ShellSidebar: View {
     /// The bottom account row — Claude's shape (user call, 2026-08-07): a circular avatar, the
     /// name, and a chevron that opens a MENU, with a quiet placeholder affordance at the trailing
     /// edge. Claude's "· Max" plan tag is deliberately absent — the user's ruling that it "has no
-    /// reason to exist" here, and Norma has no plans to name.
+    /// reason to exist" here, and Winter has no plans to name.
     ///
     /// The shape is the point: there is no profile yet (`shellAccountRowTitle` is a placeholder),
     /// and building the row as an account control now means the real profile can drop straight in

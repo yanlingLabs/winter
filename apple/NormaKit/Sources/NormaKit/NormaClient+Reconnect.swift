@@ -1,6 +1,6 @@
 import Foundation
 
-extension NormaClient {
+extension WinterClient {
     func startReconnect() {
         // Task 9 review fix 1: `reconnecting` prevents a second concurrent loop from spawning when
         // a transport drop lands while one is already in flight (e.g. the replacement transport

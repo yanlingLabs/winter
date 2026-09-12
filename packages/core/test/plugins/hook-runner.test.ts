@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { HookRunner, type HookEventPayload, type HookSpec } from "../../src/plugins/hook-runner";
 
 function tmpDir(): string {
-  return mkdtempSync(join(tmpdir(), "norma-hook-runner-"));
+  return mkdtempSync(join(tmpdir(), "winter-hook-runner-"));
 }
 
 function mkPayload(overrides: Partial<HookEventPayload> = {}): HookEventPayload {
@@ -110,10 +110,10 @@ describe("HookRunner.run", () => {
     expect(result.reason).toBeDefined();
   });
 
-  test("(h) NORMA_SESSION_ID/NORMA_PLUGIN_ID/NORMA_HOOK_EVENT are set in the child's env", async () => {
+  test("(h) WINTER_SESSION_ID/WINTER_PLUGIN_ID/WINTER_HOOK_EVENT are set in the child's env", async () => {
     const runner = new HookRunner();
     const result = await runner.run(
-      mkSpec({ pluginId: "plugin-x", command: 'printf "%s|%s|%s" "$NORMA_SESSION_ID" "$NORMA_PLUGIN_ID" "$NORMA_HOOK_EVENT"' }),
+      mkSpec({ pluginId: "plugin-x", command: 'printf "%s|%s|%s" "$WINTER_SESSION_ID" "$WINTER_PLUGIN_ID" "$WINTER_HOOK_EVENT"' }),
       mkPayload({ sessionId: "sess-42", pluginId: "plugin-x", event: "turn-end" }),
     );
     expect(result.status).toBe("ok");

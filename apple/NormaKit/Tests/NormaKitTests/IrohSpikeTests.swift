@@ -1,7 +1,7 @@
 import XCTest
-import NormaProtocol
+import WinterProtocol
 import IrohLib
-@testable import NormaKit
+@testable import WinterKit
 
 /// SP2a Task 0 — verification spike that GATES all of SP2a (see
 /// .superpowers/sdd/task-0-brief.md / task-0-report.md). SP1 shipped a
@@ -13,11 +13,11 @@ import IrohLib
 /// Two iroh endpoints in ONE process, mirroring iroh-ffi's own canonical Rust test
 /// (`endpoint.rs::tests::test_connect_echo_roundtrip`), driven entirely through the
 /// generated Swift bindings (`vendor/IrohLibSwift/IrohLib.swift`):
-///   - B binds on loopback, advertising ALPN `computer.norma.rpc/1`, and runs a manual
+///   - B binds on loopback, advertising ALPN `computer.winter.rpc/1`, and runs a manual
 ///     accept loop: `acceptNext()` -> `Incoming.accept()` -> `Accepting.connect()`.
 ///   - A binds on loopback with no protocols of its own and dials B directly via B's
 ///     `EndpointAddr` (id + bound address — no relay/discovery needed in-process).
-///   - Both sides frame bytes with `NormaProtocol.LengthPrefix` (u32-BE) over a single
+///   - Both sides frame bytes with `WinterProtocol.LengthPrefix` (u32-BE) over a single
 ///     bidirectional stream (A opens it, B accepts it) and round-trip "ping" / "pong".
 ///   - B reads the authenticated remote `EndpointId` off its accepted `Connection` and
 ///     asserts it equals A's own `EndpointId` — the crux of the whole spike.
@@ -29,7 +29,7 @@ import IrohLib
 /// environment and made connection establishment slow/non-deterministic; binding
 /// loopback explicitly sidesteps that entirely — see task-0-report.md.)
 final class IrohSpikeTests: XCTestCase {
-    static let alpn = "computer.norma.rpc/1".data(using: .utf8)!
+    static let alpn = "computer.winter.rpc/1".data(using: .utf8)!
     static let pingBytes = "ping".data(using: .utf8)!
     static let pongBytes = "pong".data(using: .utf8)!
 
@@ -121,7 +121,7 @@ final class IrohSpikeTests: XCTestCase {
         return (remoteID, ping, conn, bi)
     }
 
-    /// Reads `NormaProtocol.LengthPrefix`-framed bytes off `recv`, accumulating raw reads
+    /// Reads `WinterProtocol.LengthPrefix`-framed bytes off `recv`, accumulating raw reads
     /// into `buffer` until a full frame is buffered.
     private static func readFrame(_ recv: RecvStream, buffer: inout Data, maxBytes: Int = 1 << 20) async throws -> Data {
         while true {

@@ -1,8 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// The Mac half of Norma's brand palette and type register — the sibling of
-/// `norma-ios/Norma/App/Theme.swift`, which it mirrors name-for-name.
+/// The Mac half of Winter's brand palette and type register — the sibling of
+/// `norma-ios/Winter/App/Theme.swift`, which it mirrors name-for-name.
 ///
 /// Canonical values and the reasoning behind them live in `docs/brand.md`. Per that document's
 /// anti-rule (carried from the iOS design gallery), Swift NEVER hardcodes a hex literal for UI
@@ -47,12 +47,12 @@ enum Theme {
     static let bubbleUser = Color("BubbleUser")
 
     /// The composer card's opaque face. Live on Mac since mac-chat-parity Task 5
-    /// (`NormaComposerCard`).
+    /// (`WinterComposerCard`).
     static let composerSurface = Color("ComposerSurface")
 
     /// The composer's bright hairline; the alpha lives in the asset (0.90 light / 0.08 dark) so
     /// Swift never computes it. **The one mirrored token nothing on Mac names** — the Mac composer
-    /// draws its rim with `hairline` instead (`NormaComposerCard`). Kept because `docs/brand.md` § 1
+    /// draws its rim with `hairline` instead (`WinterComposerCard`). Kept because `docs/brand.md` § 1
     /// pins eleven shared values and the two catalogs mirror name-for-name; dropping it would break
     /// that, not tidy it.
     static let composerRim = Color("ComposerRim")
@@ -245,7 +245,7 @@ enum Theme {
 
     // MARK: - Type
 
-    /// The wordmark register — New York (the system serif, `Font.Design.serif`), Norma's ONE
+    /// The wordmark register — New York (the system serif, `Font.Design.serif`), Winter's ONE
     /// serif accent. This is the Mac's instance of the iOS serif allowlist's **binding #1** (the
     /// drawer wordmark). Pinned at 20 pt rather than the phone's 25 pt: the phone's figure was
     /// measured against Claude's iOS drawer, and in a 272 pt Mac sidebar it overpowers the row
@@ -270,7 +270,7 @@ enum Theme {
 
     /// Serif allowlist **binding #4** — assistant prose in the transcript, applied on Mac by
     /// mac-chat-parity Task 8 (it was allowlisted and unapplied from the sidebar-brand pass until
-    /// then). The reading face for what Norma *says*: paragraphs, headings, lists and quotes inside
+    /// then). The reading face for what Winter *says*: paragraphs, headings, lists and quotes inside
     /// an assistant message. Nothing else — user messages, tool rows, cards and every piece of
     /// chrome stay on the system sans, and inline code / code blocks / maths keep their own faces
     /// inside serif prose.

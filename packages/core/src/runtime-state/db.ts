@@ -68,7 +68,7 @@ const MIGRATIONS: ReadonlyArray<{ version: number; up: (db: Database) => void }>
   } },
   // Schema v2 (P8b-29): the memory-key manifest becomes PER ENTRY.
   //
-  // WHY THE SHAPE HAD TO CHANGE. `<home>/projects/<key>/` is not Norma's alone — it is also where
+  // WHY THE SHAPE HAD TO CHANGE. `<home>/projects/<key>/` is not Winter's alone — it is also where
   // the Winter SDK writes transcripts, and for the common "session opened at the repo root" case the
   // transcript key and the compatibility memory key are the SAME string. So the destination of a
   // §17 phase 5 relocation routinely EXISTS already on any home that has run a Winter session, and a
@@ -229,7 +229,7 @@ export function openRuntimeStateDb(home: string, opts: { readonly?: boolean; cre
   //
   // BUT AN OLDER *SCHEMA* VERSION IS NOT THAT, and conflating the two was a real defect the moment
   // this constant moved off 1 (re-review NEW-1). Every 8a-era home is a HEALTHY v1 store until a
-  // newer daemon opens it read-write; refusing it here made `norma doctor` — run, typically, before
+  // newer daemon opens it read-write; refusing it here made `winter doctor` — run, typically, before
   // that first boot — call a healthy store corrupt and recommend restoring a backup that would
   // itself be v1, which is advice that loops. The floor is therefore "has this schema at all",
   // not "has the current version of it"; `schemaVersion()` reports the truth and the one reader

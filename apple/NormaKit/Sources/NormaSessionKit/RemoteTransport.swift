@@ -15,7 +15,7 @@ public protocol RemoteListener: Sendable {
 
 /// One accepted phone connection: a duplex channel of already-framed `WireEnvelope` JSON frames.
 /// A concrete network-backed implementation (SP2's iroh listener) owns its OWN byte-stream
-/// framing internally (e.g. via `NormaProtocol.LengthPrefix`) and hands the gateway one discrete
+/// framing internally (e.g. via `WinterProtocol.LengthPrefix`) and hands the gateway one discrete
 /// frame's bytes per `inbound` element / `send(_:)` call — the gateway itself never touches
 /// length-prefix framing, only whole `WireEnvelope` frames.
 public protocol RemoteConn: Sendable {

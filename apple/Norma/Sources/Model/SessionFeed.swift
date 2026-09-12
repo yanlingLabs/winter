@@ -1,8 +1,8 @@
 import Foundation
-import NormaProtocol
-import NormaKit
+import WinterProtocol
+import WinterKit
 
-/// One live view of one session: its own `NormaClient` (own socket — a full Norma harness),
+/// One live view of one session: its own `WinterClient` (own socket — a full Winter harness),
 /// connect-with-backoff, attach, and an event pump into a `SessionModel`. Extracted from
 /// `AppModel` (2d-ii-b Task 1): `AppModel` remains the orb's `followFocus` consumer; a detached
 /// chat window (Task 3/4) will use `pinned` mode — a fixed sessionId, no focus-following, no
@@ -26,7 +26,7 @@ final class SessionFeed {
     }
 
     /// send/steer/interrupt/setPolicy/attach callers (AppModel, later DetachedWindowController).
-    let client: NormaClient
+    let client: WinterClient
     /// `var`, not `let`: Task 5 (2e-iii)'s `repin(to:)` flips a `.pinned` feed onto a DIFFERENT
     /// session id in place (the detached window's sidebar "switch in place" action) — everything
     /// else about the feed (client/socket, session, hooks) stays the same across a repin.
@@ -50,7 +50,7 @@ final class SessionFeed {
     /// :130-148) — always returning `true` (fully handled; the default application below never
     /// runs for followFocus). Pinned mode leaves this nil and falls through to the default: apply
     /// only events whose `sessionId` equals the pinned id, plus every connection state.
-    var onEvent: ((NormaEvent) async -> Bool)?
+    var onEvent: ((WinterEvent) async -> Bool)?
     /// browser-runtime live-gate fix A: a `.pinned` attach has answered — `ceilingSeq` is
     /// `session.attach`'s `lastSeq`, which is the seq of the `harness_attached` the daemon appended
     /// for THIS attach (`SessionHub.attach` returns exactly that, `packages/core/src/sessions/hub.ts`)
@@ -68,8 +68,8 @@ final class SessionFeed {
     /// own focus machinery, and nothing there has a panel to coalesce folds for.
     var onPinnedAttach: ((_ sessionId: String, _ ceilingSeq: Int?) -> Void)?
 
-    init(makeTransport: @escaping @Sendable () -> NormaTransport, token: String, clientName: String, mode: Mode, session: SessionModel) {
-        client = NormaClient(makeTransport: makeTransport, token: token, clientName: clientName)
+    init(makeTransport: @escaping @Sendable () -> WinterTransport, token: String, clientName: String, mode: Mode, session: SessionModel) {
+        client = WinterClient(makeTransport: makeTransport, token: token, clientName: clientName)
         self.mode = mode
         self.session = session
     }
@@ -129,7 +129,7 @@ final class SessionFeed {
     }
 
     /// Verbatim (AppModel.swift original :63-66): cancel the pump, then a deliberate, detached
-    /// close — deliberate closes must not trigger NormaClient's reconnect loop (Task 9).
+    /// close — deliberate closes must not trigger WinterClient's reconnect loop (Task 9).
     func stop() {
         pumpTask?.cancel()
         Task { await client.close() }
@@ -152,7 +152,7 @@ final class SessionFeed {
         onPinnedAttach?(sessionId, ceilingSeq)
     }
 
-    private func handle(_ ev: NormaEvent) async {
+    private func handle(_ ev: WinterEvent) async {
         if let onEvent, await onEvent(ev) { return }
         switch ev {
         case .session(let e):

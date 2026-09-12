@@ -1,6 +1,6 @@
 import Foundation
-import NormaKit
-import NormaProtocol
+import WinterKit
+import WinterProtocol
 
 func out(_ s: String, newline: Bool = true) {
     FileHandle.standardOutput.write(Data((s + (newline ? "\n" : "")).utf8))
@@ -30,7 +30,7 @@ case .success(let a): args = a
 }
 
 let socketPath = args.resolvedSocketPath()
-let keychainService = args.dev ? "com.norma.core.dev" : "com.norma.core"
+let keychainService = args.dev ? "com.winter.core.dev" : "com.winter.core"
 let token: String
 if let t = args.token { token = t }
 else {
@@ -42,10 +42,10 @@ else {
     }
 }
 
-let client = NormaClient(
+let client = WinterClient(
     makeTransport: { UnixSocketTransport(path: socketPath) },
     token: token,
-    clientName: "norma-probe"
+    clientName: "winter-probe"
 )
 
 let semaphore = DispatchSemaphore(value: 0)

@@ -1,10 +1,10 @@
 import XCTest
-import NormaKit
-@testable import Norma
+import WinterKit
+@testable import Winter
 
 /// Task 2 (Phase 4d-iii): `pluginRowDisplay(...)` — the PURE `plugins.list` entry → row-display
 /// mapping (tier badge / version / consent text / status text+color / action set). No
-/// `NormaClient`, no SwiftUI — same "pure helper, table-tested directly" posture as
+/// `WinterClient`, no SwiftUI — same "pure helper, table-tested directly" posture as
 /// `DashboardTests`' coverage of `formatDaemonStatus`/`formatQuotaState`/`sortedTrustPaths`.
 final class PluginManagerModelTests: XCTestCase {
     /// Convenience default-args wrapper so each test below only spells out the fields it's
@@ -208,18 +208,18 @@ final class PluginManagerModelTests: XCTestCase {
 // `@MainActor` test class (not folded into `PluginManagerModelTests` above) so that class's 21
 // pure-`pluginRowDisplay` tests stay byte-for-byte untouched, per the fix brief. Uses the SAME
 // scripted-transport double every other test file in this target uses to drive a real (actor)
-// `NormaClient` end-to-end (`FeedScriptedTransport`/`feedLineJSON`/`feedWaitUntil`, defined in
-// `SessionFeedTests.swift`, same target) — `PluginManagerModel` takes a concrete `NormaClient`,
+// `WinterClient` end-to-end (`FeedScriptedTransport`/`feedLineJSON`/`feedWaitUntil`, defined in
+// `SessionFeedTests.swift`, same target) — `PluginManagerModel` takes a concrete `WinterClient`,
 // but that client is ALREADY mockable at the transport layer (see `PeripheralProviderTests.
 // connectedProvider()`/`HardwareBridgeTests.connectedBridge()`), so no new protocol seam is
 // introduced here.
 @MainActor
 final class PluginManagerModelAsyncTests: XCTestCase {
-    /// Opens + hellos a scripted `NormaClient`, mirroring `PeripheralProviderTests.
+    /// Opens + hellos a scripted `WinterClient`, mirroring `PeripheralProviderTests.
     /// connectedProvider()`'s handshake exactly (send count 1 == `protocol.hello`).
-    private func connectedClient() async throws -> (NormaClient, FeedScriptedTransport) {
+    private func connectedClient() async throws -> (WinterClient, FeedScriptedTransport) {
         let t = FeedScriptedTransport()
-        let client = NormaClient(makeTransport: { t }, token: "tok", clientName: "plugin-manager-test")
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "plugin-manager-test")
         async let c: Void = client.connect()
         await feedWaitUntil { !t.sent.isEmpty }
         let hello = feedLineJSON(t.sent[0])

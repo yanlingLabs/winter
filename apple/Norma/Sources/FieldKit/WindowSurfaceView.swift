@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Gate r7 (ARCHITECTURE PIVOT — same-panel window morph): the window branch of `NormaFieldView`.
+/// Gate r7 (ARCHITECTURE PIVOT — same-panel window morph): the window branch of `WinterFieldView`.
 /// This is NOT a separate panel (the r7 pivot deleted `ChatWindow/*`): it is a THIRD morph target
 /// of the orb panel itself — the SAME `GlassEffectContainer`/glassNamespace/140-22 spring the
 /// orb↔field morph uses. Renders when `morph.renderSurface == .window`.
@@ -25,7 +25,7 @@ import SwiftUI
 struct WindowSurfaceView: View {
     @ObservedObject var adapter: FieldStateAdapter
     @ObservedObject var morph: MorphModel
-    /// Not `@ObservedObject` — same reason as `NormaFieldView.fluid` (the fluid publisher ticks at
+    /// Not `@ObservedObject` — same reason as `WinterFieldView.fluid` (the fluid publisher ticks at
     /// ~120Hz; this view must not re-run its whole body on every one). Held to hand down to the
     /// continuity `FluidOrbSlot` only.
     let fluid: FluidModel

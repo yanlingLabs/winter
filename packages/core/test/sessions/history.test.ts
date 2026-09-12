@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ToolResultEvent, FileDiffSummary, type SessionEvent } from "@norma/protocol";
+import { ToolResultEvent, FileDiffSummary, type SessionEvent } from "@winter/protocol";
 import { SessionStore } from "../../src/sessions/store";
 import { HISTORY_EVENT_TYPES, readHistoryPage, capEvent, WHOLE_EVENT_CEILING } from "../../src/sessions/history";
 
@@ -18,7 +18,7 @@ describe("readHistoryPage", () => {
   });
 
   function boot(): { store: SessionStore; sessionId: string } {
-    home = mkdtempSync(join(tmpdir(), "norma-history-"));
+    home = mkdtempSync(join(tmpdir(), "winter-history-"));
     store = new SessionStore(home);
     const sessionId = store.createSession("global");
     return { store, sessionId };

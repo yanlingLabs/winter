@@ -1,7 +1,7 @@
 import Foundation
 import Combine
 import SwiftUI
-import NormaKit
+import WinterKit
 
 /// Task 2 (fluid orb): the three states the fluid-orb bubble can render — derived purely from
 /// `SessionModel`'s turn/task/unread state by `FieldStateAdapter.fluidState` below. `.idle` means
@@ -15,15 +15,15 @@ enum FluidState: Equatable {
 }
 
 /// The ONLY new design in this transplant (everything else in `FieldKit/` is a direct v1 port).
-/// A thin, v1-shaped facade over `SessionModel` so `NormaFieldView` (copied from v1
+/// A thin, v1-shaped facade over `SessionModel` so `WinterFieldView` (copied from v1
 /// `GlassFieldView`'s composer path) can read exactly the surface v1's `AppState` used to
 /// provide — `statusText`, `isThinking`, `visibleResponse`, a settable composer draft, and three
-/// callbacks — without `NormaFieldView` knowing our session/event model exists at all. Every
-/// place the copied view used to read `appState.X` now reads `adapter.X` (see `NormaFieldView`'s
+/// callbacks — without `WinterFieldView` knowing our session/event model exists at all. Every
+/// place the copied view used to read `appState.X` now reads `adapter.X` (see `WinterFieldView`'s
 /// header comment for the full read-by-read rebind list).
 ///
 /// Task B is expected to either keep this adapter driving a live `SessionModel` (as constructed
-/// here), or fold its logic directly into whatever wires `NormaFieldView` into the running app —
+/// here), or fold its logic directly into whatever wires `WinterFieldView` into the running app —
 /// this file is deliberately small and boring so that swap is cheap either way.
 @MainActor
 final class FieldStateAdapter: ObservableObject {
@@ -153,7 +153,7 @@ final class FieldStateAdapter: ObservableObject {
     /// NOT part of the pure reducer (`SessionReducer`/`OrbSessionState`): a self-clearing timer is
     /// exactly the kind of impurity (wall-clock time, `DispatchQueue`) the reducer's contract
     /// forbids (see `OrbSessionState.workingVerb`'s doc for the same rule applied to randomness).
-    /// `NormaFieldView`/`FluidOrbSlot` read this to swap in the "⏹ stopped" caption and a muted
+    /// `WinterFieldView`/`FluidOrbSlot` read this to swap in the "⏹ stopped" caption and a muted
     /// fluid tint for 2 seconds, then fall back to their normal state-driven rendering.
     @Published var showStoppedFlash: Bool = false
 
@@ -189,7 +189,7 @@ final class FieldStateAdapter: ObservableObject {
     ///
     /// GATE-3 FIX (F3, preserved): only returns `""` when there is truly nothing to report
     /// (`status == .idle` and no turn running) — the collapsed-orb pill's reveal condition
-    /// (`NormaFieldView`'s `hasStatusPill`) gates directly on "`statusText` non-empty," mirroring
+    /// (`WinterFieldView`'s `hasStatusPill`) gates directly on "`statusText` non-empty," mirroring
     /// the pre-transplant `OrbView.pillText`'s contract (nil only for true idle).
     ///
     /// Gate polish: split into `verbText` (right of orb) and `countText` (left of orb) for
@@ -205,7 +205,7 @@ final class FieldStateAdapter: ObservableObject {
         } else {
             text = "" // true idle: status.pillText nil (.idle) and no turn running
         }
-        // Gate-3 (F3) empirical evidence hook: NORMA_ORB_DEBUG=1 traces every actual change so a
+        // Gate-3 (F3) empirical evidence hook: WINTER_ORB_DEBUG=1 traces every actual change so a
         // "disconnected" pill (or any other non-empty status) reaching the collapsed orb can be
         // observed directly from a headless launch, without a screenshot.
         if text != lastLoggedStatusText {
@@ -246,7 +246,7 @@ final class FieldStateAdapter: ObservableObject {
     /// Wave-7 gate item 2: true exactly when `statusText` is currently showing the CC-style
     /// working-verb composition (`workingPillText`) — i.e. the SAME branch of `statusText` above
     /// — as opposed to an override pill (`disconnected`/`needs approval`, which win outright even
-    /// mid-turn) or true idle. `NormaFieldView`'s animated spinner + sheen (the star-frame glyph
+    /// mid-turn) or true idle. `WinterFieldView`'s animated spinner + sheen (the star-frame glyph
     /// cycling + text sweep) is gated on this so only the actual "working" verb animates; the
     /// static override pills stay plain, unanimated text.
     var isWorkingVerb: Bool {
@@ -321,7 +321,7 @@ final class FieldStateAdapter: ObservableObject {
     var dispatchChildren: [ChildItem] { session.state.children }
 
     /// Dispatch (Phase 7), Task 9 review carry-over: the visible-cap that used to live as an
-    /// inline `.prefix(5)` in `NormaFieldView`'s ForEach — hoisted here so it's a testable seam
+    /// inline `.prefix(5)` in `WinterFieldView`'s ForEach — hoisted here so it's a testable seam
     /// (`DispatchChildrenAdapterTests`) instead of a magic number baked into the view. Behavior is
     /// unchanged: still the first `maxVisibleDispatchChildren` of `dispatchChildren`, order
     /// preserved, no "+N" overflow badge for a 6th+ child (v1, see `dispatchChildren`'s own doc).
@@ -333,7 +333,7 @@ final class FieldStateAdapter: ObservableObject {
 
     /// Wired by whichever surface owns this adapter (`GlassRootView.wireCallbacks()` — the orb/
     /// field's single app-lifetime adapter, the only surface that renders the circles — see
-    /// `NormaFieldView`'s child-circle ForEach) to open a detached window on the tapped child's
+    /// `WinterFieldView`'s child-circle ForEach) to open a detached window on the tapped child's
     /// sessionId, same "controller exposes a hook, AppDelegate wires the real side effect" seam as
     /// `onExpandToWindow` below. Default no-op so a not-yet-wired adapter (previews/tests) never
     /// crashes on a stray tap.
@@ -365,7 +365,7 @@ final class FieldStateAdapter: ObservableObject {
 
     /// Wave-5 gate item 2: messages sent while a turn is running are folded silently into the
     /// current exchange's prompt (`SessionReducer`'s mid-turn-steer branch) — this surfaces them
-    /// so `NormaFieldView` can render a small "⧗ queued: …" line instead of the send appearing to
+    /// so `WinterFieldView` can render a small "⧗ queued: …" line instead of the send appearing to
     /// vanish. `nil` when nothing is queued (the common case: idle, or a turn running with no
     /// steer sent yet) so the view can gate the line's reveal on non-nil, same convention as
     /// `displayedPrompt`/`historyPositionText` above.
@@ -386,12 +386,12 @@ final class FieldStateAdapter: ObservableObject {
         Binding(get: { self.composerDraft }, set: { self.composerDraft = $0 })
     }
 
-    /// GATE-3 FIX (round 3, F4): moved here (from a private `@State` inside `NormaFieldView`) so
+    /// GATE-3 FIX (round 3, F4): moved here (from a private `@State` inside `WinterFieldView`) so
     /// `GlassRootView` can drive it directly from `.onChange(of: controller.surface)` — the only
     /// place that knows "a fresh summon just happened." `true` = the composer/draft is what the
     /// shell shows; `false` = the inline response occupies the shell instead. v1's home-state
     /// contract: the COMPOSER is the default on every summon (see `GlassRootView`'s `.field` case
-    /// for the one exception — an actively streaming turn). `NormaFieldView` still owns the two
+    /// for the one exception — an actively streaming turn). `WinterFieldView` still owns the two
     /// other writers: the reveal-draft chevron (`true`, user asked to see the draft again) and the
     /// turn-just-started transition (`false`, a new reply takes the shell back over).
     @Published var showingDraft: Bool = false
@@ -424,7 +424,7 @@ final class FieldStateAdapter: ObservableObject {
     /// still incomplete (the WORK isn't done even though this turn ended), and only drains to
     /// `.idle` once every task is complete (or there were never any tasks).
     ///
-    /// Finding-3 (gate 2): the fluid represents Norma's WORK, not just the current turn. A turn
+    /// Finding-3 (gate 2): the fluid represents Winter's WORK, not just the current turn. A turn
     /// finishing with an incomplete task list (the agent paused between turns, or is waiting to be
     /// told to continue) used to drain the liquid to empty, reading as "all done" when it isn't.
     /// Now it holds `.working(level)` at the task-completion fill instead. Implementation choice
@@ -472,10 +472,10 @@ final class FieldStateAdapter: ObservableObject {
     /// `OrbWindowController.onSubmit` (the app-level send chain) and only clears the draft /
     /// resets `exchangeIndex` on a successful send — a failed send never loses the composed text.
     var onSubmit: (String) -> Void = { _ in }
-    /// Wired by `GlassRootView` to clear `composerDraft` — the xmark button in `NormaFieldView`'s
+    /// Wired by `GlassRootView` to clear `composerDraft` — the xmark button in `WinterFieldView`'s
     /// `composerContent`.
     var onClearMessage: () -> Void = {}
-    /// Wired by `GlassRootView` to `OrbWindowController.collapseToOrb()`. No `NormaFieldView`
+    /// Wired by `GlassRootView` to `OrbWindowController.collapseToOrb()`. No `WinterFieldView`
     /// affordance calls this yet (v1's own `onCollapse` was likewise driven almost entirely by
     /// Esc, which `OrbWindowController`'s key monitor already calls directly) — kept wired for
     /// parity/future use, same status as task A's unwired reset-icon slot.
@@ -718,7 +718,7 @@ final class FieldStateAdapter: ObservableObject {
     var onSetPolicy: (String) -> Void = { _ in }
 
     /// mac-chat-parity T6: this adapter's policy state as the composer's permissions row takes it
-    /// (spec §4) — the value `WindowContentView.composerCard` hands `NormaComposerCard`.
+    /// (spec §4) — the value `WindowContentView.composerCard` hands `WinterComposerCard`.
     ///
     /// The placeholder never crosses this boundary: `policy` is `nil` unless `sessionPolicyKnown`.
     /// That is `sessionPolicyKnown`'s own doc being obeyed — "a surface that makes a standing claim
@@ -744,7 +744,7 @@ final class FieldStateAdapter: ObservableObject {
     @Published var modelChangeInFlight: Bool = false
 
     /// Wired by whichever surface owns this adapter to `session.setModel` — `nil` clears the
-    /// override (the wire itself sends a literal `null`, `NormaClient.setModel`'s own doc). UNLIKE
+    /// override (the wire itself sends a literal `null`, `WinterClient.setModel`'s own doc). UNLIKE
     /// `onSetPolicy`, there is no adapter-cached "current value" this callback bumps on success:
     /// `session.list` already carries `model` per-row (T1) — the wirer refreshes that row's
     /// directory entry instead of keeping a second source of truth here (see `WindowContentView`'s
@@ -816,14 +816,14 @@ final class FieldStateAdapter: ObservableObject {
     /// "Change primary folder…" rows. A SEPARATE callback from `onSetDirs` because the panel and the
     /// confirm alert are AppKit, which belongs to the window controller: a SwiftUI body must never
     /// run an `NSOpenPanel`. The confirm is the user's explicit ruling — a manual add is SELECTION +
-    /// CONFIRM, never a one-click widening of what Norma may write to.
+    /// CONFIRM, never a one-click widening of what Winter may write to.
     var onPickWorkingDir: (SessionDirsOp) -> Void = { _ in }
 
     // MARK: - app-shell T3: the header's `/background` affordance — `session.setActivity`
 
     /// Wired to `session.setActivity` by whichever surface can service it — the ACTIVITY TARGET
     /// verbatim (`"background"`, `"unbackground"`, `"archived"`, or `nil` for resume; see
-    /// `NormaClient.setActivity`). The whole vocabulary, not just the one verb T3 offers, so the
+    /// `WinterClient.setActivity`). The whole vocabulary, not just the one verb T3 offers, so the
     /// roster verbs landing on the mode landings (T4) reach the same seam rather than a second one.
     ///
     /// **OPTIONAL, defaulting `nil`, and that is the visibility gate** — the same opt-in shape
@@ -836,7 +836,7 @@ final class FieldStateAdapter: ObservableObject {
 
     /// office-live-ux Job 1 — **stop the running turn** (`session.interrupt`). Both of Job 1's two
     /// surfaces come through here: the composer's Esc (`ComposerTextView.onEscape`) and the send
-    /// button's stop role (`NormaComposerCard`), so the two cannot end up calling different things.
+    /// button's stop role (`WinterComposerCard`), so the two cannot end up calling different things.
     ///
     /// **OPTIONAL, defaulting `nil`, and that is the affordance gate** — the same opt-in shape
     /// `onSetActivity` just above uses, for the same reason it gives. A surface that does not wire
@@ -866,8 +866,8 @@ final class FieldStateAdapter: ObservableObject {
 
     /// The daemon's synced model catalogue (`sync.config`) — the pickers' ONLY source of slugs and
     /// effort levels, replacing the hardcoded three-slug mirror that used to live in
-    /// `WindowContentView`. Populated by whichever surface owns this adapter (its own `NormaClient`
-    /// calls `NormaClient.syncConfig()`); `.empty` until then, which the pickers render as "no rows
+    /// `WindowContentView`. Populated by whichever surface owns this adapter (its own `WinterClient`
+    /// calls `WinterClient.syncConfig()`); `.empty` until then, which the pickers render as "no rows
     /// offered" rather than as a fallback lineup — a derived catalogue is precisely the bug the
     /// field exists to kill.
     @Published var modelCatalogue: SyncConfigSnapshot = .empty
@@ -875,7 +875,7 @@ final class FieldStateAdapter: ObservableObject {
     /// Re-reads the catalogue into `modelCatalogue`. Wired by whichever surface owns this adapter;
     /// called when a picker MENU OPENS, which is the honest refresh point for a value that is a
     /// SNAPSHOT rather than a subscription — `sync.config` re-resolves the model and effort on every
-    /// call, so a `norma model --effort` edit made while a window sat open lands the next time the
+    /// call, so a `winter model --effort` edit made while a window sat open lands the next time the
     /// user actually looks. Deliberately NOT on a session switch: the catalogue is daemon-wide, so a
     /// switch cannot change it, and firing an RPC there perturbs the create/attach sequence every
     /// switch test asserts on for no benefit.
@@ -893,7 +893,7 @@ final class FieldStateAdapter: ObservableObject {
 
     /// Re-reads `advisorModel` from disk. Local file I/O, not an RPC — no in-flight flag, no
     /// `Task`, unlike `onRefreshModelCatalogue`'s wirer-supplied closure (which needs a live
-    /// `NormaClient` per surface): this needs nothing surface-specific, so it lives directly on the
+    /// `WinterClient` per surface): this needs nothing surface-specific, so it lives directly on the
     /// adapter rather than behind a second per-surface callback slot.
     func refreshAdvisorModel() {
         advisorModel = AppModel.readAdvisorModelFromSettings()
@@ -1099,7 +1099,7 @@ enum SelectionRevert: Equatable {
 /// a false NEGATIVE just means no auto-revert (the user still sees a failing turn and can act), while
 /// a false POSITIVE silently destroys a setting they chose on purpose.
 ///
-/// **A NORMA-LEVEL TIER NEVER REVERTS HERE, AND THAT IS A PERMANENT FALSE NEGATIVE, NOT A BUG TO
+/// **A WINTER-LEVEL TIER NEVER REVERTS HERE, AND THAT IS A PERMANENT FALSE NEGATIVE, NOT A BUG TO
 /// PATCH LOCALLY** (whole-branch review M1). `probation.effort` holds what the user SELECTED —
 /// `SessionListResult.effort` reports a tier verbatim, so `"ultra"` — while the endpoint's rejection
 /// quotes what was actually SENT, the wire translation (`"max"`). The two never match, so the

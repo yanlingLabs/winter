@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// office-plumbing Task 6 — the canvas's own pure math: the two unit-chain conversions
 /// (`officeViewportTwips`, `officeTileScreenRect`) and the zoom ladder, plus the one behavior worth
@@ -2533,7 +2533,7 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     // MARK: - office-polish Bug 1 — a document that GREW under an open tab
 
     /// Every twips number below is MEASURED, not chosen: opening the user's own
-    /// `Sushi_An_Introduction.docx` through the real compiled `NormaOfficeHelper` against the real
+    /// `Sushi_An_Introduction.docx` through the real compiled `WinterOfficeHelper` against the real
     /// vendored LibreOffice reports `heightTwips 32532`; appending twenty paragraphs and reopening
     /// the saved result reports `48656`. `TileMath.twipsToPixels(_:zoomPPT: 1000)` is
     /// `round(twips * 1000 / 10_000)`, i.e. twips/10, and `officeFixedDeviceScale` is 2, so those
@@ -2640,7 +2640,7 @@ final class OfficeTileCanvasViewTests: XCTestCase {
     }
 }
 
-// MARK: - office-live-ux Job 3: "Norma is working"
+// MARK: - office-live-ux Job 3: "Winter is working"
 
 /// The overlay's own contract, and the half its pixels cannot deliver.
 ///
@@ -2651,7 +2651,7 @@ final class OfficeTileCanvasViewTests: XCTestCase {
 /// Driver, and the Driver has thirty-odd members.
 ///
 /// The spec has four clauses:
-///  1. the overlay appears **as soon as Norma reads the document open in that tab**;
+///  1. the overlay appears **as soon as Winter reads the document open in that tab**;
 ///  2. it is scoped to **that tab**, not the app;
 ///  3. **no timer** — it is tied to real turn state and clears when the turn ends;
 ///  4. tapping **interrupts** (Job 1's door; pinned in `ComposerStopButtonTests` and in
@@ -2793,7 +2793,7 @@ extension OfficeTileCanvasViewTests {
     ///
     /// All six mutating doors, because they were changed as a SET (they are the same six lines that
     /// used to arm the deleted debounce) and a partial sweep is the failure worth catching.
-    func testEveryMutatingInputDoorRefusesWhileNormaIsWorking() async {
+    func testEveryMutatingInputDoorRefusesWhileWinterIsWorking() async {
         let (runtime, recorder) = await makeOpenedRuntime()
 
         func mutatingCalls() -> Int {
@@ -2825,7 +2825,7 @@ extension OfficeTileCanvasViewTests {
         driveAllSix()
         await runtime.drainInputChainForTesting()
         XCTAssertEqual(mutatingCalls(), baseline,
-                       "not one of the six mutating doors may reach the driver while Norma is "
+                       "not one of the six mutating doors may reach the driver while Winter is "
                          + "working — a SwiftUI cover stops the pointer and nothing else")
 
         // …and they reopen when the turn ends. Without this, a permanently-wedged runtime would
@@ -2839,7 +2839,7 @@ extension OfficeTileCanvasViewTests {
     /// The MOUSE is deliberately NOT refused — the same posture the read-only-format gate takes, and
     /// for the same reason: a click cannot mutate content on its own, and blocking it would make the
     /// canvas inert. Pinned so the asymmetry reads as a decision rather than an omission.
-    func testTheMouseDoorIsDeliberatelyNotRefusedWhileNormaIsWorking() async {
+    func testTheMouseDoorIsDeliberatelyNotRefusedWhileWinterIsWorking() async {
         let (runtime, recorder) = await makeOpenedRuntime()
         runtime.setSessionTurnRunning(true)
         runtime.noteAgentEngaged(path: gatePath)

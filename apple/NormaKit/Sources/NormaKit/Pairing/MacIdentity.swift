@@ -15,7 +15,7 @@ public protocol EndpointSecretStore: Sendable {
     func save(_ secret: Data) throws
 }
 
-/// The real Keychain-backed store: service `com.norma.remote`, account `endpoint-secret`,
+/// The real Keychain-backed store: service `com.winter.remote`, account `endpoint-secret`,
 /// `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` (readable once the user has unlocked since
 /// boot; never synced to iCloud/other devices — `kSecAttrSynchronizable` is simply omitted, which
 /// defaults to false). NEVER logs the secret it loads or saves (CLAUDE.md: no print/os_log of
@@ -25,7 +25,7 @@ public protocol EndpointSecretStore: Sendable {
 /// real Keychain, which every test in this package must avoid. It's exercised at the live gate
 /// instead; kept short enough here to review by eye.
 public struct KeychainEndpointSecretStore: EndpointSecretStore {
-    private static let service = "com.norma.remote"
+    private static let service = "com.winter.remote"
     private static let account = "endpoint-secret"
 
     public init() {}

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type { NewSessionEvent } from "@norma/protocol";
+import type { NewSessionEvent } from "@winter/protocol";
 import type { AuditLog } from "./audit";
 
 // ---------------------------------------------------------------------------------------------
@@ -64,15 +64,15 @@ interface PendingHardwareRequest {
 
 export interface HardwareBrokerDeps {
   audit: AuditLog;
-  /** Push a `hardware_requested` event directly to the active provider connection (Norma.app) —
+  /** Push a `hardware_requested` event directly to the active provider connection (Winter.app) —
    *  bypasses session attachment entirely, mirrors `PeripheralBrokerDeps.pushToProvider` EXACTLY.
    *  daemon.ts wires BOTH brokers to the SAME `ProviderLink` instance
    *  (`pushToProvider: (event) => providerLink.push(event)`) — the app's one provider connection
    *  doubles as the hardware provider. Returns false when there is no provider connection to
-   *  deliver to (npm-only install, or Norma.app not running/not yet advertised). */
+   *  deliver to (npm-only install, or Winter.app not running/not yet advertised). */
   pushToProvider: (event: NewSessionEvent) => boolean;
   /** Per-call round-trip timeout to the provider (spec-fixed at 10000ms via
-   *  NORMA_HARDWARE_TIMEOUT_MS; overridable here only so tests don't have to wait out a real 10s
+   *  WINTER_HARDWARE_TIMEOUT_MS; overridable here only so tests don't have to wait out a real 10s
    *  — mirrors PeripheralBrokerDeps.callTimeoutMs / ApprovalBroker/PlanBroker/BashReviewer's own
    *  constructor-overridable timeouts elsewhere in this codebase). */
   timeoutMs?: number;
@@ -83,7 +83,7 @@ export class HardwareBroker {
   private readonly timeoutMs: number;
 
   constructor(private readonly deps: HardwareBrokerDeps) {
-    this.timeoutMs = deps.timeoutMs ?? Number(process.env.NORMA_HARDWARE_TIMEOUT_MS ?? 10_000);
+    this.timeoutMs = deps.timeoutMs ?? Number(process.env.WINTER_HARDWARE_TIMEOUT_MS ?? 10_000);
   }
 
   /** Route one hardware verb call to the active provider connection and await its
@@ -129,7 +129,7 @@ export class HardwareBroker {
     if (!delivered) {
       const p = this.pending.get(requestId);
       if (p) { clearTimeout(p.timer); this.pending.delete(requestId); }
-      const outcome: HardwareRequestResult = { code: "no_provider", message: "hardware features require Norma.app" };
+      const outcome: HardwareRequestResult = { code: "no_provider", message: "hardware features require Winter.app" };
       this.auditHardware(req.verb, req.requester, outcome);
       return outcome;
     }

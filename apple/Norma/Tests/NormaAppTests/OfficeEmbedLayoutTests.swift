@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Office Stage A Task 2, carry T2-b: zero directory symlinks anywhere under
 /// `Contents/Resources/LibreOffice/` in the BUILT app, and `Resources/` is `Frameworks/`'s real
@@ -19,7 +19,7 @@ import XCTest
 /// directory symlinks, Resources/ as Frameworks/'s real sibling — is unchanged in substance; only
 /// its root moved.
 ///
-/// Skips if the embed phase has not run for this build (e.g. a target list that excludes `Norma`
+/// Skips if the embed phase has not run for this build (e.g. a target list that excludes `Winter`
 /// itself) — same `XCTSkipIf` shape as `OfficeHelperLiveSmokeTests`.
 final class OfficeEmbedLayoutTests: XCTestCase {
     func testEmbeddedLibreOfficeTreeHasNoDirectorySymlinks() throws {

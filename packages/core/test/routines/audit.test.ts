@@ -10,7 +10,7 @@ function lines(path: string): unknown[] {
 
 describe("RoutineAuditLog", () => {
   test("append writes ts-stamped JSONL, one line per entry", () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-routines-audit-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-routines-audit-"));
     const path = join(dir, "routines-audit.jsonl");
     const log = new RoutineAuditLog(path);
 
@@ -31,7 +31,7 @@ describe("RoutineAuditLog", () => {
   });
 
   test("mkdir-safe: creates missing parent directories on first write", () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-routines-audit-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-routines-audit-"));
     const path = join(dir, "nested", "deeper", "routines-audit.jsonl");
     expect(existsSync(path)).toBe(false);
 
@@ -41,7 +41,7 @@ describe("RoutineAuditLog", () => {
   });
 
   test("a write-time ts always wins over a caller-supplied ts field", () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-routines-audit-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-routines-audit-"));
     const path = join(dir, "routines-audit.jsonl");
     const log = new RoutineAuditLog(path);
     log.append({ op: "fire", id: "r1", ts: 1 });

@@ -134,7 +134,7 @@ describe("4b gate: circuit breaker (5 real crashes)", () => {
     "5 rapid REAL-child crashes trip the circuit; no 6th spawn attempt ever follows; tools unregistered",
     async () => {
       const pluginId = "sample-echo";
-      const home = mkdtempSync(join(tmpdir(), "norma-gate-4b-circuit-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-gate-4b-circuit-"));
       installSampleEcho(home, pluginId);
       const settings = writeAndLoadSettings(home, pluginId);
       const socketPath = join(home, "core.sock");
@@ -207,7 +207,7 @@ describe("4b gate: orphan reclaim across a simulated core restart", () => {
     "a live, PID-verified child spawned by instance A re-registers against a fresh instance B (same runDir/socketPath) — the SAME OS process, never respawned",
     async () => {
       const pluginId = "sample-echo";
-      const home = mkdtempSync(join(tmpdir(), "norma-gate-4b-reclaim-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-gate-4b-reclaim-"));
       installSampleEcho(home, pluginId);
       const settings = writeAndLoadSettings(home, pluginId);
       const socketPath = join(home, "core.sock");
@@ -295,7 +295,7 @@ describe("4b gate: orphan reclaim across a simulated core restart", () => {
     "a dead pid's abandoned file is cleaned up by a fresh instance's reclaim — never adopted, no signal sent to anything",
     async () => {
       const pluginId = "sample-echo-dead";
-      const home = mkdtempSync(join(tmpdir(), "norma-gate-4b-reclaim-dead-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-gate-4b-reclaim-dead-"));
       const dir = installSampleEcho(home, pluginId);
       const settings = writeAndLoadSettings(home, pluginId);
       const socketPath = join(home, "core.sock");
@@ -310,8 +310,8 @@ describe("4b gate: orphan reclaim across a simulated core restart", () => {
         cwd: dir,
         env: {
           ...process.env,
-          NORMA_SOCKET: join(home, "unused.sock"), NORMA_PLUGIN_TOKEN: "unused",
-          NORMA_PLUGIN_ID: pluginId, NORMA_PLUGIN_DIR: dir,
+          WINTER_SOCKET: join(home, "unused.sock"), WINTER_PLUGIN_TOKEN: "unused",
+          WINTER_PLUGIN_ID: pluginId, WINTER_PLUGIN_DIR: dir,
         },
         stdout: "ignore", stderr: "ignore", stdin: "ignore",
       });

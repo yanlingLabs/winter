@@ -5,12 +5,12 @@
 // `winter-chat-e2e.test.ts` tripwire uses) is the ONE path this file reads through — never a second,
 // hand-rolled NDJSON capture.
 //
-// M5 DIAGNOSIS (recorded here, not just in the report): with ZERO Norma-side `Options.advisor`
+// M5 DIAGNOSIS (recorded here, not just in the report): with ZERO Winter-side `Options.advisor`
 // wiring and a real `openai:default` credential present, the SDK's own D30 per-family default
 // machinery ALREADY advertises `advisor` for this exact real-catalog-model shape — measured below,
 // before this lane's `advisorModel` wiring is even exercised (the FIRST test below runs against a
 // fresh daemon with no `runtimes.advisorModel` set at all). The controller's M5 measurement used
-// `codex-oauth/gpt-6-astra` specifically; Norma's session-driver has no mechanism to point a Winter
+// `codex-oauth/gpt-6-astra` specifically; Winter's session-driver has no mechanism to point a Winter
 // child's `codex-oauth` connection at a loopback fake (only `openai-compatible` sessions get a BYO
 // `baseUrl`, `session-driver.ts`'s `optionsFor`), so the EXACT M5 shape cannot be reproduced
 // hermetically — this file proves the openai-compatible arm of D30 is healthy and demonstrates the
@@ -21,7 +21,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openaiResponsesFake } from "@yanlinglabs/winter-provider-conformance/fakes";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@winter/protocol";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/auth/credential-material";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
@@ -92,7 +92,7 @@ describeWithWinterBinary("P8d-8 (D30) — advisor in init.tools on a real Winter
   }
 
   beforeAll(async () => {
-    home = realpathSync(mkdtempSync(join(tmpdir(), "norma-advisor-winter-")));
+    home = realpathSync(mkdtempSync(join(tmpdir(), "winter-advisor-winter-")));
     openaiFakeRef = await openaiResponsesFake.startOpenAiResponsesFake({
       scenarios: {},
       unknownModel: async () => openaiResponsesFake.responsesStream({ text: ["hello"] }),
@@ -119,7 +119,7 @@ describeWithWinterBinary("P8d-8 (D30) — advisor in init.tools on a real Winter
 
   async function createAndWaitForInit(): Promise<{ tools: string[] }> {
     const d = daemon!;
-    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-advisor-winter-cwd-")));
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-advisor-winter-cwd-")));
     const { sessionId } = await client!.call<{ sessionId: string }>(METHODS.sessionCreate, {
       scope: "e2e", mode: "code", model: CATALOG_OPENAI_MODEL, cwd,
     });
@@ -144,7 +144,7 @@ describeWithWinterBinary("P8d-8 (D30) — advisor in init.tools on a real Winter
   // (`provider-selection.ts`: "not a catalog provider and must never be resolved against one"), so
   // every arm of D30's resolution withholds the reviewer — `advisor` is absent regardless of settings.
   test("a winter-test/<double> session (no catalog identity) never advertises advisor — the other direction", async () => {
-    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-advisor-winter-cwd-")));
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-advisor-winter-cwd-")));
     const { sessionId } = await client!.call<{ sessionId: string }>(METHODS.sessionCreate, {
       scope: "e2e", mode: "code", model: "winter-test/echo", cwd,
     });
@@ -167,7 +167,7 @@ describeWithWinterBinary("P8d-8 (D30) — advisor in init.tools on a real Winter
   //  (2) THE GENERATION TARGET (which model id actually appears on the wire when the tool is
   //      CALLED): `Options.advisor.model` IS a disclosed, wired option documented to win over
   //      `settings.advisor.model` (the SDK's `options.ts:544-552`, forwarded unconditionally by
-  //      `query.ts:692`) — a DIFFERENT axis from visibility, and the one Norma's own `advisorModel`
+  //      `query.ts:692`) — a DIFFERENT axis from visibility, and the one Winter's own `advisorModel`
   //      wiring is actually FOR. See the describe block below this one for that proof: an advisor
   //      call reaching the fake with the EXPLICITLY CONFIGURED model id in the request, never the
   //      session's own default — which is the axis "does the override do anything" actually asks.
@@ -192,7 +192,7 @@ describeWithWinterBinary("P8d-8/F2 — the advisor's GENERATION TARGET on the re
   const ADVISOR_MODEL = "gpt-5.6-sol"; // an EXPLICIT, DIFFERENT, valid openai-family catalog model
 
   test("an advisor tool call's own HTTP request names the EXPLICITLY CONFIGURED advisorModel, not the session's own model", async () => {
-    const home = realpathSync(mkdtempSync(join(tmpdir(), "norma-advisor-target-")));
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-advisor-target-")));
     const requests: Array<{ model?: string; body: string }> = [];
     const { responsesModelOf } = openaiResponsesFake;
     const fake = await openaiResponsesFake.startOpenAiResponsesFake({
@@ -221,7 +221,7 @@ describeWithWinterBinary("P8d-8/F2 — the advisor's GENERATION TARGET on the re
       if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
       const client = await TestClient.connect(daemon.socketPath);
       await client.hello(daemon.tokens.harness, "advisor-target-e2e");
-      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-advisor-target-cwd-")));
+      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-advisor-target-cwd-")));
       const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: SESSION_MODEL, cwd });
       await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
       await client.call(METHODS.sessionSend, { sessionId, text: "please consult the advisor" });

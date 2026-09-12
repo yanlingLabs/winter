@@ -13,12 +13,12 @@ import Foundation
 // for the full trace.
 signal(SIGPIPE, SIG_IGN)
 
-// NormaOfficeHelper entry point. Office Stage A Task 2 stood up a supervised, NOT-launchd process
+// WinterOfficeHelper entry point. Office Stage A Task 2 stood up a supervised, NOT-launchd process
 // (the app spawns this directly — see `OfficeHelperSupervisor`) whose listeners came up with no
 // LibreOfficeKit loaded. Task 3: LOK now boots for real, HERE, before the socket ever binds — see
 // "Boot sequencing" below.
 //
-// No AppKit, no dock presence — a plain Foundation run loop, same shape as `NormaHelper`'s own
+// No AppKit, no dock presence — a plain Foundation run loop, same shape as `WinterHelper`'s own
 // `main.swift` (`RunLoop.current.run()` after standing up its listener).
 
 let rawArguments = Array(CommandLine.arguments.dropFirst())
@@ -34,7 +34,7 @@ let args = OfficeWireArgs.parse(rawArguments)
 /// strictly safe either way — `_exit` is a strict subset of `exit`'s behavior minus the cleanup
 /// this process never needs — so one rule for the whole file is simpler than two.
 func fail(_ message: String) -> Never {
-    FileHandle.standardError.write(Data(("[NormaOfficeHelper] error: " + message + "\n").utf8))
+    FileHandle.standardError.write(Data(("[WinterOfficeHelper] error: " + message + "\n").utf8))
     _exit(1)
 }
 
@@ -101,12 +101,12 @@ func canonicalPath(_ path: String) -> String {
 
 /// The same two-dirs-up-from-the-executable computation `resolveInstallRoot()` uses below for
 /// `Contents/Resources/LibreOffice`, for the identical reason: this must resolve correctly from
-/// BOTH shapes this helper ever runs from — embedded at `<app>/Contents/MacOS/NormaOfficeHelper`
-/// (production) and standalone at `BUILT_PRODUCTS_DIR/NormaOfficeHelper`
+/// BOTH shapes this helper ever runs from — embedded at `<app>/Contents/MacOS/WinterOfficeHelper`
+/// (production) and standalone at `BUILT_PRODUCTS_DIR/WinterOfficeHelper`
 /// (`OfficeHelperLiveTests.spawnLiveHelper`'s own default `helperURL`, the fast-iteration path most
 /// of that file's own tests use). `--sandbox-profile` (DEBUG only, mirrors `--lok-root` exactly)
 /// points directly at the checked-in source file for iteration without a full app embed; the
-/// "Embed NormaOfficeHelper" postCompileScript (project.yml) places the production copy at
+/// "Embed WinterOfficeHelper" postCompileScript (project.yml) places the production copy at
 /// `Contents/Resources/office-helper.sb`, alongside `Contents/Resources/LibreOffice`.
 func resolveSandboxProfilePath() -> URL {
     #if DEBUG
@@ -370,7 +370,7 @@ if let probeKind = args["sandbox-probe"] {
         // can and do allow a mach-lookup while the daemon-side or a DIFFERENT sandbox layer still
         // rejects the specific request). This probe tests THAT question directly, via the actual
         // public open-by-URL entry point — but on a scheme this process manufactures fresh every
-        // run (`norma-probe-<uuid>`) specifically so NO installed application can possibly be
+        // run (`winter-probe-<uuid>`) specifically so NO installed application can possibly be
         // registered for it, in EITHER the granted or ungranted configuration: an unregistered
         // scheme cannot launch anything no matter how this call resolves, which is what keeps this
         // probe side-effect-free by construction, the same posture `launch-services-query` (above)
@@ -446,7 +446,7 @@ if let probeKind = args["sandbox-probe"] {
         // links `CoreServices` (see the top-of-file import) for no other reason than this probe, and
         // `NSWorkspace` would pull in AppKit for a helper process that otherwise never needs it —
         // matching this probe family's existing minimal-dependency posture.
-        let scheme = "norma-probe-\(UUID().uuidString)"
+        let scheme = "winter-probe-\(UUID().uuidString)"
         guard let url = URL(string: "\(scheme)://x") else {
             fail("failed to construct probe URL for scheme \(scheme) — this is a bug in this probe, "
                     + "not a sandbox finding")
@@ -465,7 +465,7 @@ if let probeKind = args["sandbox-probe"] {
 // MARK: - Resolve the LibreOffice install root (carry: dlopen path resolves RELATIVE to this
 // process's own bundle position — no absolute paths hardcoded here).
 //
-// Production: this binary is embedded at `<app>/Contents/MacOS/NormaOfficeHelper`
+// Production: this binary is embedded at `<app>/Contents/MacOS/WinterOfficeHelper`
 // (`OfficeHelperSupervisor.Configuration.production()`'s own doc comment), so
 // `Contents/Resources/LibreOffice` — the T2-adjudicated embed root (NOT Frameworks/LibreOffice) —
 // is two directories up from the running executable's own real location, computed at runtime, not
@@ -481,7 +481,7 @@ func resolveInstallRoot() -> URL {
     }
     #endif
     let executableURL = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])
-    // Contents/MacOS/NormaOfficeHelper -> Contents/Resources/LibreOffice
+    // Contents/MacOS/WinterOfficeHelper -> Contents/Resources/LibreOffice
     return executableURL.deletingLastPathComponent().deletingLastPathComponent()
         .appendingPathComponent("Resources/LibreOffice", isDirectory: true)
 }

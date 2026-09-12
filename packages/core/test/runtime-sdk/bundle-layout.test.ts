@@ -10,9 +10,9 @@ const good: VersionsJson = {
 
 describe("bundle-layout (P8d-1)", () => {
   test("the bundle rung is dirname(execPath) + the layout entry", () => {
-    expect(bundleRuntimePath("/Applications/Norma.app/Contents/Resources/norma-core", "winter")).toBe("/Applications/Norma.app/Contents/Resources/runtimes/winter");
-    expect(bundleRuntimePath("/x/Resources/norma-core", "claude")).toBe("/x/Resources/runtimes/claude-official/claude");
-    expect(bundleRuntimePath("/x/Resources/norma-core", "versions")).toBe("/x/Resources/runtimes/claude-official/VERSIONS.json");
+    expect(bundleRuntimePath("/Applications/Winter.app/Contents/Resources/winter-core", "winter")).toBe("/Applications/Winter.app/Contents/Resources/runtimes/winter");
+    expect(bundleRuntimePath("/x/Resources/winter-core", "claude")).toBe("/x/Resources/runtimes/claude-official/claude");
+    expect(bundleRuntimePath("/x/Resources/winter-core", "versions")).toBe("/x/Resources/runtimes/claude-official/VERSIONS.json");
     expect(RUNTIME_BUNDLE_LAYOUT.root).toBe("runtimes");
   });
   test("parseVersionsJson accepts a record matching this build's pins", () => {

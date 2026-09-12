@@ -1,7 +1,7 @@
 import Foundation
 import os
-import NormaKit
-import NormaProtocol
+import WinterKit
+import WinterProtocol
 
 /// Owns this Mac's `RemoteHost` (SP2b's whole phone-pairing/remote-access stack) LAZILY — the
 /// `RemoteHost` itself isn't constructed until first touched. What actually STARTS the stack is
@@ -10,11 +10,11 @@ import NormaProtocol
 /// follow-up, CN combined-review Important 2 — `startRemoteAccessIfPaired()` below, called once
 /// from `AppDelegate.boot()` at launch so an already-paired phone doesn't need a human to reopen
 /// that menu after every Mac relaunch (reboot, quit, hourly Sparkle auto-update). Mirrors
-/// `DaemonSupervisor`'s own `@MainActor` convention (`apple/Norma/Sources/App/
+/// `DaemonSupervisor`'s own `@MainActor` convention (`apple/Winter/Sources/App/
 /// DaemonSupervisor.swift`): a UI-facing controller, single-threaded by construction.
 ///
-/// `socketPath`/the home directory `storeDir` derives from both come from `NormaPaths` — the
-/// SAME `$NORMA_HOME ?? ~/.norma` derivation `DaemonSupervisor`/`AppModel` already use elsewhere
+/// `socketPath`/the home directory `storeDir` derives from both come from `WinterPaths` — the
+/// SAME `$WINTER_HOME ?? ~/.winter` derivation `DaemonSupervisor`/`AppModel` already use elsewhere
 /// in this app, reused (not re-derived) here.
 @MainActor
 final class RemoteAccessCoordinator {
@@ -28,15 +28,15 @@ final class RemoteAccessCoordinator {
         case pairingUnavailable
     }
 
-    private static let log = Logger(subsystem: "com.norma.app", category: "relay-config")
+    private static let log = Logger(subsystem: "com.winter.app", category: "relay-config")
 
     /// The safe, pre-Task-6 default: direct connections only, exactly as if no relay fleet
     /// existed — the fallback for any verification failure below (resource missing, unreadable,
     /// malformed JSON, or a signature that doesn't verify). NOT a Debug-vs-Release distinction:
     /// verified against project.yml + the generated pbxproj (CN-T1 review) — the `Resources`
     /// build phase that carries `relay-config.signed.json` is NOT configuration-gated (unlike the
-    /// Release-only "Embed norma-core" script), and `RelayConfigTrust` carries no `#if DEBUG` gate
-    /// either — so a Debug build ("Norma Dev") embeds and successfully verifies the exact SAME
+    /// Release-only "Embed winter-core" script), and `RelayConfigTrust` carries no `#if DEBUG` gate
+    /// either — so a Debug build ("Winter Dev") embeds and successfully verifies the exact SAME
     /// signed Oracle relay list as Release, and only lands here if verification actually fails.
     /// Practical consequence: every build, Debug included, now probes the production relay hosts
     /// at `RemoteHost.start()` — deliberate: a dev Mac should exercise the same fallback behavior
@@ -46,10 +46,10 @@ final class RemoteAccessCoordinator {
         relayURLs: []
     )
 
-    /// Loads the bundled, production-signed relay config (SP2b Task 6 — `apple/Norma/Resources/
+    /// Loads the bundled, production-signed relay config (SP2b Task 6 — `apple/Winter/Resources/
     /// relay-config.signed.json`, embedded via `project.yml`'s `Resources` source path) and
     /// verifies it against `RelayConfigTrust.productionPublicKey` (`RelayConfigStore.accept`,
-    /// NormaProtocol) BEFORE trusting a single byte of it. On ANY failure — resource missing,
+    /// WinterProtocol) BEFORE trusting a single byte of it. On ANY failure — resource missing,
     /// unreadable, malformed JSON, or a signature that doesn't verify — this fatal-logs and falls
     /// back to `directOnlyFallback`: the app keeps working, just without relay fallback for
     /// phones that can't reach this Mac directly. NEVER half-trusts a config that fails
@@ -76,15 +76,15 @@ final class RemoteAccessCoordinator {
 
     private lazy var host: RemoteHost = {
         let relay = Self.loadVerifiedRelayConfig()
-        // devfix (socket strand): both `storeDir` and `socketPath` used to re-derive `$NORMA_HOME`
-        // independently via the bare `NormaPaths.homeDirectory()`/`socketPath()` — the SAME
-        // profile-blind gap `AppModel.production()` had. Resolve once via `AppProfile.normaHome`
+        // devfix (socket strand): both `storeDir` and `socketPath` used to re-derive `$WINTER_HOME`
+        // independently via the bare `WinterPaths.homeDirectory()`/`socketPath()` — the SAME
+        // profile-blind gap `AppModel.production()` had. Resolve once via `AppProfile.winterHome`
         // and pass it explicitly, so a dev-profile app's pairing stack persists its allowlist under
         // (and dials the daemon at) its OWN home, not the dist one.
-        let home = AppProfile.normaHome
+        let home = AppProfile.winterHome
         return RemoteHost(config: RemoteHost.Config(
             storeDir: URL(fileURLWithPath: home).appendingPathComponent("remote", isDirectory: true),
-            socketPath: NormaPaths.socketPath(home: home),
+            socketPath: WinterPaths.socketPath(home: home),
             hostLabel: Host.current().localizedName ?? "Mac",
             relayConfig: relay.relayConfig,
             relayURLs: relay.relayURLs,
@@ -102,7 +102,7 @@ final class RemoteAccessCoordinator {
     /// to the `lazy var` above skips its initializer expression, exactly like `RemoteHost`'s own
     /// `#if DEBUG` test-only init (RemoteHost.swift) skips binding a real `IrohListener`.
     /// `RemoteAccessCoordinatorTests` builds that injected `RemoteHost` via `@testable import
-    /// NormaKit`, reusing `RemoteHostTests`' own `makeListener`/`makeDaemonFactory` scripted seam
+    /// WinterKit`, reusing `RemoteHostTests`' own `makeListener`/`makeDaemonFactory` scripted seam
     /// so `startRemoteAccessIfPaired()` can be proven without ever touching a real iroh listener or
     /// the Keychain (CLAUDE.md: tests must never touch live Keychain/network).
     init(host: RemoteHost) {

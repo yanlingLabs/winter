@@ -28,7 +28,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@winter/protocol";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/auth/credential-material";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
@@ -90,7 +90,7 @@ describeWithWinterBinary("P8d-9 -- the bounded cross-runtime resumed attempt", (
     const anthropicScript: AnthropicTurnScript = { blocks: [{ type: "text", chunks: ["hello from the destination"] }], stopReason: "end_turn" };
 
     beforeAll(async () => {
-      home = realpathSync(mkdtempSync(join(tmpdir(), "norma-p8d9-")));
+      home = realpathSync(mkdtempSync(join(tmpdir(), "winter-p8d9-")));
 
       const { startFake: startOpenAiFake } = await import("@yanlinglabs/winter-provider-conformance");
       const openaiFake = await startOpenAiFake({ routes: [{ path: "*", handler: async () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } }) }] });
@@ -147,7 +147,7 @@ describeWithWinterBinary("P8d-9 -- the bounded cross-runtime resumed attempt", (
 
     test("ONE bounded attempt: construction -> session.create's actual leg -> session.setModel's barrier outcome, recorded verbatim", async () => {
       const d = daemon!;
-      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "norma-p8d9-cwd-")));
+      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "winter-p8d9-cwd-")));
 
       const { sessionId } = await client!.call<{ sessionId: string }>(METHODS.sessionCreate, {
         scope: "e2e", mode: "code", model: CLAUDE_CATALOG_MODEL, cwd,
@@ -157,7 +157,7 @@ describeWithWinterBinary("P8d-9 -- the bounded cross-runtime resumed attempt", (
       console.warn(`[p8d9] MEASURED: session.create with a Claude catalog model id under an openai-compatible provider row landed on leg="${createdLeg}" (the construction's own premise was "expect the Winter leg", D13 — see this file's header, corrected per review F4: the router's OWN selectRuntimeFor, via decideRuntime, made this call BEFORE providerSelectionFor's Winter-branch code is ever reached — P8d-20: unsatisfiable as specified).`);
 
       if (createdLeg === "official") {
-        // MEASURED: the construction's premise did not hold — Norma's `providerSelectionFor`
+        // MEASURED: the construction's premise did not hold — Winter's `providerSelectionFor`
         // resolved the bare catalog id to the credentialed "anthropic" row regardless of
         // `settings.provider.type`, so `decideRuntime` routed straight to the official leg at
         // CREATE time. There is no Winter-leg source session to attempt a handoff FROM — this is

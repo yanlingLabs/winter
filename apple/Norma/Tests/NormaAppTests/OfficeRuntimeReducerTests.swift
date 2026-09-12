@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -2787,7 +2787,7 @@ final class OfficePlaceAtomicallyTests: XCTestCase {
 
         XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "rendered content")
         let siblings = try FileManager.default.contentsOfDirectory(atPath: docDir.path)
-        XCTAssertEqual(siblings, ["gate.xlsx"], "no `.norma-save-…` sibling left behind")
+        XCTAssertEqual(siblings, ["gate.xlsx"], "no `.winter-save-…` sibling left behind")
     }
 
     func testCreatesADestinationThatWasNotThere() throws {

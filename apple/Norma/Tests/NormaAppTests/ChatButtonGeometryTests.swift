@@ -1,13 +1,13 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// GATE r1 FIX (F3) coverage for `chatButtonFinalRect(navFinal:interPillGap:)`
-/// (`FieldKit/NormaFieldView.swift`) — the pure geometry for the top-row expand/chat button
+/// (`FieldKit/WinterFieldView.swift`) — the pure geometry for the top-row expand/chat button
 /// restored per v1's `chatButtonFinalRect(navFinal:)` (GlassFieldView.swift:1058-1066): a square
 /// glass button, sized to the nav pill's own height, sitting `interPillGap` immediately to its
 /// left at the same y.
 ///
-/// `navFinal` fixtures below are computed by hand using `NormaFieldView.navPillFinalRect`'s own
+/// `navFinal` fixtures below are computed by hand using `WinterFieldView.navPillFinalRect`'s own
 /// formula (private, so not callable directly from here) against a real `MorphModel()`'s default
 /// constants, for BOTH `corner.isLeft` branches — `.topLeft`/`.topRight` are the only two the
 /// composer path distinguishes (`composerOnTop` is true for both, only `isLeft` changes the nav

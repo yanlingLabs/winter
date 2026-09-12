@@ -3,7 +3,7 @@ import Foundation
 /// Mac → phone, the structured refusal payload carried inside an `.error`-kind `WireEnvelope` when
 /// the gateway (or the pairing router, on the `not_paired` path) turns a session dialer's handshake
 /// away (SP3.1 Task 1). Before this, a real revoke/not-paired/stale-epoch reached the phone only as
-/// a bare connection close (the router sent a raw-JSON `PairRejected` a `NormaSessionClient` can't
+/// a bare connection close (the router sent a raw-JSON `PairRejected` a `WinterSessionClient` can't
 /// decode, or the gateway sent an id-less error the client's rpc-error path ignores) — so the app
 /// collapsed every honest refusal to `.macUnavailable`. This gives it a TYPED signal instead: the
 /// `code` distinguishes a re-pair-required refusal (`not_paired`/`revoked`/`stale_epoch`, all of

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Norma is a macOS-native AI assistant: a TypeScript/Bun daemon (`norma-core`) that runs the agent loop, plus a native Swift menu-bar app that gives it a face. They talk JSON-RPC 2.0 over NDJSON on a Unix socket (`~/.norma/run/core.sock`). The daemon is the single source of truth; every client (CLI, app) is a view over its event stream.
+Winter is a macOS-native AI assistant: a TypeScript/Bun daemon (`winter-core`) that runs the agent loop, plus a native Swift menu-bar app that gives it a face. They talk JSON-RPC 2.0 over NDJSON on a Unix socket (`~/.winter/run/core.sock`). The daemon is the single source of truth; every client (CLI, app) is a view over its event stream.
 
 ## Commands
 
@@ -20,14 +20,14 @@ bun test -t "test name"              # one test by name
 # Protocol codegen — REQUIRED after changing packages/protocol/src (events/methods)
 pnpm protocol:generate               # regenerates JSON schema + Swift round-trip fixtures
 
-# Workflows e2e — proves the sandboxed runtime on the REAL compiled artifact (dist/norma-core)
+# Workflows e2e — proves the sandboxed runtime on the REAL compiled artifact (dist/winter-core)
 bun run verify:workflow
 
 # Swift
-cd apple/NormaProtocol && swift test # protocol mirror round-trip tests
-cd apple/NormaKit && swift test      # daemon client library
-cd apple/Norma && xcodegen generate && \
-  xcodebuild -project Norma.xcodeproj -scheme Norma -destination 'platform=macOS' build
+cd apple/WinterProtocol && swift test # protocol mirror round-trip tests
+cd apple/WinterKit && swift test      # daemon client library
+cd apple/Winter && xcodegen generate && \
+  xcodebuild -project Winter.xcodeproj -scheme Winter -destination 'platform=macOS' build
 
 # Run the daemon + CLI in dev
 cd packages/cli
@@ -35,23 +35,23 @@ bun src/main.ts daemon run           # headless daemon
 bun src/main.ts -p "hello"           # one-shot prompt (separate terminal)
 bun src/main.ts                      # interactive TUI (Ink)
 
-# Dev profile: the Debug app is "Norma Dev" (com.norma.app.dev) on ~/.norma-dev, keychain
-# com.norma.core.dev; the global `norma-dev` command (installed by the dev app's menu) is an
-# env-setting bun wrapper. The distribution app owns `norma` (symlink installed from the app /
-# brew) on ~/.norma, keychain com.norma.core. Explicit NORMA_HOME always wins over both defaults.
-# TWO TRAPS: (1) plain `norma` is the DIST CLI — with a dead socket it AUTO-LAUNCHES the dist app
-# (`open -g -b com.norma.app`), so never use it for dev/test work: use `norma-dev`, or a temp
-# NORMA_HOME with a manually-spawned `daemon run`. (2) Debug builds do NOT embed norma-core —
-# "Norma Dev" cannot self-spawn a daemon; start the dev daemon below FIRST or the orb shows
+# Dev profile: the Debug app is "Winter Dev" (com.winter.app.dev) on ~/.winter-dev, keychain
+# com.winter.core.dev; the global `winter-dev` command (installed by the dev app's menu) is an
+# env-setting bun wrapper. The distribution app owns `winter` (symlink installed from the app /
+# brew) on ~/.winter, keychain com.winter.core. Explicit WINTER_HOME always wins over both defaults.
+# TWO TRAPS: (1) plain `winter` is the DIST CLI — with a dead socket it AUTO-LAUNCHES the dist app
+# (`open -g -b com.winter.app`), so never use it for dev/test work: use `winter-dev`, or a temp
+# WINTER_HOME with a manually-spawned `daemon run`. (2) Debug builds do NOT embed winter-core —
+# "Winter Dev" cannot self-spawn a daemon; start the dev daemon below FIRST or the orb shows
 # disconnected.
-NORMA_HOME=~/.norma-dev NORMA_PROFILE=dev bun src/main.ts daemon run   # dev daemon (or: norma-dev daemon run)
+WINTER_HOME=~/.winter-dev WINTER_PROFILE=dev bun src/main.ts daemon run   # dev daemon (or: winter-dev daemon run)
 # THIRD TRAP (Winter Phase 8b; bundle layout as of 8d; ladder as of 9a): every session runs as a
 # spawned `winter` child, and DEBUG BUILDS NEVER EMBED EITHER RUNTIME (dev/dist split, CLAUDE.md's
 # own Hard Rules) — only a RELEASE build embeds both under
 # `Contents/Resources/runtimes/{winter,claude-official/*}` (project.yml's "Embed runtimes"
 # postCompileScript, `scripts/embed-runtimes.sh`). The FULL ladder (`resolveWinterExecutable`):
-# `settings.runtimes.winterExecutable` → `$NORMA_WINTER_EXECUTABLE` →
-# `<dirname(execPath)>/runtimes/winter` (never reachable in Debug) → `<NORMA_HOME>/runtimes/bin/winter`
+# `settings.runtimes.winterExecutable` → `$WINTER_RUNTIME_EXECUTABLE` →
+# `<dirname(execPath)>/runtimes/winter` (never reachable in Debug) → `<WINTER_HOME>/runtimes/bin/winter`
 # → (P9a-9) the installed npm platform package `@yanlinglabs/winter-agent-sdk-darwin-arm64`, an
 # OPTIONAL dependency of the wrapper that `bun install` resolves on darwin-arm64 (published since
 # SDK v0.0.5; the wrapper pins the EXACT matching version, and the rung REFUSES a package whose
@@ -59,28 +59,28 @@ NORMA_HOME=~/.norma-dev NORMA_PROFILE=dev bun src/main.ts daemon run   # dev dae
 # bun's isolated linker nests it under the WRAPPER's own node_modules, which is why the resolver
 # dual-hops through `@yanlinglabs/winter-agent-sdk/package.json` (P9a fix wave C1). So a PLAIN
 # `bun install` is enough on its own and a dev daemon can simply be:
-NORMA_HOME=~/.norma-dev NORMA_PROFILE=dev bun src/main.ts daemon run
+WINTER_HOME=~/.winter-dev WINTER_PROFILE=dev bun src/main.ts daemon run
 # The npm binary is AD-HOC signed and its bytes change on every publish, so every fresh `bun
 # install` re-triggers the ONE-TIME-PER-BINARY Keychain consent dialog below. `dist/winter`
 # (`bun run build:winter` from the ../winter-agent-sdk checkout at the pinned tag) stays the
 # STABLE-IDENTITY option for anyone who wants that dialog to survive rebuilds — point the daemon
 # at it explicitly (wins over the package rung):
-NORMA_WINTER_EXECUTABLE="$PWD/../../dist/winter" NORMA_HOME=~/.norma-dev NORMA_PROFILE=dev bun src/main.ts daemon run
-# (or set `runtimes.winterExecutable` in ~/.norma-dev/settings.json). FIRST RUN AFTER A REBUILD OR A FRESH `bun install`:
-# the winter binary reads Norma's Keychain items itself, so macOS shows ONE consent dialog per credential item — click
+WINTER_RUNTIME_EXECUTABLE="$PWD/../../dist/winter" WINTER_HOME=~/.winter-dev WINTER_PROFILE=dev bun src/main.ts daemon run
+# (or set `runtimes.winterExecutable` in ~/.winter-dev/settings.json). FIRST RUN AFTER A REBUILD OR A FRESH `bun install`:
+# the winter binary reads Winter's Keychain items itself, so macOS shows ONE consent dialog per credential item — click
 # "Always Allow" or the turn stalls until the CLI's 180 s watchdog aborts it. `bun run build:winter --sign <identity>` (or env
-# `NORMA_WINTER_SIGN_IDENTITY`; `-` for an ad-hoc-but-STABLE identity works too) re-signs a freshly built `dist/winter`
-# with a fixed `--identifier com.norma.winter`, so ITS Keychain ACL survives rebuilds instead of re-prompting every time
+# `WINTER_RUNTIME_SIGN_IDENTITY`; `-` for an ad-hoc-but-STABLE identity works too) re-signs a freshly built `dist/winter`
+# with a fixed `--identifier com.winter.runtime`, so ITS Keychain ACL survives rebuilds instead of re-prompting every time
 # (P8d-14) — the npm-installed binary has no such option (Anthropic-shaped release pipeline, not this repo's to re-sign
 # for dev convenience), so it re-prompts once per `bun install` that actually changes its bytes. Credentials are JSON
 # "material" records (`openai:default`, `codex-oauth:default`; see packages/core/src/auth/credential-material.ts) —
 # the raw legacy records are migrated at boot.
 # FOURTH TRAP (Phase 8c; bundle layout as of 8d): a Code session on a Claude catalog model routes to the OFFICIAL leg,
 # which needs (1) the Claude platform runtime — `bun install` fetches `@anthropic-ai/claude-agent-sdk-darwin-arm64`;
-# the ladder is `runtimes.claudeExecutable` → `$NORMA_CLAUDE_EXECUTABLE` → `<dirname(execPath)>/runtimes/claude-official/claude`
+# the ladder is `runtimes.claudeExecutable` → `$WINTER_CLAUDE_EXECUTABLE` → `<dirname(execPath)>/runtimes/claude-official/claude`
 # (Release only; also gated on a `VERSIONS.json` staged beside it matching this build's pins — a mismatched pair refuses
 # typed even though the binary itself exists) → node_modules (dev only) — and (2) an Anthropic API key material
-# (`norma login --anthropic-key`); without either the session refuses typed (`claude_executable_unavailable` /
+# (`winter login --anthropic-key`); without either the session refuses typed (`claude_executable_unavailable` /
 # `runtime_selection_refused`). Winter-leg sessions are unaffected. Cross-runtime handoff via `session.setModel` is fenced
 # by `runtimes.handoff.crossRuntime` (default false).
 
@@ -100,15 +100,15 @@ bun run scripts/release.ts                       # real release (bumps version f
 - `packages/protocol` — the contract. Zod schemas for every JSON-RPC method and `SessionEvent` variant. `generate.ts` emits a JSON schema + canonical fixtures consumed by the Swift side.
 - `packages/core` — the daemon. Every session runs through the Winter runtime SDK (`src/runtime-sdk/` — `create.ts` builds the one router handle; `session-driver.ts` dispatches a session to the Winter child or, for Claude catalog models in Code mode with an Anthropic key, the official Claude Agent SDK leg; `official-*.ts` is that leg), the SDK-message→SessionEvent projector (`src/projector/`), per-session capability servers (`src/capabilities/`), tool definitions (`src/agent/tools/`), the provider layer for the daemon's own internal model calls (`src/providers/` on `@yanlinglabs/winter-provider-runtime`; Codex OAuth login), event-sourced sessions (`src/sessions/`), plugin supervisor (`src/plugins/`), settings hot-reload (`src/settings-watcher.ts`), routines/scheduling (`src/routines/`). The old `AgentEngine` is gone (Winter Phase 8b).
 - `packages/core/src/workflows/` — the workflows runtime: model-authored JS orchestration scripts run in a **sandboxed subprocess** (the daemon self-spawns its own binary as `__workflow-worker` under a macOS seatbelt; NDJSON stdio bridge). Dev and compiled paths differ — `bun run verify:workflow` is the compiled-binary proof and must stay green.
-- `packages/cli` — the `norma` command: Ink/React TUI, headless `-p` mode, daemon lifecycle (launchd).
+- `packages/cli` — the `winter` command: Ink/React TUI, headless `-p` mode, daemon lifecycle (launchd).
 - `packages/plugin-sdk` — what third-party plugins build against. Plugins are separate processes granted narrow, user-consented capabilities; `examples/battery-limiter` is the complete reference plugin.
-- `apple/NormaProtocol` — Swift mirror of the protocol types. Its tests decode/re-encode every TS-generated fixture and assert the exact fixture count.
-- `apple/NormaKit` — Swift client for the daemon socket.
-- `apple/Norma` — the menu-bar app (xcodegen `project.yml`, no committed pbxproj). Embeds `norma-core` and `NormaHelper` in Release builds.
-- `scripts/release.ts` + `scripts/release-lib.ts` — the release pipeline; `packaging/norma.rb.tmpl` is the Homebrew cask template it renders.
-- `norma/` at the repo root is a Phase-0 Xcode scaffold leftover — **not** the real app. The real app is `apple/Norma`.
+- `apple/WinterProtocol` — Swift mirror of the protocol types. Its tests decode/re-encode every TS-generated fixture and assert the exact fixture count.
+- `apple/WinterKit` — Swift client for the daemon socket.
+- `apple/Winter` — the menu-bar app (xcodegen `project.yml`, no committed pbxproj). Embeds `winter-core` and `WinterHelper` in Release builds.
+- `scripts/release.ts` + `scripts/release-lib.ts` — the release pipeline; `packaging/winter.rb.tmpl` is the Homebrew cask template it renders.
+- `winter/` at the repo root is a Phase-0 Xcode scaffold leftover — **not** the real app. The real app is `apple/Winter`.
 - `docs/superpowers/` is git-ignored (private design docs); don't reference it from committed code.
-- The iOS companion lives in a **sibling repo** (`../norma-ios`) and consumes `NormaProtocol` + `NormaSessionKit` as a remote SPM package pinned to a **git tag of this repo** (`v-*-kitN`, exposed via the root `Package.swift`). Editing Swift kit sources here does nothing for the phone until commit → push → new kit tag → `norma-ios/project.yml` `revision:` bump + `xcodegen generate`.
+- The iOS companion lives in a **sibling repo** (`../norma-ios`) and consumes `WinterProtocol` + `WinterSessionKit` as a remote SPM package pinned to a **git tag of this repo** (`v-*-kitN`, exposed via the root `Package.swift`). Editing Swift kit sources here does nothing for the phone until commit → push → new kit tag → `norma-ios/project.yml` `revision:` bump + `xcodegen generate`.
 
 ### The protocol change checklist
 
@@ -119,10 +119,10 @@ Adding/changing a `SessionEvent` variant or RPC method touches, in order:
 3. `pnpm protocol:generate`
 4. `packages/core/src/projector/event-coverage.ts` — its `PROJECTED_EVENT_COVERAGE` map (`satisfies Record<SessionEvent["type"], boolean>`) is the ONE exhaustiveness map since the engine retired (Winter Phase 8b); it fails core's `tsc` on a new variant until updated
 
-   **Adding a FIELD (not a variant) engages none of the compile-time traps above — so sweep the field's PRODUCERS BY MEANING, not by build breakage.** Every step in this checklist is keyed to something failing to compile, and nothing fails to compile when a producer simply doesn't set a new optional field. `turn_completed.contextTokens` shipped correct on the daemon while `NormaChatKit`'s `ChatEngine` remained a **live second producer** emitting the old shape — reaching the daemon's log verbatim via `sync.push`, past a consumer with no mode gate. Ask: who else *writes* this event, in either language, and does the consumer's fallback silently accept their shape? (Corollary that saved that change from being a Critical: replication is byte-verbatim, so the phone does not decode and re-encode — had it done so, the new field would have been stripped in transit and the fix would have looked like it worked.)
-5. `apple/NormaProtocol` — mirror the Swift type; round-trip test asserts the fixture count, so it fails until synced
-6. `apple/NormaKit` — it has exhaustive `switch`es over event variants (e.g. the `seq`/`sessionId` accessors); a new variant breaks compilation there, **not** in NormaProtocol
-7. Build NormaKit **and** the app, not just `swift test` in NormaProtocol — that's the only way to catch step 6
+   **Adding a FIELD (not a variant) engages none of the compile-time traps above — so sweep the field's PRODUCERS BY MEANING, not by build breakage.** Every step in this checklist is keyed to something failing to compile, and nothing fails to compile when a producer simply doesn't set a new optional field. `turn_completed.contextTokens` shipped correct on the daemon while `WinterChatKit`'s `ChatEngine` remained a **live second producer** emitting the old shape — reaching the daemon's log verbatim via `sync.push`, past a consumer with no mode gate. Ask: who else *writes* this event, in either language, and does the consumer's fallback silently accept their shape? (Corollary that saved that change from being a Critical: replication is byte-verbatim, so the phone does not decode and re-encode — had it done so, the new field would have been stripped in transit and the fix would have looked like it worked.)
+5. `apple/WinterProtocol` — mirror the Swift type; round-trip test asserts the fixture count, so it fails until synced
+6. `apple/WinterKit` — it has exhaustive `switch`es over event variants (e.g. the `seq`/`sessionId` accessors); a new variant breaks compilation there, **not** in WinterProtocol
+7. Build WinterKit **and** the app, not just `swift test` in WinterProtocol — that's the only way to catch step 6
 
 ### Event-sourced sessions
 
@@ -130,25 +130,25 @@ Every session is an append-only JSONL of `SessionEvent`s (each carrying `seq`/`s
 
 ### Remote surface & history (phone-facing)
 
-- The remote-role method allowlist is **four hand-mirrored lists that move in lockstep**: `REMOTE_ALLOWED_METHODS` (`packages/core/src/ipc/server.ts`) + its literal parity test (`packages/core/test/ipc/remote-allowlist-parity.test.ts`) + Swift `Gateway.remoteAllowedMethods` (`apple/NormaKit/Sources/NormaKit/Gateway/Gateway.swift`) + its count test (`GatewayGateTests`). Adding a remote method is a deliberate edit to all four; the two tests are the drift tripwire.
+- The remote-role method allowlist is **four hand-mirrored lists that move in lockstep**: `REMOTE_ALLOWED_METHODS` (`packages/core/src/ipc/server.ts`) + its literal parity test (`packages/core/test/ipc/remote-allowlist-parity.test.ts`) + Swift `Gateway.remoteAllowedMethods` (`apple/WinterKit/Sources/WinterKit/Gateway/Gateway.swift`) + its count test (`GatewayGateTests`). Adding a remote method is a deliberate edit to all four; the two tests are the drift tripwire.
 - `session.history` serves paged past events filtered by `HISTORY_EVENT_TYPES` (`packages/core/src/sessions/history.ts`) — an **allowlist, never a denylist**: `reasoning_item` must never pass it (a security sweep test pins this). Adding a type requires confirming the recursive per-event string cap bounds its large fields at every depth — the phone transport hard-fails on oversized frames, so an unbounded field is a silent connection-killer.
 - The **live/replay** stream to a remote client is a *second* allowlist with the identical obligation: `REMOTE_STREAM_EVENT_TYPES` + `capEvent` (`packages/core/src/sessions/remote-stream.ts`), applied at the one `HubClient` construction in `ipc/server.ts` and gated on `authedRole === "remote"`. It is `HISTORY_EVENT_TYPES` **plus the transients** (history governs *persisted* replay; transients are never persisted, so history excludes them by construction — using history's set alone silently kills streaming). Two types are retained by necessity, not accident: `harness_attached`/`harness_detached` (the Gateway's replay **terminator** — filtering it burns a 5s watchdog per open, measured) and `session_created` (pinned by `IrohE2ETests` as a fresh session's first frame). **The Swift stack's apparent safety on `reasoning_item` is an accident of a missing protocol variant, not policy** — this daemon-side guard is what makes it policy, and is why the guard does not live in the Gateway.
-- **Transient events are one shared constant**: `TRANSIENT_EVENT_TYPES` (`packages/protocol/src/events.ts`) ↔ Swift `SessionEvent.transientTypes`/`.isTransient`, with literal parity tests on both sides and a fixture-driven Swift equivalence test. `NormaClient`, `NormaSessionClient` and the remote-stream filter all **derive** from it — never hand-copy the strings (a hand-copy in `NormaSessionClient` is what dropped every `assistant_delta` on iOS: the daemon stamps transients with the store's `lastSeq`, so any client that dedupes them by seq drops all of them, forever, silently).
+- **Transient events are one shared constant**: `TRANSIENT_EVENT_TYPES` (`packages/protocol/src/events.ts`) ↔ Swift `SessionEvent.transientTypes`/`.isTransient`, with literal parity tests on both sides and a fixture-driven Swift equivalence test. `WinterClient`, `WinterSessionClient` and the remote-stream filter all **derive** from it — never hand-copy the strings (a hand-copy in `WinterSessionClient` is what dropped every `assistant_delta` on iOS: the daemon stamps transients with the store's `lastSeq`, so any client that dedupes them by seq drops all of them, forever, silently).
 - **Protocol-checklist addendum:** a new **transient** variant must be added to `TRANSIENT_EVENT_TYPES` *and* to `REMOTE_STREAM_EVENT_TYPES`. Omitting the first drops it for every remote client, silently and permanently; the parity tests pin "exactly the current set" and will **not** catch that direction.
 
 ### Settings
 
-`~/.norma/settings.json` is watched (`settings-watcher.ts`) and hot-swapped atomically; feature code reads live getters. **No setting may ever require a daemon restart to take effect** — new settings must follow the hot-reload pattern.
+`~/.winter/settings.json` is watched (`settings-watcher.ts`) and hot-swapped atomically; feature code reads live getters. **No setting may ever require a daemon restart to take effect** — new settings must follow the hot-reload pattern.
 
 ### Tool surface
 
-Tool design deliberately tracks Claude Code's shape (see `norma-vs-cc-tools.md` at repo root for the live comparison): file-based memory (a MEMDIR of markdown files written with normal write/edit — no dedicated memory tools), unrestricted reads (no path fence on read/glob/grep/ls; the sole read denial is `~/.norma/run`), out-of-root writes via an approval flow (grant denylist protects `~/.norma`), a single multi-purpose `lsp` tool (the `norma__lsp` capability server; auto-diagnostics-after-edit, the bash reviewer, plugin pre/post hooks and the diff-tab producer ride `Options.hooks` on BOTH legs since Phase 8c — `src/runtime-sdk/hooks.ts`), multimodal `read` (images/PDF/notebooks), and subagents with no wall-clock timeout — a progress-stall watchdog instead.
+Tool design deliberately tracks Claude Code's shape (see `winter-vs-cc-tools.md` at repo root for the live comparison): file-based memory (a MEMDIR of markdown files written with normal write/edit — no dedicated memory tools), unrestricted reads (no path fence on read/glob/grep/ls; the sole read denial is `~/.winter/run`), out-of-root writes via an approval flow (grant denylist protects `~/.winter`), a single multi-purpose `lsp` tool (the `winter__lsp` capability server; auto-diagnostics-after-edit, the bash reviewer, plugin pre/post hooks and the diff-tab producer ride `Options.hooks` on BOTH legs since Phase 8c — `src/runtime-sdk/hooks.ts`), multimodal `read` (images/PDF/notebooks), and subagents with no wall-clock timeout — a progress-stall watchdog instead.
 
 ## Hard rules
 
-- **Never kill or restart a running Norma.app or the user's live daemon.** Tests must never touch `~/.norma` — always point at a temp `NORMA_HOME`.
-- **Never launch the dist app (`/Applications/Norma.app`, bundle `com.norma.app`, `~/.norma`) during development — dev work uses ONLY the dev app** ("Norma Dev", `com.norma.app.dev`, `~/.norma-dev`, Debug build with explicit `-derivedDataPath`). The dist copy is the user's daily driver, updated by Sparkle/brew; a Claude-launched dist instance is indistinguishable from it in the menu bar and defeats the entire dev/dist split. Same rule for local Release builds (`out/release/...`): build them, never launch them — a Release build under the same bundle id shadows the /Applications copy.
-- Secrets live in the macOS Keychain (`Bun.secrets`, service `com.norma.core`) — never on disk, never in fixtures.
-- `packages/core/src/providers/codex-config.ts` self-identifies as `originator: "norma"` — a deliberate ToS decision; do not revert to a first-party value.
+- **Never kill or restart a running Winter.app or the user's live daemon.** Tests must never touch `~/.winter` — always point at a temp `WINTER_HOME`.
+- **Never launch the dist app (`/Applications/Winter.app`, bundle `com.winter.app`, `~/.winter`) during development — dev work uses ONLY the dev app** ("Winter Dev", `com.winter.app.dev`, `~/.winter-dev`, Debug build with explicit `-derivedDataPath`). The dist copy is the user's daily driver, updated by Sparkle/brew; a Claude-launched dist instance is indistinguishable from it in the menu bar and defeats the entire dev/dist split. Same rule for local Release builds (`out/release/...`): build them, never launch them — a Release build under the same bundle id shadows the /Applications copy.
+- Secrets live in the macOS Keychain (`Bun.secrets`, service `com.winter.core`) — never on disk, never in fixtures.
+- `packages/core/src/providers/codex-config.ts` self-identifies as `originator: "winter"` — a deliberate ToS decision; do not revert to a first-party value.
 - Version strings are generated; edit only `VERSION` via the bump/sync scripts.
-- The Sparkle public key in `apple/Norma/project.yml` (`SUPublicEDKey`) is the production key; the private half exists only in the login Keychain — never committed anywhere.
+- The Sparkle public key in `apple/Winter/project.yml` (`SUPublicEDKey`) is the production key; the private half exists only in the login Keychain — never committed anywhere.

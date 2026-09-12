@@ -32,7 +32,7 @@ enum BrowserRendererMemory {
     ///
     /// Split out from the sweep so the parsing — the only part with anything to get wrong — is
     /// testable without spawning a process. `SpikeCloseLeak.helperCensus` is the prior art for the
-    /// shape (same command, same `ppid == me` + `Norma Helper` filter); this adds `rss=` and the
+    /// shape (same command, same `ppid == me` + `Winter Helper` filter); this adds `rss=` and the
     /// `--type=renderer` restriction.
     ///
     /// `rss` is reported in **KiB** by `ps` on macOS, hence the `* 1024`.
@@ -53,7 +53,7 @@ enum BrowserRendererMemory {
             guard ppid == me else { continue }
             guard let rssKiB = UInt64(fields.removeFirst()) else { continue }
             let command = fields.joined(separator: " ")
-            guard command.contains("Norma Helper"), command.contains("--type=renderer") else { continue }
+            guard command.contains("Winter Helper"), command.contains("--type=renderer") else { continue }
             total += rssKiB * 1024
         }
         return total

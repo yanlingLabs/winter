@@ -48,12 +48,12 @@ final class BrowserRuntime {
     /// CEF, and the only way to get there is a seam the tests can substitute.
     ///
     /// `production` below is the whole of the un-substitutable half: thirteen forwards to
-    /// `NormaCEF*` / `NormaCEFRuntime` (ten of them until B2 Task 3 added the agent's three), one
+    /// `WinterCEF*` / `WinterCEFRuntime` (ten of them until B2 Task 3 added the agent's three), one
     /// line each but for `failureReason`'s three-line unwrap of an enum, with
     /// no branch and no state of their own — which is what "thin enough to verify by reading" has to
     /// mean when reading is the only verification available.
     struct CEFDriver {
-        var setStateObserver: (PanelCEFContainerView, ((NormaCEFBrowserState?) -> Void)?) -> Void
+        var setStateObserver: (PanelCEFContainerView, ((WinterCEFBrowserState?) -> Void)?) -> Void
         var setNavigationObserver: (PanelCEFContainerView, ((String?, String?) -> Void)?) -> Void
         var setPopupObserver: (PanelCEFContainerView, ((String?) -> Void)?) -> Void
         var seedTabState: (PanelCEFContainerView, String, String) -> Void
@@ -65,25 +65,25 @@ final class BrowserRuntime {
         /// and policy, and spec §9 says its logic tests through a driver.
         ///
         /// `loadURL` and `goBack` are the SAME two C entry points the chrome's own buttons use
-        /// (`NormaCEFLoadURL`/`NormaCEFGoBack`, reached from `PanelWebTabModel.navigate(typed:)` and
+        /// (`WinterCEFLoadURL`/`WinterCEFGoBack`, reached from `PanelWebTabModel.navigate(typed:)` and
         /// `.goBack()`) — deliberately not a second load path. What differs is only where the policy
         /// ran: the field's Return key filters at the field, the agent's `navigate` filters at the
         /// consumer, and both filter with `PanelURLPolicy`.
         var loadURL: (PanelCEFContainerView, String) -> Void
         var goBack: (PanelCEFContainerView) -> Void
-        /// One DevTools protocol method and its reply — `NormaCEFExecuteCDP`, whose completion
-        /// ALWAYS fires (`NormaCEF.h` carries that contract and the three points that keep it true
+        /// One DevTools protocol method and its reply — `WinterCEFExecuteCDP`, whose completion
+        /// ALWAYS fires (`WinterCEF.h` carries that contract and the three points that keep it true
         /// when a browser goes away mid-call). A recorder substituted here holds the completion and
         /// fires it when the test says so, which is the whole of how the read verbs are testable.
         var executeCDP: (PanelCEFContainerView, String, String?, @escaping (Bool, String) -> Void) -> Void
 
-        /// `NormaCEFRuntime`'s four doors: the lazy start, the reason the placeholder shows, whether
+        /// `WinterCEFRuntime`'s four doors: the lazy start, the reason the placeholder shows, whether
         /// a retry can succeed, and the reset that makes one possible. Injected for the same reason
         /// as the rest and one sharper one — `ensureInitialized` refuses outright under XCTest (the
         /// structural guard that keeps Chromium out of the suite), so a runtime calling it directly
         /// could never have its create path tested at all.
         ///
-        /// The four are `@MainActor` because `NormaCEFRuntime` is: annotating the closure TYPE is
+        /// The four are `@MainActor` because `WinterCEFRuntime` is: annotating the closure TYPE is
         /// what lets `production` below be a plain `static let` (a static initializer is a
         /// nonisolated context and cannot call main-actor code otherwise).
         var ensureInitialized: @MainActor () -> Bool
@@ -92,26 +92,26 @@ final class BrowserRuntime {
         var clearFailure: @MainActor () -> Void
 
         static let production = CEFDriver(
-            setStateObserver: { NormaCEFSetStateObserver($0, $1) },
-            setNavigationObserver: { NormaCEFSetNavigationObserver($0, $1) },
-            setPopupObserver: { NormaCEFSetPopupObserver($0, $1) },
-            seedTabState: { NormaCEFSeedTabState($0, $1, $2) },
+            setStateObserver: { WinterCEFSetStateObserver($0, $1) },
+            setNavigationObserver: { WinterCEFSetNavigationObserver($0, $1) },
+            setPopupObserver: { WinterCEFSetPopupObserver($0, $1) },
+            seedTabState: { WinterCEFSeedTabState($0, $1, $2) },
             // editor-product Task 4: `0` is "no override" (CEF's own `background_color` contract —
             // fully transparent alpha) — an ordinary web tab has no brand to anticipate, so this
             // preserves today's behaviour byte-for-byte rather than growing this closure's own
             // signature for a value every caller here would pass the same constant for anyway.
-            createBrowser: { NormaCEFCreateBrowser($0, $1, 0) },
-            closeBrowser: { NormaCEFCloseBrowser($0) },
-            loadURL: { NormaCEFLoadURL($0, $1) },
-            goBack: { NormaCEFGoBack($0) },
-            executeCDP: { NormaCEFRuntime.executeCDP(in: $0, method: $1, paramsJSON: $2, completion: $3) },
-            ensureInitialized: { NormaCEFRuntime.ensureInitialized() },
+            createBrowser: { WinterCEFCreateBrowser($0, $1, 0) },
+            closeBrowser: { WinterCEFCloseBrowser($0) },
+            loadURL: { WinterCEFLoadURL($0, $1) },
+            goBack: { WinterCEFGoBack($0) },
+            executeCDP: { WinterCEFRuntime.executeCDP(in: $0, method: $1, paramsJSON: $2, completion: $3) },
+            ensureInitialized: { WinterCEFRuntime.ensureInitialized() },
             failureReason: {
-                if case .failed(let reason) = NormaCEFRuntime.state { return reason }
+                if case .failed(let reason) = WinterCEFRuntime.state { return reason }
                 return nil
             },
-            isRetryable: { NormaCEFRuntime.isRetryable },
-            clearFailure: { NormaCEFRuntime.clearFailure() })
+            isRetryable: { WinterCEFRuntime.isRetryable },
+            clearFailure: { WinterCEFRuntime.clearFailure() })
     }
 
     /// The clock and the two ways this file defers work. Separate from `CEFDriver` because none of
@@ -145,7 +145,7 @@ final class BrowserRuntime {
                     MainActor.assumeIsolated { work() }
                 }
                 // **Common modes, not the default one.** `Timer.scheduledTimer` registers in the
-                // default mode alone, and `NormaCEF.mm`'s pump measured that costing 0 callbacks
+                // default mode alone, and `WinterCEF.mm`'s pump measured that costing 0 callbacks
                 // across a 5-second event-tracking window. A linger that cannot fire while a menu is
                 // open or a window is being dragged is a stop the user can indefinitely postpone by
                 // holding the mouse down.
@@ -158,7 +158,7 @@ final class BrowserRuntime {
 
     /// Which descendant of a container can actually take a keystroke, and how sure we are.
     ///
-    /// This is a search rather than a path because **Chromium's view tree is not Norma's to
+    /// This is a search rather than a path because **Chromium's view tree is not Winter's to
     /// promise**. The spike dumped one spine, three deep, with exactly one candidate at the bottom —
     /// and explicitly refused to let this task key on that: "find it by identity, not by depth".
     struct ResponderSearch: Equatable {
@@ -224,8 +224,8 @@ final class BrowserRuntime {
     /// `applicationWillTerminate` is the only object that registers to let go of one.
     static let shared: BrowserRuntime = {
         let runtime = BrowserRuntime()
-        NormaCEFSetPreShutdownHook {
-            // Called from `NormaCEFShutdown`, i.e. from `applicationWillTerminate:`, i.e. on the
+        WinterCEFSetPreShutdownHook {
+            // Called from `WinterCEFShutdown`, i.e. from `applicationWillTerminate:`, i.e. on the
             // main thread — a statement of fact rather than an assumption, which is what
             // `assumeIsolated` is for (the same reason `Scheduler.production.mainAsync` uses it).
             MainActor.assumeIsolated { runtime.releaseViewsForShutdown() }
@@ -337,7 +337,7 @@ final class BrowserRuntime {
     /// Run one DevTools protocol method against `tabId`'s browser.
     ///
     /// **`completion` is called if and only if this returns `true`** — which is the whole reason it
-    /// returns anything. `NormaCEFExecuteCDP` guarantees its own completion always fires, so a caller
+    /// returns anything. `WinterCEFExecuteCDP` guarantees its own completion always fires, so a caller
     /// that got `true` will hear back; a caller that got `false` never dispatched anything and must
     /// answer for itself rather than wait.
     @discardableResult
@@ -352,7 +352,7 @@ final class BrowserRuntime {
 
     private var parkingWindowStorage: NSWindow?
 
-    /// `true` once anything has needed parking. Exists so the laziness is assertable: a Norma that
+    /// `true` once anything has needed parking. Exists so the laziness is assertable: a Winter that
     /// never opens a web tab must not build a window for it.
     var hasParkingWindow: Bool { parkingWindowStorage != nil }
 
@@ -362,7 +362,7 @@ final class BrowserRuntime {
     ///
     /// **Its size is load-bearing for headless, and this rect is where a never-attached browser
     /// lives for life.** `CreateBrowserNow` reads `[parent bounds]` exactly ONCE, at creation, and
-    /// hands it to `CefWindowInfo::SetAsChild` (`NormaCEF.mm`) — so a browser created into a parked
+    /// hands it to `CefWindowInfo::SetAsChild` (`WinterCEF.mm`) — so a browser created into a parked
     /// container is laid out at whatever the container measured at that instant. An *attach* fixes a
     /// visible tab (Fact 4: set the frame after `addSubview` and the page follows, via
     /// `resizeSubviews(withOldSize:)`), but a browser created parked and NEVER attached — spec §5's
@@ -383,7 +383,7 @@ final class BrowserRuntime {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
-        window.title = "Norma browser parking"
+        window.title = "Winter browser parking"
         parkingWindowStorage = window
         return window
     }
@@ -417,7 +417,7 @@ final class BrowserRuntime {
     /// convenience.** `quiesce()` is called only from `AppDelegate.quitReleasingBrowserViews()`,
     /// which has exactly two callers, both true quits that cannot be cancelled:
     ///
-    ///   * the menu bar's "Quit Norma" — the `quit:` closure at `AppDelegate.swift:1082`, fired by
+    ///   * the menu bar's "Quit Winter" — the `quit:` closure at `AppDelegate.swift:1082`, fired by
     ///     `MenuBarController.didQuit()` (`MenuBarController.swift:454`), which runs `onReallyQuit()`
     ///     — setting `AppDelegate.reallyQuitting = true` — BEFORE `quitApplication()`, so
     ///     `applicationShouldTerminate` answers `.terminateNow` and the quit cannot be refused;
@@ -425,8 +425,8 @@ final class BrowserRuntime {
     ///     which arms that same flag first for that same reason.
     ///
     /// **It deliberately does NOT gate `releaseViewsForShutdown`.** That is fix H's other half and
-    /// the belt for a shutdown reached without this door (the `NormaCEFSetPreShutdownHook` block, a
-    /// system logout): `NormaCEFCloseAllBrowsers`' sweep must still get every host view back, and a
+    /// the belt for a shutdown reached without this door (the `WinterCEFSetPreShutdownHook` block, a
+    /// system logout): `WinterCEFCloseAllBrowsers`' sweep must still get every host view back, and a
     /// latch that silenced the release would trade this fix for the one it is built on.
     private(set) var isQuiescent = false
 
@@ -526,18 +526,18 @@ final class BrowserRuntime {
 
     // MARK: Create
 
-    /// `create` = container into the parking window → wire the model → seed → `NormaCEFCreateBrowser`.
+    /// `create` = container into the parking window → wire the model → seed → `WinterCEFCreateBrowser`.
     ///
     /// The CEF part of the sequence was `PanelWebTab.makeNSView`'s, absorbed **in its order** (T4
     /// deleted that copy, so this is now the only one), and that order
     /// is load-bearing: the state observer publishes the current snapshot the moment it is
     /// registered, and the seed is what makes that first snapshot the tab's known address instead of
-    /// blank (`NormaCEF.h`). Observers, then seed, then create. The two steps BEFORE it — parking
+    /// blank (`WinterCEF.h`). Observers, then seed, then create. The two steps BEFORE it — parking
     /// the container and the LRU touch — are this task's, and had no equivalent in the view.
     private func create(tabId: String, url: String?, title: String?, sessionId: String?) {
         // **The double-create guard.** Rule 8 re-creates a held session's shown tab on every plan
         // where it is missing, so a create for a tab that already has one is ordinary traffic — and
-        // a second `NormaCEFCreateBrowser` into the same container is a second live browser that
+        // a second `WinterCEFCreateBrowser` into the same container is a second live browser that
         // nothing will ever close, because the registry only remembers one container per tab.
         guard containers[tabId] == nil else { return }
 
@@ -547,7 +547,7 @@ final class BrowserRuntime {
         // **The INITIAL size of a browser born parked, and since live-gate fix B the only place the
         // parking window's rect is used as a size at all.** A fresh `PanelCEFContainerView` measures
         // zero, and `CreateBrowserNow` reads `[parent bounds]` exactly ONCE, at creation
-        // (`NormaCEF.mm`) — so a headless browser created into an unsized container would lay out at
+        // (`WinterCEF.mm`) — so a headless browser created into an unsized container would lay out at
         // zero width for life, with no attach ever coming to rescue it (spec §5, and all of B2).
         // Parking no longer supplies that rect on every park, so the create path has to.
         if let parkingBounds = parkingWindow.contentView?.bounds {
@@ -607,7 +607,7 @@ final class BrowserRuntime {
             model?.reportCommittedNavigation(url: committedURL ?? "", title: committedTitle ?? "")
         }
         // Three producers come down this one channel — `window.open`, ⌘/middle/shift-click, and the
-        // context menu's "Open Link in New Tab" (`NormaCEFSetPopupObserver`). CEF cancels the popup
+        // context menu's "Open Link in New Tab" (`WinterCEFSetPopupObserver`). CEF cancels the popup
         // regardless; this is what turns the cancelled one into a real panel tab.
         driver.setPopupObserver(container) { [weak model] popupURL in
             model?.openPopupAsTab(url: popupURL ?? "")
@@ -624,7 +624,7 @@ final class BrowserRuntime {
         // whatever pass called `apply` (`BrowserSignalsCoordinator.replan` runs from a fold, i.e.
         // from inside the session event pump, and from a Combine sink), and guarantees the run loop
         // is genuinely spinning when CEF comes
-        // up (see `NormaCEFRuntime`'s note on Task 1's starvation hypothesis).
+        // up (see `WinterCEFRuntime`'s note on Task 1's starvation hypothesis).
         scheduler.mainAsync { [weak self] in
             guard let self else { return }
             // **The race `PanelWebTab` could not have.** There, nothing could interleave between
@@ -635,10 +635,10 @@ final class BrowserRuntime {
             guard self.containers[tabId] === container else { return }
             // **live-gate fix I, and the reason the latch cannot live in `apply` alone.** This hop
             // is the one piece of `create` that runs on a LATER turn, so a create applied in the
-            // last plan before the quit door opens still has its `NormaCEFCreateBrowser` pending
+            // last plan before the quit door opens still has its `WinterCEFCreateBrowser` pending
             // when the beat starts — and the identity guard above passes, because quiescing does
             // not clear the registry. Asking CEF for a browser now is exactly the racing-create
-            // shape the tripwire counts (`NormaCEF.mm`), one turn from `NSApp.terminate`.
+            // shape the tripwire counts (`WinterCEF.mm`), one turn from `NSApp.terminate`.
             guard !self.isQuiescent else {
                 NSLog("[BrowserRuntime] quiesced — \(tabId)'s create never reached CEF")
                 return
@@ -691,7 +691,7 @@ final class BrowserRuntime {
         driver.closeBrowser(container)
 
         // Only AFTER the close, and the ordering is the same one the shipped `dismantleNSView` had.
-        // CEF's close is ASYNCHRONOUS — `OnBeforeClose` lands later — but `NormaCEFCloseBrowser`
+        // CEF's close is ASYNCHRONOUS — `OnBeforeClose` lands later — but `WinterCEFCloseBrowser`
         // both detaches CEF's own host view from this container AND releases the registry's strong
         // reference to it before returning (`CompleteCloseByReleasingHostView` — the release is
         // what lets the close COMPLETE; Task 6 measured that the detach alone completes nothing).
@@ -810,8 +810,8 @@ final class BrowserRuntime {
     /// Two callers, and the difference between them is the whole of what fix H measured.
     /// **`AppDelegate.quitReleasingBrowserViews` is the one that works** — it runs this one
     /// run-loop beat before `NSApp.terminate`, which is what actually lets the references go (that
-    /// method carries the measured table). The `NormaCEFSetPreShutdownHook` block installed on
-    /// `shared` below runs it again from inside `NormaCEFShutdown`, as the belt for a quit that
+    /// method carries the measured table). The `WinterCEFSetPreShutdownHook` block installed on
+    /// `shared` below runs it again from inside `WinterCEFShutdown`, as the belt for a quit that
     /// never passed through that door.
     ///
     /// **The stall it exists to kill, as the user measured it:** `shutting down (2 browser(s) still
@@ -827,10 +827,10 @@ final class BrowserRuntime {
     /// sweep immediately afterwards is what closes browsers, and it is CEF's to run. This only
     /// changes WHERE the views are when it does.
     ///
-    /// **Lazy-window discipline is preserved**: a Norma that never opened a web tab must not build a
+    /// **Lazy-window discipline is preserved**: a Winter that never opened a web tab must not build a
     /// parking window on its way out, which is exactly what the empty guard is for
     /// (`hasParkingWindow` is asserted elsewhere for the same reason).
-    /// Whether anything at all needs `releaseViewsForShutdown`. Read by the quit path so a Norma
+    /// Whether anything at all needs `releaseViewsForShutdown`. Read by the quit path so a Winter
     /// that never opened a web tab pays no deferral (`AppDelegate.deferQuitToReleaseBrowserViews`).
     var hasLiveBrowsers: Bool { !containers.isEmpty }
 

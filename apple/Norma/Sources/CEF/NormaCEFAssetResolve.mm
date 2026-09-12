@@ -1,4 +1,4 @@
-#import "NormaCEFAssetResolve.h"
+#import "WinterCEFAssetResolve.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -36,7 +36,7 @@ int HexValue(char c) {
 ///
 /// Returns false — refusing the whole path — for a malformed escape (`%z`, `%2`, a trailing `%`)
 /// and for an encoded NUL. Both could instead be passed through as literal bytes, and both are
-/// refused on purpose: the assets this scheme serves are Norma's own vendored files, none of which
+/// refused on purpose: the assets this scheme serves are Winter's own vendored files, none of which
 /// contains a `%` in its name, so accepting either only widens what a URL can say. `%00` in
 /// particular is the standard truncation trick against every C consumer of the resolved path.
 ///
@@ -68,9 +68,9 @@ bool PercentDecodeOnce(const char *input, std::string &out) {
 
 }  // namespace
 
-char *NormaCEFEditorAssetResolve(const char *assetsRoot, const char *urlPath) {
+char *WinterCEFEditorAssetResolve(const char *assetsRoot, const char *urlPath) {
   if (assetsRoot == nullptr || *assetsRoot == '\0' || urlPath == nullptr || *urlPath == '\0') {
-    // An unset root is the state the handler is in before `NormaCEFRegisterEditorAssetRoot` runs.
+    // An unset root is the state the handler is in before `WinterCEFRegisterEditorAssetRoot` runs.
     // It resolves NOTHING rather than falling back to the process's working directory.
     return nullptr;
   }

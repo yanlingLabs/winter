@@ -6,10 +6,10 @@ import Foundation
 /// editor-plumbing Task 5 — **the first execution of anything Tasks 1-4 built, and Stage A's exit
 /// gate.**
 ///
-/// Four tasks landed a vendored Monaco, a `norma-editor://` scheme registered in six processes, a
+/// Four tasks landed a vendored Monaco, a `winter-editor://` scheme registered in six processes, a
 /// `cefQuery` message router, a typed codec and a whole host page — and not one line of the page had
-/// ever run. Nothing in this repo can run it: the unit-test host IS `Norma.app` and
-/// `NormaCEFRuntime` refuses to start Chromium under XCTest, deliberately. So the proof is a real
+/// ever run. Nothing in this repo can run it: the unit-test host IS `Winter.app` and
+/// `WinterCEFRuntime` refuses to start Chromium under XCTest, deliberately. So the proof is a real
 /// browser in a real window driving a scripted run, and this file is that run's effects.
 ///
 /// **The sequencing and judging are NOT here** — they are `EditorHarnessScript`, pure and unit
@@ -20,13 +20,13 @@ import Foundation
 ///
 /// **1. It is harness-owned, never `BrowserRuntime`'s.** The creation sequence is the same one
 /// `BrowserRuntime.create` performs — `ensureInitialized`, a `PanelCEFContainerView` with a non-zero
-/// frame, `NormaCEFCreateBrowser` — but the browser is never registered with the runtime, never
+/// frame, `WinterCEFCreateBrowser` — but the browser is never registered with the runtime, never
 /// given a tabId, and never seen by `BrowserSignals`. A harness browser folded into the lifecycle
 /// engine would be planned over, parked, closed and re-created underneath the drill.
 ///
-/// **2. It MUST discriminate by `browserId`, and refuse rather than ignore.** `NormaCEF.h:335-349`
+/// **2. It MUST discriminate by `browserId`, and refuse rather than ignore.** `WinterCEF.h:335-349`
 /// states the exposure: the renderer-side router installs `window.cefQuery` into EVERY V8 context in
-/// every Norma browser, so an arbitrary site in a panel web tab reaches this handler. A query from
+/// every Winter browser, so an arbitrary site in a panel web tab reaches this handler. A query from
 /// any other browser is answered `success = false`; ignoring it would strand a CEF `Callback` for
 /// the life of that browser, which the router's own contract calls a runtime error. Drill 11
 /// executes exactly that, against a second browser this harness creates for the purpose.
@@ -57,7 +57,7 @@ enum EditorBridgeHarness {
     /// login item, the updater, the hotkey, a second orb) that a throwaway bundle in a scratch
     /// `derivedDataPath` must never point at the user's account.
     static var isRequested: Bool {
-        ProcessInfo.processInfo.environment["NORMA_EDITOR_HARNESS"] == "1"
+        ProcessInfo.processInfo.environment["WINTER_EDITOR_HARNESS"] == "1"
     }
 
     /// Take the launch over and run the drill unattended, terminating when the transcript is
@@ -93,7 +93,7 @@ enum EditorBridgeHarness {
 final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
     static var shared: EditorBridgeHarnessRun?
 
-    /// `norma-editor://app/editor.html` — the shell host, with Monaco on the sibling `assets` host.
+    /// `winter-editor://app/editor.html` — the shell host, with Monaco on the sibling `assets` host.
     ///
     /// **editor-product T3: written once in `EditorRuntime`, and read here.** It used to live here
     /// because the harness was the only thing that ever created an editor browser; the product now
@@ -141,7 +141,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
     private var notes: [String] = []
     /// How many console entries have already been reported, so each check reads only what is new.
     private var consoleCursor = 0
-    /// Filled by drill 1 — how long the page took from `NormaCEFCreateBrowser` to `ready`.
+    /// Filled by drill 1 — how long the page took from `WinterCEFCreateBrowser` to `ready`.
     private var readyElapsedMs: Int?
     private var browserCreatedAt: Date?
     /// The text `contentResponse` last handed over, kept as the bytes drill 5 writes to disk.
@@ -179,10 +179,10 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
     init(delegate: AppDelegate, quitWhenDone: Bool) {
         self.delegate = delegate
         self.quitWhenDone = quitWhenDone
-        let root = ProcessInfo.processInfo.environment["NORMA_EDITOR_HARNESS_DIR"].map {
+        let root = ProcessInfo.processInfo.environment["WINTER_EDITOR_HARNESS_DIR"].map {
             URL(fileURLWithPath: $0, isDirectory: true)
         } ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("norma-editor-harness", isDirectory: true)
+            .appendingPathComponent("winter-editor-harness", isDirectory: true)
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         scratch = root
         fixtures = EditorHarnessFixtures(scratch: root)
@@ -192,7 +192,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
                           styleMask: [.titled, .closable, .resizable],
                           backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
-        window.title = "Norma editor bridge harness"
+        window.title = "Winter editor bridge harness"
         super.init()
         window.delegate = self
         buildWindow()
@@ -249,8 +249,8 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
         // rather than clearing the slot itself — which is what lets a runtime coexist with this run.
         EditorBridgeHub.shared.unregister(browserId: editorBrowserId)
         EditorBridgeHub.shared.onRefusal = nil
-        NormaCEFCloseBrowser(editorContainer)
-        NormaCEFCloseBrowser(foreignContainer)
+        WinterCEFCloseBrowser(editorContainer)
+        WinterCEFCloseBrowser(foreignContainer)
         // editor-product Task 11: T3's unclean-close scar, closed here — a runtime whose browser
         // outlives the harness's own teardown is exactly the leaked-Chromium shape fixes H/I exist
         // to prevent. `EditorRuntime.teardown()` is legal from every phase and safe twice.
@@ -460,7 +460,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
 
     /// **editor-product T3: this run is a hub CLIENT now, not the slot's owner.**
     ///
-    /// Stage A registered `NormaCEFSetBridgeHandler` directly — legal while the harness was the only
+    /// Stage A registered `WinterCEFSetBridgeHandler` directly — legal while the harness was the only
     /// thing in the process that ever wanted editor messages, and untenable the moment
     /// `EditorRuntime` exists: the slot is single and register-replaces-outright, so two direct
     /// registrants means last-writer-wins and the loser's page is answered `success = false` for the
@@ -469,12 +469,12 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
     ///
     /// **The registration therefore cannot happen in `0.setup` any more, and that is not a
     /// rearrangement — it is the ordering the hub's key forces.** A `browserId` does not exist until
-    /// CEF's `OnAfterCreated` has run (`CreateBrowser` does not block, `NormaCEF.mm`), so this polls
+    /// CEF's `OnAfterCreated` has run (`CreateBrowser` does not block, `WinterCEF.mm`), so this polls
     /// from the moment the browser is asked for. The window it leaves is measured, not hoped at: the
     /// page's `ready` cannot arrive before the page has been navigated to, which is after
     /// `OnAfterCreated`, and `ready` took 234 ms in the Stage-A run against a 25 ms poll.
     private func registerWithHub(attempt: Int) {
-        let id = NormaCEFBrowserIdentifierForParent(editorContainer)
+        let id = WinterCEFBrowserIdentifierForParent(editorContainer)
         guard id != 0 else {
             guard attempt < 400 else {
                 notes.append("the editor browser never reported an id — every query it sends was "
@@ -544,7 +544,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
 
     private func cdp(_ container: NSView, _ method: String, _ params: [String: Any] = [:],
                      _ done: @escaping (Bool, [String: Any]) -> Void) {
-        NormaCEFExecuteCDP(container, method, Self.jsonString(params)) { ok, payload in
+        WinterCEFExecuteCDP(container, method, Self.jsonString(params)) { ok, payload in
             done(ok, Self.jsonObject(payload) ?? [:])
         }
     }
@@ -596,13 +596,13 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
     }
 
     private func readDebugState(_ done: @escaping (HarnessAnswer<[String: Any]>) -> Void) {
-        evaluate(editorContainer, "window.normaEditorDebugState()") { result in
+        evaluate(editorContainer, "window.winterEditorDebugState()") { result in
             switch result {
             case .bad(let reason):
-                done(.bad("normaEditorDebugState() failed: \(reason)"))
+                done(.bad("winterEditorDebugState() failed: \(reason)"))
             case .ok(let value):
                 guard let object = value as? [String: Any] else {
-                    done(.bad("normaEditorDebugState() did not answer an object"))
+                    done(.bad("winterEditorDebugState() did not answer an object"))
                     return
                 }
                 done(.ok(object))
@@ -613,7 +613,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
     /// Everything `console.error`/`console.warn`/a CSP violation has said since the last read.
     private func readConsole(_ done: @escaping ([String]) -> Void) {
         evaluate(editorContainer,
-                 "window.__normaHarness ? window.__normaHarness.log.slice(\(consoleCursor)) : []") { result in
+                 "window.__winterHarness ? window.__winterHarness.log.slice(\(consoleCursor)) : []") { result in
             guard case .ok(let value) = result, let lines = value as? [Any] else {
                 done([])
                 return
@@ -665,7 +665,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
             // editor-product T4: DEBUG-harness passes the same background the product runtime does
             // — the scheme active AT CREATION, so this drill exercises the exact call shape a real
             // session's `EditorRuntime` makes rather than a hardcoded "no override" placeholder.
-            NormaCEFCreateBrowser(editorContainer, Self.pageURL,
+            WinterCEFCreateBrowser(editorContainer, Self.pageURL,
                                  EditorTheme.cardSurfaceBackgroundARGB(for: EditorRuntime.currentColorScheme()))
             // editor-product T3: the hub's key is the browser's id, which does not exist until CEF
             // says so — armed here, immediately after the create, so the registration is in place
@@ -696,7 +696,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
                     self.local(step.id, false, reason)
                 case .ok(let value):
                     let text = "\(value ?? "")"
-                    let ok = text.hasPrefix("norma-editor: ") && text.hasSuffix(Self.pageURL)
+                    let ok = text.hasPrefix("winter-editor: ") && text.hasSuffix(Self.pageURL)
                     self.local(step.id, ok, "location = \(text)")
                 }
             }
@@ -1092,7 +1092,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
         }
         // FIRST, and before any browser exists: until this runs the scheme handler answers 404 to
         // everything, which is the fail-closed default rather than "the working directory".
-        NormaCEFRegisterEditorAssetRoot(resources.path)
+        WinterCEFRegisterEditorAssetRoot(resources.path)
         lines.append("asset root = \(resources.path)")
 
         // editor-product T3: the hub owns the slot, and a registration is keyed on a browser id
@@ -1110,8 +1110,8 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
             return
         }
 
-        guard NormaCEFRuntime.ensureInitialized() else {
-            local(stepId, false, "CEF did not start: \(NormaCEFRuntime.state)")
+        guard WinterCEFRuntime.ensureInitialized() else {
+            local(stepId, false, "CEF did not start: \(WinterCEFRuntime.state)")
             return
         }
         lines.append("CEF is up")
@@ -1130,7 +1130,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
     /// What is observable instead is stronger than a list of URLs, because it is a CONSEQUENCE:
     ///
     ///   * every subresource the document declares, resolved to its absolute URL, is on the scheme;
-    ///   * **Monaco is up** — and under `default-src 'none'` with `script-src norma-editor:` there
+    ///   * **Monaco is up** — and under `default-src 'none'` with `script-src winter-editor:` there
     ///     is no other origin its loader could have taken a single module from. A page that had
     ///     reached out to a CDN would not be running; it would be a CSP violation and a dead editor.
     private func performOfflineProof(_ stepId: String) {
@@ -1141,7 +1141,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
             function (element) { declared.push(element.src || element.href); });
           var timed = performance.getEntriesByType("resource").map(function (e) { return e.name; });
           var onScheme = function (url) {
-            return url.indexOf("norma-editor:") === 0 || url.indexOf("blob:") === 0
+            return url.indexOf("winter-editor:") === 0 || url.indexOf("blob:") === 0
               || url.indexOf("data:") === 0;
           };
           return JSON.stringify({
@@ -1170,7 +1170,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
                 let monacoUp = report["monacoUp"] as? Bool ?? false
                 self.notes.append("declared subresources: " + declared.joined(separator: ", "))
                 if timed.isEmpty {
-                    self.notes.append("Resource Timing is EMPTY for norma-editor: — Chromium does "
+                    self.notes.append("Resource Timing is EMPTY for winter-editor: — Chromium does "
                                       + "not populate it for a CEF custom scheme, so the offline "
                                       + "claim rests on the declared URLs and on Monaco being up "
                                       + "under a CSP that allows no other origin")
@@ -1194,9 +1194,9 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
         // never received the message.
         let script = """
         (function () {
-          if (window.__normaHarness) { return "already installed"; }
+          if (window.__winterHarness) { return "already installed"; }
           var log = [];
-          window.__normaHarness = { log: log };
+          window.__winterHarness = { log: log };
           ["error", "warn"].forEach(function (level) {
             var original = console[level].bind(console);
             console[level] = function () {
@@ -1215,8 +1215,8 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
           window.addEventListener("securitypolicyviolation", function (e) {
             log.push("csp: " + e.violatedDirective + " blocked " + e.blockedURI);
           });
-          return "installed; normaEditorDebugState is "
-            + (typeof window.normaEditorDebugState === "function" ? "a function" : "MISSING");
+          return "installed; winterEditorDebugState is "
+            + (typeof window.winterEditorDebugState === "function" ? "a function" : "MISSING");
         })()
         """
         evaluate(editorContainer, script) { [weak self] result in
@@ -1261,7 +1261,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
             case .bad(let reason):
                 self.local(stepId, false, "the TypeScript worker never answered: \(reason) — this is "
                            + "the recorded open question resolving NO; the fallback is to serve the "
-                           + "shell from norma-editor://assets/app/editor.html (single origin)")
+                           + "shell from winter-editor://assets/app/editor.html (single origin)")
             case .ok(let value):
                 let text = "\(value ?? "")"
                 self.local(stepId, !text.hasPrefix("WORKER FAILED"), text)
@@ -1503,7 +1503,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
     /// **The round trip `9.setView` set up, judged.** `9.openC`'s `openModel` → `activateModel
     /// (pathC)` switch captured pathA's view state on the way out (`saveViewState()`, inside
     /// `activateModel`); `9.activateA`, immediately before this step, switched back and restored it
-    /// (`restoreViewState()`). This reads the LIVE editor state — `normaEditorDebugState()`'s
+    /// (`restoreViewState()`). This reads the LIVE editor state — `winterEditorDebugState()`'s
     /// `viewTop`/`position`, not a cache of what `9.setView` set — because a restore that silently
     /// no-opped would still leave `page.currentPath` reporting the right model.
     ///
@@ -1708,7 +1708,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
 
     /// Drill 11's other browser. **Deliberately not a `data:` URL** (Chromium refuses top-level
     /// `data:` navigations, so the page would never exist): `about:blank` plus a CDP-evaluated
-    /// `window.cefQuery` is the same thing where it matters — an arbitrary page in a Norma browser
+    /// `window.cefQuery` is the same thing where it matters — an arbitrary page in a Winter browser
     /// that is NOT the editor, calling the function the renderer-side router installs into every V8
     /// context.
     private func performCreateForeign(_ stepId: String, attempt: Int) {
@@ -1722,10 +1722,10 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
             sidecar.contentView?.addSubview(foreignContainer)
             sidecar.orderFront(nil)
             foreignWindow = sidecar
-            NormaCEFCreateBrowser(foreignContainer, "about:blank", 0) // no override — not the editor
+            WinterCEFCreateBrowser(foreignContainer, "about:blank", 0) // no override — not the editor
         }
-        let id = NormaCEFBrowserIdentifierForParent(foreignContainer)
-        let editorId = NormaCEFBrowserIdentifierForParent(editorContainer)
+        let id = WinterCEFBrowserIdentifierForParent(foreignContainer)
+        let editorId = WinterCEFBrowserIdentifierForParent(editorContainer)
         guard id != 0, id != editorId else {
             guard attempt < 40 else {
                 local(stepId, false, "the second browser never came up (id=\(id), editor=\(editorId))")
@@ -1925,7 +1925,7 @@ final class EditorBridgeHarnessRun: NSObject, NSWindowDelegate {
                 self.local(stepId, false, reason)
             case .ok(let value):
                 let text = "\(value ?? "")"
-                let ok = text.hasPrefix("norma-editor: ") && text.hasSuffix(EditorRuntime.pageURL)
+                let ok = text.hasPrefix("winter-editor: ") && text.hasSuffix(EditorRuntime.pageURL)
                 self.local(stepId, ok, "the adopted view is really the runtime's own live page: "
                            + "\(text)")
             }
@@ -2811,7 +2811,7 @@ struct EditorHarnessFixtures {
     /// escaping is pinned by a unit test instead.
     private static func buildFixtureA() -> String {
         let lfLines = [
-            "// Norma editor harness fixture A — TypeScript, on purpose.",
+            "// Winter editor harness fixture A — TypeScript, on purpose.",
             "// The language worker is what proves the cross-origin fetch path.",
             "",
             "export interface Café {",
@@ -2886,7 +2886,7 @@ struct EditorHarnessFixtures {
     /// trip stays exactly as strict; only the length changed.
     private static func buildFixtureB() -> String {
         var lines: [String] = [
-            "// Norma editor harness fixture B — written from OUTSIDE the editor.",
+            "// Winter editor harness fixture B — written from OUTSIDE the editor.",
             "// Uniformly CRLF: Monaco keeps it, and the round trip must be byte-identical.",
             "export const source = \"an agent edit, or a reload from disk\";",
             "export const naïve = \"caf\u{00E9} / cafe\u{0301}\";",
@@ -2957,7 +2957,7 @@ struct EditorHarnessFixtures {
 
     static let drillTitles: [Int: String] = [
         0: "setup — asset root, bridge handler, fixtures, CEF",
-        1: "the page boots offline from norma-editor:// and the branded theme lands on ready",
+        1: "the page boots offline from winter-editor:// and the branded theme lands on ready",
         2: "openModel with a real .ts file, and the language worker behind it",
         3: "a keystroke turns the model dirty",
         4: "pullContent answers byte-identically",
@@ -3005,8 +3005,8 @@ struct EditorHarnessFixtures {
                  + "before-screenshot, sees an editor that is already branded",
                  .local, 15),
             step("1.bound", 1, "the page booted inside the drill's 5 s bound", .local, 10),
-            step("1.origin", 1, "the page really is on the norma-editor: scheme", .local, 15),
-            step("1.offline", 1, "every resource the page fetched is norma-editor: or blob:", .local, 15),
+            step("1.origin", 1, "the page really is on the winter-editor: scheme", .local, 15),
+            step("1.offline", 1, "every resource the page fetched is winter-editor: or blob:", .local, 15),
             step("1.hook", 1, "install the console/CSP capture and confirm the debug seam", .local, 15),
 
             step("2.open", 2, "openModel fixture A (.ts) — the model is present and clean", .local, 20),

@@ -5,7 +5,7 @@ import AppKit
 @MainActor
 final class StickinessEngine {
     private let onTarget: (CGPoint?) -> Void
-    private let queue = DispatchQueue(label: "norma.stickiness.ax", qos: .userInteractive)
+    private let queue = DispatchQueue(label: "winter.stickiness.ax", qos: .userInteractive)
     private let scanner = AXScanner()
 
     private var enabled = true

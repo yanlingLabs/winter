@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Office Stage A Task 2 — `OfficeWireFrame`/`OfficeWireCodec`: round-trip every frame, the
 /// brief's literal unknown-type pin (`error{seq,reason:"unknown"}`), and `seq` echo. See
@@ -861,14 +861,14 @@ final class OfficeWireCodecTests: XCTestCase {
     /// Task 8 — `LOK_CALLBACK_CELL_FORMULA`'s real captured payloads (live probe against
     /// `two-sheet.ods`, `OfficeHelperLiveTests
     /// .testProbeInvestigatesWhetherCellFormulaCallbacksExistForTheFormulaBarsContent`): clicking
-    /// A1 ("NORMA GATE", a string cell) sent the literal string; clicking B2 (genuinely empty)
+    /// A1 ("WINTER GATE", a string cell) sent the literal string; clicking B2 (genuinely empty)
     /// sent the EMPTY STRING, not a sentinel and not silence; clicking B1 (the number 42) sent
     /// "42"; typing "X" without committing sent "X" — the live, in-progress edit-buffer text.
     /// Unlike `CELL_CURSOR`, there is no structure to malform: this callback's whole payload IS
     /// the formula-bar text, verbatim, so `parseCellFormula` never rejects anything — see its own
     /// header.
     func testParseCellFormulaRealCapturedShapes() {
-        XCTAssertEqual(OfficeDocumentEvent.parseCellFormula("NORMA GATE"), .cellFormula("NORMA GATE"))
+        XCTAssertEqual(OfficeDocumentEvent.parseCellFormula("WINTER GATE"), .cellFormula("WINTER GATE"))
         XCTAssertEqual(OfficeDocumentEvent.parseCellFormula(""), .cellFormula(""), "a genuinely empty cell sends the empty string, not a sentinel")
         XCTAssertEqual(OfficeDocumentEvent.parseCellFormula("42"), .cellFormula("42"))
         XCTAssertEqual(OfficeDocumentEvent.parseCellFormula("X"), .cellFormula("X"), "the live, uncommitted in-progress edit-buffer text")

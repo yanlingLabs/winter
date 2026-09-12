@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { CODEX_MODELS, DEFAULT_CODEX_MODEL } from "../../src/providers/codex-config";
-import { NORMA_CREDENTIAL_INVENTORY } from "../../src/runtime-sdk/keychain";
+import { WINTER_CREDENTIAL_INVENTORY } from "../../src/runtime-sdk/keychain";
 import { keychainService } from "../../src/profile";
 import {
   providerSelectionFor, inventoryProvidersServing, testProviderNameFor,
@@ -19,21 +19,21 @@ const BOTH: CredentialPresence = { byProvider: { openai: "keychain", "codex-oaut
 
 test("every inventory provider id exists in the PINNED catalog", () => {
   const ids = new Set(loadCatalog().providers.map((p) => p.id));
-  for (const slot of NORMA_CREDENTIAL_INVENTORY) {
+  for (const slot of WINTER_CREDENTIAL_INVENTORY) {
     expect(ids.has(slot.provider)).toBe(true);
   }
   // The alignment itself, pinned: `codex` (Task 4's spelling) is NOT a catalog id and must not
   // return — `CredentialPresence.byProvider` is keyed by these, so a wrong id silently un-routes
   // every session on that provider.
-  expect(NORMA_CREDENTIAL_INVENTORY.map((s) => s.provider)).toEqual(["openai", "codex-oauth", "anthropic"]);
+  expect(WINTER_CREDENTIAL_INVENTORY.map((s) => s.provider)).toEqual(["openai", "codex-oauth", "anthropic"]);
   expect(ids.has("codex")).toBe(false);
 });
 
 // -------------------------------------------------------------------------------------------
-// (a) The parity test — every model Norma's own default catalogue offers.
+// (a) The parity test — every model Winter's own default catalogue offers.
 // -------------------------------------------------------------------------------------------
 
-test("every model Norma's default catalogue offers resolves to an inventory provider in the pinned catalog", () => {
+test("every model Winter's default catalogue offers resolves to an inventory provider in the pinned catalog", () => {
   for (const m of CODEX_MODELS) {
     const providers = inventoryProvidersServing(m.id);
     expect({ id: m.id, providers }).toEqual({ id: m.id, providers: expect.arrayContaining([expect.any(String)]) });
@@ -42,7 +42,7 @@ test("every model Norma's default catalogue offers resolves to an inventory prov
 });
 
 test("FINDING CLOSED at winter-provider-catalog 0.0.4: all three CODEX_MODELS are now codex-oauth rows", () => {
-  // Previously (catalog 0.0.3): Norma offers three models on the `codex-oauth` provider
+  // Previously (catalog 0.0.3): Winter offers three models on the `codex-oauth` provider
   // (`CODEX_MODELS`), but the pinned catalog listed only ONE of them under `codex-oauth` —
   // `gpt-5.6-terra` and `gpt-5.6-luna` were `openai`-only rows there. The consequence on the
   // Winter leg: a Codex-credentialled session asking for terra/luna was named to the `openai`
@@ -51,7 +51,7 @@ test("FINDING CLOSED at winter-provider-catalog 0.0.4: all three CODEX_MODELS ar
   //
   // Catalog 0.0.4 adds the missing `codex-oauth` rows for terra/luna (P8b-34's "codex terra/luna"
   // carve-out) — the finding is closed. Pinned as an exact map so drift in EITHER direction fails:
-  // the catalog losing a row, or Norma's table changing, both land here.
+  // the catalog losing a row, or Winter's table changing, both land here.
   expect(Object.fromEntries(CODEX_MODELS.map((m) => [m.id, inventoryProvidersServing(m.id)]))).toEqual({
     "gpt-5.6-sol": ["openai", "codex-oauth"],
     "gpt-5.6-terra": ["openai", "codex-oauth"],
@@ -80,9 +80,9 @@ test("an ABSENT credential still names the provider, with no ref — the child r
   expect((sel as { authRef?: unknown }).authRef).toBeUndefined();
 });
 
-test("the credential Norma actually has decides which of six ambiguous rows wins", () => {
+test("the credential Winter actually has decides which of six ambiguous rows wins", () => {
   // `gpt-5.6-sol` matches SIX catalog rows (agentrouter, codex-oauth, freeaiapikey, kie, kilocode,
-  // openai). Restricting to Norma's inventory and preferring a PRESENT credential is what makes the
+  // openai). Restricting to Winter's inventory and preferring a PRESENT credential is what makes the
   // answer deterministic and right — and never a third-party reseller.
   expect(providerSelectionFor("gpt-5.6-sol", CODEX_ONLY)?.providerId).toBe("codex-oauth");
   expect(providerSelectionFor("gpt-5.6-sol", OPENAI_ONLY)?.providerId).toBe("openai");
@@ -92,7 +92,7 @@ test("the credential Norma actually has decides which of six ambiguous rows wins
 
 test("terra now resolves to codex-oauth on a codex-only install (the finding's fix, catalog 0.0.4)", () => {
   // At catalog 0.0.3 this named `openai` (no ref on this install; the child refused). Now that
-  // 0.0.4 carries a `codex-oauth` row for terra, the credential Norma actually has decides it.
+  // 0.0.4 carries a `codex-oauth` row for terra, the credential Winter actually has decides it.
   const sel = providerSelectionFor("gpt-5.6-terra", CODEX_ONLY);
   expect(sel).toEqual({
     providerId: "codex-oauth",
@@ -124,13 +124,13 @@ test("a fully-qualified <providerId>/<model> key is taken at its word, with its 
     authRef: { kind: "keychain", account: "codex-oauth:default", service: keychainService() },
   });
   expect(providerSelectionFor("openai/gpt-4o", NONE)).toEqual({ providerId: "openai" });
-  // A qualified key for a provider Norma has no inventory row for still names it — the child owns
+  // A qualified key for a provider Winter has no inventory row for still names it — the child owns
   // the credential question from there.
   expect(providerSelectionFor("groq/llama-3.3-70b-versatile", NONE)?.providerId).toBe("groq");
 });
 
 test("a model no inventory provider serves names no provider — the child's catalog-first selection answers", () => {
   expect(providerSelectionFor("definitely-not-a-real-model-id", BOTH)).toBeUndefined();
-  // Served by the catalog, but by nobody Norma holds a credential slot for.
+  // Served by the catalog, but by nobody Winter holds a credential slot for.
   expect(providerSelectionFor("llama-3.3-70b-versatile", BOTH)).toBeUndefined();
 });

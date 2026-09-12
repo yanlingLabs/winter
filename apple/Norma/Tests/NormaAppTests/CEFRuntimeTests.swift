@@ -1,23 +1,23 @@
 import AppKit
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// panel-cef Task 6a: the runtime pins for the CEF embed.
 ///
 /// Every test in this file guards something that compiles, links, and leaves the whole suite green
 /// while being silently broken — the class of defect this branch-pair has now produced five times.
 /// None of them requires CEF to be running, and CEF deliberately does NOT run here: the unit-test
-/// host IS `Norma.app`, and `NormaCEFRuntime` refuses to start Chromium under XCTest
+/// host IS `Winter.app`, and `WinterCEFRuntime` refuses to start Chromium under XCTest
 /// (`testTheRuntimeRefusesToStartCEFUnderXCTest` pins exactly that).
 @MainActor
 final class CEFRuntimeTests: XCTestCase {
 
     // MARK: - Pin 1: the one executable line `CefAppProtocol` conformance adds
 
-    /// `NormaApplication.sendEvent:` must wrap `[super sendEvent:]` in a `CefScopedSendingEvent`.
+    /// `WinterApplication.sendEvent:` must wrap `[super sendEvent:]` in a `CefScopedSendingEvent`.
     ///
     /// Task 3's review found that DELETING `CefScopedSendingEvent sendingEventScoper;` leaves all
-    /// three of `NormaApplicationTests`' checks green — the class still exists, still conforms to
+    /// three of `WinterApplicationTests`' checks green — the class still exists, still conforms to
     /// `CefAppProtocol`, still answers both selectors — while breaking CEF at runtime. Chromium
     /// reads `[NSApp isHandlingSendEvent]` to know whether it is inside AppKit's event dispatch;
     /// with the scoper gone it is always `NO` and Chromium's event handling misbehaves in ways
@@ -54,7 +54,7 @@ final class CEFRuntimeTests: XCTestCase {
             observedInsideDispatch, true,
             "NSApp.isHandlingSendEvent was not true inside sendEvent: dispatch — "
                 + "`CefScopedSendingEvent sendingEventScoper;` is missing from "
-                + "NormaApplication.mm's sendEvent:. CEF requires that wrap; nothing else in this "
+                + "WinterApplication.mm's sendEvent:. CEF requires that wrap; nothing else in this "
                 + "build fails without it.")
 
         // And it must be scoped, not latched — the destructor restores the previous value.
@@ -90,7 +90,7 @@ final class CEFRuntimeTests: XCTestCase {
             "../../../Chromium Embedded Framework.framework/Libraries/libcef_sandbox.dylib".utf8)
 
         for suffix in Self.helperSuffixes {
-            let name = "Norma Helper\(suffix)"
+            let name = "Winter Helper\(suffix)"
             let macOS = Bundle.main.bundleURL
                 .appendingPathComponent("Contents/Frameworks/\(name).app/Contents/MacOS", isDirectory: true)
             let candidates = [
@@ -107,13 +107,13 @@ final class CEFRuntimeTests: XCTestCase {
             XCTAssertTrue(
                 found,
                 "\(name) does not contain CefScopedSandboxContext — CEF_USE_SANDBOX is no longer "
-                    + "defined for the CEFHelper target template (apple/Norma/project.yml). Its "
+                    + "defined for the CEFHelper target template (apple/Winter/project.yml). Its "
                     + "renderer processes would run UNSANDBOXED, and nothing else in this build "
                     + "would fail.")
         }
     }
 
-    // MARK: - Pin 3b: DoClose, or CEF closes Norma's own window
+    // MARK: - Pin 3b: DoClose, or CEF closes Winter's own window
 
     /// The browser client must override `CefLifeSpanHandler::DoClose` and answer `true`.
     ///
@@ -121,7 +121,7 @@ final class CEFRuntimeTests: XCTestCase {
     /// supplies `return false`, which compiles, links, runs — and, per
     /// `include/cef_life_span_handler.h`, "will send the standard close notification to the
     /// browser's top-level parent window (... **performClose: on OS X** ...)". For a browser
-    /// parented into `ShellPanel`, that window is Norma's own. Closing a panel tab, or clicking
+    /// parented into `ShellPanel`, that window is Winter's own. Closing a panel tab, or clicking
     /// Cowork with a tab open, made the entire app window vanish while the process stayed alive.
     ///
     /// **This half pins only that the override still EXISTS**, through a string literal in its log
@@ -133,19 +133,19 @@ final class CEFRuntimeTests: XCTestCase {
     /// **It deliberately does NOT pin the answer**, and must not be mistaken for doing so: the
     /// literal is emitted by a `Log(...)` statement with zero coupling to the `return`, so changing
     /// only the return would leave this green with the Critical restored. That half is
-    /// `testDoCloseAnswersThatTheHostHandlesTheCloseSoCEFNeverTouchesNormasWindow` below, which
+    /// `testDoCloseAnswersThatTheHostHandlesTheCloseSoCEFNeverTouchesWintersWindow` below, which
     /// reads the returned VALUE. Both are needed: this one catches the body being replaced (pasting
     /// `cefsimple`'s, which returns false and carries no such log line), that one catches the answer
     /// being flipped.
     ///
     /// If you change that log message, change this needle with it — that coupling is deliberate and
     /// is written at the call site too.
-    func testTheBrowserClientOverridesDoCloseSoCEFCannotCloseNormasWindow() throws {
+    func testTheBrowserClientOverridesDoCloseSoCEFCannotCloseWintersWindow() throws {
         let needle = Data("DoClose->true".utf8)
         let macOS = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
         let candidates = [
-            macOS.appendingPathComponent("Norma.debug.dylib"),  // Debug puts the real code here
-            macOS.appendingPathComponent("Norma"),              // Release
+            macOS.appendingPathComponent("Winter.debug.dylib"),  // Debug puts the real code here
+            macOS.appendingPathComponent("Winter"),              // Release
         ].filter { FileManager.default.fileExists(atPath: $0.path) }
         XCTAssertFalse(candidates.isEmpty, "no app binary found to scan")
 
@@ -155,14 +155,14 @@ final class CEFRuntimeTests: XCTestCase {
         }
         XCTAssertTrue(
             found,
-            "NormaClient no longer overrides DoClose. CefLifeSpanHandler's default returns false, "
+            "WinterClient no longer overrides DoClose. CefLifeSpanHandler's default returns false, "
                 + "which makes CEF send performClose: to the browser's top-level parent window — "
-                + "Norma's app window. Closing a panel tab would close the whole window.")
+                + "Winter's app window. Closing a panel tab would close the whole window.")
     }
 
     /// `DoClose` must ANSWER `true` — the half a binary string scan structurally cannot cover.
     ///
-    /// The override returns `NormaCEFDoCloseIsHandledByHost()` rather than a bare literal precisely
+    /// The override returns `WinterCEFDoCloseIsHandledByHost()` rather than a bare literal precisely
     /// so this test can read the value it yields instead of inferring it from a log message. Flip
     /// that function to `NO` and this reds; flip it and the app silently goes back to closing its
     /// own window whenever a panel tab closes.
@@ -172,14 +172,14 @@ final class CEFRuntimeTests: XCTestCase {
     /// browser's top-level parent window (... **performClose: on OS X** ...)". Measured at the live
     /// gate — with `false`, closing a tab took `mainWindowVisible` true→false and the activation
     /// policy regular→accessory, so the window vanished and the Dock icon with it.
-    func testDoCloseAnswersThatTheHostHandlesTheCloseSoCEFNeverTouchesNormasWindow() {
+    func testDoCloseAnswersThatTheHostHandlesTheCloseSoCEFNeverTouchesWintersWindow() {
         XCTAssertTrue(
-            NormaCEFRuntime.doCloseIsHandledByHost,
+            WinterCEFRuntime.doCloseIsHandledByHost,
             "DoClose now answers false. CEF will send performClose: to the browser's top-level "
-                + "parent window — Norma's own — so closing a panel tab, or leaving the session "
+                + "parent window — Winter's own — so closing a panel tab, or leaving the session "
                 + "with one open, will close the app's window and demote it out of the Dock. "
                 + "cefsimple and cefclient return false because each OWNS a window per browser; "
-                + "Norma does not. See NormaCEF.h.")
+                + "Winter does not. See WinterCEF.h.")
     }
 
     // MARK: - Pin 3c: popups — routed into panel tabs, and still never a window of CEF's own
@@ -191,7 +191,7 @@ final class CEFRuntimeTests: XCTestCase {
     /// The failure this guards is the natural "improvement" the feature invites — letting CEF host
     /// the popup now that popups are wanted. `false` for a native-hosted Alloy parent "creates a
     /// native popup window" of CEF's own (`include/cef_life_span_handler.h`): a top-level Chromium
-    /// window outside the panel and outside Norma's window management, which — because `DoClose`
+    /// window outside the panel and outside Winter's window management, which — because `DoClose`
     /// answers `true`, i.e. the HOST completes every close — nothing can ever close. One
     /// `target="_blank"` would strand a window and its renderer process for the life of the app.
     ///
@@ -201,12 +201,12 @@ final class CEFRuntimeTests: XCTestCase {
     /// method it cannot construct a `CefBrowser` for.
     func testPopupsAreStillCANCELLEDSoCEFNeverCreatesAWindowOfItsOwn() {
         XCTAssertTrue(
-            NormaCEFRuntime.popupsAreCancelled,
+            WinterCEFRuntime.popupsAreCancelled,
             "OnBeforePopup now answers false. That does not route popups anywhere better — it hands "
-                + "CEF a top-level native window Norma holds no handle on, and since DoClose says "
+                + "CEF a top-level native window Winter holds no handle on, and since DoClose says "
                 + "the host completes every close, nothing will ever close it or its renderer "
-                + "process. Popups reach the user as panel tabs (NormaCEFSetPopupObserver); the "
-                + "cancel is independent of that and must stay YES. See NormaCEF.h.")
+                + "process. Popups reach the user as panel tabs (WinterCEFSetPopupObserver); the "
+                + "cancel is independent of that and must stay YES. See WinterCEF.h.")
     }
 
     /// The client must still ROUTE a popup into a panel tab rather than merely blocking it.
@@ -238,8 +238,8 @@ final class CEFRuntimeTests: XCTestCase {
         let needle = Data("popup-routed-to-panel-tab".utf8)
         let macOS = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
         let candidates = [
-            macOS.appendingPathComponent("Norma.debug.dylib"),  // Debug puts the real code here
-            macOS.appendingPathComponent("Norma"),              // Release
+            macOS.appendingPathComponent("Winter.debug.dylib"),  // Debug puts the real code here
+            macOS.appendingPathComponent("Winter"),              // Release
         ].filter { FileManager.default.fileExists(atPath: $0.path) }
         XCTAssertFalse(candidates.isEmpty, "no app binary found to scan")
 
@@ -252,7 +252,7 @@ final class CEFRuntimeTests: XCTestCase {
             "OnBeforePopup no longer hands popups to the container's popupObserver. Popups are "
                 + "cancelled either way — so nothing crashes and nothing leaks — but every "
                 + "target=\"_blank\" link and every window.open in the panel silently does nothing "
-                + "again, which is the state this feature was built to end. See NormaCEF.mm.")
+                + "again, which is the state this feature was built to end. See WinterCEF.mm.")
     }
 
     // MARK: - Pin 3d: ⌘-click / middle-click, and the context menu
@@ -262,13 +262,13 @@ final class CEFRuntimeTests: XCTestCase {
     /// Same technique and same reason as `testTheBrowserClientOverridesDoClose…`: the client class
     /// is in an anonymous namespace and Release strips debugging symbols, so a symbol-based pin
     /// would be fragile in the configuration that ships, while a string literal survives stripping.
-    /// **Debug puts the real code in `Norma.debug.dylib`** and leaves a stub at `MacOS/Norma`;
+    /// **Debug puts the real code in `Winter.debug.dylib`** and leaves a stub at `MacOS/Winter`;
     /// Release has no such dylib. Both are searched and finding the needle in either passes.
     private func appBinaryContains(_ needle: String) throws -> Bool {
         let macOS = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
         let candidates = [
-            macOS.appendingPathComponent("Norma.debug.dylib"),  // Debug puts the real code here
-            macOS.appendingPathComponent("Norma"),              // Release
+            macOS.appendingPathComponent("Winter.debug.dylib"),  // Debug puts the real code here
+            macOS.appendingPathComponent("Winter"),              // Release
         ].filter { FileManager.default.fileExists(atPath: $0.path) }
         XCTAssertFalse(candidates.isEmpty, "no app binary found to scan")
         let bytes = Data(needle.utf8)
@@ -292,7 +292,7 @@ final class CEFRuntimeTests: XCTestCase {
     ///
     /// **What this covers:** that `CefClient::GetRequestHandler()` and
     /// `CefClient::GetContextMenuHandler()` both answer non-null on a real, freshly constructed
-    /// `NormaClient` — read through the `CefClient` interface, i.e. the same two calls CEF makes.
+    /// `WinterClient` — read through the `CefClient` interface, i.e. the same two calls CEF makes.
     ///
     /// **What it does NOT cover:** anything about what those handlers then DO. That is the three
     /// scans below. The two halves are complements, exactly like the `DoClose` pair above: this one
@@ -300,12 +300,12 @@ final class CEFRuntimeTests: XCTestCase {
     /// never handed.
     func testTheClientACTUALLYINSTALLSTheRequestAndContextMenuHandlers() {
         XCTAssertTrue(
-            NormaCEFRuntime.installsClickAndMenuHandlers,
-            "NormaClient no longer returns its CefRequestHandler and/or CefContextMenuHandler. "
+            WinterCEFRuntime.installsClickAndMenuHandlers,
+            "WinterClient no longer returns its CefRequestHandler and/or CefContextMenuHandler. "
                 + "Both features are then dead at runtime — CEF never calls a handler it was not "
                 + "given — while every log literal and every menu label stays in the binary, so "
                 + "every built-product scan in this file stays green. ⌘-click goes back to being a "
-                + "plain click and the context menu goes back to CEF's stock model. See NormaCEF.mm.")
+                + "plain click and the context menu goes back to CEF's stock model. See WinterCEF.mm.")
     }
 
     /// **⌘-click and middle-click must OPEN A NEW PANEL TAB**, not perform an ordinary click.
@@ -330,7 +330,7 @@ final class CEFRuntimeTests: XCTestCase {
     /// host reaches `OnOpenURLFromTab` at all. The Swift half of the route needs no new pin because
     /// there is no
     /// new Swift code: a routed click enters the SAME container observer a popup does
-    /// (`NormaCEFSetPopupObserver` — one route, three producers), so
+    /// (`WinterCEFSetPopupObserver` — one route, three producers), so
     /// `ShellSessionHostTests.testAPopupOpensAPanelTabInTheSessionItsOwnBrowserBelongsTo` is
     /// already the behavioural pin for model → policy → `panel.openTab`, in the browser's own
     /// session. A second copy of it here would pass whether or not this feature existed.
@@ -340,14 +340,14 @@ final class CEFRuntimeTests: XCTestCase {
     func testCommandAndMiddleClicksOPENANEWPANELTABInsteadOfNavigatingInPlace() throws {
         XCTAssertTrue(
             try appBinaryContains("click-routed-to-panel-tab"),
-            "NormaClient no longer routes CefRequestHandler::OnOpenURLFromTab into a panel tab. "
+            "WinterClient no longer routes CefRequestHandler::OnOpenURLFromTab into a panel tab. "
                 + "Nothing fails when that handler is absent — CEF's default is to navigate in the "
                 + "source browser's top-level frame — so ⌘-click, middle-click and shift-click "
                 + "silently go back to performing an ordinary click, which is the exact bug this "
-                + "was built to fix. See NormaCEF.mm.")
+                + "was built to fix. See WinterCEF.mm.")
     }
 
-    /// The context menu must OFFER Norma's own link and image items.
+    /// The context menu must OFFER Winter's own link and image items.
     ///
     /// Without a `CefContextMenuHandler` the user gets `CefMenuManager::CreateDefaultModel`'s stock
     /// menu, which adds **no link items at all** (verified in CEF's own source: for a page or frame
@@ -370,14 +370,14 @@ final class CEFRuntimeTests: XCTestCase {
     /// `CefContextMenuParams` ~20, so the fake would be ~200 lines of interface stubs that break on
     /// every CEF upgrade, and `CefMenuModel::CreateMenuModel` is a library call that needs the
     /// framework loaded, which never happens here.
-    func testTheContextMenuOFFERSNormasOwnLinkAndImageItems() throws {
+    func testTheContextMenuOFFERSWintersOwnLinkAndImageItems() throws {
         for label in ["Open Link in New Tab", "Copy Link Address", "Copy Image Address"] {
             XCTAssertTrue(
                 try appBinaryContains(label),
                 "the context menu no longer offers \"\(label)\". With no CefContextMenuHandler CEF "
                     + "shows its stock model, which contains no link or image items whatsoever — a "
                     + "two-finger click on a link would again offer nothing about that link. See "
-                    + "NormaCEF.mm's OnBeforeContextMenu.")
+                    + "WinterCEF.mm's OnBeforeContextMenu.")
         }
     }
 
@@ -409,20 +409,20 @@ final class CEFRuntimeTests: XCTestCase {
             "OnBeforeContextMenu no longer removes MENU_ID_VIEW_SOURCE. On macOS that item is a "
                 + "no-op all the way down to CefBrowserPlatformDelegateNativeMac::ViewText, whose "
                 + "body is NOTIMPLEMENTED() — clicking it does literally nothing, silently. A menu "
-                + "verb that does nothing is worse than an absent one. See NormaCEF.mm.")
+                + "verb that does nothing is worse than an absent one. See WinterCEF.mm.")
     }
 
     // MARK: - Pin 3: the termination path
 
-    /// **`NormaApplication` must NOT override `-terminate:`** — the whole-branch review's F7, as a
+    /// **`WinterApplication` must NOT override `-terminate:`** — the whole-branch review's F7, as a
     /// tripwire.
     ///
-    /// Task 6a added `- (void)terminate: { NormaCEFCloseAllBrowsers(); [super terminate:sender]; }`
+    /// Task 6a added `- (void)terminate: { WinterCEFCloseAllBrowsers(); [super terminate:sender]; }`
     /// on cefsimple's reasoning (Cocoa's default `terminate:` calls `exit()`, so an embedder needs
-    /// a hook there). Norma does not: `NormaCEFInitialize` subscribes CEF's shutdown to
+    /// a hook there). Winter does not: `WinterCEFInitialize` subscribes CEF's shutdown to
     /// `NSApplicationWillTerminateNotification`, which AppKit posts from inside `terminate:` once
     /// the delegate answers `.terminateNow` — so the real-quit path is covered without an override,
-    /// and `NormaCEFShutdown` closes every browser itself before `CefShutdown`.
+    /// and `WinterCEFShutdown` closes every browser itself before `CefShutdown`.
     ///
     /// What the override added was damage on the OTHER path. **A terminate here can be CANCELLED**
     /// — ⌘Q and a dock-tile quit both answer `.terminateCancel` (`terminateDecision`, Lifecycle
@@ -436,43 +436,43 @@ final class CEFRuntimeTests: XCTestCase {
     /// `NSApp` can be a KVO isa-swizzled subclass, which would make an identity comparison
     /// false-red for a reason unrelated to what this asserts (Task 3's carried minor).
     func testTerminateIsNotOverriddenBecauseAQuitHereCanBeCANCELLED() throws {
-        let normaApplication = try XCTUnwrap(NSClassFromString("NormaApplication"))
+        let winterApplication = try XCTUnwrap(NSClassFromString("WinterApplication"))
         let selector = #selector(NSApplication.terminate(_:))
         XCTAssertEqual(
-            class_getMethodImplementation(normaApplication, selector),
+            class_getMethodImplementation(winterApplication, selector),
             class_getMethodImplementation(NSApplication.self, selector),
-            "NormaApplication overrides -terminate: again. A terminate here can be CANCELLED (⌘Q "
+            "WinterApplication overrides -terminate: again. A terminate here can be CANCELLED (⌘Q "
                 + "and dock-quit both do), and anything this override destroys is NOT rebuilt on "
                 + "the cancel path when nothing is attached — that is F7, a permanently blank "
                 + "browser panel. CEF's orderly shutdown does not need this hook: it rides "
-                + "NSApplicationWillTerminateNotification, subscribed by NormaCEFInitialize. See "
-                + "NormaApplication.mm.")
+                + "NSApplicationWillTerminateNotification, subscribed by WinterCEFInitialize. See "
+                + "WinterApplication.mm.")
     }
 
     /// The carrier of that guarantee must still exist: the observer class CEF's shutdown hangs off.
     ///
-    /// Honest about its reach — it pins that `NormaCEFTerminationObserver` exists and answers
-    /// `applicationWillTerminate:`, NOT that `NormaCEFInitialize` still subscribes it. The
+    /// Honest about its reach — it pins that `WinterCEFTerminationObserver` exists and answers
+    /// `applicationWillTerminate:`, NOT that `WinterCEFInitialize` still subscribes it. The
     /// subscription is made inside `CefInitialize`'s success path, which never runs here by design
     /// (`testTheRuntimeRefusesToStartCEFUnderXCTest`), so no test in this host can reach it. The
     /// class is registered with the ObjC runtime at load time, which is why this half is reachable
     /// at all.
     func testTheShutdownObserverCEFsTerminationPathHangsOffStillExists() throws {
         let observer = try XCTUnwrap(
-            NSClassFromString("NormaCEFTerminationObserver") as? NSObject.Type,
-            "NormaCEFTerminationObserver is gone — CEF's shutdown has nothing to hang off. It is "
-                + "the ONLY thing that calls NormaCEFShutdown in production (NormaCEF.mm).")
+            NSClassFromString("WinterCEFTerminationObserver") as? NSObject.Type,
+            "WinterCEFTerminationObserver is gone — CEF's shutdown has nothing to hang off. It is "
+                + "the ONLY thing that calls WinterCEFShutdown in production (WinterCEF.mm).")
         XCTAssertTrue(observer.instancesRespond(to: Selector(("applicationWillTerminate:"))),
                       "the observer no longer answers applicationWillTerminate: — the selector "
-                          + "NormaCEFInitialize registers against NSApplicationWillTerminateNotification")
+                          + "WinterCEFInitialize registers against NSApplicationWillTerminateNotification")
     }
 
     /// **The other half: that something actually SUBSCRIBES the observer** — the half the test above
     /// is honest about not reaching, and which the whole-branch review's F7 fix made load-bearing.
     ///
-    /// F7 deleted `NormaApplication`'s `-terminate:` override (it destroyed browsers on quit-CANCEL
+    /// F7 deleted `WinterApplication`'s `-terminate:` override (it destroyed browsers on quit-CANCEL
     /// too, blanking the panel permanently). That was the right fix, and it left exactly ONE path
-    /// from a real quit to `CefShutdown`: the `addObserver:` block in `NormaCEFInitialize`. Deleting
+    /// from a real quit to `CefShutdown`: the `addObserver:` block in `WinterCEFInitialize`. Deleting
     /// those six lines compiles, links, and leaves the whole suite green — the test above included,
     /// because it pins only that the CLASS exists — while the app quits without shutting CEF down.
     ///
@@ -490,8 +490,8 @@ final class CEFRuntimeTests: XCTestCase {
         let needle = Data("willTerminate-observer-armed".utf8)
         let macOS = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
         let candidates = [
-            macOS.appendingPathComponent("Norma.debug.dylib"),  // Debug puts the real code here
-            macOS.appendingPathComponent("Norma"),              // Release
+            macOS.appendingPathComponent("Winter.debug.dylib"),  // Debug puts the real code here
+            macOS.appendingPathComponent("Winter"),              // Release
         ].filter { FileManager.default.fileExists(atPath: $0.path) }
         XCTAssertFalse(candidates.isEmpty, "no app binary found to scan")
 
@@ -501,44 +501,44 @@ final class CEFRuntimeTests: XCTestCase {
         }
         XCTAssertTrue(
             found,
-            "NormaCEFInitialize no longer subscribes NormaCEFTerminationObserver to "
+            "WinterCEFInitialize no longer subscribes WinterCEFTerminationObserver to "
                 + "NSApplicationWillTerminateNotification. Since the whole-branch F7 fix removed "
-                + "NormaApplication's -terminate: override, that subscription is the ONLY path from "
+                + "WinterApplication's -terminate: override, that subscription is the ONLY path from "
                 + "a real quit to CefShutdown — without it the app terminates with Chromium still "
                 + "up: helper processes and the GPU process are torn down by the OS rather than "
                 + "shut down, and CefShutdown's own teardown never runs.")
     }
 
-    /// `NormaCEFShutdown` must be a safe no-op before initialisation — and a no-op that changes
+    /// `WinterCEFShutdown` must be a safe no-op before initialisation — and a no-op that changes
     /// NOTHING, which is the half that was missing.
     ///
     /// The no-op property is what lets the shutdown be wired into the termination path
     /// unconditionally — `NSApplicationWillTerminateNotification`, subscribed by
-    /// `NormaCEFInitialize` — and the reason the unit-test host, which never starts CEF, can run
+    /// `WinterCEFInitialize` — and the reason the unit-test host, which never starts CEF, can run
     /// that path without touching a framework it never `dlopen`ed. `CefShutdown` on an unloaded
     /// library would dispatch through an unresolved dylib stub.
     ///
     /// **The `didShutdown` assertion is inverted from what it was, and that is the fix**
-    /// (whole-branch review F10). `NormaCEFShutdown` used to set `g_did_shutdown` even on this
+    /// (whole-branch review F10). `WinterCEFShutdown` used to set `g_did_shutdown` even on this
     /// path — process-global state that nothing resets, so this one test left `didShutdown` true
-    /// and `NormaCEFRuntime.isRetryable` false for every test that ran after it in the same host.
+    /// and `WinterCEFRuntime.isRetryable` false for every test that ran after it in the same host.
     /// Nothing asserted `isRetryable` yet, so it was latent rather than live; the next test that
     /// did would have been order-dependent. A no-op that latches the "CEF is finished forever"
     /// flag is not a no-op, and the header called it one.
     func testShutdownIsASafeNoOpWhenCEFWasNeverInitialised() {
-        XCTAssertFalse(NormaCEFRuntime.isInitialized, "CEF must not be initialised in the test host")
-        NormaCEFRuntime.shutdown()  // must not trap
-        XCTAssertFalse(NormaCEFRuntime.didShutdown,
+        XCTAssertFalse(WinterCEFRuntime.isInitialized, "CEF must not be initialised in the test host")
+        WinterCEFRuntime.shutdown()  // must not trap
+        XCTAssertFalse(WinterCEFRuntime.didShutdown,
                        "a shutdown that did nothing must not record itself as having shut CEF "
                            + "down: didShutdown is process-global, nothing resets it, and it is "
-                           + "what makes NormaCEFInitialize refuse and isRetryable answer false "
+                           + "what makes WinterCEFInitialize refuse and isRetryable answer false "
                            + "for every test that runs after this one")
-        XCTAssertFalse(NormaCEFRuntime.isInitialized, "a no-op shutdown must not report CEF as up")
+        XCTAssertFalse(WinterCEFRuntime.isInitialized, "a no-op shutdown must not report CEF as up")
     }
 
     // MARK: - Pin 4: the zombie parent view at asynchronous browser creation
 
-    /// **`NormaCEFBrowserCreation.parent` must RETAIN the view** — the one word the crash fix is.
+    /// **`WinterCEFBrowserCreation.parent` must RETAIN the view** — the one word the crash fix is.
     ///
     /// `CefBrowserHost::CreateBrowser` does not block: it copies the parent `NSView *` as a RAW
     /// handle (`CAST_NSVIEW_TO_CEF_WINDOW_HANDLE` is a cast) into a deferred `CreateBrowserHelper`
@@ -547,10 +547,10 @@ final class CEFRuntimeTests: XCTestCase {
     /// pointing at a domain that fails DNS, opened and torn down in quick succession — left CEF
     /// messaging a deallocated object: `ZombieObjectCrash`, `EXC_BAD_ACCESS` at `0x0` on
     /// `CrBrowserMain`, which kills the browser process and the whole app with it
-    /// (`Norma-2026-08-10-130829.ips`). The record holding the view across the gap is what stops it.
+    /// (`Winter-2026-08-10-130829.ips`). The record holding the view across the gap is what stops it.
     ///
     /// **What this covers:** that the record's `parent` property is a strong reference, and that
-    /// clearing it releases. Change `strong` to `weak` in `NormaCEF.mm` — the exact regression — and
+    /// clearing it releases. Change `strong` to `weak` in `WinterCEF.mm` — the exact regression — and
     /// this test reds (verified by doing it).
     ///
     /// **What it does NOT cover, stated rather than implied:** that `CreateBrowserNow` still creates
@@ -562,9 +562,9 @@ final class CEFRuntimeTests: XCTestCase {
     /// weaker built-product technique the DoClose and CEF_USE_SANDBOX pins use.
     func testAnInFlightBrowserCreationRETAINSTheParentViewCEFOnlyHoldsRaw() throws {
         let recordType = try XCTUnwrap(
-            NSClassFromString("NormaCEFBrowserCreation") as? NSObject.Type,
-            "NormaCEFBrowserCreation is gone — nothing holds the parent view across CEF's "
-                + "asynchronous browser creation, which is the zombie crash (NormaCEF.mm).")
+            NSClassFromString("WinterCEFBrowserCreation") as? NSObject.Type,
+            "WinterCEFBrowserCreation is gone — nothing holds the parent view across CEF's "
+                + "asynchronous browser creation, which is the zombie crash (WinterCEF.mm).")
         let record = recordType.init()
 
         // Control. Without it, the assertion below could pass because this harness kept the view
@@ -586,7 +586,7 @@ final class CEFRuntimeTests: XCTestCase {
         }
         XCTAssertNotNil(
             held,
-            "NormaCEFBrowserCreation.parent does not RETAIN the parent view. CEF holds that view "
+            "WinterCEFBrowserCreation.parent does not RETAIN the parent view. CEF holds that view "
                 + "as a raw, unretained pointer from CreateBrowser until CreateHostWindow() "
                 + "messages it — with nothing retaining it, a panel tab dismantled in between is "
                 + "the ZombieObjectCrash that killed the app at the live gate.")
@@ -613,8 +613,8 @@ final class CEFRuntimeTests: XCTestCase {
     func testTheZombieFixesTwoCallSitesAreCompiledIntoTheProduct() throws {
         let macOS = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
         let binaries = [
-            macOS.appendingPathComponent("Norma.debug.dylib"),  // Debug puts the real code here
-            macOS.appendingPathComponent("Norma"),              // Release
+            macOS.appendingPathComponent("Winter.debug.dylib"),  // Debug puts the real code here
+            macOS.appendingPathComponent("Winter"),              // Release
         ]
         .filter { FileManager.default.fileExists(atPath: $0.path) }
         .compactMap { try? Data(contentsOf: $0, options: .mappedIfSafe) }
@@ -633,7 +633,7 @@ final class CEFRuntimeTests: XCTestCase {
                 + "EXC_BAD_ACCESS on CrBrowserMain, and the app dies with the browser process.")
         XCTAssertTrue(
             contains("creation-abandoned-in-CEFs-queue"),
-            "NormaCEFCloseBrowser no longer marks an in-flight creation as abandoned. A tab torn "
+            "WinterCEFCloseBrowser no longer marks an in-flight creation as abandoned. A tab torn "
                 + "down while its creation sits in CEF's own queue has no browser to close yet, so "
                 + "without the mark the browser arrives afterwards parented into a discarded view "
                 + "and nothing ever closes it — a leaked renderer process per abandoned tab.")
@@ -649,7 +649,7 @@ final class CEFRuntimeTests: XCTestCase {
     /// `CloseContents` computes `close_browser = !handler->DoClose(this)`, so a `true` answer takes
     /// neither branch and resets the destruction state, which makes a second `CloseBrowser(true)` a
     /// no-op loop. So `OnBeforeClose` was waiting for CEF's view to deallocate while
-    /// `NormaCEFOpenBrowser.hostView` held that view alive until `OnBeforeClose`.
+    /// `WinterCEFOpenBrowser.hostView` held that view alive until `OnBeforeClose`.
     ///
     /// **Nothing else in this suite notices.** The close paths still run, still detach, still log,
     /// still return; every symbol and every literal is identical whether the record lets go or keeps
@@ -685,7 +685,7 @@ final class CEFRuntimeTests: XCTestCase {
             let cefView = NSView(frame: .zero)
             container.addSubview(cefView)
             hostView = cefView
-            record = NormaCEFRuntime.recordAfterACloseHandsTheHostViewBack(cefView)
+            record = WinterCEFRuntime.recordAfterACloseHandsTheHostViewBack(cefView)
             XCTAssertTrue(
                 container.subviews.isEmpty,
                 "the close did not DETACH CEF's host view from the container. The header makes "
@@ -705,14 +705,14 @@ final class CEFRuntimeTests: XCTestCase {
         XCTAssertNil(
             hostView,
             "CEF's host view is still alive after a close that holds no reference to it — something "
-                + "else in NormaCEF.mm retains it, so its -dealloc never runs and OnBeforeClose can "
+                + "else in WinterCEF.mm retains it, so its -dealloc never runs and OnBeforeClose can "
                 + "never fire. This is the audio leak, exactly.")
     }
 
     /// The release must still be IN the built product, at the close paths.
     ///
     /// Asserted on the binary for the reason the `DoClose` and zombie pins are: nothing in this host
-    /// can reach `NormaCEFCloseBrowser`, `NormaCEFCloseAllBrowsers` or `CloseAbandonedBrowser` with
+    /// can reach `WinterCEFCloseBrowser`, `WinterCEFCloseAllBrowsers` or `CloseAbandonedBrowser` with
     /// CEF down. The test above proves the release WORKS; this proves the close paths still call it.
     ///
     /// **Known limit, the same one those pins carry:** the needle is the `Log(...)` literal inside
@@ -723,8 +723,8 @@ final class CEFRuntimeTests: XCTestCase {
     func testEveryCloseReleasesTheHostViewInTheBuiltProduct() throws {
         let macOS = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
         let binaries = [
-            macOS.appendingPathComponent("Norma.debug.dylib"),  // Debug puts the real code here
-            macOS.appendingPathComponent("Norma"),              // Release
+            macOS.appendingPathComponent("Winter.debug.dylib"),  // Debug puts the real code here
+            macOS.appendingPathComponent("Winter"),              // Release
         ]
         .filter { FileManager.default.fileExists(atPath: $0.path) }
         .compactMap { try? Data(contentsOf: $0, options: .mappedIfSafe) }
@@ -742,14 +742,14 @@ final class CEFRuntimeTests: XCTestCase {
 
     /// **A browser-client callback must reach its tab WITHOUT touching a view.**
     ///
-    /// The third live-gate crash, and the callback-side half of the two pins above. `NormaClient`'s
+    /// The third live-gate crash, and the callback-side half of the two pins above. `WinterClient`'s
     /// display and load callbacks used to find the tab by casting
     /// `GetHost()->GetWindowHandle()` to an `NSView` and walking up its superviews looking for the
     /// associated bridge. CEF keeps answering that handle after the view is gone, and Chromium turns
     /// a deallocated ObjC object in the browser process into a `CrZombie` whose first message is a
     /// deliberate crash — so a title update arriving for a tab the user had just switched away from
-    /// killed the whole app (`Norma-2026-08-10-152114.ips`, `CrBrowserMain`, `ZombieObjectCrash`
-    /// under `NormaClient::OnTitleChange`). Rapid tab switching was the trigger in the pre-runtime
+    /// killed the whole app (`Winter-2026-08-10-152114.ips`, `CrBrowserMain`, `ZombieObjectCrash`
+    /// under `WinterClient::OnTitleChange`). Rapid tab switching was the trigger in the pre-runtime
     /// era this crash predates: the panel was one browser per tab, every switch closed a browser
     /// mid-navigation and every switch back reloaded, so title/address/load updates were permanently
     /// in flight against closing browsers. Browser-runtime T4 deleted that churn — a switch is a
@@ -778,13 +778,13 @@ final class CEFRuntimeTests: XCTestCase {
     /// host can construct.
     func testAClientCallbackFindsItsTabWITHOUTMessagingAnyView() throws {
         let tab = try XCTUnwrap(
-            NormaCEFRuntime.tabAfterOneClientCallbackWithNoViewAnywhere,
+            WinterCEFRuntime.tabAfterOneClientCallbackWithNoViewAnywhere,
             "the client could not be given a tab with no view behind it — the callback-side zombie "
-                + "fix (NormaClient::Tab) is gone from NormaCEF.mm")
+                + "fix (WinterClient::Tab) is gone from WinterCEF.mm")
 
         XCTAssertEqual(
             tab.value(forKey: "isLoading") as? Bool, true,
-            "a NormaClient callback did not write to the tab its client was built with. Either it "
+            "a WinterClient callback did not write to the tab its client was built with. Either it "
                 + "is back to finding the tab by casting CEF's window handle to an NSView and "
                 + "walking superviews — which messages a view CEF keeps naming after it is freed, "
                 + "and is the ZombieObjectCrash that killed the app at the live gate — or the "
@@ -802,14 +802,14 @@ final class CEFRuntimeTests: XCTestCase {
 
     // MARK: - The test-host guard, and the panel wiring
 
-    /// CEF must never start inside the suite. `NormaAppTests` runs with `Norma.app` itself as its
+    /// CEF must never start inside the suite. `WinterAppTests` runs with `Winter.app` itself as its
     /// test host, so without this guard a single test that hosted a web tab would stand Chromium's
     /// whole process tree up inside a lifecycle-sensitive, teardown-heavy 1274-test run.
     func testTheRuntimeRefusesToStartCEFUnderXCTest() {
-        XCTAssertFalse(NormaCEFRuntime.ensureInitialized())
-        XCTAssertFalse(NormaCEFRuntime.isInitialized)
-        guard case .failed = NormaCEFRuntime.state else {
-            return XCTFail("expected the runtime to record a refusal, got \(NormaCEFRuntime.state)")
+        XCTAssertFalse(WinterCEFRuntime.ensureInitialized())
+        XCTAssertFalse(WinterCEFRuntime.isInitialized)
+        guard case .failed = WinterCEFRuntime.state else {
+            return XCTFail("expected the runtime to record a refusal, got \(WinterCEFRuntime.state)")
         }
     }
 
@@ -912,7 +912,7 @@ final class CEFRuntimeTests: XCTestCase {
     /// **The door's whole contract, exercised on the one path XCTest can actually reach.**
     ///
     /// The unit-test host never starts CEF (`testTheRuntimeRefusesToStartCEFUnderXCTest` above is
-    /// the structural guard), so every call from here lands on `NormaCEFExecuteCDP`'s
+    /// the structural guard), so every call from here lands on `WinterCEFExecuteCDP`'s
     /// `!g_initialized` branch — which is exactly the branch worth pinning: it is the shape of every
     /// refusal, and "answers rather than hangs" is the property the daemon's always-settles registry
     /// depends on (`packages/core/src/panel/commands.ts`). A door that returned silently here would
@@ -923,7 +923,7 @@ final class CEFRuntimeTests: XCTestCase {
     func testTheCDPDoorAlwaysAnswersItsCompletionEvenWithCEFDown() {
         let container = PanelCEFContainerView()
         var answers: [(ok: Bool, payload: String)] = []
-        NormaCEFRuntime.executeCDP(in: container, method: "Runtime.evaluate",
+        WinterCEFRuntime.executeCDP(in: container, method: "Runtime.evaluate",
                                    paramsJSON: #"{"expression":"1+1"}"#) { ok, payload in
             answers.append((ok, payload))
         }
@@ -942,7 +942,7 @@ final class CEFRuntimeTests: XCTestCase {
 
         // An empty method is refused before anything else is even looked at.
         var second: [Bool] = []
-        NormaCEFRuntime.executeCDP(in: container, method: "", paramsJSON: nil) { ok, _ in
+        WinterCEFRuntime.executeCDP(in: container, method: "", paramsJSON: nil) { ok, _ in
             second.append(ok)
         }
         XCTAssertEqual(second, [false])
@@ -954,16 +954,16 @@ final class CEFRuntimeTests: XCTestCase {
     /// No needle can ask this (the correlation is a dictionary lookup and the fail-all is a loop,
     /// neither of which leaves a literal), and the real path cannot be reached from here: registering
     /// the observer needs a `CefBrowser` this host can never create. So the registry is driven
-    /// directly and hands back a transcript — see `NormaCEF.h` for the fixture's shape.
+    /// directly and hands back a transcript — see `WinterCEF.h` for the fixture's shape.
     ///
     /// Three properties, one string: the reply settles the call that asked for it and nothing else
     /// (`A1` fires, `B1` does not); a second reply for the same id fires nothing (`A1` appears once);
     /// and a browser going away fires every call it stranded (`A2` and `B1` both come back `ok=0`
     /// with a reason). Drop the erase-before-call in `SettlePendingCDP` and `A1` doubles; drop
-    /// `FailAllPendingCDP`'s call from `NormaCEFCloseBrowser`/`ForgetOpenBrowser` and the consumer
+    /// `FailAllPendingCDP`'s call from `WinterCEFCloseBrowser`/`ForgetOpenBrowser` and the consumer
     /// waits out its whole deadline for a browser that is already gone.
     func testAPendingCDPCallSettlesEXACTLYOnceAndAStrandedOneIsFAILEDNotDropped() {
-        let transcript = NormaCEFRuntime.pendingCDPTranscriptWithNoCEFAnywhere
+        let transcript = WinterCEFRuntime.pendingCDPTranscriptWithNoCEFAnywhere
         let fired = transcript.split(separator: ";").map(String.init)
 
         XCTAssertEqual(fired.count, 3, "expected A1, A2, B1 exactly once each — got \(transcript)")
@@ -997,7 +997,7 @@ final class CEFRuntimeTests: XCTestCase {
     /// written at both ends.
     func testTheDevToolsObserverIsRegisteredForEveryBrowserInTheBuiltProduct() throws {
         XCTAssertTrue(try appBinaryContains("cdp-observer-registered"),
-                      "NormaCEF.mm no longer registers a CefDevToolsMessageObserver when a browser "
+                      "WinterCEF.mm no longer registers a CefDevToolsMessageObserver when a browser "
                           + "is created. Every CDP call would then submit successfully and never be "
                           + "answered — the browser tool's verbs would all read as timeouts.")
     }
@@ -1013,7 +1013,7 @@ final class CEFRuntimeTests: XCTestCase {
     /// If you change that log message, change this needle with it.
     func testAClosedBrowsersInFlightCDPCallsAreFailedInTheBuiltProduct() throws {
         XCTAssertTrue(try appBinaryContains("cdp-pending-failed"),
-                      "NormaCEF.mm no longer fails in-flight CDP calls when a browser closes. Each "
+                      "WinterCEF.mm no longer fails in-flight CDP calls when a browser closes. Each "
                           + "one becomes silence, and the daemon's pending command runs out its "
                           + "whole deadlineMs before the agent hears anything.")
     }

@@ -2,8 +2,8 @@
  * Office Stage C — THE HEADLESS AGENT GATE.
  *
  * Runs the office agent tools end to end with no human in the loop: a real daemon on a temp
- * `NORMA_HOME`, the real dev app, the real `NormaOfficeHelper`, the real vendored LibreOffice, and
- * the REAL AGENT reached through `norma -p` / `norma resume` with prompts phrased the way a user
+ * `WINTER_HOME`, the real dev app, the real `WinterOfficeHelper`, the real vendored LibreOffice, and
+ * the REAL AGENT reached through `winter -p` / `winter resume` with prompts phrased the way a user
  * would phrase them. Then it asserts on the resulting files' OWN BYTES and on live UI facts read
  * back through accessibility scripting.
  *
@@ -53,7 +53,7 @@
  * FIVE THINGS THIS GATE LEARNED THE HARD WAY (none of them in the ledger before Task 8)
  *
  * 1. **`sockaddr_un.sun_path` is 103 bytes** (bind probe: 103 OK, 104 "path too long"; confirmed
- *    independently in review). A `NORMA_HOME` under a deep temp root makes the app die ~2s after
+ *    independently in review). A `WINTER_HOME` under a deep temp root makes the app die ~2s after
  *    launch with exit 133 (SIGTRAP), NO crash report and NO log line. `assertSocketPathFits` is the
  *    preflight that turns that into one clear sentence, and the gate roots itself at a SHORT `/tmp`
  *    path.
@@ -81,15 +81,15 @@
  *    exit 133. The preflight below stands on those, and on nothing that needs the retracted story.
  *
  * 2. **The office tools need the app ATTACHED TO THIS SESSION**, and the app attaches to whatever
- *    session its window shows. Norma is `LSUIElement` — no window at launch — so this gate drives
- *    the `NORMA_GATE_SESSION` DEBUG door (added in Task 8) rather than AX-clicking an unnamed
+ *    session its window shows. Winter is `LSUIElement` — no window at launch — so this gate drives
+ *    the `WINTER_GATE_SESSION` DEBUG door (added in Task 8) rather than AX-clicking an unnamed
  *    sidebar row by index, which could not tell the right row from any other.
  * 3. **The app mints its own `mode: "chat"` session on launch.** Office tools are
  *    `modes: ["code","dispatch"]` — never chat. Picking a session "the first one on disk" grabs the
- *    app's chat session and the CLI refuses with "chat sessions live in the Norma app". The gate
+ *    app's chat session and the CLI refuses with "chat sessions live in the Winter app". The gate
  *    creates its CODE session first and aims the door at that exact id.
- * 4. **`norma-dev` hardcodes the MAIN checkout.** `/opt/homebrew/bin/norma-dev` honours a preset
- *    `NORMA_HOME` but its last line execs `…/Norma v2/packages/cli/src/main.ts`. Driving this gate
+ * 4. **`winter-dev` hardcodes the MAIN checkout.** `/opt/homebrew/bin/winter-dev` honours a preset
+ *    `WINTER_HOME` but its last line execs `…/Norma v2/packages/cli/src/main.ts`. Driving this gate
  *    through it would test `main`'s CLI+core, not this branch's — green, and proving nothing. The
  *    gate invokes THIS TREE's `packages/cli/src/main.ts` directly.
  * 5. **`timeout(1)` does not exist on this host.** Every bound here is a TS `setTimeout`.
@@ -103,7 +103,7 @@
  * live and are what the gate asserts:
  *
  *     AXStaticText  "…/budget.xlsx"      the document tab's own chrome
- *     AXStaticText  "A1: NORMA GATE"     the formula bar, showing the REAL cell content
+ *     AXStaticText  "A1: WINTER GATE"     the formula bar, showing the REAL cell content
  *
  * The second is the strongest UI fact available anywhere in this app: not a static label, but the
  * document's own content read back through the live LibreOffice view.
@@ -120,10 +120,10 @@
  *      · the window frequently never appears at all, with the app attached and every office verb
  *        working — proving attachment and window presentation are independent;
  *      · this is NOT specific to the gate's door: launching with the PRE-EXISTING
- *        `NORMA_PANEL_SMOKE=1` produced no window either, on the same build;
+ *        `WINTER_PANEL_SMOKE=1` produced no window either, on the same build;
  *      · it is not the spawn method — direct-exec, `open -n --env`, and a plain shell launch all
  *        reproduce it;
- *      · `tell application id "com.norma.app.dev" to activate` answers
+ *      · `tell application id "com.winter.app.dev" to activate` answers
  *        `Application isn't running (-600)` for a directly-exec'd bundle, so activation cannot be
  *        used to force the window up.
  *    ⟹ these observations are reported as `UI-SKIP`, OUTSIDE the verdict tally. The predicates are
@@ -139,10 +139,10 @@
  * REPRODUCING THE DELETION-RED (the house evidence standard: prove the gate can FAIL)
  *
  * A gate nobody has seen fail is not evidence. This one was proven by breaking a REAL mechanism —
- * not by mutating an expectation — in `apple/Norma/Sources/OfficeHelper/LOKBridge.swift`, at the
+ * not by mutating an expectation — in `apple/Winter/Sources/OfficeHelper/LOKBridge.swift`, at the
  * top of `sheetsSetOnDedicatedThread`'s per-cell write loop:
  *
- *     if ProcessInfo.processInfo.environment["NORMA_GATE_BREAK_SHEETS_SET"] == "1" {
+ *     if ProcessInfo.processInfo.environment["WINTER_GATE_BREAK_SHEETS_SET"] == "1" {
  *         return cellAddresses.count      // skip every write, still report full success
  *     }
  *
@@ -173,8 +173,8 @@
  * line needs an explicit `return`:
  *
  *     func sheetsRead(docId: String, sheet: String, range: String, formulas: Bool) throws -> [[String]] {
- *         if ProcessInfo.processInfo.environment["NORMA_GATE_BREAK_SHEETS_READ"] == "1" {
- *             return [["NORMA GATE", "42"], ["office stage A embed probe", ""]]   // plausible, but omits A4
+ *         if ProcessInfo.processInfo.environment["WINTER_GATE_BREAK_SHEETS_READ"] == "1" {
+ *             return [["WINTER GATE", "42"], ["office stage A embed probe", ""]]   // plausible, but omits A4
  *         }
  *         return try thread.sync { try self.sheetsReadOnDedicatedThread(…) }      // `return` added
  *     }
@@ -188,7 +188,7 @@
  *   - `sheets.read` FILE-FAIL, from the assertion under test:
  *         the tool_result did NOT contain A4's saved value "QUARTERLY REVIEW". Full tool_result:
  *         Sheet1!A1:B4 (values):
- *         NORMA GATE	42
+ *         WINTER GATE	42
  *         office stage A embed probe
  *     — printed as a FULL MULTI-LINE GRID, which is itself proof the journal carries what stdout
  *     structurally cannot (the CLI's whole stdout for that call was `↳ Sheet1!A1:B4 (values):`)
@@ -221,13 +221,13 @@ import { fileURLToPath } from "node:url";
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(SCRIPTS_DIR, "..");
 const CLI_ENTRY = join(REPO_ROOT, "packages", "cli", "src", "main.ts");
-const APP_PROJECT_DIR = join(REPO_ROOT, "apple", "Norma");
-const FIXTURE_DIR = join(REPO_ROOT, "apple", "Norma", "Tests", "NormaAppTests", "Fixtures", "office");
+const APP_PROJECT_DIR = join(REPO_ROOT, "apple", "Winter");
+const FIXTURE_DIR = join(REPO_ROOT, "apple", "Winter", "Tests", "WinterAppTests", "Fixtures", "office");
 
 /** SHORT on purpose — see header note 1. `sockaddr_un.sun_path` is 103 bytes and a deep root is a
  *  silent 2-second app death. `GATE_ROOT` is short enough that even the app's own nested helper
  *  socket paths fit with room to spare. */
-const GATE_ROOT = "/tmp/norma-office-gate";
+const GATE_ROOT = "/tmp/winter-office-gate";
 const HOME_DIR = join(GATE_ROOT, "h");
 const WORK_DIR = join(GATE_ROOT, "w");
 const PRISTINE_DIR = join(GATE_ROOT, "p"); // untouched copies, for the differs-from-pristine check
@@ -253,7 +253,7 @@ const BUILD_MAX_BUFFER = 256 * 1024 * 1024;
  */
 const EXPECTED_FILE_VERDICTS = 8;
 
-const APP_BUNDLE_ID = "com.norma.app.dev";
+const APP_BUNDLE_ID = "com.winter.app.dev";
 const DAEMON_BOOT_TIMEOUT_MS = 60_000;
 const APP_BOOT_TIMEOUT_MS = 90_000;
 /** Office write verbs carry a 185s daemon-side deadline; a turn may legitimately take several
@@ -277,7 +277,7 @@ type VerdictClass = "ENV-FAIL" | "FILE-FAIL" | "UI-SKIP";
  *  verdicts is Task 9's window-presentation fix, not a thing this gate should paper over. */
 const UI_SKIP_REASON =
   "The shell window is created unreliably in this Debug configuration (root cause unestablished; "
-  + "not the gate's door — the pre-existing NORMA_PANEL_SMOKE loses its window too). These "
+  + "not the gate's door — the pre-existing WINTER_PANEL_SMOKE loses its window too). These "
   + "predicates are REAL and have been observed green, but until that is fixed they cannot detect "
   + "a regression, so they are reported and NOT counted. Restoring them is Task 9's job.";
 interface Verdict { name: string; ok: boolean; kind: VerdictClass; detail: string; }
@@ -345,16 +345,16 @@ let daemon: ChildProcess | undefined;
 let app: ChildProcess | undefined;
 
 /**
- * Kill THIS GATE's office helpers — never every `NormaOfficeHelper` on the machine.
+ * Kill THIS GATE's office helpers — never every `WinterOfficeHelper` on the machine.
  *
  * The harness leaks helpers and a leaked helper poisons the next run's results, so this must be
- * thorough; but an unscoped `pkill -9 -f NormaOfficeHelper` also SIGKILLs the helper belonging to
- * `/Applications/Norma.app`, the user's daily driver — pulling LibreOffice out from under an office
- * tab they have open. That brushes the repo's "never kill a running Norma.app" hard rule, so the
+ * thorough; but an unscoped `pkill -9 -f WinterOfficeHelper` also SIGKILLs the helper belonging to
+ * `/Applications/Winter.app`, the user's daily driver — pulling LibreOffice out from under an office
+ * tab they have open. That brushes the repo's "never kill a running Winter.app" hard rule, so the
  * pattern is scoped to the gate's own DerivedData path exactly as `stopApp` already scopes its own.
  */
 function killHelpers(): void {
-  spawnSync("pkill", ["-9", "-f", `${DERIVED_DATA}.*NormaOfficeHelper`], { encoding: "utf8" });
+  spawnSync("pkill", ["-9", "-f", `${DERIVED_DATA}.*WinterOfficeHelper`], { encoding: "utf8" });
 }
 
 function gateEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
@@ -368,14 +368,14 @@ function gateEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
     // DELETION-RED" for the set leg, "THE SECOND PROBE" for the read leg), rebuilding, and then
     // passing the flag. Stated plainly because a flag that silently does nothing while claiming to
     // break a verb would be its own kind of lie.
-    ...(process.argv.includes("--break-sheets-set") ? { NORMA_GATE_BREAK_SHEETS_SET: "1" } : {}),
-    ...(process.argv.includes("--break-sheets-read") ? { NORMA_GATE_BREAK_SHEETS_READ: "1" } : {}),
-    NORMA_HOME: HOME_DIR,
-    NORMA_PROFILE: "dev",
-    // Belt and braces: nothing in this gate may ever reach `open -g -b com.norma.app` and launch
+    ...(process.argv.includes("--break-sheets-set") ? { WINTER_GATE_BREAK_SHEETS_SET: "1" } : {}),
+    ...(process.argv.includes("--break-sheets-read") ? { WINTER_GATE_BREAK_SHEETS_READ: "1" } : {}),
+    WINTER_HOME: HOME_DIR,
+    WINTER_PROFILE: "dev",
+    // Belt and braces: nothing in this gate may ever reach `open -g -b com.winter.app` and launch
     // the user's DISTRIBUTION app, which is indistinguishable from their daily driver in the menu
     // bar. The CLI's autolaunch path is the only door to it and this closes it.
-    NORMA_NO_AUTOLAUNCH: "1",
+    WINTER_NO_AUTOLAUNCH: "1",
     ...extra,
   };
 }
@@ -408,10 +408,10 @@ async function startDaemon(): Promise<void> {
 }
 
 /** Direct-exec of the app BINARY, never `open`: the binary inherits this env (which is how
- *  `NORMA_HOME` and the gate door reach it — `AppProfile.normaHome` reads raw `getenv` first) and
+ *  `WINTER_HOME` and the gate door reach it — `AppProfile.winterHome` reads raw `getenv` first) and
  *  yields a pid we can actually tear down. */
 async function startApp(sessionId: string): Promise<void> {
-  const appBinary = join(DERIVED_DATA, "Build", "Products", "Debug", "Norma.app", "Contents", "MacOS", "Norma");
+  const appBinary = join(DERIVED_DATA, "Build", "Products", "Debug", "Winter.app", "Contents", "MacOS", "Winter");
   if (!existsSync(appBinary)) envFail(`the dev app binary is missing: ${appBinary}\n  build it first (the gate does this itself unless --no-build).`);
 
   // The stale-DerivedData scar, as a check: `xcodegen generate` mints a new DerivedData hash and a
@@ -428,14 +428,14 @@ async function startApp(sessionId: string): Promise<void> {
   // reading that window-less leftover — producing "the window never appears" for three runs while
   // the real instance was rendering the document perfectly. A measurement artifact reported as a
   // product failure is exactly the class this gate exists to prevent, so the invariant is enforced
-  // rather than assumed. Only ever `com.norma.app.dev` — the DIST app is never touched.
-  spawnSync("pkill", ["-9", "-f", `${DERIVED_DATA}.*MacOS/Norma`], { encoding: "utf8" });
+  // rather than assumed. Only ever `com.winter.app.dev` — the DIST app is never touched.
+  spawnSync("pkill", ["-9", "-f", `${DERIVED_DATA}.*MacOS/Winter`], { encoding: "utf8" });
   await sleep(1500);
 
   const logPath = join(GATE_ROOT, "app.log");
   let appLog = "";
   app = spawn(appBinary, [], {
-    env: gateEnv({ NORMA_GATE_SESSION: sessionId }),
+    env: gateEnv({ WINTER_GATE_SESSION: sessionId }),
     stdio: ["ignore", "pipe", "pipe"],
   });
   app.stdout?.on("data", (d: Buffer) => { appLog += d.toString(); });
@@ -471,7 +471,7 @@ async function startApp(sessionId: string): Promise<void> {
 
 function stopApp(): void {
   if (app && app.exitCode === null) { try { app.kill("SIGTERM"); } catch { /* gone */ } }
-  spawnSync("pkill", ["-f", `${DERIVED_DATA}.*MacOS/Norma`], { encoding: "utf8" });
+  spawnSync("pkill", ["-f", `${DERIVED_DATA}.*MacOS/Winter`], { encoding: "utf8" });
   app = undefined;
   killHelpers();
 }
@@ -932,10 +932,10 @@ function buildVerbSteps(): VerbStep[] {
         if (!differsFromPristine("deck.odp")) return [false, "the file is byte-identical to the pristine fixture — nothing was written"];
         const text = xmlText(odpAllText(odp));
         const ok = text.includes("Gate Verified Title");
-        // Non-vacuous both ways: the pristine deck's slide-2 title is "Norma T6 Slide Two", so the
+        // Non-vacuous both ways: the pristine deck's slide-2 title is "Winter T6 Slide Two", so the
         // NEW string cannot pre-exist and the OLD one must be gone from that slide.
-        const oldGone = !text.includes("Norma T6 Slide Two");
-        return [ok && oldGone, `saved odp ${ok ? "contains" : "MISSING"} "Gate Verified Title"; old title "Norma T6 Slide Two" ${oldGone ? "removed" : "STILL PRESENT"}`];
+        const oldGone = !text.includes("Winter T6 Slide Two");
+        return [ok && oldGone, `saved odp ${ok ? "contains" : "MISSING"} "Gate Verified Title"; old title "Winter T6 Slide Two" ${oldGone ? "removed" : "STILL PRESENT"}`];
       },
     },
     {
@@ -960,12 +960,12 @@ function buildVerbSteps(): VerbStep[] {
     {
       id: "docs.replace",
       file: "notes.docx",
-      prompt: 'In notes.docx, replace every occurrence of "NORMA GATE" with "NORMA GATE PASSED".',
+      prompt: 'In notes.docx, replace every occurrence of "WINTER GATE" with "WINTER GATE PASSED".',
       assert() {
         if (!differsFromPristine("notes.docx")) return [false, "the file is byte-identical to the pristine fixture — nothing was written"];
         const text = xmlText(docxAllText(docx));
-        const ok = text.includes("NORMA GATE PASSED");
-        return [ok, `saved docx text ${ok ? "contains" : "MISSING"} "NORMA GATE PASSED" (text: ${text.slice(0, 160)})`];
+        const ok = text.includes("WINTER GATE PASSED");
+        return [ok, `saved docx text ${ok ? "contains" : "MISSING"} "WINTER GATE PASSED" (text: ${text.slice(0, 160)})`];
       },
     },
     {
@@ -1007,8 +1007,8 @@ function seedFixtures(): void {
 
   writeFileSync(join(HOME_DIR, "settings.json"), JSON.stringify({
     schemaVersion: 2,
-    // Secrets are keyed by PROFILE, not by NORMA_HOME — which is the whole reason a temp home can
-    // authenticate at all without ever touching ~/.norma or ~/.norma-dev.
+    // Secrets are keyed by PROFILE, not by WINTER_HOME — which is the whole reason a temp home can
+    // authenticate at all without ever touching ~/.winter or ~/.winter-dev.
     provider: { type: "codex-oauth", model: "gpt-5.6-terra" },
   }, null, 2) + "\n");
 }
@@ -1019,7 +1019,7 @@ function buildApp(): void {
   log("   xcodegen generate: ok");
 
   const build = spawnSync("xcodebuild", [
-    "-project", "Norma.xcodeproj", "-scheme", "Norma", "-configuration", "Debug",
+    "-project", "Winter.xcodeproj", "-scheme", "Winter", "-configuration", "Debug",
     // Pinned to arm64: a bare `platform=macOS` resolves to TWO destinations on this host and
     // xcodebuild warns "Using the first of multiple matching destinations". The repo is arm64-only
     // (the vendored LibreOffice/CEF libraries have no x86_64 slice), so naming it removes an
@@ -1075,10 +1075,10 @@ async function openDocumentTab(sessionId: string, absPath: string): Promise<bool
   const helper = join(GATE_ROOT, "open-tab.ts");
   writeFileSync(helper, `
 import { KeychainSecretStore, TOKEN_NAMES } from ${JSON.stringify(join(REPO_ROOT, "packages/core/src/index"))};
-import { NormaClient } from ${JSON.stringify(join(REPO_ROOT, "packages/cli/src/client"))};
+import { WinterClient } from ${JSON.stringify(join(REPO_ROOT, "packages/cli/src/client"))};
 const token = await new KeychainSecretStore().get(TOKEN_NAMES.harness);
 if (!token) { console.error("NO_TOKEN"); process.exit(1); }
-const c = await NormaClient.connect({ socketPath: process.env.NORMA_HOME + "/run/core.sock", token,
+const c = await WinterClient.connect({ socketPath: process.env.WINTER_HOME + "/run/core.sock", token,
   clientName: "cli-office-gate", onEvent: () => {} });
 const r = await c.request("panel.openTab", { sessionId: ${JSON.stringify(sessionId)},
   kind: "document", url: ${JSON.stringify(absPath)}, title: ${JSON.stringify(basename(absPath))} });
@@ -1138,16 +1138,16 @@ async function main(): Promise<number> {
   }
   log(`   AX trust: ${ax.detail}`);
   killHelpers();
-  log("   pre-run pkill -9 -f NormaOfficeHelper: done");
+  log("   pre-run pkill -9 -f WinterOfficeHelper: done");
 
   // ── Phase 1: seed ──────────────────────────────────────────────────────────────────────────
-  step("Phase 1 — temp NORMA_HOME + fixture COPIES");
+  step("Phase 1 — temp WINTER_HOME + fixture COPIES");
   seedFixtures();
   VERB_STEPS = buildVerbSteps();
 
   // ── Phase 2: build ─────────────────────────────────────────────────────────────────────────
   step("Phase 2 — build the DEV app (Debug, explicit -derivedDataPath)");
-  if (noBuild && existsSync(join(DERIVED_DATA, "Build/Products/Debug/Norma.app"))) log("   --no-build: reusing the existing build");
+  if (noBuild && existsSync(join(DERIVED_DATA, "Build/Products/Debug/Winter.app"))) log("   --no-build: reusing the existing build");
   else buildApp();
 
   // ── Phase 3: daemon + code session ─────────────────────────────────────────────────────────
@@ -1166,9 +1166,9 @@ async function main(): Promise<number> {
   // `panel.openTab` mints tab state DAEMON-side, so it does not need the app running — and giving
   // the app a tab to show before its panel ever opens is what keeps the window alive. Measured: a
   // panel that mounts with ZERO tabs tears the whole window down a few seconds later (the CEF
-  // `DoClose` -> `performClose:` on the parent window class that `NORMA_PANEL_SMOKE`'s own comment
+  // `DoClose` -> `performClose:` on the parent window class that `WINTER_PANEL_SMOKE`'s own comment
   // documents). With the tab already present the panel mounts onto real content instead.
-  step("Phase 4 — open the document tab, THEN launch the DEV app through NORMA_GATE_SESSION");
+  step("Phase 4 — open the document tab, THEN launch the DEV app through WINTER_GATE_SESSION");
   await openDocumentTab(sessionId, join(WORK_DIR, "budget.xlsx"));
   await startApp(sessionId);
   log("   app running");
@@ -1374,7 +1374,7 @@ async function withTeardown(): Promise<void> {
     //
     // The app and helper legs match on `DERIVED_DATA`, which really is in their argv (it is part of
     // the binary path). **The daemon deliberately does NOT use `pgrep`**: its argv is
-    // `bun <worktree>/packages/cli/src/main.ts daemon run` and the temp `NORMA_HOME` lives in its
+    // `bun <worktree>/packages/cli/src/main.ts daemon run` and the temp `WINTER_HOME` lives in its
     // ENVIRONMENT, not its arguments — so any `pgrep -f` pattern naming the home can never match
     // it and would report 0 whether or not one survived: a check blind to its own failure mode,
     // inside the fix for "teardown never runs". A pattern loose enough to match (`daemon run`) has
@@ -1382,15 +1382,15 @@ async function withTeardown(): Promise<void> {
     // "surviving daemon" readings during this work. The child handle's own `close` event is exact.
     const residual = (pattern: string) =>
       (spawnSync("pgrep", ["-f", pattern], { encoding: "utf8" }).stdout || "").trim().split("\n").filter(Boolean).length;
-    const leftApp = residual(`${DERIVED_DATA}.*MacOS/Norma`);
-    const leftHelpers = residual(`${DERIVED_DATA}.*NormaOfficeHelper`);
+    const leftApp = residual(`${DERIVED_DATA}.*MacOS/Winter`);
+    const leftHelpers = residual(`${DERIVED_DATA}.*WinterOfficeHelper`);
     const clean = leftApp === 0 && leftHelpers === 0 && !daemonState.includes("RESIDENT");
     log(`   residual: app=${leftApp} helpers=${leftHelpers} daemon=${daemonState}${clean ? " (clean)" : " ⚠ LEAKED"}`);
     if (!process.argv.includes("--keep")) {
       // The temp home, the workdir and the pristine set go; the build stays (it is expensive and
       // carries no state). `--keep` leaves everything for post-mortem.
       for (const d of [HOME_DIR, WORK_DIR, PRISTINE_DIR]) rmSync(d, { recursive: true, force: true });
-      log(`   removed the temp NORMA_HOME, workdir and pristine set under ${GATE_ROOT}`);
+      log(`   removed the temp WINTER_HOME, workdir and pristine set under ${GATE_ROOT}`);
     } else {
       log(`   --keep: left ${GATE_ROOT} in place`);
     }

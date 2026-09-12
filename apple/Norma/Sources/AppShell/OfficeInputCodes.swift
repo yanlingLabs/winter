@@ -245,7 +245,7 @@ enum OfficeInputCodes {
         // answers 0), and for the Backspace key `ImplMapCharCode` never answers 0: the key reports
         // `0x7F`, whose row is `KEY_BACKSPACE`. So real LibreOffice on macOS sends `KEY_BACKSPACE`
         // for this key and never reaches `ImplMapKeyCode` at all. Transcribing row 51 literally is
-        // what made Backspace delete FORWARD in a Norma office tab — measured, not deduced:
+        // what made Backspace delete FORWARD in a Winter office tab — measured, not deduced:
         // `OfficeRuntimeLiveTests.testBackspaceThroughTheRealCanvasRemovesTheCharacterBeforeTheCaret`
         // and its caret-walk sibling, whose caret x sat at `[2431, 2431, 2431, 2431]` across three
         // presses. `Key.backspace` is what LO itself sends, so it is what goes here.

@@ -7,7 +7,7 @@ import { basename, dirname, isAbsolute, join, sep } from "node:path";
  * roots — the model that REPLACES today's single optional `cwd`. `dirs[0]` is the PRIMARY by
  * POSITION (not a flag): today's `cwd` — the shell's starting directory, the recents anchor,
  * SP4's "move to CLI opens here". Entries `1..n` are ADDED directories. Each entry locks
- * independently the moment Norma successfully writes inside it (spec §1) — reading never locks,
+ * independently the moment Winter successfully writes inside it (spec §1) — reading never locks,
  * and a locked entry can never be changed or removed for the session's lifetime (enforced at the
  * T2 domain setter, not here — this file is the data shape and path canonicalization only).
  */

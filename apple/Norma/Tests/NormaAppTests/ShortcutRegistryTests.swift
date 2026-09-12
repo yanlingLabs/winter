@@ -1,6 +1,6 @@
 import Carbon.HIToolbox
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Phase 4d-iii Task 1 — the PURE parts only (per the task brief): `ShortcutBinding` Codable
 /// round-trip through the settings-list shape, `reloadDiff`'s set-difference logic, and the

@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Dispatch (Phase 7), Task 8: `FieldStateAdapter.dispatchChildren`/`onOpenChild` — the field's
 /// top-row child-status circles' data source + click action. Same idiom as `PinnedTasksTests`:
@@ -35,7 +35,7 @@ final class DispatchChildrenAdapterTests: XCTestCase {
         XCTAssertEqual(a.dispatchChildren, [child])
     }
 
-    /// Task 9 review carry-over: the visible-cap NormaFieldView's ForEach consumes (hoisted out of
+    /// Task 9 review carry-over: the visible-cap WinterFieldView's ForEach consumes (hoisted out of
     /// an inline `.prefix(5)` into this testable seam — see FieldStateAdapter.visibleDispatchChildren).
     /// 7 tracked children → only the first 5 are visible, in `dispatchChildren`'s own order.
     func testVisibleDispatchChildrenCapsAtFiveInOrder() {

@@ -1,13 +1,13 @@
 import XCTest
 import AppKit
-import NormaKit
-@testable import Norma
+import WinterKit
+@testable import Winter
 
 /// Lifecycle T3: the ephemeral dock-icon toggle (activation-policy promote/demote) + the
 /// source-aware termination gate. `terminateDecision` is the pure, AppKit-free core (the
 /// truth-table test below, per the task brief); the rest are AppKit-wiring smoke tests reusing this
 /// target's existing real-window fixtures (`DetachedScriptedTransport` from `DetachedWindowTests`,
-/// `NormaClientTestFactory` from `DashboardTests`).
+/// `WinterClientTestFactory` from `DashboardTests`).
 ///
 /// Dock seam retarget: these tests used to flip the REAL `NSApp.activationPolicy()` of the xctest
 /// host. With the seam (`DockPolicy.apply`, swapped for `HarnessTeardownObserver`'s recorder at
@@ -220,7 +220,7 @@ final class AppLifecycleTests: XCTestCase {
         socketExists: @escaping () -> Bool = { false }
     ) -> DaemonSupervisorDeps {
         DaemonSupervisorDeps(
-            bundledDaemonPath: { "/x/norma-core" },
+            bundledDaemonPath: { "/x/winter-core" },
             socketExists: socketExists,
             isDevEnv: { false },
             spawn: { _ in let p = FakeDaemonProcess(); onSpawn(p); return p },

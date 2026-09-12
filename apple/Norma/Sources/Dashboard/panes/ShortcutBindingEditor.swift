@@ -1,10 +1,10 @@
 import AppKit
 import Carbon.HIToolbox
-import NormaKit
+import WinterKit
 import SwiftUI
 
 // -----------------------------------------------------------------------------------------------
-// Pure helpers (Task 4, 4d-iii) — no NormaClient/AppKit involved, table-tested directly.
+// Pure helpers (Task 4, 4d-iii) — no WinterClient/AppKit involved, table-tested directly.
 // -----------------------------------------------------------------------------------------------
 
 /// True when `new` shares its (keyCode, modifiers) combo with a DIFFERENT (pluginId, shortcutId)
@@ -38,14 +38,14 @@ func carbonModifiers(from flags: NSEvent.ModifierFlags) -> UInt32 {
 /// True when `modifiers` includes at least one of the three modifiers a GLOBAL Carbon hotkey
 /// actually needs to be safe to arm: control, option, or command. Shift alone (or no modifier at
 /// all) is too weak — a modifier-less or shift-only capture would register a hotkey that swallows
-/// an ordinary keystroke (or Escape) system-wide, not just while Norma's window is focused.
+/// an ordinary keystroke (or Escape) system-wide, not just while Winter's window is focused.
 /// `ShortcutBindingEditorModel.capture(...)` rejects any candidate that fails this before it ever
 /// reaches `bindingConflict`. PURE — directly testable, same posture as `bindingConflict` above.
 func hasRequiredModifier(_ modifiers: UInt32) -> Bool {
     modifiers & UInt32(controlKey | optionKey | cmdKey) != 0
 }
 
-/// Norma's own two global hotkeys, read straight off their owning files (not guessed): the summon
+/// Winter's own two global hotkeys, read straight off their owning files (not guessed): the summon
 /// combo — `HotkeyTrigger.swift`'s hardcoded default, keyCode `49` (`kVK_Space`) +
 /// `cmdKey | controlKey | optionKey`; `AppDelegate.boot()` always calls
 /// `HotkeyTrigger.shared.start()` with no arguments, so there is no live remap to read — this IS
@@ -59,7 +59,7 @@ private let panicReservedCombo: (keyCode: UInt32, modifiers: UInt32) = (
     UInt32(kVK_Escape), UInt32(controlKey | optionKey | cmdKey)
 )
 
-/// True when `(keyCode, modifiers)` matches one of Norma's own reserved global hotkeys above.
+/// True when `(keyCode, modifiers)` matches one of Winter's own reserved global hotkeys above.
 /// Binding a plugin shortcut to either would silently shadow it the moment it's armed — shadowing
 /// panic specifically is a safety issue (the user's one guaranteed hard-stop), not just an
 /// inconvenience. The panic entry here is defense-in-depth for the PERSISTED-binding path: a live
@@ -93,7 +93,7 @@ final class ShortcutBindingEditorModel: ObservableObject {
         var binding: ShortcutBinding?
     }
 
-    private let client: NormaClient
+    private let client: WinterClient
     /// `nil` under unit tests (`AppDelegate.boot()` only constructs a real `ShortcutRegistry`
     /// outside `!isRunningUnitTests`) — `capture(...)` still persists the binding either way; only
     /// the live Carbon re-registration is skipped when this is `nil`. Typed as the
@@ -110,7 +110,7 @@ final class ShortcutBindingEditorModel: ObservableObject {
     /// successful-and-armed capture. The view surfaces this as an inline message.
     @Published var conflictMessage: String?
 
-    init(client: NormaClient, shortcutRegistry: (any ShortcutHotkeyReloading)?, defaults: UserDefaults = .standard) {
+    init(client: WinterClient, shortcutRegistry: (any ShortcutHotkeyReloading)?, defaults: UserDefaults = .standard) {
         self.client = client
         self.shortcutRegistry = shortcutRegistry
         self.defaults = defaults
@@ -136,7 +136,7 @@ final class ShortcutBindingEditorModel: ObservableObject {
     /// (1) `hasRequiredModifier` — reject a modifier-less or shift-only combo outright (a real
     /// keypress can still reach here with `modifiers == 0`/shift-only since `KeyCaptureNSView` only
     /// special-cases Escape, not weak modifiers — see that view's doc comment); (2) `isReservedCombo`
-    /// — reject a combo that shadows Norma's own summon/panic hotkeys; (3) `bindingConflict` — the
+    /// — reject a combo that shadows Winter's own summon/panic hotkeys; (3) `bindingConflict` — the
     /// pre-existing conflict check against every OTHER (pluginId, shortcutId)'s persisted binding.
     /// Any rejection sets `conflictMessage` and changes nothing else. On success: replaces this
     /// pair's prior binding (if any) in the persisted list, saves, reloads the live
@@ -155,7 +155,7 @@ final class ShortcutBindingEditorModel: ObservableObject {
             return
         }
         guard !isReservedCombo(keyCode: keyCode, modifiers: modifiers) else {
-            conflictMessage = "That combo is reserved by Norma."
+            conflictMessage = "That combo is reserved by Winter."
             return
         }
         let candidate = ShortcutBinding(pluginId: pluginId, shortcutId: shortcutId, keyCode: keyCode, modifiers: modifiers)

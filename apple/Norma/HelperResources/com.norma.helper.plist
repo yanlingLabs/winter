@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.norma.helper</string>
+	<string>com.winter.helper</string>
 	<key>BundleProgram</key>
-	<string>Contents/MacOS/NormaHelper</string>
+	<string>Contents/MacOS/WinterHelper</string>
 	<key>MachServices</key>
 	<dict>
-		<key>com.norma.helper</key>
+		<key>com.winter.helper</key>
 		<true/>
 	</dict>
 </dict>

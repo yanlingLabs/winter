@@ -57,7 +57,7 @@ describe("fuzzyMatch", () => {
 
 describe("buildFileIndex", () => {
   function makeFixtureRoot(): string {
-    const root = mkdtempSync(join(tmpdir(), "norma-file-index-"));
+    const root = mkdtempSync(join(tmpdir(), "winter-file-index-"));
     writeFileSync(join(root, "a.ts"), "");
     writeFileSync(join(root, "b.md"), "");
     mkdirSync(join(root, "sub"));
@@ -83,7 +83,7 @@ describe("buildFileIndex", () => {
   });
 
   test("the returned list is sorted, regardless of on-disk creation order", async () => {
-    const root = mkdtempSync(join(tmpdir(), "norma-file-index-sort-"));
+    const root = mkdtempSync(join(tmpdir(), "winter-file-index-sort-"));
     try {
       writeFileSync(join(root, "zeta.ts"), "");
       writeFileSync(join(root, "alpha.ts"), "");
@@ -97,7 +97,7 @@ describe("buildFileIndex", () => {
   });
 
   test("caps at maxEntries and stops walking once the cap is hit", async () => {
-    const root = mkdtempSync(join(tmpdir(), "norma-file-index-cap-"));
+    const root = mkdtempSync(join(tmpdir(), "winter-file-index-cap-"));
     try {
       for (let i = 0; i < 10; i++) writeFileSync(join(root, `f${i}.ts`), "");
       const files = await buildFileIndex(root, { maxEntries: 3 });
@@ -118,7 +118,7 @@ describe("buildFileIndex", () => {
   });
 
   test("does not follow a symlinked directory (loop safety) — its contents never appear", async () => {
-    const root = mkdtempSync(join(tmpdir(), "norma-file-index-symlink-"));
+    const root = mkdtempSync(join(tmpdir(), "winter-file-index-symlink-"));
     try {
       mkdirSync(join(root, "real"));
       writeFileSync(join(root, "real", "x.ts"), "");
@@ -131,7 +131,7 @@ describe("buildFileIndex", () => {
   });
 
   test("never throws on an unreadable subdirectory — skips it and still returns the rest of the tree", async () => {
-    const root = mkdtempSync(join(tmpdir(), "norma-file-index-unreadable-"));
+    const root = mkdtempSync(join(tmpdir(), "winter-file-index-unreadable-"));
     const blocked = join(root, "blocked");
     mkdirSync(blocked);
     writeFileSync(join(blocked, "secret.ts"), "");
@@ -159,7 +159,7 @@ describe("buildFileIndex", () => {
   });
 
   test("never throws when the root itself doesn't exist", async () => {
-    const missing = join(tmpdir(), "norma-file-index-does-not-exist-", String(Math.random()));
+    const missing = join(tmpdir(), "winter-file-index-does-not-exist-", String(Math.random()));
     let files: string[] = [];
     let threw = false;
     try {

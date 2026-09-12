@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import NormaChatKit
+@testable import WinterChatKit
 
 /// `ResponsesClient` — the phone's `/responses` leg. Every test drives a SCRIPTED transport (SSE) and,
 /// where a refresh is involved, a `ScriptedChatHTTP`; none touches the network or a real model.
@@ -77,7 +77,7 @@ final class ResponsesClientTests: XCTestCase {
         _ = await collect(client.streamTurn(request()))
         XCTAssertEqual(transport.authorization(), "Bearer at_1")
         XCTAssertEqual(transport.request(0).value(forHTTPHeaderField: "chatgpt-account-id"), "acct_1")
-        XCTAssertEqual(transport.request(0).value(forHTTPHeaderField: "originator"), "norma")
+        XCTAssertEqual(transport.request(0).value(forHTTPHeaderField: "originator"), "winter")
     }
 
     // MARK: - SSE parsing (streaming order + shapes)

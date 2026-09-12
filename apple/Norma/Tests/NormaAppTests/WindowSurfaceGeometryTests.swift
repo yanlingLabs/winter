@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Gate r7 (same-panel window morph): the pure window-surface geometry — layout math, morph bands,
 /// corner-radius ramp, and mouse-gate hit test. All AppKit-free so they run without a live panel.

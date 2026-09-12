@@ -1,8 +1,8 @@
 import XCTest
 import AppKit
-import NormaProtocol
-import NormaKit
-@testable import Norma
+import WinterProtocol
+import WinterKit
+@testable import Winter
 
 /// Scripted-transport double, `Shell`-prefixed per `SessionFeedTests`' established convention (each
 /// suite keeps its own copy). The difference that matters here: these are minted by a FACTORY, one
@@ -11,7 +11,7 @@ import NormaKit
 /// server detaches a client in its socket `close(...)` handler, `packages/core/src/ipc/server.ts`).
 /// Seeing one transport per connection is therefore the only way to observe the policy table's
 /// detach rows at all.
-final class ShellScriptedTransport: NormaTransport, @unchecked Sendable {
+final class ShellScriptedTransport: WinterTransport, @unchecked Sendable {
     let incoming: AsyncStream<TransportEvent>
     private let cont: AsyncStream<TransportEvent>.Continuation
     private let lock = NSLock()
@@ -46,13 +46,13 @@ final class ShellScriptedTransport: NormaTransport, @unchecked Sendable {
     var attachmentMethods: [String] { methods.filter { $0 != "sync.config" } }
 }
 
-/// Mints (and remembers) one `ShellScriptedTransport` per `NormaClient.connect()`.
+/// Mints (and remembers) one `ShellScriptedTransport` per `WinterClient.connect()`.
 final class ShellTransportFactory: @unchecked Sendable {
     private let lock = NSLock()
     private var _made: [ShellScriptedTransport] = []
     var made: [ShellScriptedTransport] { lock.lock(); defer { lock.unlock() }; return _made }
 
-    func make() -> NormaTransport {
+    func make() -> WinterTransport {
         let t = ShellScriptedTransport()
         lock.lock(); _made.append(t); lock.unlock()
         return t
@@ -78,8 +78,8 @@ final class ShellSessionHostTests: XCTestCase {
         // (`OfficeRuntime(sessionId:driver:)` closing over a REAL, freshly-minted `OfficeHelperSupervisor
         // .production()`), the dozens of unrelated tests in this file that reveal the panel on a dirs
         // row (chat/new-session/dispatch flows with nothing to do with office) would each spawn a REAL
-        // `NormaOfficeHelper` subprocess — measured directly: two such tests raced for the same
-        // machine-global `com.norma.app.dev` office socket (one "listening", the other "bind() failed:
+        // `WinterOfficeHelper` subprocess — measured directly: two such tests raced for the same
+        // machine-global `com.winter.app.dev` office socket (one "listening", the other "bind() failed:
         // File exists"), and a real LibreOfficeKit instance later crashed with an uncaught
         // `com::sun::star::lang::WrappedTargetRuntimeException`, which is what turned `xcodebuild test`'s
         // overall verdict into `** TEST FAILED **` even though every individual `XCTAssert` in the run
@@ -573,7 +573,7 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertNil(host.attachment)
     }
 
-    // MARK: - app-shell T8: the outputs box (temp-dir fixtures throughout — never ~/.norma)
+    // MARK: - app-shell T8: the outputs box (temp-dir fixtures throughout — never ~/.winter)
 
     /// `realpath(3)` AFTER creating the directory: `/tmp`/`/var` are themselves symlinks
     /// (`/private/tmp`, `/private/var`), and `FileManager.enumerator(at:)` (`listOutputFiles`)
@@ -599,15 +599,15 @@ final class ShellSessionHostTests: XCTestCase {
     }
 
     /// Profile-resolution pin at the HOST level (spec §3 / the dev-dist-blindness class):
-    /// `refreshOutputFiles` reads `AppProfile.normaHome`, so a dev-profile `NORMA_HOME` override
-    /// must be exactly what a code session's box lists from — never a literal `~/.norma`.
+    /// `refreshOutputFiles` reads `AppProfile.winterHome`, so a dev-profile `WINTER_HOME` override
+    /// must be exactly what a code session's box lists from — never a literal `~/.winter`.
     /// `OutputsBoxTests` pins the same chain at the pure-helper level; this closes the loop through
     /// the real host.
     func testSelectingACodeSessionListsExistingOutputFilesFromTheProfileResolvedHome() async {
         let home = makeTempHome()
         defer { try? FileManager.default.removeItem(atPath: home) }
-        setenv("NORMA_HOME", home, 1)
-        defer { unsetenv("NORMA_HOME") }
+        setenv("WINTER_HOME", home, 1)
+        defer { unsetenv("WINTER_HOME") }
         let file = writeOutputFile(home: home, sessionId: "S1", name: "report.md")
 
         let rows = [SessionSummary(sessionId: "S1", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "code")]
@@ -626,8 +626,8 @@ final class ShellSessionHostTests: XCTestCase {
     func testChatSessionNeverPopulatesOutputFilesEvenWhenFilesExistOnDisk() async {
         let home = makeTempHome()
         defer { try? FileManager.default.removeItem(atPath: home) }
-        setenv("NORMA_HOME", home, 1)
-        defer { unsetenv("NORMA_HOME") }
+        setenv("WINTER_HOME", home, 1)
+        defer { unsetenv("WINTER_HOME") }
         _ = writeOutputFile(home: home, sessionId: "S_chat", name: "stray.txt")
 
         let rows = [SessionSummary(sessionId: "S_chat", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "chat")]
@@ -668,8 +668,8 @@ final class ShellSessionHostTests: XCTestCase {
             return (feed, session)
         }, outputsWatcher: watcher)
         defer { host.deselect() }
-        setenv("NORMA_HOME", home, 1)
-        defer { unsetenv("NORMA_HOME") }
+        setenv("WINTER_HOME", home, 1)
+        defer { unsetenv("WINTER_HOME") }
         host.setShellVisible(true)
         host.select("S1")
 
@@ -691,8 +691,8 @@ final class ShellSessionHostTests: XCTestCase {
     func testHopRelistsOutputFilesForTheNewSession() async {
         let home = makeTempHome()
         defer { try? FileManager.default.removeItem(atPath: home) }
-        setenv("NORMA_HOME", home, 1)
-        defer { unsetenv("NORMA_HOME") }
+        setenv("WINTER_HOME", home, 1)
+        defer { unsetenv("WINTER_HOME") }
         let file1 = writeOutputFile(home: home, sessionId: "S1", name: "one.md")
         let file2 = writeOutputFile(home: home, sessionId: "S2", name: "two.md")
 
@@ -716,8 +716,8 @@ final class ShellSessionHostTests: XCTestCase {
     func testDetachClearsOutputFilesAndClosesTheViewer() async {
         let home = makeTempHome()
         defer { try? FileManager.default.removeItem(atPath: home) }
-        setenv("NORMA_HOME", home, 1)
-        defer { unsetenv("NORMA_HOME") }
+        setenv("WINTER_HOME", home, 1)
+        defer { unsetenv("WINTER_HOME") }
         let file = writeOutputFile(home: home, sessionId: "S1", name: "one.md")
         let rows = [SessionSummary(sessionId: "S1", title: nil, createdAt: 1, scope: "global", cwd: nil, mode: "code")]
         let (host, _) = makeHost(rows: rows)
@@ -994,11 +994,11 @@ final class ShellSessionHostTests: XCTestCase {
 
     // MARK: - chatgpt-ui T2: the new-chat page's create-on-send flow (spec §2 — the wire pins)
 
-    /// A connected `NormaClient` on its OWN scripted transport — standing in for `AppModel.client`
+    /// A connected `WinterClient` on its OWN scripted transport — standing in for `AppModel.client`
     /// (the management connection the create rides), the exact `ModeLandingViewTests` idiom.
-    private func connectedManagementClient() async -> (client: NormaClient, transport: ShellScriptedTransport) {
+    private func connectedManagementClient() async -> (client: WinterClient, transport: ShellScriptedTransport) {
         let transport = ShellScriptedTransport()
-        let client = NormaClient(makeTransport: { transport }, token: "tok", clientName: "orb")
+        let client = WinterClient(makeTransport: { transport }, token: "tok", clientName: "orb")
         let connectTask = Task { try? await client.connect() }
         await feedWaitUntil { transport.sent.count >= 1 }
         let hello = feedLineJSON(transport.sent[0])
@@ -2687,7 +2687,7 @@ final class ShellSessionHostTests: XCTestCase {
             return XCTFail("an explicit Default must CLEAR the session's override: \(mgmt.methods)")
         }
         XCTAssertTrue((setModel["params"] as? [String: Any])?["model"] is NSNull,
-                      "a literal null — the wire's own clear (NormaClient.setModel), never an omitted key")
+                      "a literal null — the wire's own clear (WinterClient.setModel), never an omitted key")
         mgmt.feed(#"{"jsonrpc":"2.0","id":\#(setModel["id"] as! Int),"result":{}}"#)
 
         await feedWaitUntil { mgmt.methods.contains("session.setEffort") }
@@ -3403,7 +3403,7 @@ final class ShellSessionHostTests: XCTestCase {
         // office live-gate Bug 2 fix-round: this test's own raw host construction (not `makeHost`)
         // predates office's pre-warm entirely — S1 has real dirs and the `panelDidReveal()` below now
         // also reaches for `officeRuntime(for:)`. Without this, left at the class default, this test
-        // is the exact one MEASURED spawning a real `NormaOfficeHelper` (see `makeHost`'s own comment).
+        // is the exact one MEASURED spawning a real `WinterOfficeHelper` (see `makeHost`'s own comment).
         // NOT `OfficeDriverRecorder()` inline inside the closure: the recorder's OWN driver closures
         // capture it `[unowned self]` (mirroring every other production Driver, which assumes ITS
         // owner outlives it) — a recorder built and read in the same expression has no strong
@@ -5884,7 +5884,7 @@ final class ShellSessionHostTests: XCTestCase {
 ///
 /// An EXTENSION of `ShellSessionHostTests` rather than a class of its own, deliberately: that type's
 /// `makeHost` is what installs the inert `makeOfficeRuntime` override, and without that override a
-/// host in a bare XCTest process spawns a real `NormaOfficeHelper` subprocess (see that helper's own
+/// host in a bare XCTest process spawns a real `WinterOfficeHelper` subprocess (see that helper's own
 /// comment). A private member is reachable from an extension of the same type in the same file, so
 /// reusing the vetted harness costs nothing and duplicating it would have cost a real hazard.
 @MainActor

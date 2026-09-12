@@ -1,7 +1,7 @@
 import AppKit
-import NormaKit
+import WinterKit
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// editor-product Task 8 — **the save flow: the pull, the timeout, the atomic write, the anchored
 /// acknowledgement, and the three triggers that all land in it.**
@@ -118,7 +118,7 @@ final class EditorSaveTests: XCTestCase {
 
     private func scratchDirectory() throws -> URL {
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("norma-save-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("winter-save-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         scratchDirectories.append(directory)
         return directory
@@ -334,7 +334,7 @@ final class EditorSaveTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)),
                        Data("new — café\r\n".utf8), "compared as BYTES, never as a String")
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path),
-                       ["engine.ts"], "no .norma-save-… survives a successful write")
+                       ["engine.ts"], "no .winter-save-… survives a successful write")
     }
 
     /// A brand-new file is created by the same path — the save flow never requires the file to exist
@@ -529,7 +529,7 @@ final class EditorSaveTests: XCTestCase {
     func testInstallingTheMenuItemIsIdempotentAndCreatesTheFileMenuIfThereIsNone() throws {
         let command = EditorSaveMenuCommand(activePath: { nil }, performSave: { _ in })
         let mainMenu = NSMenu(title: "MainMenu")
-        mainMenu.addItem(withTitle: "Norma", action: nil, keyEquivalent: "").submenu = NSMenu(title: "Norma")
+        mainMenu.addItem(withTitle: "Winter", action: nil, keyEquivalent: "").submenu = NSMenu(title: "Winter")
 
         command.install(in: mainMenu)
         command.install(in: mainMenu)
@@ -537,7 +537,7 @@ final class EditorSaveTests: XCTestCase {
         let file = try XCTUnwrap(mainMenu.items.first(where: { $0.title == "File" })?.submenu)
         XCTAssertEqual(file.items.filter { $0.keyEquivalent == "s" }.count, 1)
         XCTAssertEqual(mainMenu.items.filter { $0.title == "File" }.count, 1)
-        XCTAssertEqual(mainMenu.items.first?.title, "Norma", "the app menu stays first")
+        XCTAssertEqual(mainMenu.items.first?.title, "Winter", "the app menu stays first")
 
         // An existing File menu is used rather than a second one being made.
         let withFile = NSMenu(title: "MainMenu")
@@ -911,9 +911,9 @@ final class EditorSaveTests: XCTestCase {
         let bundled = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Resources/EditorAssets/app/\(name)")
         let source = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // NormaAppTests
+            .deletingLastPathComponent()   // WinterAppTests
             .deletingLastPathComponent()   // Tests
-            .deletingLastPathComponent()   // Norma
+            .deletingLastPathComponent()   // Winter
             .appendingPathComponent("Resources/EditorAssets/app/\(name)")
         return [bundled, source].first { FileManager.default.fileExists(atPath: $0.path) }
     }
@@ -927,7 +927,7 @@ final class EditorSaveTests: XCTestCase {
     /// throughout, no shared command object to compare against).
     func testInstallingTheZoomMenuItemsIsIdempotentAndCreatesTheViewMenuIfThereIsNone() throws {
         let mainMenu = NSMenu(title: "MainMenu")
-        mainMenu.addItem(withTitle: "Norma", action: nil, keyEquivalent: "").submenu = NSMenu(title: "Norma")
+        mainMenu.addItem(withTitle: "Winter", action: nil, keyEquivalent: "").submenu = NSMenu(title: "Winter")
 
         OfficeCanvasMenuInstaller.install(in: mainMenu)
         OfficeCanvasMenuInstaller.install(in: mainMenu)
@@ -936,7 +936,7 @@ final class EditorSaveTests: XCTestCase {
         XCTAssertEqual(view.items.map(\.title), ["Zoom In", "Zoom Out", "Actual Size"],
                        "exactly one of each, no duplicates from the second install")
         XCTAssertEqual(mainMenu.items.filter { $0.title == "View" }.count, 1)
-        XCTAssertEqual(mainMenu.items.first?.title, "Norma", "the app menu stays first")
+        XCTAssertEqual(mainMenu.items.first?.title, "Winter", "the app menu stays first")
 
         let zoomIn = try XCTUnwrap(view.items.first(where: { $0.title == "Zoom In" }))
         XCTAssertEqual(zoomIn.keyEquivalent, "+")
@@ -965,7 +965,7 @@ final class EditorSaveTests: XCTestCase {
     /// A bare main menu (no Edit submenu at all) gets a real one, with all five standard verbs.
     func testEditActionsBeltCreatesTheEditMenuAndAddsAllFiveWhenNoneExist() throws {
         let mainMenu = NSMenu(title: "MainMenu")
-        mainMenu.addItem(withTitle: "Norma", action: nil, keyEquivalent: "").submenu = NSMenu(title: "Norma")
+        mainMenu.addItem(withTitle: "Winter", action: nil, keyEquivalent: "").submenu = NSMenu(title: "Winter")
 
         OfficeCanvasMenuInstaller.installEditActionsIfAbsent(in: mainMenu)
 

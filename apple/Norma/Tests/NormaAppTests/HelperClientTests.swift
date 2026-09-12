@@ -1,6 +1,6 @@
 import ServiceManagement
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Task 4 (4c): the two pure mappings in `HelperClient.swift` — `SMAppService.Status` →
 /// `HelperApprovalStatus` (the bridge init) and `HelperApprovalStatus` → `HelperStatusDisplay`

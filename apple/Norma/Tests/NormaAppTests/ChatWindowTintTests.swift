@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 final class ChatWindowTintTests: XCTestCase {
     func testLightModeIsNearWhiteAtSpecOpacity() {

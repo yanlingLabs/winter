@@ -1,5 +1,5 @@
 import Combine
-import NormaKit
+import WinterKit
 import SwiftUI
 
 // -----------------------------------------------------------------------------------------------
@@ -10,9 +10,9 @@ import SwiftUI
 
 /// The pane's own display-ready shape for one workflow run. Deliberately a distinct type, not a
 /// reuse of either source verbatim:
-///  - `WorkflowRunView` (NormaKit, `workflow.list`'s "running" snapshot) has no public initializer
-///    outside the NormaKit module — an intentional read-only wire-decode boundary, same as every
-///    other NormaKit response struct (`WorkflowSaved` alongside it, `MemoryFactMeta`, etc.) — so a
+///  - `WorkflowRunView` (WinterKit, `workflow.list`'s "running" snapshot) has no public initializer
+///    outside the WinterKit module — an intentional read-only wire-decode boundary, same as every
+///    other WinterKit response struct (`WorkflowSaved` alongside it, `MemoryFactMeta`, etc.) — so a
 ///    merge that needs to CONSTRUCT new/blended values can't produce one directly.
 ///  - `WorkflowRunState` (`SessionModel.swift`'s live fold, Task D3's own reducer cases) has no
 ///    `startedAt` — the live event stream never carries one — so it alone can't supply this pane's
@@ -55,7 +55,7 @@ extension WorkflowRunRow {
 /// Newest-started first otherwise; ties (e.g. two brand-new live-only runs, both `.max`) break on
 /// `runId` for a stable order.
 ///
-/// PURE — no `NormaClient`/SwiftUI — table-tested directly in `DashboardTests.swift`, same posture
+/// PURE — no `WinterClient`/SwiftUI — table-tested directly in `DashboardTests.swift`, same posture
 /// as `groupedSessionRows`/`pluginRowDisplay` in this same directory's other panes.
 func mergeWorkflowRuns(snapshot: [WorkflowRunRow], live: [String: WorkflowRunState]) -> [WorkflowRunRow] {
     var byId: [String: WorkflowRunRow] = [:]
@@ -108,7 +108,7 @@ func workflowStatusBadge(_ status: String) -> String {
 
 @MainActor
 final class WorkflowsPaneModel: ObservableObject {
-    private let client: NormaClient
+    private let client: WinterClient
     private let session: SessionModel
     private let currentSessionId: () -> String?
     private var cancellable: AnyCancellable?
@@ -126,7 +126,7 @@ final class WorkflowsPaneModel: ObservableObject {
     /// runIds with a `workflow.stop` currently in flight — disables just THAT row's Stop button.
     @Published private(set) var stoppingRunIds: Set<String> = []
 
-    init(client: NormaClient, session: SessionModel, currentSessionId: @escaping () -> String?) {
+    init(client: WinterClient, session: SessionModel, currentSessionId: @escaping () -> String?) {
         self.client = client
         self.session = session
         self.currentSessionId = currentSessionId
@@ -178,7 +178,7 @@ final class WorkflowsPaneModel: ObservableObject {
         }
     }
 
-    /// `workflow.stop(runId)` — a soft boolean (NormaKit's own doc: never throws for an unknown or
+    /// `workflow.stop(runId)` — a soft boolean (WinterKit's own doc: never throws for an unknown or
     /// already-terminal runId). Refresh afterward is not just cosmetic: a stop fires NO
     /// `workflow_failed`/`workflow_completed` event (workflows/runtime.ts's `finish()` — the
     /// "stopped" branch never calls `deps.onEvent`; engine.ts's own comment: "onEvent never fires

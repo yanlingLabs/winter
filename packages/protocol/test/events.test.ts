@@ -60,7 +60,7 @@ describe("SessionEvent discriminated union", () => {
   });
 
   // Phase 5 routines T3: `code` is additive-optional on the EXISTING agent_error variant (no new
-  // SessionEvent variant, no NormaKit exhaustive-switch trap) — an older-shaped payload with no
+  // SessionEvent variant, no WinterKit exhaustive-switch trap) — an older-shaped payload with no
   // `code` still parses (the "agent event variants parse" test above already covers that), and a
   // payload carrying one round-trips it losslessly.
   test("agent_error.code is additive-optional: present round-trips, absent stays undefined", () => {
@@ -215,7 +215,7 @@ describe("SessionEvent discriminated union", () => {
   });
 
   test("worktree_entered / worktree_exited round-trip", () => {
-    const we = { type: "worktree_entered", sessionId: "s", threadId: "t", seq: 1, ts: 1, name: "fix-auth", path: "/repo/.norma/worktrees/fix-auth", branch: "norma/fix-auth" } as const;
+    const we = { type: "worktree_entered", sessionId: "s", threadId: "t", seq: 1, ts: 1, name: "fix-auth", path: "/repo/.winter/worktrees/fix-auth", branch: "winter/fix-auth" } as const;
     expect(SessionEvent.parse(we)).toEqual(we);
     const wx = { type: "worktree_exited", sessionId: "s", threadId: "t", seq: 2, ts: 2, name: "fix-auth", action: "keep", removed: false } as const;
     expect(SessionEvent.parse(wx)).toEqual(wx);
@@ -301,7 +301,7 @@ describe("SessionEvent discriminated union", () => {
     expect(SessionEvent.safeParse({ ...t, type: "plugin_tool_invoke", requestId: "req_1", tool: "echo", argsJson: "" }).success).toBe(true);
   });
 
-  // Phase 4c Task 1 (spec §5): core pushes this to the active provider connection (Norma.app)
+  // Phase 4c Task 1 (spec §5): core pushes this to the active provider connection (Winter.app)
   // when a plugin (or the harness) calls hardware.request; mirrors plugin_tool_invoke's
   // request/response shape one-for-one — the provider answers with hardware.respond (methods.ts).
   test("hardware_requested round-trips", () => {
@@ -403,7 +403,7 @@ describe("SessionEvent discriminated union", () => {
     expect(SessionEvent.safeParse({ ...base, threadId: "main", type: "task_notification", content: "" }).success).toBe(false);
   });
 
-  // Phase 5e T1 (reviewer maturity, the NormaKit-trap task): a NEW SessionEvent variant, persisted
+  // Phase 5e T1 (reviewer maturity, the WinterKit-trap task): a NEW SessionEvent variant, persisted
   // once per actual reviewer.review() invocation (engine.ts, T2) — observability only, never
   // replayed into the model (eventToInput ignores it, unchanged in this task).
   test("tool_review round-trips for all three verdicts", () => {
@@ -564,7 +564,7 @@ describe("panel_command (B2 T2)", () => {
   });
 
   test("args round-trips as an opaque per-verb bag", () => {
-    const e = cmd({ action: "type", tabId: "tab_1", args: { selector: "#q", text: "norma", submit: true } });
+    const e = cmd({ action: "type", tabId: "tab_1", args: { selector: "#q", text: "winter", submit: true } });
     expect(SessionEvent.parse(e)).toEqual(e);
   });
 

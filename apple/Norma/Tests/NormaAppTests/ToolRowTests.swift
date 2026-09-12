@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// mac-chat-parity Task 2 — the pure logic behind the transcript's tool rows: per-call status,
 /// the run's aggregate status, the bounded output preview, the collapsed-row failure summary, and
@@ -376,7 +376,7 @@ final class ToolRowTests: XCTestCase {
     /// bare filename, spaces and all. Every one of these is a STRING operation; nothing resolves a
     /// path or touches the disk.
     func testTheChipPathTailIsTotalOverEveryShapeTheWireCanCarry() {
-        XCTAssertEqual(fileDiffChipDisplayPath("/Users/k/norma v2/core.ts"), "norma v2/core.ts")
+        XCTAssertEqual(fileDiffChipDisplayPath("/Users/k/winter v2/core.ts"), "winter v2/core.ts")
         XCTAssertEqual(fileDiffChipDisplayPath("src/engine.ts"), "src/engine.ts")
         XCTAssertEqual(fileDiffChipDisplayPath("engine.ts"), "engine.ts",
                        "one component is the whole answer, not a truncated two")

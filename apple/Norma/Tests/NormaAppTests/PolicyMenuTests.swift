@@ -1,8 +1,8 @@
 import XCTest
 import SwiftUI
-import NormaProtocol
-import NormaKit
-@testable import Norma
+import WinterProtocol
+import WinterKit
+@testable import Winter
 
 /// Task 4 (2d-iii): the ⋯ menu's approval-mode picker. Covers `FieldStateAdapter.sessionPolicy`'s
 /// seed/update-on-success discipline (mirrors `CardWiringTests.testAdapterInFlightLifecycle`'s
@@ -160,7 +160,7 @@ final class PolicyMenuTests: XCTestCase {
         var stubSucceeds = true
 
         // Exact wiring shape the three real wirers use (GlassRootView / DetachedWindowController /
-        // ShellSessionHost) — a STUB (not a real AppModel/NormaClient) so this test locks down the
+        // ShellSessionHost) — a STUB (not a real AppModel/WinterClient) so this test locks down the
         // discipline itself: in-flight flipped SYNCHRONOUSLY, cleared once the stub resolves, and
         // the policy adopted ONLY on success. mac-chat-parity T4 replaced the bare
         // `adapter.sessionPolicy = policy` with `adoptSessionPolicy`, which is what keeps the value
@@ -446,7 +446,7 @@ final class PolicyMenuTests: XCTestCase {
     /// reports `nil` forever, silently, with every unit test above still green. This drives a REAL
     /// scripted-transport `session.list` round trip through `AppModel`'s own lister — the same
     /// mechanism `testOrbUpdateIsChatSessionTracksARealDirectoryRoundTrip` uses — so the assertion
-    /// covers NormaKit's decode AND `AppModel.swift`'s map into `SessionSummary`, together.
+    /// covers WinterKit's decode AND `AppModel.swift`'s map into `SessionSummary`, together.
     ///
     /// (`DetachedWindowController.swift` holds the OTHER construction site, a verbatim twin of this
     /// one built on a detached window's own feed. It has its own live round trip —
@@ -469,7 +469,7 @@ final class PolicyMenuTests: XCTestCase {
 
         // The directory's OWN `session.list` — kicked by a `session_created` broadcast, the same
         // mechanism `testOrbUpdateIsChatSessionTracksARealDirectoryRoundTrip` above relies on. This
-        // is the round trip under test: its result goes through NormaKit's decode and AppModel's
+        // is the round trip under test: its result goes through WinterKit's decode and AppModel's
         // `SessionSummary` map before it reaches `directory.rows`.
         t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"session_created","seq":1,"sessionId":"s_2","ts":5,"scope":"global"}}"#)
         let relist = await waitUntilMethod(t, "session.list", occurrence: 2)
@@ -480,7 +480,7 @@ final class PolicyMenuTests: XCTestCase {
         XCTAssertEqual(model.directory.rows.count, 3, "the directory must have folded the round trip")
 
         XCTAssertEqual(model.directory.rows.first { $0.sessionId == "s_1" }?.approvalPolicy, "bypass",
-                       "the daemon's answer must survive NormaKit's decode AND AppModel's map into SessionSummary")
+                       "the daemon's answer must survive WinterKit's decode AND AppModel's map into SessionSummary")
         XCTAssertEqual(model.directory.rows.first { $0.sessionId == "s_2" }?.approvalPolicy, "plan")
         XCTAssertNil(model.directory.rows.first { $0.sessionId == "s_old" }?.approvalPolicy,
                      "an older daemon's row stays absent all the way through — never filled in en route")

@@ -5,7 +5,7 @@ import type { SkillStore } from "./skills";
 import type { ResolvedStyle } from "./output-styles";
 
 export const BASE_PROMPT = [
-  "You are Norma, an agentic assistant running on the user's Mac.",
+  "You are Winter, an agentic assistant running on the user's Mac.",
   "You operate inside a session working directory; file tool paths are relative to it.",
   "Use the tools to accomplish the user's request, then reply with a concise summary.",
   // CC-parity (user directive 2026-07-10): route decisions the user must make THROUGH the tool.
@@ -27,7 +27,7 @@ export const BASE_PROMPT = [
  *  direction, and nothing in `BASE_PROMPT` speaks to it at all.
  *
  *  WHY THIS IS SAFE HERE AND NOT ON A HOSTED AGENTS API. Telling a model to spawn children freely
- *  is only safe if something other than the model bounds the fan-out. Norma has four such bounds,
+ *  is only safe if something other than the model bounds the fan-out. Winter has four such bounds,
  *  all upstream of the child ever running: the permission gate + approval policy the child inherits
  *  (never widened — spawn_agent's `mode` is restrict-only), `SubagentManager`'s concurrency
  *  semaphore, the depth limit (a workflow-spawned child cannot spawn at all), and the progress-stall
@@ -111,7 +111,7 @@ function memoryProtocol(memDir: string): string {
     "Save a fact worth recalling in a FUTURE session (a user preference, a correction the user gave you, a durable project constraint) as its own file there, `<name>.md` where `<name>` is a short kebab-case slug, with frontmatter then the fact:",
     "```\n---\nname: <name>\ndescription: <one-line summary>\ntype: user | feedback | project | reference\n---\n<the fact — for feedback/project, add a short Why / How to apply it too>\n```",
     `Then add or update a one-line pointer for it in \`${join(memDir, "MEMORY.md")}\` (create the file if it doesn't exist yet): \`- [<name>](<name>.md) — <description>\`. MEMORY.md's first ${MEMDIR_INDEX_MAX_LINES} lines / ${Math.round(MEMDIR_INDEX_MAX_BYTES / 1024)}KB load into every session automatically — keep it terse; put detail in the fact file itself, not the index line.`,
-    "Update a fact by overwriting its file (and its MEMORY.md line) instead of writing a near-duplicate under a new name. Delete a fact (and its MEMORY.md line) once you learn it is wrong or no longer true. Never save something the repo itself already records — code, config, docs, and NORMA.md are already durable; memory is for facts ABOUT the user or project that live outside the repo.",
+    "Update a fact by overwriting its file (and its MEMORY.md line) instead of writing a near-duplicate under a new name. Delete a fact (and its MEMORY.md line) once you learn it is wrong or no longer true. Never save something the repo itself already records — code, config, docs, and WINTER.md are already durable; memory is for facts ABOUT the user or project that live outside the repo.",
   ].join("\n");
 }
 
@@ -123,7 +123,7 @@ function memoryProtocol(memDir: string): string {
  *  user goes there") plus workdir-less extras. That shape was wrong, and session `s_bfadc28c2751`
  *  is the proof: a session with a real locked working directory (`~/Xcode progects/testing`) was
  *  asked to build an app and built the ENTIRE project — package.json, server.js, public/ — inside
- *  its `$OUTDIR` instead, then told the user to `cd` into `~/.norma-dev/outputs/<sid>` to run it.
+ *  its `$OUTDIR` instead, then told the user to `cd` into `~/.winter-dev/outputs/<sid>` to run it.
  *  The model was not misbehaving; it was obeying. `$OUTDIR` was the ONLY absolute path the whole
  *  assembled prompt ever named — `BASE_PROMPT` mentions the working directory purely abstractly
  *  ("you operate inside a session working directory") and nothing else names the `dirs` row — so
@@ -134,7 +134,7 @@ function memoryProtocol(memDir: string): string {
  *
  *  So the two cases now say different things (user direction, 2026-08-15):
  *   - WITH a working directory: name it — it is the default place work happens — and demote
- *     `$OUTDIR` to a MAILBOX, used only when the user asks to be sent something or when Norma is
+ *     `$OUTDIR` to a MAILBOX, used only when the user asks to be sent something or when Winter is
  *     handing over a standalone artifact with no home in the project.
  *   - WITHOUT one (`workdirLess`): `$OUTDIR` IS the default directory, scratch goes to `$TMPDIR`
  *     (bash already starts there), and don't ask to write elsewhere. Unchanged in substance from
@@ -200,7 +200,7 @@ export interface MemoryContextConfig {
 }
 
 export class ContextAssembler {
-  private readonly normaHome: string;
+  private readonly winterHome: string;
   private readonly trust: TrustStore;
   private readonly skills: SkillStore;
   private readonly basePrompt: string;
@@ -208,7 +208,7 @@ export class ContextAssembler {
   private readonly memory?: MemoryContextConfig;
   private readonly styleResolver?: (cwd: string | null) => ResolvedStyle | null;
   constructor(deps: {
-    normaHome: string;
+    winterHome: string;
     trust: TrustStore;
     skills: SkillStore;
     basePrompt?: string;
@@ -216,7 +216,7 @@ export class ContextAssembler {
     memory?: MemoryContextConfig;
     styleResolver?: (cwd: string | null) => ResolvedStyle | null;
   }) {
-    this.normaHome = deps.normaHome;
+    this.winterHome = deps.winterHome;
     this.trust = deps.trust;
     this.skills = deps.skills;
     this.basePrompt = deps.basePrompt ?? BASE_PROMPT;
@@ -323,22 +323,22 @@ export class ContextAssembler {
     const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
     sections.push(`Today's date is ${today}.`);
 
-    const userInstr = readCapped(join(this.normaHome, "NORMA.md"), this.caps.instructionsBytes);
-    if (userInstr) sections.push(`## User instructions (~/.norma/NORMA.md)\n${userInstr}`);
+    const userInstr = readCapped(join(this.winterHome, "WINTER.md"), this.caps.instructionsBytes);
+    if (userInstr) sections.push(`## User instructions (~/.winter/WINTER.md)\n${userInstr}`);
 
     if (cwd && trusted) {
-      const projInstr = readCapped(join(cwd, "NORMA.md"), this.caps.instructionsBytes);
-      if (projInstr) sections.push(`## Project instructions (NORMA.md)\n${projInstr}`);
+      const projInstr = readCapped(join(cwd, "WINTER.md"), this.caps.instructionsBytes);
+      if (projInstr) sections.push(`## Project instructions (WINTER.md)\n${projInstr}`);
     }
 
-    // Project prose rules (CC-parity: `.claude/rules/` → `.norma/rules/*.md`). Same trust gate as
-    // the project NORMA.md block just above (reuses the same hoisted `trusted`, not a second
+    // Project prose rules (CC-parity: `.claude/rules/` → `.winter/rules/*.md`). Same trust gate as
+    // the project WINTER.md block just above (reuses the same hoisted `trusted`, not a second
     // `isTrusted` call). Every file's total is bounded by ONE shared budget — the instructions byte
     // cap — rather than per-file, so a directory of many small rule files can't add up to an
     // unbounded prompt; `readCapped` truncates each file to whatever of that budget remains, and
     // files are read in sorted filename order for determinism.
     if (cwd && trusted) {
-      const rulesDir = join(cwd, ".norma", "rules");
+      const rulesDir = join(cwd, ".winter", "rules");
       let files: string[] = [];
       try { files = readdirSync(rulesDir).filter((f) => f.endsWith(".md")).sort(); } catch { /* no rules dir → none */ }
       const parts: string[] = [];
@@ -355,7 +355,7 @@ export class ContextAssembler {
           budget -= Buffer.byteLength(part);
         }
       }
-      if (parts.length) sections.push(`## Project rules (.norma/rules/)\n${parts.join("\n\n")}`);
+      if (parts.length) sections.push(`## Project rules (.winter/rules/)\n${parts.join("\n\n")}`);
     }
 
     // File-based memory (MEMDIR, T1; bucket switch added by Dreaming Phase 7b): supersedes the
@@ -399,10 +399,10 @@ export class ContextAssembler {
       }
     } else {
       const mem: string[] = [];
-      const userMem = readMemory(join(this.normaHome, "memory", "MEMORY.md"), this.caps.memoryLines, this.caps.memoryBytes);
+      const userMem = readMemory(join(this.winterHome, "memory", "MEMORY.md"), this.caps.memoryLines, this.caps.memoryBytes);
       if (userMem) mem.push(`### User memory\n${userMem}`);
       if (cwd && trusted) {
-        const projMem = readMemory(join(cwd, ".norma", "memory", "MEMORY.md"), this.caps.memoryLines, this.caps.memoryBytes);
+        const projMem = readMemory(join(cwd, ".winter", "memory", "MEMORY.md"), this.caps.memoryLines, this.caps.memoryBytes);
         if (projMem) mem.push(`### Project memory\n${projMem}`);
       }
       if (mem.length) sections.push(`## Memory\n${mem.join("\n\n")}`);

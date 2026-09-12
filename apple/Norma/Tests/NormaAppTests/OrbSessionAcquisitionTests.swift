@@ -1,7 +1,7 @@
 import XCTest
-import NormaProtocol
-import NormaKit
-@testable import Norma
+import WinterProtocol
+import WinterKit
+@testable import Winter
 
 /// orb-regressions (2026-07-29): the two USER-REPORTED live regressions, pinned end-to-end through
 /// the wiring `AppDelegate.boot()` actually installs.
@@ -9,7 +9,7 @@ import NormaKit
 ///   1. "enter is not working in the orb and on the orb expanded mode (enter to send the message)"
 ///   2. "i cant detach the expanded orb window anymore"
 ///
-/// ROOT CAUSE (one, for both): `NormaClient.request(_:params:)` OMITTED the `params` key entirely
+/// ROOT CAUSE (one, for both): `WinterClient.request(_:params:)` OMITTED the `params` key entirely
 /// when the caller passed `nil`, and `dispatchSession()` is one of five wrappers that do. The
 /// daemon validates `session.dispatch` with `parseParams(SessionDispatchParams, params)` where
 /// `SessionDispatchParams = z.object({})` — and `z.object({}).safeParse(undefined)` FAILS, so the
@@ -27,10 +27,10 @@ import NormaKit
 ///
 /// WHY IT SURFACED NOW (latent since Phase 7, `0795a237`): `ensureFocusedSession()` early-outs when
 /// a session is already focused, and `focusNewestSession()` (connect-time) attaches to the newest
-/// EXISTING dispatch session. `~/.norma` has had one since 2026-07-20, so `dispatchSession()` was
+/// EXISTING dispatch session. `~/.winter` has had one since 2026-07-20, so `dispatchSession()` was
 /// never actually invoked there. The dev/dist split's second strand (`04961ee0`/`70737ad1`, merged
-/// `ed9c706b`) repointed the Debug app at a FRESH `~/.norma-dev` with no dispatch session — the
-/// first Norma home to ever exercise the create path from the Mac app.
+/// `ed9c706b`) repointed the Debug app at a FRESH `~/.winter-dev` with no dispatch session — the
+/// first Winter home to ever exercise the create path from the Mac app.
 ///
 /// These tests script the DAEMON'S REAL CONTRACT (`respond` below refuses a params-less
 /// `session.dispatch` exactly as the server does) rather than asserting on wire bytes, so they fail
@@ -47,7 +47,7 @@ final class OrbSessionAcquisitionTests: XCTestCase {
     /// double. Only `session.dispatch` validates params here — `default:` answers `{"result":{}}`
     /// for anything else — because `session.dispatch` is the one method whose params contract these
     /// two regressions turn on. The identical defect in `daemon.status`/`engine.activity`/
-    /// `quota.state`/`trust.list` is pinned at the byte level in NormaKit's `MethodWrapperTests`
+    /// `quota.state`/`trust.list` is pinned at the byte level in WinterKit's `MethodWrapperTests`
     /// instead; do not read this double as proving anything about them.
     private func startDaemonDouble(
         _ t: AppScriptedTransport,
@@ -103,7 +103,7 @@ final class OrbSessionAcquisitionTests: XCTestCase {
         t.sent.compactMap { lineJSON($0)["method"] as? String }
     }
 
-    /// REGRESSION 1 — Enter. A Norma home with NO dispatch session yet (the dev home's exact state):
+    /// REGRESSION 1 — Enter. A Winter home with NO dispatch session yet (the dev home's exact state):
     /// the orb's submit seam must mint/attach the dispatch singleton and actually send.
     func testOrbSubmitAcquiresTheDispatchSessionAndSendsWhenNoneIsFocusedYet() async throws {
         let delegate = AppDelegate()
@@ -177,7 +177,7 @@ final class OrbSessionAcquisitionTests: XCTestCase {
 
     /// CONTROL: the pre-existing path stays untouched — a home that ALREADY has a dispatch session
     /// focuses it at connect and never calls `session.dispatch` at all. This is exactly why the
-    /// defect stayed invisible on `~/.norma` for nine days.
+    /// defect stayed invisible on `~/.winter` for nine days.
     func testAnExistingDispatchSessionIsStillFocusedAtConnectWithoutCallingDispatch() async throws {
         let factory = RecordingTransportFactory()
         let model = AppModel(makeTransport: { factory.make() }, token: "tok")

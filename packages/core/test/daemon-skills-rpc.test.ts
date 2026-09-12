@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@winter/protocol";
 import { startDaemon, type RunningDaemon } from "../src/daemon";
 import { startIpcServer } from "../src/ipc/server";
 import { SessionStore } from "../src/sessions/store";
@@ -10,7 +10,7 @@ import { FileSecretStore } from "../src/auth/secret-store";
 import { TokenAuthority } from "../src/auth/tokens";
 
 // Phase 5c Task 3: the skills.read/write/delete RPCs over the daemon's real SkillStore (wired
-// unconditionally in daemon.ts — skillStore needs only normaHome/trust, no agentProvider — same
+// unconditionally in daemon.ts — skillStore needs only winterHome/trust, no agentProvider — same
 // precedent as memory/routines/mcp; see daemon-memory-rpc.test.ts, which this file mirrors closely:
 // a dedicated real-daemon TestClient harness, kept in its own file rather than folded into
 // server.test.ts's existing skills.list tests).
@@ -66,7 +66,7 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
   let harnessToken: string;
 
   async function boot(): Promise<string> {
-    const home = mkdtempSync(join(tmpdir(), "norma-daemon-skills-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-daemon-skills-"));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     daemon = await startDaemon({ home, secrets, agentProvider: null });
     harnessToken = daemon.tokens.harness;
@@ -75,7 +75,7 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
 
   afterEach(() => daemon?.stop());
 
-  test("write -> list (author norma) -> read -> delete round trip", async () => {
+  test("write -> list (author winter) -> read -> delete round trip", async () => {
     await boot();
     const c = await TestClient.connect(daemon.socketPath);
     await c.hello(harnessToken, "skills-tester");
@@ -89,12 +89,12 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
     const listed = await c.request(METHODS.skillsList, {});
     expect(listed.error).toBeUndefined();
     const meta = listed.result.skills.find((s: { name: string }) => s.name === "release-notes");
-    expect(meta).toMatchObject({ name: "release-notes", description: "Draft release notes", source: "self", author: "norma" });
+    expect(meta).toMatchObject({ name: "release-notes", description: "Draft release notes", source: "self", author: "winter" });
 
     const read = await c.request(METHODS.skillsRead, { name: "release-notes" });
     expect(read.error).toBeUndefined();
     expect(read.result.skill).toMatchObject({
-      name: "release-notes", description: "Draft release notes", source: "self", author: "norma",
+      name: "release-notes", description: "Draft release notes", source: "self", author: "winter",
     });
     expect(read.result.skill.body).toContain("Step one. Step two.");
 
@@ -144,7 +144,7 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
   // (there being no self/<name> to delete, deleteSelf on its own can't tell "wrong source" apart
   // from "never existed").
   test("deleting a name that resolves to a non-self source (user root) -> INVALID_PARAMS, refused before touching self/", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-daemon-skills-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-daemon-skills-"));
     mkdirSync(join(home, "skills", "greet"), { recursive: true });
     writeFileSync(join(home, "skills", "greet", "SKILL.md"), "---\nname: greet\ndescription: Say hi\n---\nSay hello warmly.\n");
     const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -183,7 +183,7 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
   // store (pre-existing behavior, unchanged); read/write/delete are typed INTERNAL. Reached via a
   // bare startIpcServer with no `skills` wired — the daemon fixture above always wires one.
   test("no SkillStore wired: list degrades to empty; read/write/delete are typed INTERNAL", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-skills-no-store-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-skills-no-store-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -214,7 +214,7 @@ describe("skills.read/write/delete RPCs (Phase 5c Task 3)", () => {
   // (ipc/server.ts, checked BEFORE the switch) rejects a plugin connection regardless of whether
   // `skills` is wired.
   test("skills.read/write/delete are role-rejected for a plugin connection, exactly like memory.*", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-skills-plugin-role-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-skills-plugin-role-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));

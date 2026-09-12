@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "../../src/sessions/store";
 
-function freshStore() { return new SessionStore(mkdtempSync(join(tmpdir(), "norma-test-"))); }
+function freshStore() { return new SessionStore(mkdtempSync(join(tmpdir(), "winter-test-"))); }
 
 /** Deletes index.db (+ WAL/SHM sidecars) so the next `new SessionStore(dir)` must rebuild the
  *  index purely from the on-disk JSONL logs — same technique as store.test.ts's
@@ -44,7 +44,7 @@ describe("dispatch session store", () => {
   // history. mode now rides the session_created event (events.ts's SessionCreatedEvent), so
   // recoverAll's pass-2 INSERT can restore it.
   test("dispatch singleton survives a full index rebuild", () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-test-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-test-"));
     const store = new SessionStore(dir);
     const d = store.createSession("global", { mode: "dispatch", origin: "dispatch" });
     const codeSession = store.createSession("global", {}); // plain session, no mode option — absent means "code"
@@ -57,7 +57,7 @@ describe("dispatch session store", () => {
   });
 
   test("old-format session_created (no mode field) rebuilds fine: mode NULL, no crash, no invention", () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-test-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-test-"));
     const store = new SessionStore(dir);
     const id = store.createSession("global"); // creates the scope dir + a real log file
     store.close();

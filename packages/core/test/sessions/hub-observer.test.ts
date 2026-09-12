@@ -7,7 +7,7 @@ import { SessionHub } from "../../src/sessions/hub";
 
 describe("SessionHub.addObserver", () => {
   test("observer sees appended events across sessions; unsubscribe stops delivery; no events appended by observing", () => {
-    const store = new SessionStore(mkdtempSync(join(tmpdir(), "norma-test-")));
+    const store = new SessionStore(mkdtempSync(join(tmpdir(), "winter-test-")));
     const hub = new SessionHub(store);
     const a = store.createSession("global", {});
     const seen: string[] = [];

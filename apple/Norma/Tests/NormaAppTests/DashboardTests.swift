@@ -1,7 +1,7 @@
 import XCTest
 import AppKit
-import NormaKit
-@testable import Norma
+import WinterKit
+@testable import Winter
 
 /// Task 5 (2f-ii): originally the Dashboard WINDOW's pure pieces + a construction/singleton smoke
 /// test. Task 7: the window is gone (`DashboardWindowController`/`Dashboard/DashboardView.swift`
@@ -30,18 +30,18 @@ final class DashboardTests: XCTestCase {
     // MARK: - formatDaemonStatus (PURE, DaemonStatusPane.swift)
 
     func testFormatDaemonStatusWithFullProvider() {
-        let d = formatDaemonStatus(version: "0.1.0", uptimeMs: 123_000, socketPath: "/tmp/norma.sock", providerId: "conn_1", providerModel: "gpt-5", sessionsCount: 3, pluginsCount: 0)
+        let d = formatDaemonStatus(version: "0.1.0", uptimeMs: 123_000, socketPath: "/tmp/winter.sock", providerId: "conn_1", providerModel: "gpt-5", sessionsCount: 3, pluginsCount: 0)
         XCTAssertEqual(d.version, "0.1.0")
         XCTAssertEqual(d.uptime, formatElapsed(123_000)) // "2m 3s" — reuses the shared task-display helper
         XCTAssertEqual(d.uptime, "2m 3s")
-        XCTAssertEqual(d.socketPath, "/tmp/norma.sock")
+        XCTAssertEqual(d.socketPath, "/tmp/winter.sock")
         XCTAssertEqual(d.provider, "conn_1 (gpt-5)")
         XCTAssertEqual(d.sessionsCount, "3")
         XCTAssertEqual(d.pluginsCount, "0")
     }
 
     func testFormatDaemonStatusWithNoProvider() {
-        let d = formatDaemonStatus(version: "0.1.0", uptimeMs: 3_840_000, socketPath: "/tmp/norma.sock", providerId: nil, providerModel: nil, sessionsCount: 0, pluginsCount: 0)
+        let d = formatDaemonStatus(version: "0.1.0", uptimeMs: 3_840_000, socketPath: "/tmp/winter.sock", providerId: nil, providerModel: nil, sessionsCount: 0, pluginsCount: 0)
         XCTAssertEqual(d.provider, "none")
         XCTAssertEqual(d.uptime, "1h 4m")
     }
@@ -49,7 +49,7 @@ final class DashboardTests: XCTestCase {
     /// A providerId present without a model (contract doesn't guarantee they're always paired) —
     /// falls back to the bare id rather than dropping the provider entirely.
     func testFormatDaemonStatusWithProviderIdOnly() {
-        let d = formatDaemonStatus(version: "0.1.0", uptimeMs: 14_000, socketPath: "/tmp/norma.sock", providerId: "conn_1", providerModel: nil, sessionsCount: 1, pluginsCount: 0)
+        let d = formatDaemonStatus(version: "0.1.0", uptimeMs: 14_000, socketPath: "/tmp/winter.sock", providerId: "conn_1", providerModel: nil, sessionsCount: 1, pluginsCount: 0)
         XCTAssertEqual(d.provider, "conn_1")
         XCTAssertEqual(d.uptime, "14s")
     }
@@ -161,14 +161,14 @@ final class DashboardTests: XCTestCase {
     func testSkillsGroupedBySourceOrdersGroupsAndOmitsEmptyOnes() {
         let skills = [
             skill("b-skill", source: "builtin"),
-            skill("self-skill", source: "self", author: "norma"),
+            skill("self-skill", source: "self", author: "winter"),
             skill("proj-skill", source: "project"),
         ]
         let groups = skillsGroupedBySource(skills)
         XCTAssertEqual(groups.map(\.source), ["project", "self", "builtin"], "user/plugin have no skills — no empty groups")
         XCTAssertEqual(groups[0].skills.map(\.name), ["proj-skill"])
         XCTAssertEqual(groups[1].skills.map(\.name), ["self-skill"])
-        XCTAssertEqual(groups[1].skills[0].author, "norma")
+        XCTAssertEqual(groups[1].skills[0].author, "winter")
         XCTAssertEqual(groups[2].skills.map(\.name), ["b-skill"])
     }
 
@@ -257,17 +257,17 @@ final class DashboardTests: XCTestCase {
 
 }
 
-/// A minimal `NormaClient` for tests that only need a real instance to satisfy a type signature
+/// A minimal `WinterClient` for tests that only need a real instance to satisfy a type signature
 /// (constructing `DashboardWindowController` closes over `client.daemonStatus()`/etc. as lazy
 /// async closures — none of them are ever awaited in these construction-only tests) — never
 /// connects, mirroring `PeripheralProviderTests`' own posture of never touching the network.
-enum NormaClientTestFactory {
-    static func make() -> NormaClient {
-        NormaClient(makeTransport: { NeverOpensTransport() }, token: "test-token", clientName: "dashboard-tests")
+enum WinterClientTestFactory {
+    static func make() -> WinterClient {
+        WinterClient(makeTransport: { NeverOpensTransport() }, token: "test-token", clientName: "dashboard-tests")
     }
 }
 
-private final class NeverOpensTransport: NormaTransport, @unchecked Sendable {
+private final class NeverOpensTransport: WinterTransport, @unchecked Sendable {
     let incoming: AsyncStream<TransportEvent> = AsyncStream { _ in }
     func open() async throws { throw NSError(domain: "NeverOpensTransport", code: 1) }
     func send(_ data: Data) async throws {}

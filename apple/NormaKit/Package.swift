@@ -2,17 +2,17 @@
 import PackageDescription
 
 let package = Package(
-    name: "NormaKit",
+    name: "WinterKit",
     // SP3: OS floor raised to 26 across the board (see docs/RELEASE-NOTES-sp3-os-floor.md).
     platforms: [.macOS("26.0"), .iOS("26.0")],
     products: [
-        .library(name: "NormaKit", targets: ["NormaKit"]),
-        .library(name: "NormaSessionKit", targets: ["NormaSessionKit"]),
-        .executable(name: "norma-probe", targets: ["norma-probe"]),
-        .executable(name: "norma-fake-phone", targets: ["norma-fake-phone"]),
+        .library(name: "WinterKit", targets: ["WinterKit"]),
+        .library(name: "WinterSessionKit", targets: ["WinterSessionKit"]),
+        .executable(name: "winter-probe", targets: ["winter-probe"]),
+        .executable(name: "winter-fake-phone", targets: ["winter-fake-phone"]),
     ],
     dependencies: [
-        .package(path: "../NormaProtocol"),
+        .package(path: "../WinterProtocol"),
     ],
     targets: [
         // iroh-ffi v1.1.0's Apple XCFramework: raw C FFI only (module `Iroh`,
@@ -42,16 +42,16 @@ let package = Package(
             ]
         ),
         // SP3 Task 1: the pure/portable seam (RemoteConn/RemoteListener + loopback/scripted test
-        // doubles, ResumePlanner) carved out of NormaKit so an iOS app can link it without any
-        // Mac-only NormaKit code. Later SP3 tasks move the iroh transport + session client here.
-        .target(name: "NormaSessionKit", dependencies: ["NormaProtocol", "IrohLib"]),
-        .target(name: "NormaKit", dependencies: ["NormaProtocol", "IrohLib", "NormaSessionKit"]),
-        .executableTarget(name: "norma-probe", dependencies: ["NormaKit", "NormaProtocol"]),
+        // doubles, ResumePlanner) carved out of WinterKit so an iOS app can link it without any
+        // Mac-only WinterKit code. Later SP3 tasks move the iroh transport + session client here.
+        .target(name: "WinterSessionKit", dependencies: ["WinterProtocol", "IrohLib"]),
+        .target(name: "WinterKit", dependencies: ["WinterProtocol", "IrohLib", "WinterSessionKit"]),
+        .executableTarget(name: "winter-probe", dependencies: ["WinterKit", "WinterProtocol"]),
         // SP2b Task 5: the dev/fake-phone CLI — closes the pairing loop end-to-end without any
         // iOS code (`PhonePairingClient` is the reusable phone-side ceremony it drives). SP3 Task 2:
-        // `PhonePairingClient` moved into `NormaSessionKit`, so this target now depends on it
+        // `PhonePairingClient` moved into `WinterSessionKit`, so this target now depends on it
         // directly too (the CLI's own hand-rolled attach dial is untouched — that's SP3 Task 5).
-        .executableTarget(name: "norma-fake-phone", dependencies: ["NormaKit", "NormaProtocol", "NormaSessionKit", "IrohLib"]),
-        .testTarget(name: "NormaKitTests", dependencies: ["NormaKit", "IrohLib", "NormaSessionKit"]),
+        .executableTarget(name: "winter-fake-phone", dependencies: ["WinterKit", "WinterProtocol", "WinterSessionKit", "IrohLib"]),
+        .testTarget(name: "WinterKitTests", dependencies: ["WinterKit", "IrohLib", "WinterSessionKit"]),
     ]
 )

@@ -1,6 +1,6 @@
 import XCTest
-import NormaProtocol
-@testable import Norma
+import WinterProtocol
+@testable import Winter
 
 /// mac-chat-parity Task 3 — the REDUCER half of "cards inline, permanent, and correct".
 ///

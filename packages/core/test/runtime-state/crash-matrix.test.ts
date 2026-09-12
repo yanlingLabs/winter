@@ -21,9 +21,9 @@ const SELF = { pid: process.pid, startedAt: "2026-01-01T00:00:00.000Z" };
 const DEAD = { pid: 999_001, startedAt: "2026-01-01T00:00:00.000Z" };
 
 /** A recovery run over a temp home, with step 8's scan (AND, Major 1, its `claude-resume-*` staging
- *  sweep) pointed at that home rather than at the developer's real `/private/tmp/norma-<uid>`.
+ *  sweep) pointed at that home rather than at the developer's real `/private/tmp/winter-<uid>`.
  *  This file calls `recoverRuntimeState` directly rather than through `startRuntimeState`, so
- *  `support.ts`'s `NORMA_CLAUDE_RESUME_SCAN_ROOT` env seam is never consulted here — the explicit
+ *  `support.ts`'s `WINTER_CLAUDE_RESUME_SCAN_ROOT` env seam is never consulted here — the explicit
  *  dep is the only thing that keeps this file off the real machine's tmpdir. `probe` describes the
  *  machine the leases claim. */
 const recover = (home: string, rs: RuntimeStateDb, store: SessionStore, probe?: LeaseProbe) =>
@@ -45,7 +45,7 @@ function seedRecord(rs: RuntimeStateDb, id: string): RuntimeSessionRecords {
 const probeOf = (alive: boolean, startedAt: string): LeaseProbe => ({ alive: () => alive, startedAt: () => startedAt });
 
 describe("crash row (a) — runtime-state.db missing or corrupt refuses runtime routing until repaired", () => {
-  test("a corrupt database refuses to open, typed, and `norma doctor` reports it as the ONLY finding", async () => {
+  test("a corrupt database refuses to open, typed, and `winter doctor` reports it as the ONLY finding", async () => {
     await withTempHome(async (home) => {
       const rs = openRuntimeStateDb(home);
       seedRecord(rs, "s_a");

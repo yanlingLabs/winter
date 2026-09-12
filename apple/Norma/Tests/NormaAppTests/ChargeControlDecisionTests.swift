@@ -2,7 +2,7 @@ import XCTest
 
 /// Table test for `chargeControlDecision` (SMCController.swift) — the pure hysteresis core of
 /// `ChargeManager`'s CHTE monitoring loop. Dual membership comes along for free: this file lives
-/// in `Tests/NormaAppTests`, which project.yml already includes wholesale in `NormaAppTests`.
+/// in `Tests/WinterAppTests`, which project.yml already includes wholesale in `WinterAppTests`.
 final class ChargeControlDecisionTests: XCTestCase {
 
     func test_socAboveTarget_inhibits() {

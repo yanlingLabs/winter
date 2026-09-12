@@ -72,7 +72,7 @@ describe("minimalOsEnvironment", () => {
       // None of these belong in a supervised child's environment (§3: "a REPLACEMENT built from an
       // allowlist; nothing is inherited").
       SECRET_TOKEN: "sk-should-never-appear",
-      NORMA_HOME: "/Users/x/.norma",
+      WINTER_HOME: "/Users/x/.winter",
       WINTER_HOME: "/Users/x/.winter",
       ANTHROPIC_API_KEY: "sk-also-never",
       RANDOM_VAR: "whatever",
@@ -101,17 +101,17 @@ describe("minimalOsEnvironment", () => {
 // ── autoMemoryDirectoryFor ───────────────────────────────────────────────────────────────────────
 
 describe("autoMemoryDirectoryFor", () => {
-  const HOME = "/Users/x/.norma-test-home";
+  const HOME = "/Users/x/.winter-test-home";
   const base = (mode: OfficialSessionInput["mode"]): OfficialSessionInput => ({ sessionId: "s_1", mode, cwd: "/Users/x/repo" });
 
   test("code -> the SAME per-project MEMDIR the Winter leg's memoryDirFor resolves to", () => {
     const input = base("code");
-    expect(autoMemoryDirectoryFor(input, HOME)).toBe(memoryDirFor(input.cwd, { normaHome: HOME }));
+    expect(autoMemoryDirectoryFor(input, HOME)).toBe(memoryDirFor(input.cwd, { winterHome: HOME }));
   });
 
   test("dispatch and chat -> the SAME shared _assistant bucket assistantMemoryDirFor resolves to", () => {
-    expect(autoMemoryDirectoryFor(base("dispatch"), HOME)).toBe(assistantMemoryDirFor({ normaHome: HOME }));
-    expect(autoMemoryDirectoryFor(base("chat"), HOME)).toBe(assistantMemoryDirFor({ normaHome: HOME }));
+    expect(autoMemoryDirectoryFor(base("dispatch"), HOME)).toBe(assistantMemoryDirFor({ winterHome: HOME }));
+    expect(autoMemoryDirectoryFor(base("chat"), HOME)).toBe(assistantMemoryDirFor({ winterHome: HOME }));
   });
 
   test("dispatch/chat and code resolve to DIFFERENT directories (the split is real, not accidental equality)", () => {
@@ -129,7 +129,7 @@ function minimalDeps(overrides: Partial<OfficialInputDeps> = {}): OfficialInputD
     authFamily: "custom", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
   };
   return {
-    home: "/Users/x/.norma-test-home",
+    home: "/Users/x/.winter-test-home",
     selection,
     explicitCredentials: [],
     explicitConnectionEnv: {},
@@ -200,7 +200,7 @@ describe("officialInputFor — official_project_key_too_deep", () => {
 // `<home>/runtimes/` is denied under both `auto` and `dont-ask` — all with `controlPlaneDenyRules`'s
 // rules UNCHANGED, no second anchoring scheme needed (measured, not assumed).
 describe("officialInputFor — the control-plane fence (C1)", () => {
-  function optionsFor(mode: OfficialSessionInput["mode"], home = "/Users/x/.norma-test-home"): Record<string, unknown> {
+  function optionsFor(mode: OfficialSessionInput["mode"], home = "/Users/x/.winter-test-home"): Record<string, unknown> {
     const input: OfficialSessionInput = { sessionId: "s_1", mode, cwd: "/Users/x/repo" };
     const result = officialInputFor(input, minimalDeps({ home }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
@@ -208,7 +208,7 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
   }
 
   test("settings.permissions.deny is EXACTLY controlPlaneDenyRules(home) — the same builder Winter uses", () => {
-    const home = "/Users/x/.norma-test-home";
+    const home = "/Users/x/.winter-test-home";
     const options = optionsFor("code", home);
     const settings = options.settings as { permissions?: { deny?: string[] } } | undefined;
     expect(settings?.permissions?.deny).toEqual(controlPlaneDenyRules(home));
@@ -217,7 +217,7 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
   });
 
   test("settings.sandbox is EXACTLY sandboxConfigFor(home) — same real directory paths, no globs", () => {
-    const home = "/Users/x/.norma-test-home";
+    const home = "/Users/x/.winter-test-home";
     const options = optionsFor("code", home);
     const settings = options.settings as { sandbox?: unknown } | undefined;
     expect(settings?.sandbox).toEqual(sandboxConfigFor(home));
@@ -234,8 +234,8 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
   });
 
   test("a DIFFERENT home produces DIFFERENT rules — the fence is keyed off the real session home, not a constant", () => {
-    const a = optionsFor("code", "/Users/x/.norma-test-home");
-    const b = optionsFor("code", "/Users/y/.norma-other-home");
+    const a = optionsFor("code", "/Users/x/.winter-test-home");
+    const b = optionsFor("code", "/Users/y/.winter-other-home");
     const denyA = (a.settings as { permissions?: { deny?: string[] } }).permissions?.deny;
     const denyB = (b.settings as { permissions?: { deny?: string[] } }).permissions?.deny;
     expect(denyA).not.toEqual(denyB);

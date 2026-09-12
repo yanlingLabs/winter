@@ -1,6 +1,6 @@
 import Foundation
-import NormaProtocol
-import NormaKit
+import WinterProtocol
+import WinterKit
 
 struct TaskItem: Equatable {
     let id: String
@@ -51,7 +51,7 @@ struct ChildItem: Equatable, Identifiable {
 /// `workflow_*` SessionEvents (`workflowStarted`/`workflowProgress`/`workflowCompleted`/
 /// `workflowFailed`, Task D1), exactly like `ChildItem` above folds `child_update`. Keyed by runId
 /// in `OrbSessionState.workflowRuns` (a Dictionary — see that field's own doc for why, unlike
-/// `children`'s ordered array). `status` mirrors NormaKit's `WorkflowRunView.status` wire
+/// `children`'s ordered array). `status` mirrors WinterKit's `WorkflowRunView.status` wire
 /// convention (a plain String — "running"/"completed"/"failed"; never "stopped", see the reducer's
 /// own doc on `workflowStop`), not a Swift enum a future server status would fail to decode.
 struct WorkflowRunState: Equatable, Identifiable {
@@ -237,7 +237,7 @@ func interactionOutcomeMayBeReplaced(current: InteractionRecord.Outcome?, with n
 }
 
 /// diff-tabs Task 9: one file edit's diff, as the transcript knows it — folded from
-/// `tool_result.fileDiff` (`SessionEvent.FileDiffSummary`, NormaProtocol) and rendered as the
+/// `tool_result.fileDiff` (`SessionEvent.FileDiffSummary`, WinterProtocol) and rendered as the
 /// clickable chip on an edit/write/notebook row.
 ///
 /// **A separate app type from the wire's `FileDiffSummary`, the same deliberate separation
@@ -1181,7 +1181,7 @@ enum SessionReducer {
     ///    call produces a readable row; only a missing/mistyped verb yields `nil`.
     /// 3. **Content the agent wrote INTO SOMETHING is never surfaced; content it wrote FOR THE USER
     ///    may be.** `browser type` shows its `selector`, never its `text`; `computer` shows `keys`
-    ///    (a shortcut) but never `text`. Norma is driving the user's own logged-in browser and their
+    ///    (a shortcut) but never `text`. Winter is driving the user's own logged-in browser and their
     ///    own screen — a transcript row is not the place for whatever got typed into them. The line
     ///    is the destination, not the authorship: `push_notification` falls back to its `message`,
     ///    and `AskQuestion`/`ask_user` show the `question`, all three agent-authored and all three
@@ -1406,7 +1406,7 @@ final class SessionModel: ObservableObject {
         state = SessionReducer.reduceConnection(state, connection)
     }
 
-    /// M2 contract: NormaClient.connect() yields NO initial `.connected` event —
+    /// M2 contract: WinterClient.connect() yields NO initial `.connected` event —
     /// the app layer calls this after connect() returns.
     func markConnected() {
         state = SessionReducer.reduceConnection(state, .connected)
@@ -1423,7 +1423,7 @@ final class SessionModel: ObservableObject {
     /// `OrbSessionState` fields directly (e.g. `turnRunning`, `tasks`) without constructing a full
     /// `SessionEvent`/`SessionReducer` round trip for state combinations the real event stream
     /// wouldn't produce on its own (e.g. "turnRunning with no tasks"). Internal, not `public` —
-    /// reachable from `FluidStateTests` via `@testable import Norma`, same convention as
+    /// reachable from `FluidStateTests` via `@testable import Winter`, same convention as
     /// `OrbWindowController.morphProgressForTesting`.
     func applyForTesting(_ mutate: (inout OrbSessionState) -> Void) {
         mutate(&state)

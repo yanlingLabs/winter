@@ -1,18 +1,18 @@
 import XCTest
-import NormaKit
-import NormaProtocol
-@testable import Norma
+import WinterKit
+import WinterProtocol
+@testable import Winter
 
 /// panel-shell T7: mirrors Task 5's TS fold tests (`packages/core/test/panel/store.test.ts`) case
 /// for case — same five scenarios, same assertions, proving the Swift fold's semantics match the
 /// daemon's `foldPanelTabs` (`packages/core/src/panel/store.ts`) exactly.
 ///
 /// `ev(_:)` decodes real wire JSON — the `WorkflowReducerTests`/`SessionModelTests` idiom — rather
-/// than constructing `SessionEvent.PanelTabOpened`/etc. payloads directly: those NormaProtocol
+/// than constructing `SessionEvent.PanelTabOpened`/etc. payloads directly: those WinterProtocol
 /// structs have no PUBLIC memberwise init (only `Codable`'s synthesized `init(from:)` is public;
 /// see `SessionEvent.swift`'s own precedent — `UserMessage`/`TurnStarted`/etc. spell out an
 /// explicit `public init` exactly where a Swift PRODUCER needs to construct one directly), so
-/// decoding wire JSON is the only construction path available outside the NormaProtocol module.
+/// decoding wire JSON is the only construction path available outside the WinterProtocol module.
 final class PanelTabFoldTests: XCTestCase {
     private func ev(_ json: String) -> SessionEvent {
         try! JSONDecoder().decode(SessionEvent.self, from: Data(json.utf8))

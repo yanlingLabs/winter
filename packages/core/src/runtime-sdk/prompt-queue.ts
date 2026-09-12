@@ -8,7 +8,7 @@
  * only when the iterable itself completes — so "the host pushes later user turns by writing into
  * its own `AsyncIterable<string>`… That is the mechanism, and the SDK provides no helper for it on
  * the Winter leg" (the router ships `createOfficialInputStream()` for the OFFICIAL leg only). This
- * module is Norma's.
+ * module is Winter's.
  *
  * Closing the queue is also how a session ENDS cleanly (§2.5 way 1): `close()` → the iterable
  * completes → `end_input` → the child finishes its last turn and EOFs stdout.

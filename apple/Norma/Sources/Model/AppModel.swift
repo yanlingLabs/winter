@@ -1,6 +1,6 @@
 import Foundation
-import NormaProtocol
-import NormaKit
+import WinterProtocol
+import WinterKit
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -16,7 +16,7 @@ final class AppModel: ObservableObject {
     /// against THIS SAME client/socket — the daemon rule (Task 3's server wiring) is THE provider =
     /// the most-recent-advertiser CONNECTION, so advertise/respond/revoke must all go through the
     /// app's MAIN feed client, never a second one.
-    var client: NormaClient { feed.client }
+    var client: WinterClient { feed.client }
     /// Task 5 (2e-iii): the left sidebar's live session list (`SessionSidebar`, not yet mounted —
     /// Task 6 does that). Lists via this AppModel's own `client`, same socket the orb's focus-follow
     /// feed already uses — no second harness for the directory.
@@ -29,11 +29,11 @@ final class AppModel: ObservableObject {
     private var selfCreatedSessionId: String?
 
     /// Task 3 (2d-ii-b): stashed so `makeDetachedFeed(sessionId:)` can mint a FRESH `SessionFeed`
-    /// (its own `NormaClient`/socket — a full harness, spec §"harness-per-window") for a detached
+    /// (its own `WinterClient`/socket — a full harness, spec §"harness-per-window") for a detached
     /// window, sharing the same transport factory + token AppModel itself connects with (one
     /// Keychain read, shared — no per-window Keychain prompts). Previously only passed through to
     /// the `followFocus` feed built in `init` below; nothing needed to reconstruct another one.
-    private let makeTransport: @Sendable () -> NormaTransport
+    private let makeTransport: @Sendable () -> WinterTransport
     private let token: String
     private let clientName: String
 
@@ -69,7 +69,7 @@ final class AppModel: ObservableObject {
     /// independently-drifting literal.
     static let ownClientName = "orb"
 
-    init(makeTransport: @escaping @Sendable () -> NormaTransport, token: String, clientName: String = AppModel.ownClientName) {
+    init(makeTransport: @escaping @Sendable () -> WinterTransport, token: String, clientName: String = AppModel.ownClientName) {
         self.makeTransport = makeTransport
         self.token = token
         self.clientName = clientName
@@ -112,12 +112,12 @@ final class AppModel: ObservableObject {
     }
 
     /// Production wiring: harness token from the Keychain, profile-resolved unix socket (devfix
-    /// socket strand — `NormaPaths.socketPath(home:)` with `AppProfile.normaHome`, not the bare
+    /// socket strand — `WinterPaths.socketPath(home:)` with `AppProfile.winterHome`, not the bare
     /// no-arg `socketPath()`, so a dev-profile app dials its OWN daemon's socket instead of
-    /// whatever `$NORMA_HOME` independently resolves to).
+    /// whatever `$WINTER_HOME` independently resolves to).
     static func production() throws -> AppModel {
         let token = try KeychainToken.readHarnessToken(service: AppProfile.keychainService)
-        let path = NormaPaths.socketPath(home: AppProfile.normaHome)
+        let path = WinterPaths.socketPath(home: AppProfile.winterHome)
         return AppModel(makeTransport: { UnixSocketTransport(path: path) }, token: token)
     }
 
@@ -173,7 +173,7 @@ final class AppModel: ObservableObject {
     /// succeed" had no choice but to infer it from `focusedSessionId` afterward — which silently
     /// stays whatever it already was (a STALE pre-existing focus, if one existed) when the create
     /// RPC fails, since nothing here ever clears it on failure. `AppDelegate`'s now-retired
-    /// `openStandaloneNormaWindow()` (App shell T6) used to read `focusedSessionId` that way and
+    /// `openStandaloneWinterWindow()` (App shell T6) used to read `focusedSessionId` that way and
     /// could spawn its standalone window on a stale prior session when the create failed. Returning
     /// the id makes success/failure the return value's
     /// job instead: `nil` unambiguously means "nothing was created," regardless of whatever
@@ -189,7 +189,7 @@ final class AppModel: ObservableObject {
         selfCreatedSessionId = created.sessionId // suppress the broadcast if it arrives AFTER us
         await refocus(onto: created.sessionId)
         // DEFECT FIX (residual leg, final-review Medium): `createSession` can succeed while the
-        // follow-up `refocus`'s `session.attach` then fails. `NormaClient.attach` rolls
+        // follow-up `refocus`'s `session.attach` then fails. `WinterClient.attach` rolls
         // `attachedSessionId` back to its pre-call value on throw, and `refocus`'s catch
         // reconciles `focusedSessionId` to that same rolled-back (STALE, pre-existing) session —
         // never to `created.sessionId`. Returning `focusedSessionId` unconditionally here would
@@ -251,7 +251,7 @@ final class AppModel: ObservableObject {
     /// Task 10 (Chat Slice D): the model menu's own focused-session surface for an EXPLICIT,
     /// user-driven model change — mirrors `setSessionPolicy` just above exactly (guard a focused
     /// session, `try?` the RPC, `nil`/throw means failure). `model: nil` clears the override
-    /// (`NormaClient.setModel` sends a literal wire `null`, never an omitted key). Unlike
+    /// (`WinterClient.setModel` sends a literal wire `null`, never an omitted key). Unlike
     /// `setSessionPolicy`, there is no mode-agnostic special case to guard here — `session.setModel`
     /// itself has none (ipc/server.ts's own doc comment: "no chat/dispatch special case").
     ///
@@ -277,7 +277,7 @@ final class AppModel: ObservableObject {
     /// exact twin on the other axis ("effort and model are two different things, just like the
     /// CLI"). `effort: nil` clears the override (a literal wire null). Like `setSessionModel`, there
     /// is no mode special case to guard here: `session.setEffort` is mode-agnostic — what IS
-    /// mode-scoped is which levels a picker may OFFER (a Norma tier is code-sessions-only), and that
+    /// mode-scoped is which levels a picker may OFFER (a Winter tier is code-sessions-only), and that
     /// is the picker's obligation, enforced daemon-side, not this method's.
     func setSessionEffort(_ effort: String?) async -> Bool {
         guard let sid = focusedSessionId else { return false }
@@ -304,7 +304,7 @@ final class AppModel: ObservableObject {
     // already asked THIS focused session about, so there is nothing to create here; no focused
     // session simply means there is nothing to respond to (fails closed, `false`).
     //
-    // `NormaClient`'s three respond methods each return `alreadyResolved` (a race indicator, not
+    // `WinterClient`'s three respond methods each return `alreadyResolved` (a race indicator, not
     // a success flag) — that's a different signal than "did the RPC succeed," so it's discarded
     // here in favor of the same `!= nil` success convention `sendOrSteer` already uses.
 
@@ -328,7 +328,7 @@ final class AppModel: ObservableObject {
     /// RPC straight to the child instead of this focused (dispatch) session. `nil` is the pre-
     /// Phase-7 behavior, unchanged: respond into whatever session is currently focused.
     /// `optionId` (SP-approvals T6): the allow-rule choice tapped, when the card offered any —
-    /// threaded straight through to `NormaKit`'s `approvalRespond`, `nil` for the plain Approve/
+    /// threaded straight through to `WinterKit`'s `approvalRespond`, `nil` for the plain Approve/
     /// Deny buttons (allow-once/deny carry no rule to persist).
     func respondApproval(callId: String, approved: Bool, optionId: String? = nil, childSessionId: String? = nil) async -> Bool {
         let target = childSessionId ?? focusedSessionId
@@ -354,7 +354,7 @@ final class AppModel: ObservableObject {
         try? await client.engineActivity()
     }
 
-    private func handle(_ ev: NormaEvent) async {
+    private func handle(_ ev: WinterEvent) async {
         switch ev {
         case .session(let e):
             if case .sessionCreated(let v) = e {
@@ -378,9 +378,9 @@ final class AppModel: ObservableObject {
             session.apply(connection: s)
             connectionSummary = summaryLine()
             // FINAL-REVIEW FIX (M1): `.connection(.connected)` arriving through the event pump is
-            // UNAMBIGUOUSLY a RECONNECT — `NormaClient.connect()`'s own initial success never
+            // UNAMBIGUOUSLY a RECONNECT — `WinterClient.connect()`'s own initial success never
             // yields this event (its contract: "no `.connection(.connected)` event for the INITIAL
-            // connect... Reconnects DO yield `.connection` states" — NormaClient.swift); the
+            // connect... Reconnects DO yield `.connection` states" — WinterClient.swift); the
             // initial connect fires `onClientConnected` directly via `feed.onConnected` above
             // instead. Re-fire the SAME hook Task 4 wired for the initial connect so
             // `PeripheralProvider.advertiseIfConnected()` runs again on reconnect too — otherwise a
@@ -468,7 +468,7 @@ final class AppModel: ObservableObject {
         do {
             _ = try await client.attach(sessionId: sessionId, fromSeq: 0)
         } catch {
-            // Target vanished or transport hiccuped: reconcile with NormaKit's ground truth
+            // Target vanished or transport hiccuped: reconcile with WinterKit's ground truth
             // (attach() rolled its state back), then fall back to the newest surviving session.
             focusedSessionId = await client.attachedSession
             // orb-scope review (Important 1): this fallback is a THIRD focus-acquisition site and
@@ -502,7 +502,7 @@ final class AppModel: ObservableObject {
 // MARK: - Winter Phase 8d Task 4.2: the ONE `session.setModel` outcome-routing door
 
 /// The richer answer `session.setModel` can now give beyond plain success/`NOT_FOUND` — the
-/// handoff barrier's four typed codes (`HandoffRpcCode`, NormaKit) plus `.ok` and a catch-all
+/// handoff barrier's four typed codes (`HandoffRpcCode`, WinterKit) plus `.ok` and a catch-all
 /// `.failed` for everything else (an unresolvable sessionId, a transport error, a refusal that
 /// carries no handoff code at all — e.g. `runtime_selection_refused`/`session_predates_winter_leg`,
 /// which ARE real refusals but not one of the four confirm/disable/error shapes a picker treats
@@ -523,7 +523,7 @@ enum ModelChangeOutcome: Equatable {
 extension AppModel {
     /// **THE ONE door every `session.setModel` call in the app goes through** (Task 4.2's own
     /// requirement) — static, not an instance method, because two of its four callers
-    /// (`ShellSessionHost`, `DetachedWindowController`) hold their OWN `NormaClient`
+    /// (`ShellSessionHost`, `DetachedWindowController`) hold their OWN `WinterClient`
     /// ("harness-per-window": each window is a full harness, not a facet of the orb's `AppModel`),
     /// so the shared decision logic must not require an `AppModel` instance to exist. The other two
     /// callers are `AppModel.setSessionModel` itself (the orb's focused-session surface) and
@@ -531,10 +531,10 @@ extension AppModel {
     /// session" stamp, which deliberately never blocks on the outcome — see that method's own doc
     /// comment for why a refusal there must never hold up the user's message).
     ///
-    /// Maps `RpcError.handoffCode` (NormaKit, Interfaces block) onto `ModelChangeOutcome` 1:1; any
+    /// Maps `RpcError.handoffCode` (WinterKit, Interfaces block) onto `ModelChangeOutcome` 1:1; any
     /// other thrown error (including a plain `RpcError` with no handoff code, and a transport
     /// failure) becomes `.failed(message)`.
-    static func applyModelChange(client: NormaClient, sessionId: String, model: String?, confirmLossy: Bool = false) async -> ModelChangeOutcome {
+    static func applyModelChange(client: WinterClient, sessionId: String, model: String?, confirmLossy: Bool = false) async -> ModelChangeOutcome {
         do {
             try await client.setModel(sessionId: sessionId, model: model, confirmLossy: confirmLossy)
             return .ok
@@ -557,15 +557,15 @@ extension AppModel {
 
     /// `settings.runtimes.advisorModel` (`packages/core/src/settings.ts`) is THE ONE D30 setting
     /// (P8d-8) — read/written here the SAME way `UpdaterCoordinator.readChannelFromSettings()`
-    /// already reads `updates.channel`: direct JSON file access via `NormaPaths.settingsPath`,
+    /// already reads `updates.channel`: direct JSON file access via `WinterPaths.settingsPath`,
     /// never an RPC. This IS the app's existing settings-access pattern (the brief's own "find the
     /// existing settings write path the app uses" — there is no generic `settings.set`-style RPC
     /// anywhere in the protocol to route through instead, and `provider.configure` is a scoped,
     /// purpose-specific BYOK verb with an unrelated params shape, not a general settings door; see
     /// this lane's report for the full note). The daemon's settings-watcher hot-reloads the file on
-    /// write, exactly as a `norma model` CLI edit does — no daemon restart, ever (P8d-8's rule).
+    /// write, exactly as a `winter model` CLI edit does — no daemon restart, ever (P8d-8's rule).
     ///
-    /// Uses `AppProfile.normaHome` explicitly (never the bare env-only `NormaPaths.settingsPath()`)
+    /// Uses `AppProfile.winterHome` explicitly (never the bare env-only `WinterPaths.settingsPath()`)
     /// — the SAME devfix discipline `AppModel.production()`/`AppDelegate` already apply to
     /// `socketPath`, for the identical reason: a dev build must never read or write the DIST home's
     /// settings.json.
@@ -574,7 +574,7 @@ extension AppModel {
     /// `winterOptionsFromSettings`'s own rule (`settings.ts`): a blank string is never READ as a
     /// model id, and is never WRITTEN — clearing removes the key rather than storing `""`.
     nonisolated static func readAdvisorModelFromSettings() -> String? {
-        let url = URL(fileURLWithPath: NormaPaths.settingsPath(home: AppProfile.normaHome))
+        let url = URL(fileURLWithPath: WinterPaths.settingsPath(home: AppProfile.winterHome))
         guard let data = try? Data(contentsOf: url),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let runtimes = obj["runtimes"] as? [String: Any],
@@ -605,7 +605,7 @@ extension AppModel {
     /// own `newChatAdvisorError`, rendered the same way `newChatCreate`'s failure banner is).
     @discardableResult
     nonisolated static func writeAdvisorModelToSettings(_ model: String?) -> Bool {
-        let url = URL(fileURLWithPath: NormaPaths.settingsPath(home: AppProfile.normaHome))
+        let url = URL(fileURLWithPath: WinterPaths.settingsPath(home: AppProfile.winterHome))
         var obj: [String: Any]
         if let data = try? Data(contentsOf: url) {
             guard let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {

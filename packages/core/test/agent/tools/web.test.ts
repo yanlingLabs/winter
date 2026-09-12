@@ -7,7 +7,7 @@ import { registerWebTools, ssrfGuard, htmlToText, extractTitle, followRedirects,
 import { extractLinks } from "../../../src/agent/tools/page-core";
 
 function tmp(): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), "norma-webfetch-")));
+  return realpathSync(mkdtempSync(join(tmpdir(), "winter-webfetch-")));
 }
 
 // --- Step 1: pure-fn tests (no live network) -------------------------------------------------
@@ -784,14 +784,14 @@ describe("web_search tool", () => {
     const audited: Record<string, unknown>[] = [];
     registerWebTools(r, { audit: (l) => audited.push(l), secret: fakeSecret(null) });
     const dir = tmp();
-    const out = await r.execute("web_search", { query: "norma agent" }, { cwd: dir, roots: [dir], sessionId: "s1", tmpDir: dir });
+    const out = await r.execute("web_search", { query: "winter agent" }, { cwd: dir, roots: [dir], sessionId: "s1", tmpDir: dir });
     expect(out.isError).toBe(true);
     // Branch review FIX 6: no `<key>` placeholder — the CLI's `--web-search-key` branch ignores a
-    // positional value and prompts via readSecret regardless, so the OLD wording ("norma login
+    // positional value and prompts via readSecret regardless, so the OLD wording ("winter login
     // --web-search-key <key> ...") described a command that doesn't do what it implies.
-    expect(out.output).toBe("web_search needs an API key — store one with: norma login --web-search-key (Brave Search API)");
+    expect(out.output).toBe("web_search needs an API key — store one with: winter login --web-search-key (Brave Search API)");
     expect(audited.length).toBe(1);
-    expect(audited[0]).toMatchObject({ kind: "network", tool: "web_search", query: "norma agent", outcome: "no_key" });
+    expect(audited[0]).toMatchObject({ kind: "network", tool: "web_search", query: "winter agent", outcome: "no_key" });
   });
 
   // Branch review FIX 1 (Important/security): the identical twin of chat's Search key leak — Bun's
@@ -813,7 +813,7 @@ describe("web_search tool", () => {
 
   // --- final re-review must-fix: search.ts's identical twin (see its comment for full reasoning)
   // — the ORIGINAL FIX 1 redirected the raw detail to console.error and called it done, but
-  // ~/.norma/logs/core.err.log (where launchd.ts sends the daemon's stderr) is deliberately
+  // ~/.winter/logs/core.err.log (where launchd.ts sends the daemon's stderr) is deliberately
   // agent-readable, so the key must be redacted before it's logged, not just before it's returned.
   // Short, obviously-fake token (not a realistic-looking secret) — asserts on absence only.
   test("the key is redacted from the console.error line too — a useful diagnostic survives", async () => {

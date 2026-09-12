@@ -62,14 +62,14 @@
       
     <draw:page draw:name="T8Slide1" draw:style-name="dp1" draw:master-page-name="Default" presentation:presentation-page-layout-name="AL1T0">
       <draw:rect draw:style-name="T8Slide1Fill" draw:text-style-name="T8Slide1Text" draw:layer="layout" svg:width="20cm" svg:height="10cm" svg:x="1cm" svg:y="1cm">
-        <text:p>NORMA T8 SLIDE ONE</text:p>
+        <text:p>WINTER T8 SLIDE ONE</text:p>
       </draw:rect>
     </draw:page>
 
       
     <draw:page draw:name="T8Slide2" draw:style-name="dp1" draw:master-page-name="Default" presentation:presentation-page-layout-name="AL1T0">
       <draw:rect draw:style-name="T8Slide2Fill" draw:text-style-name="T8Slide2Text" draw:layer="layout" svg:width="20cm" svg:height="10cm" svg:x="1cm" svg:y="1cm">
-        <text:p>NORMA T8 SLIDE TWO</text:p>
+        <text:p>WINTER T8 SLIDE TWO</text:p>
       </draw:rect>
     </draw:page>
 

@@ -2,12 +2,12 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
-import NormaKit
+import WinterKit
 import ScreenCaptureKit
 
 // -----------------------------------------------------------------------------------------------
 // Computer use (Phase 5 CU) — the screenshot / ax-read / input-drive capability implementations
-// Norma.app serves behind the peripheral lease. Structured (like HardwareBridge) as a PURE core —
+// Winter.app serves behind the peripheral lease. Structured (like HardwareBridge) as a PURE core —
 // payload parsing, the AX-tree text formatter, the chord parser, the downscale math — plus a thin
 // protocol seam (`ComputerCapabilities`) whose LIVE implementation touches CoreGraphics / the
 // accessibility APIs / CGEvent. Tests drive the pure functions directly and the dispatch with a
@@ -372,7 +372,7 @@ final class LiveComputerCapabilities: ComputerCapabilities {
     /// six input ops (click/move/drag/type/key/scroll), same actionable message everywhere.
     private func requireInputTrust() throws {
         guard AXIsProcessTrusted() else {
-            throw ComputerError(message: "accessibility permission not granted — grant Norma in System Settings › Privacy & Security › Accessibility, then retry")
+            throw ComputerError(message: "accessibility permission not granted — grant Winter in System Settings › Privacy & Security › Accessibility, then retry")
         }
     }
 
@@ -385,7 +385,7 @@ final class LiveComputerCapabilities: ComputerCapabilities {
     private func captureMainDisplayImage() async throws -> CGImage {
         guard CGPreflightScreenCaptureAccess() else {
             _ = CGRequestScreenCaptureAccess() // triggers the system prompt for next time
-            throw ComputerError(message: "screen recording permission not granted — grant Norma in System Settings › Privacy & Security › Screen Recording, then retry")
+            throw ComputerError(message: "screen recording permission not granted — grant Winter in System Settings › Privacy & Security › Screen Recording, then retry")
         }
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         // Pick the MAIN display explicitly — SCShareableContent.displays order is undocumented, and
@@ -458,7 +458,7 @@ final class LiveComputerCapabilities: ComputerCapabilities {
 
     private func snapshotAX() throws -> String {
         guard AXIsProcessTrusted() else {
-            throw ComputerError(message: "accessibility permission not granted — grant Norma in System Settings › Privacy & Security › Accessibility, then retry")
+            throw ComputerError(message: "accessibility permission not granted — grant Winter in System Settings › Privacy & Security › Accessibility, then retry")
         }
         guard let app = NSWorkspace.shared.frontmostApplication else {
             throw ComputerError(message: "no frontmost application to inspect")
@@ -627,7 +627,7 @@ final class LiveComputerCapabilities: ComputerCapabilities {
 }
 
 /// Encode a `CUResult` into the `peripheral.respond` resultJson shape the core `computer` tool
-/// expects. Pure + unit-tested. Uses NormaKit's `JSONValue` (same as `serveNoop`'s echo path).
+/// expects. Pure + unit-tested. Uses WinterKit's `JSONValue` (same as `serveNoop`'s echo path).
 func encodeCUResult(_ result: CUResult) -> String? {
     let value: JSONValue
     switch result {

@@ -1,7 +1,7 @@
 import AppKit
-import NormaProtocol
+import WinterProtocol
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// b2-agent-browser Task 3 — the `panel_command` consumer.
 ///
@@ -72,7 +72,7 @@ final class PanelCommandConsumerTests: XCTestCase {
     }
 
     /// Built as WIRE JSON and decoded, never with a memberwise initialiser — `PanelCommand`'s is
-    /// internal to NormaProtocol, and going through the real decode is the honest shape anyway: it
+    /// internal to WinterProtocol, and going through the real decode is the honest shape anyway: it
     /// is exactly what `parseServerLine` hands the pump, and it keeps a fixture from describing a
     /// payload the daemon could not emit.
     private func command(_ action: String, tabId: String? = "t1", url: String? = nil,
@@ -208,7 +208,7 @@ final class PanelCommandConsumerTests: XCTestCase {
 
     /// **THE FIFTH DOOR.** `panel_command.url` is capped on the wire but deliberately not
     /// scheme-refined (spec §3: "the consumer is where policy lands"), so this check is the only
-    /// thing between a model-authored `javascript:` url and `NormaCEFLoadURL`.
+    /// thing between a model-authored `javascript:` url and `WinterCEFLoadURL`.
     ///
     /// Two assertions, and the SECOND is the one that matters: the refusal message is convenience,
     /// **the absence of a load call is the guarantee**. Mutation: delete the

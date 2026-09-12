@@ -45,14 +45,14 @@ export function stampAll(v: string): string[] {
   // 3. apple: project.yml is the XcodeGen source of truth; Support/Info.plist is the
   //    git-tracked generated mirror that builds actually read (INFOPLIST_FILE) until the
   //    next `xcodegen generate`. Stamp BOTH so a sync never needs xcodegen installed.
-  const yml = join(ROOT, "apple", "Norma", "project.yml");
+  const yml = join(ROOT, "apple", "Winter", "project.yml");
   put(
     yml,
     readFileSync(yml, "utf8")
       .replace(/CFBundleShortVersionString: "[^"]*"/, `CFBundleShortVersionString: "${v}"`)
       .replace(/CFBundleVersion: "[^"]*"/, `CFBundleVersion: "${v}"`),
   );
-  const plist = join(ROOT, "apple", "Norma", "Support", "Info.plist");
+  const plist = join(ROOT, "apple", "Winter", "Support", "Info.plist");
   put(
     plist,
     readFileSync(plist, "utf8")

@@ -10,7 +10,7 @@
  *  Committed tool blocks are always fully resolved (state.ts's `tool_result` case commits a tool
  *  call+result pair atomically) — so every summary here is worded in the PAST tense, unlike the
  *  live "N pattern(s)…" present-tense variant the study describes for an in-flight (unresolved)
- *  group; Norma has no such in-flight collapsed state today.
+ *  group; Winter has no such in-flight collapsed state today.
  *
  *  An ERRORED collapsible tool (`isError: true`) is deliberately excluded from `COLLAPSIBLE`
  *  membership (see `isCollapsible` below): folding it into a group would silently swallow the one
@@ -33,7 +33,7 @@ export type DisplayItem =
   | { kind: "collapsed"; blocks: Block[]; summary: string };
 
 /** The four summary categories a collapsible tool name folds into (study §7's "<Verb> N ...,
- *  <verb> M ..." comma-joined format, adapted to Norma's own tool names/set). */
+ *  <verb> M ..." comma-joined format, adapted to Winter's own tool names/set). */
 type Category = "read" | "search" | "list" | "tasks";
 
 const CATEGORY_BY_TOOL: Readonly<Record<string, Category>> = {

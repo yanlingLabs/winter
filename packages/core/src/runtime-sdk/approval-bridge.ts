@@ -1,6 +1,6 @@
 import { resolve, sep } from "node:path";
 import type { CanUseTool, PermissionResult, PermissionUpdate } from "@yanlinglabs/winter-agent-sdk";
-import type { ApprovalOption, NewSessionEvent } from "@norma/protocol";
+import type { ApprovalOption, NewSessionEvent } from "@winter/protocol";
 import { ApprovalBroker, approvalCardSummary, approvalOptionsFor } from "../agent/approvals";
 import type { QuestionBroker } from "../agent/questions";
 import type { PermissionGate, SessionApprovalPolicy } from "../agent/gate";
@@ -16,7 +16,7 @@ import type { BridgedPlanRequest } from "./plan-bridge";
 export { NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
 
 /**
- * Everything a Winter permission request carries that Norma's `ApprovalBroker` has no field for.
+ * Everything a Winter permission request carries that Winter's `ApprovalBroker` has no field for.
  *
  * `WaitMeta` (`agent/approvals.ts`) holds only `{ toolName, summary, issuedAt, expiresAt, options }`
  * — the five things `approval.list` surfaces — and P8b-19 forbids changing it. So the bridge keeps
@@ -31,12 +31,12 @@ export interface BridgedApprovalRequest {
   callId: string;
   /** The name the MODEL called (Winter's spelling, e.g. `Bash`). */
   toolName: string;
-  /** The name the gate classified (Norma's spelling, e.g. `bash`). */
+  /** The name the gate classified (Winter's spelling, e.g. `bash`). */
   gateToolName: string;
   /** Winter's per-request id; distinct from `toolUseID` and re-minted on a policy re-evaluation. */
   requestId: string;
   /** Set when the caller is a Winter sub-agent inside this same session's child. Never changes
-   *  routing — the card always surfaces on the OWNING Norma session (see `canUseToolFor`). */
+   *  routing — the card always surfaces on the OWNING Winter session (see `canUseToolFor`). */
   agentID?: string;
   suggestions?: readonly PermissionUpdate[];
   decisionReason?: string;
@@ -48,7 +48,7 @@ export interface BridgedApprovalRequest {
 }
 
 export interface CanUseToolDeps {
-  /** The OWNING Norma session — every event the bridge emits lands here. */
+  /** The OWNING Winter session — every event the bridge emits lands here. */
   sessionId: string;
   /** Defaults to `"main"`, matching `daemon.ts`'s `buildLeasePolicy`, the other non-engine
    *  producer of these same two event variants. */
@@ -58,13 +58,13 @@ export interface CanUseToolDeps {
    *  value this bridge reads: a dispatch child is an ordinary CODE session whose cards are mirrored
    *  into the dispatch stream, so P8b-26's never-prompt rule must catch it too. */
   origin?: string;
-  /** NORMA_HOME. Used ONLY to recognise this session's own `$OUTDIR` as a blessed write target
+  /** WINTER_HOME. Used ONLY to recognise this session's own `$OUTDIR` as a blessed write target
    *  (see `isBlessedOutputPath`); absent means every Winter escalation is escalated, the
    *  conservative answer. */
   home?: string;
   /** The session's working directory, used to resolve a RELATIVE write target in the control-plane
    *  fence. An absent/empty cwd resolves relative paths against `/`, which is the conservative
-   *  reading (a relative target then cannot accidentally miss a real `.norma` parent). */
+   *  reading (a relative target then cannot accidentally miss a real `.winter` parent). */
   cwd?: string;
   /** Seven-valued (`gate.ts`'s `SessionApprovalPolicy`), not the six-valued wire `ApprovalPolicy`:
    *  `ipc/server.ts`'s create-time chat coercion persists the internal `"chat"` policy, and P8b-7
@@ -85,7 +85,7 @@ export interface CanUseToolDeps {
   /**
    * P8c-14 (integration round 2): lane 2's `planBridgeFor(...)` (`runtime-sdk/plan-bridge.ts`),
    * consulted here BEFORE the generic gate/never-prompt logic whenever the incoming call is
-   * `ExitPlanMode` (Winter's own spelling — `tool-names.ts`'s `WINTER_NORMA_TOOL_PAIRS` maps it to
+   * `ExitPlanMode` (Winter's own spelling — `tool-names.ts`'s `RUNTIME_HOST_TOOL_PAIRS` maps it to
    * `exit_plan_mode`, but the dispatch switch below sees the WIRE name).
    *
    * WIDENED (P8d, the deferred integration-review nit): this used to be typed as the Interfaces
@@ -135,10 +135,10 @@ export function neverPromptsMessage(toolName: string, mode: string, policy: Sess
 /**
  * Is `blockedPath` this session's OWN `$OUTDIR`, `<home>/outputs/<sessionId>`?
  *
- * Winter's protected-write check flags it only because it carries a `.norma` segment
- * (`permissions/protected.ts:154-194` matches `brand.homeDirName`), but Norma blessed that exact
+ * Winter's protected-write check flags it only because it carries a `.winter` segment
+ * (`permissions/protected.ts:154-194` matches `brand.homeDirName`), but Winter blessed that exact
  * directory as agent-writable for this session and folded it into the session's own write fence
- * (`sessions/outdir.ts`). The blessing is keyed by sessionId, never by the bare `~/.norma/outputs/`
+ * (`sessions/outdir.ts`). The blessing is keyed by sessionId, never by the bare `~/.winter/outputs/`
  * prefix, so one session can never reach another's — and that is preserved here by building the
  * prefix from `deps.sessionId`.
  *
@@ -158,7 +158,7 @@ export function isBlessedOutputPath(deps: { home?: string; sessionId: string }, 
 }
 
 /** A `bash` call asking for a full sandbox escape (`dangerouslyDisableSandbox: true`). Takes the
- *  NORMA tool name — the escape arg is Norma's own, and the Winter built-in that carries it arrives
+ *  WINTER tool name — the escape arg is Winter's own, and the Winter built-in that carries it arrives
  *  as `Bash`. Exported so the matrix test can pin the predicate as well as the verdict. */
 export function isUnsandboxedBashEscape(gateToolName: string, input: unknown): boolean {
   if (gateToolName !== "bash") return false;
@@ -166,7 +166,7 @@ export function isUnsandboxedBashEscape(gateToolName: string, input: unknown): b
   return (input as Record<string, unknown>).dangerouslyDisableSandbox === true;
 }
 
-/** Splits a Norma/CC rule string (`Bash(git push:*)`, `Edit(/foo)`, bare `WebFetch`) back into the
+/** Splits a Winter/CC rule string (`Bash(git push:*)`, `Edit(/foo)`, bare `WebFetch`) back into the
  *  `PermissionRuleValue` halves Winter's `PermissionUpdate` wants. */
 function ruleValueFor(rule: string): { toolName: string; ruleContent?: string } {
   const open = rule.indexOf("(");
@@ -180,7 +180,7 @@ function ruleValueFor(rule: string): { toolName: string; ruleContent?: string } 
  * The `updatedPermissions` carried back to the child when a human picked a rule-bearing "always
  * allow" option.
  *
- * **`destination: "session"`, always.** The rule's durable home is Norma's rules store, written by
+ * **`destination: "session"`, always.** The rule's durable home is Winter's rules store, written by
  * the ONE existing writer — `approval.respond`'s `PermissionRules.append` (`ipc/server.ts`), which
  * already ran by the time the broker resolved. A settings-file destination here would make the
  * Winter child's own store a SECOND writer of the same decision, which P8b-19 forbids; `"session"`
@@ -199,21 +199,21 @@ const MAX_SUGGESTED_OPTIONS = 4;
 /**
  * Winter's `suggestions: PermissionUpdate[]` → the `ApprovalOption[]` the phone renders.
  *
- * Norma map §4.2 (digest item 46): the bridge-provided suggestions are the PREFERRED source of a
+ * Winter map §4.2 (digest item 46): the bridge-provided suggestions are the PREFERRED source of a
  * card's rule choices, and a host "MUST NOT reconstruct a weaker summary from `toolName`". Only
  * `addRules` updates with `behavior: "allow"` become options — a `deny`/`ask` suggestion, a
  * `setMode`, or a directory update is never something a human "remembers" on an approval card, and
  * minting an option for one would let answering a card change the session's mode.
  *
- * `destination` picks the scope Norma's rules store will write: `projectSettings`/`localSettings`
- * → `"project"`, `userSettings` → `"global"`. `session`/`cliArg` have no durable Norma equivalent,
+ * `destination` picks the scope Winter's rules store will write: `projectSettings`/`localSettings`
+ * → `"project"`, `userSettings` → `"global"`. `session`/`cliArg` have no durable Winter equivalent,
  * so those suggestions are dropped rather than being silently persisted to disk.
  *
  * **Every minted rule is round-tripped through the rules store's own `parseRule` first.** Choosing
  * a rule-bearing option makes `approval.respond` APPEND that literal string to
- * `<root>/.norma/permissions.local.json`; a rule in a grammar Norma cannot parse would be written,
+ * `<root>/.winter/permissions.local.json`; a rule in a grammar Winter cannot parse would be written,
  * warned about once, and thereafter ignored — inert litter in the user's rules file, offered under
- * a label promising it would silence future calls. Winter's rule vocabulary is Norma's (both are
+ * a label promising it would silence future calls. Winter's rule vocabulary is Winter's (both are
  * CC's), so this filter is a guard against drift, not a translation layer.
  */
 export function approvalOptionsFromSuggestions(suggestions: readonly PermissionUpdate[] | undefined): ApprovalOption[] | undefined {
@@ -271,7 +271,7 @@ export function approvalOptionsFromSuggestions(suggestions: readonly PermissionU
  * **What this bridge deliberately does NOT reproduce** — every one of these is engine-resident
  * policy that becomes per-mode `Options` in Task 9, and each is listed with its disposition in the
  * task report: the in-project write/edit silencing under `ask`; `controlPlaneFileTarget` and the
- * `~/.norma` grant denylist; the out-of-root `dirGrant` card; `web_fetch`'s and `browser`'s
+ * `~/.winter` grant denylist; the out-of-root `dirGrant` card; `web_fetch`'s and `browser`'s
  * dangerous-domain floors (which move with the capability tools, P8b-12); bash's always-card
  * escalation args; and the safety reviewer. It also performs no rules-store READ, so a standing
  * rule that silences a card today does not silence it here — Winter's own rule stages do that.
@@ -340,8 +340,8 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     // reaches `canUseTool`**. (An earlier revision of this comment claimed the reverse; it was
     // wrong, and the same wrong sentence was fixed in `control-plane.ts` first.)
     //
-    // This fence exists to cover what Winter's rules do NOT: it is Norma's own invariant, enforced
-    // in Norma's own vocabulary, on BOTH tool-name spellings, over every path-bearing field
+    // This fence exists to cover what Winter's rules do NOT: it is Winter's own invariant, enforced
+    // in Winter's own vocabulary, on BOTH tool-name spellings, over every path-bearing field
     // including `MultiEdit`'s nested `edits[]` — and it does not depend on Winter's rule grammar
     // continuing to mean what it means today (the anchor semantics that made 16 of those 28 rules
     // inert are exactly the kind of thing that can move under an SDK bump). Two independent layers
@@ -354,7 +354,7 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
 
     // (3) Winter's OWN four default tools are allowed silently in every mode (P8b-28). Checked
     // after the fence (they name no paths, so this is ordering hygiene, not a hole) and before the
-    // gate, because two of the four — `ReadNotifications`, `advisor` — have no Norma name at all
+    // gate, because two of the four — `ReadNotifications`, `advisor` — have no Winter name at all
     // and would otherwise fail closed to a card in code and a deny in dispatch/chat.
     if (WINTER_OWN_TOOL_NAMES.has(toolName)) {
       return { behavior: "allow", updatedInput: input };
@@ -366,7 +366,7 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     }
 
     // (4b) P8c-14 (integration round 2): `ExitPlanMode` — Winter's OWN wire name (`tool-names.ts`'s
-    // `WINTER_NORMA_TOOL_PAIRS` maps it to `exit_plan_mode`, but `toolName` here is what the CHILD
+    // `RUNTIME_HOST_TOOL_PAIRS` maps it to `exit_plan_mode`, but `toolName` here is what the CHILD
     // called) — is answered through the plan bridge BEFORE the generic gate/never-prompt logic
     // below: a plan presentation is not a permission decision the mode-based never-prompt rule or
     // the approval policy should ever see (dispatch/chat never enter plan mode in the first place,
@@ -379,7 +379,7 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     const policy = policyNow();
     // TWO names, deliberately (review F5). `gateToolName` is what the CARD and the EVENT say — the
     // display name. `classificationName` is what the GATE is asked about, which for a tool with an
-    // explicit gate class is a different Norma name entirely: `Monitor` displays as itself but is
+    // explicit gate class is a different Winter name entirely: `Monitor` displays as itself but is
     // classified as `bash`, because its command half uses the Bash permission family and a
     // display-derived `bash_output` would be a silent allow under every policy.
     const gateToolName = gateToolNameFor(toolName);
@@ -425,9 +425,9 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     //    never-prompt deny in dispatch/chat. A gate `deny` STAYS a deny — an escalation may never
     //    WIDEN a verdict, only narrow it.
     //  - the ONE exception is `$OUTDIR`, `<home>/outputs/<sessionId>`: a path Winter's protected
-    //    check flags only because it contains a `.norma` segment, and which Norma has explicitly
+    //    check flags only because it contains a `.winter` segment, and which Winter has explicitly
     //    blessed as agent-writable for this session (`sessions/outdir.ts` — "a blessed,
-    //    agent-writable exception under `~/.norma`", folded into the session's own write fence).
+    //    agent-writable exception under `~/.winter`", folded into the session's own write fence).
     //    The host DOES have standing there, so the gate's verdict stands unescalated. Without this a
     //    dispatch session could not write its own deliverable at all.
     //  - the control plane is NOT reached by any of this: `controlPlaneTargetForCall` above already
@@ -470,7 +470,7 @@ export function canUseToolFor(deps: CanUseToolDeps): CanUseTool {
     if (never) {
       log.info(`canUseTool: deny session=${deps.sessionId} tool=${toolName} policy=${policy} reason=never-prompts mode=${deps.mode} origin=${deps.origin ?? "none"}`);
       // Named as the MODEL called it: this message is a tool result the model reads, and naming a
-      // tool it did not call would be confusing. The EVENT surface uses the Norma name (P8b-25).
+      // tool it did not call would be confusing. The EVENT surface uses the Winter name (P8b-25).
       return { behavior: "deny", message: neverPromptsMessage(toolName, never, policy) };
     }
 
@@ -492,7 +492,7 @@ interface BridgeState {
  *
  * Two disjoint reasons, and the second is the one P8b-7 was actually written about. A dispatch
  * session's own turns run in `mode: "dispatch"` — but the work is done by its CHILDREN, which
- * `agent/dispatch-children.ts` spawns as ordinary CODE sessions (Norma map §2.3: "they are ordinary
+ * `agent/dispatch-children.ts` spawns as ordinary CODE sessions (Winter map §2.3: "they are ordinary
  * Code sessions") distinguished only by `meta.origin === "dispatch-child"`, and whose cards are
  * MIRRORED into the dispatch stream. Keying only on `mode` would therefore have left exactly the
  * cards the ruling names still prompting, in a code-mode session nobody is watching.

@@ -764,7 +764,7 @@ describe("outcomes", () => {
   // ⛔ **Fix round, review IMPORTANT-1 — a READ is no longer read-only with respect to disk.**
   //
   // office-live-ux added a pre-save at five action points, two of which are the agent's own verbs.
-  // Before an ADOPTED read (a file the human already has open in a tab), Norma flushes that tab to
+  // Before an ADOPTED read (a file the human already has open in a tab), Winter flushes that tab to
   // disk. The description described `read` as returning data and attributed saving specifically to
   // *write* verbs — the description-contradicting-the-code shape, in the one artifact the model
   // actually plans from. A user who says "don't change anything, just tell me what's in there" gets

@@ -1,25 +1,25 @@
 import XCTest
 import os
-import NormaProtocol
-import NormaSessionKit
-@testable import NormaKit
+import WinterProtocol
+import WinterSessionKit
+@testable import WinterKit
 
 /// SP2b Task 4: `RemoteHost` (RemoteHost.swift) is the composition root — these tests exercise ONLY
 /// its start/stop lifecycle policy (device count / pairing-window-requested gating), never real
 /// networking or a real daemon: `makeListener` injects a `LoopbackListener` nobody ever dials into,
-/// and `makeDaemonFactory` injects a `NormaClient` over a `ScriptedTransport` nobody ever drives
+/// and `makeDaemonFactory` injects a `WinterClient` over a `ScriptedTransport` nobody ever drives
 /// (CLAUDE.md: tests must never touch the live Keychain — production `RemoteHost.start()` reads
 /// `KeychainToken.readRemoteToken()`, which these tests never exercise at all). The full-stack proof
 /// against a REAL daemon + REAL iroh lives in `PairingE2ETests`.
 final class RemoteHostTests: XCTestCase {
 
     private func makeRelayConfig() -> SignedRelayConfig {
-        SignedRelayConfig(config: RelayConfig(version: 1, relays: ["relay1.norma.dev"]), sig: Data(repeating: 7, count: 64))
+        SignedRelayConfig(config: RelayConfig(version: 1, relays: ["relay1.winter.dev"]), sig: Data(repeating: 7, count: 64))
     }
 
     private func tempStoreDir() -> URL {
         FileManager.default.temporaryDirectory
-            .appendingPathComponent("norma-remote-host-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("winter-remote-host-tests-\(UUID().uuidString)", isDirectory: true)
     }
 
     @MainActor
@@ -29,18 +29,18 @@ final class RemoteHostTests: XCTestCase {
         relayProbe: @escaping @Sendable (String) async -> Bool = RemoteHost.defaultRelayProbe
     ) -> RemoteHost {
         let config = RemoteHost.Config(
-            storeDir: storeDir, socketPath: "/tmp/norma-remote-host-tests-unused.sock",
+            storeDir: storeDir, socketPath: "/tmp/winter-remote-host-tests-unused.sock",
             hostLabel: "Test Mac", relayConfig: makeRelayConfig(), relayURLs: relayURLs, relayProbe: relayProbe
         )
         return RemoteHost(
             config: config,
             secretStore: InMemoryEndpointSecretStore(),
             makeListener: { LoopbackListener() },
-            makeDaemonFactory: { NormaClient(makeTransport: { ScriptedTransport() }, token: "test-token", clientName: "iphone-gateway") }
+            makeDaemonFactory: { WinterClient(makeTransport: { ScriptedTransport() }, token: "test-token", clientName: "iphone-gateway") }
         )
     }
 
-    /// `RelaySelection` (NormaSessionKit) isn't `Equatable` — these two pattern-match instead of
+    /// `RelaySelection` (WinterSessionKit) isn't `Equatable` — these two pattern-match instead of
     /// `XCTAssertEqual`, matching every other enum-with-payload assertion idiom in this test target.
     private func assertN0Default(_ selection: RelaySelection?, file: StaticString = #filePath, line: UInt = #line) {
         guard case .n0Default = selection else {
@@ -75,7 +75,7 @@ final class RemoteHostTests: XCTestCase {
             storeDir: tempStoreDir(), socketPath: "/tmp/unused.sock",
             hostLabel: "Test Mac", relayConfig: makeRelayConfig(), relayURLs: []
         )
-        XCTAssertEqual(config.keychainService, "com.norma.core")
+        XCTAssertEqual(config.keychainService, "com.winter.core")
     }
 
     /// The app threads `AppProfile.keychainService` through here so a dev-profile `RemoteHost`
@@ -84,9 +84,9 @@ final class RemoteHostTests: XCTestCase {
         let config = RemoteHost.Config(
             storeDir: tempStoreDir(), socketPath: "/tmp/unused.sock",
             hostLabel: "Test Mac", relayConfig: makeRelayConfig(), relayURLs: [],
-            keychainService: "com.norma.core.dev"
+            keychainService: "com.winter.core.dev"
         )
-        XCTAssertEqual(config.keychainService, "com.norma.core.dev")
+        XCTAssertEqual(config.keychainService, "com.winter.core.dev")
     }
 
     // MARK: - startIfNeeded
@@ -216,7 +216,7 @@ final class RemoteHostTests: XCTestCase {
     func test_concurrentStartCalls_bindExactlyOneListener() async throws {
         let listenerCount = OSAllocatedUnfairLock(initialState: 0)
         let config = RemoteHost.Config(
-            storeDir: tempStoreDir(), socketPath: "/tmp/norma-remote-host-tests-unused.sock",
+            storeDir: tempStoreDir(), socketPath: "/tmp/winter-remote-host-tests-unused.sock",
             hostLabel: "Test Mac", relayConfig: makeRelayConfig(), relayURLs: []
         )
         let host = await RemoteHost(
@@ -226,7 +226,7 @@ final class RemoteHostTests: XCTestCase {
                 listenerCount.withLock { $0 += 1 }
                 return LoopbackListener()
             },
-            makeDaemonFactory: { NormaClient(makeTransport: { ScriptedTransport() }, token: "test-token", clientName: "iphone-gateway") }
+            makeDaemonFactory: { WinterClient(makeTransport: { ScriptedTransport() }, token: "test-token", clientName: "iphone-gateway") }
         )
 
         async let first: QRPayload = host.openPairingWindow()

@@ -1,6 +1,6 @@
 import Foundation
 import Combine
-import NormaKit
+import WinterKit
 
 // MARK: - office-agent-tools Task 2: the document broker
 
@@ -220,7 +220,7 @@ final class OfficeAgentBroker {
         // down is the identical instinct).
         if access == .write, officeDocumentIsReadOnlyFormat(path: resolvedPath) {
             throw OfficeAgentBrokerError.saveFailed(path: resolvedPath, reason:
-                "this format can't be saved by Norma's office tools — only ODF and Office Open XML "
+                "this format can't be saved by Winter's office tools — only ODF and Office Open XML "
                 + "formats are writable.")
         }
 
@@ -390,7 +390,7 @@ final class OfficeAgentBroker {
         //
         // Gated on `adopted` because that is exactly "a tab already has this open": a document THIS
         // call opened has no tab behind it and nothing to cover. Marked for a READ as well as a
-        // write — the user's spec is that the overlay appears "as soon as Norma reads the document
+        // write — the user's spec is that the overlay appears "as soon as Winter reads the document
         // open in that tab", so the user does not edit underneath a read the agent is about to act
         // on. Both adopted branches above reach here (the `documents[resolvedPath]` hit and the
         // in-flight-join), which is the whole set of ways `adopted` becomes true.
@@ -506,7 +506,7 @@ final class OfficeAgentBroker {
             // what the pre-check would have said, so a caller sees the same sentence either way.
             if officeDocumentIsReadOnlyFormat(path: resolvedPath) {
                 throw OfficeAgentBrokerError.saveFailed(path: resolvedPath, reason:
-                    "this format can't be saved by Norma's office tools — only ODF and Office Open "
+                    "this format can't be saved by Winter's office tools — only ODF and Office Open "
                     + "XML formats are writable.")
             }
             throw OfficeAgentBrokerError.saveFailed(path: resolvedPath, reason:
@@ -568,7 +568,7 @@ final class OfficeAgentBroker {
     ///
     /// ## ⛔ A DOCUMENT IN CONFLICT IS NEVER SAVED HERE — fix round, review CRITICAL-1
     ///
-    /// A conflict means the file on disk ALSO changed outside Norma while this tab held it
+    /// A conflict means the file on disk ALSO changed outside Winter while this tab held it
     /// (`OfficeRuntimeReducer`'s `.externalChangeDetected`/`.externalDeleted` arms, both gated on
     /// `doc.dirty`). Saving it discards somebody else's write — **and this pre-save is the one
     /// caller for which nobody asked and nobody is watching.** It is worse than a plain overwrite
@@ -603,7 +603,7 @@ final class OfficeAgentBroker {
     /// what the conflict banner is for, and the cure is one click the user already has.
     ///
     /// **A distinct error case, not `.documentDirty` with a new reason string.** `.documentDirty`'s
-    /// own doc and its rendered sentence both promise a save was TRIED and failed ("Norma couldn't
+    /// own doc and its rendered sentence both promise a save was TRIED and failed ("Winter couldn't
     /// save them first … Save or discard the tab's edits, then try again"). Nothing is tried here,
     /// and "Save" is the one instruction that would complete the loss. Reusing that case would be
     /// this arc's own description-contradicting-the-code shape, planted inside the fix for it.
@@ -687,7 +687,7 @@ final class OfficeAgentBroker {
     /// **This is not a cosmetic ordering nicety — it is the fix for a measured helper-kill.** This
     /// task's own diagnostic matrix (`task-2-report.md`'s evidence table) found that closing a
     /// document immediately after `.saved`, before that real LOK callback lands, kills
-    /// `NormaOfficeHelper` roughly 4 times out of 5 — and every OTHER open document in the app rides
+    /// `WinterOfficeHelper` roughly 4 times out of 5 — and every OTHER open document in the app rides
     /// on that SAME one process (`OfficeHelperRequestQueue` is app-wide, per this file's own header).
     /// The write itself is never in question by the time this runs (`saveAndAwaitOutcome` already
     /// confirmed the bytes landed) — this exists purely to keep the ONE shared helper alive for
@@ -964,23 +964,23 @@ enum OfficeAgentBrokerError: Error, Equatable {
                 + "WRITE verb creates the file if it isn't, so if you meant to start a new document, "
                 + "write to it directly."
         case .outOfFence(let path):
-            return "path is outside the allowed directories: \(path). Norma's office tools are "
+            return "path is outside the allowed directories: \(path). Winter's office tools are "
                 + "limited to the session's working directories."
         case .documentDirty(let path, let saveAttemptFailure):
             let name = (path as NSString).lastPathComponent
-            // Names the ATTEMPT, not just the state. Norma now saves an open tab's edits before
+            // Names the ATTEMPT, not just the state. Winter now saves an open tab's edits before
             // writing to it, so reaching this refusal means that save was tried and failed — and a
             // sentence that said only "it has unsaved changes" would read as "wait and retry",
             // which is the one instruction that cannot help here.
-            return "\(name) has unsaved changes in an open tab and Norma couldn't save them first "
+            return "\(name) has unsaved changes in an open tab and Winter couldn't save them first "
                 + "(\(saveAttemptFailure)) — so it will not overwrite them. Save or discard the "
                 + "tab's edits, then try again."
         case .documentConflicted(let path):
             let name = (path as NSString).lastPathComponent
             // Names the SECOND party, and never says "save" — a save here is what would complete
             // the loss, so the only honest instruction is the banner's own two answers.
-            return "\(name) changed on disk outside Norma while it was open in a tab, so there are "
-                + "two versions of it and Norma will not pick one. The tab is showing a conflict "
+            return "\(name) changed on disk outside Winter while it was open in a tab, so there are "
+                + "two versions of it and Winter will not pick one. The tab is showing a conflict "
                 + "banner: the human has to answer it (keep their version, or reload the file from "
                 + "disk) before this can be written to."
         case .openFailed(let path, let reason):
@@ -990,7 +990,7 @@ enum OfficeAgentBrokerError: Error, Equatable {
         case .writeFailed(let path, let reason):
             return "Couldn't finish writing to \((path as NSString).lastPathComponent): \(reason)"
         case .hostGone:
-            return "Norma's office runtime is no longer available."
+            return "Winter's office runtime is no longer available."
         }
     }
 }

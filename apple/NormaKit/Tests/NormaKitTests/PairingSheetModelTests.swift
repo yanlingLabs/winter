@@ -1,7 +1,7 @@
 import XCTest
 import os
-import NormaProtocol
-@testable import NormaKit
+import WinterProtocol
+@testable import WinterKit
 
 /// SP2b Task 5, Step 2: `PairingSheetModel` is pure (no AppKit) precisely so it's fully testable
 /// here — the app's own `PairingSheetView`/`RemoteAccessCoordinator` get NO unit tests (SP2b T5

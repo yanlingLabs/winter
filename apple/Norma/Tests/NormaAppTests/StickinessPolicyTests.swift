@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 final class StickinessPolicyTests: XCTestCase {
     let a = ClickableCandidate(center: CGPoint(x: 100, y: 100), frame: CGRect(x: 90, y: 90, width: 20, height: 20))

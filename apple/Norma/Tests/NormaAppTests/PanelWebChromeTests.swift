@@ -1,6 +1,6 @@
 import AppKit
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// panel-cef Task 6b: the browser chrome — the URL scheme policy, the field caps, and the URL row's
 /// metrics.
@@ -542,7 +542,7 @@ final class PanelWebChromeTests: XCTestCase {
     /// is not a test of the policy.
     ///
     /// With a container attached the two separate, so BOTH directions are asserted. An accepted URL
-    /// reaches `NormaCEFLoadURL`, which finds no browser hosted in this bare container and returns —
+    /// reaches `WinterCEFLoadURL`, which finds no browser hosted in this bare container and returns —
     /// CEF never starts under XCTest (`CEFRuntimeTests` pins that refusal), so nothing here can
     /// launch Chromium.
     func testTheURLFieldNavigatesToAnAllowedAddressAndRefusesEverythingElse() {

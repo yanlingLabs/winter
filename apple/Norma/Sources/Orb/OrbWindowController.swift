@@ -1,5 +1,5 @@
 import AppKit
-import NormaKit
+import WinterKit
 import SwiftUI
 
 /// v1 PointerOverlayWindow's key/main refusal pattern (GlassFieldWindow.swift GlassFieldPanel,
@@ -23,7 +23,7 @@ private final class KeyableNonActivatingPanel: NSPanel {
 /// glass-anchor screen point (`currentGlassAnchor()`) — the panel expands/collapses IN PLACE,
 /// never jumping. ARCHITECTURE NOTE (v1's converged lesson) still holds: this panel IS the field
 /// window's collapsed state — expansion happens in place so the glassEffectID morph stays inside
-/// one GlassEffectContainer (now owned by `NormaFieldView` itself). Do not add a second window
+/// one GlassEffectContainer (now owned by `WinterFieldView` itself). Do not add a second window
 /// for the field.
 ///
 /// EDGE FENCE (user directive, replaces v1's per-corner switching): `morphModel.corner` stays
@@ -40,7 +40,7 @@ final class OrbWindowController: ObservableObject {
     let morphModel: MorphModel
     /// Task-3 fix wave: the fluid orb's own dedicated model (split off `MorphModel` — see
     /// `FluidModel`'s doc, `FieldKit/FluidOrbView.swift`), created alongside `morphModel` and
-    /// passed down the same path (`GlassRootView` → `NormaFieldView` → `FluidOrbSlot`).
+    /// passed down the same path (`GlassRootView` → `WinterFieldView` → `FluidOrbSlot`).
     /// `OrbFollower` also holds this reference to write its per-tick acceleration tap directly
     /// onto it instead of onto `morphModel`.
     let fluidModel = FluidModel()
@@ -164,7 +164,7 @@ final class OrbWindowController: ObservableObject {
     /// Task 6 (2e-iii): the morph window's width-responsive sidebar wiring — this controller exposes
     /// it (it does NOT import `AppModel`), `AppDelegate.boot()` wires it to the app model's
     /// `directory`/`focusSession`/create-primitive plus AppDelegate's own detached-window spawn.
-    /// `GlassRootView` reads it live and threads it down through `NormaFieldView` →
+    /// `GlassRootView` reads it live and threads it down through `WinterFieldView` →
     /// `WindowSurfaceView` → `WindowContentView`. A plain `var` set once at boot (like the callback
     /// seams above); the window surface only ever renders long after boot, so it's always set by
     /// then, and the `directory` inside drives its own updates independently.
@@ -423,7 +423,7 @@ final class OrbWindowController: ObservableObject {
         }
 
         // ARCHITECTURE NOTE above: GlassRootView (not OrbView) is the panel's content — it hosts
-        // `NormaFieldView` (FieldKit), which owns its own `GlassEffectContainer` and renders the
+        // `WinterFieldView` (FieldKit), which owns its own `GlassEffectContainer` and renders the
         // whole orb↔field morph off `morphModel.progress`.
         panel.contentView = NSHostingView(
             rootView: GlassRootView(
@@ -546,7 +546,7 @@ final class OrbWindowController: ObservableObject {
             surface: .composer
         )
         panel.setFrame(NSRect(origin: origin, size: morphModel.windowSize), display: false)
-        // Gate-3 fix (F1, root cause #2): keep `NormaFieldView`'s outer `.frame(...)` request in
+        // Gate-3 fix (F1, root cause #2): keep `WinterFieldView`'s outer `.frame(...)` request in
         // lockstep with this resize — see `MorphModel.activeWindowSize`'s doc for why (NSHostingView
         // otherwise silently resizes this panel back to whatever the SwiftUI content requests).
         morphModel.activeWindowSize = morphModel.windowSize
@@ -694,7 +694,7 @@ final class OrbWindowController: ObservableObject {
                 consumed = true
             }
 
-            // Wave-8 gate item 2 empirical evidence hook, extended for wave 9: NORMA_ORB_DEBUG=1
+            // Wave-8 gate item 2 empirical evidence hook, extended for wave 9: WINTER_ORB_DEBUG=1
             // traces every scroll-wheel sample's CONSUMED (swallowed here — either swipe-tracking
             // or, new in wave 9, manually driving the reply's scroll offset) vs PASSED (handed
             // back to AppKit unchanged) decision, paired with the raw deltas/phase that drove it
@@ -804,7 +804,7 @@ final class OrbWindowController: ObservableObject {
         return true
     }
 
-    /// Wave-9 gate fix: mirrors `NormaFieldView.showsInlineResponse` (`hasReply &&
+    /// Wave-9 gate fix: mirrors `WinterFieldView.showsInlineResponse` (`hasReply &&
     /// !adapter.showingDraft`) using the state this controller already has direct access to
     /// (`session.state`, and `isShowingDraft` — the same composer-hop seam `handleAcceptedSwipe`
     /// above reads), rather than reaching into `FieldStateAdapter` (which this controller

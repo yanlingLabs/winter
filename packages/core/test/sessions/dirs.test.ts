@@ -7,7 +7,7 @@ import { SessionStore } from "../../src/sessions/store";
 import { canonicalizeDirPath, type SessionDirs } from "../../src/sessions/dirs";
 
 function makeStore(): { store: SessionStore; dir: string } {
-  const dir = mkdtempSync(join(tmpdir(), "norma-dirs-store-"));
+  const dir = mkdtempSync(join(tmpdir(), "winter-dirs-store-"));
   return { store: new SessionStore(dir), dir };
 }
 
@@ -154,7 +154,7 @@ describe("canonicalizeDirPath", () => {
   });
 
   test("symlinked spellings resolve to the same canonical path", () => {
-    const base = mkdtempSync(join(tmpdir(), "norma-dirs-canon-"));
+    const base = mkdtempSync(join(tmpdir(), "winter-dirs-canon-"));
     const real = join(base, "real");
     mkdirSync(real);
     const link = join(base, "link");
@@ -164,13 +164,13 @@ describe("canonicalizeDirPath", () => {
   });
 
   test("not-yet-existing leaf under an existing parent: realpaths the parent, rejoins the leaf", () => {
-    const base = mkdtempSync(join(tmpdir(), "norma-dirs-canon-"));
+    const base = mkdtempSync(join(tmpdir(), "winter-dirs-canon-"));
     const leaf = join(base, "does-not-exist-yet");
     expect(canonicalizeDirPath(leaf)).toBe(join(realpathSync(base), "does-not-exist-yet"));
   });
 
   test("not-yet-existing leaf, multiple missing segments deep", () => {
-    const base = mkdtempSync(join(tmpdir(), "norma-dirs-canon-"));
+    const base = mkdtempSync(join(tmpdir(), "winter-dirs-canon-"));
     const leaf = join(base, "a", "b", "c");
     expect(canonicalizeDirPath(leaf)).toBe(join(realpathSync(base), "a", "b", "c"));
   });

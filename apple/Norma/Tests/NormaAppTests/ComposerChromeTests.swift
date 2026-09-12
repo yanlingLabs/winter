@@ -1,14 +1,14 @@
 import XCTest
 import SwiftUI
-import NormaKit
-@testable import Norma
+import WinterKit
+@testable import Winter
 
 /// mac-chat-parity Task 5 — the per-mode composers (spec §3, the user's architecture ruling:
 /// *"each mode should have its own dedicated composer which can also have different styling and
 /// maybe more features. but yes chat shouldnt show that row"*).
 ///
 /// **What this file covers:** the mode → chrome mapping, each mode's chrome INVENTORY (which
-/// blocks it declares), and the card's WIRING to that mapping — driven through `NormaComposerCard`'s
+/// blocks it declares), and the card's WIRING to that mapping — driven through `WinterComposerCard`'s
 /// real initialiser, not only through the free function, because pinning the mapping alone would
 /// survive a card that ignored its own mode entirely (the Task 4 mutation lesson, recorded in this
 /// plan's ledger: "the adapter method was pinned, its WIRING was not").
@@ -103,7 +103,7 @@ final class ComposerChromeTests: XCTestCase {
     }
 
     private func shellSource() throws -> String {
-        try source("Sources/AppShell/NormaComposerCard.swift")
+        try source("Sources/AppShell/WinterComposerCard.swift")
     }
 
     private func source(_ relative: String) throws -> String {
@@ -209,7 +209,7 @@ final class ComposerChromeTests: XCTestCase {
     /// and is the test that reds when the dispatch is collapsed.
     func testTheCardDerivesItsChromeFromItsOwnMode() {
         for mode in SessionMode.allCases {
-            let card = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
+            let card = WinterComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
                                          policy: nil, model: wiredModel(), stop: nil)
             XCTAssertEqual(card.chrome.mode, mode,
                            "the card rendered \(card.chrome.mode)'s composer for a \(mode) session")
@@ -224,7 +224,7 @@ final class ComposerChromeTests: XCTestCase {
     /// session's gets — and chat *still* has no band. Chat's absence is its mode's, not an accident
     /// of what the surface happened to wire.
     func testALiveChatSessionsCardCarriesNoBand() {
-        let card = NormaComposerCard(text: .constant("hi"), onSubmit: {},
+        let card = WinterComposerCard(text: .constant("hi"), onSubmit: {},
                                      mode: .constant(.chat), modeIsSelectable: false,
                                      policy: wiredPolicy("bypass"), model: wiredModel(),
                                      stripEdge: .above, stop: nil)
@@ -234,7 +234,7 @@ final class ComposerChromeTests: XCTestCase {
     /// …and a live code session's card, through the same door, reaches code's chrome — so Task 6's
     /// row actually appears.
     func testALiveCodeSessionsCardReachesCodesChrome() {
-        let card = NormaComposerCard(text: .constant("hi"), onSubmit: {},
+        let card = WinterComposerCard(text: .constant("hi"), onSubmit: {},
                                      mode: .constant(.code), modeIsSelectable: false,
                                      policy: wiredPolicy("ask"), model: wiredModel(),
                                      stripEdge: .above, stop: nil)
@@ -446,7 +446,7 @@ final class ComposerChromeTests: XCTestCase {
     /// on chat — the Task 4/Task 6 lesson, twice observed on this plan.
     func testTheCardsChipOffersTiersOnlyOnTheModeThatMaySelectThem() {
         for mode in SessionMode.allCases {
-            let card = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
+            let card = WinterComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
                                          policy: nil, model: wiredModel(model: "srv-a"), stop: nil)
             XCTAssertEqual(card.modelRow.tiers, mode == .code ? ["ultra"] : [],
                            "\(mode)'s chip offered tiers \(card.modelRow.tiers)")
@@ -459,7 +459,7 @@ final class ComposerChromeTests: XCTestCase {
     /// posture, so this pins shown-but-refused rather than quietly regressing it to absent.
     func testEveryModeIncludingDispatchStillOffersTheCataloguesModelsAndWireEfforts() {
         for mode in SessionMode.allCases {
-            let card = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
+            let card = WinterComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
                                          policy: nil, model: wiredModel(model: "srv-b"), stop: nil)
             XCTAssertEqual(card.modelRow.options, ["srv-a", "srv-b"], "\(mode) must still offer the models")
             XCTAssertEqual(card.modelRow.wire, ["high", "max"],
@@ -472,11 +472,11 @@ final class ComposerChromeTests: XCTestCase {
     /// has pinned something else is a legal-looking pair the create then throws INVALID_PARAMS on.
     /// Absent a pick, `effortPickerOptions`' own fallback to the catalogue's default model applies.
     func testTheChipsWireEffortsFollowTheModelInForce() {
-        let held = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
+        let held = WinterComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
                                      policy: nil, model: wiredModel(model: "srv-b"), stop: nil)
         XCTAssertEqual(held.modelRow.wire, ["high", "max"], "the HELD model's levels, not the default's")
 
-        let unpicked = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
+        let unpicked = WinterComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
                                          policy: nil, model: wiredModel(model: nil), stop: nil)
         XCTAssertEqual(unpicked.modelRow.wire, ["none", "low", "high"],
                        "no pick ⇒ the daemon's live default model decides the levels")
@@ -487,12 +487,12 @@ final class ComposerChromeTests: XCTestCase {
     /// the effort beside it once one is chosen — a control that shows neither would leave a picked
     /// effort invisible everywhere on the page.
     func testTheChipNamesTheModelInForceAndTheEffortBesideIt() {
-        let unset = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
+        let unset = WinterComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
                                       policy: nil, model: wiredModel(), stop: nil).modelRow
         XCTAssertEqual(unset.chipTitle, newChatModelPlaceholder)
         XCTAssertEqual(unset.chipTitle, "Default model", "…which is the text this slot already rendered")
 
-        let picked = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
+        let picked = WinterComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.chat),
                                        policy: nil, model: wiredModel(model: "srv-b", effort: "high"), stop: nil).modelRow
         XCTAssertEqual(picked.chipTitle, "srv-b · high")
         XCTAssertTrue(picked.help.contains("srv-b"))
@@ -503,12 +503,12 @@ final class ComposerChromeTests: XCTestCase {
     /// the two independent flags the header's two menus already disable themselves on (model and
     /// effort are separate affordances; a model change in flight must never disable the effort rows).
     func testAModelOrEffortChangeInFlightIsVisibleOnTheChip() {
-        let modelBusy = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.code),
+        let modelBusy = WinterComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.code),
                                           policy: nil, model: wiredModel(modelInFlight: true), stop: nil).modelRow
         XCTAssertTrue(modelBusy.modelChangeInFlight)
         XCTAssertFalse(modelBusy.effortChangeInFlight, "…and only that half")
 
-        let effortBusy = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.code),
+        let effortBusy = WinterComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(.code),
                                            policy: nil, model: wiredModel(effortInFlight: true), stop: nil).modelRow
         XCTAssertTrue(effortBusy.effortChangeInFlight)
         XCTAssertFalse(effortBusy.modelChangeInFlight)
@@ -590,7 +590,7 @@ final class ComposerChromeTests: XCTestCase {
     /// a refused create takes the whole first send with it.
     func testNeitherModeTheNewChatPageOffersCanHoldATier() {
         for mode in newChatModeOptions {
-            let card = NormaComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
+            let card = WinterComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
                                          policy: nil, model: wiredModel(model: "srv-a"), stop: nil)
             XCTAssertEqual(card.modelRow.tiers, [],
                            "\(mode) is one of the new-chat page's two modes — a tier held there fails the create")
@@ -657,7 +657,7 @@ final class ComposerChromeTests: XCTestCase {
         }
         // A Set, not an array: `FileManager.enumerator`'s order is unspecified, so an array
         // comparison would be a sort-order coin toss the moment a second file ever matched.
-        XCTAssertEqual(built, ["NormaComposerCard.swift"],
+        XCTAssertEqual(built, ["WinterComposerCard.swift"],
                        "the model/effort chip is the SHARED shell's — one construction, one file")
     }
 

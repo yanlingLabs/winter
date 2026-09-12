@@ -1,12 +1,12 @@
 import AppKit
-import NormaKit
+import WinterKit
 import SwiftUI
 import UniformTypeIdentifiers
 
 // -----------------------------------------------------------------------------------------------
 // Pure pane-order-independent pieces (Task 2, Phase 4d-iii): `plugins.list` entry → row display +
 // the action-availability rule. Table-tested directly in `PluginManagerModelTests`, no
-// `NormaClient`/SwiftUI involved — same "pure helper next to its View" posture as
+// `WinterClient`/SwiftUI involved — same "pure helper next to its View" posture as
 // `formatDaemonStatus`/`formatQuotaState`/`sortedTrustPaths` in this same directory's other panes.
 // -----------------------------------------------------------------------------------------------
 
@@ -48,11 +48,11 @@ struct PluginRowDisplay: Equatable, Identifiable {
     let actions: [PluginAction]
 }
 
-/// Task 2 (4d-iii): `plugins.list` entry → row display. PURE — no `NormaClient`, no SwiftUI —
+/// Task 2 (4d-iii): `plugins.list` entry → row display. PURE — no `WinterClient`, no SwiftUI —
 /// table-tested directly in `PluginManagerModelTests`.
 ///
 /// Action rule (honors 4d-ii's carryovers — `plugin.enable`/`disable`/`remove` + this task's new
-/// `plugin.restart`, NormaClient+Methods.swift):
+/// `plugin.restart`, WinterClient+Methods.swift):
 ///   - `disabled == true` (any tier/status) → `[.enable, .remove]`. Checked FIRST, ahead of
 ///     `status`: a disabled plugin has no live process regardless of what `status` last reported
 ///     (enabling is the only way back to running).
@@ -142,7 +142,7 @@ func pluginRowDisplay(
 // a temp dir via `/usr/bin/unzip` (`Process`, matching `CliLauncher`'s existing Process-launch
 // idiom elsewhere in this target — no zip-reading library dependency); a folder is used directly.
 // `locatePluginRoot` — finding the actual plugin root within an extracted zip's temp dir — touches
-// the real filesystem rather than a `NormaClient`, so it's directly testable against a real temp
+// the real filesystem rather than a `WinterClient`, so it's directly testable against a real temp
 // directory instead of mocked.
 // -----------------------------------------------------------------------------------------------
 
@@ -152,7 +152,7 @@ enum PluginInstallError: Error, Equatable {
 }
 
 /// The plugin root within `directory`: `directory` itself if it directly holds a
-/// `norma-plugin.json`/`plugin.json` manifest, else a single top-level subdirectory that does
+/// `winter-plugin.json`/`plugin.json` manifest, else a single top-level subdirectory that does
 /// (the common "zip wraps everything in one folder" shape) — checked in that order. `nil` if
 /// neither matches (ambiguous or manifest-less zip contents).
 ///
@@ -164,7 +164,7 @@ enum PluginInstallError: Error, Equatable {
 ///
 /// A manifest that is itself a SYMLINK is rejected (checked via `URLResourceValues.isSymbolicLink`,
 /// which reports on the path itself rather than following it) — a zip/folder can otherwise smuggle
-/// a symlinked `norma-plugin.json` pointing anywhere on disk, which `fileExists`/`Data(contentsOf:)`
+/// a symlinked `winter-plugin.json` pointing anywhere on disk, which `fileExists`/`Data(contentsOf:)`
 /// would happily follow.
 func locatePluginRoot(in directory: URL, fileManager: FileManager = .default) -> URL? {
     func isManifest(_ url: URL) -> Bool {
@@ -173,7 +173,7 @@ func locatePluginRoot(in directory: URL, fileManager: FileManager = .default) ->
         return !isSymlink
     }
     func hasManifest(_ url: URL) -> Bool {
-        isManifest(url.appendingPathComponent("norma-plugin.json"))
+        isManifest(url.appendingPathComponent("winter-plugin.json"))
             || isManifest(url.appendingPathComponent("plugin.json"))
     }
     func isIgnoredCandidate(_ url: URL) -> Bool {
@@ -207,7 +207,7 @@ func locatePluginRoot(in directory: URL, fileManager: FileManager = .default) ->
 /// function actually returns (extraction succeeded).
 func extractPluginZip(at zipURL: URL, fileManager: FileManager = .default) async throws -> URL {
     let tempDir = fileManager.temporaryDirectory
-        .appendingPathComponent("norma-plugin-install-\(UUID().uuidString)", isDirectory: true)
+        .appendingPathComponent("winter-plugin-install-\(UUID().uuidString)", isDirectory: true)
     try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
     do {
         let process = Process()
@@ -258,7 +258,7 @@ func settleShouldContinue(status: String?, elapsedSeconds: Double) -> Bool {
 
 @MainActor
 final class PluginManagerModel: ObservableObject {
-    private let client: NormaClient
+    private let client: WinterClient
 
     @Published private(set) var rows: [PluginRowDisplay] = []
     @Published var errorText: String?
@@ -296,7 +296,7 @@ final class PluginManagerModel: ObservableObject {
     /// `shortcutsModel.refresh()`.
     var onRefreshed: (() -> Void)?
 
-    init(client: NormaClient) {
+    init(client: WinterClient) {
         self.client = client
     }
 
@@ -449,7 +449,7 @@ final class PluginManagerModel: ObservableObject {
             case .ok(let name, let requiredConsents, _, let consentBlock):
                 consentSheet = ConsentSheetState(pluginName: name, consentBlock: consentBlock, requiredConsents: requiredConsents)
             case .invalidSource:
-                actionError = "not a valid plugin source — no norma-plugin.json/plugin.json found"
+                actionError = "not a valid plugin source — no winter-plugin.json/plugin.json found"
             case .alreadyInstalled(let name):
                 actionError = "\(name) is already installed"
             }
@@ -653,7 +653,7 @@ struct PluginManagerView: View {
                 let tempDir = try await extractPluginZip(at: url)
                 zipTempDir = tempDir
                 guard let root = locatePluginRoot(in: tempDir) else {
-                    model.errorText = "zip has no norma-plugin.json/plugin.json — not a plugin"
+                    model.errorText = "zip has no winter-plugin.json/plugin.json — not a plugin"
                     return
                 }
                 sourceDir = root

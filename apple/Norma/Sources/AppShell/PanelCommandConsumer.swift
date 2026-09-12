@@ -1,6 +1,6 @@
 import CoreGraphics
 import Foundation
-import NormaProtocol
+import WinterProtocol
 
 /// b2-agent-browser Task 3 — **the `panel_command` consumer: the first one this event has ever
 /// had.**
@@ -72,7 +72,7 @@ import NormaProtocol
 /// ## Task 5 — the interact set, and **the rule every one of its arms is built to**
 ///
 /// From here a model types and clicks inside the user's own logged-in browser. `panel_command.args`
-/// is read for the first time, which retires the containment `NormaCEF.h`'s CDP-door header relied
+/// is read for the first time, which retires the containment `WinterCEF.h`'s CDP-door header relied
 /// on ("every `method` string and every expression this app sends is a LITERAL … `args` is
 /// deliberately not read at all until Task 5"). What replaces it is a rule, honoured at every site:
 ///
@@ -751,7 +751,7 @@ final class PanelCommandConsumer {
     /// protocol error this reports. The same string concatenated into
     /// `"document.querySelector('" + selector + "')"` would be a program — in a page the user is
     /// logged into, over a bridge where one `location.href` assignment is a navigation no URL policy
-    /// in this app can see (`NormaCEF.h`'s CDP-door header states exactly that).
+    /// in this app can see (`WinterCEF.h`'s CDP-door header states exactly that).
     ///
     /// `DOM.getDocument` is re-issued per command rather than cached: node ids are scoped to the
     /// DOM agent's current document and are invalidated by every navigation, so a cached root is a
@@ -825,7 +825,7 @@ final class PanelCommandConsumer {
     /// seven-hop `click` seven times the patience the command was dispatched with.
     ///
     /// **Armed BEFORE the first dispatch**, because a completion that fires synchronously (every
-    /// refusal `NormaCEFExecuteCDP` decides itself does) must find a call it can claim — and
+    /// refusal `WinterCEFExecuteCDP` decides itself does) must find a call it can claim — and
     /// `claim()` cancels the timer, so arming first costs one cancelled timer in the fast case and
     /// closes a hole in the slow one.
     ///
@@ -864,7 +864,7 @@ final class PanelCommandConsumer {
         let dispatched = runtime.executeCDP(tabId: tabId, method: method, paramsJSON: paramsJSON) {
             [weak self] ok, payload in
             guard let self, !call.isAnswered else { return }
-            // `NormaCEFExecuteCDP` promises this fires exactly once and always — including for a
+            // `WinterCEFExecuteCDP` promises this fires exactly once and always — including for a
             // browser that closed mid-call — so there is no "and if it never comes back" branch
             // here beyond the deadline, which exists for the app being wedged rather than for the
             // bridge being unreliable.
@@ -997,7 +997,7 @@ final class PanelCommandConsumer {
     static func capped(_ text: String) -> String {
         let length = PanelURLPolicy.wireLength(text)
         guard length > resultMaxLength else { return text }
-        let marker = " … [cut by Norma: the full message was \(length) characters]"
+        let marker = " … [cut by Winter: the full message was \(length) characters]"
         let room = max(0, resultMaxLength - PanelURLPolicy.wireLength(marker))
         return PanelURLPolicy.truncated(text, toWireLength: room) + marker
     }
@@ -1019,7 +1019,7 @@ final class PanelCommandConsumer {
     /// entries yet), websockets and long-polls (never entries), and anything after the resource
     /// timing buffer fills — 250 entries by default, after which the count stops growing and `idle`
     /// becomes trivially true. Observing the real thing needs the `Network` domain's EVENTS, and
-    /// this app's CDP bridge correlates method REPLIES only (`NormaCEF.h`), so there is no event
+    /// this app's CDP bridge correlates method REPLIES only (`WinterCEF.h`), so there is no event
     /// stream to subscribe to.
     ///
     /// A literal, with nothing interpolated into it — the rule this file's header states.
@@ -1072,7 +1072,7 @@ final class PanelCommandConsumer {
     /// readable — which is a refusal, never a pass. Worded so a model does not read it as a
     /// transient fault worth retrying into.
     static let floorInspectionFailed =
-        "refused: Norma could not inspect that field, and it never types into a field it could not "
+        "refused: Winter could not inspect that field, and it never types into a field it could not "
         + "check — the check is what keeps a password or payment field from being filled in "
         + "unattended. Nothing was typed."
 
@@ -1144,7 +1144,7 @@ final class PanelCommandConsumer {
 /// The DevTools replies this app reads, parsed in Swift.
 ///
 /// Separate from the consumer because it is PURE and because the ObjC++ side deliberately does no
-/// parsing of its own (`NormaCEF.h`: the payload is handed over verbatim, always as a JSON object).
+/// parsing of its own (`WinterCEF.h`: the payload is handed over verbatim, always as a JSON object).
 /// One place decodes CDP; it is testable with canned strings; and the bridge stays a transport.
 enum PanelCDPReply {
 

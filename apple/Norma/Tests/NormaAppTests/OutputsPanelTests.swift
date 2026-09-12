@@ -1,7 +1,7 @@
 import XCTest
 import AppKit
-import NormaKit
-@testable import Norma
+import WinterKit
+@testable import Winter
 
 /// app-shell T9 (spec §3): the floating corner panel's SEAM — everything through
 /// `OutputsPanelController.handleOutputsChange` is pure or driven by injected closures, exercised

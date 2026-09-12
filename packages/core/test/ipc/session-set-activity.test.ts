@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@winter/protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
@@ -87,7 +87,7 @@ describe("session.setActivity (session-activity-hygiene T3)", () => {
     store: SessionStore; hub: SessionHub; socketPath: string; harnessToken: string; remoteToken: string;
     running: Set<string>; bgWork: Set<string>;
   }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-set-activity-rpc-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-set-activity-rpc-"));
     const store = new SessionStore(home);
     const hub = new SessionHub(store);
     const socketPath = join(home, "core.sock");
@@ -579,7 +579,7 @@ describe("session.setActivity (session-activity-hygiene T3)", () => {
   // reported a hard 0 — "idle" for a session with a live harness sitting on it. Deriving off the
   // LOCAL binding is what makes both surfaces read the hub that holds the attachments.
   test("a server built with NO injected hub still sees its own attachments (both surfaces)", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-set-activity-nohub-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-set-activity-nohub-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));

@@ -1,5 +1,5 @@
 name: 💡 Feature request
-description: Suggest something Norma should be able to do.
+description: Suggest something Winter should be able to do.
 labels: ["enhancement"]
 body:
   - type: markdown
@@ -20,14 +20,14 @@ body:
   - type: textarea
     id: proposal
     attributes:
-      label: What would you like Norma to do?
+      label: What would you like Winter to do?
     validations:
       required: true
 
   - type: dropdown
     id: area
     attributes:
-      label: Which part of Norma?
+      label: Which part of Winter?
       multiple: true
       options:
         - Chat mode

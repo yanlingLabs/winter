@@ -34,7 +34,7 @@ struct TranscriptUserBubble: View {
     let tint: Color
 
     /// **A wiring pin, not coverage** (same species as `ModelPickerTests.swift:767`): hoisted so
-    /// "the user's own words are NOT set in Norma's voice" is assertable without rendering. The
+    /// "the user's own words are NOT set in Winter's voice" is assertable without rendering. The
     /// real weight is carried by `TranscriptBrandTests`' font-resolution pins, which prove what
     /// each role actually renders as.
     var proseRole: TranscriptProseRole { .sans }
@@ -64,12 +64,12 @@ struct TranscriptUserBubble: View {
     }
 }
 
-/// Norma's reply — left-aligned, full width, formatted blocks + a per-message copy affordance
+/// Winter's reply — left-aligned, full width, formatted blocks + a per-message copy affordance
 /// that hides while the reply is still streaming (donor `ChatMessageBubble`'s non-user branch).
 ///
 /// `role` is REQUIRED, and the reason is this view's second consumer: both plan-card bodies
 /// (`PendingCards.swift`) compose it to render a plan's markdown. A hardcoded serif here would put
-/// every plan card into Norma's speaking voice, which `docs/brand.md` § 4 does not allowlist — so
+/// every plan card into Winter's speaking voice, which `docs/brand.md` § 4 does not allowlist — so
 /// the transcript's two call sites pass `.assistant` and the two card bodies pass `.sans`.
 struct TranscriptAssistantMessage: View {
     let text: String
@@ -90,7 +90,7 @@ struct TranscriptAssistantMessage: View {
                 // the USER's System Settings accent, because `docs/brand.md` § 3.2 deliberately
                 // leaves `ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME` unset — so every bullet
                 // and quote rule in the transcript was drawing in whatever colour the Mac's owner
-                // had picked in General, not in Norma's teal.
+                // had picked in General, not in Winter's teal.
                 TranscriptFormattedMessageText(text: displayText, tint: Theme.accent,
                                                role: role, fillsAvailableWidth: true)
                     .foregroundStyle(.primary)
@@ -599,7 +599,7 @@ func groupActivity(_ items: [ActivityItem]) -> [ActivityGroup] {
 /// Pure lowercase fragment for one `ToolRunEntry` — the sentence-building unit consumed by
 /// `toolRunSentence`. Natural verbs, singular/plural, matching the brief's exact vocabulary.
 /// `ls` (the native directory-listing tool, added after r1b) gets "listed a directory"/"listed N
-/// directories" — the label r1b had temporarily borrowed for `glob` as a stand-in while Norma had
+/// directories" — the label r1b had temporarily borrowed for `glob` as a stand-in while Winter had
 /// no dedicated lister. Now that `ls` exists, `glob` REVERTS to its pre-r1b "searched"/"searched N
 /// times" (same fragment as `grep` — both are pattern searches, not directory listings). Any tool
 /// name not explicitly listed (future tools, `mcp__*` server tools, etc.) falls back to "used a
@@ -882,7 +882,7 @@ func toolCallOutputPlaceholder(_ status: ToolCallStatus) -> String? {
 /// The wire's `path` is the tool argument AS RECEIVED and may be relative (`FileDiffRef`'s own doc);
 /// this is a STRING operation on it, never a filesystem one — nothing here resolves, canonicalises
 /// or touches the disk, because the string is all the wire ever carried. Two components is the
-/// user's own figure (design spec §3, "like the `norma v2/core` example"): enough to disambiguate
+/// user's own figure (design spec §3, "like the `winter v2/core` example"): enough to disambiguate
 /// the dozen `index.ts`es a real project has, short enough to sit inside a transcript row.
 ///
 /// Empty components are dropped, so a trailing or doubled separator cannot eat one of the two.

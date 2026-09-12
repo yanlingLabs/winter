@@ -22,11 +22,11 @@ final class ChargeManager {
     /// Monitoring-loop cadence. Only runs while a target is set.
     static let pollInterval: TimeInterval = 30
 
-    private static let persistenceDirectory = URL(fileURLWithPath: "/Library/Application Support/Norma")
+    private static let persistenceDirectory = URL(fileURLWithPath: "/Library/Application Support/Winter")
     private static let persistenceURL = persistenceDirectory.appendingPathComponent("charge-limit.json")
 
     private let smc: SMCController
-    private let queue = DispatchQueue(label: "com.norma.helper.chargeManager")
+    private let queue = DispatchQueue(label: "com.winter.helper.chargeManager")
     private var timer: DispatchSourceTimer?
     private var _targetPercent: Int?
     private var _inhibitingNow = false
@@ -165,7 +165,7 @@ final class ChargeManager {
 
     // MARK: - Persistence
 
-    /// `{ "targetPercent": <Int|null> }` at `/Library/Application Support/Norma/charge-limit.json`
+    /// `{ "targetPercent": <Int|null> }` at `/Library/Application Support/Winter/charge-limit.json`
     /// — root-owned (the daemon runs as root); the directory is created if absent.
     private struct PersistedState: Codable {
         let targetPercent: Int?

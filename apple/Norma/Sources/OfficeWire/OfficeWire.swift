@@ -1,7 +1,7 @@
 import Foundation
 
 /// Office Stage A, Task 2 — **the whole vocabulary spoken over the office helper's Unix socket**,
-/// compiled into BOTH `Norma` (the app) and `NormaOfficeHelper` (the helper) via two separate
+/// compiled into BOTH `Winter` (the app) and `WinterOfficeHelper` (the helper) via two separate
 /// xcodegen `sources` entries pointing at this one file — never a framework, per the brief
 /// ("NOT a framework — keep it simple").
 ///
@@ -282,7 +282,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// out of range.
     ///
     /// **`range` is an ALREADY-FORMATTED A1 string ("A1:C10"), not column/row integers — a deliberate
-    /// cross-target constraint, not a style choice.** `NormaOfficeHelper` (this frame's receiving
+    /// cross-target constraint, not a style choice.** `WinterOfficeHelper` (this frame's receiving
     /// target) compiles `Sources/OfficeWire` + `Sources/OfficeHelper` only (`project.yml`) — it never
     /// sees `Sources/AppShell/PanelDocumentTab.swift`, where Stage B T8's
     /// `officeColumnLetters`/`officeCellReference` (and this task's own inverse,
@@ -301,7 +301,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
     /// **`cellAddresses` is a flat, already-formatted list of A1 cell references ("B2"), computed
     /// APP-side — never column integers, and never a single range string this frame would have to
     /// walk itself.** Same cross-target constraint `sheetsRead`'s own `range` field carries (see
-    /// that case's own header): `NormaOfficeHelper` never compiles `Sources/AppShell`, where the A1
+    /// that case's own header): `WinterOfficeHelper` never compiles `Sources/AppShell`, where the A1
     /// column math (`officeCellReference`) lives, so per-cell addressing has to arrive pre-computed
     /// rather than be re-derived helper-side from `range` + a grid position. `cellValues[i]` is
     /// exactly what gets TYPED into `cellAddresses[i]` — a leading `=` becomes a formula, exactly
@@ -543,7 +543,7 @@ public enum OfficeWireFrame: Equatable, Sendable {
 
     /// `hello` succeeded: `token` matched. `lokVersion` is now (Task 3) the REAL
     /// `getVersionInfo()` `BuildId`, when this connection's peer is a real, LOK-booted helper.
-    /// `NormaOfficeHelperFixture` (no real LOK — see `OfficeDocumentBridge`'s fake implementation)
+    /// `WinterOfficeHelperFixture` (no real LOK — see `OfficeDocumentBridge`'s fake implementation)
     /// still honestly reports `officeWireStageALOKVersionPlaceholder` — that constant did not
     /// retire, it narrowed: it is now the fixture's own true self-description, not a Stage-A-wide
     /// placeholder.
@@ -1873,7 +1873,7 @@ public enum OfficeMouseEventType: Int, Equatable, Sendable {
 /// mirror as `OfficeKeyEventType`/`OfficeMouseEventType`: `rawValue` IS the wire integer, no
 /// translation. LOK declares THREE enumerators (`LOK_EXT_TEXTINPUT = 0`, `LOK_EXT_TEXTINPUT_POS = 1`,
 /// `LOK_EXT_TEXTINPUT_END = 2`) — this bridge only ever SENDS two of them. `POS` (cf.
-/// `SalEvent::ExtTextInputPos`) is an IME candidate-window positioning query; Norma answers that need
+/// `SalEvent::ExtTextInputPos`) is an IME candidate-window positioning query; Winter answers that need
 /// itself, locally, via `NSTextInputClient.firstRect(forCharacterRange:)` reading the already-tracked
 /// caret rect — there is nothing to ask LOK for. **`.end`'s rawValue is therefore `2`, deliberately
 /// skipping `1`** — a sequential `case input = 0, end = 1` would silently post `LOK_EXT_TEXTINPUT_POS`
@@ -1929,8 +1929,8 @@ public struct OfficeDocumentSize: Equatable, Sendable {
 /// the wire type itself so `OfficeDocumentBridge` (`OfficeHelperServer.swift`, helper-side only)
 /// doesn't need to depend on wire framing. Lives HERE, not beside `OfficeDocumentBridge` itself,
 /// because BOTH sides need it: the app's `OfficeHelperClient.open()` (`AppShell`, compiled into
-/// `Norma`) returns it, and `OfficeHelperServer.swift`'s `Sources/OfficeHelper` tree — where
-/// `OfficeDocumentBridge` itself lives — is EXCLUDED from `Norma`'s own sources sweep (project.yml:
+/// `Winter`) returns it, and `OfficeHelperServer.swift`'s `Sources/OfficeHelper` tree — where
+/// `OfficeDocumentBridge` itself lives — is EXCLUDED from `Winter`'s own sources sweep (project.yml:
 /// `Sources/OfficeHelper/main.swift` would collide with `Sources/App/main.swift`, so the whole
 /// directory is excluded, not just that one file) — a type the app needs cannot live in a file the
 /// app never compiles.
@@ -1982,7 +1982,7 @@ public enum OfficeDocumentEvent: Equatable, Sendable {
     /// Task 5 — `LOK_CALLBACK_INVALIDATE_VISIBLE_CURSOR`'s parsed rect: the blinking text caret's
     /// own position/size. Never carries "no cursor" — LOK only ever fires this with a real
     /// rectangle (see `parseCaretRect`'s own header for the empirical capture this is built from);
-    /// Norma owns the actual BLINK timing itself (`LOK_CALLBACK_CURSOR_VISIBLE`, type 5, is
+    /// Winter owns the actual BLINK timing itself (`LOK_CALLBACK_CURSOR_VISIBLE`, type 5, is
     /// deliberately not wired — a disclosed Task 5 scope decision, not an oversight).
     case caretRect(OfficeTwipsRect)
     /// Task 5 — `LOK_CALLBACK_TEXT_SELECTION`'s parsed rect LIST: one rect per visual line the
@@ -2488,7 +2488,7 @@ extension OfficeDocumentEvent {
     /// verbatim, confirmed live (`OfficeHelperLiveTests
     /// .testProbeInvestigatesWhetherCellFormulaCallbacksExistForTheFormulaBarsContent`'s own real
     /// capture) to arrive as a plain string in every observed shape — a cell's literal content
-    /// ("NORMA GATE", "42"), the empty string for a genuinely empty cell, and the live,
+    /// ("WINTER GATE", "42"), the empty string for a genuinely empty cell, and the live,
     /// uncommitted in-progress edit-buffer text while typing. A bare `""` is therefore NOT an
     /// error sentinel the way it is for `parseTextSelectionStart`/`parseCellCursor` — it is the
     /// real, meaningful "this cell has no content" shape, and must fold as such, never as a
@@ -2511,9 +2511,9 @@ public enum OfficeCellCursor: Equatable, Sendable {
 }
 
 /// Task 2 introduced this as a Stage-A-wide placeholder (no LibreOfficeKit loaded anywhere yet).
-/// Task 3 NARROWS it rather than retiring it: the real `NormaOfficeHelper` now reports the real
+/// Task 3 NARROWS it rather than retiring it: the real `WinterOfficeHelper` now reports the real
 /// `getVersionInfo()` `BuildId` (see `OfficeHelperServer`'s `hello` handler and `LOKBridge`), but
-/// `NormaOfficeHelperFixture` (`OfficeSupervisorTests`' spy binary) still has no real LOK — see
+/// `WinterOfficeHelperFixture` (`OfficeSupervisorTests`' spy binary) still has no real LOK — see
 /// `Tests/OfficeHelperFixtureSources/main.swift`'s fake `OfficeDocumentBridge` — and reporting this
 /// exact string remains its own honest self-description, not a stand-in for something realer. Four
 /// pinned call sites move together with any future change here: this constant, `OfficeHelperServer`
@@ -3369,7 +3369,7 @@ public final class OfficeWireSeqAllocator {
     }
 }
 
-/// A tiny `--flag value` CLI parser shared by `NormaOfficeHelper`'s real `main.swift` and the
+/// A tiny `--flag value` CLI parser shared by `WinterOfficeHelper`'s real `main.swift` and the
 /// test-only fixture's `main.swift` (`Tests/OfficeHelperFixtureSources`) — one implementation so
 /// the two argument grammars cannot drift. Unknown/malformed tokens are ignored rather than
 /// fatally erroring: both call sites already validate the specific flags THEY require and report

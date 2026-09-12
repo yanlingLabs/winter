@@ -1,13 +1,13 @@
 import Darwin
 import Foundation
-import NormaKit
+import WinterKit
 
 /// Injected seam (mirrors `PeripheralProvider`'s live-vs-fake dependency pattern) so
 /// `DaemonSupervisor`'s tests never launch a real process, stat the real filesystem, or read a
 /// real environment variable. Production wiring (Task 6) supplies the live closures:
-/// `bundledDaemonPath` resolves `Bundle.main`'s embedded `norma-core` (Release only — see
-/// `project.yml`'s "Embed norma-core" script), `socketExists` stats `~/.norma/run/core.sock`,
-/// `isDevEnv` checks `NORMA_DEV`, `spawn` launches `norma-core daemon run`.
+/// `bundledDaemonPath` resolves `Bundle.main`'s embedded `winter-core` (Release only — see
+/// `project.yml`'s "Embed winter-core" script), `socketExists` stats `~/.winter/run/core.sock`,
+/// `isDevEnv` checks `WINTER_DEV`, `spawn` launches `winter-core daemon run`.
 struct DaemonSupervisorDeps {
     var bundledDaemonPath: () -> String?
     var socketExists: () -> Bool
@@ -33,10 +33,10 @@ protocol DaemonProcess: AnyObject {
     var onExit: ((_ intentional: Bool) -> Void)? { get set }
 }
 
-/// Owns the bundled `norma-core` daemon's lifecycle for a SHIPPED app: spawns it once, quietly
+/// Owns the bundled `winter-core` daemon's lifecycle for a SHIPPED app: spawns it once, quietly
 /// respawns it on crash (capped, so a boot-looping daemon doesn't spin forever), and kills it
 /// intentionally when the app quits — the app itself is NEVER restarted because the daemon
-/// crashed. In DEV (`NORMA_DEV` set), when unbundled, or when a socket is already live (a
+/// crashed. In DEV (`WINTER_DEV` set), when unbundled, or when a socket is already live (a
 /// hand-run daemon holds it), `start()` spawns NOTHING: `.connectOnly` is what keeps a developer's
 /// manually-launched daemon completely untouched.
 @MainActor
@@ -168,8 +168,8 @@ final class DaemonSupervisor {
 // `DaemonSupervisorDeps` that composes it with the real bundle/filesystem/environment reads.
 // -----------------------------------------------------------------------------------------------
 
-/// The real `Process`-backed `DaemonProcess`: launches the bundled `norma-core` binary as
-/// `norma-core daemon run` (same argv the old launchd plist used — see `LaunchdMigration.swift`).
+/// The real `Process`-backed `DaemonProcess`: launches the bundled `winter-core` binary as
+/// `winter-core daemon run` (same argv the old launchd plist used — see `LaunchdMigration.swift`).
 ///
 /// CONSTRAINT (T2 review, binding): `Process.terminationHandler` fires on an arbitrary background
 /// queue Foundation manages — NOT the main actor. `DaemonSupervisor` is `@MainActor` and its
@@ -231,7 +231,7 @@ final class RealDaemonProcess: DaemonProcess {
     /// SIGTERM, then a BOUNDED wait, then SIGKILL if the child is still alive (T6 review FIX 2).
     /// CONTRACT: after this returns, the child is guaranteed dead — it either exited on SIGTERM
     /// (the daemon's normal path) or was SIGKILLed. This closes the "app quit -> daemon quit"
-    /// invariant gap: a wedged/hung norma-core that ignores SIGTERM would otherwise survive app
+    /// invariant gap: a wedged/hung winter-core that ignores SIGTERM would otherwise survive app
     /// quit. Blocks the calling thread for up to `gracefulExitTimeout` — deliberate, since the sole
     /// caller (`DaemonSupervisor.stop()` from `applicationWillTerminate`) needs the kill to COMPLETE
     /// before the process exits; a healthy daemon exits on SIGTERM in well under the deadline, so
@@ -325,15 +325,15 @@ func unixSocketIsLive(path: String, timeoutMs: Int32 = 500) -> Bool {
 }
 
 extension DaemonSupervisorDeps {
-    /// Production wiring: the real `Bundle.main`-embedded `norma-core` (Release builds only — the
-    /// "Embed norma-core" build script skips Debug/Test, see `project.yml`), the real
-    /// `~/.norma/run/core.sock` LIVENESS probe (whole-branch review — a stale socket FILE must read
-    /// as not-reachable so the supervisor spawns and `acquireLock` unlinks it), the real `NORMA_DEV`
+    /// Production wiring: the real `Bundle.main`-embedded `winter-core` (Release builds only — the
+    /// "Embed winter-core" build script skips Debug/Test, see `project.yml`), the real
+    /// `~/.winter/run/core.sock` LIVENESS probe (whole-branch review — a stale socket FILE must read
+    /// as not-reachable so the supervisor spawns and `acquireLock` unlinks it), the real `WINTER_DEV`
     /// env read, and a real `RealDaemonProcess` spawn. `AppDelegate.boot()`'s sole production caller.
     static let live = DaemonSupervisorDeps(
-        bundledDaemonPath: { Bundle.main.path(forResource: "norma-core", ofType: nil) },
-        socketExists: { unixSocketIsLive(path: NormaPaths.socketPath()) },
-        isDevEnv: { ProcessInfo.processInfo.environment["NORMA_DEV"] != nil },
+        bundledDaemonPath: { Bundle.main.path(forResource: "winter-core", ofType: nil) },
+        socketExists: { unixSocketIsLive(path: WinterPaths.socketPath()) },
+        isDevEnv: { ProcessInfo.processInfo.environment["WINTER_DEV"] != nil },
         spawn: { path in RealDaemonProcess(path: path) },
         now: { Date() }
     )
@@ -342,7 +342,7 @@ extension DaemonSupervisorDeps {
     /// `daemonSupervisorDeps` (the vast majority — `ScaffoldTests`, `DashboardTests`, etc.):
     /// `bundledDaemonPath` always resolves `nil`, so `DaemonSupervisor.start()` always lands in
     /// `.connectOnly` and spawns nothing, regardless of what the test host's `Bundle.main` happens
-    /// to contain — e.g. a Release-configuration test run that DID embed norma-core. Belt-and-
+    /// to contain — e.g. a Release-configuration test run that DID embed winter-core. Belt-and-
     /// suspenders on top of `AppDelegate.boot()`'s own `Self.isRunningUnitTests` branch below.
     static let neverSupervise = DaemonSupervisorDeps(
         bundledDaemonPath: { nil },

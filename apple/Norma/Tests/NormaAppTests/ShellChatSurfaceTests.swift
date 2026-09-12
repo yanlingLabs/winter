@@ -1,6 +1,6 @@
 import XCTest
-import NormaKit
-@testable import Norma
+import WinterKit
+@testable import Winter
 
 /// app-shell T3: the chat landing's row filter and the `/background` affordance — its visibility
 /// rule (PURE), the wiring gate that keeps it off every pre-existing surface, and its RPC + verbatim

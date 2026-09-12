@@ -9,7 +9,7 @@ import SwiftUI
 // convention (`LoginItemController.hasUserMadeChoice`).
 // -----------------------------------------------------------------------------------------------
 
-let firstRunDisclosureShownKey = "norma.firstRunDisclosureShown"
+let firstRunDisclosureShownKey = "winter.firstRunDisclosureShown"
 
 /// `true` iff the disclosure has never been shown against these `defaults` — `AppDelegate.boot()`
 /// checks this (real `UserDefaults.standard` in production; an isolated `UserDefaults(suiteName:)`
@@ -20,7 +20,7 @@ func shouldShowFirstRunDisclosure(defaults: UserDefaults) -> Bool {
 
 /// Marks the disclosure as shown — called once, at presentation time, NOT deferred to either
 /// button or the window's close. So the sheet can never reappear on a later launch regardless of
-/// how (or whether) the user dismissed it: a button click, the red traffic light, or quitting Norma
+/// how (or whether) the user dismissed it: a button click, the red traffic light, or quitting Winter
 /// entirely before touching it. Matches spec §3's "shown once; never gates functionality" — the
 /// only thing this flag controls is whether the window is offered again, never any app behavior.
 func markFirstRunDisclosureShown(defaults: UserDefaults) {
@@ -29,7 +29,7 @@ func markFirstRunDisclosureShown(defaults: UserDefaults) {
 
 // -----------------------------------------------------------------------------------------------
 // FirstRunDisclosureView — the window's content. Same plain-language disclosure as `ProviderPane`
-// (`normaProviderDisclosureText`, `ProviderPane.swift`) — one non-affiliation/account-risk text,
+// (`winterProviderDisclosureText`, `ProviderPane.swift`) — one non-affiliation/account-risk text,
 // never two different tellings of the same risk.
 // -----------------------------------------------------------------------------------------------
 
@@ -40,7 +40,7 @@ struct FirstRunDisclosureView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Before you start").font(Typography.paneTitle)
-            Text(normaProviderDisclosureText)
+            Text(winterProviderDisclosureText)
                 .font(Typography.label())
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -86,7 +86,7 @@ final class FirstRunDisclosureWindowController: NSObject, NSWindowDelegate {
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 260),
             styleMask: [.titled, .closable],
             backing: .buffered, defer: false)
-        window.title = "Norma"
+        window.title = "Winter"
         window.isReleasedWhenClosed = false // this controller owns the window's lifetime
         self.window = window
         super.init()

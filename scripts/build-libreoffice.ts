@@ -54,7 +54,7 @@
  *     the wrong answer and corrupting its 64-bit-integer emulation choice. Confirmed by isolated
  *     retry: removing only the `-Wl,-oso_prefix` pair (keeping the two `-*-prefix-map` pairs)
  *     let cairo rebuild clean with no other change. It is NOT part of the final flag set here.
- *   - `--with-vendor=Norma` replaces the default $USER-derived OOO_VENDOR.
+ *   - `--with-vendor=Winter` replaces the default $USER-derived OOO_VENDOR.
  *   - The chosen `--workdir` MUST resolve to a path containing NO identifying substrings (no
  *     account name, no hostname fragment) -- the prefix-map flags remap the compiler's OWN
  *     `__FILE__`/DWARF path embeddings, but do NOT touch arbitrary `-D` preprocessor defines a
@@ -86,7 +86,7 @@
  *                      at this commit). --workdir itself must be identity-free -- see the RE-CUT
  *                      note above; this script does not and cannot enforce that choice for you.
  *   2. configure    -- MAKE=gmake-steered autogen.sh with the 33-flag v2+scrub recipe (32 flags
- *                      verbatim from the release notes linked above plus --with-vendor=Norma). Deliberately
+ *                      verbatim from the release notes linked above plus --with-vendor=Winter). Deliberately
  *                      NO CC/CXX override -- see the RE-CUT note above for why. Do NOT add
  *                      --disable-skia -- see the constant's own comment for why that specific
  *                      flag fails to compile on this platform.
@@ -176,13 +176,13 @@ const BREW_PACKAGES_REQUIRED_BUT_NOT_AUTO_INSTALLED = ["make", "pkg-config"]; //
 // targets are deliberately unambiguous nonsense paths (never real directories) so a remapped
 // string is obviously synthetic if it ever surfaces in a bug report.
 // ---------------------------------------------------------------------------
-const PREFIX_MAP_BUILDDIR_TARGET = "/norma-build"; // replaces the corePath (BUILDDIR == SRCDIR for
+const PREFIX_MAP_BUILDDIR_TARGET = "/winter-build"; // replaces the corePath (BUILDDIR == SRCDIR for
 // this in-tree configure) -- LOAD-BEARING: a scratchpad-style workdir path can easily contain the
 // builder's account name (e.g. a Claude-harness tmp scratchpad literally embeds
 // "-Users-<name>-..." as a directory-name component) -- see the --workdir requirement below.
 //
 // THERE IS DELIBERATELY NO SEPARATE $HOME PREFIX-MAP TARGET. An earlier revision of this recipe
-// also mapped homedir()=/norma-home, "as a second, unconditional map, because nothing guarantees
+// also mapped homedir()=/winter-home, "as a second, unconditional map, because nothing guarantees
 // BUILDDIR stays under $HOME." That reasoning is what caused the exact leak class step 6 exists
 // to catch: `-ffile-prefix-map=<SOURCE>=<TARGET>` is a remap INSTRUCTION, and <SOURCE> is data --
 // when SOURCE is `homedir()` (a per-account absolute path), the flag's own ARGUMENT TEXT contains
@@ -263,7 +263,7 @@ function prefixMapFlags(builddir: string): string[] {
 
 // The v2 trimmed+merged configure line (see the release notes linked in this file's own header
 // for the "V2 configure flags + L0/L2 evidence" behind it) plus one RE-CUT addition,
-// --with-vendor=Norma: unset, LibreOffice's own configure
+// --with-vendor=Winter: unset, LibreOffice's own configure
 // (configure.ac ~15626-15645) defaults OOO_VENDOR to $USERNAME/$USER/`id -u -n` -- i.e. the
 // builder's own macOS account name -- and bakes it verbatim into Resources/versionrc's `Vendor=`
 // line and Resources/registry/main.xcd's `ooVendor` property. That is exactly the second leak
@@ -306,7 +306,7 @@ const CONFIGURE_FLAGS = [
   "--without-webdav",
   "--with-galleries=no",
   "--enable-option-checking=fatal",
-  "--with-vendor=Norma",
+  "--with-vendor=Winter",
 ];
 
 const BUILD_ARGS = ["gb_SUPPRESS_TESTS=T"];

@@ -2,7 +2,7 @@
 // `RuntimeSessionRecord`, so the runtime spine has a complete picture of the past before anything
 // starts routing on it.
 //
-// WHAT A BACKFILLED RECORD DELIBERATELY DOES NOT CLAIM. A legacy session's history is a Norma
+// WHAT A BACKFILLED RECORD DELIBERATELY DOES NOT CLAIM. A legacy session's history is a Winter
 // `SessionEvent` JSONL and nothing else: there is no Claude-dialect compatibility transcript for it,
 // no backend session uuid that any file is named after, no recorded SDK or engine version, and no
 // selection anybody actually made. Every one of those absences is written down rather than
@@ -125,7 +125,7 @@ function backfillOne(deps: BackfillDeps, records: RuntimeSessionRecords, now: ()
     // minor 6). The SDK types `modelRef` as the provider-qualified catalog ROW KEY
     // (`anthropic/claude-opus-5`), and the obvious derivation — `${providerId}/${model}` — would be
     // a fabrication here: `providerId` on this record is `settings.provider.type`
-    // (`codex-oauth` | `openai-compatible`), which is Norma's PROVIDER TYPE, not a catalog provider
+    // (`codex-oauth` | `openai-compatible`), which is Winter's PROVIDER TYPE, not a catalog provider
     // id, so the composed string would name a row no catalog has ever contained. The bare id is what
     // the session actually ran with, and the record already says it is not to be trusted as current:
     // `versionProvenance: "legacy-unknown"`, `family: "legacy"`, `reason: "backfill"`.

@@ -1,6 +1,6 @@
 import Foundation
 
-/// Accepts new `NSXPCConnection`s for the `com.norma.helper` mach service and pins each one to
+/// Accepts new `NSXPCConnection`s for the `com.winter.helper` mach service and pins each one to
 /// processes signed by team 37N77U9RSZ, per task-3-brief.md's exact requirement string.
 ///
 /// Owns the ONE shared `ChargeManager` for the daemon's lifetime (per Task 6 of the gate-fix
@@ -17,7 +17,7 @@ final class HelperServiceDelegate: NSObject, NSXPCListenerDelegate {
     }
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection newConnection: NSXPCConnection) -> Bool {
-        newConnection.exportedInterface = NSXPCInterface(with: NormaHelperProtocol.self)
+        newConnection.exportedInterface = NSXPCInterface(with: WinterHelperProtocol.self)
         newConnection.exportedObject = HelperService(chargeManager: chargeManager)
         // `NSXPCConnection.setCodeSigningRequirement(_:)` (macOS 13+) has no synchronous
         // "reject" return value — the only failure mode it can raise is an NSException for a
@@ -36,7 +36,7 @@ final class HelperServiceDelegate: NSObject, NSXPCListenerDelegate {
 /// The exported XPC object. Translates `ChargeManager`/`ChargeLimitPlan` decisions into
 /// (resultJson, errorJson) replies. Holds no state of its own — the shared `ChargeManager`
 /// (owned by `HelperServiceDelegate`, one per daemon, not per-connection) does all the work.
-final class HelperService: NSObject, NormaHelperProtocol {
+final class HelperService: NSObject, WinterHelperProtocol {
     private let chargeManager: ChargeManager
 
     init(chargeManager: ChargeManager) {

@@ -3,6 +3,6 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@norma/plugin-sdk": "workspace:*"
+    "@winter/plugin-sdk": "workspace:*"
   }
 }

@@ -92,7 +92,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let threadId: String
         public let text: String
         public let clientName: String
-        // Public init so a Swift PRODUCER (NormaChatKit's phone ChatEngine) can construct this event
+        // Public init so a Swift PRODUCER (WinterChatKit's phone ChatEngine) can construct this event
         // — the synthesized memberwise init is `internal`. Additive; no wire/shape change.
         public init(seq: Int, sessionId: String, ts: Int, threadId: String, text: String, clientName: String) {
             self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId
@@ -122,7 +122,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     }
 
     /// TRANSIENT streaming chunk — broadcast-only, never persisted/replayed; seq is the store's
-    /// lastSeq at broadcast time. Exempt from seq-based dedupe and lastSeq tracking (see NormaKit).
+    /// lastSeq at broadcast time. Exempt from seq-based dedupe and lastSeq tracking (see WinterKit).
     public struct AssistantDelta: Codable, Equatable, Sendable {
         public let seq: Int
         public let sessionId: String
@@ -248,7 +248,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let inputTokens: Int
         public let outputTokens: Int
         /// Additive/optional (provider-correctness T2, mirrored here for followups T3 now that
-        /// `NormaChatKit.ChatEngine` is a second live producer of `turn_completed`): the provider-
+        /// `WinterChatKit.ChatEngine` is a second live producer of `turn_completed`): the provider-
         /// reported input size of the turn's LARGEST single round, i.e. how full the context actually
         /// got — the only correct input to the daemon's auto-compaction trigger. ABSENT (older events,
         /// or a producer that doesn't emit it) means "skip this event", never "fall back to
@@ -542,7 +542,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     }
 
     /// TRANSIENT (broadcast-only, like `assistant_delta`/the lease events/`PluginToolInvoke`
-    /// above) — core pushes this to the active provider's connection (Norma.app, spec §5) when a
+    /// above) — core pushes this to the active provider's connection (Winter.app, spec §5) when a
     /// plugin (or the harness) calls `hardware.request`; the provider answers via
     /// `hardware.respond` {requestId, resultJson?, error?}.
     public struct HardwareRequested: Codable, Equatable, Sendable {
@@ -648,7 +648,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     /// Push-notification track (task-30, the final CC-parity tool item) — emitted once per
     /// `push_notification` tool call. NOT transient (unlike `AssistantDelta`/the lease events
     /// above): persisted and replayed like `ToolReview`/`TaskUpdated`. Delivery is entirely
-    /// client-side: the Norma app target posts a native `UNUserNotificationCenter` alert
+    /// client-side: the Winter app target posts a native `UNUserNotificationCenter` alert
     /// (`SessionModel.apply`, gated on `ts` being wall-clock-fresh so a reattach/refocus replay
     /// never re-fires a historical notification as a new banner); the daemon additionally shells
     /// `osascript` as a headless fallback when nobody's attached at all (see core's
@@ -745,8 +745,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     /// `ThreadCompleted.stopReason` and `ToolReview.verdict` make. Today's four values are
     /// `active` / `background` / `idle` / `archived`, and a fifth added by a newer daemon must
     /// DECODE on an older client rather than throw. Where that bites is the STRICT path: the Mac
-    /// app's `NormaClient` decodes every pushed frame into this very type, so an unknown case would
-    /// throw there. (The phone's `NormaSessionClient` is not the reason — it decodes the live stream
+    /// app's `WinterClient` decodes every pushed frame into this very type, so an unknown case would
+    /// throw there. (The phone's `WinterSessionClient` is not the reason — it decodes the live stream
     /// opaquely into `JSONValue` and falls back to `.null`, so a value it cannot read is skipped,
     /// not fatal.) Absence — "this session has no lifecycle", which is what chat and dispatch
     /// sessions carry in `session.list` — is never represented here: the daemon emits no event at
@@ -826,7 +826,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     ///
     /// `action` is a plain String, not a Swift enum — the same call `WorktreeExited.action`/
     /// `ToolReview.verdict` make above, and for the STRICT-decode reason `SessionActivity`'s own
-    /// comment spells out: the Mac app's `NormaClient` decodes every pushed frame into this exact
+    /// comment spells out: the Mac app's `WinterClient` decodes every pushed frame into this exact
     /// type, so a future verb an older client doesn't recognize must decode, not throw. B2 Task 2
     /// grew the TS producer's set from one verb to nine (`PANEL_COMMAND_ACTIONS`, events.ts:
     /// navigate/back/read/screenshot/click/type/scroll/submit/wait); validation of the allowed set
@@ -834,8 +834,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     ///
     /// **Where the tolerance actually lives — two layers, only the first of which keeps the
     /// COMMAND.** (1) This `String` is why an unrecognized verb decodes at all; (2) one layer up,
-    /// `parseServerLine` (NormaKit `ServerMessage.swift`) wraps the strict NormaProtocol decode in
-    /// `try?` and degrades any failure to `.unknownEvent(raw:)`, which `NormaClient` yields as
+    /// `parseServerLine` (WinterKit `ServerMessage.swift`) wraps the strict WinterProtocol decode in
+    /// `try?` and degrades any failure to `.unknownEvent(raw:)`, which `WinterClient` yields as
     /// `.unknown` and keeps reading. So a Swift enum here would NOT kill the event stream — it
     /// would silently drop that one command, the daemon's pending entry would run out its
     /// `deadlineMs`, and the agent would be told "timed out" for a verb the app simply never
@@ -1194,8 +1194,8 @@ extension SessionEvent {
     /// **Why it lives here.** `Discriminator` above is `private`, so every consumer that needed
     /// this list hand-copied the strings — and the phone client's copy was simply missing, which
     /// dropped 100% of `assistant_delta` and left iOS with no streaming at all while the suite
-    /// stayed green. Exposing one public constant is the fix: `NormaClient` (Mac),
-    /// `NormaSessionClient` (phone) and the daemon's remote live-stream filter all derive from a
+    /// stayed green. Exposing one public constant is the fix: `WinterClient` (Mac),
+    /// `WinterSessionClient` (phone) and the daemon's remote live-stream filter all derive from a
     /// single definition, and parity tests pin this literal against the TypeScript one.
     public static let transientTypes: Set<String> = [
         "assistant_delta",
@@ -1212,8 +1212,8 @@ extension SessionEvent {
         "panel_command",
     ]
 
-    /// Case-level mirror of `transientTypes`, for callers holding a DECODED event (`NormaClient`)
-    /// rather than a raw wire discriminator (`NormaSessionClient`, which handles payloads
+    /// Case-level mirror of `transientTypes`, for callers holding a DECODED event (`WinterClient`)
+    /// rather than a raw wire discriminator (`WinterSessionClient`, which handles payloads
     /// opaquely). The two halves are proven equivalent by `SessionEventTransientTests`, which
     /// round-trips every variant through the encoder and asserts
     /// `transientTypes.contains(type) == isTransient` — so this switch cannot drift from the set

@@ -1,17 +1,17 @@
 import XCTest
 import os
-import NormaProtocol
+import WinterProtocol
 import IrohLib
-@testable import NormaKit
-@testable import NormaSessionKit
+@testable import WinterKit
+@testable import WinterSessionKit
 
 /// SP2b Task 6: forced-relay end-to-end proof against the REAL production relay fleet (Oracle
-/// Always-Free, Frankfurt). Env-gated (`NORMA_RELAY_E2E=1`) — this suite makes REAL network calls
+/// Always-Free, Frankfurt). Env-gated (`WINTER_RELAY_E2E=1`) — this suite makes REAL network calls
 /// to REAL internet infrastructure this repo doesn't control the uptime of, so it must never run
 /// in CI or a normal `swift test` and must never be a dependency of anything else passing.
 ///
 /// **Relay engagement, not relay exclusivity.** iroh-ffi v1.1.0 (this repo's pinned binding — see
-/// `apple/NormaKit/vendor/README.md`) exposes no "force relay, refuse direct" knob, nor a
+/// `apple/WinterKit/vendor/README.md`) exposes no "force relay, refuse direct" knob, nor a
 /// connection-level `connectionType()`/`RemoteInfo` API (grepped the vendored `IrohLib.swift` —
 /// absent). What it DOES expose is `Connection.paths() -> [PathSnapshot]`, each with
 /// `isSelected`/`isRelay` — this is the closest available proxy to the brief's "connection-type
@@ -27,13 +27,13 @@ import IrohLib
 /// upgrade race has had time to complete over a real Frankfurt round trip — is what makes this a
 /// meaningful assertion rather than a tautology; see `awaitRelayPath` below.
 ///
-/// Run against relay-1 (default) and again against relay-2 via `NORMA_RELAY_E2E_URL` (the task's
+/// Run against relay-1 (default) and again against relay-2 via `WINTER_RELAY_E2E_URL` (the task's
 /// "run it live once against relay-1, then once against relay-2" — both runs' results belong in
 /// `infra/relay/README.md`, not in this file):
 ///
 /// ```sh
-/// NORMA_RELAY_E2E=1 swift test --filter IrohRelayE2ETests
-/// NORMA_RELAY_E2E=1 NORMA_RELAY_E2E_URL="https://relay-2.yanlinglabs.com./" swift test --filter IrohRelayE2ETests
+/// WINTER_RELAY_E2E=1 swift test --filter IrohRelayE2ETests
+/// WINTER_RELAY_E2E=1 WINTER_RELAY_E2E_URL="https://relay-2.yanlinglabs.com./" swift test --filter IrohRelayE2ETests
 /// ```
 ///
 /// **Proves relay ENGAGEMENT, not relay EXCLUSIVITY** — see "Relay engagement, not relay
@@ -46,13 +46,13 @@ final class IrohRelayE2ETests: XCTestCase {
     private static let defaultRelayURL = "https://relay-1.yanlinglabs.com./"
 
     private func relayURL() -> String {
-        ProcessInfo.processInfo.environment["NORMA_RELAY_E2E_URL"] ?? Self.defaultRelayURL
+        ProcessInfo.processInfo.environment["WINTER_RELAY_E2E_URL"] ?? Self.defaultRelayURL
     }
 
     override func setUpWithError() throws {
         try XCTSkipUnless(
-            ProcessInfo.processInfo.environment["NORMA_RELAY_E2E"] == "1",
-            "forced-relay E2E against live production infra — set NORMA_RELAY_E2E=1 to run"
+            ProcessInfo.processInfo.environment["WINTER_RELAY_E2E"] == "1",
+            "forced-relay E2E against live production infra — set WINTER_RELAY_E2E=1 to run"
         )
     }
 
@@ -64,7 +64,7 @@ final class IrohRelayE2ETests: XCTestCase {
 
     private func tempStoreDir() -> URL {
         FileManager.default.temporaryDirectory
-            .appendingPathComponent("norma-relay-e2e-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("winter-relay-e2e-tests-\(UUID().uuidString)", isDirectory: true)
     }
 
     private final class ListenerBox: @unchecked Sendable {
@@ -101,7 +101,7 @@ final class IrohRelayE2ETests: XCTestCase {
                 return listener
             },
             makeDaemonFactory: {
-                NormaClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway")
+                WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway")
             }
         )
         _ = try await host.openPairingWindow()
@@ -220,7 +220,7 @@ private struct RelayE2EError: Error, CustomStringConvertible {
 /// `IrohE2ETests`' `PhoneConn` (whose `connection`/dialer are `private` to that file, and whose
 /// `dial` hardcodes a loopback, relay-disabled dialer anyway): this codebase's established
 /// convention for these small per-file test dialers is to duplicate rather than thread private
-/// state across files (`norma-fake-phone`'s own attach dance duplicates this exact plumbing
+/// state across files (`winter-fake-phone`'s own attach dance duplicates this exact plumbing
 /// independently). Exposes `connection` (not private) so `awaitRelayPath` above can call
 /// `connection.paths()` directly.
 private final class RelayPhone: @unchecked Sendable {

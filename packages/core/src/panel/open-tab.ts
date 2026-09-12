@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { z } from "zod";
-import type { PanelTabKind } from "@norma/protocol";
+import type { PanelTabKind } from "@winter/protocol";
 import type { SessionHub } from "../sessions/hub";
 
 // ================================================================================================

@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Task 3: `buildTaskSection` — the pure row-building decision behind `WindowContentView`'s
 /// task section (SwiftUI's `body` isn't unit-tested, so the sort/collapse/active-row logic is

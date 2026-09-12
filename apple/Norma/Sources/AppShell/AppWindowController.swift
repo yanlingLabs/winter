@@ -152,7 +152,7 @@ final class AppWindowController: NSObject, NSWindowDelegate {
             contentRect: frame,
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
-        window.title = "Norma"
+        window.title = "Winter"
         // chatgpt-ui T3 (spec §4): the seamless top — the titlebar draws NO material and NO title
         // text, so the traffic lights sit inline over the sidebar's own flat background (the
         // custom pane's `windowBackgroundColor` fill, reaching the very top) and content scrolls

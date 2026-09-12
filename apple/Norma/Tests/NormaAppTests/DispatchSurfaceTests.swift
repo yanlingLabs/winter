@@ -1,7 +1,7 @@
 import XCTest
-import NormaProtocol
-import NormaKit
-@testable import Norma
+import WinterProtocol
+import WinterKit
+@testable import Winter
 
 /// app-shell T5: the dispatch surface's own tests. Two families:
 ///  - PURE: `fleetCounts`/`fleetStripTapDestination`, driven directly.
@@ -60,7 +60,7 @@ final class DispatchSurfaceTests: XCTestCase {
 
     // MARK: - Harness (dispatch resolution, through the real host)
 
-    private func makeHost(rows: [SessionSummary] = [], managementClient: NormaClient? = nil) -> (host: ShellSessionHost, factory: ShellTransportFactory) {
+    private func makeHost(rows: [SessionSummary] = [], managementClient: WinterClient? = nil) -> (host: ShellSessionHost, factory: ShellTransportFactory) {
         let factory = ShellTransportFactory()
         let directory = SessionDirectory(lister: { rows })
         let host = ShellSessionHost(
@@ -76,11 +76,11 @@ final class DispatchSurfaceTests: XCTestCase {
         return (host, factory)
     }
 
-    /// A connected `NormaClient` on its OWN scripted transport — standing in for `AppModel.client`,
+    /// A connected `WinterClient` on its OWN scripted transport — standing in for `AppModel.client`,
     /// the always-open connection `session.dispatch` (and the roster verbs/create flow) ride.
-    private func connectedManagementClient() async -> (client: NormaClient, transport: ShellScriptedTransport) {
+    private func connectedManagementClient() async -> (client: WinterClient, transport: ShellScriptedTransport) {
         let transport = ShellScriptedTransport()
-        let client = NormaClient(makeTransport: { transport }, token: "tok", clientName: "orb")
+        let client = WinterClient(makeTransport: { transport }, token: "tok", clientName: "orb")
         let connectTask = Task { try? await client.connect() }
         await feedWaitUntil { transport.sent.count >= 1 }
         let hello = feedLineJSON(transport.sent[0])

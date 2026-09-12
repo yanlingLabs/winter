@@ -4,7 +4,7 @@ import { notifyHeadless } from "../../src/agent/notify-fallback";
 describe("notifyHeadless (osascript headless fallback)", () => {
   test("spawns a FIXED 3-line AppleScript, passing title/message as trailing argv items", () => {
     const calls: string[][] = [];
-    notifyHeadless("Norma", "hello", (cmd) => { calls.push(cmd); });
+    notifyHeadless("Winter", "hello", (cmd) => { calls.push(cmd); });
     expect(calls).toHaveLength(1);
     const cmd = calls[0]!;
     expect(cmd[0]).toBe("osascript");
@@ -18,7 +18,7 @@ describe("notifyHeadless (osascript headless fallback)", () => {
       "-e", "display notification (item 1 of argv) with title (item 2 of argv)",
       "-e", "end run",
     ]);
-    expect(cmd.slice(sep + 1)).toEqual(["hello", "Norma"]);
+    expect(cmd.slice(sep + 1)).toEqual(["hello", "Winter"]);
   });
 
   // Injection safety: a message stuffed with quotes/semicolons/backticks/AppleScript keywords must

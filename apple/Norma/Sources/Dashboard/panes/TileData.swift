@@ -1,14 +1,14 @@
-import NormaKit
-import NormaProtocol
+import WinterKit
+import WinterProtocol
 
 /// Unifies the two independent tile-JSON shapes a plugin's declarative tile can arrive in (Phase
 /// 4d-iii Task 4) into one struct `TilesStripView` renders — regardless of source:
-///   - `pluginsContrib()`'s `PluginContribEntry.tile` — NormaKit's `JSONValue` (a JSON-RPC result
-///     field, decoded by the NormaKit module).
-///   - the live `plugin_tile_updated` event's `tile` — NormaProtocol's `SessionEvent.JSONValue` (a
-///     wire event payload, decoded by the NormaProtocol module).
-/// These are TWO DISTINCT Swift types (the module split between NormaKit/NormaProtocol — see
-/// `NormaClient.swift`'s doc comments on `tilesStore`/`PluginContribEntry.tile`), so there are two
+///   - `pluginsContrib()`'s `PluginContribEntry.tile` — WinterKit's `JSONValue` (a JSON-RPC result
+///     field, decoded by the WinterKit module).
+///   - the live `plugin_tile_updated` event's `tile` — WinterProtocol's `SessionEvent.JSONValue` (a
+///     wire event payload, decoded by the WinterProtocol module).
+/// These are TWO DISTINCT Swift types (the module split between WinterKit/WinterProtocol — see
+/// `WinterClient.swift`'s doc comments on `tilesStore`/`PluginContribEntry.tile`), so there are two
 /// failable initializers below, one per source — but both apply the IDENTICAL parse rule against
 /// the same declarative schema (`{title, value?, icon?, progress?, actions?: [{id, label}]}`), so
 /// equivalent JSON from either source produces an equal `TileData` (see `TileAdapterTests`).
@@ -31,7 +31,7 @@ struct TileData: Equatable {
     let progress: Double?
     let actions: [Action]
 
-    /// From `pluginsContrib()`'s `PluginContribEntry.tile` (NormaKit `JSONValue`).
+    /// From `pluginsContrib()`'s `PluginContribEntry.tile` (WinterKit `JSONValue`).
     init?(from tile: [String: JSONValue]) {
         guard case .string(let title)? = tile["title"] else { return nil }
         self.title = title
@@ -50,7 +50,7 @@ struct TileData: Equatable {
         }
     }
 
-    /// From the live `plugin_tile_updated` event's tile (NormaProtocol `SessionEvent.JSONValue`) —
+    /// From the live `plugin_tile_updated` event's tile (WinterProtocol `SessionEvent.JSONValue`) —
     /// mirrors the initializer above field-for-field, same parse rule, different source type.
     init?(from tile: [String: SessionEvent.JSONValue]) {
         guard case .string(let title)? = tile["title"] else { return nil }

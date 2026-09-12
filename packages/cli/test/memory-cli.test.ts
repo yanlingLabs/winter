@@ -1,4 +1,4 @@
-// Phase 5b Task 4 — `norma memory list|show <name>|rm <name> [--project]` (main.ts) + `/memory`
+// Phase 5b Task 4 — `winter memory list|show <name>|rm <name> [--project]` (main.ts) + `/memory`
 // (tui/commands.ts) share memory-cli.ts. `parseMemoryArgs` is pure (routeCliInvocation's
 // precedent — argv in, route out, no socket); `runMemoryRoute` is the one client-driven step,
 // exercised here with a fake client following tui/commands.test.ts's `makeClient` precedent
@@ -17,12 +17,12 @@ import {
   type MemoryFactMetaLike,
   type ResolvedMemoryRoute,
 } from "../src/memory-cli";
-import type { NormaClient } from "../src/client";
+import type { WinterClient } from "../src/client";
 
 // ---- fake client (mirrors tui/commands.test.ts's makeClient — recorded calls, canned results) ----
 type Impl = Record<string, (...args: unknown[]) => unknown>;
 
-function makeClient(impl: Impl): { client: NormaClient; calls: { method: string; args: unknown[] }[] } {
+function makeClient(impl: Impl): { client: WinterClient; calls: { method: string; args: unknown[] }[] } {
   const calls: { method: string; args: unknown[] }[] = [];
   const client: Record<string, unknown> = {};
   for (const [name, fn] of Object.entries(impl)) {
@@ -31,7 +31,7 @@ function makeClient(impl: Impl): { client: NormaClient; calls: { method: string;
       return Promise.resolve(fn(...args));
     };
   }
-  return { client: client as unknown as NormaClient, calls };
+  return { client: client as unknown as WinterClient, calls };
 }
 
 describe("parseMemoryArgs", () => {

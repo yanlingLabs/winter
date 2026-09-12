@@ -1,4 +1,4 @@
-import { TRANSIENT_EVENT_TYPES, type SessionEvent } from "@norma/protocol";
+import { TRANSIENT_EVENT_TYPES, type SessionEvent } from "@winter/protocol";
 import { HISTORY_EVENT_TYPES, capEvent } from "./history";
 
 // ================================================================================================
@@ -9,7 +9,7 @@ import { HISTORY_EVENT_TYPES, capEvent } from "./history";
 // got the same treatment. Everything below closes that asymmetry. It is enforced DAEMON-side, in
 // `ipc/server.ts`'s `session.attach` HubClient, for the same reason `assertRemoteMayUseSession` and
 // the relay-config anti-rollback rule are daemon-side: the Swift Gateway is one client of this
-// socket, not the boundary. Any remote-role connection (norma-probe, norma-fake-phone, a future
+// socket, not the boundary. Any remote-role connection (winter-probe, winter-fake-phone, a future
 // non-Swift or non-Mac-mediated client) is covered by construction, and the guard cannot be
 // bypassed by a client that simply never updates.
 //
@@ -56,12 +56,12 @@ const STREAM_CONTROL_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<Se
  *  UPSTREAM of the phone client that was just fixed to accept them, silently restoring the
  *  no-streaming-on-iOS bug with a fully green suite, because nothing else covers a transient
  *  traversing this seam. The live policy is therefore history's allowlist PLUS
- *  `TRANSIENT_EVENT_TYPES` (the canonical nine, hoisted into `@norma/protocol` so the daemon and
+ *  `TRANSIENT_EVENT_TYPES` (the canonical nine, hoisted into `@winter/protocol` so the daemon and
  *  both Swift clients derive from ONE definition) PLUS the three stream-control types above.
  *
  *  The transient half is SPREAD, never re-listed: that is what discharges CLAUDE.md's
  *  protocol-checklist addendum ("a new transient variant must be added to `TRANSIENT_EVENT_TYPES`
- *  *and* to `REMOTE_STREAM_EVENT_TYPES`") by construction — the one edit in `@norma/protocol`
+ *  *and* to `REMOTE_STREAM_EVENT_TYPES`") by construction — the one edit in `@winter/protocol`
  *  reaches both lists. Do not replace the spread with literals to "make the set explicit": the
  *  parity tests pin the RESULT, and they cannot catch a type that was never added to a hand-copy.
  *

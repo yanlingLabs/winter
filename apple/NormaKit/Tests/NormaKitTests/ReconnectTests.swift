@@ -1,5 +1,5 @@
 import XCTest
-@testable import NormaKit
+@testable import WinterKit
 
 final class ReconnectTests: XCTestCase {
     func testReconnectReattachesFromLastSeq() async throws {
@@ -7,7 +7,7 @@ final class ReconnectTests: XCTestCase {
         let tA = ScriptedTransport()
         let tB = ScriptedTransport()
         let box = TransportBox(transports: [tA, tB])
-        let client = NormaClient(makeTransport: { box.next() }, token: "tok", clientName: "rc", requestTimeout: .seconds(2))
+        let client = WinterClient(makeTransport: { box.next() }, token: "tok", clientName: "rc", requestTimeout: .seconds(2))
 
         async let connected: Void = client.connect()
         let helloA = try await waitForSent(tA, count: 1)[0]
@@ -58,7 +58,7 @@ final class ReconnectTests: XCTestCase {
         let tA = ScriptedTransport()
         let tB = ScriptedTransport()
         let box = TransportBox(transports: [tA, tB])
-        let client = NormaClient(makeTransport: { box.next() }, token: "tok", clientName: "rc2")
+        let client = WinterClient(makeTransport: { box.next() }, token: "tok", clientName: "rc2")
         async let connected: Void = client.connect()
         let hello = try await waitForSent(tA, count: 1)[0]
         tA.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(hello)["id"] as! Int),"result":{"ok":true}}"#)
@@ -80,7 +80,7 @@ final class ReconnectTests: XCTestCase {
         let tB = ScriptedTransport()
         let tC = ScriptedTransport()
         let box = TransportBox(transports: [tA, tB, tC])
-        let client = NormaClient(makeTransport: { box.next() }, token: "tok", clientName: "rc3")
+        let client = WinterClient(makeTransport: { box.next() }, token: "tok", clientName: "rc3")
 
         async let connected: Void = client.connect()
         let helloA = try await waitForSent(tA, count: 1)[0]
@@ -150,7 +150,7 @@ final class ReconnectTests: XCTestCase {
         let tA = ScriptedTransport()
         let tB = ScriptedTransport()
         let box = TransportBox(transports: [tA, tB])
-        let client = NormaClient(makeTransport: { box.next() }, token: "tok", clientName: "rc4")
+        let client = WinterClient(makeTransport: { box.next() }, token: "tok", clientName: "rc4")
         async let connected: Void = client.connect()
         let helloA = try await waitForSent(tA, count: 1)[0]
         tA.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(helloA)["id"] as! Int),"result":{"ok":true}}"#)
@@ -171,7 +171,7 @@ final class ReconnectTests: XCTestCase {
         let tA = ScriptedTransport()
         let tB = ScriptedTransport()
         let box = TransportBox(transports: [tA, tB])
-        let client = NormaClient(makeTransport: { box.next() }, token: "tok", clientName: "m1")
+        let client = WinterClient(makeTransport: { box.next() }, token: "tok", clientName: "m1")
 
         // connect + attach on A
         async let connected: Void = client.connect()

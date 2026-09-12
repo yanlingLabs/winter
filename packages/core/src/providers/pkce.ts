@@ -82,7 +82,7 @@ export async function runLoginFlow(cfg: LoginConfig): Promise<OAuthTokens> {
         const code = url.searchParams.get("code");
         if (!code) { rejectFlow(new Error("callback missing code")); return new Response("missing code", { status: 400 }); }
         resolveCode(code);
-        return new Response("Norma is signed in — you can close this tab.", { headers: { "content-type": "text/plain" } });
+        return new Response("Winter is signed in — you can close this tab.", { headers: { "content-type": "text/plain" } });
       },
     });
   } catch (err) {

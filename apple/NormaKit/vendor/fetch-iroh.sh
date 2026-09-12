@@ -3,7 +3,7 @@
 # vendor/IrohLib.xcframework (gitignored — ~133MB unpacked, ~44MB zipped).
 #
 # Run this once after cloning (or whenever bumping IROH_VERSION below).
-# `swift build` / `swift test` in apple/NormaKit will fail with a missing
+# `swift build` / `swift test` in apple/WinterKit will fail with a missing
 # binary-target error until this has been run.
 set -euo pipefail
 

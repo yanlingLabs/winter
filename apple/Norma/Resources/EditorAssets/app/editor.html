@@ -2,11 +2,11 @@
 <!--
   editor-plumbing Task 4 — the editor shell.
 
-  Loaded as `norma-editor://app/editor.html` (host `app` -> Contents/Resources/EditorAssets/app),
+  Loaded as `winter-editor://app/editor.html` (host `app` -> Contents/Resources/EditorAssets/app),
   with Monaco served from the sibling host `assets` (-> Contents/Resources/EditorAssets). Everything
-  this page references is either RELATIVE (its own two scripts) or under `norma-editor://assets/`,
+  this page references is either RELATIVE (its own two scripts) or under `winter-editor://assets/`,
   which is the same URL in both layouts — so if Task 5 has to fall back to serving the shell from
-  `norma-editor://assets/app/editor.html` (single origin), not a byte here changes.
+  `winter-editor://assets/app/editor.html` (single origin), not a byte here changes.
 -->
 <html lang="en">
 <head>
@@ -15,20 +15,20 @@
   THE OFFLINE GUARANTEE. `default-src 'none'` plus a per-directive allowlist that names exactly one
   scheme: nothing http(s), no data: script, no remote font, no telemetry. What each exception buys:
 
-    script-src norma-editor: 'unsafe-eval' — Monaco is an AMD bundle; the loader evaluates module
+    script-src winter-editor: 'unsafe-eval' — Monaco is an AMD bundle; the loader evaluates module
                                              sources, and its worker bootstrap evaluates too.
-    style-src  norma-editor: 'unsafe-inline' — Monaco injects its theme and token colours as inline
+    style-src  winter-editor: 'unsafe-inline' — Monaco injects its theme and token colours as inline
                                              <style> elements at runtime; the .css it fetches is a
-                                             norma-editor: URL.
-    font-src   norma-editor:                — codicon.ttf, out of the same bundle.
+                                             winter-editor: URL.
+    font-src   winter-editor:                — codicon.ttf, out of the same bundle.
     worker-src blob:                        — the language workers are created from a blob:
                                              bootstrap (see editor.js for why it cannot be a direct
-                                             norma-editor: Worker).
-    img-src    norma-editor: data:          — Monaco inlines a few decorations as data: URIs.
-    connect-src norma-editor:               — the worker's own loader fetches nested vs/ modules.
+                                             winter-editor: Worker).
+    img-src    winter-editor: data:          — Monaco inlines a few decorations as data: URIs.
+    connect-src winter-editor:               — the worker's own loader fetches nested vs/ modules.
 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src norma-editor: 'unsafe-eval'; style-src norma-editor: 'unsafe-inline'; font-src norma-editor:; worker-src blob:; img-src norma-editor: data:; connect-src norma-editor:">
-<title>Norma Editor</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src winter-editor: 'unsafe-eval'; style-src winter-editor: 'unsafe-inline'; font-src winter-editor:; worker-src blob:; img-src winter-editor: data:; connect-src winter-editor:">
+<title>Winter Editor</title>
 <style>
   html, body {
     height: 100%;
@@ -38,7 +38,7 @@
     overflow: hidden;
     /* editor-product Task 4 — the white-flash fix's other half. Chromium's own default page
        background is opaque white; a transparent body lets the CEF BROWSER's own creation-time
-       background (NormaCEF.h's backgroundColorARGB — the scheme's CardSurface, set before this page
+       background (WinterCEF.h's backgroundColorARGB — the scheme's CardSurface, set before this page
        has fetched or executed a byte) show through instead, for the window between the browser
        existing and Monaco's own first paint. */
     background: transparent;
@@ -60,7 +60,7 @@
   script and editor.js is a module (therefore deferred), so `window.require` is guaranteed to exist
   by the time editor.js runs — the order is the HTML spec's, not a race.
 -->
-<script src="norma-editor://assets/vs/loader.js"></script>
+<script src="winter-editor://assets/vs/loader.js"></script>
 <script type="module" src="./editor.js"></script>
 </body>
 </html>

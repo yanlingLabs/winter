@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// office-format review F-2/F-3/F-4 — the RTF containment check, pinned against REAL engine output.
 ///

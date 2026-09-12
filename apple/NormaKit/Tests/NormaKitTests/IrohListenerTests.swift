@@ -1,9 +1,9 @@
 import XCTest
 import os
-import NormaProtocol
-import NormaSessionKit
+import WinterProtocol
+import WinterSessionKit
 import IrohLib
-@testable import NormaKit
+@testable import WinterKit
 
 /// SP2a Task 3 — focused unit test for `IrohListener`, the real iroh transport behind
 /// SP1's `RemoteListener` seam. Two iroh endpoints in ONE process (no daemon, no real
@@ -13,7 +13,7 @@ import IrohLib
 ///   - a `LengthPrefix`-framed frame round-trips through `inbound` / `send(_:)` as one
 ///     whole frame each way, and
 ///   - a dialer negotiating a different ALPN is rejected (the listener accepts ONLY
-///     `computer.norma.rpc/1`).
+///     `computer.winter.rpc/1`).
 ///
 /// Both endpoints bind loopback (`127.0.0.1:0`) with relay disabled, so the test never
 /// depends on real network reachability — matching Task 0's finding that wildcard-bind +
@@ -23,8 +23,8 @@ import IrohLib
 /// `acceptBi` have NO wall-clock bound, so a regression that deadlocks would otherwise
 /// hang CI forever — the guard turns a hang into a loud, fast failure (Task 0 review Minor).
 final class IrohListenerTests: XCTestCase {
-    static let alpn = "computer.norma.rpc/1"
-    static let alpnData = "computer.norma.rpc/1".data(using: .utf8)!
+    static let alpn = "computer.winter.rpc/1"
+    static let alpnData = "computer.winter.rpc/1".data(using: .utf8)!
 
     func testAcceptEmitsAuthenticatedConnWithFramedRoundTrip() async throws {
         try await withTimeout(20) {
@@ -89,7 +89,7 @@ final class IrohListenerTests: XCTestCase {
     }
 
     /// A dialer negotiating a DIFFERENT ALPN must be rejected: the listener advertises only
-    /// `computer.norma.rpc/1`, so the QUIC handshake fails ALPN negotiation and `connect`
+    /// `computer.winter.rpc/1`, so the QUIC handshake fails ALPN negotiation and `connect`
     /// throws — no RemoteConn is ever emitted.
     func testForeignAlpnIsRejected() async throws {
         try await withTimeout(20) {
@@ -109,7 +109,7 @@ final class IrohListenerTests: XCTestCase {
             ))
             defer { Task { try? await dialer.close() } }
 
-            let foreignAlpn = "computer.norma.rpc/DIFFERENT".data(using: .utf8)!
+            let foreignAlpn = "computer.winter.rpc/DIFFERENT".data(using: .utf8)!
             do {
                 let conn = try await dialer.connect(addr: listener.endpointAddr, alpn: foreignAlpn)
                 withExtendedLifetime(conn) {}

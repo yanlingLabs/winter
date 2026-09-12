@@ -127,7 +127,7 @@ func dismissRightOverlay(_ s: SidebarState) -> SidebarState {
 /// The six approval-policy modes offered by both pickers (the WorkSidebar Options block and the
 /// ⋯ popover's `policyMenuContent`), in restrictiveness order — wire-identical to the CLI's
 /// `POLICY_ORDER` (`packages/cli/src/tui/app.tsx`) and the protocol's `ApprovalPolicy` zod enum
-/// (`packages/protocol/src/methods.ts`). Raw strings only: `onSetPolicy`/`NormaClient.setPolicy`
+/// (`packages/protocol/src/methods.ts`). Raw strings only: `onSetPolicy`/`WinterClient.setPolicy`
 /// are stringly-typed (no generated Swift enum mirrors `ApprovalPolicy` — the protocol's
 /// three-value → six-value widening doesn't touch an exhaustive switch here), so these pass
 /// straight through to the wire unchanged. `FieldStateAdapter.sessionPolicy`'s `"auto"` seed is

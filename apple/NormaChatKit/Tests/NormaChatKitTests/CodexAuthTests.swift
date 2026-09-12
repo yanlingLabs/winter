@@ -1,7 +1,7 @@
 import CryptoKit
 import Foundation
 import XCTest
-@testable import NormaChatKit
+@testable import WinterChatKit
 
 // File-scope so the `@Sendable` clock closures below capture immutable values rather than the
 // test case instance.
@@ -19,7 +19,7 @@ final class CodexAuthTests: XCTestCase {
 
     // MARK: - parity constants
 
-    /// `originator: "norma"` is a DELIBERATE ToS decision (codex-config.ts's long comment): Norma
+    /// `originator: "winter"` is a DELIBERATE ToS decision (codex-config.ts's long comment): Winter
     /// self-identifies rather than impersonating codex-rs's first-party `codex_cli_rs`. This test
     /// exists to make reverting it to a first-party value a red build, on the phone as on the Mac.
     func testShippedConfigMatchesCodexConfigTsLiterally() {
@@ -31,18 +31,18 @@ final class CodexAuthTests: XCTestCase {
         XCTAssertEqual(c.backendURL.absoluteString, "https://chatgpt.com/backend-api/codex")
         XCTAssertEqual(c.redirectURI, "http://localhost:1455/auth/callback")
         XCTAssertEqual(c.headers["OpenAI-Beta"], "responses=experimental")
-        XCTAssertEqual(c.headers["originator"], "norma")
+        XCTAssertEqual(c.headers["originator"], "winter")
         XCTAssertEqual(c.headers.count, 2)
     }
 
     /// The originator literal on an actual recorded request — the shape Task 8's ResponsesClient
     /// sends. Mirrors `codex-oauth.ts`'s `post()` header block exactly.
-    func testResponsesRequestCarriesOriginatorNorma() {
+    func testResponsesRequestCarriesOriginatorWinter() {
         let request = CodexConfig.codex.responsesRequest(
             accessToken: "at_1", accountId: "acct_42", body: Data("{}".utf8))
         XCTAssertEqual(request.httpMethod, "POST")
         XCTAssertEqual(request.url?.absoluteString, "https://chatgpt.com/backend-api/codex/responses")
-        XCTAssertEqual(request.value(forHTTPHeaderField: "originator"), "norma")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "originator"), "winter")
         XCTAssertEqual(request.value(forHTTPHeaderField: "OpenAI-Beta"), "responses=experimental")
         XCTAssertEqual(request.value(forHTTPHeaderField: "authorization"), "Bearer at_1")
         XCTAssertEqual(request.value(forHTTPHeaderField: "chatgpt-account-id"), "acct_42")
@@ -423,7 +423,7 @@ final class CodexAuthTests: XCTestCase {
     }
 
     /// A failed refresh must leave the stored state untouched — the caller decides whether to
-    /// re-run the whole flow (the TS's "run: norma login" branch).
+    /// re-run the whole flow (the TS's "run: winter login" branch).
     func testRefreshFailureIsTypedAndLeavesStateUntouched() async {
         let http = ScriptedChatHTTP([.text(#"{"error":"invalid_grant"}"#, status: 401)])
         var state = TokenState(accessToken: "at_1", refreshToken: "rt_1", expiresAt: t0)

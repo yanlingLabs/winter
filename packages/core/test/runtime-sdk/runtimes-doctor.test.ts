@@ -34,12 +34,12 @@ function goodVersionsJson(overrides: Partial<Record<string, unknown>> = {}): str
   });
 }
 
-/** Builds `<resources>/norma-core` + `<resources>/runtimes/{winter,claude-official/{claude,VERSIONS.json}}`,
+/** Builds `<resources>/winter-core` + `<resources>/runtimes/{winter,claude-official/{claude,VERSIONS.json}}`,
  *  returning the `execPath` a real daemon would report. Fake, non-executable content throughout —
  *  the doctor is READ-ONLY and never spawns either binary. */
 function bundleFixture(opts: { versionsJson?: string | null } = {}): { execPath: string } {
   const resources = tempDir("runtimes-doctor-resources-");
-  const execPath = join(resources, "norma-core");
+  const execPath = join(resources, "winter-core");
   writeFileSync(execPath, "not a real daemon\n");
   const runtimesDir = join(resources, "runtimes");
   const claudeDir = join(runtimesDir, "claude-official");
@@ -52,7 +52,7 @@ function bundleFixture(opts: { versionsJson?: string | null } = {}): { execPath:
   return { execPath };
 }
 
-describe("diagnoseRuntimes (norma doctor's runtimes section, fix round 1 Major-1)", () => {
+describe("diagnoseRuntimes (winter doctor's runtimes section, fix round 1 Major-1)", () => {
   test("the setting rung wins for BOTH winter and claude, over bundle/env/home/package", async () => {
     const { execPath } = bundleFixture(); // a bundle exists but must be ignored — setting wins
     const home = tempDir("runtimes-doctor-home-");
@@ -86,7 +86,7 @@ describe("diagnoseRuntimes (norma doctor's runtimes section, fix round 1 Major-1
 
   test("nothing configured and nothing staged anywhere: typed reasons, never a throw, bundle omitted", async () => {
     const home = tempDir("runtimes-doctor-home-empty-");
-    const execPath = join(tempDir("runtimes-doctor-resources-empty-"), "norma-core");
+    const execPath = join(tempDir("runtimes-doctor-resources-empty-"), "winter-core");
     // P9a fix wave, M1 collateral: never depend on this tree's ambient node_modules (m1's
     // local-pack residue) for a test titled "nothing staged anywhere" — inject the miss.
     const report = await diagnoseRuntimes({ execPath, home, env: {}, settings: undefined, resolvePlatformPackageBin: () => undefined });
@@ -121,7 +121,7 @@ describe("diagnoseRuntimes (norma doctor's runtimes section, fix round 1 Major-1
 
   test("claude.installedWrapper is populated from the real installed wrapper version when present, never throws", async () => {
     const home = tempDir("runtimes-doctor-home-wrapper-");
-    const execPath = join(tempDir("runtimes-doctor-resources-wrapper-"), "norma-core");
+    const execPath = join(tempDir("runtimes-doctor-resources-wrapper-"), "winter-core");
     const report = await diagnoseRuntimes({ execPath, home, env: {}, settings: undefined });
     // Either populated (this repo has the optional platform package installed) or undefined (a
     // legitimate skip elsewhere) — both are fine; only a throw would fail this test.

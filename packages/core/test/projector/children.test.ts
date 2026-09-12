@@ -68,7 +68,7 @@ describe("projector/children: a spawned subagent's thread", () => {
     expect(out[1]).toMatchObject({ agentType: "general-purpose" });
   });
 
-  test("`Agent`, `Task` and the projected Norma name all count as spawning tools", () => {
+  test("`Agent`, `Task` and the projected Winter name all count as spawning tools", () => {
     expect(isSpawnTool("Agent")).toBe(true);
     expect(isSpawnTool("Task")).toBe(true);
     expect(isSpawnTool("spawn_agent")).toBe(true);
@@ -122,7 +122,7 @@ describe("projector/children: a spawned subagent's thread", () => {
 });
 
 describe("projector/children: Winter's task graph → task_updated", () => {
-  test("THE STATUS MAP, pinned — six Winter values onto Norma's four", () => {
+  test("THE STATUS MAP, pinned — six Winter values onto Winter's four", () => {
     expect(TASK_STATUS_MAP).toEqual({
       pending: "pending",
       running: "in_progress",
@@ -150,7 +150,7 @@ describe("projector/children: Winter's task graph → task_updated", () => {
   });
 
   test("`failed` is LOSSY: it renders completed, with the true status preserved in metadata", () => {
-    // Norma's status enum has no failure state and P8b-21 forbids widening it this phase. The
+    // Winter's status enum has no failure state and P8b-21 forbids widening it this phase. The
     // alternatives are worse: `deleted` makes the row vanish, and projecting nothing strands it at
     // in_progress forever. Flagged in the task report as a protocol change for a later phase.
     const { projector } = makeProjector();

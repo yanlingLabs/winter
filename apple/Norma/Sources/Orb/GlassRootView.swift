@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// Task B (v1 field transplant, the swap): hosts the transplanted FieldKit view
-/// (`NormaFieldView`) instead of the old orb/field morph approximation (`OrbView`+`FieldView`,
-/// both deleted) — `NormaFieldView` owns its own `GlassEffectContainer` and renders the whole
+/// (`WinterFieldView`) instead of the old orb/field morph approximation (`OrbView`+`FieldView`,
+/// both deleted) — `WinterFieldView` owns its own `GlassEffectContainer` and renders the whole
 /// orb↔field morph itself off `morphModel.progress`, so this view no longer needs one either.
 ///
 /// What SURVIVES here from the pre-transplant version, moved onto `FieldStateAdapter` instead of
@@ -15,9 +15,9 @@ struct GlassRootView: View {
     @ObservedObject var session: SessionModel
     @ObservedObject var controller: OrbWindowController
     @ObservedObject var morphModel: MorphModel
-    /// Task-3 fix wave: deliberately NOT `@ObservedObject` — same reason as `NormaFieldView.fluid`
+    /// Task-3 fix wave: deliberately NOT `@ObservedObject` — same reason as `WinterFieldView.fluid`
     /// (see `FluidModel`'s doc, `FieldKit/FluidOrbView.swift`). Held only to pass down to
-    /// `NormaFieldView`, which itself only passes it further down to `FluidOrbSlot`.
+    /// `WinterFieldView`, which itself only passes it further down to `FluidOrbSlot`.
     let fluidModel: FluidModel
     // NOTE: owned by `OrbWindowController.fieldAdapter` (Task 2d-i.2), not here — the chat
     // window shares this same instance for drafts/replies/focus. Injected as `@ObservedObject`,
@@ -162,7 +162,7 @@ struct GlassRootView: View {
 
     var body: some View {
         wireCallbacks()
-        return NormaFieldView(adapter: adapter, morph: morphModel, fluid: fluidModel, sidebars: controller.sidebars)
+        return WinterFieldView(adapter: adapter, morph: morphModel, fluid: fluidModel, sidebars: controller.sidebars)
             // I2 (review): the catalogue seed — a LIFECYCLE hook, not a `body` side effect. Runs
             // once per appearance regardless of how many times `body` re-evaluates, so a daemon
             // that is down costs one failed fetch rather than one per render. The pickers refresh

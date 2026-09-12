@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Coverage for `CursorCalmTracker` (Orb/CursorCalmTracker.swift) — the pure calm-gating seam
 /// behind wave-3 gate item 2b's answer-arrival auto-expand: a finished reply only auto-expands

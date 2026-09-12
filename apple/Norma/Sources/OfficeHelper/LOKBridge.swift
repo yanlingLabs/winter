@@ -4,7 +4,7 @@ import Darwin
 #endif
 
 // Office Stage A Task 3 — dlopen + lok_init_2, real documentLoad/close, callbacks pumped to the
-// wire. Only `NormaOfficeHelper` compiles this file (excluded from `NormaOfficeHelperFixture` in
+// wire. Only `WinterOfficeHelper` compiles this file (excluded from `WinterOfficeHelperFixture` in
 // project.yml, which stays LOK-free — see `OfficeDocumentBridge`'s header in
 // `OfficeHelperServer.swift`) — it needs the `SWIFT_OBJC_BRIDGING_HEADER`
 // (`Support/OfficeHelperBridge.h`) only that target's project.yml settings carry.
@@ -308,7 +308,7 @@ final class LOKDedicatedThread {
 /// `dlopen`/`dlsym`, `LibreOfficeKitInit.h`) + boot once, `documentLoad`/`destroy` per document,
 /// callbacks pumped through to whoever owns that document's connection. See
 /// `OfficeHelperServer.swift` for the `OfficeDocumentBridge` protocol this conforms to and why it
-/// exists (keeps `OfficeHelperServer`/`NormaOfficeHelperFixture` LOK-agnostic).
+/// exists (keeps `OfficeHelperServer`/`WinterOfficeHelperFixture` LOK-agnostic).
 ///
 /// **The kit is never destroyed.** `kit->pClass->destroy(kit)` exists in the C API (the spike, a
 /// one-shot CLI, calls it) but this helper's whole lifetime model is "load once, serve documents,
@@ -697,14 +697,14 @@ final class LOKBridge: OfficeDocumentBridge {
                 }
                 return "the `docs` tool only works on text documents, but \(docId) is \(noun)"
             case .replaceCountDisagreement(let docId, let counted, let engineSucceeded):
-                return "refusing to report a replacement count for \(docId) that Norma cannot stand "
-                    + "behind: Norma counted \(counted) literal match\(counted == 1 ? "" : "es") of the "
+                return "refusing to report a replacement count for \(docId) that Winter cannot stand "
+                    + "behind: Winter counted \(counted) literal match\(counted == 1 ? "" : "es") of the "
                     + "search text, but the engine reported it "
                     + (engineSucceeded ? "DID" : "did NOT")
                     + " replace anything. The two disagree about what the search text matches, so the "
                     + "outcome of this call is UNKNOWN — re-read the document before doing anything else."
             case .docsVerificationFailed(let docId, let what, let expectedLength, let actualLength):
-                return "\(what) in \(docId) did not produce the text Norma expected when it read the "
+                return "\(what) in \(docId) did not produce the text Winter expected when it read the "
                     + "document back (expected \(expectedLength) characters, found \(actualLength)) — "
                     + "the outcome is UNKNOWN and the document may have been changed. Re-read it before "
                     + "retrying."
@@ -792,7 +792,7 @@ final class LOKBridge: OfficeDocumentBridge {
         /// `SwXTextDocument::setPart` (`sw/source/uibase/uno/unotxdoc.cxx:3410-3419`) is
         /// `pWrtShell->GotoPage(nPart + 1, true)` — a real CARET MOVE, with no same-page early-out
         /// anywhere below it (`SwWrtShell::GotoPage` → `SwCursorShell::GotoPage` →
-        /// `GetLayout()->SetCurrPage(m_pCurrentCursor, nPage)`, all read at the pin). Norma pins
+        /// `GetLayout()->SetCurrPage(m_pCurrentCursor, nPage)`, all read at the pin). Winter pins
         /// every `.odt`/`.docx` at part 0, so an ungated `setPart(handle, 0)` on a Writer document
         /// is `GotoPage(1)` — "yank the caret to the top of page 1" — on EVERY call.
         ///
@@ -902,7 +902,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// `product-set/` (`--lok-root` DEBUG override, for iteration without a full app build) — both
     /// share this exact shape, so `LOKBridge` itself never needs to know which one it was handed.
     /// `statePath` is the helper's own `--state-path` scratch directory (fontconfig conf + cache,
-    /// the per-instance user profile — never the user's real `~/.norma*` or system paths).
+    /// the per-instance user profile — never the user's real `~/.winter*` or system paths).
     init(installRoot: URL, statePath: URL) throws {
         var isDirectory: ObjCBool = false
         let frameworksPath = installRoot.appendingPathComponent("Frameworks").path
@@ -1112,7 +1112,7 @@ final class LOKBridge: OfficeDocumentBridge {
         let ext = (path as NSString).pathExtension
         guard let format = OfficeSaveFormat(pathExtension: ext) else {
             throw LoadError.documentLoadFailed(
-                "Norma can't create a new \(ext.isEmpty ? "extensionless" : ".\(ext)") document — "
+                "Winter can't create a new \(ext.isEmpty ? "extensionless" : ".\(ext)") document — "
                     + "it can only create .odt, .docx, .ods, .xlsx, .odp and .pptx files.")
         }
         // `getDocumentType()` on the loaded handle is checked below against what was asked for, so
@@ -1873,7 +1873,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// Fix-round-3 (convergence re-review) F2 — **the sentence that WAS here next, "a repo-wide grep
     /// turns up zero fixtures or tests for any of the four … so today this allowlist is inert," was
     /// FALSE, not merely unverified.** `git ls-files` returns three committed fixtures —
-    /// `Tests/NormaAppTests/Fixtures/office/legacy-doc.doc`, `legacy-ppt.ppt`, `legacy-xls.xls`, each
+    /// `Tests/WinterAppTests/Fixtures/office/legacy-doc.doc`, `legacy-ppt.ppt`, `legacy-xls.xls`, each
     /// beginning with the real CFB magic bytes (`d0cf11e0a1b11ae1`, verified via `xxd`) — and
     /// `OfficeHelperLiveTests.testRealLegacyBinaryFixturesOpenAsTextAfterR3RecutXlsStillFailsCleanly`
     /// opens all three through THIS exact helper. Application routing being closed is a fact about
@@ -2160,7 +2160,7 @@ final class LOKBridge: OfficeDocumentBridge {
         //      with its own reason in the source: "Text documents have a single coordinate system;
         //      don't change part." For Writer, `setPart` is a CARET MOVE, not a viewport switch
         //      (`SwXTextDocument::setPart` = `GotoPage(nPart + 1, true)`, no same-page early-out —
-        //      see `OpenDocument.kind`'s own header for the full citation chain). Norma pins every
+        //      see `OpenDocument.kind`'s own header for the full citation chain). Winter pins every
         //      text document at part 0, so an ungated prefix here fired `GotoPage(1)` before EVERY
         //      Writer tile paint — including helper-cache HITS, since this prefix runs before
         //      `TileRenderer.paint`'s own cache lookup — yanking the user's caret to the top of page
@@ -2484,7 +2484,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// reading `desktop/source/lib/init.cxx` showed it falls back to the SAME `doc_setPartImpl` this
     /// method's own `setPart` call reaches, and `sc/source/ui/unoobj/docuno.cxx` showed THAT call
     /// resolves its target through `ScDocShell::GetViewData()` — a PROCESS-GLOBAL "current view,"
-    /// not `doc.handle`'s own document. With more than one document open (Norma's ordinary case),
+    /// not `doc.handle`'s own document. With more than one document open (Winter's ordinary case),
     /// `setPart` on a NON-current document silently mutates whichever OTHER document is current
     /// instead — the target's own part never moves, and the wrong document's active part does.
     /// `setView` first, unconditionally, in every job that (directly or, like `setPart`, internally)
@@ -2497,7 +2497,7 @@ final class LOKBridge: OfficeDocumentBridge {
     ///
     /// **Fix round 4 (NEW-1, CRITICAL) — the `setPart` is type-gated; `setView` is not.** For a TEXT
     /// document `setPart` is not a scoping call at all, it is `GotoPage(nPart + 1)` — a caret move
-    /// (`OpenDocument.kind`'s own header has the citation chain). Norma pins every text document at
+    /// (`OpenDocument.kind`'s own header has the citation chain). Winter pins every text document at
     /// part 0, so the round-1 prefix was firing `GotoPage(1)` immediately before every single
     /// keystroke in a Writer document: harmless-looking only because a keystroke's own
     /// `postKeyEventAsync` runs later, but a genuine caret yank the moment anything else on this
@@ -4087,9 +4087,9 @@ final class LOKBridge: OfficeDocumentBridge {
     /// office-agent-tools T4 — `(charCode, keyCode)` for one formula character, real
     /// `com.sun.star.awt.Key` base codes (`offapi/com/sun/star/awt/Key.idl`) copied verbatim from
     /// this codebase's OWN authoritative, independently-cross-checked table
-    /// (`apple/Norma/Sources/AppShell/OfficeInputCodes.swift`'s own header has the full source
+    /// (`apple/Winter/Sources/AppShell/OfficeInputCodes.swift`'s own header has the full source
     /// citation and cross-check story) — this is a re-ENCODING of already-established values, not a
-    /// re-DERIVATION: `NormaOfficeHelper` cannot import `Sources/AppShell` (Task 3's own established
+    /// re-DERIVATION: `WinterOfficeHelper` cannot import `Sources/AppShell` (Task 3's own established
     /// compile-boundary constraint), and there is no AppKit `NSEvent` here to run that file's own
     /// `baseCode(appKitKeyCode:)` against in the first place — a synthetic formula character has no
     /// physical key position to look up, only the CHARACTER itself, so this table is keyed directly
@@ -4172,7 +4172,7 @@ final class LOKBridge: OfficeDocumentBridge {
 
     /// office-agent-tools T4 fix-round review (Important #3) — a LOCAL re-encoding of
     /// `officeParseCellReference`'s exact algorithm (`Sources/AppShell/PanelDocumentTab.swift`),
-    /// unreachable from `NormaOfficeHelper` (Task 3's own established compile-boundary constraint,
+    /// unreachable from `WinterOfficeHelper` (Task 3's own established compile-boundary constraint,
     /// the SAME one `formulaKeyEvent(for:)`'s own header already cites for a value copied from that
     /// module) — re-ENCODED, not re-DERIVED. Every real caller's `address` is produced by
     /// `officeCellReference` on the app side (uppercase letters, 1-based row, no colon, no
@@ -4185,7 +4185,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// property that makes the original total would be worse than no re-encoding at all — and while
     /// every real caller's `address` is app-produced and already bounded, "the caller happens to
     /// bound it" is precisely the reasoning that left three doors open on the app side. An overflow
-    /// here would abort `NormaOfficeHelper`, not the app: a smaller blast radius, still a crash.
+    /// here would abort `WinterOfficeHelper`, not the app: a smaller blast radius, still a crash.
     private static func parseSingleCellReference(_ address: String) -> (column: Int, row: Int)? {
         let letters = address.prefix(while: { $0.isASCII && $0.isLetter })
         let rest = address[letters.endIndex...]
@@ -4570,7 +4570,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// The round bounded `parseSingleCellReference` helper-side on the explicit principle that "the
     /// caller happens to bound it" is the reasoning that left three doors open, then did not apply
     /// that principle to the sibling conversion in this same file: `Int(Double)` traps outside
-    /// `Int`'s range, and an unbounded `points` reaches it. Blast radius is `NormaOfficeHelper`, not
+    /// `Int`'s range, and an unbounded `points` reaches it. Blast radius is `WinterOfficeHelper`, not
     /// the app — a smaller crash, still a crash, and still a rule this file was already following
     /// twelve hundred lines up. `nil` for anything outside the app's own documented [1, 1000]-point
     /// operand range (`OfficeCommandConsumer.officeWidthMinPoints`/`MaxPoints`, mirrored here for
@@ -4872,7 +4872,7 @@ final class LOKBridge: OfficeDocumentBridge {
         // **Deletion-red proof (office-agent-tools T6, 2026-08-24)**: hardcoded this loop to always
         // run exactly once regardless of `tabCount`, rebuilt, reran the live `read` drill (slide 2,
         // tabCount 1 for title / 2 for body) — `body` came back reading the SAME text as `title`
-        // ("Norma T6 Slide Two" for both), the exact "wrong placeholder selected" signature, not
+        // ("Winter T6 Slide Two" for both), the exact "wrong placeholder selected" signature, not
         // "nothing found" (that's proof A/C's own signature, in `handleCallback`/
         // `readSelectedShapeTextOnDedicatedThread`) — and `info` (title-only, tabCount always 1) was
         // correctly UNAFFECTED, confirming the break was scoped to this loop bound specifically, not
@@ -4972,7 +4972,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// **Deletion-red proof (office-agent-tools T6, 2026-08-24)**: skipped both `postWindowExtTextInputEvent`
     /// dispatches (the actual write), rebuilt, reran
     /// `testLiveSetTextChangesOnlyTheTargetedSlideProvenBySaveAndIndependentReopen` live — slide 2's
-    /// title/body read back as the ORIGINAL, untouched text ("Norma T6 Slide Two"/"second bullet"),
+    /// title/body read back as the ORIGINAL, untouched text ("Winter T6 Slide Two"/"second bullet"),
     /// not "CHANGED TITLE"/"CHANGED BODY", at BOTH verification layers: the independent-reopen LOK
     /// read AND the raw `unzip -p content.xml` filesystem seal (which correctly asserted "must
     /// contain the new title text" / "OLD title must be gone" and both correctly failed). Proves the
@@ -6361,7 +6361,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// (below). The real bug, root-caused live and confirmed by THREE independent methods, is a
     /// SEPARATE, unresolved finding reported to the dispatcher as NEEDS_CONTEXT (task-2-report.md
     /// has the full writeup): a raw wire probe (`open` -> `tileRequest` -> `debugEdit`, direct
-    /// against `NormaOfficeHelper`, one variable moved at a time) isolates the break to
+    /// against `WinterOfficeHelper`, one variable moved at a time) isolates the break to
     /// **sandboxed + document-path-outside-`--state-path`** — every combination of unsandboxed, or
     /// sandboxed-with-the-document-copied-inside-the-fence, fires `.uno:ModifiedStatus=true`
     /// correctly; sandboxed-and-outside (how every real document is ever opened — the fence is
@@ -6396,7 +6396,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// **Why `UseDocumentOOoLockFile=false` stays despite not being the fix**: independently
     /// justified — no sidecar-file litter beside the user's real documents; T3's own
     /// `testOpeningADocumentInAWritableDirectoryLeavesNoLockFileBeside` now holds for a stronger
-    /// reason (LO no longer attempts the file, rather than merely "hasn't yet"); and Norma's own
+    /// reason (LO no longer attempts the file, rather than merely "hasn't yet"); and Winter's own
     /// architecture is single-writer per document (one helper, one dedicated LOK thread, no
     /// multi-process contention LO's own advisory lock is protecting against here). Its sibling
     /// `UseDocumentSystemFileLocking=false` was tried and reverted — no independent justification
@@ -6440,9 +6440,9 @@ final class LOKBridge: OfficeDocumentBridge {
     /// (Stage B Task 7). A lever that only reached the 120 s backstop would have left two thirds of
     /// these stalls in place. This one is global, so it reaches both.
     ///
-    /// ⚠️ **The cost, stated plainly: every ODF document Norma writes now has no embedded preview
+    /// ⚠️ **The cost, stated plainly: every ODF document Winter writes now has no embedded preview
     /// thumbnail.** Consumers that read `Thumbnails/thumbnail.png` — LibreOffice's own Start Center
-    /// and file dialogs, some Linux file managers — will show a generic icon for a Norma-saved
+    /// and file dialogs, some Linux file managers — will show a generic icon for a Winter-saved
     /// document until something else re-saves it. Nothing about the document's CONTENT changes.
     ///
     /// **Why it is global rather than scoped to the unprompted saves that actually need it.**
@@ -6531,7 +6531,7 @@ final class LOKBridge: OfficeDocumentBridge {
     /// free either way, costs nothing, one less moving part to reason about.
     ///
     /// **Verified, not just argued** (the review's own condition for either fix shape): re-measured
-    /// cold boot against THIS config — real compiled `NormaOfficeHelper`, fresh `--state-path` per
+    /// cold boot against THIS config — real compiled `WinterOfficeHelper`, fresh `--state-path` per
     /// sample, `--lok-root` at the vendor tree, timed from process spawn to the socket file
     /// appearing (this file's boot-sequencing invariant: LOK finishes loading before the socket
     /// ever binds — see `main.swift`'s own header — so that window is exactly what

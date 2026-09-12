@@ -1,14 +1,14 @@
 import Foundation
 import os
 import IrohLib
-import NormaKit
-import NormaProtocol
-import NormaSessionKit
+import WinterKit
+import WinterProtocol
+import WinterSessionKit
 
 /// SP2b Task 5: the dev fake-phone CLI — closes the pairing loop end-to-end (scan a QR, run the
 /// ceremony, optionally attach and stream) without any iOS code. `PhonePairingClient` (this
 /// package's own reusable phone-side ceremony) does the real work; this file is just argv
-/// parsing + NDJSON printing, matching `norma-probe/main.swift`'s own "Task { } + semaphore"
+/// parsing + NDJSON printing, matching `winter-probe/main.swift`'s own "Task { } + semaphore"
 /// bridge from this synchronous `main.swift` into async `await` calls.
 ///
 /// NEVER prints `qr.pairSecret`, the phone's own generated identity secret, or the raw QR string
@@ -19,11 +19,11 @@ func out(_ s: String) {
     FileHandle.standardOutput.write(Data((s + "\n").utf8))
 }
 
-// MARK: - Arg parsing (no dependency — mirrors `norma-probe`'s own hand-rolled `ProbeArgs` posture)
+// MARK: - Arg parsing (no dependency — mirrors `winter-probe`'s own hand-rolled `ProbeArgs` posture)
 
 let usage = """
-usage: norma-fake-phone pair --qr <base64url|-> [--attach] [--mute]
-       norma-fake-phone probe-relay --url <relay-url>
+usage: winter-fake-phone pair --qr <base64url|-> [--attach] [--mute]
+       winter-fake-phone probe-relay --url <relay-url>
 
   --attach   after pairing, attach to the live event stream (session.list + NDJSON events)
   --mute     (KA-T3, requires --attach) once live, go silent: swallow every inbound event
@@ -137,7 +137,7 @@ func withTimeout<T>(_ seconds: Double, _ context: String = "", _ op: @escaping @
 
 // MARK: - NDJSON event printing (the `--attach` stream)
 //
-// SP3 T5: prints `NormaSessionClient`'s already-decoded `SessionEnvelope`/`SessionEvent.JSONValue`
+// SP3 T5: prints `WinterSessionClient`'s already-decoded `SessionEnvelope`/`SessionEvent.JSONValue`
 // output — the CLI no longer sees a raw `WireEnvelope` at all (that framing is entirely the
 // client's own concern now).
 
@@ -181,7 +181,7 @@ Task {
         // SP3 T5: the reconnect + attach/hello/session.list dance is no longer hand-rolled here —
         // `IrohDialer.dial` (Task 2) resolves the Mac and opens the bidi stream (it has its own
         // internal timeout; no `withTimeout` wrapper needed at this call site), and
-        // `NormaSessionClient` (Task 4/4b) drives the ClientHello/resume/idempotency/approval wire
+        // `WinterSessionClient` (Task 4/4b) drives the ClientHello/resume/idempotency/approval wire
         // protocol. This is the SAME production client the future iOS app links — this file is
         // back to being argv parsing + NDJSON printing, nothing more. Reconnects with the SAME
         // iroh identity (`endpointSecret`) `pair()` just used — a real phone's identity is stable
@@ -194,14 +194,14 @@ Task {
             secret: endpointSecret, macEndpointID: qr.macEndpointID, alpn: qr.alpn, relayURLs: []
         )
 
-        let client = NormaSessionClient(
+        let client = WinterSessionClient(
             conn: conn, hostID: phoneEndpointID, epoch: accepted.epoch, cursors: InMemoryCursorStore(),
             // CAVEAT: the FIXED clientInstanceID means two concurrently-running fake phones
             // collide in the gateway's per-client state (`sessions`/`revoked` are keyed by this
             // id) — one at a time only. It's also what made the SP2b whole-branch review's
             // revoke-then-re-pair lockout reproducible pre-SP3 (a real phone's id is equally
             // stable across re-pairs).
-            clientInstanceID: "norma-fake-phone",
+            clientInstanceID: "winter-fake-phone",
             clock: { Int(Date().timeIntervalSince1970 * 1000) },
             idgen: { UUID().uuidString },
             // KA-T3 `--mute`: an always-false `isActive` means the client's own liveness watchdog

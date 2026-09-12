@@ -1,7 +1,7 @@
 import AppKit
-import NormaKit
+import WinterKit
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// office-agent-tools T2 — `OfficeAgentBroker`: the single app-side door every agent office verb
 /// (task 3+'s `sheets`/`slides`/`docs`) goes through. Every PURE/behavioral test below drives a real
@@ -1021,7 +1021,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
             XCTAssertEqual(refusedPath, path)
             XCTAssertTrue(error.message.contains("conflicted-write.xlsx"),
                           "the refusal must name the file: \(error.message)")
-            XCTAssertTrue(error.message.contains("changed on disk outside Norma"),
+            XCTAssertTrue(error.message.contains("changed on disk outside Winter"),
                           "…and it must name the CONFLICT, not merely unsaved changes: \(error.message)")
             XCTAssertFalse(error.message.contains("Save or discard"),
                            "…and it must not tell the human to save — a save here is what completes "
@@ -1570,7 +1570,7 @@ final class OfficeAgentBrokerTests: XCTestCase {
     //
     // Gated exactly like `OfficeRuntimeLiveTests`: skip, never fail, when the engine is not present
     // in this run's `BUILT_PRODUCTS_DIR`. Second-copy hygiene throughout — a scratch state directory
-    // under `/tmp`, never `~/.norma*`.
+    // under `/tmp`, never `~/.winter*`.
 
     private static var repoRoot: URL {
         var url = URL(fileURLWithPath: #filePath)
@@ -1578,13 +1578,13 @@ final class OfficeAgentBrokerTests: XCTestCase {
         return url
     }
     private static var vendorProductSetRoot: URL {
-        repoRoot.appendingPathComponent("apple/Norma/vendor/libreoffice/product-set", isDirectory: true)
+        repoRoot.appendingPathComponent("apple/Winter/vendor/libreoffice/product-set", isDirectory: true)
     }
     private static var fixturesRoot: URL {
-        repoRoot.appendingPathComponent("apple/Norma/Tests/NormaAppTests/Fixtures/office", isDirectory: true)
+        repoRoot.appendingPathComponent("apple/Winter/Tests/WinterAppTests/Fixtures/office", isDirectory: true)
     }
     private static var sandboxProfilePath: URL {
-        repoRoot.appendingPathComponent("apple/Norma/Sources/OfficeHelper/office-helper.sb", isDirectory: false)
+        repoRoot.appendingPathComponent("apple/Winter/Sources/OfficeHelper/office-helper.sb", isDirectory: false)
     }
 
     /// A single "T" keystroke, delivered through the raw `OfficeHelperClient` and AWAITED at every
@@ -1642,9 +1642,9 @@ final class OfficeAgentBrokerTests: XCTestCase {
     /// spec §8), not this one's.
     func testLiveAdoptionEditsTheAlreadyOpenDocumentInPlaceAndNeverClosesIt() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -1758,9 +1758,9 @@ final class OfficeAgentBrokerTests: XCTestCase {
     /// prove the HELPER did, which is the half of this drill that actually caught the bug.
     func testLiveANotOpenDocumentRoundTripsThroughTheBrokerAndIsClosedAfterward() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -1858,9 +1858,9 @@ final class OfficeAgentBrokerTests: XCTestCase {
     /// (build 4's single pass) being misread as proof (`task-2-report.md`'s evidence table).
     func testLiveASelfOpenedReadClosesImmediatelyWithNoDrainAndTheHelperSurvives() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),

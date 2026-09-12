@@ -1,6 +1,6 @@
 import XCTest
-import NormaProtocol
-@testable import Norma
+import WinterProtocol
+@testable import Winter
 
 /// Chat mode Slice B1, Task 4: `header == nil` is the wire signal for chat's simplified
 /// `AskQuestion` card (Task 2 made `SessionEvent.Question.header` optional) — no chip, no

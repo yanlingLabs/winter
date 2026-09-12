@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
 /** Append-only JSONL audit trail for the routine scheduler (phase 5 routines, design doc §2:
- *  "every fire/defer/error appends an audit line to ~/.norma/routines-audit.jsonl"). Mirrors
+ *  "every fire/defer/error appends an audit line to ~/.winter/routines-audit.jsonl"). Mirrors
  *  peripheral/audit.ts's AuditLog byte-for-byte — see that file's doc comment for the full
  *  rationale; the short version: every line is stamped with the WRITE-time `ts` (a caller-supplied
  *  `ts` field is silently clobbered), the parent directory is created lazily on first successful
@@ -31,9 +31,9 @@ export class RoutineAuditLog {
   }
 }
 
-/** Standalone default path (~/.norma/routines-audit.jsonl) — daemon.ts overrides this with the
- *  bootstrapped normaHome-relative path instead (mirrors routines/store.ts's openRoutineStore
+/** Standalone default path (~/.winter/routines-audit.jsonl) — daemon.ts overrides this with the
+ *  bootstrapped winterHome-relative path instead (mirrors routines/store.ts's openRoutineStore
  *  default, which is likewise only for standalone/no-daemon-wiring use). */
 export function defaultRoutinesAuditPath(): string {
-  return join(homedir(), ".norma", "routines-audit.jsonl");
+  return join(homedir(), ".winter", "routines-audit.jsonl");
 }

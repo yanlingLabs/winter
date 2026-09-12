@@ -10,8 +10,8 @@ func sortedTrustPaths(_ paths: [String]) -> [String] {
 /// Task 5 (2f-ii): the Dashboard's Trust pane — lists trusted working directories (`trust.list`)
 /// and revokes one (`trust.remove`, admin-gated server-side) via a per-row Revoke button,
 /// refreshing the list on success. `list`/`remove` are the injected closures (`DashboardWiring`,
-/// ultimately `NormaClient.trustList()`/`trustRemove(path:)`) — this pane never touches a
-/// `NormaClient` directly, and (per spec) `trust.list` returns bare paths only, no `trustedAt` —
+/// ultimately `WinterClient.trustList()`/`trustRemove(path:)`) — this pane never touches a
+/// `WinterClient` directly, and (per spec) `trust.list` returns bare paths only, no `trustedAt` —
 /// there is no per-row timestamp to render.
 struct TrustPane: View {
     let list: () async throws -> [String]

@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import NormaChatKit
+@testable import WinterChatKit
 
 /// THE TWO GATES ON THE OPEN-TAG SCANNERS, and why one of them is not enough.
 ///

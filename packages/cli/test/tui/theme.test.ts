@@ -30,7 +30,7 @@ describe("theme.ts", () => {
     expect(Object.keys(theme).sort()).toEqual([...EXPECTED_KEYS].sort());
   });
 
-  test("accent is Norma's blue, not CC's burnt-orange brand color", () => {
+  test("accent is Winter's blue, not CC's burnt-orange brand color", () => {
     expect(theme.accent).toBe("#73BFFF");
   });
 

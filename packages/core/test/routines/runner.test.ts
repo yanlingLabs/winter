@@ -7,7 +7,7 @@ import { SessionHub } from "../../src/sessions/hub";
 import { makeDaemonRoutineRunner, type WinterTurnRunner } from "../../src/routines/runner";
 
 function makeHome(): string {
-  return mkdtempSync(join(tmpdir(), "norma-routine-runner-"));
+  return mkdtempSync(join(tmpdir(), "winter-routine-runner-"));
 }
 
 /** The driver table's headless door, faked over the real hub: the driver appends the `user_message`

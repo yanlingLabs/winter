@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Wave-9 gate fix: regression coverage for the manual response-scroll mechanism ported from
 /// v1's `ScrollRedirector` + `GlassFieldWindow.scrollComposer` (see the wave-9 report). AppKit's
@@ -77,7 +77,7 @@ final class ResponseScrollTests: XCTestCase {
     func testClampResponseScrollOffsetResetsToZeroWhenContentShrinksBelowViewport() {
         // A swiped-in shorter historical exchange (or a reply that shrinks) must not leave a
         // stale mid-document offset behind — this is the reactive half of the fix
-        // (`NormaFieldView`'s `.onGeometryChange` calls this whenever `responseHeight` changes).
+        // (`WinterFieldView`'s `.onGeometryChange` calls this whenever `responseHeight` changes).
         let morph = MorphModel()
         morph.responseHeight = morph.responseViewportHeight + 400
         morph.responseScrollOffset = 300

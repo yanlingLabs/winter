@@ -4,8 +4,8 @@ import Carbon.HIToolbox
 import CoreGraphics
 import CryptoKit
 import Foundation
-import NormaKit
-import NormaProtocol
+import WinterKit
+import WinterProtocol
 
 // -----------------------------------------------------------------------------------------------
 // Pure decision core (spec §A4/A3 posture, mirrored from `packages/core/src/peripheral/broker.ts`'s
@@ -94,7 +94,7 @@ func shouldServe(_ call: PeripheralCallRequest, leases: [PeripheralLeaseInfo], n
 // PeripheralProvider — thin, stateful shell around the decision core above (spec §A4).
 // -----------------------------------------------------------------------------------------------
 
-/// Norma.app's peripheral capability provider: advertises TCC-derived capability state, tracks
+/// Winter.app's peripheral capability provider: advertises TCC-derived capability state, tracks
 /// its own active-lease set from `lease_granted`/`lease_lost`, serves `peripheral_call_requested`
 /// (only `noop` in 2f), and hard-stops on panic (hotkey, menu item, screen lock, termination).
 ///
@@ -107,7 +107,7 @@ func shouldServe(_ call: PeripheralCallRequest, leases: [PeripheralLeaseInfo], n
 final class PeripheralProvider: ObservableObject {
     @Published private(set) var activeLeases: [PeripheralLeaseInfo] = []
 
-    private let client: NormaClient
+    private let client: WinterClient
     /// The computer-use capability implementation (Phase 5 CU) — the LIVE one in production, a fake
     /// in tests (the seam that keeps the provider's dispatch unit-testable without TCC).
     private let capabilities: ComputerCapabilities
@@ -158,7 +158,7 @@ final class PeripheralProvider: ObservableObject {
         return noErr
     }
 
-    init(client: NormaClient, capabilities: ComputerCapabilities? = nil) {
+    init(client: WinterClient, capabilities: ComputerCapabilities? = nil) {
         self.client = client
         self.capabilities = capabilities ?? LiveComputerCapabilities()
     }
@@ -209,7 +209,7 @@ final class PeripheralProvider: ObservableObject {
     /// There is no OS notification for "Accessibility/Screen Recording grant changed" — periodic
     /// preflight is the only way to notice (spec §A4). Mirrors `MenuBarController`'s own 2s refresh
     /// cadence in `AppDelegate.boot()`. LIVE-GATE ITEM: exercised by hand (grant/revoke in System
-    /// Settings while Norma is running), not unit-tested — a real TCC preflight call is what's
+    /// Settings while Winter is running), not unit-tested — a real TCC preflight call is what's
     /// under test here, not a fake.
     func startTCCPolling(intervalSeconds: TimeInterval = 2.0) {
         stopTCCPolling()
@@ -340,7 +340,7 @@ final class PeripheralProvider: ObservableObject {
     /// Screen lock and app termination are additional hard-stop triggers (context brief), distinct
     /// from the two spec-pinned "panic" surfaces above — `reason: "revoked"` (a valid
     /// `LeaseLostReason`) rather than `"panic"`, since the user didn't hit a panic control; the
-    /// environment changed out from under an active lease and Norma is being defensive. Safe to
+    /// environment changed out from under an active lease and Winter is being defensive. Safe to
     /// call with zero active leases (a cheap no-op `peripheral.revoke(all)` server-side).
     private func revokeAllLocally(reason: String) {
         activeLeases.removeAll()

@@ -3,9 +3,9 @@ import Foundation
 /// Office Stage A Task 4 — the PURE, LOK-free half of the tile pool: which coordinates are
 /// currently cached, their generations, and LRU eviction order. Deliberately split out of
 /// `TileRenderer.swift` (the LOK-touching half, `Sources/OfficeHelper`, which owns actual pixel
-/// rendering) for one concrete reason: `Sources/OfficeHelper` is excluded from `Norma`'s own
+/// rendering) for one concrete reason: `Sources/OfficeHelper` is excluded from `Winter`'s own
 /// sources sweep (a `main.swift` collision — see `OfficeWire.swift`'s header), so nothing living
-/// there is importable by `NormaAppTests` — exactly the trap `OfficeDocumentEvent`'s two raw-
+/// there is importable by `WinterAppTests` — exactly the trap `OfficeDocumentEvent`'s two raw-
 /// payload parsers already hit once in Task 3 (moved to this same `Sources/OfficeWire` directory
 /// for the identical reason — see that file's "LOK raw callback payload parsing" section). This
 /// file lives here so the brief's own "pool-LRU eviction test" can exist at all, fast and LOK-free,

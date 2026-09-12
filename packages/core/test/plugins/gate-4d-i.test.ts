@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@winter/protocol";
 import {
   buildSpawnablePlugins,
   createSupervisedInstance,
@@ -115,7 +115,7 @@ describe("4d-i gate: live tiles + shortcut/tile-action round-trip (real sample-e
     "initial tile paint -> live tile push on tool call -> shortcut.invoke bump -> tile.action reset -> plugins.list running -> kill clears tile + contrib",
     async () => {
       const pluginId = "sample-echo";
-      const home = mkdtempSync(join(tmpdir(), "norma-gate-4d-i-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-gate-4d-i-"));
       installSampleEcho(home, pluginId);
       const settings = writeAndLoadSettings(home, pluginId);
       const socketPath = join(home, "core.sock");

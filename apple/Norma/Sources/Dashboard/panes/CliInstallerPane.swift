@@ -10,10 +10,10 @@ import SwiftUI
 @MainActor
 func cliInstallStatusText(_ action: CliInstallAction) -> String {
     switch action {
-    case .install: return "The `norma` command isn't installed yet."
-    case .repair: return "The `norma` command points at an old app location and needs repair."
-    case .alreadyInstalled: return "The `norma` command is installed at \(CliInstaller.linkPath)."
-    case .refuseForeign(let path): return "A file already exists at \(path) that Norma didn't create — see the logs."
+    case .install: return "The `winter` command isn't installed yet."
+    case .repair: return "The `winter` command points at an old app location and needs repair."
+    case .alreadyInstalled: return "The `winter` command is installed at \(CliInstaller.linkPath)."
+    case .refuseForeign(let path): return "A file already exists at \(path) that Winter didn't create — see the logs."
     }
 }
 
@@ -36,7 +36,7 @@ func cliInstallActionable(_ action: CliInstallAction) -> Bool {
     }
 }
 
-/// Task 7 (spec §4's Mac-group additions): the `norma` command's dashboard row — surfaces the SAME
+/// Task 7 (spec §4's Mac-group additions): the `winter` command's dashboard row — surfaces the SAME
 /// `CliInstaller`(dist)/`CliLauncher`(dev) actions the menu bar already offers
 /// (`MenuBarController.cliInstallItem`/`openCliItem`), not a new capability. Dumb view: `isDev` is
 /// data, the rest are injected closures — same posture as every other pane in this directory.
@@ -52,7 +52,7 @@ struct CliInstallerPane: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Command Line").font(Typography.paneTitle)
             if isDev {
-                Text("Dev builds use the norma-dev wrapper — opens a Terminal window running the CLI straight out of this checkout.")
+                Text("Dev builds use the winter-dev wrapper — opens a Terminal window running the CLI straight out of this checkout.")
                     .font(Typography.label())
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

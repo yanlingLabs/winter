@@ -1,10 +1,10 @@
 import AppKit
 import Combine
-import NormaKit
+import WinterKit
 // b2-agent-browser T3: `onPanelCommand` names `SessionEvent.PanelCommand` in its signature.
-// NormaKit re-exports the type in USE (its `NormaEvent.session` case carries one) but not in NAME,
+// WinterKit re-exports the type in USE (its `WinterEvent.session` case carries one) but not in NAME,
 // which is the same wall `PanelStore` and every other panel surface here hit.
-import NormaProtocol
+import WinterProtocol
 import SwiftUI
 
 // MARK: - The attachment policy (PURE — spec §1's table, driven directly by ShellSessionHostTests)
@@ -120,7 +120,7 @@ func handoffDirectory(row: SessionSummary?) -> String {
 func handoffFailureMessage(_ error: HandoffError) -> String {
     switch error {
     case .cliMissing(let path):
-        return "The bundled CLI is missing (looked in \(path)). Reinstall Norma to restore it."
+        return "The bundled CLI is missing (looked in \(path)). Reinstall Winter to restore it."
     case .scriptWriteFailed(let path):
         return "Couldn't write the launch script at \(path)."
     case .openFailed(let code):
@@ -193,7 +193,7 @@ func officeRuntimeReleasedOnDeparture(dirtyDocuments: Int) -> Bool {
 
 // MARK: - The live harness behind an open session
 
-/// One live attachment: a pinned `SessionFeed` (its own `NormaClient`/socket — a full harness, the
+/// One live attachment: a pinned `SessionFeed` (its own `WinterClient`/socket — a full harness, the
 /// spec's "harness-per-window", here "harness-per-shell"), the `SessionModel` it pumps into, and the
 /// `FieldStateAdapter` the hosted `WindowContentView` renders.
 ///
@@ -278,10 +278,10 @@ final class ShellSessionHost: ObservableObject {
     /// trigger the exact un-archive-by-attaching T3's carried ruling forbids ("the Archived tab's
     /// click resumes BY ATTACH... do NOT also write setActivity(nil) — a double write"). Riding the
     /// same always-open connection the orb's own focus-follow feed uses is safe because these RPCs
-    /// never touch that connection's OWN attachment state (only `session.attach`/`NormaClient.close`
+    /// never touch that connection's OWN attachment state (only `session.attach`/`WinterClient.close`
     /// do) — multiplexed over one socket like every other request the client already sends.
     /// `nil` (additive, defaulted) in every test that doesn't drive a roster verb or the create flow.
-    private let managementClient: NormaClient?
+    private let managementClient: WinterClient?
 
     /// app-shell T4: per-session in-flight/refusal bookkeeping for roster verbs issued from a
     /// LANDING list — keyed by sessionId, unlike `attachment.adapter`'s single-session fields
@@ -357,7 +357,7 @@ final class ShellSessionHost: ObservableObject {
     /// own (no separate teardown needed; `AnyCancellable.cancel()` fires on deinit).
     private var cancellables = Set<AnyCancellable>()
 
-    init(directory: SessionDirectory, makeFeed: @escaping FeedFactory, managementClient: NormaClient? = nil,
+    init(directory: SessionDirectory, makeFeed: @escaping FeedFactory, managementClient: WinterClient? = nil,
          outputsWatcher: OutputsWatcher? = nil) {
         self.directory = directory
         self.makeFeed = makeFeed
@@ -1939,7 +1939,7 @@ final class ShellSessionHost: ObservableObject {
     /// firing an intent at the daemon, it is asking a question whose answer is the whole surface. So
     /// the failure cannot be swallowed here — a `try?` at this layer would collapse "the patch is
     /// gone" and "there is no daemon" into a silent empty result, and the model needs to reach its
-    /// unavailable state (`PanelDiffUnavailable`, `PanelDiffTab.swift`). NormaKit's own wrapper takes
+    /// unavailable state (`PanelDiffUnavailable`, `PanelDiffTab.swift`). WinterKit's own wrapper takes
     /// the same posture for the same reason (`readPanelDiff`'s doc: "don't swallow it").
     ///
     /// Read-only, idempotent, and called at most once per tab — so it needs none of the re-fetch,
@@ -2232,7 +2232,7 @@ final class ShellSessionHost: ObservableObject {
     /// a second cross-door mechanism: a "+" now reads as an in-flight create to BOTH doors, and an
     /// Enter that lands mid-"+" no-ops with the text still in the composer, the same contract a
     /// double-Enter already has.
-    private func autoCreateForNewChatPage(client: NormaClient, kindRaw: String) {
+    private func autoCreateForNewChatPage(client: WinterClient, kindRaw: String) {
         guard !panelAutoCreateInFlight, newChatCreate != .creating else { return }
         panelAutoCreateInFlight = true
         newChatCreate = .creating
@@ -2253,7 +2253,7 @@ final class ShellSessionHost: ObservableObject {
         //     needs no provider change at all: pick an effort with no model pinned (the list comes
         //     from the catalogue's default model), then pick a model that does not accept it.
         // What remains is genuinely narrow: a catalogue that went stale between the last fetch and
-        // this create (a `norma model` edit mid-visit), or a daemon that refuses what `sync.config`
+        // this create (a `winter model` edit mid-visit), or a daemon that refuses what `sync.config`
         // advertised. Accepted; the send's own stamps carry the choice either way, and the send door
         // reports its refusal visibly (`newChatCreate = .failed`).
         let heldModel = newChatModel
@@ -2687,7 +2687,7 @@ final class ShellSessionHost: ObservableObject {
     /// today's flows but is not structural — that session is real, listed, and reachable by any other
     /// client.
     private func stampHeldSelection(on sessionId: String, model: String??, effort: String??,
-                                    client: NormaClient) async {
+                                    client: WinterClient) async {
         // Winter Phase 8d (Task 4.2): routes through `AppModel.applyModelChange` — the same ONE
         // door every other `setModel` call site uses — but, unlike those, DELIBERATELY DISCARDS
         // every outcome beyond firing the call: this method's whole contract (see its own doc
@@ -2818,7 +2818,7 @@ final class ShellSessionHost: ObservableObject {
     // MARK: - T5: the dispatch surface's own door (`session.dispatch` — the singleton conversation)
 
     /// `DispatchSurface`'s resolving/failed-retry treatment — mirrors iOS's own three-state dance
-    /// (`norma-ios/Norma/Code/DispatchModeView.swift`'s `idle`/`resolving`/`failed(retry)` over
+    /// (`norma-ios/Winter/Code/DispatchModeView.swift`'s `idle`/`resolving`/`failed(retry)` over
     /// `AppNavModel.dispatchState`; there is no Mac gallery page for this moment, so the mirror is
     /// the shipped iOS BEHAVIOR, not a written page — a GALLERY EXTENSION POINT). `.idle` doubles as
     /// "not currently resolving" and "resolved" — once resolved, `attachedSessionId`/`attachment`
@@ -2984,7 +2984,7 @@ final class ShellSessionHost: ObservableObject {
             return false
         }
         // The pickers' catalogue, fetched when this harness is actually CONNECTED. Deliberately not
-        // at construction like `DetachedWindowController`'s: `NormaClient.request` throws outright
+        // at construction like `DetachedWindowController`'s: `WinterClient.request` throws outright
         // with no transport, so a fetch fired before `feed.start()` cannot land — that window has
         // only ever been covered by the pickers' own menu-open refresh. Not re-fetched on a hop, for
         // the reason `onRefreshModelCatalogue` documents: the catalogue is daemon-wide, so a session
@@ -3136,7 +3136,7 @@ final class ShellSessionHost: ObservableObject {
     /// Detach = close the socket. There is no `session.detach` RPC (the protocol has never had one);
     /// the daemon detaches a connection's hub client in its socket `close(...)` handler, which is
     /// the same `hub.detach` — and therefore the same app-kind, never-aborting `onDetached` — a hop
-    /// goes through. `NormaClient.close()` finishes its event stream for good, so the next attach
+    /// goes through. `WinterClient.close()` finishes its event stream for good, so the next attach
     /// mints a fresh harness rather than reviving this one.
     private func detachCurrent() {
         guard let live = attachment else {
@@ -3582,7 +3582,7 @@ final class ShellSessionHost: ObservableObject {
     }
 
     /// The `/background` affordance's RPC. `target` is the activity vocabulary VERBATIM (see
-    /// `NormaClient.setActivity`); T3's affordance sends two of its values, and the roster verbs
+    /// `WinterClient.setActivity`); T3's affordance sends two of its values, and the roster verbs
     /// (T4) will send the rest through this same seam.
     ///
     /// A refusal is published VERBATIM (`adapter.activityRefusal`) — `set-activity.ts` writes one
@@ -3613,7 +3613,7 @@ final class ShellSessionHost: ObservableObject {
     }
 
     /// The chip's "Add folder…"/"Change primary folder…" — panel, then the CONFIRM alert (a manual
-    /// add is selection + confirm, never a one-click widening of what Norma may write to), then the
+    /// add is selection + confirm, never a one-click widening of what Winter may write to), then the
     /// RPC. Needs the shell window, which the controller injects; with none, there is nothing to
     /// attach a sheet to and the door simply does not fire.
     private func pickWorkingDir(_ op: SessionDirsOp) {
@@ -3635,14 +3635,14 @@ final class ShellSessionHost: ObservableObject {
     /// The box's INITIAL listing on attach/hop — `outputsWatcher.onChange` only fires on a LATER
     /// filesystem change, so a session whose outputs already existed before this attach (reopened
     /// from Recents, or the very first attach of the app's life) needs its own synchronous read.
-    /// Cheap (one directory enumeration) and profile-resolved via `AppProfile.normaHome`, never a
-    /// literal `~/.norma` — the dev/dist profile-blindness class that shipped as a live bug once.
+    /// Cheap (one directory enumeration) and profile-resolved via `AppProfile.winterHome`, never a
+    /// literal `~/.winter` — the dev/dist profile-blindness class that shipped as a live bug once.
     /// Gated on `outputsBoxParticipates` so a chat/dispatch attach never even performs the read, let
     /// alone populates `outputFiles` — the "never a hollow box" rule holds structurally, not just at
     /// the view layer.
     private func refreshOutputFiles(for sessionId: String) {
         guard outputsBoxParticipates(sessionId) else { outputFiles = []; return }
-        outputFiles = listOutputFiles(home: AppProfile.normaHome, sessionId: sessionId)
+        outputFiles = listOutputFiles(home: AppProfile.winterHome, sessionId: sessionId)
     }
 
     /// `outputsWatcher.onChange`'s composed handler — filters to the session THIS host is showing
@@ -3733,7 +3733,7 @@ func presentDirtyCloseSheetAlert(basename: String, on window: NSWindow?,
 ///
 /// **`diffId` rides through, and diff-tabs Task 9 exists partly because it did not.** This is the
 /// app's ONLY source of a diff tab's identity after an attach or a hop (`PanelTabInfo.diffId`'s own
-/// doc in NormaKit says the same from the other side): the panel store is re-seeded from
+/// doc in WinterKit says the same from the other side): the panel store is re-seeded from
 /// `panel.list` on every switch, so a mapping that dropped the field would leave every surviving
 /// diff tab with `diffId == nil` and make the chip's dedupe silently re-mint a duplicate tab for a
 /// diff that is already open — visible only after a reattach, which is exactly the kind of bug that
@@ -3883,7 +3883,7 @@ func panelFilesTabAction(tabs: [PanelTab]) -> PanelFilesTabAction {
 ///
 /// GALLERY EXTENSION POINT: `norma-ios/docs/ios26-design-gallery` has no transcript-beside-a-
 /// sidebar geometry (the phone's chat is always full-bleed), so what transfers here is the
-/// CONTENT — the same header row, transcript, cards, composer and work column every other Norma
+/// CONTENT — the same header row, transcript, cards, composer and work column every other Winter
 /// window renders — while the framing is the Mac's own: no self-drawn chrome, no
 /// `.ignoresSafeArea()`, because the shell's content column already sits below the titlebar band
 /// via the safe area (custom-sidebar rework: the unified toolbar is gone; only the custom PANE
@@ -4025,7 +4025,7 @@ struct ShellSessionUnavailableView: View {
                 .foregroundStyle(.tertiary)
             Text("This session isn't open")
                 .font(Typography.emptyStateTitle)
-            Text("Norma couldn't reach the daemon for it. It opens as soon as the connection is back.")
+            Text("Winter couldn't reach the daemon for it. It opens as soon as the connection is back.")
                 .font(Typography.emptyStateSubtitle)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

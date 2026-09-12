@@ -1,5 +1,5 @@
 import SwiftUI
-import NormaKit
+import WinterKit
 
 /// The chat window's content column — header (optional leading accessory + status), transcript,
 /// pinned tasks, queued line, composer. Shared by the MORPH window (which injects its self-drawn
@@ -18,7 +18,7 @@ struct WindowContentView<Accessory: View>: View {
     /// last (the two call sites pass it as a trailing closure).
     let sidebars: SidebarWiring?
     /// The session's mode, which OPTS THIS SURFACE INTO the shared composer card
-    /// (`NormaComposerCard`). `nil` keeps the plain 88 pt `ComposerTextView` this view has always
+    /// (`WinterComposerCard`). `nil` keeps the plain 88 pt `ComposerTextView` this view has always
     /// rendered.
     ///
     /// Opt-in rather than global (2026-08-07) because this view has THREE homes and they are not
@@ -232,7 +232,7 @@ struct WindowContentView<Accessory: View>: View {
                 }
                 // provider-correctness T6: the effort menu, beside the model menu — the OTHER axis
                 // ("effort and model are two different things, just like the CLI"), and the only
-                // surface on the Mac through which a Norma-level tier is reachable at all.
+                // surface on the Mac through which a Winter-level tier is reachable at all.
                 if effortMenuIsVisible(isChatSession: adapter.isChatSession) {
                     effortMenuButton
                 }
@@ -366,7 +366,7 @@ struct WindowContentView<Accessory: View>: View {
     ///
     /// Its strip emerges from the TOP here: this composer sits at the bottom of the window, where
     /// "below" is off-screen. The mode segment is NOT selectable — a session's mode is fixed at
-    /// creation and Norma has no mode-switch, so a live segment would offer something it cannot do.
+    /// creation and Winter has no mode-switch, so a live segment would offer something it cannot do.
     ///
     /// `policy` is what makes the permissions row a control (mac-chat-parity Task 6, spec §4): the
     /// adapter's own seeded/healed policy plus its known-ness, so the band shows what the DAEMON
@@ -378,9 +378,9 @@ struct WindowContentView<Accessory: View>: View {
     /// carries this session's real policy" is assertable without rendering anything. Pinning the
     /// adapter's rule alone would have left a card that wired no policy at all completely green —
     /// this plan's own Task 4 mutation lesson.
-    var composerCard: NormaComposerCard? {
+    var composerCard: WinterComposerCard? {
         guard let cardMode = composerCardMode else { return nil }
-        return NormaComposerCard(
+        return WinterComposerCard(
             text: adapter.draftBinding,
             onSubmit: { adapter.onSubmit(adapter.composerDraft) },
             mode: .constant(cardMode),
@@ -705,7 +705,7 @@ struct WindowContentView<Accessory: View>: View {
     }
 
     /// The effort menu: "Default", then the WIRE levels the session's model accepts, then — only for
-    /// a CODE session whose model the catalogue actually lists — the Norma-level tiers, under their
+    /// a CODE session whose model the catalogue actually lists — the Winter-level tiers, under their
     /// own heading. The two sections are never merged (see `effortPickerOptions`), and the tier
     /// section is simply ABSENT rather than shown-and-refused in both cases it does not apply:
     /// chat/dispatch, and a catalogue that reported no wire levels at all (a BYOK Mac, or nothing
@@ -997,7 +997,7 @@ struct EffortPickerRow: View {
 }
 
 /// The effort menu: "Default", then the WIRE levels the session's model accepts, then — when the
-/// caller's own gate says so — the Norma-level tiers under their own heading.
+/// caller's own gate says so — the Winter-level tiers under their own heading.
 ///
 /// The two sections are never merged (see `effortPickerOptions`), and the tier section is simply
 /// ABSENT rather than shown-and-refused wherever it does not apply: a mode that may not select one
@@ -1029,7 +1029,7 @@ struct EffortMenuContent: View {
                 EffortPickerRow(effort: level, current: current, isDisabled: isDisabled, onSelect: onSelect)
             }
             if !tiers.isEmpty {
-                Text("Norma")
+                Text("Winter")
                     .font(Typography.caption(.semibold))
                     .foregroundStyle(.secondary)
                     .padding(.top, 6)
@@ -1051,7 +1051,7 @@ struct EffortMenuContent: View {
 // `buildTaskSection`/`buildSubagentSection` above.
 
 /// provider-correctness T6: the model menu's offered slugs, read from the SYNCED CATALOGUE
-/// (`sync.config`'s `models`, reached through `NormaClient.syncConfig()` and held on
+/// (`sync.config`'s `models`, reached through `WinterClient.syncConfig()` and held on
 /// `FieldStateAdapter.modelCatalogue`).
 ///
 /// This replaced a hardcoded three-slug Swift mirror of `CODEX_MODELS`. That mirror was wrong in a
@@ -1070,7 +1070,7 @@ func modelPickerOptions(_ catalogue: SyncConfigSnapshot) -> [String] {
 }
 
 /// provider-correctness T6: the effort menu's two sections — WIRE levels for the session's model,
-/// and NORMA-LEVEL tiers.
+/// and WINTER-LEVEL tiers.
 ///
 /// **TWO LISTS, NEVER ONE.** `models[].efforts` is exactly what the endpoint's request validator
 /// accepts; a tier is exactly what it does not (the daemon translates `ultra` → `max` plus a
@@ -1134,7 +1134,7 @@ func effortTiersAreOffered(mode: String?) -> Bool {
 
 /// Whether a picker row is the CURRENT selection.
 ///
-/// `SessionSummary.effort` may report a Norma-level TIER verbatim (`"ultra"`) rather than its wire
+/// `SessionSummary.effort` may report a Winter-level TIER verbatim (`"ultra"`) rather than its wire
 /// translation (`"max"`) — `SessionListResult`'s own doc comment says so explicitly — so matching
 /// against the model's `efforts` array alone silently shows NO checkmark on a session whose effort
 /// is a tier. Both lists, always.

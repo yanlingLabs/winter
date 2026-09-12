@@ -88,7 +88,7 @@ describe("WS-17 row 11 — the session index is disposable, strong form", () => 
         const listedBefore = store.list().map((r) => r.sessionId).sort();
         expect(listedBefore.length).toBe(3);
 
-        // THE OPERATION: the index is thrown away, exactly as `norma doctor --repair rebuild-index`
+        // THE OPERATION: the index is thrown away, exactly as `winter doctor --repair rebuild-index`
         // does it, and the store rebuilds itself from the JSONL logs on construction.
         const indexPath = join(home, "sessions", "index.db");
         expect(existsSync(indexPath)).toBe(true);

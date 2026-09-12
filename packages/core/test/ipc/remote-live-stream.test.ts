@@ -5,7 +5,7 @@ import { join } from "node:path";
 import {
   LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, TRANSIENT_EVENT_TYPES,
   type SessionEvent, type WritableSocket,
-} from "@norma/protocol";
+} from "@winter/protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
@@ -24,13 +24,13 @@ import { TokenAuthority } from "../../src/auth/tokens";
 //
 //   1. `reasoning_item` — provider-opaque `encrypted_content`, whose only sink is the session
 //      JSONL (CLAUDE.md) — was forwarded verbatim on attach replay and live. Nothing in the daemon
-//      stopped it. What kept it off the phone in practice was an ACCIDENT: `apple/NormaProtocol`
-//      has no `reasoningItem` variant, so `NormaClient` decodes the line as `.unknownEvent` and the
+//      stopped it. What kept it off the phone in practice was an ACCIDENT: `apple/WinterProtocol`
+//      has no `reasoningItem` variant, so `WinterClient` decodes the line as `.unknownEvent` and the
 //      Swift `Gateway` drops it for lack of a `.session` case. Mirroring the variant into Swift is
 //      exactly what CLAUDE.md's own protocol checklist tells the next person to do — and the day
 //      they do, the opaque payload starts flowing, with no test to stop it. It also only ever
-//      protected the SWIFT client: any other remote-role consumer of this socket (norma-probe,
-//      norma-fake-phone, a non-Mac-mediated client) reads the raw line.
+//      protected the SWIFT client: any other remote-role consumer of this socket (winter-probe,
+//      winter-fake-phone, a non-Mac-mediated client) reads the raw line.
 //
 //   2. No size ceiling, against a transport whose overflow is a SILENT KILL. The phone de-frames
 //      with a hard 1 MiB cap (`LengthPrefix.unwrap` / `IrohConn.readLoop`); an oversize frame is
@@ -116,7 +116,7 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
   async function boot(): Promise<{
     store: SessionStore; hub: SessionHub; socketPath: string; harnessToken: string; remoteToken: string;
   }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-remote-live-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-remote-live-"));
     const store = new SessionStore(home);
     // Our OWN hub instance, threaded into the server: `broadcastTransient` is the only way to
     // produce a genuine transient (it is deliberately not reachable over any RPC), and the daemon
@@ -187,7 +187,7 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     const sessionId = seedSessionWithReasoning(store);
 
     const mac = await TestClient.connect(socketPath);
-    await mac.hello(harnessToken, "norma.app", "harness");
+    await mac.hello(harnessToken, "winter.app", "harness");
     await mac.request(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
     await waitFor(() => mac.types().includes("harness_attached"), "the replay to finish");
     expect(mac.types()).toContain("reasoning_item"); // replay
@@ -410,7 +410,7 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
   test("TRANSIENT_EVENT_TYPES is EXACTLY the nine — the Swift mirror pins the same literals", () => {
     // Parity, remote-allowlist style: neither side imports the other, each pins its own copy to
     // these literal strings, so editing one alone fails here or in
-    // `apple/NormaProtocol/.../SessionEventTransientTests.swift` (SessionEvent.transientTypes).
+    // `apple/WinterProtocol/.../SessionEventTransientTests.swift` (SessionEvent.transientTypes).
     //
     // Growth log: 7 → 8 (session-activity-hygiene T4, `session_activity`).
     // 8 → 9 (panel-shell T3, `panel_command`).

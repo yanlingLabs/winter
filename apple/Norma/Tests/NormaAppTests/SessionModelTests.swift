@@ -1,7 +1,7 @@
 import XCTest
-import NormaProtocol
-import NormaKit
-@testable import Norma
+import WinterProtocol
+import WinterKit
+@testable import Winter
 
 final class SessionModelTests: XCTestCase {
     // Event factory helpers — one place builds wire-shaped JSON and decodes it,
@@ -48,7 +48,7 @@ final class SessionModelTests: XCTestCase {
     // task-30: `ts` defaults to "now" (ms) so a bare `notificationRequested()` call reads as a
     // genuinely LIVE event without every call site having to compute a fresh timestamp itself;
     // tests that specifically want a STALE (replayed) event pass an old `ts` explicitly.
-    func notificationRequested(title: String = "Norma", message: String = "done", ts: Int = Int(Date().timeIntervalSince1970 * 1000), seq: Int = 1) -> SessionEvent {
+    func notificationRequested(title: String = "Winter", message: String = "done", ts: Int = Int(Date().timeIntervalSince1970 * 1000), seq: Int = 1) -> SessionEvent {
         ev(#"{"type":"notification_requested","seq":\#(seq),"sessionId":"s","ts":\#(ts),"threadId":"main","title":"\#(title)","message":"\#(message)"}"#)
     }
 
@@ -390,7 +390,7 @@ final class SessionModelTests: XCTestCase {
     // MARK: - Wave-7 gate item 2: FieldStateAdapter.isWorkingVerb (animated spinner/sheen gate)
 
     /// A running turn with no override pill (`.thinking`) is exactly the "working verb" branch of
-    /// `statusText` — the animated spinner + sheen (`NormaFieldView`) should apply.
+    /// `statusText` — the animated spinner + sheen (`WinterFieldView`) should apply.
     @MainActor
     func testIsWorkingVerbTrueWhileTurnRunningWithNoOverridePill() {
         let session = SessionModel()
@@ -650,7 +650,7 @@ final class SessionModelTests: XCTestCase {
         XCTAssertTrue(s.queuedSteers.isEmpty)
     }
 
-    /// `FieldStateAdapter.queuedText` is what `NormaFieldView`'s queued-line actually reads —
+    /// `FieldStateAdapter.queuedText` is what `WinterFieldView`'s queued-line actually reads —
     /// covers the "queued: <text>" join format directly, through a live `SessionModel`.
     @MainActor
     func testQueuedTextReflectsQueuedSteersAndClearsOnCompletion() {

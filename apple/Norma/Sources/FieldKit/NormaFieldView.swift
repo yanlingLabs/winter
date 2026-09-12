@@ -82,7 +82,7 @@ import AppKit
 /// Task B ports the same callback onto v2's `ComposerTextView` (`Field/ComposerTextView.swift`)
 /// and wires it below, so `composerContentHeight`/`clampedComposerHeight()` (kept verbatim from
 /// task A) are now actually driven by the live text measurement instead of sitting fixed.
-struct NormaFieldView: View {
+struct WinterFieldView: View {
     @ObservedObject var adapter: FieldStateAdapter
     @ObservedObject var morph: MorphModel
     /// Task-3 fix wave (review finding, "full-body re-render per tick"): deliberately NOT
@@ -166,7 +166,7 @@ struct NormaFieldView: View {
         let composerTargetHeight = showsInlineResponse
             ? clampedResponseHeight(in: windowSize)
             : clampedComposerHeight()
-        // Wave-7 gate item 1 empirical evidence hook: NORMA_ORB_DEBUG=1 traces the shell-height
+        // Wave-7 gate item 1 empirical evidence hook: WINTER_ORB_DEBUG=1 traces the shell-height
         // CONSUMER every render, paired with `inlineResponse`'s measurement-site hook below — this
         // pair of log lines is what proved the growth bug live (`responseHeight` latched at 0
         // forever) and now proves the fix (`responseHeight` tracks the reply and `shell height`
@@ -420,7 +420,7 @@ struct NormaFieldView: View {
             // `FluidOrbView` itself.
             //
             // Task-3 fix wave: mounted UNCONDITIONALLY — `FluidOrbSlot` (observing `FluidModel`,
-            // never this view) owns the visible/empty decision internally, so `NormaFieldView`
+            // never this view) owns the visible/empty decision internally, so `WinterFieldView`
             // never needs to react to the fluid's own state to decide whether to include it in
             // the tree at all (see `FluidModel`'s doc).
             //
@@ -536,7 +536,7 @@ struct NormaFieldView: View {
                 // composer's single-line vertical centering within the shell. Multi-line composer
                 // growth (composerHeight-driven) keeps working: centered content expands downward
                 // from center is correct for that case too.
-                .coordinateSpace(.named("normaResponseShellTrace"))
+                .coordinateSpace(.named("winterResponseShellTrace"))
                 .clipShape(
                     RoundedRectangle(
                         cornerRadius: morphedCornerRadius(for: composerShape),
@@ -594,7 +594,7 @@ struct NormaFieldView: View {
                 .position(x: chatButtonFinal.midX, y: chatButtonFinal.midY)
                 .modifier(GlassForegroundLegibility())
 
-            // Gate r2: the focus ring lives OUTSIDE the difference-blend scope so its Norma-blue
+            // Gate r2: the focus ring lives OUTSIDE the difference-blend scope so its Winter-blue
             // hue stays TRUE instead of inverting against the wallpaper (white ring read as just
             // another chrome stroke; selection needs its own stable color).
             Circle()
@@ -796,7 +796,7 @@ struct NormaFieldView: View {
                     // without this the placeholder sat flush at (0,0) while the caret/first
                     // glyph render ~2pt right / 4pt down from there, so the placeholder visibly
                     // overlapped the caret (user report: "placeholder overlapping the caret").
-                    Text("Ask Norma…")
+                    Text("Ask Winter…")
                         .font(Typography.composerField())  // the placeholder follows the field
                         .foregroundStyle(.white.opacity(0.5)) // difference-blend-safe placeholder
                         .padding(.leading, ComposerTextView.textContainerInset.width
@@ -894,7 +894,7 @@ struct NormaFieldView: View {
                 responseContentBody
                     // Wave-10 gate fix: geometry-trace hook (paired with the fix's doc on
                     // `composerOrResponseContent`'s frame above) — the content's ACTUAL rendered
-                    // top edge relative to `normaResponseShellTrace` (the real on-screen shell
+                    // top edge relative to `winterResponseShellTrace` (the real on-screen shell
                     // viewport named there). A centered oversized child reads
                     // minY == -(content height − shell height) / 2 at rest; top-aligned reads
                     // minY == 0. Logged post-layout (`onGeometryChange`), so it reflects every
@@ -906,7 +906,7 @@ struct NormaFieldView: View {
                     // `GeometryReader` too) and (re-run after the fix) proves it's resolved.
                     .onGeometryChange(
                         for: CGFloat.self,
-                        of: { $0.frame(in: .named("normaResponseShellTrace")).minY }
+                        of: { $0.frame(in: .named("winterResponseShellTrace")).minY }
                     ) { minY in
                         OrbDebug.log(
                             "response content minY vs shell viewport: \(minY) "
@@ -1149,7 +1149,7 @@ struct NormaFieldView: View {
 
 /// v1's `chatButtonFinalRect(navFinal:)` (GlassFieldView.swift:1058-1066), verbatim math: a
 /// square button sized to the nav pill's own height, sitting `interPillGap` to its left at the
-/// same y. `navPillFinalRect(in:composerFinal:)` (`NormaFieldView`, private above) already
+/// same y. `navPillFinalRect(in:composerFinal:)` (`WinterFieldView`, private above) already
 /// reserves this exact gap on its `corner.isLeft` branch (`composerFinal.minX + height +
 /// interPillGap`) — that's what v1 did too (GlassFieldView.swift:1051-1052) — so on that branch
 /// this rect lands flush with `composerFinal`'s own left edge, still fully inside the window. On
@@ -1165,9 +1165,9 @@ struct NormaFieldView: View {
 /// formula (no explicit `isLeft` check inside `chatButtonFinalRect` itself, there or here — the
 /// corner-awareness is entirely inherited from whichever `navFinal` the caller passes in).
 ///
-/// Extracted as a free, top-level function (rather than a private `NormaFieldView` method, unlike
+/// Extracted as a free, top-level function (rather than a private `WinterFieldView` method, unlike
 /// `navPillFinalRect`) so it's directly unit-testable without constructing a full
-/// `NormaFieldView`/`FieldStateAdapter`/`FluidModel` — same convention as `fenceAnchorForTopLeftCorner`
+/// `WinterFieldView`/`FieldStateAdapter`/`FluidModel` — same convention as `fenceAnchorForTopLeftCorner`
 /// (`FieldKit/FieldCorner.swift`) and `followerTargetOrigin` (`Orb/OrbFollower.swift`).
 func chatButtonFinalRect(navFinal: CGRect, interPillGap: CGFloat) -> CGRect {
     let size = navFinal.height
@@ -1182,7 +1182,7 @@ func chatButtonFinalRect(navFinal: CGRect, interPillGap: CGFloat) -> CGRect {
 // MARK: - Child-status circles (Dispatch, Phase 7, Task 8)
 
 /// Ring/fill color for one child circle — attention accent for a child waiting on the human
-/// (matches `adapter.interactionNeeded`'s own amber, `NormaFieldView.swift:584`, since a mirrored
+/// (matches `adapter.interactionNeeded`'s own amber, `WinterFieldView.swift:584`, since a mirrored
 /// child approval/question surfaces through the exact same pending-interaction path), an error
 /// tint for a child that blew up, plain white (same default as every other foreground glyph in
 /// this file) for a running/queued child — no separate color for "running"; `childPulse` below is
@@ -1196,10 +1196,10 @@ private func childRingColor(_ status: String) -> Color {
 }
 
 /// A running child's ring breathes so it reads as "actively working" among its static siblings.
-/// Mirrors `chevronPulse`'s own convention exactly (`NormaFieldView.swift:104-113`'s doc — v1 LAW:
+/// Mirrors `chevronPulse`'s own convention exactly (`WinterFieldView.swift:104-113`'s doc — v1 LAW:
 /// a `repeatForever` animation's state stays scoped to the view chain that owns it, never hoisted
 /// onto an outer/ancestor view) rather than a raw `withAnimation` call at the ForEach call site,
-/// which would hoist the animation's state onto `NormaFieldView` itself and, worse, fire it fresh
+/// which would hoist the animation's state onto `WinterFieldView` itself and, worse, fire it fresh
 /// on every one of the field's own high-frequency re-renders (the adapter republishes on every
 /// session-state change while a turn runs — see `FieldStateAdapter.init`'s doc) instead of once
 /// per child on its own false→true transition. Scoped as a private `ViewModifier` with its own
@@ -1386,7 +1386,7 @@ private struct SegmentCell: View {
 /// that modifier's doc), the same mechanism every other label in this file relies on.
 private struct FieldThinkingPill: View {
     /// Cap on the label's width before `lineLimit`/`truncationMode` kick in. Also the width of
-    /// the fixed (invisible) alignment box `NormaFieldView.composerMorphedContent` pins this to
+    /// the fixed (invisible) alignment box `WinterFieldView.composerMorphedContent` pins this to
     /// (see `thinkingBoxCenter`'s doc in `composerBody`) — sizing that box to the same cap means
     /// a long caption grows only toward the box's far edge, never back past the pinned near edge.
     static let maxWidth: CGFloat = 220

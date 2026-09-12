@@ -57,7 +57,7 @@ describe("browserCapability: the server shape", () => {
     const h = harness();
     const server = browserCapability(h.session, { browser: h.deps });
     expect(server.type).toBe("sdk");
-    expect(server.name).toBe("norma__browser");
+    expect(server.name).toBe("winter__browser");
     expect(isWinterMcpServerInstance(server.instance)).toBe(true);
   });
 

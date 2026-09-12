@@ -655,7 +655,7 @@ enum OfficeHelperEvent: Equatable, Sendable {
     case helperUnavailable
 }
 
-/// Office Stage A Task 2 — supervises ONE `NormaOfficeHelper` process for as long as the app needs
+/// Office Stage A Task 2 — supervises ONE `WinterOfficeHelper` process for as long as the app needs
 /// it: spawns it directly (no launchd — see `OfficeWire.swift`'s header for why the brief's XPC
 /// shape is deferred to Task 4), proves it alive with a `hello`/`helloOk` handshake, watches for
 /// its death, and **never relaunches on its own**. "Relaunch on next demand only" (the brief's own
@@ -706,33 +706,33 @@ final class OfficeHelperSupervisor {
         var autosaveIntervalSeconds: Double?
         /// Appended verbatim after the standard `--socket-path`/`--state-path`/`--token` (and
         /// optional `--idle-exit-seconds`) arguments. Empty in production — a pure testability
-        /// seam so `OfficeSupervisorTests` can pass `NormaOfficeHelperFixture`'s `--mode` flag
+        /// seam so `OfficeSupervisorTests` can pass `WinterOfficeHelperFixture`'s `--mode` flag
         /// without the supervisor itself needing any concept of "fixture modes."
         var extraArguments: [String] = []
 
-        /// Helper at `Contents/MacOS/NormaOfficeHelper` — the same nested path `NormaHelper`'s own
-        /// bare-tool product is embedded at (project.yml's "Embed NormaHelper" postCompileScript
-        /// does `cp` into `Contents/MacOS/`; "Embed NormaOfficeHelper" mirrors it exactly for this
-        /// target). Socket directory per the brief's interface: `NORMA_OFFICE_STATE_PATH` (DEBUG
-        /// only — the same escape hatch `NormaCEFRuntime.rootCachePath()` already uses for
-        /// `NORMA_CEF_CACHE_PATH`) else `~/Library/Application Support/<bundleid>/Office/`.
+        /// Helper at `Contents/MacOS/WinterOfficeHelper` — the same nested path `WinterHelper`'s own
+        /// bare-tool product is embedded at (project.yml's "Embed WinterHelper" postCompileScript
+        /// does `cp` into `Contents/MacOS/`; "Embed WinterOfficeHelper" mirrors it exactly for this
+        /// target). Socket directory per the brief's interface: `WINTER_OFFICE_STATE_PATH` (DEBUG
+        /// only — the same escape hatch `WinterCEFRuntime.rootCachePath()` already uses for
+        /// `WINTER_CEF_CACHE_PATH`) else `~/Library/Application Support/<bundleid>/Office/`.
         static func production() -> Configuration {
             Configuration(
                 helperExecutableURL: Bundle.main.bundleURL
-                    .appendingPathComponent("Contents/MacOS/NormaOfficeHelper"),
+                    .appendingPathComponent("Contents/MacOS/WinterOfficeHelper"),
                 socketDirectory: defaultStateDirectory())
         }
 
         static func defaultStateDirectory() -> URL {
             #if DEBUG
-            if let override = ProcessInfo.processInfo.environment["NORMA_OFFICE_STATE_PATH"],
+            if let override = ProcessInfo.processInfo.environment["WINTER_OFFICE_STATE_PATH"],
                !override.isEmpty {
                 return URL(fileURLWithPath: override, isDirectory: true)
             }
             #endif
             let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
                 ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
-            let bundleId = Bundle.main.bundleIdentifier ?? "com.norma.app"
+            let bundleId = Bundle.main.bundleIdentifier ?? "com.winter.app"
             return base.appendingPathComponent(bundleId, isDirectory: true)
                 .appendingPathComponent("Office", isDirectory: true)
         }
@@ -984,7 +984,7 @@ final class OfficeHelperSupervisor {
 
     /// Bounds `connection.open()` by `timeout`, independent of `UnixSocketTransport`'s own
     /// internal ~3s connect timeout (F2, T2 review). NOT a `withTaskGroup` race — same reasoning
-    /// `OfficeWireConnection`'s own header gives at length for `nextFrame`: NormaKit's `open()` has
+    /// `OfficeWireConnection`'s own header gives at length for `nextFrame`: WinterKit's `open()` has
     /// no cancellation checks of its own (its 3s deadline is a plain `queue.asyncAfter`, not
     /// `Task`-aware), so a structured group would still AWAIT the abandoned attempt before this
     /// function could return, defeating the bound entirely. This is the same unstructured

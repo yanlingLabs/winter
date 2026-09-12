@@ -1,6 +1,6 @@
 import XCTest
 import AppKit
-@testable import Norma
+@testable import Winter
 
 /// Rider 2: pins for the dock-ghost teardown observer (`HarnessTeardownObserver`).
 ///
@@ -36,7 +36,7 @@ final class HarnessTeardownObserverTests: XCTestCase {
         // visible test-created surfaces → sweep
         XCTAssertTrue(HarnessTeardownObserver.shouldOrderOut(windowClassName: "NSWindow", isVisible: true))
         XCTAssertTrue(HarnessTeardownObserver.shouldOrderOut(windowClassName: "NSPanel", isVisible: true))
-        XCTAssertTrue(HarnessTeardownObserver.shouldOrderOut(windowClassName: "Norma.KeyableNonActivatingPanel", isVisible: true))
+        XCTAssertTrue(HarnessTeardownObserver.shouldOrderOut(windowClassName: "Winter.KeyableNonActivatingPanel", isVisible: true))
         // invisible → never touched, regardless of class
         XCTAssertFalse(HarnessTeardownObserver.shouldOrderOut(windowClassName: "NSWindow", isVisible: false))
         XCTAssertFalse(HarnessTeardownObserver.shouldOrderOut(windowClassName: "NSStatusBarWindow", isVisible: false))

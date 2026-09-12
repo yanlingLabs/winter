@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import NormaChatKit
+@testable import WinterChatKit
 
 /// PageCore: the cache (TTL, origin-aware eviction, in-flight dedupe), the fetch pipeline
 /// (timeout/cancellation composition, post-redirect dangerous block, HTML vs raw-text paths), and

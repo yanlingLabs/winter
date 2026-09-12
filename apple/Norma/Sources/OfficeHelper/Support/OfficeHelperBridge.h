@@ -1,7 +1,7 @@
-// NormaOfficeHelper bridging header — Office Stage A Task 3.
+// WinterOfficeHelper bridging header — Office Stage A Task 3.
 //
 // Exposes LibreOfficeKit's C API to Swift (SWIFT_OBJC_BRIDGING_HEADER, scoped to the
-// NormaOfficeHelper target ONLY in project.yml — neither Norma.app nor NormaOfficeHelperFixture
+// WinterOfficeHelper target ONLY in project.yml — neither Winter.app nor WinterOfficeHelperFixture
 // link this; see LOKBridge.swift's own header for why the fixture stays LOK-free). `LOK_USE_UNSTABLE_API`
 // unlocks the LibreOfficeKitDocumentClass members Task 3 needs (documentLoad's siblings:
 // getDocumentType, getParts, getPartName, getDocumentSize, initializeForRendering, registerCallback,

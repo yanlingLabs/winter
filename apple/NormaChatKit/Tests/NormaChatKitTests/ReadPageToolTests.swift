@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import NormaChatKit
+@testable import WinterChatKit
 
 /// ReadPage — the batched page-reading tool. Fetches ride `ScriptedChatHTTP`; the research seam is a
 /// recording stub (the real runner is exercised in `ResearchRunnerTests`).

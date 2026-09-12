@@ -1,7 +1,7 @@
 import XCTest
-import NormaProtocol
-import NormaKit
-@testable import Norma
+import WinterProtocol
+import WinterKit
+@testable import Winter
 
 /// Local copy of AppModelTests' scripted-transport double (AppModelTests.swift :8-27). Deliberate
 /// duplication, not an oversight: extracting a shared `TestTransport.swift` helper would require
@@ -10,7 +10,7 @@ import NormaKit
 /// regression net). So this file gets its own copy instead — renamed (`Feed`-prefixed) so these
 /// file-scope declarations can never collide with AppModelTests.swift's copies in the same test
 /// target.
-final class FeedScriptedTransport: NormaTransport, @unchecked Sendable {
+final class FeedScriptedTransport: WinterTransport, @unchecked Sendable {
     let incoming: AsyncStream<TransportEvent>
     private let cont: AsyncStream<TransportEvent>.Continuation
     private let lock = NSLock()

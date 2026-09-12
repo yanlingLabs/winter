@@ -1,5 +1,5 @@
 import SwiftUI
-import NormaKit
+import WinterKit
 
 // MARK: - The fleet strip (PURE — driven directly by DispatchSurfaceTests)
 
@@ -36,7 +36,7 @@ func fleetStripTapDestination() -> ShellDestination { .mode(.code) }
 /// transport factory and token).
 ///
 /// GALLERY EXTENSION POINT: no iOS page covers a fleet strip, and neither does iOS's own dispatch
-/// screen (`norma-ios/Norma/Code/DispatchModeView.swift`) — what THAT view establishes, and what this
+/// screen (`norma-ios/Winter/Code/DispatchModeView.swift`) — what THAT view establishes, and what this
 /// one mirrors, is the resolving/resolved/failed(retry) dance (`ShellSessionHost.DispatchResolution`).
 /// The fleet strip itself is a genuinely new Mac-only addition the design spec calls for directly
 /// ("the fleet view … the roster the dispatch tools made visible"), with nothing on the phone to
@@ -113,7 +113,7 @@ struct DispatchSurface: View {
         ContentUnavailableView {
             Label("Can't Open Dispatch", systemImage: "wifi.slash")
         } description: {
-            Text("Norma couldn't reach the daemon for it.")
+            Text("Winter couldn't reach the daemon for it.")
         } actions: {
             Button("Try Again") { host.retryDispatchResolution() }
         }

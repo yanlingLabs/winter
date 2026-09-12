@@ -6,7 +6,7 @@ import {
   LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR,
   SESSION_TITLE_MAX_CHARS, SYNC_MAX_CHUNK_B64, IROH_MAX_FRAME_BYTES,
   type WritableSocket,
-} from "@norma/protocol";
+} from "@winter/protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SyncPushBuffers, SYNC_PAGE_BYTES } from "../../src/ipc/sync";
 import { SessionStore } from "../../src/sessions/store";
@@ -134,7 +134,7 @@ describe("I1 — a pushed meta.model is validated exactly like session.setModel'
   afterEach(() => { stop?.(); stop = undefined; });
 
   async function boot(models: string[] | null): Promise<{ store: SessionStore; socketPath: string; token: string }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-sync-model-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-sync-model-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -240,7 +240,7 @@ describe("I2 — title is bounded at every ingress, so heads/list can never outg
   afterEach(() => { stop?.(); stop = undefined; });
 
   async function boot(): Promise<{ store: SessionStore; socketPath: string; token: string }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-sync-title-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-sync-title-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -401,7 +401,7 @@ describe("I3 — the push chunk ceiling is sized against the PHONE frame, not th
   afterEach(() => { stop?.(); stop = undefined; });
 
   async function boot(): Promise<{ store: SessionStore; socketPath: string; token: string }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-sync-chunk-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-sync-chunk-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
@@ -480,7 +480,7 @@ describe("fix-round minors (M1/M2/M4/M5)", () => {
   afterEach(() => { stop?.(); stop = undefined; });
 
   async function boot(): Promise<{ store: SessionStore; socketPath: string; token: string }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-sync-minors-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-sync-minors-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));

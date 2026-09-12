@@ -1,5 +1,5 @@
 {
-  "name": "@norma/core",
+  "name": "@winter/core",
   "version": "0.2.14",
   "private": true,
   "license": "Apache-2.0",
@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.250",
-    "@norma/protocol": "workspace:*",
+    "@winter/protocol": "workspace:*",
     "@yanlinglabs/winter-agent-sdk": "^0.0.5",
     "@yanlinglabs/winter-provider-catalog": "0.0.5",
     "@yanlinglabs/winter-provider-runtime": "^0.0.5",

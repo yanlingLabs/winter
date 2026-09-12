@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// app-shell T5: Cowork's Coming-soon surface — iOS's own actual pattern
-/// (`norma-ios/Norma/App/ComingSoonView.swift`): a `ContentUnavailableView` with an icon + one
+/// (`norma-ios/Winter/App/ComingSoonView.swift`): a `ContentUnavailableView` with an icon + one
 /// sentence, no list and no create door, because there is nothing behind it to list or create —
 /// `session_spawn` pre-flight-rejects the cowork mode entirely (design spec §"Cowork": "NOT an empty
 /// list — the mode is not wire-expressible yet"), so a list would promise a capability that fails on

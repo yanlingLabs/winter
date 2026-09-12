@@ -1,5 +1,5 @@
 /** Shared pure subagent-display logic (Phase 2e-ii/2e-iii-b) — glyph/label/alive are LOCKSTEP with
- *  `apple/Norma/Sources/ChatContent/SubagentDisplay.swift` (same fixtures both sides, like
+ *  `apple/Winter/Sources/ChatContent/SubagentDisplay.swift` (same fixtures both sides, like
  *  task-display.ts). `subagentTokens` is TS-ONLY: token arrows render only in the CLI (2e-iii-b
  *  corrects this — the CLI now shows BOTH time and tokens). `extractToolDetail` is a TS port of
  *  SessionModel.swift's `private static func extractToolDetail` — same field-picking rules per

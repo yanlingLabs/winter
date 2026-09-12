@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import NormaProtocol
+@testable import WinterProtocol
 
 /// SP2b Task 2: pairing-ceremony crypto — transcript binding, HMAC proof, 4-word SAS, and the
 /// QR payload that seeds a fresh pairing. Fixed inputs throughout; only the SAS words are
@@ -61,7 +61,7 @@ struct PairingCryptoTests {
         let cfg = SignedRelayConfig(config: RelayConfig(version: 1, relays: ["https://relay-1.yanlinglabs.com."]), sig: Data(repeating: 7, count: 64))
         // No SP3.2c hints (older/loopback shape): macRelayURL defaults nil, macDirectAddresses [].
         let qr = QRPayload(v: 1, pairID: tPairID, pairSecret: tSecret, expiresAt: 1_800_000_000,
-            macEndpointID: "mac1", relayConfig: cfg, alpn: "computer.norma.rpc/1", hostLabel: "Test Mac")
+            macEndpointID: "mac1", relayConfig: cfg, alpn: "computer.winter.rpc/1", hostLabel: "Test Mac")
         let s = qr.encodeBase64URL()
         #expect(!s.contains("+") && !s.contains("/") && !s.contains("="))
         let decoded = try QRPayload.decode(base64URL: s)
@@ -75,7 +75,7 @@ struct PairingCryptoTests {
     @Test func qrPayloadRoundTripsAddressHints() throws {
         let cfg = SignedRelayConfig(config: RelayConfig(version: 1, relays: ["https://relay-1.yanlinglabs.com."]), sig: Data(repeating: 7, count: 64))
         let qr = QRPayload(v: 1, pairID: tPairID, pairSecret: tSecret, expiresAt: 1_800_000_000,
-            macEndpointID: "mac1", relayConfig: cfg, alpn: "computer.norma.rpc/1", hostLabel: "Test Mac",
+            macEndpointID: "mac1", relayConfig: cfg, alpn: "computer.winter.rpc/1", hostLabel: "Test Mac",
             macRelayURL: "https://use1-1.relay.iroh.network./",
             macDirectAddresses: ["192.168.1.9:53421", "[fe80::1]:53421"])
         let decoded = try QRPayload.decode(base64URL: qr.encodeBase64URL())
@@ -88,7 +88,7 @@ struct PairingCryptoTests {
     @Test func qrPayloadRoundTripsRelayOnlyNoDirectAddrs() throws {
         let cfg = SignedRelayConfig(config: RelayConfig(version: 1, relays: []), sig: Data(repeating: 7, count: 64))
         let qr = QRPayload(v: 1, pairID: tPairID, pairSecret: tSecret, expiresAt: 1_800_000_000,
-            macEndpointID: "mac1", relayConfig: cfg, alpn: "computer.norma.rpc/1", hostLabel: "Test Mac",
+            macEndpointID: "mac1", relayConfig: cfg, alpn: "computer.winter.rpc/1", hostLabel: "Test Mac",
             macRelayURL: "https://use1-1.relay.iroh.network./", macDirectAddresses: [])
         let decoded = try QRPayload.decode(base64URL: qr.encodeBase64URL())
         #expect(decoded == qr)
@@ -123,7 +123,7 @@ struct PairingCryptoTests {
             ("sig", .bytes(Data(repeating: 7, count: 64))),
         ])
         let map = CBORValue.map([
-            ("alpn", .text("computer.norma.rpc/1")),
+            ("alpn", .text("computer.winter.rpc/1")),
             ("expiresAt", .uint(expiresAt)),
             ("hostLabel", .text("Test Mac")),
             ("macEndpointID", .text("mac1")),

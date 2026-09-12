@@ -1,7 +1,7 @@
-import NormaKit
+import WinterKit
 import SwiftUI
 
-// MARK: - Pure reconcile-eviction helpers (Phase 4d-cleanup Task 3 fix 3) — no `NormaClient`/
+// MARK: - Pure reconcile-eviction helpers (Phase 4d-cleanup Task 3 fix 3) — no `WinterClient`/
 // `Task.sleep` involved, table-tested directly.
 
 /// The reconcile-eviction decision for one tile id in `TilesStripModel.known`. A "live tracked" id
@@ -28,14 +28,14 @@ func isReconcileTick(_ tick: Int, every: Int = 10) -> Bool {
 /// Task 4 (4d-iii): the Plugin Manager's live tiles strip — seeded from `pluginsContrib()`'s
 /// currently-registered tile per plugin on open, then kept current by POLLING the actor-isolated
 /// `client.tiles` snapshot (NOT a second `for await client.events` consumer). `client.events` is a
-/// single-consumer `AsyncStream` and the Dashboard's `NormaClient` is the app's shared MAIN client
+/// single-consumer `AsyncStream` and the Dashboard's `WinterClient` is the app's shared MAIN client
 /// (`AppDelegate.makeDashboardWiring`'s `client = model.client` — App shell T7's re-host of
 /// `DashboardWindowController.init`'s same claim) — its `events` stream is already being
 /// drained by `AppModel`/`SessionFeed`'s own `for await` pump. A second reader on the same stream
 /// would SPLIT delivery (each event goes to whichever waiter happens to receive it), silently
 /// stealing roughly half the orb's events whenever the dashboard is open. `client.tiles` has no
-/// such hazard: it's kept current by `NormaClient.route()`'s OWN internal transport pump (which
-/// writes `tilesStore` BEFORE yielding to `events` — see `NormaClient.swift`), so reading the
+/// such hazard: it's kept current by `WinterClient.route()`'s OWN internal transport pump (which
+/// writes `tilesStore` BEFORE yielding to `events` — see `WinterClient.swift`), so reading the
 /// snapshot is always as fresh as the last update regardless of who else drains `events`.
 @MainActor
 final class TilesStripModel: ObservableObject {
@@ -46,7 +46,7 @@ final class TilesStripModel: ObservableObject {
         var data: TileData
     }
 
-    private let client: NormaClient
+    private let client: WinterClient
     @Published private(set) var tiles: [PluginTile] = []
 
     /// Merged working set — NOT simply overwritten from `client.tiles` each poll (see `poll()`'s
@@ -55,7 +55,7 @@ final class TilesStripModel: ObservableObject {
     private var known: [String: TileData] = [:]
     /// Every plugin id ever OBSERVED present in a `client.tiles` poll — once an id is "live
     /// tracked", its later absence from a poll is a REAL removal (the plugin pushed `tile: nil`,
-    /// which `NormaClient.route()` evicts from `tilesStore`); a seed-only id (declared via
+    /// which `WinterClient.route()` evicts from `tilesStore`); a seed-only id (declared via
     /// `pluginsContrib()` but never yet seen in a live poll) staying absent from `client.tiles`
     /// means nothing on its own — it may simply not have pushed anything since this app session's
     /// client connected.
@@ -64,7 +64,7 @@ final class TilesStripModel: ObservableObject {
     /// `isReconcileTick`'s "every ~10th tick" gate for the seed-only reconcile pass below.
     private var pollTickCount = 0
 
-    init(client: NormaClient) {
+    init(client: WinterClient) {
         self.client = client
     }
 

@@ -1,8 +1,8 @@
-// Pure/isolatable logic behind `norma model ...`, split out of main.ts so it can be
+// Pure/isolatable logic behind `winter model ...`, split out of main.ts so it can be
 // unit-tested without going through the top-level `if (import.meta.main)` dispatch. Mirrors
 // plugin-cli.ts's split: main.ts owns the I/O (loadSettings/saveSettings/connect), this file
 // owns the parse/validate decisions.
-import { CODEX_MODELS, REASONING_EFFORTS, catalogRowsFor } from "@norma/core";
+import { CODEX_MODELS, REASONING_EFFORTS, catalogRowsFor } from "@winter/core";
 
 export type ModelCliAction =
   | { kind: "show" }
@@ -16,10 +16,10 @@ export type ModelCliAction =
   | { kind: "clearAdvisor" }
   | { kind: "usageError"; message: string };
 
-const USAGE = "usage: norma model [<slug>] [--effort <level>]  |  norma model --effort <level>  |  norma model --advisor <slug|auto>";
+const USAGE = "usage: winter model [<slug>] [--effort <level>]  |  winter model --effort <level>  |  winter model --advisor <slug|auto>";
 
 /**
- * Parses `norma model`'s argv tail (everything after "model" — i.e. `process.argv.slice(3)`).
+ * Parses `winter model`'s argv tail (everything after "model" — i.e. `process.argv.slice(3)`).
  * Forms:
  *   []                          -> show
  *   ["--effort", level]         -> setEffort (effort-only change)

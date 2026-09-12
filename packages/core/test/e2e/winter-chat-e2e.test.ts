@@ -1,15 +1,15 @@
 // P8b Task 16 — CHAT ON THE WINTER LEG, end to end, on the BUILT binary.
 //
 // A real `startDaemon` in a temp home (every mode is the Winter leg since Task 17), a real NDJSON client
-// on its socket, and the real `winter` child `NORMA_WINTER_EXECUTABLE` names (the helper SKIPS this
-// whole file when it is unset, and FAILS when `NORMA_WINTER_REQUIRE_BINARY=1`). Every model is a
+// on its socket, and the real `winter` child `WINTER_RUNTIME_EXECUTABLE` names (the helper SKIPS this
+// whole file when it is unset, and FAILS when `WINTER_RUNTIME_REQUIRE_BINARY=1`). Every model is a
 // `winter-test/<double>` — nothing reaches the network.
 //
 // The brief's cases (a)–(h), reshaped where the binary's measured behaviour differs from the
 // brief's premise (see `winter-session.ts`'s header and the Task 16 report):
 //   (a) create → a Winter-leg record; send "hello" → user_message, turn_started, assistant_message,
 //       turn_completed, in that order, ONE terminal
-//   (b) tooluse → tool_call/tool_result/terminal with NORMA names, the fallback text on the result
+//   (b) tooluse → tool_call/tool_result/terminal with WINTER names, the fallback text on the result
 //   (c) two sessions; a delivery through the router lands in B's JSONL and runs B's next turn
 //   (d) steer during a hang, interrupt → the interrupted terminal, NO agent_error; the child stays
 //       live and the same child takes the next send; then end() → resumable → a send RESUMES the
@@ -28,7 +28,7 @@
 //       code-shaped child advertises BASE ∪ MCP ∪ its capability tools minus the ToolSearch/
 //       WaitForMcpServers half `toolSearchEnabled` excludes
 //   (e) stop() with a HANGING live turn ends inside the grace and the child is gone
-//   (h) ~/.norma and ~/.norma-dev have the same recursive NAME signature before and after, their
+//   (h) ~/.winter and ~/.winter-dev have the same recursive NAME signature before and after, their
 //       `projects/` subtrees (what a winter child writes) the same size/mtime signature, and no
 //       `dist/winter` process survives this file; the POSITIVE half — the transcript lives under
 //       the TEMP home — is (d)'s
@@ -37,7 +37,7 @@ import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync, type Stats
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@winter/protocol";
 import { buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { Options } from "@yanlinglabs/winter-agent-sdk";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -47,7 +47,7 @@ import { sessionLegOf } from "../../src/runtime-sdk/leg";
 import { CHAT_ALLOWED_WINTER_TOOLS, buildWinterOptions, disallowedToolsFor } from "../../src/runtime-sdk/mode-options";
 import { WINTER_ADVERTISED_MCP_TOOLS_0_0_4, WINTER_ADVERTISED_TOOLS_0_0_4_BASE } from "../../src/runtime-sdk/tool-names";
 import { createHostPromptQueue } from "../../src/runtime-sdk/prompt-queue";
-import { NORMA_CAPABILITY_TOOLS } from "../../src/capabilities";
+import { WINTER_CAPABILITY_TOOLS } from "../../src/capabilities";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
 
 // ── a raw NDJSON client that also collects the events it is streamed ─────────────────────────────
@@ -112,7 +112,7 @@ class TestClient {
 // user's LIVE daemon does not touch on its own — a size/mtime signature over `sessions/`, `logs/`
 // or `run/` would flake on every keystroke the user types meanwhile.
 
-const REAL_HOMES = [join(homedir(), ".norma"), join(homedir(), ".norma-dev")];
+const REAL_HOMES = [join(homedir(), ".winter"), join(homedir(), ".winter-dev")];
 function walkHome(dir: string, describe: (rel: string, st: Stats) => string): string {
   if (!existsSync(dir)) return `${dir}: absent`;
   const lines: string[] = [];
@@ -135,7 +135,7 @@ const homeSignature = (dir: string): string => walkHome(dir, (rel, st) => (st.is
 const projectsSignature = (home: string): string => walkHome(join(home, "projects"), (rel, st) => `${rel} ${st.size} ${st.mtimeMs}`);
 /** Every `dist/winter` process on the box, whoever spawned it (the survivors check) — matched on
  *  the EXECUTABLE (the command line starts with the binary), not `pgrep -f`'s substring, which also
- *  catches the shell that exported `NORMA_WINTER_EXECUTABLE=<bin>` to run this very file. */
+ *  catches the shell that exported `WINTER_RUNTIME_EXECUTABLE=<bin>` to run this very file. */
 const winterSurvivors = (bin: string): string[] =>
   Bun.spawnSync(["ps", "-axo", "pid=,command="]).stdout.toString().split("\n")
     .map((l) => l.trim()).filter((l) => l.replace(/^\d+\s+/, "").startsWith(bin));
@@ -182,7 +182,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
 
   beforeAll(async () => {
     for (const h of REAL_HOMES) { signaturesBefore.set(h, homeSignature(h)); projectsBefore.set(h, projectsSignature(h)); }
-    home = mkdtempSync(join(tmpdir(), "norma-winter-chat-e2e-"));
+    home = mkdtempSync(join(tmpdir(), "winter-chat-e2e-"));
     mkdirSync(home, { recursive: true });
     writeSettings(true);
     await bootDaemon();
@@ -254,7 +254,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     const driver = daemon!.winter.get(sid)!;
     const t0 = Date.now();
     while (driver.init === undefined && Date.now() - t0 < 10_000) await Bun.sleep(20);
-    const chatCaps = Object.entries(NORMA_CAPABILITY_TOOLS).filter(([, f]) => (f.modes as readonly string[]).includes("chat")).map(([n]) => n);
+    const chatCaps = Object.entries(WINTER_CAPABILITY_TOOLS).filter(([, f]) => (f.modes as readonly string[]).includes("chat")).map(([n]) => n);
     const disallowed = new Set(disallowedToolsFor("chat"));
     const expected = [...new Set([
       ...WINTER_ADVERTISED_TOOLS_0_0_4_BASE, ...WINTER_ADVERTISED_MCP_TOOLS_0_0_4, ...chatCaps,
@@ -265,7 +265,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     expect(expected).toEqual([...CHAT_ALLOWED_WINTER_TOOLS.filter((t) => t !== "advisor"), ...chatCaps].sort());
   }, 30_000);
 
-  test("(b) tooluse → tool_call + tool_result + terminal, NORMA-shaped, and the child's fallback text on the unregistered tool", async () => {
+  test("(b) tooluse → tool_call + tool_result + terminal, WINTER-shaped, and the child's fallback text on the unregistered tool", async () => {
     const { sid } = await createChat("tooluse");
     await client.call(METHODS.sessionSend, { sessionId: sid, text: "use the tool" });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sid);
@@ -275,7 +275,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     expect(kinds).toEqual(["user_message", "turn_started", "tool_call", "tool_result", "assistant_message", "turn_completed"]);
     const call = log.find((e) => e.type === "tool_call") as { name: string; callId: string };
     const res = log.find((e) => e.type === "tool_result") as { callId: string; isError: boolean; output: string };
-    expect(call.name).toBe("test_tool");      // no Norma name: the documented fail-open pass-through
+    expect(call.name).toBe("test_tool");      // no Winter name: the documented fail-open pass-through
     expect(res.callId).toBe(call.callId);
     expect(res.isError).toBe(true);           // the tool is not registered: the child's own denial text
     expect(res.output.length).toBeGreaterThan(0);
@@ -532,7 +532,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     const handle = daemon!.runtimeSdk!;
     const sdk = handle.sdk;
     const sid = "s_tripwire_code";
-    const cwd = mkdtempSync(join(tmpdir(), "norma-winter-tripwire-cwd-"));
+    const cwd = mkdtempSync(join(tmpdir(), "winter-tripwire-cwd-"));
     const caps = daemon!.buildSessionCapabilities({ sessionId: sid, mode: "code", cwd, roots: [cwd], tmpDir: cwd });
     const hook = handle.spawnHookFor("code");
     if (hook instanceof Error) throw hook;
@@ -540,7 +540,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     const options: Options = buildWinterOptions({
       mode: "code", policy: "auto", sessionId: crypto.randomUUID(), home, cwd, model: "winter-test/echo",
       credentials: { byProvider: {} }, spawn: hook, canUseTool: async () => ({ behavior: "deny", message: "tripwire" }), abort,
-      capabilityTools: NORMA_CAPABILITY_TOOLS, capabilities: caps,
+      capabilityTools: WINTER_CAPABILITY_TOOLS, capabilities: caps,
     });
     const queue = createHostPromptQueue();
     const q = sdk.query({ prompt: queue, options });
@@ -588,7 +588,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     } finally { store.close(); }
   }, 30_000);
 
-  test("(h) home isolation: ~/.norma and ~/.norma-dev carry the same name signature as before this file ran, their projects/ the same size+mtime signature, and no dist/winter survives", async () => {
+  test("(h) home isolation: ~/.winter and ~/.winter-dev carry the same name signature as before this file ran, their projects/ the same size+mtime signature, and no dist/winter survives", async () => {
     for (const h of REAL_HOMES) {
       expect(homeSignature(h)).toBe(signaturesBefore.get(h)!);
       expect(projectsSignature(h)).toBe(projectsBefore.get(h)!);

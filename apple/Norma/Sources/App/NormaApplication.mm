@@ -1,4 +1,4 @@
-#import "NormaApplication.h"
+#import "WinterApplication.h"
 
 #import "include/cef_application_mac.h"
 
@@ -18,7 +18,7 @@
 // TWO THINGS THIS DELIBERATELY DOES NOT DO:
 //
 //   1. It does not touch `-terminate:`. The pump report's scratch subclass overrode it to call
-//      `CefShutdown` first; there is no CEF to shut down yet, and Norma's termination path is
+//      `CefShutdown` first; there is no CEF to shut down yet, and Winter's termination path is
 //      already non-trivial (`AppDelegate.applicationShouldTerminate`, the updater's idle gate).
 //      That override was OWED TO THE TASK THAT CALLS `CefInitialize` — Task 6a took it, and the
 //      whole-branch review took it back out. **This file still has no `-terminate:` override, now
@@ -34,13 +34,13 @@
 //
 // Build requirement this adds (see `project.yml`): CEF 151's public headers need **C++20**, not
 // C++17 — `cef_scoped_refptr.h:101` uses `std::same_as`.
-@interface NormaApplication () <CefAppProtocol> {
+@interface WinterApplication () <CefAppProtocol> {
  @private
   BOOL handlingSendEvent_;
 }
 @end
 
-@implementation NormaApplication
+@implementation WinterApplication
 
 - (BOOL)isHandlingSendEvent {
   return handlingSendEvent_;
@@ -58,20 +58,20 @@
 // **THERE IS DELIBERATELY NO `-terminate:` OVERRIDE, and re-adding one is a regression.**
 // `CEFRuntimeTests.testTerminateIsNotOverriddenBecauseAQuitHereCanBeCANCELLED` is the tripwire.
 //
-// Task 6a added one — `NormaCEFCloseAllBrowsers(); [super terminate:sender];` — reasoning that
+// Task 6a added one — `WinterCEFCloseAllBrowsers(); [super terminate:sender];` — reasoning that
 // cefsimple overrides `-terminate:` because Cocoa's default calls `exit()` and skips the rest of
 // the run loop, so an embedder needs a hook there. Two-thirds of that reasoning survives and the
 // conclusion does not:
 //
 //   1. `CefShutdown` genuinely must not be called from here. **A terminate can be CANCELLED.**
 //      `AppDelegate.applicationShouldTerminate` answers `.terminateCancel` for ⌘Q and for a
-//      dock-tile quit — only the menu bar's "Quit Norma", a Sparkle install and a system-initiated
+//      dock-tile quit — only the menu bar's "Quit Winter", a Sparkle install and a system-initiated
 //      logout/shutdown are real quits (`terminateDecision`, Lifecycle T3). `CefShutdown` is TERMINAL
-//      for a process, so calling it here would leave a perfectly alive Norma whose browser panel can
+//      for a process, so calling it here would leave a perfectly alive Winter whose browser panel can
 //      never work again, after a keystroke the user expects to be harmless.
 //
 //   2. So the shutdown lives at the actual point of no return: `NSApplicationWillTerminateNotification`,
-//      which `NormaCEFInitialize` subscribes to itself (`NormaCEF.mm`), so the guarantee cannot be
+//      which `WinterCEFInitialize` subscribes to itself (`WinterCEF.mm`), so the guarantee cannot be
 //      deleted from `AppDelegate` without deleting CEF's startup with it. AppKit posts that
 //      notification from inside `[NSApplication terminate:]` once the delegate has answered
 //      `.terminateNow` — the override was never what carried it.
@@ -94,11 +94,11 @@
 //      dismantling the panel's viewport only DETACHES it (`PanelViewport.dismantleNSView`) — so the
 //      teardown chain above closes no browser on any path, attached or not, and the blank-rectangle
 //      failure it describes is no longer reachable from here. Where browsers are actually closed at
-//      a real quit is unchanged: `NormaCEFShutdown`'s own `NormaCEFCloseAllBrowsers`, inside an
-//      `@autoreleasepool` before the bounded pump drain (`NormaCEF.mm`, Task 6).
+//      a real quit is unchanged: `WinterCEFShutdown`'s own `WinterCEFCloseAllBrowsers`, inside an
+//      `@autoreleasepool` before the bounded pump drain (`WinterCEF.mm`, Task 6).
 //
 // Dropping the call rather than making the unattached case tear down on hide, because the call was
-// redundant on the one path where it worked (`NormaCEFShutdown` calls `NormaCEFCloseAllBrowsers`
+// redundant on the one path where it worked (`WinterCEFShutdown` calls `WinterCEFCloseAllBrowsers`
 // itself, then drives the pump bounded, which is CEF's own external-pump sample shape) and harmful
 // on the path where it did not. Whole-branch review F7.
 

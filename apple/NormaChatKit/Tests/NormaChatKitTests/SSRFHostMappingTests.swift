@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 import XCTest
-@testable import NormaChatKit
+@testable import WinterChatKit
 
 /// THE UTS-46 QUESTION, AND ITS ANSWER (chat-d T6c, `task-6b-review.md` §8 item 1).
 ///

@@ -1,7 +1,7 @@
 // The `external` capability server (Phase 8c Lane 3, Task 3.4) — plugin-contributed tools, forwarded
 // to the OWNING plugin over its existing RPC (the pre-8c `tool.register`/`plugin_tool_invoke` door,
 // `ipc/server.ts` + `plugins/supervisor.ts`'s `invoke()`), now advertised through a per-session
-// `mcp__norma__external__<tool>` server instead of the shared, name-mangled `plugin__<pluginId>__
+// `mcp__winter__external__<tool>` server instead of the shared, name-mangled `plugin__<pluginId>__
 // <tool>` registry entry that door still also writes (that write is untouched — Lane 3 owns
 // `plugins/*` GLUE, not the `tool.register` handler itself, which no lane touches in 8c).
 //
@@ -45,8 +45,8 @@ import { capabilityServer, type CapabilitySession } from "./server";
 
 /** One plugin-contributed tool, alive at session-build time. `name` is the BARE tool name the
  *  plugin declared (never the shared registry's `plugin__<pluginId>__<name>` form) — it becomes
- *  `mcp__norma__external__<name>` on the wire, the router's own `mcp__<server>__<tool>` convention
- *  (`capabilities/names.ts`'s header) applied to THIS server's name (`norma__external`). */
+ *  `mcp__winter__external__<name>` on the wire, the router's own `mcp__<server>__<tool>` convention
+ *  (`capabilities/names.ts`'s header) applied to THIS server's name (`winter__external`). */
 export interface ExternalToolSource {
   /** Which plugin owns this tool — carried only for the invoke bridge and error messages; never
    *  part of the advertised wire name (that would defeat the point of a bare name). */
@@ -60,7 +60,7 @@ export interface ExternalToolSource {
   /** Which session modes may see this tool. Absent ⇒ `["code"]` — the SAME restrictive default
    *  `ToolDefinition.modes` documents (a dynamically registered tool "stays code-only, matching
    *  their reachability today"); this is "the plugin's declared modes (default code)" the brief
-   *  asks for, expressed as data on the source rather than a static `NORMA_CAPABILITY_TOOLS` row
+   *  asks for, expressed as data on the source rather than a static `WINTER_CAPABILITY_TOOLS` row
    *  (impossible here: tool names are runtime-defined per plugin, not a fixed enumerable set). */
   modes?: Mode[];
   /** Forwards this call to the OWNING plugin over its existing RPC — the caller's job to bind to

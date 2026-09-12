@@ -7,7 +7,7 @@ import { sandboxAvailable } from "../../src/agent/sandbox";
 import { sessionTmpDir } from "../../src/agent/session-tmp";
 
 const d = sandboxAvailable() ? describe : describe.skip;
-function realDir() { return realpathSync(mkdtempSync(join(tmpdir(), "norma-bg-"))); }
+function realDir() { return realpathSync(mkdtempSync(join(tmpdir(), "winter-bg-"))); }
 
 function makeRegistry(cwd: string) {
   const events: any[] = [];

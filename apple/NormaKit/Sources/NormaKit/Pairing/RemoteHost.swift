@@ -1,7 +1,7 @@
 import Foundation
 import IrohLib
-import NormaProtocol
-import NormaSessionKit
+import WinterProtocol
+import WinterSessionKit
 import os
 
 /// Errors `RemoteHost` itself can throw — distinct from whatever `IrohListener.start`/
@@ -17,7 +17,7 @@ public enum RemoteHostError: Error, Equatable {
 /// paired-device allowlist (`PairingStore`), starts/stops the whole remote stack — `IrohListener` ->
 /// `PairingRouter` (the real allowlist gate, PairingRouter.swift) -> `Gateway` (the daemon bridge,
 /// Gateway.swift) — on demand, and exposes the pairing ceremony (`PairingManager`) for a QR sheet to
-/// drive. `@MainActor` (mirrors this codebase's own `DaemonSupervisor` convention, apple/Norma/
+/// drive. `@MainActor` (mirrors this codebase's own `DaemonSupervisor` convention, apple/Winter/
 /// Sources/App/DaemonSupervisor.swift): a UI-facing controller, single-threaded by construction, so
 /// `pairingManager`/`macEndpointID` can stay plain synchronous-read properties instead of needing
 /// `async` getters.
@@ -30,11 +30,11 @@ public enum RemoteHostError: Error, Equatable {
 @MainActor
 public final class RemoteHost {
     public struct Config {
-        /// Where `PairingStore` persists its allowlist file. Defaults to `~/.norma/remote/
-        /// paired-devices.json`'s parent — never `~/.norma` itself (CLAUDE.md's own read-denylist
+        /// Where `PairingStore` persists its allowlist file. Defaults to `~/.winter/remote/
+        /// paired-devices.json`'s parent — never `~/.winter` itself (CLAUDE.md's own read-denylist
         /// precedent for that directory).
         public var storeDir: URL
-        /// The daemon's own unix socket — `NormaClient`'s `UnixSocketTransport` target.
+        /// The daemon's own unix socket — `WinterClient`'s `UnixSocketTransport` target.
         public var socketPath: String
         /// Shown to the phone during pairing (`PairAccepted`/QR display) — e.g. "My Mac".
         public var hostLabel: String
@@ -55,7 +55,7 @@ public final class RemoteHost {
         public var relayProbe: @Sendable (String) async -> Bool
         /// Keychain service `start()` reads its `remote-token` from (`KeychainToken.
         /// readRemoteToken(service:)`) — must match the TARGET daemon's `profile.ts`
-        /// `keychainService()` (dist `"com.norma.core"` vs. dev `"com.norma.core.dev"`; devfix:
+        /// `keychainService()` (dist `"com.winter.core"` vs. dev `"com.winter.core.dev"`; devfix:
         /// before this field existed, EVERY profile read the dist service, so a dev-profile app
         /// silently authenticated against the dist daemon's token instead of its own dev daemon's).
         /// Defaulted to the dist literal so every construction site that predates this field
@@ -63,13 +63,13 @@ public final class RemoteHost {
         public var keychainService: String
 
         public init(
-            storeDir: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".norma/remote", isDirectory: true),
+            storeDir: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".winter/remote", isDirectory: true),
             socketPath: String,
             hostLabel: String,
             relayConfig: SignedRelayConfig,
             relayURLs: [String],
             relayProbe: @escaping @Sendable (String) async -> Bool = RemoteHost.defaultRelayProbe,
-            keychainService: String = "com.norma.core"
+            keychainService: String = "com.winter.core"
         ) {
             self.storeDir = storeDir
             self.socketPath = socketPath
@@ -95,7 +95,7 @@ public final class RemoteHost {
     /// production reads `KeychainToken.readRemoteToken()` (CLAUDE.md: never in a test). Both
     /// `RemoteHostTests` (lifecycle only, never actually connects) and `PairingE2ETests` (a REAL
     /// `RealDaemon`, whose token is minted per-run, never Keychain-resident) supply this instead.
-    private let makeDaemonFactory: (@Sendable () -> NormaClient)?
+    private let makeDaemonFactory: (@Sendable () -> WinterClient)?
     #endif
 
     private var listener: RemoteListener?
@@ -123,7 +123,7 @@ public final class RemoteHost {
     /// scripted listener isn't a real `IrohListener` and exposes none of its bind arguments).
     /// `nil` until a start has actually run; cleared on `stop()` like every other started-state
     /// property here. `internal`, not `public` (CN-T1 review — narrowed: zero consumers outside
-    /// NormaKit; `RemoteHostTests` reaches it via `@testable import NormaKit`, which needs no
+    /// WinterKit; `RemoteHostTests` reaches it via `@testable import WinterKit`, which needs no
     /// more than `internal` visibility).
     private(set) var lastRelaySelection: RelaySelection?
 
@@ -138,13 +138,13 @@ public final class RemoteHost {
     }
 
     #if DEBUG
-    /// Test-only initializer (reachable via `@testable import NormaKit`) — see `makeListener`/
+    /// Test-only initializer (reachable via `@testable import WinterKit`) — see `makeListener`/
     /// `makeDaemonFactory`'s own doc comments.
     init(
         config: Config,
         secretStore: EndpointSecretStore,
         makeListener: (@Sendable () async throws -> RemoteListener)?,
-        makeDaemonFactory: (@Sendable () -> NormaClient)? = nil
+        makeDaemonFactory: (@Sendable () -> WinterClient)? = nil
     ) {
         self.config = config
         self.secretStore = secretStore
@@ -203,11 +203,11 @@ public final class RemoteHost {
 
     // MARK: - Relay selection (CN-T1)
 
-    /// `RemoteAccessCoordinator.swift`'s own loud-log idiom (`Logger(subsystem: "com.norma.app",
+    /// `RemoteAccessCoordinator.swift`'s own loud-log idiom (`Logger(subsystem: "com.winter.app",
     /// category: ...)`, `.fault` for "this needs a human's attention right now") — mirrored here,
-    /// not shared, since that type lives in the app target and `RemoteHost` (NormaKit) can't
+    /// not shared, since that type lives in the app target and `RemoteHost` (WinterKit) can't
     /// import it.
-    private static let log = Logger(subsystem: "com.norma.app", category: "remote-host")
+    private static let log = Logger(subsystem: "com.winter.app", category: "remote-host")
 
     /// Default `Config.relayProbe` (CN-T1): "is anything answering at that URL at all" — a HEAD
     /// request RACED against a GET fallback (some HTTP servers don't implement HEAD), both sharing
@@ -252,7 +252,7 @@ public final class RemoteHost {
     /// `internal`, not `private`: this is the one piece of the probe's TIMING contract that's
     /// actually unit-testable without real networking — `RemoteHostTests` pins the bound directly
     /// with `Task.sleep`-based fake probes (a real black-holed-host test would need a live server
-    /// and wouldn't be reliable in CI); `@testable import NormaKit` reaches it from there.
+    /// and wouldn't be reliable in CI); `@testable import WinterKit` reaches it from there.
     static func raceProbes(_ first: @escaping @Sendable () async -> Bool, _ second: @escaping @Sendable () async -> Bool) async -> Bool {
         await withTaskGroup(of: Bool.self) { group in
             group.addTask { await first() }
@@ -296,13 +296,13 @@ public final class RemoteHost {
         // protocol.
         let macID = try SecretKey.fromBytes(bytes: identity.secret).public().description
 
-        // Relay provenance: EVERY build config — Debug ("Norma Dev") included — embeds the
-        // production-signed Oracle relay config at build time (`apple/Norma/Resources/
+        // Relay provenance: EVERY build config — Debug ("Winter Dev") included — embeds the
+        // production-signed Oracle relay config at build time (`apple/Winter/Resources/
         // relay-config.signed.json`) and `RemoteAccessCoordinator.loadVerifiedRelayConfig`
         // verifies it before this Mac ever sees it — `config.relayURLs` there is
         // `signed.config.relays`. Verified against project.yml + the generated pbxproj (CN-T1
         // review): the `Resources` build phase that carries this file is NOT configuration-gated
-        // (unlike the Release-only "Embed norma-core" script), and `RelayConfigTrust` carries no
+        // (unlike the Release-only "Embed winter-core" script), and `RelayConfigTrust` carries no
         // `#if DEBUG` gate either — so a Debug build embeds and successfully verifies the exact
         // SAME signed relay list as Release. `directOnlyFallback` (empty `relayConfig`/
         // `relayURLs`) fires only if that resource is missing, unreadable, malformed, or fails
@@ -327,7 +327,7 @@ public final class RemoteHost {
         } else if await Self.anyRelayReachable(config.relayURLs, probe: config.relayProbe) {
             relaySelection = .custom(config.relayURLs)
         } else {
-            Self.log.fault("EMERGENCY relay fallback: every custom relay unreachable (\(self.config.relayURLs.joined(separator: ", "), privacy: .public)) — homing on n0 public relays. Custom relays are re-evaluated only at listener start: restart Norma once the fleet is back.")
+            Self.log.fault("EMERGENCY relay fallback: every custom relay unreachable (\(self.config.relayURLs.joined(separator: ", "), privacy: .public)) — homing on n0 public relays. Custom relays are re-evaluated only at listener start: restart Winter once the fleet is back.")
             relaySelection = .n0Default
         }
         let boundListener: RemoteListener
@@ -356,17 +356,17 @@ public final class RemoteHost {
         let router = PairingRouter(base: boundListener, directory: store, manager: manager)
 
         let socketPath = config.socketPath
-        let daemonFactory: @Sendable () -> NormaClient
+        let daemonFactory: @Sendable () -> WinterClient
         #if DEBUG
         if let makeDaemonFactory {
             daemonFactory = makeDaemonFactory
         } else {
             let token = try KeychainToken.readRemoteToken(service: config.keychainService)
-            daemonFactory = { NormaClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: token, clientName: "iphone-gateway") }
+            daemonFactory = { WinterClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: token, clientName: "iphone-gateway") }
         }
         #else
         let token = try KeychainToken.readRemoteToken(service: config.keychainService)
-        daemonFactory = { NormaClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: token, clientName: "iphone-gateway") }
+        daemonFactory = { WinterClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: token, clientName: "iphone-gateway") }
         #endif
 
         let gateway = Gateway(listener: router, daemonFactory: daemonFactory, hostID: macID, directory: store)

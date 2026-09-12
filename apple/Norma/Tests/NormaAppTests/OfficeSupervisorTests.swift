@@ -1,10 +1,10 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 #if canImport(Darwin)
 import Darwin
 #endif
 
-/// Office Stage A Task 2 — `OfficeHelperSupervisor` against `NormaOfficeHelperFixture`, a real
+/// Office Stage A Task 2 — `OfficeHelperSupervisor` against `WinterOfficeHelperFixture`, a real
 /// spawnable stand-in process (NOT an in-memory `Process` double, unlike `DaemonSupervisorTests`'
 /// `FakeDaemonProcess`) — deliberately, because the risk this task exists to retire is the actual
 /// wire protocol over a real kernel Unix socket, not just the retry/backoff state machine in
@@ -35,11 +35,11 @@ final class OfficeSupervisorTests: XCTestCase {
     }
 
     private func fixtureExecutableURL() -> URL {
-        // Bare `type: tool` products land directly in BUILT_PRODUCTS_DIR, sibling to Norma.app —
-        // the same place project.yml's "Embed NormaHelper" script reads `NormaHelper` from
-        // (`"${BUILT_PRODUCTS_DIR}/NormaHelper"`). NormaAppTests is TEST_HOST-hosted inside
-        // Norma.app, so `Bundle.main` here IS the host app's bundle.
-        Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelperFixture")
+        // Bare `type: tool` products land directly in BUILT_PRODUCTS_DIR, sibling to Winter.app —
+        // the same place project.yml's "Embed WinterHelper" script reads `WinterHelper` from
+        // (`"${BUILT_PRODUCTS_DIR}/WinterHelper"`). WinterAppTests is TEST_HOST-hosted inside
+        // Winter.app, so `Bundle.main` here IS the host app's bundle.
+        Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelperFixture")
     }
 
     /// Short timings so the "3 attempts, all failing" test costs low single-digit seconds, not
@@ -273,7 +273,7 @@ final class OfficeSupervisorTests: XCTestCase {
         _ = withUnsafePointer(to: &addr) { rawAddr -> Int32 in
             rawAddr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
                 // Qualified `Darwin.bind` — this test file's broader import surface
-                // (`@testable import Norma` + `XCTest`) puts an unrelated INSTANCE method named
+                // (`@testable import Winter` + `XCTest`) puts an unrelated INSTANCE method named
                 // `bind` in scope, which the compiler otherwise prefers over Darwin's global
                 // `bind()` free function at this call site.
                 Darwin.bind(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))

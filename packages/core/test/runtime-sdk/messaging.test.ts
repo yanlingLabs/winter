@@ -17,10 +17,10 @@ import type { Query, SessionMessagingFacet } from "@yanlinglabs/winter-agent-sdk
 import * as winter from "@yanlinglabs/winter-agent-sdk";
 import { createInMemoryRuntimeDirectoryStore, createRuntimeSdk } from "@yanlinglabs/winter-runtime-sdk";
 import type { RuntimeDirectoryStore, RuntimeSdk, SerializedRuntimeAddress } from "@yanlinglabs/winter-runtime-sdk";
-import { NORMA_BRAND } from "../../src/runtime-sdk/brand";
+import { CORE_BRAND } from "../../src/runtime-sdk/brand";
 import { attachOfficialSession, attachWinterSession, parkRecoveredSessions, releaseAllHeld, renderAttributedTurn } from "../../src/runtime-sdk/messaging";
-import type { NormaRuntimeSdk } from "../../src/runtime-sdk/create";
-import { NORMA_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
+import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
+import { WINTER_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
 
 // ── The two sessions ────────────────────────────────────────────────────────────────────────────
 
@@ -43,7 +43,7 @@ function fakeSession(backendSessionId: string, permissionClass: PermissionClassL
       facetCalls.push("listReachable");
       return [];
     },
-    // A REAL spawned child answers this over the control pipe; a Norma session must never reach it
+    // A REAL spawned child answers this over the control pipe; a Winter session must never reach it
     // (surface map §2.5: "no messaging runtime is registered in that process"). If a test ever sees
     // this call, the wrapper has stopped re-pointing `deliver` at the host queue.
     deliver: async (msg: GlobalAgentMessage): Promise<DeliveryOutcome> => {
@@ -84,16 +84,16 @@ function fakeSession(backendSessionId: string, permissionClass: PermissionClassL
   };
 }
 
-/** The real router, over an in-memory store. `NormaRuntimeSdk` is structurally satisfied by the two
+/** The real router, over an in-memory store. `WinterRuntimeSdk` is structurally satisfied by the two
  *  members this task's door reads — building the whole daemon handle here would drag in a secret
  *  store and an executable resolution neither of which messaging touches. */
 function harness(
   store: RuntimeDirectoryStore = createInMemoryRuntimeDirectoryStore(),
-  /** `createNormaRuntimeSdk`'s `sessionPermissionClass` seam — the host's declaration for a session
+  /** `createWinterRuntimeSdk`'s `sessionPermissionClass` seam — the host's declaration for a session
    *  this process holds no live facet for. Absent is the shipped daemon's state in Task 12. */
   declaredClass?: PermissionClassLabel,
 ): {
-  runtime: NormaRuntimeSdk;
+  runtime: WinterRuntimeSdk;
   sdk: RuntimeSdk;
   store: RuntimeDirectoryStore;
   /** Every `winter.query(...)` the router attempted. Must stay empty in every test here. */
@@ -106,14 +106,14 @@ function harness(
     // — a whole second `winter` process opened from inside a delivery, untracked by `trackQuery`,
     // unbudgeted in `dispose()`. Every test that says "never cold-resumes" asserts against THIS.
     peers: { winter: { ...winter, query: ((args: unknown) => { spawned.push(args); throw new Error("a cold resume was attempted"); }) as typeof winter.query } },
-    peerVersions: NORMA_PEER_VERSIONS,
+    peerVersions: WINTER_PEER_VERSIONS,
     keychain: { read: async () => undefined },
-    brand: NORMA_BRAND,
+    brand: CORE_BRAND,
     directoryStore: store,
-    handoff: { winterHome: "/tmp/norma-messaging-test" },
+    handoff: { winterHome: "/tmp/winter-messaging-test" },
     messaging: declaredClass === undefined ? {} : { messaging: { winter: { permissionClass: () => declaredClass } } },
   });
-  const runtime = { sdk } as unknown as NormaRuntimeSdk;
+  const runtime = { sdk } as unknown as WinterRuntimeSdk;
   return { runtime, sdk, store, spawned };
 }
 
@@ -208,7 +208,7 @@ describe("attachWinterSession", () => {
 
   test("the wrapper's rendered frame is BYTE-IDENTICAL to the router's own push path", async () => {
     // The drift tripwire this module's header promises. `renderAttributedTurn` is not re-exported by
-    // the published router, so Norma rebuilds it; a push-ONLY handle takes the router's own
+    // the published router, so Winter rebuilds it; a push-ONLY handle takes the router's own
     // rendering, and the two strings must be the same one.
     //
     // The declared class is load-bearing here and nowhere else: a push-only handle carries NO facet,
@@ -238,7 +238,7 @@ describe("attachWinterSession", () => {
       generation: 1,
       selection: {
         runtimeKind: "winter-agent", providerId: "unstated", modelRef: "unstated/unstated", family: "unstated",
-        authFamily: "custom", sdkVersion: NORMA_PEER_VERSIONS.winterAgentSdk, reason: "test", decidedAt: new Date().toISOString(),
+        authFamily: "custom", sdkVersion: WINTER_PEER_VERSIONS.winterAgentSdk, reason: "test", decidedAt: new Date().toISOString(),
       },
       backendSessionId: "be_raw",
       capabilities: { message: true, resume: true, notifyWhenIdle: false, reply: true },
@@ -325,7 +325,7 @@ describe("attachWinterSession", () => {
   test("two sessions claiming ONE name: resolution is `ambiguous`, and neither is pushed to", async () => {
     // The honest reading of "a name collision". `directory.record` does NOT refuse a duplicate
     // display name (`syncLeases` only releases leases held by the SAME address), because a name is a
-    // handle, not an identity — a Norma session title is not unique. The refusal lands where it can
+    // handle, not an identity — a Winter session title is not unique. The refusal lands where it can
     // name both candidates: at resolution, as WS-10 §11's `ambiguous`.
     const { runtime } = harness();
     const a = fakeSession("be_s");
@@ -372,7 +372,7 @@ describe("attachWinterSession", () => {
       generation: 1,
       selection: {
         runtimeKind: "winter-agent", providerId: "unstated", modelRef: "unstated/unstated", family: "unstated",
-        authFamily: "custom", sdkVersion: NORMA_PEER_VERSIONS.winterAgentSdk, reason: "test", decidedAt: new Date().toISOString(),
+        authFamily: "custom", sdkVersion: WINTER_PEER_VERSIONS.winterAgentSdk, reason: "test", decidedAt: new Date().toISOString(),
       },
       parentAddress: addr("be_p"),
       capabilities: { message: true, resume: true, notifyWhenIdle: false, reply: true },
@@ -523,7 +523,7 @@ describe("parkRecoveredSessions (fix round 1, F3)", () => {
       generation: 1,
       selection: {
         runtimeKind: "winter-agent", providerId: "unstated", modelRef: "unstated/unstated", family: "unstated",
-        authFamily: "custom", sdkVersion: NORMA_PEER_VERSIONS.winterAgentSdk, reason: "test", decidedAt: new Date().toISOString(),
+        authFamily: "custom", sdkVersion: WINTER_PEER_VERSIONS.winterAgentSdk, reason: "test", decidedAt: new Date().toISOString(),
       },
       backendSessionId: "be_crashed",
       capabilities: { message: true, resume: true, notifyWhenIdle: true, reply: true },
@@ -563,7 +563,7 @@ describe("parkRecoveredSessions (fix round 1, F3)", () => {
       displayName: "archived", status: "archived", mode: "code", generation: 1,
       selection: {
         runtimeKind: "winter-agent", providerId: "unstated", modelRef: "unstated/unstated", family: "unstated",
-        authFamily: "custom", sdkVersion: NORMA_PEER_VERSIONS.winterAgentSdk, reason: "test", decidedAt: new Date().toISOString(),
+        authFamily: "custom", sdkVersion: WINTER_PEER_VERSIONS.winterAgentSdk, reason: "test", decidedAt: new Date().toISOString(),
       },
       backendSessionId: "be_archived",
       capabilities: { message: true, resume: true, notifyWhenIdle: true, reply: true },
@@ -590,7 +590,7 @@ describe("parkRecoveredSessions (fix round 1, F3)", () => {
       displayName: "child", status: "running", mode: "code", generation: 1,
       selection: {
         runtimeKind: "winter-agent", providerId: "unstated", modelRef: "unstated/unstated", family: "unstated",
-        authFamily: "custom", sdkVersion: NORMA_PEER_VERSIONS.winterAgentSdk, reason: "test", decidedAt: new Date().toISOString(),
+        authFamily: "custom", sdkVersion: WINTER_PEER_VERSIONS.winterAgentSdk, reason: "test", decidedAt: new Date().toISOString(),
       },
       backendSessionId: "be_child_crashed",
       capabilities: { message: true, resume: true, notifyWhenIdle: true, reply: true },
@@ -613,7 +613,7 @@ describe("parkRecoveredSessions (fix round 1, F3)", () => {
       displayName: "child-archived", status: "archived", mode: "code", generation: 1,
       selection: {
         runtimeKind: "winter-agent", providerId: "unstated", modelRef: "unstated/unstated", family: "unstated",
-        authFamily: "custom", sdkVersion: NORMA_PEER_VERSIONS.winterAgentSdk, reason: "test", decidedAt: new Date().toISOString(),
+        authFamily: "custom", sdkVersion: WINTER_PEER_VERSIONS.winterAgentSdk, reason: "test", decidedAt: new Date().toISOString(),
       },
       backendSessionId: "be_child_archived",
       capabilities: { message: true, resume: true, notifyWhenIdle: true, reply: true },
@@ -646,7 +646,7 @@ describe("parkRecoveredSessions (fix round 1, F3)", () => {
   test("a directory that will not answer costs the sweep, never the boot", async () => {
     const { runtime } = harness();
     const lines: string[] = [];
-    const broken = { sdk: { ...runtime.sdk, directory: { ...runtime.sdk.directory, list: async () => { throw new Error("db is gone"); } } } } as unknown as NormaRuntimeSdk;
+    const broken = { sdk: { ...runtime.sdk, directory: { ...runtime.sdk.directory, list: async () => { throw new Error("db is gone"); } } } } as unknown as WinterRuntimeSdk;
     await expect(parkRecoveredSessions(broken, (l) => lines.push(l))).resolves.toBe(0);
     expect(lines.join("\n")).toContain("could not sweep the directory");
   });
@@ -788,14 +788,14 @@ describe("attachOfficialSession", () => {
     const spawned: unknown[] = [];
     const sdk = createRuntimeSdk({
       peers: { winter: { ...winter, query: ((args: unknown) => { spawned.push(args); throw new Error("a cold resume was attempted"); }) as typeof winter.query } },
-      peerVersions: NORMA_PEER_VERSIONS,
+      peerVersions: WINTER_PEER_VERSIONS,
       keychain: { read: async () => undefined },
-      brand: NORMA_BRAND,
+      brand: CORE_BRAND,
       directoryStore: store,
-      handoff: { winterHome: "/tmp/norma-messaging-test" },
+      handoff: { winterHome: "/tmp/winter-messaging-test" },
       messaging: { messaging: { official: { permissionClass: () => "prompts" } } },
     });
-    const runtime = { sdk } as unknown as NormaRuntimeSdk;
+    const runtime = { sdk } as unknown as WinterRuntimeSdk;
     const sender = fakeSession("be_other");
     attachWinterSession(runtime, { sessionId: "s_other", backendSessionId: sender.backendSessionId, query: sender.query, push: (t) => sender.pushed.push(t) });
     const delivered: string[] = [];

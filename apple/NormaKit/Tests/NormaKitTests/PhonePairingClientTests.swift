@@ -1,9 +1,9 @@
 import XCTest
 import os
-import NormaProtocol
+import WinterProtocol
 import IrohLib
-@testable import NormaKit
-@testable import NormaSessionKit
+@testable import WinterKit
+@testable import WinterSessionKit
 
 /// SP2b Task 5, Step 1: proves `PhonePairingClient` runs the FULL ceremony correctly against a
 /// real `PairingManager` over a real (loopback) iroh listener — the phone side now goes through
@@ -16,7 +16,7 @@ final class PhonePairingClientTests: XCTestCase {
 
     private func tempStoreDir() -> URL {
         FileManager.default.temporaryDirectory
-            .appendingPathComponent("norma-phone-pairing-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("winter-phone-pairing-tests-\(UUID().uuidString)", isDirectory: true)
     }
 
     private func makeRelayConfig() -> SignedRelayConfig {

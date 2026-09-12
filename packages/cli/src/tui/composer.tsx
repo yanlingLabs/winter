@@ -42,7 +42,7 @@ import { join } from "node:path";
 import { Box, Text, useInput, useStdin } from "ink";
 import { Chalk } from "chalk";
 import wrapAnsi from "wrap-ansi";
-import type { ApprovalPolicy } from "@norma/protocol";
+import type { ApprovalPolicy } from "@winter/protocol";
 import { footerKeyAction } from "../keys";
 import type { FooterSelection } from "../task-block";
 import { theme } from "./theme";
@@ -92,7 +92,7 @@ const DELETE_SEQS = new Set(["\x1b[3~", "\x1b[3^", "\x1b[3$"]);
 const ansi = new Chalk({ level: 3 });
 
 function defaultHistoryPath(): string {
-  return join(homedir(), ".norma", "history.jsonl");
+  return join(homedir(), ".winter", "history.jsonl");
 }
 
 /** Phase 3d T2 — pure predicate: is the `/`-slash-command menu open for this `InputState`, and if
@@ -172,7 +172,7 @@ export interface ComposerProps {
    *  defaults to "" (the App threads through its real sessionId; tests may omit it entirely since
    *  the priority behavior itself is covered at the history-store level). */
   sessionId?: string;
-  /** Injectable history file location (tests pass a temp path); defaults to `~/.norma/history.jsonl`. */
+  /** Injectable history file location (tests pass a temp path); defaults to `~/.winter/history.jsonl`. */
   historyPath?: string;
   /** Fires on the FIRST esc press against non-empty text ("Esc again to clear"); a later task wires
    *  this into the footer's hint line. Optional so existing call sites need no changes. */

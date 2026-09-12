@@ -9,13 +9,13 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@winter/protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import type { WinterSessionDrivers } from "../../src/runtime-sdk/session-driver";
-import type { NormaRuntimeSdk } from "../../src/runtime-sdk/create";
+import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -69,15 +69,15 @@ function acceptingTable(): WinterSessionDrivers {
   };
 }
 
-/** Winter Phase 8d (P8d-7): a fake `NormaRuntimeSdk` whose ONLY live member is
+/** Winter Phase 8d (P8d-7): a fake `WinterRuntimeSdk` whose ONLY live member is
  *  `officialPeerSync` — every other member throws if ever touched, mirroring
  *  `handoff.test.ts`'s `fakeRuntime` (this file needs no barrier/selector, only the one
  *  presence check `session.create`/`session.dispatch` read to decide whether `runtimeKind` is
  *  knowable). */
-function fakeRuntimeWithOfficialPeer(present: boolean): NormaRuntimeSdk {
+function fakeRuntimeWithOfficialPeer(present: boolean): WinterRuntimeSdk {
   const never = (): never => { throw new Error("not reached by this test"); };
   return {
-    sdk: {} as NormaRuntimeSdk["sdk"],
+    sdk: {} as WinterRuntimeSdk["sdk"],
     spawnHookFor: never, officialPeer: never,
     officialPeerSync: () => (present ? ({} as never) : undefined),
     claudeExecutableFor: never,
@@ -94,8 +94,8 @@ describe("Winter Phase 8c: session_created carries runtimeKind/modelRef when kno
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
 
-  async function boot(winter: WinterSessionDrivers | undefined, runtimeSdk?: NormaRuntimeSdk) {
-    const home = mkdtempSync(join(tmpdir(), "norma-runtime-annotation-"));
+  async function boot(winter: WinterSessionDrivers | undefined, runtimeSdk?: WinterRuntimeSdk) {
+    const home = mkdtempSync(join(tmpdir(), "winter-runtime-annotation-"));
     const store = new SessionStore(home);
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
     const tokens = await authority.ensureTokens();

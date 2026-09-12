@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Lifecycle Task 2: `DaemonSupervisor` — the dev-decoupling contract (`.connectOnly` spawns
 /// NOTHING; a pre-existing live socket always short-circuits) and crash-respawn-with-backoff.
@@ -12,7 +12,7 @@ final class DaemonSupervisorTests: XCTestCase {
     func testStartIsConnectOnlyWhenSocketAlreadyLive() {
         var spawned = 0
         let s = DaemonSupervisor(deps: .init(
-            bundledDaemonPath: { "/x/norma-core" }, socketExists: { true }, isDevEnv: { false },
+            bundledDaemonPath: { "/x/winter-core" }, socketExists: { true }, isDevEnv: { false },
             spawn: { _ in spawned += 1; return FakeDaemonProcess() }, now: { Date() }))
         s.start()
         XCTAssertEqual(s.mode, .connectOnly)
@@ -43,7 +43,7 @@ final class DaemonSupervisorTests: XCTestCase {
 
     func testSupervisingSpawnsOnce() {
         var spawned = 0
-        let s = DaemonSupervisor(deps: .init(bundledDaemonPath: { "/x/norma-core" }, socketExists: { false },
+        let s = DaemonSupervisor(deps: .init(bundledDaemonPath: { "/x/winter-core" }, socketExists: { false },
             isDevEnv: { false }, spawn: { _ in spawned += 1; return FakeDaemonProcess() }, now: { Date() }))
         s.start()
         XCTAssertEqual(s.mode, .supervising)
@@ -55,7 +55,7 @@ final class DaemonSupervisorTests: XCTestCase {
 
     func testCrashRespawnsButIntentionalStopDoesNot() {
         var spawned = 0; var procs: [FakeDaemonProcess] = []
-        let s = DaemonSupervisor(deps: .init(bundledDaemonPath: { "/x/norma-core" }, socketExists: { false },
+        let s = DaemonSupervisor(deps: .init(bundledDaemonPath: { "/x/winter-core" }, socketExists: { false },
             isDevEnv: { false }, spawn: { _ in spawned += 1; let p = FakeDaemonProcess(); procs.append(p); return p }, now: { Date() }))
         s.start()
         procs.last!.simulateExit(intentional: false) // crash
@@ -72,7 +72,7 @@ final class DaemonSupervisorTests: XCTestCase {
     func testRapidRespawnCapTripsFailed() {
         // 6 crashes within the window → state .failed, spawn stops at the cap+1.
         var spawned = 0; var procs: [FakeDaemonProcess] = []
-        let s = DaemonSupervisor(deps: .init(bundledDaemonPath: { "/x/norma-core" }, socketExists: { false },
+        let s = DaemonSupervisor(deps: .init(bundledDaemonPath: { "/x/winter-core" }, socketExists: { false },
             isDevEnv: { false }, spawn: { _ in spawned += 1; let p = FakeDaemonProcess(); procs.append(p); return p }, now: { Date() }))
         s.start()
         for _ in 0..<6 {
@@ -91,7 +91,7 @@ final class DaemonSupervisorTests: XCTestCase {
     /// happened.
     func testRestartRecoversFromFailedAndResetsCrashHistory() {
         var spawned = 0; var procs: [FakeDaemonProcess] = []
-        let s = DaemonSupervisor(deps: .init(bundledDaemonPath: { "/x/norma-core" }, socketExists: { false },
+        let s = DaemonSupervisor(deps: .init(bundledDaemonPath: { "/x/winter-core" }, socketExists: { false },
             isDevEnv: { false }, spawn: { _ in spawned += 1; let p = FakeDaemonProcess(); procs.append(p); return p }, now: { Date() }))
         s.start()
         for _ in 0..<6 { // trip the cap (mirrors testRapidRespawnCapTripsFailed)
@@ -169,7 +169,7 @@ final class DaemonSupervisorTests: XCTestCase {
     func testCrashOutsideRapidWindowDoesNotCountTowardCap() {
         var spawned = 0; var procs: [FakeDaemonProcess] = []
         var clock = Date()
-        let s = DaemonSupervisor(deps: .init(bundledDaemonPath: { "/x/norma-core" }, socketExists: { false },
+        let s = DaemonSupervisor(deps: .init(bundledDaemonPath: { "/x/winter-core" }, socketExists: { false },
             isDevEnv: { false }, spawn: { _ in spawned += 1; let p = FakeDaemonProcess(); procs.append(p); return p }, now: { clock }))
         s.start()
         procs.last!.simulateExit(intentional: false) // crash 1, at t0

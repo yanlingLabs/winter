@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { execPayloadLines, loadManifest, requiredConsentClasses, type NormaManifest } from "./plugin-manifest";
+import { execPayloadLines, loadManifest, requiredConsentClasses, type WinterManifest } from "./plugin-manifest";
 import type { HookRegistryPlugin } from "../plugins/hook-registry";
 
 export const PluginManifest = z.object({
@@ -11,7 +11,7 @@ export const PluginManifest = z.object({
 
 export interface PluginInfo {
   name: string; description?: string; version?: string; skills: string[]; hasMcp: boolean; mcpEnabled: boolean; disabled: boolean;
-  /** norma-plugin.json tier, when a valid manifest was found. undefined for legacy (plugin.json-only) plugins. */
+  /** winter-plugin.json tier, when a valid manifest was found. undefined for legacy (plugin.json-only) plugins. */
   tier?: "capability" | "platform";
   /** Consent classes ("exec"|"tcc"|"hardware") the manifest requires, per plugin-manifest.ts#requiredConsentClasses. [] for legacy plugins. */
   requiredConsents: string[];
@@ -19,21 +19,21 @@ export interface PluginInfo {
    *  as consented when its key is present in the record, regardless of the timestamp value). []
    *  when there's no consents dep or no record for this plugin. See consentComplete/pluginMcpEligible below. */
   consented: string[];
-  /** true when no valid norma-plugin.json was found (missing OR present-but-malformed) and the plugin loaded via the legacy plugin.json path. */
+  /** true when no valid winter-plugin.json was found (missing OR present-but-malformed) and the plugin loaded via the legacy plugin.json path. */
   legacy: boolean;
-  /** true when norma-plugin.json declares contributes.mcpServers. Distinct from hasMcp, which reflects the legacy .mcp.json file. */
+  /** true when winter-plugin.json declares contributes.mcpServers. Distinct from hasMcp, which reflects the legacy .mcp.json file. */
   hasManifestMcp: boolean;
-  /** norma-plugin.json's contributes.mcpServers verbatim, filled from the SINGLE loadManifest
+  /** winter-plugin.json's contributes.mcpServers verbatim, filled from the SINGLE loadManifest
    *  call this store's list() already makes — callers (daemon.ts) read this instead of re-parsing
-   *  norma-plugin.json a second time. undefined for legacy plugins and for manifest plugins with
+   *  winter-plugin.json a second time. undefined for legacy plugins and for manifest plugins with
    *  no mcpServers declared (hasManifestMcp false). */
-  manifestServers?: NonNullable<NormaManifest["contributes"]>["mcpServers"];
-  /** norma-plugin.json's `contributes.hooks` verbatim (Phase 4f Task 2), filled from the SAME
+  manifestServers?: NonNullable<WinterManifest["contributes"]>["mcpServers"];
+  /** winter-plugin.json's `contributes.hooks` verbatim (Phase 4f Task 2), filled from the SAME
    *  single loadManifest call list() already makes — same precedent as manifestServers above.
    *  undefined for legacy plugins and manifest plugins with no hooks declared. daemon.ts/
    *  ipc/server.ts feed this straight into HookRegistry.rebuild() (dir/hooks per eligible plugin)
-   *  rather than re-parsing norma-plugin.json a second time. */
-  manifestHooks?: NonNullable<NormaManifest["contributes"]>["hooks"];
+   *  rather than re-parsing winter-plugin.json a second time. */
+  manifestHooks?: NonNullable<WinterManifest["contributes"]>["hooks"];
   /** Display data for the CLI consent block (Task 3, spec §1: "Consent text always shows the
    *  exec payload ... never just a summary."). execPayload = plugin-manifest.ts#execPayloadLines
    *  verbatim (one line per mcpServer/hook/entry). [] for legacy plugins or manifests with no
@@ -43,11 +43,11 @@ export interface PluginInfo {
   tccPermissions: string[];
   /** manifest.permissions.hardware verbatim (e.g. "battery") — one consent-block line per entry. [] when hardware isn't required. */
   hardwarePermissions: string[];
-  /** norma-plugin.json's `entry` verbatim (Phase 4b Task 3, spec §3: what the PluginSupervisor
+  /** winter-plugin.json's `entry` verbatim (Phase 4b Task 3, spec §3: what the PluginSupervisor
    *  spawns for a Tier-2 platform plugin) — filled from the SAME single loadManifest call list()
    *  already makes, same precedent as manifestServers above. undefined for legacy plugins and for
    *  manifest plugins that declare no entry point (e.g. capability-tier / skills-only plugins). */
-  entry?: NonNullable<NormaManifest["entry"]>;
+  entry?: NonNullable<WinterManifest["entry"]>;
 }
 
 /** Consent record shape for one plugin: settings.plugins.consents[id] (settings.ts). */
@@ -56,8 +56,8 @@ export type PluginConsentRecord = { exec?: number; tcc?: number; hardware?: numb
 const CONSENT_CLASSES = ["exec", "tcc", "hardware"] as const;
 
 /**
- * Reads ~/.norma/plugins/<name>/. The DIRECTORY NAME is the canonical plugin name.
- * norma-plugin.json (the Phase 4 superset manifest — see plugin-manifest.ts) is read first and,
+ * Reads ~/.winter/plugins/<name>/. The DIRECTORY NAME is the canonical plugin name.
+ * winter-plugin.json (the Phase 4 superset manifest — see plugin-manifest.ts) is read first and,
  * when present and valid, is the source of truth for description/version/tier/consent classes.
  * Otherwise the plugin loads via the legacy path: plugin.json is metadata only (malformed →
  * ignored, the plugin still loads).
@@ -65,7 +65,7 @@ const CONSENT_CLASSES = ["exec", "tcc", "hardware"] as const;
 export class PluginStore {
   constructor(
     private readonly deps: {
-      normaHome: string;
+      winterHome: string;
       plugins?: { enabled?: string[]; disabled?: string[] };
       /** settings.plugins.consents — per-plugin-id consent records. Kept as a sibling dep (not
        *  nested under `plugins`) so callers/tests can wire it independently of enabled/disabled. */
@@ -81,7 +81,7 @@ export class PluginStore {
   }
 
   list(): PluginInfo[] {
-    const root = join(this.deps.normaHome, "plugins");
+    const root = join(this.deps.winterHome, "plugins");
     let dirs: string[] = [];
     try { dirs = readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name); } catch { return []; }
     const enabled = this.deps.plugins?.enabled ?? [];
@@ -176,10 +176,10 @@ export function pluginHooksEligible(p: PluginInfo): boolean {
  * already hot-apply Tier-2 spawn via `hotApplyStart`/`hotApplyStop`) so the two call sites can
  * never drift out of sync on what counts as an eligible hook-contributing plugin.
  */
-export function hookRegistryPlugins(plugins: PluginInfo[], normaHome: string): HookRegistryPlugin[] {
+export function hookRegistryPlugins(plugins: PluginInfo[], winterHome: string): HookRegistryPlugin[] {
   return plugins
     .filter(pluginHooksEligible)
-    .map((p) => ({ id: p.name, dir: join(normaHome, "plugins", p.name), hooks: p.manifestHooks ?? [] }));
+    .map((p) => ({ id: p.name, dir: join(winterHome, "plugins", p.name), hooks: p.manifestHooks ?? [] }));
 }
 
 /**

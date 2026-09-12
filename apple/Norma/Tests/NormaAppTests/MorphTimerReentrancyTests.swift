@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Gate-fix regression (Esc-interrupt live-gate finding): `OrbWindowController`'s 60Hz morph
 /// timer schedules each tick via `Task { @MainActor in self?.morphTick() }` rather than running

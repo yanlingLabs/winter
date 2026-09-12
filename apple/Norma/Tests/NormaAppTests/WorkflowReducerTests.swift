@@ -1,15 +1,15 @@
 import XCTest
-@testable import Norma
-import NormaProtocol
+@testable import Winter
+import WinterProtocol
 
 /// CC-parity phase 3 (Workflows), Track D Task D3: the reducer's `state.workflowRuns:
 /// [String: WorkflowRunState]` — folded from `workflow_started`/`workflow_progress`/
 /// `workflow_completed`/`workflow_failed` (Task D1's 4 `SessionEvent` variants, mirrored into
-/// NormaProtocol; Task D2 added the separate `workflow.list`/`run`/`stop`/`get` NormaKit RPCs this
+/// WinterProtocol; Task D2 added the separate `workflow.list`/`run`/`stop`/`get` WinterKit RPCs this
 /// fold is NOT about — this suite only covers the LIVE event stream). Sibling suite to
 /// `ChildSessionReducerTests` (that one covers `child_update` folding into `state.children`), same
 /// `ev`/`reduce` idiom — feed raw wire JSON through `SessionReducer.reduce` and assert on the
-/// resulting `OrbSessionState`, no `SessionModel`/`NormaClient` involved.
+/// resulting `OrbSessionState`, no `SessionModel`/`WinterClient` involved.
 final class WorkflowReducerTests: XCTestCase {
     private func ev(_ json: String) -> SessionEvent {
         try! JSONDecoder().decode(SessionEvent.self, from: Data(json.utf8))

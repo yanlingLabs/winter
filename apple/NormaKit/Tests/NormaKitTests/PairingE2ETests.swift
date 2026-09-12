@@ -1,14 +1,14 @@
 import XCTest
 import os
-import NormaProtocol
+import WinterProtocol
 import IrohLib
-@testable import NormaKit
-@testable import NormaSessionKit
+@testable import WinterKit
+@testable import WinterSessionKit
 
 /// SP2b Task 4 (the capstone): prove the WHOLE stack — `RemoteHost` (the composition root) driving
 /// a real `IrohListener` (loopback, relay disabled) + `PairingRouter` + `PairingManager` + `Gateway`
 /// against a REAL bun daemon (`RealDaemon`) — with a genuine in-process iroh "phone" running the
-/// actual pairing ceremony crypto (`PairingCrypto`, NormaProtocol) end-to-end. Every earlier test
+/// actual pairing ceremony crypto (`PairingCrypto`, WinterProtocol) end-to-end. Every earlier test
 /// left at least one piece of this out: `IrohE2ETests` never runs a ceremony (dev-stub "accept any
 /// peer" wiring, no `PairingRouter`); `PairingManagerTests`/`PairingRouterTests` never touch real
 /// iroh or a real daemon. This file is the first place the WHOLE SP2b stack is genuine at once.
@@ -22,12 +22,12 @@ final class PairingE2ETests: XCTestCase {
     // MARK: - Shared setup
 
     private func makeRelayConfig() -> SignedRelayConfig {
-        SignedRelayConfig(config: RelayConfig(version: 1, relays: ["relay1.norma.dev"]), sig: Data(repeating: 7, count: 64))
+        SignedRelayConfig(config: RelayConfig(version: 1, relays: ["relay1.winter.dev"]), sig: Data(repeating: 7, count: 64))
     }
 
     private func tempStoreDir() -> URL {
         FileManager.default.temporaryDirectory
-            .appendingPathComponent("norma-pairing-e2e-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("winter-pairing-e2e-tests-\(UUID().uuidString)", isDirectory: true)
     }
 
     /// Captures the `IrohListener` `RemoteHost.start()` binds via the `#if DEBUG` `makeListener`
@@ -72,7 +72,7 @@ final class PairingE2ETests: XCTestCase {
                 return listener
             },
             makeDaemonFactory: {
-                NormaClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway")
+                WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway")
             }
         )
         // Force-starts (even at zero paired devices) so the listener is bound before the caller
@@ -240,8 +240,8 @@ final class PairingE2ETests: XCTestCase {
         ])
         // SP3.1 T1: this is a SESSION dialer (it sent a `.hello` WireEnvelope), so the router refuses
         // it with a WireEnvelope `error` carrying a structured `HandshakeRejection(not_paired)` — the
-        // typed signal a `NormaSessionClient` maps to its honest `.revoked` state (a real
-        // NormaSessionClient reconnect is proven end-to-end in `FakePhoneConformanceTests`). A raw
+        // typed signal a `WinterSessionClient` maps to its honest `.revoked` state (a real
+        // WinterSessionClient reconnect is proven end-to-end in `FakePhoneConformanceTests`). A raw
         // JSON `PairRejected` (the pre-SP3.1 shape) stays reserved for PAIRING dialers.
         let rejection = try await reconnect.expectFrame(timeout: 10)
         XCTAssertEqual(rejection.kind, .error, "a session dialer's post-revoke reconnect gets a WireEnvelope error, not raw JSON")

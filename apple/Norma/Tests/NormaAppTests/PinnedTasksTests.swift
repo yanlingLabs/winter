@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// LIVE-GATE G4: `FieldStateAdapter.pinnedTasks` derivation — the CC-parity pinned-todo widget
 /// `WindowSurfaceView` renders below the transcript. Same idiom as `FluidStateTests`: drive

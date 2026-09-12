@@ -1,4 +1,4 @@
-// P8c Task 1.2 — the real-runtime test bed, Norma's own mirror of the router's own
+// P8c Task 1.2 — the real-runtime test bed, Winter's own mirror of the router's own
 // `test/official/support.ts` `officialRuntimeBed` (that file is NOT importable — it lives in a
 // sibling repo's `test/` tree, never published). Same three resolutions, same reasons:
 //
@@ -7,7 +7,7 @@
 //  2. hermeticity — a fresh `HOME`/`CLAUDE_CONFIG_DIR` per session, no ambient `ANTHROPIC_API_KEY`,
 //     the loopback fake bound to `127.0.0.1:0`;
 //  3. `describeWithClaudeRuntime` skips (with a printed reason) when the optional platform package
-//     was not installed, and THROWS instead under `NORMA_CLAUDE_REQUIRE_RUNTIME=1` (the CI gate,
+//     was not installed, and THROWS instead under `WINTER_CLAUDE_REQUIRE_RUNTIME=1` (the CI gate,
 ///    P8c-9) — a missing binary must never read as "the suite has nothing to say" in CI.
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -68,7 +68,7 @@ export function claudeRuntimeForTests(): ClaudeRuntimeBed | undefined {
 /**
  * `describe(name, fn)`, run only when the real runtime bed resolves. Skips (with a printed reason)
  * on a normal dev/CI machine missing the optional platform package; THROWS under
- * `NORMA_CLAUDE_REQUIRE_RUNTIME=1` (P8c-9's CI gate — a required suite that silently skipped is
+ * `WINTER_CLAUDE_REQUIRE_RUNTIME=1` (P8c-9's CI gate — a required suite that silently skipped is
  * worse than one that never ran).
  */
 export function describeWithClaudeRuntime(name: string, fn: () => void): void {
@@ -76,14 +76,14 @@ export function describeWithClaudeRuntime(name: string, fn: () => void): void {
     try {
       return claudeRuntimeForTests();
     } catch (err) {
-      if (process.env.NORMA_CLAUDE_REQUIRE_RUNTIME === "1") throw err;
+      if (process.env.WINTER_CLAUDE_REQUIRE_RUNTIME === "1") throw err;
       console.warn(`[claude runtime bed] SKIPPING ${name} — ${err instanceof Error ? err.message : String(err)}`);
       return undefined;
     }
   })();
   if (bed === undefined) {
-    if (process.env.NORMA_CLAUDE_REQUIRE_RUNTIME === "1") {
-      throw new Error(`NORMA_CLAUDE_REQUIRE_RUNTIME=1 and the real official runtime is unavailable: ${resolutionFailure ?? "unknown reason"}`);
+    if (process.env.WINTER_CLAUDE_REQUIRE_RUNTIME === "1") {
+      throw new Error(`WINTER_CLAUDE_REQUIRE_RUNTIME=1 and the real official runtime is unavailable: ${resolutionFailure ?? "unknown reason"}`);
     }
     console.warn(`[claude runtime bed] SKIPPING ${name} — ${resolutionFailure ?? "unknown reason"}`);
     describe.skip(name, fn);
@@ -102,7 +102,7 @@ export interface HermeticOfficialHome {
 const roots: string[] = [];
 
 export function hermeticOfficialHome(prefix = "official"): HermeticOfficialHome {
-  const root = mkdtempSync(join(tmpdir(), `norma-${prefix}-`));
+  const root = mkdtempSync(join(tmpdir(), `winter-${prefix}-`));
   roots.push(root);
   const home = join(root, "home");
   mkdirSync(home, { recursive: true });

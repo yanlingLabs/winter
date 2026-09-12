@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@winter/protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SYNC_PAGE_BYTES, SyncPushBuffers } from "../../src/ipc/sync";
 import { SessionStore } from "../../src/sessions/store";
@@ -11,7 +11,7 @@ import { TokenAuthority } from "../../src/auth/tokens";
 
 // Chat Slice D task 2 — the sync wire: `sync.heads` / `sync.pull` / `sync.push`, the replication
 // seam between a phone's local chat session logs and the daemon's own. Exercised over a REAL
-// daemon socket (own temp NORMA_HOME + SessionStore + TokenAuthority, no AgentEngine) — the same
+// daemon socket (own temp WINTER_HOME + SessionStore + TokenAuthority, no AgentEngine) — the same
 // harness shape as session-set-model.test.ts/remote-chat-gate.test.ts (this codebase's convention:
 // no shared test-harness module, every test/ipc/*.test.ts carries its own copy).
 //
@@ -139,7 +139,7 @@ describe("sync.heads / sync.pull / sync.push (Chat Slice D task 2)", () => {
   afterEach(() => { stop?.(); stop = undefined; });
 
   async function boot(): Promise<{ store: SessionStore; home: string; socketPath: string; harnessToken: string; remoteToken: string }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-sync-core-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-sync-core-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));

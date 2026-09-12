@@ -1,6 +1,6 @@
 import Foundation
 import CryptoKit
-import NormaProtocol
+import WinterProtocol
 
 // ================================================================================================
 // SyncClient (Chat Slice D task 9) — the phone half of the replication wire, the mirror image of
@@ -169,8 +169,8 @@ public struct SyncConfig: Codable, Equatable, Sendable {
     /// The Mac's live reasoning effort. `""` means UNSET, which is NOT `"none"`: unset makes a turn
     /// omit the `reasoning` block entirely, while `"none"` is an explicit level the backend honours.
     public let defaultEffort: String
-    /// NORMA-LEVEL effort tiers the Mac offers (`["ultra"]` on a current daemon) — selectable in
-    /// Norma, **never sent upstream**, and offered on CODE sessions only.
+    /// WINTER-LEVEL effort tiers the Mac offers (`["ultra"]` on a current daemon) — selectable in
+    /// Winter, **never sent upstream**, and offered on CODE sessions only.
     ///
     /// A SEPARATE list from `models[].efforts`, and the two must never be concatenated into one
     /// picker section. `models[].efforts` is exactly what the endpoint accepts; a tier is exactly
@@ -678,7 +678,7 @@ public actor SyncClient {
 let ERR_DIVERGED = -32006
 let ERR_INTERNAL = -32603
 
-// `METHODS` string constants the client sends. Kept as a tiny local mirror so NormaChatKit does not
+// `METHODS` string constants the client sends. Kept as a tiny local mirror so WinterChatKit does not
 // take a source dependency on the TS protocol's method table for five strings.
 enum METHODS {
     static let syncHeads = "sync.heads"

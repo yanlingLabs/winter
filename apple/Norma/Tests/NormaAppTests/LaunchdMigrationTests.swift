@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Lifecycle T6 (T4 review finding 5f): `migrateFromLaunchdAgent` — the Swift mirror of
 /// `packages/cli/src/launchd.ts`'s `migrateFromLaunchdAgent`. Entirely seamed via
@@ -10,7 +10,7 @@ final class LaunchdMigrationTests: XCTestCase {
         var bootoutCalled = false
         var removedPaths: [String] = []
         migrateFromLaunchdAgent(deps: LaunchdMigrationDeps(
-            plistPath: { "/fake/com.norma.core.plist" },
+            plistPath: { "/fake/com.winter.core.plist" },
             exists: { _ in false },
             remove: { removedPaths.append($0) },
             bootout: { bootoutCalled = true }
@@ -23,13 +23,13 @@ final class LaunchdMigrationTests: XCTestCase {
     func testBootsOutThenRemovesWhenPlistIsPresent() {
         var order: [String] = []
         migrateFromLaunchdAgent(deps: LaunchdMigrationDeps(
-            plistPath: { "/fake/com.norma.core.plist" },
+            plistPath: { "/fake/com.winter.core.plist" },
             exists: { _ in true },
             remove: { path in order.append("remove:\(path)") },
             bootout: { order.append("bootout") }
         ))
 
-        XCTAssertEqual(order, ["bootout", "remove:/fake/com.norma.core.plist"], "bootout must precede remove — a KeepAlive agent that relaunches after the plist is gone would still be alive to do so")
+        XCTAssertEqual(order, ["bootout", "remove:/fake/com.winter.core.plist"], "bootout must precede remove — a KeepAlive agent that relaunches after the plist is gone would still be alive to do so")
     }
 
     /// A failing `bootout`/`remove` (permissions, e.g.) must not crash or block the caller —
@@ -38,7 +38,7 @@ final class LaunchdMigrationTests: XCTestCase {
     /// `NSLog`-and-continue posture in `LaunchdMigrationDeps.live`.
     func testSurvivesANoOpBootoutAndRemove() {
         migrateFromLaunchdAgent(deps: LaunchdMigrationDeps(
-            plistPath: { "/fake/com.norma.core.plist" },
+            plistPath: { "/fake/com.winter.core.plist" },
             exists: { _ in true },
             remove: { _ in /* no-op, simulating a failed unlink */ },
             bootout: { /* no-op, simulating a failed launchctl bootout */ }

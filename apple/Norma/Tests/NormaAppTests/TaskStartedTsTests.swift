@@ -1,7 +1,7 @@
 import XCTest
-import NormaProtocol
-import NormaKit
-@testable import Norma
+import WinterProtocol
+import WinterKit
+@testable import Winter
 
 /// Task 2 (2e-i): `TaskItem.activeForm`/`startedTs` — the reducer carries `activeForm` straight
 /// off the wire and stamps `startedTs` with `event.ts` the moment a task FIRST enters

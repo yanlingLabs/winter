@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Final-review IMPORTANT-1 fix: `FieldStateAdapter.showStoppedFlash` used to be cleared ONLY by
 /// its own 2s `DispatchWorkItem` — if the user Esc'd (triggering the flash) then resubmitted

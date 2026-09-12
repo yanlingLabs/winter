@@ -12,7 +12,7 @@ import type { PeripheralClass } from "../peripheral/broker";
 //
 // Every public method returns a typed result and NEVER throws across its surface (mirrors
 // PeripheralBroker's convention). The broker + clock + scheduler are all injectable so the whole
-// service is unit-tested with a fake broker — no Norma.app, no TCC, no real timers.
+// service is unit-tested with a fake broker — no Winter.app, no TCC, no real timers.
 // ---------------------------------------------------------------------------------------------
 
 /** The exact subset of PeripheralBroker this service depends on (kept narrow so tests inject a
@@ -72,7 +72,7 @@ export interface ComputerUseServiceDeps {
 
 /** The tool-facing outcome of a CU action. `ok:false` carries a model-ready message and a `kind`
  *  the tool can use for logging/branching. `unavailable` is the spec-pinned "no provider / lease
- *  gone" case → message "computer use unavailable — Norma.app not running". */
+ *  gone" case → message "computer use unavailable — Winter.app not running". */
 export type CuActResult =
   | { ok: true; resultJson: string }
   | { ok: false; kind: "unavailable" | "denied" | "provider_error" | "timeout"; message: string };
@@ -102,7 +102,7 @@ interface SessionState {
  *  lease that is about to expire (the heartbeat normally keeps it well clear of this window). */
 const EXPIRY_SKEW_MS = 1_000;
 
-export const CU_UNAVAILABLE_MESSAGE = "computer use unavailable — Norma.app not running";
+export const CU_UNAVAILABLE_MESSAGE = "computer use unavailable — Winter.app not running";
 
 export class ComputerUseService {
   private readonly broker: PeripheralBrokerLike;

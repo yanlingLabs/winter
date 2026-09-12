@@ -13,7 +13,7 @@ import {
 } from "../../src/agent/memory-dir";
 
 function realDir(): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), "norma-memdir-")));
+  return realpathSync(mkdtempSync(join(tmpdir(), "winter-memdir-")));
 }
 
 function git(args: string[], cwd: string): { code: number; stdout: string } {
@@ -75,53 +75,53 @@ describe("memory-dir: sanitizeProjectKey", () => {
 describe("memory-dir: memoryDirFor", () => {
   beforeEach(() => _clearRepoRootCacheForTests());
 
-  test("computes ~/.norma/projects/<key>/memory for a repo cwd", () => {
-    const normaHome = realDir();
+  test("computes ~/.winter/projects/<key>/memory for a repo cwd", () => {
+    const winterHome = realDir();
     const root = initRepo();
-    const dir = memoryDirFor(root, { normaHome });
-    expect(dir).toBe(join(normaHome, "projects", sanitizeProjectKey(root), "memory"));
+    const dir = memoryDirFor(root, { winterHome });
+    expect(dir).toBe(join(winterHome, "projects", sanitizeProjectKey(root), "memory"));
   });
 
   test("a worktree and its main checkout share the SAME memory dir", () => {
-    const normaHome = realDir();
+    const winterHome = realDir();
     const root = initRepo();
     const wtParent = realDir();
     const wtDir = join(wtParent, "wt");
     git(["worktree", "add", "-q", "-b", "wt-branch2", wtDir], root);
-    expect(memoryDirFor(wtDir, { normaHome })).toBe(memoryDirFor(root, { normaHome }));
+    expect(memoryDirFor(wtDir, { winterHome })).toBe(memoryDirFor(root, { winterHome }));
   });
 
   test("non-repo cwd keys off the cwd itself", () => {
-    const normaHome = realDir();
+    const winterHome = realDir();
     const cwd = realDir();
-    expect(memoryDirFor(cwd, { normaHome })).toBe(join(normaHome, "projects", sanitizeProjectKey(cwd), "memory"));
+    expect(memoryDirFor(cwd, { winterHome })).toBe(join(winterHome, "projects", sanitizeProjectKey(cwd), "memory"));
   });
 
   test("settings.memory.directory overrides the computed path entirely (absolute)", () => {
-    const normaHome = realDir();
+    const winterHome = realDir();
     const root = initRepo();
     const override = realDir();
-    expect(memoryDirFor(root, { normaHome, directory: override })).toBe(override);
+    expect(memoryDirFor(root, { winterHome, directory: override })).toBe(override);
   });
 
   test("settings.memory.directory honors a ~/ prefix", () => {
-    const normaHome = realDir();
+    const winterHome = realDir();
     const root = initRepo();
-    const dir = memoryDirFor(root, { normaHome, directory: "~/norma-memdir-override-test-does-not-exist" });
+    const dir = memoryDirFor(root, { winterHome, directory: "~/winter-memdir-override-test-does-not-exist" });
     expect(dir.startsWith("/")).toBe(true);
-    expect(dir.endsWith("norma-memdir-override-test-does-not-exist")).toBe(true);
+    expect(dir.endsWith("winter-memdir-override-test-does-not-exist")).toBe(true);
   });
 
   test("an empty/whitespace-only override is treated as absent", () => {
-    const normaHome = realDir();
+    const winterHome = realDir();
     const root = initRepo();
-    expect(memoryDirFor(root, { normaHome, directory: "   " })).toBe(join(normaHome, "projects", sanitizeProjectKey(root), "memory"));
+    expect(memoryDirFor(root, { winterHome, directory: "   " })).toBe(join(winterHome, "projects", sanitizeProjectKey(root), "memory"));
   });
 
   test("does not create the directory (pure path computation)", () => {
-    const normaHome = realDir();
+    const winterHome = realDir();
     const root = initRepo();
-    const dir = memoryDirFor(root, { normaHome });
+    const dir = memoryDirFor(root, { winterHome });
     const exists = Bun.spawnSync(["test", "-d", dir]).exitCode === 0;
     expect(exists).toBe(false);
   });
@@ -135,53 +135,53 @@ describe("memory-dir: the relocation door (P8b-17)", () => {
   beforeEach(() => _clearRepoRootCacheForTests());
 
   test("relocatedKey replaces the derived key, and is asked for exactly that key", () => {
-    const normaHome = realDir();
+    const winterHome = realDir();
     const root = initRepo();
     const todaysKey = sanitizeProjectKey(root);
     const asked: string[] = [];
 
     const dir = memoryDirFor(root, {
-      normaHome,
+      winterHome,
       relocatedKey: (k) => { asked.push(k); return "compat-key-64"; },
     });
 
     expect(asked).toEqual([todaysKey]);
-    expect(dir).toBe(join(normaHome, "projects", "compat-key-64", "memory"));
+    expect(dir).toBe(join(winterHome, "projects", "compat-key-64", "memory"));
   });
 
   test("a resolver that answers undefined leaves the derivation exactly as it was", () => {
-    const normaHome = realDir();
+    const winterHome = realDir();
     const root = initRepo();
-    expect(memoryDirFor(root, { normaHome, relocatedKey: () => undefined })).toBe(memoryDirFor(root, { normaHome }));
+    expect(memoryDirFor(root, { winterHome, relocatedKey: () => undefined })).toBe(memoryDirFor(root, { winterHome }));
   });
 
   test("memoryProjectKeyFor names the same key the directory is built from", () => {
-    const normaHome = realDir();
+    const winterHome = realDir();
     const root = initRepo();
-    const opts = { normaHome, relocatedKey: (k: string) => (k === sanitizeProjectKey(root) ? "moved-here" : undefined) };
+    const opts = { winterHome, relocatedKey: (k: string) => (k === sanitizeProjectKey(root) ? "moved-here" : undefined) };
     expect(memoryProjectKeyFor(root, opts)).toBe("moved-here");
-    expect(memoryDirFor(root, opts)).toBe(join(normaHome, "projects", memoryProjectKeyFor(root, opts), "memory"));
+    expect(memoryDirFor(root, opts)).toBe(join(winterHome, "projects", memoryProjectKeyFor(root, opts), "memory"));
   });
 
   test("the settings override still wins over a relocation — a pinned MEMDIR is never re-keyed", () => {
-    const normaHome = realDir();
+    const winterHome = realDir();
     const override = realDir();
     const root = initRepo();
-    expect(memoryDirFor(root, { normaHome, directory: override, relocatedKey: () => "compat-key-64" })).toBe(override);
+    expect(memoryDirFor(root, { winterHome, directory: override, relocatedKey: () => "compat-key-64" })).toBe(override);
   });
 
   test("memoryDirForRecord reads the record's OWN key — no derivation, no git, no relocation map", () => {
-    const normaHome = realDir();
+    const winterHome = realDir();
     // Deliberately a key no derivation from this path could produce: the record is the authority.
-    expect(memoryDirForRecord({ memoryProjectKey: "some-compat-key" }, { normaHome })).toBe(
-      join(normaHome, "projects", "some-compat-key", "memory"),
+    expect(memoryDirForRecord({ memoryProjectKey: "some-compat-key" }, { winterHome })).toBe(
+      join(winterHome, "projects", "some-compat-key", "memory"),
     );
   });
 
   test("memoryDirForRecord honours the settings override, same as every other MEMDIR door", () => {
-    const normaHome = realDir();
+    const winterHome = realDir();
     const override = realDir();
-    expect(memoryDirForRecord({ memoryProjectKey: "some-compat-key" }, { normaHome, directory: override })).toBe(override);
+    expect(memoryDirForRecord({ memoryProjectKey: "some-compat-key" }, { winterHome, directory: override })).toBe(override);
   });
 });
 
@@ -189,25 +189,25 @@ describe("memory-dir: the relocation door (P8b-17)", () => {
 // importer (legacy USER-scope facts) and the memory.* RPC rewire (a cwd-less request) fall back
 // to — see memory-migrate.ts / ipc/server.ts's own doc comments.
 describe("memory-dir: globalMemoryDirFor", () => {
-  test("computes ~/.norma/projects/_global/memory", () => {
-    const normaHome = realDir();
-    expect(globalMemoryDirFor({ normaHome })).toBe(join(normaHome, "projects", "_global", "memory"));
+  test("computes ~/.winter/projects/_global/memory", () => {
+    const winterHome = realDir();
+    expect(globalMemoryDirFor({ winterHome })).toBe(join(winterHome, "projects", "_global", "memory"));
   });
 
   test("never collides with a real project's sanitized key", () => {
-    const normaHome = realDir();
+    const winterHome = realDir();
     const root = initRepo();
-    expect(globalMemoryDirFor({ normaHome })).not.toBe(memoryDirFor(root, { normaHome }));
+    expect(globalMemoryDirFor({ winterHome })).not.toBe(memoryDirFor(root, { winterHome }));
   });
 
   test("settings.memory.directory overrides the computed path entirely, same as memoryDirFor", () => {
-    const normaHome = realDir();
+    const winterHome = realDir();
     const override = realDir();
-    expect(globalMemoryDirFor({ normaHome, directory: override })).toBe(override);
+    expect(globalMemoryDirFor({ winterHome, directory: override })).toBe(override);
   });
 
   test("an empty/whitespace-only override is treated as absent", () => {
-    const normaHome = realDir();
-    expect(globalMemoryDirFor({ normaHome, directory: "  " })).toBe(join(normaHome, "projects", "_global", "memory"));
+    const winterHome = realDir();
+    expect(globalMemoryDirFor({ winterHome, directory: "  " })).toBe(join(winterHome, "projects", "_global", "memory"));
   });
 });

@@ -1,4 +1,4 @@
-import NormaProtocol
+import WinterProtocol
 
 /// Pure resume-decision logic shared by the gateway (Task 5): given a client's replay cursor and
 /// the host's high watermark for a stream, decide whether to replay events, report up-to-date, or

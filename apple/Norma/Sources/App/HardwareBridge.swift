@@ -1,6 +1,6 @@
 import Foundation
-import NormaKit
-import NormaProtocol
+import WinterKit
+import WinterProtocol
 
 // -----------------------------------------------------------------------------------------------
 // Pure decision core: hardwarePlan (Task 4, Phase 4c) — mirrors chargeLimitPlan's role in
@@ -25,7 +25,7 @@ private struct SetChargeLimitArgs: Decodable { let percent: Int }
 /// mirrors `chargeLimitPlan(percent:appleSilicon:)`'s pure "decision table, two inputs" shape.
 ///
 /// Ordering: unknown-verb is checked FIRST, ahead of approval — a caller sending a verb this
-/// bridge has never heard of is a caller bug, independent of whether NormaHelper happens to be
+/// bridge has never heard of is a caller bug, independent of whether WinterHelper happens to be
 /// approved right now. Unknown-verb here is defense-in-depth only: core's own
 /// `HardwareBroker.request()` (`packages/core/src/peripheral/hardware.ts`'s `verbClass`) already
 /// resolves unknown verbs SYNCHRONOUSLY, before a `hardware_requested` event is ever pushed to this
@@ -41,7 +41,7 @@ func hardwarePlan(verb: String, argsJson: String, helperApproved: Bool) -> Hardw
         return .error(code: "unknown_verb", message: "unknown hardware verb: \(verb)")
     }
     guard helperApproved else {
-        return .error(code: "helper_not_approved", message: "NormaHelper is not approved — open System Settings > General > Login Items")
+        return .error(code: "helper_not_approved", message: "WinterHelper is not approved — open System Settings > General > Login Items")
     }
     if verb == "setChargeLimit" {
         guard let args = try? JSONDecoder().decode(SetChargeLimitArgs.self, from: Data(argsJson.utf8)) else {
@@ -72,8 +72,8 @@ protocol HelperCalling: AnyObject {
 
 extension HelperClient: HelperCalling {}
 
-/// Norma.app's hardware-verb bridge (Task 4, Phase 4c, spec §5): answers `hardware_requested`
-/// pushes by routing through `HelperClient`'s XPC calls to `NormaHelper`. `hardware_requested`
+/// Winter.app's hardware-verb bridge (Task 4, Phase 4c, spec §5): answers `hardware_requested`
+/// pushes by routing through `HelperClient`'s XPC calls to `WinterHelper`. `hardware_requested`
 /// arrives on the SAME provider connection / feed-hook path `peripheral_call_requested` uses
 /// (`AppModel.onPeripheralEvent`, fired for every raw `.session` event) — `AppDelegate.boot()`
 /// composes this instance's `handle` ALONGSIDE `PeripheralProvider.handle` on that SAME hook,
@@ -86,10 +86,10 @@ extension HelperClient: HelperCalling {}
 /// `HelperSources/HelperService.swift` relative to `chargeLimitPlan`.
 @MainActor
 final class HardwareBridge {
-    private let client: NormaClient
+    private let client: WinterClient
     private let helperClient: HelperCalling
 
-    init(client: NormaClient, helperClient: HelperCalling) {
+    init(client: WinterClient, helperClient: HelperCalling) {
         self.client = client
         self.helperClient = helperClient
     }

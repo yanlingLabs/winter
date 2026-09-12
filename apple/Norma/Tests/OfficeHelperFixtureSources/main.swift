@@ -1,19 +1,19 @@
 import Foundation
 
 // Fix round 1, M1 — ignore SIGPIPE process-wide, as the very first thing this process does. See
-// NormaOfficeHelper's own main.swift for the full rationale (write() to a peer that already closed
+// WinterOfficeHelper's own main.swift for the full rationale (write() to a peer that already closed
 // its read side delivers SIGPIPE, whose DEFAULT disposition terminates the process before write()
 // can return -1 at all). This fixture links NO LibreOffice code, so unlike the real helper it has
 // had ZERO incidental protection against exactly that — this line is the only thing standing
 // between a stalled/dead test connection and a crash here.
 signal(SIGPIPE, SIG_IGN)
 
-// NormaOfficeHelperFixture — test-only spawnable stand-in for NormaOfficeHelper, used by
+// WinterOfficeHelperFixture — test-only spawnable stand-in for WinterOfficeHelper, used by
 // OfficeSupervisorTests. NOT part of the shipping app (it lives under Tests/, not Sources/, and
 // is only added to the test-facing build list in project.yml — see the "Fixture" target).
 //
 // This is deliberately NOT a reimplementation of the wire protocol: it links OfficeHelperServer
-// (Sources/OfficeHelper/OfficeHelperServer.swift, the SAME file NormaOfficeHelper's real
+// (Sources/OfficeHelper/OfficeHelperServer.swift, the SAME file WinterOfficeHelper's real
 // main.swift drives) and only swaps in Hooks for the failure modes a supervisor test needs to
 // provoke on purpose. A test that exercises this fixture is exercising the real protocol handler,
 // not a second copy of it that could silently drift from the real one.
@@ -44,7 +44,7 @@ signal(SIGPIPE, SIG_IGN)
 let args = OfficeWireArgs.parse(Array(CommandLine.arguments.dropFirst()))
 
 func fail(_ message: String) -> Never {
-    FileHandle.standardError.write(Data(("[NormaOfficeHelperFixture] error: " + message + "\n").utf8))
+    FileHandle.standardError.write(Data(("[WinterOfficeHelperFixture] error: " + message + "\n").utf8))
     exit(1)
 }
 

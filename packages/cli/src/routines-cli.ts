@@ -1,4 +1,4 @@
-// Phase 5 routines T4 — pure formatting helpers for `norma routines` (main.ts) and `/routines`
+// Phase 5 routines T4 — pure formatting helpers for `winter routines` (main.ts) and `/routines`
 // (tui/commands.ts). Extracted here (task-display.ts's formatElapsed/formatTokens precedent:
 // shared pure formatting logic, no I/O, imported by both call sites) because main.ts's argv
 // switch can't be driven directly by a unit test the way commands.ts's registry can — main.test.ts
@@ -17,7 +17,7 @@ export interface RoutineLike {
 const PROMPT_HEAD_LEN = 60;
 
 /** First line of `prompt`, truncated to 60 chars with a trailing "…" only when actually cut short
- *  — mirrors `agent/tools/schedule.ts`'s own `promptHead` (core) so `norma routines`/`/routines`
+ *  — mirrors `agent/tools/schedule.ts`'s own `promptHead` (core) so `winter routines`/`/routines`
  *  read the same shape as the `schedule` tool's `op:"list"` output the model itself sees. */
 export function routinePromptHead(prompt: string): string {
   const line = (prompt.split("\n", 1)[0] ?? "").trim();
@@ -25,7 +25,7 @@ export function routinePromptHead(prompt: string): string {
 }
 
 /** Everything after the id — enabled marker, spec, next-run ISO timestamp, prompt head. This is
- *  the DIM-wrapped remainder of `norma routines`' colored line (main.ts colors the id AQUA, this
+ *  the DIM-wrapped remainder of `winter routines`' colored line (main.ts colors the id AQUA, this
  *  DIM — matching `sessions`/`bg list`'s own two-tone convention) and also the tail of
  *  `formatRoutineLine` below. */
 export function formatRoutineDetail(r: RoutineLike): string {
@@ -35,7 +35,7 @@ export function formatRoutineDetail(r: RoutineLike): string {
 }
 
 /** One full plain (uncolored) summary line: id + formatRoutineDetail. Printed as-is by `/routines`
- *  (no color — matches runSessions/runBg's own no-color convention for in-chat notes); `norma
+ *  (no color — matches runSessions/runBg's own no-color convention for in-chat notes); `winter
  *  routines`' CLI list case wraps the id/detail pieces in AQUA/DIM around this same content. */
 export function formatRoutineLine(r: RoutineLike): string {
   return `${r.id}  ${formatRoutineDetail(r)}`;

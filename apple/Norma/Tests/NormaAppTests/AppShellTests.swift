@@ -1,6 +1,6 @@
 import XCTest
 import AppKit
-@testable import Norma
+@testable import Winter
 
 /// Mac app shell, Task 1: the singleton app window, its summon paths, and the sidebar's selection
 /// model. Same posture as `DashboardTests`/`StandaloneWindowTests` — the PURE decision helpers
@@ -258,7 +258,7 @@ final class AppShellTests: XCTestCase {
     /// chatgpt-ui T3 (spec §4): the seamless ChatGPT-desktop chrome, asserted on the REAL window.
     /// Transparent titlebar over full-size content — the traffic lights float over the custom
     /// pane's own flat background (which ignores the top safe area and clears them with
-    /// `shellSidebarTopInset`); the title TEXT is hidden (the seamless top carries no "Norma"
+    /// `shellSidebarTopInset`); the title TEXT is hidden (the seamless top carries no "Winter"
     /// label) while the window KEEPS its title — Mission Control/Window-menu identity must
     /// survive the reskin.
     ///
@@ -280,7 +280,7 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(window.titlebarAppearsTransparent, "spec §4: the seamless top — the sidebar shows through the titlebar")
         XCTAssertTrue(window.styleMask.contains(.fullSizeContentView), "content extends under the titlebar")
         XCTAssertEqual(window.titleVisibility, .hidden, "no title text over the seamless top")
-        XCTAssertEqual(window.title, "Norma", "the window keeps its NAME — Mission Control/Window-menu identity")
+        XCTAssertEqual(window.title, "Winter", "the window keeps its NAME — Mission Control/Window-menu identity")
         XCTAssertNil(window.toolbar, "custom-sidebar: NO toolbar — ChatGPT has none; the traffic lights float over the custom pane")
         XCTAssertTrue(window.isOpaque, "the shell is an opaque window — the detached windows' clear shell is NOT this recipe")
     }
@@ -566,12 +566,12 @@ final class AppShellTests: XCTestCase {
         XCTAssertTrue(wiring.showsSessionSwitcher, "a wiring that doesn't opt out must keep its left column")
     }
 
-    /// The menu bar's "Open Norma App" entry summons the singleton — fired through the REAL menu
+    /// The menu bar's "Open Winter App" entry summons the singleton — fired through the REAL menu
     /// item's target/action, exactly like a click (the `MenuBarEntryPointsTests` idiom).
-    func testOpenNormaAppMenuItemSummonsTheShell() {
+    func testOpenWinterAppMenuItemSummonsTheShell() {
         let delegate = AppDelegate()
         XCTAssertTrue(delegate.boot())
-        guard let item = delegate.menuBar?.openNormaAppItem else {
+        guard let item = delegate.menuBar?.openWinterAppItem else {
             return XCTFail("boot() must have installed the menu bar")
         }
 
@@ -585,7 +585,7 @@ final class AppShellTests: XCTestCase {
     // MARK: - App shell T6: the menu-bar retarget's funeral
 
     /// "Chat" summons the shell and lands on the chat mode's landing — same fired-through-the-real-
-    /// item posture as `testOpenNormaAppMenuItemSummonsTheShell`. `openChat()` (the detached-window
+    /// item posture as `testOpenWinterAppMenuItemSummonsTheShell`. `openChat()` (the detached-window
     /// spawn it used to drive) is retired.
     func testChatMenuItemSummonsToTheChatLanding() {
         let delegate = AppDelegate()
@@ -666,7 +666,7 @@ final class AppShellTests: XCTestCase {
     /// `DetachedWindowController` except an explicit detach action — the real Dashboard WINDOW this
     /// pin originally also checked for (`AppDelegate.dashboardWindow`) is gone as a TYPE, Task 7
     /// (`DashboardWindowController` deleted), so there is nothing left of that half to assert;
-    /// structurally impossible now, not merely untrue. Fires every retargeted item plus "Open Norma
+    /// structurally impossible now, not merely untrue. Fires every retargeted item plus "Open Winter
     /// App" in one pass — the funeral's actual proof, not just each item's own destination in
     /// isolation — and additionally proves the ROUTING actually reaches the surface: the last item
     /// fired, "Manage Plugins…", must leave the shell on its targeted pane.
@@ -677,7 +677,7 @@ final class AppShellTests: XCTestCase {
             return XCTFail("boot() must have installed the menu bar")
         }
         let items = [
-            menuBar.openNormaAppItem, menuBar.newChatItem, menuBar.chatItem,
+            menuBar.openWinterAppItem, menuBar.newChatItem, menuBar.chatItem,
             menuBar.dashboardItem, menuBar.pluginManagerItem,
         ]
         for item in items {
@@ -958,7 +958,7 @@ final class AppShellTests: XCTestCase {
     }
 
     /// RETRUED (sidebar-chrome-2, user call 2026-08-07): the greeting ROTATES and is time-aware
-    /// (`newChatGreetings`), replacing the single fixed "Ask Norma anything.".
+    /// (`newChatGreetings`), replacing the single fixed "Ask Winter anything.".
     ///
     /// This also retires the 2026-08-06 ruling that it must be a calm STATEMENT rather than a
     /// question — the user asked for the reference's register directly, so the question form is

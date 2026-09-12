@@ -159,7 +159,7 @@ enum Typography {
     /// The orb field's reply text — the Mac transcript's assistant voice, FACE AND SIZE
     /// (final 2026-08-13 ruling: "the assistant reply should also use the same font the mac
     /// app uses font style and size"): `Theme.assistantProse` serif at the assistant role's
-    /// size. An extension of serif allowlist binding #4's surface — the field reply is Norma
+    /// size. An extension of serif allowlist binding #4's surface — the field reply is Winter
     /// speaking — recorded in `docs/brand.md` § 4.2. New York under the field's
     /// difference-blend law is a visual-gate item; only eyes can check glass legibility.
     static func fieldAssistantMessage(_ weight: NSFont.Weight = .regular) -> Font {
@@ -205,7 +205,7 @@ enum Typography {
     }
 
     /// Block maths' default size is the assistant-prose body — a DERIVATION, because display
-    /// maths sits inside Norma's reply and must read as part of that prose.
+    /// maths sits inside Winter's reply and must read as part of that prose.
     static func mathDefaultNS(italic: Bool) -> NSFont {
         mathNS(ofSize: transcriptProseMetrics(.assistant).bodySize, italic: italic)
     }
@@ -233,7 +233,7 @@ enum Typography {
 /// It is a REQUIRED parameter — never a default — on the three views that TAKE one
 /// (`TranscriptAssistantMessage` and the two private renderers beside it), because the dangerous
 /// direction is a new call site *inheriting* serif: a card, a placeholder, a future summary panel
-/// silently putting chrome into Norma's speaking voice. A `let` with no initial value is a required
+/// silently putting chrome into Winter's speaking voice. A `let` with no initial value is a required
 /// parameter of Swift's memberwise initialiser, so omitting it does not compile — demonstrated by
 /// mutation (`error: missing argument for parameter 'role'`), not assumed. (The distinction this
 /// plan learned the hard way at Task 6: an *optional* `var` gets an implicit `nil` default and
@@ -242,7 +242,7 @@ enum Typography {
 /// `TranscriptUserBubble` is the one view that DECLARES its role rather than taking one: it renders
 /// exactly one thing — the user's own words — so there is nothing for a caller to decide.
 enum TranscriptProseRole: Equatable {
-    /// Serif allowlist binding #4 — what Norma *says*, in the transcript, in its own voice.
+    /// Serif allowlist binding #4 — what Winter *says*, in the transcript, in its own voice.
     case assistant
     /// Everything else that goes through this same markdown renderer: the user's own message, and a
     /// plan card's body. A card is chrome around a decision, so it stays sans even though its text
@@ -329,7 +329,7 @@ func transcriptProseSwiftUIFont(_ role: TranscriptProseRole, size: CGFloat,
 
 /// iOS sets a question at the transcript's own prose size and steps everything under it down from
 /// there; the Mac had the whole card a register lower, with the question at 14 — which is the
-/// USER's message size, not Norma's. So her question was set in the user's register while wearing
+/// USER's message size, not Winter's. So her question was set in the user's register while wearing
 /// her serif face, the one place the two crossed.
 ///
 /// Ported as RATIOS against `.body` (17 at the default Dynamic Type size), not as point values:
@@ -349,7 +349,7 @@ enum QuestionCardType {
 }
 
 extension Typography {
-    /// The question's own text — serif, because the question is Norma ASKING, in her voice
+    /// The question's own text — serif, because the question is Winter ASKING, in her voice
     /// (`QuestionCardType.question` derives from the assistant prose ladder; see its doc).
     static func questionSerif() -> Font {
         Font(Theme.assistantProse(size: QuestionCardType.question, weight: .regular))

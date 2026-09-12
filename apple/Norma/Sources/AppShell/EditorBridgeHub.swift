@@ -4,8 +4,8 @@ import Foundation
 /// editor-product Task 3 — **the one registrant of the process-global bridge slot, and the demux
 /// behind it.**
 ///
-/// `NormaCEFSetBridgeHandler` is a SINGLE slot for the whole process and registering again replaces
-/// the previous block outright (`NormaCEF.h`). Stage A shipped with exactly one registrant (the
+/// `WinterCEFSetBridgeHandler` is a SINGLE slot for the whole process and registering again replaces
+/// the previous block outright (`WinterCEF.h`). Stage A shipped with exactly one registrant (the
 /// DEBUG harness) and its own review named the consequence before a second one could exist: two
 /// registrants means last-writer-wins, and the loser's page is not merely unheard — every query it
 /// sends is answered `success = false` by a handler that has never heard of it, for the life of the
@@ -18,7 +18,7 @@ import Foundation
 /// ## What it guarantees
 ///
 /// **1. Discrimination by `browserId`, checked BEFORE anything else.** The renderer-side router
-/// installs `window.cefQuery` into every V8 context in every Norma browser (`NormaCEF.h:335-349`),
+/// installs `window.cefQuery` into every V8 context in every Winter browser (`WinterCEF.h:335-349`),
 /// so an arbitrary site in a panel web tab reaches this handler with whatever bytes it likes —
 /// including a perfectly well-formed `saveRequested` naming a file it wants written. The id is
 /// checked first and the payload is not even decoded for a browser nobody registered: the refusal
@@ -30,7 +30,7 @@ import Foundation
 /// strands a CEF `Callback` for the life of the browser, which the router's own contract calls a
 /// runtime error.
 ///
-/// **3. `browserId` 0 never registers.** 0 is `NormaCEFBrowserIdentifierForParent`'s "no browser"
+/// **3. `browserId` 0 never registers.** 0 is `WinterCEFBrowserIdentifierForParent`'s "no browser"
 /// sentinel; a client registered under it would match every query from any container that has no
 /// browser at all — the exact `browserId == 0 == 0` accident that header warns about.
 @MainActor
@@ -74,19 +74,19 @@ final class EditorBridgeHub {
                 // Registered on the MAIN thread, where callers of `register` already are:
                 // `g_bridge_handler` is read unlocked on CEF's UI thread, which under the external
                 // pump IS this thread.
-                NormaCEFSetBridgeHandler { browserId, queryId, requestJSON in
+                WinterCEFSetBridgeHandler { browserId, queryId, requestJSON in
                     // The C string is valid only for the duration of the call — copied here, once,
                     // before anything else can hold it.
                     let request = requestJSON.map { String(cString: $0) } ?? ""
-                    // A statement of fact rather than an assumption: `NormaCEF.h` contracts this
+                    // A statement of fact rather than an assumption: `WinterCEF.h` contracts this
                     // block as main-thread, one main-queue turn after CEF's own callback. Same
                     // shape `BrowserRuntime.Scheduler.production` uses for the same reason.
                     MainActor.assumeIsolated { handler(browserId, queryId, request) }
                 }
             },
-            clear: { NormaCEFSetBridgeHandler(nil) },
+            clear: { WinterCEFSetBridgeHandler(nil) },
             respond: { queryId, success, json in
-                NormaCEFBridgeRespondCall(queryId, success, json)
+                WinterCEFBridgeRespondCall(queryId, success, json)
             })
     }
 
@@ -168,7 +168,7 @@ final class EditorBridgeHub {
     /// untestable (the test that proves the refusal would take the process down with it) and there
     /// is no `assertionFailure` anywhere in this app's sources; the guard IS the discipline and a
     /// test observes it. A caller reaching this has almost certainly not waited for its browser to
-    /// exist — `NormaCEFBrowserIdentifierForParent` answers 0 until `OnAfterCreated` has run.
+    /// exist — `WinterCEFBrowserIdentifierForParent` answers 0 until `OnAfterCreated` has run.
     func register(browserId: Int32, client: @escaping Client) {
         guard browserId != 0 else {
             NSLog("[EditorBridgeHub] refused to register browser id 0 — that is the \"no browser\" "

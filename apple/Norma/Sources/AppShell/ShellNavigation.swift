@@ -2,9 +2,9 @@ import Foundation
 
 // MARK: - The four modes (the iOS nav mirror)
 
-/// The four Norma session modes the shell's sidebar presents — the same four cases and the same
+/// The four Winter session modes the shell's sidebar presents — the same four cases and the same
 /// `isAvailable` reading of cowork as the phone's own `SessionMode`
-/// (`norma-ios/Norma/App/SessionMode.swift`).
+/// (`norma-ios/Winter/App/SessionMode.swift`).
 ///
 /// chatgpt-ui T1 (spec R1, superseding the shell spec's iOS-mirror ruling FOR THE MAC ONLY): the
 /// Mac's `sidebarOrder` is now Chats-first — the ChatGPT-desktop sidebar shape (New chat action row

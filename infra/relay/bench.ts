@@ -2,7 +2,7 @@
 /**
  * Concurrency bench for one relay (SP2b Task 6 Step 6). There is no TS/Bun iroh client (iroh-ffi
  * has no Node/Bun binding in this repo) -- so this drives N parallel REAL OS PROCESSES, each
- * running `norma-fake-phone probe-relay --url <url>` (binds a fresh iroh endpoint with ONLY that
+ * running `winter-fake-phone probe-relay --url <url>` (binds a fresh iroh endpoint with ONLY that
  * relay configured, awaits `Endpoint.online()`, prints `ok`), and measures success rate and
  * p50/p95 wall-clock time-to-online. If `--ssh-host` is given, also captures the relay's own
  * `systemctl status`/`free -m` over SSH right after the burst, for a memory-per-connection data
@@ -28,7 +28,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const NORMAKIT_DIR = join(HERE, "..", "..", "apple", "NormaKit");
+const WINTERKIT_DIR = join(HERE, "..", "..", "apple", "WinterKit");
 
 interface Args {
   url: string;
@@ -75,11 +75,11 @@ function percentile(sorted: number[], p: number): number {
 async function main(): Promise<void> {
   const { url, n, sshHost } = parseArgs();
 
-  console.log("Building norma-fake-phone (release)...");
-  execFileSync("swift", ["build", "-c", "release", "--product", "norma-fake-phone"], { cwd: NORMAKIT_DIR, stdio: "inherit" });
+  console.log("Building winter-fake-phone (release)...");
+  execFileSync("swift", ["build", "-c", "release", "--product", "winter-fake-phone"], { cwd: WINTERKIT_DIR, stdio: "inherit" });
   const binPath =
-    execFileSync("swift", ["build", "-c", "release", "--show-bin-path"], { cwd: NORMAKIT_DIR, encoding: "utf8" }).trim() +
-    "/norma-fake-phone";
+    execFileSync("swift", ["build", "-c", "release", "--show-bin-path"], { cwd: WINTERKIT_DIR, encoding: "utf8" }).trim() +
+    "/winter-fake-phone";
 
   const ulimitN = execFileSync("bash", ["-c", "ulimit -n"], { encoding: "utf8" }).trim();
   console.log(`ulimit -n on this machine: ${ulimitN} (bench --n=${n}) -- raise it first if --n approaches this.`);

@@ -1,7 +1,7 @@
 import XCTest
 import AppKit
 import SwiftUI
-@testable import Norma
+@testable import Winter
 
 /// mac-chat-parity Task 8 — the transcript wears the brand.
 ///
@@ -258,7 +258,7 @@ final class TranscriptBrandTests: XCTestCase {
 
     // MARK: - 2. Serif assistant prose (brand.md § 4, allowlist binding #4)
 
-    /// The claim in one assertion: what Norma SAYS is set in a serif, and nothing else on this
+    /// The claim in one assertion: what Winter SAYS is set in a serif, and nothing else on this
     /// surface is. Pinned on the resolved `NSFont`, not on the enum case that asked for it — a role
     /// that silently fell back to the system sans (the `guard` in `Theme.assistantProse`) would
     /// still satisfy any check written against the case.
@@ -407,7 +407,7 @@ final class TranscriptBrandTests: XCTestCase {
 
     /// **A WIRING PIN, NOT COVERAGE** — the same species as `ModelPickerTests.swift:767`. It restates
     /// the declaration next door; it is here because it is what a mutation of that declaration trips,
-    /// and because "the user's own words are not set in Norma's voice" deserves to be written down as
+    /// and because "the user's own words are not set in Winter's voice" deserves to be written down as
     /// an assertion. The real weight is `testAssistantProseIsSerifAndTheSansRoleIsNot` above.
     func testTheUserBubbleDeclaresTheSansRole() {
         XCTAssertEqual(TranscriptUserBubble(text: "hi", tint: .blue).proseRole, .sans)
@@ -457,7 +457,7 @@ final class TranscriptBrandTests: XCTestCase {
     ///   colours: a hex by another name, with no light and dark halves to author.
     /// - `accentColor` — SwiftUI's app accent resolves to the **user's System Settings accent**,
     ///   because brand.md § 3.2 deliberately leaves `ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME`
-    ///   unset. Every use of it was drawing in a colour Norma did not pick. `Theme.accent` is the
+    ///   unset. Every use of it was drawing in a colour Winter did not pick. `Theme.accent` is the
     ///   brand teal.
     ///
     /// What is NOT banned, deliberately: `.primary`/`.secondary` (system semantic, sanctioned by

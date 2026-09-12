@@ -1,7 +1,7 @@
 import Foundation
 import Security
 import XCTest
-@testable import NormaChatKit
+@testable import WinterChatKit
 
 /// `ChatKeychain` — where the phone's OWN OpenAI credentials live (never the Mac's, never the
 /// pairing identity's). The behavioural tests drive a `KeychainStore` spy so they are hermetic;
@@ -14,11 +14,11 @@ final class ChatKeychainTests: XCTestCase {
     // MARK: - service identity
 
     /// Distinct services keep three unrelated credentials from ever colliding: the daemon/pairing
-    /// identity (`com.norma.core`, NormaKit), the phone's ChatGPT tokens, and the Exa key.
+    /// identity (`com.winter.core`, WinterKit), the phone's ChatGPT tokens, and the Exa key.
     func testServiceNamesArePinned() {
-        XCTAssertEqual(ChatKeychain.openAIService, "com.norma.chat.openai")
-        XCTAssertEqual(ChatKeychain.exaService, "com.norma.chat.exa")
-        XCTAssertNotEqual(ChatKeychain.openAIService, "com.norma.core")
+        XCTAssertEqual(ChatKeychain.openAIService, "com.winter.chat.openai")
+        XCTAssertEqual(ChatKeychain.exaService, "com.winter.chat.exa")
+        XCTAssertNotEqual(ChatKeychain.openAIService, "com.winter.core")
     }
 
     /// `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`: readable by background work after the
@@ -73,7 +73,7 @@ final class ChatKeychainTests: XCTestCase {
         try ChatKeychain(store: spy).storeTokens(
             TokenState(accessToken: "at_1", refreshToken: "rt_1", idToken: "id_1",
                        accountId: "acct_42", expiresAt: t0))
-        let raw = try XCTUnwrap(spy.items[Key(service: "com.norma.chat.openai", account: "codex-tokens")])
+        let raw = try XCTUnwrap(spy.items[Key(service: "com.winter.chat.openai", account: "codex-tokens")])
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
         XCTAssertEqual(json["accessToken"] as? String, "at_1")
         XCTAssertEqual(json["refreshToken"] as? String, "rt_1")
@@ -86,7 +86,7 @@ final class ChatKeychainTests: XCTestCase {
     /// bricking on a corrupt item.
     func testCorruptBlobReadsAsSignedOut() throws {
         let spy = SpyKeychainStore()
-        spy.items[Key(service: "com.norma.chat.openai", account: "codex-tokens")] = Data("garbage".utf8)
+        spy.items[Key(service: "com.winter.chat.openai", account: "codex-tokens")] = Data("garbage".utf8)
         XCTAssertNil(try ChatKeychain(store: spy).loadTokens())
     }
 
@@ -96,7 +96,7 @@ final class ChatKeychainTests: XCTestCase {
         try keychain.storeTokens(TokenState(accessToken: "at_1", expiresAt: t0))
         try keychain.clear()
         XCTAssertNil(try keychain.loadTokens())
-        XCTAssertTrue(spy.deletes.contains(Key(service: "com.norma.chat.openai", account: "codex-tokens")))
+        XCTAssertTrue(spy.deletes.contains(Key(service: "com.winter.chat.openai", account: "codex-tokens")))
     }
 
     /// Signing out of ChatGPT must not throw away the user's Exa key (a separate credential with
@@ -118,8 +118,8 @@ final class ChatKeychainTests: XCTestCase {
         let keychain = ChatKeychain(store: spy)
         try keychain.storeExaKey("exa_abc")
         XCTAssertEqual(try keychain.loadExaKey(), "exa_abc")
-        XCTAssertNotNil(spy.items[Key(service: "com.norma.chat.exa", account: "exa-api-key")])
-        XCTAssertNil(spy.items[Key(service: "com.norma.chat.openai", account: "exa-api-key")])
+        XCTAssertNotNil(spy.items[Key(service: "com.winter.chat.exa", account: "exa-api-key")])
+        XCTAssertNil(spy.items[Key(service: "com.winter.chat.openai", account: "exa-api-key")])
     }
 
     func testLoadExaKeyIsNilWhenUnset() throws {
@@ -160,13 +160,13 @@ final class ChatKeychainTests: XCTestCase {
     /// Proves `SystemKeychainStore` actually talks to SecItem. OPT-IN only: an unsigned SwiftPM
     /// test binary's Keychain access depends on the machine's signing/ACL state, so this must
     /// never be able to redden a normal `swift test`. It writes under a throwaway service name and
-    /// removes it again, so it can never touch the real `com.norma.chat.*` items.
+    /// removes it again, so it can never touch the real `com.winter.chat.*` items.
     ///
-    ///     NORMA_CHAT_KEYCHAIN_INTEGRATION=1 swift test --filter testRealKeychainRoundTrip
+    ///     WINTER_CHAT_KEYCHAIN_INTEGRATION=1 swift test --filter testRealKeychainRoundTrip
     func testRealKeychainRoundTrip() throws {
-        try XCTSkipUnless(ProcessInfo.processInfo.environment["NORMA_CHAT_KEYCHAIN_INTEGRATION"] == "1",
-                          "touches the real login Keychain — set NORMA_CHAT_KEYCHAIN_INTEGRATION=1 to run")
-        let service = "com.norma.chat.test.\(UUID().uuidString)"
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["WINTER_CHAT_KEYCHAIN_INTEGRATION"] == "1",
+                          "touches the real login Keychain — set WINTER_CHAT_KEYCHAIN_INTEGRATION=1 to run")
+        let service = "com.winter.chat.test.\(UUID().uuidString)"
         let store = SystemKeychainStore()
         addTeardownBlock { try? store.delete(service: service, account: "codex-tokens") }
 

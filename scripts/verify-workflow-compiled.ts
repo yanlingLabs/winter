@@ -10,7 +10,7 @@
  * INSIDE the compiled binary instead of being loaded from a path that only exists in dev.
  *
  * This script is the ONLY check that exercises the true bundler + the real Release artifact
- * (dist/norma-core). `packages/core/src/workflows/subprocess-entry.test.ts` covers the stdio bridge
+ * (dist/winter-core). `packages/core/src/workflows/subprocess-entry.test.ts` covers the stdio bridge
  * protocol under `bun test`, but that spawns `bun subprocess-entry.ts` directly (the DEV path) — it
  * never touches `bun build --compile` at all, so it could not have caught C1 and cannot regress-guard
  * it either. Only running the compiled binary itself can.
@@ -23,15 +23,15 @@
  *   bun run verify:workflow   (package.json alias, if present)
  *
  * Steps (per .superpowers/sdd/task-Averify-brief.md):
- *   1. `bun run compile:core` -> dist/norma-core. NOTE: packages/cli/package.json is the only place
+ *   1. `bun run compile:core` -> dist/winter-core. NOTE: packages/cli/package.json is the only place
  *      `compile:core` is defined; plain `bun run compile:core` from the repo root fails with
  *      "Script not found" because bun does not search workspace packages without `--filter`. This
- *      script invokes it as `bun run --filter '@norma/cli' compile:core` with cwd = the repo root —
+ *      script invokes it as `bun run --filter '@winter/cli' compile:core` with cwd = the repo root —
  *      the repo-root-relative invocation the brief calls for, that actually resolves the script.
- *   2. Build the tight seatbelt profile via buildWorkflowSeatbeltProfile(dist/norma-core) — NOT
- *      exported from `@norma/core`'s barrel, so imported directly from its source file (same as
+ *   2. Build the tight seatbelt profile via buildWorkflowSeatbeltProfile(dist/winter-core) — NOT
+ *      exported from `@winter/core`'s barrel, so imported directly from its source file (same as
  *      sandbox.test.ts does).
- *   3. spawn("/usr/bin/sandbox-exec", ["-p", profile, dist/norma-core, "__workflow-worker"], ...) —
+ *   3. spawn("/usr/bin/sandbox-exec", ["-p", profile, dist/winter-core, "__workflow-worker"], ...) —
  *      exactly the shape runtime.ts's `launch()` uses for a real daemon.
  *   4. Speak the NDJSON bridge (bridge.ts) by hand: one WorkerInit line in, reply to the single
  *      {op:"agent"} request, and assert {op:"phase"} then {op:"done", result:"[hi]"} come back before
@@ -51,7 +51,7 @@ import type { BridgeRequest, WorkerInit } from "../packages/core/src/workflows/b
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(SCRIPTS_DIR, "..");
-const DIST_BINARY = join(REPO_ROOT, "dist", "norma-core");
+const DIST_BINARY = join(REPO_ROOT, "dist", "winter-core");
 /** Generous margin: the spike found the round-trip fast (sub-second); this only guards against a
  *  genuine hang (e.g. the reply never reaching the child) rather than normal cold-start variance. */
 const ROUNDTRIP_TIMEOUT_MS = 30_000;
@@ -76,11 +76,11 @@ async function main(): Promise<void> {
   }
 
   // ---- Step 1: compile the REAL Release artifact -----------------------------------------------
-  log("\n--- Step 1: compiling dist/norma-core (bun run --filter '@norma/cli' compile:core) ---");
+  log("\n--- Step 1: compiling dist/winter-core (bun run --filter '@winter/cli' compile:core) ---");
   const compileStart = Date.now();
   const compile = spawnSync(
     process.execPath, // the running bun binary itself — avoids any PATH/version ambiguity
-    ["run", "--filter", "@norma/cli", "compile:core"],
+    ["run", "--filter", "@winter/cli", "compile:core"],
     { cwd: REPO_ROOT, encoding: "utf8", timeout: COMPILE_TIMEOUT_MS },
   );
   const compileMs = Date.now() - compileStart;
@@ -102,12 +102,12 @@ async function main(): Promise<void> {
   log(`(info) literal "__workflow-worker" occurrences in binary: ${grep.stdout?.trim() || "0"}`);
 
   // ---- Step 2: build the tight seatbelt profile for THIS binary --------------------------------
-  log("\n--- Step 2: buildWorkflowSeatbeltProfile(dist/norma-core) ---");
+  log("\n--- Step 2: buildWorkflowSeatbeltProfile(dist/winter-core) ---");
   const profile = buildWorkflowSeatbeltProfile(DIST_BINARY);
   log(profile);
 
   // ---- Step 3+4: spawn under sandbox-exec, speak the NDJSON bridge protocol by hand -------------
-  log("--- Step 3: spawn /usr/bin/sandbox-exec -p <profile> dist/norma-core __workflow-worker ---");
+  log("--- Step 3: spawn /usr/bin/sandbox-exec -p <profile> dist/winter-core __workflow-worker ---");
   const child = spawn("/usr/bin/sandbox-exec", ["-p", profile, DIST_BINARY, "__workflow-worker"], {
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
@@ -196,7 +196,7 @@ async function main(): Promise<void> {
       "one or more assertions failed — the compiled binary did NOT successfully run the workflow " +
       "subprocess to completion. Diagnose before touching the assertions: " +
       "(a) bundling gap — no NDJSON at all + child stderr mentions a missing module/file -> the " +
-      "workflow entry did not make it into dist/norma-core (this IS what C1 looked like); " +
+      "workflow entry did not make it into dist/winter-core (this IS what C1 looked like); " +
       "(b) sandbox profile issue specific to the real binary — sandbox-exec exits 65 (profile " +
       "failed to load) or 71 (execvp denied) or stderr mentions 'Operation not permitted' around " +
       "process start -> buildWorkflowSeatbeltProfile's self-exec literal may not match the real " +
@@ -207,7 +207,7 @@ async function main(): Promise<void> {
   }
 
   log(
-    "\nRESULT: PASS — dist/norma-core (the real `bun build --compile` Release artifact) self-spawned " +
+    "\nRESULT: PASS — dist/winter-core (the real `bun build --compile` Release artifact) self-spawned " +
     "a sandboxed __workflow-worker subprocess, ran the workflow script, round-tripped one agent() " +
     "call over the NDJSON stdio bridge, and exited 0. C1 (workflows dead in the compiled binary) is " +
     "fixed on the actual shipped artifact."

@@ -1,5 +1,5 @@
 import XCTest
-@testable import NormaProtocol
+@testable import WinterProtocol
 
 final class RoundTripTests: XCTestCase {
     func fixtureURLs() throws -> [URL] {
@@ -97,7 +97,7 @@ final class RoundTripTests: XCTestCase {
         XCTAssertNil(without.modelRef)
     }
 
-    /// Phase 5e T1 (reviewer maturity — the NormaKit-trap task): the NEW `tool_review` variant
+    /// Phase 5e T1 (reviewer maturity — the WinterKit-trap task): the NEW `tool_review` variant
     /// decodes with its verdict/toolName/reason/summary intact — this is what proves the exhaustive
     /// switches + codec were actually synced, not just that the union compiles.
     func testToolReviewDecodes() throws {
@@ -149,7 +149,7 @@ final class RoundTripTests: XCTestCase {
     }
 
     /// task-30 (push-notification track — the final CC-parity tool item, and another
-    /// NormaKit-trap task like `tool_review` above): the NEW `notification_requested` variant
+    /// WinterKit-trap task like `tool_review` above): the NEW `notification_requested` variant
     /// decodes with its title/message intact — proves the exhaustive switches + codec were synced.
     func testNotificationRequestedDecodes() throws {
         guard let url = Bundle.module.url(forResource: "notification_requested", withExtension: "json", subdirectory: "Fixtures") else {
@@ -157,7 +157,7 @@ final class RoundTripTests: XCTestCase {
         }
         let data = try Data(contentsOf: url)
         guard case .notificationRequested(let v) = try JSONDecoder().decode(SessionEvent.self, from: data) else { return XCTFail() }
-        XCTAssertEqual(v.title, "Norma")
+        XCTAssertEqual(v.title, "Winter")
         XCTAssertFalse(v.message.isEmpty)
     }
 
@@ -242,7 +242,7 @@ final class RoundTripTests: XCTestCase {
         guard case .panelCommand(let with) = try JSONDecoder().decode(SessionEvent.self, from: try Data(contentsOf: withURL)) else { return XCTFail() }
         XCTAssertEqual(with.action, "type")
         XCTAssertEqual(with.args?["selector"], .string("#search"))
-        XCTAssertEqual(with.args?["text"], .string("norma"))
+        XCTAssertEqual(with.args?["text"], .string("winter"))
         XCTAssertEqual(with.deadlineMs, 15000)
 
         let reencoded = try JSONEncoder().encode(SessionEvent.panelCommand(with))
@@ -263,7 +263,7 @@ final class RoundTripTests: XCTestCase {
     /// B2 Task 2 — THE TOLERANCE STORY, pinned where it actually lives: `PanelCommand.action` is a
     /// plain `String` (SessionEvent.swift), so a verb this build has never heard of decodes rather
     /// than throwing. That matters because the TS `action` enum grows over time and the Mac app is
-    /// released separately from the daemon; NormaKit's own half of the story (a decode failure
+    /// released separately from the daemon; WinterKit's own half of the story (a decode failure
     /// degrades to `.unknownEvent` instead of killing the stream — `parseServerLine`, wrapped in
     /// `try?`) is pinned in `ServerMessageTests`. Layer 2 protects the connection; only this layer
     /// protects the command itself.
@@ -282,7 +282,7 @@ final class RoundTripTests: XCTestCase {
     /// `PanelCommand` type the browser verbs above use. This is the evidence for T1's no-kit-tag
     /// claim, made concrete rather than argued from the type declaration alone: a namespaced action
     /// string (`office.sheets.read`) this build's Swift source has never spelled out ANYWHERE decodes
-    /// with no `NormaProtocol` change, for the identical reason `testUnknownPanelCommandVerbStillDecodes`
+    /// with no `WinterProtocol` change, for the identical reason `testUnknownPanelCommandVerbStillDecodes`
     /// above already proves for `"drag"` — `PanelCommand.action` stayed a plain `String` through B2's
     /// own 1-to-9 verb growth (its own doc comment: "this type deliberately did not have to change for
     /// it"), and T1 spends exactly that design margin rather than extending it.

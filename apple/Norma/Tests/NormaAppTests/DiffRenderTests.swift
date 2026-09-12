@@ -1,8 +1,8 @@
 import XCTest
 import AppKit
-import NormaKit
+import WinterKit
 import SwiftUI
-@testable import Norma
+@testable import Winter
 
 /// diff-tabs Task 10 — the diff tab: the parser, the renderer's state machine, and the pure
 /// presentation decisions around them.
@@ -401,7 +401,7 @@ final class DiffRenderTests: XCTestCase {
         let model = PanelDiffTabModel(tabId: "t1", diffId: "diff_1", sessionId: "s_1") { _, _ in
             self.payload(patch: patch)
         }
-        let board = NSPasteboard(name: .init("NormaDiffRenderTests"))
+        let board = NSPasteboard(name: .init("WinterDiffRenderTests"))
         XCTAssertFalse(model.copyPatch(to: board), "nothing to copy while loading")
 
         await model.loadForTesting()

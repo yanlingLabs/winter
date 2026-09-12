@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Office Stage A Task 4 — the exhaustive, pure table test for `TileMath`: unit conversions, the
 /// zoomPPT=1000 identity that pins the Tile Core spec's "256pt tiles at 2x (512px)" line, floor

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { TRANSIENT_EVENT_TYPES } from "@norma/protocol";
+import { TRANSIENT_EVENT_TYPES } from "@winter/protocol";
 import { ProjectorRefusedError, createEchoWindow } from "../../src/projector";
 import {
   FakeCheckpoints, accept, assistantText, assistantToolUse, init, makeProjector, result, run, textDelta, toolResult, userTextFrame,

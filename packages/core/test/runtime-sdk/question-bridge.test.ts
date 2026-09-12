@@ -1,6 +1,6 @@
 import { test, expect, afterEach, jest } from "bun:test";
 import type { CanUseTool } from "@yanlinglabs/winter-agent-sdk";
-import { QuestionAskedEvent, QuestionResolvedEvent, type NewSessionEvent } from "@norma/protocol";
+import { QuestionAskedEvent, QuestionResolvedEvent, type NewSessionEvent } from "@winter/protocol";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
 import { PermissionGate } from "../../src/agent/gate";
@@ -291,7 +291,7 @@ test("a re-asked question supersedes the stale wait, and the withdrawal lands BE
 });
 
 test("AskUserQuestion reaches a human under dont-ask — a deliberate descriptor divergence", async () => {
-  // Winter's own descriptor says AskUserQuestion is "denied under `dontAsk`". Norma's `ask_user` is
+  // Winter's own descriptor says AskUserQuestion is "denied under `dontAsk`". Winter's `ask_user` is
   // READ_ONLY and therefore ALLOWED under `dont-ask` today, and the bridge routes the tool to the
   // question broker before any policy is consulted — so on this leg the human is still asked.
   // Recorded and pinned rather than silently inherited: `dont-ask` means "don't ask me to approve

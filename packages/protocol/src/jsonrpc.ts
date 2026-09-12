@@ -78,7 +78,7 @@ export function parseIncoming(raw: unknown): Incoming {
   return { kind: "response", msg: RpcResponse.parse(raw) };
 }
 
-// Error codes (spec §5): JSON-RPC reserved + Norma application codes.
+// Error codes (spec §5): JSON-RPC reserved + Winter application codes.
 export const ERR = {
   PARSE_ERROR: -32700,
   INVALID_REQUEST: -32600,

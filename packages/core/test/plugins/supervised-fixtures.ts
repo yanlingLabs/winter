@@ -37,35 +37,35 @@ const EXAMPLES_DIR = join(import.meta.dir, "../../../../examples/sample-echo");
 const BATTERY_LIMITER_DIR = join(import.meta.dir, "../../../../examples/battery-limiter");
 const PLUGIN_SDK_ENTRY = join(import.meta.dir, "../../../plugin-sdk/src/index.ts");
 
-/** Copies an `examples/<name>` reference plugin into `<normaHome>/plugins/<pluginId>` and
- *  rewrites its `@norma/plugin-sdk` import to an absolute path (a bare copy has no `node_modules`
+/** Copies an `examples/<name>` reference plugin into `<winterHome>/plugins/<pluginId>` and
+ *  rewrites its `@winter/plugin-sdk` import to an absolute path (a bare copy has no `node_modules`
  *  of its own — see the module doc comment). Returns the installed directory. Shared by
  *  `installSampleEcho` and `installBatteryLimiter` below — identical rewrite, different source
  *  tree. */
-function installExample(srcDir: string, normaHome: string, pluginId: string): string {
-  const dest = join(normaHome, "plugins", pluginId);
+function installExample(srcDir: string, winterHome: string, pluginId: string): string {
+  const dest = join(winterHome, "plugins", pluginId);
   cpSync(srcDir, dest, { recursive: true });
   const indexPath = join(dest, "index.ts");
   const rewritten = readFileSync(indexPath, "utf8").replace(
-    'from "@norma/plugin-sdk"',
+    'from "@winter/plugin-sdk"',
     `from ${JSON.stringify(PLUGIN_SDK_ENTRY)}`,
   );
   writeFileSync(indexPath, rewritten);
   return dest;
 }
 
-/** Copies `examples/sample-echo` into `<normaHome>/plugins/<pluginId>` and rewrites its
- *  `@norma/plugin-sdk` import to an absolute path (a bare copy has no `node_modules` of its own —
+/** Copies `examples/sample-echo` into `<winterHome>/plugins/<pluginId>` and rewrites its
+ *  `@winter/plugin-sdk` import to an absolute path (a bare copy has no `node_modules` of its own —
  *  see the module doc comment). Returns the installed directory. */
-export function installSampleEcho(normaHome: string, pluginId: string): string {
-  return installExample(EXAMPLES_DIR, normaHome, pluginId);
+export function installSampleEcho(winterHome: string, pluginId: string): string {
+  return installExample(EXAMPLES_DIR, winterHome, pluginId);
 }
 
 /** Phase 4c Task 5: same install-and-rewrite as `installSampleEcho`, for
  *  `examples/battery-limiter` — the `ctx.hardware()` reference plugin. Used by
  *  `battery-limiter-e2e.test.ts`'s real-child-process hardware round-trip. */
-export function installBatteryLimiter(normaHome: string, pluginId: string): string {
-  return installExample(BATTERY_LIMITER_DIR, normaHome, pluginId);
+export function installBatteryLimiter(winterHome: string, pluginId: string): string {
+  return installExample(BATTERY_LIMITER_DIR, winterHome, pluginId);
 }
 
 /** `ps -p <pid>` liveness probe — a REAL process check (not `process.kill(pid, 0)`), matching the
@@ -120,8 +120,8 @@ export function writeAndLoadSettings(home: string, pluginId: string, opts?: { ha
  *  reduced to the `EligiblePlugin[]` shape `PluginSupervisor.startAll`/`reclaimOrphans` consume. */
 export function buildSpawnablePlugins(home: string, settings: Settings): EligiblePlugin[] {
   const pluginStore = new PluginStore({
-    normaHome: home, plugins: settings.plugins, consents: settings.plugins?.consents,
-    log: (m) => { if (process.env.NORMA_TEST_DEBUG) console.error(`[plugins] ${m}`); },
+    winterHome: home, plugins: settings.plugins, consents: settings.plugins?.consents,
+    log: (m) => { if (process.env.WINTER_TEST_DEBUG) console.error(`[plugins] ${m}`); },
   });
   return pluginStore.list()
     .filter(pluginSpawnEligible)
@@ -182,12 +182,12 @@ export async function createSupervisedInstance(params: {
   plugins?: boolean;
   /** Phase 4d-ii Task 4, opt-in and purely additive (independent of `plugins`/`hardware` above,
    *  though every current caller that wants this also wants `plugins: true` for `plugins.list`
-   *  enrichment). Forwards `normaHome: home` into `startIpcServer` so the plugin-lifecycle RPCs
-   *  (plugins.install/plugin.enable/disable/remove/setConsent, ipc/server.ts) have a normaHome to
+   *  enrichment). Forwards `winterHome: home` into `startIpcServer` so the plugin-lifecycle RPCs
+   *  (plugins.install/plugin.enable/disable/remove/setConsent, ipc/server.ts) have a winterHome to
    *  read+write settings.json/the plugins dir against — server.test.ts's own `bootLifecycleServer`
    *  wires the SAME option directly; this lets `gate-4d-ii.test.ts` get it through the shared
    *  supervised-fixtures boot path instead of hand-rolling its own IpcServer wiring a second time. */
-  wireNormaHome?: boolean;
+  wireWinterHome?: boolean;
 }): Promise<SupervisedInstance> {
   const { home, socketPath, supervisorSettings, spawn, signalPid } = params;
   const store = new SessionStore(home);
@@ -203,7 +203,7 @@ export async function createSupervisedInstance(params: {
     spawn,
     signalPid,
     settings: { registrationTimeoutMs: 60_000, killGraceMs: 1_500, ...supervisorSettings },
-    onLog: (m) => { if (process.env.NORMA_TEST_DEBUG) console.error(`[supervisor] ${m}`); },
+    onLog: (m) => { if (process.env.WINTER_TEST_DEBUG) console.error(`[supervisor] ${m}`); },
     onCircuitOpen: (id) => registry.unregisterByPrefix(`plugin__${id}__`),
   });
 
@@ -221,29 +221,29 @@ export async function createSupervisedInstance(params: {
     hardwareBroker = new HardwareBroker({ audit, pushToProvider: (e) => providerLink!.push(e) });
     const settings = loadSettings(join(home, "settings.json"));
     plugins = new PluginStore({
-      normaHome: home, plugins: settings.plugins, consents: settings.plugins?.consents,
-      log: (m) => { if (process.env.NORMA_TEST_DEBUG) console.error(`[plugins] ${m}`); },
+      winterHome: home, plugins: settings.plugins, consents: settings.plugins?.consents,
+      log: (m) => { if (process.env.WINTER_TEST_DEBUG) console.error(`[plugins] ${m}`); },
     });
   } else if (params.plugins) {
     const settings = loadSettings(join(home, "settings.json"));
     plugins = new PluginStore({
-      normaHome: home, plugins: settings.plugins, consents: settings.plugins?.consents,
-      log: (m) => { if (process.env.NORMA_TEST_DEBUG) console.error(`[plugins] ${m}`); },
+      winterHome: home, plugins: settings.plugins, consents: settings.plugins?.consents,
+      log: (m) => { if (process.env.WINTER_TEST_DEBUG) console.error(`[plugins] ${m}`); },
     });
   }
 
   // The socket must already be listening before startAll() spawns a child — the child connects to
-  // NORMA_SOCKET immediately on startup.
+  // WINTER_SOCKET immediately on startup.
   const server = startIpcServer({
     socketPath, serverVersion: "test", tokens: authority, store, registry, supervisor, contrib,
     providerLink, hardware: hardwareBroker, peripheral, plugins,
-    normaHome: params.wireNormaHome ? home : undefined,
+    winterHome: params.wireWinterHome ? home : undefined,
   });
 
   return { store, authority, registry, contrib, supervisor, server, providerLink, hardware: hardwareBroker, peripheral, plugins };
 }
 
-/** The Task 6 convenience wrapper: installs sample-echo into a fresh tmp `normaHome`, writes/loads
+/** The Task 6 convenience wrapper: installs sample-echo into a fresh tmp `winterHome`, writes/loads
  *  real consent-complete settings, boots one `SupervisedInstance`, and immediately `startAll`s the
  *  single eligible plugin. Matches `supervised-e2e.test.ts`'s original `bootSupervisedServer`
  *  shape exactly (same fields, same behavior with default options) plus two additive knobs the
@@ -265,7 +265,7 @@ export async function bootSupervisedServer(pluginId: string, opts?: {
   spawnable: EligiblePlugin[];
   stop: () => void;
 }> {
-  const home = mkdtempSync(join(tmpdir(), "norma-plugin-supervised-"));
+  const home = mkdtempSync(join(tmpdir(), "winter-plugin-supervised-"));
   installSampleEcho(home, pluginId);
   const settings = writeAndLoadSettings(home, pluginId);
   const socketPath = join(home, "core.sock");

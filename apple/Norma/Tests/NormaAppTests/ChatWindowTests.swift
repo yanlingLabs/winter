@@ -1,6 +1,6 @@
 import XCTest
 import AppKit
-@testable import Norma
+@testable import Winter
 
 /// Chat Mode Slice A (CM-T3) / Plan-immunity Task 2, surviving App shell T6's menu-bar retarget:
 /// `AppDelegate.isOrbSidebarRow(_:)` (the orb's dispatch-only sidebar filter — a DIFFERENT subject
@@ -387,7 +387,7 @@ final class ChatWindowTests: XCTestCase {
             XCTFail("makeDetachedFeed must succeed with a real (non-missing) token")
             return
         }
-        let source = DetachedWindowController(feed: sourceFeed, session: sourceSession, frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma")
+        let source = DetachedWindowController(feed: sourceFeed, session: sourceSession, frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Winter")
         delegate.registerDetachedWindow(source)
         XCTAssertEqual(delegate.detachedWindows.count, 1)
 
@@ -437,7 +437,7 @@ final class ChatWindowTests: XCTestCase {
             XCTFail("makeDetachedFeed must succeed with a real (non-missing) token")
             return
         }
-        let source = DetachedWindowController(feed: sourceFeed, session: sourceSession, frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma")
+        let source = DetachedWindowController(feed: sourceFeed, session: sourceSession, frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Winter")
         delegate.registerDetachedWindow(source)
         source.show()
 
@@ -511,7 +511,7 @@ final class ChatWindowTests: XCTestCase {
             XCTFail("makeDetachedFeed must succeed with a real (non-missing) token")
             return
         }
-        let source = DetachedWindowController(feed: sourceFeed, session: sourceSession, frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma")
+        let source = DetachedWindowController(feed: sourceFeed, session: sourceSession, frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Winter")
         delegate.registerDetachedWindow(source)
 
         source.onOpenSessionDetached?("s_code")

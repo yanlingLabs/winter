@@ -128,7 +128,7 @@ public actor TokenSource {
     }
 
     /// Reactive (401): force a single refresh and return the fresh credentials. Throws on failure so
-    /// the caller can surface `.error(auth)` — the daemon's "token refresh failed, run: norma login".
+    /// the caller can surface `.error(auth)` — the daemon's "token refresh failed, run: winter login".
     public func refreshedCredentials() async throws -> (accessToken: String, accountId: String?) {
         let fresh = try await refresh(force: true)
         return (fresh.accessToken, fresh.accountId)

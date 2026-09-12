@@ -1,5 +1,5 @@
 import Foundation
-@testable import NormaChatKit
+@testable import WinterChatKit
 
 /// The ONLY model any research test ever speaks to. Returns a pre-scripted event list per
 /// `streamTurn` call (one list per round) and records every `ProviderTurnRequest` verbatim, so a

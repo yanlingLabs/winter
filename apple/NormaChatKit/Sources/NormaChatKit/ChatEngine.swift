@@ -1,16 +1,16 @@
 import Foundation
-import NormaProtocol
+import WinterProtocol
 
 /// The phone's standalone chat turn-loop — the Swift counterpart of the daemon's chat turn
 /// (`packages/core/src/agent/engine.ts`), radically reduced to exactly what a phone-local chat
-/// session needs: stream from the provider, emit typed NormaProtocol `SessionEvent`s, dispatch chat's
+/// session needs: stream from the provider, emit typed WinterProtocol `SessionEvent`s, dispatch chat's
 /// three tools, and continue on the model's tool calls until it answers. Two engines, ONE event
 /// dialect — the fixture round-trip test proves an engine-emitted event decodes through the same
-/// NormaProtocol coders the daemon's events do, which is why Slice C's transcript UI works unchanged.
+/// WinterProtocol coders the daemon's events do, which is why Slice C's transcript UI works unchanged.
 ///
 /// Opaque reasoning discipline (CLAUDE.md §events): a provider `reasoning_item` is appended to the
 /// session log via `LocalSession.appendReasoning` — its ONLY sink — and fed back to the provider for
-/// continuity, but NEVER surfaced through `emit` (NormaProtocol has no reasoning_item variant by
+/// continuity, but NEVER surfaced through `emit` (WinterProtocol has no reasoning_item variant by
 /// design: a reasoning item is not a renderable event).
 
 // MARK: - session seam
@@ -87,11 +87,11 @@ public final class ChatEngine: @unchecked Sendable {
     /// model composes the fuller instructions (date, user instructions, the replicated memory bucket)
     /// on top of this via `ChatToolset.systemPrompt`; this is the floor.
     public static let defaultSystemPrompt = [
-        "You are Norma in Chat mode: a conversation, not an agent. You have no access to this machine — no files, no shell, no repository — and you never imply otherwise.",
+        "You are Winter in Chat mode: a conversation, not an agent. You have no access to this machine — no files, no shell, no repository — and you never imply otherwise.",
         "",
         "# What you are here for",
         "Thinking things through with the user: questions, explanations, drafting, planning, remembering.",
-        "You share the assistant memory that Norma builds across conversations — use what you know about the user, and do not re-ask what is already established.",
+        "You share the assistant memory that Winter builds across conversations — use what you know about the user, and do not re-ask what is already established.",
         "",
         "# Honesty about your reach",
         "If something needs the user's files, code, or terminal, say so plainly and point at the mode that can do it (Code for a project, Dispatch to coordinate work).",
@@ -412,7 +412,7 @@ public final class ChatEngine: @unchecked Sendable {
     static let toolSpecs: [ProviderToolSpec] = [
         ProviderToolSpec(
             name: "Search",
-            description: "Search the web and get back results WITH an excerpt of each page, in a single fast call. Use it freely whenever a fact might be newer than you are, or when the user asks about something current. Cite the URL when you use what it returns. Requires a stored Exa API key (norma login --exa-key).",
+            description: "Search the web and get back results WITH an excerpt of each page, in a single fast call. Use it freely whenever a fact might be newer than you are, or when the user asks about something current. Cite the URL when you use what it returns. Requires a stored Exa API key (winter login --exa-key).",
             parametersJSON: #"{"type":"object","properties":{"query":{"type":"string","minLength":1},"max_results":{"type":"integer","minimum":1}},"required":["query"],"additionalProperties":false}"#),
         ProviderToolSpec(
             name: "ReadPage",

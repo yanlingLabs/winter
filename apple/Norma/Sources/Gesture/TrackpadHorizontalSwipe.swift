@@ -1,7 +1,7 @@
 import AppKit
 import QuartzCore
 
-/// Ported from v1 Norma/Gesture/TrackpadHorizontalSwipe.swift:1-317 — the HORIZONTAL swipe
+/// Ported from v1 Winter/Gesture/TrackpadHorizontalSwipe.swift:1-317 — the HORIZONTAL swipe
 /// recognizer core only. The vertical recognizer (`TrackpadVerticalSwipeRecognizer`) and every
 /// DynamicIsland-specific caller (`ScrollRedirector`, `DynamicIslandController`'s own copy,
 /// `DynamicIslandPlugin.onHorizontalSwipe`) are NOT ported — 2c wave 2 task 4 has exactly one
@@ -98,7 +98,7 @@ enum TrackpadHorizontalSwipeResult: Equatable {
     }
 }
 
-/// Ported from v1 Norma/Gesture/TrackpadHorizontalSwipe.swift:66-190
+/// Ported from v1 Winter/Gesture/TrackpadHorizontalSwipe.swift:66-190
 /// (`TrackpadHorizontalSwipeRecognizer`) — thresholds, phase discipline, and accumulation logic
 /// UNCHANGED. Only the return type changed shape (see `TrackpadHorizontalSwipeResult` above);
 /// every branch below maps 1:1 onto its v1 counterpart's `(consumesScroll, direction)` pair.

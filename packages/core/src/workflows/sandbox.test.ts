@@ -7,7 +7,7 @@ import { buildWorkflowSeatbeltProfile, sandboxAvailable } from "./sandbox";
 import { sandboxAvailable as agentSandboxAvailable } from "../agent/sandbox";
 
 function realTmp(): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), "norma-wf-sb-")));
+  return realpathSync(mkdtempSync(join(tmpdir(), "winter-wf-sb-")));
 }
 
 describe("buildWorkflowSeatbeltProfile", () => {
@@ -41,7 +41,7 @@ describe("buildWorkflowSeatbeltProfile", () => {
   });
 
   test("canonicalizes the self-exec literal (macOS symlink resolution, e.g. /tmp -> /private/tmp)", () => {
-    const rawDir = mkdtempSync(join(tmpdir(), "norma-wf-sb-"));
+    const rawDir = mkdtempSync(join(tmpdir(), "winter-wf-sb-"));
     const resolvedDir = realpathSync(rawDir);
     const rawSelf = join(rawDir, "fake-bun");
     writeFileSync(rawSelf, "");
@@ -103,7 +103,7 @@ import { writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { connect } from "node:net";
 function probeWrite() {
-  try { writeFileSync("/tmp/norma-wf-sandbox-test-escape.txt", "x"); return "ALLOWED"; }
+  try { writeFileSync("/tmp/winter-wf-sandbox-test-escape.txt", "x"); return "ALLOWED"; }
   catch (e) { return "DENIED:" + (e && e.code || e); }
 }
 function probeExec() {
@@ -130,7 +130,7 @@ function probeNet() {
 d("buildWorkflowSeatbeltProfile: real sandbox-exec containment (integration)", () => {
   test("bun boots to completion under the profile (exit 0) AND write/exec/net are all denied inside it", () => {
     const bun = process.execPath; // the running bun binary — same shape as the runtime's self-spawn
-    const probeFile = "/tmp/norma-wf-sandbox-test-escape.txt";
+    const probeFile = "/tmp/winter-wf-sandbox-test-escape.txt";
     try {
       const profile = buildWorkflowSeatbeltProfile(bun);
       const r = spawnSync("/usr/bin/sandbox-exec", ["-p", profile, bun, "-e", PROBE_SCRIPT], {

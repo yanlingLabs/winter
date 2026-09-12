@@ -5,7 +5,7 @@
 // `user` and `stream_event` frames cannot occur, while the runtime yields both. Import the real one.
 import type { ProtocolSdkMessage } from "@yanlinglabs/winter-agent-sdk";
 import type { RuntimeKind } from "@yanlinglabs/winter-runtime-sdk";
-import type { NewSessionEvent, SessionEvent } from "@norma/protocol";
+import type { NewSessionEvent, SessionEvent } from "@winter/protocol";
 
 export type { ProtocolSdkMessage };
 
@@ -92,7 +92,7 @@ export class ProjectorRefusedError extends Error {
 }
 
 export interface ProjectorDeps {
-  /** The NORMA session id every produced event is stamped with. */
+  /** The WINTER session id every produced event is stamped with. */
   sessionId: string;
   mode: SessionMode;
   /** The store's next sequence number. Called once per PERSISTED event; transients never consume one. */

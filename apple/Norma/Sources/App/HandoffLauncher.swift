@@ -10,9 +10,9 @@ enum HandoffError: Error, Equatable {
 
 /// App→CLI handoff (SP4 Plan 1, Task 1): builds and launches the per-invocation script that
 /// moves a code session into Terminal — `cd` into the session's main dir, then `exec` the CLI's
-/// `resume <sessionId>` against an ABSOLUTE binary (never the `norma`/`norma-dev` globals; R2).
+/// `resume <sessionId>` against an ABSOLUTE binary (never the `winter`/`winter-dev` globals; R2).
 ///
-/// The script ALWAYS bakes `export NORMA_HOME=…` + `export NORMA_PROFILE=…` — in BOTH profiles —
+/// The script ALWAYS bakes `export WINTER_HOME=…` + `export WINTER_PROFILE=…` — in BOTH profiles —
 /// because a Terminal launched via `open -a` inherits NOTHING of this app's process env; a script
 /// without them reproduces the dev/dist profile-blindness class (the CLI would dial the wrong
 /// daemon's socket and keychain). Same lesson `CliLauncher`'s wrapper learned; see that class doc.
@@ -28,13 +28,13 @@ enum HandoffLauncher {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    /// Pure: the handoff script's exact byte content. Both profiles bake NORMA_HOME/NORMA_PROFILE
+    /// Pure: the handoff script's exact byte content. Both profiles bake WINTER_HOME/WINTER_PROFILE
     /// (see the class doc for why); every interpolated value is single-quoted via
     /// `shellSingleQuoted`. Dev execs the checkout CLI through bun; dist execs the bundled
-    /// `norma-core` binary directly.
-    static func handoffScript(dev: Bool, normaHome: String, cliPath: String,
+    /// `winter-core` binary directly.
+    static func handoffScript(dev: Bool, winterHome: String, cliPath: String,
                               dir: String, sessionId: String) -> String {
-        let home = shellSingleQuoted(normaHome)
+        let home = shellSingleQuoted(winterHome)
         let d = shellSingleQuoted(dir)
         let sid = shellSingleQuoted(sessionId)
         let execLine = dev
@@ -42,17 +42,17 @@ enum HandoffLauncher {
             : "exec \(shellSingleQuoted(cliPath)) resume \(sid)"
         return """
         #!/bin/sh
-        export NORMA_HOME=\(home)
-        export NORMA_PROFILE='\(dev ? "dev" : "dist")'
+        export WINTER_HOME=\(home)
+        export WINTER_PROFILE='\(dev ? "dev" : "dist")'
         cd \(d)
         \(execLine)
 
         """
     }
 
-    /// `#filePath` for this file is `<repoRoot>/apple/Norma/Sources/App/HandoffLauncher.swift` —
+    /// `#filePath` for this file is `<repoRoot>/apple/Winter/Sources/App/HandoffLauncher.swift` —
     /// the same directory as `CliLauncher.swift`, so the same five `deletingLastPathComponent()`
-    /// hops strip the filename, `App`, `Sources`, `Norma`, `apple`, leaving `<repoRoot>`; then
+    /// hops strip the filename, `App`, `Sources`, `Winter`, `apple`, leaving `<repoRoot>`; then
     /// down to the checkout CLI entry point. DEV-mode only: `moveToCli` reaches here iff
     /// `AppProfile.isDev`, and `#filePath` embeds the builder's absolute path, so Release
     /// compiles the literal out entirely (mirroring `CliLauncher.defaultRepoRoot`).
@@ -66,12 +66,12 @@ enum HandoffLauncher {
         #else
         // Unreachable: dist builds have AppProfile.isDev == false, and moveToCli only calls
         // this on the dev branch. A sentinel path keeps the symbol total without baking one.
-        return "/norma-dev-checkout-unavailable/packages/cli/src/main.ts"
+        return "/winter-dev-checkout-unavailable/packages/cli/src/main.ts"
         #endif
     }
 
     /// Effectful: resolves the CLI path (dev: bun + checkout via `#filePath`; dist: the app's own
-    /// `Bundle.main` `norma-core` — works with no symlink installed), writes the per-invocation
+    /// `Bundle.main` `winter-core` — works with no symlink installed), writes the per-invocation
     /// temp script 0755, `open -a Terminal <script>`, then schedules best-effort cleanup.
     /// Runs `open` synchronously — it returns fast (it doesn't wait on Terminal).
     /// Failures come back as a typed `Result` for the caller to SURFACE; they're also logged
@@ -82,18 +82,18 @@ enum HandoffLauncher {
         if dev {
             cliPath = checkoutMainTs()
         } else {
-            guard let url = Bundle.main.resourceURL?.appendingPathComponent("norma-core"),
+            guard let url = Bundle.main.resourceURL?.appendingPathComponent("winter-core"),
                   FileManager.default.isExecutableFile(atPath: url.path) else {
                 let missing = Bundle.main.resourceURL?.path ?? "<no bundle>"
-                OrbDebug.log("HandoffLauncher.moveToCli: bundled norma-core missing at \(missing)")
+                OrbDebug.log("HandoffLauncher.moveToCli: bundled winter-core missing at \(missing)")
                 return .failure(.cliMissing(missing))
             }
             cliPath = url.path
         }
-        let script = handoffScript(dev: dev, normaHome: AppProfile.normaHome,
+        let script = handoffScript(dev: dev, winterHome: AppProfile.winterHome,
                                    cliPath: cliPath, dir: dir, sessionId: sessionId)
         let target = FileManager.default.temporaryDirectory
-            .appendingPathComponent("norma-handoff-\(sessionId)-\(UUID().uuidString).sh")
+            .appendingPathComponent("winter-handoff-\(sessionId)-\(UUID().uuidString).sh")
         do {
             try script.write(to: target, atomically: true, encoding: .utf8)
             try FileManager.default.setAttributes([.posixPermissions: 0o755],

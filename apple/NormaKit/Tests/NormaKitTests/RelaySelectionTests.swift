@@ -1,7 +1,7 @@
 import XCTest
 import IrohLib
-@testable import NormaKit
-@testable import NormaSessionKit
+@testable import WinterKit
+@testable import WinterSessionKit
 
 /// SP3.2: `RelaySelection` maps onto iroh's `RelayMode` and resolves the new explicit `relays`
 /// override against the legacy `relayURLs` seam. Fully HERMETIC — constructing a `RelayMode` and

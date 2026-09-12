@@ -1,5 +1,5 @@
 import Foundation
-import NormaKit
+import WinterKit
 
 /// working-directories T8: the PURE decisions behind the app's two working-directory surfaces — the
 /// create-time picker sheet (`WorkingDirPickerSheet`) and the mid-session folders chip
@@ -24,7 +24,7 @@ let maxRecentWorkingDirs = 8
 /// Three deliberate choices:
 ///   * **Primaries only** (`dirs.first`) — a secondary is a directory some session was additionally
 ///     granted, not the project it was working in. `dirs[0]` is the primary BY POSITION.
-///   * **Locked only** — the first-write lock means Norma actually WROTE there. An unlocked primary
+///   * **Locked only** — the first-write lock means Winter actually WROTE there. An unlocked primary
 ///     is a folder that was picked and then never worked in; offering it as a "recent project" would
 ///     let one mistaken pick propagate itself forward through every future sheet.
 ///   * **Client-side, off `session.list`** — no new RPC (design doc §2: "the picker's data all rides
@@ -135,7 +135,7 @@ func dirsPrimaryIsReplaceable(_ dirs: [SessionDirEntry]) -> Bool {
 /// The confirm-alert text for a manual add/replace (the user's explicit ruling: a manual add is
 /// SELECTION + CONFIRM, never a one-click widening). Names the op and the FULL path — the leaf name
 /// alone would let two same-named folders in different trees read identically at the exact moment
-/// the user is being asked to widen what Norma may write to.
+/// the user is being asked to widen what Winter may write to.
 ///
 /// (wd-m31): `.remove` is dead in practice — this function's only caller, `confirmWorkingDir`, is
 /// only ever reached from `pickWorkingDir`, which the menu wires to `.setPrimary`/`.add` alone; the
@@ -154,6 +154,6 @@ func workingDirConfirmMessage(op: SessionDirsOp, path: String) -> String {
 }
 
 /// The confirm alert's own explanation line — what approving actually grants. Deliberately concrete
-/// (Norma may WRITE there) rather than "allow access": the whole point of a working directory is the
+/// (Winter may WRITE there) rather than "allow access": the whole point of a working directory is the
 /// write fence, and reads were never fenced at all.
-let workingDirConfirmDetail = "Norma will be able to write inside it for the rest of this session."
+let workingDirConfirmDetail = "Winter will be able to write inside it for the rest of this session."

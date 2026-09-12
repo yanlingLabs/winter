@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CORE_VERSION } from "@norma/core";
+import { CORE_VERSION } from "@winter/core";
 import { formatQuestionHeadlineLine, formatResumeHint, invisibleKeyCharWarning, routeCliInvocation, type CliRoute } from "../src/main";
 import { agentResumeCommand } from "../src/agents-cli";
 
@@ -14,20 +14,20 @@ import { agentResumeCommand } from "../src/agents-cli";
 // (process.argv.slice(2)), matching what main.ts passes.
 
 describe("routeCliInvocation — bare / policy-flag entry (Findings 3 & 4)", () => {
-  test("bare `norma` on a TTY → chat, no existing session", () => {
+  test("bare `winter` on a TTY → chat, no existing session", () => {
     expect(routeCliInvocation([], true)).toEqual<CliRoute>({ kind: "chat" });
   });
 
-  test("bare `norma --auto` / `--plan` on a TTY → chat (Finding 3 — previously fell through to help)", () => {
+  test("bare `winter --auto` / `--plan` on a TTY → chat (Finding 3 — previously fell through to help)", () => {
     expect(routeCliInvocation(["--auto"], true)).toEqual<CliRoute>({ kind: "chat" });
     expect(routeCliInvocation(["--plan"], true)).toEqual<CliRoute>({ kind: "chat" });
   });
 
-  test("non-TTY bare `norma` → fallthrough, NOT chat (Finding 4 — keeps the usage/help output on scripted stdin)", () => {
+  test("non-TTY bare `winter` → fallthrough, NOT chat (Finding 4 — keeps the usage/help output on scripted stdin)", () => {
     expect(routeCliInvocation([], false)).toEqual<CliRoute>({ kind: "fallthrough" });
   });
 
-  test("non-TTY `norma --auto` / `--plan` → fallthrough too (chat requires a TTY regardless of which flag asked for it)", () => {
+  test("non-TTY `winter --auto` / `--plan` → fallthrough too (chat requires a TTY regardless of which flag asked for it)", () => {
     expect(routeCliInvocation(["--auto"], false)).toEqual<CliRoute>({ kind: "fallthrough" });
     expect(routeCliInvocation(["--plan"], false)).toEqual<CliRoute>({ kind: "fallthrough" });
   });
@@ -101,7 +101,7 @@ describe("routeCliInvocation — resume (Finding 3)", () => {
 // decision (same rationale as the table above); the exact printed line + exit code are pinned by
 // the subprocess tests below (console.log/process.exit live in the dispatcher, not here).
 describe("routeCliInvocation — --version / -v (handoff Task 2)", () => {
-  test("`norma --version` / `norma -v` → version, TTY or not (scripts ask for versions)", () => {
+  test("`winter --version` / `winter -v` → version, TTY or not (scripts ask for versions)", () => {
     expect(routeCliInvocation(["--version"], true)).toEqual<CliRoute>({ kind: "version" });
     expect(routeCliInvocation(["-v"], true)).toEqual<CliRoute>({ kind: "version" });
     expect(routeCliInvocation(["--version"], false)).toEqual<CliRoute>({ kind: "version" });
@@ -126,17 +126,17 @@ describe("routeCliInvocation — --version / -v (handoff Task 2)", () => {
 });
 
 // The dispatcher half of the flag: exact bytes + exit code, via the real entry point. The
-// `--version` path never dials the daemon or reads settings, but NORMA_HOME still points at a
-// temp dir (house rule: tests never touch ~/.norma). Spawn pipes are non-TTY — which doubles as
+// `--version` path never dials the daemon or reads settings, but WINTER_HOME still points at a
+// temp dir (house rule: tests never touch ~/.winter). Spawn pipes are non-TTY — which doubles as
 // proof the flag is not TTY-gated.
-describe("norma --version — printed line and exit code (handoff Task 2)", () => {
+describe("winter --version — printed line and exit code (handoff Task 2)", () => {
   const cliDir = join(import.meta.dir, "..");
-  const home = mkdtempSync(join(tmpdir(), "norma-version-flag-"));
+  const home = mkdtempSync(join(tmpdir(), "winter-version-flag-"));
 
   const runMain = async (...args: string[]): Promise<{ stdout: string; exitCode: number }> => {
     const proc = Bun.spawn(["bun", "src/main.ts", ...args], {
       cwd: cliDir,
-      env: { ...process.env, NORMA_HOME: home },
+      env: { ...process.env, WINTER_HOME: home },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -145,17 +145,17 @@ describe("norma --version — printed line and exit code (handoff Task 2)", () =
     return { stdout, exitCode };
   };
 
-  test("`--version` and `-v` print exactly `norma <CORE_VERSION>` + newline, exit 0", async () => {
+  test("`--version` and `-v` print exactly `winter <CORE_VERSION>` + newline, exit 0", async () => {
     for (const flag of ["--version", "-v"]) {
       const { stdout, exitCode } = await runMain(flag);
-      expect(stdout).toBe(`norma ${CORE_VERSION}\n`);
+      expect(stdout).toBe(`winter ${CORE_VERSION}\n`);
       expect(exitCode).toBe(0);
     }
   }, 30_000);
 
   test("the usage header carries CORE_VERSION — the Phase 1b-ii-d fossil is gone", async () => {
     const { stdout } = await runMain(); // bare, non-TTY → fallthrough → usage (Finding 4 table above)
-    expect(stdout.startsWith(`norma ${CORE_VERSION} — commands:`)).toBe(true);
+    expect(stdout.startsWith(`winter ${CORE_VERSION} — commands:`)).toBe(true);
     expect(stdout).not.toContain("Phase 1b-ii-d");
   }, 30_000);
 });
@@ -164,7 +164,7 @@ describe("formatResumeHint (Phase 3c Task 5 — the dim post-exit resume hint)",
   test("exact text (dim-wrapped), including the session id", () => {
     const DIM = "\x1b[2m";
     const RESET = "\x1b[0m";
-    expect(formatResumeHint("s_abc123")).toBe(`${DIM}\nResume this session with:\n  norma resume s_abc123\n${RESET}`);
+    expect(formatResumeHint("s_abc123")).toBe(`${DIM}\nResume this session with:\n  winter resume s_abc123\n${RESET}`);
   });
 
   test("no trailing newline is added beyond the one already in the spec string (process.stdout.write, not console.log)", () => {
@@ -172,14 +172,14 @@ describe("formatResumeHint (Phase 3c Task 5 — the dim post-exit resume hint)",
     expect(hint.endsWith("\n\x1b[0m")).toBe(true); // ends with the required "\n" then the RESET code — no EXTRA "\n"
   });
 
-  // session-activity-hygiene T9: `norma agents`' "open" verb prints a resume invocation for the
+  // session-activity-hygiene T9: `winter agents`' "open" verb prints a resume invocation for the
   // selected session. Two surfaces now tell a user how to get back into a session, and a roster that
   // printed a command the CLI does not accept would be worse than printing nothing — so the strings
   // are bound together here rather than each being asserted against a literal in its own file.
-  // `norma resume <id>` is a SUBCOMMAND (main.ts's `case "resume"`), NOT a `--resume` flag.
+  // `winter resume <id>` is a SUBCOMMAND (main.ts's `case "resume"`), NOT a `--resume` flag.
   test("agentResumeCommand is exactly the invocation formatResumeHint already advertises", () => {
     expect(formatResumeHint("s_abc123")).toContain(agentResumeCommand("s_abc123"));
-    expect(agentResumeCommand("s_abc123")).toBe("norma resume s_abc123");
+    expect(agentResumeCommand("s_abc123")).toBe("winter resume s_abc123");
   });
 });
 
@@ -207,14 +207,14 @@ describe("formatQuestionHeadlineLine (Slice B1 Task 4 — CLI one-line question 
   });
 });
 
-// Branch review (chat-mode Slice B1, FIX 1 — defense in depth): `norma login --exa-key` /
+// Branch review (chat-mode Slice B1, FIX 1 — defense in depth): `winter login --exa-key` /
 // `--web-search-key` must reject a key carrying a non-printable or non-ASCII character BEFORE it
 // ever reaches a fetch header, since Bun's real fetch embeds an invalid header's VALUE verbatim in
 // its own error text (confirmed live against both Exa's and Brave's auth headers — see
 // search.test.ts/web.test.ts's own FIX-1 tests). `.trim()` does NOT strip U+200B (Cf category, not
 // whitespace) — the most common copy-paste artifact. Every "bad" char below is spelled with an
 // explicit \u escape (not a literal invisible character) so the test source stays legible.
-describe("invisibleKeyCharWarning (branch review FIX 1 — `norma login --exa-key`/`--web-search-key`)", () => {
+describe("invisibleKeyCharWarning (branch review FIX 1 — `winter login --exa-key`/`--web-search-key`)", () => {
   test("a clean printable-ASCII key -> null (no warning)", () => {
     expect(invisibleKeyCharWarning("sk-exa-abc123XYZ_-")).toBeNull();
   });

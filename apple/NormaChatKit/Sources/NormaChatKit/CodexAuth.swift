@@ -59,11 +59,11 @@ public struct CodexConfig: Sendable, Equatable {
         headers: [
             "OpenAI-Beta": "responses=experimental",
             // Originator header — identifies the client to the ChatGPT backend. We SELF-IDENTIFY
-            // as "norma" rather than sending codex-rs's first-party value "codex_cli_rs". This is
+            // as "winter" rather than sending codex-rs's first-party value "codex_cli_rs". This is
             // the same deliberate go-public ToS decision the daemon made (codex-config.ts's long
-            // comment): Norma is an independent client and says so honestly. Do NOT revert to a
+            // comment): Winter is an independent client and says so honestly. Do NOT revert to a
             // first-party value to chase fingerprint parity — on the phone no less than the Mac.
-            "originator": "norma",
+            "originator": "winter",
         ]
     )
 

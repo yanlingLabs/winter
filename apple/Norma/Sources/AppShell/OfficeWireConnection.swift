@@ -1,8 +1,8 @@
 import Foundation
-import NormaKit
+import WinterKit
 
-/// Trips exactly once; returns `true` only for the tripping caller. A private twin of NormaKit's
-/// own `UnixSocketTransport.OnceFlag` — that one is internal to NormaKit's module and not visible
+/// Trips exactly once; returns `true` only for the tripping caller. A private twin of WinterKit's
+/// own `UnixSocketTransport.OnceFlag` — that one is internal to WinterKit's module and not visible
 /// here, so this repeats the same ten lines rather than reaching across a module boundary for
 /// them.
 final class OnceFlag: @unchecked Sendable {
@@ -17,7 +17,7 @@ final class OnceFlag: @unchecked Sendable {
 }
 
 /// One client connection to an office helper's Unix socket: line-buffered NDJSON framing over
-/// NormaKit's `UnixSocketTransport`, plus a single-outstanding-request/response primitive with a
+/// WinterKit's `UnixSocketTransport`, plus a single-outstanding-request/response primitive with a
 /// timeout. Owns no retry policy and no process lifecycle — `OfficeHelperSupervisor` layers both
 /// on top. `OfficeSupervisorTests`' token-mismatch case uses this directly, with no supervisor
 /// involved, to assert the WIRE PROTOCOL's own refusal behavior against the fake helper fixture.
@@ -59,7 +59,7 @@ final class OfficeWireConnection: @unchecked Sendable {
         let continuation: CheckedContinuation<OfficeWireFrame?, Never>
     }
 
-    private let transport: NormaTransport
+    private let transport: WinterTransport
     private let lock = NSLock()
     private var buffer = Data()
     /// Task 4 — how many leading bytes of `buffer` are ALREADY confirmed newline-free, while in

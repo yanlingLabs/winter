@@ -1,6 +1,6 @@
 import XCTest
 import AppKit
-@testable import Norma
+@testable import Winter
 
 /// The pins for `HarnessQuiet` — the test-bundle-only hooks that stop this suite hijacking the
 /// desktop it runs on (see that type's doc for why each lever was chosen against measurement).
@@ -194,7 +194,7 @@ final class HarnessQuietTests: XCTestCase {
     func testShouldDimCatchesSwiftMangledPrivateAppClasses() {
         XCTAssertTrue(
             HarnessQuiet.shouldDim(
-                windowClassName: "_TtC5NormaP33_D87F03A9DDDF9A6DA5F5A83835FCB2EF25KeyableNonActivatingPanel"
+                windowClassName: "_TtC5WinterP33_D87F03A9DDDF9A6DA5F5A83835FCB2EF25KeyableNonActivatingPanel"
             ),
             "the orb panel's mangled private-class name must NOT be mistaken for a private AppKit window"
         )
@@ -204,6 +204,6 @@ final class HarnessQuietTests: XCTestCase {
         XCTAssertTrue(HarnessQuiet.shouldDim(windowClassName: "NSWindow"))
         XCTAssertTrue(HarnessQuiet.shouldDim(windowClassName: "NSPanel"))
         XCTAssertTrue(HarnessQuiet.shouldDim(windowClassName: "KeyableNonActivatingPanel"))
-        XCTAssertTrue(HarnessQuiet.shouldDim(windowClassName: "Norma.OutputsPanelWindow"))
+        XCTAssertTrue(HarnessQuiet.shouldDim(windowClassName: "Winter.OutputsPanelWindow"))
     }
 }

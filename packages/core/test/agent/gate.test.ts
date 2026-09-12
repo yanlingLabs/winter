@@ -193,7 +193,7 @@ describe("PermissionGate v1", () => {
     }
   });
 
-  // 4g Task 5/6: web_fetch/web_search are Norma's only network-capable tools. They get their OWN
+  // 4g Task 5/6: web_fetch/web_search are Winter's only network-capable tools. They get their OWN
   // gate class (NETWORK), distinct from both READ_ONLY and MUTATING.
   //
   // SP-approvals T10 (user addition 2026-07-21, spec §7): "web tools become free by default" —

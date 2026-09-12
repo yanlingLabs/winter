@@ -52,8 +52,8 @@ export class WorktreeManager {
     const root = toplevel.stdout.trim();
 
     const wtName = name ?? randomUUID().slice(0, 8);
-    const dir = join(root, ".norma", "worktrees", wtName);
-    const branch = `norma/${wtName}`;
+    const dir = join(root, ".winter", "worktrees", wtName);
+    const branch = `winter/${wtName}`;
 
     if (existsSync(dir)) throw new Error(`worktree dir already exists: ${dir}`);
     const branchList = git(["branch", "--list", branch], root);
@@ -106,7 +106,7 @@ export class WorktreeManager {
 
   /** Creates an EPHEMERAL worktree for a spawned child (spawn_agent `isolation:"worktree"`,
    *  4h-i Task 4) — does NOT read or write `this.sessions`. Mirrors enter()'s git sequence
-   *  exactly (same `.norma/worktrees/<name>` layout, same `norma/<name>` branch naming, same
+   *  exactly (same `.winter/worktrees/<name>` layout, same `winter/<name>` branch naming, same
    *  base-ref resolution) but is a pure create with no per-session bookkeeping: a child's
    *  isolation worktree is per-child and torn down by the SPAWN BRIDGE itself (via
    *  removeDetached below), never by exit_worktree — sharing `sessions` here would let a
@@ -124,8 +124,8 @@ export class WorktreeManager {
     const root = toplevel.stdout.trim();
 
     const wtName = name ?? randomUUID().slice(0, 8);
-    const dir = join(root, ".norma", "worktrees", wtName);
-    const branch = `norma/${wtName}`;
+    const dir = join(root, ".winter", "worktrees", wtName);
+    const branch = `winter/${wtName}`;
 
     if (existsSync(dir)) throw new Error(`worktree dir already exists: ${dir}`);
     const branchList = git(["branch", "--list", branch], root);

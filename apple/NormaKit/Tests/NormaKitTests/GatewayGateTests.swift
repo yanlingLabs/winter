@@ -1,8 +1,8 @@
 import XCTest
 import os
-import NormaProtocol
-import NormaSessionKit
-@testable import NormaKit
+import WinterProtocol
+import WinterSessionKit
+@testable import WinterKit
 
 /// SP2a Task 2: the eight review gates SP1's whole-branch review flagged as only surfacing against
 /// the REAL daemon (SP1's own `GatewayTests` used a scripted fake). Each gate that needs genuine
@@ -21,7 +21,7 @@ import NormaSessionKit
 ///       tripwire — the count is asserted, so this header must be re-stamped when it moves)
 ///
 /// Winter Phase 9a (P9a-11, Lane K): G1, R2 (below) are among the 13 tests `ci.yml`'s
-/// `NORMAKIT_SKIP` names by exact test — bisected to `ed6ebeca6c1fce175ef0e818361fb3662b38d6ca`
+/// `WINTERKIT_SKIP` names by exact test — bisected to `ed6ebeca6c1fce175ef0e818361fb3662b38d6ca`
 /// (`session.dispatch`'s default mode now requires a resolvable `winter` executable this Swift
 /// suite never provisions); see `RealDaemon.waitForFirstLine`'s own doc comment for the full
 /// classification (G2/G3/R1/T6b in this file are NOT waived — they pass once a real `winter`
@@ -97,7 +97,7 @@ final class GatewayGateTests: XCTestCase {
         })
         return Gateway(
             listener: listener,
-            daemonFactory: { NormaClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: remoteToken, clientName: "iphone-gateway") },
+            daemonFactory: { WinterClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: remoteToken, clientName: "iphone-gateway") },
             hostID: "host-test",
             directory: directory
         )
@@ -107,7 +107,7 @@ final class GatewayGateTests: XCTestCase {
     /// (the seq of the seeding harness's own `harness_attached`, a clean cursor to resume from that
     /// is PAST the session_created/harness_attached preamble) and the last content seq.
     func seedTwoMessages(socketPath: String, harnessToken: String) async throws -> (sid: String, afterHarnessAttach: Int, seqM2: Int) {
-        let harness = NormaClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: harnessToken, clientName: "seed")
+        let harness = WinterClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: harnessToken, clientName: "seed")
         try await harness.connect(role: "harness")
         // `session.dispatch {}` (empty object, NOT nil — SessionDispatchParams is z.object({})).
         let sid = try await harness.request("session.dispatch", params: .object([:]))["sessionId"]!.stringValue!
@@ -194,7 +194,7 @@ final class GatewayGateTests: XCTestCase {
         let socketPath = daemon.socketPath, remoteToken = daemon.remoteToken
 
         // A live harness that stays attached, so it can produce a new event mid-handshake.
-        let live = NormaClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: daemon.harnessToken, clientName: "live")
+        let live = WinterClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: daemon.harnessToken, clientName: "live")
         try await live.connect(role: "harness")
         let sid = try await live.request("session.dispatch", params: .object([:]))["sessionId"]!.stringValue!
         let afterAttach = try await live.attach(sessionId: sid, fromSeq: 0)
@@ -267,7 +267,7 @@ final class GatewayGateTests: XCTestCase {
         // burst 2, frozen clock → tokens never refill: exactly 2 admitted, the 3rd rejected.
         let gateway = Gateway(
             listener: listener,
-            daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
+            daemonFactory: { WinterClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
             hostID: "host-test",
             directory: InMemoryDirectory(peerID: "peer-stub"),
             rateLimit: (perSec: 1000, burst: 2),
@@ -319,7 +319,7 @@ final class GatewayGateTests: XCTestCase {
         let listener = LoopbackListener()
         let gateway = Gateway(
             listener: listener,
-            daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
+            daemonFactory: { WinterClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
             hostID: "host-test",
             directory: InMemoryDirectory(peerID: "peer-stub")
         )
@@ -357,7 +357,7 @@ final class GatewayGateTests: XCTestCase {
         let directory = InMemoryDirectory(peerID: "peer-stub")
         let gateway = Gateway(
             listener: listener,
-            daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
+            daemonFactory: { WinterClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
             hostID: "host-test",
             directory: directory
         )
@@ -406,7 +406,7 @@ final class GatewayGateTests: XCTestCase {
         let out2 = try await waitForOutbound(conn2, count: 1)
         // SP3.1 T1: a SESSION dialer (its first frame is a `.hello` WireEnvelope) reconnecting after
         // revoke now gets a WireEnvelope `error` carrying a structured `HandshakeRejection`, not the
-        // raw-JSON `PairRejected` a pairing dialer sees — so a `NormaSessionClient` can surface the
+        // raw-JSON `PairRejected` a pairing dialer sees — so a `WinterSessionClient` can surface the
         // typed `.handshakeRejected(not_paired)` (→ the app's honest `.revoked`) instead of a bare close.
         let rejectionEnv2 = try decodeEnvelope(out2[0])
         XCTAssertEqual(rejectionEnv2.kind, .error)
@@ -469,7 +469,7 @@ final class GatewayGateTests: XCTestCase {
         defer { daemon.stop() }
         let socketPath = daemon.socketPath
 
-        let live = NormaClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: daemon.harnessToken, clientName: "live")
+        let live = WinterClient(makeTransport: { UnixSocketTransport(path: socketPath) }, token: daemon.harnessToken, clientName: "live")
         try await live.connect(role: "harness")
         let sid = try await live.request("session.dispatch", params: .object([:]))["sessionId"]!.stringValue!
         let afterAttach = try await live.attach(sessionId: sid, fromSeq: 0)
@@ -523,7 +523,7 @@ final class GatewayGateTests: XCTestCase {
         let listener = LoopbackListener()
         let gateway = Gateway(
             listener: listener,
-            daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
+            daemonFactory: { WinterClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
             hostID: "host-test",
             directory: InMemoryDirectory(peerID: "peer-stub")
         )
@@ -555,7 +555,7 @@ final class GatewayGateTests: XCTestCase {
         let listener = LoopbackListener()
         let gateway = Gateway(
             listener: listener,
-            daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
+            daemonFactory: { WinterClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
             hostID: "host-test",
             directory: InMemoryDirectory(peerID: "peer-stub")
         )
@@ -621,7 +621,7 @@ final class GatewayGateTests: XCTestCase {
     /// sync permanently and fork-on-divergence — the slice's headline mechanic — never ran once.
     ///
     /// So this test deliberately uses NEITHER double: a real daemon, a real `Gateway`, a real
-    /// `NormaClient` bridge, and the assertion made on the bytes of the phone-bound `rpcResponse`
+    /// `WinterClient` bridge, and the assertion made on the bytes of the phone-bound `rpcResponse`
     /// frame. Both `lastSeq` values that the client branches on are driven, because they mean
     /// opposite things and only one of them is zero (which a "field present" assertion could pass
     /// by accident):
@@ -954,7 +954,7 @@ final class GatewayGateTests: XCTestCase {
         let listener = LoopbackListener()
         let gateway = Gateway(
             listener: listener,
-            daemonFactory: { NormaClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway") },
+            daemonFactory: { WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway") },
             hostID: "host-test",
             directory: directory
         )
@@ -1021,7 +1021,7 @@ final class GatewayGateTests: XCTestCase {
     /// protects nothing — but `drainHeldLive` targets `liveConn`, so that hold's drain flushed a
     /// DIFFERENT connection's queued live events onto that connection's wire, mid-replay, and
     /// lowered the hold behind it. The phone cannot repair the reorder on this path:
-    /// `NormaSessionClient` buffers only while `replaying`, which is set from a `ServerHello`
+    /// `WinterSessionClient` buffers only while `replaying`, which is set from a `ServerHello`
     /// verdict, and the attach rpc returns only `lastSeq` — so the higher-seq live event advances
     /// the durable cursor and the still-pending lower-seq replay frames are dropped as duplicates.
     /// Silent, permanent transcript loss, on exactly the two paths this task exists to make work
@@ -1055,7 +1055,7 @@ final class GatewayGateTests: XCTestCase {
         _ = try await waitForOutbound(sessionConn, count: 2) // the first replay frame, recorded then parked
 
         // A live event lands while conn A is parked: it must queue on `heldLive` behind the replay.
-        let harness = NormaClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.harnessToken, clientName: "t6b-live")
+        let harness = WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.harnessToken, clientName: "t6b-live")
         try await harness.connect(role: "harness")
         _ = try await harness.attach(sessionId: seeded.sid, fromSeq: seeded.seqM2)
         let seqM3 = try await harness.send(sessionId: seeded.sid, text: "m3")
@@ -1112,7 +1112,7 @@ final class GatewayGateTests: XCTestCase {
         let directory = InMemoryDirectory(peerID: "peer-stub")
         let gateway = Gateway(
             listener: listener,
-            daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
+            daemonFactory: { WinterClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
             hostID: "host-test",
             directory: directory
         )

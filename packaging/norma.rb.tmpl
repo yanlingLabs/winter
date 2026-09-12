@@ -1,5 +1,5 @@
-# Homebrew cask template for Norma. Rendered per release by scripts/release.ts
-# (caskFrom in scripts/release-lib.ts) into out/release/<version>/norma.rb — this .tmpl is
+# Homebrew cask template for Winter. Rendered per release by scripts/release.ts
+# (caskFrom in scripts/release-lib.ts) into out/release/<version>/winter.rb — this .tmpl is
 # the only copy committed to the repo; the rendered file is per-release build output.
 #
 # Interpolated at release time: the release version and the sha256 checksum of the release DMG.
@@ -7,13 +7,13 @@
 # interpolation (idiomatic cask style — keeps a real per-version sha256, passes brew audit).
 # (Slot names written in prose, not the literal syntax, so caskFrom's replaceAll can't mangle
 # this comment itself.)
-cask "norma" do
+cask "winter" do
   version "{{version}}"
   sha256 "{{sha256}}"
 
-  url "https://github.com/yanlingLabs/norma/releases/download/v#{version}/Norma-#{version}.dmg"
-  name "Norma"
-  desc "Menu bar app for the Norma AI engine"
+  url "https://github.com/yanlingLabs/norma/releases/download/v#{version}/Winter-#{version}.dmg"
+  name "Winter"
+  desc "Menu bar app for the Winter AI engine"
   homepage "https://github.com/yanlingLabs/norma"
 
   livecheck do
@@ -25,6 +25,6 @@ cask "norma" do
 
   auto_updates true
 
-  app "Norma.app"
-  binary "#{appdir}/Norma.app/Contents/Resources/norma-core", target: "norma"
+  app "Winter.app"
+  binary "#{appdir}/Winter.app/Contents/Resources/winter-core", target: "winter"
 end

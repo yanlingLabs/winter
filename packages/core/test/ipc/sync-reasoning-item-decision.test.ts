@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type SessionEvent, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type SessionEvent, type WritableSocket } from "@winter/protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { HISTORY_EVENT_TYPES, readHistoryPage } from "../../src/sessions/history";
@@ -90,7 +90,7 @@ describe("SECURITY DECISION: sync.pull replicates reasoning_item; session.histor
   afterEach(() => { stop?.(); stop = undefined; });
 
   async function bootWithChatSession(): Promise<{ store: SessionStore; socketPath: string; token: string; sessionId: string }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-sync-security-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-sync-security-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));

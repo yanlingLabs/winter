@@ -277,7 +277,7 @@ final class EditorSaveCoordinator {
         let url = URL(fileURLWithPath: path)
         let directory = url.deletingLastPathComponent()
         let temporary = directory.appendingPathComponent(
-            ".\(url.lastPathComponent).norma-save-\(UUID().uuidString)")
+            ".\(url.lastPathComponent).winter-save-\(UUID().uuidString)")
         var data = Data()
         // Never a SECOND BOM: a buffer that already begins with U+FEFF — a file that carried two, or
         // a user who typed one — keeps exactly the one it has.
@@ -307,7 +307,7 @@ final class EditorSaveCoordinator {
                 ])
             }
         } catch {
-            // Never leave a `.norma-save-…` beside the user's file, whatever went wrong.
+            // Never leave a `.winter-save-…` beside the user's file, whatever went wrong.
             try? FileManager.default.removeItem(at: temporary)
             throw error
         }
@@ -471,7 +471,7 @@ enum OfficeCanvasMenuInstaller {
 
     /// **Review fix round 1 (I-1) — the belt.** `keyDown`'s own policy comment (and this file's
     /// `validateMenuItem`) rest on an UNVERIFIED premise: that SwiftUI's default command set
-    /// (`NormaApp: App` carries no `.commands` override) actually wires target-`nil` Copy/Cut/
+    /// (`WinterApp: App` carries no `.commands` override) actually wires target-`nil` Copy/Cut/
     /// Paste/Undo/Redo items into this specific `LSUIElement` + `Settings`-only app's real main
     /// menu. That premise is structurally unprovable under xctest (no real main menu is ever built
     /// in the test host). Rather than leave five headline verbs resting on an assumption with no

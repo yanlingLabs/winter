@@ -2,7 +2,7 @@ import SwiftUI
 
 /// One fetch's worth of `daemon.status` rendered as display strings — pure so the formatting
 /// (uptime especially — spec's own hint to reuse `formatElapsed`) is table-tested without a live
-/// `NormaClient`.
+/// `WinterClient`.
 struct DaemonStatusDisplay: Equatable {
     let version: String
     let uptime: String
@@ -37,7 +37,7 @@ func formatDaemonStatus(version: String, uptimeMs: Int, socketPath: String, prov
 
 /// Task 5 (2f-ii): the Dashboard's Daemon-status pane — spec §B: "static fetch + refresh button in
 /// v1 (no polling loop)". `fetch` is the injected `daemon.status` closure (`DashboardWiring`,
-/// ultimately `NormaClient.daemonStatus()`), never a `NormaClient` directly.
+/// ultimately `WinterClient.daemonStatus()`), never a `WinterClient` directly.
 struct DaemonStatusPane: View {
     let fetch: () async throws -> (version: String, uptimeMs: Int, socketPath: String, providerId: String?, providerModel: String?, sessionsCount: Int, pluginsCount: Int)
 

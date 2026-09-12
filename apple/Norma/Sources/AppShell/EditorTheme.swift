@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// editor-product Task 4 — Norma's brand palette, resolved to the two payloads the editor's
+/// editor-product Task 4 — Winter's brand palette, resolved to the two payloads the editor's
 /// white-flash fix and branded repaint need: a Monaco `defineTheme` object (`tokensJSON`) and the
 /// CEF browser's own creation-time background (`cardSurfaceBackgroundARGB`).
 ///
@@ -54,7 +54,7 @@ enum EditorTheme {
         return json
     }
 
-    /// The CEF browser's OWN background at creation, packed `0xAARRGGBB` — `NormaCEF.h`'s
+    /// The CEF browser's OWN background at creation, packed `0xAARRGGBB` — `WinterCEF.h`'s
     /// `backgroundColorARGB` parameter, in the shape CEF's `cef_color_t`/`CefColorSetARGB` already
     /// use inside the framework. The white-flash fix's OTHER half: `tokensJSON` colors the PAGE once
     /// Monaco boots and a theme lands; this colors the BROWSER itself for the window before that —
@@ -63,7 +63,7 @@ enum EditorTheme {
     ///
     /// Always fully opaque (`0xFF` alpha) — CEF's own contract requires the alpha component be
     /// either fully opaque or fully transparent, and `0x00…` is reserved as "no override" for every
-    /// OTHER caller of `NormaCEFCreateBrowser` (ordinary web tabs, the CEF spikes): passing an
+    /// OTHER caller of `WinterCEFCreateBrowser` (ordinary web tabs, the CEF spikes): passing an
     /// intermediate alpha here would silently fall outside that contract.
     static func cardSurfaceBackgroundARGB(for scheme: ColorScheme) -> UInt32 {
         let cardSurface = MessageTextFormatter.themeColor("CardSurface", colorScheme: scheme)
@@ -185,7 +185,7 @@ enum EditorTheme {
     }
 
     /// `0xFF` alpha, then the same three bytes `hex(_:)` formats — CEF's `cef_color_t` packing
-    /// (`CefColorSetARGB`'s own bit layout, mirrored without including a CEF header: `NormaCEF.h`
+    /// (`CefColorSetARGB`'s own bit layout, mirrored without including a CEF header: `WinterCEF.h`
     /// stays framework-free).
     private static func argb(_ color: NSColor) -> UInt32 {
         (0xFF << 24) | (UInt32(byte(color.redComponent)) << 16)

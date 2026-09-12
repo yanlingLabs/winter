@@ -52,7 +52,7 @@ const DOMAIN_BASE = "yanlinglabs.com";
 const RELAY_HOSTNAMES = ["relay-1", "relay-2"] as const;
 
 // iroh-relay pin (SP2b Task 6): latest release on the `>= 1.0.2` line iroh-ffi v1.1.0 (this
-// repo's pinned client binding) itself requires -- see apple/NormaKit/vendor/README.md. Verified
+// repo's pinned client binding) itself requires -- see apple/WinterKit/vendor/README.md. Verified
 // against https://github.com/n0-computer/iroh/releases: v1.0.2 published 2026-07-06 IS the
 // latest release overall (not just latest on this line), so this is not "silently taking a newer
 // major" -- there is no newer release yet.

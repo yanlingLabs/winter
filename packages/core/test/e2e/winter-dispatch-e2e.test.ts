@@ -2,7 +2,7 @@
 //
 // A real `startDaemon` in a temp home whose settings carry NO `winterLeg` block (the engine is
 // retired: every mode is the Winter leg), a real NDJSON client, the real `winter` child
-// `NORMA_WINTER_EXECUTABLE` names (skipped when unset; required under NORMA_WINTER_REQUIRE_BINARY=1).
+// `WINTER_RUNTIME_EXECUTABLE` names (skipped when unset; required under WINTER_RUNTIME_REQUIRE_BINARY=1).
 // Every model is a `winter-test/<double>`; nothing reaches the network.
 //
 //   (a) `session.dispatch` mints the singleton ON THE WINTER LEG by default; the card-free pin
@@ -19,7 +19,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync, type Stats } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@winter/protocol";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import type { RuntimeStateWiring } from "../../src/runtime-state";
@@ -77,7 +77,7 @@ class TestClient {
   close(): void { try { this.socket.end(); } catch { /* already closed */ } }
 }
 
-const REAL_HOMES = [join(homedir(), ".norma"), join(homedir(), ".norma-dev")];
+const REAL_HOMES = [join(homedir(), ".winter"), join(homedir(), ".winter-dev")];
 function walkHome(dir: string, describe: (rel: string, st: Stats) => string): string {
   if (!existsSync(dir)) return `${dir}: absent`;
   const lines: string[] = [];
@@ -153,7 +153,7 @@ describeWithWinterBinary("dispatch on the Winter leg — the built binary throug
 
   beforeAll(async () => {
     for (const h of REAL_HOMES) { signaturesBefore.set(h, homeSignature(h)); projectsBefore.set(h, projectsSignature(h)); }
-    home = mkdtempSync(join(tmpdir(), "norma-winter-dispatch-e2e-"));
+    home = mkdtempSync(join(tmpdir(), "winter-dispatch-e2e-"));
     mkdirSync(home, { recursive: true });
     writeSettings();
     await bootDaemon();
@@ -311,7 +311,7 @@ describeWithWinterBinary("dispatch on the Winter leg — the built binary throug
     await driver.end();
   }, 40_000);
 
-  test("(d) home isolation: ~/.norma and ~/.norma-dev untouched (names; projects/ size+mtime), and no dist/winter survives", async () => {
+  test("(d) home isolation: ~/.winter and ~/.winter-dev untouched (names; projects/ size+mtime), and no dist/winter survives", async () => {
     if (daemon !== undefined) await stopDaemon();
     for (const h of REAL_HOMES) {
       expect(homeSignature(h)).toBe(signaturesBefore.get(h)!);

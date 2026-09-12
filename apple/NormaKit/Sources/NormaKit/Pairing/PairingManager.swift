@@ -1,8 +1,8 @@
 import Foundation
 import CryptoKit
 import Security
-import NormaProtocol
-import NormaSessionKit
+import WinterProtocol
+import WinterSessionKit
 
 /// What the Mac's pairing UI (the menu-bar app's QR sheet) reacts to. `PairingManager` is the
 /// sole producer; the app never touches ceremony state directly.
@@ -63,7 +63,7 @@ public actor PairingManager {
     private let sleepHook: @Sendable (Duration) async -> Void
 
     // `nonisolated`: an `AsyncStream`/`Continuation` are themselves Sendable and safe to touch
-    // from any context — mirrors `NormaClient.events`'s own `nonisolated let` (NormaClient.swift)
+    // from any context — mirrors `WinterClient.events`'s own `nonisolated let` (WinterClient.swift)
     // so callers can iterate `manager.events` without hopping onto the actor for every read.
     public nonisolated let events: AsyncStream<PairingUIEvent>
     private nonisolated let eventsContinuation: AsyncStream<PairingUIEvent>.Continuation
@@ -128,7 +128,7 @@ public actor PairingManager {
         )
     }
 
-    /// Test-only seam (internal — reachable via `@testable import NormaKit`): identical to the
+    /// Test-only seam (internal — reachable via `@testable import WinterKit`): identical to the
     /// public initializer, plus the injectable `sleepHook` the confirm-timeout watchdog uses (see
     /// that property's own doc comment).
     init(
@@ -195,7 +195,7 @@ public actor PairingManager {
         return QRPayload(
             v: 1, pairID: pairID, pairSecret: pairSecret, expiresAt: expiresAt,
             macEndpointID: macEndpointID, relayConfig: relayConfig,
-            // SP2b Task 5 fix: this used to be the disconnected literal `"norma/remote/1"` — a
+            // SP2b Task 5 fix: this used to be the disconnected literal `"winter/remote/1"` — a
             // value nobody ever actually dialed with, since `RemoteHost.start()`'s real
             // `IrohListener` binds on `IrohListener.defaultALPN` (its own default parameter) and
             // every prior test's phone stand-in (`PhoneConn.dial`) defaults to the SAME constant

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@winter/protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
@@ -79,7 +79,7 @@ describe("session.list approvalPolicy (mac-chat-parity T4)", () => {
   afterEach(() => { stop?.(); stop = undefined; });
 
   async function boot(): Promise<{ store: SessionStore; socketPath: string; harnessToken: string }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-list-policy-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-list-policy-"));
     const store = new SessionStore(home);
     const hub = new SessionHub(store);
     const socketPath = join(home, "core.sock");

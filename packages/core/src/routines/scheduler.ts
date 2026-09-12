@@ -1,7 +1,7 @@
 import type { Routine, RoutineStore } from "./store";
 
 /** The daemon-side "fire a routine headless" bridge — implemented in routines/runner.ts against
- *  the real engine/session machinery (the SAME internal path `norma -p` turns use), with a fake
+ *  the real engine/session machinery (the SAME internal path `winter -p` turns use), with a fake
  *  implementation swapped in for this module's own unit tests. */
 export interface RoutineRunner {
   runHeadless(opts: {

@@ -83,19 +83,19 @@ struct HelperApprovalRow: View {
 }
 
 // -----------------------------------------------------------------------------------------------
-// HelperClient — SMAppService lifecycle + the app-side half of the NormaHelperProtocol XPC contract.
+// HelperClient — SMAppService lifecycle + the app-side half of the WinterHelperProtocol XPC contract.
 // -----------------------------------------------------------------------------------------------
 
-/// Owns the app-side half of the `com.norma.helper` XPC contract (Task 4, Phase 4c): `SMAppService`
-/// registration lifecycle for the privileged `NormaHelper` daemon (`HelperResources/
-/// com.norma.helper.plist`, Label/mach-service `com.norma.helper` — see `normaHelperMachServiceName`
-/// in `HelperShared/NormaHelperProtocol.swift`) and a lazy, invalidation-resilient
-/// `NSXPCConnection` for the two `NormaHelperProtocol` calls.
+/// Owns the app-side half of the `com.winter.helper` XPC contract (Task 4, Phase 4c): `SMAppService`
+/// registration lifecycle for the privileged `WinterHelper` daemon (`HelperResources/
+/// com.winter.helper.plist`, Label/mach-service `com.winter.helper` — see `winterHelperMachServiceName`
+/// in `HelperShared/WinterHelperProtocol.swift`) and a lazy, invalidation-resilient
+/// `NSXPCConnection` for the two `WinterHelperProtocol` calls.
 ///
 /// LIVE-GATE: `register()`/`refreshStatus()` drive real `SMAppService` state, and
-/// `setChargeLimit`/`getChargeLimit` drive a real XPC round-trip to a real `NormaHelper` process —
+/// `setChargeLimit`/`getChargeLimit` drive a real XPC round-trip to a real `WinterHelper` process —
 /// neither is meaningful under XCTest (no daemon to register/approve/connect to in CI, and the
-/// `NormaAppTests` bundle loader is the real `Norma.app`, so a REAL `service.register()` call here
+/// `WinterAppTests` bundle loader is the real `Winter.app`, so a REAL `service.register()` call here
 /// would attempt to register an actual privileged daemon from the test process — see
 /// `AppDelegate.boot()`'s `!isRunningUnitTests` gate on `helperClient.register()`, mirroring the
 /// same gate `MultitouchTrigger`/`peripheral.registerPanicSurfaces()` already use). `status` itself
@@ -107,7 +107,7 @@ struct HelperApprovalRow: View {
 final class HelperClient: ObservableObject {
     @Published private(set) var status: HelperApprovalStatus = .notRegistered
 
-    private let service = SMAppService.daemon(plistName: "com.norma.helper.plist")
+    private let service = SMAppService.daemon(plistName: "com.winter.helper.plist")
     private var connection: NSXPCConnection?
 
     init() {
@@ -133,19 +133,19 @@ final class HelperClient: ObservableObject {
         refreshStatus()
     }
 
-    // MARK: - XPC calls (NormaHelperProtocol)
+    // MARK: - XPC calls (WinterHelperProtocol)
 
     /// Lazy + invalidation-resilient: `invalidationHandler`/`interruptionHandler` both nil out
     /// `connection` so the NEXT call reconnects fresh instead of reusing a dead `NSXPCConnection`
     /// forever. `.privileged` matches the standard SMAppService-daemon connection pattern (the
     /// modern replacement for the old SMJobBless privileged-helper XPC setup).
-    private func remoteProxy(errorHandler: @escaping (Error) -> Void) -> NormaHelperProtocol? {
+    private func remoteProxy(errorHandler: @escaping (Error) -> Void) -> WinterHelperProtocol? {
         let c: NSXPCConnection
         if let existing = connection {
             c = existing
         } else {
-            let fresh = NSXPCConnection(machServiceName: normaHelperMachServiceName, options: .privileged)
-            fresh.remoteObjectInterface = NSXPCInterface(with: NormaHelperProtocol.self)
+            let fresh = NSXPCConnection(machServiceName: winterHelperMachServiceName, options: .privileged)
+            fresh.remoteObjectInterface = NSXPCInterface(with: WinterHelperProtocol.self)
             fresh.invalidationHandler = { [weak self] in
                 Task { @MainActor in self?.connection = nil }
             }
@@ -156,7 +156,7 @@ final class HelperClient: ObservableObject {
             connection = fresh
             c = fresh
         }
-        return c.remoteObjectProxyWithErrorHandler(errorHandler) as? NormaHelperProtocol
+        return c.remoteObjectProxyWithErrorHandler(errorHandler) as? WinterHelperProtocol
     }
 
     /// `{"code":"xpc_error","message":...}` — this file's own synthesized error for connection-
@@ -188,12 +188,12 @@ final class HelperClient: ObservableObject {
     /// The shared XPC-call body: a checked continuation resumed EXACTLY ONCE by whichever fires
     /// first — the method's reply block, the proxy's connection-level error handler, or (Task 4,
     /// Phase 4d-cleanup) an 8s fallback timer. XPC guarantees one of the first two per call, but
-    /// a wedged/silent `NormaHelper` (hung, deadlocked, killed mid-call without the connection
+    /// a wedged/silent `WinterHelper` (hung, deadlocked, killed mid-call without the connection
     /// noticing) satisfies neither, so the timer is a THIRD race participant, not a replacement
-    /// for the other two. 8s is deliberately under norma-core's `HardwareBroker` 10s timeout, so
+    /// for the other two. 8s is deliberately under winter-core's `HardwareBroker` 10s timeout, so
     /// this typed error resolves first and the broker never has to fire its own. All three arrive
     /// on non-main queues/timers, so the once-latch is a real lock (`ResumeOnce`), not a bare Bool.
-    private func call(_ invoke: (NormaHelperProtocol, @escaping (String?, String?) -> Void) -> Void) async -> (resultJson: String?, errorJson: String?) {
+    private func call(_ invoke: (WinterHelperProtocol, @escaping (String?, String?) -> Void) -> Void) async -> (resultJson: String?, errorJson: String?) {
         await withCheckedContinuation { continuation in
             let once = ResumeOnce()
             let resume: (String?, String?) -> Void = { result, error in
@@ -206,7 +206,7 @@ final class HelperClient: ObservableObject {
             guard let proxy = remoteProxy(errorHandler: { error in
                 resume(nil, Self.xpcErrorJson("\(error)"))
             }) else {
-                resume(nil, Self.xpcErrorJson("no NormaHelper connection"))
+                resume(nil, Self.xpcErrorJson("no WinterHelper connection"))
                 return
             }
             invoke(proxy) { result, error in resume(result, error) }

@@ -1,15 +1,15 @@
 import XCTest
-import NormaProtocol
-import NormaSessionKit
-@testable import NormaKit
+import WinterProtocol
+import WinterSessionKit
+@testable import WinterKit
 
 /// Remote Gateway SP1 Task 5 (the capstone): the `Gateway` actor terminates a remote (phone)
 /// transport, validates envelopes, bridges to the daemon as the `remote` principal, and
 /// orchestrates resume/replay + the gateway-side allowlist. Exercised end-to-end with:
 ///   - `ScriptedRemoteConn`/`LoopbackListener` (RemoteTransport.swift) standing in for the
 ///     phone-side transport (SP2 wires the real iroh listener at this exact seam).
-///   - `ScriptedTransport` (NormaClientTests.swift, same test target) standing in for the
-///     daemon-side `NormaTransport` — no live bun process needed.
+///   - `ScriptedTransport` (WinterClientTests.swift, same test target) standing in for the
+///     daemon-side `WinterTransport` — no live bun process needed.
 /// Scenarios A-E mirror the task brief verbatim.
 final class GatewayTests: XCTestCase {
 
@@ -18,7 +18,7 @@ final class GatewayTests: XCTestCase {
     func makeGateway(daemonTransport: ScriptedTransport, listener: LoopbackListener) -> Gateway {
         Gateway(
             listener: listener,
-            daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
+            daemonFactory: { WinterClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
             hostID: "host-test",
             directory: InMemoryDirectory(peerID: "peer-stub")
         )

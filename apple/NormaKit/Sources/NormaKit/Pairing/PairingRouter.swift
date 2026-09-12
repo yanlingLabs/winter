@@ -1,6 +1,6 @@
 import Foundation
-import NormaProtocol
-import NormaSessionKit
+import WinterProtocol
+import WinterSessionKit
 
 /// The gateway-side allowlist lookup `Gateway` and `PairingRouter` both consume — one paired-phone
 /// record per authenticated peer, or `nil` if the peer isn't (or is no longer) paired. `PairingStore`
@@ -95,7 +95,7 @@ public final class PairingRouter: RemoteListener, @unchecked Sendable {
 ///
 /// **Dual-path (SP3.1 Task 1).** The reply shape depends on what KIND of dialer this is, told apart
 /// by peeking the first frame:
-///   - A SESSION dialer (a `NormaSessionClient` reconnecting after a revoke) speaks the
+///   - A SESSION dialer (a `WinterSessionClient` reconnecting after a revoke) speaks the
 ///     `WireEnvelope` protocol — its first frame is a `kind: .hello` envelope. It gets a
 ///     `WireEnvelope` `error` frame carrying a structured `HandshakeRejection(code: "not_paired")`,
 ///     which its handshake decodes into a typed `.handshakeRejected` (→ the app's honest `.revoked`
@@ -103,7 +103,7 @@ public final class PairingRouter: RemoteListener, @unchecked Sendable {
 ///     collapsed to a bare close / `.macUnavailable`, making the honest state UNREACHABLE from a
 ///     real revoke. The echoed epoch is the phone's own claimed `pairingEpoch` (the router has no
 ///     record to consult — that's WHY it's rejecting), so the phone's own strict decode accepts it;
-///     `NormaSessionClient` also decodes this one frame epoch-lenient regardless.
+///     `WinterSessionClient` also decodes this one frame epoch-lenient regardless.
 ///   - A PAIRING dialer (`PhonePairingClient` mid-ceremony) sends a raw-JSON `PairRequest` — no
 ///     `WireEnvelope` wrapper (it hasn't paired, so it has no epoch to wrap one in). It gets the
 ///     SAME raw JSON `PairRejected` a failed ceremony uses (`PairingManager.reject(_:code:)`),

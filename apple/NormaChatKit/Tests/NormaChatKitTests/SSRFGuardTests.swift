@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import NormaChatKit
+@testable import WinterChatKit
 
 /// `ssrfGuard` parity with `packages/core/src/agent/tools/web.ts:37-91`. The phone is ON the user's
 /// LAN, so this matters *more* here than on the Mac: without it a prompt-injected page can talk the

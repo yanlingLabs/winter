@@ -8,7 +8,7 @@ import { Compactor } from "../../src/agent/compactor";
 import { FakeProvider } from "../../src/agent/fake-provider";
 
 function seedSession(n: number) {
-  const home = realpathSync(mkdtempSync(join(tmpdir(), "norma-cmp-")));
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-cmp-")));
   const store = new SessionStore(home);
   const hub = new SessionHub(store);
   const sid = store.createSession("global", { cwd: "/tmp", approvalPolicy: "auto" });
@@ -132,7 +132,7 @@ describe("Compactor", () => {
   // pin the Compactor's pair-aware clamp that prevents it.
   describe("clamp: never folds inside an unresolved main-thread tool_call/tool_result pair", () => {
     function emptySession() {
-      const home = realpathSync(mkdtempSync(join(tmpdir(), "norma-cmp-pair-")));
+      const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-cmp-pair-")));
       const store = new SessionStore(home);
       const hub = new SessionHub(store);
       const sid = store.createSession("global", { cwd: "/tmp", approvalPolicy: "auto" });
@@ -218,7 +218,7 @@ describe("Compactor", () => {
   // that the clamp ALSO refuses to fold a reasoning item while replaying its function_call bare.
   describe("clamp: never strands a reasoning item without its function_call (steer-interleave between stream-time reasoning and dispatch-time call)", () => {
     function emptySession() {
-      const home = realpathSync(mkdtempSync(join(tmpdir(), "norma-cmp-reasoning-")));
+      const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-cmp-reasoning-")));
       const store = new SessionStore(home);
       const hub = new SessionHub(store);
       const sid = store.createSession("global", { cwd: "/tmp", approvalPolicy: "auto" });

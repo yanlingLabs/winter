@@ -28,7 +28,7 @@ function makeControllableRunner(): { runner: RoutineRunner; calls: PendingCall[]
 }
 
 function makeStore(): { store: RoutineStore; dir: string } {
-  const dir = mkdtempSync(join(tmpdir(), "norma-scheduler-"));
+  const dir = mkdtempSync(join(tmpdir(), "winter-scheduler-"));
   return { store: openRoutineStore(join(dir, "routines.db")), dir };
 }
 

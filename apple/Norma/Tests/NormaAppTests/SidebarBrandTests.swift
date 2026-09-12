@@ -1,7 +1,7 @@
 import XCTest
 import AppKit
 import SwiftUI
-@testable import Norma
+@testable import Winter
 
 /// sidebar-brand: the brand palette's catalog wiring, the shared Recents row filter, and the
 /// search palette's pure helpers. Same posture as `AppShellTests` — the PURE decision helpers are
@@ -285,7 +285,7 @@ final class SidebarBrandTests: XCTestCase {
 
     /// A real announcement always wins over the resting line.
     func testAnnouncementBeatsTheRestingLine() {
-        XCTAssertEqual(newChatAnnouncement("Norma 0.3 is out", fallback: "x"), "Norma 0.3 is out")
+        XCTAssertEqual(newChatAnnouncement("Winter 0.3 is out", fallback: "x"), "Winter 0.3 is out")
     }
 
     /// Absent, empty, and whitespace-only all mean "nothing to announce" — a strip showing a lone

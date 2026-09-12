@@ -1,6 +1,6 @@
 import AppKit
 import SwiftUI
-import NormaKit
+import WinterKit
 
 /// working-directories T8: the CREATE-TIME working-folder picker (design doc §1) — the CC-style
 /// sheet a new code session opens with: **Recent** (locked primaries from session history, newest
@@ -17,7 +17,7 @@ import NormaKit
 @MainActor
 final class WorkingDirPickerModel: ObservableObject {
     /// Locked primaries from history (`recentWorkingDirs`) — never mutated by a pick: "recent" means
-    /// "a project Norma has actually worked in", and a folder chosen in this sheet has not been
+    /// "a project Winter has actually worked in", and a folder chosen in this sheet has not been
     /// worked in yet. It joins `folderRows` for THIS sheet, and joins the real recents only once the
     /// session it creates writes something.
     @Published private(set) var recents: [String]
@@ -66,7 +66,7 @@ struct WorkingDirPickerView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Working folder")
                 .font(Typography.control(.semibold))
-            Text("Norma can write inside the folder you choose. Everything else stays read-only.")
+            Text("Winter can write inside the folder you choose. Everything else stays read-only.")
                 .font(Typography.caption())
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -222,7 +222,7 @@ func runWorkingDirOpenPanel(on host: NSWindow?, completion: @escaping (String?) 
     panel.canCreateDirectories = true
     panel.resolvesAliases = true
     panel.prompt = "Choose"
-    panel.message = "Choose a working folder — Norma will be able to write inside it."
+    panel.message = "Choose a working folder — Winter will be able to write inside it."
     let handle: (NSApplication.ModalResponse) -> Void = { response in
         completion(response == .OK ? panel.url?.path : nil)
     }

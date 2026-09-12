@@ -1,5 +1,5 @@
 import Foundation
-import NormaProtocol
+import WinterProtocol
 
 /// b2-agent-browser Task 5 — **the two pure pieces of the interaction verbs**: the operands a
 /// `panel_command` carries, and the SENSITIVE FLOOR that decides whether a `type` may happen at all.
@@ -15,7 +15,7 @@ import NormaProtocol
 
 /// **`panel_command.args`, read for the first time.**
 ///
-/// Until Task 5 this field was decoded and deliberately never looked at, and `NormaCEF.h`'s CDP-door
+/// Until Task 5 this field was decoded and deliberately never looked at, and `WinterCEF.h`'s CDP-door
 /// header said exactly why: every CDP method name and every JavaScript expression this app sends is
 /// a LITERAL written in `PanelCommandConsumer`, so the bridge — which really is a navigation door,
 /// `Page.navigate` and an `location.href` assignment both being one protocol call away — was
@@ -486,7 +486,7 @@ enum SensitiveFieldFloor {
     /// plainly that no retry will work — otherwise a model reasonably tries a different selector for
     /// the same field, three times.
     static func refusal(kind: String, evidence: String) -> String {
-        "refused: that is a \(kind) (\(evidence)), and Norma never types into one. This is not a "
+        "refused: that is a \(kind) (\(evidence)), and Winter never types into one. This is not a "
         + "retryable failure and no different selector will change it — ask the person to fill that "
         + "field in themselves."
     }

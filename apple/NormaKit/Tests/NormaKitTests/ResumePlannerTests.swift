@@ -1,7 +1,7 @@
 import XCTest
-import NormaProtocol
-import NormaSessionKit
-@testable import NormaKit
+import WinterProtocol
+import WinterSessionKit
+@testable import WinterKit
 
 final class ResumePlannerTests: XCTestCase {
     // MARK: - verdict

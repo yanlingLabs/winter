@@ -36,13 +36,13 @@ export interface InstallPluginResult { name: string; target: string }
  * already have plugin contents on disk rather than a git URL. Like `installPlugin`, NEVER touches
  * settings.json (installing a plugin must not silently enable any MCP servers it bundles — the
  * fresh-consent rule lives in enable/disable). Throws on: invalid/traversal name, an existing
- * target dir, or a sourceDir with neither `norma-plugin.json` nor `plugin.json` (no plugin here).
+ * target dir, or a sourceDir with neither `winter-plugin.json` nor `plugin.json` (no plugin here).
  */
 export function installPluginFromDir(sourceDir: string, name: string, pluginsRoot: string): InstallPluginResult {
   const target = resolvePluginTarget(pluginsRoot, name);
   if (existsSync(target)) throw new Error(`${name} already exists at ${target}`);
-  const hasManifest = existsSync(resolve(sourceDir, "norma-plugin.json")) || existsSync(resolve(sourceDir, "plugin.json"));
-  if (!hasManifest) throw new Error(`${sourceDir} has no norma-plugin.json or plugin.json — not a plugin`);
+  const hasManifest = existsSync(resolve(sourceDir, "winter-plugin.json")) || existsSync(resolve(sourceDir, "plugin.json"));
+  if (!hasManifest) throw new Error(`${sourceDir} has no winter-plugin.json or plugin.json — not a plugin`);
   cpSync(sourceDir, target, { recursive: true });
   return { name, target };
 }
@@ -83,7 +83,7 @@ export interface ConsentBlockPlugin {
  *   - exec: every `execPayload` line verbatim (already self-describing — "mcp: …", "hook(…): …",
  *     "entry: …" — no extra prefix).
  *   - tcc: one "will request macOS permission: <perm>" line per `tccPermissions` entry.
- *   - hardware: one "hardware access via Norma.app helper: <perm>" line per `hardwarePermissions`
+ *   - hardware: one "hardware access via Winter.app helper: <perm>" line per `hardwarePermissions`
  *     entry.
  * Does NOT include the trailing `type "yes" to consent:` prompt — that's printed by the caller's
  * own `readLine` call, since it's an input prompt, not a disclosure line.
@@ -97,7 +97,7 @@ export function buildConsentBlock(info: ConsentBlockPlugin): string[] {
     for (const perm of info.tccPermissions) lines.push(`will request macOS permission: ${perm}`);
   }
   if (info.requiredConsents.includes("hardware")) {
-    for (const perm of info.hardwarePermissions) lines.push(`hardware access via Norma.app helper: ${perm}`);
+    for (const perm of info.hardwarePermissions) lines.push(`hardware access via Winter.app helper: ${perm}`);
   }
   return lines;
 }
@@ -120,7 +120,7 @@ export function grantPluginConsents(settings: Settings, name: string, classes: s
  * grantPluginConsents + setPluginEnabled, composed against a FRESHLY read settings snapshot
  * rather than one captured before an interactive prompt. `enable`'s consent flow reads settings
  * once just to decide whether the consent block is even needed, then waits on a human-scale
- * `readLine` for "yes" — a settings.json edit landing during that wait (e.g. `norma plugin
+ * `readLine` for "yes" — a settings.json edit landing during that wait (e.g. `winter plugin
  * disable` run concurrently from another shell) would otherwise be silently clobbered by writing
  * back whatever object the pre-prompt read produced. `readSettings` is injected (this function
  * never opens the file itself) so the caller controls read timing — call it AFTER the prompt

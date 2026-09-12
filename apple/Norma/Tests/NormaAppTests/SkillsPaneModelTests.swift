@@ -1,6 +1,6 @@
 import XCTest
-import NormaKit
-@testable import Norma
+import WinterKit
+@testable import Winter
 
 /// Phase 5c Task 4: `SkillsPaneModel`'s async correctness — copied verbatim (house pattern, brief
 /// T4) from `MemoryPaneModelTests`'s stale-select-response guard (a slow `skills.read` resolving
@@ -8,17 +8,17 @@ import NormaKit
 /// skill A's body under B's name), the same-shape delete guard, and the `canSave` gating — PLUS
 /// the self-vs-non-self read-only gating this pane adds on top of Memory's shape (`skills.write`/
 /// `skills.delete` are server-confined to the self source; this pane must never even offer them
-/// for anything else). Drives a real (actor) `NormaClient` over the SAME scripted-transport double
+/// for anything else). Drives a real (actor) `WinterClient` over the SAME scripted-transport double
 /// every other async model test in this target uses (`FeedScriptedTransport`/`feedLineJSON`/
 /// `feedWaitUntil`, SessionFeedTests.swift) — same posture as `MemoryPaneModelTests`, no new client
 /// seam.
 @MainActor
 final class SkillsPaneModelTests: XCTestCase {
-    /// Opens + hellos a scripted `NormaClient`, mirroring `MemoryPaneModelTests.connectedClient()`
+    /// Opens + hellos a scripted `WinterClient`, mirroring `MemoryPaneModelTests.connectedClient()`
     /// exactly (send count 1 == `protocol.hello`).
-    private func connectedClient() async throws -> (NormaClient, FeedScriptedTransport) {
+    private func connectedClient() async throws -> (WinterClient, FeedScriptedTransport) {
         let t = FeedScriptedTransport()
-        let client = NormaClient(makeTransport: { t }, token: "tok", clientName: "skills-pane-test")
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "skills-pane-test")
         async let c: Void = client.connect()
         await feedWaitUntil { !t.sent.isEmpty }
         let hello = feedLineJSON(t.sent[0])
@@ -45,7 +45,7 @@ final class SkillsPaneModelTests: XCTestCase {
         let reqB = feedLineJSON(t.sent[2])
 
         // B's response resolves FIRST...
-        t.feed(#"{"jsonrpc":"2.0","id":\#(reqB["id"] as! Int),"result":{"skill":{"name":"skill-b","description":"B desc","source":"self","path":"/self/skill-b","author":"norma","body":"B body"}}}"#)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(reqB["id"] as! Int),"result":{"skill":{"name":"skill-b","description":"B desc","source":"self","path":"/self/skill-b","author":"winter","body":"B body"}}}"#)
         await selectB
         XCTAssertEqual(model.detail?.name, "skill-b")
 
@@ -72,7 +72,7 @@ final class SkillsPaneModelTests: XCTestCase {
         async let selectB: Void = model.select("skill-b")
         await feedWaitUntil { t.sent.count >= 2 }
         let readReq = feedLineJSON(t.sent[1])
-        t.feed(#"{"jsonrpc":"2.0","id":\#(readReq["id"] as! Int),"result":{"skill":{"name":"skill-b","description":"B desc","source":"self","path":"/self/skill-b","author":"norma","body":"B body"}}}"#)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(readReq["id"] as! Int),"result":{"skill":{"name":"skill-b","description":"B desc","source":"self","path":"/self/skill-b","author":"winter","body":"B body"}}}"#)
         await selectB
 
         // Delete A (a different skill) — as if its confirmation alert resolved after reselection.
@@ -86,7 +86,7 @@ final class SkillsPaneModelTests: XCTestCase {
         // survive refresh()'s vanished-skill pruning too.
         await feedWaitUntil { t.sent.count >= 4 } // request #4: skills.list
         let listReq = feedLineJSON(t.sent[3])
-        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"skills":[{"name":"skill-b","description":"B desc","source":"self","path":"/self/skill-b","author":"norma"}]}}"#)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(listReq["id"] as! Int),"result":{"skills":[{"name":"skill-b","description":"B desc","source":"self","path":"/self/skill-b","author":"winter"}]}}"#)
         await deleteA
 
         XCTAssertEqual(model.selectedName, "skill-b")
@@ -105,7 +105,7 @@ final class SkillsPaneModelTests: XCTestCase {
         async let select: Void = model.select("skill-a")
         await feedWaitUntil { t.sent.count >= 2 }
         let req = feedLineJSON(t.sent[1])
-        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"skill":{"name":"skill-a","description":"desc","source":"self","path":"/self/skill-a","author":"norma","body":"body"}}}"#)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"skill":{"name":"skill-a","description":"desc","source":"self","path":"/self/skill-a","author":"winter","body":"body"}}}"#)
         await select
 
         XCTAssertFalse(model.canSave, "loaded but unmodified — not dirty, not savable")
@@ -131,7 +131,7 @@ final class SkillsPaneModelTests: XCTestCase {
         async let select: Void = model.select("builtin-skill")
         await feedWaitUntil { t.sent.count >= 2 }
         let req = feedLineJSON(t.sent[1])
-        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"skill":{"name":"builtin-skill","description":"desc","source":"builtin","path":"/norma/skills/builtin-skill","body":"body"}}}"#)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"skill":{"name":"builtin-skill","description":"desc","source":"builtin","path":"/winter/skills/builtin-skill","body":"body"}}}"#)
         await select
 
         XCTAssertFalse(model.isSelectedSelf)

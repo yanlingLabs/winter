@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 final class PanelMetricsTests: XCTestCase {
     /// Measured from docs/research/reference/chatgpt-panel-2026-08-08.png at @2x.

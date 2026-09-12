@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import NormaChatKit
+@testable import WinterChatKit
 
 /// Search — the Exa-backed single-call web search. Every test drives `ScriptedChatHTTP`; none reach
 /// the network. The two security properties (key never in an error string, dangerous results

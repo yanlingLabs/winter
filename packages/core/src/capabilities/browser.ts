@@ -41,7 +41,7 @@ export function browserCapability(session: CapabilitySession, deps: BrowserCapab
       key: "browser",
       // `deferred: ["code","dispatch"]` is NOT forwarded — see `computer.ts`'s note: deferral is the
       // engine's prompt-budget mechanism and would make the private registry refuse every code and
-      // dispatch call. Recorded in `NORMA_CAPABILITY_TOOLS` for Task 9 instead.
+      // dispatch call. Recorded in `WINTER_CAPABILITY_TOOLS` for Task 9 instead.
       defs: browserToolDefs(deps.browser),
     },
     session,

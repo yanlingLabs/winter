@@ -10,7 +10,7 @@ const TOTAL_OUTPUT_CHARS = 30_000; // whole-response cap; see run()'s doc commen
 const EXA_SEARCH_URL = "https://api.exa.ai/search";
 
 /** Keychain secret name for the Exa API key — ONE exported const shared by the daemon wiring
- *  (daemon.ts) and `norma login --exa-key` (cli/src/main.ts), so the two can never drift on the
+ *  (daemon.ts) and `winter login --exa-key` (cli/src/main.ts), so the two can never drift on the
  *  literal. Same precedent as WEB_SEARCH_API_KEY_SECRET (web.ts:18). */
 export const EXA_API_KEY_SECRET = "exa-api-key";
 
@@ -70,7 +70,7 @@ export function searchToolDefs(deps: SearchToolDeps = {}): ToolDefinition[] {
   return [{
     name: "Search",
     description:
-      "Search the web and get back results WITH an excerpt of each page, in a single fast call. Use it freely whenever a fact might be newer than you are, or when the user asks about something current. Cite the URL when you use what it returns. Requires a stored Exa API key (norma login --exa-key).",
+      "Search the web and get back results WITH an excerpt of each page, in a single fast call. Use it freely whenever a fact might be newer than you are, or when the user asks about something current. Cite the URL when you use what it returns. Requires a stored Exa API key (winter login --exa-key).",
     // Deliberately NOT `deferred: true` (unlike code's web_search): chat's derived toolset
     // (registry.namesForMode("chat")) has no ToolSearch member unless something chat-eligible is
     // itself deferred (nothing is), so a deferred Search here could never have its schema loaded —
@@ -97,7 +97,7 @@ export function searchToolDefs(deps: SearchToolDeps = {}): ToolDefinition[] {
           // No `<key>` placeholder (branch review FIX 6): the CLI's --exa-key branch ignores a
           // positional argv value and always PROMPTS via readSecret — a message implying
           // otherwise would walk a user into pasting their key into shell history for nothing.
-          throw new Error("Search needs an API key — store one with: norma login --exa-key (from exa.ai)");
+          throw new Error("Search needs an API key — store one with: winter login --exa-key (from exa.ai)");
         }
         const count = Math.min(Math.max(max_results ?? DEFAULT_RESULTS, 1), MAX_RESULTS);
         const fetchFn = deps.fetchFn ?? fetch;
@@ -141,9 +141,9 @@ export function searchToolDefs(deps: SearchToolDeps = {}): ToolDefinition[] {
           //
           // Whole-branch re-review FIX (was: redirect the raw detail to console.error and call it
           // done): stderr is NOT operator-only here. `launchd.ts` redirects the daemon's stderr to
-          // `~/.norma/logs/core.err.log`, and that directory is DELIBERATELY agent-readable
+          // `~/.winter/logs/core.err.log`, and that directory is DELIBERATELY agent-readable
           // (daemon.ts denies only `dirs.runDir` to the read/grep tools) — so the raw key would
-          // still land somewhere Norma's own tools can open it, just one hop removed. Redact the
+          // still land somewhere Winter's own tools can open it, just one hop removed. Redact the
           // literal key substring out of the message before it ever reaches this log line.
           //
           // `replaceAll` is sufficient: verified live (bun 1.3.14) that Bun's fetch embeds the

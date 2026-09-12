@@ -2,12 +2,12 @@
 // web surface.
 //
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// WHY THESE ARE NORMA'S TOOLS AND NOT THE SDK'S WebSearch/WebFetch
+// WHY THESE ARE WINTER'S TOOLS AND NOT THE SDK'S WebSearch/WebFetch
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 //
 // WS-06 §5 originally folded `Search`/`ReadPage` into the SDK's built-in web tools "in the chat-mode
 // advertised set". C-6 overturned that, and the reason is daemon state the built-ins cannot have
-// (Norma map §5.1 trap (ii)):
+// (Winter map §5.1 trap (ii)):
 //
 //   1. **The Exa key.** `Search` reaches it through `deps.secret(EXA_API_KEY_SECRET)` — the daemon's
 //      `KeychainSecretStore`. A built-in WebSearch has no key and would simply fail; worse, a

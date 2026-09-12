@@ -1,9 +1,9 @@
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import type { ModelFamilyListing, ProviderSelection } from "@yanlinglabs/winter-agent-sdk";
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
-import { NORMA_CREDENTIAL_INVENTORY, credentialRefFor } from "./keychain";
+import { WINTER_CREDENTIAL_INVENTORY, credentialRefFor } from "./keychain";
 
-/** The `winter-test/<name>` namespace (Norma map §11.6): selection is BY NAME through
+/** The `winter-test/<name>` namespace (Winter map §11.6): selection is BY NAME through
  *  `model: "winter-test/<name>"` plus the env var `WINTER_TEST_PROVIDER`, precisely because a
  *  spawned or compiled child shares no module state with the test process. It is not a catalog
  *  provider and must never be resolved against one. */
@@ -46,19 +46,19 @@ function qualifiedProviderFor(model: string): string | undefined {
  *    model AND no provider" is the child's own typed resolution error, never a silent default.)
  * 2. **`winter-test/<name>`** → `undefined`. The test double is selected by env var, not by the
  *    catalog, and naming a provider for it would be a lie.
- * 3. **A fully-qualified `<providerId>/<model>` key** → that provider, with its ref if Norma has
+ * 3. **A fully-qualified `<providerId>/<model>` key** → that provider, with its ref if Winter has
  *    one. §7.1: "a qualified key needs no `provider` at all" — we still return one so the
  *    credential is named, which is the half the child cannot do for itself.
- * 4. **A bare id** → resolve against the pinned catalog, RESTRICTED to the providers Norma actually
+ * 4. **A bare id** → resolve against the pinned catalog, RESTRICTED to the providers Winter actually
  *    has credentials for. This restriction is load-bearing: a bare id like `gpt-5.6-sol` matches
  *    SIX catalog rows (`agentrouter`, `codex-oauth`, `freeaiapikey`, `kie`, `kilocode`, `openai`),
  *    so "resolve the model id against the catalog" alone is ambiguous and would pick an arbitrary
- *    third-party reseller. Within Norma's own inventory the choice is made in inventory order,
+ *    third-party reseller. Within Winter's own inventory the choice is made in inventory order,
  *    preferring a provider whose credential is actually PRESENT — so a Codex-only install routes
  *    `gpt-5.6-sol` to `codex-oauth` and an API-key install routes it to `openai`, which is exactly
  *    what the engine leg does today.
  * 5. **Served by no inventory provider** → `undefined`, letting the child's own catalog-first
- *    selection answer. Never a host-side throw (a model Norma cannot name is the child's typed
+ *    selection answer. Never a host-side throw (a model Winter cannot name is the child's typed
  *    refusal to give, not ours).
  *
  * A provider that serves the model but has NO stored credential still returns a selection WITHOUT
@@ -81,7 +81,7 @@ export function providerSelectionFor(
   const serving = new Set(catalogRowsFor(model).map((r) => r.providerId));
   if (serving.size === 0) return undefined;
 
-  const inInventory = NORMA_CREDENTIAL_INVENTORY.filter((s) => serving.has(s.provider));
+  const inInventory = WINTER_CREDENTIAL_INVENTORY.filter((s) => serving.has(s.provider));
   if (inInventory.length === 0) return undefined;
 
   const withCredential = inInventory.find((s) => credentials.byProvider[s.provider] !== undefined);
@@ -90,12 +90,12 @@ export function providerSelectionFor(
   return ref ? { providerId: chosen.provider, authRef: ref } : { providerId: chosen.provider };
 }
 
-/** Which of Norma's inventory providers the pinned catalog says serve `model`. Exported for the
- *  parity test, which pins the EXACT answer for every model Norma's own default catalogue offers —
+/** Which of Winter's inventory providers the pinned catalog says serve `model`. Exported for the
+ *  parity test, which pins the EXACT answer for every model Winter's own default catalogue offers —
  *  so a catalog bump that adds or drops a row fails loudly in either direction. */
 export function inventoryProvidersServing(model: string): string[] {
   const serving = new Set(catalogRowsFor(model).map((r) => r.providerId));
-  return NORMA_CREDENTIAL_INVENTORY.filter((s) => serving.has(s.provider)).map((s) => s.provider);
+  return WINTER_CREDENTIAL_INVENTORY.filter((s) => serving.has(s.provider)).map((s) => s.provider);
 }
 
 /**
@@ -103,14 +103,14 @@ export function inventoryProvidersServing(model: string): string[] {
  * `SelectionInput` from, with exactly the fields `select-runtime.ts`'s `candidatesFor`/
  * `resolveSlot` read (`row.key/providerId/status/servable`, `family.slots[].name/canonicalModelId`).
  *
- * `servable` IS ALWAYS `"unknown"` HERE, DELIBERATELY (never `"present"`/`"absent"`) — Norma has no
+ * `servable` IS ALWAYS `"unknown"` HERE, DELIBERATELY (never `"present"`/`"absent"`) — Winter has no
  * independent per-provider reachability probe, and the doc on `ModelRowServable` is explicit that
  * `"unknown"` is the honest answer for a row nobody has probed. The REAL admission gate is
  * `candidatesFor`'s OWN separate `providerAuthView`/credential check, which this listing does not
  * duplicate — a row with no configured credential is excluded there regardless of what this
  * function reports for `servable`.
  *
- * `active` is always `undefined` — Norma does not (yet) persist a per-session "active family" the
+ * `active` is always `undefined` — Winter does not (yet) persist a per-session "active family" the
  * way `Query.listModelFamilies()` does; the D25 reserved-slot names and the "unique name across
  * every family" fallback (`resolveSlot`'s own next two rungs) still work with no active set.
  *
@@ -125,7 +125,7 @@ export function inventoryProvidersServing(model: string): string[] {
  * `canonicalModelId`, or a row's `key` — because the SDK's `ModelFamilyListing` row shape HAS no
  * `aliases`/`upstreamId` field to consult at all. `catalogRowsFor` (this file, just above) matches
  * a broader set — a row's `key`, `upstreamId`, `canonicalModelId` OR any of its `aliases` — which is
- * exactly right for "does Norma's catalog know this model" (`decideRuntime`'s bail-out #4,
+ * exactly right for "does Winter's catalog know this model" (`decideRuntime`'s bail-out #4,
  * `session-driver.ts`) but WRONG the moment that broader answer is fed to the router as a literal
  * `requested.model` string: an alias/upstreamId match passes the bail-out (a real catalog row
  * exists) and then reaches `resolveModel`, which cannot find it anywhere in THIS listing and

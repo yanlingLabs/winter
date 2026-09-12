@@ -1,7 +1,7 @@
 import XCTest
 import AppKit
 import SwiftUI
-@testable import Norma
+@testable import Winter
 
 /// diff-tabs Task 12 — soft per-kind panel tab tints. Same three-tier posture
 /// `TranscriptBrandTests`' own file doc states, applied to a new surface:

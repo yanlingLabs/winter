@@ -1,9 +1,9 @@
 import XCTest
-import NormaProtocol
-@testable import NormaKit
+import WinterProtocol
+@testable import WinterKit
 
 /// Scripted transport: records outbound lines; the test feeds inbound lines/closure manually.
-final class ScriptedTransport: NormaTransport, SentLineRecording, @unchecked Sendable {
+final class ScriptedTransport: WinterTransport, SentLineRecording, @unchecked Sendable {
     let incoming: AsyncStream<TransportEvent>
     private let cont: AsyncStream<TransportEvent>.Continuation
     private let lock = NSLock()
@@ -50,7 +50,7 @@ func decodeLine(_ s: String) -> [String: Any] {
 /// (hello, during connect()) succeeds and is recorded normally; every call after that fails
 /// before it can record anything, simulating a transport whose socket dies right as a caller
 /// tries to write to it.
-final class FlakySendTransport: NormaTransport, SentLineRecording, @unchecked Sendable {
+final class FlakySendTransport: WinterTransport, SentLineRecording, @unchecked Sendable {
     let incoming: AsyncStream<TransportEvent>
     private let cont: AsyncStream<TransportEvent>.Continuation
     private let lock = NSLock()
@@ -76,9 +76,9 @@ final class FlakySendTransport: NormaTransport, SentLineRecording, @unchecked Se
     func feed(_ line: String) { cont.yield(.data(Data((line + "\n").utf8))) }
 }
 
-final class NormaClientTests: XCTestCase {
-    func makeClient(_ t: ScriptedTransport) -> NormaClient {
-        NormaClient(makeTransport: { t }, token: "tok64", clientName: "test-client")
+final class WinterClientTests: XCTestCase {
+    func makeClient(_ t: ScriptedTransport) -> WinterClient {
+        WinterClient(makeTransport: { t }, token: "tok64", clientName: "test-client")
     }
 
     func testConnectSendsHelloAndResolvesOnResponse() async throws {
@@ -154,10 +154,10 @@ final class NormaClientTests: XCTestCase {
         XCTAssertTrue(raw.contains("future_thing"))
     }
 
-    /// Phase 5e T1 (reviewer maturity — the NormaKit-trap task): the NEW `tool_review` variant
+    /// Phase 5e T1 (reviewer maturity — the WinterKit-trap task): the NEW `tool_review` variant
     /// must decode as a REAL case (not fall back to `.unknown`, the way `testEventsFlowToTheStream
     /// AndUnknownWraps`'s `future_thing` does above) and both exhaustive accessor switches
-    /// (`var seq`/`var sessionId`, NormaClient.swift) must return its values — this is what would
+    /// (`var seq`/`var sessionId`, WinterClient.swift) must return its values — this is what would
     /// have failed to compile before this task's switch sync.
     func testToolReviewEventDecodesAndAccessorsWork() async throws {
         let t = ScriptedTransport()
@@ -176,7 +176,7 @@ final class NormaClientTests: XCTestCase {
         XCTAssertEqual(SessionEvent.toolReview(v).sessionId, "s_1")
     }
 
-    /// task-30 (push-notification track — another NormaKit-trap task, same shape as
+    /// task-30 (push-notification track — another WinterKit-trap task, same shape as
     /// testToolReviewEventDecodesAndAccessorsWork above): the NEW `notification_requested` variant
     /// must decode as a REAL case and both exhaustive accessor switches (`var seq`/`var
     /// sessionId`) must return its values — this is what would have failed to compile before this
@@ -191,9 +191,9 @@ final class NormaClientTests: XCTestCase {
         try await connected
 
         var iter = client.events.makeAsyncIterator()
-        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"notification_requested","seq":9,"sessionId":"s_1","ts":5,"threadId":"main","title":"Norma","message":"migration finished"}}"#)
+        t.feed(#"{"jsonrpc":"2.0","method":"event","params":{"type":"notification_requested","seq":9,"sessionId":"s_1","ts":5,"threadId":"main","title":"Winter","message":"migration finished"}}"#)
         guard case .session(.notificationRequested(let v)) = await iter.next() else { return XCTFail() }
-        XCTAssertEqual(v.title, "Norma")
+        XCTAssertEqual(v.title, "Winter")
         XCTAssertEqual(v.message, "migration finished")
         XCTAssertEqual(SessionEvent.notificationRequested(v).seq, 9)
         XCTAssertEqual(SessionEvent.notificationRequested(v).sessionId, "s_1")
@@ -218,7 +218,7 @@ final class NormaClientTests: XCTestCase {
 
     func testRequestTimesOut() async throws {
         let t = ScriptedTransport()
-        let client = NormaClient(makeTransport: { t }, token: "tok", clientName: "c", requestTimeout: .milliseconds(80))
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "c", requestTimeout: .milliseconds(80))
         async let connected: Void = client.connect()
         let hello = try await waitForSent(t, count: 1)[0]
         t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(hello)["id"] as! Int),"result":{"ok":true}}"#)
@@ -232,7 +232,7 @@ final class NormaClientTests: XCTestCase {
     /// timeout path's "timed out" wording.
     func testSendFailureResumesWithTransportError() async throws {
         let t = FlakySendTransport()
-        let client = NormaClient(makeTransport: { t }, token: "tok", clientName: "flaky")
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "flaky")
         async let connected: Void = client.connect()
         let hello = try await waitForSent(t, count: 1)[0]
         t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(hello)["id"] as! Int),"result":{"ok":true}}"#)
@@ -273,7 +273,7 @@ final class NormaClientTests: XCTestCase {
 
     func testDeliberateCloseFinishesEventStream() async throws {
         let t = ScriptedTransport()
-        let client = NormaClient(makeTransport: { t }, token: "tok", clientName: "close-ends")
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "close-ends")
         async let connected: Void = client.connect()
         let hello = try await waitForSent(t, count: 1)[0]
         t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(hello)["id"] as! Int),"result":{"ok":true}}"#)

@@ -1,7 +1,7 @@
 import AppKit
-import NormaProtocol
+import WinterProtocol
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// b2-agent-browser Task 5 — **the interaction verbs, and the sensitive floor.**
 ///
@@ -70,7 +70,7 @@ final class PanelCommandInteractionTests: XCTestCase {
 
     /// Built as WIRE JSON and decoded, never with a memberwise initialiser — the same call
     /// `PanelCommandConsumerTests` makes, and for the same reason: `PanelCommand`'s init is internal
-    /// to NormaProtocol, and going through the real decode keeps a fixture from describing an `args`
+    /// to WinterProtocol, and going through the real decode keeps a fixture from describing an `args`
     /// payload the daemon could not emit.
     private func command(_ action: String, args: [String: Any]? = nil, tabId: String? = "t1",
                          deadlineMs: Int = 15_000) -> SessionEvent.PanelCommand {
@@ -330,7 +330,7 @@ final class PanelCommandInteractionTests: XCTestCase {
     /// goes red, by REFUSING. The floor rows below stay green under that mutation, which is the
     /// direction that proves fail-closed rather than merely asserting it.
     func testASafeFieldIsInspectedThenFocusedSelectedAndTypedInto() throws {
-        consumer.handle(command("type", args: ["selector": "input[name=q]", "text": "norma"]))
+        consumer.handle(command("type", args: ["selector": "input[name=q]", "text": "winter"]))
         answer([Self.document, Self.matched, Self.field(["type", "search", "name", "q"]),
                 Self.empty, Self.empty, Self.handle, Self.selected, Self.empty])
 
@@ -352,7 +352,7 @@ final class PanelCommandInteractionTests: XCTestCase {
             .map { $0.params["nodeId"] as? Int }
         XCTAssertEqual(nodeIds, [42, 42, 42])
 
-        XCTAssertEqual(transcript().last?.params["text"] as? String, "norma")
+        XCTAssertEqual(transcript().last?.params["text"] as? String, "winter")
         XCTAssertEqual(sent.count, 1)
         XCTAssertEqual(sent.first?.ok, true)
         XCTAssertTrue(sent.first?.result?.contains("typed 5 characters") == true, "\(sent)")
@@ -483,7 +483,7 @@ final class PanelCommandInteractionTests: XCTestCase {
         let huge = String(repeating: "a", count: PanelCommandConsumer.resultMaxLength + 5_000)
         let cut = PanelCommandConsumer.capped(huge)
         XCTAssertLessThanOrEqual(PanelURLPolicy.wireLength(cut), PanelCommandConsumer.resultMaxLength)
-        XCTAssertTrue(cut.contains("cut by Norma"), "a silent truncation is a message read to the end")
+        XCTAssertTrue(cut.contains("cut by Winter"), "a silent truncation is a message read to the end")
         XCTAssertTrue(cut.hasPrefix("aaa"), "the head — where the meaning is — survives")
 
         // The UNIT, again: each emoji is one Character and TWO UTF-16 units, so a cut measured in

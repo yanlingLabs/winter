@@ -281,7 +281,7 @@ describe("read", () => {
 
   // The class this arc has now paid for three times: `z.number().int().positive()` is NOT a bound
   // (`Number.isInteger(1e30)` is `true`), the app's `Int(Double)` TRAPS outside `Int`'s range, and a
-  // trap ABORTS Norma.app along with every open document's unsaved edits. `docs.ts` did not exist
+  // trap ABORTS Winter.app along with every open document's unsaved edits. `docs.ts` did not exist
   // during the sweep that closed `sheets`' and `slides`' own doors, so it is outside that sweep by
   // construction — these are bounded on arrival rather than after a review.
   test("an app-aborting paragraph index is refused before dispatch — both operands, every shape", async () => {
@@ -703,7 +703,7 @@ describe("append texts[]", () => {
   // ⛔ **Fix round, review IMPORTANT-1 — a READ is no longer read-only with respect to disk.**
   //
   // office-live-ux added a pre-save at five action points, two of which are the agent's own verbs.
-  // Before an ADOPTED read (a file the human already has open in a tab), Norma flushes that tab to
+  // Before an ADOPTED read (a file the human already has open in a tab), Winter flushes that tab to
   // disk. The description described `read` as returning data and attributed saving specifically to
   // *write* verbs — the description-contradicting-the-code shape, in the one artifact the model
   // actually plans from. A user who says "don't change anything, just tell me what's in there" gets

@@ -11,7 +11,7 @@ import Foundation
 /// playing, headless browsers an agent drives while the user looks elsewhere — is that one fact.
 /// B1's two spikes each voided several "established" facts, so this one is measured, not reasoned.
 ///
-/// **Entirely `#if DEBUG` and entirely env-gated** (`NORMA_SPIKE_REPARENT=1`). With the variable
+/// **Entirely `#if DEBUG` and entirely env-gated** (`WINTER_SPIKE_REPARENT=1`). With the variable
 /// unset nothing in this file is reachable: `AppDelegate.applicationDidFinishLaunching` asks
 /// `SpikeReparent.isRequested` and, only if it says yes, hands the launch over — *instead of*
 /// `boot()`, never after it (see `start`). The Release app does not contain this file at all.
@@ -21,11 +21,11 @@ import Foundation
 /// prove audio is genuinely playing, runs the cycles, and quits itself. The page reports its own
 /// state back through `document.title` → `CefDisplayHandler::OnTitleChange` → the container's state
 /// observer, because that is the one channel out of a page this bridge already has (there is no JS
-/// evaluation entry point on `NormaCEF.h`, and `javascript:` never enters a load path).
+/// evaluation entry point on `WinterCEF.h`, and `javascript:` never enters a load path).
 enum SpikeReparent {
     /// The whole gate. Read once per launch, before anything else happens.
     static var isRequested: Bool {
-        ProcessInfo.processInfo.environment["NORMA_SPIKE_REPARENT"] == "1"
+        ProcessInfo.processInfo.environment["WINTER_SPIKE_REPARENT"] == "1"
     }
 
     /// Take the launch over. Called **instead of** `AppProfile.bootstrapEnvironment()` + `boot()`,
@@ -83,14 +83,14 @@ final class SpikeReparentHarness {
     private var msSinceLastMove: Int { Int(Date().timeIntervalSince(lastMove) * 1000) }
     private var lastMove = Date()
 
-    /// `NORMA_SPIKE_CYCLES` / `NORMA_SPIKE_LONG_DWELL` exist so a follow-up run can re-ask one
+    /// `WINTER_SPIKE_CYCLES` / `WINTER_SPIKE_LONG_DWELL` exist so a follow-up run can re-ask one
     /// question in 40 s instead of re-running the whole 4-minute programme.
-    private let cycles = SpikeReparentHarness.envInt("NORMA_SPIKE_CYCLES", 20)
+    private let cycles = SpikeReparentHarness.envInt("WINTER_SPIKE_CYCLES", 20)
     private let visibleDwell: TimeInterval = 3.5
     private let parkedDwell: TimeInterval = 3.5
     /// The long tail: one 40 s park and one 40 s show, so the CPU sampler has clean, uncontended
     /// windows to average over instead of 3.5 s slivers.
-    private let longDwell = TimeInterval(SpikeReparentHarness.envInt("NORMA_SPIKE_LONG_DWELL", 40))
+    private let longDwell = TimeInterval(SpikeReparentHarness.envInt("WINTER_SPIKE_LONG_DWELL", 40))
 
     private let parkedSize = NSSize(width: 700, height: 500)
     private let visibleSizes = [NSSize(width: 1000, height: 700), NSSize(width: 820, height: 560)]
@@ -101,13 +101,13 @@ final class SpikeReparentHarness {
             contentRect: NSRect(origin: .zero, size: parkedSize),
             styleMask: [.borderless], backing: .buffered, defer: false)
         parkingWindow.isReleasedWhenClosed = false
-        parkingWindow.title = "Norma spike parking"
+        parkingWindow.title = "Winter spike parking"
 
         visibleWindow = NSWindow(
             contentRect: NSRect(x: 120, y: 120, width: 1000, height: 700),
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         visibleWindow.isReleasedWhenClosed = false
-        visibleWindow.title = "Norma reparent spike"
+        visibleWindow.title = "Winter reparent spike"
     }
 
     // MARK: Ledger
@@ -149,13 +149,13 @@ final class SpikeReparentHarness {
         }
         log("PARKWINDOW visible=\(parkingWindow.isVisible) occlusion=\(parkingWindow.occlusionState.rawValue) num=\(parkingWindow.windowNumber)")
 
-        NormaCEFSetStateObserver(container) { [weak self] state in
+        WinterCEFSetStateObserver(container) { [weak self] state in
             self?.onState(state)
         }
-        NormaCEFSetNavigationObserver(container) { [weak self] url, title in
+        WinterCEFSetNavigationObserver(container) { [weak self] url, title in
             self?.log("NAV phase=\(self?.phase ?? "?") sinceMove=\(self?.msSinceLastMove ?? -1)ms url=\(url ?? "") title=\(Self.short(title ?? ""))")
         }
-        NormaCEFSetPopupObserver(container) { [weak self] url in
+        WinterCEFSetPopupObserver(container) { [weak self] url in
             self?.log("POPUP url=\(url ?? "")")
         }
 
@@ -180,7 +180,7 @@ final class SpikeReparentHarness {
             at: URL(fileURLWithPath: cache), withIntermediateDirectories: true)
         log("CEFINIT cache=\(cache)")
 
-        // **Not `NormaCEFRuntime.ensureInitialized()`, and the reason is a hard environment
+        // **Not `WinterCEFRuntime.ensureInitialized()`, and the reason is a hard environment
         // constraint rather than a preference.** That path derives `root_cache_path` from the
         // BUNDLE ID, and this Debug spike carries the same bundle id as the user's live dev app.
         // Chromium takes an exclusive lock on `root_cache_path`: sharing it means whichever process
@@ -188,13 +188,13 @@ final class SpikeReparentHarness {
         // browser panel is the thing that breaks. The hazard is bidirectional, so the spike takes a
         // scratch profile of its own. Everything downstream of this one call — creation, the three
         // observers, the chrome verbs, the close path — is the production API verbatim.
-        let ok = NormaCEFInitialize(CommandLine.argc, CommandLine.unsafeArgv, cache, helper)
+        let ok = WinterCEFInitialize(CommandLine.argc, CommandLine.unsafeArgv, cache, helper)
         guard ok else {
-            fatal("CefInitialize failed: \(String(cString: NormaCEFLastError()))")
+            fatal("CefInitialize failed: \(String(cString: WinterCEFLastError()))")
             return
         }
         log("CEFREADY")
-        NormaCEFCreateBrowser(container, pageURL, 0) // no background override — not the editor
+        WinterCEFCreateBrowser(container, pageURL, 0) // no background override — not the editor
         waitForAudio(attempt: 0)
     }
 
@@ -236,9 +236,9 @@ final class SpikeReparentHarness {
             // Key #1 goes in WITHOUT touching the first responder — that is the whole first-responder
             // measurement: did the reparent leave the CEF view able to take a keystroke on its own?
             enqueue(0.3, "click\(i)") { [weak self] in
-                // `NORMA_SPIKE_NO_CLICK=1` removes the click, which is how the spike separates
+                // `WINTER_SPIKE_NO_CLICK=1` removes the click, which is how the spike separates
                 // "a click restores focus" from "an explicit makeFirstResponder restores focus".
-                if SpikeReparentHarness.envInt("NORMA_SPIKE_NO_CLICK", 0) == 0 { self?.injectClick() }
+                if SpikeReparentHarness.envInt("WINTER_SPIKE_NO_CLICK", 0) == 0 { self?.injectClick() }
             }
             enqueue(0.4, "key1-\(i)") { [weak self] in self?.injectKey("a", keyCode: 0, forceFirstResponder: false) }
             // Key #2 goes in after an explicit `makeFirstResponder`. Comparing the page's key count
@@ -367,9 +367,9 @@ final class SpikeReparentHarness {
     ///
     /// **`NSApp.postEvent`, never `NSWindow.sendEvent` — measured.** Run 1 of this spike sent key
     /// events straight to the window, with the window key and the CEF view made first responder,
-    /// and the renderer received **not one of the 40**. The reason is Norma-specific and
+    /// and the renderer received **not one of the 40**. The reason is Winter-specific and
     /// structural: `NSWindow.sendEvent` bypasses `NSApplication.sendEvent:`, which is precisely
-    /// where `NormaApplication` (Norma's `CefAppProtocol` subclass, the thing `main.swift` exists
+    /// where `WinterApplication` (Winter's `CefAppProtocol` subclass, the thing `main.swift` exists
     /// to install) wraps dispatch in `CefScopedSendingEvent` and sets `isHandlingSendEvent`. CEF
     /// requires that flag to be set while an event is dispatched. Posting to the queue puts the
     /// event back on the real `NSApp` path and the flag is set for us.
@@ -419,7 +419,7 @@ final class SpikeReparentHarness {
     /// so a callback carrying a title IDENTICAL to the previous one provably did not come from
     /// `OnTitleChange`. Those are the ones a reparent would produce, and they are logged
     /// individually; the sample stream itself is not (it would be thousands of lines).
-    private func onState(_ state: NormaCEFBrowserState?) {
+    private func onState(_ state: WinterCEFBrowserState?) {
         guard let state else { return }
         stateCallbacks += 1
         let title = state.title ?? ""
@@ -473,7 +473,7 @@ final class SpikeReparentHarness {
         // `applicationShouldTerminate` — which for the spike would mean "close the windows and keep
         // running", i.e. an unattended run that never ends and a CEF that is never shut down. The
         // bypass is safe precisely because this file is `#if DEBUG` and unreachable without
-        // `NORMA_SPIKE_REPARENT=1`: no shipped path can reach it, and the spike owns the whole
+        // `WINTER_SPIKE_REPARENT=1`: no shipped path can reach it, and the spike owns the whole
         // process (it ran INSTEAD of `boot()`, so there is no daemon, no orb and no user window to
         // take down with it).
         delegate.reallyQuitting = true
@@ -488,24 +488,24 @@ final class SpikeReparentHarness {
     }
 
     private static var parkMode: String {
-        ProcessInfo.processInfo.environment["NORMA_SPIKE_PARK_MODE"] ?? "never"
+        ProcessInfo.processInfo.environment["WINTER_SPIKE_PARK_MODE"] ?? "never"
     }
 
-    /// A scratch Chromium profile — never `~/.norma*`, never the bundle-id path the user's live dev
+    /// A scratch Chromium profile — never `~/.winter*`, never the bundle-id path the user's live dev
     /// app holds an exclusive lock on. See `startCEF` for why that lock is the whole reason.
     private static func cachePath() -> String {
-        if let explicit = ProcessInfo.processInfo.environment["NORMA_SPIKE_CEF_CACHE"], !explicit.isEmpty {
+        if let explicit = ProcessInfo.processInfo.environment["WINTER_SPIKE_CEF_CACHE"], !explicit.isEmpty {
             return explicit
         }
-        return NSTemporaryDirectory() + "norma-spike-cef"
+        return NSTemporaryDirectory() + "winter-spike-cef"
     }
 
-    /// A three-line copy of `NormaCEFRuntime.helperExecutablePath()` — private there, and copying it
+    /// A three-line copy of `WinterCEFRuntime.helperExecutablePath()` — private there, and copying it
     /// is right for spike code that must not widen a production surface.
     private static func helperExecutablePath() -> String? {
         let url = Bundle.main.bundleURL
-            .appendingPathComponent("Contents/Frameworks/Norma Helper.app/Contents/MacOS", isDirectory: true)
-            .appendingPathComponent("Norma Helper", isDirectory: false)
+            .appendingPathComponent("Contents/Frameworks/Winter Helper.app/Contents/MacOS", isDirectory: true)
+            .appendingPathComponent("Winter Helper", isDirectory: false)
         return FileManager.default.isExecutableFile(atPath: url.path) ? url.path : nil
     }
 
@@ -525,7 +525,7 @@ final class SpikeReparentHarness {
     /// **Why not the "real URL" the brief suggests, and why this is not the closed `data:` door.**
     /// The measurement needs a page that reports its own audio clock, rAF count, key count, DOM
     /// focus and viewport size — and this bridge's only channel out of a page is `document.title`
-    /// (`NormaCEF.h` exposes no JS evaluation, and `javascript:` never enters a load path). No
+    /// (`WinterCEF.h` exposes no JS evaluation, and `javascript:` never enters a load path). No
     /// remote page can be instrumented that way. `file://` is a real scheme on the ordinary
     /// navigation path, needs no network, and is byte-reproducible for anyone re-running this
     /// harness. The `data:` restriction the brief cites is `PanelURLPolicy`'s, which is Swift-side
@@ -533,7 +533,7 @@ final class SpikeReparentHarness {
     /// of** the page, never a top-frame navigation, which is a different thing again.
     private func writePage() -> String {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("norma-spike-page", isDirectory: true)
+            .appendingPathComponent("winter-spike-page", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let file = dir.appendingPathComponent("spike.html")
         try? Self.pageHTML.write(to: file, atomically: true, encoding: .utf8)
@@ -553,7 +553,7 @@ final class SpikeReparentHarness {
       pre{margin:0;font:11px ui-monospace,Menlo,monospace;color:#8fd}
     </style>
     <body>
-      <div><b>Norma reparent spike</b> — the page instruments itself and reports through document.title.</div>
+      <div><b>Winter reparent spike</b> — the page instruments itself and reports through document.title.</div>
       <button id="start" hidden>Click to start audio</button>
       <input id="field" placeholder="keystrokes land here" autofocus>
       <canvas id="c" width="360" height="70"></canvas>

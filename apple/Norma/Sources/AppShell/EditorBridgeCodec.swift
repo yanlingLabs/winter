@@ -5,16 +5,16 @@ import Foundation
 ///
 /// The transport underneath is CEF's message router: the page calls `window.cefQuery` (wrapped by
 /// its own `bridge-protocol.js`, Task 4) and the browser process delivers the request JSON to the
-/// block registered with `NormaCEFSetBridgeHandler` (`NormaCEF.h`). This file is what turns those
+/// block registered with `WinterCEFSetBridgeHandler` (`WinterCEF.h`). This file is what turns those
 /// bytes into something typed, and what turns a Swift decision back into one line of JavaScript.
 ///
 /// ## Two rules this file exists to hold
 ///
 /// **1. The page is DATA, never code.** Every outbound message renders as exactly one call to one
-/// literal entry point — `window.normaEditor.dispatch(<json>)` — with the payload as a JSON
+/// literal entry point — `window.winterEditor.dispatch(<json>)` — with the payload as a JSON
 /// argument. Nothing a user's file contains can become an expression: a path, a language name and
 /// a whole file's text all travel as JSON string values, which the page's `dispatch` reads off an
-/// object. This is the same discipline `NormaCEF.h` states for the CDP door ("`method` is always a
+/// object. This is the same discipline `WinterCEF.h` states for the CDP door ("`method` is always a
 /// literal … a model string may be a PARAMS VALUE, and only where the value is data by
 /// construction"), applied to the one channel that carries the most attacker-shaped bytes in the
 /// app: the contents of whatever file the user opened.
@@ -33,12 +33,12 @@ import Foundation
 /// transport hard-fails on oversized frames for the same reason this refuses them: an unbounded
 /// field on a channel that carries file contents is a channel with no worst case. A `contentResponse`
 /// for a file bigger than this is refused whole; the editor keeps its own copy either way, so the
-/// failure mode is "Norma does not write a 9 MiB file it was never asked to open", not data loss.
+/// failure mode is "Winter does not write a 9 MiB file it was never asked to open", not data loss.
 let editorBridgeMaxInboundBytes = 8 * 1024 * 1024
 
 /// **Page → Swift.** What the editor tells the app.
 enum EditorBridgeInbound: Equatable {
-    /// The page has loaded, Monaco is up, and `window.normaEditor.dispatch` exists. Nothing may be
+    /// The page has loaded, Monaco is up, and `window.winterEditor.dispatch` exists. Nothing may be
     /// sent to the page before this arrives.
     case ready
     /// A model's dirty flag flipped — the tab's modified dot follows this and nothing else.
@@ -159,7 +159,7 @@ enum EditorBridgeOutbound {
     /// Replace a model's text with something that changed outside the editor (an agent edit, a
     /// reload from disk).
     case applyExternalContent(path: String, text: String)
-    /// Restyle the editor. `tokensJSON` is a JSON OBJECT as a string — Norma's own theme tokens —
+    /// Restyle the editor. `tokensJSON` is a JSON OBJECT as a string — Winter's own theme tokens —
     /// embedded as an object so the page reads `message.tokens.…` rather than parsing a string.
     case setTheme(tokensJSON: String)
     /// **The save acknowledgement**: Swift has written to disk the content that `pullContent`'s
@@ -208,11 +208,11 @@ enum EditorBridgeOutbound {
     }
 
     /// **One call, one literal entry point, payload as data.** The whole Swift-facing API the page
-    /// exposes is `window.normaEditor.dispatch`; everything this enum can say is a JSON object
+    /// exposes is `window.winterEditor.dispatch`; everything this enum can say is a JSON object
     /// handed to it. Nothing here interpolates a value into JavaScript SYNTAX, which is what keeps a
     /// file containing `"); doSomething("` from being anything but text.
     var javascript: String {
-        return "window.normaEditor.dispatch(" + payloadJSON + ")"
+        return "window.winterEditor.dispatch(" + payloadJSON + ")"
     }
 
     /// The message as a JSON object. `type` plus that case's own fields, nothing else.
@@ -249,7 +249,7 @@ enum EditorBridgeOutbound {
               let rendered = String(data: data, encoding: .utf8) else {
             // Unreachable — every payload above is strings, a `UInt64` and a parsed JSON object —
             // but not silence if it ever were: the type alone still reaches the page's switch,
-            // which reports a message it cannot act on. (`CDPReasonJSON` in `NormaCEF.mm` carries
+            // which reports a message it cannot act on. (`CDPReasonJSON` in `WinterCEF.mm` carries
             // the same kind of can't-happen fallback for the same reason.)
             return "{\"type\":\"\(wireType)\"}"
         }

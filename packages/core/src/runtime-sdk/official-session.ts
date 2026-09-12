@@ -1,4 +1,4 @@
-// P8c Task 1.2 — `OfficialSession`: ONE Norma session running on the official leg (a spawned
+// P8c Task 1.2 — `OfficialSession`: ONE Winter session running on the official leg (a spawned
 // `claude` child through the router's own official adapter). Mirrors `WinterSession`'s PUBLIC shape
 // (`winter-session.ts`) closely enough that `session-driver.ts` can hold either behind one
 // `LegSession` interface (that wiring is a Task 1.2 CARRY — see the lane report), but the internal
@@ -16,10 +16,10 @@
 // both runtimes, cast at the boundary exactly as `winter-session.ts` does); `interrupt()` calls the
 // official `Query`'s own `interrupt()` and the projector's `result(interrupted)` frame is what turns
 // that into `turn_completed(aborted)` — never a thrown error.
-import type { NewSessionEvent, SessionEvent } from "@norma/protocol";
+import type { NewSessionEvent, SessionEvent } from "@winter/protocol";
 import { createOfficialInputStream, isOfficialQuery, type OfficialInputStream, type RouterOfficialInput, type RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import { MAIN_THREAD, ProjectorRefusedError, classifyThrown, createProjector, type CheckpointStore, type ProjectedBatch, type Projector, type ProtocolSdkMessage } from "../projector";
-import type { NormaRuntimeSdk, SessionMode } from "./create";
+import type { WinterRuntimeSdk, SessionMode } from "./create";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { OfficialCredentialPlanRefused, officialInputFor, OfficialProjectKeyTooDeep, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
 import { ClaudeExecutableUnavailable } from "./official-executable";
@@ -49,7 +49,7 @@ export interface OfficialSessionDeps {
    *  here — a mismatch is a typed refusal, never a silent divergence). */
   backendSessionId: string;
   mode: SessionMode;
-  runtime: NormaRuntimeSdk;
+  runtime: WinterRuntimeSdk;
   selection: RuntimeSelection;
   /** Builds `OfficialSessionInput` for the CURRENT turn — re-read live, same posture as
    *  `WinterSessionDeps.options`. */

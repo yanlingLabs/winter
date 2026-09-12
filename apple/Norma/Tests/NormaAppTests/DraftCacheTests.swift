@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 final class DraftCacheTests: XCTestCase {
     func testStashRestoreRoundTrip() {

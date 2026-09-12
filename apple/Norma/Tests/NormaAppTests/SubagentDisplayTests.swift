@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// 2e-ii Task 2: lockstep twin of `packages/cli/test/subagent-display.test.ts` — glyph/label/alive
 /// use the SAME fixtures on both sides. `subagentActiveMs` is Swift-only (window shows time).

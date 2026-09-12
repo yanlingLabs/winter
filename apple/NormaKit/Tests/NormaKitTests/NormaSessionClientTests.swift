@@ -1,12 +1,12 @@
 import XCTest
 import os
-import NormaProtocol
-import NormaSessionKit
+import WinterProtocol
+import WinterSessionKit
 
 /// SP3 Task 4: the phone-side resume / idempotency / approval state machine. Driven entirely by
 /// `ScriptedRemoteConn` (loss/dup/gap/reorder injectors) + `InMemoryCursorStore` + injected
 /// clock/idgen — no real iroh, no real daemon (that is T5's real-daemon conformance).
-final class NormaSessionClientTests: XCTestCase {
+final class WinterSessionClientTests: XCTestCase {
 
     // MARK: - Frame helpers (server → phone direction)
 
@@ -110,8 +110,8 @@ final class NormaSessionClientTests: XCTestCase {
         conn: ScriptedRemoteConn, cursors: CursorStore, firstFrameDeadline: Double = 1,
         idgen: @escaping @Sendable () -> String = { UUID().uuidString },
         liveBufferCap: Int = 10_000
-    ) -> NormaSessionClient {
-        NormaSessionClient(
+    ) -> WinterSessionClient {
+        WinterSessionClient(
             conn: conn, hostID: "mac-host", epoch: epoch, cursors: cursors,
             clientInstanceID: "phone-under-test", clock: { 0 }, idgen: idgen,
             firstFrameDeadline: firstFrameDeadline, liveBufferCap: liveBufferCap
@@ -138,8 +138,8 @@ final class NormaSessionClientTests: XCTestCase {
         conn: ScriptedRemoteConn, cursors: CursorStore = InMemoryCursorStore(),
         clock: TestClock, heartbeat: HeartbeatConfig,
         isActive: @escaping @Sendable () -> Bool = { true }
-    ) -> NormaSessionClient {
-        NormaSessionClient(
+    ) -> WinterSessionClient {
+        WinterSessionClient(
             conn: conn, hostID: "mac-host", epoch: epoch, cursors: cursors,
             clientInstanceID: "phone-under-test", clock: { clock.now }, idgen: { UUID().uuidString },
             firstFrameDeadline: 2, heartbeat: heartbeat, isActive: isActive
@@ -198,7 +198,7 @@ final class NormaSessionClientTests: XCTestCase {
 
     func testFileCursorPersistsAndReloadsFresh() throws {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("norma-cursors-\(UUID().uuidString)")
+            .appendingPathComponent("winter-cursors-\(UUID().uuidString)")
             .appendingPathComponent("cursors.json")
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
@@ -215,7 +215,7 @@ final class NormaSessionClientTests: XCTestCase {
 
     func testFileCursorIsAtomic0600() throws {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("norma-cursors-\(UUID().uuidString)")
+            .appendingPathComponent("winter-cursors-\(UUID().uuidString)")
             .appendingPathComponent("cursors.json")
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
@@ -503,7 +503,7 @@ final class NormaSessionClientTests: XCTestCase {
     /// The same drop killed all NINE transient types, not just streaming: the peripheral-lease v1
     /// events, `plugin_tool_invoke`, `hardware_requested` and `plugin_tile_updated` are broadcast
     /// with the same borrowed seq. Pins the phone's exemption list against the Mac client's
-    /// (`NormaClient.swift`) — membership drift in either direction fails here.
+    /// (`WinterClient.swift`) — membership drift in either direction fails here.
     func testEveryTransientTypeAtCursorSeqIsExempt() async throws {
         let conn = ScriptedRemoteConn()
         let cursors = InMemoryCursorStore()
@@ -865,7 +865,7 @@ final class NormaSessionClientTests: XCTestCase {
         let task = Task { try await client.pendingApprovals(sessionID: "s") }
         let out = try await waitOutbound(conn, count: 2)
         let req = decodeOutbound(out[1])
-        XCTAssertEqual(outboundPayload(req)["method"]?.stringValue, NormaSessionClient.approvalListMethod)
+        XCTAssertEqual(outboundPayload(req)["method"]?.stringValue, WinterSessionClient.approvalListMethod)
         // The sessionId scopes the query.
         XCTAssertEqual(outboundPayload(req)["params"]?["sessionId"]?.stringValue, "s")
         let id = outboundPayload(req)["id"]!.intValue!
@@ -888,13 +888,13 @@ final class NormaSessionClientTests: XCTestCase {
     // MARK: - orb-regressions fix round 1 (2026-07-29): no-argument RPCs carry `params: {}`
     //
     // `rpcCall` built its frame with `if let params { obj["params"] = params }` — character-for-
-    // character the NormaKit bug that killed the orb's Enter and detach: the daemon validates each
+    // character the WinterKit bug that killed the orb's Enter and detach: the daemon validates each
     // method with `parseParams` against its zod schema, every no-argument method's schema is
     // `z.object({})`, and `z.object({}).safeParse(undefined)` FAILS, so an omitted key comes back
     // `-32602 invalid params: (root)`.
     //
-    // It mattered MORE here than in NormaKit: NormaSessionKit — not NormaKit — is what `norma-ios`
-    // actually consumes (the root Package.swift exports NormaProtocol + NormaSessionKit only), and
+    // It mattered MORE here than in WinterKit: WinterSessionKit — not WinterKit — is what `norma-ios`
+    // actually consumes (the root Package.swift exports WinterProtocol + WinterSessionKit only), and
     // the phone is version-skewed by design (kit tags + App Store cadence), so a client-side-only
     // fix is precisely the fix that cannot be shipped there quickly. `engine.activity` and
     // `session.dispatch` are both remote-allowed and both `z.object({})`, so a phone feature
@@ -946,7 +946,7 @@ final class NormaSessionClientTests: XCTestCase {
     // MARK: - WB-C1: the JSON-RPC error's `data` member reaches the caller
     //
     // `sync.push` answers a base-seq mismatch with `ERR.DIVERGED (-32006)` and puts the daemon's own
-    // head in `error.data.lastSeq`. `NormaChatKit.SyncClient` branches on THAT number and nothing
+    // head in `error.data.lastSeq`. `WinterChatKit.SyncClient` branches on THAT number and nothing
     // else — `0` means "the daemon holds nothing for this id, re-push from seq 1", `> 0` is a real
     // branch point that forks. The Mac gateway was fixed to relay `data` through; a client that
     // decoded only `code`/`message` would put the phone right back where it started, and the failure

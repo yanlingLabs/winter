@@ -1,7 +1,7 @@
 import XCTest
-import NormaProtocol
-import NormaKit
-@testable import Norma
+import WinterProtocol
+import WinterKit
+@testable import Winter
 
 /// Task 4 (2f): `shouldServe` (the pure decision core) + `PeripheralProvider`'s activeLeases
 /// tracking / respond / panic behavior. Deliberately does NOT exercise hotkey registration,
@@ -10,7 +10,7 @@ import NormaKit
 /// UI/registration paths noted for the live gate."
 ///
 /// `SessionEvent`'s nested structs (`LeaseGranted`/`Holder`/etc.) have no PUBLIC memberwise
-/// initializer (NormaProtocol relies on `Codable` synthesis only, matching every other test file
+/// initializer (WinterProtocol relies on `Codable` synthesis only, matching every other test file
 /// in this codebase — see `SessionFeedTests`/`AppModelTests`), so test events are built the SAME
 /// way production code receives them: JSON-decoded, not struct-literal-constructed.
 @MainActor
@@ -31,7 +31,7 @@ final class PeripheralProviderTests: XCTestCase {
     /// single source of truth so `leaseGrantedEvent()`'s default `tokenHash` and
     /// `callRequestedEvent()`'s default `token` stay a matching pair without hardcoding the hex
     /// digest twice. `sha256Hex` is the SAME function `shouldServe` uses in production
-    /// (`@testable import Norma`), so this doubles as a light round-trip check of that helper.
+    /// (`@testable import Winter`), so this doubles as a light round-trip check of that helper.
     private static let defaultTokenHash = sha256Hex("tok_1")
 
     private func leaseGrantedEvent(leaseId: String = "lease_1", class cls: String = "noop", expiresAt: Int = PeripheralProviderTests.farFutureMs, tokenHash: String = PeripheralProviderTests.defaultTokenHash) -> SessionEvent {
@@ -54,12 +54,12 @@ final class PeripheralProviderTests: XCTestCase {
     }
 
     private func makeProvider(capabilities: ComputerCapabilities? = nil) -> PeripheralProvider {
-        PeripheralProvider(client: NormaClient(makeTransport: { FeedScriptedTransport() }, token: "tok", clientName: "provider-test"), capabilities: capabilities)
+        PeripheralProvider(client: WinterClient(makeTransport: { FeedScriptedTransport() }, token: "tok", clientName: "provider-test"), capabilities: capabilities)
     }
 
     private func connectedProvider(capabilities: ComputerCapabilities? = nil) async throws -> (PeripheralProvider, FeedScriptedTransport) {
         let t = FeedScriptedTransport()
-        let client = NormaClient(makeTransport: { t }, token: "tok", clientName: "provider-test")
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "provider-test")
         async let c: Void = client.connect()
         await feedWaitUntil { !t.sent.isEmpty }
         let hello = feedLineJSON(t.sent[0])
@@ -177,9 +177,9 @@ final class PeripheralProviderTests: XCTestCase {
 
     // MARK: - handle(peripheral_call_requested) → peripheral.respond over the wire
 
-    /// `NormaClient`'s `request()` blocks until a matching `id` response arrives (or a 5s
+    /// `WinterClient`'s `request()` blocks until a matching `id` response arrives (or a 5s
     /// timeout) — feed one immediately after asserting on the outbound bytes so these tests don't
-    /// eat the full timeout, mirroring NormaKitTests' `MethodWrapperTests.roundTrip` pattern.
+    /// eat the full timeout, mirroring WinterKitTests' `MethodWrapperTests.roundTrip` pattern.
     private func ackLastSent(_ t: FeedScriptedTransport, index: Int) {
         let req = feedLineJSON(t.sent[index])
         t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"ok":true}}"#)

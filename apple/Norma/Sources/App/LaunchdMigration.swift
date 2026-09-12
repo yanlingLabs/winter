@@ -2,15 +2,15 @@ import Darwin
 import Foundation
 
 // -----------------------------------------------------------------------------------------------
-// Lifecycle T6 (T4 review finding 5f): tears down the OLD `com.norma.core` launchd `KeepAlive`
+// Lifecycle T6 (T4 review finding 5f): tears down the OLD `com.winter.core` launchd `KeepAlive`
 // agent (`packages/cli/src/launchd.ts`'s `installDaemon`) — superseded by `DaemonSupervisor`
-// embedding norma-core directly (Task 2). A leftover KeepAlive agent would otherwise relaunch a
+// embedding winter-core directly (Task 2). A leftover KeepAlive agent would otherwise relaunch a
 // daemon the app just killed, permanently defeating "app quit -> daemon quit" for that user, so
 // this MUST complete before `DaemonSupervisor.start()`'s socket-exists probe — see the call site
 // (`AppDelegate.boot()`, which runs this first, before constructing the supervisor).
 // -----------------------------------------------------------------------------------------------
 
-private let launchdAgentLabel = "com.norma.core"
+private let launchdAgentLabel = "com.winter.core"
 
 /// Injectable seam mirroring `launchd.ts`'s `MigrateLaunchdDeps` — production defaults touch the
 /// real filesystem/launchctl; tests supply fakes/spies so migration never runs against a real

@@ -85,7 +85,7 @@ describe("updateSubagents (spec §2, CLI column: lifecycle + tokens, NO time)", 
 // Until then a wedged child is indistinguishable from a working one on the roster. These pin the
 // PRE-KILL signal: the row banks the ts of every wire event it sees plus the two "legitimate
 // silence" counters, and a pure predicate — deliberately the same shape as watchdog.ts's own
-// `isStalled` for `norma -p` — turns that into a live verdict.
+// `isStalled` for `winter -p` — turns that into a live verdict.
 // ---------------------------------------------------------------------------------------------
 describe("live stall hint (task-5): lastEventAt / in-flight counters / subagentStalled", () => {
   const at = (ts: number) => ({ ts });

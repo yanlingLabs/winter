@@ -18,7 +18,7 @@ let composerBusyControlOpacity: Double = 0.55
 /// (2026-08-12): *"each mode should have its own dedicated composer which can also have different
 /// styling and maybe more features. but yes chat shouldnt show that row"*.
 ///
-/// One mode's chrome is written in ONE type here, and nowhere else. `NormaComposerCard` — the
+/// One mode's chrome is written in ONE type here, and nowhere else. `WinterComposerCard` — the
 /// shared shell — holds the parts every mode has in common (the text field, the control row's fixed
 /// buttons, the send button, the card's surface and hover rim) and knows nothing about modes at all;
 /// the only mode → composer decision in the app is `composerChrome(_:)` below.
@@ -36,7 +36,7 @@ let composerBusyControlOpacity: Double = 0.55
 /// identity, so toggling the segment would tear down and rebuild the whole composer. Two live costs,
 /// both on a surface the plan is judged on: the `NSTextView` inside `ComposerTextView` is recreated
 /// (first responder lost mid-typing), and the band's slide-out — a documented deliberate effect
-/// ("Animating THIS is the whole effect", `NormaComposerCard`) — has nothing to interpolate across
+/// ("Animating THIS is the whole effect", `WinterComposerCard`) — has nothing to interpolate across
 /// an identity change.
 ///
 /// Handing the shell a per-mode chrome **value** keeps the shell one view instance across every
@@ -73,7 +73,7 @@ let composerBusyControlOpacity: Double = 0.55
 struct ComposerContext {
     let mode: Binding<SessionMode>
     /// Whether the Chat/Cowork segment can be CHANGED. False on a live session — a session's mode is
-    /// fixed at creation and Norma has no mode-switch.
+    /// fixed at creation and Winter has no mode-switch.
     let modeIsSelectable: Bool
     /// The permissions row's wiring (mac-chat-parity Task 6, spec §4), or `nil` from a surface with
     /// no session to set a policy on — the new-chat page, whose session does not exist until the
@@ -84,8 +84,8 @@ struct ComposerContext {
     ///
     /// **Task 7's model/effort slot did NOT land here, and the shape is worth stating.** It expected
     /// to; it turned out that no chrome consumes it. The chip is drawn by the shared shell for every
-    /// mode (the slot has always been shared — see `NormaComposerCard.controlRow`), so its CONTROL
-    /// is a card parameter (`NormaComposerCard.model`) and only its one per-mode question — may this
+    /// mode (the slot has always been shared — see `WinterComposerCard.controlRow`), so its CONTROL
+    /// is a card parameter (`WinterComposerCard.model`) and only its one per-mode question — may this
     /// mode select a tier? — is a chrome member (`offersClientEffortTiers`). This context carries
     /// what a chrome READS; that control is not read by one.
     let policy: ComposerPolicyControl?
@@ -186,7 +186,7 @@ struct ComposerStrip {
 
 /// What ONE mode adds to (or answers for) the shared composer shell.
 ///
-/// Everything not named here is shared and unconditional in `NormaComposerCard`, so "the text field
+/// Everything not named here is shared and unconditional in `WinterComposerCard`, so "the text field
 /// and the send button are identical across modes" is true by construction rather than by
 /// discipline. A mode that later needs its own send treatment adds a member here — visibly, in one
 /// place, for all four modes at once. There are deliberately NO protocol-extension defaults: a new
@@ -196,7 +196,7 @@ protocol ComposerChrome {
     /// identity and cannot be constructed disagreeing with itself.
     var mode: SessionMode { get }
 
-    /// mac-chat-parity Task 7 (spec §5): whether this mode may select a **Norma-level effort tier**.
+    /// mac-chat-parity Task 7 (spec §5): whether this mode may select a **Winter-level effort tier**.
     ///
     /// **A boolean, because the mode-dependence of model/effort is exactly one row.**
     /// `CLIENT_EFFORTS` is a one-element list — `["ultra"]` (`packages/core/src/settings.ts:51`) —
@@ -276,7 +276,7 @@ struct CodeComposerChrome: ComposerChrome {
     let context: ComposerContext
     var mode: SessionMode { .code }
 
-    /// **The one mode that may select a Norma-level tier** (`clientEffortEligible`, code-only).
+    /// **The one mode that may select a Winter-level tier** (`clientEffortEligible`, code-only).
     var offersClientEffortTiers: Bool { effortTiersAreOffered(mode: mode.rawValue) }
 
     func makeControlRowAccessory() -> AnyView? { nil }
@@ -429,7 +429,7 @@ struct CoworkComposerChrome: ComposerChrome {
     }
 }
 
-/// Cowork's band content — moved here verbatim from `NormaComposerCard.coworkStrip`, unchanged.
+/// Cowork's band content — moved here verbatim from `WinterComposerCard.coworkStrip`, unchanged.
 /// Both chips stay placeholders and stay labelled as such (spec §8: Attach and Dictate, and these,
 /// remain out of scope for v1).
 struct CoworkComposerStrip: View {
@@ -467,7 +467,7 @@ struct CoworkComposerStrip: View {
 
 // MARK: - The Chat/Cowork segment (shared by the two modes that segment contains)
 
-/// The Chat/Cowork segmented control — moved here verbatim from `NormaComposerCard.modeSegment`,
+/// The Chat/Cowork segmented control — moved here verbatim from `WinterComposerCard.modeSegment`,
 /// unchanged.
 ///
 /// Shared between `ChatComposerChrome` and `CoworkComposerChrome` **by composition**: both construct

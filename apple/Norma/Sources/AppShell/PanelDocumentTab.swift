@@ -214,7 +214,7 @@ func officeCellReference(column: Int, row: Int) -> String {
 /// `-O` as well as debug — and every caller reaches it from an agent-controlled `range` string that
 /// nothing upstream bounded (`sheets.ts`'s `A1_RANGE_SHAPE` had an unbounded `[A-Za-z]+` under a
 /// `.max(64)`). `range:"ZZZZZZZZZZZZZZ1"` — 14 letters, well inside 64 characters, a plain model
-/// typo — therefore aborted **Norma.app itself**, taking every open office document's unsaved edits
+/// typo — therefore aborted **Winter.app itself**, taking every open office document's unsaved edits
 /// with it. Measured, not reasoned: `task-5-fixround-report.md` §2 records the SIGTRAP for that
 /// exact string against a verbatim copy of the original.
 ///
@@ -1350,7 +1350,7 @@ struct OfficeDocumentSurface: View {
         // office-live-ux Job 3 — the overlay sits over the WHOLE surface (canvas, formula bar, part
         // strips), which is the "full-tab" scope the spec asks for, and over nothing else: it is
         // attached HERE rather than at the tab's root so the tab's own chrome and its close button
-        // stay reachable while Norma works. Scoped to this document by `path`.
+        // stay reachable while Winter works. Scoped to this document by `path`.
         .overlay {
             OfficeAgentWorkingOverlay(runtime: runtime, path: path,
                                       onInterrupt: model.interruptAgentTurn)
@@ -1358,9 +1358,9 @@ struct OfficeDocumentSurface: View {
     }
 }
 
-// MARK: - office-live-ux Job 3: "Norma is working"
+// MARK: - office-live-ux Job 3: "Winter is working"
 
-/// The full-surface cover shown while Norma is reading or writing THIS document.
+/// The full-surface cover shown while Winter is reading or writing THIS document.
 ///
 /// ## Why it exists
 ///
@@ -1405,7 +1405,7 @@ struct OfficeAgentWorkingOverlay: View {
                 Theme.canvas.opacity(0.94)
                 VStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text("Norma is working")
+                    Text("Winter is working")
                         .font(Typography.heading(.semibold))
                     Text("Tap to interrupt")
                         .font(Typography.caption())
@@ -1418,7 +1418,7 @@ struct OfficeAgentWorkingOverlay: View {
             .contentShape(Rectangle())
             .onTapGesture(perform: onInterrupt)
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("Norma is working. Tap to interrupt.")
+            .accessibilityLabel("Winter is working. Tap to interrupt.")
             .transition(.opacity)
         }
     }

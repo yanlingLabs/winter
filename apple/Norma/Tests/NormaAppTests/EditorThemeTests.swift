@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// editor-product Task 4 — the branded Monaco theme + the white-flash elimination.
 ///
@@ -151,7 +151,7 @@ final class EditorThemeTests: XCTestCase {
 
     // MARK: - cardSurfaceBackgroundARGB (the white-flash fix's other producer)
 
-    /// CEF's own contract for `background_color` (`NormaCEF.h`, `cef_types.h`): the alpha byte must
+    /// CEF's own contract for `background_color` (`WinterCEF.h`, `cef_types.h`): the alpha byte must
     /// be either fully opaque or fully transparent. This is always the "override" half of that pair.
     func testCardSurfaceBackgroundARGBIsFullyOpaque() {
         for scheme in [ColorScheme.light, .dark] {

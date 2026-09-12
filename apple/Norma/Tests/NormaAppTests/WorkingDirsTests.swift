@@ -1,6 +1,6 @@
 import XCTest
-import NormaKit
-@testable import Norma
+import WinterKit
+@testable import Winter
 
 /// working-directories T8: the pure decisions behind the create-time picker sheet and the
 /// mid-session working-folders chip (`WorkingDirs.swift`). SwiftUI bodies and AppKit panels aren't

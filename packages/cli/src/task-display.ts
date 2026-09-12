@@ -1,5 +1,5 @@
 /** Shared pure task-display logic (Phase 2e-i) — the Claude-Code-tree rendering rules, written
- *  ONCE here and mirrored byte-for-byte in `apple/Norma/Sources/ChatContent/TaskDisplay.swift`.
+ *  ONCE here and mirrored byte-for-byte in `apple/Winter/Sources/ChatContent/TaskDisplay.swift`.
  *  Task 3 (window) and Task 4 (CLI) each consume this; nothing renders here. Every function is
  *  pure — no I/O, no ANSI, no SwiftUI — so both sides can be unit-tested against the SAME
  *  fixtures (see `test/task-display.test.ts` / `TaskDisplayTests.swift`) and stay in lockstep. */

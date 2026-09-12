@@ -99,7 +99,7 @@ const fixtures: Record<string, unknown> = {
       owner: "researcher", blocks: ["5", "6"], blockedBy: ["2"], metadata: { priority: "high", sprint: 12 } } },
   plan_presented: { type: "plan_presented", sessionId: "s_1", threadId: "t_1", seq: 13, ts: 1700000000003, callId: "call_1", plan: "# Plan\n\n1. Add the flag\n2. Wire it up\n3. Test" },
   plan_resolved: { type: "plan_resolved", sessionId: "s_1", threadId: "t_1", seq: 14, ts: 1700000000004, callId: "call_1", approved: true, feedback: "looks good", autoAccept: true, by: "cli" },
-  worktree_entered: { type: "worktree_entered", sessionId: "s_1", threadId: "t_1", seq: 15, ts: 1700000000005, name: "fix-auth", path: "/repo/.norma/worktrees/fix-auth", branch: "norma/fix-auth" },
+  worktree_entered: { type: "worktree_entered", sessionId: "s_1", threadId: "t_1", seq: 15, ts: 1700000000005, name: "fix-auth", path: "/repo/.winter/worktrees/fix-auth", branch: "winter/fix-auth" },
   worktree_exited: { type: "worktree_exited", sessionId: "s_1", threadId: "t_1", seq: 16, ts: 1700000000006, name: "fix-auth", action: "keep", removed: false },
   thread_started: { type: "thread_started", sessionId: "s_1", threadId: "th_child1", seq: 17, ts: 1700000000007, parentThreadId: "main", agentType: "researcher", prompt: "Summarize the auth module" },
   thread_completed: { type: "thread_completed", sessionId: "s_1", threadId: "th_child1", seq: 18, ts: 1700000000008, stopReason: "end_turn" },
@@ -119,14 +119,14 @@ const fixtures: Record<string, unknown> = {
   plugin_tile_updated: { type: "plugin_tile_updated", sessionId: "$system", seq: 24, ts: 1700000000014, pluginId: "sample-echo", tile: { title: "Sample", value: "1", enabled: true } },
   shortcut_invoke: { type: "shortcut_invoke", sessionId: "$system", seq: 25, ts: 1700000000015, shortcutId: "toggle-mute" },
   tile_action: { type: "tile_action", sessionId: "$system", seq: 26, ts: 1700000000016, actionId: "reconnect" },
-  // Phase 5e T1 (reviewer maturity — the NormaKit-trap task): a NEW SessionEvent variant, unlike
+  // Phase 5e T1 (reviewer maturity — the WinterKit-trap task): a NEW SessionEvent variant, unlike
   // reasoning_item/task_notification above — NOT sensitive (no encrypted_content), so a normal
   // fixture is correct here (see this variant's own doc comment in events.ts).
   tool_review: { type: "tool_review", sessionId: "s_1", threadId: "t_1", seq: 31, ts: 1700000000021, toolName: "bash", verdict: "unsafe", reason: "recursive delete outside the session cwd", summary: "bash rm -rf /tmp/scratch" },
   // task-30 (push-notification track — the final CC-parity tool item): a NEW SessionEvent
   // variant, same full switch-trap discipline as tool_review above. NOT sensitive — a normal
   // fixture.
-  notification_requested: { type: "notification_requested", sessionId: "s_1", threadId: "t_1", seq: 33, ts: 1700000000023, title: "Norma", message: "Long-running migration finished — 12,004 rows updated." },
+  notification_requested: { type: "notification_requested", sessionId: "s_1", threadId: "t_1", seq: 33, ts: 1700000000023, title: "Winter", message: "Long-running migration finished — 12,004 rows updated." },
   "child_update": { ...base, threadId: "main", type: "child_update", childSessionId: "s_child000001", status: "completed", title: "Fix login bug", resultSummary: "Fixed the null token check; tests pass." },
   // Dispatch relay (Phase 7): childSessionId is additive/optional on the four existing
   // approval/question shapes — dedicated with-fixtures so Swift round-trips carriers, mirroring
@@ -143,20 +143,20 @@ const fixtures: Record<string, unknown> = {
     { id: "allow_once", label: "Allow once" },
     { id: "allow_project", label: "Always allow \"git push\" in this project", rule: "Bash(git push:*)", scope: "project" },
   ] },
-  // CC-parity phase 3 (Workflows, Track D Task D1 — another NormaKit-trap task like tool_review/
+  // CC-parity phase 3 (Workflows, Track D Task D1 — another WinterKit-trap task like tool_review/
   // notification_requested above): 4 NEW SessionEvent variants mirroring the daemon's onEvent
   // rewire of WorkflowRuntimeEvent's started/progress/completed/failed onto the wire.
   "workflow_started": { ...base, threadId: "main", type: "workflow_started", runId: "wf_a1b2c3", name: "triage", summary: "Triage 20 files in parallel" },
   "workflow_progress": { ...base, threadId: "main", type: "workflow_progress", runId: "wf_a1b2c3", phase: "synthesize", log: "merging findings", running: 3, completed: 17, total: 20 },
   "workflow_completed": { ...base, threadId: "main", type: "workflow_completed", runId: "wf_a1b2c3", resultSummary: "12 issues found across 20 files; report written." },
   "workflow_failed": { ...base, threadId: "main", type: "workflow_failed", runId: "wf_a1b2c3", error: "workflow exceeded the per-run agent cap (1000)" },
-  // session-activity-hygiene T4: a NEW SessionEvent variant (full NormaKit switch-trap discipline,
+  // session-activity-hygiene T4: a NEW SessionEvent variant (full WinterKit switch-trap discipline,
   // like tool_review / notification_requested / the workflow_* four above). TRANSIENT — but a
   // fixture is still REQUIRED: Swift mirrors the variant, so the round-trip gate is what proves the
   // mirror decodes it (assistant_delta, the original transient, carries one for the same reason).
   // Session-scoped, so NO threadId — the `harness_attached` shape, not `ThreadBase`.
   "session_activity": { ...base, type: "session_activity", activity: "background" },
-  // panel-shell T3: five NEW SessionEvent variants (full NormaKit switch-trap discipline). All five
+  // panel-shell T3: five NEW SessionEvent variants (full WinterKit switch-trap discipline). All five
   // are session-scoped, not thread-scoped — tabs belong to the whole session, not one agent thread
   // — so NO threadId on any of them, the `harness_attached`/`session_activity` shape, not
   // `ThreadBase`. panel_command is TRANSIENT but still needs a fixture for the same reason
@@ -191,7 +191,7 @@ const fixtures: Record<string, unknown> = {
   // Swift's `JSONValue.number(Double)` and re-encode as `1` vs `1.0`-shaped drift that has nothing
   // to do with what these fixtures are pinning.
   "panel_command_back": { ...base, type: "panel_command", commandId: "cmd_2", tabId: "tab_1", action: "back", deadlineMs: 15000 },
-  "panel_command_type": { ...base, type: "panel_command", commandId: "cmd_3", tabId: "tab_1", action: "type", args: { selector: "#search", text: "norma" }, deadlineMs: 15000 },
+  "panel_command_type": { ...base, type: "panel_command", commandId: "cmd_3", tabId: "tab_1", action: "type", args: { selector: "#search", text: "winter" }, deadlineMs: 15000 },
   // office-agent-tools T1 — the FIRST office verb on the wire, and deliberately a DIFFERENT shape
   // from every fixture above rather than a fourth `panel_command_*` clone of the browser ones. Two
   // things this fixture alone proves the Swift mirror tolerates, because nothing above exercises
@@ -216,7 +216,7 @@ for (const [name, value] of Object.entries(fixtures)) {
 // parity-fixtures.ts, the ONE place that imports across the protocol->core boundary — see that
 // file's own doc comment for why that's safe here.
 // Written into the SAME fixtures/ directory as the SessionEvent fixtures above, but deliberately
-// NOT added to the `fixtures` map itself and NOT swept into the Swift NormaProtocol test bundle
+// NOT added to the `fixtures` map itself and NOT swept into the Swift WinterProtocol test bundle
 // below: RoundTripTests.swift decodes EVERY .json file it finds under Fixtures/ as a SessionEvent
 // and asserts an exact count (65 as of B2 T2) — these two are a different shape entirely, so
 // the sync step
@@ -232,7 +232,7 @@ writeFileSync(join(fixDir, "cleaner-vectors.json"), JSON.stringify(cleanerVector
 // SessionEvent and hard-asserts an exact count (65 as of B2 T2). Both counts here are
 // deliberately written as "the count RoundTripTests asserts" rather than restated numbers — they
 // have drifted twice; check `RoundTripTests.swift` rather than trusting a figure in this comment.
-const swiftFixDir = join(import.meta.dir, "..", "..", "..", "apple", "NormaProtocol", "Tests", "NormaProtocolTests", "Fixtures");
+const swiftFixDir = join(import.meta.dir, "..", "..", "..", "apple", "WinterProtocol", "Tests", "WinterProtocolTests", "Fixtures");
 rmSync(swiftFixDir, { recursive: true, force: true }); // delete-then-copy: no orphaned fixtures after variant renames
 mkdirSync(swiftFixDir, { recursive: true });
 for (const name of Object.keys(fixtures)) {

@@ -10,7 +10,7 @@ import type { ProjectedEvent } from "./types";
  * Conflating the two is a named brief error, corrected by the shape authority, and it is why
  * nothing here reads an agent id.
  *
- * A child's identity on the Norma side is therefore the spawning call's `tool_use.id`, used as the
+ * A child's identity on the Winter side is therefore the spawning call's `tool_use.id`, used as the
  * `threadId`. That is stable for the life of the child, unique by construction (the model never
  * reuses a tool_use id), and it is the SAME id the child's completing `tool_result` carries as
  * `tool_use_id` — so `thread_started` and `thread_completed` are derived from one identifier with
@@ -23,7 +23,7 @@ import type { ProjectedEvent } from "./types";
  * (`winter-agent-sdk/dist/options.d.ts:99` on the installed barrel — the exact option name, checked,
  * not remembered). So:
  *
- *   forwardSubagentText OFF (the default, and what a Norma session gets today):
+ *   forwardSubagentText OFF (the default, and what a Winter session gets today):
  *       thread_started  ← the spawning `tool_use` block
  *       …the child's own tool_call/tool_result events, on the child's threadId…
  *       thread_completed ← the spawning call's `tool_result` block
@@ -57,7 +57,7 @@ import type { ProjectedEvent } from "./types";
  * fact the pair would have carried.
  */
 
-/** The spawning tools whose `tool_use` opens a child thread. Winter's name is `Agent`; the Norma
+/** The spawning tools whose `tool_use` opens a child thread. Winter's name is `Agent`; the Winter
  *  name it is projected under is `spawn_agent` (ruling P8b-25) — matched on BOTH because
  *  `tool-names.ts` maps the wire name before a `tool_call` is built, and this module reads the
  *  raw wire block. */
@@ -66,7 +66,7 @@ const SPAWN_TOOLS = new Set(["Agent", "Task", "spawn_agent"]);
 export const isSpawnTool = (winterName: string): boolean => SPAWN_TOOLS.has(winterName);
 
 export interface ChildRecord {
-  /** The spawning `tool_use.id`, used as the Norma `threadId`. */
+  /** The spawning `tool_use.id`, used as the Winter `threadId`. */
   threadId: string;
   parentThreadId: string;
   agentType: string;
@@ -121,12 +121,12 @@ export function threadCompletedFrom(block: ContentBlock, sessionId: string): Pro
 // ── the task graph (§4.4) ──────────────────────────────────────────────────────────────────────
 
 /**
- * ── `system/task_updated` → Norma's `task_updated`, AND THE ONE PLACE THE ENUMS DO NOT MEET ─────
+ * ── `system/task_updated` → Winter's `task_updated`, AND THE ONE PLACE THE ENUMS DO NOT MEET ─────
  *
  * Winter's task graph is ONE registry holding both the model's to-do rows (`TaskCreate`: subject,
- * description, activeForm, blocks/blockedBy — the same shape as Norma's own `task_create` tool) and
+ * description, activeForm, blocks/blockedBy — the same shape as Winter's own `task_create` tool) and
  * its background agent runs (`startTracking({kind:"agent"})`). Its status vocabulary has six values;
- * Norma's `TaskSchema.status` has four (`pending | in_progress | completed | deleted`), and
+ * Winter's `TaskSchema.status` has four (`pending | in_progress | completed | deleted`), and
  * P8b-21 forbids widening the enum this phase.
  *
  * Four map cleanly. Two do not, and both losses are recorded rather than hidden:
@@ -146,9 +146,9 @@ export function threadCompletedFrom(block: ContentBlock, sessionId: string): Pro
  * therefore a later phase's** — flagged in the task report, not smuggled in here.
  */
 export type WinterTaskStatus = "pending" | "running" | "completed" | "failed" | "killed" | "paused";
-export type NormaTaskStatus = "pending" | "in_progress" | "completed" | "deleted";
+export type HostTaskStatus = "pending" | "in_progress" | "completed" | "deleted";
 
-export const TASK_STATUS_MAP: Readonly<Record<WinterTaskStatus, NormaTaskStatus>> = {
+export const TASK_STATUS_MAP: Readonly<Record<WinterTaskStatus, HostTaskStatus>> = {
   pending: "pending",
   running: "in_progress",
   paused: "pending",
@@ -157,10 +157,10 @@ export const TASK_STATUS_MAP: Readonly<Record<WinterTaskStatus, NormaTaskStatus>
   killed: "deleted",
 };
 
-/** The two Winter statuses Norma's enum cannot express; their real value rides in `metadata`. */
+/** The two Winter statuses Winter's enum cannot express; their real value rides in `metadata`. */
 const LOSSY_STATUSES = new Set<WinterTaskStatus>(["failed", "killed"]);
 
-export interface TaskRow { id: string; subject: string; status: NormaTaskStatus; activeForm?: string; metadata?: Record<string, unknown> }
+export interface TaskRow { id: string; subject: string; status: HostTaskStatus; activeForm?: string; metadata?: Record<string, unknown> }
 
 /**
  * Fold one `system/task_updated` patch into the tracked row and return the event, or undefined when

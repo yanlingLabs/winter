@@ -1,9 +1,9 @@
 import XCTest
 import os
-import NormaProtocol
-import NormaSessionKit
+import WinterProtocol
+import WinterSessionKit
 import IrohLib
-@testable import NormaKit
+@testable import WinterKit
 
 /// SP2b Task 1 — the binding gate the SP2a whole-branch review left on `IrohConn.close()`:
 /// its delivery guarantee must be an actual acknowledgement, not a probabilistic 100ms grace
@@ -20,7 +20,7 @@ import IrohLib
 /// .finishAndAwaitAcked`) makes `close()` wait for the peer's stream-stopped ack before ever
 /// touching the connection, so there is no window left to lose a race in.
 final class IrohCloseDeterminismTests: XCTestCase {
-    static let alpn = "computer.norma.rpc/1"
+    static let alpn = "computer.winter.rpc/1"
     static let alpnData = Data(alpn.utf8)
 
     func testSendThenCloseNeverDropsTheFrameAcross20Iterations() async throws {

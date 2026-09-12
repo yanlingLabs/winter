@@ -1,9 +1,9 @@
-// Winter Phase 8d — the compiled-binary probe behind `norma-core __runtimes-probe`. It runs
+// Winter Phase 8d — the compiled-binary probe behind `winter-core __runtimes-probe`. It runs
 // OUTSIDE a daemon (no settings, no store — mirrors `resolveWinterExecutable`/
 // `resolveClaudeExecutable`'s own `setting: undefined`, exactly as a fresh boot with nothing
 // configured would see them), resolves both executable ladders from the given execPath/home/env,
 // and reports what it found. It NEVER spawns `winter` (the pinned build has no version flag —
-// controller measurement M2) and never calls `resolveNormaHome()` — `home` is exactly what the
+// controller measurement M2) and never calls `resolveWinterHome()` — `home` is exactly what the
 // caller passed, so `scripts/verify-runtimes-compiled.ts` can point it at a mkdtemp dir and prove
 // the real user's homes are never touched.
 import { accessSync, constants as fsConstants, existsSync, readFileSync } from "node:fs";

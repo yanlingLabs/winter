@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CanUseTool, PermissionResult, PermissionUpdate } from "@yanlinglabs/winter-agent-sdk";
-import { ApprovalRequestedEvent, ApprovalResolvedEvent, type NewSessionEvent } from "@norma/protocol";
+import { ApprovalRequestedEvent, ApprovalResolvedEvent, type NewSessionEvent } from "@winter/protocol";
 import { ApprovalBroker, approvalCardSummary, approvalOptionsFor } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
 import { PermissionGate, type SessionApprovalPolicy } from "../../src/agent/gate";
@@ -141,10 +141,10 @@ test("Winter's suggestions become the card's rule options, session-scoped on the
   // answer must not be able to change the session's mode or write a deny rule.
   expect(approvalOptionsFromSuggestions([{ type: "setMode", mode: "plan", destination: "session" }])).toBeUndefined();
   expect(approvalOptionsFromSuggestions(undefined)).toBeUndefined();
-  // A rule Norma's own grammar cannot parse is never offered — choosing it would append inert
+  // A rule Winter's own grammar cannot parse is never offered — choosing it would append inert
   // litter to the user's rules file under a label promising it silences future calls.
   expect(approvalOptionsFromSuggestions([
-    { type: "addRules", rules: [{ toolName: "NotARealNormaRuleTool", ruleContent: "x" }], behavior: "allow", destination: "projectSettings" },
+    { type: "addRules", rules: [{ toolName: "NotARealWinterRuleTool", ruleContent: "x" }], behavior: "allow", destination: "projectSettings" },
   ])).toBeUndefined();
 });
 
@@ -190,8 +190,8 @@ test("a rule-bearing option returns session-scoped updatedPermissions (Winter is
 });
 
 test("the option the card offers is a rule the EXISTING rules store accepts and honours", () => {
-  const root = mkdtempSync(join(tmpdir(), "norma-rules-"));
-  const home = mkdtempSync(join(tmpdir(), "norma-home-"));
+  const root = mkdtempSync(join(tmpdir(), "winter-rules-"));
+  const home = mkdtempSync(join(tmpdir(), "winter-home-"));
   try {
     const h = harness();
     const input = { command: "git push origin main" };
@@ -203,8 +203,8 @@ test("the option the card offers is a rule the EXISTING rules store accepts and 
     // The bridge itself writes NOTHING — `ipc/server.ts`'s `approval.respond` handler is the one
     // writer, and it is what runs this append. Proven here by appending the bridge's own rule
     // string through the real store and watching a matching call become allowed.
-    const rules = new PermissionRules({ globalAllow: () => [], normaHome: home });
-    expect(existsSync(join(root, ".norma"))).toBe(false);
+    const rules = new PermissionRules({ globalAllow: () => [], winterHome: home });
+    expect(existsSync(join(root, ".winter"))).toBe(false);
     expect(rules.decision({ name: "bash", argsJson: JSON.stringify(input) }, root)).toBeNull();
     rules.append(option.rule!, option.scope!, root);
     expect(rules.decision({ name: "bash", argsJson: JSON.stringify(input) }, root)).toBe("allow");
@@ -371,10 +371,10 @@ test("a Winter-protected path is the P8b-7 typed deny in a session that never pr
 });
 
 test("$OUTDIR is BLESSED — the gate's verdict stands, unescalated", async () => {
-  // Winter flags `<home>/outputs/<sid>` only because it carries a `.norma` segment, but Norma
+  // Winter flags `<home>/outputs/<sid>` only because it carries a `.winter` segment, but Winter
   // explicitly blessed it as agent-writable for THIS session (`sessions/outdir.ts`). Without the
   // carve-out a dispatch session could not write its own deliverable at all.
-  const home = "/tmp/norma-home";
+  const home = "/tmp/winter-home";
   const out = `${home}/outputs/${SESSION}/report.md`;
   for (const mode of ["code", "dispatch", "chat"] as const) {
     const h = harness({ mode, policy: "auto", home, cwd: "/repo" });
@@ -383,7 +383,7 @@ test("$OUTDIR is BLESSED — the gate's verdict stands, unescalated", async () =
     expect(h.events).toEqual([]);
   }
   // …and ANOTHER session's outputs directory is not blessed for this one (the blessing is keyed by
-  // sessionId, never by the bare `~/.norma/outputs/` prefix).
+  // sessionId, never by the bare `~/.winter/outputs/` prefix).
   const other = harness({ mode: "dispatch", policy: "auto", home, cwd: "/repo" });
   const foreign = `${home}/outputs/sess-2/report.md`;
   expect((await other.canUse("Write", { file_path: foreign }, requestCtx({ blockedPath: foreign })))!.behavior).toBe("deny");
@@ -429,7 +429,7 @@ test("decisionReason alone changes nothing — it is informational (logged, neve
 test("the control plane is refused independently, BEFORE any escalation can soften it", async () => {
   // A protected-path signal on the rules store must not turn the hard deny into a card.
   const h = harness({ policy: "bypass", cwd: "/repo" });
-  const target = "/repo/.norma/permissions.local.json";
+  const target = "/repo/.winter/permissions.local.json";
   const res = (await h.canUse("Edit", { file_path: target }, requestCtx({ blockedPath: target })))!;
   expect(res.behavior).toBe("deny");
   expect((res as { message: string }).message).toContain("the permission rules store can only be changed");
@@ -538,9 +538,9 @@ const MATRIX: { mode: "code" | "dispatch" | "chat"; policy: SessionApprovalPolic
   { mode: "dispatch", policy: "bypass", tool: "Bash", want: "allow", note: "unchanged from today" },
 
   // CHAT — the coerced internal "chat" policy is allow-or-deny and never reaches the divergence
-  { mode: "chat", policy: "chat", tool: "mcp__norma__research__Search", want: "allow", note: "capability tool normalizes to NETWORK `Search`" },
-  { mode: "chat", policy: "chat", tool: "mcp__norma__research__ReadPage", want: "allow", note: "normalizes to NETWORK `ReadPage`" },
-  { mode: "chat", policy: "chat", tool: "mcp__norma__browser__browser", want: "allow", note: "normalizes to NETWORK `browser`" },
+  { mode: "chat", policy: "chat", tool: "mcp__winter__research__Search", want: "allow", note: "capability tool normalizes to NETWORK `Search`" },
+  { mode: "chat", policy: "chat", tool: "mcp__winter__research__ReadPage", want: "allow", note: "normalizes to NETWORK `ReadPage`" },
+  { mode: "chat", policy: "chat", tool: "mcp__winter__browser__browser", want: "allow", note: "normalizes to NETWORK `browser`" },
   { mode: "chat", policy: "chat", tool: "Bash", want: "deny", note: "chat runs nothing mutating" },
   { mode: "chat", policy: "chat", tool: "TotallyUnknownTool", want: "deny", note: "chat denies, never asks" },
   // a session created before the create-time coercion keeps `auto` on its row — the stale-row case
@@ -642,16 +642,16 @@ test("gateToolNameFor maps Winter names onto the names gate.ts classifies", () =
   expect(gateToolNameFor("Agent")).toBe("spawn_agent");
   expect(gateToolNameFor("CronCreate")).toBe("schedule");
   // capability tools: the bare tool name, which is how all five servers' tools are already classified
-  expect(gateToolNameFor("mcp__norma__research__Search")).toBe("Search");
-  expect(gateToolNameFor("mcp__norma__office__docs")).toBe("docs");
-  expect(gateToolNameFor("mcp__norma__sessions__manage_session")).toBe("manage_session");
+  expect(gateToolNameFor("mcp__winter__research__Search")).toBe("Search");
+  expect(gateToolNameFor("mcp__winter__office__docs")).toBe("docs");
+  expect(gateToolNameFor("mcp__winter__sessions__manage_session")).toBe("manage_session");
   // a third-party MCP server keeps its prefix, so `isExternalToolName` still classifies it
   expect(gateToolNameFor("mcp__github__create_issue")).toBe("mcp__github__create_issue");
   expect(gateToolNameFor("plugin__battery__status")).toBe("plugin__battery__status");
   // anything unknown passes through and therefore fails closed
   expect(gateToolNameFor("SomeFutureTool")).toBe("SomeFutureTool");
   // a malformed capability name is never silently widened
-  expect(gateToolNameFor("mcp__norma__broken")).toBe("mcp__norma__broken");
+  expect(gateToolNameFor("mcp__winter__broken")).toBe("mcp__winter__broken");
 });
 
 // -------------------------------------------------------------------------------------------

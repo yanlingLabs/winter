@@ -2,7 +2,7 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 
 export class AlreadyRunningError extends Error {
   constructor(public readonly pid: number) {
-    super(`norma-core already running (pid ${pid})`);
+    super(`winter-core already running (pid ${pid})`);
   }
 }
 

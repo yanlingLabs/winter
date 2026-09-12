@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Phase 4d-cleanup Task 3 fix 3 — the PURE reconcile-eviction pieces only (per the task brief):
 /// `shouldEvictSeedOnly`'s per-tile decision and `isReconcileTick`'s "every ~10th poll" cadence.

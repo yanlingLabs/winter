@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Office Stage B Task 4 — `OfficeInputCodes`' own pin. Every literal here is independently
 /// re-derived from the same two sources `OfficeInputCodes`' own header cites (LibreOffice core's
@@ -85,7 +85,7 @@ final class OfficeInputCodesTests: XCTestCase {
     /// `nCharCode` (this table's own `charCode(for:)`, independent of `baseCode`), never from
     /// `keyCode`'s base-letter portion — `keyCode`'s base value only matters for NAMED keys
     /// (arrows/Return/Tab/Escape/Delete, all independently verified correct above) and for
-    /// accelerator matching on a held modifier, and Norma's own policy never lets an unhandled
+    /// accelerator matching on a held modifier, and Winter's own policy never lets an unhandled
     /// Cmd-combo reach LOK at all (`OfficeTileCanvasView.keyDown`'s own routing).
     func testAppKitKeyCode31IsRightCurlyBracketNotOAKnownLOKUpstreamQuirk() {
         XCTAssertEqual(OfficeInputCodes.baseCode(appKitKeyCode: 31), 1319, "KEY_RIGHTCURLYBRACKET, not KEY_O (526)")

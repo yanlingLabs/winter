@@ -1,5 +1,5 @@
 import AppKit
-import NormaKit
+import WinterKit
 import SwiftUI
 
 // -----------------------------------------------------------------------------------------------
@@ -24,19 +24,19 @@ func providerStatusText(providerId: String?, providerModel: String?) -> String {
 /// "Bringing your own AI" wording verbatim in spirit (plain language, not legalese). Shared by both
 /// `ProviderPane` (this file) and the first-run disclosure sheet (`FirstRunDisclosure.swift`) so
 /// the two surfaces never drift into saying subtly different things about the same risk.
-let normaProviderDisclosureText = """
-Norma is an independent project and is not affiliated with, endorsed by, or sponsored by OpenAI. \
+let winterProviderDisclosureText = """
+Winter is an independent project and is not affiliated with, endorsed by, or sponsored by OpenAI. \
 Signing in with a ChatGPT account uses that account under OpenAI's own terms, which don't \
 specifically bless third-party apps — so, as with any tool that isn't OpenAI's own, there's some \
 risk to that account, and it's yours to weigh. If you'd rather not, the API-key option below is \
 the straightforward, officially-supported path. Either way, your credentials live only in this \
-Mac's Keychain — Norma keeps no copy.
+Mac's Keychain — Winter keeps no copy.
 """
 
 // -----------------------------------------------------------------------------------------------
 // ProviderPaneModel — the pane's live view-model (`@MainActor`/`ObservableObject`), modeled
 // directly on `MemoryPaneModel` (freshest reviewed precedent): owns the current-provider status
-// read + the BYO-key form's save flow, constructed around the raw `NormaClient` — never closures
+// read + the BYO-key form's save flow, constructed around the raw `WinterClient` — never closures
 // for the RPCs themselves (mirrors `MemoryPaneModel`/`SkillsPaneModel`). App shell T7: built once,
 // for the process lifetime, by `AppDelegate.makeDashboardWiring` (alongside `ShellSessionHost`,
 // `summonAppWindow`'s construction) — replacing `DashboardWindowController.init`'s old "fresh per
@@ -53,7 +53,7 @@ Mac's Keychain — Norma keeps no copy.
 
 @MainActor
 final class ProviderPaneModel: ObservableObject {
-    private let client: NormaClient
+    private let client: WinterClient
     private let onConfigured: () -> Void
 
     @Published private(set) var providerId: String?
@@ -71,11 +71,11 @@ final class ProviderPaneModel: ObservableObject {
     @Published private(set) var saving = false
     @Published var saveErrorText: String?
     /// True right after a successful save — the pane's confirmation row
-    /// ("Saved — Norma is switching to your API key"). Reset at the START of the next save attempt
+    /// ("Saved — Winter is switching to your API key"). Reset at the START of the next save attempt
     /// so a second save doesn't show a stale confirmation while the new one is still in flight.
     @Published private(set) var savedConfirmation = false
 
-    init(client: NormaClient, onConfigured: @escaping () -> Void = {}) {
+    init(client: WinterClient, onConfigured: @escaping () -> Void = {}) {
         self.client = client
         self.onConfigured = onConfigured
     }
@@ -110,7 +110,7 @@ final class ProviderPaneModel: ObservableObject {
     }
 
     /// `provider.configure` with the form's current fields — `model` is sent only when non-empty
-    /// (omitted entirely otherwise, matching `NormaClient.configureProvider`'s own "omit, never
+    /// (omitted entirely otherwise, matching `WinterClient.configureProvider`'s own "omit, never
     /// null" convention so the server falls back to its own default). On success: clears any prior
     /// error, shows the confirmation, fires `onConfigured` (the daemon-restart hook), and refreshes
     /// the status row so it reflects the just-applied change. On failure: the confirmation never
@@ -148,7 +148,7 @@ struct ProviderPane: View {
     @ObservedObject var model: ProviderPaneModel
     @State private var didCopyLoginCommand = false
 
-    private let loginCommand = "norma login"
+    private let loginCommand = "winter login"
 
     var body: some View {
         ScrollView {
@@ -193,7 +193,7 @@ struct ProviderPane: View {
     private var byoKeyForm: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Use your own OpenAI API key").font(Typography.control(.semibold))
-            Text("Norma will talk to OpenAI directly with this key. Applying it restarts the daemon so it takes effect immediately.")
+            Text("Winter will talk to OpenAI directly with this key. Applying it restarts the daemon so it takes effect immediately.")
                 .font(Typography.label())
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -220,7 +220,7 @@ struct ProviderPane: View {
             if let saveErrorText = model.saveErrorText {
                 Text(saveErrorText).foregroundStyle(.red).font(Typography.label())
             } else if model.savedConfirmation {
-                Text("Saved — Norma is switching to your API key.")
+                Text("Saved — Winter is switching to your API key.")
                     .foregroundStyle(.green)
                     .font(Typography.label())
             }
@@ -271,7 +271,7 @@ struct ProviderPane: View {
     }
 
     private var disclosure: some View {
-        Text(normaProviderDisclosureText)
+        Text(winterProviderDisclosureText)
             .font(Typography.caption())
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)

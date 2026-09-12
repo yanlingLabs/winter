@@ -1,12 +1,12 @@
 import Foundation
 import CoreGraphics
 
-/// Gate r7 (same-panel window morph): which body `NormaFieldView` renders off `morph.progress` —
+/// Gate r7 (same-panel window morph): which body `WinterFieldView` renders off `morph.progress` —
 /// the composer/field morph (`.field`, covering both the collapsed orb and the expanded field, one
 /// progress dimension) or the large window surface (`.window`). v1 carried the analogous
 /// `surface: GlassFieldSurface` (`composer`/`dashboard`/`chat`) on its own `MorphModel`; v2 splits
 /// the field↔window render choice onto this dedicated flag so the controller (`OrbWindowController`)
-/// can flip it at the same instants it drives the morph, without `NormaFieldView` importing the
+/// can flip it at the same instants it drives the morph, without `WinterFieldView` importing the
 /// controller's own `Surface` enum. Set `.window` in `presentWindowSurface()`, back to `.field` in
 /// `finishWindowCollapse()`.
 enum MorphRenderSurface { case field, window }
@@ -18,7 +18,7 @@ enum MorphRenderSurface { case field, window }
 /// halo ramps its glow, and the orb window fades out on the same curve.
 ///
 /// TASK A/B NAME COLLISION, NOW RESOLVED: task A (the additive port) had to name this type
-/// `FieldKitMorphModel` and this file `FieldKitMorphModel.swift` because v2's flat "Norma" target
+/// `FieldKitMorphModel` and this file `FieldKitMorphModel.swift` because v2's flat "Winter" target
 /// (project.yml: one `sources: [Sources]` entry) still declared the OLD thin approximation as
 /// `Orb/MorphModel.swift`'s `final class MorphModel` at the time — two top-level types (and two
 /// files) named `MorphModel` in one module is a redeclaration error. Task B (this swap) deletes
@@ -55,8 +55,8 @@ final class MorphModel: ObservableObject {
     @Published var composerHeight: CGFloat = 44
     /// Wave-5 gate item 3: natural (unclamped) height of the inline response's own content —
     /// pinned/live prompt + reply + the queued-steer line, whichever are showing — measured live
-    /// by `NormaFieldView.inlineResponse`. Drives the shell height while a response is showing
-    /// (`NormaFieldView.clampedResponseHeight(in:)`), clamped to the window's own usable vertical
+    /// by `WinterFieldView.inlineResponse`. Drives the shell height while a response is showing
+    /// (`WinterFieldView.clampedResponseHeight(in:)`), clamped to the window's own usable vertical
     /// space so the pill never grows past the halo padding — anything taller keeps scrolling
     /// internally, same as before this wave.
     ///
@@ -70,13 +70,13 @@ final class MorphModel: ObservableObject {
     /// above `GlassForegroundLegibility`'s `.compositingGroup()` — ever saw those updates. Fixed by
     /// replacing the whole `PreferenceKey` plumbing with `.onGeometryChange(for:of:action:)` (the
     /// modern, direct replacement for exactly this pattern — no bubbling required), applied to a
-    /// hidden, non-scrolling twin of the response content (see `NormaFieldView.inlineResponse`'s
+    /// hidden, non-scrolling twin of the response content (see `WinterFieldView.inlineResponse`'s
     /// doc for why a second copy is measured instead of the visible, `ScrollView`-hosted one).
     @Published var responseHeight: CGFloat = 0
     /// Wave-9 gate fix (v1 mechanism port — see `Core/ScrollRedirector.swift` +
     /// `TextField/GlassFieldWindow.swift.scrollComposer` in v1, and the wave-9 report for the
     /// full empirical trail): AppKit's normal hit-test dispatch never reaches
-    /// `NormaFieldView.inlineResponse`'s scrollable viewport — `GlassForegroundLegibility`'s
+    /// `WinterFieldView.inlineResponse`'s scrollable viewport — `GlassForegroundLegibility`'s
     /// `.compositingGroup()` + `.blendMode(.difference)` (applied over the whole
     /// composer/response content layer) silently breaks the AppKit-level hit-testing a real
     /// `NSScrollView` needs to receive `-scrollWheel:`, confirmed live via synthesized CGEvent
@@ -126,14 +126,14 @@ final class MorphModel: ObservableObject {
 
     // Task-3 fix wave (review finding, "full-body re-render per tick"): `fluid`/`fluidAcceleration`
     // used to live here as `@Published` properties, advanced every render tick (~120/s while a
-    // turn is active). Because `NormaFieldView` (the WHOLE field body — glass geometry, composer/
+    // turn is active). Because `WinterFieldView` (the WHOLE field body — glass geometry, composer/
     // response content, nav pill…) also observes this `MorphModel`, every one of those writes
     // re-ran that entire body for a change nothing but the fluid bubble needed to see — a direct
     // violation of this codebase's own local-animation-state convention (cf.
-    // `NormaFieldView.WorkingSpinnerGlyph`/`SheenText`, each scoping their own animation state to
+    // `WinterFieldView.WorkingSpinnerGlyph`/`SheenText`, each scoping their own animation state to
     // themselves via `@State`, never an ancestor). Both fields now live on their own dedicated
     // `FluidModel` (`FieldKit/FluidOrbView.swift`), observed ONLY by `FluidOrbSlot`/`FluidOrbView`
-    // — `NormaFieldView` holds a plain, non-`@ObservedObject` reference solely to pass one down.
+    // — `WinterFieldView` holds a plain, non-`@ObservedObject` reference solely to pass one down.
     // `OrbFollower` writes the acceleration tap onto that `FluidModel` directly instead of onto
     // this model now.
 
@@ -152,7 +152,7 @@ final class MorphModel: ObservableObject {
     let collapsedWindowSize = CGSize(width: 240, height: 140)
 
     /// GATE-3 FIX (F1, root cause #2): which of `collapsedWindowSize`/`windowSize` the AppKit
-    /// panel is ACTUALLY sized to right now — `NormaFieldView.body` requests this as its outer
+    /// panel is ACTUALLY sized to right now — `WinterFieldView.body` requests this as its outer
     /// `.frame(...)`, instead of unconditionally requesting `windowSize`. Root cause: `
     /// NSHostingView` resizes its own window to match its SwiftUI content's requested frame on
     /// every `windowDidLayout` (confirmed live via a symbolicated stack trace —
@@ -164,7 +164,7 @@ final class MorphModel: ObservableObject {
     /// 240×140 `contentRect` `OrbWindowController.init` constructs the panel with and every later
     /// `panel.setFrame(..., size: collapsedWindowSize)` call (`finishCollapse()`). Since the
     /// composer's visible geometry already morphs off `progress` independent of this outer frame
-    /// (see `NormaFieldView`'s own doc — the frame only changes at the two hard resize instants,
+    /// (see `WinterFieldView`'s own doc — the frame only changes at the two hard resize instants,
     /// never mid-morph), keeping this in lockstep with `OrbWindowController`'s own two
     /// `panel.setFrame` calls (`expandToField()`/`finishCollapse()`) makes NSHostingView's
     /// auto-resize AGREE with our explicit sizing instead of fighting it.
@@ -193,7 +193,7 @@ final class MorphModel: ObservableObject {
 
     // MARK: - Wave-9 gate fix: manual response-scroll clamp (see `responseScrollOffset`'s doc)
 
-    /// Same formula as `NormaFieldView.maxShellHeight(in:)` (window height minus halo padding on
+    /// Same formula as `WinterFieldView.maxShellHeight(in:)` (window height minus halo padding on
     /// both edges, minus the nav pill's reserved slot) — duplicated rather than shared because
     /// that method takes a caller-supplied `windowSize` for `GeometryReader` flexibility, while
     /// this is only ever consulted from `OrbWindowController` while `surface == .field`, at which

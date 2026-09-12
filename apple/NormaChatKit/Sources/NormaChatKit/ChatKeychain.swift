@@ -5,8 +5,8 @@ import Security
 /// Mac's) and the Exa key the Mac syncs down (Task 12).
 ///
 /// Three separate Keychain services keep three unrelated credentials from ever being confused for
-/// one another: `com.norma.core` is the daemon/pairing identity (NormaKit's `Keychain.swift`),
-/// `com.norma.chat.openai` is this device's ChatGPT session, `com.norma.chat.exa` is the search
+/// one another: `com.winter.core` is the daemon/pairing identity (WinterKit's `Keychain.swift`),
+/// `com.winter.chat.openai` is this device's ChatGPT session, `com.winter.chat.exa` is the search
 /// key. Signing out of ChatGPT must not throw away the search key, so `clear()` is scoped.
 
 /// The SecItem seam. Real Keychain access is signing- and ACL-dependent, so every behavioural test
@@ -87,8 +87,8 @@ public struct SystemKeychainStore: KeychainStore {
 }
 
 public struct ChatKeychain: Sendable {
-    public static let openAIService = "com.norma.chat.openai"
-    public static let exaService = "com.norma.chat.exa"
+    public static let openAIService = "com.winter.chat.openai"
+    public static let exaService = "com.winter.chat.exa"
     public static let tokensAccount = "codex-tokens"
     public static let exaKeyAccount = "exa-api-key"
 

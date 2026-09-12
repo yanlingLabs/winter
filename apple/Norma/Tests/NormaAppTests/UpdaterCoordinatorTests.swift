@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Sparkle T3: `UpdaterCoordinator`'s injectable deps seam (`DaemonSupervisorDeps` precedent —
 /// see `DaemonSupervisorTests.swift`). Only the feed-override resolution is exercised here; T4
@@ -90,7 +90,7 @@ final class UpdaterCoordinatorTests: XCTestCase {
     }
 
     /// Whole-branch review (Critical): Sparkle terminates the host via a CANCELLABLE quit event,
-    /// which Norma's lifecycle terminate gate would intercept like a ⌘Q (`.terminateCancel`) and
+    /// which Winter's lifecycle terminate gate would intercept like a ⌘Q (`.terminateCancel`) and
     /// silently defeat the whole install+relaunch. `onWillInstall` is the arming hook — AppDelegate
     /// wires it to set its `updaterQuitting` axis — so it must fire exactly once, BEFORE the
     /// install handler runs (the terminate round-trip happens inside `install()`), and never again
@@ -175,8 +175,8 @@ final class UpdaterCoordinatorTests: XCTestCase {
     func testReadChannelFromSettingsFile() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        setenv("NORMA_HOME", dir.path, 1)
-        defer { unsetenv("NORMA_HOME") }
+        setenv("WINTER_HOME", dir.path, 1)
+        defer { unsetenv("WINTER_HOME") }
         try #"{"schemaVersion":2,"updates":{"channel":"beta"}}"#
             .write(to: dir.appendingPathComponent("settings.json"), atomically: true, encoding: .utf8)
         XCTAssertEqual(UpdaterCoordinator.readChannelFromSettings(), "beta")

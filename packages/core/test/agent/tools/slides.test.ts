@@ -145,7 +145,7 @@ describe("read", () => {
 
   // T5 fix-round RE-REVIEW, the NEW Critical — every value here used to satisfy
   // `z.number().int().positive()` (`Number.isInteger(1e30)` is `true`), reach the app's own
-  // `oneBasedIndex`, and ABORT NORMA.APP inside its `Int(Double)`. Proven red at the app: removing
+  // `oneBasedIndex`, and ABORT WINTER.APP inside its `Int(Double)`. Proven red at the app: removing
   // the app-side ceiling crashes the XCTest runner outright ("Restarting after unexpected exit,
   // crash, or test timeout"), which is what an aborting `Int(Double)` looks like from outside.
   test("an app-aborting slide/at/to index is refused before dispatch — every verb that takes one", async () => {
@@ -495,7 +495,7 @@ describe("outcomes", () => {
   // ⛔ **Fix round, review IMPORTANT-1 — a READ is no longer read-only with respect to disk.**
   //
   // office-live-ux added a pre-save at five action points, two of which are the agent's own verbs.
-  // Before an ADOPTED read (a file the human already has open in a tab), Norma flushes that tab to
+  // Before an ADOPTED read (a file the human already has open in a tab), Winter flushes that tab to
   // disk. The description described `read` as returning data and attributed saving specifically to
   // *write* verbs — the description-contradicting-the-code shape, in the one artifact the model
   // actually plans from. A user who says "don't change anything, just tell me what's in there" gets

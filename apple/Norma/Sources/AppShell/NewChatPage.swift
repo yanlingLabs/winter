@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - chatgpt-ui T2: the new-chat page (spec §2 — the pass's ONE behavior change)
 
 /// The page's greeting, ROTATING (user call, 2026-08-07 — a fresh line on every new-chat page and
-/// every launch). This retires the single fixed "Ask Norma anything.", and with it the 2026-08-06
+/// every launch). This retires the single fixed "Ask Winter anything.", and with it the 2026-08-06
 /// ruling that the greeting must be a calm STATEMENT rather than a question: the user asked for
 /// the reference's register explicitly, so the question form is now wanted, not avoided.
 ///
@@ -67,10 +67,10 @@ func newChatSendUI(_ state: ShellSessionHost.NewChatCreateState) -> NewChatSendU
 /// The mode segmented picker's options, mirroring the reference's Chat/Cowork pair. Cowork is
 /// present but NOT selectable — it has no daemon mode at all yet (`SessionMode.isAvailable`), the
 /// same honest posture the sidebar's Cowork row takes. Shown rather than hidden on the user's
-/// call: "keep the chat/cowork picker… it's not built yet in Norma but will be later."
+/// call: "keep the chat/cowork picker… it's not built yet in Winter but will be later."
 let newChatModeOptions: [SessionMode] = [.chat, .cowork]
 
-/// The announcement strip's resting lines — what shows when Norma has nothing to announce.
+/// The announcement strip's resting lines — what shows when Winter has nothing to announce.
 ///
 /// This REPLACES the tips list (user call, 2026-08-07: it "looks like a dev tool", and it did —
 /// keyboard shortcuts and Keychain facts are documentation, not a thing you want to read on an
@@ -178,7 +178,7 @@ struct NewChatIdea: Equatable {
     let prefill: String
 }
 
-/// Cowork's ideas. Deliberately things Norma could plausibly be ASKED to do rather than features
+/// Cowork's ideas. Deliberately things Winter could plausibly be ASKED to do rather than features
 /// it ships — Cowork itself is unbuilt, so an idea list that implied working capabilities would be
 /// advertising vapour. They prefill the composer exactly like the chat starters.
 let newChatCoworkIdeas: [NewChatIdea] = [
@@ -196,7 +196,7 @@ let newChatStarters: [NewChatStarter] = [
     NewChatStarter(title: "Code", systemImage: "chevron.left.forwardslash.chevron.right",
                    prefill: "Help me with this code: "),
     NewChatStarter(title: "Plan", systemImage: "list.bullet.rectangle", prefill: "Help me plan "),
-    NewChatStarter(title: "Norma's choice", systemImage: "lightbulb",
+    NewChatStarter(title: "Winter's choice", systemImage: "lightbulb",
                    prefill: "Surprise me — pick something useful."),
 ]
 
@@ -457,16 +457,16 @@ struct NewChatPage: View {
         .animation(.easeOut(duration: 0.15), value: host.newChatDraft.isEmpty)
     }
 
-    /// The greeting — the reference's shape (brand mark + a serif line), Norma's own words.
+    /// The greeting — the reference's shape (brand mark + a serif line), Winter's own words.
     ///
     /// SERIF is a deliberate allowlist addition (`Theme.wordmark`'s doc, binding #5): the iOS
     /// gallery's typography file already sanctions "the home greeting" as a serif moment, and this
     /// is that moment. The COPY stays the house line rather than borrowing the reference's
-    /// time-of-day form — it has no user name to greet, and "Ask Norma anything." is the register
+    /// time-of-day form — it has no user name to greet, and "Ask Winter anything." is the register
     /// the field itself uses.
     private var greeting: some View {
         HStack(spacing: 12) {
-            // Norma's own brand mark, ACCENT-TINTED — the reference sets its mark in the brand
+            // Winter's own brand mark, ACCENT-TINTED — the reference sets its mark in the brand
             // colour beside the greeting, and this is that treatment with our mark and our teal.
             //
             // The VECTOR asset (`BrandMark`, the scale-burst SVG with
@@ -525,7 +525,7 @@ struct NewChatPage: View {
         .frame(width: newChatCardWidth, alignment: .leading)
     }
 
-    /// The composer — now the SHARED `NormaComposerCard`, the same component the live chat page
+    /// The composer — now the SHARED `WinterComposerCard`, the same component the live chat page
     /// renders (user call, 2026-08-07). This page owns only what is specific to it: the deferred
     /// create's in-flight state, and the mode segment being interactive because no session exists
     /// yet to have a fixed mode.
@@ -534,9 +534,9 @@ struct NewChatPage: View {
     /// `WindowContentView.composerCard`'s own hoist records: the whole path from the host's held
     /// choice to the rendered chip is then a value a test can drive, and a page that wired its chip
     /// to something other than the host would red rather than pass quietly.
-    var composerCard: NormaComposerCard {
+    var composerCard: WinterComposerCard {
         let ui = newChatSendUI(host.newChatCreate)
-        return NormaComposerCard(
+        return WinterComposerCard(
             text: draftBinding,
             onSubmit: submit,
             mode: $mode,

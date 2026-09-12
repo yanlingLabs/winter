@@ -123,7 +123,7 @@ final class PanelWebTabModel: ObservableObject {
     /// this address be shown to the user", asked everywhere it is shown.
     var displayURL: String { PanelURLPolicy.isAllowed(url) ? url : "" }
 
-    func apply(_ state: NormaCEFBrowserState) {
+    func apply(_ state: WinterCEFBrowserState) {
         apply(url: state.url, title: state.title, isLoading: state.isLoading,
               canGoBack: state.canGoBack, canGoForward: state.canGoForward)
     }
@@ -131,12 +131,12 @@ final class PanelWebTabModel: ObservableObject {
     /// The live channel, named in primitives — `apply(_:)` above is a one-line adapter onto it, so
     /// this IS the path CEF drives, not a parallel one.
     ///
-    /// Split out because `NormaCEFBrowserState`'s properties are `readonly` in `NormaCEF.h` and
-    /// readwrite only inside `NormaCEF.mm`: a test cannot construct a snapshot, so without this the
+    /// Split out because `WinterCEFBrowserState`'s properties are `readonly` in `WinterCEF.h` and
+    /// readwrite only inside `WinterCEF.mm`: a test cannot construct a snapshot, so without this the
     /// display filter above could only be pinned in isolation from the channel that feeds it —
     /// which is precisely the "green whether or not the production path calls it" shape this branch
     /// has already produced seven times. (`CEFRuntimeTests` reaches CEF's C surface through
-    /// `NormaCEFRuntime` for the same class of reason.)
+    /// `WinterCEFRuntime` for the same class of reason.)
     func apply(url: String, title: String, isLoading: Bool, canGoBack: Bool, canGoForward: Bool) {
         self.url = url
         self.title = title
@@ -161,14 +161,14 @@ final class PanelWebTabModel: ObservableObject {
     }
 
     /// **A URL the browser wants opened in a new panel tab.** Three producers reach here through
-    /// the one C channel (`NormaCEFSetPopupObserver`): a popup the page asked for, a ⌘-click /
+    /// the one C channel (`WinterCEFSetPopupObserver`): a popup the page asked for, a ⌘-click /
     /// middle-click / shift-click (`OnOpenURLFromTab`), and the context menu's "Open Link in New
     /// Tab". Only gestured ones reach this far. For the popup case CEF has already cancelled the
-    /// popup itself (it always does — `NormaCEF.h`); for the click case it has cancelled the
+    /// popup itself (it always does — `WinterCEF.h`); for the click case it has cancelled the
     /// in-place navigation, so in both the tab is not an addition to something else happening.
     ///
     /// The name is the first producer's and is kept because the C symbol is
-    /// (`NormaCEFSetPopupObserver`), not because it is the whole story.
+    /// (`WinterCEFSetPopupObserver`), not because it is the whole story.
     ///
     /// It goes through `ShellSessionHost.openPanelTab`, the app's existing tab door, rather than
     /// anywhere new: that is what runs `PanelURLPolicy.mayOpenTab` on a URL the PAGE chose — the
@@ -189,12 +189,12 @@ final class PanelWebTabModel: ObservableObject {
 
     // MARK: Intents
 
-    func goBack() { container.map { NormaCEFGoBack($0) } }
-    func goForward() { container.map { NormaCEFGoForward($0) } }
+    func goBack() { container.map { WinterCEFGoBack($0) } }
+    func goForward() { container.map { WinterCEFGoForward($0) } }
     /// One button, two verbs — stop while loading, reload otherwise, exactly as every browser does.
     func reloadOrStop() {
         guard let container else { return }
-        if isLoading { NormaCEFStopLoad(container) } else { NormaCEFReload(container) }
+        if isLoading { WinterCEFStopLoad(container) } else { WinterCEFReload(container) }
     }
 
     /// The URL field's Return key. Returns whether the input was accepted, so the field can leave
@@ -206,7 +206,7 @@ final class PanelWebTabModel: ObservableObject {
         // not the same thing, and only the first one is a decision.
         guard let target = PanelURLPolicy.normalizeTypedInput(raw) else { return false }
         guard let container else { return false }
-        NormaCEFLoadURL(container, target)
+        WinterCEFLoadURL(container, target)
         return true
     }
 }

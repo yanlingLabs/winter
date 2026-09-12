@@ -1,8 +1,8 @@
 import AppKit
 import XCTest
-import NormaProtocol
-import NormaKit
-@testable import Norma
+import WinterProtocol
+import WinterKit
+@testable import Winter
 
 /// 2d-iii task 3: mount + respond wiring (both windows) + keyboard. Covers the PURE keyboard
 /// router (`cardKeyAction`, `OrbWindowController.swift`), the adapter's in-flight/error discipline
@@ -215,7 +215,7 @@ final class CardWiringTests: XCTestCase {
         var stubSucceeds = true
 
         // Exact wiring shape the brief specifies for GlassRootView/DetachedWindowController —
-        // wired here to a STUB (not a real AppModel/NormaClient) so this test locks down the
+        // wired here to a STUB (not a real AppModel/WinterClient) so this test locks down the
         // discipline itself: inFlight inserted synchronously, removed only after the async stub
         // resolves, and an error line set on failure (never on success).
         adapter.onApprovalRespond = { [adapter] callId, approved, optionId, childSessionId in

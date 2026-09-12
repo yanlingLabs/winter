@@ -1,6 +1,6 @@
 import Foundation
 import os
-@testable import NormaKit
+@testable import WinterKit
 
 /// Test double for `PairingDirectory` (SP2b Task 4) — a plain in-memory allowlist a test seeds
 /// directly, standing in for `PairingStore` wherever a test doesn't need real persistence/ceremony

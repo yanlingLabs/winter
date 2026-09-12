@@ -151,7 +151,7 @@ public enum WireFrame {
     ///
     /// **Deliberately narrow.** This exists for exactly two epoch-blind call sites: (1) the pairing
     /// router peeking a first frame's `kind` to tell a session dialer (a `.hello` `WireEnvelope`)
-    /// from a pairing dialer (raw-JSON `PairRequest`), and (2) `NormaSessionClient` recognizing an
+    /// from a pairing dialer (raw-JSON `PairRequest`), and (2) `WinterSessionClient` recognizing an
     /// `.error`-kind HANDSHAKE-REJECTION frame — whose whole point (`stale_epoch`) is that the
     /// client's own epoch is the wrong one to validate against. Every other path — live/replay/rpc
     /// frames — MUST keep using strict `decode(_:expectedEpoch:)`; do not reach for this to sidestep

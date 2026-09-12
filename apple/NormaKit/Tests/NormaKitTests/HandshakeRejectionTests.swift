@@ -1,24 +1,24 @@
 import XCTest
-import NormaProtocol
-import NormaSessionKit
-@testable import NormaKit
+import WinterProtocol
+import WinterSessionKit
+@testable import WinterKit
 
 /// SP3.1 Task 1: the gateway assigns the RIGHT `HandshakeRejectionCode` on each handshake refusal,
 /// and the pairing router's `sendNotPairedRejection` peeks the first frame to reply in the shape the
-/// dialer can decode — a WireEnvelope `error` for a SESSION dialer (a `NormaSessionClient`, which
+/// dialer can decode — a WireEnvelope `error` for a SESSION dialer (a `WinterSessionClient`, which
 /// turns it into a typed `.handshakeRejected` → the app's honest `.revoked`), the UNCHANGED raw-JSON
 /// `PairRejected` for a PAIRING dialer (`PhonePairingClient`). Driven with scripted doubles
 /// (`ScriptedRemoteConn`/`LoopbackListener`, `ScriptedTransport`) — no iroh, no real daemon (that's
 /// `FakePhoneConformanceTests`' real-revoke E2E). The client-side recognition of these frames is
-/// covered in `NormaSessionClientTests` (`testHandshakeThrowsTypedRejection...`).
+/// covered in `WinterSessionClientTests` (`testHandshakeThrowsTypedRejection...`).
 final class HandshakeRejectionTests: XCTestCase {
 
     // MARK: - Harness (per-file copies, matching this target's test-double convention)
 
-    private func makeGateway(daemonTransport: NormaTransport, listener: LoopbackListener, directoryEpoch: Int = 1) -> Gateway {
+    private func makeGateway(daemonTransport: WinterTransport, listener: LoopbackListener, directoryEpoch: Int = 1) -> Gateway {
         Gateway(
             listener: listener,
-            daemonFactory: { NormaClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
+            daemonFactory: { WinterClient(makeTransport: { daemonTransport }, token: "remote-token", clientName: "iphone-gateway") },
             hostID: "host-test",
             directory: InMemoryDirectory(peerID: "peer-stub", epoch: directoryEpoch)
         )
@@ -182,10 +182,10 @@ final class HandshakeRejectionTests: XCTestCase {
     }
 }
 
-/// A `NormaTransport` whose `open()` fails immediately — drives `NormaClient.connect(role:)` to
+/// A `WinterTransport` whose `open()` fails immediately — drives `WinterClient.connect(role:)` to
 /// throw, so the gateway's daemon-connect refusal path (`daemon_unavailable`) is exercised without a
 /// real daemon.
-private final class FailingOpenTransport: NormaTransport, @unchecked Sendable {
+private final class FailingOpenTransport: WinterTransport, @unchecked Sendable {
     let incoming: AsyncStream<TransportEvent>
     private let cont: AsyncStream<TransportEvent>.Continuation
 

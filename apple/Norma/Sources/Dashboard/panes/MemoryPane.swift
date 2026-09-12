@@ -1,11 +1,11 @@
-import NormaKit
+import WinterKit
 import SwiftUI
 
 // -----------------------------------------------------------------------------------------------
 // Pure display helper (Task 5, Phase 5b): `MemoryFactMeta.type` -> the row's badge text
 // (methods.ts `MemoryTypeSchema`: user/feedback/project/reference) — same "tierBadge"-style
 // mapping as `pluginRowDisplay`'s badge (`PluginManagerView.swift`). Table-tested directly in
-// `DashboardTests.swift`, no `NormaClient`/SwiftUI involved, same posture as this directory's
+// `DashboardTests.swift`, no `WinterClient`/SwiftUI involved, same posture as this directory's
 // other pure pane helpers (`sortedTrustPaths`, `holderDisplay`, ...).
 // -----------------------------------------------------------------------------------------------
 
@@ -24,7 +24,7 @@ func memoryTypeBadge(_ type: String) -> String {
 // -----------------------------------------------------------------------------------------------
 // MemoryPaneModel — the pane's live view-model (`@MainActor`/`ObservableObject`), same posture as
 // `PluginManagerModel`: owns the fact list + the selected fact's detail/edit state + the audit
-// tail, constructed around the raw `NormaClient` — never closures, mirroring how
+// tail, constructed around the raw `WinterClient` — never closures, mirroring how
 // `PluginManagerModel`/`TilesStripModel`/`ShortcutBindingEditorModel` are wired into
 // `DashboardWiring`. App shell T7: built once, for the process lifetime, by
 // `AppDelegate.makeDashboardWiring` — replacing `DashboardWindowController.init`'s old "fresh per
@@ -37,7 +37,7 @@ func memoryTypeBadge(_ type: String) -> String {
 
 @MainActor
 final class MemoryPaneModel: ObservableObject {
-    private let client: NormaClient
+    private let client: WinterClient
     /// Pane v1 scope: the dashboard has no cwd context, so every RPC below is pinned to the user
     /// scope — never project (that would need a `cwd` this connection doesn't have).
     private let scope = "user"
@@ -64,7 +64,7 @@ final class MemoryPaneModel: ObservableObject {
     @Published var auditErrorText: String?
     @Published private(set) var auditLoading = false
 
-    init(client: NormaClient) {
+    init(client: WinterClient) {
         self.client = client
     }
 

@@ -1,12 +1,12 @@
 import XCTest
-import NormaProtocol
-@testable import NormaKit
+import WinterProtocol
+@testable import WinterKit
 
 final class MethodWrapperTests: XCTestCase {
     /// Connects a client over a scripted transport, answering hello automatically.
-    func connected() async throws -> (NormaClient, ScriptedTransport) {
+    func connected() async throws -> (WinterClient, ScriptedTransport) {
         let t = ScriptedTransport()
-        let client = NormaClient(makeTransport: { t }, token: "tok", clientName: "wrap-test")
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "wrap-test")
         async let c: Void = client.connect()
         let hello = try await waitForSent(t, count: 1)[0]
         t.feed(#"{"jsonrpc":"2.0","id":\#(decodeLine(hello)["id"] as! Int),"result":{"ok":true}}"#)
@@ -334,12 +334,12 @@ final class MethodWrapperTests: XCTestCase {
         let (client, t) = try await connected()
 
         let (statusReq, status) = try await roundTrip(t, sentIndex: 1,
-            result: #"{"version":"0.1.0","uptimeMs":42,"socketPath":"/tmp/norma.sock","provider":{"id":"c_1","model":"orb"},"sessionsCount":2,"pluginsCount":0}"#
+            result: #"{"version":"0.1.0","uptimeMs":42,"socketPath":"/tmp/winter.sock","provider":{"id":"c_1","model":"orb"},"sessionsCount":2,"pluginsCount":0}"#
         ) { try await client.daemonStatus() }
         XCTAssertEqual(statusReq["method"] as? String, "daemon.status")
         XCTAssertEqual(status.version, "0.1.0")
         XCTAssertEqual(status.uptimeMs, 42)
-        XCTAssertEqual(status.socketPath, "/tmp/norma.sock")
+        XCTAssertEqual(status.socketPath, "/tmp/winter.sock")
         XCTAssertEqual(status.providerId, "c_1")
         XCTAssertEqual(status.providerModel, "orb")
         XCTAssertEqual(status.sessionsCount, 2)
@@ -644,7 +644,7 @@ final class MethodWrapperTests: XCTestCase {
     /// gate, like assistant_delta/hardwareRequested/etc. above) AND routes into the client's
     /// `tiles` store, keyed by pluginId — set on a non-null `tile`, REMOVED entirely on `tile:null`
     /// (a plugin disconnecting/clearing its tile), never left as a stored `nil`. The store mutation
-    /// happens before the event is yielded to `events` (NormaClient.swift's `route()`), so
+    /// happens before the event is yielded to `events` (WinterClient.swift's `route()`), so
     /// consuming the event via the iterator first guarantees `tiles` already reflects it — avoids
     /// racing the actor's async pump.
     func testPluginTileUpdatedEventUpdatesAndClearsTilesStore() async throws {
@@ -773,12 +773,12 @@ final class MethodWrapperTests: XCTestCase {
 
     /// `skills.list` now decodes every `SkillMetaSchema` field (methods.ts) — the prior wrapper
     /// dropped `path`/`claudeFormat`/`author` on the floor; this proves all five are round-tripped,
-    /// including the "author: norma" self-authored marker and a claude-format plugin skill.
+    /// including the "author: winter" self-authored marker and a claude-format plugin skill.
     func testSkillsListDecodesEveryMetaField() async throws {
         let (client, t) = try await connected()
 
         let (req, skills) = try await roundTrip(t, sentIndex: 1,
-            result: #"{"ok":true,"skills":[{"name":"writing-skills","description":"how to write a skill","source":"builtin","path":"/norma/skills/writing-skills"},{"name":"my-note","description":"a self-authored skill","source":"self","path":"/home/u/.norma/skills/self/my-note","author":"norma"},{"name":"pdf-helper","description":"plugin skill","source":"plugin","path":"/plugins/x/skills/pdf","claudeFormat":true}]}"#
+            result: #"{"ok":true,"skills":[{"name":"writing-skills","description":"how to write a skill","source":"builtin","path":"/winter/skills/writing-skills"},{"name":"my-note","description":"a self-authored skill","source":"self","path":"/home/u/.winter/skills/self/my-note","author":"winter"},{"name":"pdf-helper","description":"plugin skill","source":"plugin","path":"/plugins/x/skills/pdf","claudeFormat":true}]}"#
         ) { try await client.skillsList() }
         XCTAssertEqual(req["method"] as? String, "skills.list")
         XCTAssertNil((req["params"] as? [String: Any])?["cwd"]) // omitted cwd dropped, not sent as null
@@ -787,7 +787,7 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertNil(skills[0].author)
         XCTAssertNil(skills[0].claudeFormat)
         XCTAssertEqual(skills[1].source, "self")
-        XCTAssertEqual(skills[1].author, "norma")
+        XCTAssertEqual(skills[1].author, "winter")
         XCTAssertEqual(skills[2].claudeFormat, true)
     }
 
@@ -795,13 +795,13 @@ final class MethodWrapperTests: XCTestCase {
         let (client, t) = try await connected()
 
         let (req, skill) = try await roundTrip(t, sentIndex: 1,
-            result: ##"{"ok":true,"skill":{"name":"my-note","description":"a self-authored skill","source":"self","path":"/home/u/.norma/skills/self/my-note","author":"norma","body":"# My Note\n\nSome body text."}}"##
+            result: ##"{"ok":true,"skill":{"name":"my-note","description":"a self-authored skill","source":"self","path":"/home/u/.winter/skills/self/my-note","author":"winter","body":"# My Note\n\nSome body text."}}"##
         ) { try await client.skillsRead(name: "my-note") }
         XCTAssertEqual(req["method"] as? String, "skills.read")
         XCTAssertEqual((req["params"] as? [String: Any])?["name"] as? String, "my-note")
         XCTAssertNil((req["params"] as? [String: Any])?["cwd"])
         XCTAssertEqual(skill.source, "self")
-        XCTAssertEqual(skill.author, "norma")
+        XCTAssertEqual(skill.author, "winter")
         XCTAssertEqual(skill.body, "# My Note\n\nSome body text.")
     }
 
@@ -839,7 +839,7 @@ final class MethodWrapperTests: XCTestCase {
         let (client, t) = try await connected()
 
         let (req, result) = try await roundTrip(t, sentIndex: 1,
-            result: #"{"running":[{"runId":"wf_1","sessionId":"s_1","name":"deploy","status":"running","counts":{"running":1,"completed":2,"total":4},"phase":"build","startedAt":1000},{"runId":"wf_2","sessionId":"s_1","status":"failed","counts":{"running":0,"completed":1,"total":2},"error":"boom","startedAt":900}],"saved":[{"name":"deploy","description":"Ship it","source":"/repo/.norma/workflows/deploy.js"}]}"#
+            result: #"{"running":[{"runId":"wf_1","sessionId":"s_1","name":"deploy","status":"running","counts":{"running":1,"completed":2,"total":4},"phase":"build","startedAt":1000},{"runId":"wf_2","sessionId":"s_1","status":"failed","counts":{"running":0,"completed":1,"total":2},"error":"boom","startedAt":900}],"saved":[{"name":"deploy","description":"Ship it","source":"/repo/.winter/workflows/deploy.js"}]}"#
         ) { try await client.workflowList(sessionId: "s_1") }
         XCTAssertEqual(req["method"] as? String, "workflow.list")
         XCTAssertEqual((req["params"] as? [String: Any])?["sessionId"] as? String, "s_1")
@@ -865,7 +865,7 @@ final class MethodWrapperTests: XCTestCase {
         XCTAssertEqual(result.saved.count, 1)
         XCTAssertEqual(result.saved[0].name, "deploy")
         XCTAssertEqual(result.saved[0].description, "Ship it")
-        XCTAssertEqual(result.saved[0].source, "/repo/.norma/workflows/deploy.js")
+        XCTAssertEqual(result.saved[0].source, "/repo/.winter/workflows/deploy.js")
 
         let (reqWithCwd, _) = try await roundTrip(t, sentIndex: 2, result: #"{"running":[],"saved":[]}"#) {
             try await client.workflowList(sessionId: "s_1", cwd: "/repo/proj")
@@ -963,25 +963,25 @@ final class MethodWrapperTests: XCTestCase {
     // (`session.dispatch` with no `params` key → that exact error; with `"params":{}` → success).
     //
     // User-visible blast radius: `AppModel.ensureFocusedSession()` calls `dispatchSession()` on
-    // the FIRST orb summon/submit of any Norma home that has no dispatch session yet. The throw
+    // the FIRST orb summon/submit of any Winter home that has no dispatch session yet. The throw
     // made it return `nil`, so `sendOrSteer` returned false (Enter silently did nothing) and
     // `focusedSessionId` stayed nil forever (the yellow-light detach bailed too — see
     // `AppDelegate.handleWindowDetach`). The bug was latent from Phase 7 until the dev/dist split
-    // pointed the Debug app at a FRESH `~/.norma-dev` with no pre-existing dispatch session.
+    // pointed the Debug app at a FRESH `~/.winter-dev` with no pre-existing dispatch session.
     //
     // `session.list` is in this list even though its handler happens not to `parseParams` today —
     // pinning it costs nothing and keeps THIS client correct if that handler ever grows a schema.
     //
     // Fix round 1 (review finding I1): that is a Swift-side guarantee only, so it is no longer the
     // whole defence. The identical pattern lived in two more clients and is fixed in both, each
-    // with its own wire-shape pin: the phone's `NormaSessionClient` (`rpcCall`, covered by
-    // `NormaSessionClientTests.testNoArgumentSendCarriesAnEmptyParamsObject`) and the TS CLI
+    // with its own wire-shape pin: the phone's `WinterSessionClient` (`rpcCall`, covered by
+    // `WinterSessionClientTests.testNoArgumentSendCarriesAnEmptyParamsObject`) and the TS CLI
     // client (`packages/cli/src/client.ts`, covered by client.test.ts's "a params-less request
     // still puts an empty params object on the wire"). The daemon also normalizes `params ?? {}`
     // now (`parseParams`, packages/core/src/ipc/server.ts, pinned both directions in
     // test/ipc/session-dispatch.test.ts), which is what actually protects clients that DON'T
     // update — a version-skewed phone above all. Client-side pins still earn their keep: they hold
-    // against an OLDER daemon, which a `norma` CLI or a shipped app can genuinely be talking to.
+    // against an OLDER daemon, which a `winter` CLI or a shipped app can genuinely be talking to.
 
     /// `session.dispatch` — the one whose failure the user actually reported.
     func testDispatchSessionSendsAParamsObject() async throws {
@@ -1041,7 +1041,7 @@ final class MethodWrapperTests: XCTestCase {
 
 extension MethodWrapperTests {
     /// The wrapper exists at all. T3's review recorded its ABSENCE as a known gap: `sync.config`
-    /// carries the model catalogue and the effort lists, and NormaKit — the Mac app's only daemon
+    /// carries the model catalogue and the effort lists, and WinterKit — the Mac app's only daemon
     /// client — had no way to ask for them, which is why the Mac's picker was still a hardcoded
     /// three-slug mirror.
     func testSyncConfigDecodesTheCatalogueAndBothEffortLists() async throws {
@@ -1101,7 +1101,7 @@ extension MethodWrapperTests {
         XCTAssertEqual(snapshot.clientEfforts, ["ultra"])
     }
 
-    private func roundTripSyncConfig(_ result: String) async throws -> (NormaClient, SyncConfigSnapshot) {
+    private func roundTripSyncConfig(_ result: String) async throws -> (WinterClient, SyncConfigSnapshot) {
         let (client, t) = try await connected()
         let (_, snapshot) = try await roundTrip(t, sentIndex: 1, result: result) { try await client.syncConfig() }
         return (client, snapshot)
@@ -1119,7 +1119,7 @@ extension MethodWrapperTests {
         }
         XCTAssertEqual(rows.first { $0.sessionId == "s_1" }?.effort, "xhigh")
         XCTAssertEqual(rows.first { $0.sessionId == "s_2" }?.effort, "ultra",
-                       "a Norma tier is reported verbatim, never rewritten to its wire translation")
+                       "a Winter tier is reported verbatim, never rewritten to its wire translation")
         XCTAssertNil(rows.first { $0.sessionId == "s_3" }?.effort, "absent = no override")
     }
 
@@ -1489,14 +1489,14 @@ extension MethodWrapperTests {
         let (client, t) = try await connected()
 
         let (req, payload) = try await roundTrip(t, sentIndex: 1,
-            result: #"{"path":"/Users/me/norma v2/core/x.ts","added":3,"removed":1,"patch":"@@ -1,2 +1,2 @@\n-old\n+new\n","truncated":false}"#
+            result: #"{"path":"/Users/me/winter v2/core/x.ts","added":3,"removed":1,"patch":"@@ -1,2 +1,2 @@\n-old\n+new\n","truncated":false}"#
         ) { try await client.readPanelDiff(sessionId: "s_9", diffId: "diff_1") }
 
         XCTAssertEqual(req["method"] as? String, "panel.readDiff")
         let params = req["params"] as? [String: Any]
         XCTAssertEqual(params?["sessionId"] as? String, "s_9")
         XCTAssertEqual(params?["diffId"] as? String, "diff_1")
-        XCTAssertEqual(payload.path, "/Users/me/norma v2/core/x.ts")
+        XCTAssertEqual(payload.path, "/Users/me/winter v2/core/x.ts")
         XCTAssertEqual(payload.added, 3)
         XCTAssertEqual(payload.removed, 1)
         XCTAssertEqual(payload.patch, "@@ -1,2 +1,2 @@\n-old\n+new\n")

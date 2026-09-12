@@ -1,18 +1,18 @@
 import XCTest
 import os
-import NormaProtocol
+import WinterProtocol
 import IrohLib
-@testable import NormaKit
-@testable import NormaSessionKit
+@testable import WinterKit
+@testable import WinterSessionKit
 
-/// SP3 Task 5 (closes Phase A): the CI conformance harness proving `norma-fake-phone`'s new
-/// `--attach` path — `IrohDialer.dial` -> `NormaSessionClient` — is genuinely the SAME production
+/// SP3 Task 5 (closes Phase A): the CI conformance harness proving `winter-fake-phone`'s new
+/// `--attach` path — `IrohDialer.dial` -> `WinterSessionClient` — is genuinely the SAME production
 /// client the app will use, driven end-to-end against a REAL `RealDaemon` (never the live
-/// `~/.norma` daemon). Structurally this is `PairingE2ETests.testScenarioA_...`'s own ceremony ->
+/// `~/.winter` daemon). Structurally this is `PairingE2ETests.testScenarioA_...`'s own ceremony ->
 /// reconnect -> `session.list` proof (that file's helpers are `private` to it, so this file
 /// duplicates the small harness-setup glue rather than reusing them directly — this codebase's own
 /// established convention for such test-only plumbing, e.g. `withTimeout`'s many per-file copies),
-/// carried one step further: the reconnect goes through `NormaSessionClient` itself (not a
+/// carried one step further: the reconnect goes through `WinterSessionClient` itself (not a
 /// hand-rolled `PhoneConn`), then drives a full prompt round trip AND the REAL approval flow
 /// (`ApprovalBroker`/`peripheral.lease`, SP3 T4b's shipped `approval.list`/`approval.respond`
 /// wiring) — never a scripted/fake broker.
@@ -21,11 +21,11 @@ import IrohLib
 /// `session.attach` (both at hello-time via `ClientHello.resumes` and live via the `session.attach`
 /// RPC) ALWAYS mints its own `harness_attached` bookkeeping event on the daemon (`hub.attach`'s own
 /// `appendAndBroadcast`) — filtered from the wire (SP2a gate G1: "no harness_attached/detached
-/// leak"), but it still CONSUMES a real, persisted seq slot. `NormaSessionClient`'s original strict
+/// leak"), but it still CONSUMES a real, persisted seq slot. `WinterSessionClient`'s original strict
 /// gap detection (each seq EXACTLY `cursor + 1`) therefore flagged the very next piece of real
 /// content after ANY attach as a permanent false gap (snapshot resume → re-attach → fresh
 /// `harness_attached` → new hole → repeat) — first reproduced here against a REAL daemon+gateway,
-/// confirmed via a raw `NormaClient` (harness-role, whose own dedup is the more lenient
+/// confirmed via a raw `WinterClient` (harness-role, whose own dedup is the more lenient
 /// `seq <= lastSeq`, immune to this) observing the SAME events land correctly. The fix aligns the
 /// client with SP2a G1's documented contract ("cursors stay exclusive-> over what the phone
 /// actually received (filtered seq gaps are fine)"): on the single reliable, ordered QUIC
@@ -38,10 +38,10 @@ import IrohLib
 /// corroboration that the underlying daemon round trips genuinely happened.
 ///
 /// Winter Phase 9a (P9a-11, Lane K): all four tests in this file are among the 13 `ci.yml`'s
-/// `NORMAKIT_SKIP` names by exact test — bisected to `ed6ebeca6c1fce175ef0e818361fb3662b38d6ca`
+/// `WINTERKIT_SKIP` names by exact test — bisected to `ed6ebeca6c1fce175ef0e818361fb3662b38d6ca`
 /// (`session.dispatch`'s default mode now requires a resolvable `winter` executable this suite
 /// never provisions). Three of the four pass outright once a real `winter` binary is available
-/// (`NORMA_WINTER_EXECUTABLE`); `testStreamingDeltasReachThePhone_...` does not, for a second,
+/// (`WINTER_RUNTIME_EXECUTABLE`); `testStreamingDeltasReachThePhone_...` does not, for a second,
 /// independent cause — its `streamingProviderFixture`'s injected `agentProvider` (this file's own
 /// synthetic-event seam, built for the retired engine) is never consulted by the Winter leg, so
 /// none of its chunks reach the wire. See `RealDaemon.waitForFirstLine`'s own doc comment for the
@@ -51,12 +51,12 @@ final class FakePhoneConformanceTests: XCTestCase {
     // MARK: - Host + ceremony setup (mirrors PairingE2ETests' own pattern)
 
     private func makeRelayConfig() -> SignedRelayConfig {
-        SignedRelayConfig(config: RelayConfig(version: 1, relays: ["relay1.norma.dev"]), sig: Data(repeating: 7, count: 64))
+        SignedRelayConfig(config: RelayConfig(version: 1, relays: ["relay1.winter.dev"]), sig: Data(repeating: 7, count: 64))
     }
 
     private func tempStoreDir() -> URL {
         FileManager.default.temporaryDirectory
-            .appendingPathComponent("norma-fake-phone-conformance-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("winter-fake-phone-conformance-\(UUID().uuidString)", isDirectory: true)
     }
 
     /// Captures the `IrohListener` `RemoteHost.start()` binds via the `#if DEBUG` `makeListener`
@@ -97,7 +97,7 @@ final class FakePhoneConformanceTests: XCTestCase {
                 return listener
             },
             makeDaemonFactory: {
-                NormaClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway")
+                WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway")
             }
         )
         // Force-starts (even at zero paired devices) so the listener is bound before pairing.
@@ -155,13 +155,13 @@ final class FakePhoneConformanceTests: XCTestCase {
     // ALSO double as independent, gap-immune observers (see `verifier`/`approvalVerifier` below)
     // that confirm the underlying events genuinely happened.
 
-    private func harnessClient(_ daemon: RealDaemon, name: String) async throws -> NormaClient {
-        let c = NormaClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.harnessToken, clientName: name)
+    private func harnessClient(_ daemon: RealDaemon, name: String) async throws -> WinterClient {
+        let c = WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.harnessToken, clientName: name)
         try await c.connect(role: "harness")
         return c
     }
 
-    // MARK: - Event-wait helpers (mirrors NormaSessionClientTests' own Sink/drain/waitUntil)
+    // MARK: - Event-wait helpers (mirrors WinterSessionClientTests' own Sink/drain/waitUntil)
 
     private final class Sink<T: Sendable>: @unchecked Sendable {
         private let lock = OSAllocatedUnfairLock(initialState: [T]())
@@ -184,11 +184,11 @@ final class FakePhoneConformanceTests: XCTestCase {
         XCTFail("timed out: \(msg)")
     }
 
-    /// Polls the REAL broker via `approval.list` (`NormaSessionClient.pendingApprovals`) until it
+    /// Polls the REAL broker via `approval.list` (`WinterSessionClient.pendingApprovals`) until it
     /// reports a pending entry — a genuine RPC round trip against `ApprovalBroker.list()`, the
     /// queryable-state surface T4b shipped (pending approvals age out of the retained log, so live
     /// state — not event reconstruction — is the right source regardless of stream timing).
-    private func waitForPendingApproval(_ client: NormaSessionClient, sessionID: String, timeout: TimeInterval = 10) async throws -> SessionEvent.JSONValue {
+    private func waitForPendingApproval(_ client: WinterSessionClient, sessionID: String, timeout: TimeInterval = 10) async throws -> SessionEvent.JSONValue {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             let pending = try await client.pendingApprovals(sessionID: sessionID)
@@ -200,7 +200,7 @@ final class FakePhoneConformanceTests: XCTestCase {
 
     // MARK: - The conformance test
 
-    func testFullLoopThroughNormaSessionClient_PromptRoundTripAndRealApprovalFlow() async throws {
+    func testFullLoopThroughWinterSessionClient_PromptRoundTripAndRealApprovalFlow() async throws {
         let daemon = try await RealDaemon.start()
         defer { daemon.stop() }
         let setup = try await makeHost(daemon: daemon)
@@ -210,8 +210,8 @@ final class FakePhoneConformanceTests: XCTestCase {
         XCTAssertEqual(accepted.epoch, 1)
         XCTAssertEqual(accepted.grantedCaps, ["sessions"])
 
-        // ---- Reconnect through the SAME production entry points norma-fake-phone now uses ----
-        // (IrohDialer.dial -> NormaSessionClient — NOT a hand-rolled PhoneConn/dial/hello loop).
+        // ---- Reconnect through the SAME production entry points winter-fake-phone now uses ----
+        // (IrohDialer.dial -> WinterSessionClient — NOT a hand-rolled PhoneConn/dial/hello loop).
         // `dialInternal`'s `addrOverride` is the identical hermetic seam `IrohDialerTests` uses:
         // production has no bare-macEndpointID discovery wired up in a test environment.
         let phoneEndpointID = try SecretKey.fromBytes(bytes: secret).public().description
@@ -219,9 +219,9 @@ final class FakePhoneConformanceTests: XCTestCase {
             secret: secret, macEndpointID: setup.macEndpointID, alpn: IrohListener.defaultALPN,
             relayURLs: [], addrOverride: setup.irohListener.endpointAddr
         )
-        let client = NormaSessionClient(
+        let client = WinterSessionClient(
             conn: conn, hostID: phoneEndpointID, epoch: accepted.epoch, cursors: InMemoryCursorStore(),
-            clientInstanceID: "norma-fake-phone", clock: { Int(Date().timeIntervalSince1970 * 1000) },
+            clientInstanceID: "winter-fake-phone", clock: { Int(Date().timeIntervalSince1970 * 1000) },
             idgen: { UUID().uuidString }
         )
         // The shipped client's own event feed IS the primary assertion surface now (see this
@@ -240,9 +240,9 @@ final class FakePhoneConformanceTests: XCTestCase {
         // ---- Prompt leg: session.dispatch -> attach -> send, verified two ways ----
         //
         // 1. The shipped client's OWN `events` stream delivers the live `user_message` cleanly —
-        //    the real "attach → see messages" flow through `NormaSessionClient` itself (the
+        //    the real "attach → see messages" flow through `WinterSessionClient` itself (the
         //    header comment's finding, now fixed: the filtered-seq forward jump applies, no gap).
-        // 2. An independent harness `NormaClient` ("verifier") also attaches and genuinely
+        // 2. An independent harness `WinterClient` ("verifier") also attaches and genuinely
         //    observes the same `user_message` — corroborating the REAL daemon/hub/gateway round
         //    trip (session.dispatch -> session.attach -> session.send) underneath.
         let dispatchResult = try await client.send(method: "session.dispatch", params: .object([:]))
@@ -312,13 +312,13 @@ final class FakePhoneConformanceTests: XCTestCase {
         // Fired, not awaited yet: `peripheral.lease` blocks (on the REAL `ApprovalBroker.wait`)
         // until `approval.respond` answers it, exactly mirroring packages/core's own
         // `test/peripheral/e2e.test.ts` "ask policy raises an approval card" sequence — the ONLY
-        // difference here is that the answering side is the PHONE, over `NormaSessionClient`,
+        // difference here is that the answering side is the PHONE, over `WinterSessionClient`,
         // instead of the same harness connection that requested the lease.
         async let leaseResult = requester.request("peripheral.lease", params: .object([
             "sessionId": .string(approvalSid), "class": .string("screenshot"),
         ]))
 
-        // approval.list (NormaSessionClient.pendingApprovals) — a genuine RPC query against the
+        // approval.list (WinterSessionClient.pendingApprovals) — a genuine RPC query against the
         // REAL `ApprovalBroker.list()`, never dependent on the push-event path — is how the phone
         // discovers the pending approval, exactly as T4b's own doc comment intends ("pending
         // approvals age out of the retained log" is the SAME reason it queries live state rather
@@ -378,7 +378,7 @@ final class FakePhoneConformanceTests: XCTestCase {
     /// tasks.** Everything below runs through production code: a REAL daemon with a REAL
     /// `AgentEngine` (only the `Provider` is injected — `RealDaemon.streamingProviderFixture`), a
     /// REAL pairing ceremony, the REAL `Gateway` over a REAL iroh QUIC link, into the shipped
-    /// `NormaSessionClient`. Nothing between the provider and the phone is faked.
+    /// `WinterSessionClient`. Nothing between the provider and the phone is faked.
     ///
     /// It exists because NOTHING in either suite covered a transient event traversing the gateway,
     /// and that hole hid two bugs at once:
@@ -401,7 +401,7 @@ final class FakePhoneConformanceTests: XCTestCase {
     /// the assertions after it never see their events.
     ///
     /// Honest note on the reasoning half: the Swift stack was ALREADY accidentally safe there —
-    /// `apple/NormaProtocol` has no `reasoningItem` variant, so `NormaClient` yields `.unknownEvent`
+    /// `apple/WinterProtocol` has no `reasoningItem` variant, so `WinterClient` yields `.unknownEvent`
     /// and the gateway's `guard case .session` drops it. That accident evaporates the moment someone
     /// mirrors the variant into Swift, which is exactly what CLAUDE.md's protocol checklist tells
     /// them to do. The RED evidence for that hole is `remote-live-stream.test.ts` at the daemon
@@ -419,9 +419,9 @@ final class FakePhoneConformanceTests: XCTestCase {
             secret: secret, macEndpointID: setup.macEndpointID, alpn: IrohListener.defaultALPN,
             relayURLs: [], addrOverride: setup.irohListener.endpointAddr
         )
-        let client = NormaSessionClient(
+        let client = WinterSessionClient(
             conn: conn, hostID: phoneEndpointID, epoch: accepted.epoch, cursors: InMemoryCursorStore(),
-            clientInstanceID: "norma-fake-phone", clock: { Int(Date().timeIntervalSince1970 * 1000) },
+            clientInstanceID: "winter-fake-phone", clock: { Int(Date().timeIntervalSince1970 * 1000) },
             idgen: { UUID().uuidString }
         )
         let (eventSink, eventTask) = drain(client.events)
@@ -503,13 +503,13 @@ final class FakePhoneConformanceTests: XCTestCase {
     private func dialPhone(
         setup: TestSetup, secret: Data, epoch: Int, installID: String,
         heartbeat: HeartbeatConfig
-    ) async throws -> NormaSessionClient {
+    ) async throws -> WinterSessionClient {
         let phoneEndpointID = try SecretKey.fromBytes(bytes: secret).public().description
         let conn = try await IrohDialer.dialInternal(
             secret: secret, macEndpointID: setup.macEndpointID, alpn: IrohListener.defaultALPN,
             relayURLs: [], addrOverride: setup.irohListener.endpointAddr
         )
-        return NormaSessionClient(
+        return WinterSessionClient(
             conn: conn, hostID: phoneEndpointID, epoch: epoch, cursors: InMemoryCursorStore(),
             clientInstanceID: installID, clock: { Int(Date().timeIntervalSince1970 * 1000) },
             idgen: { UUID().uuidString }, heartbeat: heartbeat
@@ -679,7 +679,7 @@ final class FakePhoneConformanceTests: XCTestCase {
     }
 
     /// SP3.1 T1 (the whole point): a REAL revoke, reached through the REAL router/gateway stack, must
-    /// surface on the shipped `NormaSessionClient` as a TYPED `.handshakeRejected` with a re-pair code
+    /// surface on the shipped `WinterSessionClient` as a TYPED `.handshakeRejected` with a re-pair code
     /// — the signal the iOS app maps to its honest `.revoked` state — NOT a bare `connectionClosed`/
     /// timeout (which the SP3 whole-branch review found collapsed to `.macUnavailable`, making the
     /// honest state unreachable from a real revoke). Pre-fix, the router sent a raw-JSON `PairRejected`
@@ -707,15 +707,15 @@ final class FakePhoneConformanceTests: XCTestCase {
         try await setup.host.revoke(phoneEndpointID: phoneEndpointID)
 
         // Reconnect through the SAME production entry points a real phone uses: IrohDialer.dial ->
-        // NormaSessionClient (identical to the conformance test above), a fresh conn on the same
+        // WinterSessionClient (identical to the conformance test above), a fresh conn on the same
         // iroh identity, carrying the accepted epoch.
         let conn = try await IrohDialer.dialInternal(
             secret: secret, macEndpointID: setup.macEndpointID, alpn: IrohListener.defaultALPN,
             relayURLs: [], addrOverride: setup.irohListener.endpointAddr
         )
-        let client = NormaSessionClient(
+        let client = WinterSessionClient(
             conn: conn, hostID: phoneEndpointID, epoch: accepted.epoch, cursors: InMemoryCursorStore(),
-            clientInstanceID: "norma-fake-phone", clock: { Int(Date().timeIntervalSince1970 * 1000) },
+            clientInstanceID: "winter-fake-phone", clock: { Int(Date().timeIntervalSince1970 * 1000) },
             idgen: { UUID().uuidString }, firstFrameDeadline: 15
         )
 

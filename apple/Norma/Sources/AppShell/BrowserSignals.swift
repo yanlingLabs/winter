@@ -367,7 +367,7 @@ final class BrowserSignalsCoordinator {
                                 url: tab.url,
                                 isShown: tab.tabId == shownTabId,
                                 // Obligation #5. Never read by the engine — it is here for
-                                // `NormaCEFSeedTabState`, which primes the navigation channel's
+                                // `WinterCEFSeedTabState`, which primes the navigation channel's
                                 // dedupe with the (url, title) PAIR; seeding an empty title lets
                                 // every restore re-report a navigation the log already holds.
                                 title: tab.title)

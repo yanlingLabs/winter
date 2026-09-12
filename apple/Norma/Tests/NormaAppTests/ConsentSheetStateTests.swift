@@ -1,9 +1,9 @@
 import XCTest
-import NormaKit
-@testable import Norma
+import WinterKit
+@testable import Winter
 
 /// Task 3 (4d-iii): `ConsentSheetState` — the PURE state machine backing the plugin install/enable
-/// consent sheet. No `NormaClient`, no SwiftUI — same "pure model, table-tested directly" posture
+/// consent sheet. No `WinterClient`, no SwiftUI — same "pure model, table-tested directly" posture
 /// as `PluginManagerModelTests`' coverage of `pluginRowDisplay`.
 final class ConsentSheetStateTests: XCTestCase {
     /// Deliberately odd content (empty line, leading/trailing whitespace, a long line) — the point
@@ -104,7 +104,7 @@ final class ConsentSheetStateTests: XCTestCase {
 }
 
 // -----------------------------------------------------------------------------------------------
-// `locatePluginRoot` — Task 3's real-filesystem (not `NormaClient`) install helper. Directly
+// `locatePluginRoot` — Task 3's real-filesystem (not `WinterClient`) install helper. Directly
 // testable against a real temp directory rather than mocked (same posture as `CliLauncher`'s own
 // `wrapperInstallPath`/`ensureWrapper` tests elsewhere in this target).
 // -----------------------------------------------------------------------------------------------
@@ -114,7 +114,7 @@ final class LocatePluginRootTests: XCTestCase {
 
     override func setUpWithError() throws {
         tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("norma-locate-root-test-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("winter-locate-root-test-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
     }
 
@@ -124,7 +124,7 @@ final class LocatePluginRootTests: XCTestCase {
 
     func testFindsManifestAtTopLevel() {
         FileManager.default.createFile(
-            atPath: tempDir.appendingPathComponent("norma-plugin.json").path, contents: Data("{}".utf8)
+            atPath: tempDir.appendingPathComponent("winter-plugin.json").path, contents: Data("{}".utf8)
         )
         XCTAssertEqual(locatePluginRoot(in: tempDir)?.standardizedFileURL.path, tempDir.standardizedFileURL.path)
     }
@@ -165,7 +165,7 @@ final class LocatePluginRootTests: XCTestCase {
         let sub = tempDir.appendingPathComponent("PluginDir", isDirectory: true)
         try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
         FileManager.default.createFile(
-            atPath: sub.appendingPathComponent("norma-plugin.json").path, contents: Data("{}".utf8)
+            atPath: sub.appendingPathComponent("winter-plugin.json").path, contents: Data("{}".utf8)
         )
 
         let macosx = tempDir.appendingPathComponent("__MACOSX", isDirectory: true)
@@ -209,7 +209,7 @@ final class LocatePluginRootTests: XCTestCase {
     func testNilWhenManifestIsASymlink() throws {
         let realFile = tempDir.appendingPathComponent("real-manifest.json")
         FileManager.default.createFile(atPath: realFile.path, contents: Data("{}".utf8))
-        let manifestLink = tempDir.appendingPathComponent("norma-plugin.json")
+        let manifestLink = tempDir.appendingPathComponent("winter-plugin.json")
         try FileManager.default.createSymbolicLink(at: manifestLink, withDestinationURL: realFile)
 
         XCTAssertNil(locatePluginRoot(in: tempDir))
@@ -220,17 +220,17 @@ final class LocatePluginRootTests: XCTestCase {
 // PluginManagerModel — the consent-sheet-driving methods (`enable`'s needsConsent path, `install`,
 // `confirmConsent`, `cancelConsent`). A SEPARATE `@MainActor` test class, same posture as
 // `PluginManagerModelAsyncTests` (`PluginManagerModelTests.swift`) — drives a real (actor)
-// `NormaClient` end-to-end via the same scripted-transport double
+// `WinterClient` end-to-end via the same scripted-transport double
 // (`FeedScriptedTransport`/`feedLineJSON`/`feedWaitUntil`, `SessionFeedTests.swift`, same target).
 // `PluginManagerModel` has no `PluginManagerClient` protocol seam (Task 2 didn't introduce one —
-// the concrete `NormaClient` is already mockable at the transport layer), so no new seam is
+// the concrete `WinterClient` is already mockable at the transport layer), so no new seam is
 // introduced here either.
 // -----------------------------------------------------------------------------------------------
 @MainActor
 final class PluginManagerModelConsentTests: XCTestCase {
-    private func connectedClient() async throws -> (NormaClient, FeedScriptedTransport) {
+    private func connectedClient() async throws -> (WinterClient, FeedScriptedTransport) {
         let t = FeedScriptedTransport()
-        let client = NormaClient(makeTransport: { t }, token: "tok", clientName: "consent-sheet-test")
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "consent-sheet-test")
         async let c: Void = client.connect()
         await feedWaitUntil { !t.sent.isEmpty }
         let hello = feedLineJSON(t.sent[0])
@@ -402,6 +402,6 @@ final class PluginManagerModelConsentTests: XCTestCase {
         await action
 
         XCTAssertNil(model.consentSheet)
-        XCTAssertEqual(model.errorText, "not a valid plugin source — no norma-plugin.json/plugin.json found")
+        XCTAssertEqual(model.errorText, "not a valid plugin source — no winter-plugin.json/plugin.json found")
     }
 }

@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
-import NormaProtocol
-@testable import NormaChatKit
+import WinterProtocol
+@testable import WinterChatKit
 
 /// `SyncClient` — the phone half of the replication wire, driven against a `FakeDaemon` (the scripted
 /// `RpcConn` double). The fake implements the daemon's push/pull/heads semantics in memory: chunk
@@ -12,7 +12,7 @@ final class SyncClientTests: XCTestCase {
     private var dir: URL!
 
     override func setUpWithError() throws {
-        dir = FileManager.default.temporaryDirectory.appendingPathComponent("norma-sc-\(UUID().uuidString)")
+        dir = FileManager.default.temporaryDirectory.appendingPathComponent("winter-sc-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     }
     override func tearDownWithError() throws { try? FileManager.default.removeItem(at: dir) }
@@ -1068,7 +1068,7 @@ final class SyncClientTests: XCTestCase {
         }
     }
 
-    // MARK: - provider-correctness T5: Norma-level client tiers on sync.config
+    // MARK: - provider-correctness T5: Winter-level client tiers on sync.config
 
     /// The tiers arrive as their OWN list and are never folded into a model's wire efforts.
     ///
@@ -1084,7 +1084,7 @@ final class SyncClientTests: XCTestCase {
         XCTAssertEqual(config.clientEfforts, ["ultra"])
         for model in config.models {
             XCTAssertFalse(model.efforts.contains("ultra"),
-                           "a Norma-level tier must never appear as a wire level for any model")
+                           "a Winter-level tier must never appear as a wire level for any model")
             XCTAssertTrue(Set(model.efforts).isDisjoint(with: Set(config.clientEfforts)),
                           "the two lists are disjoint by construction — never concatenate them")
         }
@@ -1290,7 +1290,7 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
     var beforePull: [String: () -> Void] = [:]
     /// G9 (provider-correctness T3, widened again by T5 and by the whole-branch review's C1): the
     /// default carries the FULL `sync.config` shape — the PROVIDER IDENTITY, the model catalogue,
-    /// the live effort, and the Norma-level client tiers, not just a model string. `codex-oauth`
+    /// the live effort, and the Winter-level client tiers, not just a model string. `codex-oauth`
     /// specifically, because that is what the phone itself runs: a double serving a foreign provider
     /// by default would put every consumer on the never-synced path. A double that kept serving the old
     /// three-field body would have every catalogue consumer testing against an empty lineup while the
@@ -1310,7 +1310,7 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
     /// pre-T3 mock effort list had the first two exactly backwards — a double that invented its own
     /// list would let that recur.
     static let wireEfforts = ["none", "low", "medium", "high", "xhigh", "max"]
-    /// The NORMA-LEVEL tiers a current Mac offers (`CLIENT_EFFORTS`, packages/core/src/settings.ts).
+    /// The WINTER-LEVEL tiers a current Mac offers (`CLIENT_EFFORTS`, packages/core/src/settings.ts).
     /// A SEPARATE constant from `wireEfforts` because they are separate lists on the wire and must
     /// stay separate here: a double that merged them would let a picker offer `ultra` as if the
     /// endpoint accepted it — the exact drift T3/T5 exist to make impossible.
@@ -1510,9 +1510,9 @@ class FakeDaemon: RpcConn, @unchecked Sendable {
             // `{seq, sessionId, type}` envelope `LineEnvelope` checks. An envelope-only check lets a
             // variant with a MISSING REQUIRED FIELD (or an unrecognized `type`) through — exactly what a
             // phone-engine event-construction bug or a fork-rewrite corruption could produce — and every
-            // SyncClient test would still pass. `NormaProtocol.SessionEvent` is the Swift mirror of the
+            // SyncClient test would still pass. `WinterProtocol.SessionEvent` is the Swift mirror of the
             // same zod schema, so decoding each line with it is the cheap, faithful fix.
-            guard (try? JSONDecoder().decode(NormaProtocol.SessionEvent.self, from: line)) != nil else {
+            guard (try? JSONDecoder().decode(WinterProtocol.SessionEvent.self, from: line)) != nil else {
                 throw RpcError(code: -32602, message: "unparseable or invalid SessionEvent line")
             }
             guard env.sessionId == id else {

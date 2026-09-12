@@ -35,7 +35,7 @@ public struct SignedRelayConfig: Codable, Equatable {
     }
 }
 
-/// Signs a `RelayConfig` with the Norma relay-config Ed25519 key (the private half lives in the
+/// Signs a `RelayConfig` with the Winter relay-config Ed25519 key (the private half lives in the
 /// login Keychain in production — see `scripts/sign-relay-config.ts` — and only as a hardcoded
 /// test seed in this package's tests).
 public enum RelayConfigSigner {

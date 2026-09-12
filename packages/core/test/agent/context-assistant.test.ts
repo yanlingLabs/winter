@@ -16,13 +16,13 @@ import { assistantMemoryDirFor } from "../../src/agent/memory-dir";
 // protocol block is/isn't present without depending on its full wording.
 const PROTOCOL_MARKER = "NO dedicated memory tools";
 
-function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "norma-ctx-asst-"))); }
+function realDir(): string { return realpathSync(mkdtempSync(join(tmpdir(), "winter-ctx-asst-"))); }
 
 function setup() {
   const home = realDir();
   mkdirSync(join(home, "memory"), { recursive: true });
   const trust = new TrustStore(join(home, "trust.json"));
-  const skills = new SkillStore({ normaHome: home, trust });
+  const skills = new SkillStore({ winterHome: home, trust });
   return { home, trust, skills };
 }
 
@@ -30,23 +30,23 @@ describe("ContextAssembler + _assistant bucket (Dreaming Task 1)", () => {
   test('memoryBucket: "assistant" — loads the _assistant index, no protocol block, no project MEMORY.md leakage', () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
-    const assistantDir = assistantMemoryDirFor({ normaHome: home });
+    const assistantDir = assistantMemoryDirFor({ winterHome: home });
     mkdirSync(assistantDir, { recursive: true });
-    writeFileSync(join(assistantDir, "MEMORY.md"), "- [Alex](alex.md) — builds Norma\n");
+    writeFileSync(join(assistantDir, "MEMORY.md"), "- [Alex](alex.md) — builds Winter\n");
 
     const projectDir = join(home, "projects", "some-project-key", "memory");
     mkdirSync(projectDir, { recursive: true });
     writeFileSync(join(projectDir, "MEMORY.md"), "PROJECT_ONLY_LINE_MUST_NOT_LEAK\n");
 
     const a = new ContextAssembler({
-      normaHome: home, trust, skills,
+      winterHome: home, trust, skills,
       memory: { enabled: () => true, dirFor: () => projectDir, assistantDir: () => assistantDir },
     });
     const out = a.assemble({ cwd, memoryBucket: "assistant" });
 
     expect(out).toContain("Assistant memory index");
     expect(out).toContain("Alex");
-    expect(out).toContain("builds Norma");
+    expect(out).toContain("builds Winter");
     expect(out).not.toContain(PROTOCOL_MARKER);
     expect(out).not.toContain("PROJECT_ONLY_LINE_MUST_NOT_LEAK");
   });
@@ -54,16 +54,16 @@ describe("ContextAssembler + _assistant bucket (Dreaming Task 1)", () => {
   test('memoryBucket omitted ("project"): today\'s behavior unchanged — project index + protocol block, _assistant absent', () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
-    const assistantDir = assistantMemoryDirFor({ normaHome: home });
+    const assistantDir = assistantMemoryDirFor({ winterHome: home });
     mkdirSync(assistantDir, { recursive: true });
-    writeFileSync(join(assistantDir, "MEMORY.md"), "- [Alex](alex.md) — builds Norma\n");
+    writeFileSync(join(assistantDir, "MEMORY.md"), "- [Alex](alex.md) — builds Winter\n");
 
     const projectDir = join(home, "projects", "some-project-key", "memory");
     mkdirSync(projectDir, { recursive: true });
     writeFileSync(join(projectDir, "MEMORY.md"), "- [coffee-pref](coffee-pref.md) — Likes oat milk lattes\n");
 
     const a = new ContextAssembler({
-      normaHome: home, trust, skills,
+      winterHome: home, trust, skills,
       memory: { enabled: () => true, dirFor: () => projectDir, assistantDir: () => assistantDir },
     });
     const out = a.assemble({ cwd });
@@ -72,36 +72,36 @@ describe("ContextAssembler + _assistant bucket (Dreaming Task 1)", () => {
     expect(out).toContain("Project memory index");
     expect(out).toContain("coffee-pref");
     expect(out).not.toContain("Assistant memory index");
-    expect(out).not.toContain("builds Norma");
+    expect(out).not.toContain("builds Winter");
   });
 
   test("memory disabled: assistant branch loads nothing — no index, no protocol", () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
-    const assistantDir = assistantMemoryDirFor({ normaHome: home });
+    const assistantDir = assistantMemoryDirFor({ winterHome: home });
     mkdirSync(assistantDir, { recursive: true });
-    writeFileSync(join(assistantDir, "MEMORY.md"), "- [Alex](alex.md) — builds Norma\n");
+    writeFileSync(join(assistantDir, "MEMORY.md"), "- [Alex](alex.md) — builds Winter\n");
 
     const a = new ContextAssembler({
-      normaHome: home, trust, skills,
+      winterHome: home, trust, skills,
       memory: { enabled: () => false, dirFor: () => join(home, "projects", "x", "memory"), assistantDir: () => assistantDir },
     });
     const out = a.assemble({ cwd, memoryBucket: "assistant" });
 
     expect(out).not.toContain("Assistant memory index");
     expect(out).not.toContain(PROTOCOL_MARKER);
-    expect(out).not.toContain("builds Norma");
+    expect(out).not.toContain("builds Winter");
   });
 
   test("caps: assistant index respects the same MEMDIR_INDEX_MAX_LINES/BYTES caps as the project bucket", () => {
     const { home, trust, skills } = setup();
     const cwd = realDir();
-    const assistantDir = assistantMemoryDirFor({ normaHome: home });
+    const assistantDir = assistantMemoryDirFor({ winterHome: home });
     mkdirSync(assistantDir, { recursive: true });
     writeFileSync(join(assistantDir, "MEMORY.md"), Array.from({ length: 300 }, (_, i) => `line${i}`).join("\n"));
 
     const a = new ContextAssembler({
-      normaHome: home, trust, skills,
+      winterHome: home, trust, skills,
       memory: { enabled: () => true, dirFor: () => join(home, "projects", "x", "memory"), assistantDir: () => assistantDir },
     });
     const out = a.assemble({ cwd, memoryBucket: "assistant" });

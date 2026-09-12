@@ -19,7 +19,7 @@ import { Settings, hooksEnabledFrom } from "../../src/settings";
 // HookRegistry.rebuild) — rather than through a full AgentEngine/SessionStore, since the facade's
 // new `cwdForSession` dep is exactly the seam daemon.ts wires `store.meta(sid).cwd` through; a stub
 // function is all that seam needs to be exercised here. Every test uses a fresh mkdtemp'd
-// directory — never ~/.norma (project rule).
+// directory — never ~/.winter (project rule).
 
 function tmpDir(prefix: string): string {
   return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
@@ -65,11 +65,11 @@ function hooksEnabledHotFor(resolver: ProjectSettingsResolver): (cwd?: string | 
 }
 
 describe("hooks.enabled becomes per-project via ProjectSettingsResolver (Task 9)", () => {
-  test("a trusted project's .norma/settings.json sets hooks.enabled:false -> the hook does NOT run for a session whose cwdForSession resolves there; a control session in another project still runs it", async () => {
-    const projectCwd = tmpDir("norma-hooks-project-");
-    mkdirSync(join(projectCwd, ".norma"), { recursive: true });
-    writeFileSync(join(projectCwd, ".norma", "settings.json"), JSON.stringify({ hooks: { enabled: false } }));
-    const controlCwd = tmpDir("norma-hooks-control-"); // a different project — no overlay at all
+  test("a trusted project's .winter/settings.json sets hooks.enabled:false -> the hook does NOT run for a session whose cwdForSession resolves there; a control session in another project still runs it", async () => {
+    const projectCwd = tmpDir("winter-hooks-project-");
+    mkdirSync(join(projectCwd, ".winter"), { recursive: true });
+    writeFileSync(join(projectCwd, ".winter", "settings.json"), JSON.stringify({ hooks: { enabled: false } }));
+    const controlCwd = tmpDir("winter-hooks-control-"); // a different project — no overlay at all
 
     const base = minimalBase();
     const trust = { isTrusted: (dir: string) => dir === projectCwd };
@@ -95,10 +95,10 @@ describe("hooks.enabled becomes per-project via ProjectSettingsResolver (Task 9)
   });
 
   test("session-start's extra.cwd takes precedence over cwdForSession", async () => {
-    const projectCwd = tmpDir("norma-hooks-extracwd-project-");
-    mkdirSync(join(projectCwd, ".norma"), { recursive: true });
-    writeFileSync(join(projectCwd, ".norma", "settings.json"), JSON.stringify({ hooks: { enabled: false } }));
-    const controlCwd = tmpDir("norma-hooks-extracwd-control-"); // cwdForSession would point here (hooks on)
+    const projectCwd = tmpDir("winter-hooks-extracwd-project-");
+    mkdirSync(join(projectCwd, ".winter"), { recursive: true });
+    writeFileSync(join(projectCwd, ".winter", "settings.json"), JSON.stringify({ hooks: { enabled: false } }));
+    const controlCwd = tmpDir("winter-hooks-extracwd-control-"); // cwdForSession would point here (hooks on)
 
     const base = minimalBase();
     const trust = { isTrusted: (dir: string) => dir === projectCwd };

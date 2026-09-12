@@ -1,12 +1,12 @@
-# Tool inventories — Norma vs. Claude Code
+# Tool inventories — Winter vs. Claude Code
 
-Two reference tables: Norma's built-in agent tools, and Claude Code's fixed built-in
+Two reference tables: Winter's built-in agent tools, and Claude Code's fixed built-in
 catalogue. **Deferred = Yes** means the tool is hidden behind `ToolSearch` (schema not
 loaded / not callable until loaded); **No** means always visible.
 
 ---
 
-## Norma — built-in agent tools
+## Winter — built-in agent tools
 
 Source: `packages/core/src/agent/tools/` + daemon wiring (`packages/core/src/daemon.ts`).
 "Deferred = Yes" reflects the per-tool `deferred: true` flag, active whenever built-in
@@ -177,18 +177,18 @@ subcommands, and the server-side `advisor` tool). Notes:
 
 ---
 
-## Norma vs. CC — the contrast
+## Winter vs. CC — the contrast
 
 - CC keeps its whole fixed catalogue **eager** and defers **only** external MCP tools.
-- Norma additionally defers ~20 of its **own** built-ins via a per-tool `deferred: true`
+- Winter additionally defers ~20 of its **own** built-ins via a per-tool `deferred: true`
   flag riding the same ToolSearch machinery.
-- Same mechanism, broader application in Norma. CC's built-ins are "conditional" (gated by
-  version/plan/provider/OS) rather than deferred; Norma's counts: 39 built-ins vs. CC's 42.
-- `PushNotification`/`push_notification` (task-30) closes the last item on this list: Norma's
+- Same mechanism, broader application in Winter. CC's built-ins are "conditional" (gated by
+  version/plan/provider/OS) rather than deferred; Winter's counts: 39 built-ins vs. CC's 42.
+- `PushNotification`/`push_notification` (task-30) closes the last item on this list: Winter's
   version leans on a REAL Mac app for delivery — a native `UNUserNotificationCenter` alert with
   proper app identity — rather than CC's undocumented hosted delivery, plus a headless `osascript`
   fallback when nobody's attached at all (CC's hosted Remote Control phone delivery is out of
-  scope for Norma).
-- Update (SP2a): Norma's own remote transport — a Mac-side `Gateway` fronted by a real iroh P2P
+  scope for Winter).
+- Update (SP2a): Winter's own remote transport — a Mac-side `Gateway` fronted by a real iroh P2P
   listener, proven end-to-end (real daemon + real iroh) in `IrohE2ETests.swift` — is now live code,
   though dev/test-only until SP2b's pairing ceremony ships.

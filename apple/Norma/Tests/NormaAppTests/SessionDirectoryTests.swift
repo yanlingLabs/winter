@@ -1,6 +1,6 @@
 import XCTest
-import NormaProtocol
-@testable import Norma
+import WinterProtocol
+@testable import Winter
 
 /// Stub `lister` — a mutable box test cases swap the returned rows on, mirroring the
 /// scripted-transport doubles' mutable-state convention used elsewhere in this test target
@@ -19,7 +19,7 @@ final class StubSessionLister {
 }
 
 /// app-shell Task 2: a `sleepTick` the test fully controls — adapted from `PairingSheetModelTests`'
-/// `ManualTickSource` (NormaKit; not reusable across modules, it's `private` there). `wait()`
+/// `ManualTickSource` (WinterKit; not reusable across modules, it's `private` there). `wait()`
 /// genuinely suspends (no busy-spin, no real 5s sleep) until the test calls `tick()`;
 /// `AsyncStream`'s default unbounded buffering makes this order-safe even if `tick()` lands before
 /// the poll loop has reached its own `wait()`.

@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 import XCTest
-@testable import NormaChatKit
+@testable import WinterChatKit
 
 /// The generator-INDEPENDENT safety net for `ssrfGuard`, and the direct answer to having been bitten
 /// twice by the same failure mode: a differential is only ever as good as its generator's imagination

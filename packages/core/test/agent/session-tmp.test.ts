@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sessionTmpDir } from "../../src/agent/session-tmp";
 
-afterEach(() => { delete process.env.NORMA_TMPDIR; });
+afterEach(() => { delete process.env.WINTER_TMPDIR; });
 
 describe("sessionTmpDir", () => {
   test("creates a stable realpath'd dir per session id", () => {
@@ -24,21 +24,21 @@ describe("sessionTmpDir", () => {
   });
 });
 
-describe("sessionTmpDir NORMA_TMPDIR override", () => {
-  test("uses NORMA_TMPDIR as the base when set", () => {
-    const base = realpathSync(mkdtempSync(join(tmpdir(), "norma-tmpbase-")));
-    process.env.NORMA_TMPDIR = base;
-    expect(sessionTmpDir("s1")).toBe(join(base, "norma-session-s1"));
+describe("sessionTmpDir WINTER_TMPDIR override", () => {
+  test("uses WINTER_TMPDIR as the base when set", () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), "winter-tmpbase-")));
+    process.env.WINTER_TMPDIR = base;
+    expect(sessionTmpDir("s1")).toBe(join(base, "winter-session-s1"));
   });
-  test("empty NORMA_TMPDIR falls back to os.tmpdir()", () => {
-    process.env.NORMA_TMPDIR = "";
-    expect(sessionTmpDir("s2")).toBe(join(realpathSync(tmpdir()), "norma-session-s2"));
+  test("empty WINTER_TMPDIR falls back to os.tmpdir()", () => {
+    process.env.WINTER_TMPDIR = "";
+    expect(sessionTmpDir("s2")).toBe(join(realpathSync(tmpdir()), "winter-session-s2"));
   });
   test("unset → os.tmpdir()", () => {
-    expect(sessionTmpDir("s3")).toBe(join(realpathSync(tmpdir()), "norma-session-s3"));
+    expect(sessionTmpDir("s3")).toBe(join(realpathSync(tmpdir()), "winter-session-s3"));
   });
-  test("fix-wave D: whitespace-only NORMA_TMPDIR falls back to os.tmpdir() (blank is treated as unset, not used verbatim)", () => {
-    process.env.NORMA_TMPDIR = "   ";
-    expect(sessionTmpDir("s4")).toBe(join(realpathSync(tmpdir()), "norma-session-s4"));
+  test("fix-wave D: whitespace-only WINTER_TMPDIR falls back to os.tmpdir() (blank is treated as unset, not used verbatim)", () => {
+    process.env.WINTER_TMPDIR = "   ";
+    expect(sessionTmpDir("s4")).toBe(join(realpathSync(tmpdir()), "winter-session-s4"));
   });
 });

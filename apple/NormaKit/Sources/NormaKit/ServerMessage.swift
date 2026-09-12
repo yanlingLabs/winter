@@ -1,5 +1,5 @@
 import Foundation
-import NormaProtocol
+import WinterProtocol
 
 public struct RpcError: Error, Equatable, Sendable {
     public let code: Int
@@ -79,7 +79,7 @@ public func parseServerLine(_ line: String) -> ServerMessage {
         return .response(id: id, result: .success(inbound.result ?? .null))
     }
     if inbound.method == "event", let params = inbound.params {
-        // Re-encode the params subtree and decode strictly via NormaProtocol (fail-loud there,
+        // Re-encode the params subtree and decode strictly via WinterProtocol (fail-loud there,
         // wrapped here). Double decode is fine at NDJSON line rates.
         if let paramsData = try? JSONEncoder().encode(params),
            let event = try? JSONDecoder().decode(SessionEvent.self, from: paramsData) {

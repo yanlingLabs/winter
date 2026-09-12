@@ -1,14 +1,14 @@
 import AppKit
 import Combine
 import XCTest
-import NormaKit
-import NormaProtocol
-@testable import Norma
+import WinterKit
+import WinterProtocol
+@testable import Winter
 
 /// browser-runtime T5: **the integration, driven end to end** — a fold arrives on a real
 /// `SessionFeed` over a scripted transport, and a CEF transcript comes out the other side.
 ///
-/// Everything between those two points is production code: `NormaClient`'s routing,
+/// Everything between those two points is production code: `WinterClient`'s routing,
 /// `ShellSessionHost`'s attachment policy, `PanelStore`'s fold, `BrowserSignalsCoordinator`'s
 /// assembly, `BrowserLifecycleEngine.plan`, `BrowserRuntime.apply`. Nothing here calls `plan`
 /// directly and nothing asserts on an action array: `BrowserLifecycleTests` owns the decision
@@ -18,7 +18,7 @@ import NormaProtocol
 ///
 /// **What no test here covers**, stated per spec §9's discipline: CEF itself. The driver is
 /// `BrowserRuntimeTests.CEFRecorder`, because no CEF client override is callable under XCTest,
-/// ever. "A browser was created" here means `NormaCEFCreateBrowser` would have been called with
+/// ever. "A browser was created" here means `WinterCEFCreateBrowser` would have been called with
 /// that URL — that it then renders, plays audio and survives a reparent is Task 1's spike,
 /// measured in the running app.
 @MainActor
@@ -225,7 +225,7 @@ final class BrowserSignalsTests: XCTestCase {
 
     /// Wraps one `SessionEvent` payload in the JSON-RPC notification the daemon actually sends —
     /// `{"method":"event","params":{…}}` (`AppModelTests`' own shape). A bare event object is not a
-    /// frame `NormaClient` routes, so nothing would ever reach the fold.
+    /// frame `WinterClient` routes, so nothing would ever reach the fold.
     private func frame(_ payload: String) -> String {
         #"{"jsonrpc":"2.0","method":"event","params":\#(payload)}"#
     }
@@ -293,7 +293,7 @@ final class BrowserSignalsTests: XCTestCase {
 
     /// **Obligation #5: the title travels fold → `BrowserTabState.title` → the seed.**
     ///
-    /// `NormaCEFSeedTabState` primes the navigation channel's dedupe memory with the (url, title)
+    /// `WinterCEFSeedTabState` primes the navigation channel's dedupe memory with the (url, title)
     /// PAIR. Seeded with an empty title, the browser's first committed navigation looks new and is
     /// re-reported as a `panel_tab_navigated` the session log already holds — a permanent extra
     /// line per restore, in a log that is never deleted. The engine never reads this field (no rule

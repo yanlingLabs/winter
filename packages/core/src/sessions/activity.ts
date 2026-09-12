@@ -1,4 +1,4 @@
-import type { SessionActivity } from "@norma/protocol";
+import type { SessionActivity } from "@winter/protocol";
 import type { SessionRow } from "./store";
 
 /** The four lifecycle states (spec §1). Aliased from the protocol's `SessionActivity` rather than

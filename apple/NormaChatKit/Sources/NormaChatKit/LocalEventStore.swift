@@ -1,6 +1,6 @@
 import Foundation
 import CryptoKit
-import NormaProtocol
+import WinterProtocol
 
 // ================================================================================================
 // LocalEventStore (Chat Slice D task 9) — the phone's OWN copy of the append-only session log the
@@ -29,7 +29,7 @@ import NormaProtocol
 // RAW BYTES, NOT DECODED EVENTS. The log is stored and replicated as verbatim JSONL bytes, never a
 // re-serialization — the byte-identity contract the whole sync surface rests on (see store.ts's
 // `appendSynced` doc comment). It also lets the log carry `reasoning_item`, which is deliberately
-// NOT a `NormaProtocol.SessionEvent` variant (CLAUDE.md §events: opaque, never rendered): a decoded
+// NOT a `WinterProtocol.SessionEvent` variant (CLAUDE.md §events: opaque, never rendered): a decoded
 // store could not hold it. So indexing/folding parse each line's minimal envelope (`seq`, `sessionId`,
 // `type`) with `JSONSerialization`, and `read` hands back both the raw bytes and a best-effort decode
 // (nil for `reasoning_item`/unknown) so a caller can render what renders and replicate everything.
@@ -798,7 +798,7 @@ public actor LocalEventStore {
         let contentHex = content.finalize().map { String(format: "%02x", $0) }.joined()
 
         var hasher = SHA256()
-        hasher.update(data: Data("norma-chat-fork:\(originalId):\(atSeq):\(contentHex)".utf8))
+        hasher.update(data: Data("winter-chat-fork:\(originalId):\(atSeq):\(contentHex)".utf8))
         var bytes = Array(hasher.finalize().prefix(16))
         bytes[6] = (bytes[6] & 0x0F) | 0x40 // version 4
         bytes[8] = (bytes[8] & 0x3F) | 0x80 // RFC 4122 variant

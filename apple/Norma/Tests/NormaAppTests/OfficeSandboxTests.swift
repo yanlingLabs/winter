@@ -1,10 +1,10 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 #if canImport(Darwin)
 import Darwin
 #endif
 
-/// Office Stage B Task 1 — the seatbelt. Spawns the REAL, compiled `NormaOfficeHelper` binary
+/// Office Stage B Task 1 — the seatbelt. Spawns the REAL, compiled `WinterOfficeHelper` binary
 /// directly (same "drive the real process, not a double" posture `OfficeHelperLiveTests` already
 /// established) but stays focused on sandbox-specific probes that do NOT need LibreOfficeKit or the
 /// vendor tree at all — `main.swift` applies and self-asserts the sandbox BEFORE ever resolving the
@@ -43,7 +43,7 @@ final class OfficeSandboxTests: XCTestCase {
 
     // MARK: - Repo-relative paths (same `#filePath`-climbing precedent as `OfficeHelperLiveTests`)
 
-    /// `#filePath` for this file is `<repoRoot>/apple/Norma/Tests/NormaAppTests/OfficeSandboxTests.swift`
+    /// `#filePath` for this file is `<repoRoot>/apple/Winter/Tests/WinterAppTests/OfficeSandboxTests.swift`
     /// — the identical nesting depth `OfficeHelperLiveTests.repoRoot` climbs from, duplicated here
     /// rather than shared: this codebase's own precedent (`CliLauncher.defaultRepoRoot` alongside
     /// `OfficeHelperLiveTests.repoRoot`) is a small per-file climb, not a shared test-utility file.
@@ -53,13 +53,13 @@ final class OfficeSandboxTests: XCTestCase {
         return url
     }
     private static var repoSandboxProfilePath: URL {
-        repoRoot.appendingPathComponent("apple/Norma/Sources/OfficeHelper/office-helper.sb", isDirectory: false)
+        repoRoot.appendingPathComponent("apple/Winter/Sources/OfficeHelper/office-helper.sb", isDirectory: false)
     }
 
     private func resolvedHelperURL() throws -> URL {
-        let url = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let url = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: url.path),
-                      "NormaOfficeHelper was not built into this run (\(url.path)) — add it to the "
+                      "WinterOfficeHelper was not built into this run (\(url.path)) — add it to the "
                         + "scheme's build list and re-run.")
         return url
     }

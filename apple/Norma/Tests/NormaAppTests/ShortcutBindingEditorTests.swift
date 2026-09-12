@@ -1,8 +1,8 @@
 import AppKit
 import Carbon.HIToolbox
-import NormaKit
+import WinterKit
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Task 4 (Phase 4d-iii) — the PURE parts only, same posture as `ShortcutRegistryTests`: conflict
 /// detection (`bindingConflict`) and the modifier-flags→Carbon-mask mapping (`carbonModifiers`) the
@@ -100,7 +100,7 @@ final class CarbonModifiersTests: XCTestCase {
 // Final-review fix wave (4d-iii Task 4): the system-wide-keyboard-hijack fix. Escape-to-cancel and
 // "require a real modifier" close the hole where "click to set" then Esc-to-back-out registered a
 // modifier-less GLOBAL Carbon hotkey on Escape; the reserved-combo check closes the hole where a
-// plugin shortcut could shadow Norma's own summon/panic hotkeys.
+// plugin shortcut could shadow Winter's own summon/panic hotkeys.
 // -----------------------------------------------------------------------------------------------
 
 /// `hasRequiredModifier(_:)` — the capture-path gate against arming a modifier-less or shift-only
@@ -136,7 +136,7 @@ final class HasRequiredModifierTests: XCTestCase {
     }
 }
 
-/// `isReservedCombo(keyCode:modifiers:)` — rejects a capture equal to Norma's own summon hotkey
+/// `isReservedCombo(keyCode:modifiers:)` — rejects a capture equal to Winter's own summon hotkey
 /// (`HotkeyTrigger.swift`'s fixed default) or panic hotkey (`PeripheralProvider.swift`'s fixed
 /// combo). PURE, no live event tap needed.
 final class IsReservedComboTests: XCTestCase {
@@ -166,8 +166,8 @@ final class IsReservedComboTests: XCTestCase {
 
 /// `ShortcutBindingEditorModel.capture(...)`'s full three-gate chain (`hasRequiredModifier` →
 /// `isReservedCombo` → `bindingConflict`), exercised end to end against a real (never-connected)
-/// `NormaClient` — `capture(...)` never touches the client, only `UserDefaults`/`ShortcutRegistry`
-/// (`nil` here, same as under `AppDelegate.boot()`'s unit-test gate), so `NormaClientTestFactory.
+/// `WinterClient` — `capture(...)` never touches the client, only `UserDefaults`/`ShortcutRegistry`
+/// (`nil` here, same as under `AppDelegate.boot()`'s unit-test gate), so `WinterClientTestFactory.
 /// make()` (`DashboardTests.swift`, same target) is enough to satisfy the model's initializer
 /// without a live connection.
 @MainActor
@@ -179,7 +179,7 @@ final class ShortcutBindingEditorModelCaptureTests: XCTestCase {
     }
 
     private func model(defaults: UserDefaults) -> ShortcutBindingEditorModel {
-        ShortcutBindingEditorModel(client: NormaClientTestFactory.make(), shortcutRegistry: nil, defaults: defaults)
+        ShortcutBindingEditorModel(client: WinterClientTestFactory.make(), shortcutRegistry: nil, defaults: defaults)
     }
 
     /// (a) modifiers==0 → no binding produced (nothing persisted), and the rejection surfaces via
@@ -235,7 +235,7 @@ final class ShortcutBindingEditorModelCaptureTests: XCTestCase {
         m.capture(pluginId: "com.example.a", shortcutId: "toggle", keyCode: UInt32(kVK_Space), modifiers: UInt32(cmdKey | controlKey | optionKey))
 
         XCTAssertEqual(ShortcutSettingsStore.load(from: defaults), [])
-        XCTAssertEqual(m.conflictMessage, "That combo is reserved by Norma.")
+        XCTAssertEqual(m.conflictMessage, "That combo is reserved by Winter.")
     }
 }
 
@@ -278,7 +278,7 @@ final class ShortcutBindingEditorModelArmFailureTests: XCTestCase {
         let candidate = ShortcutBinding(pluginId: "com.example.a", shortcutId: "toggle", keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(controlKey))
         let fake = FakeHotkeyReloader()
         fake.failedBindings = [candidate]
-        let m = ShortcutBindingEditorModel(client: NormaClientTestFactory.make(), shortcutRegistry: fake, defaults: defaults)
+        let m = ShortcutBindingEditorModel(client: WinterClientTestFactory.make(), shortcutRegistry: fake, defaults: defaults)
 
         m.capture(pluginId: "com.example.a", shortcutId: "toggle", keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(controlKey))
 
@@ -293,7 +293,7 @@ final class ShortcutBindingEditorModelArmFailureTests: XCTestCase {
         defer { cleanup() }
         let fake = FakeHotkeyReloader()
         fake.failedBindings = []
-        let m = ShortcutBindingEditorModel(client: NormaClientTestFactory.make(), shortcutRegistry: fake, defaults: defaults)
+        let m = ShortcutBindingEditorModel(client: WinterClientTestFactory.make(), shortcutRegistry: fake, defaults: defaults)
 
         m.capture(pluginId: "com.example.a", shortcutId: "toggle", keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(controlKey))
 
@@ -308,7 +308,7 @@ final class ShortcutBindingEditorModelArmFailureTests: XCTestCase {
         let other = ShortcutBinding(pluginId: "com.example.b", shortcutId: "open", keyCode: UInt32(kVK_ANSI_L), modifiers: UInt32(optionKey))
         let fake = FakeHotkeyReloader()
         fake.failedBindings = [other]
-        let m = ShortcutBindingEditorModel(client: NormaClientTestFactory.make(), shortcutRegistry: fake, defaults: defaults)
+        let m = ShortcutBindingEditorModel(client: WinterClientTestFactory.make(), shortcutRegistry: fake, defaults: defaults)
 
         m.capture(pluginId: "com.example.a", shortcutId: "toggle", keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(controlKey))
 
@@ -321,7 +321,7 @@ final class ShortcutBindingEditorModelArmFailureTests: XCTestCase {
     func testCaptureWithNilRegistryDoesNotCrashAndClearsConflictMessage() {
         let (defaults, cleanup) = freshDefaults("nilregistry")
         defer { cleanup() }
-        let m = ShortcutBindingEditorModel(client: NormaClientTestFactory.make(), shortcutRegistry: nil, defaults: defaults)
+        let m = ShortcutBindingEditorModel(client: WinterClientTestFactory.make(), shortcutRegistry: nil, defaults: defaults)
 
         m.capture(pluginId: "com.example.a", shortcutId: "toggle", keyCode: UInt32(kVK_ANSI_K), modifiers: UInt32(controlKey))
 

@@ -43,7 +43,7 @@ class HangingProvider implements Provider {
 }
 
 /** A provider that resolves successfully after a short real delay — used to prove a malformed
- *  NORMA_DREAM_TIMEOUT_MS env value falls back to the documented default instead of NaN-ing
+ *  WINTER_DREAM_TIMEOUT_MS env value falls back to the documented default instead of NaN-ing
  *  setTimeout into an instant timeout. */
 class DelayedProvider implements Provider {
   readonly id = "delayed";
@@ -60,7 +60,7 @@ class DelayedProvider implements Provider {
 
 describe("Dreamer gates — each independently blocks (provider call count stays 0)", () => {
   test("1) enabled() => false", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-gate-enabled-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-gate-enabled-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
     const provider = okProvider();
     const dreamer = new Dreamer({
@@ -72,7 +72,7 @@ describe("Dreamer gates — each independently blocks (provider call count stays
   });
 
   test("2) activeTurnCount() > 0", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-gate-busy-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-gate-busy-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
     const provider = okProvider();
     const dreamer = new Dreamer({
@@ -84,7 +84,7 @@ describe("Dreamer gates — each independently blocks (provider call count stays
   });
 
   test("3) no dispatch session in store", async () => {
-    const home = realpathSync(mkdtempSync(join(tmpdir(), "norma-dreamer-gate-nodispatch-")));
+    const home = realpathSync(mkdtempSync(join(tmpdir(), "winter-dreamer-gate-nodispatch-")));
     const store = new SessionStore(home); // no session created at all -> dispatchSessionId() undefined
     const dir = join(home, "memory");
     const provider = okProvider();
@@ -97,7 +97,7 @@ describe("Dreamer gates — each independently blocks (provider call count stays
   });
 
   test("4) 39 substantive events (40th noise event like harness_attached doesn't count)", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-gate-threshold-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-gate-threshold-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS - 1);
     store.append(dispatchId, { type: "harness_attached", sessionId: dispatchId, clientName: "cli" });
     const provider = okProvider();
@@ -110,7 +110,7 @@ describe("Dreamer gates — each independently blocks (provider call count stays
   });
 
   test("5) spacing: lastDreamAt = now - 1h (< 2h minimum) blocks even with threshold met", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-gate-spacing-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-gate-spacing-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
     const fixedNow = 1_753_000_000_000;
     mkdirSync(dir, { recursive: true });
@@ -127,7 +127,7 @@ describe("Dreamer gates — each independently blocks (provider call count stays
 
 describe("Dreamer — fires when all gates pass", () => {
   test("6) 40 substantive + idle + spacing elapsed -> exactly ONE call; an immediate second tick() -> still one", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-fires-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-fires-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
     const provider = okProvider();
     const dreamer = new Dreamer({
@@ -142,7 +142,7 @@ describe("Dreamer — fires when all gates pass", () => {
   });
 
   test("7) re-entrancy: tick() while a slow provider call is in flight -> second tick() returns without a second call", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-reentrant-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-reentrant-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
     const provider = new HangingProvider();
     const dreamer = new Dreamer({
@@ -157,7 +157,7 @@ describe("Dreamer — fires when all gates pass", () => {
   });
 
   test("8) backlog-after-restart falls out naturally: lastDreamAt = now - 3h on disk, fresh Dreamer instance dreams on first tick", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-backlog-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-backlog-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
     const fixedNow = 1_753_000_000_000;
     mkdirSync(dir, { recursive: true });
@@ -175,7 +175,7 @@ describe("Dreamer — fires when all gates pass", () => {
 
 describe("Dreamer — start()/stop()", () => {
   test("9) idempotent start, timer runs tick() on interval, stop() halts it (idempotent)", async () => {
-    const { store, dir } = setup("norma-dreamer-startstop-");
+    const { store, dir } = setup("winter-dreamer-startstop-");
     let calls = 0;
     // enabled() is the FIRST thing every tick() reads -> counting its calls isolates "is the
     // timer still firing tick()" from the gating logic exercised by the tests above.
@@ -203,7 +203,7 @@ describe("Dreamer — start()/stop()", () => {
 
 describe("Dreamer — carried-over review fix: timeout aborts the in-flight provider call", () => {
   test("timeoutMs elapses -> tick() resolves without throwing, watermark NOT advanced, provider's request.signal is aborted", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-timeout-abort-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-timeout-abort-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
     const provider = new HangingProvider();
     const dreamer = new Dreamer({
@@ -219,12 +219,12 @@ describe("Dreamer — carried-over review fix: timeout aborts the in-flight prov
     expect(existsSync(join(dir, "dream-state.json"))).toBe(false); // watermark not advanced
   });
 
-  test("malformed NORMA_DREAM_TIMEOUT_MS env value falls back to the default instead of NaN-ing an instant timeout", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-timeout-env-");
+  test("malformed WINTER_DREAM_TIMEOUT_MS env value falls back to the default instead of NaN-ing an instant timeout", async () => {
+    const { store, dispatchId, dir } = setup("winter-dreamer-timeout-env-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
-    const original = process.env.NORMA_DREAM_TIMEOUT_MS;
+    const original = process.env.WINTER_DREAM_TIMEOUT_MS;
     try {
-      process.env.NORMA_DREAM_TIMEOUT_MS = "not-a-number";
+      process.env.WINTER_DREAM_TIMEOUT_MS = "not-a-number";
       const provider = new DelayedProvider(30); // resolves in 30ms — fine under the real default, fatal under NaN
       const dreamer = new Dreamer({
         provider: { provider, model: "x" }, store, dir: () => dir,
@@ -234,8 +234,8 @@ describe("Dreamer — carried-over review fix: timeout aborts the in-flight prov
       expect(provider.requests).toHaveLength(1);
       expect(existsSync(join(dir, "dream-state.json"))).toBe(true); // succeeded -> watermark advanced
     } finally {
-      if (original === undefined) delete process.env.NORMA_DREAM_TIMEOUT_MS;
-      else process.env.NORMA_DREAM_TIMEOUT_MS = original;
+      if (original === undefined) delete process.env.WINTER_DREAM_TIMEOUT_MS;
+      else process.env.WINTER_DREAM_TIMEOUT_MS = original;
     }
   });
 });
@@ -258,7 +258,7 @@ describe("Dreamer — the T7 cleaner rides the same scheduler slot", () => {
   }
 
   test("the cleaner pass runs on EVERY tick, including ticks where no dream happens", async () => {
-    const { store, dir } = setup("norma-dreamer-cleaner-notick-");
+    const { store, dir } = setup("winter-dreamer-cleaner-notick-");
     const order: string[] = [];
     const cleaner = recordingCleaner(order);
     // No dispatch session and no substantive events: every dream gate blocks.
@@ -276,7 +276,7 @@ describe("Dreamer — the T7 cleaner rides the same scheduler slot", () => {
   });
 
   test("on a tick where a dream DOES happen, the cleaner runs AFTER it", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-cleaner-after-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-cleaner-after-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
     const order: string[] = [];
     const cleaner = recordingCleaner(order);
@@ -303,7 +303,7 @@ describe("Dreamer — the T7 cleaner rides the same scheduler slot", () => {
   });
 
   test("`memory.enabled: false` stops DREAMS but not the cleaner — they are separate settings", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-cleaner-memoff-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-cleaner-memoff-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
     const cleaner = recordingCleaner([]);
     const provider = okProvider();
@@ -319,7 +319,7 @@ describe("Dreamer — the T7 cleaner rides the same scheduler slot", () => {
   });
 
   test("a dream that throws does not skip the cleaner, and a cleaner that throws never escapes tick()", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-cleaner-throws-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-cleaner-throws-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
     const cleaner = recordingCleaner([], { throws: true });
     const provider = okProvider("not json at all"); // makes runCycle throw
@@ -337,7 +337,7 @@ describe("Dreamer — the T7 cleaner rides the same scheduler slot", () => {
   });
 
   test("no cleaner wired: tick() behaves exactly as before", async () => {
-    const { store, dispatchId, dir } = setup("norma-dreamer-cleaner-absent-");
+    const { store, dispatchId, dir } = setup("winter-dreamer-cleaner-absent-");
     fillSubstantive(store, dispatchId, DREAM_MIN_EVENTS);
     const provider = okProvider();
     const dreamer = new Dreamer({

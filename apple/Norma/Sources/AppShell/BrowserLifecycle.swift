@@ -69,11 +69,11 @@ struct BrowserTabState: Equatable {
     /// **Carried FOR THE EXECUTOR, never read by this engine** — no rule below mentions it, and none
     /// may: a title cannot make a browser more or less worth having.
     ///
-    /// It is here because `NormaCEFSeedTabState` primes the navigation channel's dedupe memory with
+    /// It is here because `WinterCEFSeedTabState` primes the navigation channel's dedupe memory with
     /// the (url, title) PAIR, and Task 3 reaches a tab's title through no other route: `plan`'s
     /// `tabs` argument is the executor's only per-tab lookup, and `.create` carries the url alone.
     /// Seeding an empty title would let every restore re-report a `panel_tab_navigated` the log
-    /// already holds — the exact leak `NormaCEFSeedTabState` exists to stop (`NormaCEF.h`).
+    /// already holds — the exact leak `WinterCEFSeedTabState` exists to stop (`WinterCEF.h`).
     /// Declared LAST, with a default, so it is invisible to every caller that does not need it.
     var title: String? = nil
 }

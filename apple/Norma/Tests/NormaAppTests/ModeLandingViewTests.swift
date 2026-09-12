@@ -1,7 +1,7 @@
 import XCTest
-import NormaProtocol
-import NormaKit
-@testable import Norma
+import WinterProtocol
+import WinterKit
+@testable import Winter
 
 /// app-shell T4: the code landing — tabs/chips (PURE), and the roster verbs + create flow (through
 /// the real `ShellSessionHost`, on the wire). Reuses `ShellSessionHostTests`' `ShellScriptedTransport`/
@@ -96,7 +96,7 @@ final class ModeLandingViewTests: XCTestCase {
 
     // MARK: - Harness (roster verbs + create, through the real host)
 
-    private func makeHost(rows: [SessionSummary] = [], managementClient: NormaClient? = nil) -> (host: ShellSessionHost, factory: ShellTransportFactory) {
+    private func makeHost(rows: [SessionSummary] = [], managementClient: WinterClient? = nil) -> (host: ShellSessionHost, factory: ShellTransportFactory) {
         let factory = ShellTransportFactory()
         let directory = SessionDirectory(lister: { rows })
         let host = ShellSessionHost(
@@ -112,12 +112,12 @@ final class ModeLandingViewTests: XCTestCase {
         return (host, factory)
     }
 
-    /// A connected `NormaClient` on its OWN scripted transport — standing in for `AppModel.client`,
+    /// A connected `WinterClient` on its OWN scripted transport — standing in for `AppModel.client`,
     /// the always-open connection roster verbs and the create flow ride (see
     /// `ShellSessionHost.managementClient`'s doc).
-    private func connectedManagementClient() async -> (client: NormaClient, transport: ShellScriptedTransport) {
+    private func connectedManagementClient() async -> (client: WinterClient, transport: ShellScriptedTransport) {
         let transport = ShellScriptedTransport()
-        let client = NormaClient(makeTransport: { transport }, token: "tok", clientName: "orb")
+        let client = WinterClient(makeTransport: { transport }, token: "tok", clientName: "orb")
         let connectTask = Task { try? await client.connect() }
         await feedWaitUntil { transport.sent.count >= 1 }
         let hello = feedLineJSON(transport.sent[0])

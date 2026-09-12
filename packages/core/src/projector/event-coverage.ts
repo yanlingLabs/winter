@@ -1,4 +1,4 @@
-import type { SessionEvent } from "@norma/protocol";
+import type { SessionEvent } from "@winter/protocol";
 
 /**
  * ── WHY THIS FILE EXISTS (Winter 8b, C-5 / ruling P8b-9) ────────────────────────────────────────
@@ -30,7 +30,7 @@ import type { SessionEvent } from "@norma/protocol";
  * ALLOWLIST BY DESIGN (task-9 review, Important): the transcript file is a MODEL-GREPPABLE
  * surface, so the event filter must fail CLOSED — an unknown/future event type must never leak
  * into it by default; add new types here deliberately. The `satisfies Record<SessionEvent["type"],
- * boolean>` clause makes this the NormaKit-switch-trap discipline at compile time: adding a NEW
+ * boolean>` clause makes this the WinterKit-switch-trap discipline at compile time: adding a NEW
  * SessionEvent variant to the protocol union makes this object non-conforming (missing key) and
  * fails `tsc --noEmit` until someone makes an explicit include/exclude decision for the transcript.
  *
@@ -222,7 +222,7 @@ export const PROJECTED_EVENT_COVERAGE = {
   // Opaque `encrypted_content` / `itemJson`; the session JSONL is its only sink and the projector
   // has no branch that can emit it. Never flip this to `true`.
   reasoning_item: false,
-  // Live non-projector producers, untouched by the Winter leg (Norma map §3, "27 with non-engine
+  // Live non-projector producers, untouched by the Winter leg (Winter map §3, "27 with non-engine
   // producers that keep working untouched").
   session_created: false,
   session_titled: false,
@@ -251,7 +251,7 @@ export const PROJECTED_EVENT_COVERAGE = {
   panel_tab_activated: false,
   panel_tab_navigated: false,
   panel_command: false,
-  // ---- engine-only PRODUCT events whose fate follows the tool that raised them (Norma map §3's
+  // ---- engine-only PRODUCT events whose fate follows the tool that raised them (Winter map §3's
   // fourth bucket — "the one a plan forgets", because nothing in the type system notices their
   // producer vanishing). None of them is projected from a wire message; each needs its successor
   // named when the engine retires (Task 17), and that is tracked there, not here. ----

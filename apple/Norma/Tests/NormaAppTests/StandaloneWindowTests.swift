@@ -1,12 +1,12 @@
 import XCTest
 import AppKit
-@testable import Norma
+@testable import Winter
 
 /// DEFECT FIX regression helper: records every transport `AppModel`'s `makeTransport` factory
 /// constructs. A fresh `AppScriptedTransport` per call (rather than always the SAME shared
-/// instance) keeps `testOpenStandaloneNormaWindowNoOpsWhenPriorFocusExistsAndSessionCreateFails`
+/// instance) keeps `testOpenStandaloneWinterWindowNoOpsWhenPriorFocusExistsAndSessionCreateFails`
 /// below safe even against the PRE-FIX buggy code path it's designed to catch red-handed: that
-/// path spawns a SECOND `SessionFeed`/`NormaClient` (`AppModel.makeDetachedFeed`) which would
+/// path spawns a SECOND `SessionFeed`/`WinterClient` (`AppModel.makeDetachedFeed`) which would
 /// otherwise contend with the first client's already-live pump over one shared transport.
 /// `AppScriptedTransport` itself is `AppModelTests`' local double — same test target/module, no
 /// re-declaration needed.
@@ -23,7 +23,7 @@ final class RecordingTransportFactory: @unchecked Sendable {
 
 /// Task 2 (2e-iv): the pure centering geometry `centeredStandaloneFrame` — still load-bearing as
 /// `AppDelegate.openSessionInNewDetachedWindow`'s frame-less fallback, even though its original
-/// motivating caller, `openStandaloneNormaWindow()`, was retired by App shell T6 (that menu item
+/// motivating caller, `openStandaloneWinterWindow()`, was retired by App shell T6 (that menu item
 /// summons the app shell instead; its own wiring tests died with it — see that task's report).
 /// Also: `AppModel.refocus`'s catch-path mode filter (site 3 of three — `AppModelTests` covers
 /// sites 1/2), which this file's `RecordingTransportFactory` helper predates and still backs. The
@@ -57,10 +57,10 @@ final class StandaloneWindowTests: XCTestCase {
         XCTAssertEqual(f.midY, 600, accuracy: 1)
     }
 
-    // App shell T6 (the menu-bar retarget's funeral): four `openStandaloneNormaWindow()` wiring
-    // tests that lived here — testOpenStandaloneNormaWindowNoOpsWithoutAppModel,
+    // App shell T6 (the menu-bar retarget's funeral): four `openStandaloneWinterWindow()` wiring
+    // tests that lived here — testOpenStandaloneWinterWindowNoOpsWithoutAppModel,
     // …NoOpsWhenSessionCreateFails, …NoOpsWhenPriorFocusExistsAndSessionCreateFails,
-    // …NoOpsWhenSessionCreateSucceedsButAttachFails — are deleted with their subject. "Open Norma
+    // …NoOpsWhenSessionCreateSucceedsButAttachFails — are deleted with their subject. "Open Winter
     // App" summons the app shell now (App shell T1); the method they tested had no other caller.
 
     // MARK: - Important-1 fix (orb-scope review): refocus(onto:)'s catch/error-recovery fallback

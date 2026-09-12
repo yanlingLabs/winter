@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { PermissionResult } from "@yanlinglabs/winter-agent-sdk";
-import type { NewSessionEvent, Question } from "@norma/protocol";
+import type { NewSessionEvent, Question } from "@winter/protocol";
 import type { QuestionBroker } from "../agent/questions";
 import { NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
 
@@ -20,8 +20,8 @@ export const ASK_USER_QUESTION_TOOL = "AskUserQuestion";
  * returned as `{ ...input, answers }` off the ORIGINAL object, so `answers`/`annotations`/`metadata`
  * (and anything a later runtime adds) ride through untouched whether or not they appear here — the
  * "strip unknown keys" default can therefore never lose a field. `header` is `.optional()` even
- * though the descriptor marks it required, because Norma's own `QuestionSchema` has made it optional
- * since chat's simplified card shipped: a header-less question is a genuinely valid Norma question
+ * though the descriptor marks it required, because Winter's own `QuestionSchema` has made it optional
+ * since chat's simplified card shipped: a header-less question is a genuinely valid Winter question
  * (the simplified card), and refusing one here would be stricter than the surface it feeds.
  */
 export const AskUserQuestionInput = z.object({
@@ -38,7 +38,7 @@ export const AskUserQuestionInput = z.object({
 });
 
 export interface AskUserQuestionDeps {
-  /** The OWNING Norma session. A Winter sub-agent's question surfaces HERE (see below). */
+  /** The OWNING Winter session. A Winter sub-agent's question surfaces HERE (see below). */
   sessionId: string;
   threadId?: string;
   questions: QuestionBroker;
@@ -51,14 +51,14 @@ export interface AskUserQuestionDeps {
  * **The `AskUserQuestion` bridge** — a Winter child's question over the daemon's EXISTING
  * `QuestionBroker`, `question_asked`/`question_resolved` events and `ask_user.respond` RPC, the
  * same machinery `ask_user` (code) and `AskQuestion` (chat/dispatch) use today. The two tools
- * collapse into this one (Norma map §5.3 / digest item 51); the answer goes back to the model as
+ * collapse into this one (Winter map §5.3 / digest item 51); the answer goes back to the model as
  * `canUseTool`'s `updatedInput.answers`, keyed by question TEXT — which is exactly how
  * `QuestionBroker`, `AskUserRespondParams` and `QuestionResolvedEvent.answers` are already keyed,
  * so no translation is needed anywhere on the phone's path.
  *
- * **Routing, and `agentID`.** The event is emitted on `deps.sessionId` — the owning Norma session —
+ * **Routing, and `agentID`.** The event is emitted on `deps.sessionId` — the owning Winter session —
  * *by construction*: this bridge is built once per session and never learns a child session id. A
- * Winter `agentID` names a sub-agent INSIDE that session's one child process, not a Norma session
+ * Winter `agentID` names a sub-agent INSIDE that session's one child process, not a Winter session
  * of its own; it has no event stream, no `SessionStore` row and no id `ask_user.respond` could
  * address. So a sub-agent's question surfaces on the parent's stream and is answered at the
  * parent's `sessionId` — the same end state today's dispatch relay reaches by MIRRORING a child
@@ -96,7 +96,7 @@ export function askUserQuestionBridge(
     }
     const raw = parsed.data;
 
-    // Norma's `QuestionSchema` requires `multiSelect`; Winter's descriptor makes it optional. The
+    // Winter's `QuestionSchema` requires `multiSelect`; Winter's descriptor makes it optional. The
     // default is `false` — a single-choice question, which is what an omitted flag means.
     const questions: Question[] = raw.questions.map((q) => ({
       question: q.question,

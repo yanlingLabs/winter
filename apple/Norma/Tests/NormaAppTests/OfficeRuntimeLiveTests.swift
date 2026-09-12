@@ -1,6 +1,6 @@
 import XCTest
 import AppKit
-@testable import Norma
+@testable import Winter
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -8,7 +8,7 @@ import Darwin
 /// Office Stage A Task 5 — the live smoke test: one `OfficeRuntime`, reached through
 /// `ShellSessionHost`'s REAL production wiring (the shared `OfficeHelperSupervisor`, the
 /// `OfficeHelperRequestQueue` funnel, the fan-out this task built), against the REAL compiled
-/// `NormaOfficeHelper` binary and the REAL vendored LibreOffice tree. Proves the whole app-side
+/// `WinterOfficeHelper` binary and the REAL vendored LibreOffice tree. Proves the whole app-side
 /// plumbing end to end — not just the pure reducer (`OfficeRuntimeReducerTests`) or the
 /// recorder-backed doubles (`ShellSessionHostTests`' office suite).
 ///
@@ -16,7 +16,7 @@ import Darwin
 /// fails) when the helper binary, the vendor tree, or the fixture is not present in this run's
 /// `BUILT_PRODUCTS_DIR` — the same `XCTSkipIf`-naming-what's-missing convention every other live
 /// test in this suite already uses. Second-copy hygiene throughout: a scratch state directory under
-/// `/tmp`, never `~/.norma*`, never the user's app.
+/// `/tmp`, never `~/.winter*`, never the user's app.
 @MainActor
 final class OfficeRuntimeLiveTests: XCTestCase {
     private var scratchDirs: [URL] = []
@@ -50,17 +50,17 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     // MARK: - Repo-relative paths (same `#filePath`-climbing precedent as
     // `CliLauncher.defaultRepoRoot`/`OfficeHelperLiveTests`/`OfficeHelperLiveSmokeTests`)
 
-    /// `#filePath` for this file is `<repoRoot>/apple/Norma/Tests/NormaAppTests/OfficeRuntimeLiveTests.swift`.
+    /// `#filePath` for this file is `<repoRoot>/apple/Winter/Tests/WinterAppTests/OfficeRuntimeLiveTests.swift`.
     private static var repoRoot: URL {
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0..<5 { url = url.deletingLastPathComponent() }
         return url
     }
     private static var vendorProductSetRoot: URL {
-        repoRoot.appendingPathComponent("apple/Norma/vendor/libreoffice/product-set", isDirectory: true)
+        repoRoot.appendingPathComponent("apple/Winter/vendor/libreoffice/product-set", isDirectory: true)
     }
     private static var fixturesRoot: URL {
-        repoRoot.appendingPathComponent("apple/Norma/Tests/NormaAppTests/Fixtures/office", isDirectory: true)
+        repoRoot.appendingPathComponent("apple/Winter/Tests/WinterAppTests/Fixtures/office", isDirectory: true)
     }
     /// Office Stage B Task 1 — the checked-in seatbelt profile SOURCE. Every test below spawns the
     /// STANDALONE `BUILT_PRODUCTS_DIR` build product via `OfficeHelperSupervisor.Configuration`'s
@@ -71,7 +71,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// second, independent spawn path from `OfficeHelperLiveTests.spawnLiveHelper`, easy to miss —
     /// see task-1-report.md), not by any of these tests failing first.
     private static var sandboxProfilePath: URL {
-        repoRoot.appendingPathComponent("apple/Norma/Sources/OfficeHelper/office-helper.sb", isDirectory: false)
+        repoRoot.appendingPathComponent("apple/Winter/Sources/OfficeHelper/office-helper.sb", isDirectory: false)
     }
 
     /// **The Task 5 exit gate**: one runtime opens `gate.xlsx` through the REAL supervisor+helper
@@ -82,9 +82,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// machinery — see `isProcessAlive`'s own doc).
     func testOneRuntimeOpensGateXlsxThroughTheRealSupervisorAndHelperThenTeardownLeavesNoHelperProcess() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run. "
                         + "This pin goes live the moment it's built.")
         let vendorRoot = Self.vendorProductSetRoot
@@ -163,9 +163,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// wire itself is unmapped, as designed).
     func testCFBBytesUnderAModernExtensionRefuseWithTheMappedBannerThroughRealStagingAndTheRuntimeStaysUsable() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -253,9 +253,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// about whether real LOK actually paints a second part differently, which no recorder can answer.
     func testSubscribingAndRequestingTilesThroughTheRealHelperDeliversRealPixelsIntoTheTileStore() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -482,9 +482,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// DIFFERENT `CGImage` at the caret's own tile. Pixel-diffed at the end, not merely "an event
     /// fired somewhere."
     func testTheTypingDrillARealKeyDownThroughTheRealCanvasViewReachesLOKAndTheCaretTileRepaints() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -567,7 +567,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         view.mouseDown(with: makeMouseEvent(.leftMouseDown))
         view.mouseUp(with: makeMouseEvent(.leftMouseUp))
         // 'Z' — AppKit physical keyCode 6 (verified in `OfficeInputCodesTests`), a letter this
-        // fixture's own A1 seed content ("NORMA GATE") does not already contain, so a successful
+        // fixture's own A1 seed content ("WINTER GATE") does not already contain, so a successful
         // insertion is unambiguously this drill's own doing, not a coincidence of existing content.
         view.keyDown(with: makeKeyEvent(.keyDown, characters: "Z", keyCode: 6))
         view.keyUp(with: makeKeyEvent(.keyUp, characters: "Z", keyCode: 6))
@@ -637,9 +637,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// OTHER live test in this file), which is exactly the code path this fix lives in and a
     /// wire-level-only test would never actually exercise.
     func testTypingOnSheetTwoLandsOnSheetTwoNotSheetOneThroughSaveAndReopen() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -751,7 +751,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                       + "F2's fix: input now carries the SAME part the viewport was showing")
         XCTAssertFalse(sheet1XML.contains(marker), "the typed marker must NOT leak onto sheet 1 — "
                       + "the pre-fix failure mode this drill exists to close")
-        XCTAssertTrue(sheet1XML.contains("NORMA GATE"), "sheet 1's own original seed content must be "
+        XCTAssertTrue(sheet1XML.contains("WINTER GATE"), "sheet 1's own original seed content must be "
                       + "completely untouched, not merely marker-free")
 
         view.unmount()
@@ -782,7 +782,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// `ScModelObj::setPart`, confirmed by reading `sc/source/ui/unoobj/docuno.cxx` directly) resolves
     /// through `ScDocShell::GetViewData()` — a PROCESS-GLOBAL "current view," not `pThis`'s own
     /// document handle — while `postKeyEvent`/`postMouseEvent`/`paintTile` all correctly resolve via
-    /// the per-instance `pDocShell->GetBestViewShell()`. Norma's helper holds MANY documents open in
+    /// the per-instance `pDocShell->GetBestViewShell()`. Winter's helper holds MANY documents open in
     /// ONE process and never called LOK's view-management API at all (`createView`/`setView` never
     /// appeared anywhere in `LOKBridge` before this fix) — so with two documents open, typing into
     /// the NON-current one silently mutated the OTHER document's active part instead of the target's,
@@ -800,9 +800,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// competing for "current"; (3) **B is untouched** — B's own dirty flag never flips and B's own
     /// part/content survive completely undisturbed by anything done to A.
     func testTypingOnDocumentASheetTwoIsUnaffectedByDocumentBBeingTheMostRecentlyLoadedCurrentView() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -944,7 +944,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         //
         // **The disabled-build signature, RE-MEASURED in fix round 4 (NEW-3) with A's saved bytes
         // dumped rather than inferred from which assertions fired.** With `setView` deleted and the
-        // click removed: A's Sheet1 is UNTOUCHED (`NORMA GATE`, `42`) and **A's Sheet2!A1 =
+        // click removed: A's Sheet1 is UNTOUCHED (`WINTER GATE`, `42`) and **A's Sheet2!A1 =
         // `4EDIZ`** — the marker (`T4EDIZ`) minus its FIRST character, which is destroyed. B's own
         // dirty flag does flip, both before and after A's save. 3 failing assertions, and the
         // reasons are two different things, not one: (a) the first `setPart(A.handle, 1)` runs while
@@ -1079,7 +1079,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         let sheet2XML = try XCTUnwrap(extractTableXML(content, sheetName: "Sheet2"), "Sheet2 must still exist")
         XCTAssertTrue(sheet2XML.contains(marker), "the typed marker must appear on A's SHEET 2")
         XCTAssertFalse(sheet1XML.contains(marker), "the typed marker must NOT leak onto A's sheet 1")
-        XCTAssertTrue(sheet1XML.contains("NORMA GATE"), "A's sheet 1 seed content must be untouched")
+        XCTAssertTrue(sheet1XML.contains("WINTER GATE"), "A's sheet 1 seed content must be untouched")
 
         // (3) B is untouched, checkpoint 2 — after A's full save (the highest-risk moment, given the
         // `.uno:Save` active-frame hazard documented above). B was never explicitly edited or saved
@@ -1143,9 +1143,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// assertion. See `testDirectlyProvesTheInputPathsOwnSetViewPrefixIsLoadBearingBelowTheCanvas
     /// Layer`'s own header for the full four-step account and the dumped bytes.
     func testTypingOnDocumentAIsUnaffectedWhenDocumentBIsAWriterDocumentTheDynamicCastNoOpCase() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -1312,7 +1312,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         let sheet2XML = try XCTUnwrap(extractTableXML(content, sheetName: "Sheet2"), "Sheet2 must still exist")
         XCTAssertTrue(sheet2XML.contains(marker), "the typed marker must appear on A's SHEET 2")
         XCTAssertFalse(sheet1XML.contains(marker), "the typed marker must NOT leak onto A's sheet 1")
-        XCTAssertTrue(sheet1XML.contains("NORMA GATE"), "A's sheet 1 seed content must be untouched")
+        XCTAssertTrue(sheet1XML.contains("WINTER GATE"), "A's sheet 1 seed content must be untouched")
 
         XCTAssertEqual(runtime.stateSnapshot.documents[pathB]?.dirty, false,
                        "B's dirty flag flipped after A's save — A's `.uno:Save` dispatch leaked onto B")
@@ -1383,9 +1383,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// complex tracked-current-part alternative was considered and set aside as solving a risk this
     /// codebase's own call graph does not have.
     func testRequestingPartZeroAfterTypingOnSheetTwoRendersSheetOneNotAStaleBystanderMatch() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -1520,7 +1520,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         let sheet2XML = try XCTUnwrap(extractTableXML(content, sheetName: "Sheet2"), "Sheet2 must still exist")
         XCTAssertTrue(sheet2XML.contains(marker), "the typed marker must appear on SHEET 2")
         XCTAssertFalse(sheet1XML.contains(marker), "the typed marker must NOT leak onto sheet 1")
-        XCTAssertTrue(sheet1XML.contains("NORMA GATE"), "sheet 1's own seed content must be untouched — "
+        XCTAssertTrue(sheet1XML.contains("WINTER GATE"), "sheet 1's own seed content must be untouched — "
                       + "this is the save-side half of the same proof: the saved file's own ACTIVE part "
                       + "reflects where the user's real typing left it (sheet 2), not wherever a stray "
                       + "prefetch/paint last painted, since every paint's own part always matches the "
@@ -1583,7 +1583,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// **The disabled-build signature, RE-MEASURED in fix round 4 (NEW-3) with the saved bytes
     /// actually dumped rather than inferred from which assertions fired.** With `setView` deleted
     /// from both dedicated-thread input functions (restored immediately after), the saved file
-    /// contains: Sheet1 completely untouched (`NORMA GATE`, `42`), and **Sheet2!A1 = `4EDIT`** — the
+    /// contains: Sheet1 completely untouched (`WINTER GATE`, `42`), and **Sheet2!A1 = `4EDIT`** — the
     /// marker is `T4EDIT`, so every character but the FIRST lands correctly and the first one is
     /// destroyed. Exactly ONE assertion fails (`the typed marker must appear on A's SHEET 2`, a
     /// substring miss), and B's own dirty flag stays false.
@@ -1621,9 +1621,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// the same "must appear on sheet 2" miss). The Writer-B mounted-canvas drill re-measures at one
     /// failing assertion, matching this one.
     func testDirectlyProvesTheInputPathsOwnSetViewPrefixIsLoadBearingBelowTheCanvasLayer() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -1736,7 +1736,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                         + "fails: measured, the disabled build leaves sheet 1 untouched and puts "
                         + "'4EDIT' — the marker minus its first character — on sheet 2. See this "
                         + "test's own header for the four-step mechanism and the dumped bytes.")
-        XCTAssertTrue(sheet1XML.contains("NORMA GATE"), "A's sheet 1 seed content must be untouched")
+        XCTAssertTrue(sheet1XML.contains("WINTER GATE"), "A's sheet 1 seed content must be untouched")
 
         runtime.close(pathA)
         runtime.close(pathB)
@@ -1751,7 +1751,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// this codebase's pinned LO commit `11482c8f`) is `pWrtShell->GotoPage(nPart + 1, true)`, and
     /// nothing below it early-outs when the caret is already on that page (`SwWrtShell::GotoPage` →
     /// `SwCursorShell::GotoPage` → `GetLayout()->SetCurrPage(m_pCurrentCursor, nPage)`, all read at
-    /// the pin). Norma pins every text document at part 0, so the prefix meant `GotoPage(1)` — "put
+    /// the pin). Winter pins every text document at part 0, so the prefix meant `GotoPage(1)` — "put
     /// the caret at the top of page 1" — before every single tile this document ever painted,
     /// including helper-cache HITS (the prefix runs before `TileRenderer.paint`'s own cache
     /// lookup). LOK's own `doc_paintPartTile` never had this bug because it type-gates the same
@@ -1776,12 +1776,12 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// finding fail differently and the difference is the point:
     ///
     ///   * **Paint gate deleted, input gates intact** — saved body text
-    ///     `EDNORMA GATEoffice stage A embed probeNORMA PAGE TWOT4`. Burst 1 lands correctly at the
+    ///     `EDWINTER GATEoffice stage A embed probeWINTER PAGE TWOT4`. Burst 1 lands correctly at the
     ///     end of page 2; the interleaved paint yanks the caret to page-1 start; burst 2 lands
     ///     there. **2 failing assertions** (the marker-appears-once assertion still holds — the
     ///     burst landed in exactly one, wrong, place).
     ///   * **All three gates deleted (the real pre-round-4 build)** — saved body text
-    ///     `DE4TNORMA GATEoffice stage A embed probeNORMA PAGE TWO`. **3 failing assertions.** The
+    ///     `DE4TWINTER GATEoffice stage A embed probeWINTER PAGE TWO`. **3 failing assertions.** The
     ///     whole marker is at page-1 start and it is REVERSED, which is the ungated INPUT prefix
     ///     showing its own hand: `GotoPage(1)` ran before EVERY keystroke, so each character was
     ///     inserted at page-1 start and pushed its predecessor right. Plain typing into any Writer
@@ -1790,9 +1790,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     ///     drill never noticed because it asserts only "dirty" and "the pixels changed," and
     ///     reversed text at the wrong place satisfies both.
     func testTypingIntoAWriterDocumentSurvivesAnInterleavedTileRepaint() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -1884,10 +1884,10 @@ final class OfficeRuntimeLiveTests: XCTestCase {
 
         // Read the SAVED bytes back, the standard every other drill in this file holds itself to.
         let text = strippedODFBodyText(try readODFContentXML(atPath: path))
-        XCTAssertTrue(text.contains("NORMA PAGE TWOT4ED"),
+        XCTAssertTrue(text.contains("WINTER PAGE TWOT4ED"),
                       "the whole typed marker must sit where it was typed, at the end of page 2 — "
                         + "got: \(text)")
-        XCTAssertTrue(text.hasPrefix("NORMA GATE"),
+        XCTAssertTrue(text.hasPrefix("WINTER GATE"),
                       "page 1 must still begin with its own seed text — anything in front of it is "
                         + "text that was typed on page 2 and landed at page-1 start, which is "
                         + "exactly what an ungated setPart's GotoPage(1) does to the caret. got: \(text)")
@@ -1936,9 +1936,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// Pre-fix signature, measured with the `setPart` line deleted from `saveAsOnDedicatedThread`
     /// (restored immediately after): the saved `settings.xml` records `ActiveTable` = `Sheet1`.
     func testASaveRecordsTheUsersOwnActiveSheetNotWhereAStalePaintLeftLOK() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -2140,9 +2140,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// persistence round trip, not a canvas-forwarding proof.
     func testSaveThroughTheRealEditDoorThenCloseThenReopenPersistsRealContentAcrossTwoFormats() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -2296,7 +2296,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// Reproduces the EXACT sequence `ShellSessionHost.resolveDirtyDocumentTabClose`'s Save choice
     /// drives against a real document, through REAL production wiring (`ShellSessionHost
     /// .officeRuntime` -> the real `OfficeHelperSupervisor` -> the real, seatbelted
-    /// `NormaOfficeHelper` -> the real vendored LibreOffice) — never `ShellSessionHost`'s own
+    /// `WinterOfficeHelper` -> the real vendored LibreOffice) — never `ShellSessionHost`'s own
     /// panel-tab/sheet machinery, which this codebase's `ShellSessionHostTests` always drives against
     /// a FAKE driver on purpose (that file's own `makeHost` comment: two office-live tests racing the
     /// SAME real helper subprocess was measured directly, mid-review, as a source of failures
@@ -2331,9 +2331,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// many of the 5 laps saw the helper die. The report names the observed rate both ways.
     func testDirtyCloseSheetSaveSequenceRepeatedlyThroughTheRealHelperNeverKillsTheSharedProcess() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -2459,9 +2459,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// simply waits."
     func testCleanCloseImmediatelyAfterASaveRepeatedlyThroughTheRealHelperNeverKillsTheSharedProcess() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -2574,9 +2574,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// `Task { [driver] in await driver.close(docId) }` it used to be.
     func testTeardownRightAfterASaveNeverKillsTheHelperANOTHERSessionIsStillUsing() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -2741,9 +2741,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// with it in place it does not. Counts in the report.
     func testAnUnpromptedBackstopSaveFollowedImmediatelyByACloseNeverKillsTheSharedHelper() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -2897,9 +2897,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// OOXML-specific and because this one leg is a product decision's gate, not one more format.
     func testDocxSaveThroughTheRealEditDoorLandsOnTheUsersOwnPathWithTheTypedTextInsideIt() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -2982,7 +2982,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         let documentXML = try readODFEntry(atPath: docPath, entry: "word/document.xml")
         XCTAssertTrue(documentXML.contains("T4EDIT"), "the typed marker is missing from the SAVED "
                       + "real file's own word/document.xml — the edit never reached disk")
-        XCTAssertTrue(documentXML.contains("NORMA GATE"), "the fixture's own seed text is missing "
+        XCTAssertTrue(documentXML.contains("WINTER GATE"), "the fixture's own seed text is missing "
                       + "— the save wrote something other than this document")
         // `[Content_Types].xml` — the brackets MUST be backslash-escaped: `unzip -p` treats its
         // filename argument as a shell-style PATTERN, so a bare `[Content_Types].xml` parses as a
@@ -3034,7 +3034,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     ///
     /// **The failure is made genuinely real, not simulated** — no fake driver, no injected error. The
     /// document's own DIRECTORY is chmod'd `0555` between the edit and the save, so `placeAtomically`'s
-    /// sibling-temp `copyItem` (`.\(name).norma-save-<uuid>`, created beside the destination) fails
+    /// sibling-temp `copyItem` (`.\(name).winter-save-<uuid>`, created beside the destination) fails
     /// with `EACCES`. That is the right lever for two independent reasons: it fails INSIDE
     /// `placeAtomically`, after the helper's own `saveAs` has already succeeded and already cleared
     /// `ModifiedStatus` (the exact ordering C1 is about); and a 0444 *file* would NOT reproduce it —
@@ -3051,9 +3051,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// them up.
     func testASaveThatFailsAtThePlaceStepLeavesTheDocumentDirtyAndBothQuitGatesSeeIt() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -3184,7 +3184,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// one variable moving" discipline `testTypingIntoAWriterDocumentSurvivesAnInterleavedTileRepaint`
     /// already established for input ordering: if `postWindowExtTextInputEvent` behaves
     /// unexpectedly at this vendored pin, it must surface HERE, not wrapped in
-    /// `interpretKeyEvents`/`setMarkedText:` fog where "LOK did something unexpected" and "Norma's
+    /// `interpretKeyEvents`/`setMarkedText:` fog where "LOK did something unexpected" and "Winter's
     /// own NSTextInputClient plumbing is wrong" would be much harder to tell apart.
     ///
     /// Three phases, one real Writer document, one real click position (100, 100 twips —
@@ -3201,9 +3201,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     ///    residue AT ALL — on disk, not merely that in-memory pixels reverted, which alone cannot
     ///    tell "cancelled" apart from "committed identically by coincidence."
     func testExtTextInputMarksCommitsAndCancelsAgainstRealLOKThroughSaveAndReopen() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -3362,9 +3362,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// EXACTLY one é lands, never a stray plain "e" alongside it (the double-delivery failure mode
     /// this task's whole `interpretKeyEvents` seam exists to prevent — see `keyDown`'s own header).
     func testComposedEAcuteLandsExactlyOnceThroughTheRealCanvasWithNoStrayPlainE() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -3493,7 +3493,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         // `</office:text>`, tags stripped). Hardcoded rather than re-read from `fixturePath` at
         // runtime: OfficeHelperLiveTests' own sha256 pin on gate.odt means any future change to the
         // fixture breaks that hash test first, before this literal could silently drift out of sync.
-        let seedText = "NORMA GATEoffice stage A embed probe"
+        let seedText = "WINTER GATEoffice stage A embed probe"
         XCTAssertTrue(body.hasSuffix(seedText), "the untouched seed text must survive, byte-identical, "
                       + "as the tail — got: \"\(body)\"")
         // Fix round 1, M-2: the ORIGINAL `hasPrefix`-based assertions here were a confirmed gap —
@@ -3532,9 +3532,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// (this file's own shared helper, below), same reasoning as the tripwire's own migration.
     func testOpeningADocumentStagedFromAReadOnlySourceStillBecomesEditable() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -3610,7 +3610,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
               <table:table table:name="T3BigSheet">
                 <table:table-column table:number-columns-repeated="\(columns)"/>
                 <table:table-row>
-                  <table:table-cell office:value-type="string"><text:p>NORMA T3 CORNER</text:p></table:table-cell>
+                  <table:table-cell office:value-type="string"><text:p>WINTER T3 CORNER</text:p></table:table-cell>
                 </table:table-row>
                 <table:table-row table:number-rows-repeated="\(max(0, rows - 2))"/>
                 <table:table-row>
@@ -3636,9 +3636,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// column/row default metrics are not something this file controls or has previously measured.
     func testGateXlsxBecomesFullyResidentAndPostFillSwipingProducesNoPlaceholders() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -3813,7 +3813,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
 
         let sharedStrings = extractDir.appendingPathComponent("xl/sharedStrings.xml")
         let original = try String(contentsOf: sharedStrings, encoding: .utf8)
-        let modified = original.replacingOccurrences(of: "NORMA GATE", with: "NORMA GATE RELOADED")
+        let modified = original.replacingOccurrences(of: "WINTER GATE", with: "WINTER GATE RELOADED")
         precondition(modified != original, "the fixture's own known text — see OfficeHelperLiveTests' "
                      + "Expectation table — must be present to edit; if gate.xlsx's content ever "
                      + "changes, this string needs to change with it")
@@ -3855,9 +3855,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     ///    before the delete.
     func testExternalOverwriteReloadsPreservingViewStateThenDeletionBanners() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -4092,9 +4092,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// never merely "the document became dirty" or "pixels changed" (the T4 lesson, carried
     /// forward by this task's own brief).
     func testClipboardCopyThenPasteDoublesTheTypedTextThroughSaveAndReopen() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -4169,9 +4169,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// checked off disk: (1) the cut text matches what was selected; (2) the selection is GONE
     /// from the saved body — never merely "the document became dirty."
     func testClipboardCutRemovesTheSelectionHeadlessAndReturnsItsText() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -4240,9 +4240,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// took (a real, disclosed characterization finding, not a hardcoded assumption about
     /// grouping).
     func testUndoLadderTypeThenUndoRemovesTheTypedTextThenRedoRestoresIt() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -4350,9 +4350,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// is pinned by the final assertion below (tightened after a real run against real LOK — see
     /// this test's own trailing comment for the raw finding).
     func testTwoLOKViewsOnOneDocumentCharacterizesCrossViewUndo() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -4479,7 +4479,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         // an EARLIER version of this test pinned SHARED/LIFO here — that was a guess made BEFORE
         // ever running the drill, and it was WRONG; corrected against the real observed body,
         // never left standing on the strength of the a-priori reasoning alone). The real body
-        // after undo was `"BBBBAAAANORMA GATE..."` — BOTH markers intact, byte-for-byte identical
+        // after undo was `"BBBBAAAAWINTER GATE..."` — BOTH markers intact, byte-for-byte identical
         // to the pre-undo body. **REFUSED/NO-OP**: dispatching `.uno:Undo` via view A's own
         // primary-view door did NOT remove view B's edit (the most recent action) NOR view A's own
         // — consistent with LO's collaborative undo REFUSING to act on a foreign view's top undo
@@ -4525,9 +4525,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// save made it the ORDINARY path rather than a narrow race, because the debounce is armed at
     /// key ENQUEUE time, not delivery time. That is why it is fixed here.
     func testASaveIssuedWhileTypingIsStillInFlightPersistsTheTypingNotThePreEditDocument() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR")
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
                       "LibreOffice vendor tree not present at \(vendorRoot.path)")
@@ -4608,7 +4608,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
                         + "Saved body: \(strippedODFBodyText(content))")
         // The untouched NEIGHBOURING cell, not A1. Typing straight after a click REPLACES the
         // clicked cell's content (ordinary spreadsheet UX — `typeOneCharacterOnPrimaryView`'s own
-        // header says so), so `gate.ods`'s A1 seed "NORMA GATE" is legitimately gone here; asserting
+        // header says so), so `gate.ods`'s A1 seed "WINTER GATE" is legitimately gone here; asserting
         // it survived would be asserting the gesture did NOT work. A2 is what proves this was a save
         // of the SAME document with one cell changed, rather than some other document entirely.
         //
@@ -4633,7 +4633,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// the save is issued, so the save has nothing to wait for and must behave exactly as it always
     /// did.
     func testASaveWithNothingInFlightStillLandsPromptlyAndCompletely() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path), "helper not built")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -4722,9 +4722,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// actually makes (B's actions all sit above A's on the one shared per-document stack), and
     /// which would catch the one alternative worth catching: a repair undo that pops indiscriminately.
     func testRepairArgumentLetsAPrimaryViewUndoTakeBackAnAgentViewEdit() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -4871,9 +4871,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// are different claims and only the second one is usable. A query that always returned the
     /// same constant would satisfy the first and fail here.
     func testUndoStackDepthIsReadableAndTracksRealEdits() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -4963,9 +4963,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// undo ever runs; every wait's own success is asserted, never discarded — review fix round 1,
     /// I-4's own lesson applied here from the start rather than retrofitted).
     func testUndoViaAWorksNormallyWhenViewBExistsButWasNeverEdited() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -5068,9 +5068,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// REAL Calc document," not a second full placement proof): type into a cell, re-select it,
     /// copy, and confirm the real content comes back.
     func testClipboardCopyOnACalcDocumentExercisesTheTypeGatedSetPartBranch() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -5150,9 +5150,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// crash) gets its own, separate empirical proof immediately below this test — together the two
     /// cover both halves of "does recovery work" and "does the fallback keep the helper alive."
     func testCrashDuringAutosaveRecoversTheTypedContentThenSaveLandsOnTheRealPath() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -5316,9 +5316,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// helper. Nothing in `autosaveFormat` falls back to ODF any more, so the `other` column below
     /// is a NEGATIVE pin in both rows: it names the sidecar that must NOT appear.
     func testXlsxAndDocxAutosaveSidecarsWriteNativelyAndTheHelperSurvives() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -5428,9 +5428,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// Window discipline mirrors Task 5 review fix round 1, I-1 (`isReleasedWhenClosed = false` +
     /// `defer { close() }`) — a further site of the same precedent, not a new bad one.
     func testFormulaBarRefAndContentUpdateAsTheCellCursorMovesThroughARealClickAndArrowKey() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -5598,9 +5598,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// leg all worked. Deliberately its own test, run and read before anything depends on the
     /// answer — see this file's own task-8-report.md for what it found.
     func testTwoSlideFodpFixtureOpensAsATwoPartPresentation() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -5663,9 +5663,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// (`index == activePart ? Color.primary : Theme.textMuted`) — this drill's own pass IS that
     /// highlight's live-gate proof by construction, not a separate assertion to add.
     func testTwoSlideRailClickSwitchesPartsAndTilesDifferPerPart() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run.")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
@@ -5752,11 +5752,11 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// meaningless.
     ///
     /// Geometry of the drill: the marker `ABCDE` is typed at the very start of `two-page.odt`'s
-    /// first paragraph (`NORMA GATE`), then Left twice puts the caret between `C` and `D`. One
+    /// first paragraph (`WINTER GATE`), then Left twice puts the caret between `C` and `D`. One
     /// Backspace has exactly two possible outcomes and they are different strings:
     ///
-    /// - deletes BEFORE the caret (correct, `KEY_BACKSPACE`): `ABDENORMA GATE`
-    /// - deletes AFTER the caret  (the bug, `KEY_DELETE`):    `ABCENORMA GATE`
+    /// - deletes BEFORE the caret (correct, `KEY_BACKSPACE`): `ABDEWINTER GATE`
+    /// - deletes AFTER the caret  (the bug, `KEY_DELETE`):    `ABCEWINTER GATE`
     ///
     /// so the destination IS the direction here — no ordering ambiguity to hide in.
     /// `testForwardDeleteThroughTheRealCanvasStillRemovesTheCharacterAfterTheCaret` is the control
@@ -5765,8 +5765,8 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     func testBackspaceThroughTheRealCanvasRemovesTheCharacterBeforeTheCaret() async throws {
         try await runDeleteDirectionDrill(
             deleteKeyCharacters: "\u{7F}", deleteKeyCode: 51, name: "backspace-direction",
-            expectedBody: "ABDENORMA GATE",
-            wrongBody: "ABCENORMA GATE",
+            expectedBody: "ABDEWINTER GATE",
+            wrongBody: "ABCEWINTER GATE",
             explanation: "Backspace (AppKit keyCode 51) must delete the character BEFORE the caret. "
                 + "Getting the forward-delete string instead means this key reached LOK as "
                 + "com.sun.star.awt.Key::DELETE (1286) rather than ::BACKSPACE (1283)")
@@ -5780,8 +5780,8 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     func testForwardDeleteThroughTheRealCanvasStillRemovesTheCharacterAfterTheCaret() async throws {
         try await runDeleteDirectionDrill(
             deleteKeyCharacters: "\u{F728}", deleteKeyCode: 117, name: "forward-delete-direction",
-            expectedBody: "ABCENORMA GATE",
-            wrongBody: "ABDENORMA GATE",
+            expectedBody: "ABCEWINTER GATE",
+            wrongBody: "ABDEWINTER GATE",
             explanation: "fn+Delete (AppKit keyCode 117) must delete the character AFTER the caret")
     }
 
@@ -6231,11 +6231,11 @@ final class OfficeRuntimeLiveTests: XCTestCase {
 
     /// `two-page.odt`'s body text as `strippedODFBodyText` renders it — the three paragraphs
     /// concatenated with no separator. Re-derived from the fixture's own bytes, not assumed:
-    /// `unzip -p two-page.odt content.xml | sed 's/<[^>]*>/|/g'` -> `NORMA GATE`,
-    /// `office stage A embed probe`, `NORMA PAGE TWO`.
-    private static let twoPageBody = "NORMA GATEoffice stage A embed probeNORMA PAGE TWO"
-    /// The same body minus the `NORMA GATE` prefix each delete-direction expectation re-states.
-    private static let twoPageBodyTail = "office stage A embed probeNORMA PAGE TWO"
+    /// `unzip -p two-page.odt content.xml | sed 's/<[^>]*>/|/g'` -> `WINTER GATE`,
+    /// `office stage A embed probe`, `WINTER PAGE TWO`.
+    private static let twoPageBody = "WINTER GATEoffice stage A embed probeWINTER PAGE TWO"
+    /// The same body minus the `WINTER GATE` prefix each delete-direction expectation re-states.
+    private static let twoPageBodyTail = "office stage A embed probeWINTER PAGE TWO"
 
     private struct LiveTypingDrill {
         let host: ShellSessionHost
@@ -6285,9 +6285,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     /// factories.
     private func openWriterCanvasForTypingDrill(name: String) async throws -> LiveTypingDrill {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR")
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
                       "LibreOffice vendor tree not present at \(vendorRoot.path)")
@@ -6302,7 +6302,7 @@ final class OfficeRuntimeLiveTests: XCTestCase {
         // that the save instrument prints the staged file's own size+hash, which came back byte-
         // identical (`8909:…:a0035cc1309a6b8f`) across every arm. A check blind to its own failure
         // mode. The resolved path and its real byte count are logged below for the same reason.
-        let overrideFile = "/tmp/norma-responsive-fixture.txt"
+        let overrideFile = "/tmp/winter-responsive-fixture.txt"
         let fixtureOverride = (try? String(contentsOfFile: overrideFile, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let fixturePath = (fixtureOverride?.isEmpty == false ? fixtureOverride! : nil)
@@ -6401,9 +6401,9 @@ final class OfficeRuntimeLiveTests: XCTestCase {
     ///   3. the saved package contains the format's OWN marker entry — `word/`, `xl/` or `ppt/` —
     ///      which is a property of the bytes, not of what the engine reported about them.
     func testCreateIfMissingMintsTheRightKindForWriterCalcAndImpress() async throws {
-        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        let helperURL = Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR")
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR")
         let vendorRoot = Self.vendorProductSetRoot
         try XCTSkipIf(!FileManager.default.fileExists(atPath: vendorRoot.appendingPathComponent("Frameworks").path),
                       "LibreOffice vendor tree not present at \(vendorRoot.path)")

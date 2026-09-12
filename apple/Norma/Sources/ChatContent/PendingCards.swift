@@ -1,5 +1,5 @@
 import SwiftUI
-import NormaProtocol
+import WinterProtocol
 
 /// Cards for approvals/questions/plans — PURE UI: consumes one `InteractionRecord` (the reducer's
 /// per-exchange record of an ask and, once it lands, its outcome) plus injected response closures.
@@ -20,7 +20,7 @@ import NormaProtocol
 /// what that did and did not change: the accent chrome was SwiftUI's own app accent, which resolves
 /// to the *user's System Settings accent* because `docs/brand.md` § 3.2 leaves the global accent name
 /// unset — so a selected option used to be drawn in whatever colour the Mac's owner had picked, and
-/// is now Norma's teal. And a card is CHROME: its text stays sans, including a plan's markdown body,
+/// is now Winter's teal. And a card is CHROME: its text stays sans, including a plan's markdown body,
 /// which is why both plan bodies pass `TranscriptAssistantMessage` the `.sans` role explicitly.
 
 /// Everything a transcript-mounted card needs from its surface, bundled so `TranscriptExchangeRow`
@@ -187,7 +187,7 @@ func questionCardComplete(
 /// Maps the card's local per-question notes state (`notes[index]` — one free-text
 /// `TextField("Add a note (optional)", ...)` per question, see `QuestionBlock`) to the notes dict
 /// `onQuestion` sends — keyed the SAME way `questionAnswers` keys `answers` (by each question's own
-/// `question` text, per `NormaProtocol.SessionEvent.QuestionResolved.notes`/
+/// `question` text, per `WinterProtocol.SessionEvent.QuestionResolved.notes`/
 /// `packages/protocol/src/methods.ts`'s `AskUserRespondParams.notes`). Notes are OPTIONAL and never
 /// gate `questionCardComplete` — a question with no note (or a whitespace-only one) is simply
 /// omitted, matching `packages/core/src/agent/questions.ts`'s "omitted entirely when no notes were
@@ -231,7 +231,7 @@ func questionFocusedPreview(_ question: SessionEvent.Question, selected: Set<Int
 
 /// A header-less question is chat's SIMPLIFIED card (Slice B1): question + labels + Other, nothing
 /// else. `header == nil` is the wire signal — chat's `AskQuestion` omits it, code's `ask_user`
-/// always sends one (see `SessionEvent.Question.header`'s own doc in NormaProtocol).
+/// always sends one (see `SessionEvent.Question.header`'s own doc in WinterProtocol).
 func questionIsSimplified(_ q: SessionEvent.Question) -> Bool { q.header == nil }
 
 /// The ≤12-char chip only ever made sense as a disambiguator between questions in a multi-question
@@ -553,7 +553,7 @@ struct TranscriptInteractionCard: View {
         // 560 is not a new number — it is the width the user's own bubble already caps at
         // (`TranscriptMessageViews.swift:133`), so a card and a message share one column edge
         // instead of disagreeing about how wide the conversation is. Left-aligned: the card is
-        // Norma's side of the dialogue, and everything of hers on this surface leads from the left.
+        // Winter's side of the dialogue, and everything of hers on this surface leads from the left.
         .frame(maxWidth: interactionCardMaxWidth, alignment: .leading)
         .modifier(InteractionCardChrome())
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -798,7 +798,7 @@ struct ResolvedQuestionBody: View {
                             .font(Typography.questionPill(.semibold))
                             .foregroundStyle(.secondary)
                     }
-                    // Norma's voice, so it wears Norma's voice — the assistant-prose serif register
+                    // Winter's voice, so it wears Winter's voice — the assistant-prose serif register
                     // (`brand.md` § 4, binding #4), which iOS applies here for the same stated
                     // reason. Not a new serif binding: a question IS assistant prose, and Task 8
                     // shipped that register for exactly this. The ANSWER below stays sans — it is

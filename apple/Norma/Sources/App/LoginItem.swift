@@ -2,13 +2,13 @@ import Foundation
 import ServiceManagement
 
 // -----------------------------------------------------------------------------------------------
-// LoginItemService / SMLoginItem — Lifecycle T4: this app's own "Launch Norma at login" toggle.
+// LoginItemService / SMLoginItem — Lifecycle T4: this app's own "Launch Winter at login" toggle.
 // -----------------------------------------------------------------------------------------------
 
 /// Seam over `SMAppService.mainApp`'s register()/unregister()/status — same "own bridge type,
 /// mockable service" posture as `HelperClient`'s wrapping of `SMAppService.daemon` in
 /// `HelperClient.swift` (`HelperApprovalStatus`), but for THIS app's own login-item registration
-/// (System Settings > General > Login Items), not the privileged `NormaHelper` daemon. Kept as a
+/// (System Settings > General > Login Items), not the privileged `WinterHelper` daemon. Kept as a
 /// protocol so `LoginItemController` is testable against `FakeLoginItemService` instead of a real
 /// `SMAppService.mainApp` round-trip, which would attempt an actual login-item registration from
 /// whatever process runs the test (same LIVE-GATE concern `HelperClient.register()` documents).
@@ -19,7 +19,7 @@ protocol LoginItemService {
 }
 
 /// Wraps `SMAppService.mainApp` — the modern (macOS 13+) replacement for the launchd
-/// `com.norma.core` agent this app used to install (`packages/cli/src/launchd.ts`'s
+/// `com.winter.core` agent this app used to install (`packages/cli/src/launchd.ts`'s
 /// `migrateFromLaunchdAgent` tears that old mechanism down so it can't resurrect a killed daemon).
 /// `isEnabled` treats both `.enabled` and `.requiresApproval` as "the user asked for this" —
 /// `.requiresApproval` only means System Settings hasn't confirmed it yet, not that registration
@@ -66,7 +66,7 @@ struct SMLoginItem: LoginItemService {
 /// `ShortcutSettingsStore`.
 @MainActor
 final class LoginItemController {
-    private static let userChoiceMadeKey = "com.norma.loginItem.userChoiceMade"
+    private static let userChoiceMadeKey = "com.winter.loginItem.userChoiceMade"
 
     private let service: LoginItemService
     private let defaults: UserDefaults

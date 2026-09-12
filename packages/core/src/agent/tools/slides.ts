@@ -150,7 +150,7 @@ const SlidesAlign = z.enum(["left", "center", "right", "justify"]);
  *  A shared four-value enum would let a model ask a slide for a spacing the engine cannot apply, and
  *  the failure would be a silent no-op — the exact shape this arc keeps shipping. Refused here, and
  *  refused again app-side with a sentence that explains it is a real difference between the two
- *  editors rather than a Norma limitation. */
+ *  editors rather than a Winter limitation. */
 const SlidesLineSpacing = z.enum(["single", "1.5", "double"]);
 
 /** Which of a slide's two addressable text areas to format — the same pair `read`/`set_text`
@@ -171,7 +171,7 @@ const SlidesArgs = z.object({
    *  **Bounded (T5 fix round, re-review's NEW Critical).** `z.number().int().positive()` is not a
    *  bound: `Number.isInteger(1e30)` is `true`, so `1e30` satisfied every clause and reached the
    *  app's own `OfficeCommandConsumer.oneBasedIndex`, whose `Int(Double)` TRAPS outside `Int`'s
-   *  range — aborting Norma.app and every open document's unsaved edits, from `slides read
+   *  range — aborting Winter.app and every open document's unsaved edits, from `slides read
    *  slide:1e30`. Identical class to `sheets`' own `at`/`count`, on five live handlers. The
    *  app-side ceiling is the load-bearing fix (`officeSlideMaxIndex`); this makes the refusal
    *  immediate and specific. 10,000 is far past any real deck and keeps every downstream
@@ -358,7 +358,7 @@ export function slidesToolDefs(deps: SlidesToolDeps): ToolDefinition[] {
   return [{
     name: "slides",
     description:
-      "Read and edit a presentation Norma has access to (.pptx, .odp — any format the office engine "
+      "Read and edit a presentation Winter has access to (.pptx, .odp — any format the office engine "
       + "can open). "
       + "**A write verb whose path does not exist CREATES the document** — there is no separate "
       + "\"create\" or \"new\" verb, exactly as with the `write` tool for ordinary files. The kind "
@@ -371,7 +371,7 @@ export function slidesToolDefs(deps: SlidesToolDeps): ToolDefinition[] {
       + "Every write verb SAVES immediately — there is no separate save step, and you "
       + "cannot undo from here. A HUMAN can: if they have the file open in a tab, one press of ⌘Z "
       + "takes back your whole tool call, and ⌘⇧Z puts it back. "
-      + "Before EVERY verb — `read` and `info` included — if a human already has that file open in a tab, Norma first SAVES whatever unsaved edits their tab is holding. So a read is NOT read-only with respect to disk: it flushes the human's own work to the file before reporting on it. (Nothing to flush when this tool opens the file itself.) The one exception is a file that ALSO changed on disk outside Norma while that tab held it: there are then two versions and Norma will not pick between them, so a read SKIPS that save and still answers from the tab's live content, and a write is REFUSED until the human answers the conflict banner in their tab. "
+      + "Before EVERY verb — `read` and `info` included — if a human already has that file open in a tab, Winter first SAVES whatever unsaved edits their tab is holding. So a read is NOT read-only with respect to disk: it flushes the human's own work to the file before reporting on it. (Nothing to flush when this tool opens the file itself.) The one exception is a file that ALSO changed on disk outside Winter while that tab held it: there are then two versions and Winter will not pick between them, so a read SKIPS that save and still answers from the tab's live content, and a write is REFUSED until the human answers the conflict banner in their tab. "
       + "Slides are numbered 1-based, matching how a human counts them — every verb below targets a "
       + "slide BY THAT NUMBER ONLY, never by its name (see info's own entry for why a slide's name is "
       + "not a stable way to refer to it). Pick a verb:\n"
@@ -429,18 +429,18 @@ export function slidesToolDefs(deps: SlidesToolDeps): ToolDefinition[] {
       + "primary view's current slide to do its work, not merely reorder's).\n"
       + "• format — path, slide, placeholder (\"title\" or \"body\"), and at least one of bold/italic/underline (true or false), align (left/center/right/justify) or lineSpacing (single/1.5/double). Formats ALL of that placeholder's text — there is no way to format part of it.\n"
       + "  Two differences from docs format, both real limits of the presentation editor "
-      + "rather than Norma: there is no 1.15 line spacing (only single, 1.5, double), and "
+      + "rather than Winter: there is no 1.15 line spacing (only single, 1.5, double), and "
       + "there are no paragraph styles like heading1. Also, aligning a placeholder "
       + "re-anchors the whole text box, not just the text inside it.\n"
       + "  Unlike docs format, this cannot read the formatting back to check it — a "
-      + "presentation gives Norma no way to do that — so it reports what it asked for. "
+      + "presentation gives Winter no way to do that — so it reports what it asked for. "
       + "Reopen the slide if you need to be sure.\n"
       + "Every path must be inside this session's own working directories — an office read/write "
       + "COPIES the file and parses it with LibreOffice, so it is not an ordinary file read/write and "
       + "the usual unrestricted-reads rule does not cover it.\n"
       + "The Mac app has to be running and showing this session, or nothing here can work — "
       + "info's own refusal tells you if that's the problem.\n"
-      + "A document a human has open with UNSAVED changes does NOT refuse a write any more — Norma saves their edits first and then writes. A write is refused only when that save FAILS (the refusal names what went wrong), or when the file also changed on disk outside Norma "
+      + "A document a human has open with UNSAVED changes does NOT refuse a write any more — Winter saves their edits first and then writes. A write is refused only when that save FAILS (the refusal names what went wrong), or when the file also changed on disk outside Winter "
       + "and the human still has a conflict banner to answer.\n"
       + "**A timeout means the outcome is UNKNOWN, never that a write failed to happen** — the "
       + "app may have completed it and lost the race home. Re-read the document before ever retrying "
@@ -524,7 +524,7 @@ export function slidesToolDefs(deps: SlidesToolDeps): ToolDefinition[] {
         if (allowedVerbs.includes(a.verb)) continue;
         const takenBy = allowedVerbs.map((v) => `\`${v}\``).join(" or ");
         throw new Error(`slides ${a.verb} has no \`${key}\` — that operand belongs to ${takenBy}. `
-          + "Nothing was changed. (Norma refuses an operand it cannot honour rather than ignoring "
+          + "Nothing was changed. (Winter refuses an operand it cannot honour rather than ignoring "
           + "it, because ignoring one would report success for something it did not do.)");
       }
       if (a.verb === "format") {
@@ -551,7 +551,7 @@ export function slidesToolDefs(deps: SlidesToolDeps): ToolDefinition[] {
       // not the app happens to be attached at this instant).
       const resolvedPath = officeSlidesResolvedPathWithinFence(a.path, deps.dirsOf(sessionId));
       if (!resolvedPath) {
-        throw new Error(`path is outside the allowed directories: ${a.path}. Norma's office tools `
+        throw new Error(`path is outside the allowed directories: ${a.path}. Winter's office tools `
           + "are limited to the session's working directories.");
       }
 

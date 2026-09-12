@@ -8,7 +8,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { transcriptProjectKey, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
-import type { SessionEvent } from "@norma/protocol";
+import type { SessionEvent } from "@winter/protocol";
 import { convertEngineEraLog, importEngineEraSession, ImportLegacySessionError } from "../../src/runtime-sdk/import-legacy";
 import { openRuntimeStateDb, RuntimeSessionRecords, backfillNativeSessions } from "../../src/runtime-state";
 import { sessionLegOf } from "../../src/runtime-sdk/leg";
@@ -134,7 +134,7 @@ describe("importEngineEraSession", () => {
         expect(appended[0]!.key).toEqual({ projectKey: transcriptProjectKey(cwd), sessionId: result.backendSessionId });
 
         const after = records.get(sid)!;
-        expect(after.winterSessionId).toBe(sid); // SAME Norma session id — never a new record
+        expect(after.winterSessionId).toBe(sid); // SAME Winter session id — never a new record
         expect(sessionLegOf(after)).toBe("winter");
         expect(after.backendSessionId).toBe(result.backendSessionId);
         expect(after.transcriptHealth).toBe("clean");

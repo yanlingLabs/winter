@@ -9,7 +9,7 @@
 //     refused HERE, before it ever reaches the router's own (stricter) refusal — the daemon's error
 //     should name the setting that is wrong, not the router's generic one.
 //  2. There is no `winterLeg`-style "user's home" rung: a session's own credential lives in Keychain,
-//     never on disk, so there is nothing under `NORMA_HOME` this ladder would ever find. The two
+//     never on disk, so there is nothing under `WINTER_HOME` this ladder would ever find. The two
 //     implicit rungs are the P8d-1 bundle drop (`<dirname(execPath)>/runtimes/claude-official/claude`,
 //     `bundleRuntimePath` — the one place this layout is spelled) and, for every dev checkout, the
 //     optional platform package `bun install` already resolved — found THROUGH THE WRAPPER PACKAGE'S
@@ -39,7 +39,7 @@ export class ClaudeExecutableUnavailable extends Error {
   constructor(readonly tried: string[], detail?: string) {
     super(
       `claude runtime executable not found (tried: ${tried.join(", ") || "nothing configured"})` +
-        `${detail ? `: ${detail}` : ""}; set settings.runtimes.claudeExecutable or NORMA_CLAUDE_EXECUTABLE, ` +
+        `${detail ? `: ${detail}` : ""}; set settings.runtimes.claudeExecutable or WINTER_CLAUDE_EXECUTABLE, ` +
         `or install the optional @anthropic-ai/claude-agent-sdk platform package (\`bun install\`)`,
     );
     this.name = "ClaudeExecutableUnavailable";
@@ -116,7 +116,7 @@ function checkBundleVersions(execPath: string, readVersions: (p: string) => stri
 }
 
 /**
- * P8d-1's ladder: `settings.runtimes.claudeExecutable` → env `NORMA_CLAUDE_EXECUTABLE` →
+ * P8d-1's ladder: `settings.runtimes.claudeExecutable` → env `WINTER_CLAUDE_EXECUTABLE` →
  * `<dirname(execPath)>/runtimes/claude-official/claude` (the Release bundle drop, gated on a
  * valid `VERSIONS.json`) → the platform package under `node_modules` (dev only) → the typed
  * refusal.
@@ -138,7 +138,7 @@ export function resolveClaudeExecutable(input: {
 }): { path: string; source: ClaudeExecutableSource } | ClaudeExecutableUnavailable {
   const explicit: Array<[ClaudeExecutableSource, string | undefined]> = [
     ["setting", input.setting?.trim() || undefined],
-    ["env", input.env.NORMA_CLAUDE_EXECUTABLE?.trim() || undefined],
+    ["env", input.env.WINTER_CLAUDE_EXECUTABLE?.trim() || undefined],
   ];
   for (const [source, path] of explicit) {
     if (!path) continue;

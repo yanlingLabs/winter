@@ -1,8 +1,8 @@
 import XCTest
 import os
-import NormaProtocol
-import NormaSessionKit
-@testable import NormaKit
+import WinterProtocol
+import WinterSessionKit
+@testable import WinterKit
 
 /// SP2b Task 3: `PairingManager` is the ceremony engine driving `beginPairing` ->
 /// `handleConnection` (proof verify) -> `confirm`/`deny` (or timeout). Exercised against
@@ -22,7 +22,7 @@ final class PairingManagerTests: XCTestCase {
     }
 
     private func makeRelayConfig() -> SignedRelayConfig {
-        SignedRelayConfig(config: RelayConfig(version: 1, relays: ["relay1.norma.dev"]), sig: Data(repeating: 7, count: 64))
+        SignedRelayConfig(config: RelayConfig(version: 1, relays: ["relay1.winter.dev"]), sig: Data(repeating: 7, count: 64))
     }
 
     /// A no-op, immediate `sleepHook` — the confirm-timeout watchdog's poll loop spins through
@@ -43,7 +43,7 @@ final class PairingManagerTests: XCTestCase {
     /// The phone-side half of the ceremony: given the QR the Mac displayed, builds the
     /// `PairRequest` a legitimate phone would send (transcript + proof over its own chosen
     /// endpoint id/nonce/caps). Deliberately inline here (per the brief) rather than a shared
-    /// helper in NormaKit — this is test-only, throwaway phone-side crypto.
+    /// helper in WinterKit — this is test-only, throwaway phone-side crypto.
     private func phonePairRequest(
         qr: QRPayload, phoneEndpointID: String = "phone-endpoint-1",
         phoneInstallNonce: Data = Data(repeating: 0x11, count: 16), caps: [String] = ["sessions"]
@@ -61,7 +61,7 @@ final class PairingManagerTests: XCTestCase {
 
     private func tempStoreURL() -> URL {
         FileManager.default.temporaryDirectory
-            .appendingPathComponent("norma-pairing-manager-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("winter-pairing-manager-tests-\(UUID().uuidString)", isDirectory: true)
             .appendingPathComponent("paired-devices.json")
     }
 
@@ -377,7 +377,7 @@ final class PairingManagerTests: XCTestCase {
         // A store whose persist always fails: fileURL's parent is a read-only dir, so the
         // temp-file creation inside `persist()` fails with a non-capReached error.
         let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("norma-pairing-manager-ro-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("winter-pairing-manager-ro-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: dir.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path) }

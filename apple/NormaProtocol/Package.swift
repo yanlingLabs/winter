@@ -2,17 +2,17 @@
 import PackageDescription
 
 let package = Package(
-    name: "NormaProtocol",
+    name: "WinterProtocol",
     // SP3: OS floor raised to 26 across the board (see docs/RELEASE-NOTES-sp3-os-floor.md).
     platforms: [.macOS("26.0"), .iOS("26.0")],
     products: [
-        .library(name: "NormaProtocol", targets: ["NormaProtocol"]),
+        .library(name: "WinterProtocol", targets: ["WinterProtocol"]),
     ],
     targets: [
-        .target(name: "NormaProtocol"),
+        .target(name: "WinterProtocol"),
         .testTarget(
-            name: "NormaProtocolTests",
-            dependencies: ["NormaProtocol"],
+            name: "WinterProtocolTests",
+            dependencies: ["WinterProtocol"],
             resources: [.copy("Fixtures")]
         ),
     ]

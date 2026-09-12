@@ -2,7 +2,7 @@ import SwiftUI
 
 /// One fetch's worth of `quota.state` rendered as display strings — pure so the "limited, resumes
 /// in Xs" wording (reusing `formatElapsed`) and the token totals (reusing `formatTokens`) are
-/// table-tested without a live `NormaClient`.
+/// table-tested without a live `WinterClient`.
 struct QuotaDisplay: Equatable {
     let statusLine: String
     let tokensLine: String
@@ -29,7 +29,7 @@ func formatQuotaState(kind: String, resumeAt: Int?, inputTokens: Int, outputToke
 
 /// Task 5 (2f-ii): the Dashboard's Quota pane — spec §B: "static fetch + refresh button in v1".
 /// `fetch` is the injected `quota.state` closure (`DashboardWiring`, ultimately
-/// `NormaClient.quotaState()`).
+/// `WinterClient.quotaState()`).
 struct QuotaPane: View {
     let fetch: () async throws -> (kind: String, resumeAt: Int?, inputTokens: Int, outputTokens: Int)
 

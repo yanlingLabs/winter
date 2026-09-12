@@ -1,5 +1,5 @@
 import SwiftUI
-import NormaKit
+import WinterKit
 
 /// working-directories T8: the header's WORKING-FOLDERS chip and its menu — the mid-session half of
 /// the picker (design doc §3; the create-time half is `WorkingDirPickerSheet`).
@@ -126,7 +126,7 @@ extension WindowContentView {
                             .foregroundStyle(Theme.textMuted)
                     }
                     if entry.locked {
-                        // The first-write lock: Norma has written here, so this entry is permanent
+                        // The first-write lock: Winter has written here, so this entry is permanent
                         // for the session's lifetime.
                         Image(systemName: "lock.fill")
                             .font(Typography.micro())

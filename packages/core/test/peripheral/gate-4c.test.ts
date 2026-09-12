@@ -2,7 +2,7 @@ import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@winter/protocol";
 import {
   buildSpawnablePlugins,
   createSupervisedInstance,
@@ -129,7 +129,7 @@ async function connectPlugin(inst: SupervisedInstance, socketPath: string, plugi
   return c;
 }
 
-const NO_PROVIDER_MESSAGE = "hardware features require Norma.app"; // pinned to hardware.ts's literal (verified against source, not re-derived)
+const NO_PROVIDER_MESSAGE = "hardware features require Winter.app"; // pinned to hardware.ts's literal (verified against source, not re-derived)
 
 describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
   // -----------------------------------------------------------------------------------------
@@ -148,7 +148,7 @@ describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
       "set_charge_limit routes broker -> scripted-provider-conn -> hardware.respond -> the real child's tool receives the limit",
       async () => {
         const pluginId = "battery-limiter";
-        home = mkdtempSync(join(tmpdir(), "norma-gate4c-roundtrip-"));
+        home = mkdtempSync(join(tmpdir(), "winter-gate4c-roundtrip-"));
         installBatteryLimiter(home, pluginId);
         const settings = writeAndLoadSettings(home, pluginId, { hardwareConsent: true });
         const socketPath = join(home, "core.sock");
@@ -213,7 +213,7 @@ describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
     afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
 
     async function bootScripted(pluginId: string, opts?: { hardwareConsent?: boolean }): Promise<{ inst: SupervisedInstance; home: string; socketPath: string }> {
-      const home = mkdtempSync(join(tmpdir(), "norma-gate4c-scripted-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-gate4c-scripted-"));
       installBatteryLimiter(home, pluginId);
       writeAndLoadSettings(home, pluginId, opts);
       const socketPath = join(home, "core.sock");
@@ -260,10 +260,10 @@ describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
       // so this leg swaps in a hand-seeded manifest lacking it, same precedent as
       // server.test.ts's seedBatteryPlugin({}) variant.
       const pluginId = "no-hw-permission-plugin";
-      const home = mkdtempSync(join(tmpdir(), "norma-gate4c-scripted-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-gate4c-scripted-"));
       const { mkdirSync, writeFileSync } = await import("node:fs");
       mkdirSync(join(home, "plugins", pluginId), { recursive: true });
-      writeFileSync(join(home, "plugins", pluginId, "norma-plugin.json"), JSON.stringify({
+      writeFileSync(join(home, "plugins", pluginId, "winter-plugin.json"), JSON.stringify({
         id: pluginId, tier: "capability", permissions: { exec: true }, // no permissions.hardware at all
       }));
       writeAndLoadSettings(home, pluginId, { hardwareConsent: true });
@@ -278,14 +278,14 @@ describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
       plugin.close();
     });
 
-    test("PATH 3: NO-PROVIDER (no provider connection registered) -> typed no_provider whose message conveys \"requires Norma.app\"", async () => {
+    test("PATH 3: NO-PROVIDER (no provider connection registered) -> typed no_provider whose message conveys \"requires Winter.app\"", async () => {
       const pluginId = "battery-limiter";
       const { inst, home, socketPath } = await bootScripted(pluginId, { hardwareConsent: true });
       const plugin = await connectPlugin(inst, socketPath, pluginId);
 
       const res = await plugin.request(METHODS.hardwareRequest, { verb: "getChargeLimit" });
       expect(res.result).toEqual({ code: "no_provider", message: NO_PROVIDER_MESSAGE });
-      expect((res.result as { message: string }).message).toContain("Norma.app");
+      expect((res.result as { message: string }).message).toContain("Winter.app");
 
       const hwLine = readAuditLines(home).find((l) => l.kind === "hardware" && l.verb === "getChargeLimit");
       expect(hwLine).toMatchObject({
@@ -297,21 +297,21 @@ describe("4c gate: hardware broker paths (spec §5, plan Task 6)", () => {
       plugin.close();
     });
 
-    test("PATH 4: TIMEOUT (provider registered but never responds) -> typed timeout, using NORMA_HARDWARE_TIMEOUT_MS to stay fast", async () => {
+    test("PATH 4: TIMEOUT (provider registered but never responds) -> typed timeout, using WINTER_HARDWARE_TIMEOUT_MS to stay fast", async () => {
       const pluginId = "battery-limiter";
-      const home = mkdtempSync(join(tmpdir(), "norma-gate4c-scripted-timeout-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-gate4c-scripted-timeout-"));
       installBatteryLimiter(home, pluginId);
       writeAndLoadSettings(home, pluginId, { hardwareConsent: true });
       const socketPath = join(home, "core.sock");
 
-      // HardwareBroker reads NORMA_HARDWARE_TIMEOUT_MS synchronously at construction time (see
+      // HardwareBroker reads WINTER_HARDWARE_TIMEOUT_MS synchronously at construction time (see
       // hardware.ts's constructor) — set it immediately before, and restore immediately after, the
       // ONE synchronous createSupervisedInstance call that constructs it, so no other concurrently-
       // running test in this process ever observes the override.
-      const orig = process.env.NORMA_HARDWARE_TIMEOUT_MS;
-      process.env.NORMA_HARDWARE_TIMEOUT_MS = "80";
+      const orig = process.env.WINTER_HARDWARE_TIMEOUT_MS;
+      process.env.WINTER_HARDWARE_TIMEOUT_MS = "80";
       const inst = await createSupervisedInstance({ home, socketPath, hardware: true });
-      if (orig === undefined) delete process.env.NORMA_HARDWARE_TIMEOUT_MS; else process.env.NORMA_HARDWARE_TIMEOUT_MS = orig;
+      if (orig === undefined) delete process.env.WINTER_HARDWARE_TIMEOUT_MS; else process.env.WINTER_HARDWARE_TIMEOUT_MS = orig;
       cleanups.push(() => { inst.supervisor.stopAll(); inst.server.stop(); inst.store.close(); });
 
       const tokens = await inst.authority.ensureTokens();

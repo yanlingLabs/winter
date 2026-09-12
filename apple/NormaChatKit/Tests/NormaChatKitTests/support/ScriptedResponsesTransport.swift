@@ -1,5 +1,5 @@
 import Foundation
-@testable import NormaChatKit
+@testable import WinterChatKit
 
 /// The ONLY `/responses` transport any ResponsesClient/ChatEngine test speaks to. Hands back scripted
 /// SSE responses in order and records every request verbatim (the `httpBody` survives because nothing

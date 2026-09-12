@@ -8,7 +8,7 @@
 //
 // THE WINTER LEG DOES NOT USE THIS FILE. Its own advisor is configured per-session through
 // `Options.advisor.model` (`mode-options.ts`/`session-driver.ts`) — the spawned `winter` child
-// resolves its OWN reviewer PROVIDER internally (it reads the Keychain itself), so Norma only ever
+// resolves its OWN reviewer PROVIDER internally (it reads the Keychain itself), so Winter only ever
 // states the WINTER leg's target MODEL id, never builds a provider for it. `d30DefaultModel` below is
 // the ONE shared piece both legs need (the family→model table), so the two can never state two
 // different defaults for the same family.
@@ -37,7 +37,7 @@ import { credentialStoreOverSecretStore } from "../providers/credential-store";
 import { winterOptionsFromSettings, type Settings } from "../settings";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME, credentialRefFor } from "./keychain";
 
-/** Which of Norma's three D30-relevant families a catalog-recognised model belongs to. `"other"` is
+/** Which of Winter's three D30-relevant families a catalog-recognised model belongs to. `"other"` is
  *  every family the pinned catalog has that is neither the OpenAI ("gpt") nor the Claude ("claude")
  *  family — Gemini/Grok/DeepSeek/etc. — for which 8d states no provider-runtime mapping (see
  *  `buildReviewerFor`'s own doc): the D30 table's own third rung, "else the session's own model", is
@@ -99,12 +99,12 @@ export function d30DefaultModel(sessionModel: string | undefined): string | unde
   return sessionModel;
 }
 
-/** `AdvisorReviewerRequest.messages` -> one non-streaming text turn, for the OpenAI-family Norma
+/** `AdvisorReviewerRequest.messages` -> one non-streaming text turn, for the OpenAI-family Winter
  *  `Provider` shape (`providers/types.ts`'s `TurnInputItem`/`ProviderEvent`) — the SAME shape
  *  `agent/reviewer.ts`'s `BashReviewer` already drives, reused here rather than re-derived. Never
  *  streams (WS-06 §4/R6-G: "an auxiliary generation never emits stream_events" is the router's OWN
- *  rule for its reviewer backend; Norma's side of that is simply never surfacing partial deltas). */
-async function generateOverNormaProvider(provider: Provider, model: string, input: AdvisorReviewerRequest): Promise<AdvisorReviewerTurn> {
+ *  rule for its reviewer backend; Winter's side of that is simply never surfacing partial deltas). */
+async function generateOverWinterProvider(provider: Provider, model: string, input: AdvisorReviewerRequest): Promise<AdvisorReviewerTurn> {
   const turnInput: TurnInputItem[] = input.messages.map((m) => ({ type: "message", role: m.role === "tool" ? "assistant" : m.role, content: m.content }));
   let text = "";
   for await (const ev of provider.streamTurn({ model, input: turnInput, tools: [] })) {
@@ -132,11 +132,11 @@ function openAiFamilyReviewer(secrets: SecretStore, settings: () => Settings | u
     async generate(input: AdvisorReviewerRequest): Promise<AdvisorReviewerTurn> {
       const material = await readCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth);
       if (material !== null) {
-        return generateOverNormaProvider(createCodexOauthRuntimeProvider(secrets), DEFAULT_CODEX_MODEL, input);
+        return generateOverWinterProvider(createCodexOauthRuntimeProvider(secrets), DEFAULT_CODEX_MODEL, input);
       }
       const provider = settings()?.provider;
       const baseUrl = provider?.type === "openai-compatible" ? provider.baseUrl : OPENAI_API_BASE_URL;
-      return generateOverNormaProvider(createOpenAiCompatibleRuntimeProvider(secrets, baseUrl), targetModel, input);
+      return generateOverWinterProvider(createOpenAiCompatibleRuntimeProvider(secrets, baseUrl), targetModel, input);
     },
   };
 }

@@ -3,7 +3,7 @@ import { join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { TrustStore } from "./trust";
 
-// Phase 5c Task 3: `author?` mirrors T1's `author: norma` frontmatter stamp (writeSelf below) back
+// Phase 5c Task 3: `author?` mirrors T1's `author: winter` frontmatter stamp (writeSelf below) back
 // out through list()/load() — additive on every interface (undefined for any skill written before
 // this parse existed, or one that never carried the field, e.g. a project/user/plugin/builtin
 // skill nobody stamped).
@@ -74,12 +74,12 @@ function capBytes(s: string, maxBytes: number): string {
 
 /**
  * Spec §8 (Phase 4): skills from claude-format plugins are written for Claude Code's tool names.
- * The mapping is CONTEXT for the agent — Norma's permission gate, not the plugin tier, contains
+ * The mapping is CONTEXT for the agent — Winter's permission gate, not the plugin tier, contains
  * what the skill convinces the agent to do. Prepended AFTER capBytes so it can never truncate.
  */
 function compatPreamble(skillDir: string): string {
   return [
-    "[compat] This skill was written for Claude Code. You are running under Norma — the equivalent tools are:",
+    "[compat] This skill was written for Claude Code. You are running under Winter — the equivalent tools are:",
     "- TodoWrite / TaskCreate / TaskUpdate → `task_create` / `task_update` / `task_list`",
     "- AskUserQuestion → `ask_user`",
     "- Task (subagent dispatch) → `spawn_agent`",
@@ -116,22 +116,22 @@ const USER_ROOT_EXCLUDE = new Set(["self"]); // the self/ subdir is scanned sepa
 
 /**
  * Discovers SKILL.md skills from five sources, in precedence order (first occurrence of a name wins):
- *  - project: `<cwd>/.norma/skills/*`   — TRUST-GATED (only when `trust.isTrusted(cwd)`)
- *  - user:    `~/.norma/skills/*`       — always (excludes the reserved `self/` subdir)
- *  - self:    `~/.norma/skills/self/*`  — always; written by `writeSelf`/`deleteSelf` below
- *  - plugin:  `~/.norma/plugins/<plugin>/skills/<skill>` — always, namespaced `<plugin>:<skill>`
+ *  - project: `<cwd>/.winter/skills/*`   — TRUST-GATED (only when `trust.isTrusted(cwd)`)
+ *  - user:    `~/.winter/skills/*`       — always (excludes the reserved `self/` subdir)
+ *  - self:    `~/.winter/skills/self/*`  — always; written by `writeSelf`/`deleteSelf` below
+ *  - plugin:  `~/.winter/plugins/<plugin>/skills/<skill>` — always, namespaced `<plugin>:<skill>`
  *  - builtin: `<repo>/packages/core/skills/*` — always, shipped in-repo; LAST, so any of the
  *    above can shadow a builtin of the same name (e.g. a user override of `writing-skills`)
  * Defensive throughout: malformed/missing/permission-denied skills are skipped, never thrown.
  */
 export class SkillStore {
-  private readonly normaHome: string;
+  private readonly winterHome: string;
   private readonly trust: TrustStore;
   private readonly bodyBytes: number;
   private readonly disabledPlugins: string[];
 
-  constructor(deps: { normaHome: string; trust: TrustStore; caps?: { bodyBytes?: number }; plugins?: { disabled?: string[] } }) {
-    this.normaHome = deps.normaHome;
+  constructor(deps: { winterHome: string; trust: TrustStore; caps?: { bodyBytes?: number }; plugins?: { disabled?: string[] } }) {
+    this.winterHome = deps.winterHome;
     this.trust = deps.trust;
     this.bodyBytes = deps.caps?.bodyBytes ?? 32768;
     this.disabledPlugins = deps.plugins?.disabled ?? [];
@@ -142,20 +142,20 @@ export class SkillStore {
     const all: ScannedSkill[] = [];
 
     if (cwd && this.trust.isTrusted(cwd)) {
-      all.push(...scanRoot(join(cwd, ".norma", "skills"), "project"));
+      all.push(...scanRoot(join(cwd, ".winter", "skills"), "project"));
     }
 
-    all.push(...scanRoot(join(this.normaHome, "skills"), "user", USER_ROOT_EXCLUDE));
-    all.push(...scanRoot(join(this.normaHome, "skills", "self"), "self"));
+    all.push(...scanRoot(join(this.winterHome, "skills"), "user", USER_ROOT_EXCLUDE));
+    all.push(...scanRoot(join(this.winterHome, "skills", "self"), "self"));
 
     let plugins: string[] = [];
     try {
-      plugins = readdirSync(join(this.normaHome, "plugins"), { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+      plugins = readdirSync(join(this.winterHome, "plugins"), { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
     } catch { /* no plugins dir */ }
     for (const plugin of plugins) {
       if (this.disabledPlugins.includes(plugin)) continue;
-      const claudeFormat = existsSync(join(this.normaHome, "plugins", plugin, ".claude-plugin", "plugin.json")) || undefined;
-      for (const s of scanRoot(join(this.normaHome, "plugins", plugin, "skills"), "plugin")) {
+      const claudeFormat = existsSync(join(this.winterHome, "plugins", plugin, ".claude-plugin", "plugin.json")) || undefined;
+      for (const s of scanRoot(join(this.winterHome, "plugins", plugin, "skills"), "plugin")) {
         all.push({ ...s, name: `${plugin}:${s.name}`, ...(claudeFormat ? { claudeFormat } : {}) }); // the one place plugin names get namespaced
       }
     }
@@ -192,15 +192,15 @@ export class SkillStore {
     return null;
   }
 
-  /** Root of the self-authored scope: `~/.norma/skills/self` — the same path `discover` scans as source "self". */
+  /** Root of the self-authored scope: `~/.winter/skills/self` — the same path `discover` scans as source "self". */
   private selfRoot(): string {
-    return join(this.normaHome, "skills", "self");
+    return join(this.winterHome, "skills", "self");
   }
 
   /**
    * Writes (or overwrites) a self-authored skill at `self/<name>/SKILL.md`. Overwrite-is-edit: an
    * existing dir is written in place, no merge. The frontmatter (`name`, `description`,
-   * `author: norma`) is stamped by the STORE and written FIRST; `body` is concatenated verbatim
+   * `author: winter`) is stamped by the STORE and written FIRST; `body` is concatenated verbatim
    * AFTER that block's closing fence — so a body containing frontmatter-looking text (an
    * author-spoof attempt) can never override the stamp: `parseSkill` stops at the FIRST closing
    * fence it finds, which is always this one, never something embedded later in the body.
@@ -217,7 +217,7 @@ export class SkillStore {
     const dir = join(this.selfRoot(), input.name);
     try {
       mkdirSync(dir, { recursive: true });
-      const content = `---\nname: ${input.name}\ndescription: ${description}\nauthor: norma\n---\n\n${input.body}`;
+      const content = `---\nname: ${input.name}\ndescription: ${description}\nauthor: winter\n---\n\n${input.body}`;
       writeFileSync(join(dir, "SKILL.md"), content, "utf8");
       return { ok: true, value: undefined };
     } catch (err) {

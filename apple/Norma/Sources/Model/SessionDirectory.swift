@@ -1,11 +1,11 @@
 import Foundation
-import NormaKit
-import NormaProtocol
+import WinterKit
+import WinterProtocol
 
 /// 2e-iii Task 5: a live list of every session (title/createdAt/scope/cwd), backing the left
 /// sidebar's session switcher (`SessionSidebar` — not yet mounted anywhere, Task 6 does that).
 /// Deliberately socket-free: production wiring (`AppModel`/`DetachedWindowController`, both own
-/// their own `NormaClient`) injects a `lister` closure around `client.listSessions()`, the same
+/// their own `WinterClient`) injects a `lister` closure around `client.listSessions()`, the same
 /// dependency-injection shape `SessionFeed` uses for its transport — this file stays testable with
 /// a stub closure, no scripted transport needed (see `SessionDirectoryTests`).
 @MainActor
@@ -15,7 +15,7 @@ final class SessionDirectory: ObservableObject {
     private let lister: () async throws -> [SessionSummary]
     /// app-shell Task 2: the poll's tick, injectable so a test drives it deterministically instead
     /// of waiting on a real 5s sleep — the same seam shape as `PairingSheetModel`'s `sleepTick`
-    /// (NormaKit), just defaulted to a real `Task.sleep` here since this type has no `now()` clock
+    /// (WinterKit), just defaulted to a real `Task.sleep` here since this type has no `now()` clock
     /// of its own to pair it with.
     private let sleepTick: @Sendable () async -> Void
     private var pollTask: Task<Void, Never>?
@@ -107,7 +107,7 @@ final class SessionDirectory: ObservableObject {
         case .sessionActivity(let v):
             // app-shell Task 2, THE dedupe trap (CLAUDE.md's iOS-streaming lesson, hand-copied
             // here on purpose): this event is TRANSIENT — stamped with the store's `lastSeq`, never
-            // persisted, and NormaKit's own `route()` already exempts it from seq dedupe before it
+            // persisted, and WinterKit's own `route()` already exempts it from seq dedupe before it
             // ever reaches `feed.onEvent`/this method. Gating this patch on `v.seq` (e.g. dropping
             // it when `v.seq <= someCursor`) would therefore drop EVERY one of these, forever,
             // silently — a transient routinely arrives AT or BELOW a caught-up client's cursor. So:
@@ -158,7 +158,7 @@ struct SessionSummary: Equatable, Identifiable {
     /// override) — `WindowContentView`'s effort menu reads this to know what is currently pinned,
     /// same convention as `model` above.
     ///
-    /// The value may be a Norma-level TIER (`"ultra"`) reported VERBATIM rather than its wire
+    /// The value may be a Winter-level TIER (`"ultra"`) reported VERBATIM rather than its wire
     /// translation (`SessionListResult.effort`'s own doc comment) — so a picker matching it against
     /// the chosen model's `efforts` array alone will show no checkmark. Match against BOTH lists.
     var effort: String? = nil
@@ -172,7 +172,7 @@ struct SessionSummary: Equatable, Identifiable {
     /// WORKDIR-LESS session, writable only in `$OUTDIR`/`$TMPDIR`/`$MEMDIR`. `cwd` above is the
     /// daemon's alias of `dirs[0]?.path` for a participating row, never an independent fact.
     var dirs: [SessionDirEntry]? = nil
-    /// app-shell Task 2: threaded through from `listSessions()` (NormaKit's own `activity` decode)
+    /// app-shell Task 2: threaded through from `listSessions()` (WinterKit's own `activity` decode)
     /// AND kept live by `handle`'s `.sessionActivity` case above — every later app-shell surface
     /// (chips, tabs, roster, panel) reads this field, never `listSessions()` directly. Defaulted,
     /// same reasoning as `mode`/`dirs` above.

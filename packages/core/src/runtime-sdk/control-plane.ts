@@ -17,19 +17,19 @@ export const CONTROL_PLANE_FILENAMES: ReadonlySet<string> = new Set([
  * The tool names whose input this fence inspects — the WRITE class, in both vocabularies.
  *
  * **Reads are deliberately absent.** CLAUDE.md's tool-surface rule is that read/glob/grep/ls have
- * no path fence at all (the sole read denial is `~/.norma/run`, which the daemon applies through
+ * no path fence at all (the sole read denial is `~/.winter/run`, which the daemon applies through
  * its own denylist); P8b-27(b)'s "any tool input naming a path" is about what a call can WRITE, and
  * widening it to `Read` would quietly reverse a deliberate, documented product decision.
  *
- * `MultiEdit` has no Norma counterpart (Norma's `edit` is single-file) but is a Winter built-in that
+ * `MultiEdit` has no Winter counterpart (Winter's `edit` is single-file) but is a Winter built-in that
  * writes, so it is fenced under its Winter name alone.
  */
 export const WRITE_CLASS_TOOL_NAMES: ReadonlySet<string> = new Set([
-  "write", "edit", "notebook_edit",                 // Norma
+  "write", "edit", "notebook_edit",                 // Winter
   "Write", "Edit", "MultiEdit", "NotebookEdit",     // Winter
 ]);
 
-/** Every field a write-class tool might name its target in, across both vocabularies: Norma's
+/** Every field a write-class tool might name its target in, across both vocabularies: Winter's
  *  `path`/`notebook_path` and Winter/CC's `file_path`/`notebook_path`. `MultiEdit` additionally
  *  carries `edits: [{ file_path }]`, drained below. */
 const PATH_FIELDS = ["file_path", "path", "notebook_path", "filePath", "notebookPath"] as const;
@@ -62,17 +62,17 @@ export function writeTargetPathsIn(input: unknown): string[] {
  * for both vocabularies). Every subtlety in the original is preserved deliberately — see that
  * function's own doc comment for the full history; the short version:
  *
- *  - **project-INDEPENDENT.** The agent must never write ANY `<any>/.norma/permissions.local.json`,
+ *  - **project-INDEPENDENT.** The agent must never write ANY `<any>/.winter/permissions.local.json`,
  *    whichever project owns it: a broad `Edit(<parent>)` grant folds a SIBLING project's tree into
  *    the writable set, and a check anchored to this session's own project returned "not my store".
  *  - **case-folded on both spellings.** macOS's default volume is case-insensitive but
- *    case-preserving, so `.norma/Permissions.Local.json` and `.NORMA/...` reach the same file the
+ *    case-preserving, so `.winter/Permissions.Local.json` and `.WINTER/...` reach the same file the
  *    reader opens. The PRE-resolution parent is tested first (catches a write through a symlink
- *    NAMED `.norma`, which canonicalization would resolve away), then the canonicalized one
- *    (catches a real `.../.norma/...` reached through a differently-named link or `..` games).
- *  - **matches by FILENAME, never by directory** — `.norma/` itself stays writable, which is what
+ *    NAMED `.winter`, which canonicalization would resolve away), then the canonicalized one
+ *    (catches a real `.../.winter/...` reached through a differently-named link or `..` games).
+ *  - **matches by FILENAME, never by directory** — `.winter/` itself stays writable, which is what
  *    keeps the MEMDIR (`<home>/projects/<key>/memory/*.md`) and `$OUTDIR` (`<home>/outputs/<sid>`)
- *    agent-writable. Both are deliberate, shipped, agent-writable exceptions under NORMA_HOME.
+ *    agent-writable. Both are deliberate, shipped, agent-writable exceptions under WINTER_HOME.
  *
  * `null` for a malformed/unresolvable path — the caller decides from there.
  */
@@ -82,13 +82,13 @@ export function controlPlaneFileTarget(path: string, cwd: string): { path: strin
   // Cheap, syscall-free early-out: a target whose filename isn't SOME casing of a control-plane
   // filename can never be one, whatever its parent resolves to.
   if (!CONTROL_PLANE_FILENAMES.has(basename(raw0).toLowerCase())) return null;
-  if (basename(dirname(raw0)).toLowerCase() === ".norma") {
+  if (basename(dirname(raw0)).toLowerCase() === ".winter") {
     try { return { path, canonical: canonicalizeForWrite(resolveLeafSymlinks(raw0)) }; }
     catch { return { path, canonical: raw0 }; }   // still a confirmed match; report the raw target
   }
   try {
     const canonical = canonicalizeForWrite(resolveLeafSymlinks(raw0));
-    return basename(dirname(canonical)).toLowerCase() === ".norma" ? { path, canonical } : null;
+    return basename(dirname(canonical)).toLowerCase() === ".winter" ? { path, canonical } : null;
   } catch { return null; }
 }
 
@@ -105,7 +105,7 @@ export function controlPlaneFileTarget(path: string, cwd: string): { path: strin
  * (`permissions/evaluator.ts:1350-1364` at `v0.0.3`) and runs BEFORE the mode stage (`:1008`), so it
  * binds under `bypassPermissions` too and **never reaches `canUseTool`**. (An earlier revision of
  * this comment claimed the reverse; it was wrong.) The host fence exists because a deny rule only
- * covers what its pattern covers: it is Norma's own invariant, enforced in Norma's own vocabulary,
+ * covers what its pattern covers: it is Winter's own invariant, enforced in Winter's own vocabulary,
  * on both tool-name spellings, over every path-bearing field including `MultiEdit`'s nested
  * `edits[]` — and it does not depend on Winter's rule grammar continuing to mean what it means
  * today. Two independent layers over one invariant, which is the right number for a self-grant.

@@ -3,7 +3,7 @@
 
     ./analyze-spike-ledger.py spike.log [cpu.txt]
 
-`spike.log` is the stderr ledger of a `NORMA_SPIKE_REPARENT=1` run; `cpu.txt` is cpusample.sh's
+`spike.log` is the stderr ledger of a `WINTER_SPIKE_REPARENT=1` run; `cpu.txt` is cpusample.sh's
 output for the same run. Prints, per long phase (parked / visible):
 
   * rAF fps and setInterval Hz          -> §4's "nothing throttles"
@@ -83,7 +83,7 @@ def main():
             if prev:
                 w = [prev[-1], w[0]]
         if len(w) < 2:
-            print(f"  {label} (no window — run with NORMA_SPIKE_LONG_DWELL>=10)")
+            print(f"  {label} (no window — run with WINTER_SPIKE_LONG_DWELL>=10)")
             continue
         f0, f1 = w[0][1], w[-1][1]
         dt = (gi(f1, 2) - gi(f0, 2)) / 1000.0

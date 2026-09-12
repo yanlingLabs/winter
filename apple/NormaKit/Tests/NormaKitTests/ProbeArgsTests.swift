@@ -1,5 +1,5 @@
 import XCTest
-@testable import NormaKit
+@testable import WinterKit
 
 final class ProbeArgsTests: XCTestCase {
     func testAttachWithFlags() throws {
@@ -29,7 +29,7 @@ final class ProbeArgsTests: XCTestCase {
         guard case .failure = ProbeArgs.parse(["attach", "s_1", "--from", "NaN"]) else { return XCTFail() }
     }
 
-    /// devfix: `--dev` picks the dev Keychain service (`com.norma.core.dev`) for the fallback
+    /// devfix: `--dev` picks the dev Keychain service (`com.winter.core.dev`) for the fallback
     /// `KeychainToken.readHarnessToken` read — default (absent) must stay `false`/dist so every
     /// existing invocation is unaffected.
     func testDevFlagDefaultsFalse() throws {
@@ -45,7 +45,7 @@ final class ProbeArgsTests: XCTestCase {
     // MARK: - resolvedSocketPath (devfix, socket strand)
 
     /// devfix: `--dev` switched the Keychain service but NOT the socket in the earlier pass —
-    /// `norma-probe --dev list` dialed the DIST socket with a DEV token and hung. `--dev` (absent
+    /// `winter-probe --dev list` dialed the DIST socket with a DEV token and hung. `--dev` (absent
     /// `--socket`) must now target the dev home's socket explicitly.
     func testResolvedSocketPathDevDefaultsToDevHomeSocket() throws {
         guard case .success(let a) = ProbeArgs.parse(["list", "--dev"]) else { return XCTFail() }
@@ -58,10 +58,10 @@ final class ProbeArgsTests: XCTestCase {
         XCTAssertEqual(a.resolvedSocketPath(devHome: "/tmp/fake-dev-home"), "/tmp/explicit.sock")
     }
 
-    /// No `--dev`: falls back to the ambient `NormaPaths.socketPath()` default — unchanged dist
+    /// No `--dev`: falls back to the ambient `WinterPaths.socketPath()` default — unchanged dist
     /// behavior for every invocation that predates `--dev`.
     func testResolvedSocketPathWithoutDevMatchesAmbientDefault() throws {
         guard case .success(let a) = ProbeArgs.parse(["list"]) else { return XCTFail() }
-        XCTAssertEqual(a.resolvedSocketPath(), NormaPaths.socketPath())
+        XCTAssertEqual(a.resolvedSocketPath(), WinterPaths.socketPath())
     }
 }

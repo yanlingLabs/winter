@@ -1,6 +1,6 @@
 import Foundation
 
-/// The kit's ONLY egress. Every component in NormaChatKit (CodexAuth, PageFetcher, Search,
+/// The kit's ONLY egress. Every component in WinterChatKit (CodexAuth, PageFetcher, Search,
 /// ResponsesClient in later tasks) speaks through this one seam, which is what lets the whole kit
 /// be tested on macOS with a scripted double and never touch the network in CI.
 public protocol ChatHTTP: Sendable {

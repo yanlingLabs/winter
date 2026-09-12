@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Final-review Important-2 (D9 settled-tick freeze): direct unit coverage for the pure
 /// `shouldPauseFluidTick` decision (`FieldKit/FluidOrbView.swift`) — no `TimelineView`, no

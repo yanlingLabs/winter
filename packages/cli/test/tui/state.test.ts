@@ -519,21 +519,21 @@ describe("state.ts — note one-liners match main.ts's wording (bg-task/worktree
   // app's native alert / the daemon's headless osascript fallback, neither of which the CLI does.
   test("notification_requested", () => {
     let s = initialState();
-    s = reduce(s, { type: "notification_requested", threadId: "main", title: "Norma", message: "migration finished" }, T0);
-    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "notification: Norma: migration finished" });
+    s = reduce(s, { type: "notification_requested", threadId: "main", title: "Winter", message: "migration finished" }, T0);
+    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "notification: Winter: migration finished" });
   });
 
   test("lease_granted / lease_lost (Phase 5 CU) — CU control notes with friendly class labels", () => {
     let s = initialState();
     const holder = { kind: "session", id: "s1" };
     s = reduce(s, { type: "lease_granted", threadId: "main", leaseId: "l1", class: "screenshot", holder, expiresAt: 0, tokenHash: "h" }, T0);
-    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "⌘ Norma acquired screen capture control" });
+    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "⌘ Winter acquired screen capture control" });
     s = reduce(s, { type: "lease_granted", threadId: "main", leaseId: "l2", class: "input-drive", holder, expiresAt: 0, tokenHash: "h" }, T0);
-    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "⌘ Norma acquired mouse/keyboard control" });
+    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "⌘ Winter acquired mouse/keyboard control" });
     s = reduce(s, { type: "lease_lost", threadId: "main", leaseId: "l1", class: "screenshot", holder, reason: "released" }, T0);
-    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "⌘ Norma released screen capture control (released)" });
+    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "⌘ Winter released screen capture control (released)" });
     s = reduce(s, { type: "lease_lost", threadId: "main", leaseId: "l2", class: "ax-read", holder, reason: "provider-gone" }, T0);
-    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "⌘ Norma released accessibility control (provider-gone)" });
+    expect(s.committed.at(-1)).toEqual({ kind: "note", text: "⌘ Winter released accessibility control (provider-gone)" });
   });
 
   test("local_note (Phase 3d T2 — App-internal only, never a real wire event): commits a note block", () => {
@@ -560,7 +560,7 @@ describe("state.ts — note one-liners match main.ts's wording (bg-task/worktree
 
   // Phase 5e T1 (reviewer maturity, the wire-vocabulary/5c lesson): `tool_review` is a NEW
   // SessionEvent variant this reducer has no dedicated case for — confirms the existing `default:
-  // return s` (no exhaustive switch on `e.type` here, unlike NormaKit's Swift accessor switches)
+  // return s` (no exhaustive switch on `e.type` here, unlike WinterKit's Swift accessor switches)
   // already no-ops gracefully, so no reducer change was needed for this task. A later task (T5)
   // may add a dedicated rendering; this only pins today's safe-by-construction behavior.
   test("tool_review (unknown to this reducer) is a no-op: state is byte-identical", () => {
@@ -601,7 +601,7 @@ describe("state.ts — child transcript accumulation (child-transcript-view T2)"
 
   // task-5 (live stall hint): the roster's pre-kill "Stalled" verdict is only honest if the two
   // legitimate-silence signals reach `updateSubagents`. In the TUI that routing is this reducer's
-  // job (unlike `norma -p`'s main.ts, which already feeds it every event) — a child's tool_result
+  // job (unlike `winter -p`'s main.ts, which already feeds it every event) — a child's tool_result
   // and approval events previously stopped at childBlocks/`pending` and never touched the row, so
   // a child mid-`bash` would have been mislabelled the moment the threshold elapsed.
   test("a child's tool_result and approval events reach the roster row's in-flight counters", () => {

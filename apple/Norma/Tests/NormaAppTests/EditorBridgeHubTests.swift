@@ -1,6 +1,6 @@
 import AppKit
 import XCTest
-@testable import Norma
+@testable import Winter
 
 // MARK: - Doubles
 
@@ -8,7 +8,7 @@ import XCTest
 /// install/clear pairs, and records every answer that went back to a page.
 ///
 /// **Queries are delivered through the STORED HANDLER**, never by reaching into the hub — which is
-/// what makes these tests exercise the real path (`NormaCEFSetBridgeHandler`'s block is the only way
+/// what makes these tests exercise the real path (`WinterCEFSetBridgeHandler`'s block is the only way
 /// a query ever arrives) rather than a private method that happens to be shaped like it.
 @MainActor
 final class EditorSlotRecorder {

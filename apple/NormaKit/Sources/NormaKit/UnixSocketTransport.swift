@@ -4,11 +4,11 @@ import Network
 /// NWConnection over a unix domain socket (SOCK_STREAM). If NWEndpoint.unix proves unreliable
 /// on some OS build, the fallback is a POSIX socket + DispatchSourceRead — note the outcome in
 /// the phase-2 carryover doc (spec §4.2 explicitly allows the swap).
-public final class UnixSocketTransport: NormaTransport, @unchecked Sendable {
+public final class UnixSocketTransport: WinterTransport, @unchecked Sendable {
     public let incoming: AsyncStream<TransportEvent>
     private let cont: AsyncStream<TransportEvent>.Continuation
     private let conn: NWConnection
-    private let queue = DispatchQueue(label: "norma.unix-transport")
+    private let queue = DispatchQueue(label: "winter.unix-transport")
     private let closedOnce = OnceFlag()
 
     public init(path: String) {
@@ -91,34 +91,34 @@ final class OnceFlag: @unchecked Sendable {
     }
 }
 
-public enum NormaPaths {
-    /// Mirror of core's resolveNormaHome(): `$NORMA_HOME` ?? `~/.norma`. The single source of
+public enum WinterPaths {
+    /// Mirror of core's resolveWinterHome(): `$WINTER_HOME` ?? `~/.winter`. The single source of
     /// truth every other path in this type (and, per SP2b T5, `RemoteAccessCoordinator`'s own
-    /// `storeDir`) derives from — added so a caller needing some OTHER path under the Norma home
+    /// `storeDir`) derives from — added so a caller needing some OTHER path under the Winter home
     /// (not socket/settings) can reuse this instead of re-deriving the same env-var-or-default
     /// logic a third time.
     public static func homeDirectory() -> String {
-        ProcessInfo.processInfo.environment["NORMA_HOME"]
-            ?? (NSHomeDirectory() + "/.norma")
+        ProcessInfo.processInfo.environment["WINTER_HOME"]
+            ?? (NSHomeDirectory() + "/.winter")
     }
 
-    /// Mirror of core's resolveNormaHome(): $NORMA_HOME ?? ~/.norma, + /run/core.sock.
+    /// Mirror of core's resolveWinterHome(): $WINTER_HOME ?? ~/.winter, + /run/core.sock.
     public static func socketPath() -> String {
         socketPath(home: homeDirectory())
     }
 
-    /// devfix (socket strand): explicit-home overload. `homeDirectory()` re-derives `$NORMA_HOME`
+    /// devfix (socket strand): explicit-home overload. `homeDirectory()` re-derives `$WINTER_HOME`
     /// independently at each call site — fine for a caller that's genuinely profile-agnostic (or
     /// dist-only), but the live gate that found the keychain-service bug (v-dev-dist-split) found a
     /// SECOND instance of the same shape here: a caller that has ALREADY resolved its own
-    /// profile-correct home (the app's `AppProfile.normaHome`) must pass it explicitly rather than
+    /// profile-correct home (the app's `AppProfile.winterHome`) must pass it explicitly rather than
     /// trust this type to independently re-derive the identical answer. Pure string-joining, no env
     /// touched.
     public static func socketPath(home: String) -> String {
         home + "/run/core.sock"
     }
 
-    /// Mirror of core's resolveNormaHome(): $NORMA_HOME ?? ~/.norma, + /settings.json.
+    /// Mirror of core's resolveWinterHome(): $WINTER_HOME ?? ~/.winter, + /settings.json.
     public static func settingsPath() -> String {
         settingsPath(home: homeDirectory())
     }

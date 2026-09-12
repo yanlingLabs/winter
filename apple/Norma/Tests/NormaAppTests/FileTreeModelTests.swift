@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// editor-product Task 7: `FileTreeModel` — lazy children, a watcher per expanded node, roots =
 /// the session's own working directories.

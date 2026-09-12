@@ -3,7 +3,7 @@
  * Health-checks one or more production relays (SP2b Task 6 Step 3): dual-stack DNS resolution,
  * TLS certificate validity/issuer/days-left, an HTTPS identity probe (the relay's own `GET /`
  * page -- pinned from the real iroh-relay v1.0.2 binary's response, verified locally during
- * this task), and a REAL iroh connectivity probe via `swift run norma-fake-phone probe-relay
+ * this task), and a REAL iroh connectivity probe via `swift run winter-fake-phone probe-relay
  * --url <url>` (binds an endpoint with ONLY that relay configured and awaits `Endpoint.online()`
  * -- i.e. the relay actually accepted a real iroh client, not just a bare HTTPS GET).
  *
@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const NORMAKIT_DIR = join(HERE, "..", "..", "apple", "NormaKit");
+const WINTERKIT_DIR = join(HERE, "..", "..", "apple", "WinterKit");
 
 const DEFAULT_HOSTS = ["relay-1.yanlinglabs.com", "relay-2.yanlinglabs.com"];
 
@@ -84,8 +84,8 @@ async function checkHTTPS(host: string): Promise<CheckResult> {
  */
 function checkIrohProbe(url: string): CheckResult {
   try {
-    const out = execFileSync("swift", ["run", "norma-fake-phone", "probe-relay", "--url", url], {
-      cwd: NORMAKIT_DIR,
+    const out = execFileSync("swift", ["run", "winter-fake-phone", "probe-relay", "--url", url], {
+      cwd: WINTERKIT_DIR,
       encoding: "utf8",
       timeout: 60_000,
     });

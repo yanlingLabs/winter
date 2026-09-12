@@ -1,10 +1,10 @@
 import SwiftUI
 // mac-chat-parity T7: `SyncConfigSnapshot` — the daemon's model catalogue, which the model/effort
 // chip's two lists are built from.
-import NormaKit
+import WinterKit
 // The composer morph (2026-08-12): `SessionEvent.Question` — what `ComposerQuestionBox` renders
 // when the composer's slot is holding an ask instead of a draft.
-import NormaProtocol
+import WinterProtocol
 
 // MARK: - office-live-ux Job 1: stopping the turn from the composer
 
@@ -76,7 +76,7 @@ func composerEscapeInterrupts(isRunning: Bool, canStop: Bool) -> Bool {
 ///
 /// A property of the HOME, not of the mode: both are set by the call site, and every mode's chrome
 /// uses whichever edge the surface it is mounted on hands it.
-enum NormaComposerStripEdge: Equatable {
+enum WinterComposerStripEdge: Equatable {
     case below
     case above
 }
@@ -92,7 +92,7 @@ enum NormaComposerStripEdge: Equatable {
 /// to render `.above` (cowork was the only strip producer before it, and cowork is unreachable on a
 /// live session) — the one direction with no live evidence behind it deserved a value a test can
 /// read rather than an expression only the screen can check.
-func composerStripStackAlignment(_ edge: NormaComposerStripEdge) -> Alignment {
+func composerStripStackAlignment(_ edge: WinterComposerStripEdge) -> Alignment {
     edge == .below ? .top : .bottom
 }
 
@@ -100,7 +100,7 @@ func composerStripStackAlignment(_ edge: NormaComposerStripEdge) -> Alignment {
 /// protrudes past the composer, never the part the opaque composer covers. The mirror of
 /// `composerStripStackAlignment`: get the two out of step and the row renders behind the composer,
 /// perfectly, invisibly.
-func composerStripContentAlignment(_ edge: NormaComposerStripEdge) -> Alignment {
+func composerStripContentAlignment(_ edge: WinterComposerStripEdge) -> Alignment {
     edge == .below ? .bottom : .top
 }
 
@@ -129,7 +129,7 @@ struct ComposerModelControl {
     /// The model in force — the session's own (with its optimistic overlay) on a live session, the
     /// held pick pre-session. `nil` = no override, i.e. the daemon's live default.
     let model: String?
-    /// The effort in force, on the same terms. May be a Norma-level TIER reported verbatim.
+    /// The effort in force, on the same terms. May be a Winter-level TIER reported verbatim.
     let effort: String?
     /// The daemon's catalogue (`sync.config`). EMPTY is a real answer and never a licence to guess —
     /// see `modelPickerOptions`' own doc.
@@ -168,7 +168,7 @@ struct ComposerModelRow: Equatable {
     let options: [String]
     /// The WIRE effort levels this model accepts. Model-scoped, never mode-scoped.
     let wire: [String]
-    /// The NORMA-LEVEL tiers this mode may select — `["ultra"]` on code, EMPTY everywhere else.
+    /// The WINTER-LEVEL tiers this mode may select — `["ultra"]` on code, EMPTY everywhere else.
     /// The one per-mode thing about this chip (`ComposerChrome.offersClientEffortTiers`).
     let tiers: [String]
     let modelChangeInFlight: Bool
@@ -359,7 +359,7 @@ struct AdvisorModelPickerRow: View {
 ///
 /// What it does NOT own: the suggestion chips and idea list below the new-chat card. Those belong
 /// to an EMPTY page — there is nothing to suggest once a conversation is underway.
-struct NormaComposerCard: View {
+struct WinterComposerCard: View {
     @Binding var text: String
     var onSubmit: () -> Void
 
@@ -370,7 +370,7 @@ struct NormaComposerCard: View {
     /// through it. On a live session it is `.constant`: a session's mode is fixed at creation.
     @Binding var mode: SessionMode
     /// Whether the mode segment can be CHANGED. False on a live session: a session's mode is fixed
-    /// at creation and Norma has no mode-switch, so an interactive segment there would be a control
+    /// at creation and Winter has no mode-switch, so an interactive segment there would be a control
     /// that cannot do what it appears to offer.
     var modeIsSelectable: Bool = true
 
@@ -406,7 +406,7 @@ struct NormaComposerCard: View {
     /// `let` here is for immutability and consistency with `policy`; the requiredness is the type's.
     let model: ComposerModelControl
 
-    var stripEdge: NormaComposerStripEdge = .below
+    var stripEdge: WinterComposerStripEdge = .below
     var placeholder: String = newChatComposerPlaceholder
     /// A trailing line for a mode whose chrome shows one — today only cowork's strip. Empty renders
     /// that strip's controls with nothing after them.
@@ -524,7 +524,7 @@ struct NormaComposerCard: View {
                             // reached the composer" from "Esc reached it and correctly declined",
                             // which are the two live failures worth telling apart. Fires only on an
                             // actual Esc keypress, so it is not a hot path.
-                            OrbDebug.log("NormaComposerCard.onEscape: fired stop="
+                            OrbDebug.log("WinterComposerCard.onEscape: fired stop="
                                          + "\(stop != nil) running=\(stop?.isRunning ?? false)")
                             guard composerEscapeInterrupts(isRunning: stop?.isRunning ?? false,
                                                            canStop: stop != nil) else { return false }
@@ -643,7 +643,7 @@ struct NormaComposerCard: View {
     ///
     /// **Where the model slot goes was not settled by "it is shared", and Task 5's own report was
     /// corrected on this by its review:** the single slot covers model AND effort, and effort's
-    /// Norma-level tiers are gated to code sessions (`clientEffortEligible`, `settings.ts:89-91`,
+    /// Winter-level tiers are gated to code sessions (`clientEffortEligible`, `settings.ts:89-91`,
     /// enforced by `assertEffortSelectable`, `ipc/server.ts:476-489`), so the slot's CONTENTS are
     /// mode-dependent even though the slot itself is not. Wiring it here unconditionally would ship
     /// an `ultra` row on chat that RPC-errors; filtering it here would drag a mode conditional back
@@ -698,7 +698,7 @@ struct NormaComposerCard: View {
             case .stop:
                 // The SAME footprint and the same filled slot as send — the button does not move or
                 // resize when a turn starts, only its glyph and its verb change. `stop.fill` inside
-                // the accent square is the macOS-native stop shape (`NormaFieldView`'s own "⏹
+                // the accent square is the macOS-native stop shape (`WinterFieldView`'s own "⏹
                 // stopped" caption already speaks it) rather than a second, differently-coloured
                 // control appearing beside the first.
                 Button(action: { stop?.onStop() }) {

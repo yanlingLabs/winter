@@ -91,7 +91,7 @@ struct TagClose {
 /// error, not a runtime condition.
 private func compile(_ pattern: String) -> NSRegularExpression {
     guard let re = try? NSRegularExpression(pattern: pattern) else {
-        preconditionFailure("NormaChatKit: invalid built-in regex \(pattern)")
+        preconditionFailure("WinterChatKit: invalid built-in regex \(pattern)")
     }
     return re
 }

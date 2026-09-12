@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
-import type { NewSessionEvent } from "@norma/protocol";
+import type { NewSessionEvent } from "@winter/protocol";
 import { ToolRegistry, type ToolContext } from "../../src/agent/tools/registry";
 import { registerBrowserTool } from "../../src/agent/tools/browser";
 import { registerDocsTool } from "../../src/agent/tools/docs";
@@ -177,7 +177,7 @@ describe("P8b-20: docs emits the identical panel sequence on both doors", () => 
 
     expect(registryOut.isError).toBe(false);
     expect(capabilityOut.isError).toBe(false);
-    // Office mints no tab — `panel_command` only (Norma map §3.1).
+    // Office mints no tab — `panel_command` only (Winter map §3.1).
     expect(viaRegistryRec.events.map((e) => e.type)).toEqual(["panel_command"]);
     expect(normalize(viaCapabilityRec.events)).toEqual(normalize(viaRegistryRec.events));
     expect(capabilityOut.content).toEqual([{ type: "text", text: registryOut.output }]);

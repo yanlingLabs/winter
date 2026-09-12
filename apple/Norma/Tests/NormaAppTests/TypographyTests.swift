@@ -1,7 +1,7 @@
 import XCTest
 import AppKit
 import SwiftUI
-@testable import Norma
+@testable import Winter
 
 /// The 2026-08-13 typography pass — `docs/brand.md` § 4 is the type source of truth and this
 /// suite is its enforcement, three fences deep:
@@ -513,7 +513,7 @@ final class TypographyTests: XCTestCase {
         // the component's bound default is what reaches the pill — and its placeholder
         // renders at the same bound role.
         let fieldSource = try String(
-            contentsOf: sourceRoot().appendingPathComponent("FieldKit/NormaFieldView.swift"),
+            contentsOf: sourceRoot().appendingPathComponent("FieldKit/WinterFieldView.swift"),
             encoding: .utf8)
         let fieldCode = fieldSource.components(separatedBy: "\n")
             .filter { !$0.drop(while: { $0 == " " || $0 == "\t" }).hasPrefix("//") }

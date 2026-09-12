@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
-import NormaProtocol
-@testable import NormaChatKit
+import WinterProtocol
+@testable import WinterChatKit
 
 /// `ChatEngine` — the phone's chat turn-loop. Every test drives a SCRIPTED provider; the tool tests
 /// drive a `ScriptedChatHTTP`. None touches the network or a real model.
@@ -366,7 +366,7 @@ final class ChatEngineTests: XCTestCase {
 
     // MARK: - THE FIXTURE PROOF (spec §Component 1): the two engines share ONE event dialect
 
-    func testEveryTsFixtureRoundTripsThroughNormaProtocolCoders() throws {
+    func testEveryTsFixtureRoundTripsThroughWinterProtocolCoders() throws {
         let urls = EventFixtures.urls()
         XCTAssertGreaterThanOrEqual(urls.count, 40, "expected the TS-generated event fixtures — run `pnpm protocol:generate`")
         let decoder = JSONDecoder()
@@ -381,7 +381,7 @@ final class ChatEngineTests: XCTestCase {
 
     func testEngineEmittedEventsAreValidInTheSharedDialect() async throws {
         // Run turns that emit every renderable variant the engine produces, then prove each one
-        // survives an encode→decode through the SAME NormaProtocol coders the daemon's events use.
+        // survives an encode→decode through the SAME WinterProtocol coders the daemon's events use.
         let searchHTTP = ScriptedChatHTTP([.json(["results": [["title": "T", "url": "https://ex.com", "text": "x"]]])])
         let broker = QuestionBroker()
         let provider = ScriptedChatProvider([

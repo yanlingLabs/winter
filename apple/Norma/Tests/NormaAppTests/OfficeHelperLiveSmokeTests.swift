@@ -1,21 +1,21 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Office Stage A Task 2 — the one test in this task that touches the REAL, compiled
-/// `NormaOfficeHelper` binary rather than the test fixture (`OfficeSupervisorTests` uses the
+/// `WinterOfficeHelper` binary rather than the test fixture (`OfficeSupervisorTests` uses the
 /// fixture for everything else, deliberately — see that file's header). Proves the actual shipped
 /// process binds, accepts, handshakes, answers a ping, and idle-exits, against a scratch state
-/// directory — never `~/.norma*`, never the user's app.
+/// directory — never `~/.winter*`, never the user's app.
 ///
 /// Skips (does not fail) if the real helper was not built into this run's `BUILT_PRODUCTS_DIR` —
 /// the same shape `EditorPlumbingTests`' `bridge-protocol.js` pin uses (`XCTSkipIf`, with a
 /// message naming exactly what's missing): a live gate that goes live the moment the artifact
 /// exists, not a hard requirement of every possible test invocation (e.g. a target list that
-/// doesn't include `NormaOfficeHelper`).
+/// doesn't include `WinterOfficeHelper`).
 ///
 /// Task 3 update: this binary now boots REAL LibreOfficeKit unconditionally (main.swift's boot
 /// sequencing runs before the socket even binds) — this test spawns the STANDALONE build product
-/// (`BUILT_PRODUCTS_DIR/NormaOfficeHelper`, not the app-embedded copy; `OfficeHelperLiveTests`'
+/// (`BUILT_PRODUCTS_DIR/WinterOfficeHelper`, not the app-embedded copy; `OfficeHelperLiveTests`'
 /// `.officeLive` class owns the embedded-root proof), which has no `Contents/Resources/LibreOffice`
 /// sibling of its own — so it now ALSO needs `--lok-root` pointing at the vendor tree, and is
 /// ALSO vendor-gated. `lokVersion` is no longer the Stage-A placeholder (one of the sentinel's 4
@@ -47,13 +47,13 @@ final class OfficeHelperLiveSmokeTests: XCTestCase {
         return true
     }
 
-    /// `#filePath` for this file is `<repoRoot>/apple/Norma/Tests/NormaAppTests/OfficeHelperLiveSmokeTests.swift`
-    /// — five `deletingLastPathComponent()` hops strip the filename, `NormaAppTests`, `Tests`,
-    /// `Norma`, `apple`, leaving `<repoRoot>` (same climbing pattern as `CliLauncher.defaultRepoRoot`).
+    /// `#filePath` for this file is `<repoRoot>/apple/Winter/Tests/WinterAppTests/OfficeHelperLiveSmokeTests.swift`
+    /// — five `deletingLastPathComponent()` hops strip the filename, `WinterAppTests`, `Tests`,
+    /// `Winter`, `apple`, leaving `<repoRoot>` (same climbing pattern as `CliLauncher.defaultRepoRoot`).
     private static var vendorProductSetRoot: URL {
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0..<5 { url = url.deletingLastPathComponent() }
-        return url.appendingPathComponent("apple/Norma/vendor/libreoffice/product-set", isDirectory: true)
+        return url.appendingPathComponent("apple/Winter/vendor/libreoffice/product-set", isDirectory: true)
     }
     /// Office Stage B Task 1 — same repo-root climb as `vendorProductSetRoot` above, for the
     /// checked-in seatbelt profile SOURCE. This test spawns the STANDALONE `BUILT_PRODUCTS_DIR`
@@ -67,14 +67,14 @@ final class OfficeHelperLiveSmokeTests: XCTestCase {
     private static var sandboxProfilePath: URL {
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0..<5 { url = url.deletingLastPathComponent() }
-        return url.appendingPathComponent("apple/Norma/Sources/OfficeHelper/office-helper.sb", isDirectory: false)
+        return url.appendingPathComponent("apple/Winter/Sources/OfficeHelper/office-helper.sb", isDirectory: false)
     }
 
     func testRealHelperBindsHandshakesPingsAndIdleExits() async throws {
         let helperURL = Bundle.main.bundleURL.deletingLastPathComponent()
-            .appendingPathComponent("NormaOfficeHelper")
+            .appendingPathComponent("WinterOfficeHelper")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(helperURL.path)) — add it to the scheme's build list and re-run. "
                         + "This pin goes live the moment it's built.")
         // Task 3: this standalone build product has no Contents/Resources/LibreOffice sibling of

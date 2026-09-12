@@ -5,8 +5,8 @@
 // SESSION and handed to that session's own `Options.mcpServers`, not to the handle-wide
 // construction-time `capabilities` list — see `server.ts`'s header for the measurement behind that
 // (there is no per-call session identity on `callTool`, so the identity has to be a closure).
-export { capabilityToolName, capabilityServerName, NORMA_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS } from "./names";
-export type { CapabilityServerKey, CapabilityToolFacts, NormaCapabilityToolName, SessionMode } from "./names";
+export { capabilityToolName, capabilityServerName, WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS } from "./names";
+export type { CapabilityServerKey, CapabilityToolFacts, WinterCapabilityToolName, SessionMode } from "./names";
 export type { CapabilitySession, CapabilityServerSpec } from "./server";
 export { capabilityServer } from "./server";
 export { sessionsCapability, type SessionsCapabilityDeps } from "./sessions";
@@ -19,7 +19,7 @@ export { lspCapability, type LspCapabilityDeps } from "./lsp";
 export { externalCapability, type ExternalCapabilityDeps, type ExternalToolSource } from "./external";
 
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
-import { NORMA_BRAND } from "../runtime-sdk/brand";
+import { CORE_BRAND } from "../runtime-sdk/brand";
 import { browserCapability, type BrowserCapabilityDeps } from "./browser";
 import { computerCapability, type ComputerCapabilityDeps } from "./computer";
 import { officeCapability, type OfficeCapabilityDeps } from "./office";
@@ -117,11 +117,11 @@ export function buildCapabilitiesFor(
  * The router's capability-name collision guard, re-provided for the path that no longer has it (N2).
  *
  * `assertNoCapabilityCollision` inside the router only runs when the HANDLE carries capabilities,
- * and P8b-36 moved Norma's to each session's own `Options.mcpServers` with the handle's list empty.
+ * and P8b-36 moved Winter's to each session's own `Options.mcpServers` with the handle's list empty.
  * So the router no longer refuses a same-named server appearing beside a capability — and a
- * settings- or plugin-contributed MCP server called `norma__browser` merged into the same record
+ * settings- or plugin-contributed MCP server called `winter__browser` merged into the same record
  * would silently shadow the daemon-owned one, or be shadowed by it, depending on spread order.
- * Either way the model would be handed a `browser` that is not Norma's, under Norma's name.
+ * Either way the model would be handed a `browser` that is not Winter's, under Winter's name.
  *
  * Task 16 calls this whenever it merges ANY other server into the session's record. It throws
  * rather than dropping: a collision is a configuration fault with two plausible intents and no safe
@@ -129,13 +129,13 @@ export function buildCapabilitiesFor(
  */
 export class CapabilityNameCollisionError extends Error {
   readonly code = "capability_name_collision" as const;
-  /** The colliding server name — a daemon-owned `norma__<key>` name, or the brand name itself. */
+  /** The colliding server name — a daemon-owned `winter__<key>` name, or the brand name itself. */
   readonly server: string;
   constructor(server: string, reason: "owned" | "brand" = "owned") {
     super(
       reason === "brand"
-        ? `\`${server}\` is Norma's own MCP namespace (the brand's \`mcpServerName\`): a server keyed ` +
-          `by it would mint \`mcp__${server}__<tool>\` names that Norma maps back onto its OWN tool ` +
+        ? `\`${server}\` is Winter's own MCP namespace (the brand's \`mcpServerName\`): a server keyed ` +
+          `by it would mint \`mcp__${server}__<tool>\` names that Winter maps back onto its OWN tool ` +
           `classes and names — so the door refuses the key rather than let a foreign server borrow them`
         : `\`${server}\` is the name of a daemon-owned capability server for this session, and the ` +
           `caller's own \`mcpServers\` already carries it — one of the two would silently not be ` +
@@ -152,13 +152,13 @@ export function assertNoCapabilityCollision(
 ): void {
   if (mcpServers === undefined) return;
   // Fix-wave re-review N-1: the BRAND NAME is refused too. A configured server keyed exactly
-  // `norma` (`NORMA_BRAND.mcpServerName`) registers its tools as `mcp__norma__<tool>`; a tool it
+  // `winter` (`CORE_BRAND.mcpServerName`) registers its tools as `mcp__winter__<tool>`; a tool it
   // names `web__web_fetch` or `lsp__lsp` is then the identical string `tool-names.ts`'s
-  // `normaToolNameFor` strips to Norma's OWN `web_fetch`/`lsp` — Norma's gate class (NETWORK /
-  // READ_ONLY, silent under every policy including `plan`) and Norma's name on the card and the
-  // Mac's tool rows, for a tool that is not Norma's. The router refuses that name for a capability
+  // `hostToolNameFor` strips to Winter's OWN `web_fetch`/`lsp` — Winter's gate class (NETWORK /
+  // READ_ONLY, silent under every policy including `plan`) and Winter's name on the card and the
+  // Mac's tool rows, for a tool that is not Winter's. The router refuses that name for a capability
   // server for the same reason; this guard is the one door the configured servers pass.
-  if (Object.hasOwn(mcpServers, NORMA_BRAND.mcpServerName)) throw new CapabilityNameCollisionError(NORMA_BRAND.mcpServerName, "brand");
+  if (Object.hasOwn(mcpServers, CORE_BRAND.mcpServerName)) throw new CapabilityNameCollisionError(CORE_BRAND.mcpServerName, "brand");
   const owned = typeof (ownedNames as Iterable<string>)[Symbol.iterator] === "function"
     ? (ownedNames as Iterable<string>)
     : Object.keys(ownedNames as CapabilityServerRecord);

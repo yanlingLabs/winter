@@ -1,8 +1,8 @@
 import AppKit
-import NormaKit
-import NormaProtocol
+import WinterKit
+import WinterProtocol
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// office-agent-tools T5 — live drills for `sheets format` against the REAL helper, REAL vendored
 /// LibreOffice, and REAL fixtures. Skips cleanly (never fails) when the vendor engine or the built
@@ -33,16 +33,16 @@ final class OfficeSheetsFormatTests: XCTestCase {
         return url
     }
     private static var vendorProductSetRoot: URL {
-        repoRoot.appendingPathComponent("apple/Norma/vendor/libreoffice/product-set", isDirectory: true)
+        repoRoot.appendingPathComponent("apple/Winter/vendor/libreoffice/product-set", isDirectory: true)
     }
     private static var fixturesRoot: URL {
-        repoRoot.appendingPathComponent("apple/Norma/Tests/NormaAppTests/Fixtures/office", isDirectory: true)
+        repoRoot.appendingPathComponent("apple/Winter/Tests/WinterAppTests/Fixtures/office", isDirectory: true)
     }
     private static var sandboxProfilePath: URL {
-        repoRoot.appendingPathComponent("apple/Norma/Sources/OfficeHelper/office-helper.sb", isDirectory: false)
+        repoRoot.appendingPathComponent("apple/Winter/Sources/OfficeHelper/office-helper.sb", isDirectory: false)
     }
     private static var helperURL: URL {
-        Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
     }
 
     private var scratchDirs: [URL] = []
@@ -63,7 +63,7 @@ final class OfficeSheetsFormatTests: XCTestCase {
 
     private func requireLiveEngine() throws {
         try XCTSkipIf(!FileManager.default.fileExists(atPath: Self.helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(Self.helperURL.path)) — add it to the scheme's build list and re-run.")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: Self.vendorProductSetRoot.appendingPathComponent("Frameworks").path),
                       "LibreOffice vendor tree not present at \(Self.vendorProductSetRoot.path) — run "
@@ -823,7 +823,7 @@ final class OfficeSheetsFormatTests: XCTestCase {
                       "this document was ADOPTED (the drill opened it first), so the adopted branch's "
                           + "own sentence is the correct one — the opened branch's 'nothing persisted' "
                           + "would be a lie about a document that is still open: \(sent)")
-        XCTAssertFalse(sent.result?.contains("discarded when Norma closed the document") == true, "\(sent)")
+        XCTAssertFalse(sent.result?.contains("discarded when Winter closed the document") == true, "\(sent)")
 
         // And the disclosure is TRUE against the bytes: the broker throws before its save-through, so
         // nothing reached the file even though phase 1 dispatched into the live document.
@@ -834,7 +834,7 @@ final class OfficeSheetsFormatTests: XCTestCase {
         // === The SECOND half of the adopted branch's promise, and the honest reading of it.
         //
         // The sentence is CONDITIONAL — "**If** an earlier attribute in this call already applied
-        // ... the tab is dirty, and Norma will refuse further writes." Measured here rather than
+        // ... the tab is dirty, and Winter will refuse further writes." Measured here rather than
         // assumed: on THIS vector the antecedent turns out to be FALSE. Phase 1 verified its anchor
         // (XFC1 is reachable) but the bold dispatch left the document unmodified — the engine's own
         // dirty flag never rises — so nothing partial actually happened, the conditional holds
@@ -860,7 +860,7 @@ final class OfficeSheetsFormatTests: XCTestCase {
                                       sessionId: "S1", commandId: "pcmd-after-partial"), through: host)
         if dirtyAfterPartial {
             XCTAssertFalse(next.ok, "the document IS dirty after the partial, so the disclosure's own "
-                               + "'Norma will refuse further writes' must hold: \(next)")
+                               + "'Winter will refuse further writes' must hold: \(next)")
             XCTAssertTrue(next.result?.contains("unsaved") == true || next.result?.contains("dirty") == true, "\(next)")
         } else {
             XCTAssertTrue(next.ok, "nothing applied in phase 1 (the document is not dirty), so the "

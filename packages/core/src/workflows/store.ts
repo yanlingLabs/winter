@@ -34,8 +34,8 @@ const DESCRIPTION_RE = /(?:^|[{,\s])description\s*:\s*(["'`])((?:\\.|(?!\1).)*)\
  *  feature's entire raison d'être is a sandboxed subprocess for a script's actual body; running any
  *  fragment of a workflow file — even just its meta block — in the unsandboxed daemon defeats that,
  *  since `list()`/`resolve()`/`read()` (and thus this function) fire passively, e.g. whenever the
- *  Workflows pane opens or `norma workflow list` runs, on every workflow file the trust gate would
- *  ever surface (a trusted project's `.norma/workflows/*.js`, or ANY `~/.norma/workflows/*.js`) —
+ *  Workflows pane opens or `winter workflow list` runs, on every workflow file the trust gate would
+ *  ever surface (a trusted project's `.winter/workflows/*.js`, or ANY `~/.winter/workflows/*.js`) —
  *  there is no opportunity for a human to review the file first. Any failure to find a well-formed
  *  `meta`/`description` (no `meta`, unbalanced braces, a computed/interpolated/missing description)
  *  yields "" rather than throwing or evaluating anything: a missing or malformed `meta` block must
@@ -96,23 +96,23 @@ function parseWorkflowFile(path: string, fallbackName: string): { name: string; 
 
 /**
  * Resolves a workflow script by name from two sources, closest-wins: a trusted project's
- * `<cwd>/.norma/workflows/<name>.js`, then `<normaHome>/workflows/<name>.js`. Unlike
+ * `<cwd>/.winter/workflows/<name>.js`, then `<winterHome>/workflows/<name>.js`. Unlike
  * OutputStyleStore (agent/output-styles.ts) there are no built-ins to fall back to — an unresolved
  * name simply resolves to null. Mirrors OutputStyleStore's trust-gated project-dir discovery and
  * slug-guard exactly, adapted for the `.js` extension and the lack of built-ins. Never throws,
  * except `save()`, which rejects a malformed name before it ever reaches a filesystem call.
  */
 export class WorkflowStore {
-  constructor(private readonly deps: { normaHome: string; trust: Pick<TrustStore, "isTrusted"> }) {}
+  constructor(private readonly deps: { winterHome: string; trust: Pick<TrustStore, "isTrusted"> }) {}
 
   /** Shared traversal for resolve()/read(): project[trusted] > user. Slug-guarded — see SLUG_RE. */
   private resolveInternal(name: string, cwd: string | null): { name: string; description: string; source: string; body: string } | null {
     if (!SLUG_RE.test(name)) return null;
     if (cwd && this.deps.trust.isTrusted(cwd)) {
-      const p = parseWorkflowFile(join(cwd, ".norma", "workflows", `${name}.js`), name);
+      const p = parseWorkflowFile(join(cwd, ".winter", "workflows", `${name}.js`), name);
       if (p) return { ...p, source: "project" };
     }
-    const u = parseWorkflowFile(join(this.deps.normaHome, "workflows", `${name}.js`), name);
+    const u = parseWorkflowFile(join(this.deps.winterHome, "workflows", `${name}.js`), name);
     if (u) return { ...u, source: "user" };
     return null;
   }
@@ -143,19 +143,19 @@ export class WorkflowStore {
         if (p) out.set(p.name, { description: p.description, source });
       }
     };
-    scan(join(this.deps.normaHome, "workflows"), "user");
-    if (cwd && this.deps.trust.isTrusted(cwd)) scan(join(cwd, ".norma", "workflows"), "project"); // project overrides user
+    scan(join(this.deps.winterHome, "workflows"), "user");
+    if (cwd && this.deps.trust.isTrusted(cwd)) scan(join(cwd, ".winter", "workflows"), "project"); // project overrides user
     return [...out].map(([name, v]) => ({ name, description: v.description, source: v.source }));
   }
 
-  /** Writes a run's script to `<normaHome>/workflows/<name>.js` (creating the directory if it
+  /** Writes a run's script to `<winterHome>/workflows/<name>.js` (creating the directory if it
    *  doesn't exist yet). Slug-guarded — same regex/rationale as resolve(); rejected BEFORE any
    *  filesystem call, since `name` here can come from a tool-call argument (the Workflow tool's
    *  `name` param) just as readily as from a human. Throws on an invalid name, rather than
    *  returning a result object — callers are expected to validate/catch, not silently no-op. */
   save(name: string, source: string): void {
     if (!SLUG_RE.test(name)) throw new Error(`invalid workflow name: "${name}"`);
-    const dir = join(this.deps.normaHome, "workflows");
+    const dir = join(this.deps.winterHome, "workflows");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, `${name}.js`), source);
   }

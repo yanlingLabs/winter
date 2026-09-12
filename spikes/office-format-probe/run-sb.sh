@@ -12,7 +12,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-ROOT="$REPO/apple/Norma/vendor/libreoffice/product-set"
+ROOT="$REPO/apple/Winter/vendor/libreoffice/product-set"
 STATE="${OFP_SB_STATE:-/tmp/ofp-sb-state}"
 
 rm -rf "$STATE"
@@ -30,6 +30,6 @@ cat > "$STATE/fc/fonts.conf" <<EOF
 </fontconfig>
 EOF
 export FONTCONFIG_FILE="$STATE/fc/fonts.conf"
-export OFP_SANDBOX_PROFILE="$REPO/apple/Norma/Sources/OfficeHelper/office-helper.sb"
+export OFP_SANDBOX_PROFILE="$REPO/apple/Winter/Sources/OfficeHelper/office-helper.sb"
 export OFP_SANDBOX_STATE="$STATE"
 exec "$HERE/out/office-format-probe" "$ROOT/Frameworks" "$STATE/profile" "$@"

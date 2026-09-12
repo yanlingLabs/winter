@@ -6,7 +6,7 @@ import Foundation
 /// it -- never in this repo, never anywhere else.
 ///
 /// `RemoteAccessCoordinator` verifies the bundled `relay-config.signed.json` app resource against
-/// EXACTLY this key (`RelayConfigStore.accept`, NormaProtocol) before trusting ANY relay URL from
+/// EXACTLY this key (`RelayConfigStore.accept`, WinterProtocol) before trusting ANY relay URL from
 /// it -- a config that doesn't verify against this key (wrong signature, or a version that
 /// doesn't strictly exceed whatever was last accepted) is rejected outright and the app falls
 /// back to `relays: []` (direct-only), never a half-trusted partial config.
@@ -18,7 +18,7 @@ public enum RelayConfigTrust {
     // Generated ONCE via `bun scripts/sign-relay-config.ts --generate` (SP2b Task 6 Step 3) --
     // printed to stdout at generation time, never re-derivable from anything in this repo (the
     // private half lives only in the generating machine's login Keychain). Matches the `publicKey`
-    // field inside the committed `apple/Norma/Resources/relay-config.signed.json` /
+    // field inside the committed `apple/Winter/Resources/relay-config.signed.json` /
     // `infra/relay/relay-config.signed.json`.
     public static let productionPublicKey = Data(
         base64Encoded: "BVlZ2wxJtDMWXo+9O8SE/6F9/+ggV5yhE0mL+EuSb5Y="

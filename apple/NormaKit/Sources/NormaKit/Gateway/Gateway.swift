@@ -1,12 +1,12 @@
 import Foundation
-import NormaProtocol
-import NormaSessionKit
+import WinterProtocol
+import WinterSessionKit
 
 /// Remote Gateway sub-project, Task 5 (the capstone): terminate a remote (phone) transport,
 /// validate envelopes, bridge to the daemon as the least-privileged `remote` principal, and
 /// orchestrate resume/replay + the gateway-side allowlist.
 ///
-/// **Design note (load-bearing for SP3):** the gateway keeps exactly ONE daemon `NormaClient` per
+/// **Design note (load-bearing for SP3):** the gateway keeps exactly ONE daemon `WinterClient` per
 /// paired phone (keyed by `ClientHello.clientInstanceID`) and does NOT tear it down when the
 /// phone's transport connection closes — only a pairing revocation would (out of scope for SP1,
 /// no revocation exists yet). This lets the daemon's per-connection command dedup (Task 2) and
@@ -27,7 +27,7 @@ import NormaSessionKit
 /// `PhoneSession.liveConn`'s own doc comment for the full account.
 ///
 /// **Transparent relay for `commandId`:** the gateway forwards a phone's `rpcRequest` payload
-/// (including any top-level `commandId`) UNCHANGED to the daemon — see `NormaClient.request
+/// (including any top-level `commandId`) UNCHANGED to the daemon — see `WinterClient.request
 /// (_:params:commandId:)`. It never dedups a repeat itself; the daemon does (Task 2). This
 /// layering is deliberate (task brief's own "deviations a reviewer should NOT flag" section) —
 /// do not "optimize" by deduping here.
@@ -92,7 +92,7 @@ public actor Gateway {
     private static let maxSessions = 32
 
     private let listener: RemoteListener
-    private let daemonFactory: @Sendable () -> NormaClient
+    private let daemonFactory: @Sendable () -> WinterClient
     /// This Mac's identity, stamped into every outgoing `WireEnvelope.hostID`/`ServerHello.hostID`
     /// — one value for the whole gateway (unlike `pairingEpoch`, which is per-phone).
     private let hostID: String
@@ -127,13 +127,13 @@ public actor Gateway {
     private var peerToClients: [String: Set<String>] = [:]
 
     /// `RemoteHost` (the composition root) constructs the real thing:
-    /// `Gateway(listener: PairingRouter(...), daemonFactory: { NormaClient(makeTransport: {
+    /// `Gateway(listener: PairingRouter(...), daemonFactory: { WinterClient(makeTransport: {
     /// UnixSocketTransport(...) }, token: try KeychainToken.readRemoteToken(), clientName:
     /// "iphone-gateway") }, hostID: macEndpointID, directory: pairingStore)` — nothing else calls
     /// this initializer outside of tests.
     public init(
         listener: RemoteListener,
-        daemonFactory: @escaping @Sendable () -> NormaClient,
+        daemonFactory: @escaping @Sendable () -> WinterClient,
         hostID: String,
         directory: any PairingDirectory,
         rateLimit: (perSec: Int, burst: Int) = (perSec: 50, burst: 200),
@@ -162,7 +162,7 @@ public actor Gateway {
         // a revoke races the router's own accept-time check. A non-member gets the SAME
         // `sendNotPairedRejection` a phone would see from the router — which peeks the first frame
         // and gives a SESSION dialer a `WireEnvelope` error carrying `HandshakeRejection(not_paired)`
-        // (a `NormaSessionClient` decodes it into a typed `.handshakeRejected`), a PAIRING dialer the
+        // (a `WinterSessionClient` decodes it into a typed `.handshakeRejected`), a PAIRING dialer the
         // raw JSON `PairRejected` (SP3.1 Task 1).
         guard let rec = await directory.record(forPeer: conn.peerID) else {
             await sendNotPairedRejection(conn)
@@ -279,7 +279,7 @@ public actor Gateway {
         // on ANOTHER connection's stream. Raising it unconditionally meant a pool shell handshake
         // could flush a code session's queued live events onto that session's wire in the MIDDLE of
         // its `session.attach` replay flush, and lower the hold behind it. The phone does not catch
-        // that reorder on the attach path — `NormaSessionClient` only buffers while `replaying`,
+        // that reorder on the attach path — `WinterSessionClient` only buffers while `replaying`,
         // which is set from a `ServerHello` verdict, and the attach rpc returns just `lastSeq` — so
         // the higher-seq live events advance the durable cursor and the pending lower-seq replay
         // frames are dropped as duplicates: silent, permanent transcript loss. Skipping the raise
@@ -421,7 +421,7 @@ public actor Gateway {
     // MARK: - Revocation (SP2a gate G5; SP2b Task 4 peer-level fan-out)
 
     /// Tears down a paired phone's gateway footprint: cancels its persistent daemon-event pump,
-    /// closes its daemon `NormaClient` (releasing the `remote` connection), CLOSES its current
+    /// closes its daemon `WinterClient` (releasing the `remote` connection), CLOSES its current
     /// transport connection (if any — SP2a Task 4 E2E fix, see below), drops its `PhoneSession`,
     /// and records the `clientInstanceID` as revoked so both any in-flight live loop AND a future
     /// reconnect are refused. Idempotent; safe to call for an unknown id (the id is still marked
@@ -562,7 +562,7 @@ public actor Gateway {
         }
     }
 
-    private func routeDaemonEvent(_ ev: NormaEvent, session: PhoneSession) async {
+    private func routeDaemonEvent(_ ev: WinterEvent, session: PhoneSession) async {
         guard case .session(let e) = ev else { return }
 
         // A `StreamResume`/live `session.attach` handshake is in flight for this session — feed
@@ -647,7 +647,7 @@ public actor Gateway {
         // Pre-arm the collector BEFORE sending `session.attach` — the daemon (real or faked) may
         // emit the replay's `event` lines strictly before the attach's own RPC response (hub.ts's
         // `hub.attach` delivers synchronously, before the handler returns), so the collector must
-        // already be registered when those lines land — mirrors `NormaClient.attach()`'s own
+        // already be registered when those lines land — mirrors `WinterClient.attach()`'s own
         // "seed lastSeq before the request" trick, one level up.
         session.waiterGeneration += 1
         let myGeneration = session.waiterGeneration
@@ -692,7 +692,7 @@ public actor Gateway {
 
     /// Waits until the collector (pre-armed by `attachAndReplay`) has accumulated every event up
     /// to `target` (persisted per-session seq is gapless, so "seq >= target" is exactly "done").
-    /// Bounded by a watchdog (mirrors `NormaClient.request`'s own timeout pattern) so a
+    /// Bounded by a watchdog (mirrors `WinterClient.request`'s own timeout pattern) so a
     /// misbehaving/malformed daemon feed degrades to "replay whatever arrived" rather than a hang.
     /// `generation` (from `session.waiterGeneration`) guards against a STALE watchdog for an
     /// abandoned handshake clobbering a NEWER attach for the same session that starts within the
@@ -891,7 +891,7 @@ public actor Gateway {
 
     /// SP3.1 Task 1: a HANDSHAKE refusal, carried as a structured `HandshakeRejection` payload inside
     /// an `.error` frame — distinct from `sendGatewayError`'s JSON-RPC-error body. The difference is
-    /// load-bearing: a `NormaSessionClient` parked on its `helloAck` recognizes THIS payload and
+    /// load-bearing: a `WinterSessionClient` parked on its `helloAck` recognizes THIS payload and
     /// throws a typed `.handshakeRejected(code:)` (which the app maps to its honest `.revoked`
     /// state), whereas the id-less `sendGatewayError` frame its handshake never even looked at
     /// collapsed every refusal to a bare close / `.macUnavailable`. Every refusal site in `handle`
@@ -933,7 +933,7 @@ private final class PhoneSession: @unchecked Sendable {
     /// The `ClientHello.clientInstanceID` this session is keyed by — carried on the object so
     /// revocation/inspection paths can round-trip it without a reverse lookup.
     let clientInstanceID: String
-    let daemonClient: NormaClient
+    let daemonClient: WinterClient
     /// Inbound-rpcRequest token bucket (SP2a gate G4a), one per phone — a flood from one phone
     /// never spends another's budget.
     let rateLimiter: RateLimiter
@@ -942,7 +942,7 @@ private final class PhoneSession: @unchecked Sendable {
     var revoked = false
     var connected = false
 
-    /// The one session currently "live" for this phone. `NormaClient` supports exactly one
+    /// The one session currently "live" for this phone. `WinterClient` supports exactly one
     /// attach at a time (mirroring the daemon's own hub move-semantics re-attach), so only the
     /// MOST RECENT `attachAndReplay` call's session is truly live-forwarded afterward — an
     /// inherent SP1/single-daemon-connection limitation; true concurrent multi-session live
@@ -1059,7 +1059,7 @@ private final class PhoneSession: @unchecked Sendable {
     /// `evictIfNeeded()` sorts disconnected sessions by, oldest first.
     var lastActiveAt: TimeInterval = 0
 
-    init(clientInstanceID: String, daemonClient: NormaClient, rateLimiter: RateLimiter) {
+    init(clientInstanceID: String, daemonClient: WinterClient, rateLimiter: RateLimiter) {
         self.clientInstanceID = clientInstanceID
         self.daemonClient = daemonClient
         self.rateLimiter = rateLimiter

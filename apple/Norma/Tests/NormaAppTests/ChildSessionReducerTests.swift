@@ -1,6 +1,6 @@
 import XCTest
-@testable import Norma
-import NormaProtocol
+@testable import Winter
+import WinterProtocol
 
 /// Dispatch (Phase 7), Task 7: the reducer's `state.children: [ChildItem]` — child SESSIONS
 /// mirrored via `child_update` events into the dispatch session's own stream. Sibling suite to

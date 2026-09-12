@@ -1,6 +1,6 @@
-import NormaKit
+import WinterKit
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// editor-product Task 7: `PanelFilesTabModel` — the glue between a session's rows and its
 /// `FileTreeModel`, and the registry that keeps one per tab id.
@@ -43,9 +43,9 @@ final class PanelFilesTabTests: XCTestCase {
     /// (`ShellSessionHost.openPanelTab`'s own doc: "a named session needs neither the attach read
     /// nor the auto-create"), so this suite's harness is lighter than `ShellSessionHostTests`' own
     /// (no `ShellTransportFactory`, no handshake dance).
-    private func connectedManagementClient() async -> (client: NormaClient, transport: ShellScriptedTransport) {
+    private func connectedManagementClient() async -> (client: WinterClient, transport: ShellScriptedTransport) {
         let transport = ShellScriptedTransport()
-        let client = NormaClient(makeTransport: { transport }, token: "tok", clientName: "orb")
+        let client = WinterClient(makeTransport: { transport }, token: "tok", clientName: "orb")
         let connectTask = Task { try? await client.connect() }
         await feedWaitUntil { transport.sent.count >= 1 }
         let hello = feedLineJSON(transport.sent[0])

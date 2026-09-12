@@ -1,15 +1,15 @@
 import Foundation
 import XCTest
-import NormaProtocol
-@testable import NormaChatKit
+import WinterProtocol
+@testable import WinterChatKit
 
 /// `LocalEventStore` / `LocalChatSession` — the phone's own append-only chat log. Every test uses a
-/// throwaway temp directory (never `~/.norma`); nothing here touches a network or a real model.
+/// throwaway temp directory (never `~/.winter`); nothing here touches a network or a real model.
 final class LocalEventStoreTests: XCTestCase {
     private var dir: URL!
 
     override func setUpWithError() throws {
-        dir = FileManager.default.temporaryDirectory.appendingPathComponent("norma-les-\(UUID().uuidString)")
+        dir = FileManager.default.temporaryDirectory.appendingPathComponent("winter-les-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     }
     override func tearDownWithError() throws { try? FileManager.default.removeItem(at: dir) }
@@ -161,16 +161,16 @@ final class LocalEventStoreTests: XCTestCase {
 
     /// The checkpoint line's field names come from the TS-generated protocol fixture, not from this
     /// test's imagination: `packages/protocol/scripts/generate.ts` emits `checkpoint.json`, the same
-    /// artifact `NormaProtocol`'s round-trip suite pins. Re-stamping its `seq`/`sessionId`/`uptoSeq`
+    /// artifact `WinterProtocol`'s round-trip suite pins. Re-stamping its `seq`/`sessionId`/`uptoSeq`
     /// keeps the SHAPE generated and only the coordinates local — so a protocol rename breaks this
     /// test instead of silently turning the fold back into a no-op.
     private func checkpointLine(sessionId: String, seq: Int, uptoSeq: Int, summary: String) throws -> Data {
         let fixture = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()  // …/NormaChatKitTests
+            .deletingLastPathComponent()  // …/WinterChatKitTests
             .deletingLastPathComponent()  // …/Tests
-            .deletingLastPathComponent()  // …/NormaChatKit
+            .deletingLastPathComponent()  // …/WinterChatKit
             .deletingLastPathComponent()  // …/apple
-            .appendingPathComponent("NormaProtocol/Tests/NormaProtocolTests/Fixtures/checkpoint.json")
+            .appendingPathComponent("WinterProtocol/Tests/WinterProtocolTests/Fixtures/checkpoint.json")
         var obj = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fixture)) as? [String: Any])
         XCTAssertEqual(obj["type"] as? String, "checkpoint")
         obj["sessionId"] = sessionId

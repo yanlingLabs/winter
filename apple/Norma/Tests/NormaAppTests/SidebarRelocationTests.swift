@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// 2e-iii Task 6: the PURE decisions behind the width-responsive sidebar integration — where the
 /// tasks/subagents "work" content is placed (inline vs the right WorkSidebar, never both/neither)

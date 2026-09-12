@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import CryptoKit
-@testable import NormaProtocol
+@testable import WinterProtocol
 
 /// SP2b Task 2: signed relay config with anti-rollback. `RelayConfig.swift` was implemented
 /// alongside `Pairing.swift` (Step 6) rather than strictly after this file, because

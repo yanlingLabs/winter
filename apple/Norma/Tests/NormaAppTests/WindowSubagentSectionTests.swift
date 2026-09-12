@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// 2e-ii Task 4: the pure decision behind WindowContentView's subagent section (SwiftUI body
 /// isn't unit-tested — same convention as WindowTaskSectionTests). The D9 twin: the 1s tick

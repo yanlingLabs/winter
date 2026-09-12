@@ -1,23 +1,23 @@
 import XCTest
 import AppKit
-@testable import Norma
+@testable import Winter
 
 /// Task 3 (2e-iv): the menu bar's two new entry points — "Open CLI" (`CliLauncher.openCli`, Task 1)
-/// and "Open Norma App" (`AppDelegate.summonAppWindow`, App shell T1 — retargeted from the original
-/// `openStandaloneNormaWindow`, since retired by App shell T6). No prior MenuBarController
+/// and "Open Winter App" (`AppDelegate.summonAppWindow`, App shell T1 — retargeted from the original
+/// `openStandaloneWinterWindow`, since retired by App shell T6). No prior MenuBarController
 /// test file existed (grepped Tests/ — only `ScaffoldTests.testBootInstallsMenuBar`, which just
 /// asserts `menuBar` is non-nil after `boot()`), so this is a new file.
 ///
-/// `statusItem` and the two new items (`openCliItem`/`openNormaAppItem`) are exposed as internal
+/// `statusItem` and the two new items (`openCliItem`/`openWinterAppItem`) are exposed as internal
 /// (not `private`) stored properties on `MenuBarController` specifically so this file — via
-/// `@testable import Norma` — can walk the real built `NSMenu` for order and fire the items'
+/// `@testable import Winter` — can walk the real built `NSMenu` for order and fire the items'
 /// `target`/`action` directly for the closure-firing assertions, exactly like a real menu click
 /// would (`NSApplication.sendAction`), without needing to call the `@objc private` methods by name.
 @MainActor
 final class MenuBarEntryPointsTests: XCTestCase {
     private func makeController(
         openCli: @escaping () -> Void = {},
-        openNormaApp: @escaping () -> Void = {},
+        openWinterApp: @escaping () -> Void = {},
         openNewChat: @escaping () -> Void = {},
         openChat: @escaping () -> Void = {},
         openDashboard: @escaping () -> Void = {},
@@ -37,7 +37,7 @@ final class MenuBarEntryPointsTests: XCTestCase {
             toggleOrb: {},
             summonField: {},
             openCli: openCli,
-            openNormaApp: openNormaApp,
+            openWinterApp: openWinterApp,
             openNewChat: openNewChat,
             openChat: openChat,
             openDashboard: openDashboard,
@@ -62,23 +62,23 @@ final class MenuBarEntryPointsTests: XCTestCase {
 
     // MARK: - DD-T7: dist-only CLI installer item
 
-    /// `MenuBarController.install()`'s dist branch (`cliInstallItem`, "Install norma Command") is
+    /// `MenuBarController.install()`'s dist branch (`cliInstallItem`, "Install winter Command") is
     /// compile-time unreachable from this xctest host — it always builds under the Debug config,
     /// so `AppProfile.isDev` is always `true` here and only the dev branch (`openCliItem`) ever
     /// mounts. That dist item is exercised at the live gate instead; here we assert the DEV side
-    /// of the same `if AppProfile.isDev { … } else { … }` branch — the norma-dev CLI item is
+    /// of the same `if AppProfile.isDev { … } else { … }` branch — the winter-dev CLI item is
     /// present, and the dist-only title never leaks into the dev menu.
-    func testDevMenuContainsNormaDevCliItemNotDistInstallItem() {
+    func testDevMenuContainsWinterDevCliItemNotDistInstallItem() {
         let controller = makeController()
         controller.install()
 
         let titles = controller.statusItem?.menu?.items.map(\.title) ?? []
 
-        XCTAssertTrue(titles.contains("Open CLI"), "dev builds must mount the norma-dev CLI item")
-        XCTAssertFalse(titles.contains("Install norma Command"), "the dist-only installer item must never appear in a dev build's menu")
+        XCTAssertTrue(titles.contains("Open CLI"), "dev builds must mount the winter-dev CLI item")
+        XCTAssertFalse(titles.contains("Install winter Command"), "the dist-only installer item must never appear in a dev build's menu")
     }
 
-    func testMenuContainsOpenCliAndOpenNormaAppAfterSummonField() {
+    func testMenuContainsOpenCliAndOpenWinterAppAfterSummonField() {
         let controller = makeController()
         controller.install()
 
@@ -86,56 +86,56 @@ final class MenuBarEntryPointsTests: XCTestCase {
         let titles = items.map(\.title)
 
         XCTAssertTrue(titles.contains("Open CLI"))
-        XCTAssertTrue(titles.contains("Open Norma App"))
+        XCTAssertTrue(titles.contains("Open Winter App"))
 
         guard let summonIdx = titles.firstIndex(of: "Summon Field"),
               let cliIdx = titles.firstIndex(of: "Open CLI"),
-              let appIdx = titles.firstIndex(of: "Open Norma App"),
-              let quitIdx = titles.firstIndex(of: "Quit Norma") else {
+              let appIdx = titles.firstIndex(of: "Open Winter App"),
+              let quitIdx = titles.firstIndex(of: "Quit Winter") else {
             XCTFail("expected all four items present, got \(titles)")
             return
         }
 
         XCTAssertLessThan(summonIdx, cliIdx, "Open CLI must come after Summon Field")
-        XCTAssertLessThan(cliIdx, appIdx, "Open Norma App must come right after Open CLI")
-        XCTAssertLessThan(appIdx, quitIdx, "both new items must precede Quit Norma")
+        XCTAssertLessThan(cliIdx, appIdx, "Open Winter App must come right after Open CLI")
+        XCTAssertLessThan(appIdx, quitIdx, "both new items must precede Quit Winter")
 
         // Exactly one separator between Summon Field and Open CLI (the new one this task inserts),
-        // and Open CLI/Open Norma App are adjacent (no separator between them).
+        // and Open CLI/Open Winter App are adjacent (no separator between them).
         XCTAssertEqual(cliIdx, summonIdx + 2, "expected exactly one separator between Summon Field and Open CLI")
-        XCTAssertEqual(appIdx, cliIdx + 1, "Open CLI and Open Norma App must be adjacent, no separator between them")
+        XCTAssertEqual(appIdx, cliIdx + 1, "Open CLI and Open Winter App must be adjacent, no separator between them")
         XCTAssertTrue(items[summonIdx + 1].isSeparatorItem)
     }
 
-    // MARK: - Task 5 (2f-ii): "Dashboard…" — same section, mirrors Open CLI/Open Norma App exactly.
+    // MARK: - Task 5 (2f-ii): "Dashboard…" — same section, mirrors Open CLI/Open Winter App exactly.
 
-    func testMenuContainsDashboardRightAfterOpenNormaAppThenPluginManagerThenPreQuitSeparator() {
+    func testMenuContainsDashboardRightAfterOpenWinterAppThenPluginManagerThenPreQuitSeparator() {
         let controller = makeController()
         controller.install()
 
         let items = controller.statusItem?.menu?.items ?? []
         let titles = items.map(\.title)
 
-        guard let appIdx = titles.firstIndex(of: "Open Norma App"),
+        guard let appIdx = titles.firstIndex(of: "Open Winter App"),
               let dashboardIdx = titles.firstIndex(of: "Dashboard…"),
               let pluginManagerIdx = titles.firstIndex(of: "Manage Plugins…"),
-              let quitIdx = titles.firstIndex(of: "Quit Norma") else {
-            XCTFail("expected Open Norma App, Dashboard…, Manage Plugins…, and Quit Norma present, got \(titles)")
+              let quitIdx = titles.firstIndex(of: "Quit Winter") else {
+            XCTFail("expected Open Winter App, Dashboard…, Manage Plugins…, and Quit Winter present, got \(titles)")
             return
         }
 
-        // Chat Mode Slice A (CM-T3): "New Chat"/"Chat" sit right after Open Norma App, adjacent
+        // Chat Mode Slice A (CM-T3): "New Chat"/"Chat" sit right after Open Winter App, adjacent
         // to each other and to Dashboard… — same "no separator" posture as every other entry
         // point in this run.
         guard let newChatIdx = titles.firstIndex(of: "New Chat"),
               let chatIdx = titles.firstIndex(of: "Chat") else {
             return XCTFail("expected New Chat and Chat present, got \(titles)")
         }
-        XCTAssertEqual(newChatIdx, appIdx + 1, "New Chat must be adjacent to Open Norma App, no separator between them")
+        XCTAssertEqual(newChatIdx, appIdx + 1, "New Chat must be adjacent to Open Winter App, no separator between them")
         XCTAssertEqual(chatIdx, newChatIdx + 1, "Chat must be adjacent to New Chat, no separator between them")
         XCTAssertEqual(dashboardIdx, chatIdx + 1, "Dashboard… must be adjacent to Chat, no separator between them")
         // Phase 4d-iii Task 2: "Manage Plugins…" is adjacent to Dashboard…, same posture as
-        // Dashboard… itself being adjacent to Open Norma App — no separator between them either.
+        // Dashboard… itself being adjacent to Open Winter App — no separator between them either.
         XCTAssertEqual(pluginManagerIdx, dashboardIdx + 1, "Manage Plugins… must be adjacent to Dashboard…, no separator between them")
         // SP2b T5: "Pair a Device…"/"Paired Devices…" sit right after Manage Plugins… — same
         // "adjacent, no separator" posture as every other entry point in this run.
@@ -145,18 +145,18 @@ final class MenuBarEntryPointsTests: XCTestCase {
         }
         XCTAssertEqual(pairDeviceIdx, pluginManagerIdx + 1, "Pair a Device… must be adjacent to Manage Plugins…, no separator between them")
         XCTAssertEqual(pairedDevicesIdx, pairDeviceIdx + 1, "Paired Devices… must be adjacent to Pair a Device…, no separator between them")
-        // Lifecycle T4: "Launch Norma at login" sits between Paired Devices… and the pre-existing
+        // Lifecycle T4: "Launch Winter at login" sits between Paired Devices… and the pre-existing
         // pre-Quit separator — still no separator between Paired Devices… and it.
-        guard let loginItemIdx = titles.firstIndex(of: "Launch Norma at login") else {
-            return XCTFail("expected Launch Norma at login present, got \(titles)")
+        guard let loginItemIdx = titles.firstIndex(of: "Launch Winter at login") else {
+            return XCTFail("expected Launch Winter at login present, got \(titles)")
         }
-        XCTAssertEqual(loginItemIdx, pairedDevicesIdx + 1, "Launch Norma at login must be adjacent to Paired Devices…, no separator between them")
-        // Sparkle T3: "Check for Updates…" sits between "Launch Norma at login" and the
-        // pre-existing pre-Quit separator — still no separator between Launch Norma at login and it.
+        XCTAssertEqual(loginItemIdx, pairedDevicesIdx + 1, "Launch Winter at login must be adjacent to Paired Devices…, no separator between them")
+        // Sparkle T3: "Check for Updates…" sits between "Launch Winter at login" and the
+        // pre-existing pre-Quit separator — still no separator between Launch Winter at login and it.
         guard let checkForUpdatesIdx = titles.firstIndex(of: "Check for Updates…") else {
             return XCTFail("expected Check for Updates… present, got \(titles)")
         }
-        XCTAssertEqual(checkForUpdatesIdx, loginItemIdx + 1, "Check for Updates… must be adjacent to Launch Norma at login, no separator between them")
+        XCTAssertEqual(checkForUpdatesIdx, loginItemIdx + 1, "Check for Updates… must be adjacent to Launch Winter at login, no separator between them")
         XCTAssertEqual(quitIdx, checkForUpdatesIdx + 2)
         XCTAssertTrue(items[checkForUpdatesIdx + 1].isSeparatorItem)
     }
@@ -214,7 +214,7 @@ final class MenuBarEntryPointsTests: XCTestCase {
     }
 
     /// Firing "Manage Plugins…" must never fire "Dashboard…" (and vice versa) — same independence
-    /// guarantee as `testOpenCliAndOpenNormaAppClosuresAreIndependent`.
+    /// guarantee as `testOpenCliAndOpenWinterAppClosuresAreIndependent`.
     func testDashboardAndPluginManagerClosuresAreIndependent() {
         var dashboardFired = 0
         var pluginManagerFired = 0
@@ -239,14 +239,14 @@ final class MenuBarEntryPointsTests: XCTestCase {
         controller.install()
         let titles = controller.statusItem?.menu?.items.map(\.title) ?? []
         XCTAssertEqual(titles.filter { $0 == "Open CLI" }.count, 1)
-        XCTAssertEqual(titles.filter { $0 == "Open Norma App" }.count, 1)
+        XCTAssertEqual(titles.filter { $0 == "Open Winter App" }.count, 1)
         XCTAssertEqual(titles.filter { $0 == "New Chat" }.count, 1)
         XCTAssertEqual(titles.filter { $0 == "Chat" }.count, 1)
         XCTAssertEqual(titles.filter { $0 == "Dashboard…" }.count, 1)
         XCTAssertEqual(titles.filter { $0 == "Manage Plugins…" }.count, 1)
         XCTAssertEqual(titles.filter { $0 == "Pair a Device…" }.count, 1)
         XCTAssertEqual(titles.filter { $0 == "Paired Devices…" }.count, 1)
-        XCTAssertEqual(titles.filter { $0 == "Launch Norma at login" }.count, 1)
+        XCTAssertEqual(titles.filter { $0 == "Launch Winter at login" }.count, 1)
         XCTAssertEqual(titles.filter { $0 == "Check for Updates…" }.count, 1)
     }
 
@@ -265,12 +265,12 @@ final class MenuBarEntryPointsTests: XCTestCase {
         XCTAssertEqual(fired, 1)
     }
 
-    func testOpenNormaAppItemFiresInjectedClosure() {
+    func testOpenWinterAppItemFiresInjectedClosure() {
         var fired = 0
-        let controller = makeController(openNormaApp: { fired += 1 })
+        let controller = makeController(openWinterApp: { fired += 1 })
         controller.install()
 
-        let item = controller.openNormaAppItem
+        let item = controller.openWinterAppItem
         XCTAssertNotNil(item.target)
         XCTAssertNotNil(item.action)
         NSApp.sendAction(item.action!, to: item.target, from: item)
@@ -307,7 +307,7 @@ final class MenuBarEntryPointsTests: XCTestCase {
     }
 
     /// Firing "New Chat" must never fire "Chat" (and vice versa) — same independence guarantee as
-    /// `testOpenCliAndOpenNormaAppClosuresAreIndependent`.
+    /// `testOpenCliAndOpenWinterAppClosuresAreIndependent`.
     func testNewChatAndChatClosuresAreIndependent() {
         var newChatFired = 0
         var chatFired = 0
@@ -325,10 +325,10 @@ final class MenuBarEntryPointsTests: XCTestCase {
     }
 
     /// Firing one item must never fire the other.
-    func testOpenCliAndOpenNormaAppClosuresAreIndependent() {
+    func testOpenCliAndOpenWinterAppClosuresAreIndependent() {
         var cliFired = 0
         var appFired = 0
-        let controller = makeController(openCli: { cliFired += 1 }, openNormaApp: { appFired += 1 })
+        let controller = makeController(openCli: { cliFired += 1 }, openWinterApp: { appFired += 1 })
         controller.install()
 
         let cliItem = controller.openCliItem
@@ -347,7 +347,7 @@ final class MenuBarEntryPointsTests: XCTestCase {
         let controller = makeController()
         controller.install()
         let titles = controller.statusItem?.menu?.items.map(\.title) ?? []
-        XCTAssertFalse(titles.contains("Stop Norma's Control"), "panic item must not be mounted with zero active leases")
+        XCTAssertFalse(titles.contains("Stop Winter's Control"), "panic item must not be mounted with zero active leases")
     }
 
     func testSetPanicVisibleMountsRightBeforeQuitAndUnmountsAgain() {
@@ -357,17 +357,17 @@ final class MenuBarEntryPointsTests: XCTestCase {
         controller.setPanicVisible(true)
         var items = controller.statusItem?.menu?.items ?? []
         var titles = items.map(\.title)
-        guard let panicIdx = titles.firstIndex(of: "Stop Norma's Control"),
-              let quitIdx = titles.firstIndex(of: "Quit Norma") else {
-            return XCTFail("expected panic item mounted before Quit Norma, got \(titles)")
+        guard let panicIdx = titles.firstIndex(of: "Stop Winter's Control"),
+              let quitIdx = titles.firstIndex(of: "Quit Winter") else {
+            return XCTFail("expected panic item mounted before Quit Winter, got \(titles)")
         }
-        XCTAssertEqual(quitIdx, panicIdx + 2, "expected panic item then the pre-existing separator then Quit Norma")
+        XCTAssertEqual(quitIdx, panicIdx + 2, "expected panic item then the pre-existing separator then Quit Winter")
         XCTAssertTrue(items[panicIdx + 1].isSeparatorItem)
 
         controller.setPanicVisible(false)
         items = controller.statusItem?.menu?.items ?? []
         titles = items.map(\.title)
-        XCTAssertFalse(titles.contains("Stop Norma's Control"), "panic item must be fully removed once no leases are active")
+        XCTAssertFalse(titles.contains("Stop Winter's Control"), "panic item must be fully removed once no leases are active")
     }
 
     func testSetPanicVisibleIsIdempotent() {
@@ -376,7 +376,7 @@ final class MenuBarEntryPointsTests: XCTestCase {
         controller.setPanicVisible(true)
         controller.setPanicVisible(true)
         let titles = controller.statusItem?.menu?.items.map(\.title) ?? []
-        XCTAssertEqual(titles.filter { $0 == "Stop Norma's Control" }.count, 1, "a repeated setPanicVisible(true) must not duplicate the item")
+        XCTAssertEqual(titles.filter { $0 == "Stop Winter's Control" }.count, 1, "a repeated setPanicVisible(true) must not duplicate the item")
     }
 
     func testPanicItemFiresInjectedClosure() {
@@ -441,7 +441,7 @@ final class MenuBarEntryPointsTests: XCTestCase {
         )
         controller.install()
 
-        let item = controller.statusItem?.menu?.items.first { $0.title == "Quit Norma" }
+        let item = controller.statusItem?.menu?.items.first { $0.title == "Quit Winter" }
         XCTAssertNotNil(item)
         NSApp.sendAction(item!.action!, to: item!.target, from: item!)
 
@@ -562,7 +562,7 @@ final class MenuBarEntryPointsTests: XCTestCase {
         XCTAssertNil(controller.cliInstallItem.target)
         XCTAssertNil(controller.cliInstallItem.action)
 
-        controller.applyCliInstallState(.refuseForeign("/usr/local/bin/norma"))
+        controller.applyCliInstallState(.refuseForeign("/usr/local/bin/winter"))
         XCTAssertFalse(controller.cliInstallItem.isEnabled)
         XCTAssertNil(controller.cliInstallItem.target)
         XCTAssertNil(controller.cliInstallItem.action)
@@ -589,7 +589,7 @@ final class MenuBarEntryPointsTests: XCTestCase {
         XCTAssertNotNil(controller.cliInstallItem.action)
     }
 
-    // MARK: - Lifecycle T4: "Launch Norma at login" checkbox
+    // MARK: - Lifecycle T4: "Launch Winter at login" checkbox
 
     func testLoginItemCheckboxReflectsControllerStateAfterInstall() {
         let fake = FakeLoginItemService()

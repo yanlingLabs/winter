@@ -1,5 +1,5 @@
 import Foundation
-import NormaKit
+import WinterKit
 import Sparkle
 
 /// Injectable seam for everything the updater touches outside its own logic
@@ -24,9 +24,9 @@ struct UpdaterCoordinatorDeps {
     /// with the live walk over every session's `EditorRuntime` (`quitDirtyFilePaths`, the same pure
     /// function `EditorQuitGate` uses) whenever no test override is installed.
     var dirtyEditors: () -> Bool
-    /// updates.channel from ~/.norma/settings.json; nil/absent → stable.
+    /// updates.channel from ~/.winter/settings.json; nil/absent → stable.
     var readChannel: () -> String?
-    /// NORMA_UPDATE_FEED env override for local test feeds; nil → Info.plist SUFeedURL.
+    /// WINTER_UPDATE_FEED env override for local test feeds; nil → Info.plist SUFeedURL.
     var feedOverride: () -> String?
     var now: () -> Date
     var pollIntervalSeconds: TimeInterval
@@ -46,7 +46,7 @@ extension UpdaterCoordinatorDeps {
             activeTurns: { nil },
             dirtyEditors: { false },
             readChannel: { UpdaterCoordinator.readChannelFromSettings() },
-            feedOverride: { ProcessInfo.processInfo.environment["NORMA_UPDATE_FEED"] },
+            feedOverride: { ProcessInfo.processInfo.environment["WINTER_UPDATE_FEED"] },
             now: { Date() },
             pollIntervalSeconds: 30,
             badgeAfterSeconds: 24 * 60 * 60
@@ -54,7 +54,7 @@ extension UpdaterCoordinatorDeps {
     }
 }
 
-/// Sparkle delegate: silent background updates; Norma-specific gating lives here.
+/// Sparkle delegate: silent background updates; Winter-specific gating lives here.
 @MainActor
 final class UpdaterCoordinator: NSObject {
     let deps: UpdaterCoordinatorDeps
@@ -70,7 +70,7 @@ final class UpdaterCoordinator: NSObject {
     /// Whole-branch review (Critical): fired exactly once, immediately before the install handler
     /// runs. Sparkle terminates the host via a CANCELLABLE Apple quit event (no forceTerminate,
     /// no kAEQuitReason), which routes through `applicationShouldTerminate` — without arming,
-    /// Norma's lifecycle gate answers it `.terminateCancel` (like a ⌘Q) and the install dies
+    /// Winter's lifecycle gate answers it `.terminateCancel` (like a ⌘Q) and the install dies
     /// silently. AppDelegate wires this to set its `updaterQuitting` true-quit axis.
     var onWillInstall: (() -> Void)?
 
@@ -137,9 +137,9 @@ final class UpdaterCoordinator: NSObject {
         channelSetting == "beta" ? ["beta"] : []
     }
 
-    /// Live read of updates.channel from ~/.norma/settings.json (nil on absent/malformed).
+    /// Live read of updates.channel from ~/.winter/settings.json (nil on absent/malformed).
     nonisolated static func readChannelFromSettings() -> String? {
-        let url = URL(fileURLWithPath: NormaPaths.settingsPath())
+        let url = URL(fileURLWithPath: WinterPaths.settingsPath())
         guard let data = try? Data(contentsOf: url),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let updates = obj["updates"] as? [String: Any]
@@ -149,7 +149,7 @@ final class UpdaterCoordinator: NSObject {
 }
 
 extension UpdaterCoordinator: SPUUpdaterDelegate {
-    /// Dev/test override: NORMA_UPDATE_FEED wins; nil → Sparkle falls back to Info.plist.
+    /// Dev/test override: WINTER_UPDATE_FEED wins; nil → Sparkle falls back to Info.plist.
     nonisolated func feedURLString(for updater: SPUUpdater) -> String? {
         MainActor.assumeIsolated { resolvedFeedOverride() }
     }

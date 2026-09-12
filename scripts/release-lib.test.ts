@@ -62,7 +62,7 @@ describe("preflight", () => {
 describe("appcastItem", () => {
   const base = {
     version: "0.2.002",
-    zipName: "Norma-0.2.002.zip",
+    zipName: "Winter-0.2.002.zip",
     edSignature: "gr6VoIYzbcgIf6ScRRcbnPRnKPKtNGeHmVBqZlHEr3XQ0V6WQdT/E1eeGz1nA9Am==",
     length: 12345678,
     minSystem: "26.0",
@@ -148,11 +148,11 @@ describe("verifyVersionsJsonAgainstPins (P8d-2's claude gate, pure half)", () =>
 });
 
 describe("caskFrom", () => {
-  const tmpl = `cask "norma" do
+  const tmpl = `cask "winter" do
   version "{{version}}"
   sha256 "{{sha256}}"
   url "{{url}}"
-  name "Norma {{version}}"
+  name "Winter {{version}}"
 end
 `;
 
@@ -160,14 +160,14 @@ end
     const rendered = caskFrom(tmpl, {
       version: "0.2.002",
       sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      url: "https://github.com/yanlingLabs/norma/releases/download/v0.2.002/Norma-0.2.002.dmg",
+      url: "https://github.com/yanlingLabs/norma/releases/download/v0.2.002/Winter-0.2.002.dmg",
     });
     expect(rendered).toContain('version "0.2.002"');
     expect(rendered).toContain('sha256 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"');
     expect(rendered).toContain(
-      'url "https://github.com/yanlingLabs/norma/releases/download/v0.2.002/Norma-0.2.002.dmg"',
+      'url "https://github.com/yanlingLabs/norma/releases/download/v0.2.002/Winter-0.2.002.dmg"',
     );
-    expect(rendered).toContain('name "Norma 0.2.002"');
+    expect(rendered).toContain('name "Winter 0.2.002"');
     expect(rendered).not.toContain("{{");
     expect(rendered).not.toContain("}}");
   });
@@ -175,29 +175,29 @@ end
 
 describe("dmgStagePlan", () => {
   test("plans a copy of the app plus an /Applications symlink", () => {
-    const ops = dmgStagePlan("/out/release/0.2.002/dd/Build/Products/Release/Norma.app");
+    const ops = dmgStagePlan("/out/release/0.2.002/dd/Build/Products/Release/Winter.app");
     expect(ops).toEqual([
       {
         kind: "copy",
-        source: "/out/release/0.2.002/dd/Build/Products/Release/Norma.app",
-        destName: "Norma.app",
+        source: "/out/release/0.2.002/dd/Build/Products/Release/Winter.app",
+        destName: "Winter.app",
       },
       { kind: "symlink", source: "/Applications", destName: "Applications" },
     ]);
   });
 
   test("throws on a path that doesn't end in .app", () => {
-    expect(() => dmgStagePlan("/out/release/0.2.002/Norma.zip")).toThrow();
+    expect(() => dmgStagePlan("/out/release/0.2.002/Winter.zip")).toThrow();
   });
 
   test("tolerates a trailing slash on the app path", () => {
-    const ops = dmgStagePlan("/tmp/Norma.app/");
-    expect(ops[0]).toEqual({ kind: "copy", source: "/tmp/Norma.app/", destName: "Norma.app" });
+    const ops = dmgStagePlan("/tmp/Winter.app/");
+    expect(ops[0]).toEqual({ kind: "copy", source: "/tmp/Winter.app/", destName: "Winter.app" });
   });
 });
 
 describe("nameScanPlan (panel-cef Task 5 — §11b's exclusion, expressed in the repo)", () => {
-  // A miniature Norma.app: two locally-compiled bits, one third-party framework in the VERSIONED
+  // A miniature Winter.app: two locally-compiled bits, one third-party framework in the VERSIONED
   // layout project.yml actually embeds (Versions/A + Current + top-level symlinks), and the
   // licence notices. Keys are POSIX-relative paths; a value of null is a file, and names listed
   // in SYMLINKS are symlinks — which release.ts's real callbacks filter out, because `find
@@ -211,11 +211,11 @@ describe("nameScanPlan (panel-cef Task 5 — §11b's exclusion, expressed in the
   const tree: Record<string, string[] | null> = {
     "": ["Contents"],
     Contents: ["MacOS", "Resources", "Frameworks"],
-    "Contents/MacOS": ["Norma", "NormaHelper"],
-    "Contents/MacOS/Norma": null,
-    "Contents/MacOS/NormaHelper": null,
-    "Contents/Resources": ["norma-core", "Licenses"],
-    "Contents/Resources/norma-core": null,
+    "Contents/MacOS": ["Winter", "WinterHelper"],
+    "Contents/MacOS/Winter": null,
+    "Contents/MacOS/WinterHelper": null,
+    "Contents/Resources": ["winter-core", "Licenses"],
+    "Contents/Resources/winter-core": null,
     "Contents/Resources/Licenses": ["CEF-LICENSE.txt", "CREDITS.html"],
     "Contents/Resources/Licenses/CEF-LICENSE.txt": null,
     "Contents/Resources/Licenses/CREDITS.html": null,
@@ -243,7 +243,7 @@ describe("nameScanPlan (panel-cef Task 5 — §11b's exclusion, expressed in the
     "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources/sw.lproj": ["locale.pak"],
     "Contents/Frameworks/Chromium Embedded Framework.framework/Versions/A/Resources/sw.lproj/locale.pak": null,
   };
-  const ROOT = "/out/Norma.app";
+  const ROOT = "/out/Winter.app";
   const rel = (absPath: string) => (absPath === ROOT ? "" : absPath.slice(ROOT.length + 1));
   // Mirrors release.ts's real callbacks: symlink-filtered listing + lstat-style isDir.
   const io = {
@@ -316,8 +316,8 @@ describe("nameScanPlan (panel-cef Task 5 — §11b's exclusion, expressed in the
     expect(m(`${fw}/Versions/A/Resources/resources.pak`)).toBe(false);
     expect(m(`${fw}/Versions/A/Libraries/libcef_sandbox.dylib`)).toBe(false);
     expect(m("Contents/Resources/Licenses/CREDITS.html")).toBe(false);
-    expect(m("Contents/MacOS/Norma")).toBe(false);
-    // Not a blanket "any .lproj anywhere" — Norma's own resources stay scanned.
+    expect(m("Contents/MacOS/Winter")).toBe(false);
+    // Not a blanket "any .lproj anywhere" — Winter's own resources stay scanned.
     expect(m("Contents/Resources/en.lproj")).toBe(false);
     // Nor a subdirectory sneaking past the anchor.
     expect(m(`${fw}/Versions/A/Resources/sw.lproj/locale.pak`)).toBe(false);
@@ -333,7 +333,7 @@ describe("nameScanPlan (panel-cef Task 5 — §11b's exclusion, expressed in the
     expect(m("Contents/Resources/EditorAssets/vs")).toBe(true);
     expect(m("Contents/Resources/EditorAssets/vs/loader.js")).toBe(true);
     expect(m("Contents/Resources/EditorAssets/vs/base/worker/workerMain.js")).toBe(true);
-    // Task 4's in-repo page shell — Norma's OWN code — stays scanned.
+    // Task 4's in-repo page shell — Winter's OWN code — stays scanned.
     expect(m("Contents/Resources/EditorAssets/app")).toBe(false);
     expect(m("Contents/Resources/EditorAssets/app/index.html")).toBe(false);
     // The parent dir itself (not the vs/ child) stays scanned.
@@ -343,7 +343,7 @@ describe("nameScanPlan (panel-cef Task 5 — §11b's exclusion, expressed in the
     // Not a blanket prefix match — a sibling name merely starting with "vs" must not sneak in.
     expect(m("Contents/Resources/EditorAssets/vsx")).toBe(false);
     // Unrelated CEF paths are unaffected by this rule.
-    expect(m("Contents/MacOS/Norma")).toBe(false);
+    expect(m("Contents/MacOS/Winter")).toBe(false);
   });
 
   test("NAME_SCAN_EXCLUSIONS matches the LibreOffice language-subtag-registry.xml file only — nothing else in that tree", () => {
@@ -366,7 +366,7 @@ describe("appcastInsertPlan", () => {
   const emptyChannel = `<?xml version="1.0"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
   <channel>
-    <title>Norma Changelog</title>
+    <title>Winter Changelog</title>
   </channel>
 </rss>
 `;
@@ -435,9 +435,9 @@ describe("appcastInsertPlan", () => {
 
 describe("resolveSigningIdentity", () => {
   const sampleOutput = `Policy: Code Signing
-  1) AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "Developer ID Application: Norma (37N77U9RSZ)"
+  1) AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "Developer ID Application: Winter (37N77U9RSZ)"
   2) BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB "Apple Development: dev@example.com (37N77U9RSZ)"
-  3) CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC "Developer ID Application: Norma (OTHERTEAM1)"
+  3) CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC "Developer ID Application: Winter (OTHERTEAM1)"
      3 valid identities found
 `;
 
@@ -545,7 +545,7 @@ describe("catalogueStaleness (T2 review M2 — warn-only nudge in the release pi
     expect(r.stale).toBe(true);
     expect(r.ageDays).toBeGreaterThan(120);
     expect(r.line).toContain(verified);
-    expect(r.line).toContain("NORMA_CODEX_LIVE_DRIFT=1");
+    expect(r.line).toContain("WINTER_CODEX_LIVE_DRIFT=1");
   });
 
   test("exactly at the budget is NOT stale (warn only once genuinely past it)", () => {

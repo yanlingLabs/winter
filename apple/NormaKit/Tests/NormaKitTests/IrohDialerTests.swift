@@ -1,12 +1,12 @@
 import XCTest
 import os
-import NormaProtocol
+import WinterProtocol
 import IrohLib
-@testable import NormaKit
-@testable import NormaSessionKit
+@testable import WinterKit
+@testable import WinterSessionKit
 
 /// SP3 Task 2 — proves `IrohDialer.dial` (the new reusable phone-side dial, lifted from
-/// `norma-fake-phone`'s hand-rolled `--attach` reconnect dial at main.swift:171-189) produces a
+/// `winter-fake-phone`'s hand-rolled `--attach` reconnect dial at main.swift:171-189) produces a
 /// working `IrohConn` against a real (loopback) `IrohListener` — the SAME Mac accept side
 /// `IrohListenerTests` already exercises. Two things this suite must show:
 ///   - a frame round-trips BOTH ways over the dialed `IrohConn` (listener -> dialer AND
@@ -156,7 +156,7 @@ final class IrohDialerTests: XCTestCase {
 
     /// A phone that dials a `macEndpointID` other than the one it actually reaches must refuse to
     /// proceed — same rule `PhonePairingClient.pairInternal` already enforces, now also enforced
-    /// by the reusable dialer every future caller (including a future `norma-fake-phone`
+    /// by the reusable dialer every future caller (including a future `winter-fake-phone`
     /// refactor, SP3 Task 5) gets for free. Dials the REAL listener (via `addrOverride`, same as
     /// above) but claims a WRONG `macEndpointID` — mirrors
     /// `PhonePairingClientTests.testMacIdentityMismatch_ThrowsRatherThanProceeding`'s identical

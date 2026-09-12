@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// browser-runtime live-gate fix G: the two decisions `BrowserMemory.swift` actually makes — what
 /// counts as renderer memory, and how a total becomes a per-tab map.
@@ -13,11 +13,11 @@ final class BrowserMemoryTests: XCTestCase {
     /// command line long enough to contain the substrings that decide inclusion.
     private let psFixture = """
           1   12345 /Applications/Something.app/Contents/MacOS/Something
-        900  524288 /Applications/Norma.app/Contents/Frameworks/Norma Helper.app/Contents/MacOS/Norma Helper --type=renderer --lang=en-US
-        900  262144 /Applications/Norma.app/Contents/Frameworks/Norma Helper.app/Contents/MacOS/Norma Helper --type=renderer --lang=en-US
-        900   65536 /Applications/Norma.app/Contents/Frameworks/Norma Helper (GPU).app/Contents/MacOS/Norma Helper (GPU) --type=gpu-process
-        900   32768 /Applications/Norma.app/Contents/Frameworks/Norma Helper.app/Contents/MacOS/Norma Helper --type=utility
-        901  999999 /Applications/Norma.app/Contents/Frameworks/Norma Helper.app/Contents/MacOS/Norma Helper --type=renderer
+        900  524288 /Applications/Winter.app/Contents/Frameworks/Winter Helper.app/Contents/MacOS/Winter Helper --type=renderer --lang=en-US
+        900  262144 /Applications/Winter.app/Contents/Frameworks/Winter Helper.app/Contents/MacOS/Winter Helper --type=renderer --lang=en-US
+        900   65536 /Applications/Winter.app/Contents/Frameworks/Winter Helper (GPU).app/Contents/MacOS/Winter Helper (GPU) --type=gpu-process
+        900   32768 /Applications/Winter.app/Contents/Frameworks/Winter Helper.app/Contents/MacOS/Winter Helper --type=utility
+        901  999999 /Applications/Winter.app/Contents/Frameworks/Winter Helper.app/Contents/MacOS/Winter Helper --type=renderer
         900    4096 /usr/bin/some-other-child
         """
 
@@ -45,7 +45,7 @@ final class BrowserMemoryTests: XCTestCase {
     /// stopping the wrong browsers.
     func testUnparseableOutputIsNoMeasurementRatherThanAWrongOne() {
         XCTAssertEqual(BrowserRendererMemory.rendererBytes(psOutput: "", parentPid: 900), 0)
-        XCTAssertEqual(BrowserRendererMemory.rendererBytes(psOutput: "900 notanumber Norma Helper --type=renderer",
+        XCTAssertEqual(BrowserRendererMemory.rendererBytes(psOutput: "900 notanumber Winter Helper --type=renderer",
                                                            parentPid: 900), 0)
         XCTAssertEqual(BrowserRendererMemory.rendererBytes(psOutput: "900 1024", parentPid: 900), 0,
                        "a line with no command at all is skipped, not counted as a nameless renderer")

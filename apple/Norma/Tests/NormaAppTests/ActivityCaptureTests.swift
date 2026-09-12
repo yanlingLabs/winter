@@ -1,7 +1,7 @@
 import XCTest
-import NormaProtocol
-import NormaKit
-@testable import Norma
+import WinterProtocol
+import WinterKit
+@testable import Winter
 
 /// Drives the PURE reducer directly (same pattern as SessionModelTests). Helper builders
 /// mirror that file's event construction — wire-shaped JSON decoded through the real
@@ -151,7 +151,7 @@ final class ActivityCaptureTests: XCTestCase {
         XCTAssertEqual(lastActivity(s), [ActivityItem(kind: .tool(name: "read", detail: "/tmp/x.swift", callId: "c3"))])
     }
 
-    // The belt, kept deliberately: `file_path` is CC's name for this argument (and Norma's own
+    // The belt, kept deliberately: `file_path` is CC's name for this argument (and Winter's own
     // `lsp` tool's), so a model trained on that shape sometimes emits it here. Such a call fails
     // the daemon's zod parse — but `tool_call` is emitted BEFORE execution, so the row still
     // renders and may as well say which file was meant.
@@ -295,7 +295,7 @@ final class ActivityCaptureTests: XCTestCase {
 
     func testSearchDetailIsQuery() {
         // search.ts:80-83
-        XCTAssertEqual(detail("Search", #"{"query":"norma daemon"}"#), "norma daemon")
+        XCTAssertEqual(detail("Search", #"{"query":"winter daemon"}"#), "winter daemon")
     }
 
     func testReadPageDetailIsTheFirstPageUrl() {

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@winter/protocol";
 import { SessionStore, EMPTY_SESSION_GRACE_MS } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
 import { appendCleanerLog } from "../../src/sessions/cleaner-log";
@@ -40,7 +40,7 @@ function backdateCreatedAt(store: SessionStore, sessionId: string, ms: number): 
 // "10 minutes have passed" is simulated by computing a `nowMs` relative to the session's REAL
 // `createdAt` (itself real — `createSession` isn't clock-injectable), never by waiting.
 
-function freshStore() { return new SessionStore(mkdtempSync(join(tmpdir(), "norma-reaper-test-"))); }
+function freshStore() { return new SessionStore(mkdtempSync(join(tmpdir(), "winter-reaper-test-"))); }
 
 /** Every test in this file wants "nobody attached" unless it says otherwise. */
 const NOBODY_ATTACHED = () => 0;
@@ -148,7 +148,7 @@ describe("SessionStore.emptySessionIds (session-activity-hygiene T6)", () => {
   // assistant_message a few lines later. This proves first_message's blind spot is reachable, not
   // hypothetical.
   test("a recovered log whose user_message line was corrupted (assistant_message survives) is still not a candidate", () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-reaper-test-"));
     const scopeDir = join(dir, "sessions", "global");
     mkdirSync(scopeDir, { recursive: true });
     const id = "s_deadbeef0001";
@@ -203,7 +203,7 @@ describe("SessionStore.emptySessionIds (session-activity-hygiene T6)", () => {
 
 describe("SessionStore.deleteSession (session-activity-hygiene T6)", () => {
   test("deletes the JSONL file and the index row", () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-reaper-test-"));
     const store = new SessionStore(dir);
     const id = store.createSession("global");
     const logPath = join(dir, "sessions", "global", `${id}.jsonl`);
@@ -222,7 +222,7 @@ describe("SessionStore.deleteSession (session-activity-hygiene T6)", () => {
   });
 
   test("refuses the dispatch session — pinned", () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-reaper-test-"));
     const store = new SessionStore(dir);
     const dispatchId = store.createSession("global", { mode: "dispatch" });
     expect(() => store.deleteSession(dispatchId)).toThrow(/dispatch/);
@@ -237,7 +237,7 @@ describe("SessionStore.deleteSession (session-activity-hygiene T6)", () => {
   // `reapEmptySessions`'s own best-effort log append (delete first, never undo/retry over a
   // filesystem hiccup on the SECOND thing).
   test("also removes the session's outputs dir, best-effort, once one exists", () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-reaper-test-"));
     const store = new SessionStore(dir);
     const id = store.createSession("global");
     const outDir = ensureOutdir(dir, id);
@@ -249,7 +249,7 @@ describe("SessionStore.deleteSession (session-activity-hygiene T6)", () => {
   });
 
   test("a session with NO outputs dir at all deletes cleanly — vacuous, never throws (the reaper's common case: an empty session never wrote anything)", () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-reaper-test-"));
     const store = new SessionStore(dir);
     const id = store.createSession("global");
     expect(existsSync(outdirPath(dir, id))).toBe(false); // never created
@@ -269,7 +269,7 @@ describe("SessionStore.deleteSession (session-activity-hygiene T6)", () => {
   // user-delete RPC by construction, since `deleteSession` is documented as the FULL deletion
   // method (JSONL + index row) — see this describe block's own name.
   test("also removes the session's diffs dir, best-effort, once one exists", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-reaper-test-"));
     const store = new SessionStore(dir);
     const id = store.createSession("global");
     const diffId = mintDiffId();
@@ -285,7 +285,7 @@ describe("SessionStore.deleteSession (session-activity-hygiene T6)", () => {
   });
 
   test("a session with NO diffs dir at all deletes cleanly — vacuous, never throws (no edits, no diffs)", () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-reaper-test-"));
     const store = new SessionStore(dir);
     const id = store.createSession("global");
     expect(existsSync(diffDirPath(dir, id))).toBe(false); // never created
@@ -296,7 +296,7 @@ describe("SessionStore.deleteSession (session-activity-hygiene T6)", () => {
 
 describe("appendCleanerLog (session-activity-hygiene T6)", () => {
   test("creates the file if missing and appends one NDJSON line matching the spec shape", () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-reaper-test-"));
     const logPath = join(home, "cleaner.jsonl");
     expect(existsSync(logPath)).toBe(false);
     appendCleanerLog(home, { sessionId: "s_abc123", title: "Abandoned chat", reason: "reaped: empty", date: "2026-08-02T00:00:00.000Z" });
@@ -309,7 +309,7 @@ describe("appendCleanerLog (session-activity-hygiene T6)", () => {
   });
 
   test("appends without truncating existing lines", () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-reaper-test-"));
     appendCleanerLog(home, { sessionId: "s_1", reason: "reaped: empty", date: "2026-08-02T00:00:00.000Z" });
     appendCleanerLog(home, { sessionId: "s_2", reason: "reaped: empty", date: "2026-08-02T00:01:00.000Z" });
     const lines = readFileSync(join(home, "cleaner.jsonl"), "utf8").trim().split("\n");
@@ -319,7 +319,7 @@ describe("appendCleanerLog (session-activity-hygiene T6)", () => {
   });
 
   test("an absent title is omitted from the line entirely, never written as null", () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-reaper-test-"));
     appendCleanerLog(home, { sessionId: "s_1", reason: "reaped: empty", date: "2026-08-02T00:00:00.000Z" });
     const parsed = JSON.parse(readFileSync(join(home, "cleaner.jsonl"), "utf8").trim());
     expect("title" in parsed).toBe(false);
@@ -327,7 +327,7 @@ describe("appendCleanerLog (session-activity-hygiene T6)", () => {
 });
 
 describe("reapEmptySessions (session-activity-hygiene T6)", () => {
-  function tempHome(): string { return mkdtempSync(join(tmpdir(), "norma-reaper-test-")); }
+  function tempHome(): string { return mkdtempSync(join(tmpdir(), "winter-reaper-test-")); }
   function cleanerLines(home: string): any[] {
     if (!existsSync(join(home, "cleaner.jsonl"))) return [];
     return readFileSync(join(home, "cleaner.jsonl"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
@@ -495,7 +495,7 @@ describe("reapEmptySessions (session-activity-hygiene T6)", () => {
   test("a failed audit-log append does not undo or retry the delete, and logs a warning", () => {
     // A `home` that is actually a FILE (not a directory) makes appendCleanerLog's mkdirSync/
     // appendFileSync throw — simulating a disk/permissions failure without touching real fs limits.
-    const parent = mkdtempSync(join(tmpdir(), "norma-reaper-test-"));
+    const parent = mkdtempSync(join(tmpdir(), "winter-reaper-test-"));
     const bogusHome = join(parent, "not-a-directory");
     writeFileSync(bogusHome, "i am a file, not a directory");
     const deleted: string[] = [];
@@ -588,8 +588,8 @@ describe("wired: session.create's mint-time sweep (session-activity-hygiene T6)"
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
 
-  async function boot(withNormaHome: boolean): Promise<{ store: SessionStore; hub: SessionHub; socketPath: string; harnessToken: string; home: string }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-reaper-wire-"));
+  async function boot(withWinterHome: boolean): Promise<{ store: SessionStore; hub: SessionHub; socketPath: string; harnessToken: string; home: string }> {
+    const home = mkdtempSync(join(tmpdir(), "winter-reaper-wire-"));
     const store = new SessionStore(home);
     const hub = new SessionHub(store);
     const socketPath = join(home, "core.sock");
@@ -597,7 +597,7 @@ describe("wired: session.create's mint-time sweep (session-activity-hygiene T6)"
     const tokens = await authority.ensureTokens();
     const server = startIpcServer({
       socketPath, serverVersion: "test", tokens: authority, store, hub,
-      normaHome: withNormaHome ? home : undefined,
+      winterHome: withWinterHome ? home : undefined,
     });
     stop = () => { server.stop(); store.close(); };
     return { store, hub, socketPath, harnessToken: tokens.harness, home };
@@ -685,7 +685,7 @@ describe("wired: session.create's mint-time sweep (session-activity-hygiene T6)"
   // macrotask via `setTimeout`, which only runs once the microtask queue — including the reply write
   // — has fully drained), the round trip is unaffected by the stub's delay at all.
   test("the mint-time sweep never delays the create reply, even when the sweep itself is slow", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-reaper-wire-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-reaper-wire-"));
     const store = new SessionStore(home);
     const hub = new SessionHub(store);
     const socketPath = join(home, "core.sock");
@@ -694,7 +694,7 @@ describe("wired: session.create's mint-time sweep (session-activity-hygiene T6)"
     const ARTIFICIAL_SWEEP_DELAY_MS = 200; // generous margin over a normal <10ms round trip
     let sweepRan = false;
     const server = startIpcServer({
-      socketPath, serverVersion: "test", tokens: authority, store, hub, normaHome: home,
+      socketPath, serverVersion: "test", tokens: authority, store, hub, winterHome: home,
       reapEmptySessions: () => {
         const until = Date.now() + ARTIFICIAL_SWEEP_DELAY_MS;
         while (Date.now() < until) { /* deliberate synchronous busy-wait — blocks the event loop */ }
@@ -715,7 +715,7 @@ describe("wired: session.create's mint-time sweep (session-activity-hygiene T6)"
     c.close();
   });
 
-  test("with no normaHome wired, session.create still works and never throws over the sweep", async () => {
+  test("with no winterHome wired, session.create still works and never throws over the sweep", async () => {
     const { socketPath, harnessToken } = await boot(false);
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "harness");
@@ -733,7 +733,7 @@ describe("wired: daemon.ts's boot sweep (session-activity-hygiene T6)", () => {
   afterEach(async () => { await daemon?.stop(); daemon = undefined; });
 
   test("an old, empty, unattached session left over from a previous run is gone after the NEXT boot", async () => {
-    const home = mkdtempSync(join(tmpdir(), "norma-reaper-boot-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-reaper-boot-"));
     // Seed the leftover candidate using a throwaway SessionStore instance, exactly as a previous
     // daemon run would have left it on disk — then close it before startDaemon opens its own (a
     // second live sqlite writer on the same file, even briefly, is unnecessary risk to take on).

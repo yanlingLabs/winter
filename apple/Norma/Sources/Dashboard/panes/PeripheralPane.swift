@@ -20,7 +20,7 @@ func peripheralLeaseAgeText(expiresAt: Int, nowMs: Int) -> String {
 /// Task 5 (2f-ii): the Dashboard's Peripheral pane — spec §B: "active leases (class, holder, age)
 /// + the panic button (same action as the menu item)". `provider` is injected directly (an
 /// already-decoupled, published view-model — same posture as `SessionsPane`'s `SessionDirectory`,
-/// not a `NormaClient`); the Panic button calls the SAME `PeripheralProvider.panic()` the menu
+/// not a `WinterClient`); the Panic button calls the SAME `PeripheralProvider.panic()` the menu
 /// item and hotkey use (Task 4).
 struct PeripheralPane: View {
     @ObservedObject var provider: PeripheralProvider

@@ -1,6 +1,6 @@
 import AppKit
 import XCTest
-@testable import Norma
+@testable import Winter
 
 // MARK: - The banner, as a pure function
 
@@ -1083,7 +1083,7 @@ final class EditorWatcherTests: XCTestCase {
 
     private func scratchDirectory() throws -> URL {
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("norma-conflict-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("winter-conflict-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         scratchDirectories.append(directory)
         return directory
@@ -1105,9 +1105,9 @@ final class EditorWatcherTests: XCTestCase {
         let bundled = Bundle.main.bundleURL
             .appendingPathComponent("Contents/Resources/EditorAssets/app/\(name)")
         let source = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // NormaAppTests
+            .deletingLastPathComponent()   // WinterAppTests
             .deletingLastPathComponent()   // Tests
-            .deletingLastPathComponent()   // Norma
+            .deletingLastPathComponent()   // Winter
             .appendingPathComponent("Resources/EditorAssets/app/\(name)")
         return [bundled, source].first { FileManager.default.fileExists(atPath: $0.path) }
     }

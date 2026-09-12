@@ -343,8 +343,8 @@ describe("skills.list schema", () => {
   test("SkillMetaSchema.author is optional, round-trips when present (phase 5c Task 3)", () => {
     const meta = SkillMetaSchema.parse({ name: "greet", description: "Say hi", source: "self", path: "/x/SKILL.md" });
     expect(meta.author).toBeUndefined();
-    const stamped = SkillMetaSchema.parse({ name: "greet", description: "Say hi", source: "self", path: "/x", author: "norma" });
-    expect(stamped.author).toBe("norma");
+    const stamped = SkillMetaSchema.parse({ name: "greet", description: "Say hi", source: "self", path: "/x", author: "winter" });
+    expect(stamped.author).toBe("winter");
   });
 
   // 5c T3 review regression: source:"builtin" (always present since T1's shipped writing-skills)
@@ -373,7 +373,7 @@ describe("skills.read/write/delete schemas (Phase 5c Task 3)", () => {
     expect(SkillsReadParams.parse({ name: "my-skill" })).toEqual({ name: "my-skill" });
     expect(SkillsReadParams.parse({ name: "my-skill", cwd: "/tmp/proj" })).toEqual({ name: "my-skill", cwd: "/tmp/proj" });
     expect(() => SkillsReadParams.parse({ name: "" })).toThrow();
-    const skill = { name: "my-skill", description: "d", source: "self" as const, path: "/x/SKILL.md", author: "norma", body: "BODY" };
+    const skill = { name: "my-skill", description: "d", source: "self" as const, path: "/x/SKILL.md", author: "winter", body: "BODY" };
     expect(SkillsReadResult.parse({ skill })).toEqual({ skill });
   });
 
@@ -610,7 +610,7 @@ describe("per-session effort ingress shapes (provider-correctness T6)", () => {
   });
 
   test("SyncPushParams.meta.effort is bounded but NOT enumerated — the tier drop is a handler rule", () => {
-    // `ultra` is a Norma-level tier this ingress always DROPS (sync.push is chat-only fail-closed,
+    // `ultra` is a Winter-level tier this ingress always DROPS (sync.push is chat-only fail-closed,
     // and tiers are code-sessions-only). It parses here on purpose: the schema is a shape contract,
     // and enumerating levels in this package would be a second copy of a set it cannot see change.
     const base = { sessionId: "s1", baseSeq: 0, data: "", complete: true };
@@ -920,8 +920,8 @@ describe("hardware.request / hardware.respond (Phase 4c Task 1, spec §5)", () =
       code: "consent_denied", missing: "battery",
     });
 
-    expect(HardwareRequestResult.parse({ code: "no_provider", message: "hardware features require Norma.app" })).toEqual({
-      code: "no_provider", message: "hardware features require Norma.app",
+    expect(HardwareRequestResult.parse({ code: "no_provider", message: "hardware features require Winter.app" })).toEqual({
+      code: "no_provider", message: "hardware features require Winter.app",
     });
     expect(() => HardwareRequestResult.parse({ code: "no_provider" })).toThrow(); // message is required
 
@@ -1245,7 +1245,7 @@ describe("sync.config schema (provider-correctness T3)", () => {
     expect(() => SyncConfigResult.parse({ ...full, models: [{ id: "", efforts: [] }] })).toThrow();
   });
 
-  // provider-correctness T5 — `clientEfforts`: NORMA-LEVEL tiers, a SEPARATE field from
+  // provider-correctness T5 — `clientEfforts`: WINTER-LEVEL tiers, a SEPARATE field from
   // `models[].efforts` and never merged into it. `models[].efforts` is exactly what the endpoint's
   // request validator accepts; a client tier is exactly what it does NOT (the daemon translates it
   // before building a request). Merging them would make the daemon advertise a value its own turn
@@ -1254,7 +1254,7 @@ describe("sync.config schema (provider-correctness T3)", () => {
     const { clientEfforts, ...noClientEfforts } = full;
     expect(() => SyncConfigResult.parse(noClientEfforts)).toThrow();
     // The same sentinel discipline as `models: []` / `defaultEffort: ""`: an explicit empty is a
-    // statement ("this daemon offers no Norma-level tiers"), which is what lets an older/newer
+    // statement ("this daemon offers no Winter-level tiers"), which is what lets an older/newer
     // pairing degrade to daemon-driven pickers instead of a client-side guess.
     expect(SyncConfigResult.parse({ ...full, clientEfforts: [] }).clientEfforts).toEqual([]);
   });
@@ -1315,8 +1315,8 @@ describe("sync.config schema (provider-correctness T3)", () => {
   // Whole-branch review C3 — THE MIRROR TRIPWIRE.
   //
   // `sync.config` is mirrored BY HAND into two Swift types that no compiler and no fixture connects
-  // to this schema: NormaChatKit's `SyncConfig` (the phone's whole local-chat bootstrap) and
-  // NormaKit's `SyncConfigSnapshot` (the Mac pickers' projection). `packages/protocol`'s generated
+  // to this schema: WinterChatKit's `SyncConfig` (the phone's whole local-chat bootstrap) and
+  // WinterKit's `SyncConfigSnapshot` (the Mac pickers' projection). `packages/protocol`'s generated
   // artifacts cover EVENTS only — a method result gets no fixture, so the round-trip test that
   // normally forces a Swift sync never fires for this type. Adding a field here therefore breaks
   // NOTHING anywhere, in either language, and the phone simply never learns about it.
@@ -1329,10 +1329,10 @@ describe("sync.config schema (provider-correctness T3)", () => {
       Object.keys(SyncConfigResult.shape).sort(),
       "sync.config's FIELD SET changed. Nothing else in either language will tell you, so update " +
       "BOTH hand-written Swift mirrors in the same commit, then this pin:\n" +
-      "  • apple/NormaChatKit/Sources/NormaChatKit/SyncClient.swift  (struct SyncConfig — the phone's " +
+      "  • apple/WinterChatKit/Sources/WinterChatKit/SyncClient.swift  (struct SyncConfig — the phone's " +
       "local-chat bootstrap; its memberwise init takes NO default arguments on purpose, so every " +
       "construction site including both test doubles must be updated)\n" +
-      "  • apple/NormaKit/Sources/NormaKit/NormaClient+Methods.swift (struct SyncConfigSnapshot — the " +
+      "  • apple/WinterKit/Sources/WinterKit/WinterClient+Methods.swift (struct SyncConfigSnapshot — the " +
       "Mac pickers' projection; widen it only for a field a Mac caller genuinely needs)\n" +
       "…and, at the next kit tag, ../norma-ios's ScriptedSyncDaemon double.",
     ).toEqual([
@@ -1366,7 +1366,7 @@ describe("PanelTabSchema (diff-tabs Task 7 fix round 1 — the mirror-staleness 
 
 // fix-wave 2026-08-14, Item 1: `PanelOpenTabParams`'s `superRefine` gained a second issue —
 // `diffId` present with `kind !== "diff"` is now refused, closing the gap three shipped Swift
-// comments already claimed was closed (NormaClient+Methods.swift, ShellSessionHost.swift ×2).
+// comments already claimed was closed (WinterClient+Methods.swift, ShellSessionHost.swift ×2).
 describe("PanelOpenTabParams diffId/kind pairing (fix-wave 2026-08-14, Item 1)", () => {
   test('diffId present with kind "web" is refused; kind "diff" with no diffId still parses (the reverse is NOT required)', () => {
     const result = PanelOpenTabParams.safeParse({ sessionId: "s1", kind: "web", diffId: "a".repeat(8) });

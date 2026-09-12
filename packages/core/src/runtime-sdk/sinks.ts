@@ -1,4 +1,4 @@
-import type { NewSessionEvent } from "@norma/protocol";
+import type { NewSessionEvent } from "@winter/protocol";
 import type { BridgeLogger } from "./bridge-common";
 import type { RuntimeStateDb } from "../runtime-state/db";
 
@@ -14,7 +14,7 @@ import type { RuntimeStateDb } from "../runtime-state/db";
  * emit `notification_requested` unconditionally, then fire the headless macOS fallback ONLY when
  * nobody is attached right now. Winter's OWN `PushNotification` executor
  * (`winter-agent-sdk/packages/runtime/src/tools/impl/push-notification.ts`) has an injectable
- * `configurePushNotifier` seam, but that seam lives INSIDE the spawned child process — Norma's
+ * `configurePushNotifier` seam, but that seam lives INSIDE the spawned child process — Winter's
  * daemon cannot reach into a separate OS process to call it, so it is dead wiring from this side
  * regardless of what a future SDK does with it; the daemon's own path is this sink, driven off the
  * ordinary wire `tool_use`/`tool_result` the projector already turns into `tool_call`/`tool_result`
@@ -26,8 +26,8 @@ import type { RuntimeStateDb } from "../runtime-state/db";
  *
  * ── `schedule` (Winter's `CronCreate`/`CronDelete`/`CronList`) ──────────────────────────────────
  *
- * All three Winter tool names collapse onto Norma's ONE `schedule` name (`tool-names.ts`'s
- * `WINTER_NORMA_TOOL_PAIRS`, "one tool, one gate decision") — which means the PROJECTED `tool_call`
+ * All three Winter tool names collapse onto Winter's ONE `schedule` name (`tool-names.ts`'s
+ * `RUNTIME_HOST_TOOL_PAIRS`, "one tool, one gate decision") — which means the PROJECTED `tool_call`
  * this sink sees has already lost which of the three it was. The three input shapes are disjoint
  * by construction (create needs `cron`+`prompt`; delete needs only `id`; list needs neither), so
  * this sink disambiguates by ARGS SHAPE rather than by tool name — the only information left once
@@ -36,7 +36,7 @@ import type { RuntimeStateDb } from "../runtime-state/db";
  * Winter's `CronCreate`/`CronDelete` fully execute inside the child (an in-memory Map, or a
  * `<projectDir>/.winter/scheduled_tasks.json` file when `durable:true` — see the SDK's `cron.ts`),
  * but NOTHING ever turns a stored job into a running prompt at the right wall-clock moment except
- * Norma's own `routines/scheduler.ts` — and per P8c-11 that is the only mechanism this daemon may
+ * Winter's own `routines/scheduler.ts` — and per P8c-11 that is the only mechanism this daemon may
  * rely on, since "a child dies at idle" makes the child's own store inert the moment nobody is
  * attached. So every `CronCreate` this sink observes becomes a REAL, persistent `RoutineStore` row
  * (mirroring the retired `schedule` tool's own `op:"create"` — see `git show
@@ -50,13 +50,13 @@ import type { RuntimeStateDb } from "../runtime-state/db";
  *
  * **The id-space mismatch, and why creation happens on the RESULT, not the call.** `CronCreate`
  * mints its OWN job id inside the child (`randomUUID()`) and returns it in the tool_result; a later
- * `CronDelete(id=<that id>)` from the model addresses THAT id, never Norma's `RoutineStore`'s own.
+ * `CronDelete(id=<that id>)` from the model addresses THAT id, never Winter's `RoutineStore`'s own.
  * Mirroring on the CALL (before the child's own validation has run) would risk creating an orphaned
- * Norma routine for an input the child's `validateCronExpression` was about to reject — so this
+ * Winter routine for an input the child's `validateCronExpression` was about to reject — so this
  * sink stashes the parsed create args on the CALL and only actually calls `routines.create` once
  * the matching RESULT confirms the child accepted it (an `isError` result is never mirrored), at
  * which point the child's minted id is read from the result and mapped to the freshly-created
- * Norma routine id. `CronDelete` has no equivalent risk (deleting is idempotent) and fires at the
+ * Winter routine id. `CronDelete` has no equivalent risk (deleting is idempotent) and fires at the
  * call.
  *
  * ── IDEMPOTENCY (P8c-11's own obligation: "a replay never re-fires") ────────────────────────────
@@ -77,13 +77,13 @@ import type { RuntimeStateDb } from "../runtime-state/db";
  * generation must never collide with the same id minted fresh in a later one.
  */
 
-const NOTIFICATION_DEFAULT_TITLE = "Norma";
+const NOTIFICATION_DEFAULT_TITLE = "Winter";
 
 export interface ProjectedToolCall {
   sessionId: string;
   threadId: string;
   callId: string;
-  /** The NORMA name (post-`renameTool`) — `"push_notification"` or `"schedule"`; anything else is
+  /** The WINTER name (post-`renameTool`) — `"push_notification"` or `"schedule"`; anything else is
    *  ignored by both sinks. */
   name: string;
   argsJson: string;
@@ -272,7 +272,7 @@ export function sinksFor(deps: SinksDeps): Sinks {
   /** `sessionId:callId` of a create call → its parsed args, awaiting the matching tool_result. */
   const pendingCreates = new Map<string, PendingCronCreate>();
   /** Winter's minted job id → the mirrored `RoutineStore` id, so a later `CronDelete` (which
-   *  addresses the CHILD's id, never Norma's) can resolve the row to remove. Not scoped per
+   *  addresses the CHILD's id, never Winter's) can resolve the row to remove. Not scoped per
    *  session: Winter mints these with `randomUUID()`, which is unique enough on its own, and a
    *  `CronDelete` carries no session-scoping information beyond the id it was handed. */
   // carry: never pruned — an entry only leaves via a matching CronDelete. Bounded by the number of
@@ -280,7 +280,7 @@ export function sinksFor(deps: SinksDeps): Sinks {
   // at today's scale, but a long-lived daemon with many one-off schedule creates and few deletes
   // would grow this unboundedly. Revisit alongside the durable-dedupe carry (sinks.ts's own header
   // doc comment) if that ever matters in practice.
-  const winterToNormaRoutineId = new Map<string, string>();
+  const runtimeToHostRoutineId = new Map<string, string>();
 
   function fireNotification(sessionId: string, threadId: string, message: string): void {
     const title = NOTIFICATION_DEFAULT_TITLE;
@@ -306,14 +306,14 @@ export function sinksFor(deps: SinksDeps): Sinks {
     try {
       created = deps.routines.create({ spec: args.cron, prompt: args.prompt, cwd: deps.cwdFor?.(sessionId) });
     } catch (err) {
-      // A spec Norma's own parser rejects (grammar drift from Winter's `validateCronExpression`,
+      // A spec Winter's own parser rejects (grammar drift from Winter's `validateCronExpression`,
       // however unlikely) or an invalid policy default — logged, never mirrored, never thrown:
       // the child's own CronCreate already succeeded and answered the model, so a mirror failure
       // here must not surface as a tool error the model never actually got.
       log?.error(`schedule sink: RoutineStore.create failed for winter job ${winterJobId} session=${sessionId}: ${(err as Error).message}`);
       return;
     }
-    winterToNormaRoutineId.set(winterJobId, created.id);
+    runtimeToHostRoutineId.set(winterJobId, created.id);
     log?.info(`schedule sink: mirrored CronCreate winterJob=${winterJobId} → routine=${created.id} session=${sessionId}`);
   }
 
@@ -346,8 +346,8 @@ export function sinksFor(deps: SinksDeps): Sinks {
       if (del !== undefined) {
         if (alreadySeen(event.sessionId, event.generation, event.callId)) return;
         markSeen(event.sessionId, event.generation, event.callId);
-        const normaId = winterToNormaRoutineId.get(del.id);
-        if (normaId === undefined) {
+        const hostId = runtimeToHostRoutineId.get(del.id);
+        if (hostId === undefined) {
           // Unknown to this daemon process — could be a durable job created by an earlier daemon
           // run (this map is in-memory only), or the model passing a bogus id. CronDelete's own
           // contract treats an unknown id as a normal, non-error lookup (see cron.ts's T8 note 2);
@@ -355,9 +355,9 @@ export function sinksFor(deps: SinksDeps): Sinks {
           log?.info(`schedule sink: CronDelete for an id this daemon never mirrored (id=${del.id}) — no routine to remove`);
           return;
         }
-        winterToNormaRoutineId.delete(del.id);
-        deps.routines.delete(normaId);
-        log?.info(`schedule sink: mirrored CronDelete winterJob=${del.id} → deleted routine=${normaId} session=${event.sessionId}`);
+        runtimeToHostRoutineId.delete(del.id);
+        deps.routines.delete(hostId);
+        log?.info(`schedule sink: mirrored CronDelete winterJob=${del.id} → deleted routine=${hostId} session=${event.sessionId}`);
         return;
       }
 

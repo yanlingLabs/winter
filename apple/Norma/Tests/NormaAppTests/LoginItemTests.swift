@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// An in-memory `LoginItemService` seam — never touches the real `SMAppService.mainApp`, which
 /// would attempt an actual login-item registration from the xctest host process (same LIVE-GATE
@@ -35,7 +35,7 @@ final class LoginItemTests: XCTestCase {
     // MARK: - Task 4 brief, Step 1 (exact given test body — default `UserDefaults.standard`).
 
     func testLoginItemToggle() {
-        defer { UserDefaults.standard.removeObject(forKey: "com.norma.loginItem.userChoiceMade") }
+        defer { UserDefaults.standard.removeObject(forKey: "com.winter.loginItem.userChoiceMade") }
         let fake = FakeLoginItemService()
         let c = LoginItemController(service: fake)
         c.setEnabled(true);  XCTAssertTrue(fake.isEnabled)

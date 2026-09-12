@@ -13,7 +13,7 @@
 //      `firePostTool` ran on both. Every `HookFacade.runFor` call here is wrapped so a throwing
 //      facade (review r1 MAJOR 1) degrades to "no verdict" rather than propagating into the child.
 //   2. The bash-safety reviewer (`agent/reviewer.ts`'s `BashReviewer`) — a `PreToolUse` group
-//      matched on `"Bash"`, gated to Norma's `auto` policy exactly as the retired engine gated it
+//      matched on `"Bash"`, gated to Winter's `auto` policy exactly as the retired engine gated it
 //      (`meta.approvalPolicy === "auto" && reviewerReady`, engine.ts:4547-4548): the reviewer is a
 //      GATE for auto-policy calls, never a second opinion layered under `ask`/`accept-edits`, whose
 //      human card already exists on this leg through the approval bridge.
@@ -50,7 +50,7 @@
 // both SDKs). So the exact object built for `winter` below is ALREADY the shape the official leg's
 // `mergeHooks` expects for its second argument: no translation, no second implementation. The
 // router puts its own containment matchers FIRST in each event's array (`mergeHooks`'s own
-// `[...matchers, ...host[event] ?? []]`), so Norma's groups here always run AFTER the containment
+// `[...matchers, ...host[event] ?? []]`), so Winter's groups here always run AFTER the containment
 // floor on the official leg — the ordering the fix-wave brief calls for. `official-options.ts`
 // (lane 1's file) threads this value into `OptionsTemplatePolicy.hooks` via `session-driver.ts`'s
 // `hooksFor(session).official`, already wired at integration.
@@ -59,7 +59,7 @@ import type {
   HookCallback, HookCallbackMatcher, HookJSONOutput, Options,
   PostToolUseFailureHookInput, PostToolUseHookInput, PreToolUseHookInput,
 } from "@yanlinglabs/winter-agent-sdk";
-import type { FileDiffSummary } from "@norma/protocol";
+import type { FileDiffSummary } from "@winter/protocol";
 import { BashReviewer, bashLooksSafe } from "../agent/reviewer";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { AUTO_DIAG_TOOL_NAMES, autoDiagnosticsSuffix } from "../agent/lsp/auto-diagnostics";
@@ -83,10 +83,10 @@ export interface HookFacadeLike {
 }
 
 export interface SessionHooksDeps {
-  /** Norma's own session id — what a produced `fileDiff` is filed under (`diffs/store.ts`'s
+  /** Winter's own session id — what a produced `fileDiff` is filed under (`diffs/store.ts`'s
    *  `<home>/diffs/<sessionId>/` and `diff-attach.ts`'s pending map). */
   sessionId: string;
-  /** NORMA_HOME. Absent ⇒ the `fileDiff` producer is skipped entirely (mirrors the retired
+  /** WINTER_HOME. Absent ⇒ the `fileDiff` producer is skipped entirely (mirrors the retired
    *  engine's `diffSink`-absent fast path in `diff-report.ts`'s `withFileDiff`) — there is nowhere
    *  to persist a patch without it. */
   home?: string;

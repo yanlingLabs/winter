@@ -181,9 +181,9 @@ let panelWebTabStartPageURL: String = {
 /// `dismantleNSView`, so a browser's existence was welded to a mounted view: a tab switch was a
 /// create/destroy churn and the page's scroll position, video, form text and JS heap died with it.
 /// Everything that used to happen here — the three observer channels, the seed, the deferred
-/// `NormaCEFCreateBrowser` and its unavailable/retry placeholder — is `BrowserRuntime`'s create
+/// `WinterCEFCreateBrowser` and its unavailable/retry placeholder — is `BrowserRuntime`'s create
 /// path now (`BrowserRuntime.swift`, absorbed bit-for-bit in T3), and this file no longer calls
-/// into `NormaCEF*` at all.
+/// into `WinterCEF*` at all.
 ///
 /// **After:** this view does exactly two things — hand the runtime a host `NSView` to mount the
 /// tab's container into while the tab is on screen, and give it back when it is not. Neither is a
@@ -344,15 +344,15 @@ final class PanelCEFContainerView: NSView {
     }
 
     /// CEF could not start. The panel says so instead of showing a permanently blank rectangle —
-    /// and Norma keeps running, which is the whole reason none of the bridge's entry points abort.
+    /// and Winter keeps running, which is the whole reason none of the bridge's entry points abort.
     ///
-    /// **Task 6b adds the retry door, and it is not cosmetic.** `NormaCEFRuntime.ensureInitialized`
+    /// **Task 6b adds the retry door, and it is not cosmetic.** `WinterCEFRuntime.ensureInitialized`
     /// returns early on `.failed` and nothing ever reset that state, so ONE transient startup
     /// failure disabled the browser panel for the rest of the process's life — and the failures
     /// that actually happen are transient by nature: Chromium's profile lock (exit code 24) when a
     /// second copy of the app holds the same `root_cache_path`, and a stale `SingletonLock` left by
     /// a `kill -9`. Both are fixed by quitting the other copy and trying again, which until now
-    /// meant relaunching Norma. `retry` is `nil` for failures that genuinely cannot be retried
+    /// meant relaunching Winter. `retry` is `nil` for failures that genuinely cannot be retried
     /// (`CefShutdown` has run; the helper bundle is missing from the build), so the button is not
     /// offered where it would only fail again.
     func showUnavailable(_ reason: String, retry: (() -> Void)? = nil) {

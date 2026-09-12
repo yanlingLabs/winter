@@ -1,11 +1,11 @@
-import NormaKit
-import NormaProtocol
+import WinterKit
+import WinterProtocol
 import XCTest
-@testable import Norma
+@testable import Winter
 
-/// Task 4 (Phase 4d-iii): `TileData` — the pure adapter that unifies `pluginsContrib()`'s NormaKit
-/// `JSONValue` tile shape and the live `plugin_tile_updated` event's NormaProtocol
-/// `SessionEvent.JSONValue` tile shape into one struct. No `NormaClient`, no SwiftUI — same "pure
+/// Task 4 (Phase 4d-iii): `TileData` — the pure adapter that unifies `pluginsContrib()`'s WinterKit
+/// `JSONValue` tile shape and the live `plugin_tile_updated` event's WinterProtocol
+/// `SessionEvent.JSONValue` tile shape into one struct. No `WinterClient`, no SwiftUI — same "pure
 /// helper, table-tested directly" posture as `PluginManagerModelTests`' coverage of
 /// `pluginRowDisplay`.
 final class TileAdapterTests: XCTestCase {

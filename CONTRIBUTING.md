@@ -1,10 +1,10 @@
-# Contributing to Norma
+# Contributing to Winter
 
 Thanks for wanting to help. This document is the practical stuff: how to get a working build, how to
 run the tests, and the handful of rules that will save you a wasted afternoon.
 
 **Before anything nontrivial, [open an issue](https://github.com/yanlingLabs/norma/issues) or start a
-[discussion](https://github.com/yanlingLabs/norma/discussions).** Norma has a lot of load-bearing
+[discussion](https://github.com/yanlingLabs/norma/discussions).** Winter has a lot of load-bearing
 structure that isn't obvious from a diff, and it's much easier to point you at it before you write
 the code than after.
 
@@ -14,7 +14,7 @@ Found a security problem? Don't open an issue — see [SECURITY.md](SECURITY.md)
 
 - [What you need](#what-you-need)
 - [First build](#first-build)
-- [Running Norma in development](#running-norma-in-development)
+- [Running Winter in development](#running-winter-in-development)
 - [The dev/dist split — read this one](#the-devdist-split--read-this-one)
 - [Tests](#tests)
 - [Changing the protocol](#changing-the-protocol)
@@ -29,7 +29,7 @@ Found a security problem? Don't open an issue — see [SECURITY.md](SECURITY.md)
 | **[Bun](https://bun.sh) ≥ 1.3** | The runtime. TypeScript runs directly; there is no build step in dev. |
 | **pnpm** | Orchestrates the workspaces. `bun install` is what you actually run. |
 | **Xcode 26+** | Only if you're touching Swift. |
-| **[XcodeGen](https://github.com/yonaskolb/XcodeGen)** | `brew install xcodegen`. The `.xcodeproj` is generated from `apple/Norma/project.yml`; the pbxproj is not the source of truth. |
+| **[XcodeGen](https://github.com/yonaskolb/XcodeGen)** | `brew install xcodegen`. The `.xcodeproj` is generated from `apple/Winter/project.yml`; the pbxproj is not the source of truth. |
 
 TypeScript-only contributions (the daemon, the CLI, tools, providers) need nothing from the Xcode
 column.
@@ -38,7 +38,7 @@ column.
 
 ```sh
 git clone https://github.com/yanlingLabs/norma.git
-cd norma
+cd winter
 bun install
 ```
 
@@ -49,15 +49,15 @@ may as well get them out of the way first:
 ```sh
 bun run cef:fetch                      # Chromium Embedded Framework  (~332 MB, SHA1-pinned)
 bun run monaco:fetch                   # Monaco editor                (~14 MB, sha512-pinned)
-./apple/NormaKit/vendor/fetch-iroh.sh  # iroh transport xcframework   (~133 MB, checksum-pinned)
+./apple/WinterKit/vendor/fetch-iroh.sh  # iroh transport xcframework   (~133 MB, checksum-pinned)
 ```
 
 Then generate and build:
 
 ```sh
-cd apple/Norma
+cd apple/Winter
 xcodegen generate
-xcodebuild -project Norma.xcodeproj -scheme Norma -destination 'platform=macOS' \
+xcodebuild -project Winter.xcodeproj -scheme Winter -destination 'platform=macOS' \
   -derivedDataPath build/DerivedData build
 ```
 
@@ -65,7 +65,7 @@ xcodebuild -project Norma.xcodeproj -scheme Norma -destination 'platform=macOS' 
 time, and without this you will eventually test a days-old binary and lose hours to it. This has
 happened; it is in the repo's scar tissue.
 
-## Running Norma in development
+## Running Winter in development
 
 ```sh
 cd packages/cli
@@ -74,20 +74,20 @@ bun src/main.ts -p "hello"        # one-shot prompt, another terminal
 bun src/main.ts                   # interactive TUI (Code mode)
 ```
 
-Useful CLI surface while developing: `norma status`, `norma ping`, `norma sessions`,
-`norma agents`, `norma watch <sessionId>`, `norma bg list <session>`, `norma plugin list`.
+Useful CLI surface while developing: `winter status`, `winter ping`, `winter sessions`,
+`winter agents`, `winter watch <sessionId>`, `winter bg list <session>`, `winter plugin list`.
 
 ## The dev/dist split — read this one
 
-Norma ships as two separate installs that must never be confused:
+Winter ships as two separate installs that must never be confused:
 
 | | Distribution | Development |
 | --- | --- | --- |
-| App | `Norma.app` | `Norma Dev.app` (Debug build) |
-| Bundle id | `com.norma.app` | `com.norma.app.dev` |
-| Home | `~/.norma` | `~/.norma-dev` |
-| Keychain service | `com.norma.core` | `com.norma.core.dev` |
-| Command | `norma` | `norma-dev` |
+| App | `Winter.app` | `Winter Dev.app` (Debug build) |
+| Bundle id | `com.winter.app` | `com.winter.app.dev` |
+| Home | `~/.winter` | `~/.winter-dev` |
+| Keychain service | `com.winter.core` | `com.winter.core.dev` |
+| Command | `winter` | `winter-dev` |
 
 **Never launch the distribution app during development.** It's somebody's daily driver, updated by
 Sparkle; a locally-launched copy under the same bundle id is indistinguishable from it in the menu
@@ -96,14 +96,14 @@ them.
 
 Two traps worth stating outright:
 
-1. **Plain `norma` is the distribution CLI.** With a dead socket it *auto-launches the dist app*.
-   Use `norma-dev`, or a temporary `NORMA_HOME` with a manually-spawned daemon:
+1. **Plain `winter` is the distribution CLI.** With a dead socket it *auto-launches the dist app*.
+   Use `winter-dev`, or a temporary `WINTER_HOME` with a manually-spawned daemon:
 
    ```sh
-   NORMA_HOME=~/.norma-dev NORMA_PROFILE=dev bun src/main.ts daemon run
+   WINTER_HOME=~/.winter-dev WINTER_PROFILE=dev bun src/main.ts daemon run
    ```
 
-2. **Debug builds don't embed `norma-core`.** "Norma Dev" cannot spawn its own daemon — start the
+2. **Debug builds don't embed `winter-core`.** "Winter Dev" cannot spawn its own daemon — start the
    dev daemon *first* or the orb just shows disconnected.
 
 And: **after any change under `packages/`, restart the daemon, not just the app.** An app-only
@@ -117,8 +117,8 @@ cd packages/core && bun test           # one package
 bun test path/to/file.test.ts          # one file (path substring match)
 bun test -t "test name"                # one test by name
 
-cd apple/NormaProtocol && swift test   # protocol mirror round-trip
-cd apple/NormaKit      && swift test   # daemon client library
+cd apple/WinterProtocol && swift test   # protocol mirror round-trip
+cd apple/WinterKit      && swift test   # daemon client library
 
 bun run verify:workflow                # workflows e2e against the REAL compiled binary
 ```
@@ -140,11 +140,11 @@ changing a `SessionEvent` variant or an RPC method touches these, **in order**:
 3. `pnpm protocol:generate` — regenerates the JSON schema + Swift round-trip fixtures
 4. `packages/core/src/agent/subagent-transcript.ts` — its exhaustiveness map fails core's `tsc`
    until you update it
-5. `apple/NormaProtocol` — mirror the Swift type. Its test asserts the exact fixture count, so it
+5. `apple/WinterProtocol` — mirror the Swift type. Its test asserts the exact fixture count, so it
    fails until synced
-6. `apple/NormaKit` — has exhaustive `switch`es over event variants (the `seq`/`sessionId`
-   accessors). A new variant breaks compilation **here**, not in NormaProtocol
-7. **Build NormaKit *and* the app** — not just `swift test` in NormaProtocol. That's the only way to
+6. `apple/WinterKit` — has exhaustive `switch`es over event variants (the `seq`/`sessionId`
+   accessors). A new variant breaks compilation **here**, not in WinterProtocol
+7. **Build WinterKit *and* the app** — not just `swift test` in WinterProtocol. That's the only way to
    catch step 6
 
 ### Adding a *field* is more dangerous than adding a variant
@@ -170,23 +170,23 @@ never pass either one; a security test pins that.
 
 ## Rules that bite
 
-- **Tests must never touch `~/.norma`.** Always point at a temp `NORMA_HOME`. Never kill or restart
+- **Tests must never touch `~/.winter`.** Always point at a temp `WINTER_HOME`. Never kill or restart
   a user's live daemon or app.
-- **No setting may ever require a daemon restart.** `~/.norma/settings.json` is watched and
+- **No setting may ever require a daemon restart.** `~/.winter/settings.json` is watched and
   hot-swapped atomically; feature code reads live getters. New settings follow that pattern — this
   is a product promise, not a preference.
-- **Secrets live in the Keychain.** `Bun.secrets`, service `com.norma.core`. Never on disk, never in
+- **Secrets live in the Keychain.** `Bun.secrets`, service `com.winter.core`. Never on disk, never in
   a fixture, never in a log line.
 - **Provider `encrypted_content` / `reasoning_item.itemJson` is opaque.** The session JSONL is its
   only sink. Never log it, never write it into a model-readable transcript.
 - **Versions are generated.** `VERSION` (format `#.#.###`) is canonical; edit it only via
   `bun run version:bump` / `version:sync`. Never hand-edit a version in a `package.json` or plist.
 - **Minimum OS targets track the latest major Apple OS.** No legacy compatibility shims.
-- **`packages/core/src/providers/codex-config.ts` self-identifies as `originator: "norma"`.** That's
+- **`packages/core/src/providers/codex-config.ts` self-identifies as `originator: "winter"`.** That's
   a deliberate terms-of-service decision. Don't "fix" it to a first-party value.
-- The Sparkle public key in `apple/Norma/project.yml` is the production key. Its private half exists
+- The Sparkle public key in `apple/Winter/project.yml` is the production key. Its private half exists
   only in one login Keychain and is committed nowhere.
-- `norma/` at the repo root is a dead Phase-0 scaffold. The real app is `apple/Norma`.
+- `winter/` at the repo root is a dead Phase-0 scaffold. The real app is `apple/Winter`.
 
 ## Sending a pull request
 
@@ -194,7 +194,7 @@ never pass either one; a security test pins that.
 - **Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) with a
   scope** — the repo's history is `feat(app):`, `fix(editor):`, `docs(brand):`, `perf(app):`,
   `chore(release):`. Match it.
-- **Explain *why* in the body.** Norma's code carries unusually heavy comments explaining why
+- **Explain *why* in the body.** Winter's code carries unusually heavy comments explaining why
   something is the way it is, because the alternative is somebody helpfully undoing it in six
   months. Write your PR description the same way.
 - **Run the tests for what you touched**, and say which ones you ran. If your change crosses the

@@ -3,10 +3,10 @@ import SwiftUI
 
 // MARK: - The `$OUTDIR` convention (app-shell T8, spec §3) — the app READS it directly, no RPC.
 //
-// Mirrors `packages/core/src/sessions/outdir.ts`'s directory shape (`<normaHome>/outputs/
+// Mirrors `packages/core/src/sessions/outdir.ts`'s directory shape (`<winterHome>/outputs/
 // <sessionId>/…`) without this app ever calling into that file. `home` is EVERY caller's own
-// `AppProfile.normaHome` — never a literal `~/.norma` (the dev/dist profile-blindness class that
-// shipped as a live bug once; see `AppProfile.normaHome`'s own doc comment). Kept as free functions
+// `AppProfile.winterHome` — never a literal `~/.winter` (the dev/dist profile-blindness class that
+// shipped as a live bug once; see `AppProfile.winterHome`'s own doc comment). Kept as free functions
 // (not methods) so both `OutputsWatcher` and `ShellSessionHost` share exactly one implementation of
 // "where is this session's outputs dir" rather than two that could drift.
 
@@ -19,7 +19,7 @@ func outputsRootPath(home: String) -> String {
 /// `<home>/outputs/<sessionId>` — one session's own outdir. `sessionId` is trusted here (it always
 /// arrives off `SessionSummary.sessionId`/`ShellSessionHost.attachedSessionId`, never raw external
 /// input) — unlike the daemon's own `outdirPath`, which validates it against path-component
-/// injection because a TOOL CALL there could otherwise escape `~/.norma` with a crafted id; no such
+/// injection because a TOOL CALL there could otherwise escape `~/.winter` with a crafted id; no such
 /// attacker-controlled path reaches this side.
 func outputsSessionPath(home: String, sessionId: String) -> String {
     outputsRootPath(home: home) + "/" + sessionId

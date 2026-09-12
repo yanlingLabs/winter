@@ -1,6 +1,6 @@
 import Foundation
 import Combine
-import NormaProtocol
+import WinterProtocol
 
 /// panel-shell T9: tab state keyed by session. Switching sessions swaps which set is shown; it
 /// never MERGES or clears — a session's tabs are its own and survive being switched away from,
@@ -67,7 +67,7 @@ struct PanelTabsBySession: Equatable {
 /// is; it never clears a departed session's entry.
 ///
 /// **One code path for live/replayed events.** `apply(_:)` is the sole per-event mutator. It is fed
-/// EXTERNALLY by whatever already pumps the live `NormaClient.events` stream — mirroring
+/// EXTERNALLY by whatever already pumps the live `WinterClient.events` stream — mirroring
 /// `SessionFeed.handle` → `SessionModel.apply` exactly (`ShellSessionHost.attachFresh`'s `onEvent`
 /// hook, the SAME one that already forwards to `SessionDirectory.handle`) — rather than subscribing
 /// to `client.events` itself: `AsyncStream` delivers each element to exactly one waiting consumer, so
@@ -109,7 +109,7 @@ struct PanelTabsBySession: Equatable {
 ///
 /// **Indifferent to provenance by construction, not by a check.** `panel_tab_opened/closed/
 /// activated/navigated` carry no "who did this" field on the wire (events.ts's `PanelTab*Event`
-/// schemas, mirrored verbatim in NormaProtocol) — a human's `panel.openTab` tap and the agent's
+/// schemas, mirrored verbatim in WinterProtocol) — a human's `panel.openTab` tap and the agent's
 /// browser-tool open both resolve, daemon-side, to the identical event, and this store has no path
 /// that mutates `tabs`/`activeTabId` other than folding one of those four. There is deliberately no
 /// second, optimistic-local-mutation path for a UI action to take instead — see `foldPanelTabs`'s
@@ -259,7 +259,7 @@ final class PanelStore: ObservableObject {
     /// this one path. Anything that isn't one of the four persisted panel-lifecycle cases (every
     /// other `SessionEvent`, INCLUDING `panelCommand`) is a no-op: this store recognizes exactly
     /// the same four cases `foldPanelTabs` does, for the same reason — no seq/ordering bookkeeping
-    /// happens here either, since `NormaClient` already owns dedupe/ordering upstream of whatever
+    /// happens here either, since `WinterClient` already owns dedupe/ordering upstream of whatever
     /// pump calls this.
     ///
     /// The event's OWN `sessionId` (read straight off its payload — every one of the four structs

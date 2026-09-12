@@ -1,6 +1,6 @@
 import AppKit
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// browser-runtime T3: the executor's whole coverage (spec §2, §5, §6).
 ///
@@ -10,11 +10,11 @@ import XCTest
 /// through `BrowserRuntime.CEFDriver` and these tests substitute a recorder. What that leaves
 /// uncovered is stated plainly rather than papered over:
 ///
-///   * **`CEFDriver.production` itself** — ten one-line forwards to `NormaCEF*`. Nothing here
+///   * **`CEFDriver.production` itself** — ten one-line forwards to `WinterCEF*`. Nothing here
 ///     executes them; they are verified by reading, which is what "thin enough to verify by
 ///     reading" has to mean for a seam no test may cross.
-///   * **What CEF does with the calls** — that `NormaCEFCreateBrowser` really parents a browser,
-///     that `NormaCEFCloseBrowser` really drains the registry. B1 pinned those; Task 1's spike
+///   * **What CEF does with the calls** — that `WinterCEFCreateBrowser` really parents a browser,
+///     that `WinterCEFCloseBrowser` really drains the registry. B1 pinned those; Task 1's spike
 ///     measured the reparent itself in the real app (`docs/research/2026-08-10-cef-reparent-spike.md`).
 ///   * **The DECISIONS** — whether a browser should exist at all is `BrowserLifecycleEngine`'s, and
 ///     `BrowserLifecycleTests` is where that lives. These tests only ask whether the executor
@@ -37,18 +37,18 @@ final class BrowserRuntimeTests: XCTestCase {
         private(set) var log: [String] = []
         private var marks: [ObjectIdentifier: String] = [:]
 
-        var stateBlocks: [String: (NormaCEFBrowserState?) -> Void] = [:]
+        var stateBlocks: [String: (WinterCEFBrowserState?) -> Void] = [:]
         var navigationBlocks: [String: (String?, String?) -> Void] = [:]
         var popupBlocks: [String: (String?) -> Void] = [:]
 
-        /// What `NormaCEFRuntime.ensureInitialized()` answers. `true` is the ordinary path; the
+        /// What `WinterCEFRuntime.ensureInitialized()` answers. `true` is the ordinary path; the
         /// failure trio below drives the unavailable placeholder.
         var initialises = true
         var failure: String?
         var retryable = false
         private(set) var clearFailureCount = 0
 
-        /// Stands in for what `NormaCEFCreateBrowser` does to the container: CEF parents its own
+        /// Stands in for what `WinterCEFCreateBrowser` does to the container: CEF parents its own
         /// view tree into it. Tests that care about the view tree install one here.
         var onCreate: ((PanelCEFContainerView, String) -> Void)?
 
@@ -70,7 +70,7 @@ final class BrowserRuntimeTests: XCTestCase {
 
         /// **The container's bounds AT THE INSTANT the browser was asked for**, which is the only
         /// instant that matters: `CreateBrowserNow` reads `[parent bounds]` once and hands it to
-        /// `CefWindowInfo::SetAsChild` (`NormaCEF.mm`). Recorded separately from `log` so that the
+        /// `CefWindowInfo::SetAsChild` (`WinterCEF.mm`). Recorded separately from `log` so that the
         /// ordering assertions stay readable.
         private(set) var boundsAtCreate: [String: NSRect] = [:]
 
@@ -125,7 +125,7 @@ final class BrowserRuntimeTests: XCTestCase {
                 executeCDP: { [unowned self] container, method, params, completion in
                     let mark = self.mark(container)
                     self.log.append("\(mark) cdp \(method) params=\(params ?? "-")")
-                    // HELD, not answered. `NormaCEFExecuteCDP` promises its completion always fires;
+                    // HELD, not answered. `WinterCEFExecuteCDP` promises its completion always fires;
                     // a recorder that fired it here would make every consumer test synchronous and
                     // hide the case the deadline exists for — a verb that never comes back.
                     self.cdpCompletions.append(completion)
@@ -206,7 +206,7 @@ final class BrowserRuntimeTests: XCTestCase {
     /// Objective-C class name, which is the string the runtime matches on — the class is
     /// Chromium-internal and cannot be named from Swift any other way (spike Fact 2). No collision
     /// with the real one is possible: CEF's framework is never `dlopen`ed under XCTest
-    /// (`NormaCEFRuntime` refuses), so this is the only class with that name in the process.
+    /// (`WinterCEFRuntime` refuses), so this is the only class with that name in the process.
     @objc(RenderWidgetHostViewCocoa)
     final class FakeRenderWidgetHostView: NSView {
         override var acceptsFirstResponder: Bool { true }
@@ -237,7 +237,7 @@ final class BrowserRuntimeTests: XCTestCase {
         func characterIndex(for point: NSPoint) -> Int { NSNotFound }
     }
 
-    /// What `NormaCEFCreateBrowser` does, as far as the view tree is concerned: parent a two-deep
+    /// What `WinterCEFCreateBrowser` does, as far as the view tree is concerned: parent a two-deep
     /// spine into the container, with the keystroke-taking view at the bottom. Mirrors the shape the
     /// spike dumped live (`PanelCEFContainerView > CefBrowserHostView > … > RenderWidgetHostViewCocoa`).
     @discardableResult
@@ -298,9 +298,9 @@ final class BrowserRuntimeTests: XCTestCase {
 
     /// The absorbed `makeNSView` sequence, in the order that file wrote it (T4 deleted the original,
     /// so this is now the only copy) — which is load-bearing,
-    /// not cosmetic: `NormaCEFSetStateObserver` publishes the current snapshot the moment it is
-    /// registered, and `NormaCEFSeedTabState` is what makes that first snapshot the tab's known
-    /// address instead of blank (`NormaCEF.h`). Observers, then seed, then create.
+    /// not cosmetic: `WinterCEFSetStateObserver` publishes the current snapshot the moment it is
+    /// registered, and `WinterCEFSeedTabState` is what makes that first snapshot the tab's known
+    /// address instead of blank (`WinterCEF.h`). Observers, then seed, then create.
     func testCreateWiresTheThreeObserversThenSeedsThenCreates() {
         let runtime = makeRuntime()
         runtime.apply([.create(tabId: "t1", url: "https://example.com")],
@@ -341,7 +341,7 @@ final class BrowserRuntimeTests: XCTestCase {
 
     /// **The parked container must be a REAL SIZE before the browser is asked for, and this is the
     /// only moment that can be checked.** `CreateBrowserNow` reads `[parent bounds]` exactly once
-    /// and hands it to `CefWindowInfo::SetAsChild` (`NormaCEF.mm`), so the rect a browser is born
+    /// and hands it to `CefWindowInfo::SetAsChild` (`WinterCEF.mm`), so the rect a browser is born
     /// with is whatever the container measured at that instant. A tab that is later attached is
     /// rescued by `resizeSubviews(withOldSize:)` — but spec §5's headless browsers, and every one of
     /// B2's, are created parked and may NEVER be attached. At a zero-sized parking window they would
@@ -395,7 +395,7 @@ final class BrowserRuntimeTests: XCTestCase {
     /// The seed's SECOND argument is the whole reason `BrowserTabState` carries a title. Seeding
     /// `(url, "")` for a tab whose stored title is known re-opens the restore re-report: the dedupe
     /// memory is the (url, title) PAIR, so the first `OnLoadEnd` after a restore would differ from
-    /// the seed and file a `panel_tab_navigated` the log already holds (`NormaCEF.h`).
+    /// the seed and file a `panel_tab_navigated` the log already holds (`WinterCEF.h`).
     func testTheSeedCarriesTheStoredTitleNotAnEmptyOne() {
         let runtime = makeRuntime()
         runtime.apply([.create(tabId: "t1", url: "https://example.com")],
@@ -425,7 +425,7 @@ final class BrowserRuntimeTests: XCTestCase {
     /// Routing: each container's state observer must publish into ITS OWN tab's model. Getting this
     /// wrong puts one tab's address in another tab's URL field, and no CEF is needed to prove it.
     ///
-    /// `NormaCEFBrowserState`'s properties are readonly in the header and readwrite in the `.mm`, so
+    /// `WinterCEFBrowserState`'s properties are readonly in the header and readwrite in the `.mm`, so
     /// the setters exist at runtime and KVC reaches them — the same trick `CEFRuntimeTests` uses to
     /// read that type's values.
     func testEachTabsStateObserverPublishesIntoItsOwnModel() {
@@ -434,7 +434,7 @@ final class BrowserRuntimeTests: XCTestCase {
                        .create(tabId: "t2", url: "https://two.example")],
                       tabs: tabs("s1", tab("t1"), tab("t2")), sessionOf: { _ in "s1" })
 
-        let state = NormaCEFBrowserState()
+        let state = WinterCEFBrowserState()
         state.setValue("https://moved.example", forKey: "url")
         state.setValue("Moved", forKey: "title")
         state.setValue(true, forKey: "canGoBack")
@@ -452,7 +452,7 @@ final class BrowserRuntimeTests: XCTestCase {
 
     /// **The double-create guard.** The engine's rule 8 re-creates a held session's shown tab on
     /// every plan where it is missing, so a create for a tab that already has one is ordinary
-    /// traffic, not a bug — and a second `NormaCEFCreateBrowser` into the same container is a second
+    /// traffic, not a bug — and a second `WinterCEFCreateBrowser` into the same container is a second
     /// live browser nothing will ever close.
     func testASecondCreateForALiveTabIsANoOp() {
         let runtime = makeRuntime()
@@ -470,7 +470,7 @@ final class BrowserRuntimeTests: XCTestCase {
     }
 
     /// **The create/stop race the view could not have.** `PanelWebTab.makeNSView` hopped one turn
-    /// before `NormaCEFCreateBrowser` and nothing could interleave — `dismantleNSView` cannot beat a
+    /// before `WinterCEFCreateBrowser` and nothing could interleave — `dismantleNSView` cannot beat a
     /// same-turn async. Here a LATER PLAN can: create is queued, the next plan stops the tab, and if
     /// the hop then fired it would create a browser into a container the runtime has already
     /// released — live, observer-less, and closed by nobody for the life of the process.
@@ -612,7 +612,7 @@ final class BrowserRuntimeTests: XCTestCase {
         let runtime = makeRuntime()
         runtime.apply([.create(tabId: "t1", url: "https://example.com")],
                       tabs: tabs("s1", tab("t1")), sessionOf: { _ in "s1" })
-        let state = NormaCEFBrowserState()
+        let state = WinterCEFBrowserState()
         state.setValue("https://example.com/page", forKey: "url")
         state.setValue("A Page", forKey: "title")
         cef.stateBlocks["c1"]?(state)
@@ -719,7 +719,7 @@ final class BrowserRuntimeTests: XCTestCase {
     }
 
     /// The durable fallback, and the two counts the spike says to log loudly. Chromium's view tree
-    /// "is not Norma's to promise": zero matches means nobody can type, more than one means the
+    /// "is not Winter's to promise": zero matches means nobody can type, more than one means the
     /// choice is a guess — both are reported rather than silently absorbed.
     func testTheResponderSearchFallsBackToTextInputConformanceAndReportsZeroAndMany() {
         let empty = PanelCEFContainerView()
@@ -1133,10 +1133,10 @@ final class BrowserRuntimeTests: XCTestCase {
     /// **The half `apply`'s latch cannot reach: the create hop that was already in flight.**
     ///
     /// `create` registers its container synchronously and defers the CEF call by one main-queue turn
-    /// (`startBrowser`), so the last plan before the quit still has a `NormaCEFCreateBrowser`
+    /// (`startBrowser`), so the last plan before the quit still has a `WinterCEFCreateBrowser`
     /// pending when the beat starts — and the hop's own guard (`containers[tabId] === container`)
     /// passes, because quiescing deliberately does not clear the registry. That is a browser created
-    /// one turn from `NSApp.terminate`: the racing-create shape `NormaCEF.mm`'s tripwire counts.
+    /// one turn from `NSApp.terminate`: the racing-create shape `WinterCEF.mm`'s tripwire counts.
     ///
     /// The container is asserted still registered afterwards, so this row proves the HOP's guard
     /// rather than an identity check that happened to fire.
@@ -1195,8 +1195,8 @@ final class BrowserRuntimeTests: XCTestCase {
     }
 
     /// **The latch must not gate the shutdown release** — that is fix H's other half, and the belt
-    /// for a shutdown reached without the quit door at all (`NormaCEFSetPreShutdownHook`, i.e. a
-    /// system logout). `NormaCEFCloseAllBrowsers`' sweep completes a close only when CEF's host view
+    /// for a shutdown reached without the quit door at all (`WinterCEFSetPreShutdownHook`, i.e. a
+    /// system logout). `WinterCEFCloseAllBrowsers`' sweep completes a close only when CEF's host view
     /// deallocates, and a container still mounted in a window (still holding the first responder)
     /// is what defeats it. A latch that silenced this would trade fix I for fix H.
     func testTheShutdownReleaseStillRunsAfterTheLatchIsSet() {

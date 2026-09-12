@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Task 1: the shared pure task-display module — sort/collapse/glyph/elapsed/tokens. Lockstep
 /// twin of `packages/cli/test/task-display.test.ts` — SAME fixtures/expectations on both sides

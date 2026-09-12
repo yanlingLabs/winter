@@ -2,7 +2,7 @@ import Foundation
 import CoreServices
 
 /// app-shell T8 (spec §3, post-review YAGNI ruling): ONE recursive FSEvents watcher on
-/// `<normaHome>/outputs/` for the app's WHOLE LIFETIME — no per-session watcher bookkeeping, no
+/// `<winterHome>/outputs/` for the app's WHOLE LIFETIME — no per-session watcher bookkeeping, no
 /// activity-bounded scheme, and the "files missed between polls" limitation a poll-based design
 /// would have simply disappears. Constructed once in `AppDelegate.boot()` and handed to every
 /// consumer that needs it (`ShellSessionHost`, this task; the floating corner panel, T9) — never a
@@ -40,8 +40,8 @@ final class OutputsWatcher {
     /// wiring should copy.
     var onChange: ((_ sessionId: String, _ files: [String]) -> Void)?
 
-    /// `AppProfile.normaHome` at construction — profile-resolved by the CALLER (`AppDelegate.boot()`
-    /// passes `AppProfile.normaHome` explicitly), never re-read here; this class has no opinion
+    /// `AppProfile.winterHome` at construction — profile-resolved by the CALLER (`AppDelegate.boot()`
+    /// passes `AppProfile.winterHome` explicitly), never re-read here; this class has no opinion
     /// about dev vs dist, only about a path it was handed.
     private let home: String
     private let fileManager: FileManager
@@ -118,7 +118,7 @@ final class OutputsWatcher {
     // MARK: - PURE diffing (unit-tested; no FSEventStream, no live filesystem state required)
 
     /// `path → sessionId`: the first path component under `outputsRoot` is the sessionId
-    /// (`outputsSessionPath`'s own shape — `<normaHome>/outputs/<sessionId>/…`). A raw path outside
+    /// (`outputsSessionPath`'s own shape — `<winterHome>/outputs/<sessionId>/…`). A raw path outside
     /// `outputsRoot`, or equal to `outputsRoot` itself (no session component at all), contributes
     /// nothing. Pure string manipulation only — no filesystem access, so this half needs no
     /// temp-dir fixture and no real path to even exist.
@@ -130,7 +130,7 @@ final class OutputsWatcher {
     /// path (e.g. a just-deleted session's file) untouched — so a root and a path built from the
     /// exact same string can silently stop sharing a prefix the moment the directory in question is
     /// removed, which is precisely the scenario under test. `home`/`outputsRoot` are always built
-    /// from ONE string (`AppProfile.normaHome`, threaded through unmodified), so there is nothing
+    /// from ONE string (`AppProfile.winterHome`, threaded through unmodified), so there is nothing
     /// here for symlink resolution to usefully do in production either — real FSEvents paths are
     /// reported in canonical form already, and this app's real `home` is never itself a symlink.
     static func sessionIdsTouched(outputsRoot: String, changedPaths: [String]) -> Set<String> {

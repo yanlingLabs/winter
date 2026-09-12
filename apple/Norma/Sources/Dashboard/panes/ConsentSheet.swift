@@ -1,9 +1,9 @@
-import NormaKit
+import WinterKit
 import SwiftUI
 
 // -----------------------------------------------------------------------------------------------
 // ConsentSheetState — Task 3 (4d-iii): a PURE state machine backing the plugin install/enable
-// consent sheet. No `NormaClient`, no SwiftUI — table-tested directly in `ConsentSheetStateTests`,
+// consent sheet. No `WinterClient`, no SwiftUI — table-tested directly in `ConsentSheetStateTests`,
 // same "pure model, table-tested next to its View" posture as `pluginRowDisplay` in
 // `PluginManagerView.swift`.
 // -----------------------------------------------------------------------------------------------
@@ -22,7 +22,7 @@ import SwiftUI
 ///
 /// `decision` is a pure record of user intent, NOT a completed action — `PluginManagerModel` is
 /// the one that actually calls `pluginEnable(name:consent:true)` on `.confirmed`
-/// (`PluginManagerModel.confirmConsent()`); this type has no `NormaClient` of its own to call it
+/// (`PluginManagerModel.confirmConsent()`); this type has no `WinterClient` of its own to call it
 /// with.
 struct ConsentSheetState: Equatable, Identifiable {
     enum Decision: Equatable {

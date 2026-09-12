@@ -1,4 +1,4 @@
-import { TRANSIENT_EVENT_TYPES, type SessionEvent } from "@norma/protocol";
+import { TRANSIENT_EVENT_TYPES, type SessionEvent } from "@winter/protocol";
 import {
   MAIN_THREAD, asAssistantFrame, asInitFrame, asMirrorErrorFrame, asResultFrame, asStreamEventFrame,
   asUserFrame, assistantText, deltaText, hasToolResults, threadIdOf, toolCalls, toolResults, userText,
@@ -9,7 +9,7 @@ import { classifyThrown, sanitizeDetail } from "./errors";
 import { isKnownUnpersistedKind, kindOf, summarize } from "./hooks";
 import { isQuestionTool } from "./questions";
 import { projectTerminal, totalsOf, type UsageTotals } from "./terminal";
-import { normaToolNameFor } from "../runtime-sdk/tool-names";
+import { hostToolNameFor } from "../runtime-sdk/tool-names";
 import { ProjectorRefusedError } from "./types";
 import type { CheckpointStore, ProjectedBatch, ProjectedEvent, Projector, ProjectorDeps, ProjectorRefusal, ProtocolSdkMessage } from "./types";
 
@@ -22,12 +22,12 @@ export {
 } from "./errors";
 export {
   TASK_STATUS_MAP, applyTaskPatch, childFromSpawn, isSpawnTool, seedTask, threadCompletedFrom,
-  threadStarted, type ChildRecord, type NormaTaskStatus, type TaskRow, type WinterTaskStatus,
+  threadStarted, type ChildRecord, type HostTaskStatus, type TaskRow, type WinterTaskStatus,
 } from "./children";
 export { UNPERSISTED_KINDS, isKnownUnpersistedKind, kindOf, summarize } from "./hooks";
 export { QUESTION_TOOLS, isQuestionTool } from "./questions";
 export { MAIN_THREAD, threadIdOf } from "./conversation";
-export { normaToolNameFor } from "../runtime-sdk/tool-names";
+export { hostToolNameFor } from "../runtime-sdk/tool-names";
 export { ProjectorRefusedError } from "./types";
 export type {
   CheckpointStore, Logger, ProjectedBatch, ProjectedEvent, ProjectionCursorInput, ProjectionKey,
@@ -375,7 +375,7 @@ class ProjectorImpl implements Projector {
   /**
    * Winter's task graph (§4.4). `task_started` seeds a row (so a later patch has a subject to
    * carry); `task_updated` and `task_notification` patch it. `task_progress` and
-   * `background_tasks_changed` carry nothing Norma's `task_updated` can express beyond what the
+   * `background_tasks_changed` carry nothing Winter's `task_updated` can express beyond what the
    * patches already say, and `local_command_output` is not a task at all — all three fall through
    * to the debug log.
    *
@@ -397,7 +397,7 @@ class ProjectorImpl implements Projector {
       const patch = typeof m.patch === "object" && m.patch !== null ? (m.patch as Record<string, unknown>) : {};
       return this.claimed(`tk:${taskId}:${this.messageIndex}`, () => {
         const ev = applyTaskPatch(this.tasks, taskId, patch, this.deps.sessionId);
-        // A patch of only run-bookkeeping (`total_paused_ms`, `end_time`) says nothing Norma's
+        // A patch of only run-bookkeeping (`total_paused_ms`, `end_time`) says nothing Winter's
         // `task_updated` can express. Logged rather than dropped in silence (n8, review r2).
         if (ev === undefined) this.logSkipped(msg);
         return ev === undefined ? [] : [ev];
@@ -548,22 +548,22 @@ class ProjectorImpl implements Projector {
   }
 
   /**
-   * Winter's tool name → Norma's (ruling P8b-25). An unknown name passes through unchanged and is
+   * Winter's tool name → Winter's (ruling P8b-25). An unknown name passes through unchanged and is
    * logged once: a tool row with an unfamiliar label is a cosmetic surprise, whereas dropping the
    * call or inventing a name would corrupt the transcript and break the `callId` linkage the Mac
    * and iOS renderers fold on.
    *
-   * The table is `runtime-sdk/tool-names.ts` — the policy lane's canonical `WINTER_NORMA_TOOL_PAIRS`,
+   * The table is `runtime-sdk/tool-names.ts` — the policy lane's canonical `RUNTIME_HOST_TOOL_PAIRS`,
    * shared with the approval bridge's `gateToolNameFor`. ONE table: the name the gate classifies by
    * and the name the transcript records cannot drift apart, which they could while the projector
    * carried its own copy (that private stand-in is deleted).
    */
   private renameTool(winterName: string): string {
-    const norma = normaToolNameFor(winterName);
-    if (norma !== undefined) return norma;
+    const winter = hostToolNameFor(winterName);
+    if (winter !== undefined) return winter;
     if (!this.loggedToolNames.has(winterName)) {
       this.loggedToolNames.add(winterName);
-      this.deps.log.debug?.("[projector] no Norma name for a Winter tool — passing it through", {
+      this.deps.log.debug?.("[projector] no Winter name for a Winter tool — passing it through", {
         sessionId: this.deps.sessionId, tool: winterName,
       });
     }

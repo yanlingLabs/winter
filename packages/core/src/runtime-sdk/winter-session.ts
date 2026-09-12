@@ -1,6 +1,6 @@
-// P8b Task 16 — THE PER-SESSION DRIVER for a Norma session running on the Winter leg.
+// P8b Task 16 — THE PER-SESSION DRIVER for a Winter session running on the Winter leg.
 //
-// One `WinterSession` per Norma session (`s_<hex>`), owning a sequence of INCARNATIONS: each is one
+// One `WinterSession` per Winter session (`s_<hex>`), owning a sequence of INCARNATIONS: each is one
 // spawned `winter` child (`runtime.sdk.query({ prompt: queue, options })`), one host prompt queue
 // (P8b-6: the streaming prompt is the only thing that keeps a session reachable by messaging), one
 // projector (P8b-14: the SDK→SessionEvent fold, keyed by the 8a generation the incarnation bumped),
@@ -82,12 +82,12 @@
 // `resumable` from the moment `end()` returns — the next `open()` awaits that iteration before it
 // spawns (finding 3), and no push can reach the closed queue in between.
 import type { Options, Query } from "@yanlinglabs/winter-agent-sdk";
-import type { NewSessionEvent, SessionEvent } from "@norma/protocol";
+import type { NewSessionEvent, SessionEvent } from "@winter/protocol";
 import { MAIN_THREAD, ProjectorRefusedError, classifyThrown, type ProjectedBatch, type Projector, type ProtocolSdkMessage } from "../projector";
 import { PROJECTOR_PASSTHROUGH_CLIENT } from "../projector/index";
 import { asInitFrame, asResultFrame } from "../projector/conversation";
 import { ALLOWED_TRANSITIONS, type RuntimeSessionState } from "../runtime-state/records";
-import type { NormaRuntimeSdk, SessionMode } from "./create";
+import type { WinterRuntimeSdk, SessionMode } from "./create";
 import type { attachWinterSession, WinterSessionAttachHandle, WinterSessionAttachment } from "./messaging";
 import { createHostPromptQueue, type HostPromptQueue } from "./prompt-queue";
 import { permissionModeFor } from "./mode-options";
@@ -136,13 +136,13 @@ export interface WinterSessionRecords {
 }
 
 export interface WinterSessionDeps {
-  /** Norma's own session id — what every persisted event is stamped with. */
+  /** Winter's own session id — what every persisted event is stamped with. */
   sessionId: string;
   /** The BACKEND uuid allocated by the creation transaction: `Options.sessionId` on a fresh start,
    *  `Options.resume` afterwards, the messaging address, the name of the child's transcript. */
   backendSessionId: string;
   mode: SessionMode;
-  runtime: NormaRuntimeSdk;
+  runtime: WinterRuntimeSdk;
   /** `Options` for ONE incarnation. Re-reads the session's LIVE facts (model, effort, policy) and
    *  re-resolves the spawn hook, so a `session.setModel` while resumable is honoured on resume. May
    *  throw a typed refusal (an executable that has gone away) — `open()` surfaces it. */

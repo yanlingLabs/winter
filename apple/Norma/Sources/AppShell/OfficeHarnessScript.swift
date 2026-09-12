@@ -165,7 +165,7 @@ enum OfficeHarnessPlan {
         step("18.twoViewUndoCharacterization", 18, "undo via A's primary door — PINNED: both edits survive (REFUSED/NO-OP, branch-aware)", 30),
 
         step("19.saveRoundTrip", 19, "type, saveAndAwaitOutcome succeeds, the real file carries the content", 30),
-        step("19.noSelfReloadSuppression", 19, "Norma's own write does not trigger a spurious reload of itself", 10),
+        step("19.noSelfReloadSuppression", 19, "Winter's own write does not trigger a spurious reload of itself", 10),
 
         step("20.setup", 20, "a DEDICATED helper with a 2s autosave interval boots; a fresh doc opens", 40),
         step("20.typeDirtyWaitSidecar", 20, "type a marker (dirty=true); the real autosave timer writes a sidecar; helper alive", 35),
@@ -379,7 +379,7 @@ func classifyOfficeAgentWriteEvidence(commandOk: Bool, tileRepainted: Bool,
 // MARK: - office-plumbing Task 9: the multi-sheet fixture, templated (never shelled out to soffice)
 
 /// **Why this is Swift string templating and not `soffice --convert-to`, the brief's own literal
-/// wording**: the PRODUCTIZED vendor tree (`apple/Norma/vendor/libreoffice/product-set`) ships
+/// wording**: the PRODUCTIZED vendor tree (`apple/Winter/vendor/libreoffice/product-set`) ships
 /// `libmergedlo.dylib` and its sibling dylibs only — T1v2's own trim removed everything the LOK
 /// embed path does not `dlopen`, and a `soffice` CLI binary was never among the set carried forward
 /// from the NO-GO exploration's harvested official build (confirmed directly: zero matches for a
@@ -427,7 +427,7 @@ func officeHarnessMultiSheetFodsContent() -> String {
             <table:table-column table:number-columns-repeated="4"/>
             <table:table-row>
               <table:table-cell table:style-name="T9Sheet1Fill" office:value-type="string">
-                <text:p>NORMA T9 PART ZERO</text:p>
+                <text:p>WINTER T9 PART ZERO</text:p>
               </table:table-cell>
               <table:table-cell office:value-type="float" office:value="0">
                 <text:p>0</text:p>
@@ -438,7 +438,7 @@ func officeHarnessMultiSheetFodsContent() -> String {
             <table:table-column table:number-columns-repeated="4"/>
             <table:table-row>
               <table:table-cell table:style-name="T9Sheet2Fill" office:value-type="string">
-                <text:p>NORMA T9 PART ONE</text:p>
+                <text:p>WINTER T9 PART ONE</text:p>
               </table:table-cell>
               <table:table-cell office:value-type="float" office:value="1">
                 <text:p>1</text:p>

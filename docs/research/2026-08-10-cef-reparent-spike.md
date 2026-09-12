@@ -1,7 +1,7 @@
 # Reparenting a live CEF browser between a hidden window and a visible one
 
 **Date:** 2026-08-10 · **Status:** measured in a scratch build of the real app; the harness is
-committed (`apple/Norma/Sources/CEF/SpikeReparent.swift`, Debug-only, `NORMA_SPIKE_REPARENT=1`) ·
+committed (`apple/Winter/Sources/CEF/SpikeReparent.swift`, Debug-only, `WINTER_SPIKE_REPARENT=1`) ·
 **Question:** the Browser Runtime spec (§3) rests on one AppKit/CEF interaction — that a live
 windowed CEF browser survives having its container `NSView` moved between a hidden parking window
 and a visible one, repeatedly, both directions, with audio playing, input working and the page
@@ -17,10 +17,10 @@ against. Three further findings change what Task 5 has to write:
 1. **A reparent fires no CEF callback at all** — not `OnLoadEnd`, not `OnAddressChange`, not
    `OnLoadingStateChange`. Task 5's fold logic has nothing to defend against here.
 2. **First responder is destroyed by the move and must be restored by hand**, and the view to
-   restore it to is **not** the one `NormaCEFCreateBrowser` parents in. Getting this wrong is
+   restore it to is **not** the one `WinterCEFCreateBrowser` parents in. Getting this wrong is
    silent: the wrong view accepts first-responder status and then delivers nothing.
 3. **`NSWindow.sendEvent` cannot be used to drive a CEF browser** — it bypasses
-   `NormaApplication.sendEvent:` and therefore `CefScopedSendingEvent`. 40 of 40 keystrokes
+   `WinterApplication.sendEvent:` and therefore `CefScopedSendingEvent`. 40 of 40 keystrokes
    vanished before this was found.
 
 ---
@@ -31,8 +31,8 @@ against. Three further findings change what Task 5 has to write:
 |---|---|
 | Machine / OS | arm64 Mac, macOS 26.6.1 (Darwin 25.6.0) |
 | CEF | `151.3.16+gbe1e15d+chromium-151.0.7922.109` (the vendored minimal distribution) |
-| Build | the **real app**, Debug, `-derivedDataPath /private/tmp/norma-dd-spike` |
-| Isolation | `NORMA_HOME=$(mktemp -d)` per run; Chromium profile `/private/tmp/norma-spike-cef` |
+| Build | the **real app**, Debug, `-derivedDataPath /private/tmp/winter-dd-spike` |
+| Isolation | `WINTER_HOME=$(mktemp -d)` per run; Chromium profile `/private/tmp/winter-spike-cef` |
 | Launch | the raw executable from a terminal (never `open`), stderr to a file |
 | Page | a file:// page the spike writes, instrumenting itself (see "the page" below) |
 
@@ -48,11 +48,11 @@ browser, no lost page, no reload, no geometry error:
 | 6–8 | never / ordered-out / offscreen | 2 cycles + 40 s park / 40 s show, sliced at 5 s, back to back | occlusion throttling, per-mode CPU, where audio drift lives |
 | 9 | never | 3 cycles + window screenshots at ~11 Hz | white flash / stale layer |
 
-`NORMA_SPIKE_PARK_MODE` covers the three plausible parking shapes: **never** ordered in at all (the
+`WINTER_SPIKE_PARK_MODE` covers the three plausible parking shapes: **never** ordered in at all (the
 spec's literal wording), **ordered-out** (ordered front once, then `orderOut:`), and **offscreen**
 (positioned at −20000, −20000 and ordered front).
 
-**How the page reports.** `NormaCEF.h` exposes no JS evaluation and `javascript:` never enters a
+**How the page reports.** `WinterCEF.h` exposes no JS evaluation and `javascript:` never enters a
 load path, so the one channel out of a page is `document.title` →
 `CefDisplayHandler::OnTitleChange` → the container's state observer. The page publishes a
 pipe-delimited payload 4×/s carrying: sequence, `performance.now()`, accumulated `<audio>` media
@@ -125,7 +125,7 @@ AppKit's first responder is.
 that view *is* `container.subviews.first` and is what `GetWindowHandle()` returns — **succeeds**
 (returns `true`, and the window reports it as first responder) and then delivers nothing. And
 `NSWindow.sendEvent` delivers nothing either, because it bypasses `NSApplication.sendEvent:`, which
-is exactly where `NormaApplication` (the `CefAppProtocol` subclass `main.swift` exists to install)
+is exactly where `WinterApplication` (the `CefAppProtocol` subclass `main.swift` exists to install)
 wraps dispatch in `CefScopedSendingEvent`. Runs 1 and 2 combined both mistakes and lost 40 of 40
 keystrokes with every log line looking green.
 
@@ -254,11 +254,11 @@ the first instant — but the honest claim is "no flash at ≥90 ms resolution",
 ## Traps found (the section the B1 spikes taught this document to have)
 
 1. **Chromium's `root_cache_path` lock is exclusive and bundle-id-scoped, and the hazard is
-   bidirectional.** `NormaCEFRuntime.rootCachePath()` derives from the bundle id, and a Debug spike
+   bidirectional.** `WinterCEFRuntime.rootCachePath()` derives from the bundle id, and a Debug spike
    build carries the *same* bundle id as the user's live dev app. Whichever process initialises
    second fails with exit code 24 — so a careless spike does not merely fail, it can break the
    browser panel of the app the user is working in. The harness takes a scratch profile
-   (`NORMA_SPIKE_CEF_CACHE`) and calls `NormaCEFInitialize` directly for exactly this reason.
+   (`WINTER_SPIKE_CEF_CACHE`) and calls `WinterCEFInitialize` directly for exactly this reason.
 2. **`NSWindow.sendEvent` silently loses every event destined for CEF** (§2).
 3. **`makeFirstResponder` on the wrong view succeeds and delivers nothing** (§2).
 4. **A reparent resets first responder to the window** (§2) — the *only* thing about input that a
@@ -289,7 +289,7 @@ the first instant — but the honest claim is "no flash at ≥90 ms resolution",
    **Find it by identity, not by depth.** The harness takes "the last
    `acceptsFirstResponder` view in a pre-order walk", which happens to equal
    `RenderWidgetHostViewCocoa` only because the single spine measured here is three views deep with
-   exactly one candidate at the bottom. Chromium's view tree is not Norma's to promise: Task 3
+   exactly one candidate at the bottom. Chromium's view tree is not Winter's to promise: Task 3
    should search for the descendant whose class is `RenderWidgetHostViewCocoa` (or, more durably,
    the one conforming to `NSTextInputClient` — that conformance is what makes it the view that can
    take a keystroke) and log loudly if it finds zero or more than one.
@@ -304,7 +304,7 @@ the first instant — but the honest claim is "no flash at ≥90 ms resolution",
    visible; `document.visibilityState` stays `"visible"`. Good for headless, and the reason §4's cap
    and linger matter more than the spec assumed. If a future pass *wants* throttling, none of the
    three obvious window shapes (never-ordered-in, ordered-out, offscreen) provides it — it would
-   have to come from `CefBrowserHost::WasHidden()`, which is not on `NormaCEF.h` today.
+   have to come from `CefBrowserHost::WasHidden()`, which is not on `WinterCEF.h` today.
 7. **A browser created into a parked container loads and runs normally** — headless creation needs
    no visible window at any point.
 8. **Quit with parked browsers is clean** (`DoClose->true`, registry drains, no stranded helpers).
@@ -323,23 +323,23 @@ the first instant — but the honest claim is "no flash at ≥90 ms resolution",
 ## Re-running the harness
 
 ```sh
-cd apple/Norma && xcodegen generate && xcodebuild -project Norma.xcodeproj -scheme Norma \
-  -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/norma-dd-spike build
+cd apple/Winter && xcodegen generate && xcodebuild -project Winter.xcodeproj -scheme Winter \
+  -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/winter-dd-spike build
 
-NORMA_HOME=$(mktemp -d) NORMA_PROFILE=dev NORMA_SPIKE_REPARENT=1 \
-NORMA_SPIKE_CEF_CACHE=/private/tmp/norma-spike-cef \
-  /private/tmp/norma-dd-spike/Build/Products/Debug/Norma.app/Contents/MacOS/Norma \
+WINTER_HOME=$(mktemp -d) WINTER_PROFILE=dev WINTER_SPIKE_REPARENT=1 \
+WINTER_SPIKE_CEF_CACHE=/private/tmp/winter-spike-cef \
+  /private/tmp/winter-dd-spike/Build/Products/Debug/Winter.app/Contents/MacOS/Winter \
   --autoplay-policy=no-user-gesture-required 2>&1 | tee /tmp/spike.log
 ```
 
 `--autoplay-policy=no-user-gesture-required` is what makes the run unattended; it reaches Chromium
-because `NormaCEFInitialize` is handed the process's real `argv` (`NormaCEF.h`). Without it the page
+because `WinterCEFInitialize` is handed the process's real `argv` (`WinterCEF.h`). Without it the page
 shows a Start button and waits for a click, and the cycle loop refuses to begin until the page's
 audio clock proves audio is actually playing — never on a fixed delay, so a run where autoplay
 silently failed cannot produce twenty green cycles proving nothing.
 
-Knobs: `NORMA_SPIKE_CYCLES` (default 20), `NORMA_SPIKE_LONG_DWELL` (40 s),
-`NORMA_SPIKE_PARK_MODE` (`never` | `ordered-out` | `offscreen`), `NORMA_SPIKE_NO_CLICK=1`.
+Knobs: `WINTER_SPIKE_CYCLES` (default 20), `WINTER_SPIKE_LONG_DWELL` (40 s),
+`WINTER_SPIKE_PARK_MODE` (`never` | `ordered-out` | `offscreen`), `WINTER_SPIKE_NO_CLICK=1`.
 
 **With the CPU sampler, and then the derivation** — §4's table needs both halves, so start the
 sampler about a second before the app and hand both files to the analyser afterwards:
@@ -348,7 +348,7 @@ sampler about a second before the app and hand both files to the analyser afterw
 REF=docs/research/reference/2026-08-10-cef-reparent-spike
 "$REF"/cpusample.sh 330 > /tmp/cpu.txt &        # 1 Hz, filtered to the spike bundle only
 sleep 1
-NORMA_HOME=$(mktemp -d) NORMA_SPIKE_REPARENT=1 … /…/Norma > /tmp/spike.log 2>&1
+WINTER_HOME=$(mktemp -d) WINTER_SPIKE_REPARENT=1 … /…/Winter > /tmp/spike.log 2>&1
 python3 "$REF"/analyze-spike-ledger.py /tmp/spike.log /tmp/cpu.txt
 ```
 
@@ -367,7 +367,7 @@ the display profile to sRGB (raw pixels do not match the CSS values). The nine l
 CPU samples are likewise session-scratch; the tooling above is committed so that any future run
 regenerates them rather than depending on files nobody kept.
 
-**The gate is inert.** With `NORMA_SPIKE_REPARENT` unset the whole file is unreachable and in
+**The gate is inert.** With `WINTER_SPIKE_REPARENT` unset the whole file is unreachable and in
 Release it is not compiled at all (`#if DEBUG`). Proven: the app suite is **1324 passed, 0 failed**
 and `packages/core` `tsc --noEmit` reports its usual **6** pre-existing errors (all in
 `test/agent/approvals.test.ts`; this task changed no TypeScript).

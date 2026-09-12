@@ -1,15 +1,15 @@
 import { CredentialResolutionError } from "@yanlinglabs/winter-provider-runtime";
 import type { CredentialMaterial as RuntimeCredentialMaterial, CredentialRef, CredentialStore } from "@yanlinglabs/winter-provider-runtime";
 import type { SecretStore } from "../auth/secret-store";
-import { clearCredentialMaterial, readCredentialMaterial, writeCredentialMaterial, type CredentialMaterial as NormaCredentialMaterial } from "../auth/credential-material";
+import { clearCredentialMaterial, readCredentialMaterial, writeCredentialMaterial, type CredentialMaterial as WinterCredentialMaterial } from "../auth/credential-material";
 
-const STORE_NAME = "norma keychain credential store";
+const STORE_NAME = "winter keychain credential store";
 
-/** `@yanlinglabs/winter-provider-runtime`'s `CredentialMaterial` union is a SUPERSET of Norma's own
- *  (it adds `aws`/`gcp-service-account`/`gcp-access-token`, kinds Norma never writes for these two
+/** `@yanlinglabs/winter-provider-runtime`'s `CredentialMaterial` union is a SUPERSET of Winter's own
+ *  (it adds `aws`/`gcp-service-account`/`gcp-access-token`, kinds Winter never writes for these two
  *  providers) — narrow to the arms `auth/credential-material.ts`'s `writeCredentialMaterial`
  *  actually accepts, or refuse typed rather than silently dropping a field the write would need. */
-function toNormaMaterial(material: RuntimeCredentialMaterial): NormaCredentialMaterial {
+function toWinterMaterial(material: RuntimeCredentialMaterial): WinterCredentialMaterial {
   switch (material.kind) {
     case "api-key":
       return { kind: "api-key", key: material.key };
@@ -27,13 +27,13 @@ function toNormaMaterial(material: RuntimeCredentialMaterial): NormaCredentialMa
     default:
       throw new CredentialResolutionError(
         "unsupported",
-        `${STORE_NAME}: cannot store a "${material.kind}" credential — Norma's material records support api-key/oauth/bearer only`,
+        `${STORE_NAME}: cannot store a "${material.kind}" credential — Winter's material records support api-key/oauth/bearer only`,
       );
   }
 }
 
 /**
- * A `@yanlinglabs/winter-provider-runtime` `CredentialStore` over Norma's OWN Keychain-backed
+ * A `@yanlinglabs/winter-provider-runtime` `CredentialStore` over Winter's OWN Keychain-backed
  * `SecretStore`, delegating every read/write to `auth/credential-material.ts` — the SAME
  * parser/writer the post-8b hotfix defined for the spawned Winter child (lane-5 brief, P8c-10's
  * seam). A `{kind:"keychain",account}` ref's `account` IS the material record name
@@ -57,7 +57,7 @@ export function credentialStoreOverSecretStore(secrets: SecretStore): Credential
       return await readCredentialMaterial(secrets, ref.account);
     },
     async set(ref: Extract<CredentialRef, { kind: "keychain" }>, material: RuntimeCredentialMaterial): Promise<void> {
-      await writeCredentialMaterial(secrets, ref.account, toNormaMaterial(material));
+      await writeCredentialMaterial(secrets, ref.account, toWinterMaterial(material));
     },
     async delete(ref: Extract<CredentialRef, { kind: "keychain" }>): Promise<void> {
       await clearCredentialMaterial(secrets, ref.account);

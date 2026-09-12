@@ -17,7 +17,7 @@ export interface ReaperDeps {
   /** `SessionHub.attachedCount`, injected — see `ReaperStore`'s own doc comment for why the store
    *  never holds this itself. */
   attachedCount: (sessionId: string) => number;
-  /** `<home>/cleaner.jsonl` — the SAME normaHome the store itself was constructed with, in every
+  /** `<home>/cleaner.jsonl` — the SAME winterHome the store itself was constructed with, in every
    *  real caller (daemon.ts's `dirs.home`). Passed explicitly (not read off the store) so a test can
    *  point it anywhere without a second store accessor. */
   home: string;

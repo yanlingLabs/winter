@@ -1,7 +1,7 @@
 import XCTest
-import NormaProtocol
-import NormaKit
-@testable import Norma
+import WinterProtocol
+import WinterKit
+@testable import Winter
 
 /// Task 1 (2d-iii): the reducer's `pendingInteractions: [PendingInteraction]` replaces the old
 /// `pendingApprovalIds: Set<String>` — same drives of `status = .approvalNeeded(count:)`, but now
@@ -75,7 +75,7 @@ final class PendingInteractionTests: XCTestCase {
         // `SessionEvent.Question`/`QuestionOption` are cross-module `Codable` structs with no
         // public memberwise initializer — build the expected value the same wire-JSON way the
         // reducer itself decodes it, rather than reaching for a synthesized init that doesn't
-        // exist outside NormaProtocol.
+        // exist outside WinterProtocol.
         let expectedQuestions = try! JSONDecoder().decode(
             [SessionEvent.Question].self,
             from: Data(#"[{"question":"Which port?","header":"h","options":[{"label":"80","description":null},{"label":"443","description":"https"}],"multiSelect":true}]"#.utf8)

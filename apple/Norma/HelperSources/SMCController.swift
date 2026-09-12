@@ -326,6 +326,6 @@ private struct SMCParamStruct {
 
 /// Regression guard for the 80-byte AppleSMC parameter-struct requirement above. Exposed at
 /// internal (default) scope — rather than widening `SMCParamStruct` itself out of file-private
-/// scope — specifically so `NormaAppTests` (which gives this file dual target membership; see
+/// scope — specifically so `WinterAppTests` (which gives this file dual target membership; see
 /// project.yml) can pin the size without touching AppleSMC's private wire-struct visibility.
 let smcParamStructByteSize = MemoryLayout<SMCParamStruct>.size

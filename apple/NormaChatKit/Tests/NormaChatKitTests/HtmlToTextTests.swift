@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import NormaChatKit
+@testable import WinterChatKit
 
 /// The cleaner's ONLY correctness anchor: `packages/protocol/generated/fixtures/cleaner-vectors.json`,
 /// computed from the live TS `htmlToText` at `pnpm protocol:generate` time. This test ITERATES the

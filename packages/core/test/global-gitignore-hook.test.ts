@@ -24,15 +24,15 @@ describe("global-gitignore hook", () => {
     process.env.XDG_CONFIG_HOME = xdg;
     addLocalDir(tmp("proj-"), "/some/dir");
     const gi = readFileSync(join(xdg, "git", "ignore"), "utf8");
-    expect(gi).toContain("**/.norma/settings.local.json");
-    expect(gi).toContain("**/.norma/permissions.local.json");
+    expect(gi).toContain("**/.winter/settings.local.json");
+    expect(gi).toContain("**/.winter/permissions.local.json");
   });
 
   test("PermissionRules.append(project) adds the personal patterns", () => {
     const xdg = tmp("xdg2-");
     process.env.XDG_CONFIG_HOME = xdg;
-    const pr = new PermissionRules({ globalAllow: () => [], normaHome: tmp("home-") });
+    const pr = new PermissionRules({ globalAllow: () => [], winterHome: tmp("home-") });
     pr.append("Bash(ls:*)", "project", tmp("proj2-"));
-    expect(readFileSync(join(xdg, "git", "ignore"), "utf8")).toContain("**/.norma/permissions.local.json");
+    expect(readFileSync(join(xdg, "git", "ignore"), "utf8")).toContain("**/.winter/permissions.local.json");
   });
 });

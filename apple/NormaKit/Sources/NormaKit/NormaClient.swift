@@ -1,17 +1,17 @@
 import Foundation
-import NormaProtocol
+import WinterProtocol
 
-public actor NormaClient {
+public actor WinterClient {
     public static let protocolVersion = 0
 
-    private let makeTransport: @Sendable () -> NormaTransport
+    private let makeTransport: @Sendable () -> WinterTransport
     private let token: String
     private let clientName: String
     private let requestTimeout: Duration
 
-    // internal (not private): NormaClient+Reconnect.swift needs to close a stale transport when a
+    // internal (not private): WinterClient+Reconnect.swift needs to close a stale transport when a
     // deliberate close() lands mid-reconnect (Task 9 review fix 2).
-    var transport: NormaTransport?
+    var transport: WinterTransport?
     private var decoder = LineDecoder()
     private var nextId = 1
     private var pending: [Int: CheckedContinuation<JSONValue, Error>] = [:]
@@ -23,7 +23,7 @@ public actor NormaClient {
     var everConnected = false
     var deliberatelyClosed = false
     // Remote Gateway Task 5: the hello `role` this client authenticates as ("harness" by default,
-    // "remote" for the gateway's daemon-facing bridge client). Not `private`: NormaClient+
+    // "remote" for the gateway's daemon-facing bridge client). Not `private`: WinterClient+
     // Reconnect.swift's reconnectLoop() must re-send the SAME role on every reconnect attempt —
     // reconnecting with the default would silently downgrade a `remote` connection back to
     // `harness` (wrong principal, and the daemon's REMOTE_ALLOWED_METHODS gate would then admit
@@ -35,8 +35,8 @@ public actor NormaClient {
     // exit path (defer), so a later, genuinely-new disconnect can still trigger reconnection.
     var reconnecting = false
 
-    public nonisolated let events: AsyncStream<NormaEvent>
-    nonisolated let eventsCont: AsyncStream<NormaEvent>.Continuation // internal: Task 9's reconnect extension yields states
+    public nonisolated let events: AsyncStream<WinterEvent>
+    nonisolated let eventsCont: AsyncStream<WinterEvent>.Continuation // internal: Task 9's reconnect extension yields states
 
     // Attach/resync state (used by Task 8/9): the session this client is attached to and the
     // last PERSISTED seq it has seen. assistant_delta is exempt (transient; carries lastSeq).
@@ -60,7 +60,7 @@ public actor NormaClient {
     public var tiles: [String: [String: SessionEvent.JSONValue]] { tilesStore }
 
     public init(
-        makeTransport: @escaping @Sendable () -> NormaTransport,
+        makeTransport: @escaping @Sendable () -> WinterTransport,
         token: String,
         clientName: String,
         requestTimeout: Duration = .seconds(5)
@@ -69,7 +69,7 @@ public actor NormaClient {
         self.token = token
         self.clientName = clientName
         self.requestTimeout = requestTimeout
-        var c: AsyncStream<NormaEvent>.Continuation!
+        var c: AsyncStream<WinterEvent>.Continuation!
         self.events = AsyncStream { c = $0 }
         self.eventsCont = c
     }
@@ -112,7 +112,7 @@ public actor NormaClient {
         eventsCont.finish() // deliberate close: the event stream ENDS — consumers' for-await loops exit
     }
 
-    private func startPump(_ t: NormaTransport) {
+    private func startPump(_ t: WinterTransport) {
         pumpTask?.cancel()
         pumpTask = Task { [weak self] in
             for await ev in t.incoming {
@@ -138,7 +138,7 @@ public actor NormaClient {
         }
     }
 
-    /// Task 9: backoff + reconnect + re-attach (NormaClient+Reconnect.swift). Kept separate so
+    /// Task 9: backoff + reconnect + re-attach (WinterClient+Reconnect.swift). Kept separate so
     /// the pump logic never changes when reconnection lands.
     func onDisconnected() { startReconnect() }
 
@@ -159,7 +159,7 @@ public actor NormaClient {
             // must never be resurrected by replay — plugin_tile_updated also carries the
             // `sessionId:"$system"` sentinel, never a real attached session).
             //
-            // The membership test is `SessionEvent.isTransient` (NormaProtocol) — the ONE
+            // The membership test is `SessionEvent.isTransient` (WinterProtocol) — the ONE
             // cross-language definition of the transient set, mirroring the daemon's own
             // `TRANSIENT_EVENT_TYPES`. It used to be a literal case list here, hand-copied into
             // the phone client and the daemon's live filter; the phone's copy was simply missing,
@@ -222,7 +222,7 @@ public actor NormaClient {
         // `z.object({})` — `z.object({}).safeParse(undefined)` FAILS, so every wrapper that passed
         // `nil` (session.dispatch, daemon.status, engine.activity, quota.state, trust.list) came
         // back `-32602 invalid params: (root)` against a real daemon. `session.dispatch`'s failure
-        // was user-visible: `AppModel.ensureFocusedSession()` returned nil on any Norma home with
+        // was user-visible: `AppModel.ensureFocusedSession()` returned nil on any Winter home with
         // no dispatch session yet, so orb Enter silently no-op'd and the yellow-light detach bailed
         // on a permanently-nil `focusedSessionId`. Fixed HERE rather than at the five call sites so
         // the whole CLASS is closed — a future `params: nil` wrapper can't reintroduce it — and

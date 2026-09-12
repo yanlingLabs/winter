@@ -93,7 +93,7 @@ enum OfficeDiskChange: Equatable {
 /// **The alternative — favoring the old blind-count design — is not a smaller false-positive rate,
 /// it is trading a self-healing flicker for N1's own silent, PERMANENT data loss**: a genuine
 /// external write landing in that same window, misread as `.ours`, is never surfaced at all, and
-/// the next save from Norma's own in-memory copy silently clobbers it. Given that trade, favoring
+/// the next save from Winter's own in-memory copy silently clobbers it. Given that trade, favoring
 /// `.external` on anything less than a proven match is the only defensible default.
 func officeDiskChange(stat: OfficeFileStat?, baseline: OfficeFileStat?, matchesPendingIdentity: Bool) -> OfficeDiskChange {
     guard let stat else { return .deleted }
@@ -1527,7 +1527,7 @@ enum OfficeRuntimeReducer {
 /// - anything truncates or clears the stack → depths no longer match → the group is pruned.
 ///
 /// This is why the ledger never tries to detect a user edit. The research's own framing ("N must be
-/// tracked by Norma itself and invalidated the moment the user edits") is satisfied by construction
+/// tracked by Winter itself and invalidated the moment the user edits") is satisfied by construction
 /// rather than by a watcher that could miss an edit.
 ///
 /// **A group is never allowed to mean "undo nothing".** `stepSize` floors at one action whenever
@@ -2535,7 +2535,7 @@ final class OfficeRuntime: ObservableObject {
     ///
     /// *Method (re-runnable in three greps).* (1) The wire close is
     /// `OfficeHelperClient.close(docId:)`. (2) Tree-wide, `grep -rn "client\.close(docId"
-    /// apple/Norma/Sources` returns exactly two hits: `ShellSessionHost.swift:965`, which is the
+    /// apple/Winter/Sources` returns exactly two hits: `ShellSessionHost.swift:965`, which is the
     /// body of the `Driver.close` closure — the single production wrapper, inside `queue.run` — and
     /// `OfficeHarness.swift:1391`, which is `#if DEBUG` test surface. (3) `Driver` is a struct held
     /// only by this type, so every production close is a call to `driver.close(`, and
@@ -2988,7 +2988,7 @@ final class OfficeRuntime: ObservableObject {
     /// The Swift suites are all green armed. The **office harness is not**, and it is the surface
     /// that catches this because it is the one that talks to `OfficeHelperClient` DIRECTLY:
     ///
-    /// | build (same machine, same session, `NORMA_OFFICE_HARNESS_DIR=/tmp/…`) | harness |
+    /// | build (same machine, same session, `WINTER_OFFICE_HARNESS_DIR=/tmp/…`) | harness |
     /// |---|---|
     /// | base `69c9c230` | **102 / 103**, 155 s (only `[22.clickCell]`, a budget flake) |
     /// | this branch, **disarmed** | **101 / 103**, 180 s (`[14.freshTile]` + `[22.clickCell]`, both budget flakes) |
@@ -3133,7 +3133,7 @@ final class OfficeRuntime: ObservableObject {
     /// request at all (guard 1), so an idle session's timer is free.
     private var periodicSaveTask: Task<Void, Never>?
 
-    // MARK: - office-live-ux Job 3: "Norma is working"
+    // MARK: - office-live-ux Job 3: "Winter is working"
 
     /// Paths this session's agent has ENGAGED — set by `OfficeAgentBroker` the moment it adopts a
     /// document a tab already has open, for a read exactly as for a write.
@@ -3248,7 +3248,7 @@ final class OfficeRuntime: ObservableObject {
     private func fireAutoSave(path: String) {
         // (0) ⛔ **NEVER resolve a conflict unprompted** — fix round, review CRITICAL-2.
         //
-        //     A conflict means the file on disk ALSO changed outside Norma while this tab held it
+        //     A conflict means the file on disk ALSO changed outside Winter while this tab held it
         //     (`.externalChangeDetected`/`.externalDeleted`, both gated on `doc.dirty`). Saving it
         //     discards the other party's bytes — and `.saveSucceeded` unconditionally clears
         //     `documentConflicts`, so the banner about them deletes itself in the same operation.
@@ -4187,7 +4187,7 @@ final class OfficeRuntime: ObservableObject {
     // `.ours` regardless (the pre-2b `officeDiskChange`'s own blind `expectedWrites > 0` gate) —
     // the round-2 re-review's own PRE-EXISTING hole (N1): a genuinely external write racing in that
     // same window was silently swallowed, never classified `.external`, and the next save from
-    // Norma's own in-memory copy would clobber it with no warning. `officeDiskChange` now requires
+    // Winter's own in-memory copy would clobber it with no warning. `officeDiskChange` now requires
     // `matchesPendingIdentity` (`OfficeRuntime.hasPendingIdentity(for:matching:)`, a non-mutating
     // probe of this SAME bag) before it will ever answer `.ours` — a fire that cannot be matched to
     // ANY recorded identity now reads `.external` and is routed through the ordinary conflict/
@@ -4322,7 +4322,7 @@ final class OfficeRuntime: ObservableObject {
     /// same-filesystem, by construction, regardless of where `tempPath` started out.
     ///
     /// The sibling's name carries a LEADING DOT, matching `EditorSaveCoordinator.writeAtomically`'s
-    /// own `.{name}.norma-save-{uuid}` convention exactly — not merely cosmetic parity: `FileTreeModel
+    /// own `.{name}.winter-save-{uuid}` convention exactly — not merely cosmetic parity: `FileTreeModel
     /// .listTreeEntries` reads with `.skipsHiddenFiles`, so this transient file can never flash into
     /// an open Files tab's tree even on an unlucky watcher fire mid-save (the "Files-tree sibling
     /// watcher" this task's own brief calls out — see this method's callers for the OTHER half,
@@ -4351,7 +4351,7 @@ final class OfficeRuntime: ObservableObject {
         let destination = URL(fileURLWithPath: path)
         let directory = destination.deletingLastPathComponent()
         let sibling = directory.appendingPathComponent(
-            ".\(destination.lastPathComponent).norma-save-\(UUID().uuidString)")
+            ".\(destination.lastPathComponent).winter-save-\(UUID().uuidString)")
         do {
             // office-authoring — the destination's PARENT may not exist yet. A write to a path that
             // does not exist now creates the document, and `write`'s own contract (fs-write.ts:
@@ -4390,7 +4390,7 @@ final class OfficeRuntime: ObservableObject {
             }
             return landedStat
         } catch {
-            // Never leave a `.norma-save-…` beside the user's file, whatever went wrong.
+            // Never leave a `.winter-save-…` beside the user's file, whatever went wrong.
             try? FileManager.default.removeItem(at: sibling)
             throw error
         }

@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import NormaChatKit
+@testable import WinterChatKit
 
 /// The manual redirect loop (`followRedirects`) and the streaming body cap (`collectCapped`) —
 /// the two halves of `ssrfGuard` parity that are about the TRANSPORT rather than the address check.

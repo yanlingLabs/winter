@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@winter/protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SYNC_PAGE_BYTES } from "../../src/ipc/sync";
 import { SessionStore } from "../../src/sessions/store";
@@ -25,7 +25,7 @@ import { TokenAuthority } from "../../src/auth/tokens";
 // The phone half is modelled by `PhoneStore` — a tiny in-TS mirror of `LocalEventStore` (raw JSONL
 // per session + a lastSyncedSeq watermark + the fork rewrite) — so this is a genuine end-to-end of
 // the daemon SURFACE, with the client's algorithm reproduced here rather than driven from Swift.
-// TS CAN touch the daemon; every run uses its own temp NORMA_HOME.
+// TS CAN touch the daemon; every run uses its own temp WINTER_HOME.
 // ================================================================================================
 
 /** Minimal raw NDJSON JSON-RPC client — duplicated from sync-core.test.ts (codebase convention:
@@ -176,7 +176,7 @@ describe("sync phone drill (Chat Slice D task 9) — the full reconcile against 
   afterEach(() => { stop?.(); stop = undefined; });
 
   async function boot(): Promise<{ store: SessionStore; socketPath: string; remoteToken: string }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-sync-drill-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-sync-drill-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));

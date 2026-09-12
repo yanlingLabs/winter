@@ -1,10 +1,10 @@
 import XCTest
-@testable import NormaProtocol
+@testable import WinterProtocol
 
 /// The cross-language TRANSIENT-list tripwire (iOS remote-path T2).
 ///
-/// The seven broadcast-only transient types had been hand-copied into four places — `NormaClient`
-/// (Mac, as a case list), `NormaSessionClient` (phone, as a string set), that client's test mirror,
+/// The seven broadcast-only transient types had been hand-copied into four places — `WinterClient`
+/// (Mac, as a case list), `WinterSessionClient` (phone, as a string set), that client's test mirror,
 /// and now the daemon's remote live-stream filter — because `SessionEvent.Discriminator` is
 /// `private`. The cost of a divergent copy is invisible: a transient missing from a client's list is
 /// dropped 100% of the time by seq dedupe, and a transient missing from the daemon's live-stream
@@ -41,8 +41,8 @@ final class SessionEventTransientTests: XCTestCase {
         XCTAssertEqual(SessionEvent.transientTypes.count, 9)
     }
 
-    /// `isTransient` (the case switch, used by `NormaClient` on decoded events) and
-    /// `transientTypes` (the string set, used by `NormaSessionClient` on opaque wire payloads) must
+    /// `isTransient` (the case switch, used by `WinterClient` on decoded events) and
+    /// `transientTypes` (the string set, used by `WinterSessionClient` on opaque wire payloads) must
     /// classify EVERY event variant identically — otherwise the Mac and the phone disagree about
     /// which events are exempt from dedupe. Driven off the TS-generated fixtures, so the check
     /// covers every variant the protocol actually emits rather than a hand-picked sample, and a new

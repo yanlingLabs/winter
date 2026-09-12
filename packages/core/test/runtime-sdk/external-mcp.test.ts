@@ -1,4 +1,4 @@
-// Fix wave (review row 7): Norma's configured MCP servers → the SDK's stdio configs, keyed as the
+// Fix wave (review row 7): Winter's configured MCP servers → the SDK's stdio configs, keyed as the
 // daemon's registry keys them, trust-gated for the project half.
 import { expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, realpathSync, rmSync } from "node:fs";
@@ -22,7 +22,7 @@ test("user servers from settings.mcpServers become stdio configs under their own
 });
 
 test("a TRUSTED project's <cwd>/.mcp.json contributes its servers; an UNTRUSTED one contributes nothing and is never read", () => {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "norma-ext-mcp-")));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-ext-mcp-")));
   try {
     writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { proj: { command: "bun", args: ["run", "p.ts"] } } }));
     expect(configuredMcpServersFor({ settings: null, cwd: dir, trusted: () => true })).toEqual({ proj: { type: "stdio", command: "bun", args: ["run", "p.ts"] } });
@@ -33,7 +33,7 @@ test("a TRUSTED project's <cwd>/.mcp.json contributes its servers; an UNTRUSTED 
 });
 
 test("a missing or malformed .mcp.json contributes nothing and never throws; a user server shadows a same-keyed project server", () => {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), "norma-ext-mcp-bad-")));
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "winter-ext-mcp-bad-")));
   try {
     expect(configuredMcpServersFor({ settings: null, cwd: dir, trusted: () => true })).toEqual({});
     writeFileSync(join(dir, ".mcp.json"), "{ not json");

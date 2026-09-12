@@ -1,8 +1,8 @@
 import AppKit
-import NormaKit
-import NormaProtocol
+import WinterKit
+import WinterProtocol
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// office-agent-tools T3 — live drills for `sheets info`/`sheets read` against the REAL helper, REAL
 /// vendored LibreOffice, and REAL fixtures. Skips cleanly (never fails) when the vendor engine or the
@@ -15,7 +15,7 @@ import XCTest
 /// broker/runtime/helper stack instead of a fake one. This is the actual end-to-end path an agent's
 /// tool call takes once the daemon dispatches it: wire JSON -> `SessionEvent.PanelCommand` ->
 /// `OfficeCommandConsumer` -> `OfficeAgentBroker` -> `OfficeRuntime` -> `OfficeHelperClient` -> the
-/// wire to `NormaOfficeHelper` -> `LOKBridge` -> real LOK -> and all the way back.
+/// wire to `WinterOfficeHelper` -> `LOKBridge` -> real LOK -> and all the way back.
 @MainActor
 final class OfficeSheetsCommandTests: XCTestCase {
 
@@ -27,16 +27,16 @@ final class OfficeSheetsCommandTests: XCTestCase {
         return url
     }
     private static var vendorProductSetRoot: URL {
-        repoRoot.appendingPathComponent("apple/Norma/vendor/libreoffice/product-set", isDirectory: true)
+        repoRoot.appendingPathComponent("apple/Winter/vendor/libreoffice/product-set", isDirectory: true)
     }
     private static var fixturesRoot: URL {
-        repoRoot.appendingPathComponent("apple/Norma/Tests/NormaAppTests/Fixtures/office", isDirectory: true)
+        repoRoot.appendingPathComponent("apple/Winter/Tests/WinterAppTests/Fixtures/office", isDirectory: true)
     }
     private static var sandboxProfilePath: URL {
-        repoRoot.appendingPathComponent("apple/Norma/Sources/OfficeHelper/office-helper.sb", isDirectory: false)
+        repoRoot.appendingPathComponent("apple/Winter/Sources/OfficeHelper/office-helper.sb", isDirectory: false)
     }
     private static var helperURL: URL {
-        Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("NormaOfficeHelper")
+        Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("WinterOfficeHelper")
     }
 
     private var scratchDirs: [URL] = []
@@ -45,7 +45,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
     /// measured helper leak.**
     ///
     /// This suite built 27 live hosts and called `teardownAllOfficeRuntimesAndStopHelper()` in only
-    /// 2 of them, leaving **22 `NormaOfficeHelper` processes resident** after a full run. That is
+    /// 2 of them, leaving **22 `WinterOfficeHelper` processes resident** after a full run. That is
     /// real debt, not tidiness: leaked helpers hold the shared socket directory and CPU, and they
     /// are a documented source of spurious reds for whoever runs the suite next (the same class that
     /// already produced a 69-helper leak elsewhere in this suite).
@@ -76,7 +76,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
     /// `OfficeRuntimeLiveTests`'s own live drills open with.
     private func requireLiveEngine() throws {
         try XCTSkipIf(!FileManager.default.fileExists(atPath: Self.helperURL.path),
-                      "NormaOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
+                      "WinterOfficeHelper was not built into this run's BUILT_PRODUCTS_DIR "
                         + "(\(Self.helperURL.path)) — add it to the scheme's build list and re-run.")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: Self.vendorProductSetRoot.appendingPathComponent("Frameworks").path),
                       "LibreOffice vendor tree not present at \(Self.vendorProductSetRoot.path) — run "
@@ -435,7 +435,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
                                                  sessionId: "S1", commandId: "pcmd-calc-read-undone-2"), through: host)
         XCTAssertTrue(afterSecondUndo.ok, "\(afterSecondUndo)")
         let restored = try XCTUnwrap(afterSecondUndo.result)
-        XCTAssertTrue(restored.contains("NORMA GATE"),
+        XCTAssertTrue(restored.contains("WINTER GATE"),
                       "a SAVED edit must still be undoable — the fixture's original A1 must come "
                         + "back. If it does not, saving truncated the undo stack, and instant-save "
                         + "would be silently destroying the user's ⌘Z history: \(restored)")
@@ -469,7 +469,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
         XCTAssertTrue(result.contains("2 sheets"), result)
 
         // **Used range asserted literally (review I2) — not eyeballed from a print() line.**
-        // Sheet1's real content is "NORMA GATE"/"42" (row 1) and "office stage A embed probe"/""
+        // Sheet1's real content is "WINTER GATE"/"42" (row 1) and "office stage A embed probe"/""
         // (row 2), spanning A1:B2. Sheet2's real content ("SHEET TWO SEED"/84, "office stage B
         // sheet two probe"/"") spans A1:B2 too — checked directly against the fixture's own
         // content.xml, not assumed. Neither sheet exercises `sheetsInfoOnDedicatedThread`'s own
@@ -575,7 +575,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
                                        sessionId: "S1"), through: host)
         XCTAssertTrue(sent.ok, "\(sent)")
         let result = try XCTUnwrap(sent.result)
-        XCTAssertTrue(result.contains("NORMA GATE\t42"), result)
+        XCTAssertTrue(result.contains("WINTER GATE\t42"), result)
         XCTAssertTrue(result.contains("office stage A embed probe"), result)
         XCTAssertTrue(result.contains("values"), result)
         XCTAssertFalse(result.contains("formulas"), result)
@@ -598,7 +598,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
                                        sessionId: "S1"), through: host)
         XCTAssertTrue(sent.ok, "\(sent)")
         let result = try XCTUnwrap(sent.result)
-        XCTAssertTrue(result.contains("NORMA GATE\t42"), result)
+        XCTAssertTrue(result.contains("WINTER GATE\t42"), result)
         // Never padded to the full 10x50 requested rectangle — only 2 real content rows.
         XCTAssertEqual(result.components(separatedBy: "\n").count, 3, // header line + 2 content rows
                        "a range past the used area must return only the REAL rows, not the requested rectangle: \(result)")
@@ -769,7 +769,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
     /// Fixed by reading the SAME sheet the primary is already on (`Sheet1!A2:B2`, not `Sheet2!...`)
     /// — no part switch ever happens in the observation, so Calc's memory-restore camouflage never
     /// engages. If the agent read genuinely runs on the agent view, the primary's own selection
-    /// (still A1, "NORMA GATE") is untouched. If it mistakenly ran on the primary view instead,
+    /// (still A1, "WINTER GATE") is untouched. If it mistakenly ran on the primary view instead,
     /// `.uno:GoToCell("A2:B2")` would have moved the primary's own selection there for real, and
     /// this observation reads "office stage A embed probe" (A2's real content) instead — a
     /// genuinely different string, not it silently reverting. **Proven to discriminate, not
@@ -779,11 +779,11 @@ final class OfficeSheetsCommandTests: XCTestCase {
     ///
     /// **Round 4 — the coordinator flagged this assertion as possibly polarity-inverted after a
     /// round-3 full-app-suite run failed here; re-derived from the fixture, confirmed NOT
-    /// inverted.** `two-sheet.ods` Sheet1 A1 = "NORMA GATE", A2 = "office stage A embed probe"
+    /// inverted.** `two-sheet.ods` Sheet1 A1 = "WINTER GATE", A2 = "office stage A embed probe"
     /// (confirmed by unzipping the fixture directly, not from memory). `beforeSelection` is pinned
-    /// to "NORMA GATE" by the setup assertion below, so `XCTAssertEqual(beforeSelection,
-    /// afterSelection)` already demands `afterSelection == "NORMA GATE"` — the CLEAN value —
-    /// matching exactly what the coordinator's own cited reviewer measured ("clean -> NORMA GATE,
+    /// to "WINTER GATE" by the setup assertion below, so `XCTAssertEqual(beforeSelection,
+    /// afterSelection)` already demands `afterSelection == "WINTER GATE"` — the CLEAN value —
+    /// matching exactly what the coordinator's own cited reviewer measured ("clean -> WINTER GATE,
     /// mutant -> office stage A embed probe"). The apparent conflict was a misreading of
     /// `XCTAssertEqual`'s failure text, which prints arguments in call order (before, after), not
     /// expected-then-actual: the second-printed value is what was MEASURED that run, not what the
@@ -803,7 +803,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
     /// first time. The two assertions below discriminate the two ways this can fail instead of
     /// leaving one ambiguous mismatch: a content check on the read's OWN returned value (fails
     /// first, with its own message, if the read itself came back stale — the straggler signature)
-    /// and an absolute check that `afterSelection` literally still contains "NORMA GATE" (fails if
+    /// and an absolute check that `afterSelection` literally still contains "WINTER GATE" (fails if
     /// the primary's own selection moved — the isolation signature, whether from a genuine
     /// cross-view read or a queued command landing late against whatever view a later call makes
     /// current).
@@ -824,10 +824,10 @@ final class OfficeSheetsCommandTests: XCTestCase {
             return XCTFail("no live client to drive the primary cursor through")
         }
 
-        // Primary cursor -> Sheet1's A1 ("NORMA GATE", the fixture's own known content).
+        // Primary cursor -> Sheet1's A1 ("WINTER GATE", the fixture's own known content).
         try await click(client: client, docId: docId, xTwips: 100, yTwips: 100)
         let beforeSelection = try await client.clipboardCopy(docId: docId, part: 0)
-        XCTAssertTrue(beforeSelection.contains("NORMA GATE"), "setup: the primary click did not land on A1: \(beforeSelection)")
+        XCTAssertTrue(beforeSelection.contains("WINTER GATE"), "setup: the primary click did not land on A1: \(beforeSelection)")
 
         // The agent read: the SAME sheet (Sheet1), a DIFFERENT range (A2:B2) — deliberately never
         // switching the primary's own part in the observation below, which is what makes this
@@ -847,7 +847,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
         let afterSelection = try await client.clipboardCopy(docId: docId, part: 0)
         // Absolute, arg-order-proof insurance: independent of XCTAssertEqual's printed order below,
         // this fails specifically when the primary's own selection is no longer parked on A1.
-        XCTAssertTrue(afterSelection.contains("NORMA GATE"),
+        XCTAssertTrue(afterSelection.contains("WINTER GATE"),
                       "the PRIMARY view's own selection moved off A1 during an agent read — either the read ran on the primary view directly, or a queued GoToCell(A2:B2) landed late, after the read returned, against whatever view a later LOK call (here, this test's own clipboardCopy) made current next: \(afterSelection)")
         XCTAssertEqual(beforeSelection, afterSelection,
                        "an agent read moved the PRIMARY view's own selection to A2:B2 — the whole point of reading on the agent view instead")
@@ -1632,7 +1632,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
     }
 
     /// `insert_rows`/`insert_cols`/`delete_rows`/`delete_cols`, round-tripped: shift real, known
-    /// content (`gate.xlsx`'s own A1 = "NORMA GATE", ground-truthed via this file's own raw-callback
+    /// content (`gate.xlsx`'s own A1 = "WINTER GATE", ground-truthed via this file's own raw-callback
     /// trace on a prior run, not assumed) two rows down and one column right, then back — each step
     /// verified by READING the content at its new expected position, not merely by a dimension
     /// number. A structural verb that silently shifted the WRONG range, or shifted by the wrong
@@ -1671,7 +1671,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
 
         // Baseline — confirmed real, not assumed.
         let baseline = await readCell("A1")
-        XCTAssertTrue(baseline.contains("NORMA GATE"), "setup: A1 must be the known seed text: \(baseline)")
+        XCTAssertTrue(baseline.contains("WINTER GATE"), "setup: A1 must be the known seed text: \(baseline)")
 
         // insert_rows at=1 count=2 — shifts A1 down to A3.
         let insertRowsSent = await send(command("office.sheets.insert_rows",
@@ -1680,9 +1680,9 @@ final class OfficeSheetsCommandTests: XCTestCase {
         XCTAssertTrue(insertRowsSent.ok, "\(insertRowsSent)")
         XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId, "insert_rows must ADOPT")
         let afterInsertRows = await readCell("A3")
-        XCTAssertTrue(afterInsertRows.contains("NORMA GATE"), "content must shift DOWN by 2 rows: \(afterInsertRows)")
+        XCTAssertTrue(afterInsertRows.contains("WINTER GATE"), "content must shift DOWN by 2 rows: \(afterInsertRows)")
         let a1AfterInsert = await readCell("A1")
-        XCTAssertFalse(a1AfterInsert.contains("NORMA GATE"), "A1 must be vacated by the insert: \(a1AfterInsert)")
+        XCTAssertFalse(a1AfterInsert.contains("WINTER GATE"), "A1 must be vacated by the insert: \(a1AfterInsert)")
 
         // insert_cols at="A" count=1 — shifts A3 right to B3.
         let insertColsSent = await send(command("office.sheets.insert_cols",
@@ -1690,7 +1690,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
                                                 sessionId: "S1", commandId: "pcmd-ic-1"), through: host)
         XCTAssertTrue(insertColsSent.ok, "\(insertColsSent)")
         let afterInsertCols = await readCell("B3")
-        XCTAssertTrue(afterInsertCols.contains("NORMA GATE"), "content must shift RIGHT by 1 column: \(afterInsertCols)")
+        XCTAssertTrue(afterInsertCols.contains("WINTER GATE"), "content must shift RIGHT by 1 column: \(afterInsertCols)")
 
         // Mid-chain SAVED-BYTES proof (see the doc comment above for why this must happen HERE,
         // not only at the chain's end). `dirty == false` on the adopted runtime is the save-through
@@ -1708,12 +1708,12 @@ final class OfficeSheetsCommandTests: XCTestCase {
             return rows.map { $0.joined(separator: "\t") }.joined(separator: "\n")
         }
         let midChainB3 = try await midChainCell("B3")
-        XCTAssertTrue(midChainB3.contains("NORMA GATE"),
+        XCTAssertTrue(midChainB3.contains("WINTER GATE"),
                       "the insert_rows+insert_cols shift must have actually PERSISTED to the saved "
                           + "file — read from a genuinely independent reopen, not the adopted "
                           + "runtime's in-memory model: \(midChainB3)")
         let midChainA1 = try await midChainCell("A1")
-        XCTAssertFalse(midChainA1.contains("NORMA GATE"),
+        XCTAssertFalse(midChainA1.contains("WINTER GATE"),
                        "A1 must be vacated in the SAVED file too, not just the in-memory model: \(midChainA1)")
         try await midChainClient.close(docId: midChainDocId)
 
@@ -1723,7 +1723,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
                                                 sessionId: "S1", commandId: "pcmd-dc-1"), through: host)
         XCTAssertTrue(deleteColsSent.ok, "\(deleteColsSent)")
         let afterDeleteCols = await readCell("A3")
-        XCTAssertTrue(afterDeleteCols.contains("NORMA GATE"), "content must shift back LEFT: \(afterDeleteCols)")
+        XCTAssertTrue(afterDeleteCols.contains("WINTER GATE"), "content must shift back LEFT: \(afterDeleteCols)")
 
         // delete_rows at=1 count=2 — shifts A3 back to A1, the original position.
         let deleteRowsSent = await send(command("office.sheets.delete_rows",
@@ -1731,7 +1731,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
                                                 sessionId: "S1", commandId: "pcmd-dr-1"), through: host)
         XCTAssertTrue(deleteRowsSent.ok, "\(deleteRowsSent)")
         let backToOriginal = await readCell("A1")
-        XCTAssertTrue(backToOriginal.contains("NORMA GATE"), "the full round trip must restore the "
+        XCTAssertTrue(backToOriginal.contains("WINTER GATE"), "the full round trip must restore the "
                      + "original position exactly: \(backToOriginal)")
         XCTAssertEqual(runtime.stateSnapshot.documents[path]?.docId, originalDocId,
                        "every resize verb in this chain must have ADOPTED — never reloaded")
@@ -1743,7 +1743,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
         // the mid-chain reopen added by `8d232cb9` covers insert_rows+insert_cols only, and this
         // chain's own FINAL position is `gate.xlsx`'s own pristine, untouched A1 — a reopen here
         // would pass even if delete_rows/delete_cols silently did nothing at all, since the fixture's
-        // OWN unwritten A1 already reads "NORMA GATE". **Checks B3, not B2** — the coordinator's own
+        // OWN unwritten A1 already reads "WINTER GATE". **Checks B3, not B2** — the coordinator's own
         // review named B2, but B3 is the cell THIS chain's own insert_cols step actually shifted real
         // content into (line ~1119 above, `afterInsertCols`/the mid-chain reopen both target B3 for
         // the same reason) — B2 is never touched anywhere in this chain, so asserting it stays empty
@@ -1758,12 +1758,12 @@ final class OfficeSheetsCommandTests: XCTestCase {
         let endChainDocId = "sheets-resize-reopen-endchain"
         _ = try await endChainClient.open(docId: endChainDocId, path: path)
         let endChainA1 = try await endChainClient.sheetsRead(docId: endChainDocId, sheet: "Sheet1", range: "A1", formulas: false).rows
-        XCTAssertEqual(endChainA1, [["NORMA GATE"]],
+        XCTAssertEqual(endChainA1, [["WINTER GATE"]],
                        "the full round trip must have actually PERSISTED A1's restoration to the "
                            + "saved file — read from a genuinely independent reopen, not the adopted "
                            + "runtime's in-memory model")
         let endChainB3 = try await endChainClient.sheetsRead(docId: endChainDocId, sheet: "Sheet1", range: "B3", formulas: false).rows
-        XCTAssertNotEqual(endChainB3, [["NORMA GATE"]],
+        XCTAssertNotEqual(endChainB3, [["WINTER GATE"]],
                           "B3 (the cell insert_cols shifted real content into, earlier in this same "
                               + "chain) must be vacated in the SAVED file too — no leftover fragment "
                               + "from delete_cols/delete_rows: \(endChainB3)")
@@ -1830,7 +1830,7 @@ final class OfficeSheetsCommandTests: XCTestCase {
                                                          range: "H10", formulas: false).rows
         try await verifyClient.close(docId: verifyDocId)
 
-        XCTAssertNotEqual(savedA1, [["NORMA GATE"]],
+        XCTAssertNotEqual(savedA1, [["WINTER GATE"]],
                           "the human's own unsaved keystroke must be in the SAVED file — the pre-save "
                             + "is what puts it there, and A1 still reading the pristine fixture value "
                             + "means it was lost: \(savedA1)")

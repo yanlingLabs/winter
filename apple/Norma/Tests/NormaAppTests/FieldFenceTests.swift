@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Coverage for `fenceAnchorForTopLeftCorner` (FieldKit/FieldCorner.swift) — the pure geometry
 /// seam that replaces `FieldPlacementTests`' old `fieldFrame` coverage (deleted: `fieldFrame`/

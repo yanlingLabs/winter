@@ -1,8 +1,8 @@
 import XCTest
 import os
-import NormaProtocol
+import WinterProtocol
 import IrohLib
-@testable import NormaKit
+@testable import WinterKit
 
 /// SP2a Task 4 (the capstone): prove the WHOLE stack — a real bun daemon, a real `Gateway`, a
 /// real `IrohListener`, and a real dialing iroh endpoint speaking the actual
@@ -20,12 +20,12 @@ import IrohLib
 /// window to confirm NO further frame arrives — the same idiom `GatewayGateTests` already uses.
 ///
 /// Winter Phase 9a (P9a-11, Lane K): scenarios B, C, D are among the 13 tests `ci.yml`'s
-/// `NORMAKIT_SKIP` names by exact test — bisected to `ed6ebeca6c1fce175ef0e818361fb3662b38d6ca`
+/// `WINTERKIT_SKIP` names by exact test — bisected to `ed6ebeca6c1fce175ef0e818361fb3662b38d6ca`
 /// (`session.dispatch`'s default mode now requires a resolvable `winter` executable this suite
 /// never provisions, which is what a `RealDaemon`-spawned daemon's `session.dispatch` needs); the
 /// resulting local connection close is what iroh-ffi reports to this scenario's own dialing peer
 /// as `IrohError { kind: Stream, message: "ConnectionLost(LocallyClosed)" }` — reproduced verbatim
-/// with `NORMA_WINTER_EXECUTABLE` unset. See `RealDaemon.waitForFirstLine`'s own doc comment for
+/// with `WINTER_RUNTIME_EXECUTABLE` unset. See `RealDaemon.waitForFirstLine`'s own doc comment for
 /// the full classification (scenario B passes once a real `winter` binary is available; C/D do
 /// not, for a second, independent cause documented there).
 final class IrohE2ETests: XCTestCase {
@@ -49,7 +49,7 @@ final class IrohE2ETests: XCTestCase {
         let gateway = Gateway(
             listener: listener,
             daemonFactory: {
-                NormaClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway")
+                WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.remoteToken, clientName: "iphone-gateway")
             },
             hostID: "host-e2e",
             directory: directory
@@ -67,10 +67,10 @@ final class IrohE2ETests: XCTestCase {
         return (secret, peerID, InMemoryDirectory(peerID: peerID))
     }
 
-    /// A harness-role `NormaClient` connected to `daemon` — used to seed/verify session state from
+    /// A harness-role `WinterClient` connected to `daemon` — used to seed/verify session state from
     /// a principal OTHER than the phone (mirrors `GatewayGateTests`' own `seedTwoMessages` helper).
-    private func harnessClient(_ daemon: RealDaemon, name: String) async throws -> NormaClient {
-        let c = NormaClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.harnessToken, clientName: name)
+    private func harnessClient(_ daemon: RealDaemon, name: String) async throws -> WinterClient {
+        let c = WinterClient(makeTransport: { UnixSocketTransport(path: daemon.socketPath) }, token: daemon.harnessToken, clientName: name)
         try await c.connect(role: "harness")
         return c
     }
@@ -121,7 +121,7 @@ final class IrohE2ETests: XCTestCase {
         defer { daemon.stop() }
 
         // Seed a real session over a SEPARATE harness-role connection. Raw `session.dispatch {}` —
-        // NOT `NormaClient.dispatchSession()`, whose `params: nil` the daemon rejects (a known
+        // NOT `WinterClient.dispatchSession()`, whose `params: nil` the daemon rejects (a known
         // latent bug flagged in Task 2's report; out of scope here).
         let seeder = try await harnessClient(daemon, name: "seeder")
         guard let sid = try await seeder.request("session.dispatch", params: .object([:]))["sessionId"]?.stringValue else {
@@ -444,7 +444,7 @@ final class IrohE2ETests: XCTestCase {
         // A reconnect by the SAME clientInstanceID is refused at the handshake — and closed too.
         // SP3.1 T1: a SESSION dialer (its first frame is a `.hello` WireEnvelope) now gets a
         // WireEnvelope `error` carrying a structured `HandshakeRejection(not_paired)` — the epoch it
-        // echoes is the phone's own claimed hello epoch — so a `NormaSessionClient` surfaces a typed
+        // echoes is the phone's own claimed hello epoch — so a `WinterSessionClient` surfaces a typed
         // `.handshakeRejected` (→ the app's honest `.revoked`) instead of a bare close.
         let phone2 = try await PhoneConn.dial(listener: listener, secret: secret)
         defer { phone2.closeConnection(); phone2.closeDialer() }
@@ -464,7 +464,7 @@ final class IrohE2ETests: XCTestCase {
 
 /// An in-process iroh endpoint that DIALS the Gateway's `IrohListener` and speaks the actual wire
 /// protocol: `ClientHello`/`rpcRequest` out, `helloAck`/`event`/`rpcResponse`/`error` in, each
-/// frame `NormaProtocol.LengthPrefix`-framed — mirrors `IrohListenerTests`' own dialer plumbing,
+/// frame `WinterProtocol.LengthPrefix`-framed — mirrors `IrohListenerTests`' own dialer plumbing,
 /// but speaks the REAL `WireEnvelope` protocol the Gateway expects instead of bare stand-in bytes.
 ///
 /// Every network call is bounded by `withTimeout` (below) — iroh-ffi's generated async calls
@@ -473,7 +473,7 @@ final class IrohE2ETests: XCTestCase {
 ///
 /// `@unchecked Sendable`: used from a single flow of `await` calls per test (never concurrently
 /// against the SAME instance, except the deliberate `async let` race in scenario C, which only
-/// ever touches a DIFFERENT `PhoneConn`/`NormaClient`) — matches this test target's existing
+/// ever touches a DIFFERENT `PhoneConn`/`WinterClient`) — matches this test target's existing
 /// convention for test-only connection doubles (`ScriptedRemoteConn`).
 final class PhoneConn: @unchecked Sendable {
     private let dialerEndpoint: Endpoint

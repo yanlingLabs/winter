@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Office Stage B Task 5 — `OfficeCursorStore`: pure fold tests (mirrors `OfficeTileStoreTests`'
 /// own shape for the sibling store), plus one integration test proving `OfficeRuntime.handle
@@ -74,9 +74,9 @@ final class OfficeCursorStoreTests: XCTestCase {
         let sink = store.cursorChanged.sink { signaled.append($0) }
         defer { sink.cancel() }
 
-        store.apply(docId: "doc-1", event: .cellFormula("NORMA GATE"), activePart: 1)
+        store.apply(docId: "doc-1", event: .cellFormula("WINTER GATE"), activePart: 1)
         var state = store.state(docId: "doc-1")
-        XCTAssertEqual(state.cellFormulaText, "NORMA GATE")
+        XCTAssertEqual(state.cellFormulaText, "WINTER GATE")
         XCTAssertEqual(state.cellFormulaPart, 1)
         XCTAssertEqual(signaled, ["doc-1"])
 

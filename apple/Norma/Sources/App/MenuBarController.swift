@@ -6,7 +6,7 @@ final class MenuBarController {
     private let toggleOrb: () -> Void
     private let summonField: () -> Void
     private let openCli: () -> Void
-    private let openNormaApp: () -> Void
+    private let openWinterApp: () -> Void
     // Chat Mode Slice A (CM-T3): the "New Chat"/"Chat" entries — same decoupled-closure posture as
     // every other action in this initializer.
     private let openNewChat: () -> Void
@@ -35,7 +35,7 @@ final class MenuBarController {
     private let onInstallUpdate: () -> Void
     private let loginItemController: LoginItemController
     // Task 3 (2e-iv): internal (not private), same stored-`let` pattern as `stateItem` below, so
-    // `MenuBarEntryPointsTests` (`@testable import Norma`) can walk `statusItem`'s built menu for
+    // `MenuBarEntryPointsTests` (`@testable import Winter`) can walk `statusItem`'s built menu for
     // order and fire these items' actions via their `target`/`action` directly.
     var statusItem: NSStatusItem?
     // Lifecycle T6: internal (not private) — `AppLifecycleTests` reads `.title` and fires
@@ -53,14 +53,14 @@ final class MenuBarController {
     // `!AppProfile.isDev`. Title/enabled state is state-driven (`refreshCliInstallItem()`), not
     // fixed at construction like the other items above — `install()` mounts it, and its own action
     // handler re-derives the title after `CliInstaller.install()` runs.
-    let cliInstallItem = NSMenuItem(title: "Install norma Command", action: #selector(didInstallCli), keyEquivalent: "")
-    let openNormaAppItem = NSMenuItem(title: "Open Norma App", action: #selector(didOpenNormaApp), keyEquivalent: "")
+    let cliInstallItem = NSMenuItem(title: "Install winter Command", action: #selector(didInstallCli), keyEquivalent: "")
+    let openWinterAppItem = NSMenuItem(title: "Open Winter App", action: #selector(didOpenWinterApp), keyEquivalent: "")
     // Chat Mode Slice A (CM-T3): "New Chat"/"Chat" — same adjacency/testability posture as
-    // `openNormaAppItem` (2e-iv precedent), placed right after it.
+    // `openWinterAppItem` (2e-iv precedent), placed right after it.
     let newChatItem = NSMenuItem(title: "New Chat", action: #selector(didNewChat), keyEquivalent: "")
     let chatItem = NSMenuItem(title: "Chat", action: #selector(didChat), keyEquivalent: "")
     // Task 5 (2f-ii): the Dashboard entry — same section/adjacency convention as `openCliItem`/
-    // `openNormaAppItem` (2e-iv), mirrored exactly.
+    // `openWinterAppItem` (2e-iv), mirrored exactly.
     let dashboardItem = NSMenuItem(title: "Dashboard…", action: #selector(didOpenDashboard), keyEquivalent: "")
     // Phase 4d-iii Task 2: "Manage Plugins…" — same 4-touch-point precedent as `dashboardItem`,
     // placed right after it (opens the Dashboard window focused on `.pluginManager`).
@@ -69,15 +69,15 @@ final class MenuBarController {
     // `pluginManagerItem` (4d-iii Task 2's own precedent), placed right after it.
     let pairDeviceItem = NSMenuItem(title: "Pair a Device…", action: #selector(didOpenPairDevice), keyEquivalent: "")
     let pairedDevicesItem = NSMenuItem(title: "Paired Devices…", action: #selector(didOpenPairedDevices), keyEquivalent: "")
-    // Task 4 (2f): the red "Stop Norma's Control" panic item — mounted/unmounted (not just
+    // Task 4 (2f): the red "Stop Winter's Control" panic item — mounted/unmounted (not just
     // shown/hidden, unlike `orbItem`'s title-flip via `setOrbVisible`) with the active-lease count.
-    // `internal`, same testability posture as `openCliItem`/`openNormaAppItem` above.
-    let panicItem = NSMenuItem(title: "Stop Norma's Control", action: #selector(didPanic), keyEquivalent: "")
+    // `internal`, same testability posture as `openCliItem`/`openWinterAppItem` above.
+    let panicItem = NSMenuItem(title: "Stop Winter's Control", action: #selector(didPanic), keyEquivalent: "")
     private let preQuitSeparator = NSMenuItem.separator()
-    private let quitItem = NSMenuItem(title: "Quit Norma", action: #selector(didQuit), keyEquivalent: "q")
-    // Lifecycle T4: the "Launch Norma at login" checkbox, bound to `loginItemController`. `internal`
+    private let quitItem = NSMenuItem(title: "Quit Winter", action: #selector(didQuit), keyEquivalent: "q")
+    // Lifecycle T4: the "Launch Winter at login" checkbox, bound to `loginItemController`. `internal`
     // (not `private`), same testability posture as `openCliItem`/`panicItem` above.
-    let loginItemItem = NSMenuItem(title: "Launch Norma at login", action: #selector(didToggleLoginItem), keyEquivalent: "")
+    let loginItemItem = NSMenuItem(title: "Launch Winter at login", action: #selector(didToggleLoginItem), keyEquivalent: "")
     // Sparkle T3: manual "Check for Updates…" entry — `internal`, same testability posture as
     // `openCliItem`/`panicItem` above.
     let checkForUpdatesItem = NSMenuItem(title: "Check for Updates…", action: #selector(didCheckForUpdates), keyEquivalent: "")
@@ -99,7 +99,7 @@ final class MenuBarController {
     ///
     /// **Set it before `install()`**: the menu is built once, there.
     ///
-    /// Norma has no debug MENU — the menu bar's status-item menu is the app's only menu (it is
+    /// Winter has no debug MENU — the menu bar's status-item menu is the app's only menu (it is
     /// `LSUIElement`, so there is no main menu bar to hang one from), which is why this lands beside
     /// "Dashboard…" rather than under a "Debug" submenu the app does not have.
     var onOpenEditorHarness: (() -> Void)?
@@ -158,7 +158,7 @@ final class MenuBarController {
     /// Resources phase flattens every file straight into `Resources/`) NOR a bare `.png` per name —
     /// `COMBINE_HIDPI_IMAGES` (macOS default) merges each `name.png`/`name@2x.png` pair into a
     /// single multi-representation `name.tiff` at build time. Confirmed by inspecting both Debug
-    /// and Release `Norma.app/Contents/Resources` under DerivedData: e.g. `mb-idle.tiff`,
+    /// and Release `Winter.app/Contents/Resources` under DerivedData: e.g. `mb-idle.tiff`,
     /// `mb-dev-working-3.tiff`, no `MenuBar/` directory anywhere. `Bundle.image(forResource:)` is
     /// exactly AppKit's documented answer to this (`NSImage.h`: "Neither [pathForImageResource:/
     /// URLForImageResource:] can return images with multiple representations in different files...
@@ -192,7 +192,7 @@ final class MenuBarController {
         guard !updateBadged else {
             statusItem?.button?.image = NSImage(
                 systemSymbolName: currentImageName,
-                accessibilityDescription: "Norma — update ready")
+                accessibilityDescription: "Winter — update ready")
             return
         }
         statusItem?.button?.image = templateImage(named: currentImageName)
@@ -227,7 +227,7 @@ final class MenuBarController {
         toggleOrb: @escaping () -> Void,
         summonField: @escaping () -> Void,
         openCli: @escaping () -> Void,
-        openNormaApp: @escaping () -> Void,
+        openWinterApp: @escaping () -> Void,
         openNewChat: @escaping () -> Void,
         openChat: @escaping () -> Void,
         openDashboard: @escaping () -> Void,
@@ -246,7 +246,7 @@ final class MenuBarController {
         self.toggleOrb = toggleOrb
         self.summonField = summonField
         self.openCli = openCli
-        self.openNormaApp = openNormaApp
+        self.openWinterApp = openWinterApp
         self.openNewChat = openNewChat
         self.openChat = openChat
         self.openDashboard = openDashboard
@@ -275,9 +275,9 @@ final class MenuBarController {
         summonFieldItem.target = self
         menu.addItem(summonFieldItem)
         menu.addItem(.separator())
-        // DD-T6: the dev-only `norma-dev` wrapper installer/launcher — dist builds never mount
+        // DD-T6: the dev-only `winter-dev` wrapper installer/launcher — dist builds never mount
         // this item, so `CliLauncher.openCli()`/`ensureWrapper()` can never fire there. Dist's
-        // own CLI story (a packaged `norma` symlink, no wrapper install) is Task 7.
+        // own CLI story (a packaged `winter` symlink, no wrapper install) is Task 7.
         if AppProfile.isDev {
             openCliItem.target = self
             menu.addItem(openCliItem)
@@ -287,8 +287,8 @@ final class MenuBarController {
             menu.addItem(cliInstallItem)
             refreshCliInstallItem()
         }
-        openNormaAppItem.target = self
-        menu.addItem(openNormaAppItem)
+        openWinterAppItem.target = self
+        menu.addItem(openWinterAppItem)
         newChatItem.target = self
         menu.addItem(newChatItem)
         chatItem.target = self
@@ -388,29 +388,29 @@ final class MenuBarController {
     ///
     /// Factored out of `refreshCliInstallItem()` (which feeds it the real, environment-dependent
     /// `CliInstaller.currentPlan()`) so `MenuBarEntryPointsTests` can drive every `CliInstallAction`
-    /// case directly and deterministically, without depending on whatever `/usr/local/bin/norma`
+    /// case directly and deterministically, without depending on whatever `/usr/local/bin/winter`
     /// happens to be on the test host, and without needing the dist-only mounting branch in
     /// `install()` (compile-time unreachable from this Debug-config xctest host) to have run.
     /// `internal` (not `private`), same testability posture as `applyCurrentFrame()` above.
     func applyCliInstallState(_ action: CliInstallAction) {
         switch action {
         case .install:
-            cliInstallItem.title = "Install norma Command"
+            cliInstallItem.title = "Install winter Command"
             cliInstallItem.isEnabled = true
             cliInstallItem.target = self
             cliInstallItem.action = #selector(didInstallCli)
         case .repair:
-            cliInstallItem.title = "Repair norma Command"
+            cliInstallItem.title = "Repair winter Command"
             cliInstallItem.isEnabled = true
             cliInstallItem.target = self
             cliInstallItem.action = #selector(didInstallCli)
         case .alreadyInstalled:
-            cliInstallItem.title = "norma Command Installed ✓"
+            cliInstallItem.title = "winter Command Installed ✓"
             cliInstallItem.isEnabled = false
             cliInstallItem.target = nil
             cliInstallItem.action = nil
         case .refuseForeign:
-            cliInstallItem.title = "norma Command: foreign file — see logs"
+            cliInstallItem.title = "winter Command: foreign file — see logs"
             cliInstallItem.isEnabled = false
             cliInstallItem.target = nil
             cliInstallItem.action = nil
@@ -467,14 +467,14 @@ final class MenuBarController {
     @objc private func didToggleOrb() { toggleOrb() }
     @objc private func didSummonField() { summonField() }
     @objc private func didOpenCli() { openCli() }
-    // DD-T7: dist's counterpart to `didOpenCli()` — installs/repairs the `norma` symlink, then
+    // DD-T7: dist's counterpart to `didOpenCli()` — installs/repairs the `winter` symlink, then
     // re-titles the item from the fresh post-install state (no full menu teardown/rebuild needed,
     // same "re-derive and reassign" posture as `refresh()`'s `loginItemItem.state` sync).
     @objc private func didInstallCli() {
         CliInstaller.install()
         refreshCliInstallItem()
     }
-    @objc private func didOpenNormaApp() { openNormaApp() }
+    @objc private func didOpenWinterApp() { openWinterApp() }
     @objc private func didNewChat() { openNewChat() }
     @objc private func didChat() { openChat() }
     #if DEBUG

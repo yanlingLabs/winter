@@ -13,7 +13,7 @@ export interface ResolvedStyle {
   keepCodingInstructions: boolean;
 }
 
-// Overlay bodies — each ASSUMES Norma's base SYSTEM_PROMPT is still present (keepCodingInstructions:
+// Overlay bodies — each ASSUMES Winter's base SYSTEM_PROMPT is still present (keepCodingInstructions:
 // true), so they layer behavior on top rather than restating the base.
 const PROACTIVE_BODY =
   "Operate in a proactive mode. When the user's intent is clear, take the initiating action instead " +
@@ -35,7 +35,7 @@ const LEARNING_BODY =
 /** The four built-ins. `default` is reserved: empty body, never injected — selecting it (or leaving
  *  `outputStyle` unset) means "use the base prompt as-is". The other three augment the base. */
 export const BUILTIN_OUTPUT_STYLES: ResolvedStyle[] = [
-  { name: "default", description: "Norma's standard behavior.", body: "", keepCodingInstructions: true },
+  { name: "default", description: "Winter's standard behavior.", body: "", keepCodingInstructions: true },
   { name: "proactive", description: "Act immediately and autonomously; ask less.", body: PROACTIVE_BODY, keepCodingInstructions: true },
   { name: "explanatory", description: "Explain reasoning and tradeoffs while working.", body: EXPLANATORY_BODY, keepCodingInstructions: true },
   { name: "learning", description: "Leave labeled TODO(human) gaps for you to complete.", body: LEARNING_BODY, keepCodingInstructions: true },
@@ -86,28 +86,28 @@ function parseStyleFile(path: string, fallbackName: string, cap: number): Resolv
 
 /**
  * Resolves an output style by name from three sources, closest-wins: a trusted project's
- * `<cwd>/.norma/output-styles/<name>.md`, then `<normaHome>/output-styles/<name>.md`, then the
+ * `<cwd>/.winter/output-styles/<name>.md`, then `<winterHome>/output-styles/<name>.md`, then the
  * built-ins. Mirrors SkillStore's trust-gated project-dir discovery. Never throws.
  */
 export class OutputStyleStore {
   private readonly cap: number;
-  constructor(private readonly deps: { normaHome: string; trust: Pick<TrustStore, "isTrusted">; caps?: { bodyBytes?: number } }) {
+  constructor(private readonly deps: { winterHome: string; trust: Pick<TrustStore, "isTrusted">; caps?: { bodyBytes?: number } }) {
     this.cap = deps.caps?.bodyBytes ?? DEFAULT_BODY_CAP;
   }
 
   /** project[trusted] > user > built-in. null if the name resolves to nothing, or isn't a valid slug. */
   resolve(name: string, cwd: string | null): ResolvedStyle | null {
     // Path-traversal guard: `name` flows from settings.outputStyle — including a trusted project's
-    // checked-in .norma/settings.json — straight into join(..., `${name}.md`) below. Reject anything
+    // checked-in .winter/settings.json — straight into join(..., `${name}.md`) below. Reject anything
     // that isn't a bare slug BEFORE it ever reaches a filesystem call. Same slug-jail spirit as
     // skills.ts's skillNameError; no dots either, so a bare "." or ".." stem is rejected too rather
     // than relying on the `${name}.md` suffix to accidentally neuter it into "..md"/"...md".
     if (!/^[A-Za-z0-9_-]+$/.test(name)) return null;
     if (cwd && this.deps.trust.isTrusted(cwd)) {
-      const p = parseStyleFile(join(cwd, ".norma", "output-styles", `${name}.md`), name, this.cap);
+      const p = parseStyleFile(join(cwd, ".winter", "output-styles", `${name}.md`), name, this.cap);
       if (p) return p;
     }
-    const u = parseStyleFile(join(this.deps.normaHome, "output-styles", `${name}.md`), name, this.cap);
+    const u = parseStyleFile(join(this.deps.winterHome, "output-styles", `${name}.md`), name, this.cap);
     if (u) return u;
     return BUILTIN_OUTPUT_STYLES.find((s) => s.name === name) ?? null;
   }
@@ -126,8 +126,8 @@ export class OutputStyleStore {
         if (p) out.set(p.name, p.description);
       }
     };
-    scan(join(this.deps.normaHome, "output-styles"));           // user overrides built-in
-    if (cwd && this.deps.trust.isTrusted(cwd)) scan(join(cwd, ".norma", "output-styles")); // project overrides user
+    scan(join(this.deps.winterHome, "output-styles"));           // user overrides built-in
+    if (cwd && this.deps.trust.isTrusted(cwd)) scan(join(cwd, ".winter", "output-styles")); // project overrides user
     return [...out].map(([name, description]) => ({ name, description }));
   }
 }

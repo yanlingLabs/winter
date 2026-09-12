@@ -1,6 +1,6 @@
 import XCTest
-import NormaProtocol
-@testable import Norma
+import WinterProtocol
+@testable import Winter
 
 /// mac-chat-parity Task 3 — the VIEW half of "cards inline, permanent, and correct": the pure
 /// decisions `TranscriptInteractionCard` and its bodies branch on.
@@ -260,7 +260,7 @@ final class InteractionCardTests: XCTestCase {
     /// one that still carries meaning, and it stays.
     func testTheQuestionIsSetAtTheTranscriptsOwnProseSize() {
         XCTAssertEqual(QuestionCardType.question, transcriptProseMetrics(.assistant).bodySize,
-                       "a question is Norma talking — it belongs in her prose register, not a step under it")
+                       "a question is Winter talking — it belongs in her prose register, not a step under it")
     }
 
     /// The steps under it, as iOS's ratios against `.body` (17) rather than its point values —

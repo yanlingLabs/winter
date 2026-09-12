@@ -1,5 +1,5 @@
 import Foundation
-import NormaProtocol
+import WinterProtocol
 
 // MARK: - Plugin lifecycle result types (Phase 4d-ii Task 3)
 //
@@ -66,7 +66,7 @@ public struct PluginContribEntry: Equatable, Sendable {
 ///
 /// **`dirs[0]` is the PRIMARY by POSITION, not by a flag** — there is no `primary` field to read,
 /// and a set is never "secondaries without a primary" (the daemon refuses `remove` of index 0
-/// outright). `locked` is the first-write lock: once Norma has successfully written inside a
+/// outright). `locked` is the first-write lock: once Winter has successfully written inside a
 /// directory, that entry can never be replaced or removed for the session's lifetime.
 ///
 /// An EMPTY array is a real, meaningful state (a workdir-less session — writable only in
@@ -148,7 +148,7 @@ extension JSONValue {
     var objectValue: [String: JSONValue]? { if case .object(let o) = self { return o }; return nil }
 }
 
-extension NormaClient {
+extension WinterClient {
     private func obj(_ pairs: [String: JSONValue?]) -> JSONValue {
         .object(pairs.compactMapValues { $0 })
     }
@@ -298,7 +298,7 @@ extension NormaClient {
 
     /// Chat Mode Slice A (CM-T3): `mode` is additive and defaults to `nil` (the daemon reads
     /// absence as "code", `packages/protocol/src/methods.ts`'s `SessionCreateParams.mode`) — every
-    /// existing call site (the sidebar's "+ New session", `norma-probe`) is unaffected. The Mac
+    /// existing call site (the sidebar's "+ New session", `winter-probe`) is unaffected. The Mac
     /// app's "New Chat"/"Chat" menu entries are the first callers to pass `mode: "chat"`.
     ///
     /// mac-chat-parity T7 (spec §5): `model`/`effort` are additive in exactly the same way, and for
@@ -382,7 +382,7 @@ extension NormaClient {
     /// provider-correctness T6: `effort` appended after `model`, same purely-additive precedent
     /// (`SessionListResult`'s own row carries it since T4). The Mac's effort picker is its consumer,
     /// and it must be read with `SessionSummary.effort`'s rule in mind: the value may be a
-    /// Norma-level TIER (`sync.config.clientEfforts`, e.g. `"ultra"`) reported verbatim rather than
+    /// Winter-level TIER (`sync.config.clientEfforts`, e.g. `"ultra"`) reported verbatim rather than
     /// rewritten to its wire translation, so a picker matching it against the model's `efforts`
     /// array alone will miss. Match against BOTH lists.
     ///
@@ -439,7 +439,7 @@ extension NormaClient {
     /// not say — an older daemon, since every daemon at or past this version stamps EVERY row (it
     /// rides no participation gate, unlike `activity`/`dirs`). **Never coerce that `nil` to
     /// `"auto"`**: that asserts a policy nobody stated, which is the standing lie this field exists
-    /// to end. See `FieldStateAdapter.sessionPolicyKnown` (apple/Norma) for the consumer shape.
+    /// to end. See `FieldStateAdapter.sessionPolicyKnown` (apple/Winter) for the consumer shape.
     /// Winter Phase 8d (Task 4.2): `runtimeKind`/`providerId` appended LAST, same purely-additive
     /// precedent as every field above them (`archived`/`signals`/`approvalPolicy`'s own doc
     /// comments). `runtimeKind` mirrors `SessionListResult.runtimeKind` (methods.ts) —
@@ -800,7 +800,7 @@ extension NormaClient {
 
     /// Provider-side (Phase 4c Task 1, spec §5): answer a `hardware_requested` event with either
     /// a JSON-encoded result or an error message (mutually exclusive) — mirrors
-    /// `peripheralRespond`'s shape exactly. Only the active provider connection (Norma.app) may
+    /// `peripheralRespond`'s shape exactly. Only the active provider connection (Winter.app) may
     /// call this; the core-side broker (Task 2) rejects it otherwise.
     public func hardwareRespond(requestId: String, resultJson: String?, error: String?) async throws {
         _ = try await request("hardware.respond", params: obj([
@@ -851,7 +851,7 @@ extension NormaClient {
     /// `provider.configure {type, baseUrl, apiKey, model?}` (BYOK T1, design doc
     /// `2026-07-16-byok-provider-setup-design.md` §1) — the in-app "bring your own OpenAI API key"
     /// path. Always sends `type: "openai-compatible"` (v1 is BYOK-only — switching back to
-    /// codex-oauth stays CLI-only via `norma login`, out of scope here). The server writes the API
+    /// codex-oauth stays CLI-only via `winter login`, out of scope here). The server writes the API
     /// key to its OWN SecretStore and replaces the `provider` block in settings.json; a plain
     /// `{ok:true}` on success (no typed outcome union — an invalid baseUrl/empty apiKey throws a
     /// server-side `RpcFailure`, surfaced here as a thrown `RpcError`, same discipline as
@@ -903,7 +903,7 @@ public struct MemoryAuditLine: Equatable, Sendable {
     public let description: String?
 }
 
-extension NormaClient {
+extension WinterClient {
     /// `memory.list {scope, cwd?}` — fact metadata only. The Dashboard pane is user-scope only (no
     /// cwd context to source a project scope from), so its own call site omits `cwd`.
     public func memoryList(scope: String, cwd: String? = nil) async throws -> [MemoryFactMeta] {
@@ -982,13 +982,13 @@ public struct SkillMeta: Equatable, Sendable, Identifiable {
     public let path: String
     /// Set only on claude-format plugin skills (methods.ts's own comment) — `nil` otherwise.
     public let claudeFormat: Bool?
-    /// Set for a self-authored skill (`SkillStore.writeSelf` always stamps `author: norma`);
-    /// `nil` for every other source. The Dashboard pane's "author: norma" row marker.
+    /// Set for a self-authored skill (`SkillStore.writeSelf` always stamps `author: winter`);
+    /// `nil` for every other source. The Dashboard pane's "author: winter" row marker.
     public let author: String?
 
     /// Explicit memberwise init: a `public` struct's SYNTHESIZED memberwise init is only
     /// `internal` — the Dashboard-side pure helper tests (`DashboardTests.swift`, cross-module)
-    /// construct `SkillMeta` values directly (no `NormaClient` round-trip needed for pure display
+    /// construct `SkillMeta` values directly (no `WinterClient` round-trip needed for pure display
     /// helpers), so this needs to be public explicitly.
     public init(name: String, description: String, source: String, path: String, claudeFormat: Bool?, author: String?) {
         self.name = name
@@ -1022,7 +1022,7 @@ public struct Skill: Equatable, Sendable {
     }
 }
 
-extension NormaClient {
+extension WinterClient {
     /// Shared metadata decode for `skills.list`'s per-entry shape and `skills.read`'s `skill`
     /// object (which is `SkillMetaSchema.extend({body})` — same fields plus `body`).
     private func decodeSkillMeta(_ s: JSONValue) -> SkillMeta? {
@@ -1064,10 +1064,10 @@ extension NormaClient {
     }
 }
 
-// MARK: - Workflows (CC-parity phase 3, Track D Task D2: NormaKit workflow.* client surface)
+// MARK: - Workflows (CC-parity phase 3, Track D Task D2: WinterKit workflow.* client surface)
 //
 // The Swift half of C2's workflow.list/run/stop/get RPCs (protocol/src/methods.ts) — D1 already
-// mirrored the 4 `workflow_*` SessionEvent variants (live progress broadcast) in NormaProtocol's
+// mirrored the 4 `workflow_*` SessionEvent variants (live progress broadcast) in WinterProtocol's
 // SessionEvent.swift; these four are the separate request/response management verbs (list runs +
 // saved scripts, launch, stop, poll one run by id) that back a future Dashboard/session workflows
 // view (D3). LOCAL-ONLY IN V1 (methods.ts's own header comment): none of the four are in
@@ -1100,7 +1100,7 @@ public struct WorkflowRunView: Equatable, Sendable {
 }
 
 /// Mirrors `WorkflowSavedSchema` (methods.ts) — a saved (not-yet-running) workflow's identity, from
-/// `workflow.list`'s `saved` array (`WorkflowStore`, C1's trust-gated `.norma/workflows/*.js`
+/// `workflow.list`'s `saved` array (`WorkflowStore`, C1's trust-gated `.winter/workflows/*.js`
 /// scripts).
 public struct WorkflowSaved: Equatable, Sendable {
     public let name: String
@@ -1108,7 +1108,7 @@ public struct WorkflowSaved: Equatable, Sendable {
     public let source: String
 }
 
-extension NormaClient {
+extension WinterClient {
     /// Shared decode for `WorkflowRunViewSchema`'s wire shape — used by `workflowList`'s `running`
     /// array and `workflowGet`'s `run` object.
     private func decodeWorkflowRunView(_ v: JSONValue) -> WorkflowRunView? {
@@ -1196,7 +1196,7 @@ public struct SyncConfigModelInfo: Equatable, Sendable {
 }
 
 /// What `sync.config` tells a client about models and effort — the catalogue, the daemon's live
-/// defaults, and the Norma-level tiers.
+/// defaults, and the Winter-level tiers.
 ///
 /// **A PROJECTION, not the whole result, and deliberately so.** `SyncConfigResult` also carries
 /// `exaKey` (a Keychain secret) and `dangerousDomains`. Both exist for the PHONE, which runs its own
@@ -1229,14 +1229,14 @@ public struct SyncConfigSnapshot: Equatable, Sendable {
     /// not yours" has it, rather than having to widen the type under pressure.
     public let provider: String
     /// The daemon's live default model — re-resolved by the daemon on every call, so a
-    /// `norma model` edit lands with no restart. `""` when no provider is configured.
+    /// `winter model` edit lands with no restart. `""` when no provider is configured.
     public let defaultModel: String
     /// The active provider's whole catalogue. EMPTY means "no catalogue was reported" — wait, never
     /// derive one.
     public let models: [SyncConfigModelInfo]
     /// The daemon's live reasoning effort. `""` means UNSET (see the type's own note).
     public let defaultEffort: String
-    /// NORMA-LEVEL effort tiers — selectable in Norma, **never sent upstream**, and offered on CODE
+    /// WINTER-LEVEL effort tiers — selectable in Winter, **never sent upstream**, and offered on CODE
     /// sessions only. `["ultra"]` on a current daemon.
     ///
     /// A SEPARATE list from `models[].efforts`, and the two must never be concatenated into one
@@ -1246,7 +1246,7 @@ public struct SyncConfigSnapshot: Equatable, Sendable {
     /// cannot know which session a picker is for.
     public let clientEfforts: [String]
 
-    // No default arguments, same reason `NormaChatKit.SyncConfig`'s init has none: this type is a
+    // No default arguments, same reason `WinterChatKit.SyncConfig`'s init has none: this type is a
     // HAND-written mirror of a schema no compiler connects it to, so the memberwise widening is the
     // only sweep pressure that exists.
     public init(provider: String, defaultModel: String, models: [SyncConfigModelInfo], defaultEffort: String, clientEfforts: [String]) {
@@ -1265,7 +1265,7 @@ public struct SyncConfigSnapshot: Equatable, Sendable {
     public static let empty = SyncConfigSnapshot(provider: "", defaultModel: "", models: [], defaultEffort: "", clientEfforts: [])
 }
 
-extension NormaClient {
+extension WinterClient {
     /// `sync.config {}` (Chat Slice D task 3; the catalogue fields are provider-correctness T3/T5).
     ///
     /// **ROLE-AGNOSTIC, which is why a Mac harness client may call it at all.** The method is on
@@ -1276,9 +1276,9 @@ extension NormaClient {
     /// the Mac's model/effort pickers are the caller that closes it.
     ///
     /// Every field is read by the daemon AT CALL TIME, so this is a snapshot and never a
-    /// subscription — a caller that wants to track a `norma model --effort` edit re-calls it.
+    /// subscription — a caller that wants to track a `winter model --effort` edit re-calls it.
     ///
-    /// Decodes LENIENTLY on absence and STRICTLY on shape, the same split `NormaChatKit.SyncConfig`
+    /// Decodes LENIENTLY on absence and STRICTLY on shape, the same split `WinterChatKit.SyncConfig`
     /// makes for the same reason: a missing field means an older daemon (degrade to the absent
     /// value), while a present-but-malformed row would put an empty slug into a picker, and an empty
     /// slug reaches a request body verbatim and comes back an opaque 400. A malformed row is

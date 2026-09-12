@@ -1,14 +1,14 @@
 import XCTest
 import AppKit
-import NormaProtocol
-import NormaKit
-@testable import Norma
+import WinterProtocol
+import WinterKit
+@testable import Winter
 
 /// Local copy of `SessionFeedTests`' scripted-transport double (`FeedScriptedTransport`),
 /// `Detached`-prefixed per that file's own established convention (see its header comment) — plus
 /// a `closeCallCount` this suite needs to prove `feed.stop()` actually closed the transport
 /// (`testCloseStopsFeedAndFiresOnClosedOnce`), which the other copies don't track.
-final class DetachedScriptedTransport: NormaTransport, @unchecked Sendable {
+final class DetachedScriptedTransport: WinterTransport, @unchecked Sendable {
     let incoming: AsyncStream<TransportEvent>
     private let cont: AsyncStream<TransportEvent>.Continuation
     private let lock = NSLock()
@@ -86,7 +86,7 @@ final class DetachedWindowTests: XCTestCase {
         let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
         let controller = DetachedWindowController(
             feed: feed, session: session,
-            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma"
+            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Winter"
         )
 
         var closedCount = 0
@@ -110,7 +110,7 @@ final class DetachedWindowTests: XCTestCase {
         let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
         let controller = DetachedWindowController(
             feed: feed, session: session,
-            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma"
+            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Winter"
         )
         defer { controller.close() }
         controller.show()
@@ -148,7 +148,7 @@ final class DetachedWindowTests: XCTestCase {
         let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
         let controller = DetachedWindowController(
             feed: feed, session: session,
-            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma"
+            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Winter"
         )
         defer { controller.close() }
         controller.show()
@@ -197,7 +197,7 @@ final class DetachedWindowTests: XCTestCase {
         let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
         let controller = DetachedWindowController(
             feed: feed, session: session,
-            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma"
+            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Winter"
         )
         defer { controller.close() }
         controller.show()
@@ -245,7 +245,7 @@ final class DetachedWindowTests: XCTestCase {
         let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
         let controller = DetachedWindowController(
             feed: feed, session: session,
-            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma"
+            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Winter"
         )
         defer { controller.close() }
         controller.show()
@@ -274,7 +274,7 @@ final class DetachedWindowTests: XCTestCase {
         let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
         let controller = DetachedWindowController(
             feed: feed, session: session,
-            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma"
+            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Winter"
         )
         defer { controller.close() }
         controller.show()
@@ -297,7 +297,7 @@ final class DetachedWindowTests: XCTestCase {
         let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
         let controller = DetachedWindowController(
             feed: feed, session: session,
-            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma"
+            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Winter"
         )
         defer { controller.close() }
         controller.show()
@@ -338,7 +338,7 @@ final class DetachedWindowTests: XCTestCase {
         let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
         let controller = DetachedWindowController(
             feed: feed, session: session,
-            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma"
+            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Winter"
         )
         defer { controller.close() }
         controller.show()
@@ -390,7 +390,7 @@ final class DetachedWindowTests: XCTestCase {
         let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
         let controller = DetachedWindowController(
             feed: feed, session: session,
-            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma"
+            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Winter"
         )
         defer { controller.close() }
         XCTAssertFalse(controller.adapterForTesting.isChatSession)
@@ -426,7 +426,7 @@ final class DetachedWindowTests: XCTestCase {
         let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S1"), session: session)
         let controller = DetachedWindowController(
             feed: feed, session: session,
-            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma"
+            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Winter"
         )
         defer { controller.close() }
         controller.show()
@@ -461,7 +461,7 @@ final class DetachedWindowTests: XCTestCase {
         let feed = SessionFeed(makeTransport: { t }, token: "tok", clientName: "orb", mode: .pinned(sessionId: "S_DISP"), session: session)
         let controller = DetachedWindowController(
             feed: feed, session: session,
-            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Norma"
+            frame: NSRect(x: 0, y: 0, width: 560, height: 640), title: "Winter"
         )
         defer { controller.close() }
         controller.show()

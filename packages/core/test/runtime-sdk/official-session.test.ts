@@ -33,14 +33,14 @@ afterAll(() => {
   mock.module("@yanlinglabs/winter-runtime-sdk", () => winterRuntimeSdk);
 });
 
-import type { NewSessionEvent, SessionEvent } from "@norma/protocol";
+import type { NewSessionEvent, SessionEvent } from "@winter/protocol";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { PermissionGate } from "../../src/agent/gate";
 import { QuestionBroker } from "../../src/agent/questions";
 import { createProjector, type Projector } from "../../src/projector";
 import { FakeCheckpoints } from "../projector/harness";
-import type { NormaRuntimeSdk } from "../../src/runtime-sdk/create";
+import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import type { OfficialInputDeps, OfficialSessionInput } from "../../src/runtime-sdk/official-options";
 import type { OfficialSessionAttachment } from "../../src/runtime-sdk/messaging";
 import {
@@ -141,7 +141,7 @@ function harness(overrides: Partial<OfficialSessionDeps> = {}): Harness {
     sdk: { query: ({ prompt }: { prompt: AsyncIterable<string> }) => { const q = new FakeOfficialQuery(prompt); queries.push(q); return q as unknown; } },
     trackQuery: (_sid: string, abort: AbortController, end: () => Promise<void>) => { tracked.push({ abort, end }); },
     untrack: () => { h.untracked++; },
-  } as unknown as NormaRuntimeSdk;
+  } as unknown as WinterRuntimeSdk;
 
   const selection: RuntimeSelection = {
     runtimeKind: "claude-agent",

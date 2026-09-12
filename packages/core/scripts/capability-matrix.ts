@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 /**
  * Winter Phase 8d (P8d-15, WS-17 §6 row 9): generates `packages/core/capability-matrix.json` —
- * Norma's OWN rows of the cross-repo capability matrix (mode × runtime × surface). The SDK repo
- * owns the other axes (provider/protocol capabilities); this file's whole scope is "what Norma's
+ * Winter's OWN rows of the cross-repo capability matrix (mode × runtime × surface). The SDK repo
+ * owns the other axes (provider/protocol capabilities); this file's whole scope is "what Winter's
  * own daemon/CLI/app/remote-gateway code lets each combination reach", derived from three real
  * predicates rather than hand-typed:
  *
@@ -18,7 +18,7 @@
  *      `session.create`/`session.setModel` for every mode `REMOTE_ELIGIBLE_SESSION_MODES` names
  *      (`code`/`dispatch`/`chat` — Chat Slice C lifted chat's remote gate, SP3.4 added remote
  *      session.create). Winter Phase 8d fix round 1: `REMOTE_ELIGIBLE_SESSION_MODES` is now
- *      EXPORTED from `ipc/server.ts` and imported directly here — Norma's own capability-matrix
+ *      EXPORTED from `ipc/server.ts` and imported directly here — Winter's own capability-matrix
  *      generator is an in-repo consumer with no dependency-direction problem, unlike the CLI
  *      surface rule below.
  *   3. **The mode tool registry** (`runtime-sdk/mode-options.ts`'s `disallowedToolsFor`) — chat's

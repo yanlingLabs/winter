@@ -1,5 +1,5 @@
 import SwiftUI
-import NormaKit
+import WinterKit
 
 // MARK: - Tabs (PURE — driven directly by ModeLandingViewTests)
 

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DIFF_ID_RE, DIFF_PATCH_MAX_BYTES, mintDiffId, diffDirPath, writeDiff, readStoredDiff, removeSessionDiffs } from "../../src/diffs/store";
 
 let home: string;
-beforeEach(() => { home = mkdtempSync(join(tmpdir(), "norma-diff-store-")); });
+beforeEach(() => { home = mkdtempSync(join(tmpdir(), "winter-diff-store-")); });
 afterEach(() => { rmSync(home, { recursive: true, force: true }); });
 
 const SID = "sess_abc123";

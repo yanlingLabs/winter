@@ -1,6 +1,6 @@
 import Foundation
-import NormaProtocol
-@testable import NormaChatKit
+import WinterProtocol
+@testable import WinterChatKit
 
 /// A minimal `LocalSession` for engine tests — Task 9's real store conforms the same protocol. Holds
 /// a fixed prior-input and records reasoning appends (proving the opaque sink is used and never

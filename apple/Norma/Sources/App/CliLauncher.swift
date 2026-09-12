@@ -1,15 +1,15 @@
 import Foundation
 
-/// 2e-iv Task 1: installs a thin `norma-dev` shell wrapper on `$PATH` and opens it in Terminal.app
+/// 2e-iv Task 1: installs a thin `winter-dev` shell wrapper on `$PATH` and opens it in Terminal.app
 /// via `open -a Terminal <path>`, so the CLI runs as a normal Terminal-owned process instead of
 /// as a child of the (Automation-permission-gated) menu-bar app — no TCC prompt either way.
 ///
 /// DEV-MODE ONLY (dev/dist split, Task 6): the wrapper script `exec`s `bun` straight against
 /// `packages/cli/src/main.ts` out of a live repo checkout (see `wrapperScript(repoRoot:)`), and
-/// bakes the dev profile's env (`NORMA_HOME`/`NORMA_PROFILE`) into the script itself — a Terminal
+/// bakes the dev profile's env (`WINTER_HOME`/`WINTER_PROFILE`) into the script itself — a Terminal
 /// launched via `open -a` does not inherit this app's process env, so the wrapper cannot rely on
 /// `AppProfile.bootstrapEnvironment()` having already run in its shell. Call sites gate this
-/// class's use on `AppProfile.isDev`; the distribution app's `norma` command is a separate,
+/// class's use on `AppProfile.isDev`; the distribution app's `winter` command is a separate,
 /// packaged-binary story (Task 7).
 @MainActor
 final class CliLauncher {
@@ -28,9 +28,9 @@ final class CliLauncher {
         self.repoRoot = Self.defaultRepoRoot
     }
 
-    /// `#filePath` for this file is `<repoRoot>/apple/Norma/Sources/App/CliLauncher.swift`.
+    /// `#filePath` for this file is `<repoRoot>/apple/Winter/Sources/App/CliLauncher.swift`.
     /// Five `deletingLastPathComponent()` hops strip, in order: the filename itself, `App`,
-    /// `Sources`, `Norma`, `apple` — leaving `<repoRoot>`. DEV-mode only (see class doc); tests
+    /// `Sources`, `Winter`, `apple` — leaving `<repoRoot>`. DEV-mode only (see class doc); tests
     /// never rely on this default, they set `repoRoot` explicitly.
     ///
     /// Debug-only: `#filePath` embeds the builder's absolute home path in the binary, and
@@ -45,17 +45,17 @@ final class CliLauncher {
         }
         return url.path
         #else
-        return "/norma-dev-checkout-unavailable"
+        return "/winter-dev-checkout-unavailable"
         #endif
     }
 
-    /// Pure: the norma-dev wrapper's exact byte content. Sets the dev profile env (respecting
+    /// Pure: the winter-dev wrapper's exact byte content. Sets the dev profile env (respecting
     /// explicit overrides) then execs the checkout CLI via bun.
     static func wrapperScript(repoRoot: String) -> String {
         """
         #!/bin/sh
-        export NORMA_HOME="${NORMA_HOME:-$HOME/.norma-dev}"
-        export NORMA_PROFILE="${NORMA_PROFILE:-dev}"
+        export WINTER_HOME="${WINTER_HOME:-$HOME/.winter-dev}"
+        export WINTER_PROFILE="${WINTER_PROFILE:-dev}"
         exec /usr/bin/env bun "\(repoRoot)/packages/cli/src/main.ts" "$@"
 
         """
@@ -72,17 +72,17 @@ final class CliLauncher {
         var isDirectory: ObjCBool = false
         let brewBinExists = fileManager.fileExists(atPath: brewBinPath, isDirectory: &isDirectory)
         if brewBinExists && fileManager.isWritableFile(atPath: brewBinPath) {
-            return URL(fileURLWithPath: brewBinPath).appendingPathComponent("norma-dev")
+            return URL(fileURLWithPath: brewBinPath).appendingPathComponent("winter-dev")
         }
-        return home.appendingPathComponent(".local/bin/norma-dev")
+        return home.appendingPathComponent(".local/bin/winter-dev")
     }
 
-    /// One-time migration: earlier dev builds installed the wrapper AS `norma`, which now
-    /// belongs to the DISTRIBUTION app's symlink. Removes a sibling `norma` iff its content
+    /// One-time migration: earlier dev builds installed the wrapper AS `winter`, which now
+    /// belongs to the DISTRIBUTION app's symlink. Removes a sibling `winter` iff its content
     /// proves it was our bun wrapper (starts with the historical exec line) — a user-owned or
-    /// dist-owned `norma` is never touched.
-    static func removeLegacyNormaWrapper(besides installPath: URL) {
-        let legacy = installPath.deletingLastPathComponent().appendingPathComponent("norma")
+    /// dist-owned `winter` is never touched.
+    static func removeLegacyWinterWrapper(besides installPath: URL) {
+        let legacy = installPath.deletingLastPathComponent().appendingPathComponent("winter")
         guard let content = try? String(contentsOf: legacy, encoding: .utf8),
               content.hasPrefix("#!/bin/sh\nexec /usr/bin/env bun \""),
               content.contains("/packages/cli/src/main.ts\" \"$@\"") else { return }
@@ -95,7 +95,7 @@ final class CliLauncher {
     /// rewrites the file nor touches its mtime. Returns the resolved install path either way.
     func ensureWrapper() throws -> URL {
         let path = installPathOverride ?? Self.wrapperInstallPath()
-        Self.removeLegacyNormaWrapper(besides: path)
+        Self.removeLegacyWinterWrapper(besides: path)
         let directory = path.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 

@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@winter/protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { startDaemon } from "../../src/daemon";
 import { SessionStore } from "../../src/sessions/store";
@@ -29,7 +29,7 @@ import {
 //
 // `grantDenied` is wired to `opts.engine.isGrantDenied` at server construction — most tests below
 // fake that accessor on a doubled `engine` (the `session-set-activity.test.ts` precedent); ONE test
-// at the bottom boots a REAL daemon (a real `AgentEngine`, `grantDeniedPrefixes: [normaHome]`) to
+// at the bottom boots a REAL daemon (a real `AgentEngine`, `grantDeniedPrefixes: [winterHome]`) to
 // prove the wiring reaches the actual dirGrant predicate, not just a plausible-looking fake.
 //
 // Exercised over a bare IPC server (own SessionStore + SessionHub + TokenAuthority) for every test
@@ -92,7 +92,7 @@ describe("session.setDirs (working-directories T3)", () => {
   async function boot(opts: { noEngine?: boolean } = {}): Promise<{
     store: SessionStore; home: string; socketPath: string; harnessToken: string; remoteToken: string; denied: Set<string>;
   }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-set-dirs-rpc-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-set-dirs-rpc-"));
     const store = new SessionStore(home);
     const hub = new SessionHub(store);
     const socketPath = join(home, "core.sock");
@@ -119,7 +119,7 @@ describe("session.setDirs (working-directories T3)", () => {
   }
 
   function fixtureBase(): string {
-    return mkdtempSync(join(tmpdir(), "norma-set-dirs-fixture-"));
+    return mkdtempSync(join(tmpdir(), "winter-set-dirs-fixture-"));
   }
 
   function fixtureDir(base: string, name: string): string {
@@ -570,7 +570,7 @@ describe("session.setDirs (working-directories T3)", () => {
   });
 
   // -------------------------------------------------------------------------------------------
-  // The REAL wiring: a full daemon with a REAL AgentEngine (grantDeniedPrefixes: [normaHome]) —
+  // The REAL wiring: a full daemon with a REAL AgentEngine (grantDeniedPrefixes: [winterHome]) —
   // proves session.setDirs reaches the actual dirGrant predicate, not a plausible-looking fake.
   // -------------------------------------------------------------------------------------------
 

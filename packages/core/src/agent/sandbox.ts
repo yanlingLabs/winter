@@ -63,17 +63,17 @@ export function __resetDarwinTempDirCacheForTests(): void {
  *
  * SP-approvals final review (composition hole, HIGH, defense-in-depth): EVERY writable root
  * (cwd + each of `writableRoots`) additionally gets an explicit `(deny file-write* (literal
- * "<root>/.norma/permissions.local.json"))` line, unconditionally — automatic for every caller,
+ * "<root>/.winter/permissions.local.json"))` line, unconditionally — automatic for every caller,
  * with no opt-in flag to forget. This is the bash-invoked-write half of the same fix engine.ts's
  * dispatch loop applies to the write/edit TOOLS (`controlPlaneFileTarget`): a bash command like
- * `echo x > .norma/permissions.local.json` never goes through that tool-level check at all — the
+ * `echo x > .winter/permissions.local.json` never goes through that tool-level check at all — the
  * seatbelt is the only enforcement point left for it. Verified empirically (this exact profile
  * shape, a real `/usr/bin/sandbox-exec` child, on this task's own dev machine — see
  * sandbox.test.ts and tools-bash.test.ts): SBPL evaluates a profile's rules for a given operation
  * in FILE ORDER and the LAST matching rule wins, so placing this `(deny ...)` after the `(allow
  * file-write* (subpath ...))` block carves out that ONE exact file from an otherwise-writable
  * subpath, without touching anything else in it — a sibling file, or an entire OTHER subdirectory
- * like `.norma/memory/` (the MEMDIR), stays fully writable. Matches by filename alone, deliberately
+ * like `.winter/memory/` (the MEMDIR), stays fully writable. Matches by filename alone, deliberately
  * never by directory. Each candidate path is realpath-canonicalized the same way the writable
  * `roots` themselves already are (`canon`, below) — for the near-universal case where the file
  * doesn't exist yet, `canon` gracefully falls through to the raw (already-canonical, since `roots`
@@ -82,8 +82,8 @@ export function __resetDarwinTempDirCacheForTests(): void {
  *
  * SP-policies whole-branch review (Item 1, HIGH): those per-root literals only cover a store
  * DIRECTLY under a root; a broad `Edit(<parent>)` grant makes a NESTED store
- * (`<parent>/projB/.norma/permissions.local.json`) writable. An additional `(deny file-write*
- * (regex ...))` line — placed after the literals, matching `<any>/.norma/permissions.local.json` at ANY
+ * (`<parent>/projB/.winter/permissions.local.json`) writable. An additional `(deny file-write*
+ * (regex ...))` line — placed after the literals, matching `<any>/.winter/permissions.local.json` at ANY
  * depth, case-folded per character (SBPL has no working `(?i)`) — closes that. See the inline
  * comment on `RULES_FILE_REGEX` below for the real-`sandbox-exec` verification of both facts.
  *
@@ -93,7 +93,7 @@ export function __resetDarwinTempDirCacheForTests(): void {
  * logic as above: engine.ts's write/edit-tool fence (`controlPlaneFileTarget`, renamed from
  * `permissionRulesFileTarget` in this same pass) only ever sees write/edit TOOL calls, so a
  * bash-invoked `echo '{"permissions":{"allow":["BashUnsandboxed(*:*)"]}}' >
- * .norma/settings.local.json` needs THIS seatbelt to be the one thing standing in its way. The two
+ * .winter/settings.local.json` needs THIS seatbelt to be the one thing standing in its way. The two
  * new filenames get their own SEPARATE `(deny file-write* (regex ...))` lines — never combined via
  * alternation into one — mirroring `RULES_FILE_REGEX`'s own per-character case-class technique. See
  * `SETTINGS_FILE_REGEX`/`SETTINGS_LOCAL_FILE_REGEX` below.
@@ -107,24 +107,24 @@ export function buildSeatbeltProfile(opts: SandboxOptions): string {
   // this a single joined block of literal denies, same shape as before, just wider.
   const CONTROL_PLANE_FILES = ["permissions.local.json", "settings.json", "settings.local.json"];
   const denyRulesFileRules = roots
-    .flatMap((r) => CONTROL_PLANE_FILES.map((f) => `(deny file-write* (literal "${sbplString(canon(join(r, ".norma", f)))}"))`))
+    .flatMap((r) => CONTROL_PLANE_FILES.map((f) => `(deny file-write* (literal "${sbplString(canon(join(r, ".winter", f)))}"))`))
     .join("\n");
   // SP-policies whole-branch review (Item 1, HIGH): the per-root literal denies above only cover a
-  // rules store DIRECTLY under a writable root (`<root>/.norma/permissions.local.json`). A broad
+  // rules store DIRECTLY under a writable root (`<root>/.winter/permissions.local.json`). A broad
   // `Edit(<parent>)` grant makes `<parent>` a writable root, so a NESTED store —
-  // `<parent>/projB/.norma/permissions.local.json` — sat inside a writable subpath with no literal
+  // `<parent>/projB/.winter/permissions.local.json` — sat inside a writable subpath with no literal
   // deny for it, and sandboxed bash could write it (minting a sibling project's rules). This regex
-  // deny closes that: it matches any path ending in `/.norma/permissions.local.json` at ANY nesting
+  // deny closes that: it matches any path ending in `/.winter/permissions.local.json` at ANY nesting
   // depth. Case-folded per character on purpose — SBPL's regex engine does NOT honor an inline
   // `(?i)` flag (verified against a real `/usr/bin/sandbox-exec`: with `(?i)` the write sailed
   // straight through; with explicit `[Nn]`-style character classes it was denied), and the macOS
-  // default volume is case-insensitive so `.NORMA/Permissions.Local.json` reaches the SAME file the
+  // default volume is case-insensitive so `.WINTER/Permissions.Local.json` reaches the SAME file the
   // reader opens. It is a REGEX rule, never a `(subpath ...)` blanket — a sibling file, or the whole
-  // `.norma/memory/` MEMDIR, at any depth, stays writable (filename-specific, same as the literals).
+  // `.winter/memory/` MEMDIR, at any depth, stays writable (filename-specific, same as the literals).
   const RULES_FILE_REGEX = String.raw`/\.[Nn][Oo][Rr][Mm][Aa]/[Pp][Ee][Rr][Mm][Ii][Ss][Ss][Ii][Oo][Nn][Ss]\.[Ll][Oo][Cc][Aa][Ll]\.[Jj][Ss][Oo][Nn]$`;
   const denyRulesFileRegex = `(deny file-write* (regex #"${RULES_FILE_REGEX}"))`;
   // CC-parity Task 6.5: the same NESTED-store hole applies to the two settings overlays once a
-  // broad `Edit(<parent>)` grant is in force — `<parent>/projB/.norma/settings.local.json` sits
+  // broad `Edit(<parent>)` grant is in force — `<parent>/projB/.winter/settings.local.json` sits
   // inside a writable subpath with no literal deny for it either. Two SEPARATE regex deny lines
   // (never one combined via alternation — only plain per-character char-class regexes are verified
   // against real sandbox-exec, see the comment above), same per-character case-folding technique as
@@ -147,7 +147,7 @@ export function buildSeatbeltProfile(opts: SandboxOptions): string {
   // convenience. The per-user temp dir is where every other app on the machine keeps its own temp
   // state, and (this is the load-bearing part) it is also where the bash tool's own tests build the
   // "outside" directories they assert are UNWRITABLE: `CANNOT write outside the session cwd` writes
-  // to `<tmp>/norma-bash-XXXX/escaped.txt`. That is two levels down, so `[^/]+$` leaves it denied,
+  // to `<tmp>/winter-bash-XXXX/escaped.txt`. That is two levels down, so `[^/]+$` leaves it denied,
   // while `mktemp`'s own `<tmp>/tmp.XXXXXXXX` — one level — is allowed. The rule buys exactly the
   // idiom that was broken and nothing else: creating a temp FILE, and writing to it.
   // `mktemp -d` still yields an unwritable directory; `$TMPDIR` (the per-session scratch, fully
@@ -155,7 +155,7 @@ export function buildSeatbeltProfile(opts: SandboxOptions): string {
   //
   // Placed BEFORE the control-plane denies below on purpose: SBPL is last-match-wins, so those
   // denies continue to override this allow. (No control-plane file can be a direct child anyway —
-  // they all sit under a `.norma/` component — but the ordering is what makes that structural
+  // they all sit under a `.winter/` component — but the ordering is what makes that structural
   // rather than incidental.)
   const perUserTemp = darwinUserTempDir();
   const allowDarwinTempFiles = perUserTemp

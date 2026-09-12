@@ -1,7 +1,7 @@
 import AppKit
 import CoreImage
 import CoreImage.CIFilterBuiltins
-import NormaKit
+import WinterKit
 import SwiftUI
 
 /// Renders `string` as a QR bitmap — `CIFilter.qrCodeGenerator`, correction level M (SP2b T5
@@ -140,7 +140,7 @@ struct PairingSheetContainerView: View {
 }
 
 /// The Mac's pairing sheet (SP2b Task 5): a dumb SwiftUI presentation over `PairingSheetModel`
-/// (NormaKit, pure) — this view owns no state of its own beyond the label `TextField`'s live
+/// (WinterKit, pure) — this view owns no state of its own beyond the label `TextField`'s live
 /// text, and never touches `RemoteHost`/`PairingManager` directly. Task 7: hosted as a SwiftUI
 /// `.sheet` on the shell (`ShellRootView`, via `PairingSheetContainerView`) — no longer an `NSPanel`
 /// (`PairingSheetWindowController`, deleted this task).
@@ -181,7 +181,7 @@ struct PairingSheetView: View {
                 }
             }
             .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.white))
-            Text("Scan this with the Norma companion app")
+            Text("Scan this with the Winter companion app")
                 .font(Typography.label())
                 .foregroundStyle(.secondary)
             Text("Expires in \(secondsLeft)s")

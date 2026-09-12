@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export interface NormaDirs {
+export interface WinterDirs {
   home: string;
   sessionsDir: string;
   runDir: string;
@@ -14,13 +14,13 @@ export interface NormaDirs {
   runtimeStatePath: string;
 }
 
-export function resolveNormaHome(): string {
-  return process.env.NORMA_HOME ?? join(homedir(), ".norma");
+export function resolveWinterHome(): string {
+  return process.env.WINTER_HOME ?? join(homedir(), ".winter");
 }
 
 const SUBDIRS = ["sessions", "memory", "skills/self", "agents", "plugins", "hooks", "logs", "run", "runtimes", "runtimes/backups", "runtimes/official-agent-spool", "runtimes/handoff-leases"];
 
-export function bootstrapNormaDir(home: string = resolveNormaHome()): NormaDirs {
+export function bootstrapWinterDir(home: string = resolveWinterHome()): WinterDirs {
   for (const d of SUBDIRS) mkdirSync(join(home, d), { recursive: true });
   chmodSync(join(home, "run"), 0o700);
   chmodSync(join(home, "runtimes", "official-agent-spool"), 0o700);

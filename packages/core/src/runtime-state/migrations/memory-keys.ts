@@ -399,7 +399,7 @@ export function planMemoryKeyMigration(deps: {
   // what lets the sweep below read records that agree with the disk.
   plan.reconciled = reconcileManifest(rs, home, fs, deps.records);
 
-  // `compatibilityKeys` spawns `git` and, unlike Norma's own `repoRootFor`, memoises nothing — so a
+  // `compatibilityKeys` spawns `git` and, unlike Winter's own `repoRootFor`, memoises nothing — so a
   // migration over hundreds of records would be hundreds of subprocesses. One `Map` per plan call
   // (sessions cluster heavily on a handful of cwds) fixes that without caching across calls, which
   // would risk answering from a stale repo layout.
@@ -986,7 +986,7 @@ export function rollbackMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: str
     // An I/O failure mid-rename (never reachable through the two `fs.existsSync` checks above,
     // which only test presence) leaves the row `undoing` for the next boot's repair to retry — not
     // a `target-exists` collision, so it is not reported in `failures`; a leftover `undoing` row is
-    // now itself a fact `norma doctor`'s `memory-keys-migration` finding can surface.
+    // now itself a fact `winter doctor`'s `memory-keys-migration` finding can surface.
     if (outcome === "left-undoing") continue;
     touched.add(row.new_key);
     rolledBack += 1;

@@ -1,7 +1,7 @@
 import Foundation
 
-// Office Stage A Task 4 — the LOK-touching half of the tile pool. Only `NormaOfficeHelper`
-// compiles this file (excluded from `NormaOfficeHelperFixture` in project.yml, alongside
+// Office Stage A Task 4 — the LOK-touching half of the tile pool. Only `WinterOfficeHelper`
+// compiles this file (excluded from `WinterOfficeHelperFixture` in project.yml, alongside
 // `LOKBridge.swift`/`Support/` — see that file's own header for why the fixture stays LOK-free):
 // it calls `paintPartTile`/`getTileMode` directly through the same bridging-header vtable
 // `LOKBridge.swift` already uses.
@@ -9,7 +9,7 @@ import Foundation
 /// One instance per open document, owned by `LOKBridge`'s `OpenDocument` alongside the document's
 /// own handle. Wraps a pure `TileCache` (`Sources/OfficeWire/TileCache.swift` — the generation
 /// ledger + LRU pool, unit-tested independently and fast, per the structural split this task's own
-/// review caught: `Sources/OfficeHelper` is unreachable from `NormaAppTests`, so a pool/eviction
+/// review caught: `Sources/OfficeHelper` is unreachable from `WinterAppTests`, so a pool/eviction
 /// design that lived ENTIRELY in this file would have zero fast test coverage, the same trap
 /// `OfficeDocumentEvent`'s two raw parsers already hit once in Task 3) with the one real LOK call
 /// that actually produces pixels.

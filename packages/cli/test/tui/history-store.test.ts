@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { appendHistory, loadHistory, makeHistoryNav } from "../../src/tui/history-store";
 
-const tmpFile = (name = "history.jsonl"): string => join(mkdtempSync(join(tmpdir(), "norma-history-")), name);
+const tmpFile = (name = "history.jsonl"): string => join(mkdtempSync(join(tmpdir(), "winter-history-")), name);
 
 describe("history-store", () => {
   describe("appendHistory + loadHistory round-trip", () => {
@@ -18,12 +18,12 @@ describe("history-store", () => {
     });
 
     test("missing file loads as empty, never throws", () => {
-      const path = join(mkdtempSync(join(tmpdir(), "norma-history-")), "does-not-exist.jsonl");
+      const path = join(mkdtempSync(join(tmpdir(), "winter-history-")), "does-not-exist.jsonl");
       expect(loadHistory(path, "s1")).toEqual([]);
     });
 
     test("appendHistory never throws even against an unwritable path", () => {
-      const path = join(tmpdir(), "norma-history-missing-dir", "nested", "history.jsonl");
+      const path = join(tmpdir(), "winter-history-missing-dir", "nested", "history.jsonl");
       expect(() => appendHistory(path, { display: "x", ts: 1, sessionId: "s1" })).not.toThrow();
     });
 

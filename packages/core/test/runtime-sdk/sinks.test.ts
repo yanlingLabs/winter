@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { NewSessionEvent } from "@norma/protocol";
+import type { NewSessionEvent } from "@winter/protocol";
 import { createSinkCallStore, sinksFor, type ProjectedToolCall, type ProjectedToolResult, type RoutineSink } from "../../src/runtime-sdk/sinks";
 import { openRuntimeStateDb } from "../../src/runtime-state/db";
 import { withTempHome } from "../runtime-state/support";
@@ -51,8 +51,8 @@ test("push_notification: emits notification_requested with the fixed title and f
   const { sinks, events, fallbacks, attached } = harness();
   attached.count = 0;
   sinks.onToolCall(call({ name: "push_notification", argsJson: JSON.stringify({ message: "build finished", status: "proactive" }) }));
-  expect(events).toEqual([{ type: "notification_requested", sessionId: SESSION, threadId: "main", title: "Norma", message: "build finished" }]);
-  expect(fallbacks).toEqual([{ title: "Norma", message: "build finished" }]);
+  expect(events).toEqual([{ type: "notification_requested", sessionId: SESSION, threadId: "main", title: "Winter", message: "build finished" }]);
+  expect(fallbacks).toEqual([{ title: "Winter", message: "build finished" }]);
 });
 
 test("push_notification: does NOT fire the headless fallback when a client is attached", () => {

@@ -14,7 +14,7 @@
 
 Then **[`monaco-languageclient`](https://github.com/TypeFox/monaco-languageclient)** (v10.7.0, Feb 2026) connects Monaco to real language servers over JSON-RPC.
 
-**Why this is mostly done already.** Norma has:
+**Why this is mostly done already.** Winter has:
 
 - `packages/core/src/lsp/manager.ts` + `client.ts` — a working **LSP manager** that already starts and speaks to language servers, with per-language routing (`languageForPath`)
 - the `lsp` tool, and auto-diagnostics-after-edit
@@ -61,7 +61,7 @@ Same OOXML-native editing core, same fidelity, **without the five-service stack*
 
 #### B. Collabora Online — friendliest licence, lightest, weaker OOXML
 
-- **MPL 2.0** — file-level copyleft. You bundle and link freely and publish changes to *their* files only. **Norma stays Apache-2.0.**
+- **MPL 2.0** — file-level copyleft. You bundle and link freely and publish changes to *their* files only. **Winter stays Apache-2.0.**
 - **Single container, runs in ~1 GB RAM.** Dramatically lighter than ONLYOFFICE.
 - Built on LibreOffice, so **ODF-native**; Microsoft formats are handled "well but not perfectly". For a product whose whole point is editing `.docx`/`.pptx`, that gap is the risk.
 - Automation via LibreOffice's **UNO API**, which is mature and very capable.
@@ -98,7 +98,7 @@ This is more viable than "roll your own" usually is, because of one fact: **OOXM
 | **Faithful preview** | Render in Chromium via a converter (LibreOffice headless is MPL-2.0 and would only be *invoked*, never linked) or a permissive renderer. Read-only, accurate. |
 | **Human edits** | A simplified content editor for text-level changes, or **"Open in Word/Pages"** — the user already owns an app that does this perfectly. |
 
-The insight underneath: **most agent edits are content-level** — change this paragraph, add a slide, update that table. None of that needs a layout engine; it needs surgical XML editing plus a faithful preview. That dodges the entire hard problem **and keeps Norma Apache-2.0**.
+The insight underneath: **most agent edits are content-level** — change this paragraph, add a slide, update that table. None of that needs a layout engine; it needs surgical XML editing plus a faithful preview. That dodges the entire hard problem **and keeps Winter Apache-2.0**.
 
 #### E. Drive Microsoft Office if installed
 
@@ -108,7 +108,7 @@ AppleScript or Office add-ins against a real Office install. Perfect fidelity by
 
 ## 3. DECIDED: LibreOffice via LibreOfficeKit
 
-**User rule (2026-08-07):** full Word, Excel and PowerPoint — editable by the user *and* by the agent, **including layout**, not just content. Norma must stay **Apache-2.0**. The upstream project must be modifiable. Microsoft's proprietary extras are explicitly out of scope.
+**User rule (2026-08-07):** full Word, Excel and PowerPoint — editable by the user *and* by the agent, **including layout**, not just content. Winter must stay **Apache-2.0**. The upstream project must be modifiable. Microsoft's proprietary extras are explicitly out of scope.
 
 Those constraints admit exactly one family. **LibreOffice, embedded through [LibreOfficeKit](https://docs.libreoffice.org/libreofficekit.html).**
 
@@ -116,7 +116,7 @@ Those constraints admit exactly one family. **LibreOffice, embedded through [Lib
 
 **MPL-2.0 is FILE-LEVEL copyleft.** MPL files may be combined with your own code in separate files, and your files keep whatever licence you choose. So:
 
-- **Norma stays Apache-2.0.**
+- **Winter stays Apache-2.0.**
 - You publish modifications to **LibreOffice's own files** only — which is exactly the "allowed to modify it to fit my needs" requirement, satisfied rather than merely tolerated.
 - Bonus: LibreOffice already contains Apache-2.0 code inherited from OpenOffice, and Apache-2.0 is explicitly compatible with MPL-2.0.
 
@@ -162,7 +162,7 @@ The Document Foundation's own framing: *an office suite implements a document th
 
 1. **The carve-out helps.** Microsoft's proprietary extras are excluded by the rule, and that is where the worst gaps concentrate.
 2. **The OOXML filters have had 15+ years of investment**, much of it from Collabora, precisely because their customers live in `.docx`.
-3. **The cost scales with boundary crossings.** Created in Norma, edited in Norma, exported once → barely affected. Cycling Word → Norma → Word repeatedly → drift accumulates. Which pattern real users have is worth knowing before optimising for it.
+3. **The cost scales with boundary crossings.** Created in Winter, edited in Winter, exported once → barely affected. Cycling Word → Winter → Word repeatedly → drift accumulates. Which pattern real users have is worth knowing before optimising for it.
 
 **Source caveat:** this is a partisan topic. ONLYOFFICE publishes about LibreOffice's OOXML weakness; TDF publishes about OOXML suites handling ODF badly. Both are correct about the other. The neutral statement is only the mapping principle: *whichever format is not your internal model costs you fidelity.*
 
@@ -183,7 +183,7 @@ The Document Foundation's own framing: *an office suite implements a document th
 **What is genuinely excellent:**
 
 - **Apache-2.0** core — a perfect licence fit, no contamination at all.
-- **Isomorphic**: the same TypeScript API runs in the browser *and* headless in Node (≥18.17). Their own framing is "Headless for AI infrastructure — run workbook and document logic in Node.js to power agents, automation, and server-side workflows", which is Norma's daemon architecture described back at us.
+- **Isomorphic**: the same TypeScript API runs in the browser *and* headless in Node (≥18.17). Their own framing is "Headless for AI infrastructure — run workbook and document logic in Node.js to power agents, automation, and server-side workflows", which is Winter's daemon architecture described back at us.
 - It would deliver the one-engine property **more cleanly than LOKit**: the agent manipulates documents in the daemon through the *identical API* the editor uses in the Chromium panel. No UNO bridge, no tile protocol, no C++ build.
 
 **Why it fails the rule anyway:**
@@ -204,7 +204,7 @@ No editor works "directly in OOXML"; that is not a thing anyone does. Every suit
 
 **Writing OOXML filters for Univer yourself** is permitted (Apache-2.0) and is what Univer's own OSS guidance suggests — map OOXML ↔ `IWorkbookData`/`IDocumentData` via the Facade API. Sheets would be feasible, Docs a serious project, Slides hardest and unready. **But it does not change the decision:** that rebuilds the exact two-translation problem, on a model that is not OOXML-shaped either, without the filter history — taking on the hardest part of the job to avoid a C++ build.
 
-**Worth remembering for a DIFFERENT question.** If Norma ever wants *native* documents — sheets and docs created and living in Norma, agent-manipulated headlessly, never round-tripping to Microsoft formats — Univer is an excellent Apache-2.0 foundation and cleaner than anything LibreOffice offers for that job. Two different products; Univer wins the other one.
+**Worth remembering for a DIFFERENT question.** If Winter ever wants *native* documents — sheets and docs created and living in Winter, agent-manipulated headlessly, never round-tripping to Microsoft formats — Univer is an excellent Apache-2.0 foundation and cleaner than anything LibreOffice offers for that job. Two different products; Univer wins the other one.
 
 ### The command-bus architecture already exists — do not port Univer's
 
@@ -214,7 +214,7 @@ The attractive thing about Univer is not its format, it is that **everything flo
 
 **2. The collaboration model is simpler than Univer's.** LOKit exposes `createView()` / `destroyView()` / `setView()` / `getView()` / `getViews()`: **one document instance, N views, no OT and no CRDT.** All views mutate the same in-memory model and receive callbacks about what changed — "cursor moves notify one view while inserting a slide notifies all views".
 
-**So Norma has no synchronisation problem at all.** The user's editor is one view; the agent posts commands into the same document; there is one model and one truth. Univer needs OT because it is a distributed web app with a model per client — porting it would import a problem this architecture does not have.
+**So Winter has no synchronisation problem at all.** The user's editor is one view; the agent posts commands into the same document; there is one model and one truth. Univer needs OT because it is a distributed web app with a model per client — porting it would import a problem this architecture does not have.
 
 **What to build instead: a thin TypeScript facade that is the ONLY mutation path.**
 
@@ -222,7 +222,7 @@ The attractive thing about Univer is not its format, it is that **everything flo
       user (Chromium panel)          agent (tools)
                 |                          |
                 +------------+-------------+
-                     Norma command layer          <- the only mutation path
+                     Winter command layer          <- the only mutation path
                             |  (semantic ops + a log)
                      UNO dispatch / UNO API
                             |
@@ -232,7 +232,7 @@ The attractive thing about Univer is not its format, it is that **everything flo
 It buys three things raw LOKit does not give:
 
 - **semantic operations** (`insertSlide`, `setParagraphStyle`) rather than the agent hand-assembling `.uno:` URLs;
-- **a command log** — LibreOffice has undo, but not "show me what the agent changed and let me reject it", which is a Norma feature and falls out of a single mutation path;
+- **a command log** — LibreOffice has undo, but not "show me what the agent changed and let me reject it", which is a Winter feature and falls out of a single mutation path;
 - **one place for the awkwardness** — bridging C++ into TypeScript is unpleasant exactly once instead of in every feature.
 
 **The discipline is the point.** What is admirable in Univer is not portable technology, it is the rule that nothing bypasses the command layer. If the agent can reach UNO directly, the log and the guarantee are both gone. Enforce it.
@@ -247,12 +247,12 @@ It buys three things raw LOKit does not give:
 
 ## 4. The licence table, for the record
 
-Norma is **Apache-2.0** (`packages/*/package.json`), public at `github.com/yanlingLabs/norma`. An earlier draft of this note assumed proprietary and called AGPL a blocker — wrong, but the licence still decides the engine, just differently.
+Winter is **Apache-2.0** (`packages/*/package.json`), public at `github.com/yanlingLabs/norma`. An earlier draft of this note assumed proprietary and called AGPL a blocker — wrong, but the licence still decides the engine, just differently.
 
-| Engine | Licence | Effect on Norma |
+| Engine | Licence | Effect on Winter |
 | --- | --- | --- |
 | ONLYOFFICE (Docs or Desktop Editors) | **AGPL v3** | The **shipped app becomes AGPL v3.** Repo may stay Apache-2.0; the distribution carries AGPL obligations including the network clause. **Ruled out by the Apache-2.0 rule.** |
-| **LibreOffice / LibreOfficeKit** | **MPL 2.0** | **Norma stays Apache-2.0.** Publish changes to their files only — which is also the permission to modify. **Chosen.** |
+| **LibreOffice / LibreOfficeKit** | **MPL 2.0** | **Winter stays Apache-2.0.** Publish changes to their files only — which is also the permission to modify. **Chosen.** |
 | Collabora Online | **MPL 2.0** | Same; a packaging of the above. |
 | ZetaOffice / ZetaJS | **MPL 2.0** | Same; a WASM packaging of the above. |
 
@@ -290,4 +290,4 @@ Apache-2.0 is one-way compatible with AGPL v3 — Apache code can be pulled into
 - `packages/core/src/lsp/manager.ts`, `client.ts` — an existing LSP manager with per-language routing
 - `packages/core/src/agent/tools/lsp.ts` — the `lsp` tool already registered
 - The daemon already speaks JSON-RPC over a Unix socket — the transport `monaco-languageclient` expects
-- Norma is proprietary and distributed as a signed app — which is what makes AGPL a blocker rather than a detail
+- Winter is proprietary and distributed as a signed app — which is what makes AGPL a blocker rather than a detail

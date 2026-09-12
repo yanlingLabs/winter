@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// Task 7: `FieldStateAdapter.interactionNeeded` — the daemon needs a human (a pending approval,
 /// question, or plan; the reducer folds all three into `OrbStatus.approvalNeeded`, see that

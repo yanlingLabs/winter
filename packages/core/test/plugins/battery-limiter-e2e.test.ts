@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@winter/protocol";
 import {
   buildSpawnablePlugins,
   createSupervisedInstance,
@@ -17,13 +17,13 @@ import {
  * index.ts` battery-limiter child process (installed via `installBatteryLimiter`, same
  * install-and-rewrite machinery `supervised-e2e.test.ts` uses for sample-echo — see
  * `supervised-fixtures.ts`'s doc comment). Only ONE thing here is scripted: the "provider"
- * connection (Norma.app's XPC helper stand-in) — a raw `TestClient` socket that hellos as a
+ * connection (Winter.app's XPC helper stand-in) — a raw `TestClient` socket that hellos as a
  * harness, advertises itself via `peripheral.advertise`, and answers the `hardware_requested` push
  * with `hardware.respond`. That is deliberate, not a shortcut: this suite has no way to drive a
- * real XPC connection to a real NormaHelper daemon (there's no helper process in the test
- * environment at all — Task 3's NormaHelper is a separate, un-spawnable-here macOS system
+ * real XPC connection to a real WinterHelper daemon (there's no helper process in the test
+ * environment at all — Task 3's WinterHelper is a separate, un-spawnable-here macOS system
  * daemon), so the provider boundary is exactly where core's OWN spec draws the seam between
- * "core's job" and "Norma.app's job" (design spec §5) — the same boundary
+ * "core's job" and "Winter.app's job" (design spec §5) — the same boundary
  * `server.test.ts`'s "hardware.request / hardware.respond" suite already stubs, just reused here
  * one layer further out, with a REAL plugin process (not a scripted "plugin" TestClient) on the
  * other end.
@@ -120,7 +120,7 @@ describe("battery-limiter ctx.hardware round-trip (real Bun child process, scrip
     "set_charge_limit round-trips through a real child's ctx.hardware() to a scripted provider and back; get_charge_limit too; tile starts \"unknown\"",
     async () => {
       const pluginId = "battery-limiter";
-      const home = mkdtempSync(join(tmpdir(), "norma-battery-limiter-e2e-"));
+      const home = mkdtempSync(join(tmpdir(), "winter-battery-limiter-e2e-"));
       installBatteryLimiter(home, pluginId);
       const settings = writeAndLoadSettings(home, pluginId, { hardwareConsent: true });
       const socketPath = join(home, "core.sock");

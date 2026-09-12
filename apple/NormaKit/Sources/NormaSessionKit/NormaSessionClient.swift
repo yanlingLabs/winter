@@ -1,6 +1,6 @@
 import Foundation
 import os
-import NormaProtocol
+import WinterProtocol
 
 /// Transport-keepalive tuning (KA-T3). The client pings the host after `quietMs` of silence; if
 /// that first ping draws no inbound frame within `secondWindowMs`, it pings again; if THAT also
@@ -27,7 +27,7 @@ public struct HeartbeatConfig: Sendable {
 }
 
 /// The phone-side session client (SP3 Task 4): the resume / idempotency / approval state machine
-/// the `norma-fake-phone` CLI currently hand-rolls, promoted to a tested, reusable actor. It owns
+/// the `winter-fake-phone` CLI currently hand-rolls, promoted to a tested, reusable actor. It owns
 /// one `RemoteConn`, drives the `ClientHello` → `helloAck` → stream wire dance, and turns the raw
 /// frame stream into an ordered, deduplicated, gap-aware `SessionEnvelope` feed the UI consumes.
 ///
@@ -42,7 +42,7 @@ public struct HeartbeatConfig: Sendable {
 /// **Framing.** `RemoteConn` is frame-oriented — one whole `WireFrame`-encoded envelope per
 /// `inbound` element / `send(_:)` call. The concrete iroh conn owns the `LengthPrefix` byte framing
 /// internally; this client never touches it (matching the gateway's own posture).
-public actor NormaSessionClient {
+public actor WinterSessionClient {
     // MARK: - Injected dependencies
 
     private let conn: RemoteConn
@@ -76,11 +76,11 @@ public actor NormaSessionClient {
 
     /// Informational `ClientHello.appBuild` — a fixed module identifier (the gateway never keys on
     /// it; a real app would thread its build string through).
-    private static let appBuild = "NormaSessionKit"
+    private static let appBuild = "WinterSessionKit"
 
     /// Diagnostics only — identifiers and error descriptions, NEVER payload/transcript content
     /// (the hard privacy rule for this module).
-    private static let logger = Logger(subsystem: "com.norma.sessionkit", category: "NormaSessionClient")
+    private static let logger = Logger(subsystem: "com.winter.sessionkit", category: "WinterSessionClient")
 
     /// Method name for the pending-approval query. SP3 T4b implemented this on the daemon side:
     /// `approval.list {sessionId} → {pending: [{callId, toolName, summary, issuedAt, expiresAt}]}`
@@ -317,7 +317,7 @@ public actor NormaSessionClient {
     /// called without inventing an empty object at the call site. Source-compatible: every existing
     /// caller passes a value. `rpcCall` normalizes `nil` to `{}` on the wire — see its own note for
     /// why an OMITTED `params` key is a daemon-side `-32602`, and why that mattered here more than
-    /// anywhere else (this, not NormaKit, is the target `norma-ios` consumes).
+    /// anywhere else (this, not WinterKit, is the target `norma-ios` consumes).
     public func send(method: String, params: SessionEvent.JSONValue? = nil, commandID: String? = nil) async throws -> SessionEvent.JSONValue {
         try await rpcCall(method: method, params: params, commandID: commandID ?? idgen())
     }
@@ -412,11 +412,11 @@ public actor NormaSessionClient {
         // against its zod schema (`parseParams`, packages/core/src/ipc/server.ts) and every
         // no-argument method's schema is `z.object({})` — `z.object({}).safeParse(undefined)` FAILS,
         // so an omitted key returns `-32602 invalid params: (root)`. That exact defect (the same
-        // `if let params` line, in NormaKit's `NormaClient`) killed the orb's Enter and yellow-light
+        // `if let params` line, in WinterKit's `WinterClient`) killed the orb's Enter and yellow-light
         // detach. It was latent here — the public `send` took a NON-optional `params`, so nothing
         // could reach the nil branch — which is precisely the shape that makes a future
         // no-argument call a silent trap. Closed rather than left dead, because THIS target (not
-        // NormaKit) is what `norma-ios` consumes, and a version-skewed phone is exactly where a
+        // WinterKit) is what `norma-ios` consumes, and a version-skewed phone is exactly where a
         // client-side-only fix cannot be shipped quickly. The daemon normalizes too now, but this
         // client must hold against an older/skewed daemon on its own.
         obj["params"] = params ?? .object([:])
@@ -752,7 +752,7 @@ public actor NormaSessionClient {
     }
 
     /// The seven broadcast-only TRANSIENT event types, mirroring the Mac client's exemption list
-    /// (`NormaKit.NormaClient.route`) exactly — assistant_delta streaming, the peripheral-lease v1
+    /// (`WinterKit.WinterClient.route`) exactly — assistant_delta streaming, the peripheral-lease v1
     /// events, plugin_tool_invoke, hardware_requested and plugin_tile_updated. All are runtime-only:
     /// the daemon fans them out WITHOUT appending them to the session log, so they are absent from
     /// replay and must never be resurrected by it.
@@ -776,9 +776,9 @@ public actor NormaSessionClient {
     /// Matched on the wire discriminator rather than a typed decode: this client handles event
     /// payloads OPAQUELY (`SessionEnvelope.json`) so an unknown/future type never throws.
     ///
-    /// The list itself is `SessionEvent.transientTypes` (NormaProtocol) — the ONE cross-language
+    /// The list itself is `SessionEvent.transientTypes` (WinterProtocol) — the ONE cross-language
     /// definition, mirroring the daemon's `TRANSIENT_EVENT_TYPES`. It was a private literal here,
-    /// hand-copied from `NormaClient`'s case list; the daemon's new remote live-stream filter would
+    /// hand-copied from `WinterClient`'s case list; the daemon's new remote live-stream filter would
     /// have made that hand-mirrored copy #4 on the same axis, and a filter missing a type it should
     /// carry drops that event silently, forever, one hop upstream of this client. Derive, never
     /// re-list.

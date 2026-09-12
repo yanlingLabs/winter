@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@norma/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@winter/protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
@@ -101,7 +101,7 @@ describe("session_activity transient (session-activity-hygiene T4)", () => {
     store: SessionStore; hub: SessionHub; socketPath: string; harnessToken: string;
     running: Set<string>; bgWork: Set<string>;
   }> {
-    const home = mkdtempSync(join(tmpdir(), "norma-activity-event-"));
+    const home = mkdtempSync(join(tmpdir(), "winter-activity-event-"));
     const store = new SessionStore(home);
     const hub = new SessionHub(store);
     const socketPath = join(home, "core.sock");

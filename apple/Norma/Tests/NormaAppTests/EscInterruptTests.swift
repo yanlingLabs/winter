@@ -1,7 +1,7 @@
 import XCTest
-import NormaProtocol
-import NormaKit
-@testable import Norma
+import WinterProtocol
+import WinterKit
+@testable import Winter
 
 /// Wave-5 gate item 1 (bug report): the original design (`AppDelegate` wires
 /// `OrbWindowController.onEsc: () -> Bool` — `true` = consumed as an interrupt while a turn is

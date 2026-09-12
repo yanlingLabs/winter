@@ -1,6 +1,6 @@
 import XCTest
 import Network
-@testable import NormaKit
+@testable import WinterKit
 
 /// Minimal scripted NDJSON server on a real unix socket (Network.framework listener).
 final class LoopbackServer: @unchecked Sendable {
@@ -18,7 +18,7 @@ final class LoopbackServer: @unchecked Sendable {
     private let decoder = LineDecoder()
 
     init() throws {
-        path = NSTemporaryDirectory() + "norma-test-\(UUID().uuidString.prefix(8)).sock"
+        path = NSTemporaryDirectory() + "winter-test-\(UUID().uuidString.prefix(8)).sock"
         let params = NWParameters.tcp
         params.requiredLocalEndpoint = NWEndpoint.unix(path: path)
         listener = try NWListener(using: params)

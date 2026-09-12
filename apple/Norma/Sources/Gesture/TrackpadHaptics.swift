@@ -2,7 +2,7 @@ import AppKit
 import IOKit
 
 /// Haptics via private trackpad actuator (MTActuator*) from MultitouchSupport.framework.
-/// Ported from v1 Norma/Gesture/TrackpadHorizontalSwipe.swift (lines 318-524).
+/// Ported from v1 Winter/Gesture/TrackpadHorizontalSwipe.swift (lines 318-524).
 /// On macOS, NSHapticFeedbackManager is suppressed outside drag contexts;
 /// this actuator provides consistent haptic feedback by directly interfacing
 /// with the trackpad hardware, falling back to NSHapticFeedbackManager if unavailable.

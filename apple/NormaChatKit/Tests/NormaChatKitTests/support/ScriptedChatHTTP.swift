@@ -1,8 +1,8 @@
 import Foundation
 import XCTest
-@testable import NormaChatKit
+@testable import WinterChatKit
 
-/// The ONLY HTTP any NormaChatKit test ever speaks to. Hands back scripted responses in order and
+/// The ONLY HTTP any WinterChatKit test ever speaks to. Hands back scripted responses in order and
 /// records every request verbatim (including `httpBody`, which survives because nothing here ever
 /// goes near URLSession). A kit test that reaches the network is a bug in the test, not the kit —
 /// `ChatHTTP` is the single seam and this double is its only test implementation.
@@ -206,7 +206,7 @@ enum AuthFixture {
         redirectURI: "http://localhost:1455/auth/callback",
         scope: "openid profile email offline_access",
         backendURL: URL(string: "https://backend.test.invalid/codex")!,
-        headers: ["OpenAI-Beta": "responses=experimental", "originator": "norma"]
+        headers: ["OpenAI-Beta": "responses=experimental", "originator": "winter"]
     )
 }
 

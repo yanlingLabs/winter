@@ -5,7 +5,7 @@
  * vendored (or, in the pre-trim run, full) LibreOffice arm64 program/ tree: lok_init_2()
  * accepts it, one document loads, and one tile paints non-blank pixels.
  *
- * Uses the vendored headers verbatim (apple/Norma/Sources/OfficeKit/include/) -- the whole point
+ * Uses the vendored headers verbatim (apple/Winter/Sources/OfficeKit/include/) -- the whole point
  * of "header-only use" per the gate brief. LOK_USE_UNSTABLE_API is required for paintTile /
  * getDocumentSize / getTileMode / initializeForRendering; documentLoad and getVersionInfo are
  * in the always-available (stable) section.

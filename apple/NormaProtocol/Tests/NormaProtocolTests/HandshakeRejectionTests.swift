@@ -1,8 +1,8 @@
 import XCTest
-import NormaProtocol
+import WinterProtocol
 
 /// SP3.1 Task 1: the structured handshake-rejection payload + the epoch-lenient decode helper it
-/// rides on. `import NormaProtocol` (NOT `@testable`) — like `WireEnvelopeTests`, these are the
+/// rides on. `import WinterProtocol` (NOT `@testable`) — like `WireEnvelopeTests`, these are the
 /// public phone↔Mac contract the gateway/router/session-client consume, so the tests exercise
 /// exactly what an external module sees.
 final class HandshakeRejectionTests: XCTestCase {

@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// diff-tabs Task 11: the tab-strip kind-grouping accordion's pure math
 /// (`Sources/AppShell/PanelStripLayout.swift`). No view is mounted anywhere in this file — the

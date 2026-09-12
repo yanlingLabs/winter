@@ -8,7 +8,7 @@ import { DEFAULT_CODEX_MODEL } from "../../src/providers/codex-config";
 import type { Settings } from "../../src/settings";
 
 function tmpSettingsFile(settings: Settings): string {
-  const p = join(mkdtempSync(join(tmpdir(), "norma-manager-")), "settings.json");
+  const p = join(mkdtempSync(join(tmpdir(), "winter-manager-")), "settings.json");
   writeFileSync(p, JSON.stringify(settings));
   return p;
 }
@@ -149,7 +149,7 @@ describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
   });
 
   test("parse failure (missing file) on re-read falls back to the LAST GOOD value, never throws", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "norma-manager-missing-"));
+    const dir = mkdtempSync(join(tmpdir(), "winter-manager-missing-"));
     const settingsPath = join(dir, "settings.json");
     writeFileSync(settingsPath, JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-terra" } }));
     const p = await createProvider(

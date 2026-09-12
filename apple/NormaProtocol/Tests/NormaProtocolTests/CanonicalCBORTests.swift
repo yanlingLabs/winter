@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import NormaProtocol
+@testable import WinterProtocol
 
 /// SP2b Task 2: canonical CBOR (RFC 8949 §4.2.1 core deterministic encoding). Known-answer
 /// vectors straight from the RFC, plus map-key sort order and decoder-rejects-garbage checks.

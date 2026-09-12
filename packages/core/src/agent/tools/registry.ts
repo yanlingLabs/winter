@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { FileDiffSummary, Question, Task } from "@norma/protocol";
+import type { FileDiffSummary, Question, Task } from "@winter/protocol";
 import type { ToolSpec } from "../../providers/types";
 import { isWithin } from "../paths";
 import type { AskOutcome } from "../questions";
@@ -10,7 +10,7 @@ export interface ToolContext {
   cwd: string;
   roots: string[]; // allowed roots; roots[0] MUST be the primary cwd — relative tool paths resolve against it
   tmpDir?: string; // per-session scratch dir (sandbox writable root + child TMPDIR); bash uses it, other tools ignore
-  // working-directories T4: the session's delivery-folder — `<normaHome>/outputs/<sessionId>`
+  // working-directories T4: the session's delivery-folder — `<winterHome>/outputs/<sessionId>`
   // (sessions/outdir.ts's `ensureOutdir`). Independent of `roots`/`rootsOverride` (mirrors `tmpDir`'s
   // own independence — see engine.ts's `executeCall`): a worktree-isolated child's FIXED roots
   // never include it either, yet the delivery channel must stay reachable regardless. bash.ts
@@ -50,8 +50,8 @@ export interface ToolContext {
   // to persist a computed diff — bound to THIS call's sessionId by executeCall (engine.ts), which
   // pre-binds it from `EngineConfig.persistDiff` (see that field's own doc comment for why this is
   // a closure — the ask/taskEvent/notify shape, a capability scoped to exactly one side effect —
-  // rather than a raw `normaHome` field the outDir/tmpDir precedent might otherwise suggest:
-  // normaHome is deliberately kept OUT of tool reach elsewhere in this file, see
+  // rather than a raw `winterHome` field the outDir/tmpDir precedent might otherwise suggest:
+  // winterHome is deliberately kept OUT of tool reach elsewhere in this file, see
   // `grantDeniedPrefixes` on EngineConfig). Absent (a direct `registry.execute()` call in a test,
   // or any caller that never wires `persistDiff`) → the three tools skip diff computation entirely
   // and return their pre-Task-6 plain string, byte-identical to before this field existed. Header
@@ -374,7 +374,7 @@ export class ToolRegistry {
 
   /** P8c integration round 2: every registered tool whose NAME starts with `prefix`, rendered the
    *  SAME way `specFor`/`specs()` render one (`toSpec`: `rawParameters ?? z.toJSONSchema(...)`) —
-   *  a READ-ONLY enumeration `capabilities/external.ts`'s `norma__external` server uses to
+   *  a READ-ONLY enumeration `capabilities/external.ts`'s `winter__external` server uses to
    *  advertise plugin-contributed tools (`plugin__<pluginId>__<name>`, `tool.register`'s own
    *  namespacing, `ipc/server.ts`) from the SAME definitions the shared registry already holds,
    *  never a second copy. Mirrors `specFor`'s scope check; never touches deferral bookkeeping

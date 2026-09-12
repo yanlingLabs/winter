@@ -20,18 +20,18 @@ import XCTest
 /// removed measured 18-41 s at 20,000 candidates, against 0.08 s for the scans that replaced them, and
 /// the cubic one did not finish 50 KB in ten minutes.
 ///
-/// THE RULE ENFORCED BELOW: every regex pattern in live Swift code in `Sources/NormaChatKit` that
+/// THE RULE ENFORCED BELOW: every regex pattern in live Swift code in `Sources/WinterChatKit` that
 /// mentions `<` or `>` must either carry no unbounded class/dot quantifier, or have that quantifier as its
 /// final element, or have its only unbounded quantifiers be whitespace-only and non-leading, or be named
 /// in `allowed` with a proof. A pattern that cannot be read statically (built from a variable) fails
 /// closed rather than passing unexamined.
 final class RegexShapeTripwireTests: XCTestCase {
-    /// `<repo>/apple/NormaChatKit/Sources/NormaChatKit`, derived from this file's own path exactly as
+    /// `<repo>/apple/WinterChatKit/Sources/WinterChatKit`, derived from this file's own path exactly as
     /// `ParityFixtures` derives the fixture directory.
     private static let sourceDir: URL = {
         var url = URL(fileURLWithPath: #filePath)
-        for _ in 0 ..< 3 { url.deleteLastPathComponent() } // RegexShapeTripwireTests.swift, NormaChatKitTests, Tests
-        return url.appending(path: "Sources/NormaChatKit")
+        for _ in 0 ..< 3 { url.deleteLastPathComponent() } // RegexShapeTripwireTests.swift, WinterChatKitTests, Tests
+        return url.appending(path: "Sources/WinterChatKit")
     }()
 
     /// DERIVED, not hardcoded, and RECURSIVE (the TS gate's review Minor 7: a non-recursive derivation

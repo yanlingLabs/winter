@@ -86,7 +86,7 @@ function toFileUri(p: string): string {
   return `file://${encodeURI(p)}`;
 }
 
-// The session tmp dir is a Norma-managed, session-private read root, same allowance fs-read.ts's
+// The session tmp dir is a Winter-managed, session-private read root, same allowance fs-read.ts's
 // own readRootsOf grants — duplicated here (not imported) because that version closes over
 // ToolContext's roots/tmpDir, while this file's tool resolves both via deps closures instead.
 function readRootsOf(roots: string[], tmpDir?: string): string[] {

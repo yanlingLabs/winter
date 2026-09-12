@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// browser-runtime T2: the lifecycle engine's whole coverage (spec §4, §8, §9).
 ///
@@ -9,7 +9,7 @@ import XCTest
 /// real coverage lives, and it needs no CEF."
 ///
 /// What these tests do NOT cover: that Task 3's executor applies an action correctly (that a
-/// `.create` really reaches `NormaCEFCreateBrowser`, that `.attachViewport` really reparents), and
+/// `.create` really reaches `WinterCEFCreateBrowser`, that `.attachViewport` really reparents), and
 /// that Task 5 assembles truthful `BrowserSignals` from daemon state. Both are separately pinned in
 /// their own tasks. This file pins only the DECISION.
 final class BrowserLifecycleTests: XCTestCase {

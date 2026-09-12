@@ -65,7 +65,7 @@ struct SessionSidebar: View {
             HStack(spacing: 6) {
                 Image(systemName: "macwindow")
                     .font(Typography.label())
-                Text("Open Norma")
+                Text("Open Winter")
                     .font(Typography.label())
                 Spacer()
             }

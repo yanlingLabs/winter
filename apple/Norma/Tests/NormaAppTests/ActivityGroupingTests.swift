@@ -1,5 +1,5 @@
 import XCTest
-@testable import Norma
+@testable import Winter
 
 /// LIVE-GATE G3 / r1b: pure grouping/label/sentence logic for the transcript's grouped tool
 /// lines. Drives `groupActivity`/`toolGroupFragment`/`toolGroupLabel`/`toolRunSentence` directly
@@ -167,7 +167,7 @@ final class ActivityGroupingTests: XCTestCase {
     }
 
     func testToolGroupFragmentLsGetsListedGlobRevertsToSearchedGrepStaysSearched() {
-        // Post-r1b: now that Norma has a native `ls` tool, `ls` gets "listed a/N directories" —
+        // Post-r1b: now that Winter has a native `ls` tool, `ls` gets "listed a/N directories" —
         // the label r1b had temporarily borrowed for `glob` as a stand-in. `glob` REVERTS to its
         // pre-r1b "searched"/"searched N times" (same fragment as `grep` — both are pattern
         // searches, not directory listings).
@@ -189,7 +189,7 @@ final class ActivityGroupingTests: XCTestCase {
     /// to "used a tool"; §2.5 item 4 asks for them). Every name here is a real registered daemon
     /// tool — verified against `name: "…"` across `packages/core/src/agent/tools/`. This is the
     /// MAC's vocabulary being extended, NOT iOS's `ToolPhrase` being ported (spec §7 forbids that:
-    /// it matches capitalized Claude-Code names Norma's daemon never emits).
+    /// it matches capitalized Claude-Code names Winter's daemon never emits).
     func testToolGroupFragmentCoversTheToolsThatUsedToFallThrough() {
         XCTAssertEqual(toolGroupFragment(name: "browser", count: 1), "used the browser")
         XCTAssertEqual(toolGroupFragment(name: "browser", count: 5), "used the browser 5 times")
@@ -255,7 +255,7 @@ final class ActivityGroupingTests: XCTestCase {
     }
 
     func testSentenceCombinesMultipleEntriesCommaJoinedFirstCapitalizedRestLowercase() {
-        // CC screenshot said "Read 4 files, listed 1 directory, ran 8 shell commands" — but Norma's
+        // CC screenshot said "Read 4 files, listed 1 directory, ran 8 shell commands" — but Winter's
         // own singular convention (matching every other verb: "a file" not "1 file") renders a
         // count of exactly 1 as "a directory", so the count-1 fragment here is "listed a directory".
         // Uses `ls` (not `glob`, which reverted to "searched" once `ls` shipped as its own tool).
