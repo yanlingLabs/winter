@@ -27,6 +27,7 @@ import { ALLOWED_TRANSITIONS, RuntimeSessionRecords } from "./records";
 import { RuntimeLeases, type LeaseRow } from "./leases";
 import { rollbackMemoryKeyMigration } from "./migrations/memory-keys";
 import { readMigrationManifest } from "../migration/manifest";
+import { describeHomePristineness } from "../migration/migrate-b";
 import { MIGRATION_B_SECRET_NAMES } from "../auth/legacy-secret-names";
 import type { SecretStore } from "../auth/secret-store";
 
@@ -885,6 +886,15 @@ export interface MigrationDoctorReport {
   /** How many of `MIGRATION_B_SECRET_NAMES` still answer non-null under `legacyKeychainService` —
    *  a count, never the names or values themselves. */
   legacyKeychainRemaining: number;
+  /**
+   * Review M2: WHY auto-migration never ran, when it looks like it should have. Full path of the
+   * first entry `describeHomePristineness(home)` found — only computed when `legacyHomePresent &&
+   * status === "absent"` (a legacy home sitting right there, but no manifest ever written): once
+   * migration has actually run (or is running), `home` is expected to have content, and pristine-
+   * ness stops being interesting. `undefined` when `home` IS pristine (nothing to explain) or the
+   * check was skipped.
+   */
+  homeNotPristineReason?: string;
 }
 
 export async function diagnoseMigration(input: {
@@ -906,12 +916,17 @@ export async function diagnoseMigration(input: {
       if ((await input.legacyStore.get(name)) !== null) legacyKeychainRemaining++;
     }
   }
+  // Review M2: only worth explaining when there's a live mystery — a legacy home sits right there,
+  // but Migration B never ran at all. `homedirOverride`/profile play no part here: `winter doctor`
+  // reports against whatever `home` it was actually given.
+  const homeNotPristineReason = legacyHomePresent && status === "absent" ? describeHomePristineness(input.home).reason : undefined;
   return {
     status,
     finishedAt: manifest?.finishedAt,
     legacyHome: input.legacyHome,
     legacyHomePresent,
     legacyKeychainService: input.legacyKeychainService,
+    homeNotPristineReason,
     legacyKeychainRemaining,
   };
 }
@@ -931,6 +946,10 @@ export function formatMigrationDoctorLines(report: MigrationDoctorReport): strin
   }
   if (report.legacyHomePresent) {
     lines.push(`legacy home present: ${report.legacyHome} (safe to remove after verifying Winter)`);
+  }
+  // Review M2: WHY it never auto-migrated, with a path forward.
+  if (report.homeNotPristineReason) {
+    lines.push(`this home is not pristine (found ${report.homeNotPristineReason}) — legacy data at ${report.legacyHome} was never migrated; run \`winter migrate --from ${report.legacyHome}\``);
   }
   if (report.legacyKeychainRemaining > 0) {
     lines.push(`legacy keychain items remaining: ${report.legacyKeychainRemaining} under ${report.legacyKeychainService}`);

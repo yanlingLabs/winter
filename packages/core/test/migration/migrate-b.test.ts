@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   MIGRATION_B_SECRET_NAMES,
   MigrationRefused,
+  describeHomePristineness,
   isPristineHome,
   legacyHomeFor,
   planMigrationB,
@@ -253,6 +254,48 @@ describe("isPristineHome (Step 3, P9c-10)", () => {
     const home = tempDir();
     writeFileSync(join(home, "settings.json"), "{}");
     expect(isPristineHome(home)).toBe(false);
+  });
+
+  // Review M2: a Finder browse of a fresh home drops known OS noise with no user action at all —
+  // it must never silently block the first-boot migration.
+  test("a .DS_Store beside otherwise-empty bootstrap dirs is still pristine", () => {
+    const home = tempDir();
+    for (const d of ["agents", "hooks", "logs", "memory", "outputs", "plugins", "projects", "runtimes", "sessions", "skills"]) {
+      mkdirSync(join(home, d), { recursive: true });
+    }
+    mkdirSync(join(home, "run"), { recursive: true });
+    writeFileSync(join(home, ".DS_Store"), "binary-finder-metadata");
+    writeFileSync(join(home, ".localized"), "");
+    writeFileSync(join(home, "._sessions"), "apple-double-sidecar");
+    expect(isPristineHome(home)).toBe(true);
+  });
+
+  test("a .DS_Store PLUS a real top-level file is still not pristine — the noise ignore is not a blanket exemption", () => {
+    const home = tempDir();
+    writeFileSync(join(home, ".DS_Store"), "binary-finder-metadata");
+    writeFileSync(join(home, "not-noise.txt"), "real content");
+    expect(isPristineHome(home)).toBe(false);
+  });
+
+  test("OS noise INSIDE a bootstrap-set directory still counts as real content — the ignore is top-level only", () => {
+    const home = tempDir();
+    mkdirSync(join(home, "sessions"), { recursive: true });
+    writeFileSync(join(home, "sessions", ".DS_Store"), "binary-finder-metadata");
+    expect(isPristineHome(home)).toBe(false);
+  });
+
+  test("describeHomePristineness names the first offending entry, full path", () => {
+    const home = tempDir();
+    writeFileSync(join(home, ".DS_Store"), "x"); // ignored
+    mkdirSync(join(home, "sessions"), { recursive: true });
+    writeFileSync(join(home, "sessions", "index.db"), "x");
+    const check = describeHomePristineness(home);
+    expect(check.pristine).toBe(false);
+    expect(check.reason).toBe(join(home, "sessions", "index.db"));
+  });
+
+  test("describeHomePristineness reports pristine:true with no reason for a genuinely pristine home", () => {
+    expect(describeHomePristineness(tempDir())).toEqual({ pristine: true });
   });
 
   test("planMigrationB refuses a non-pristine destination, naming the path and the fix", async () => {

@@ -67,14 +67,26 @@ export function legacyHomeFor(profile: WinterProfile, env: NodeJS.ProcessEnv = p
 
 const BOOTSTRAP_TOP_LEVEL = new Set(["agents", "hooks", "logs", "memory", "outputs", "plugins", "projects", "run", "runtimes", "sessions", "skills"]);
 
-/** True when `path` contains no regular files, symlinks, or anything else — only (optionally
- *  nested) empty directories. Absent counts as empty. */
-function isEmptyRecursively(path: string): boolean {
+/** Review M2: known macOS/Finder noise that must never block the first-boot migration — a mere
+ *  Finder browse of a fresh `~/.winter` drops a `.DS_Store` (and `.localized` on some volumes; an
+ *  AppleDouble `._*` sidecar can appear from a copy/USB-transfer touching the folder) with no user
+ *  action at all. Ignored ONLY at the home's TOP LEVEL — everything else (inside a bootstrap-set
+ *  directory, or any other top-level name) stays exactly as strict as before. */
+const IGNORED_TOP_LEVEL_NOISE = new Set([".DS_Store", ".localized"]);
+function isIgnorableTopLevelNoise(name: string): boolean {
+  return IGNORED_TOP_LEVEL_NOISE.has(name) || name.startsWith("._");
+}
+
+/** The full path of the first regular file/symlink/etc found inside `path` (recursing into
+ *  subdirectories, sorted for determinism), or `undefined` when it is empty (or absent) all the
+ *  way down. Review M2: this is the "not pristine" REASON, not just a boolean — `winter doctor`
+ *  names it so the user has somewhere to look instead of a bare "not pristine" verdict. */
+function firstNonEmptyEntry(path: string): string | undefined {
   let entries: string[];
   try {
-    entries = readdirSync(path);
+    entries = readdirSync(path).sort();
   } catch {
-    return true;
+    return undefined;
   }
   for (const name of entries) {
     const full = join(path, name);
@@ -85,39 +97,52 @@ function isEmptyRecursively(path: string): boolean {
       continue; // vanished between readdir and lstat — treat as not-there
     }
     if (st.isDirectory()) {
-      if (!isEmptyRecursively(full)) return false;
+      const nested = firstNonEmptyEntry(full);
+      if (nested) return nested;
     } else {
-      return false; // a file, symlink, socket, etc — not empty
+      return full; // a file, symlink, socket, etc — not empty
     }
   }
-  return true;
+  return undefined;
 }
 
-function runDirIsPristine(path: string): boolean {
+/** Same idea as `firstNonEmptyEntry`, for `run/` specifically — `core.lock`/`core.sock` are always
+ *  tolerated there (they're the daemon's own lock/socket, expected on an otherwise-pristine home). */
+function firstOffendingRunEntry(path: string): string | undefined {
   let entries: string[];
   try {
-    entries = readdirSync(path);
+    entries = readdirSync(path).sort();
   } catch {
-    return true;
+    return undefined;
   }
-  return entries.every((e) => e === "core.lock" || e === "core.sock");
+  const offender = entries.find((e) => e !== "core.lock" && e !== "core.sock");
+  return offender ? join(path, offender) : undefined;
+}
+
+export interface PristineCheck {
+  pristine: boolean;
+  /** Full path of the first entry that made the home non-pristine. `undefined` iff `pristine`. */
+  reason?: string;
 }
 
 /**
- * True for: an absent home, an empty directory, or a directory containing ONLY entries from the
- * bootstrap set (`agents hooks logs memory outputs plugins projects run runtimes sessions skills`),
- * each of which must itself be empty (`run/` may additionally hold `core.lock`/`core.sock`). False
- * the moment any file exists anywhere else — at the top level, or inside a bootstrap-set directory.
+ * Full report for: an absent home, an empty directory, or a directory containing ONLY entries from
+ * the bootstrap set (`agents hooks logs memory outputs plugins projects run runtimes sessions
+ * skills`), each of which must itself be empty (`run/` may additionally hold `core.lock`/
+ * `core.sock`) — ignoring known top-level OS noise (`isIgnorableTopLevelNoise`, review M2).
+ * `pristine: false` the moment any OTHER entry exists anywhere — at the top level, or inside a
+ * bootstrap-set directory — and `reason` names the first one found, full path.
  */
-export function isPristineHome(home: string): boolean {
+export function describeHomePristineness(home: string): PristineCheck {
   let topEntries: string[];
   try {
-    topEntries = readdirSync(home);
+    topEntries = readdirSync(home).sort();
   } catch {
-    return true; // absent
+    return { pristine: true }; // absent
   }
   for (const entry of topEntries) {
-    if (!BOOTSTRAP_TOP_LEVEL.has(entry)) return false;
+    if (isIgnorableTopLevelNoise(entry)) continue; // Finder/AppleDouble noise — never blocks migration
+    if (!BOOTSTRAP_TOP_LEVEL.has(entry)) return { pristine: false, reason: join(home, entry) };
     const full = join(home, entry);
     let st;
     try {
@@ -125,10 +150,15 @@ export function isPristineHome(home: string): boolean {
     } catch {
       continue;
     }
-    if (!st.isDirectory()) return false; // a FILE named e.g. "sessions" — not the bootstrap dir
-    if (entry === "run" ? !runDirIsPristine(full) : !isEmptyRecursively(full)) return false;
+    if (!st.isDirectory()) return { pristine: false, reason: full }; // a FILE named e.g. "sessions"
+    const offender = entry === "run" ? firstOffendingRunEntry(full) : firstNonEmptyEntry(full);
+    if (offender) return { pristine: false, reason: offender };
   }
-  return true;
+  return { pristine: true };
+}
+
+export function isPristineHome(home: string): boolean {
+  return describeHomePristineness(home).pristine;
 }
 
 // ── Planning ─────────────────────────────────────────────────────────────────────────────────────

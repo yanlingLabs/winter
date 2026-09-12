@@ -122,6 +122,7 @@ export {
   MIGRATION_B_SECRET_NAMES,
   MigrationRefused,
   isPristineHome,
+  describeHomePristineness,
   legacyHomeFor,
   planMigrationB,
   readMigrationManifest,
@@ -133,6 +134,7 @@ export {
   type MigrationFileEntry,
   type MigrationKeychainEntry,
   type MigrationManifest,
+  type PristineCheck,
   type MigrationPlan,
   type MigrationPlanFileEntry,
 } from "./migration/migrate-b";

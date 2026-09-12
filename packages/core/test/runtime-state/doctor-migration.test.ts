@@ -96,6 +96,63 @@ describe("diagnoseMigration / formatMigrationDoctorLines", () => {
     expect(lines.join("\n")).not.toContain("sk-super-secret-value");
   });
 
+  test("review M2: absent + legacy home present + home NOT pristine — names the offending entry and points at winter migrate --from", async () => {
+    const parent = tempDir();
+    const legacyHome = join(parent, "legacy");
+    mkdirSync(legacyHome, { recursive: true });
+    const home = join(parent, "home");
+    mkdirSync(join(home, "sessions"), { recursive: true });
+    writeFileSync(join(home, "sessions", "index.db"), "already has real content");
+
+    const report = await diagnoseMigration({
+      home,
+      legacyHome,
+      legacyKeychainService: "com.example.legacy",
+      legacyStore: new FileSecretStore(join(parent, "legacy-secrets")),
+    });
+    expect(report.status).toBe("absent");
+    expect(report.homeNotPristineReason).toBe(join(home, "sessions", "index.db"));
+
+    const lines = formatMigrationDoctorLines(report);
+    const reasonLine = lines.find((l) => l.includes("not pristine"));
+    expect(reasonLine).toBeDefined();
+    expect(reasonLine).toContain(join(home, "sessions", "index.db"));
+    expect(reasonLine).toContain(`winter migrate --from ${legacyHome}`);
+  });
+
+  test("review M2: absent + legacy home present + home IS pristine (OS noise only) — no not-pristine row at all", async () => {
+    const parent = tempDir();
+    const legacyHome = join(parent, "legacy");
+    mkdirSync(legacyHome, { recursive: true });
+    const home = join(parent, "home");
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, ".DS_Store"), "finder noise");
+
+    const report = await diagnoseMigration({
+      home,
+      legacyHome,
+      legacyKeychainService: "com.example.legacy",
+      legacyStore: new FileSecretStore(join(parent, "legacy-secrets")),
+    });
+    expect(report.homeNotPristineReason).toBeUndefined();
+    expect(formatMigrationDoctorLines(report).some((l) => l.includes("not pristine"))).toBe(false);
+  });
+
+  test("the not-pristine check is skipped (never computed) once status is complete — pristine-ness stops being interesting after a real migration", async () => {
+    const parent = tempDir();
+    const legacyHome = join(parent, "legacy");
+    mkdirSync(legacyHome, { recursive: true });
+    writeFileSync(join(legacyHome, "settings.json"), JSON.stringify({ schemaVersion: 1 }));
+    const home = join(parent, "home");
+    const legacySecrets = new FileSecretStore(join(parent, "legacy-secrets"));
+    const plan = await planMigrationB({ legacyHome, home, profile: "dev" });
+    await runMigrationB(plan, { from: legacySecrets, to: new FileSecretStore(join(parent, "secrets-to")), log: () => {} });
+
+    const report = await diagnoseMigration({ home, legacyHome, legacyKeychainService: "com.example.legacy", legacyStore: legacySecrets });
+    expect(report.status).toBe("complete");
+    expect(report.homeNotPristineReason).toBeUndefined();
+  });
+
   test("in-progress: reports IN PROGRESS with the resume/rollback hint", async () => {
     const parent = tempDir();
     const home = join(parent, "home");
