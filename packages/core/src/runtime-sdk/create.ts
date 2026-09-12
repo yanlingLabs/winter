@@ -75,13 +75,18 @@ export type SessionMode = "code" | "dispatch" | "chat";
  * How long `dispose()` waits for ONE live session to end before it aborts that one.
  *
  * 300 ms, AND THE NUMBER IS ARITHMETIC, not taste (P8b-32). The whole of teardown has to fit inside
- * `DaemonSupervisor.gracefulExitTimeout` — 2.0 s, `apple/Norma/Sources/App/DaemonSupervisor.swift` —
- * after which the app SIGKILLs the daemon; a teardown that overruns is killed mid-drain, so
+ * `DaemonSupervisor.gracefulExitTimeout` — 5.0 s as of P8d-6, `apple/Norma/Sources/App/DaemonSupervisor.swift`
+ * — after which the app SIGKILLs the daemon; a teardown that overruns is killed mid-drain, so
  * `lock.release()` never runs, the socket file is left on disk, and the supervisor drops to
- * `.connectOnly` on the next launch. 8a already spends 1500 ms of that budget on its own deletion
- * drain (`RUNTIME_SHUTDOWN_DRAIN_MS`), and the two are SEQUENTIAL in `daemon.ts`'s `stop()`:
+ * `.connectOnly` on the next launch. That 5.0 s only reaches this budget because P8d-6 PAIRED the
+ * raise with escaping `applicationWillTerminate`'s own ~5 s force-quit window: `AppDelegate`'s
+ * `applicationShouldTerminate` now returns `.terminateLater` while `terminateGracefully()` runs,
+ * then calls `reply(toApplicationShouldTerminate:)` — without that move, the app-side clock the
+ * daemon is racing was never 5.0 s to begin with. 8a already spends 3500 ms of that budget on its
+ * own deletion drain (`RUNTIME_SHUTDOWN_DRAIN_MS`, raised in the same P8d-6 pairing), and the two
+ * are SEQUENTIAL in `daemon.ts`'s `stop()`:
  *
- *     SHUTDOWN_QUERY_GRACE_MS (300) + RUNTIME_SHUTDOWN_DRAIN_MS (1500) = 1800 < 2000
+ *     SHUTDOWN_QUERY_GRACE_MS (300) + RUNTIME_SHUTDOWN_DRAIN_MS (3500) = 3800 < 5000
  *
  * `create.test.ts` asserts that inequality, so the next edit to either number trips a test instead
  * of shipping a stale socket. In the ordinary case — a child that ends when its prompt queue closes
