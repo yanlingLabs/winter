@@ -624,7 +624,13 @@ function sweepClaudeResumeStaging(scanRoot: string, known: ReadonlySet<string>):
   let removed = 0;
   for (const name of entries) {
     const path = join(scanRoot, name);
-    if (known.has(path)) continue;
+    // PREFIX-AWARE, exactly like `defaultTempScan`'s own `claimed` predicate just below: a known
+    // root is not always the candidate directory itself — a generation's `local_write_root` can
+    // name a SUBDIRECTORY of a `claude-resume-<uuid>` dir (a nested working root inside the staged
+    // payload), and an exact-match check would have swept the whole dir out from under it. `known`
+    // protects `path` whenever some root equals it OR sits inside it.
+    const claimed = [...known].some((root) => root === path || root.startsWith(`${path}/`));
+    if (claimed) continue;
     let ageMs: number;
     try {
       ageMs = Date.now() - statSync(path).mtimeMs;

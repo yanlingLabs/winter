@@ -495,6 +495,27 @@ describe("recoverRuntimeState — WS-16 §13's twelve steps", () => {
       });
     });
 
+    test("a generation that records a SUBDIRECTORY of a staging dir protects the WHOLE dir (review Major-1)", async () => {
+      await withHarness(async (h) => {
+        const resumeScan = join(h.home, "claude-resume-scan");
+        const staging = join(resumeScan, "claude-resume-44444444-5555-4666-8777-888888888888");
+        const nestedRoot = join(staging, "nested", "child");
+        mkdirSync(nestedRoot, { recursive: true });
+        backdate(staging, DAY_MS * 30); // old enough to be swept on an exact-match check
+
+        h.records.create(newRecord(h.home, "s_claude_nested"));
+        h.records.transition("s_claude_nested", "ready");
+        // The known root is DEEPER than the staging dir itself — an exact-match `known.has(path)`
+        // check would have missed this and swept the dir out from under a live generation.
+        h.records.bumpGeneration("s_claude_nested", { runtimeKind: "claude-agent", localWriteRoot: nestedRoot, localWriteRootKind: "sdk-resume-staging" });
+
+        const report = await h.run();
+        expect(report.steps.find((s) => s.step === 8)!.detail.claudeResumeRemoved).toBe(0);
+        expect(existsSync(staging)).toBe(true);
+        expect(existsSync(nestedRoot)).toBe(true);
+      });
+    });
+
     test("a directory that does not match the claude-resume- prefix is never touched by this sweep", async () => {
       await withHarness(async (h) => {
         const resumeScan = join(h.home, "claude-resume-scan");

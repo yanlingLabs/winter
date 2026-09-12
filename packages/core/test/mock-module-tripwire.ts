@@ -18,6 +18,20 @@
 // LAST lifecycle hook that file registers — after any `afterAll`/`afterEach` that re-mocks a module
 // back to its real shape — so this guard's own `afterAll` (registered last) sees the file's truly
 // final state.
+//
+// A KNOWN LIMIT, NOT A GUARANTEE: this is a PARITY check (odd count = leaked), not a content check.
+// `mock.module(A, f1); mock.module(A, f2);` with no third, restoring call reads as CLEAN — two
+// calls, even — even though the module is left mocked as `f2` forever. Bun gives no way to ask "is
+// A currently mocked, and to what" from outside the module being mocked, so this cannot tell "the
+// second call was a genuine restore" from "the second call was just another fake" any more finely
+// than counting. It catches the shape a FORGOTTEN cleanup actually takes (one call, never revisited)
+// — which is the whole failure mode this guard exists for — not every way a file could still leave
+// a mock behind on purpose or by a subtler mistake.
+//
+// WHY THIS FILE LIVES AT `test/`, NOT `test/helpers/`: `test/helpers/*` is another lane's owned
+// path this phase; this is a suite-wide concern with no home there, so it sits beside
+// `test/preload.ts` instead (the OTHER file this whole suite's `bunfig.toml` already treats as
+// global) — a deliberate placement, not an oversight.
 import { afterAll, mock } from "bun:test";
 
 /**

@@ -289,6 +289,11 @@ export function controlPlaneDenyRules(home: string): string[] {
   // `claude-resume-` prefix is repeated (not imported) in `runtime-state/recovery.ts`'s step 8 scan
   // — the two live in different subsystems this phase does not bridge with a shared constant, and
   // each names the other in its own comment so a rename cannot drift silently.
+  //
+  // The mid-segment `*` is a real glob wildcard on the pinned SDK's own matcher, not a literal
+  // asterisk: `packages/runtime/src/permissions/paths.ts`'s `globSegmentToRegexBody` compiles a
+  // mid-segment `*` to `[^/]*`, so `claude-resume-*` matches every `claude-resume-<uuid>` name and
+  // nothing else — recorded so this form is not re-investigated.
   const claudeResumeStaging = fsRootAnchored([join(tmpdir(), "claude-resume-*"), "**"].join("/"));
   const targets = [
     // Any project's control-plane files, at any depth — the project-INDEPENDENT invariant
