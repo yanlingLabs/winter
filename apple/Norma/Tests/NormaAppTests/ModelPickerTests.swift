@@ -160,6 +160,72 @@ final class ModelPickerTests: XCTestCase {
         XCTAssertTrue(t.sent.isEmpty, "no RPC should go out with no focused session")
     }
 
+    // MARK: - Winter Phase 8d (Task 4.2): AppModel.applyModelChange's outcome mapping — THE ONE
+    // door `ShellSessionHost`/`DetachedWindowController`'s live-session `onSetModel` wiring, and
+    // `AppModel.setSessionModel` itself, all resolve through.
+
+    /// Each of `HandoffRpcCode`'s four wire codes maps to its own `ModelChangeOutcome` case, and a
+    /// plain success maps to `.ok` — proved against a REAL `NormaClient` over a scripted
+    /// transport (not a stub of `applyModelChange` itself), so this also pins the wire shape:
+    /// `confirmLossy` defaults `false` and the confirm-sheet's resend sets it `true`.
+    @MainActor
+    func testApplyModelChangeMapsEachHandoffCodeAndPlainSuccess() async throws {
+        let t = AppScriptedTransport()
+        let client = NormaClient(makeTransport: { t }, token: "tok", clientName: "apply-model-change-test")
+        let connectTask = Task { try? await client.connect() }
+        await waitUntilSent(t, 1)
+        let hello = lineJSON(t.sent[0])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(hello["id"] as! Int),"result":{"ok":true}}"#)
+        await connectTask.value
+
+        async let confirmationOutcome = AppModel.applyModelChange(client: client, sessionId: "s_1", model: "claude-opus-5")
+        await waitUntilSent(t, 2)
+        let confirmReq = lineJSON(t.sent[1])
+        XCTAssertEqual((confirmReq["params"] as? [String: Any])?["confirmLossy"] as? Bool, false, "omitting confirmLossy must still send it explicitly false")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(confirmReq["id"] as! Int),"error":{"code":-32602,"message":"x","data":{"code":"handoff_confirmation_required","warnings":["reasoning state may be lost"]}}}"#)
+        let outcome1 = await confirmationOutcome
+        XCTAssertEqual(outcome1, .confirmationRequired(warnings: ["reasoning state may be lost"]))
+
+        async let disabledOutcome = AppModel.applyModelChange(client: client, sessionId: "s_1", model: "claude-opus-5")
+        await waitUntilSent(t, 3)
+        let disabledReq = lineJSON(t.sent[2])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(disabledReq["id"] as! Int),"error":{"code":-32602,"message":"cross-runtime handoff is disabled","data":{"code":"handoff_disabled"}}}"#)
+        let outcome2 = await disabledOutcome
+        XCTAssertEqual(outcome2, .disabled("cross-runtime handoff is disabled"))
+
+        async let lossyForkOutcome = AppModel.applyModelChange(client: client, sessionId: "s_1", model: "claude-opus-5")
+        await waitUntilSent(t, 4)
+        let lossyReq = lineJSON(t.sent[3])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(lossyReq["id"] as! Int),"error":{"code":-32602,"message":"forked","data":{"code":"handoff_lossy_fork"}}}"#)
+        let outcome3 = await lossyForkOutcome
+        XCTAssertEqual(outcome3, .lossyFork("forked"))
+
+        async let blockedOutcome = AppModel.applyModelChange(client: client, sessionId: "s_1", model: "claude-opus-5")
+        await waitUntilSent(t, 5)
+        let blockedReq = lineJSON(t.sent[4])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(blockedReq["id"] as! Int),"error":{"code":-32603,"message":"blocked","data":{"code":"handoff_blocked"}}}"#)
+        let outcome4 = await blockedOutcome
+        XCTAssertEqual(outcome4, .blocked("blocked"))
+
+        // A refusal with NO handoff code at all (e.g. `runtime_selection_refused`) is `.failed`,
+        // never mistaken for one of the four handoff shapes.
+        async let plainRefusalOutcome = AppModel.applyModelChange(client: client, sessionId: "s_1", model: "claude-opus-5")
+        await waitUntilSent(t, 6)
+        let plainReq = lineJSON(t.sent[5])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(plainReq["id"] as! Int),"error":{"code":-32602,"message":"no provider can serve this model"}}"#)
+        let outcome5 = await plainRefusalOutcome
+        XCTAssertEqual(outcome5, .failed("no provider can serve this model"))
+
+        // The confirm sheet's "Switch anyway" resend — confirmLossy:true — succeeds.
+        async let okOutcome = AppModel.applyModelChange(client: client, sessionId: "s_1", model: "claude-opus-5", confirmLossy: true)
+        await waitUntilSent(t, 7)
+        let okReq = lineJSON(t.sent[6])
+        XCTAssertEqual((okReq["params"] as? [String: Any])?["confirmLossy"] as? Bool, true)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(okReq["id"] as! Int),"result":{}}"#)
+        let outcome6 = await okOutcome
+        XCTAssertEqual(outcome6, .ok)
+    }
+
     // MARK: - T1 deferred item, closed: listSessions() → SessionSummary.model, end to end
 
     /// Proves `model` genuinely threads from the wire through `NormaKit.listSessions()` into
@@ -820,5 +886,203 @@ final class ModelPickerTests: XCTestCase {
         let wiring = SidebarWiring(directory: directory, currentSessionId: { rows.first?.sessionId },
                                    onSelect: { _ in }, onOpenDetached: { _ in }, onNewSession: {})
         return WindowContentView(adapter: adapter, tint: .blue, topInset: 8, sidebars: wiring) { EmptyView() }
+    }
+
+}
+
+// MARK: - Winter Phase 8d (P8d-8, fix round 1): AppModel.readAdvisorModelFromSettings /
+// writeAdvisorModelToSettings — the D30 advisor setting's direct-file-I/O door (`AppModel`'s own
+// doc: the SAME pattern `UpdaterCoordinator.readChannelFromSettings()` already uses,
+// `UpdaterCoordinatorTests.testReadChannelFromSettingsFile`'s own `setenv("NORMA_HOME", …)` +
+// temp-dir technique reused verbatim here). Both functions resolve the settings path through
+// `AppProfile.normaHome`, which reads the SAME raw `NORMA_HOME` env var `NormaPaths.
+// homeDirectory()` reads (via `getenv`, not `ProcessInfo.environment` — `AppProfile.swift`'s own
+// doc explains why both must agree), so overriding the env var redirects both functions at once.
+//
+/// A SEPARATE `XCTestCase` (not nested in `ModelPickerTests` above) — these tests need no
+/// main-actor isolation at all, since they touch no adapter/`AppModel` instance, only the two
+/// static file-I/O functions. Same file for proximity to the outcome tests above, which exercise
+/// the OTHER half of the same D30 surface.
+final class AdvisorSettingsTests: XCTestCase {
+    private func tempHome() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private func write(_ json: String, to dir: URL) throws {
+        try json.write(to: dir.appendingPathComponent("settings.json"), atomically: true, encoding: .utf8)
+    }
+
+    private func read(_ dir: URL) throws -> [String: Any] {
+        let data = try Data(contentsOf: dir.appendingPathComponent("settings.json"))
+        return try JSONSerialization.jsonObject(with: data) as! [String: Any]
+    }
+
+    /// A realistic fixture matching `packages/core/src/settings.ts`'s `Settings` shape —
+    /// `schemaVersion`, `provider`, and a `runtimes` block carrying several of its OWN sibling
+    /// fields (`winterExecutable`, `retention`, `winterLeg`, `handoff`) — the exact shape the
+    /// review asked this write to round-trip without corrupting.
+    private static let realisticFixture = #"""
+    {
+      "schemaVersion": 2,
+      "provider": { "type": "codex-oauth", "model": "gpt-5.6-sol" },
+      "runtimes": {
+        "winterExecutable": "/opt/homebrew/bin/winter",
+        "retention": { "deliveriesDays": 30, "nameLeasesDays": 7 },
+        "winterLeg": { "chat": true, "dispatch": true, "code": true },
+        "handoff": { "crossRuntime": false }
+      },
+      "memory": { "enabled": true }
+    }
+    """#
+
+    func testReadOfAMissingSettingsFileIsNil() throws {
+        let dir = try tempHome()
+        setenv("NORMA_HOME", dir.path, 1)
+        defer { unsetenv("NORMA_HOME") }
+        XCTAssertNil(AppModel.readAdvisorModelFromSettings(), "no settings.json at all -> nil, never a guess")
+    }
+
+    func testReadOfAMissingAdvisorKeyIsNil() throws {
+        let dir = try tempHome()
+        setenv("NORMA_HOME", dir.path, 1)
+        defer { unsetenv("NORMA_HOME") }
+        try write(Self.realisticFixture, to: dir) // no runtimes.advisorModel key at all
+        XCTAssertNil(AppModel.readAdvisorModelFromSettings())
+    }
+
+    func testReadReturnsTheStoredAdvisorModelVerbatim() throws {
+        let dir = try tempHome()
+        setenv("NORMA_HOME", dir.path, 1)
+        defer { unsetenv("NORMA_HOME") }
+        try write(#"{"schemaVersion":2,"runtimes":{"advisorModel":"claude-fable-5"}}"#, to: dir)
+        XCTAssertEqual(AppModel.readAdvisorModelFromSettings(), "claude-fable-5")
+    }
+
+    /// Blank-is-absent on the READ side — mirrors `winterOptionsFromSettings`'s own rule
+    /// (settings.ts): a blank string is never surfaced as a model id.
+    func testReadOfABlankStoredValueIsNil() throws {
+        let dir = try tempHome()
+        setenv("NORMA_HOME", dir.path, 1)
+        defer { unsetenv("NORMA_HOME") }
+        try write(#"{"schemaVersion":2,"runtimes":{"advisorModel":"   "}}"#, to: dir)
+        XCTAssertNil(AppModel.readAdvisorModelFromSettings())
+    }
+
+    /// THE MAJOR finding's core case: writing preserves every sibling `runtimes.*` key AND every
+    /// unrelated top-level key, on a fixture shaped exactly like a real daemon's `settings.json`
+    /// (`Settings.parse`'s own shape) — never a whole-block replace.
+    func testWritePreservesSiblingRuntimesKeysAndUnrelatedTopLevelKeys() throws {
+        let dir = try tempHome()
+        setenv("NORMA_HOME", dir.path, 1)
+        defer { unsetenv("NORMA_HOME") }
+        try write(Self.realisticFixture, to: dir)
+
+        XCTAssertTrue(AppModel.writeAdvisorModelToSettings("gpt-5.6-astra"))
+
+        let obj = try read(dir)
+        XCTAssertEqual(obj["schemaVersion"] as? Int, 2, "unrelated top-level key preserved")
+        let provider = obj["provider"] as? [String: Any]
+        XCTAssertEqual(provider?["type"] as? String, "codex-oauth", "unrelated top-level block preserved")
+        XCTAssertEqual(provider?["model"] as? String, "gpt-5.6-sol")
+        let memory = obj["memory"] as? [String: Any]
+        XCTAssertEqual(memory?["enabled"] as? Bool, true, "unrelated top-level block preserved")
+
+        let runtimes = obj["runtimes"] as? [String: Any]
+        XCTAssertEqual(runtimes?["advisorModel"] as? String, "gpt-5.6-astra", "the write landed")
+        XCTAssertEqual(runtimes?["winterExecutable"] as? String, "/opt/homebrew/bin/winter", "sibling runtimes.* key preserved")
+        let retention = runtimes?["retention"] as? [String: Any]
+        XCTAssertEqual(retention?["deliveriesDays"] as? Int, 30, "sibling runtimes.* BLOCK preserved")
+        XCTAssertEqual(retention?["nameLeasesDays"] as? Int, 7)
+        let winterLeg = runtimes?["winterLeg"] as? [String: Any]
+        XCTAssertEqual(winterLeg?["chat"] as? Bool, true, "sibling runtimes.* block preserved")
+        XCTAssertEqual(winterLeg?["dispatch"] as? Bool, true)
+        XCTAssertEqual(winterLeg?["code"] as? Bool, true)
+        let handoff = runtimes?["handoff"] as? [String: Any]
+        XCTAssertEqual(handoff?["crossRuntime"] as? Bool, false, "sibling runtimes.* block preserved")
+
+        // Round-trips through a fresh read too, proving the write is self-consistent.
+        XCTAssertEqual(AppModel.readAdvisorModelFromSettings(), "gpt-5.6-astra")
+    }
+
+    /// `nil` clears the key entirely (never writes an empty string) — the picker's "Automatic" row.
+    func testWriteNilClearsTheKeyEntirely() throws {
+        let dir = try tempHome()
+        setenv("NORMA_HOME", dir.path, 1)
+        defer { unsetenv("NORMA_HOME") }
+        try write(#"{"schemaVersion":2,"runtimes":{"advisorModel":"claude-fable-5","winterExecutable":"/x"}}"#, to: dir)
+
+        XCTAssertTrue(AppModel.writeAdvisorModelToSettings(nil))
+
+        let obj = try read(dir)
+        let runtimes = obj["runtimes"] as? [String: Any]
+        XCTAssertNil(runtimes?["advisorModel"], "the key must be REMOVED, not set to an empty string")
+        XCTAssertEqual(runtimes?["winterExecutable"] as? String, "/x", "sibling key untouched by the clear")
+        XCTAssertNil(AppModel.readAdvisorModelFromSettings())
+    }
+
+    /// A blank/whitespace-only string clears the key exactly like `nil` — "auto"'s own spelling in
+    /// `norma model --advisor auto` maps to `nil` before this function ever sees it, but the
+    /// function itself must not special-case that: a blank string arriving by any other path
+    /// (a future caller) gets the identical blank-is-absent treatment `settings.ts` documents.
+    func testWriteBlankStringClearsTheKeyLikeNil() throws {
+        let dir = try tempHome()
+        setenv("NORMA_HOME", dir.path, 1)
+        defer { unsetenv("NORMA_HOME") }
+        try write(#"{"schemaVersion":2,"runtimes":{"advisorModel":"claude-fable-5"}}"#, to: dir)
+
+        XCTAssertTrue(AppModel.writeAdvisorModelToSettings("   "))
+
+        let obj = try read(dir)
+        let runtimes = obj["runtimes"] as? [String: Any]
+        XCTAssertNil(runtimes?["advisorModel"])
+    }
+
+    /// A HOME WITH NO `runtimes` BLOCK AT ALL, and no `settings.json` at all — the first write on a
+    /// fresh home must still produce a schema-valid file (every `Settings` field is optional) with
+    /// no OTHER top-level key invented.
+    func testWriteOnAFreshHomeWithNoSettingsFileCreatesOne() throws {
+        let dir = try tempHome()
+        setenv("NORMA_HOME", dir.path, 1)
+        defer { unsetenv("NORMA_HOME") }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("settings.json").path))
+
+        XCTAssertTrue(AppModel.writeAdvisorModelToSettings("claude-opus-5"))
+
+        let obj = try read(dir)
+        XCTAssertEqual(Set(obj.keys), ["runtimes"], "a fresh home gets ONLY the runtimes block — nothing invented")
+        let runtimes = obj["runtimes"] as? [String: Any]
+        XCTAssertEqual(runtimes?["advisorModel"] as? String, "claude-opus-5")
+        XCTAssertEqual(Set((runtimes ?? [:]).keys), ["advisorModel"], "no sibling runtimes.* field invented either")
+    }
+
+    /// A write must never corrupt the file into something `Settings.parse` (the daemon's own
+    /// validator) would reject — proved here by checking every field this fixture came in with is
+    /// still the SAME TYPE it started as (an object stays an object, a bool stays a bool) after the
+    /// merge, which is what a `JSONSerialization`-level shallow merge guarantees and a naive
+    /// string-replace would not.
+    func testWrittenFileStaysShapeCompatibleWithTheDaemonsSettingsSchema() throws {
+        let dir = try tempHome()
+        setenv("NORMA_HOME", dir.path, 1)
+        defer { unsetenv("NORMA_HOME") }
+        try write(Self.realisticFixture, to: dir)
+
+        XCTAssertTrue(AppModel.writeAdvisorModelToSettings("gpt-5.6-luna"))
+
+        let obj = try read(dir)
+        XCTAssertTrue(obj["schemaVersion"] is Int)
+        XCTAssertTrue(obj["provider"] is [String: Any])
+        XCTAssertTrue(obj["runtimes"] is [String: Any])
+        XCTAssertTrue(obj["memory"] is [String: Any])
+        let runtimes = obj["runtimes"] as! [String: Any]
+        XCTAssertTrue(runtimes["advisorModel"] is String)
+        XCTAssertTrue(runtimes["winterExecutable"] is String)
+        XCTAssertTrue(runtimes["retention"] is [String: Any])
+        XCTAssertTrue(runtimes["winterLeg"] is [String: Any])
+        XCTAssertTrue(runtimes["handoff"] is [String: Any])
+        // JSONSerialization itself is the round-trip proof: a shape it cannot re-encode as valid
+        // JSON would already have thrown inside writeAdvisorModelToSettings (returning false) —
+        // the `true` return above IS the "this is valid JSON" assertion.
     }
 }

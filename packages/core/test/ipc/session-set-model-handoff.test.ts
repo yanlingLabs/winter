@@ -1,7 +1,13 @@
 // Winter Phase 8c (Task 4.1): `session.setModel`'s RPC-level wiring to `opts.handoff` — proved
 // against a fake `planAndApplySwitch` hook (the decision matrix itself is
 // `test/runtime-sdk/handoff.test.ts`'s). Confirms the store write is gated on the outcome: it runs
-// for same-runtime/deferred/resumed, and never runs for a refusal/confirmation/lossy-fork/blocked.
+// for same-runtime/resumed, and never runs for a refusal/confirmation/lossy-fork/blocked.
+//
+// Winter Phase 8d fix round 1 (item 5): `deferred` moved OUT of the "writes" bucket into its own
+// test below — Lane 2's handoff m5 change makes the deferred continuation commit the model
+// preference itself, exactly once, when it settles to "resumed"; this RPC must reply success
+// (never a refusal) but must NOT write `meta.model` now, or the continuation's later write would
+// either double it or race a preference this RPC never actually applied.
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -62,7 +68,6 @@ async function boot(store: SessionStore, home: string, outcome: PlanSwitchOutcom
 
 const cases: Array<{ name: string; outcome: PlanSwitchOutcome; expectWrite: boolean; expectedCode?: string }> = [
   { name: "same-runtime", outcome: { kind: "same-runtime" }, expectWrite: true },
-  { name: "deferred", outcome: { kind: "deferred" }, expectWrite: true },
   { name: "resumed", outcome: { kind: "resumed", selection: { runtimeKind: "claude-agent", providerId: "p", modelRef: "m", family: "f", authFamily: "api-key", sdkVersion: "x", reason: "r", decidedAt: "t" } }, expectWrite: true },
   { name: "refused", outcome: { kind: "refused", code: "runtime_selection_refused", detail: "no credential" }, expectWrite: false, expectedCode: "runtime_selection_refused" },
   { name: "confirmation_required", outcome: { kind: "confirmation_required", warnings: ["lossy"] }, expectWrite: false, expectedCode: "handoff_confirmation_required" },
@@ -97,4 +102,27 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
       }
     });
   }
+
+  // Fix round 1 (item 5): "deferred" is neither a refusal NOR an immediate write — the RPC
+  // succeeds (a turn is running; the caller's model preference was accepted, not rejected) but
+  // `meta.model` must stay exactly what it was before this call, because `planAndApplySwitch`'s
+  // OWN deferred continuation is what commits it, once, when the turn settles to "resumed".
+  test("deferred: succeeds with no error, but leaves meta.model UNCHANGED (the continuation commits it later)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "norma-setmodel-handoff-deferred-"));
+    const store = new SessionStore(home);
+    const sessionId = store.createSession("global");
+    const { server, c } = await boot(store, home, { kind: "deferred" });
+    try {
+      const before = store.meta(sessionId).model;
+      const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet", confirmLossy: true });
+      expect(res.error).toBeUndefined();
+      expect(res.result).toEqual({});
+      expect(store.meta(sessionId).model).toBe(before);
+      expect(store.meta(sessionId).model).toBeUndefined();
+    } finally {
+      c.close();
+      server.stop();
+      store.close();
+    }
+  });
 });

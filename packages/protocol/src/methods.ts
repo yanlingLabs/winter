@@ -282,6 +282,16 @@ export const SessionListResult = z.object({
     // runtime record (a phone-owned row `sync.push` materialised). A picker that wants to render
     // "which runtime is this on" must therefore treat absence as unknown, not as a default leg.
     runtimeKind: z.enum(["claude-agent", "winter-agent"]).optional(),
+    // Winter Phase 8d (P8d-7, Task 4.1): the runtime-state record's OWN `providerId` (WS-16 §4's
+    // `RuntimeSessionRecord.providerId`, stamped by `session-driver.ts`'s `create()` on BOTH legs) —
+    // a finer-grained fact than `runtimeKind` above ("which provider served this session", e.g.
+    // "anthropic"/"codex-oauth"/"openai", not just "which leg"). Read at list time from the SAME
+    // record `runtimeKind` is derived from, never re-decided here. Absent means one of two honest
+    // things: no runtime-state spine wired on this daemon, or a session with no runtime record at
+    // all (an engine-era row, or a phone-owned row `sync.push` materialised) — never a guess, and
+    // NOT the same absence as `runtimeKind`'s (a daemon can know the leg from `legOf` while this
+    // daemon build predates threading the record through to `session.list` at all).
+    providerId: z.string().min(1).optional(),
   })),
 });
 

@@ -747,6 +747,19 @@ func recentsActivityDotStyle(_ activity: String?) -> ActivityChipStyle? {
     }
 }
 
+/// Winter Phase 8d (Task 4.2, WS-14 §14): the runtime badge's label. `nil` for BOTH an absent
+/// `runtimeKind` (a daemon that hasn't decided/does not know the leg — never a guessed default) AND
+/// an unrecognised future value (fail-quiet, same posture as `recentsActivityDotStyle` just above —
+/// an unknown string is not a licence to invent a label). The branding ruling this exists to serve:
+/// NEVER "Claude Code" — `"claude-agent"` reads "Claude Agent", full stop.
+func runtimeBadgeLabel(_ runtimeKind: String?) -> String? {
+    switch runtimeKind {
+    case "winter-agent": return "Winter Agent"
+    case "claude-agent": return "Claude Agent"
+    default: return nil
+    }
+}
+
 /// THE hairline width for every rim and border the shell draws — the detail card, the composer,
 /// the starter chips, the Cowork strip.
 ///
@@ -1255,6 +1268,16 @@ struct ShellSidebar: View {
                     .font(Typography.control())
                     .lineLimit(1)
                     .truncationMode(.middle)
+                // Winter Phase 8d (Task 4.2, WS-14 §14): the runtime badge — a quiet trailing label
+                // beside the title, absent whenever `runtimeBadgeLabel` says so (an unrecorded leg,
+                // or a daemon that predates the field). Never a colored pill: this is provenance,
+                // not a state that needs to draw the eye the way the activity dot does.
+                if let badge = runtimeBadgeLabel(row.runtimeKind) {
+                    Text(badge)
+                        .font(Typography.tiny())
+                        .foregroundStyle(Theme.textMuted)
+                        .lineLimit(1)
+                }
                 Spacer(minLength: 4)
                 if let style = recentsActivityDotStyle(row.activity) {
                     Circle()

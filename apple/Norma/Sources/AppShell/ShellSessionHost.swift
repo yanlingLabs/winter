@@ -2410,6 +2410,20 @@ final class ShellSessionHost: ObservableObject {
     /// menu for one round trip on every entry.
     @Published private(set) var newChatCatalogue: SyncConfigSnapshot = .empty
 
+    /// Winter Phase 8d (P8d-8, fix round 1): the new-chat page's own cached D30 advisor value —
+    /// there is no session/`FieldStateAdapter` on this page, so `newChatCatalogue`'s exact
+    /// "snapshot, refreshed exactly when about to be read" convention is mirrored here rather than
+    /// reading `settings.json` synchronously from the chip's computed property (the review finding
+    /// this fix round addresses for `WindowContentView`'s live-session twin applies identically
+    /// here). `nil` = unset ("Automatic") or not yet read.
+    @Published private(set) var newChatAdvisorModel: String? = nil
+
+    func setNewChatAdvisorModel(_ model: String?) {
+        if AppModel.writeAdvisorModelToSettings(model) {
+            newChatAdvisorModel = model
+        }
+    }
+
     func setNewChatModel(_ model: String?) {
         newChatModelPick = .some(model)
         // Fix round 1: the held effort is validated against the MODEL, so changing the model can
@@ -2464,7 +2478,9 @@ final class ShellSessionHost: ObservableObject {
                              effortChangeInFlight: false,
                              onOpen: { [weak self] in self?.refreshNewChatCatalogue() },
                              onSetModel: { [weak self] in self?.setNewChatModel($0) },
-                             onSetEffort: { [weak self] in self?.setNewChatEffort($0) })
+                             onSetEffort: { [weak self] in self?.setNewChatEffort($0) },
+                             advisorModel: newChatAdvisorModel,
+                             onSetAdvisorModel: { [weak self] in self?.setNewChatAdvisorModel($0) })
     }
 
     /// The page chip's catalogue fetch — fired when the menu is about to be read, the same
@@ -2472,6 +2488,10 @@ final class ShellSessionHost: ObservableObject {
     /// buttons follow. `try?`, same posture as `refreshModelCatalogue`: a hiccup leaves the previous
     /// snapshot in place rather than blanking the picker out from under the user.
     private func refreshNewChatCatalogue() {
+        // Winter Phase 8d (P8d-8, fix round 1): the advisor read is local file I/O, not an RPC —
+        // no `Task`/round trip needed, so it runs synchronously right here rather than waiting on
+        // the catalogue fetch below. Co-located because both fire from the SAME `onOpen`.
+        newChatAdvisorModel = AppModel.readAdvisorModelFromSettings()
         guard let client = managementClient else { return }
         Task { @MainActor [weak self] in
             guard let snapshot = try? await client.syncConfig() else { return }
@@ -2657,7 +2677,15 @@ final class ShellSessionHost: ObservableObject {
     /// client.
     private func stampHeldSelection(on sessionId: String, model: String??, effort: String??,
                                     client: NormaClient) async {
-        if case .some(let model) = model { _ = try? await client.setModel(sessionId: sessionId, model: model) }
+        // Winter Phase 8d (Task 4.2): routes through `AppModel.applyModelChange` — the same ONE
+        // door every other `setModel` call site uses — but, unlike those, DELIBERATELY DISCARDS
+        // every outcome beyond firing the call: this method's whole contract (see its own doc
+        // comment above) is that a refusal never blocks the send, including a `confirmationRequired`
+        // one. Auto-confirming a lossy handoff with no user consent would be worse than the status
+        // quo of leaving the session on its existing selection, so this stays a fire-and-forget —
+        // exactly the `try?` posture it replaces, just through the shared decision logic rather than
+        // a second copy of the error-code switch.
+        if case .some(let model) = model { _ = await AppModel.applyModelChange(client: client, sessionId: sessionId, model: model) }
         if case .some(let effort) = effort { _ = try? await client.setEffort(sessionId: sessionId, effort: effort) }
     }
 
@@ -3383,15 +3411,48 @@ final class ShellSessionHost: ObservableObject {
                 if ok { adapter?.adoptSessionPolicy(policy) }
             }
         }
+        // Winter Phase 8d (Task 4.2): routes through `AppModel.applyModelChange` — THE ONE
+        // `session.setModel` door — instead of a bare `try?`, so a lossy cross-runtime switch
+        // surfaces its confirm dialog (`adapter.pendingModelConfirmation`, read by the shared
+        // `WindowContentView`) rather than silently failing exactly like a NOT_FOUND would have.
         adapter.onSetModel = { [weak self, weak adapter] model in
             guard let adapter else { return }
             adapter.modelChangeInFlight = true
             Task { @MainActor [weak self, weak adapter] in
                 guard let self, let sid = self.attachedSessionId else { adapter?.modelChangeInFlight = false; return }
-                let ok = (try? await client.setModel(sessionId: sid, model: model)) != nil
-                if ok { await self.directory.refresh() }
+                let outcome = await AppModel.applyModelChange(client: client, sessionId: sid, model: model)
                 adapter?.pendingModel = .none
-                if ok { adapter?.armProbation(model: .some(model)) }
+                switch outcome {
+                case .ok:
+                    await self.directory.refresh()
+                    adapter?.armProbation(model: .some(model))
+                case .confirmationRequired(let warnings):
+                    adapter?.pendingModelConfirmation = .init(model: model, warnings: warnings)
+                case .disabled(let reason), .lossyFork(let reason), .blocked(let reason), .failed(let reason):
+                    adapter?.modelChangeError = reason
+                }
+                adapter?.modelChangeInFlight = false
+            }
+        }
+        // The confirm dialog's "Switch anyway" — identical body, forced `confirmLossy: true`, and
+        // no second confirm-dialog case to route to (a resend that STILL comes back
+        // `.confirmationRequired` is treated as `.failed`, never re-shown — the barrier does not
+        // retry itself).
+        adapter.onConfirmModelSwitch = { [weak self, weak adapter] model in
+            guard let adapter else { return }
+            adapter.modelChangeInFlight = true
+            Task { @MainActor [weak self, weak adapter] in
+                guard let self, let sid = self.attachedSessionId else { adapter?.modelChangeInFlight = false; return }
+                let outcome = await AppModel.applyModelChange(client: client, sessionId: sid, model: model, confirmLossy: true)
+                switch outcome {
+                case .ok:
+                    await self.directory.refresh()
+                    adapter?.armProbation(model: .some(model))
+                case .confirmationRequired:
+                    adapter?.modelChangeError = "the runtime switch could not be confirmed"
+                case .disabled(let reason), .lossyFork(let reason), .blocked(let reason), .failed(let reason):
+                    adapter?.modelChangeError = reason
+                }
                 adapter?.modelChangeInFlight = false
             }
         }

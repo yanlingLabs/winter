@@ -594,6 +594,37 @@ export function setReasoningEffort(settings: Settings, effort: (typeof REASONING
   return { ...settings, provider: { ...settings.provider, reasoningEffort: effort } };
 }
 
+/**
+ * Winter Phase 8d (P8d-8): pure `Settings -> Settings` transform for THE ONE D30 advisor
+ * setting (`settings.runtimes.advisorModel`) — used by `norma model --advisor <slug|auto>`
+ * (Task 4.3) and the Mac app's composer-chip picker (Swift side writes the JSON file directly,
+ * same "no daemon RPC needed" posture this function's CLI caller takes). `model: undefined`
+ * clears the override, mirroring `setReasoningEffort`'s own `effort: undefined` convention — the
+ * router then applies D30's per-family defaults (OpenAI family → astra, Claude family → fable,
+ * else the session's own model), never a fabricated slug written here.
+ *
+ * Preserves every OTHER key already under `runtimes` (retention/migrations/winterExecutable/etc.)
+ * — a shallow merge one level in, mirroring `provider.configure`'s own handler-side merge
+ * (`ipc/server.ts`) rather than replacing the whole block. `settings.runtimes` may be absent
+ * entirely (it is `.optional()`); spreading `undefined` is a no-op object literal, so the first
+ * write on a home with no `runtimes` block yet still produces a schema-valid one.
+ */
+export function setAdvisorModel(settings: Settings, model: string | undefined): Settings {
+  // `Record<string, unknown>` rather than `Settings["runtimes"]`: that type's OTHER fields
+  // (`retention`/`migrations`/`winterLeg`/`winterIdleTimeoutSec`/`handoff`) are non-optional in
+  // zod's INFERRED output type (`.prefault({})` fills them during validation), but this function
+  // — like `saveSettings` itself (which persists its argument VERBATIM, never the parsed/defaulted
+  // result) — must be able to write a `runtimes` block that omits them, exactly as a home that has
+  // never touched `runtimes` at all has none of them on disk either. The cast back on `return` is
+  // the honest boundary: `Settings.parse` (inside `saveSettings`) is what actually re-validates
+  // this shape before it is ever persisted.
+  const runtimes: Record<string, unknown> = { ...settings.runtimes };
+  const trimmed = model?.trim();
+  if (trimmed) runtimes.advisorModel = trimmed;
+  else delete runtimes.advisorModel;
+  return { ...settings, runtimes: runtimes as Settings["runtimes"] };
+}
+
 function expandTilde(p: string): string {
   return p.startsWith("~/") || p === "~" ? join(homedir(), p.slice(1)) : p;
 }

@@ -149,10 +149,49 @@ struct WindowContentView<Accessory: View>: View {
     var body: some View {
         // `sidebars == nil` → today's exact layout, byte-identical: `contentColumn(rightVisible:
         // false)` re-adds `&& !false` (== `&& true`) to the two relocation gates, a no-op.
-        if let sidebars {
-            sidebarLayout(sidebars)
-        } else {
-            contentColumn(rightVisible: false)
+        Group {
+            if let sidebars {
+                sidebarLayout(sidebars)
+            } else {
+                contentColumn(rightVisible: false)
+            }
+        }
+        // Winter Phase 8d (Task 4.2, WS-13 §8.2): the lossy-handoff confirm dialog — ONE modifier
+        // on this shared view covers all three of `WindowContentView`'s homes (the shell's live
+        // chat page, a detached window, the orb's morph window), because `adapter.onSetModel`'s
+        // wiring at each of those homes populates the SAME `adapter.pendingModelConfirmation`
+        // rather than each home drawing its own dialog. "Switch anyway" resends through
+        // `adapter.onConfirmModelSwitch` with `confirmLossy: true`; "Cancel" (and any other
+        // dismissal) simply drops the pending request — the session stays on its prior selection,
+        // exactly as if the picker had never been touched.
+        .confirmationDialog(
+            "Switch runtime?",
+            isPresented: Binding(
+                get: { adapter.pendingModelConfirmation != nil },
+                set: { if !$0 { adapter.pendingModelConfirmation = nil } }
+            ),
+            presenting: adapter.pendingModelConfirmation
+        ) { pending in
+            Button("Switch anyway", role: .destructive) {
+                adapter.onConfirmModelSwitch(pending.model)
+                adapter.pendingModelConfirmation = nil
+            }
+            Button("Cancel", role: .cancel) { adapter.pendingModelConfirmation = nil }
+        } message: { pending in
+            Text(pending.warnings.isEmpty
+                 ? "This model change would move the session to a different runtime and may lose in-flight provider state."
+                 : pending.warnings.joined(separator: "\n"))
+        }
+        // The remaining three outcomes (`.disabled`/`.lossyFork`/`.blocked`/`.failed`, collapsed by
+        // `onSetModel`'s wiring into one string) — a one-line explanation, dismissed with a plain
+        // OK. Never a sheet: there is nothing actionable to offer beyond "read this".
+        .alert("Couldn't switch model", isPresented: Binding(
+            get: { adapter.modelChangeError != nil },
+            set: { if !$0 { adapter.modelChangeError = nil } }
+        ), presenting: adapter.modelChangeError) { _ in
+            Button("OK") { adapter.modelChangeError = nil }
+        } message: { reason in
+            Text(reason)
         }
     }
 
@@ -400,9 +439,17 @@ struct WindowContentView<Accessory: View>: View {
             catalogue: adapter.modelCatalogue,
             modelChangeInFlight: adapter.modelChangeInFlight,
             effortChangeInFlight: adapter.effortChangeInFlight,
-            onOpen: { adapter.onRefreshModelCatalogue() },
+            runtimeKind: row?.runtimeKind,
+            // Winter Phase 8d (fix round 1): `onOpen` now refreshes advisorModel TOO —
+            // `FieldStateAdapter.advisorModel` is a CACHE (`refreshAdvisorModel()`'s own doc),
+            // never read from settings.json synchronously here. Fixes the review finding that this
+            // computed property (evaluated on every `body` pass) used to do a blocking file read
+            // on every render, not just when the menu was actually about to be shown.
+            onOpen: { adapter.onRefreshModelCatalogue(); adapter.refreshAdvisorModel() },
             onSetModel: { adapter.applyModelSelection($0) },
-            onSetEffort: { adapter.applyEffortSelection($0) })
+            onSetEffort: { adapter.applyEffortSelection($0) },
+            advisorModel: adapter.advisorModel,
+            onSetAdvisorModel: { adapter.applyAdvisorModelSelection($0) })
     }
 
     // MARK: - Task 6 (2e-iii): width-responsive sidebar layout

@@ -9,10 +9,10 @@
 import { join } from "node:path";
 import {
   CODEX_MODELS, OutputStyleStore, TrustStore, loadSettings, resolveNormaHome, saveSettings,
-  setOutputStyle, setProviderModel, setReasoningEffort,
+  setOutputStyle, setProviderModel, setReasoningEffort, setAdvisorModel,
 } from "@norma/core";
 import type { Settings } from "@norma/core";
-import { parseModelArgs, validateEffort, validateModelSlug } from "../model-cli";
+import { parseModelArgs, validateEffort, validateModelSlug, validateAdvisorSlug } from "../model-cli";
 import { parseOutputStyleArgs } from "../output-style-cli";
 import { formatElapsed, formatTokens } from "../task-display";
 import { formatRoutineLine } from "../routines-cli";
@@ -116,7 +116,23 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
       lines.push("available (codex-oauth):");
       for (const m of CODEX_MODELS) lines.push(`  ${m.id === settings.provider.model ? "*" : " "} ${m.id}`);
     }
+    // Winter Phase 8d (P8d-8, Task 4.3): mirrors main.ts's `case "model"` show branch verbatim.
+    lines.push(`advisor: ${settings.runtimes?.advisorModel ?? "auto"}`);
     ctx.appendNote(lines.join("\n"));
+    return;
+  }
+
+  // Winter Phase 8d (P8d-8, Task 4.3): `/model --advisor …` mirrors main.ts's `case "model"`
+  // exactly — its OWN standalone write, short-circuiting before the model/effort branches below
+  // (never combined with a slug/--effort change in one call, per `parseModelArgs`'s own doc).
+  if (action.kind === "setAdvisor" || action.kind === "clearAdvisor") {
+    if (action.kind === "setAdvisor") {
+      const err = validateAdvisorSlug(action.slug);
+      if (err) { ctx.appendNote(err); return; }
+    }
+    const next = setAdvisorModel(settings, action.kind === "setAdvisor" ? action.slug : undefined);
+    saveSettings(settingsPath, next);
+    ctx.appendNote(`updated (advisor ${next.runtimes?.advisorModel ?? "auto"}) — takes effect next turn, no daemon restart needed`);
     return;
   }
 
@@ -522,6 +538,11 @@ async function runSetActivity(ctx: CommandCtx, verb: "background" | "archive", a
 export const COMMANDS: SlashCommand[] = [
   { name: "help", description: "List commands and keybindings", run: (ctx) => runHelp(ctx) },
   { name: "compact", description: "Compact conversation history to a summary", run: (ctx) => runCompact(ctx) },
+  // Winter Phase 8d (Task 4.3): the displayed args/description string is deliberately UNCHANGED
+  // (not "…| --advisor <slug|auto>]") — `composer.test.tsx`'s slash-command menu asserts this
+  // exact wording is visible within the menu's fixed truncation width, and growing the hint text
+  // pushed the description past it. `--advisor` still works via `runModel`/`parseModelArgs`; only
+  // the ONE-LINE command-palette hint stays as it was.
   { name: "model", args: "[slug] [--effort <level>]", description: "Show or switch the active model/effort", run: (ctx, argText) => runModel(ctx, argText) },
   { name: "output-style", args: "[name]", description: "Show or switch the output style", run: (ctx, argText) => runOutputStyle(ctx, argText) },
   { name: "status", description: "Show daemon status and provider info", run: (ctx) => runStatus(ctx) },

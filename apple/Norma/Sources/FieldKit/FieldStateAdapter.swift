@@ -751,6 +751,28 @@ final class FieldStateAdapter: ObservableObject {
     /// model-menu content, which reads the row directly via `currentSidebarSessionSummary`).
     var onSetModel: (String?) -> Void = { _ in }
 
+    /// Winter Phase 8d (Task 4.2): one confirm-dialog request at a time — set by `onSetModel`'s
+    /// wirer (`ShellSessionHost`/`DetachedWindowController`) when `AppModel.applyModelChange`
+    /// answers `.confirmationRequired`, read by the shared `WindowContentView` (ONE dialog covers
+    /// all three of its homes: the shell's live page, a detached window, the orb's morph window).
+    /// `warnings` is `error.data.warnings` verbatim. `nil` = no dialog showing.
+    struct PendingModelConfirmation: Equatable {
+        let model: String?
+        let warnings: [String]
+    }
+    @Published var pendingModelConfirmation: PendingModelConfirmation?
+
+    /// Winter Phase 8d (Task 4.2): resends the SAME model with `confirmLossy: true` — the confirm
+    /// dialog's "Switch anyway" button. Wired identically to `onSetModel` at each of its two
+    /// call sites; unwired (the default) is inert, matching every other callback here.
+    var onConfirmModelSwitch: (String?) -> Void = { _ in }
+
+    /// Winter Phase 8d (Task 4.2): a `session.setModel` outcome that is neither success nor a
+    /// confirm-dialog case — `.disabled`/`.lossyFork`/`.blocked`/`.failed`
+    /// (`ModelChangeOutcome`'s own doc names the distinction). A one-line alert, dismissed with a
+    /// plain OK — never a sheet, since there is nothing actionable to offer beyond "read this".
+    @Published var modelChangeError: String?
+
     /// Plan-immunity (2026-07-28 design): true for a chat-mode session — chat's approval policy is
     /// FIXED (core's engine.ts resolves it to the internal "chat" policy every turn regardless of
     /// the stored row, and session.setPolicy rejects ANY change for a chat target), so BOTH policy
@@ -858,6 +880,34 @@ final class FieldStateAdapter: ObservableObject {
     /// switch cannot change it, and firing an RPC there perturbs the create/attach sequence every
     /// switch test asserts on for no benefit.
     var onRefreshModelCatalogue: () -> Void = {}
+
+    /// Winter Phase 8d (P8d-8, fix round 1): the D30 advisor setting, CACHED here rather than read
+    /// synchronously from `settings.json` on every render — `WindowContentView.composerModelControl`
+    /// (a computed property evaluated on every `body` pass) used to call
+    /// `AppModel.readAdvisorModelFromSettings()` directly, a blocking file read on the render path.
+    /// Same "snapshot, refreshed exactly when about to be read" convention as `modelCatalogue`
+    /// above: `refreshAdvisorModel()` below re-reads it, called from the SAME `onOpen` that
+    /// refreshes the catalogue (the composer chip's popover opens both together). `nil` = unset
+    /// ("Automatic") or not yet read.
+    @Published var advisorModel: String? = nil
+
+    /// Re-reads `advisorModel` from disk. Local file I/O, not an RPC — no in-flight flag, no
+    /// `Task`, unlike `onRefreshModelCatalogue`'s wirer-supplied closure (which needs a live
+    /// `NormaClient` per surface): this needs nothing surface-specific, so it lives directly on the
+    /// adapter rather than behind a second per-surface callback slot.
+    func refreshAdvisorModel() {
+        advisorModel = AppModel.readAdvisorModelFromSettings()
+    }
+
+    /// Writes the setting and updates the cached value on success, so the picker's own selection
+    /// reads back immediately rather than waiting for the menu to reopen. `nil` clears it
+    /// ("Automatic"). A failed write (see `AppModel.writeAdvisorModelToSettings`'s own doc) leaves
+    /// the cache untouched — the picker keeps showing the value that is actually on disk.
+    func applyAdvisorModelSelection(_ model: String?) {
+        if AppModel.writeAdvisorModelToSettings(model) {
+            advisorModel = model
+        }
+    }
 
     /// True while a `session.setEffort` RPC is in flight. A SEPARATE flag from `modelChangeInFlight`
     /// for the same reason that one is separate from `policyChangeInFlight`: model and effort are

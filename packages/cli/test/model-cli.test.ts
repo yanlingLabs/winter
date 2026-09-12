@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { CODEX_MODELS, REASONING_EFFORTS } from "@norma/core";
-import { parseModelArgs, validateEffort, validateModelSlug } from "../src/model-cli";
+import { CODEX_MODELS, REASONING_EFFORTS, catalogRowsFor } from "@norma/core";
+import { parseModelArgs, validateEffort, validateModelSlug, validateAdvisorSlug } from "../src/model-cli";
 
 describe("parseModelArgs", () => {
   test("no args -> show", () => {
@@ -41,6 +41,23 @@ describe("parseModelArgs", () => {
 
   test("slug followed by an unrecognized second token -> usageError", () => {
     expect(parseModelArgs(["gpt-5.6-sol", "bogus"])).toMatchObject({ kind: "usageError" });
+  });
+
+  // Winter Phase 8d (P8d-8, Task 4.3): the D30 advisor override's own standalone flag form.
+  test("--advisor <slug> -> setAdvisor", () => {
+    expect(parseModelArgs(["--advisor", "claude-opus-5"])).toEqual({ kind: "setAdvisor", slug: "claude-opus-5" });
+  });
+
+  test("--advisor auto -> clearAdvisor", () => {
+    expect(parseModelArgs(["--advisor", "auto"])).toEqual({ kind: "clearAdvisor" });
+  });
+
+  test("--advisor with no value -> usageError", () => {
+    expect(parseModelArgs(["--advisor"])).toMatchObject({ kind: "usageError" });
+  });
+
+  test("--advisor with trailing garbage -> usageError", () => {
+    expect(parseModelArgs(["--advisor", "claude-opus-5", "extra"])).toMatchObject({ kind: "usageError" });
   });
 });
 
@@ -84,5 +101,20 @@ describe("validateEffort", () => {
     const err = validateEffort("bogus");
     expect(err).not.toBeNull();
     for (const effort of REASONING_EFFORTS) expect(err).toContain(effort);
+  });
+});
+
+// Winter Phase 8d (P8d-8, Task 4.3): validated against the PINNED CATALOG (`catalogRowsFor`) —
+// deliberately not CODEX_MODELS/a live provider list, since this command runs with no daemon RPC.
+describe("validateAdvisorSlug", () => {
+  test("a real catalog row (by canonicalModelId) is valid", () => {
+    expect(catalogRowsFor("claude-opus-5").length).toBeGreaterThan(0); // sanity: the fixture exists
+    expect(validateAdvisorSlug("claude-opus-5")).toBeNull();
+  });
+
+  test("a model with zero catalog rows is rejected, naming the clearing spelling", () => {
+    const err = validateAdvisorSlug("totally-made-up-model-xyz");
+    expect(err).not.toBeNull();
+    expect(err).toContain("auto");
   });
 });

@@ -440,12 +440,21 @@ extension NormaClient {
     /// rides no participation gate, unlike `activity`/`dirs`). **Never coerce that `nil` to
     /// `"auto"`**: that asserts a policy nobody stated, which is the standing lie this field exists
     /// to end. See `FieldStateAdapter.sessionPolicyKnown` (apple/Norma) for the consumer shape.
-    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?, effort: String?, dirs: [SessionDirEntry]?, activity: String?, archived: Bool?, signals: SessionSignals?, approvalPolicy: String?)] {
+    /// Winter Phase 8d (Task 4.2): `runtimeKind`/`providerId` appended LAST, same purely-additive
+    /// precedent as every field above them (`archived`/`signals`/`approvalPolicy`'s own doc
+    /// comments). `runtimeKind` mirrors `SessionListResult.runtimeKind` (methods.ts) —
+    /// `"winter-agent"`/`"claude-agent"`/`nil` (never a fourth string; a newer daemon's future enum
+    /// case would still decode here since this reads a bare `String`, unlike a Swift enum that
+    /// would need every case named up front). `providerId` (P8d-7) is a FINER fact than
+    /// `runtimeKind` — read from the runtime-state record, absent independently of it (an older
+    /// daemon, a record-less session, or a daemon with no runtime-state door wired at all). Neither
+    /// field is ever fabricated from the other.
+    public func listSessions() async throws -> [(sessionId: String, scope: String, createdAt: Int, lastSeq: Int, title: String?, cwd: String?, mode: String?, parentSessionId: String?, model: String?, effort: String?, dirs: [SessionDirEntry]?, activity: String?, archived: Bool?, signals: SessionSignals?, approvalPolicy: String?, runtimeKind: String?, providerId: String?)] {
         let r = try await request("session.list", params: nil)
         return (r["sessions"]?.arrayValue ?? []).compactMap { s in
             guard let id = s["sessionId"]?.stringValue, let scope = s["scope"]?.stringValue,
                   let created = s["createdAt"]?.intValue, let last = s["lastSeq"]?.intValue else { return nil }
-            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue, s["effort"]?.stringValue, decodeSessionDirs(s["dirs"]), s["activity"]?.stringValue, s["archived"]?.boolValue, decodeSessionSignals(s["signals"]), s["approvalPolicy"]?.stringValue)
+            return (id, scope, created, last, s["title"]?.stringValue, s["cwd"]?.stringValue, s["mode"]?.stringValue, s["parentSessionId"]?.stringValue, s["model"]?.stringValue, s["effort"]?.stringValue, decodeSessionDirs(s["dirs"]), s["activity"]?.stringValue, s["archived"]?.boolValue, decodeSessionSignals(s["signals"]), s["approvalPolicy"]?.stringValue, s["runtimeKind"]?.stringValue, s["providerId"]?.stringValue)
         }
     }
 
@@ -538,10 +547,19 @@ extension NormaClient {
     /// when clearing. Result is a bare `{}` (skills.write's idiom) — nothing to report beyond
     /// success; an unresolvable sessionId throws `RpcError` via the daemon's own NOT_FOUND, same
     /// precedent as `setPolicy`.
-    public func setModel(sessionId: String, model: String?) async throws {
+    /// `confirmLossy` (Winter Phase 8d, Interfaces block): the handoff barrier's one-shot
+    /// confirmation for a cross-runtime switch (`SessionSetModelParams.confirmLossy`, methods.ts) —
+    /// defaulted `false` so every pre-8d call site keeps compiling unchanged. `obj(...)`'s
+    /// `compactMapValues` would normally omit a `false` the same as a `nil`, but this method sends
+    /// it EXPLICITLY (`.bool(confirmLossy)`, never `confirmLossy ? .bool(true) : nil`) because the
+    /// field means something different from absence on the wire only in the caller's own retry path
+    /// — always sending the same key either way costs nothing and removes a "did I forget the flag"
+    /// class of bug from the confirm-sheet's resend call.
+    public func setModel(sessionId: String, model: String?, confirmLossy: Bool = false) async throws {
         _ = try await request("session.setModel", params: obj([
             "sessionId": .string(sessionId),
             "model": model.map { JSONValue.string($0) } ?? JSONValue.null,
+            "confirmLossy": .bool(confirmLossy),
         ]))
     }
 
