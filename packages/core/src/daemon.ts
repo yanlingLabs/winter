@@ -75,6 +75,8 @@ import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
 import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
 import { planBridgeFor, type PlanBridge } from "./runtime-sdk/plan-bridge";
+import { importEngineEraSession } from "./runtime-sdk/import-legacy";
+import { registerHandoffParticipants, planAndApplySwitch } from "./runtime-sdk/handoff";
 import { sinksFor } from "./runtime-sdk/sinks";
 import { sessionHooksFor } from "./runtime-sdk/hooks";
 import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord, type CapabilitySession } from "./capabilities";
@@ -1181,6 +1183,17 @@ export async function startDaemon(opts: {
   // Wiring 1: fills the forward reference `planBridge`'s `setPolicy` closes over (declared above,
   // before `winterDrivers` existed) — see that block's own comment for why the cycle is broken here.
   winterDriversForPlanBridge = winterDrivers;
+  // P8c integration round 3 (lane 4's NEEDS daemon.ts note): the ONE registration of the router's
+  // handoff participants (`create.ts`'s `NormaRuntimeSdk.registerHandoffParticipants`, lane 1's
+  // hook) — the router reads `participants`/`selectionInputFor` LAZILY at handoff time, so this
+  // must run once, after both `runtimeSdk` (the router handle — `HandoffDeps.runtime`) and
+  // `winterDrivers` exist, and never inside an RPC case. Guarded on both existing: `runtime`
+  // (the 8a spine, for `.records`) can be offline (`runtimeStateOnline` returned undefined), and
+  // `runtimeSdk` can be undefined (a packaging fault) — either absence already means every
+  // `session.*` Winter-leg call refuses typed, so a handoff has nothing live to register against.
+  if (runtime !== undefined && runtimeSdk !== undefined) {
+    registerHandoffParticipants({ runtime: runtimeSdk, winter: winterDrivers, records: runtime.records, store });
+  }
   /** A deleted session takes its Winter child (bounded `end()`, out of the table) AND its runtime
    *  rows with it — the reaper's 600 s grace is shorter than the 900 s idle timer, so without the
    *  first half a live child would outlive its session. The boot sweep above ran before any driver
@@ -1919,6 +1932,27 @@ export async function startDaemon(opts: {
     buildSessionCapabilities,
     // P8b Task 16: the driver table — the Winter leg's door for every `session.*` handler.
     winter: winterDrivers,
+    // P8c integration round 3: lane 4's engine-era IMPORT door (`session.send`'s one-shot
+    // conversion before the permanent refusal) and the handoff-aware `session.setModel` path
+    // (`runtime-sdk/handoff.ts`'s `planAndApplySwitch`) — both bound to this daemon's OWN
+    // home/store/records/driver table/router handle, same "typed no-op when the dep is missing"
+    // precedent as every other optional field in this object. `runtime` here is the 8a spine
+    // (`.records`); `runtimeSdk` is the router handle `HandoffDeps.runtime` names.
+    ...(runtime === undefined ? {} : {
+      importLegacy: { importSession: (sessionId: string) => importEngineEraSession({ home: normaHome, store, records: runtime.records }, sessionId) },
+    }),
+    // `sdk` is captured into its own `const` before the closure below: `runtimeSdk` (outer scope)
+    // is a `let` reassigned inside a try/catch above, so a narrowing on it does not persist into a
+    // nested arrow function — TS would otherwise still see `NormaRuntimeSdk | undefined` inside
+    // `planAndApplySwitch`'s call and refuse `runtime: sdk` against `HandoffDeps.runtime`'s
+    // non-optional type. `runtime` (the 8a spine, unlike the router handle) IS a `const`, so
+    // `runtime.records` needs no such capture.
+    ...(runtime === undefined || runtimeSdk === undefined ? {} : ((sdk: NormaRuntimeSdk) => ({
+      handoff: {
+        planAndApplySwitch: (sessionId: string, model: string | null, confirmLossy: boolean) =>
+          planAndApplySwitch({ runtime: sdk, winter: winterDrivers, records: runtime.records, store }, sessionId, model, confirmLossy),
+      },
+    }))(runtimeSdk)),
     ...opts.server,
   });
 
