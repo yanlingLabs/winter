@@ -6,8 +6,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { HandoffBarrier, HandoffOutcome, HandoffPlan, RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
-import { planAndApplySwitch, type HandoffDeps } from "../../src/runtime-sdk/handoff";
+import type { HandoffBarrier, HandoffOutcome, HandoffPlan, RuntimeKind, RuntimeSelection, SelectionInput } from "@yanlinglabs/winter-runtime-sdk";
+import { planAndApplySwitch, registerHandoffParticipants, type HandoffDeps } from "../../src/runtime-sdk/handoff";
 import { openRuntimeStateDb, RuntimeSessionRecords } from "../../src/runtime-state";
 import type { NormaRuntimeSdk } from "../../src/runtime-sdk/create";
 import type { LegSession, WinterSessionDrivers } from "../../src/runtime-sdk/session-driver";
@@ -40,16 +40,34 @@ function seedRecord(records: RuntimeSessionRecords, sessionId: string): void {
   records.transition(sessionId, "ready");
 }
 
-function fakeRuntime(opts: { selectRuntimeFor: NormaRuntimeSdk["selectRuntimeFor"] }): NormaRuntimeSdk {
+function fakeRuntime(opts: {
+  selectRuntimeFor: NormaRuntimeSdk["selectRuntimeFor"];
+  buildSelectionInput?: NormaRuntimeSdk["buildSelectionInput"];
+}): NormaRuntimeSdk {
   const never = (): never => { throw new Error("not reached by this test"); };
   return {
     sdk: {} as NormaRuntimeSdk["sdk"], // never touched: the barrier is injected directly (HandoffDeps.barrier)
     spawnHookFor: never, officialPeer: never, officialPeerSync: never, claudeExecutableFor: never,
     selectRuntimeFor: opts.selectRuntimeFor,
+    buildSelectionInput: opts.buildSelectionInput,
     registerHandoffParticipants: () => {},
     trackQuery: never, untrack: never,
     messaging: { releaseHeld: never },
     dispose: never,
+  };
+}
+
+/**
+ * Distinguishes a FRESH selection call (no `persisted`) from a review of the PERSISTED one, so a
+ * test can assert `planAndApplySwitch`'s destination decision is never made by handing the router's
+ * own persisted-wins rule the record it should instead be deciding fresh against (the P8c bug: a
+ * `persisted` field on this call always echoed the current leg back, and the barrier was never
+ * reached). Throws if `input.persisted` is set — a call shaped that way must never reach this fake.
+ */
+function freshOnlySelector(forModel: (model: string | undefined) => RuntimeSelection | { refused: true; reason: "runtime-unavailable"; detail: string }): NormaRuntimeSdk["selectRuntimeFor"] {
+  return async (input) => {
+    if (input.persisted !== undefined) throw new Error("planAndApplySwitch must decide the destination FRESH — it must never pass `persisted` to selectRuntimeFor");
+    return forModel(input.model);
   };
 }
 
@@ -64,7 +82,7 @@ function fakeWinter(opts: { live?: LegSession }): WinterSessionDrivers {
 
 function deps(overrides: Partial<HandoffDeps>): HandoffDeps {
   return {
-    runtime: fakeRuntime({ selectRuntimeFor: async () => SELECTION("winter-agent") }),
+    runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")) }),
     winter: fakeWinter({}),
     records: {} as RuntimeSessionRecords,
     store: { meta: () => ({ mode: "code", cwd: "/x" }) },
@@ -91,7 +109,7 @@ describe("planAndApplySwitch", () => {
       let planCalled = false;
       const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return null as unknown as HandoffPlan; }, execute: async () => null as unknown as HandoffOutcome };
       const out = await planAndApplySwitch(
-        deps({ records, barrier, runtime: fakeRuntime({ selectRuntimeFor: async () => SELECTION("winter-agent") }) }),
+        deps({ records, barrier, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")) }) }),
         "s1", "openai/gpt-5.4", false,
       );
       expect(out).toEqual({ kind: "same-runtime" });
@@ -103,7 +121,7 @@ describe("planAndApplySwitch", () => {
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1");
       const out = await planAndApplySwitch(
-        deps({ records, runtime: fakeRuntime({ selectRuntimeFor: async () => ({ refused: true, reason: "runtime-unavailable", detail: "no claude executable" }) }) }),
+        deps({ records, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => ({ refused: true, reason: "runtime-unavailable", detail: "no claude executable" })) }) }),
         "s1", "anthropic/sonnet", false,
       );
       expect(out).toEqual({ kind: "refused", code: "runtime_selection_refused", detail: "no claude executable" });
@@ -120,12 +138,16 @@ describe("planAndApplySwitch", () => {
         selection: { kind: "servable", selection: SELECTION("claude-agent"), review: { checked: true } as never },
       };
       let executeCalled = false;
-      const barrier: HandoffBarrier = { plan: async () => plan, execute: async () => { executeCalled = true; return { kind: "resumed", selection: SELECTION("claude-agent") }; } };
+      let planCalled: RuntimeKind | undefined;
+      const barrier: HandoffBarrier = { plan: async (_session, to) => { planCalled = to; return plan; }, execute: async () => { executeCalled = true; return { kind: "resumed", selection: SELECTION("claude-agent") }; } };
       const out = await planAndApplySwitch(
-        deps({ records, barrier, runtime: fakeRuntime({ selectRuntimeFor: async () => SELECTION("claude-agent") }) }),
+        deps({ records, barrier, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }) }),
         "s1", "anthropic/sonnet", false,
       );
       expect(out).toEqual({ kind: "confirmation_required", warnings: ["reasoning state does not survive a move to the official leg"] });
+      // A fresh selection landing on a DIFFERENT leg from the recorded one must reach the barrier's
+      // own plan() -- the P8c bug was exactly that this call never happened.
+      expect(planCalled).toBe("claude-agent");
       expect(executeCalled).toBe(false);
     });
   });
@@ -140,12 +162,14 @@ describe("planAndApplySwitch", () => {
         selection: { kind: "servable", selection: SELECTION("claude-agent"), review: { checked: true } as never },
       };
       let executedPlan: HandoffPlan | undefined;
-      const barrier: HandoffBarrier = { plan: async () => plan, execute: async (p) => { executedPlan = p; return { kind: "resumed", selection: SELECTION("claude-agent") }; } };
+      let planCalled = false;
+      const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return plan; }, execute: async (p) => { executedPlan = p; return { kind: "resumed", selection: SELECTION("claude-agent") }; } };
       const out = await planAndApplySwitch(
-        deps({ records, barrier, runtime: fakeRuntime({ selectRuntimeFor: async () => SELECTION("claude-agent") }) }),
+        deps({ records, barrier, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }) }),
         "s1", "anthropic/sonnet", true,
       );
       expect(out).toEqual({ kind: "resumed", selection: SELECTION("claude-agent") });
+      expect(planCalled).toBe(true);
       expect(executedPlan).toBe(plan);
     });
   });
@@ -172,7 +196,7 @@ describe("planAndApplySwitch", () => {
       };
       const barrier: HandoffBarrier = { plan: async () => plan, execute: async () => { executeCalled = true; return { kind: "resumed", selection: SELECTION("claude-agent") }; } };
       const out = await planAndApplySwitch(
-        deps({ records, barrier, winter: fakeWinter({ live }), runtime: fakeRuntime({ selectRuntimeFor: async () => SELECTION("claude-agent") }) }),
+        deps({ records, barrier, winter: fakeWinter({ live }), runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }) }),
         "s1", "anthropic/sonnet", true,
       );
       expect(out).toEqual({ kind: "deferred" });
@@ -182,5 +206,49 @@ describe("planAndApplySwitch", () => {
       await Bun.sleep(10); // let the fire-and-forget .then() run
       expect(executeCalled).toBe(true);
     });
+  });
+});
+
+describe("registerHandoffParticipants: selectionInputFor wiring", () => {
+  test("selectionInputFor delegates to NormaRuntimeSdk.buildSelectionInput, with mode from the record's session and persisted from the barrier's own args", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const fakeSelectionInput: SelectionInput = {
+        mode: "dispatch", requested: {}, families: { families: [] } as unknown as SelectionInput["families"],
+        credentials: { byProvider: {} }, hasClaudePeer: true, claudeOauthApproved: false,
+      };
+      let captured: { mode: string; model?: string; persisted?: RuntimeSelection } | undefined;
+      const runtime = fakeRuntime({
+        selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")),
+        buildSelectionInput: async (input) => { captured = input; return fakeSelectionInput; },
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let registered: any;
+      registerHandoffParticipants({
+        runtime: { ...runtime, registerHandoffParticipants: (p) => { registered = p; } },
+        winter: fakeWinter({}), records,
+        store: { meta: () => ({ mode: "dispatch", cwd: "/x" }) },
+      });
+      expect(registered.selectionInputFor).toBeDefined();
+      const persisted = SELECTION("winter-agent");
+      const result = await registered.selectionInputFor({ session: { projectKey: "pk", sessionId: "be-1" }, from: "winter-agent" as RuntimeKind, to: "claude-agent" as RuntimeKind, persisted });
+      expect(result).toBe(fakeSelectionInput);
+      // No `model` in the call — this door reviews the PERSISTED family's servability on the
+      // destination, never a specific newly-requested model (that decision already happened, fresh,
+      // in `planAndApplySwitch` before the barrier was ever reached).
+      expect(captured).toEqual({ mode: "dispatch", persisted });
+    });
+  });
+
+  test("omits selectionInputFor when the runtime has no buildSelectionInput (a hand-built NormaRuntimeSdk test double)", () => {
+    const runtime = fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")) });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let registered: any;
+    registerHandoffParticipants({
+      runtime: { ...runtime, registerHandoffParticipants: (p) => { registered = p; } },
+      winter: fakeWinter({}), records: {} as RuntimeSessionRecords,
+      store: { meta: () => ({ mode: "code", cwd: "/x" }) },
+    });
+    expect(registered.selectionInputFor).toBeUndefined();
   });
 });

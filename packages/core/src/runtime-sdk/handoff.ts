@@ -25,27 +25,34 @@
 // module's closures reach the live driver table and record store without `create.ts` ever knowing
 // they exist.
 //
-// `selectionInputFor` IS DELIBERATELY LEFT UNREGISTERED. The router's own default (create.ts, absent
-// a lane-4 registration) answers the honest "unreviewed" `SelectionInput` — real families, real
-// credentials, nothing synthesized — which is a VALID, non-refusing plan outcome (HandoffSelection's
-// own doc: "ABSENT MEANS UNREVIEWED, NOT ASSUMED-FINE", never a refusal). `planSwitch` below already
-// runs the REAL servability check via `runtime.selectRuntimeFor` before ever asking the barrier to
-// plan anything, so the barrier's own internal re-check would be redundant work for the same answer,
-// not a second opinion.
+// `selectionInputFor` IS NOW REGISTERED (P8c handoff fix). It was left unregistered on the theory
+// that `planAndApplySwitch`'s own `runtime.selectRuntimeFor` call already ran the real servability
+// check before the barrier ever saw the session — but that call passed `persisted: record.selection`,
+// and the router's OWN rule (`SELECTION_RULES.persisted`) returns a persisted selection BY IDENTITY,
+// never re-decided. The "real servability check" was therefore always a no-op that handed back the
+// CURRENT leg, `legOfRuntimeKind(decided.runtimeKind) === currentLeg` was always true, and the barrier
+// was never consulted — measured by `test/e2e/handoff-cross-runtime-e2e.test.ts` against the real
+// router. Two changes fix it: (1) the DESTINATION decision below is now a FRESH `selectRuntimeFor`
+// call with NO `persisted` field, so it answers what today's catalog/credentials would pick for the
+// requested model, independent of the recorded leg; (2) `selectionInputFor` is registered here so
+// `barrier.plan()` reviews the DESTINATION's servability with this deployment's real catalog and
+// credentials (via `NormaRuntimeSdk.buildSelectionInput`) instead of the router's own unreviewed
+// default — `persisted` is still passed to IT, because reviewing "is the persisted family still
+// servable on the destination" is exactly the barrier's job, not the initial leg decision's.
 import type {
   HandoffBarrier,
   HandoffDestinationRuntime,
   HandoffOutcome,
-  HandoffParticipants,
   HandoffPlan,
   HandoffResumeTarget,
   HandoffSourceOwner,
   RuntimeKind,
   RuntimeSelection,
+  SelectionInput,
   SessionKey,
 } from "@yanlinglabs/winter-runtime-sdk";
 import { runtimeSdkInternals } from "@yanlinglabs/winter-runtime-sdk";
-import type { NormaRuntimeSdk, SessionMode } from "./create";
+import type { HandoffParticipants, NormaRuntimeSdk, SessionMode } from "./create";
 import { RuntimeSessionRecords, type RuntimeSessionRecord } from "../runtime-state/records";
 import { sessionLegOf } from "./leg";
 import type { LegSession, WinterSessionDrivers } from "./session-driver";
@@ -156,10 +163,39 @@ function destinationRuntimeFor(deps: HandoffDeps, session: SessionKey, to: Runti
   };
 }
 
+/**
+ * WS-05 §12's Lane D door: builds the `SelectionInput` `barrier.plan()` reviews destination
+ * servability against, using `NormaRuntimeSdk.buildSelectionInput` — the SAME real catalog/
+ * credentials/official-peer facts `selectRuntimeFor` reads, never a synthesized view.
+ *
+ * `persisted: args.persisted` is where the router's OWN "the persisted selection wins" rule
+ * (`SELECTION_RULES.persisted`) now belongs: `reviewPersistedSelection` (run inside the barrier's
+ * `plan()`) compares a FRESH decision against it and reports `unchanged` / `handoff-required` /
+ * `fresh-refused` — never a silent rewrite. `requested` is deliberately left empty: this door
+ * answers "is the session's own persisted family still servable on the destination", not "does a
+ * specific newly-requested model resolve there" — `planAndApplySwitch`'s own fresh `selectRuntimeFor`
+ * call already decided THAT question before the barrier was ever reached.
+ *
+ * Absent when `deps.runtime.buildSelectionInput` is absent (a hand-built test double for
+ * `NormaRuntimeSdk` that does not implement it) — `registerHandoffParticipants` below omits the key
+ * entirely in that case, which is the router's own "unreviewed" default, not a crash.
+ */
+function selectionInputFor(deps: HandoffDeps): ((args: { session: SessionKey; from: RuntimeKind; to: RuntimeKind; persisted: RuntimeSelection }) => Promise<SelectionInput>) | undefined {
+  const build = deps.runtime.buildSelectionInput;
+  if (build === undefined) return undefined;
+  return async (args) => {
+    const record = deps.records.byBackendSessionId(args.session.sessionId);
+    const mode = modeOf(record === undefined ? undefined : deps.store.meta(record.winterSessionId).mode);
+    return build({ mode, persisted: args.persisted });
+  };
+}
+
 export function registerHandoffParticipants(deps: HandoffDeps): void {
+  const selectionInput = selectionInputFor(deps);
   const participants: HandoffParticipants = {
     source: (session, from) => sourceOwnerFor(deps, session, from),
     destination: (session, to) => destinationRuntimeFor(deps, session, to),
+    ...(selectionInput === undefined ? {} : { selectionInputFor: selectionInput }),
   };
   deps.runtime.registerHandoffParticipants(participants);
 }
@@ -213,7 +249,12 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
     return { kind: "same-runtime" };
   }
   const mode = modeOf(deps.store.meta(sessionId).mode);
-  const decided = await deps.runtime.selectRuntimeFor({ mode, model, persisted: record.selection });
+  // FRESH — no `persisted`. `SELECTION_RULES.persisted` returns a persisted selection BY IDENTITY,
+  // so passing `record.selection` here (the pre-fix shape) made `decided.runtimeKind` always equal
+  // the recorded leg and the barrier was never reached — see this file's header. What today's
+  // catalog/credentials would pick for the REQUESTED model is the question this call answers; the
+  // persisted-selection review happens later, inside the barrier's own plan (`selectionInputFor`).
+  const decided = await deps.runtime.selectRuntimeFor({ mode, model });
   if ("refused" in decided) {
     return { kind: "refused", code: "runtime_selection_refused", detail: decided.detail };
   }
