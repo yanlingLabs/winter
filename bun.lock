@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "norma-monorepo",
+      "name": "winter-monorepo",
       "devDependencies": {
         "@resvg/resvg-js": "^2.6.2",
         "@types/bun": "^1.3.0",

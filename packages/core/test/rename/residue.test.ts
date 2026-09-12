@@ -102,6 +102,14 @@ function lineAndContext(text: string, index: number): { line: number; context: s
   return { line, context };
 }
 
+// This file's OWN path, relative to the repo root — it necessarily spells `norma`/`Norma`/`NORMA`
+// literally (the trap-token doc comment, the scanning regex, this test's own name) to describe what
+// it looks for, exactly like `scripts/rename/**` does for the codemod. NEITHER `RENAME_ALLOWLIST`
+// nor `EXEMPT_PATHS` (both spine-owned, `scripts/rename/allowlist.ts`) currently names this file —
+// a gap reported as a concern rather than fixed by editing that file — so the self-exemption lives
+// here, the same way a linter excludes its own source from its own rule.
+const SELF_PATH = "packages/core/test/rename/residue.test.ts";
+
 function scan(): { hits: Hit[]; matchedEntryIds: Set<string> } {
   const root = repoRoot();
   const files = trackedFiles(root);
@@ -109,6 +117,7 @@ function scan(): { hits: Hit[]; matchedEntryIds: Set<string> } {
   const matchedEntryIds = new Set<string>();
 
   for (const relPath of files) {
+    if (relPath === SELF_PATH) continue;
     if (isBinaryPath(relPath)) continue;
     const applicable = RENAME_ALLOWLIST.filter((e: AllowlistEntry) => entryAppliesTo(e, relPath));
     // Precompute this file's permitted ranges once (not per-match) — the one-pass discipline.
