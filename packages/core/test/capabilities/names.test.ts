@@ -94,9 +94,16 @@ describe("NORMA_CAPABILITY_TOOLS", () => {
     expect(Object.keys(NORMA_CAPABILITY_TOOLS).sort()).toEqual([...CANONICAL_NAMES].sort());
   });
 
-  test("every declared server key is represented, and every name names a declared key", () => {
+  test("every declared server key with a STATIC tool set is represented, and every name names a declared key", () => {
     const keysUsed = new Set(Object.keys(NORMA_CAPABILITY_TOOLS).map((n) => n.slice("mcp__norma__".length).split("__")[0]));
-    expect([...keysUsed].sort()).toEqual([...CAPABILITY_SERVER_KEYS].sort());
+    // Phase 8c Lane 3 (Task 3.4): `external` is a declared server key with NO row here, deliberately
+    // — its tool set is per-plugin and runtime-defined (a name this table could never enumerate
+    // ahead of time), so mode-scoping for it lives on each `ExternalToolSource.modes` instead
+    // (`capabilities/external.ts`'s own header; `capabilities/names.ts`'s comment on
+    // `CAPABILITY_SERVER_KEYS`). Every OTHER key still must appear here — this exclusion is
+    // enumerated, not a blanket "some keys are exempt" escape hatch.
+    const staticKeys = CAPABILITY_SERVER_KEYS.filter((k) => k !== "external");
+    expect([...keysUsed].sort()).toEqual([...staticKeys].sort());
   });
 
   test("m1: modes and deferral are pinned against the REAL ToolDefinitions, not against comments", () => {

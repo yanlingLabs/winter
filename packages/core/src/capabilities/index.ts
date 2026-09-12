@@ -16,6 +16,7 @@ export { officeCapability, type OfficeCapabilityDeps } from "./office";
 export { researchCapability, type ResearchCapabilityDeps } from "./research";
 export { webCapability, type WebCapabilityDeps } from "./web";
 export { lspCapability, type LspCapabilityDeps } from "./lsp";
+export { externalCapability, type ExternalCapabilityDeps, type ExternalToolSource } from "./external";
 
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
 import { NORMA_BRAND } from "../runtime-sdk/brand";
@@ -27,6 +28,7 @@ import type { CapabilitySession } from "./server";
 import { sessionsCapability, type SessionsCapabilityDeps } from "./sessions";
 import { webCapability, type WebCapabilityDeps } from "./web";
 import { lspCapability, type LspCapabilityDeps } from "./lsp";
+import { externalCapability, type ExternalCapabilityDeps } from "./external";
 
 /**
  * The daemon-wide half of the wiring: the instances, stores and closures the capability tools need,
@@ -42,6 +44,9 @@ export interface CapabilityDeps {
   web: WebCapabilityDeps;
   /** Fix wave (review F7): the `lsp` capability over the daemon's single `LspManager` holder. */
   lsp: LspCapabilityDeps;
+  /** Phase 8c Lane 3, Task 3.4: plugin-contributed tools, per session. Optional — absent registers
+   *  `external` with zero tools (see `external.ts`'s own header for the real-wiring carry). */
+  external?: ExternalCapabilityDeps;
   /**
    * `settings.computerUse.enabled`, read LIVE — a getter, never a boot snapshot.
    *
@@ -102,6 +107,7 @@ export function buildCapabilitiesFor(
   servers.push(researchCapability(session, deps.research));
   servers.push(webCapability(session, deps.web));
   servers.push(lspCapability(session, deps.lsp));
+  servers.push(externalCapability(session, deps.external ?? {}));
   const record: Record<string, McpSdkServerConfigWithInstance> = {};
   for (const server of servers) record[server.name] = server;
   return record;
