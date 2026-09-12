@@ -354,3 +354,93 @@ describe("m8 — backend id mismatch", () => {
     expect(caught).toBeInstanceOf(OfficialSessionEnded);
   });
 });
+
+// ── Phase 9c (P9c-1) ─────────────────────────────────────────────────────────────────────────────
+//
+// The api-key family's own assertion on the REAL SDK init message (`official-options.ts`'s own
+// `OfficialAuthSourceRefused`) — scripted here with `init(BACKEND_ID, { apiKeySource })`, the SAME
+// `harness()`/`FakeOfficialQuery` this file's M6/m7/m8 suites already use, rather than a second,
+// duplicated harness in a new file. `harness({ selection })` overrides ONLY the outer
+// `OfficialSessionDeps.selection` this assertion reads (`this.deps.selection.authFamily`) — the
+// closure's own `inputDeps.selection` stays the harness default (`authFamily: "custom"`), which is
+// harmless here because `inputDeps.explicitCredentials: []` short-circuits `officialCredentialPlan`
+// before it ever branches on a family at all (`official-options.ts`'s own header).
+describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
+  const apiKeySelection: RuntimeSelection = {
+    runtimeKind: "claude-agent",
+    providerId: "anthropic",
+    modelRef: "anthropic/claude-sonnet-5",
+    family: "claude",
+    authFamily: "api-key",
+    sdkVersion: "0.0.3",
+    reason: "unit test",
+    decidedAt: new Date(0).toISOString(),
+  };
+
+  test("apiKeySource !== ANTHROPIC_API_KEY -> official_auth_source_refused, before any turn runs", async () => {
+    const h = harness({ selection: apiKeySelection });
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "none" }));
+    await h.settled();
+
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string; message?: string }) | undefined;
+    expect(err?.code).toBe("official_auth_source_refused");
+    expect(err?.message).toContain("apiKeySource=none");
+    expect(h.session.state).toBe("ended");
+    // No turn ever ran: the init frame refused before the projector saw an assistant/result frame.
+    expect(h.types()).not.toContain("assistant_message");
+    expect(h.types()).not.toContain("turn_completed");
+
+    let caught: unknown;
+    try {
+      await h.session.send("too late");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(OfficialSessionEnded);
+  });
+
+  test("apiKeySource === ANTHROPIC_API_KEY -> no refusal; the turn proceeds normally", async () => {
+    const h = harness({ selection: apiKeySelection });
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "ANTHROPIC_API_KEY" }));
+    h.q().emit(assistant("ok"));
+    h.q().emit(result());
+    await h.settled();
+    expect(h.events.some((e) => e.type === "agent_error")).toBe(false);
+    expect(h.types()).toContain("turn_completed");
+    expect(h.session.state).not.toBe("ended");
+  });
+
+  test("an unknown/missing apiKeySource (never invented as a pass) still refuses for the api-key family", async () => {
+    const h = harness({ selection: apiKeySelection });
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID)); // no apiKeySource field at all
+    await h.settled();
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string }) | undefined;
+    expect(err?.code).toBe("official_auth_source_refused");
+  });
+
+  test("the console-oauth family is EXEMPT — apiKeySource \"none\" (its own expected bearer shape) never refuses", async () => {
+    const consoleOauthSelection: RuntimeSelection = { ...apiKeySelection, authFamily: "console-oauth" };
+    const h = harness({ selection: consoleOauthSelection });
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "none" }));
+    h.q().emit(assistant("ok"));
+    h.q().emit(result());
+    await h.settled();
+    expect(h.events.some((e) => e.type === "agent_error")).toBe(false);
+    expect(h.types()).toContain("turn_completed");
+  });
+
+  test("a non-api-key, non-console-oauth family (custom, this harness's own default) is also never asserted on", async () => {
+    const h = harness(); // default selection: authFamily "custom"
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "none" }));
+    h.q().emit(assistant("ok"));
+    h.q().emit(result());
+    await h.settled();
+    expect(h.events.some((e) => e.type === "agent_error")).toBe(false);
+    expect(h.types()).toContain("turn_completed");
+  });
+});

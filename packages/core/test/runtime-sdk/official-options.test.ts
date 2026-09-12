@@ -5,6 +5,9 @@
 // that test's own comment), and the auto-memory-directory equality with the Winter leg's own MEMDIR
 // helper (WS-14 §2: "identical for both branches").
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { chmodSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { installMockModuleTripwire } from "../mock-module-tripwire";
 import * as winterAgentSdk from "@yanlinglabs/winter-agent-sdk";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
@@ -14,9 +17,13 @@ import { QuestionBroker } from "../../src/agent/questions";
 import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { assistantMemoryDirFor, memoryDirFor } from "../../src/agent/memory-dir";
 import { controlPlaneDenyRules, disallowedToolsFor, sandboxConfigFor } from "../../src/runtime-sdk/mode-options";
+import type { Settings } from "../../src/settings";
 import {
   autoMemoryDirectoryFor,
+  ensureOfficialConfigDir,
+  FORBIDDEN_CHILD_ENV,
   minimalOsEnvironment,
+  officialConfigDirFor,
   officialInputFor,
   officialPermissionModeFor,
   OfficialProjectKeyTooDeep,
@@ -240,6 +247,95 @@ describe("officialInputFor — the control-plane fence (C1)", () => {
     const denyA = (a.settings as { permissions?: { deny?: string[] } }).permissions?.deny;
     const denyB = (b.settings as { permissions?: { deny?: string[] } }).permissions?.deny;
     expect(denyA).not.toEqual(denyB);
+  });
+});
+
+// ── Phase 9c (P9c-1): the env shape + CLAUDE_CONFIG_DIR pin ────────────────────────────────────
+//
+// `officialConfigDirFor(home)` = `<home>/runtimes/claude-config` is a real path this file's own
+// `minimalDeps()` fixture's symbolic `home` (`/Users/x/.winter-test-home`) is never meant to touch
+// on disk — `officialInputFor` only COMPUTES the path (never creates it); `ensureOfficialConfigDir`
+// is exercised separately below, against a real `mkdtempSync` root.
+describe("officialInputFor — the env shape + spool (P9c-1)", () => {
+  const apiKeySelection: RuntimeSelection = {
+    runtimeKind: "claude-agent", providerId: "anthropic", modelRef: "anthropic/claude-sonnet-5",
+    family: "claude", authFamily: "api-key", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
+  };
+  const HOME = "/Users/x/.winter-test-home";
+  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+  const settingsWith = (subscriptionAuth: boolean): Settings => ({ runtimes: { official: { subscriptionAuth } } }) as unknown as Settings;
+
+  function build(overrides: Partial<OfficialInputDeps> = {}): { input: import("@yanlinglabs/winter-runtime-sdk").RouterOfficialInput } {
+    const result = officialInputFor(input, minimalDeps({ home: HOME, selection: apiKeySelection, ...overrides }));
+    if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
+    return result;
+  }
+
+  test("base is EXACTLY the minimalOsEnvironment allowlist — no FORBIDDEN_CHILD_ENV name leaks through, even when the host env carries every one of them as a sentinel", () => {
+    const hostEnv: Record<string, string> = { HOME: "/Users/x", PATH: "/usr/bin:/bin", LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8", TERM: "xterm-256color" };
+    for (const name of FORBIDDEN_CHILD_ENV) hostEnv[name] = `SENTINEL_${name}`;
+    const built = build({ env: hostEnv });
+    for (const name of FORBIDDEN_CHILD_ENV) expect(built.input.base?.[name]).toBeUndefined();
+    expect(built.input.base).toEqual({ HOME: "/Users/x", PATH: "/usr/bin:/bin", LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8", TERM: "xterm-256color" });
+  });
+
+  test("no settings (absent block) -> subscriptionAuth defaults OFF -> spool is officialConfigDirFor(home)", () => {
+    const built = build({});
+    expect(built.input.spool).toBe(officialConfigDirFor(HOME));
+  });
+
+  test("subscriptionAuth explicitly false -> the SAME spool as the absent-block default", () => {
+    const built = build({ settings: settingsWith(false) });
+    expect(built.input.spool).toBe(officialConfigDirFor(HOME));
+  });
+
+  test("subscriptionAuth true -> spool is left undefined (the router's own default applies instead)", () => {
+    const built = build({ settings: settingsWith(true) });
+    expect(built.input.spool).toBeUndefined();
+  });
+
+  test("flipping the flag between two calls with the SAME deps object otherwise -> spool changes with no other field touched (hot, no restart)", () => {
+    const off = build({ settings: settingsWith(false) });
+    const on = build({ settings: settingsWith(true) });
+    expect(off.input.spool).toBe(officialConfigDirFor(HOME));
+    expect(on.input.spool).toBeUndefined();
+    // Nothing else about the assembled input moved with the flag.
+    expect(off.input.base).toEqual(on.input.base);
+    expect(off.input.projectKey).toEqual(on.input.projectKey);
+  });
+
+  test("a DIFFERENT home produces a DIFFERENT officialConfigDirFor path — never a constant", () => {
+    expect(officialConfigDirFor("/Users/x/.winter-test-home")).not.toBe(officialConfigDirFor("/Users/y/.winter-other-home"));
+  });
+
+  test("the credential plan still injects exactly ANTHROPIC_API_KEY for the api-key family (router behaviour, unaffected by the flag)", () => {
+    const provider = { providerId: "anthropic", authRef: { kind: "inline" as const, value: "sk-test-unit" } };
+    const built = officialInputFor(input, minimalDeps({
+      home: HOME, selection: apiKeySelection, provider, explicitCredentials: undefined, settings: settingsWith(false),
+    }));
+    if (!("input" in built)) throw new Error("unexpectedly refused");
+    expect(built.input.credentials).toEqual([{ variable: "ANTHROPIC_API_KEY", ref: provider.authRef }]);
+  });
+});
+
+describe("ensureOfficialConfigDir", () => {
+  test("creates the directory 0700, and re-hardens an already-existing, more-permissive one", () => {
+    const root = mkdtempSync(join(tmpdir(), "winter-official-config-dir-"));
+    try {
+      const dir = join(root, "runtimes", "claude-config");
+      expect(existsSync(dir)).toBe(false);
+      ensureOfficialConfigDir(dir);
+      expect(existsSync(dir)).toBe(true);
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
+
+      // A stale, more permissive mode (e.g. from an older daemon version) is corrected, not left alone.
+      chmodSync(dir, 0o755);
+      expect(statSync(dir).mode & 0o777).toBe(0o755);
+      ensureOfficialConfigDir(dir);
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

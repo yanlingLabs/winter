@@ -41,7 +41,7 @@ import { attachOfficialSession } from "../../src/runtime-sdk/messaging";
 import { createSqliteRuntimeDirectoryStore, openRuntimeStateDb } from "../../src/runtime-state";
 import { processStartedAt } from "../../src/runtime-state/leases";
 import { buildChildAddress, buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
-import type { OfficialInputDeps, OfficialSessionInput } from "../../src/runtime-sdk/official-options";
+import { officialConfigDirFor, type OfficialInputDeps, type OfficialSessionInput } from "../../src/runtime-sdk/official-options";
 import { startOfficialSession, type OfficialSession } from "../../src/runtime-sdk/official-session";
 import { createProjector, type CheckpointStore } from "../../src/projector";
 import { z } from "zod";
@@ -350,13 +350,18 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       expect(auth).toBeDefined();
       expect(String(auth)).not.toContain("sk-e2e");
 
-      // m1: the OBSERVED `CLAUDE_CONFIG_DIR`/spool a fresh-spool launch actually used
-      // (`officialSpoolRoot(winterHome)` — WS-14 §1 profile 1) lives under WINTER_HOME (`w.home`,
-      // the router's own `winterHome`, per `create.ts`'s `handoff: { winterHome: deps.home }`) —
-      // never under the child's hermetic `HOME`. The real `claude` CLI writing into it (a real file
-      // on disk, not merely a configured option) is the actual proof CLAUDE_CONFIG_DIR took effect.
-      const spoolRoot = join(w.home, "runtimes", "official-agent-spool");
+      // m1 (Phase 9c/P9c-1 update): the OBSERVED `CLAUDE_CONFIG_DIR`/spool a fresh-spool launch
+      // actually used lives under WINTER_HOME (`w.home`, the router's own `winterHome`, per
+      // `create.ts`'s `handoff: { winterHome: deps.home }`) — never under the child's hermetic
+      // `HOME`. Since P9c-1 this leg no longer relies on the router's own default spool name
+      // (`officialSpoolRoot`, `runtimes/official-agent-spool`) while `subscriptionAuth` is off (the
+      // shipped default `buildWorld`'s `inputDeps` — no `settings` field — resolves to): it pins its
+      // OWN `officialConfigDirFor(home)` (`runtimes/claude-config`) instead, created 0700. The real
+      // `claude` CLI writing into it (a real file on disk, not merely a configured option) is the
+      // actual proof `CLAUDE_CONFIG_DIR` took effect.
+      const spoolRoot = officialConfigDirFor(w.home);
       expect(existsSync(spoolRoot)).toBe(true);
+      expect(statSync(spoolRoot).mode & 0o777).toBe(0o700);
 
       // m1: `~/.claude` is never created under the CHILD's own (hermetic) HOME — before this fix
       // the child had no HOME of its own (it silently inherited the real machine's `$HOME`), so this
