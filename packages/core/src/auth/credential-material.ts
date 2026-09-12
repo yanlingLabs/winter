@@ -1,5 +1,10 @@
 import type { SecretStore } from "./secret-store";
 import { OPENAI_API_KEY_SECRET, CODEX_SECRET_NAMES } from "./legacy-secret-names";
+import type { OAuthTokens } from "../providers/pkce";
+
+/** Re-exported verbatim so every existing importer of `CODEX_SECRET_NAMES` from the now-deleted
+ *  `providers/codex-oauth.ts` keeps working unchanged — see `CodexAuthStore`'s own doc comment. */
+export { CODEX_SECRET_NAMES };
 
 /**
  * Hotfix (post-8b, 2026-09-11): the spawned `winter` child resolves a `CredentialRef { kind:
@@ -208,4 +213,64 @@ export async function migrateLegacyCredentialMaterial(store: SecretStore): Promi
   const openai = await migrateOpenAi(store);
   const codexOauth = await migrateCodexOauth(store);
   return { openai, codexOauth };
+}
+
+/**
+ * P8d-13's dead-provider cleanup relocated this class here from the now-deleted
+ * `providers/codex-oauth.ts` (which existed only to house `CodexOAuthProvider`, superseded by
+ * `providers/runtime-provider.ts`'s `createCodexOauthRuntimeProvider` — see that module's own
+ * header for the ruling). `CodexAuthStore` itself was never part of that ruling: it is the ONLY
+ * writer of the `codex-oauth:default` credential material (`norma login`'s OAuth callback,
+ * `packages/cli/src/main.ts`) and is unrelated to which `Provider` implementation later reads it.
+ *
+ * Facade over the `codex-oauth:default` JSON credential material record (post-8b hotfix): the
+ * spawned Winter child resolves its `CredentialRef` by reading this SAME record directly off the
+ * Keychain and `JSON.parse`-ing it, so `save`/`load` here and the child's own reads/writes (its
+ * 401-refresh writes the merged material back to the exact ref it was handed) share ONE token set.
+ * `save` no longer touches the five legacy `CODEX_SECRET_NAMES` — those are migration-source/logout
+ * only now. `load` falls back to them (read-only) when the material record is absent, so an
+ * upgrade from a pre-hotfix install keeps working until the boot-time migration (or this load
+ * itself, next save) writes the material record forward.
+ */
+export class CodexAuthStore {
+  constructor(private readonly store: SecretStore) {}
+
+  async save(t: OAuthTokens): Promise<void> {
+    await writeCredentialMaterial(this.store, CREDENTIAL_MATERIAL_NAMES.codexOauth, {
+      kind: "oauth",
+      accessToken: t.accessToken,
+      ...(t.refreshToken ? { refreshToken: t.refreshToken } : {}),
+      ...(t.idToken ? { idToken: t.idToken } : {}),
+      ...(t.accountId ? { accountId: t.accountId } : {}),
+      // Hotfix review r1, n1: mirrors migrateCodexOauth's own guard — an `OAuthTokens.expiresAt`
+      // of `0` (this type's own "unknown expiry" default, e.g. after a load() with no legacy
+      // `codex-expires-at` at all) must not round-trip into the material as a literal `expiresAt:
+      // 0`, which the child would read as "expired since the epoch" rather than "unknown".
+      ...(Number.isFinite(t.expiresAt) && t.expiresAt > 0 ? { expiresAt: t.expiresAt } : {}),
+    });
+  }
+
+  async load(): Promise<OAuthTokens | null> {
+    const material = await readCredentialMaterial(this.store, CREDENTIAL_MATERIAL_NAMES.codexOauth);
+    if (material?.kind === "oauth") {
+      return {
+        accessToken: material.accessToken,
+        refreshToken: material.refreshToken ?? null,
+        idToken: material.idToken ?? null,
+        accountId: material.accountId ?? null,
+        expiresAt: material.expiresAt ?? 0,
+      };
+    }
+    // Read-only legacy fallback — never rewritten from here (the migration function is the only
+    // writer that promotes these into the material record).
+    const accessToken = await this.store.get(CODEX_SECRET_NAMES.access);
+    if (!accessToken) return null;
+    return {
+      accessToken,
+      refreshToken: await this.store.get(CODEX_SECRET_NAMES.refresh),
+      idToken: await this.store.get(CODEX_SECRET_NAMES.id),
+      accountId: await this.store.get(CODEX_SECRET_NAMES.account),
+      expiresAt: Number((await this.store.get(CODEX_SECRET_NAMES.expires)) ?? 0),
+    };
+  }
 }
