@@ -317,6 +317,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Phase 8d (CI run 34683922033): NormaKit's daemon fixture is `/usr/bin/env bun -e …` and its
+      # inline daemon imports @norma/core, so this job needs bun on PATH AND the workspace installed —
+      # without them ~17 NormaKit tests die with exit 127 before the JSON hello (green locally, red here).
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install dependencies (the NormaKit daemon fixture imports @norma/core)
+        run: bun install --frozen-lockfile
+
       - name: NormaProtocol — swift test
         working-directory: apple/NormaProtocol
         run: swift test
