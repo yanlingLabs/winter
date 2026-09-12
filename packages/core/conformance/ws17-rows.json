@@ -49,22 +49,22 @@
       "status": "partial",
       "citations": [
         {
-          "repo": "norma",
+          "repo": "winter",
           "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts",
           "contains": "WS-17 §8 row 4"
         },
         {
-          "repo": "norma",
+          "repo": "winter",
           "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts",
           "contains": "9a MEASURED: row 4 HOLD"
         },
         {
-          "repo": "norma",
+          "repo": "winter",
           "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts",
           "contains": "9a MEASURED: row 4 REFUSE"
         },
         {
-          "repo": "norma",
+          "repo": "winter",
           "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts",
           "contains": "9a MEASURED: row 4 IDLE WAKE"
         }
@@ -77,7 +77,7 @@
       "status": "partial",
       "citations": [
         {
-          "repo": "norma",
+          "repo": "winter",
           "file": "packages/core/test/runtime-sdk/official-leg.e2e.test.ts",
           "contains": "WS-17 §8 row 5"
         }
@@ -90,7 +90,7 @@
       "status": "proven",
       "citations": [
         {
-          "repo": "norma",
+          "repo": "winter",
           "file": "packages/core/test/runtime-state/children-restart.test.ts",
           "contains": "WS-17 §8 row 6"
         }
@@ -131,17 +131,17 @@
       "status": "partial",
       "citations": [
         {
-          "repo": "norma",
+          "repo": "winter",
           "file": "packages/core/capability-matrix.json",
           "contains": "packages/core/scripts/capability-matrix.ts"
         },
         {
-          "repo": "norma",
+          "repo": "winter",
           "file": "packages/core/test/capability-matrix.test.ts",
           "contains": "the drift tripwire for"
         }
       ],
-      "note": "Partial as measured in 8d: Norma's mode × runtime × surface rows are generated and drift-pinned (packages/core/capability-matrix.json, P8d-15). The other axes of the matrix are the router/SDK repo's own obligation, not proven here."
+      "note": "Partial as measured in 8d: the host's (this repo's) mode × runtime × surface rows are generated and drift-pinned (packages/core/capability-matrix.json, P8d-15). The other axes of the matrix are the router/SDK repo's own obligation, not proven here."
     },
     {
       "row": 10,
@@ -190,7 +190,7 @@
           "contains": "WS17-13"
         },
         {
-          "repo": "norma",
+          "repo": "winter",
           "file": "scripts/embed-runtimes.sh",
           "contains": "VERIFY (never re-sign)"
         }
@@ -231,17 +231,17 @@
       "status": "proven",
       "citations": [
         {
-          "repo": "norma",
+          "repo": "winter",
           "file": "scripts/release-lib.ts",
           "contains": "row16IdentityCheck"
         },
         {
-          "repo": "norma",
+          "repo": "winter",
           "file": "scripts/stage-runtimes.ts",
           "contains": "platform-package"
         },
         {
-          "repo": "norma",
+          "repo": "winter",
           "file": "packages/core/src/runtime-sdk/bundle-layout.ts",
           "contains": "winterSourceOf"
         }
@@ -268,7 +268,7 @@
       "status": "proven",
       "citations": [
         {
-          "repo": "norma",
+          "repo": "winter",
           "file": ".github/workflows/ci.yml",
           "contains": "verify (workflow, runtime-state, runtimes)"
         }

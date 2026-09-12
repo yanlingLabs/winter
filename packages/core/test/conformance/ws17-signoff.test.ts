@@ -3,7 +3,7 @@
 // `packages/core/conformance/ws17-rows.json` is the in-repo row matrix: one entry per WS-17 §8
 // obligation (1..18), each carrying a `status` and one or more `citations`. This is the
 // "cite-or-cover" gate the release depends on: every row must EITHER
-//   (a) CITE something machine-checkable — a `norma` citation is verified HERE (the file exists
+//   (a) CITE something machine-checkable — a `winter` citation is verified HERE (the file exists
 //       under the repo root and literally contains the quoted substring), while a `router`/`sdk`
 //       citation (the SDK/router repos are siblings, not a workspace member, so their content
 //       cannot be read from here) is only format-checked here and is verified once by the
@@ -18,7 +18,7 @@
 // pinned to a 3-character substring proves nothing and would rot silently.
 //
 // HERMETIC: reads two files under the repository (this file's own JSON fixture, plus whatever
-// `norma` citations name) and writes nothing. No server, no runtime, no `~/.winter*`.
+// `winter` citations name) and writes nothing. No server, no runtime, no `~/.winter*`.
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -28,7 +28,7 @@ const ROWS_PATH = join(import.meta.dir, "..", "..", "conformance", "ws17-rows.js
 
 const MIN_CONTAINS_LENGTH = 12;
 const STATUSES = ["proven", "partial", "unproven", "carried"] as const;
-const REPOS = ["norma", "router", "sdk"] as const;
+const REPOS = ["winter", "router", "sdk"] as const;
 
 type Status = (typeof STATUSES)[number];
 type Repo = (typeof REPOS)[number];
@@ -90,10 +90,10 @@ describe("WS-17 §8 sign-off matrix (ws17-rows.json)", () => {
     }
   });
 
-  test("every `norma` citation's file exists and literally contains its `contains` substring (min 12 chars)", () => {
+  test("every `winter` citation's file exists and literally contains its `contains` substring (min 12 chars)", () => {
     for (const row of rows) {
       for (const citation of row.citations) {
-        if (citation.repo !== "norma") continue;
+        if (citation.repo !== "winter") continue;
         expect(
           citation.contains.length,
           `row ${row.row} citation into ${citation.file} has too short a 'contains' (${citation.contains.length} < ${MIN_CONTAINS_LENGTH})`,
