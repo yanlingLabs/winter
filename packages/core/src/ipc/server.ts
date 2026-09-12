@@ -1772,7 +1772,14 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // TaskStore path. Same shape as `session.compact`/`session.interrupt`'s own leg check just
         // above: a RECORDED "winter" leg (`legOf`) reads the folded history too, live driver or
         // not; only an engine-era session (or no `winter` at all) takes the legacy fallback.
-        if (opts.winter?.get(p.sessionId) !== undefined || opts.winter?.legOf(p.sessionId) === "winter") {
+        //
+        // Fix wave M3 (whole-branch review): `legOf(id) === "winter"` alone missed the OFFICIAL
+        // leg entirely — an idle official-leg session (no live driver) fell through to the empty
+        // legacy fallback exactly like the pre-review-r1 bug this comment describes for Winter.
+        // `isRunnableLeg` (this file's own siblings, `session.send`/`session.compact` above) is the
+        // ONE "a leg the driver table can actually run a turn on" predicate; both legs' task
+        // graphs live the same way (the child's own in-memory store, folded from `task_updated`).
+        if (opts.winter?.get(p.sessionId) !== undefined || isRunnableLeg(p.sessionId)) {
           return { ok: true, tasks: readWinterTasks(opts.store, p.sessionId) };
         }
         return { ok: true, tasks: opts.tasks?.list(p.sessionId) ?? [] };
