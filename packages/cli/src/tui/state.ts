@@ -42,7 +42,7 @@
  *  PURE: `nowMs` is the caller's injected clock (App.tsx will tick it); `reduce` itself never calls
  *  `Date.now()`. ZERO Ink/React import — unit-testable in isolation (state.test.ts). */
 
-import type { ApprovalOption, ApprovalPolicy, SessionActivity, Task } from "@winter/protocol";
+import type { ApprovalOption, ApprovalPolicy, SessionActivity, Task } from "@yanlinglabs/winter-protocol";
 import { updateSubagents, type CliSubagent } from "../subagent-state";
 import { subagentTokens } from "../subagent-display";
 import { upsertTask } from "../task-block";

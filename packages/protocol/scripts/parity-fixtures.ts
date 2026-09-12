@@ -9,8 +9,8 @@
  * changed and `pnpm protocol:generate` wasn't re-run), not a false positive from two
  * hand-maintained copies disagreeing with each other.
  *
- * Reaches into `@winter/core` via a RELATIVE import, deliberately: core depends on protocol
- * (`@winter/core`'s package.json lists `@winter/protocol`), never the reverse — protocol declaring a
+ * Reaches into `@yanlinglabs/winter-core` via a RELATIVE import, deliberately: core depends on protocol
+ * (`@yanlinglabs/winter-core`'s package.json lists `@yanlinglabs/winter-protocol`), never the reverse — protocol declaring a
  * package dependency on core would be a real cycle. This file is a dev-time codegen/test helper
  * only, though, never part of protocol's published `"."` export (`src/index.ts`, which does not
  * import this file or anything under `scripts/`) — no protocol *consumer* ever pulls core in via

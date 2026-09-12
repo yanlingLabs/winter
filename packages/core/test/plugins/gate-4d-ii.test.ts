@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@winter/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import {
   createSupervisedInstance,
   installSampleEcho,
@@ -118,7 +118,7 @@ describe("4d-ii gate: over-the-wire plugin lifecycle (install -> enable/consent 
 
       // A fixture plugin dir NOT yet anywhere under `home`'s plugins root: `installSampleEcho`
       // copies examples/sample-echo into a THROWAWAY staging winterHome and rewrites its
-      // `@winter/plugin-sdk` import to an absolute path (a bare copy has no node_modules of its
+      // `@yanlinglabs/winter-plugin-sdk` import to an absolute path (a bare copy has no node_modules of its
       // own) — reused here purely for that copy-and-rewrite, so `plugins.install` below is the
       // ONLY thing that ever puts the plugin under this test's real `home`.
       const srcHome = mkdtempSync(join(tmpdir(), "winter-gate-4d-ii-src-"));

@@ -16,7 +16,7 @@
 // both runtimes, cast at the boundary exactly as `winter-session.ts` does); `interrupt()` calls the
 // official `Query`'s own `interrupt()` and the projector's `result(interrupted)` frame is what turns
 // that into `turn_completed(aborted)` — never a thrown error.
-import type { NewSessionEvent, SessionEvent } from "@winter/protocol";
+import type { NewSessionEvent, SessionEvent } from "@yanlinglabs/winter-protocol";
 import { createOfficialInputStream, isOfficialQuery, type OfficialInputStream, type RouterOfficialInput, type RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import { MAIN_THREAD, ProjectorRefusedError, classifyThrown, createProjector, type CheckpointStore, type ProjectedBatch, type Projector, type ProtocolSdkMessage } from "../projector";
 import type { WinterRuntimeSdk, SessionMode } from "./create";

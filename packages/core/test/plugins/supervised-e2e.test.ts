@@ -15,7 +15,7 @@ import { bootSupervisedServer, isPidAlive, waitFor } from "./supervised-fixtures
  * real daemon would ever spawn it.
  *
  * The install/settings/boot machinery is shared with Task 7's `gate-4b.test.ts` — see
- * `./supervised-fixtures.ts` for the SDK-import-path rewrite rationale (bare `@winter/plugin-sdk`
+ * `./supervised-fixtures.ts` for the SDK-import-path rewrite rationale (bare `@yanlinglabs/winter-plugin-sdk`
  * specifier -> absolute path into `packages/plugin-sdk/src/index.ts`) and the full boot sequence.
  */
 

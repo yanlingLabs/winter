@@ -5,7 +5,7 @@
 // `user` and `stream_event` frames cannot occur, while the runtime yields both. Import the real one.
 import type { ProtocolSdkMessage } from "@yanlinglabs/winter-agent-sdk";
 import type { RuntimeKind } from "@yanlinglabs/winter-runtime-sdk";
-import type { NewSessionEvent, SessionEvent } from "@winter/protocol";
+import type { NewSessionEvent, SessionEvent } from "@yanlinglabs/winter-protocol";
 
 export type { ProtocolSdkMessage };
 

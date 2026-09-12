@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { PermissionResult } from "@yanlinglabs/winter-agent-sdk";
-import type { NewSessionEvent, Question } from "@winter/protocol";
+import type { NewSessionEvent, Question } from "@yanlinglabs/winter-protocol";
 import type { QuestionBroker } from "../agent/questions";
 import { NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
 

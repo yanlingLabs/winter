@@ -85,7 +85,7 @@ import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord,
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
 import { makeDaemonRoutineRunner } from "./routines/runner";
 import { makeRoutineScheduler } from "./routines/scheduler";
-import type { NewSessionEvent } from "@winter/protocol";
+import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import { CORE_VERSION } from "./version";
 
 export { CORE_VERSION } from "./version";

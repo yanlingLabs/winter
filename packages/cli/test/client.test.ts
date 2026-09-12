@@ -3,9 +3,9 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startDaemon, FileSecretStore, FakeProvider, MemoryStore, type RunningDaemon } from "@winter/core";
+import { startDaemon, FileSecretStore, FakeProvider, MemoryStore, type RunningDaemon } from "@yanlinglabs/winter-core";
 import { WinterClient } from "../src/client";
-import { encodeLine, METHODS, PROTOCOL_VERSION } from "@winter/protocol";
+import { encodeLine, METHODS, PROTOCOL_VERSION } from "@yanlinglabs/winter-protocol";
 import { WINTER_BIN, testWithWinterBinary as sessionTest } from "./helpers/winter-binary";
 
 // Fix wave 2 (CLI, Winter Phase 8b): every `session.create` spawns a `winter` child, so the tests

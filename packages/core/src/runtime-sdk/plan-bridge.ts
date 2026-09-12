@@ -1,5 +1,5 @@
 import type { PermissionResult } from "@yanlinglabs/winter-agent-sdk";
-import type { NewSessionEvent } from "@winter/protocol";
+import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import type { BridgedApprovalRequest } from "./approval-bridge";
 import { NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";

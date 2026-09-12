@@ -1,4 +1,4 @@
-import { TRANSIENT_EVENT_TYPES, type SessionEvent } from "@winter/protocol";
+import { TRANSIENT_EVENT_TYPES, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import {
   MAIN_THREAD, asAssistantFrame, asInitFrame, asMirrorErrorFrame, asResultFrame, asStreamEventFrame,
   asUserFrame, assistantText, deltaText, hasToolResults, threadIdOf, toolCalls, toolResults, userText,

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CanUseTool, PermissionResult, PermissionUpdate } from "@yanlinglabs/winter-agent-sdk";
-import { ApprovalRequestedEvent, ApprovalResolvedEvent, type NewSessionEvent } from "@winter/protocol";
+import { ApprovalRequestedEvent, ApprovalResolvedEvent, type NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import { ApprovalBroker, approvalCardSummary, approvalOptionsFor } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
 import { PermissionGate, type SessionApprovalPolicy } from "../../src/agent/gate";

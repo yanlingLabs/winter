@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { writeFileSync, unlinkSync, existsSync } from "node:fs";
-import { resolveWinterProfile, type WinterProfile } from "@winter/core";
+import { resolveWinterProfile, type WinterProfile } from "@yanlinglabs/winter-core";
 
 /** Kept ONLY for the legacy teardown of the historical dist agent (`migrateFromLaunchdAgent`
  *  below) — never used for new installs. Active call sites derive the label from the current

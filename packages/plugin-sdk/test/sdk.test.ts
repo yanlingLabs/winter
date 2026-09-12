@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { encodeLine, LineDecoder, METHODS, PROTOCOL_VERSION, ERR } from "@winter/protocol";
+import { encodeLine, LineDecoder, METHODS, PROTOCOL_VERSION, ERR } from "@yanlinglabs/winter-protocol";
 import { backoffDelayMs, createPlugin } from "../src/index";
 
 // -------------------------------------------------------------------------------------------

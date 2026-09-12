@@ -40,7 +40,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { SessionEvent } from "@winter/protocol";
+import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import { SessionStore } from "../src/sessions/store";
 import { SessionHub } from "../src/sessions/hub";
 import { ToolRegistry } from "../src/agent/tools/registry";

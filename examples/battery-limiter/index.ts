@@ -1,4 +1,4 @@
-import { createPlugin } from "@winter/plugin-sdk";
+import { createPlugin } from "@yanlinglabs/winter-plugin-sdk";
 
 /**
  * battery-limiter — the reference Tier-2 (`platform`) plugin for `ctx.hardware()` (Phase 4c Task 5,
@@ -14,7 +14,7 @@ import { createPlugin } from "@winter/plugin-sdk";
  *  - `get_charge_limit {}` -> `ctx.hardware("getChargeLimit")`
  *
  * Both calls THROW on any typed hardware failure (unknown_verb/consent_denied/no_provider/timeout/
- * provider_error — see `@winter/plugin-sdk`'s `PluginContext.hardware` doc comment) rather than
+ * provider_error — see `@yanlinglabs/winter-plugin-sdk`'s `PluginContext.hardware` doc comment) rather than
  * returning an error-shaped value, so a failure naturally becomes a typed `plugin.toolResult
  * {error}` — no try/catch needed here, same "let it throw" posture as sample-echo's `boom` tool.
  *

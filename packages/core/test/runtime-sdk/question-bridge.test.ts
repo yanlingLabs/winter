@@ -1,6 +1,6 @@
 import { test, expect, afterEach, jest } from "bun:test";
 import type { CanUseTool } from "@yanlinglabs/winter-agent-sdk";
-import { QuestionAskedEvent, QuestionResolvedEvent, type NewSessionEvent } from "@winter/protocol";
+import { QuestionAskedEvent, QuestionResolvedEvent, type NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
 import { PermissionGate } from "../../src/agent/gate";

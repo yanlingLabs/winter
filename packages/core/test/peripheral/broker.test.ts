@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Holder, NewSessionEvent } from "@winter/protocol";
+import type { Holder, NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import { AuditLog } from "../../src/peripheral/audit";
 import {
   PeripheralBroker,

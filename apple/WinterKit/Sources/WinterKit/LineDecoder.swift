@@ -4,7 +4,7 @@ public enum LineDecoderError: Error, Equatable {
     case lineTooLong(max: Int)
 }
 
-/// Byte-accurate NDJSON line splitter — Swift mirror of @winter/protocol's LineDecoder.
+/// Byte-accurate NDJSON line splitter — Swift mirror of @yanlinglabs/winter-protocol's LineDecoder.
 /// Safe across UTF-8 chunk boundaries (splits on raw 0x0a bytes, decodes only whole lines).
 /// Blank lines are skipped. If the buffered partial line exceeds `maxLine`, the buffer is
 /// reset and `.lineTooLong` is thrown (matching the TS decoder's hostile-peer guard).

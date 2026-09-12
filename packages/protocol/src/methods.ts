@@ -3,7 +3,7 @@ import { z } from "zod";
 // lives): the `session_activity` EVENT variant needs the same enum, and events.ts cannot import
 // from this file — methods.ts already imports from events.ts, so the reverse edge would be a module
 // cycle whose `z.enum(...)` const would be in the TDZ at events.ts's evaluation. Re-exported by the
-// package index either way, so `@winter/protocol` consumers see no difference.
+// package index either way, so `@yanlinglabs/winter-protocol` consumers see no difference.
 import { SessionEvent, SessionActivity, TaskSchema, PeripheralClassSchema, HolderSchema, ApprovalOption, PanelTabKind, PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH, DIFF_ID_SHAPE } from "./events";
 
 export const PROTOCOL_VERSION = 0;
@@ -942,7 +942,7 @@ export const TileActionResult = PluginPushResult;
 // daemon (no restart required), instead of the CLI-only, file-based, restart-to-apply flow that
 // predates this task. Mirrors the CLI's own plugin-cli.ts flow (missingConsents/
 // buildConsentBlock/applyFreshPluginConsent/setPluginEnabled/grantPluginConsents/
-// removePluginFromSettings/removePluginDir, all @winter/core's plugins/lifecycle.ts) but wire-
+// removePluginFromSettings/removePluginDir, all @yanlinglabs/winter-core's plugins/lifecycle.ts) but wire-
 // shaped as typed result unions that never throw for an expected outcome — same precedent as
 // `HardwareRequestResult`/`PluginPushResult` above. NOT plugin-role verbs: a plugin can never
 // install/enable/disable/remove/consent itself or another plugin — ipc/server.ts's

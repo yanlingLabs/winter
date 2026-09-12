@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { NewSessionEvent } from "@winter/protocol";
+import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 
 /**
  * PluginSupervisor — process lifecycle for Tier-2 (`platform`) plugins (design spec §3, plan

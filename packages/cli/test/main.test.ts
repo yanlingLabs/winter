@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CORE_VERSION } from "@winter/core";
+import { CORE_VERSION } from "@yanlinglabs/winter-core";
 import { formatQuestionHeadlineLine, formatResumeHint, invisibleKeyCharWarning, routeCliInvocation, type CliRoute } from "../src/main";
 import { agentResumeCommand } from "../src/agents-cli";
 

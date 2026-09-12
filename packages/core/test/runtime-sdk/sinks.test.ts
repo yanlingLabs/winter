@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { NewSessionEvent } from "@winter/protocol";
+import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import { createSinkCallStore, sinksFor, type ProjectedToolCall, type ProjectedToolResult, type RoutineSink } from "../../src/runtime-sdk/sinks";
 import { openRuntimeStateDb } from "../../src/runtime-state/db";
 import { withTempHome } from "../runtime-state/support";

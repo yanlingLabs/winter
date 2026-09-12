@@ -42,7 +42,7 @@ import { join } from "node:path";
 import { Box, Text, useInput, useStdin } from "ink";
 import { Chalk } from "chalk";
 import wrapAnsi from "wrap-ansi";
-import type { ApprovalPolicy } from "@winter/protocol";
+import type { ApprovalPolicy } from "@yanlinglabs/winter-protocol";
 import { footerKeyAction } from "../keys";
 import type { FooterSelection } from "../task-block";
 import { theme } from "./theme";

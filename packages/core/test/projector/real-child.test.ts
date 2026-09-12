@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { query } from "@yanlinglabs/winter-agent-sdk";
-import { SessionEvent } from "@winter/protocol";
+import { SessionEvent } from "@yanlinglabs/winter-protocol";
 import { createHostPromptQueue } from "../../src/runtime-sdk/prompt-queue";
 import { MAIN_THREAD, createProjector } from "../../src/projector";
 import type { ProjectedBatch, ProtocolSdkMessage } from "../../src/projector";

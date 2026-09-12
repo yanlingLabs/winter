@@ -2,8 +2,8 @@
 // unit-tested without going through the top-level `if (import.meta.main)` dispatch.
 //
 // Phase 4d-ii Task 1: the reusable pure Settings-transform + fs helpers moved to
-// `@winter/core`'s `plugins/lifecycle.ts` (so the coming plugin-lifecycle RPCs, which live in
-// @winter/core and can't import from @winter/cli, can share them). They're re-exported below so
+// `@yanlinglabs/winter-core`'s `plugins/lifecycle.ts` (so the coming plugin-lifecycle RPCs, which live in
+// @yanlinglabs/winter-core and can't import from @yanlinglabs/winter-cli, can share them). They're re-exported below so
 // every existing import site in this package (main.ts, tests) still resolves identically — a
 // pure refactor, no behavior change. Only what's genuinely CLI-specific stays defined here:
 // `installPlugin` (network — git clone), `installNeedsConsentHint`, `revokePluginTokenBestEffort`.
@@ -20,7 +20,7 @@ import {
   setPluginEnabled,
   stripPluginConsents,
   type ConsentBlockPlugin,
-} from "@winter/core";
+} from "@yanlinglabs/winter-core";
 
 export {
   applyFreshPluginConsent,

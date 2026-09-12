@@ -59,7 +59,7 @@ import type {
   HookCallback, HookCallbackMatcher, HookJSONOutput, Options,
   PostToolUseFailureHookInput, PostToolUseHookInput, PreToolUseHookInput,
 } from "@yanlinglabs/winter-agent-sdk";
-import type { FileDiffSummary } from "@winter/protocol";
+import type { FileDiffSummary } from "@yanlinglabs/winter-protocol";
 import { BashReviewer, bashLooksSafe } from "../agent/reviewer";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { AUTO_DIAG_TOOL_NAMES, autoDiagnosticsSuffix } from "../agent/lsp/auto-diagnostics";

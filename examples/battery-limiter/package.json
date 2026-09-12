@@ -3,6 +3,6 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@winter/plugin-sdk": "workspace:*"
+    "@yanlinglabs/winter-plugin-sdk": "workspace:*"
   }
 }

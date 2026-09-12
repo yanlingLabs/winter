@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Provider, ProviderEvent, TurnRequest } from "../../src/providers/types";
 import { FakeProvider } from "../../src/agent/fake-provider";
-import { SessionEvent } from "@winter/protocol";
+import { SessionEvent } from "@yanlinglabs/winter-protocol";
 import { SessionStore } from "../../src/sessions/store";
 import {
   SessionCleaner, renderTranscript, hasUserSetTitle, CLEANER_MODEL, CLEANER_EFFORT, CLEANER_INSTRUCTION,

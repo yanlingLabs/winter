@@ -30,7 +30,7 @@ import { makeSyncStdout } from "./sync-stdout";
 import { makeDiffingStdout } from "./frame-diff";
 import { enterAltScreen, leaveAltScreen, enableMouseTracking, disableMouseTracking } from "./alt-screen";
 import type { EventBridge } from "./event-bridge";
-import type { ApprovalPolicy, SessionActivity } from "@winter/protocol";
+import type { ApprovalPolicy, SessionActivity } from "@yanlinglabs/winter-protocol";
 
 export interface MountOpts {
   client: AppClient;

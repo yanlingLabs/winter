@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import type { Role } from "@winter/protocol";
+import type { Role } from "@yanlinglabs/winter-protocol";
 import type { SecretStore } from "./secret-store";
 
 // Remote Gateway SP1 Task 1: `remote` is the least-privileged phone-gateway principal — its token

@@ -1,4 +1,4 @@
-import type { SessionEvent } from "@winter/protocol";
+import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { Provider, TurnInputItem } from "../providers/types";
 import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";

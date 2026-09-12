@@ -18,7 +18,7 @@ import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@winter/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import type { ReviewerResolver } from "@yanlinglabs/winter-agent-sdk/tools";
 import { ApprovalBroker } from "../../src/agent/approvals";

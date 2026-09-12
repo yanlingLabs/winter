@@ -28,7 +28,7 @@ enum RealDaemonError: Error, CustomStringConvertible {
 }
 
 /// SP2a Task 1: a real-daemon Swift test harness. Spawns the ACTUAL bun daemon (`startDaemon`
-/// from `@winter/core`) on a temp `WINTER_HOME`, with an EXPLICIT `FileSecretStore` — never the
+/// from `@yanlinglabs/winter-core`) on a temp `WINTER_HOME`, with an EXPLICIT `FileSecretStore` — never the
 /// live macOS Keychain, and never `packages/cli/src/main.ts`'s `daemon run` (whose CLI path
 /// defaults to `KeychainSecretStore`: reading that token from Swift is infeasible, and spawning
 /// it would touch the real, live daemon's Keychain entry — forbidden by this project's
@@ -47,11 +47,11 @@ struct RealDaemon {
     private let stdoutPath: String
     private let stderrPath: String
 
-    /// bun's resolution of a bare specifier like `@winter/core` walks up from the SPAWNED
-    /// PROCESS'S CWD looking for `node_modules/@winter/core` — it does not consult the repo root.
+    /// bun's resolution of a bare specifier like `@yanlinglabs/winter-core` walks up from the SPAWNED
+    /// PROCESS'S CWD looking for `node_modules/@yanlinglabs/winter-core` — it does not consult the repo root.
     /// In this pnpm workspace, `node_modules/@winter/{core,protocol}` (symlinks into
     /// `packages/{core,protocol}`) exist ONLY under `packages/cli` — verified empirically:
-    /// `bun -e 'import ... from "@winter/core"'` fails with "Cannot find module '@winter/core'"
+    /// `bun -e 'import ... from "@yanlinglabs/winter-core"'` fails with "Cannot find module '@yanlinglabs/winter-core'"
     /// when run with the repo root as cwd, and succeeds when run from `packages/cli`. This is
     /// exactly why the TS precedent (`daemon-sigterm.test.ts`) spawns with
     /// `cwd: join(import.meta.dir, "..")` — i.e. `packages/cli` — rather than the repo root. So
@@ -72,7 +72,7 @@ struct RealDaemon {
     /// token (this task's daemon.ts change exposes it on `RunningDaemon.tokens`) since Tasks 2 & 9
     /// need it for the gateway's daemon-facing bridge client, which authenticates as `"remote"`.
     private static let fixture = """
-    import { startDaemon, FileSecretStore } from "@winter/core";
+    import { startDaemon, FileSecretStore } from "@yanlinglabs/winter-core";
     const home = process.env.WINTER_HOME;
     const d = await startDaemon({ home, secrets: new FileSecretStore(home + "/secrets"), agentProvider: null });
     process.stdout.write(JSON.stringify({ socketPath: d.socketPath, harness: d.tokens.harness, remote: d.tokens.remote }) + "\\n");
@@ -93,7 +93,7 @@ struct RealDaemon {
     /// both an `assistant_delta` and a final `assistant_message` past the phone transport's hard
     /// 1 MiB de-framing limit, whose overflow silently ends the phone's inbound stream.
     static let streamingProviderFixture = """
-    import { startDaemon, FileSecretStore } from "@winter/core";
+    import { startDaemon, FileSecretStore } from "@yanlinglabs/winter-core";
     const home = process.env.WINTER_HOME;
     const CHUNKS = \(streamedChunksJSLiteral);
     const provider = {

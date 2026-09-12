@@ -1,4 +1,4 @@
-import type { NewSessionEvent } from "@winter/protocol";
+import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import type { BridgeLogger } from "./bridge-common";
 import type { RuntimeStateDb } from "../runtime-state/db";
 

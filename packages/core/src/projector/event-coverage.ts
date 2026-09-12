@@ -1,4 +1,4 @@
-import type { SessionEvent } from "@winter/protocol";
+import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 
 /**
  * ── WHY THIS FILE EXISTS (Winter 8b, C-5 / ruling P8b-9) ────────────────────────────────────────

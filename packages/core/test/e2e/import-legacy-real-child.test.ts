@@ -27,7 +27,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { query, transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
-import type { SessionEvent } from "@winter/protocol";
+import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import { importEngineEraSession } from "../../src/runtime-sdk/import-legacy";
 import { openRuntimeStateDb, RuntimeSessionRecords, backfillNativeSessions } from "../../src/runtime-state";
 import { sessionLegOf } from "../../src/runtime-sdk/leg";

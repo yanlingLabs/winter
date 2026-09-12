@@ -1,4 +1,4 @@
-import { SessionEvent, type SessionActivity } from "@winter/protocol";
+import { SessionEvent, type SessionActivity } from "@yanlinglabs/winter-protocol";
 import type { SessionStore, EventInput } from "./store";
 
 /** Default bound on `SessionHub`'s last-emitted-activity memo (see `emitActivity`). Sessions are

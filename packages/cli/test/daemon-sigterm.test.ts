@@ -18,7 +18,7 @@ import { join } from "node:path";
  */
 describe("daemon run SIGTERM socket cleanup", () => {
   const fixture = `
-    import { startDaemon, FileSecretStore } from "@winter/core";
+    import { startDaemon, FileSecretStore } from "@yanlinglabs/winter-core";
     const home = process.env.WINTER_HOME;
     const daemon = await startDaemon({ home, secrets: new FileSecretStore(home + "/secrets"), agentProvider: null });
     const shutdown = async () => { await daemon.stop(); process.exit(0); };
@@ -31,7 +31,7 @@ describe("daemon run SIGTERM socket cleanup", () => {
     const socketPath = join(home, "run", "core.sock");
 
     const proc = Bun.spawn(["bun", "-e", fixture], {
-      // cwd inside the cli package so `@winter/core` resolves via the workspace.
+      // cwd inside the cli package so `@yanlinglabs/winter-core` resolves via the workspace.
       cwd: join(import.meta.dir, ".."),
       env: { ...process.env, WINTER_HOME: home },
       stdout: "pipe",

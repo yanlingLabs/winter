@@ -6,7 +6,7 @@ import { join } from "node:path";
 import {
   LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket,
   type NewSessionEvent,
-} from "@winter/protocol";
+} from "@yanlinglabs/winter-protocol";
 import { startIpcServer, type IpcServer } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";

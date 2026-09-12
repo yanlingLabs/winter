@@ -1,4 +1,4 @@
-import type { Task } from "@winter/protocol";
+import type { Task } from "@yanlinglabs/winter-protocol";
 import { collapseCompleted, formatElapsed, formatTokens, sortTasksForDisplay, taskCountsLine, taskGlyph } from "./task-display";
 import type { CliSubagent } from "./subagent-state";
 import { anySubagentAlive, subagentElapsedMs, subagentTokens } from "./subagent-display";

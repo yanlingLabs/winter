@@ -6,7 +6,7 @@ import {
   LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, SessionEvent,
   PANEL_URL_MAX_LENGTH, PANEL_TITLE_MAX_LENGTH,
   PANEL_COMMAND_ARGS_MAX_JSON_BYTES, PANEL_COMMAND_RESULT_MAX_LENGTH, type WritableSocket,
-} from "@winter/protocol";
+} from "@yanlinglabs/winter-protocol";
 import { startIpcServer, REMOTE_ALLOWED_METHODS } from "../../src/ipc/server";
 import { PanelCommandRegistry } from "../../src/panel/commands";
 import { SessionStore } from "../../src/sessions/store";

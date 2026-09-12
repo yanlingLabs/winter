@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Task } from "@winter/protocol";
+import type { Task } from "@yanlinglabs/winter-protocol";
 import { taskCountsLine, taskGlyph } from "../src/task-display";
 import type { CliSubagent } from "../src/subagent-state";
 import {

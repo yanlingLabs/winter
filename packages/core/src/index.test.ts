@@ -2,10 +2,10 @@ import { expect, test } from "bun:test";
 import * as core from "./index";
 
 // Task A-main (workflows runtime re-plumb, C1 fix): `runWorkflowSubprocess` must be reachable via a
-// STATIC import of the `@winter/core` barrel — that's what makes `bun build --compile` bundle
+// STATIC import of the `@yanlinglabs/winter-core` barrel — that's what makes `bun build --compile` bundle
 // subprocess-entry.ts (+ worker-harness.ts) into the compiled binary, so `winter-core __workflow-worker`
 // has everything it needs in-image with no `new Worker(url)` / runtime file resolution. This test just
 // asserts the export exists and is the right shape; the compiled-binary round-trip is A-verify's job.
-test("runWorkflowSubprocess is exported from the @winter/core barrel", () => {
+test("runWorkflowSubprocess is exported from the @yanlinglabs/winter-core barrel", () => {
   expect(typeof core.runWorkflowSubprocess).toBe("function");
 });

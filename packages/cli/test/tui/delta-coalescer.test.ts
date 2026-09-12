@@ -19,7 +19,7 @@
  *
  *  Timers are INJECTED (set/clear) so every test is deterministic manual time — no sleeps. */
 import { describe, expect, test } from "bun:test";
-import type { SessionEvent } from "@winter/protocol";
+import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import { DELTA_COALESCE_MS, makeDeltaCoalescer } from "../../src/tui/event-bridge";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

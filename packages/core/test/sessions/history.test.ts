@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ToolResultEvent, FileDiffSummary, type SessionEvent } from "@winter/protocol";
+import { ToolResultEvent, FileDiffSummary, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import { SessionStore } from "../../src/sessions/store";
 import { HISTORY_EVENT_TYPES, readHistoryPage, capEvent, WHOLE_EVENT_CEILING } from "../../src/sessions/history";
 

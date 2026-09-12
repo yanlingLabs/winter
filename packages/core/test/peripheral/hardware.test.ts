@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { NewSessionEvent } from "@winter/protocol";
+import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import { AuditLog } from "../../src/peripheral/audit";
 import { HardwareBroker, verbClass, type HardwareBrokerDeps, type HardwareRequester } from "../../src/peripheral/hardware";
 

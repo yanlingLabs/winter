@@ -2,7 +2,7 @@
 // unit-tested without going through the top-level `if (import.meta.main)` dispatch. Mirrors
 // plugin-cli.ts's split: main.ts owns the I/O (loadSettings/saveSettings/connect), this file
 // owns the parse/validate decisions.
-import { CODEX_MODELS, REASONING_EFFORTS, catalogRowsFor } from "@winter/core";
+import { CODEX_MODELS, REASONING_EFFORTS, catalogRowsFor } from "@yanlinglabs/winter-core";
 
 export type ModelCliAction =
   | { kind: "show" }

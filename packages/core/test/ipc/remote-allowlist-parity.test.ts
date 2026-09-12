@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { METHODS } from "@winter/protocol";
+import { METHODS } from "@yanlinglabs/winter-protocol";
 import { REMOTE_ALLOWED_METHODS } from "../../src/ipc/server";
 import { startDaemon } from "../../src/daemon";
 import { FileSecretStore } from "../../src/auth/secret-store";

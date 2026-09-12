@@ -1,9 +1,9 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, runRuntimesProbe, resolveWinterProfile } from "@winter/core";
-import type { Settings } from "@winter/core";
-import { METHODS, type ApprovalPolicy, type Task } from "@winter/protocol";
+import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, runRuntimesProbe, resolveWinterProfile } from "@yanlinglabs/winter-core";
+import type { Settings } from "@yanlinglabs/winter-core";
+import { METHODS, type ApprovalPolicy, type Task } from "@yanlinglabs/winter-protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
 import { WinterClient } from "./client";
 import { checkCodeSession, filterCodeSessions, sessionModeMarker, sessionRuntimeMarker } from "./session-mode";
@@ -399,7 +399,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
   // which IS the daemon's resolution for an override-less session (engine.ts `meta.model || base`).
   let sessionModelOverride: string | undefined;
   let sessionEffortOverride: string | undefined;
-  let initialActivity: import("@winter/protocol").SessionActivity | undefined;
+  let initialActivity: import("@yanlinglabs/winter-protocol").SessionActivity | undefined;
   const wd: WatchdogState = { turnRunning: false, toolsInFlight: 0, approvalsPending: 0, lastEventAt: Date.now() };
   let wdTimer: ReturnType<typeof setInterval> | undefined; // one session-long stall poll; cleared on teardown
   let exiting = false; // guard to ensure a single exit path wins (stall watchdog vs endHeadlessTurn vs ctrl+C)
@@ -826,7 +826,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
         sessionId: string; scope: string; lastSeq: number; mode?: string;
         // T5 status chrome: the row's per-session model/effort overrides + derived activity
         // (SessionSummary fields the daemon already serves — methods.ts SessionListResult).
-        model?: string; effort?: string; activity?: import("@winter/protocol").SessionActivity;
+        model?: string; effort?: string; activity?: import("@yanlinglabs/winter-protocol").SessionActivity;
       }>;
     };
     const check = checkCodeSession(sessions, existingSessionId);
@@ -868,7 +868,7 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
   // dangling legacy timers/listener and exit cleanly, exactly as the legacy chat teardown does.
   if (inkMode) {
     const { mountTui } = await import("./tui/mount");
-    // Welcome-banner data. Version: the unified @winter/core CORE_VERSION (also correct for a
+    // Welcome-banner data. Version: the unified @yanlinglabs/winter-core CORE_VERSION (also correct for a
     // compiled binary, which has no adjacent package.json to read). Model: the resolved provider
     // model the daemon will use, read from settings.json (same source as `winter model`), best-effort
     // with an inert fallback so missing settings never blocks the interactive session.
@@ -1107,7 +1107,7 @@ if (import.meta.main) {
   // Compiled-artifact probe (P8b-18): proves runtime-state.db is created/migrated INSIDE the
   // compiled binary with an injected FileSecretStore — never the Keychain, never a real home.
   // Reached only by scripts/verify-runtime-state-compiled.ts. WINTER_HOME must be set to a temp dir
-  // by the caller; the probe refuses without it. Static, and importing from the `@winter/core`
+  // by the caller; the probe refuses without it. Static, and importing from the `@yanlinglabs/winter-core`
   // barrel exactly like `runWorkflowSubprocess` above — that is the import shape that survives
   // `bun build --compile` (a dynamic import keyed on a string does not resolve in $bunfs).
   //
@@ -1233,7 +1233,7 @@ if (import.meta.main) {
     // doctor whose first move is to reach the daemon is useless in exactly the state it exists for.
     // `runtime-state.db` is WAL, so the read-only half runs happily beside a live daemon; every
     // repair refuses while the lock is held, on the same probe `lock.ts` uses.
-    const { diagnoseRuntimeState, repairRuntimeState, isDaemonLockHeld, DAEMON_RUNNING_REFUSAL, diagnoseRuntimes, loadSettings } = await import("@winter/core");
+    const { diagnoseRuntimeState, repairRuntimeState, isDaemonLockHeld, DAEMON_RUNNING_REFUSAL, diagnoseRuntimes, loadSettings } = await import("@yanlinglabs/winter-core");
     const home = resolveWinterHome();
     const args = process.argv.slice(3);
     const flag = (name: string): string | undefined => {
@@ -1509,7 +1509,7 @@ if (import.meta.main) {
         console.error((err as Error).message);
         process.exit(1);
       }
-      const { PluginStore } = await import("@winter/core");
+      const { PluginStore } = await import("@yanlinglabs/winter-core");
       const info = new PluginStore({ winterHome: home }).list().find((p) => p.name === installed.name);
       console.log(`${AQUA}installed ${installed.name}${RESET}  skills: ${info?.skills.join(", ") || "(none)"}`);
       // hasMcp alone misses a manifest-only plugin (contributes.mcpServers, no .mcp.json) — that
@@ -1526,7 +1526,7 @@ if (import.meta.main) {
       // Direct PluginStore read (not the daemon RPC) — mirrors `install` above and keeps `enable`
       // usable without a running daemon, exactly like it was pre-4a. `consents` comes straight
       // from the settings file we're about to (maybe) write back to.
-      const { loadSettings, saveSettings, PluginStore } = await import("@winter/core");
+      const { loadSettings, saveSettings, PluginStore } = await import("@yanlinglabs/winter-core");
       const settings = loadSettings(settingsPath);
       const info = new PluginStore({ winterHome: home, consents: settings.plugins?.consents }).list().find((p) => p.name === name);
       if (!info) { console.error(`no such plugin: ${name}`); process.exit(1); }
@@ -1564,7 +1564,7 @@ if (import.meta.main) {
       const name = process.argv[4];
       if (!name) { console.error("usage: winter plugin disable <name>"); process.exit(1); }
       if (!existsSync(join(pluginsRoot, name))) { console.error(`no such plugin: ${name}`); process.exit(1); }
-      const { loadSettings, saveSettings } = await import("@winter/core");
+      const { loadSettings, saveSettings } = await import("@yanlinglabs/winter-core");
       const settings = stripPluginConsents(setPluginEnabled(loadSettings(settingsPath), name, false), name);
       saveSettings(settingsPath, settings);
       // Phase 4b Task 2: best-effort revoke of the plugin's daemon-side token (Tier-2 platform
@@ -1585,7 +1585,7 @@ if (import.meta.main) {
         console.error((err as Error).message);
         process.exit(1);
       }
-      const { loadSettings, saveSettings } = await import("@winter/core");
+      const { loadSettings, saveSettings } = await import("@yanlinglabs/winter-core");
       saveSettings(settingsPath, removePluginFromSettings(loadSettings(settingsPath), name));
       // Phase 4b Task 2: same best-effort token revoke as disable (see comment there) — removing
       // the plugin dir must not silently leave a stale, still-valid token in the daemon's sqlite.
@@ -1793,7 +1793,7 @@ if (import.meta.main) {
     break;
   }
   case "login": {
-    const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, writeOpenAiApiKey, writeAnthropicApiKey, WEB_SEARCH_API_KEY_SECRET, EXA_API_KEY_SECRET, profileDisplayName } = await import("@winter/core");
+    const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, writeOpenAiApiKey, writeAnthropicApiKey, WEB_SEARCH_API_KEY_SECRET, EXA_API_KEY_SECRET, profileDisplayName } = await import("@yanlinglabs/winter-core");
     console.log(`${AQUA}${profileDisplayName()} login${RESET}`);
     const secrets = new KeychainSecretStore();
     // P8c-10: the official leg's own credential — same shape as --api-key below (prefix check,
@@ -1866,7 +1866,7 @@ if (import.meta.main) {
     break;
   }
   case "logout": {
-    const { KeychainSecretStore, CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, clearCredentialMaterial, ANTHROPIC_CREDENTIAL_SECRET_NAME } = await import("@winter/core");
+    const { KeychainSecretStore, CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, clearCredentialMaterial, ANTHROPIC_CREDENTIAL_SECRET_NAME } = await import("@yanlinglabs/winter-core");
     const secrets = new KeychainSecretStore();
     // P8c-10: `--anthropic` clears ONLY the official leg's own credential — Codex sign-out
     // (the bare command, unchanged) must not touch it, and this flag must not touch Codex's.
@@ -1887,7 +1887,7 @@ if (import.meta.main) {
     break;
   }
   case "provider": {
-    const { loadSettings, resolveWinterHome } = await import("@winter/core");
+    const { loadSettings, resolveWinterHome } = await import("@yanlinglabs/winter-core");
     const s = loadSettings(join(resolveWinterHome(), "settings.json"));
     console.log(`${AQUA}${s.provider.type}${RESET} ${DIM}model ${s.provider.model}${RESET}`);
     break;
@@ -1898,7 +1898,7 @@ if (import.meta.main) {
     // "changing models must NOT require a daemon restart") is that a running daemon picks the
     // new value up on its NEXT turn via providers/manager.ts's live model resolver — no restart,
     // no RPC round-trip needed here at all.
-    const { loadSettings, saveSettings, resolveWinterHome, setProviderModel, setReasoningEffort, setAdvisorModel, CODEX_MODELS } = await import("@winter/core");
+    const { loadSettings, saveSettings, resolveWinterHome, setProviderModel, setReasoningEffort, setAdvisorModel, CODEX_MODELS } = await import("@yanlinglabs/winter-core");
     const settingsPath = join(resolveWinterHome(), "settings.json");
     const settings = loadSettings(settingsPath);
     const action = parseModelArgs(process.argv.slice(3));
@@ -1965,7 +1965,7 @@ if (import.meta.main) {
     // settings.outputStyle, live, on the session's next turn — same live-getter precedent as the
     // provider model).
     const { parseOutputStyleArgs } = await import("./output-style-cli");
-    const { loadSettings, saveSettings, resolveWinterHome, setOutputStyle, OutputStyleStore, TrustStore } = await import("@winter/core");
+    const { loadSettings, saveSettings, resolveWinterHome, setOutputStyle, OutputStyleStore, TrustStore } = await import("@yanlinglabs/winter-core");
     const action = parseOutputStyleArgs(process.argv.slice(3));
     const home = resolveWinterHome();
     const settingsPath = join(home, "settings.json");
@@ -2017,7 +2017,7 @@ if (import.meta.main) {
       break;
     }
 
-    const { WorkflowStore, TrustStore } = await import("@winter/core");
+    const { WorkflowStore, TrustStore } = await import("@yanlinglabs/winter-core");
     const home = resolveWinterHome();
     const store = new WorkflowStore({ winterHome: home, trust: new TrustStore(join(home, "trust.json")) });
     const cwd = process.cwd();
@@ -2132,7 +2132,7 @@ if (import.meta.main) {
     break;
   }
   case "provider-smoke": {
-    const { loadSettings, resolveWinterHome, createProvider, KeychainSecretStore } = await import("@winter/core");
+    const { loadSettings, resolveWinterHome, createProvider, KeychainSecretStore } = await import("@yanlinglabs/winter-core");
     const s = loadSettings(join(resolveWinterHome(), "settings.json"));
     const active = await createProvider(s, new KeychainSecretStore());
     const promptIdx = process.argv.indexOf("--prompt");

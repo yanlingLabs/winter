@@ -2,15 +2,15 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket,
-} from "@winter/protocol";
+} from "@yanlinglabs/winter-protocol";
 
 /**
- * `@winter/plugin-sdk` — the Tier-2 plugin authoring library (design spec §4, plan Phase 4b
+ * `@yanlinglabs/winter-plugin-sdk` — the Tier-2 plugin authoring library (design spec §4, plan Phase 4b
  * Task 5). `createPlugin({tools, onShortcut, tile}).serve()` owns the WHOLE lifecycle contract
  * (connect, hello, register, dispatch, reconnect, clean shutdown) so a plugin author never has
  * to implement it themselves — see the class doc below for the exact wire sequence.
  *
- * SELF-CONTAINED BY DESIGN: this package imports wire *types* from `@winter/protocol` (a
+ * SELF-CONTAINED BY DESIGN: this package imports wire *types* from `@yanlinglabs/winter-protocol` (a
  * declared dependency) but never `packages/core` — a plugin process is a separate OS process the
  * supervisor spawns (packages/core/src/plugins/supervisor.ts), so pulling in core's daemon
  * machinery here would be both wrong (core is a server, this is a client) and a dependency
@@ -220,7 +220,7 @@ type PendingEntry = { resolve: (v: unknown) => void; reject: (e: Error) => void 
 
 // -------------------------------------------------------------------------------------------
 // `hardware.request`'s wire result union — a local TS type kept independent of
-// `@winter/protocol`'s `HardwareRequestResult` zod schema (methods.ts), same precedent as core's
+// `@yanlinglabs/winter-protocol`'s `HardwareRequestResult` zod schema (methods.ts), same precedent as core's
 // own `packages/core/src/peripheral/hardware.ts` (`HardwareRequestResult` there): coverage that
 // the two stay in sync lives in tests (this package's + core's), not the type system. This SDK
 // never zod-parses ANY RPC result (see `request()` above, `Promise<unknown>` throughout) — adding

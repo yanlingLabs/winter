@@ -1,6 +1,6 @@
 import { resolve, sep } from "node:path";
 import type { CanUseTool, PermissionResult, PermissionUpdate } from "@yanlinglabs/winter-agent-sdk";
-import type { ApprovalOption, NewSessionEvent } from "@winter/protocol";
+import type { ApprovalOption, NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import { ApprovalBroker, approvalCardSummary, approvalOptionsFor } from "../agent/approvals";
 import type { QuestionBroker } from "../agent/questions";
 import type { PermissionGate, SessionApprovalPolicy } from "../agent/gate";

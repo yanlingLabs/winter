@@ -1,4 +1,4 @@
-import type { ApprovalOption } from "@winter/protocol";
+import type { ApprovalOption } from "@yanlinglabs/winter-protocol";
 
 export interface ApprovalOutcome {
   approved: boolean;

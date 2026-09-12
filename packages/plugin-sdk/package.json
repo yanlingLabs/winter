@@ -1,5 +1,5 @@
 {
-  "name": "@winter/plugin-sdk",
+  "name": "@yanlinglabs/winter-plugin-sdk",
   "version": "0.2.14",
   "private": true,
   "license": "Apache-2.0",
@@ -11,6 +11,6 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@winter/protocol": "workspace:*"
+    "@yanlinglabs/winter-protocol": "workspace:*"
   }
 }

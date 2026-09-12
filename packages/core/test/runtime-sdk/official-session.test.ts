@@ -33,7 +33,7 @@ afterAll(() => {
   mock.module("@yanlinglabs/winter-runtime-sdk", () => winterRuntimeSdk);
 });
 
-import type { NewSessionEvent, SessionEvent } from "@winter/protocol";
+import type { NewSessionEvent, SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { PermissionGate } from "../../src/agent/gate";

@@ -1,4 +1,4 @@
-import type { SessionActivity } from "@winter/protocol";
+import type { SessionActivity } from "@yanlinglabs/winter-protocol";
 import type { ActivityDeriver, ActivityRow } from "./activity";
 import { participatesInActivity } from "./activity";
 

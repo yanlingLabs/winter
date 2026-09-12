@@ -12,7 +12,7 @@
  *  — no ink/react import, so `main.ts` can construct the bridge on the shared path without pulling
  *  the Ink module graph onto the non-TTY branch. */
 
-import type { SessionEvent } from "@winter/protocol";
+import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 
 export type EventBridge = {
   push(e: SessionEvent): void;

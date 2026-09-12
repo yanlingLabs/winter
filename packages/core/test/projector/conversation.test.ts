@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { TRANSIENT_EVENT_TYPES } from "@winter/protocol";
+import { TRANSIENT_EVENT_TYPES } from "@yanlinglabs/winter-protocol";
 import { MAIN_THREAD } from "../../src/projector";
 import {
   accept, assistantText, assistantToolUse, init, makeProjector, result, run, textDelta, toolResult, userTextFrame,

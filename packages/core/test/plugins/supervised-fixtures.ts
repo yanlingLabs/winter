@@ -38,7 +38,7 @@ const BATTERY_LIMITER_DIR = join(import.meta.dir, "../../../../examples/battery-
 const PLUGIN_SDK_ENTRY = join(import.meta.dir, "../../../plugin-sdk/src/index.ts");
 
 /** Copies an `examples/<name>` reference plugin into `<winterHome>/plugins/<pluginId>` and
- *  rewrites its `@winter/plugin-sdk` import to an absolute path (a bare copy has no `node_modules`
+ *  rewrites its `@yanlinglabs/winter-plugin-sdk` import to an absolute path (a bare copy has no `node_modules`
  *  of its own — see the module doc comment). Returns the installed directory. Shared by
  *  `installSampleEcho` and `installBatteryLimiter` below — identical rewrite, different source
  *  tree. */
@@ -47,7 +47,7 @@ function installExample(srcDir: string, winterHome: string, pluginId: string): s
   cpSync(srcDir, dest, { recursive: true });
   const indexPath = join(dest, "index.ts");
   const rewritten = readFileSync(indexPath, "utf8").replace(
-    'from "@winter/plugin-sdk"',
+    'from "@yanlinglabs/winter-plugin-sdk"',
     `from ${JSON.stringify(PLUGIN_SDK_ENTRY)}`,
   );
   writeFileSync(indexPath, rewritten);
@@ -55,7 +55,7 @@ function installExample(srcDir: string, winterHome: string, pluginId: string): s
 }
 
 /** Copies `examples/sample-echo` into `<winterHome>/plugins/<pluginId>` and rewrites its
- *  `@winter/plugin-sdk` import to an absolute path (a bare copy has no `node_modules` of its own —
+ *  `@yanlinglabs/winter-plugin-sdk` import to an absolute path (a bare copy has no `node_modules` of its own —
  *  see the module doc comment). Returns the installed directory. */
 export function installSampleEcho(winterHome: string, pluginId: string): string {
   return installExample(EXAMPLES_DIR, winterHome, pluginId);

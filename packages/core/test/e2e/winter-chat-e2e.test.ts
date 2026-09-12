@@ -37,7 +37,7 @@ import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync, type Stats
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@winter/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import { buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { Options } from "@yanlinglabs/winter-agent-sdk";
 import { FileSecretStore } from "../../src/auth/secret-store";

@@ -10,8 +10,8 @@ import { join } from "node:path";
 import {
   CODEX_MODELS, OutputStyleStore, TrustStore, loadSettings, resolveWinterHome, saveSettings,
   setOutputStyle, setProviderModel, setReasoningEffort, setAdvisorModel,
-} from "@winter/core";
-import type { Settings } from "@winter/core";
+} from "@yanlinglabs/winter-core";
+import type { Settings } from "@yanlinglabs/winter-core";
 import { parseModelArgs, validateEffort, validateModelSlug, validateAdvisorSlug } from "../model-cli";
 import { parseOutputStyleArgs } from "../output-style-cli";
 import { formatElapsed, formatTokens } from "../task-display";
@@ -79,7 +79,7 @@ async function runCompact(ctx: CommandCtx): Promise<void> {
  *  and writes `settings.json` directly (spec: model switches must not require a daemon restart;
  *  the daemon's live model resolver in providers/manager.ts picks the new value up on its next
  *  turn). Reuses model-cli.ts's parseModelArgs/validateModelSlug/validateEffort — the exact same
- *  pure parse/validate functions main.ts's route calls — and @winter/core's
+ *  pure parse/validate functions main.ts's route calls — and @yanlinglabs/winter-core's
  *  loadSettings/saveSettings/setProviderModel/setReasoningEffort/CODEX_MODELS, the same helpers.
  *  No arg -> "show" (lists CODEX_MODELS marking the active one, mirroring the route's `*` marker);
  *  an arg -> switches (mirrors the route's write path + "takes effect next turn" note). */
@@ -176,7 +176,7 @@ function applyModelPick(ctx: CommandCtx, slug: string): void {
 /** Mirrors main.ts `case "output-style"` (~:1546): NO client/daemon RPC at all — same
  *  no-daemon-restart precedent as /model above (the daemon's live style resolver re-resolves
  *  settings.outputStyle on the session's next turn). Reuses output-style-cli.ts's
- *  parseOutputStyleArgs — the exact same pure parser main.ts's route calls — and @winter/core's
+ *  parseOutputStyleArgs — the exact same pure parser main.ts's route calls — and @yanlinglabs/winter-core's
  *  loadSettings/saveSettings/setOutputStyle/OutputStyleStore, the same helpers. Uses `ctx.cwd`
  *  (not `process.cwd()`) for the store's trust-gated project lookup — same substitution as
  *  /skills and /mcp above, since a project's `.winter/output-styles/` is resolved relative to the

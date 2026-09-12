@@ -26,10 +26,10 @@
  *   1. `bun run compile:core` -> dist/winter-core. NOTE: packages/cli/package.json is the only place
  *      `compile:core` is defined; plain `bun run compile:core` from the repo root fails with
  *      "Script not found" because bun does not search workspace packages without `--filter`. This
- *      script invokes it as `bun run --filter '@winter/cli' compile:core` with cwd = the repo root —
+ *      script invokes it as `bun run --filter '@yanlinglabs/winter-cli' compile:core` with cwd = the repo root —
  *      the repo-root-relative invocation the brief calls for, that actually resolves the script.
  *   2. Build the tight seatbelt profile via buildWorkflowSeatbeltProfile(dist/winter-core) — NOT
- *      exported from `@winter/core`'s barrel, so imported directly from its source file (same as
+ *      exported from `@yanlinglabs/winter-core`'s barrel, so imported directly from its source file (same as
  *      sandbox.test.ts does).
  *   3. spawn("/usr/bin/sandbox-exec", ["-p", profile, dist/winter-core, "__workflow-worker"], ...) —
  *      exactly the shape runtime.ts's `launch()` uses for a real daemon.
@@ -76,11 +76,11 @@ async function main(): Promise<void> {
   }
 
   // ---- Step 1: compile the REAL Release artifact -----------------------------------------------
-  log("\n--- Step 1: compiling dist/winter-core (bun run --filter '@winter/cli' compile:core) ---");
+  log("\n--- Step 1: compiling dist/winter-core (bun run --filter '@yanlinglabs/winter-cli' compile:core) ---");
   const compileStart = Date.now();
   const compile = spawnSync(
     process.execPath, // the running bun binary itself — avoids any PATH/version ambiguity
-    ["run", "--filter", "@winter/cli", "compile:core"],
+    ["run", "--filter", "@yanlinglabs/winter-cli", "compile:core"],
     { cwd: REPO_ROOT, encoding: "utf8", timeout: COMPILE_TIMEOUT_MS },
   );
   const compileMs = Date.now() - compileStart;

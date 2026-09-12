@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type { NewSessionEvent } from "@winter/protocol";
+import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import type { AuditLog } from "./audit";
 
 // ---------------------------------------------------------------------------------------------

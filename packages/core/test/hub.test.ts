@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "../src/sessions/store";
 import { SessionHub, type HubClient } from "../src/sessions/hub";
-import type { SessionEvent } from "@winter/protocol";
+import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 
 function fakeClient(name: string): HubClient & { received: SessionEvent[] } {
   const received: SessionEvent[] = [];

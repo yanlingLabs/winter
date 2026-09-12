@@ -82,7 +82,7 @@
 // `resumable` from the moment `end()` returns — the next `open()` awaits that iteration before it
 // spawns (finding 3), and no push can reach the closed queue in between.
 import type { Options, Query } from "@yanlinglabs/winter-agent-sdk";
-import type { NewSessionEvent, SessionEvent } from "@winter/protocol";
+import type { NewSessionEvent, SessionEvent } from "@yanlinglabs/winter-protocol";
 import { MAIN_THREAD, ProjectorRefusedError, classifyThrown, type ProjectedBatch, type Projector, type ProtocolSdkMessage } from "../projector";
 import { PROJECTOR_PASSTHROUGH_CLIENT } from "../projector/index";
 import { asInitFrame, asResultFrame } from "../projector/conversation";

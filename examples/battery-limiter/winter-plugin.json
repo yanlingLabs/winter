@@ -1,7 +1,7 @@
 {
   "id": "battery-limiter",
   "name": "Battery Limiter",
-  "description": "Reference Tier-2 (platform) plugin for @winter/plugin-sdk's ctx.hardware() — sets/reads the battery charge limit through Winter.app's privileged XPC helper (Phase 4c, design spec §5).",
+  "description": "Reference Tier-2 (platform) plugin for @yanlinglabs/winter-plugin-sdk's ctx.hardware() — sets/reads the battery charge limit through Winter.app's privileged XPC helper (Phase 4c, design spec §5).",
   "version": "0.0.1",
   "tier": "platform",
   "permissions": { "exec": true, "hardware": ["battery"] },

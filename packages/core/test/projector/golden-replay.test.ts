@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { SessionEvent } from "@winter/protocol";
+import { SessionEvent } from "@yanlinglabs/winter-protocol";
 import { MAIN_THREAD, PROJECTED_EVENT_COVERAGE } from "../../src/projector";
 import type { ProtocolSdkMessage } from "../../src/projector";
 import { accept, beginTurn, makeProjector, run } from "./harness";

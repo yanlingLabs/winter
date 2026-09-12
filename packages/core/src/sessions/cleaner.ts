@@ -1,4 +1,4 @@
-import type { SessionEvent } from "@winter/protocol";
+import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { Provider, TurnInputItem } from "../providers/types";
 import { DREAM_MODEL } from "../agent/dreamer";
 import { hasOpenPanelTabs } from "../panel/store";

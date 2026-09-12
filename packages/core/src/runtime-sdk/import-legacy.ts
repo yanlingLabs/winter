@@ -61,7 +61,7 @@ import { randomUUID } from "node:crypto";
 import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { WinterCompatibilitySessionStore, transcriptProjectKey, type SessionKey, type SessionStoreEntry } from "@yanlinglabs/winter-agent-sdk";
-import type { SessionEvent } from "@winter/protocol";
+import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import { MAIN_THREAD } from "../projector";
 import { RuntimeSessionRecords, type RuntimeSessionState } from "../runtime-state/records";
 import { sessionLegOf } from "./leg";

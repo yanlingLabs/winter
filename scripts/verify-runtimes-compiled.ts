@@ -10,7 +10,7 @@
  * bundle rung (not the dev `node_modules` package door) is what actually resolves.
  *
  * Steps:
- *   1. `bun run --filter '@winter/cli' compile:core` -> dist/winter-core (the same invocation
+ *   1. `bun run --filter '@yanlinglabs/winter-cli' compile:core` -> dist/winter-core (the same invocation
  *      verify-workflow-compiled.ts and verify-runtime-state-compiled.ts use).
  *   2. mkdtemp a fake `Contents/Resources/` — copy the compiled binary in as `winter-core` (so
  *      `process.execPath` inside the spawned process really is `<tmp>/Resources/winter-core`, and
@@ -93,11 +93,11 @@ async function main(): Promise<void> {
   log(`dist binary : ${DIST_BINARY}`);
 
   // ---- Step 1: compile the REAL Release artifact -----------------------------------------------
-  log("\n--- Step 1: compiling dist/winter-core (bun run --filter '@winter/cli' compile:core) ---");
+  log("\n--- Step 1: compiling dist/winter-core (bun run --filter '@yanlinglabs/winter-cli' compile:core) ---");
   const compileStart = Date.now();
   const compile = spawnSync(
     process.execPath,
-    ["run", "--filter", "@winter/cli", "compile:core"],
+    ["run", "--filter", "@yanlinglabs/winter-cli", "compile:core"],
     { cwd: REPO_ROOT, encoding: "utf8", timeout: COMPILE_TIMEOUT_MS },
   );
   log(`compile:core exit=${compile.status ?? "null"} signal=${compile.signal ?? "none"} (${Date.now() - compileStart}ms)`);

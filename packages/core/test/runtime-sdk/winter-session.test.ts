@@ -7,7 +7,7 @@
 // machine and the push/hold/resume discipline (P8b-5/24/32/38), not the fold.
 import { describe, expect, test } from "bun:test";
 import type { Options, Query } from "@yanlinglabs/winter-agent-sdk";
-import type { NewSessionEvent, SessionEvent } from "@winter/protocol";
+import type { NewSessionEvent, SessionEvent } from "@yanlinglabs/winter-protocol";
 import { SHUTDOWN_QUERY_GRACE_MS, type WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import { createProjector, type Projector } from "../../src/projector";
 import { createHostPromptQueue } from "../../src/runtime-sdk/prompt-queue";

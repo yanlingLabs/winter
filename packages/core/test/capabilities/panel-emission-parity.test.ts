@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { WinterMcpServerInstance } from "@yanlinglabs/winter-agent-sdk";
-import type { NewSessionEvent } from "@winter/protocol";
+import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import { ToolRegistry, type ToolContext } from "../../src/agent/tools/registry";
 import { registerBrowserTool } from "../../src/agent/tools/browser";
 import { registerDocsTool } from "../../src/agent/tools/docs";

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { FileDiffSummary, Question, Task } from "@winter/protocol";
+import type { FileDiffSummary, Question, Task } from "@yanlinglabs/winter-protocol";
 import type { ToolSpec } from "../../providers/types";
 import { isWithin } from "../paths";
 import type { AskOutcome } from "../questions";

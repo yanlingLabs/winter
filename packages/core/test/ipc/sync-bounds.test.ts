@@ -6,7 +6,7 @@ import {
   LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR,
   SESSION_TITLE_MAX_CHARS, SYNC_MAX_CHUNK_B64, IROH_MAX_FRAME_BYTES,
   type WritableSocket,
-} from "@winter/protocol";
+} from "@yanlinglabs/winter-protocol";
 import { startIpcServer } from "../../src/ipc/server";
 import { SyncPushBuffers, SYNC_PAGE_BYTES } from "../../src/ipc/sync";
 import { SessionStore } from "../../src/sessions/store";

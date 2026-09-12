@@ -2,7 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, realpathSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@winter/protocol";
+import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, type WritableSocket } from "@yanlinglabs/winter-protocol";
 import { startDaemon, type RunningDaemon, CORE_VERSION } from "../src/daemon";
 import { startIpcServer } from "../src/ipc/server";
 import { SessionStore } from "../src/sessions/store";
@@ -288,7 +288,7 @@ describe("daemon IPC", () => {
 
   test("malformed JSON line gets an id:null error frame that our own schema accepts", async () => {
     await boot();
-    const { RpcResponse } = await import("@winter/protocol");
+    const { RpcResponse } = await import("@yanlinglabs/winter-protocol");
     const c = await TestClient.connect(daemon.socketPath);
     await c.hello(harnessToken, "garbler");
     (c as any).socket.write(new TextEncoder().encode("THIS IS NOT JSON\n"));

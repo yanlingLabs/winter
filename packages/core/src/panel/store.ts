@@ -1,4 +1,4 @@
-import type { SessionEvent } from "@winter/protocol";
+import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 
 export type PanelTab = { tabId: string; kind: string; url?: string; title?: string; diffId?: string };
 export type PanelTabState = { tabs: PanelTab[]; activeTabId?: string };
@@ -58,7 +58,7 @@ export function foldPanelTabs(events: readonly SessionEvent[]): PanelTabState {
  *  holds NOW, so eligibility resumes the moment there is nothing left to lose.
  *
  *  Lives here rather than in either door's own file so the two can share ONE definition without a
- *  cycle: this file imports only `SessionEvent` from `@winter/protocol`, so both `sessions/store.ts`
+ *  cycle: this file imports only `SessionEvent` from `@yanlinglabs/winter-protocol`, so both `sessions/store.ts`
  *  and `sessions/cleaner.ts` (which already imports `SYNCED_SESSION_ID_RE` from `./store`) can import
  *  from here with no path back. */
 export function hasOpenPanelTabs(events: readonly SessionEvent[]): boolean {

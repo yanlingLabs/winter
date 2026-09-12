@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { buildSeatbeltProfile, sandboxAvailable } from "./sandbox";
 import { OutputCoalescer } from "./bg-coalescer";
-import type { NewSessionEvent } from "@winter/protocol";
+import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 
 const RING_CAP = 1024 * 1024; // 1 MiB in-memory ring per task
 const FILE_CAP = 64 * 1024 * 1024; // generous per-task output-FILE byte cap (the ring stays 1MiB)

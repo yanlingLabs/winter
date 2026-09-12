@@ -30,7 +30,7 @@ import {
   PanelCommandResultParams, PanelReadDiffParams,
   SYSTEM_SESSION_ID,
   type SessionEvent, ConnWriter, type WritableSocket,
-} from "@winter/protocol";
+} from "@yanlinglabs/winter-protocol";
 import type { TokenAuthority } from "../auth/tokens";
 import type { SecretStore } from "../auth/secret-store";
 import { writeOpenAiApiKey } from "../auth/credential-material";

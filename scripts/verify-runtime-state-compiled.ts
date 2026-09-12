@@ -9,7 +9,7 @@
  * binary. Nothing but running the real artifact can close that gap.
  *
  * What it does:
- *   1. `bun run --filter '@winter/cli' compile:core` -> dist/winter-core (the real Release artifact;
+ *   1. `bun run --filter '@yanlinglabs/winter-cli' compile:core` -> dist/winter-core (the real Release artifact;
  *      the same invocation verify-workflow-compiled.ts uses, and the same reason for the `--filter`:
  *      `compile:core` is defined only in packages/cli/package.json).
  *   2. `mkdtemp` a throwaway WINTER_HOME.
@@ -121,11 +121,11 @@ async function main(): Promise<void> {
   log(`dist binary : ${DIST_BINARY}`);
 
   // ---- Step 1: compile the REAL Release artifact -----------------------------------------------
-  log("\n--- Step 1: compiling dist/winter-core (bun run --filter '@winter/cli' compile:core) ---");
+  log("\n--- Step 1: compiling dist/winter-core (bun run --filter '@yanlinglabs/winter-cli' compile:core) ---");
   const compileStart = Date.now();
   const compile = spawnSync(
     process.execPath, // the running bun binary itself — avoids any PATH/version ambiguity
-    ["run", "--filter", "@winter/cli", "compile:core"],
+    ["run", "--filter", "@yanlinglabs/winter-cli", "compile:core"],
     { cwd: REPO_ROOT, encoding: "utf8", timeout: COMPILE_TIMEOUT_MS },
   );
   log(`compile:core exit=${compile.status ?? "null"} signal=${compile.signal ?? "none"} (${Date.now() - compileStart}ms)`);
@@ -231,7 +231,7 @@ async function main(): Promise<void> {
       fail(
         "one or more assertions failed — the compiled binary did NOT create/migrate runtime-state.db " +
         "as the daemon does. Diagnose before touching the assertions: (a) no JSON line at all + a " +
-        "stderr about a missing module -> the probe route or `@winter/core`'s barrel did not survive " +
+        "stderr about a missing module -> the probe route or `@yanlinglabs/winter-core`'s barrel did not survive " +
         "`bun build --compile` (this is what C1 looked like for workflows); (b) ok:false with a " +
         "`runtime state reported offline` error -> `openRuntimeStateDb` refused inside $bunfs, which " +
         "is the 8a carry itself failing; (c) userVersion 0 -> the migrations did not run; (d) a real " +

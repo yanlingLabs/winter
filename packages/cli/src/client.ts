@@ -15,7 +15,7 @@ import {
   MemoryListResult, MemoryReadResult, MemoryDeleteResult,
   WorkflowListResult, WorkflowRunResult, WorkflowStopResult, WorkflowGetResult,
   ConnWriter, type WritableSocket,
-} from "@winter/protocol";
+} from "@yanlinglabs/winter-protocol";
 
 /** Mirrors `RoutineSchema` (protocol/src/methods.ts) / `Routine` (core/src/routines/store.ts)
  *  field-for-field — a plain inline interface, matching this file's own convention of spelling

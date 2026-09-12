@@ -13,24 +13,24 @@
     "examples/battery-limiter": {
       "name": "battery-limiter",
       "dependencies": {
-        "@winter/plugin-sdk": "workspace:*",
+        "@yanlinglabs/winter-plugin-sdk": "workspace:*",
       },
     },
     "examples/sample-echo": {
       "name": "sample-echo",
       "dependencies": {
-        "@winter/plugin-sdk": "workspace:*",
+        "@yanlinglabs/winter-plugin-sdk": "workspace:*",
       },
     },
     "packages/cli": {
-      "name": "@winter/cli",
+      "name": "@yanlinglabs/winter-cli",
       "version": "0.2.14",
       "bin": {
         "winter": "./src/main.ts",
       },
       "dependencies": {
-        "@winter/core": "workspace:*",
-        "@winter/protocol": "workspace:*",
+        "@yanlinglabs/winter-core": "workspace:*",
+        "@yanlinglabs/winter-protocol": "workspace:*",
         "chalk": "^5.6.2",
         "cli-highlight": "^2.1.11",
         "figures": "^6.1.0",
@@ -45,12 +45,12 @@
       },
     },
     "packages/core": {
-      "name": "@winter/core",
+      "name": "@yanlinglabs/winter-core",
       "version": "0.2.14",
       "dependencies": {
         "@anthropic-ai/claude-agent-sdk": "0.3.250",
-        "@winter/protocol": "workspace:*",
         "@yanlinglabs/winter-agent-sdk": "^0.0.5",
+        "@yanlinglabs/winter-protocol": "workspace:*",
         "@yanlinglabs/winter-provider-catalog": "0.0.5",
         "@yanlinglabs/winter-provider-runtime": "^0.0.5",
         "@yanlinglabs/winter-runtime-sdk": "^0.0.3",
@@ -62,14 +62,14 @@
       },
     },
     "packages/plugin-sdk": {
-      "name": "@winter/plugin-sdk",
+      "name": "@yanlinglabs/winter-plugin-sdk",
       "version": "0.2.14",
       "dependencies": {
-        "@winter/protocol": "workspace:*",
+        "@yanlinglabs/winter-protocol": "workspace:*",
       },
     },
     "packages/protocol": {
-      "name": "@winter/protocol",
+      "name": "@yanlinglabs/winter-protocol",
       "version": "0.2.14",
       "dependencies": {
         "zod": "^4.0.0",
@@ -153,17 +153,17 @@
 
     "@winter-spike/bun-compile": ["@winter-spike/bun-compile@workspace:spikes/bun-compile"],
 
-    "@winter/cli": ["@winter/cli@workspace:packages/cli"],
-
-    "@winter/core": ["@winter/core@workspace:packages/core"],
-
-    "@winter/plugin-sdk": ["@winter/plugin-sdk@workspace:packages/plugin-sdk"],
-
-    "@winter/protocol": ["@winter/protocol@workspace:packages/protocol"],
-
     "@yanlinglabs/winter-agent-sdk": ["@yanlinglabs/winter-agent-sdk@0.0.5", "", { "dependencies": { "@yanlinglabs/winter-provider-catalog": "0.0.5" }, "optionalDependencies": { "@yanlinglabs/winter-agent-sdk-darwin-arm64": "0.0.5" } }, "sha512-opIJlNYXs3ga9J7oqRkqdguQh6kiYa9yRs9wXJyLlgeei866kzfAXDJzUCYXYEtza+3EoUBx0rc+dKrJkLBKrQ=="],
 
     "@yanlinglabs/winter-agent-sdk-darwin-arm64": ["@yanlinglabs/winter-agent-sdk-darwin-arm64@0.0.5", "", { "os": "darwin", "cpu": "arm64", "bin": { "winter": "bin/winter" } }, "sha512-Q6PFkEDpkrot40d6kNQFlcoKfFXBHmjvXYNN8VSmpqufgRL+J26qMRrsVgKmKMjkOAp3BAsgM0KryZQkaVVCvQ=="],
+
+    "@yanlinglabs/winter-cli": ["@yanlinglabs/winter-cli@workspace:packages/cli"],
+
+    "@yanlinglabs/winter-core": ["@yanlinglabs/winter-core@workspace:packages/core"],
+
+    "@yanlinglabs/winter-plugin-sdk": ["@yanlinglabs/winter-plugin-sdk@workspace:packages/plugin-sdk"],
+
+    "@yanlinglabs/winter-protocol": ["@yanlinglabs/winter-protocol@workspace:packages/protocol"],
 
     "@yanlinglabs/winter-provider-catalog": ["@yanlinglabs/winter-provider-catalog@0.0.5", "", {}, "sha512-4owqWfArzZZIrrsPjwhaH77YiFD4KgAZMz+6iHTBjXBIyebgX9X3UsdZRY0nBVGKfpaw29gruAm26UbYCyVdhQ=="],
 
