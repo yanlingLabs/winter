@@ -1,7 +1,7 @@
 // P9b-22 — the residue test is the 9c handoff. Walks EVERY tracked file in the repo (not just
 // packages/core), finds every `norma`/`Norma`/`NORMA` occurrence outside the trap tokens
 // (`normal*`, `abnormal`, `normative`), and asserts:
-//   1. each surviving match sits inside a range permitted by EXACTLY ONE applicable
+//   1. each surviving match sits inside a range permitted by AT LEAST ONE applicable
 //      `RENAME_ALLOWLIST` entry (Global Constraints bullet 3 pins the exact surviving set);
 //   2. every allowlist entry matched at least once somewhere (no dead entries — an entry that
 //      protects nothing is either stale or hiding a rename the codemod should have made).
@@ -29,6 +29,10 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { BINARY_EXTENSIONS, RENAME_ALLOWLIST, type AllowlistEntry } from "../../../../scripts/rename/allowlist";
+
+// The three helpers below (`globToRegex`, `entryAppliesTo`, `isBinaryPath`) are hand-copies of
+// their `scripts/rename/codemod.ts` counterparts, kept in sync by inspection rather than import
+// because `scripts/` has no tsconfig coverage (a 9c carry — see the file-header comment above).
 
 /** `codemod.ts`'s `globToRegex`, reimplemented: simple glob (`**` = any path, `*` = one segment),
  *  anchored. Kept in sync by inspection — both are ~10 lines and neither has changed since 9b. */
@@ -145,7 +149,7 @@ function scan(): { hits: Hit[]; matchedEntryIds: Set<string> } {
 }
 
 describe("rename residue (P9b-22)", () => {
-  test("every surviving norma/Norma/NORMA is permitted by exactly one allowlist entry", () => {
+  test("every surviving norma/Norma/NORMA is permitted by at least one allowlist entry", () => {
     const { hits } = scan();
     const unpermitted = hits.filter((h) => h.permittedBy === undefined);
     const report = unpermitted.map((h) => `${h.file}:${h.line}: ${h.context}`).join("\n");
