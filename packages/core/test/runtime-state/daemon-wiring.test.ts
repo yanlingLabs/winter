@@ -9,7 +9,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { compatibilityKeys } from "@yanlinglabs/winter-agent-sdk";
 import { buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { FakeProvider } from "../../src/agent/fake-provider";
@@ -17,7 +17,7 @@ import { memoryDirFor, repoRootFor, sanitizeProjectKey } from "../../src/agent/m
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import {
   RUNTIME_STATE_SCHEMA_VERSION, RuntimeSessionRecords, type MemoryKeyFs, RuntimeStateUnavailableError, backfillNativeSessions, createSqliteRuntimeDirectoryStore, openRuntimeStateDb,
-  startRuntimeState, type RuntimeStateWiring,
+  startRuntimeState, runtimeStateOnline, type RuntimeStateWiring,
 } from "../../src/runtime-state";
 import { Settings } from "../../src/settings";
 import { EMPTY_SESSION_GRACE_MS, SessionStore } from "../../src/sessions/store";
@@ -233,6 +233,21 @@ describe("daemon wiring — the runtime store is not readable by the model", () 
       expect(sandboxConfigFor(home).filesystem!.denyRead).toContain(dirs.runtimesDir);
     });
   });
+
+  test("P8d-12 (WS-16 §10): the official leg's SDK-parent staging root (<tmpdir>/claude-resume-*) is denied to read AND write tools", async () => {
+    await withTempHome(async (home) => {
+      const { controlPlaneDenyRules } = await import("../../src/runtime-sdk/mode-options");
+      const { tmpdir } = await import("node:os");
+      const deny = controlPlaneDenyRules(home);
+      // `//`-anchored (filesystem-root), never a bare single `/` (inert for an SDK-seeded rule —
+      // see `fsRootAnchored`'s own comment), and the pattern itself is rooted at the SYSTEM temp
+      // dir, never under `home` — a resume payload never lands under `~/.norma*`.
+      const wantSuffix = `/${join(tmpdir(), "claude-resume-*", "**")}`;
+      for (const tool of ["Read", "Glob", "Grep", "Edit", "Write", "MultiEdit", "NotebookEdit"]) {
+        expect(deny).toContain(`${tool}(${wantSuffix})`);
+      }
+    });
+  });
 });
 
 describe("daemon wiring — the retention sweep reads settings live", () => {
@@ -245,7 +260,7 @@ describe("daemon wiring — the retention sweep reads settings live", () => {
       await rt.directory.deliveries.put(receipted("recent", 5 * 86_400_000));
 
       // The shipped 30-day window: the 40-day-old receipt goes, the 5-day-old one stays.
-      expect(await rt.sweepNow()).toEqual({ deliveriesPruned: 1, leasesPruned: 0 });
+      expect(await rt.sweepNow()).toEqual({ deliveriesPruned: 1, leasesPruned: 0, sinkCallsPruned: 0 });
       expect(await rt.directory.deliveries.get("recent")).toBeDefined();
 
       writeSettings(home, { runtimes: { retention: { deliveriesDays: 1 } } });
@@ -282,6 +297,67 @@ describe("daemon wiring — the retention sweep runs at boot and on its own inte
         await until("the interval sweep to prune it", async () => (await rt!.directory.deliveries.get("stale")) === undefined, 4000);
       } finally {
         await rt?.close();
+        store.close();
+      }
+    });
+  });
+});
+
+describe("daemon wiring — Major 1: the claude-resume-* staging sweep's root is injectable", () => {
+  /** A `claude-resume-<uuid>` directory old enough for step 8's sweep to consider it (P8d-12's
+   *  `CLAUDE_RESUME_STALE_MS` is 24h; back-dated well past it). */
+  function plantStaleResumeDir(root: string, name: string): string {
+    mkdirSync(root, { recursive: true });
+    const path = join(root, name);
+    mkdirSync(path);
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    utimesSync(path, old, old);
+    return path;
+  }
+
+  test("an explicit recovery.claudeResumeScanRoot dep wins over NORMA_CLAUDE_RESUME_SCAN_ROOT — only the named root is swept", async () => {
+    await withTempHome(async (home) => {
+      // `withTempHome` already points NORMA_CLAUDE_RESUME_SCAN_ROOT at its own subdir — this test's
+      // whole point is that an explicit dep must be used INSTEAD of that env value.
+      const envRoot = process.env.NORMA_CLAUDE_RESUME_SCAN_ROOT!;
+      const depRoot = join(home, "explicit-dep-root");
+      const depStale = plantStaleResumeDir(depRoot, "claude-resume-11111111-2222-4333-8444-555555555555");
+      const envStale = plantStaleResumeDir(envRoot, "claude-resume-22222222-3333-4444-8555-666666666666");
+
+      const store = new SessionStore(home);
+      const state = await startRuntimeState({ home, store, settings: () => Settings.parse(SETTINGS_BASE), recovery: { claudeResumeScanRoot: depRoot } });
+      const rt = runtimeStateOnline(state);
+      if (!rt) throw new Error("runtime state unavailable");
+      try {
+        const step8 = rt.lastRecovery.steps.find((s) => s.step === 8);
+        expect(step8?.detail.claudeResumeRemoved).toBe(1);
+        expect(existsSync(depStale)).toBe(false); // the named dep root WAS swept
+        expect(existsSync(envStale)).toBe(true); // the env root was NEVER read — the dep won
+      } finally {
+        await rt.close();
+        store.close();
+      }
+    });
+  });
+
+  test("with no dep, NORMA_CLAUDE_RESUME_SCAN_ROOT is read — never the real machine tmpdir", async () => {
+    await withTempHome(async (home) => {
+      const envRoot = process.env.NORMA_CLAUDE_RESUME_SCAN_ROOT!;
+      const unnamedRoot = join(home, "never-named-root");
+      const envStale = plantStaleResumeDir(envRoot, "claude-resume-33333333-4444-4555-8666-777777777777");
+      const unnamedStale = plantStaleResumeDir(unnamedRoot, "claude-resume-44444444-5555-4666-8777-888888888888");
+
+      const store = new SessionStore(home);
+      const state = await startRuntimeState({ home, store, settings: () => Settings.parse(SETTINGS_BASE) }); // no `recovery` opts at all
+      const rt = runtimeStateOnline(state);
+      if (!rt) throw new Error("runtime state unavailable");
+      try {
+        const step8 = rt.lastRecovery.steps.find((s) => s.step === 8);
+        expect(step8?.detail.claudeResumeRemoved).toBe(1);
+        expect(existsSync(envStale)).toBe(false); // the env seam WAS read and swept
+        expect(existsSync(unnamedStale)).toBe(true); // a root nobody named is never touched
+      } finally {
+        await rt.close();
         store.close();
       }
     });

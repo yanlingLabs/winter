@@ -9,6 +9,10 @@
 // overwritten" — so this works regardless of import order (`official-session.test.ts`'s own
 // precedent). Undone in `afterAll` so no other test file sharing this process sees the spy.
 import { afterAll, afterEach, expect, mock, test } from "bun:test";
+import { installMockModuleTripwire } from "./mock-module-tripwire";
+// m6: called BEFORE the first `mock.module` below, so it is counted (see that file's own header —
+// the check itself still runs LAST, deferred to a microtask past this file's whole synchronous body).
+installMockModuleTripwire();
 import * as handoffModule from "../src/runtime-sdk/handoff";
 
 let registeredWith: Parameters<typeof handoffModule.registerHandoffParticipants>[0] | undefined;

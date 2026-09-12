@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
 import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
 import { RuntimeSessionRecords, type NewRuntimeSessionRecord } from "../../src/runtime-state/records";
 import { RuntimeLeases, processStartedAt, type ProcessIdentity } from "../../src/runtime-state/leases";
 import { RuntimeChildren, type PersistedWinterChild } from "../../src/runtime-state/children";
-import { recoverRuntimeState, type RecoveryDeps, type RecoveryReport } from "../../src/runtime-state/recovery";
+import { recoverRuntimeState, restampStep, type RecoveryDeps, type RecoveryReport } from "../../src/runtime-state/recovery";
 import { SessionStore } from "../../src/sessions/store";
 import { ISO, withTempHome } from "./support";
 
@@ -101,7 +101,11 @@ const withHarness = (fn: (h: Harness) => Promise<void>): Promise<void> =>
         records: new RuntimeSessionRecords(rs),
         leases: new RuntimeLeases(rs, SELF()),
         children: new RuntimeChildren(rs),
-        run: (over = {}) => recoverRuntimeState({ home, rs, store, self: SELF(), tempScanRoot: join(home, "tmp-scan"), ...over }),
+        // `claudeResumeScanRoot` defaults here too — its OWN real-machine default is `os.tmpdir()`,
+        // exactly the trap `tempScanRoot` already guards against, and every test in this file goes
+        // through `h.run()`.
+        run: (over = {}) =>
+          recoverRuntimeState({ home, rs, store, self: SELF(), tempScanRoot: join(home, "tmp-scan"), claudeResumeScanRoot: join(home, "claude-resume-scan"), ...over }),
         attempts: () =>
           rs.db
             .query<AttemptRow, []>("SELECT step, winter_session_id, outcome, detail_json, daemon_pid FROM runtime_recovery_attempts ORDER BY id")
@@ -439,6 +443,101 @@ describe("recoverRuntimeState — WS-16 §13's twelve steps", () => {
     });
   });
 
+  describe("P8d-12: the claude-resume-* staging sweep", () => {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const backdate = (path: string, ageMs: number): void => {
+      const at = (Date.now() - ageMs) / 1000;
+      utimesSync(path, at, at);
+    };
+
+    test("an unclaimed dir older than 24h is REMOVED, and the count is logged — never a path", async () => {
+      await withHarness(async (h) => {
+        const resumeScan = join(h.home, "claude-resume-scan");
+        const stale = join(resumeScan, "claude-resume-11111111-2222-4333-8444-555555555555");
+        mkdirSync(stale, { recursive: true });
+        backdate(stale, DAY_MS + 60_000);
+
+        const report = await h.run();
+        const step8 = report.steps.find((s) => s.step === 8)!;
+        expect(step8.detail.claudeResumeRemoved).toBe(1);
+        expect(JSON.stringify(step8.detail)).not.toContain(stale);
+        expect(existsSync(stale)).toBe(false);
+      });
+    });
+
+    test("a dir younger than 24h is left alone — a resume genuinely in flight is never this old", async () => {
+      await withHarness(async (h) => {
+        const resumeScan = join(h.home, "claude-resume-scan");
+        const fresh = join(resumeScan, "claude-resume-22222222-3333-4444-8555-666666666666");
+        mkdirSync(fresh, { recursive: true });
+        backdate(fresh, 60_000); // one minute old
+
+        const report = await h.run();
+        expect(report.steps.find((s) => s.step === 8)!.detail.claudeResumeRemoved).toBe(0);
+        expect(existsSync(fresh)).toBe(true);
+      });
+    });
+
+    test("a dir a LIVE generation names as its sdk-resume-staging root is never removed, however old", async () => {
+      await withHarness(async (h) => {
+        const resumeScan = join(h.home, "claude-resume-scan");
+        const claimed = join(resumeScan, "claude-resume-33333333-4444-4555-8666-777777777777");
+        mkdirSync(claimed, { recursive: true });
+        backdate(claimed, DAY_MS * 30);
+
+        h.records.create(newRecord(h.home, "s_claude"));
+        h.records.transition("s_claude", "ready");
+        h.records.bumpGeneration("s_claude", { runtimeKind: "claude-agent", localWriteRoot: claimed, localWriteRootKind: "sdk-resume-staging" });
+
+        const report = await h.run();
+        expect(report.steps.find((s) => s.step === 8)!.detail.claudeResumeRemoved).toBe(0);
+        expect(existsSync(claimed)).toBe(true);
+      });
+    });
+
+    test("a generation that records a SUBDIRECTORY of a staging dir protects the WHOLE dir (review Major-1)", async () => {
+      await withHarness(async (h) => {
+        const resumeScan = join(h.home, "claude-resume-scan");
+        const staging = join(resumeScan, "claude-resume-44444444-5555-4666-8777-888888888888");
+        const nestedRoot = join(staging, "nested", "child");
+        mkdirSync(nestedRoot, { recursive: true });
+        backdate(staging, DAY_MS * 30); // old enough to be swept on an exact-match check
+
+        h.records.create(newRecord(h.home, "s_claude_nested"));
+        h.records.transition("s_claude_nested", "ready");
+        // The known root is DEEPER than the staging dir itself — an exact-match `known.has(path)`
+        // check would have missed this and swept the dir out from under a live generation.
+        h.records.bumpGeneration("s_claude_nested", { runtimeKind: "claude-agent", localWriteRoot: nestedRoot, localWriteRootKind: "sdk-resume-staging" });
+
+        const report = await h.run();
+        expect(report.steps.find((s) => s.step === 8)!.detail.claudeResumeRemoved).toBe(0);
+        expect(existsSync(staging)).toBe(true);
+        expect(existsSync(nestedRoot)).toBe(true);
+      });
+    });
+
+    test("a directory that does not match the claude-resume- prefix is never touched by this sweep", async () => {
+      await withHarness(async (h) => {
+        const resumeScan = join(h.home, "claude-resume-scan");
+        const unrelated = join(resumeScan, "not-claude-resume-at-all");
+        mkdirSync(unrelated, { recursive: true });
+        backdate(unrelated, DAY_MS * 30);
+
+        const report = await h.run();
+        expect(report.steps.find((s) => s.step === 8)!.detail.claudeResumeRemoved).toBe(0);
+        expect(existsSync(unrelated)).toBe(true);
+      });
+    });
+
+    test("a missing scan root costs nothing — no root yet is not a failure", async () => {
+      await withHarness(async (h) => {
+        const report = await h.run({ claudeResumeScanRoot: join(h.home, "never-created") });
+        expect(report.steps.find((s) => s.step === 8)!.detail.claudeResumeRemoved).toBe(0);
+        expect(report.ok).toBe(true);
+      });
+    });
+  });
+
   test("step 6's repair-required verdict marks the record's transcript health", async () => {
     await withHarness(async (h) => {
       seedLive(h, "s_live", "running");
@@ -469,6 +568,50 @@ describe("recoverRuntimeState — WS-16 §13's twelve steps", () => {
 
       expect(asked).toEqual(["s_live"]);
       expect(report.steps.find((s) => s.step === 3)?.detail).toMatchObject({ quarantined: 1, pendingMarks: 1 });
+    });
+  });
+});
+
+describe("restampStep — P8d-11's late re-stamp of step 10", () => {
+  test("an attempt whose step 10 was `skipped` is re-stamped `ok` with { entriesLoaded, staleMarked }", async () => {
+    await withHarness(async (h) => {
+      // No `recoverDirectory` hook — this is the real-boot shape: step 10 runs `"skipped"`, exactly
+      // as it does at the point `startRuntimeState` calls it, before the router handle exists.
+      const report = await h.run();
+      const before = h.attempts().find((r) => r.step === 10 && r.winter_session_id === null);
+      expect(before?.outcome).toBe("skipped");
+      expect(report.step10AttemptId).toBeDefined();
+
+      // The daemon's late call, after `sdk.directory.recover()` — the P8d-11 sanctioned ordering.
+      restampStep(h.rs.db, report.step10AttemptId!, 10, "ok", { entriesLoaded: 3, staleMarked: 1 });
+
+      const rows = h.attempts().filter((r) => r.step === 10 && r.winter_session_id === null);
+      // The SAME row, restamped in place — never a second one.
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.outcome).toBe("ok");
+      expect(JSON.parse(rows[0]!.detail_json)).toEqual({ entriesLoaded: 3, staleMarked: 1 });
+    });
+  });
+
+  test("never throws when the row is gone (bounded, matching this file's own diagnostics-are-evidence rule)", async () => {
+    await withHarness(async (h) => {
+      const report = await h.run();
+      h.rs.db.run("DELETE FROM runtime_recovery_attempts WHERE step = 10");
+      expect(() => restampStep(h.rs.db, report.step10AttemptId!, 10, "ok", { entriesLoaded: 0, staleMarked: 0 })).not.toThrow();
+    });
+  });
+
+  test("never restamps a DIFFERENT step's row, even if the id were reused by mistake", async () => {
+    await withHarness(async (h) => {
+      await h.run();
+      const step9 = h.attempts().find((r) => r.step === 9)!;
+      // Look up the real numeric id behind step 9's row and try (wrongly) to restamp it as step 10.
+      const id = (
+        h.rs.db.query<{ id: number }, []>("SELECT id FROM runtime_recovery_attempts WHERE step = 9 AND winter_session_id IS NULL").get()
+      )!.id;
+      restampStep(h.rs.db, id, 10, "ok", { entriesLoaded: 9, staleMarked: 9 });
+      const stillStep9 = h.rs.db.query<{ outcome: string }, [number]>("SELECT outcome FROM runtime_recovery_attempts WHERE id = ?").get(id);
+      expect(stillStep9?.outcome).toBe(step9.outcome); // untouched — the WHERE clause named step 10
     });
   });
 });

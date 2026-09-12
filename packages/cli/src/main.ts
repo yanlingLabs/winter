@@ -1,12 +1,12 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { resolveNormaHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, resolveNormaProfile } from "@norma/core";
+import { resolveNormaHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, runRuntimesProbe, resolveNormaProfile } from "@norma/core";
 import type { Settings } from "@norma/core";
 import { METHODS, type ApprovalPolicy, type Task } from "@norma/protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
 import { NormaClient } from "./client";
-import { checkCodeSession, filterCodeSessions, sessionModeMarker } from "./session-mode";
+import { checkCodeSession, filterCodeSessions, sessionModeMarker, sessionRuntimeMarker } from "./session-mode";
 import { applyEvent, isStalled, type WatchdogState } from "./watchdog";
 import { streamAction } from "./stream-state";
 import { updateSubagents, type CliSubagent } from "./subagent-state";
@@ -43,7 +43,7 @@ import {
   setPluginEnabled,
   stripPluginConsents,
 } from "./plugin-cli";
-import { parseModelArgs, validateEffort, validateModelSlug } from "./model-cli";
+import { parseModelArgs, validateEffort, validateModelSlug, validateAdvisorSlug } from "./model-cli";
 import { formatElapsed, formatTokens } from "./task-display";
 import { formatRoutineDetail } from "./routines-cli";
 import { runAgentsCommand } from "./agents-cli";
@@ -1121,6 +1121,25 @@ if (import.meta.main) {
     process.stdout.write(`${JSON.stringify(result)}\n`);
     process.exit(result.ok ? 0 : 1);
   }
+  // Winter Phase 8d: the compiled-binary runtimes probe (`scripts/verify-runtimes-compiled.ts`) —
+  // same argv[2] shape and the same reasons as `__runtime-state-probe` above. Resolves both runtime
+  // ladders from THIS binary's execPath (the bundle rung is `<dirname(execPath)>/runtimes/…`).
+  //
+  // Whole-branch review Nit 3: `home` used to be `process.env.NORMA_HOME ?? ""` — an unset
+  // NORMA_HOME probed a RELATIVE empty-string home (inert: no rung under it ever resolves, but a
+  // silently wrong answer rather than the CLI's own normal default). `resolveNormaHome()` is the
+  // same "env var or else `~/.norma`" fallback every OTHER command here already uses, and it is
+  // PURE (`process.env.NORMA_HOME ?? join(homedir(), ".norma")`, `norma-dir.ts`) — no directory
+  // creation, no side effect (that's `bootstrapNormaDir`'s separate job) — so calling it here does
+  // NOT touch the user's real home in a test: `scripts/verify-runtimes-compiled.ts` sets
+  // `NORMA_HOME` to a temp dir before spawning this route, so `resolveNormaHome()` returns that
+  // temp dir, never `~/.norma`, exactly as `__runtime-state-probe`'s own neighboring route already
+  // relies on for the identical reason.
+  if (process.argv[2] === "__runtimes-probe") {
+    const result = await runRuntimesProbe({ execPath: process.execPath, home: resolveNormaHome(), env: process.env });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.exit(result.ok ? 0 : 1);
+  }
 
   const argv = process.argv.slice(2);
   const isTTY = !!(process.stdin.isTTY && process.stdout.isTTY);
@@ -1182,7 +1201,7 @@ if (import.meta.main) {
     // session-mode.ts's file doc for why the two surfaces differ).
     const c = await connect("cli-sessions");
     const { sessions } = (await c.listSessions()) as any;
-    for (const s of sessions) console.log(`${AQUA}${s.sessionId}${RESET} ${DIM}${s.scope} · ${s.lastSeq} events${process.stdout.isTTY && s.title ? ` — ${s.title}` : ""}${RESET}${sessionModeMarker(s.mode)}`);
+    for (const s of sessions) console.log(`${AQUA}${s.sessionId}${RESET} ${DIM}${s.scope} · ${s.lastSeq} events${process.stdout.isTTY && s.title ? ` — ${s.title}` : ""}${RESET}${sessionModeMarker(s.mode)}${sessionRuntimeMarker(s.runtimeKind)}`);
     c.close();
     break;
   }
@@ -1214,12 +1233,54 @@ if (import.meta.main) {
     // doctor whose first move is to reach the daemon is useless in exactly the state it exists for.
     // `runtime-state.db` is WAL, so the read-only half runs happily beside a live daemon; every
     // repair refuses while the lock is held, on the same probe `lock.ts` uses.
-    const { diagnoseRuntimeState, repairRuntimeState, isDaemonLockHeld, DAEMON_RUNNING_REFUSAL } = await import("@norma/core");
+    const { diagnoseRuntimeState, repairRuntimeState, isDaemonLockHeld, DAEMON_RUNNING_REFUSAL, diagnoseRuntimes, loadSettings } = await import("@norma/core");
     const home = resolveNormaHome();
     const args = process.argv.slice(3);
     const flag = (name: string): string | undefined => {
       const i = args.indexOf(name);
       return i === -1 ? undefined : args[i + 1];
+    };
+    // Winter Phase 8d (Lane 1 fills `diagnoseRuntimes`; this print needs no change once it does —
+    // brief's own note). READ-ONLY, same posture as `diagnoseRuntimeState` above: a missing/invalid
+    // settings.json must never crash `doctor` — that IS a thing worth diagnosing, not a reason to
+    // refuse diagnosing anything else, so it degrades to `settings: undefined` (the honest "this
+    // daemon's settings are unreadable" input `diagnoseRuntimes` already accepts) rather than
+    // throwing `loadSettings`'s own ENOENT/parse error out of this command entirely.
+    const printRuntimesSection = async (): Promise<void> => {
+      let settings: Settings | undefined;
+      try { settings = loadSettings(join(home, "settings.json")); } catch { settings = undefined; }
+      // Fix round 1 (Minor): `doctor` must NEVER crash — `diagnoseRuntimes` is Lane 1's own code
+      // (a stub today), and a bug or an unanticipated throw in it must degrade to one honest line
+      // rather than take down every OTHER section this command prints (the findings loop above
+      // already ran and printed by the time this executes). Mirrors this function's own settings
+      // guard just above — a diagnostic that can crash the diagnostic tool defeats its own purpose.
+      console.log(`${AQUA}runtimes${RESET}`);
+      let report: Awaited<ReturnType<typeof diagnoseRuntimes>>;
+      try {
+        report = await diagnoseRuntimes({ execPath: process.execPath, home, env: process.env, settings });
+      } catch (err) {
+        console.log(`  ${DIM}unavailable (${err instanceof Error ? err.message : "unknown error"})${RESET}`);
+        return;
+      }
+      const legLine = (label: string, leg: { resolved?: { path: string; source: string }; error?: string; installedWrapper?: string; platformPackage?: string }): void => {
+        if (leg.resolved) {
+          const extras = [
+            leg.installedWrapper ? `wrapper=${leg.installedWrapper}` : null,
+            leg.platformPackage ? `platform=${leg.platformPackage}` : null,
+          ].filter(Boolean).join(" ");
+          console.log(`  ${AQUA}${label}${RESET} ${leg.resolved.path} ${DIM}(${leg.resolved.source})${extras ? ` ${extras}` : ""}${RESET}`);
+        } else {
+          console.log(`  ${AQUA}${label}${RESET} ${DIM}${leg.error ?? "unresolved"}${RESET}`);
+        }
+      };
+      legLine("winter:", report.winter);
+      legLine("claude:", report.claude);
+      if (report.bundle?.versions) {
+        const v = report.bundle.versions;
+        console.log(`  ${AQUA}bundle:${RESET} ${DIM}winterAgentSdk=${v.winterAgentSdk} winterRuntimeSdk=${v.winterRuntimeSdk} officialSdk=${v.officialSdk} claudeCode=${v.claudeCode}${RESET}`);
+      } else if (report.bundle?.error) {
+        console.log(`  ${AQUA}bundle:${RESET} ${DIM}${report.bundle.error}${RESET}`);
+      }
     };
     // `--repair` with nothing after it must reach the usage branch, not silently run a diagnosis.
     const repair = args.includes("--repair") ? (flag("--repair") ?? "") : undefined;
@@ -1227,13 +1288,14 @@ if (import.meta.main) {
       const findings = await diagnoseRuntimeState(home);
       if (findings.length === 0) {
         console.log(`${AQUA}no findings${RESET} ${DIM}(${home})${RESET}`);
-        break;
+      } else {
+        for (const f of findings) {
+          const where = f.winterSessionId ? ` ${f.winterSessionId}` : "";
+          const fix = f.repairable.length ? ` ${DIM}[--repair ${f.repairable.join(" | ")}]${RESET}` : "";
+          console.log(`${AQUA}${f.kind}${RESET}${where} — ${f.detail}${fix}`);
+        }
       }
-      for (const f of findings) {
-        const where = f.winterSessionId ? ` ${f.winterSessionId}` : "";
-        const fix = f.repairable.length ? ` ${DIM}[--repair ${f.repairable.join(" | ")}]${RESET}` : "";
-        console.log(`${AQUA}${f.kind}${RESET}${where} — ${f.detail}${fix}`);
-      }
+      await printRuntimesSection();
       break;
     }
     const session = flag("--session");
@@ -1836,7 +1898,7 @@ if (import.meta.main) {
     // "changing models must NOT require a daemon restart") is that a running daemon picks the
     // new value up on its NEXT turn via providers/manager.ts's live model resolver — no restart,
     // no RPC round-trip needed here at all.
-    const { loadSettings, saveSettings, resolveNormaHome, setProviderModel, setReasoningEffort, CODEX_MODELS } = await import("@norma/core");
+    const { loadSettings, saveSettings, resolveNormaHome, setProviderModel, setReasoningEffort, setAdvisorModel, CODEX_MODELS } = await import("@norma/core");
     const settingsPath = join(resolveNormaHome(), "settings.json");
     const settings = loadSettings(settingsPath);
     const action = parseModelArgs(process.argv.slice(3));
@@ -1856,6 +1918,24 @@ if (import.meta.main) {
           console.log(`  ${active ? `${AQUA}*${RESET}` : " "} ${m.id}`);
         }
       }
+      // Winter Phase 8d (P8d-8, Task 4.3): the D30 advisor line — "auto" is the honest label for
+      // an unset override (the router applies its own per-family default, never a slug this CLI
+      // invents), mirroring `norma model --advisor auto`'s own clearing spelling.
+      console.log(`${DIM}advisor: ${settings.runtimes?.advisorModel ?? "auto"}${RESET}`);
+      process.exit(0);
+    }
+
+    // Winter Phase 8d (P8d-8, Task 4.3): the advisor override is its OWN standalone write —
+    // never combined with a model/effort change in the same invocation (`parseModelArgs`'s own
+    // doc), so it short-circuits before the model/effort branches below ever run.
+    if (action.kind === "setAdvisor" || action.kind === "clearAdvisor") {
+      if (action.kind === "setAdvisor") {
+        const err = validateAdvisorSlug(action.slug);
+        if (err) { console.error(err); process.exit(1); }
+      }
+      const next = setAdvisorModel(settings, action.kind === "setAdvisor" ? action.slug : undefined);
+      saveSettings(settingsPath, next);
+      console.log(`${AQUA}updated${RESET} ${DIM}(advisor ${next.runtimes?.advisorModel ?? "auto"}) — takes effect next turn, no daemon restart needed${RESET}`);
       process.exit(0);
     }
 

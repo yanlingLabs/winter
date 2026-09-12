@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   CanUseTool, EffortLevel, McpServerConfig, Options, PermissionMode, ProviderConnectionConfig, SandboxSettingsConfig, SpawnClaudeCodeProcess,
@@ -198,6 +199,17 @@ export interface WinterOptionsInput {
    * whether to build one; this builder never constructs `SessionHooksDeps` itself.
    */
   hooks?: Options["hooks"];
+  /**
+   * P8d-8 (D30): the WINTER leg's own advisor target model, ALREADY RESOLVED by the caller
+   * (`session-driver.ts`'s `optionsFor`, from `winterOptionsFromSettings(settings()).advisorModel ??
+   * d30DefaultModel(model)` — a LIVE read at every incarnation, never a boot snapshot). Set verbatim
+   * onto `Options.advisor.model`, which the SDK's own doc says "wins over its own settings.advisor.model"
+   * — so this is Norma's deterministic 8d workaround for the M5 gap (`advisor-reviewer.ts`'s own
+   * header), never conditional on whether `runtimes.advisorModel` itself is set. Absent only when the
+   * session has no model at all yet (`d30DefaultModel` falls through to the caller's `model`, itself
+   * possibly `undefined`) — in which case no `advisor` key is set and the child's own default applies.
+   */
+  advisorModel?: string;
 }
 
 /**
@@ -278,6 +290,22 @@ export function buildChildEnv(input: WinterOptionsInput): Record<string, string>
  */
 export function controlPlaneDenyRules(home: string): string[] {
   const writeTools = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
+  // P8d-12 (WS-16 §10): the official leg's own SDK-parent staging root — `claude-resume-<uuid>`
+  // directories the Claude Agent SDK stages a cross-generation resume payload under, directly in
+  // the SYSTEM temp dir (never under `home`, which is why this rule anchors at `tmpdir()` rather
+  // than joining `home` the way every other rule here does). Nothing on either leg may read OR
+  // write another generation's — or another session's — staged resume payload: the official SDK's
+  // own process boundary does not fence that off from a child it spawns, and a resume payload can
+  // carry provider-native state as sensitive as anything under `<home>/runtimes`. The literal
+  // `claude-resume-` prefix is repeated (not imported) in `runtime-state/recovery.ts`'s step 8 scan
+  // — the two live in different subsystems this phase does not bridge with a shared constant, and
+  // each names the other in its own comment so a rename cannot drift silently.
+  //
+  // The mid-segment `*` is a real glob wildcard on the pinned SDK's own matcher, not a literal
+  // asterisk: `packages/runtime/src/permissions/paths.ts`'s `globSegmentToRegexBody` compiles a
+  // mid-segment `*` to `[^/]*`, so `claude-resume-*` matches every `claude-resume-<uuid>` name and
+  // nothing else — recorded so this form is not re-investigated.
+  const claudeResumeStaging = fsRootAnchored([join(tmpdir(), "claude-resume-*"), "**"].join("/"));
   const targets = [
     // Any project's control-plane files, at any depth — the project-INDEPENDENT invariant
     // (`controlPlaneFileTarget`'s own doc: "the agent must NEVER write ANY
@@ -287,11 +315,16 @@ export function controlPlaneDenyRules(home: string): string[] {
     ...[...CONTROL_PLANE_FILENAMES].sort().map((f) => fsRootAnchored(join(home, f))),
     // The daemon's control plane: sockets, pid files, the runtime state db.
     fsRootAnchored([join(home, "run"), "**"].join("/")),
+    claudeResumeStaging,
   ];
   // Task 17: the engine's read tool denied `<home>/run` and `<home>/runtimes` (the runtime store,
   // 8a's model-denied directory); the Winter leg's read-class tools carry the same two denials.
   const readTools = ["Read", "Glob", "Grep"];
-  const readTargets = [fsRootAnchored([join(home, "run"), "**"].join("/")), fsRootAnchored([join(home, "runtimes"), "**"].join("/"))];
+  const readTargets = [
+    fsRootAnchored([join(home, "run"), "**"].join("/")),
+    fsRootAnchored([join(home, "runtimes"), "**"].join("/")),
+    claudeResumeStaging,
+  ];
   return [...writeTools.flatMap((t) => targets.map((p) => `${t}(${p})`)), ...readTools.flatMap((t) => readTargets.map((p) => `${t}(${p})`))];
 }
 
@@ -410,6 +443,7 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
   if (input.outputStyle !== undefined) options.outputStyle = input.outputStyle;
   if (input.policy === "bypass") options.allowDangerouslySkipPermissions = true;
   if (input.hooks !== undefined) options.hooks = input.hooks;
+  if (input.advisorModel !== undefined) options.advisor = { model: input.advisorModel };
   const provider = providerSelectionFor(input.model, input.credentials);
   if (provider) options.provider = input.connection === undefined ? provider : { ...provider, connection: input.connection };
   // P8b-36: the session's own servers, spread under their own names (see `capabilities` above).

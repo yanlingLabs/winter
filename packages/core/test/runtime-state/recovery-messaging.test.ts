@@ -128,6 +128,10 @@ describe("recovery step 10 — directory.recover() over the 8a store", () => {
           store,
           self: { pid: process.pid, startedAt: processStartedAt(process.pid) },
           tempScanRoot: join(home, "tmp-scan"),
+          // Major 1: this file calls `recoverRuntimeState` directly (not through
+          // `startRuntimeState`), so `support.ts`'s env seam is never consulted here — name the
+          // root explicitly or this sweeps the developer's real tmpdir.
+          claudeResumeScanRoot: join(home, "claude-resume-scan"),
           hooks: { recoverDirectory: () => sdk.directory.recover() },
         });
 
@@ -184,6 +188,7 @@ describe("recovery step 10 — directory.recover() over the 8a store", () => {
           home, rs, store,
           self: { pid: process.pid, startedAt: processStartedAt(process.pid) },
           tempScanRoot: join(home, "tmp-scan"),
+          claudeResumeScanRoot: join(home, "claude-resume-scan"),
         });
         const step10 = report.steps.find((s) => s.step === 10);
         expect(step10?.outcome).toBe("skipped");

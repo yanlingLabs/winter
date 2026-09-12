@@ -45,19 +45,28 @@ bun src/main.ts                      # interactive TUI (Ink)
 # "Norma Dev" cannot self-spawn a daemon; start the dev daemon below FIRST or the orb shows
 # disconnected.
 NORMA_HOME=~/.norma-dev NORMA_PROFILE=dev bun src/main.ts daemon run   # dev daemon (or: norma-dev daemon run)
-# THIRD TRAP (Winter Phase 8b, until 8d's bundle drop): every session runs as a spawned `winter` child, and
-# a dev daemon resolves that binary from `settings.runtimes.winterExecutable` → `$NORMA_WINTER_EXECUTABLE` →
-# `<dirname(execPath)>/winter` → `<NORMA_HOME>/runtimes/bin/winter` — a dev run has none of the last two, so
-# build one (`bun run build:winter` → dist/winter, from the ../winter-agent-sdk checkout at the pinned tag)
-# and point the daemon at it, or EVERY session.create/session.dispatch refuses typed (winter_executable_unavailable):
+# THIRD TRAP (Winter Phase 8b; bundle layout as of 8d): every session runs as a spawned `winter`
+# child, and DEBUG BUILDS NEVER EMBED EITHER RUNTIME (dev/dist split, CLAUDE.md's own Hard Rules) —
+# only a RELEASE build embeds both under `Contents/Resources/runtimes/{winter,claude-official/*}`
+# (project.yml's "Embed runtimes" postCompileScript, `scripts/embed-runtimes.sh`). A dev daemon
+# resolves winter from `settings.runtimes.winterExecutable` → `$NORMA_WINTER_EXECUTABLE` →
+# `<dirname(execPath)>/runtimes/winter` (never reachable in Debug) → `<NORMA_HOME>/runtimes/bin/winter`
+# — a dev run has none of these, so build one (`bun run build:winter` → dist/winter, from the
+# ../winter-agent-sdk checkout at the pinned tag) and point the daemon at it, or EVERY
+# session.create/session.dispatch refuses typed (winter_executable_unavailable):
 NORMA_WINTER_EXECUTABLE="$PWD/../../dist/winter" NORMA_HOME=~/.norma-dev NORMA_PROFILE=dev bun src/main.ts daemon run
 # (or set `runtimes.winterExecutable` in ~/.norma-dev/settings.json). FIRST RUN AFTER A REBUILD: the ad-hoc-signed dist/winter
 # reads Norma's Keychain items itself, so macOS shows ONE consent dialog per credential item — click "Always Allow" or the
-# turn stalls until the CLI's 180 s watchdog aborts it. Credentials are JSON "material" records (`openai:default`,
+# turn stalls until the CLI's 180 s watchdog aborts it. `bun run build:winter --sign <identity>` (or env
+# `NORMA_WINTER_SIGN_IDENTITY`; `-` for an ad-hoc-but-STABLE identity works too) re-signs the freshly built
+# binary with a fixed `--identifier com.norma.winter`, so the Keychain ACL survives rebuilds instead of
+# re-prompting every time (P8d-14). Credentials are JSON "material" records (`openai:default`,
 # `codex-oauth:default`; see packages/core/src/auth/credential-material.ts) — the raw legacy records are migrated at boot.
-# FOURTH TRAP (Phase 8c): a Code session on a Claude catalog model routes to the OFFICIAL leg, which needs (1) the Claude
-# platform runtime — `bun install` fetches `@anthropic-ai/claude-agent-sdk-darwin-arm64`; the ladder is `runtimes.claudeExecutable`
-# → `$NORMA_CLAUDE_EXECUTABLE` → `<dirname(execPath)>/claude` → node_modules — and (2) an Anthropic API key material
+# FOURTH TRAP (Phase 8c; bundle layout as of 8d): a Code session on a Claude catalog model routes to the OFFICIAL leg,
+# which needs (1) the Claude platform runtime — `bun install` fetches `@anthropic-ai/claude-agent-sdk-darwin-arm64`;
+# the ladder is `runtimes.claudeExecutable` → `$NORMA_CLAUDE_EXECUTABLE` → `<dirname(execPath)>/runtimes/claude-official/claude`
+# (Release only; also gated on a `VERSIONS.json` staged beside it matching this build's pins — a mismatched pair refuses
+# typed even though the binary itself exists) → node_modules (dev only) — and (2) an Anthropic API key material
 # (`norma login --anthropic-key`); without either the session refuses typed (`claude_executable_unavailable` /
 # `runtime_selection_refused`). Winter-leg sessions are unaffected. Cross-runtime handoff via `session.setModel` is fenced
 # by `runtimes.handoff.crossRuntime` (default false).

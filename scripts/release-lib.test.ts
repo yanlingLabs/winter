@@ -5,12 +5,16 @@ import {
   caskFrom,
   catalogueStaleness,
   dmgStagePlan,
+  embeddedRuntimesDescriptionLine,
   NAME_SCAN_EXCLUSIONS,
   nameScanPlan,
   preflight,
   publishGuard,
   resolveSigningIdentity,
+  row16ProvenanceCheck,
+  verifyVersionsJsonAgainstPins,
 } from "./release-lib";
+import { REQUIRED_CLAUDE_AGENT_SDK, REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../packages/core/src/runtime-sdk/versions";
 
 describe("preflight", () => {
   test("every check passing -> ok with no failures", () => {
@@ -80,6 +84,60 @@ describe("appcastItem", () => {
     expect(xml).toContain(base.zipName);
     expect(xml).toContain("<item>");
     expect(xml).toContain("</item>");
+  });
+
+  test("no description given (existing callers) -> no <description> element at all", () => {
+    const xml = appcastItem({ ...base, beta: false });
+    expect(xml).not.toContain("<description>");
+  });
+
+  test("P8d-2: an optional description renders as a CDATA-wrapped standard <description> element", () => {
+    const xml = appcastItem({ ...base, beta: false, description: "Winter agent SDK 0.0.4 · Claude Agent SDK 0.3.250" });
+    expect(xml).toContain("<description><![CDATA[Winter agent SDK 0.0.4 · Claude Agent SDK 0.3.250]]></description>");
+  });
+});
+
+describe("embeddedRuntimesDescriptionLine (P8d-2)", () => {
+  test("names both pinned SDK versions", () => {
+    expect(embeddedRuntimesDescriptionLine({ winterAgentSdk: REQUIRED_WINTER_AGENT_SDK, officialSdk: REQUIRED_CLAUDE_AGENT_SDK })).toBe(
+      `Winter agent SDK ${REQUIRED_WINTER_AGENT_SDK} · Claude Agent SDK ${REQUIRED_CLAUDE_AGENT_SDK}`,
+    );
+  });
+});
+
+describe("verifyVersionsJsonAgainstPins (P8d-2's claude gate, pure half)", () => {
+  const sha = "a".repeat(64);
+  const goodVersionsJson = JSON.stringify({
+    schema: 1,
+    winterAgentSdk: REQUIRED_WINTER_AGENT_SDK,
+    winterRuntimeSdk: REQUIRED_WINTER_RUNTIME_SDK,
+    officialSdk: REQUIRED_CLAUDE_AGENT_SDK,
+    claudeCode: "2.1.250",
+    checksums: { winterPreSign: sha, claude: sha },
+    stagedAt: "2026-09-12T00:00:00Z",
+  });
+
+  test("a valid record whose recorded claude checksum matches the actual binary -> ok", () => {
+    const r = verifyVersionsJsonAgainstPins({ versionsJsonText: goodVersionsJson, claudeSha256: sha });
+    expect(r.ok).toBe(true);
+    expect(r.failures).toEqual([]);
+    expect(r.versions?.officialSdk).toBe(REQUIRED_CLAUDE_AGENT_SDK);
+  });
+
+  test("a checksum mismatch fails, names both hashes, but still returns the parsed record", () => {
+    const wrongSha = "b".repeat(64);
+    const r = verifyVersionsJsonAgainstPins({ versionsJsonText: goodVersionsJson, claudeSha256: wrongSha });
+    expect(r.ok).toBe(false);
+    expect(r.failures[0]).toContain(sha);
+    expect(r.failures[0]).toContain(wrongSha);
+    expect(r.versions).toBeDefined();
+  });
+
+  test("unparseable or pin-mismatched VERSIONS.json fails via the SAME gate the executable ladder uses, versions omitted", () => {
+    const r = verifyVersionsJsonAgainstPins({ versionsJsonText: "{not json", claudeSha256: sha });
+    expect(r.ok).toBe(false);
+    expect(r.versions).toBeUndefined();
+    expect(r.failures[0]).toContain("VERSIONS.json");
   });
 });
 
@@ -494,5 +552,54 @@ describe("catalogueStaleness (T2 review M2 — warn-only nudge in the release pi
     const r = catalogueStaleness({ verified: "soon", now: new Date("2026-09-01T00:00:00Z") });
     expect(r.stale).toBe(true);
     expect(r.line).toContain("not a parseable date");
+  });
+});
+
+describe("row16ProvenanceCheck (P8d-26: provenance, never rebuild-hash equality)", () => {
+  test("a successful rebuild whose hash DIFFERS from the staged build's does NOT fail — bun compiles are not byte-reproducible", () => {
+    const r = row16ProvenanceCheck({
+      rebuildSucceeded: true,
+      freshHash: "a".repeat(64),
+      recordedHash: "b".repeat(64),
+    });
+    expect(r.ok).toBe(true);
+    expect(r.failure).toBeUndefined();
+    expect(r.record.hashesMatch).toBe(false);
+    expect(r.record.freshHash).toBe("a".repeat(64));
+    expect(r.record.recordedHash).toBe("b".repeat(64));
+  });
+
+  test("a successful rebuild whose hash MATCHES is also ok, and reports hashesMatch: true", () => {
+    const same = "c".repeat(64);
+    const r = row16ProvenanceCheck({ rebuildSucceeded: true, freshHash: same, recordedHash: same });
+    expect(r.ok).toBe(true);
+    expect(r.record.hashesMatch).toBe(true);
+  });
+
+  test("a failed rebuild (e.g. the checkout is at the wrong tag — buildWinter's own checkoutIsAtTag gate) FAILS, naming the reason", () => {
+    const r = row16ProvenanceCheck({
+      rebuildSucceeded: false,
+      rebuildError: "build-winter: /checkout's HEAD carries 'v0.0.3', not v0.0.4; check out the pinned tag",
+      recordedHash: "d".repeat(64),
+    });
+    expect(r.ok).toBe(false);
+    expect(r.failure).toContain("v0.0.3");
+    expect(r.failure).toContain("not v0.0.4");
+    expect(r.record.rebuildSucceeded).toBe(false);
+    expect(r.record.freshHash).toBeUndefined();
+    expect(r.record.hashesMatch).toBeUndefined();
+  });
+
+  test("a failed rebuild with no error message still fails, with a fallback reason rather than 'undefined'", () => {
+    const r = row16ProvenanceCheck({ rebuildSucceeded: false, recordedHash: "e".repeat(64) });
+    expect(r.ok).toBe(false);
+    expect(r.failure).toContain("unknown reason");
+  });
+
+  test("the record always carries recordedHash, whether the rebuild succeeded or failed", () => {
+    const ok = row16ProvenanceCheck({ rebuildSucceeded: true, freshHash: "f".repeat(64), recordedHash: "g".repeat(64) });
+    const failed = row16ProvenanceCheck({ rebuildSucceeded: false, rebuildError: "boom", recordedHash: "g".repeat(64) });
+    expect(ok.record.recordedHash).toBe("g".repeat(64));
+    expect(failed.record.recordedHash).toBe("g".repeat(64));
   });
 });

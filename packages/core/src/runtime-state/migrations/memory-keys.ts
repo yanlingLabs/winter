@@ -251,7 +251,19 @@ export interface MemoryKeyRollbackFailure {
   reason: "target-exists";
 }
 
-interface ManifestRow { old_key: string; entry: string; new_key: string; status: string; record_ids: string }
+interface ManifestRow {
+  old_key: string;
+  entry: string;
+  new_key: string;
+  status: string;
+  record_ids: string;
+  /** P8d-13's schema v6 column, selected ONLY where an `undoing` row's resting state matters (the
+   *  boot repair's own undoing-row query). `undefined` for any row that predates the column (there
+   *  are none in production — `undoing` itself shipped in this same branch's schema v4 — but a
+   *  replayed migration fixture can still produce one) and is read as `"planned"`, which is
+   *  `undoEntries`' own historical behaviour. See `finishUndo`. */
+  undo_target?: string | null;
+}
 
 /** The records a pair was derived from, as the manifest stored them. Tolerant of anything that is
  *  not a JSON array of strings: a row that cannot say whose records it owns owns none. */
@@ -376,6 +388,11 @@ export function planMemoryKeyMigration(deps: {
     plan.declined = "memory-directory-override";
     return plan;
   }
+
+  // (b) — whole-branch review NEW-4(b): drop any `rolled-back` row whose entry has vanished from
+  // both ends BEFORE anything else runs, so a shrunk entry set from an earlier rollback can never
+  // trip `apply`'s stale-row pre-check on a re-plan. See `pruneVanishedRollbacks`'s own doc comment.
+  pruneVanishedRollbacks(rs, fs, home);
 
   // FIRST, before anything is derived from a record: a previous run may have died between a rename
   // and its commit, and the records it left behind still name the old key. Settling those here is
@@ -608,8 +625,16 @@ function reconcileManifest(rs: RuntimeStateDb, home: string, fs: MemoryKeyFs, re
   // NARRATED (re-review NEW-13): this is the one operation the repair performs on somebody's files,
   // and a completed undo used to contribute nothing to the return value — a directory under the
   // user's `projects/` was renamed at boot with no line in the log. Each rename-back says so.
-  for (const row of rs.db.query(`SELECT old_key, entry, new_key, status, record_ids FROM memory_key_manifest WHERE status = 'undoing' ORDER BY old_key, entry`).all() as ManifestRow[]) {
-    const outcome = finishUndo(rs, records, fs, home, row.old_key, row.new_key, row.entry);
+  for (const row of rs.db
+    .query(`SELECT old_key, entry, new_key, status, record_ids, undo_target FROM memory_key_manifest WHERE status = 'undoing' ORDER BY old_key, entry`)
+    .all() as ManifestRow[]) {
+    // a′ (P8d-11's rollback-door ruling): `undo_target` says which caller declared this undo — a
+    // NULL/legacy row (every row `undoEntries` ever wrote before this column existed) means
+    // "planned", `undoEntries`' own historical resting state; `rollbackMemoryKeyMigration` writes
+    // `'rolled-back'` so a rollback interrupted mid-flight still settles as a completed rollback,
+    // never as a project silently re-armed for the next `apply`.
+    const restingStatus: "planned" | "rolled-back" = row.undo_target === "rolled-back" ? "rolled-back" : "planned";
+    const outcome = finishUndo(rs, records, fs, home, row.old_key, row.new_key, row.entry, restingStatus);
     if (outcome === "renamed-back") log?.(`memory-key repair: finished an undo a previous run left in flight — moved projects/${row.new_key}/${row.entry} back to projects/${row.old_key}/${row.entry}`);
   }
 
@@ -817,21 +842,30 @@ function undoEntries(
   // repair agreeing, rather than a window where the map says relocated and the tree is not.
   rs.transaction(() => {
     for (const entry of entries) {
+      // `undo_target = 'planned'`, explicit rather than relying on the column's NULL default: this
+      // caller's own resting state has always been `planned` (an aborted forward move goes back to
+      // being re-planned), and a caller that says so plainly needs no default at all.
       rs.db.run(
-        `UPDATE memory_key_manifest SET status = 'undoing' WHERE old_key = ? AND entry = ? AND new_key = ? AND status = 'moved'`,
+        `UPDATE memory_key_manifest SET status = 'undoing', undo_target = 'planned' WHERE old_key = ? AND entry = ? AND new_key = ? AND status = 'moved'`,
         [move.oldKey, entry, move.newKey],
       );
     }
     syncRecordKey(rs, records, move.oldKey);
   }, { mode: "immediate" });
 
-  for (const entry of entries) finishUndo(rs, records, fs, home, move.oldKey, move.newKey, entry);
+  for (const entry of entries) finishUndo(rs, records, fs, home, move.oldKey, move.newKey, entry, "planned");
 }
 
 /**
- * Carry ONE `undoing` entry to rest — from `undoEntries` immediately, or from the boot repair after
- * a crash in between. Idempotent by construction: every branch is decided by where the entry
- * actually IS, never by how it got there.
+ * Carry ONE `undoing` entry to rest — from `undoEntries` immediately, from
+ * `rollbackMemoryKeyMigration` immediately, or from the boot repair after a crash in either. Every
+ * branch is decided by where the entry actually IS, never by how it got there — the ONE thing a
+ * caller supplies is `restingStatus`, where the entry lands when the undo can be considered
+ * complete: `undoEntries`' own aborted-forward-move always passes `"planned"`; a full user-directed
+ * rollback (a′, P8d-11's ruling) passes `"rolled-back"`, so a rollback interrupted mid-flight still
+ * finishes AS a rollback rather than quietly re-arming the project for the next `apply` — the
+ * rollback completes, and whatever `runtimes.migrations.memoryKeys` is set to is left exactly as the
+ * user set it; this operation only ever moves files and manifest rows, never that flag.
  */
 function finishUndo(
   rs: RuntimeStateDb,
@@ -841,36 +875,46 @@ function finishUndo(
   oldKey: string,
   newKey: string,
   entry: string,
+  restingStatus: "planned" | "rolled-back",
 ): "renamed-back" | "settled" | "left-undoing" {
   const back = entryPath(home, oldKey, entry);
   const at = entryPath(home, newKey, entry);
-  let settled: "planned" | "moved" | undefined;
+  let settled: "resting" | "moved" | undefined;
   let renamed = false;
   try {
     if (fs.existsSync(back)) {
       // Already home — either this call's rename landed and its commit did not, or a hand-undo.
-      settled = fs.existsSync(at) ? "moved" : "planned";
+      settled = fs.existsSync(at) ? "moved" : "resting";
     } else if (fs.existsSync(at)) {
       fs.mkdirSync(projectDir(home, oldKey), { recursive: true });
       fs.renameSync(at, back);
       renamed = true;
-      settled = "planned";
+      settled = "resting";
     } else {
-      // At neither end: the entry is gone. `planned` is the honest resting state — `apply` moves
-      // only entries that exist at the source, so this row asks for nothing until one reappears.
-      settled = "planned";
+      // At neither end: the entry is gone. The RESTING status is the honest state either way —
+      // `apply` moves only entries that exist at the source, so a `planned` row asks for nothing
+      // until one reappears, and a `rolled-back` row simply describes a rollback of an entry that
+      // is no longer anywhere to be found (task 2.1's `pruneVanishedRollbacks` is what eventually
+      // clears such a row, not this function).
+      settled = "resting";
     }
   } catch {
     return "left-undoing"; // the next boot's repair tries again rather than recording a guess
   }
   // BOTH ends occupied is the one shape the undo cannot complete: something re-took the old name
   // while the entry sat at the new key. The row goes back to `moved`, which is where the entry
-  // really is, so the live map and the records describe the disk rather than an intention.
+  // really is, so the live map and the records describe the disk rather than an intention —
+  // regardless of which caller declared this undo, `moved` is never a caller's own resting status.
   rs.transaction(() => {
     if (settled === "moved") {
       rs.db.run(`UPDATE memory_key_manifest SET status = 'moved' WHERE old_key = ? AND entry = ? AND new_key = ? AND status = 'undoing'`, [oldKey, entry, newKey]);
-    } else {
+    } else if (restingStatus === "planned") {
       rs.db.run(`UPDATE memory_key_manifest SET status = 'planned', moved_at = NULL WHERE old_key = ? AND entry = ? AND new_key = ? AND status = 'undoing'`, [oldKey, entry, newKey]);
+    } else {
+      // `rolled-back` rows keep `moved_at` — the ORIGINAL rollback door's own convention (it never
+      // clears the field either): the timestamp still answers "when was this actually moved",
+      // which a rollback does not erase, only reverse.
+      rs.db.run(`UPDATE memory_key_manifest SET status = 'rolled-back' WHERE old_key = ? AND entry = ? AND new_key = ? AND status = 'undoing'`, [oldKey, entry, newKey]);
     }
     syncRecordKey(rs, records, oldKey);
   }, { mode: "immediate" });
@@ -904,28 +948,46 @@ export function rollbackMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: str
   for (const row of rows) {
     const source = entryPath(home, row.new_key, row.entry);
     const target = entryPath(home, row.old_key, row.entry);
-    if (fs.existsSync(source)) {
-      // A rollback is an undo under pressure. One blocked entry must not deny every other entry its
-      // restore — and it must not throw halfway through either, which would leave some back and some
-      // forward with no report of which. So it is COLLECTED, and this row is left entirely alone:
-      // file, record and manifest all stay `moved`, ready to retry once the obstruction is cleared.
-      // (`apply` refuses up front instead, because a move can still be declined; by the time rollback
-      // runs the entries have already been moved.)
-      if (fs.existsSync(target)) {
-        failures.push({ oldKey: row.old_key, newKey: row.new_key, entry: row.entry, reason: "target-exists" });
-        continue;
-      }
-      fs.mkdirSync(projectDir(home, row.old_key), { recursive: true });
-      fs.renameSync(source, target);
-    } else if (!fs.existsSync(target)) {
+    // A rollback is an undo under pressure. One blocked entry must not deny every other entry its
+    // restore. So a collision is COLLECTED and this row is left entirely alone: file, record and
+    // manifest all stay `moved`, ready to retry once the obstruction is cleared. (`apply` refuses up
+    // front instead, because a move can still be declined; by the time rollback runs the entries
+    // have already been moved.)
+    if (fs.existsSync(source) && fs.existsSync(target)) {
+      failures.push({ oldKey: row.old_key, newKey: row.new_key, entry: row.entry, reason: "target-exists" });
       continue;
     }
+    // Neither end holds the entry any more — nothing to roll back (it was deleted after the
+    // migration moved it). The row stays `moved`, describing the last place it truthfully was;
+    // `planMemoryKeyMigration`'s `pruneVanishedRollbacks` is scoped to `rolled-back` rows only, so
+    // this one is left for an operator to notice, not silently reclassified.
+    if (!fs.existsSync(source) && !fs.existsSync(target)) continue;
+
+    // a′ (P8d-11's own ruling — the rollback door's torn window). This used to rename first and
+    // commit `rolled-back` second, exactly the shape `undoEntries` above was fixed for (re-review
+    // NEW-8): a crash in between left the entry at the OLD key with a row still saying `moved`,
+    // which nothing reads as anything but "still there" (`rollback` itself only reads `moved`; the
+    // boot repair only reads `undoing`). Declaring the direction FIRST makes this window repairable
+    // by the SAME `finishUndo` the forward apply's own race window uses, with `undo_target =
+    // 'rolled-back'` so a resumed rollback settles to `rolled-back` — never `undoEntries`' own
+    // `planned` — and the ruling this ships with: the rollback completes, and
+    // `runtimes.migrations.memoryKeys` is left exactly as the user set it (this operation only ever
+    // moves files and manifest rows, never that flag; whether the NEXT boot re-plans a `rolled-back`
+    // row is entirely up to whatever the flag says then, same as any other boot).
     rs.transaction(() => {
-      rs.db.run(`UPDATE memory_key_manifest SET status = 'rolled-back' WHERE old_key = ? AND entry = ? AND status = 'moved'`, [row.old_key, row.entry]);
-      // Back where the records say it is, in the same transaction and for the same reason `apply`
-      // re-keys forward.
+      rs.db.run(
+        `UPDATE memory_key_manifest SET status = 'undoing', undo_target = 'rolled-back' WHERE old_key = ? AND entry = ? AND new_key = ? AND status = 'moved'`,
+        [row.old_key, row.entry, row.new_key],
+      );
       syncRecordKey(rs, records, row.old_key);
     }, { mode: "immediate" });
+
+    const outcome = finishUndo(rs, records, fs, home, row.old_key, row.new_key, row.entry, "rolled-back");
+    // An I/O failure mid-rename (never reachable through the two `fs.existsSync` checks above,
+    // which only test presence) leaves the row `undoing` for the next boot's repair to retry — not
+    // a `target-exists` collision, so it is not reported in `failures`; a leftover `undoing` row is
+    // now itself a fact `norma doctor`'s `memory-keys-migration` finding can surface.
+    if (outcome === "left-undoing") continue;
     touched.add(row.new_key);
     rolledBack += 1;
   }
@@ -939,4 +1001,38 @@ export function rollbackMemoryKeyMigration(deps: { rs: RuntimeStateDb; home: str
     }
   }
   return { rolledBack, failures };
+}
+
+/**
+ * (b) — whole-branch review NEW-4(b): a re-plan after a rollback whose entry set has SHRUNK (an
+ * entry was rolled back and then deleted by hand, or never recreated) must not leave a `rolled-back`
+ * row behind for it. `applyMemoryKeyMigration`'s stale-row pre-check reads EVERY row for an old key
+ * it is about to move, and a `rolled-back` row is not one of the three statuses it tolerates
+ * (`planned`/`moved`/`undoing`) — so one leftover row denied the WHOLE project's migration, on every
+ * retry, forever. Only `rolled-back` rows are dropped, and only when the entry is gone from BOTH
+ * ends: a `planned`/`moved`/`undoing` row for a missing entry is evidence something else is wrong
+ * and stays for an operator to see (or for `finishUndo`/the boot repair to settle), but a
+ * `rolled-back` row is CLOSED history the moment the entry it describes is gone everywhere — nothing
+ * can ever roll it forward or back again.
+ *
+ * Called from `planMemoryKeyMigration`, BEFORE `apply` ever sees these rows.
+ */
+function pruneVanishedRollbacks(rs: RuntimeStateDb, fs: MemoryKeyFs, home: string): void {
+  const oldKeys = (rs.db.query(`SELECT DISTINCT old_key FROM memory_key_manifest WHERE status = 'rolled-back'`).all() as Array<{ old_key: string }>).map(
+    (r) => r.old_key,
+  );
+  if (oldKeys.length === 0) return;
+  rs.transaction(() => {
+    for (const oldKey of oldKeys) {
+      const onOldSide = new Set(entriesUnder(fs, home, oldKey));
+      for (const row of manifestRowsFor(rs, oldKey)) {
+        if (row.status !== "rolled-back" || onOldSide.has(row.entry)) continue;
+        // Gone from the old side (where a rollback puts an entry) — confirm it is not ALSO sitting
+        // at the new key before deleting the only record of where it used to live; the new-side
+        // check is what keeps this from ever discarding a row that is merely mid-flight.
+        if (fs.existsSync(entryPath(home, row.new_key, row.entry))) continue;
+        rs.db.run(`DELETE FROM memory_key_manifest WHERE old_key = ? AND entry = ? AND status = 'rolled-back'`, [row.old_key, row.entry]);
+      }
+    }
+  }, { mode: "immediate" });
 }

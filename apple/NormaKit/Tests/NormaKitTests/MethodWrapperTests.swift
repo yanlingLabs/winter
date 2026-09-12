@@ -146,6 +146,43 @@ final class MethodWrapperTests: XCTestCase {
         )
     }
 
+    /// Winter Phase 8d (Task 4.2, Interfaces block): `setModel`'s new `confirmLossy` parameter —
+    /// defaulted `false` (an unconfirmed call — the daemon refuses a lossy switch typed rather than
+    /// performing it), and the confirm sheet's "Switch anyway" resend passes `true`. ALWAYS sent as
+    /// an explicit key (never omitted), unlike `model`'s presence/null distinction above.
+    func testSetModelEncodesConfirmLossy() async throws {
+        let (client, t) = try await connected()
+
+        let (defaultReq, _) = try await roundTrip(t, sentIndex: 1, result: #"{}"#) {
+            try await client.setModel(sessionId: "s_1", model: "claude-opus-5")
+        }
+        XCTAssertEqual((defaultReq["params"] as? [String: Any])?["confirmLossy"] as? Bool, false,
+                       "omitting the argument must still send confirmLossy:false explicitly")
+
+        let (confirmedReq, _) = try await roundTrip(t, sentIndex: 2, result: #"{}"#) {
+            try await client.setModel(sessionId: "s_1", model: "claude-opus-5", confirmLossy: true)
+        }
+        XCTAssertEqual((confirmedReq["params"] as? [String: Any])?["confirmLossy"] as? Bool, true,
+                       "the confirm sheet's resend must set confirmLossy:true")
+    }
+
+    /// Winter Phase 8d (Task 4.2): `listSessions()` threads `runtimeKind`/`providerId` through —
+    /// present when the daemon's record carries them, `nil` when absent (an older daemon, an
+    /// engine-era row, or a record-less session), independently of each other.
+    func testListSessionsDecodesRuntimeKindAndProviderId() async throws {
+        let (client, t) = try await connected()
+        let (_, sessions) = try await roundTrip(
+            t, sentIndex: 1,
+            result: #"{"sessions":[{"sessionId":"s_1","scope":"global","createdAt":5,"lastSeq":9,"runtimeKind":"claude-agent","providerId":"anthropic"},{"sessionId":"s_2","scope":"global","createdAt":6,"lastSeq":1}]}"#
+        ) {
+            try await client.listSessions()
+        }
+        XCTAssertEqual(sessions[0].runtimeKind, "claude-agent")
+        XCTAssertEqual(sessions[0].providerId, "anthropic")
+        XCTAssertNil(sessions[1].runtimeKind, "absent on the wire decodes to nil")
+        XCTAssertNil(sessions[1].providerId, "absent on the wire decodes to nil")
+    }
+
     /// provider-correctness T4: `session.setEffort`'s wire shape — same required-but-nullable rule
     /// as `session.setModel` above (`SessionSetEffortParams.effort: z.string().min(1).nullable()`),
     /// so a clear must carry a LITERAL JSON `null` rather than omitting the key, which would fail

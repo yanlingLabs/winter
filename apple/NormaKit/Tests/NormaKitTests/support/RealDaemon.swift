@@ -213,25 +213,64 @@ struct RealDaemon {
         )
     }
 
-    /// Polls the redirected stdout file until its first full (newline-terminated) line lands —
-    /// mirrors the TS precedent's own `while (!existsSync...) await Bun.sleep(50)` poll loop, no
-    /// blocking Pipe reads or extra threads needed. Requires an actual `\n` to have arrived (not
-    /// just non-empty content) so a partial write mid-flush is never mistaken for the full JSON
-    /// line. 20s deadline: `startDaemon` boots a full agent-less core (sessions store, hub, IPC
-    /// server, routine scheduler, ...) — a couple of seconds on a warm machine, generous headroom
-    /// for CI.
+    /// Polls the redirected stdout file until a line that decodes as the fixture's OWN JSON hello
+    /// (`FixtureOutput`'s `{socketPath, harness, remote}` shape) lands — mirrors the TS
+    /// precedent's own `while (!existsSync...) await Bun.sleep(50)` poll loop, no blocking Pipe
+    /// reads or extra threads needed.
+    ///
+    /// Winter Phase 8d (P8d-19, whole-branch review / Lane 1's new CI Swift job): this used to
+    /// trust the very FIRST newline-terminated line as the hello, which broke the instant
+    /// `startDaemon` (`packages/core/src/daemon.ts`, the 8b credential-material hotfix) started
+    /// printing its OWN boot narration to stdout before ever returning — `credentials: …`,
+    /// `runtime-state: runtime recovery: …`, `runtime-sdk: directory recovery — …`, `norma-core …
+    /// listening on …` all land on the SAME stdout stream, ahead of the fixture's
+    /// `process.stdout.write(JSON.stringify(...))` call, which only runs after `startDaemon`
+    /// resolves. ~29 tests across `RealDaemonTests`/`GatewayGateTests`/`IrohE2ETests`/
+    /// `PairingE2ETests`/`FakePhoneConformanceTests` failed decoding a narration line as JSON.
+    ///
+    /// Fixed by trying EVERY complete line seen so far, in order, on every poll — the first one
+    /// that decodes as `FixtureOutput` wins and is returned (the caller re-decodes it itself,
+    /// unchanged, so `.badOutput`'s wrapping stays exactly as it was); every earlier line is
+    /// recorded as skipped rather than trusted. A still-running process with only narration lines
+    /// so far keeps polling (the new, correct behaviour); a process that has ALREADY EXITED
+    /// without ever printing a decodable line returns the LAST line it printed — preserving the
+    /// pre-fix contract for a fixture that prints garbage and exits immediately
+    /// (`testStartCleansUpOnBadOutput`'s own `.badOutput("not-json")` expectation) — or throws
+    /// `.processExitedEarly` if it printed nothing decodable at all, exactly as before. Requires an
+    /// actual `\n` to have arrived per line (not just non-empty content) so a partial write
+    /// mid-flush is never mistaken for a complete line. 20s deadline: `startDaemon` boots a full
+    /// agent-less core (sessions store, hub, IPC server, routine scheduler, ...) — a couple of
+    /// seconds on a warm machine, generous headroom for CI.
     private static func waitForFirstLine(
         process: Process, stdoutPath: String, stderrPath: String, timeoutSeconds: Double = 20
     ) async throws -> String {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
+        var skipped: [String] = []
         while Date() < deadline {
             if let data = FileManager.default.contents(atPath: stdoutPath),
-               let text = String(data: data, encoding: .utf8),
-               let newlineIndex = text.firstIndex(of: "\n") {
-                let firstLine = String(text[..<newlineIndex])
-                if !firstLine.isEmpty { return firstLine }
+               let text = String(data: data, encoding: .utf8) {
+                // `dropLast()`: splitting "a\nb\n" by "\n" yields ["a", "b", ""] (a trailing empty
+                // component after the final newline) — dropping it leaves exactly the COMPLETE
+                // lines. Splitting "a\npartial" (no trailing newline yet) yields ["a", "partial"] —
+                // dropping the last element correctly excludes the still-being-written partial line
+                // too, the same "requires an actual \n" guarantee the original version had.
+                let completeLines = text.split(separator: "\n", omittingEmptySubsequences: false).dropLast()
+                for substring in completeLines {
+                    let candidate = String(substring)
+                    guard !candidate.isEmpty else { continue }
+                    if let lineData = candidate.data(using: .utf8),
+                       (try? JSONDecoder().decode(FixtureOutput.self, from: lineData)) != nil {
+                        return candidate // the real hello — every earlier narration line is discarded
+                    }
+                    if !skipped.contains(candidate) { skipped.append(candidate) }
+                }
             }
             if !process.isRunning {
+                // Nothing ever decoded as the hello and the process is gone: hand the caller the
+                // LAST line it printed (its own JSON decode will fail and wrap this as
+                // `.badOutput`, unchanged from before this fix) — or, if it printed no line at
+                // all, the original `.processExitedEarly`.
+                if let last = skipped.last { return last }
                 throw RealDaemonError.processExitedEarly(
                     exitCode: process.terminationStatus,
                     stderr: readAll(stderrPath)
@@ -239,7 +278,8 @@ struct RealDaemon {
             }
             try await Task.sleep(for: .milliseconds(50))
         }
-        throw RealDaemonError.timedOut(stderr: readAll(stderrPath))
+        let skippedNote = skipped.isEmpty ? "" : "\n(non-hello stdout line(s) seen while waiting: \(skipped.joined(separator: " | ")))"
+        throw RealDaemonError.timedOut(stderr: readAll(stderrPath) + skippedNote)
     }
 
     private static func readAll(_ path: String) -> String {
@@ -334,5 +374,28 @@ final class RealDaemonTests: XCTestCase {
         }
         // Cleanup removes the temp home it created → count returns to baseline (no leak).
         XCTAssertEqual(normaTempDirCount(), before, "start() must remove its temp home on failure")
+    }
+
+    /// Winter Phase 8d (P8d-19, whole-branch review / Lane 1's new CI Swift job): reproduces the
+    /// exact regression shape SYNTHETICALLY (no real daemon needed) — `startDaemon`'s real boot
+    /// narration (`credentials: …`, `runtime-state: runtime recovery: …`, `norma-core … listening
+    /// on …`, the 8b credential-material hotfix) lands on stdout BEFORE the fixture's own JSON
+    /// hello line, and the pre-fix `waitForFirstLine` trusted the very first line blindly — which
+    /// broke `RealDaemonTests`/`GatewayGateTests`/`IrohE2ETests`/`PairingE2ETests`/
+    /// `FakePhoneConformanceTests` (~29 tests) the moment that narration shipped. Proves `start()`
+    /// skips every non-hello line, in order, and still resolves to the real envelope.
+    func testStartSkipsNarrationLinesBeforeTheJSONHello() async throws {
+        let fixture = """
+        console.log("credentials: openai absent, codex-oauth absent");
+        console.log("runtime-state: runtime recovery: ok, 0 session(s), 0 parked, 0 child(ren) interrupted, 0 corrupt");
+        console.log("runtime-sdk: directory recovery — 0 entr(ies), 0 stale, 0 cursor(s), 0 held, 0 parked");
+        console.log("norma-core 0.2.014 listening on /tmp/does-not-exist/core.sock");
+        process.stdout.write(JSON.stringify({ socketPath: "/tmp/norma-p8d19-fake.sock", harness: "h", remote: "r" }) + "\\n");
+        """
+        let daemon = try await RealDaemon.start(fixtureOverride: fixture)
+        defer { daemon.stop() }
+        XCTAssertEqual(daemon.socketPath, "/tmp/norma-p8d19-fake.sock")
+        XCTAssertEqual(daemon.harnessToken, "h")
+        XCTAssertEqual(daemon.remoteToken, "r")
     }
 }

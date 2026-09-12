@@ -45,6 +45,16 @@ export function sessionModeMarker(mode?: string): string {
   return ` [${m} — app only]`; // chat, cowork, and any future/unknown mode
 }
 
+/** Winter Phase 8d (Task 4.3): `norma sessions`' runtime tag — "" when absent (an engine-era row,
+ *  a record-less/phone-owned row, or a daemon predating the field — `SessionListResult.runtimeKind`'s
+ *  own doc names all three), ` · winter-agent`/` · claude-agent` verbatim otherwise. Deliberately
+ *  the RAW WIRE VALUE, not a display label ("Winter Agent"/"Claude Agent", WS-14 §14) — this
+ *  listing's own convention is terse machine-ish tags (`sessionModeMarker`'s bracketed form is the
+ *  other example), unlike the Mac app's prose badge; the Interfaces block spells this exact tag. */
+export function sessionRuntimeMarker(runtimeKind?: string): string {
+  return runtimeKind ? ` · ${runtimeKind}` : "";
+}
+
 /** Attach/send/watch/resume refusal text — distinct per mode (chat/dispatch get the spec's exact
  *  wording), with a generic apps-only fallback covering cowork and any future/unknown mode so this
  *  never needs a new branch as new modes are added. */

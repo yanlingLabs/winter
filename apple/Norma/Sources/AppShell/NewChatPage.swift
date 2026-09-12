@@ -427,6 +427,15 @@ struct NewChatPage: View {
                     .font(Typography.emptyStateSubtitle)
                     .foregroundStyle(.red)
                     .multilineTextAlignment(.center)
+            } else if let advisorError = host.newChatAdvisorError {
+                // Whole-branch review Major 2: the advisor picker's OWN failure banner — a
+                // SEPARATE property from `newChatCreate` above (see that property's own doc), so
+                // this never shows at the same time as a create failure (the `else` here is just
+                // "don't stack two banners", not a shared state machine).
+                Text(advisorError)
+                    .font(Typography.emptyStateSubtitle)
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
             }
             Spacer(minLength: 0)
             Spacer(minLength: 0) // greeting+composer sit slightly above center, the reference's own balance

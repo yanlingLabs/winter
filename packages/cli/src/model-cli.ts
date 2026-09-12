@@ -2,26 +2,33 @@
 // unit-tested without going through the top-level `if (import.meta.main)` dispatch. Mirrors
 // plugin-cli.ts's split: main.ts owns the I/O (loadSettings/saveSettings/connect), this file
 // owns the parse/validate decisions.
-import { CODEX_MODELS, REASONING_EFFORTS } from "@norma/core";
+import { CODEX_MODELS, REASONING_EFFORTS, catalogRowsFor } from "@norma/core";
 
 export type ModelCliAction =
   | { kind: "show" }
   | { kind: "setModel"; slug: string }
   | { kind: "setEffort"; effort: string }
   | { kind: "setModelAndEffort"; slug: string; effort: string }
+  // Winter Phase 8d (P8d-8, Task 4.3): the D30 advisor override — its OWN standalone flag form,
+  // never combined with a slug/--effort change in the same invocation (mirrors `--effort`'s own
+  // "effort-only change" form above, not the combined one below it).
+  | { kind: "setAdvisor"; slug: string }
+  | { kind: "clearAdvisor" }
   | { kind: "usageError"; message: string };
 
-const USAGE = "usage: norma model [<slug>] [--effort <level>]  |  norma model --effort <level>";
+const USAGE = "usage: norma model [<slug>] [--effort <level>]  |  norma model --effort <level>  |  norma model --advisor <slug|auto>";
 
 /**
  * Parses `norma model`'s argv tail (everything after "model" — i.e. `process.argv.slice(3)`).
  * Forms:
  *   []                          -> show
  *   ["--effort", level]         -> setEffort (effort-only change)
+ *   ["--advisor", "auto"]       -> clearAdvisor (P8d-8)
+ *   ["--advisor", slug]         -> setAdvisor (P8d-8)
  *   [slug]                      -> setModel
  *   [slug, "--effort", level]   -> setModelAndEffort
- * Anything else (missing effort value, trailing garbage, an unknown flag in slug position) is a
- * usageError — main.ts prints `.message` and exits 1, never silently guesses.
+ * Anything else (missing effort/advisor value, trailing garbage, an unknown flag in slug
+ * position) is a usageError — main.ts prints `.message` and exits 1, never silently guesses.
  */
 export function parseModelArgs(args: string[]): ModelCliAction {
   if (args.length === 0) return { kind: "show" };
@@ -30,6 +37,12 @@ export function parseModelArgs(args: string[]): ModelCliAction {
     const effort = args[1];
     if (!effort || args.length > 2) return { kind: "usageError", message: USAGE };
     return { kind: "setEffort", effort };
+  }
+
+  if (args[0] === "--advisor") {
+    const value = args[1];
+    if (!value || args.length > 2) return { kind: "usageError", message: USAGE };
+    return value === "auto" ? { kind: "clearAdvisor" } : { kind: "setAdvisor", slug: value };
   }
 
   const slug = args[0]!;
@@ -69,4 +82,17 @@ export function validateModelSlug(providerType: "codex-oauth" | "openai-compatib
 export function validateEffort(effort: string): string | null {
   if ((REASONING_EFFORTS as readonly string[]).includes(effort)) return null;
   return `invalid effort "${effort}" — must be one of: ${REASONING_EFFORTS.join(", ")}`;
+}
+
+/** Winter Phase 8d (P8d-8, Task 4.3): validates an advisor slug against the pinned catalog
+ *  (`catalogRowsFor`) — the SAME catalog `session.setModel`'s handler consults on the daemon side
+ *  (`ipc/server.ts`'s `isClaudeCatalogModel`/`resolveModelSelection`'s own catalog-membership
+ *  check), not `CODEX_MODELS`/the live provider's own model list: the CLI runs this command with
+ *  no daemon RPC at all (direct settings.json read/write, same posture as `validateModelSlug`
+ *  above), so the compiled-in static catalog is the only universe it can check against. `"auto"`
+ *  is parsed as `clearAdvisor` before this ever runs (`parseModelArgs`) — this only ever sees a
+ *  real candidate slug. Returns an error message, or null when valid. */
+export function validateAdvisorSlug(slug: string): string | null {
+  if (catalogRowsFor(slug).length > 0) return null;
+  return `invalid advisor model "${slug}" — not in the pinned catalog (use "auto" to clear the override)`;
 }

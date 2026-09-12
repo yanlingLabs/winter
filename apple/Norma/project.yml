@@ -622,6 +622,20 @@ targets:
           # carry the hardened-runtime flag, so this nested resign must request it explicitly.
           # Release-only (see CONFIGURATION check above) — dev/Debug builds never reach this line.
           codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --options runtime --timestamp "${DEST_RES}/norma-core"
+      # Winter Phase 8d (P8d-1/P8d-2): the SECOND embedded binary, right after norma-core, same
+      # Release-only shape. The body lives in scripts/embed-runtimes.sh (not inline, unlike the
+      # script above) because it has a real gate worth unit-testing standalone
+      # (scripts/embed-runtimes.test.ts) — stage the P8d-1 runtimes/ layout, re-sign ONLY winter
+      # with a stable identifier, VERIFY (never re-sign) the vendored claude binary is still
+      # exactly the pinned Anthropic-signed artifact. Xcode already exports BUILT_PRODUCTS_DIR,
+      # CONTENTS_FOLDER_PATH, CONFIGURATION and EXPANDED_CODE_SIGN_IDENTITY into a Run Script
+      # phase's environment — the script reads them exactly as this file's other postCompileScripts
+      # do; nothing extra to pass here.
+      - name: Embed runtimes
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          "${SRCROOT}/../../scripts/embed-runtimes.sh"
     info:
       path: Support/Info.plist
       properties:

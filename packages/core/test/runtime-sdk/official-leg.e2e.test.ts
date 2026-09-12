@@ -15,11 +15,12 @@
 // `describeWithClaudeRuntime` skips without the optional platform package and THROWS under
 // `NORMA_CLAUDE_REQUIRE_RUNTIME=1` (P8c-9).
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@norma/protocol";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
+import type { ReviewerResolver } from "@yanlinglabs/winter-agent-sdk/tools";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { PermissionGate } from "../../src/agent/gate";
 import { QuestionBroker } from "../../src/agent/questions";
@@ -35,7 +36,10 @@ import { FakeProvider } from "../../src/agent/fake-provider";
 import { BashReviewer } from "../../src/agent/reviewer";
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "../../src/runtime-sdk/create";
 import { credentialRefFor, ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
-import { sessionHooksFor } from "../../src/runtime-sdk/hooks";
+import { sessionHooksFor, type SessionHooksDeps } from "../../src/runtime-sdk/hooks";
+import { attachOfficialSession } from "../../src/runtime-sdk/messaging";
+import { createSqliteRuntimeDirectoryStore, openRuntimeStateDb } from "../../src/runtime-state";
+import { buildChildAddress, buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
 import type { OfficialInputDeps, OfficialSessionInput } from "../../src/runtime-sdk/official-options";
 import { startOfficialSession, type OfficialSession } from "../../src/runtime-sdk/official-session";
 import { createProjector, type CheckpointStore } from "../../src/projector";
@@ -139,8 +143,9 @@ const probeDef: ToolDefinition = {
 
 async function buildWorld(
   selection: RuntimeSelection, secretsDir: string, baseUrl: string, policy: "auto" | "dont-ask" | "plan" = "auto",
-  opts: { reviewer?: BashReviewer } = {},
+  opts: { reviewer?: BashReviewer; mode?: "code" | "chat"; hookFacade?: SessionHooksDeps["hookFacade"]; advisorReviewer?: ReviewerResolver; onIncarnationStart?: (abort: AbortController) => void } = {},
 ): Promise<World> {
+  const mode = opts.mode ?? "code";
   const home = mkdtempSync(join(tmpdir(), "p8c-official-e2e-"));
   const cwd = join(home, "work");
   mkdirSync(cwd, { recursive: true });
@@ -157,6 +162,7 @@ async function buildWorld(
     settings: () => null,
     secrets,
     capabilities: [],
+    ...(opts.advisorReviewer === undefined ? {} : { advisorReviewer: opts.advisorReviewer }),
   });
   const officialPeer = await runtime.officialPeer();
   if (officialPeer === undefined) throw new Error("unreachable: the suite is skipped without a bed");
@@ -168,7 +174,7 @@ async function buildWorld(
 
   const registry = new ToolRegistry();
   registry.register(probeDef);
-  const capSession = { sessionId: "s_official_e2e", mode: "code" as const, cwd, roots: [cwd] };
+  const capSession = { sessionId: "s_official_e2e", mode, cwd, roots: [cwd] };
   const probeServer = capabilityServer({ key: "probe", defs: [probeDef] }, capSession);
   const capabilities: CapabilityServerRecord = { [probeServer.name]: probeServer };
 
@@ -188,11 +194,15 @@ async function buildWorld(
 
   // M4 (ruling P8c-19): the SAME `hooks.ts` builder the Winter leg uses, its `.official` half —
   // see `hooks.ts`'s own header for why that value is safe to hand the official leg unmodified.
-  // Only built when a test asks for a reviewer — every other `buildWorld` caller keeps running with
-  // no `Options.hooks` at all, byte-identical to before this fix wave.
-  const hooks = opts.reviewer === undefined
+  // Only built when a test asks for a reviewer OR a hook facade — every other `buildWorld` caller
+  // keeps running with no `Options.hooks` at all, byte-identical to before this fix wave.
+  const hooks = opts.reviewer === undefined && opts.hookFacade === undefined
     ? undefined
-    : sessionHooksFor({ sessionId, roots: [cwd], reviewer: opts.reviewer, policy: () => policy }).official;
+    : sessionHooksFor({
+        sessionId, roots: [cwd], policy: () => policy,
+        ...(opts.reviewer === undefined ? {} : { reviewer: opts.reviewer }),
+        ...(opts.hookFacade === undefined ? {} : { hookFacade: opts.hookFacade }),
+      }).official;
 
   const inputDeps: OfficialInputDeps = {
     home,
@@ -215,18 +225,18 @@ async function buildWorld(
     ...(hooks === undefined ? {} : { hooks }),
   };
 
-  const sessionInput: OfficialSessionInput = { sessionId, mode: "code", cwd };
+  const sessionInput: OfficialSessionInput = { sessionId, mode, cwd };
 
   const session = startOfficialSession({
     sessionId,
     backendSessionId,
-    mode: "code",
+    mode,
     runtime,
     selection,
     sessionInput: () => sessionInput,
     inputDeps: () => inputDeps,
     projector: (generation) => createProjector({
-      sessionId, mode: "code", generation, runtimeKind: "claude-agent",
+      sessionId, mode, generation, runtimeKind: "claude-agent",
       nextSeq: () => ++seq,
       checkpoint: checkpoints,
       now: () => new Date().toISOString(),
@@ -235,6 +245,7 @@ async function buildWorld(
     append: (e) => { const stamped = { ...e, seq: (e as { seq?: number }).seq ?? ++seq } as SessionEvent; events.push(stamped); if (process.env.DEBUG_E2E) console.log("EVENT", JSON.stringify(stamped).slice(0, 300)); return stamped; },
     broadcast: (e) => { events.push(e as unknown as SessionEvent); if (process.env.DEBUG_E2E) console.log("BROADCAST", JSON.stringify(e).slice(0, 300)); },
     log: (l) => { if (process.env.DEBUG_E2E) console.log("[log]", l); },
+    ...(opts.onIncarnationStart === undefined ? {} : { onIncarnationStart: opts.onIncarnationStart }),
   });
 
   const world: World = { home, cwd, runtime, events, session, backendSessionId, hermetic };
@@ -533,6 +544,632 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       expect(result?.output).toContain("official-leg-hooks-forced-unsafe");
       expect(reviewProvider.requests.length).toBeGreaterThan(0);
     });
+  }, 60_000);
+
+  // ── Phase 8d Task 3.2 — remaining official-leg measurements (WS-17 §8, real binary) ──────────
+
+  test("8d MEASURED: a Bash read OUTSIDE cwd is ALLOWED on this leg — no sandbox denies it (unlike Winter's own seatbelt)", async () => {
+    // MEASURED, not assumed (this test's premise going in was the OPPOSITE): `sandboxConfigFor(home)`
+    // (reused verbatim on this leg) denies only `<home>/run`/`<home>/runtimes` — Norma's own
+    // philosophy is unrestricted reads otherwise (CLAUDE.md: "the sole read denial is ~/.norma/run").
+    // The real 0.3.250 CLI's own default sandbox (`Options.sandbox`, reused from `sandboxConfigFor`)
+    // does NOT additionally fence Bash to the working directory the way `agent/sandbox.ts`'s
+    // seatbelt profile does for the retired engine — an out-of-cwd `cat` SUCCEEDS end to end, and its
+    // content reaches the ordinary `tool_result` event. This is the exact "denial shape" measurement
+    // Task 3.2 asked for: on the official leg, filesystem containment for Bash is `permissions.deny`
+    // (named paths) ONLY — there is no path-independent out-of-cwd fence — so a deployment relying on
+    // Bash confinement to cwd for the official leg needs an explicit `permissions.deny` rule of its
+    // own; `sandboxConfigFor`'s current denyRead/denyWrite lists (`<home>/run`, `<home>/runtimes`)
+    // are the daemon control plane ONLY, never a project-boundary fence.
+    const outsideDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-outside-"));
+    const SENTINEL = "NORMA_8D_OUTSIDE_CWD_SENTINEL_7c2b";
+    writeFileSync(join(outsideDir, "secret.txt"), SENTINEL);
+    const turns: AnthropicTurnScript[] = [PLACEHOLDER_TURN("Bash", [JSON.stringify({ command: "cat /placeholder" })]), DONE_TURN];
+    await withAnthropicLoopback(turns, async (fake) => {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto");
+      const target = join(outsideDir, "secret.txt");
+      turns[0] = PLACEHOLDER_TURN("Bash", [JSON.stringify({ command: `cat ${target}` })]);
+      await w.session.send("cat that file for me");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      const result = w.events.find((e) => e.type === "tool_result") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
+      expect(result).toBeDefined();
+      expect(result?.isError).toBe(false);
+      expect(result?.output).toContain(SENTINEL);
+      console.warn(`[8d official-leg] MEASURED: an out-of-cwd Bash read is ALLOWED on the official leg (policy=auto, no seatbelt-equivalent fence) — isError=${result?.isError}`);
+      rmSync(outsideDir, { recursive: true, force: true });
+    });
+  }, 60_000);
+
+  test("8d: additionalDisallowedTools is HONOURED by the real binary — a chat-mode session's system/init.tools never advertises Bash, a code-mode one does", async () => {
+    const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+    await withAnthropicLoopback([DONE_TURN], async (fake) => {
+      const codeWorld = await buildWorld(selectionFor(), secretsDir, fake.url, "auto", { mode: "code" });
+      await codeWorld.session.send("hi");
+      await waitFor(codeWorld.events, (e) => e.type === "turn_completed", 45_000);
+      expect(codeWorld.session.init?.tools).toContain("Bash");
+    });
+    await withAnthropicLoopback([DONE_TURN], async (fake) => {
+      const chatWorld = await buildWorld(selectionFor(), secretsDir, fake.url, "auto", { mode: "chat" });
+      await chatWorld.session.send("hi");
+      await waitFor(chatWorld.events, (e) => e.type === "turn_completed", 45_000);
+      expect(chatWorld.session.init?.tools).toBeDefined();
+      expect(chatWorld.session.init?.tools).not.toContain("Bash");
+    });
+  }, 90_000);
+
+  // ── PostToolUse / PostToolUseFailure fire on the official binary (Task 3.2) ──────────────────
+  //
+  // `hooks.ts`'s `pluginPostToolUseHook`/`pluginPostToolUseFailureHook` are already measured on the
+  // WINTER leg (P8c-7's own `hooks-measure.e2e.test.ts`); M4 above proves the official leg's
+  // PreToolUse group (the bash reviewer) fires on the REAL 0.3.250 binary, but nothing yet measures
+  // whether the SAME binary's PostToolUse/PostToolUseFailure events reach a plugin-shaped
+  // `HookFacadeLike` on this leg — this is that measurement, with the PINNED payload shape
+  // `pluginPostToolUseHook`/`pluginPostToolUseFailureHook` build (`toolName`, `argsJson`, `output`,
+  // `isError`, `threadId`).
+  test("8d: PostToolUse fires (with the real tool output) for a SUCCEEDED call, on the real binary", async () => {
+    const calls: Array<{ event: string; extra: Record<string, unknown> }> = [];
+    const hookFacade: SessionHooksDeps["hookFacade"] = {
+      async runFor(event, extra) { calls.push({ event, extra }); return []; },
+    };
+    const turns: AnthropicTurnScript[] = [
+      { blocks: [{ type: "tool_use", id: "call_1", name: "mcp__norma__probe__probe", jsonChunks: [JSON.stringify({ note: "8d-post" })] }], stopReason: "tool_use" },
+      DONE_TURN,
+    ];
+    await withAnthropicLoopback(turns, async (fake) => {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto", { hookFacade });
+      await w.session.send("use the probe tool");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      const post = calls.find((c) => c.event === "post-tool" && c.extra.toolName === "mcp__norma__probe__probe");
+      expect(post).toBeDefined();
+      expect(post?.extra).toMatchObject({ toolName: "mcp__norma__probe__probe", isError: false, threadId: "main" });
+      expect(String(post?.extra.output)).toContain("probed: 8d-post");
+    });
+  }, 60_000);
+
+  test("8d: PostToolUseFailure fires (isError: true) for a call that RAN and failed, on the real binary", async () => {
+    // A Bash command that RUNS (passes every permission check) and then fails at execution — NOT the
+    // C1 control-plane fence: a call the fence denies never runs at all, so PostToolUse/
+    // PostToolUseFailure never fire for it either (measured separately, below) — this is `hooks.ts`'s
+    // OWN documented rule for a PreToolUse deny, and the control-plane fence is functionally the same
+    // "never ran" shape. `cat` of a path that genuinely does not exist is the honest "ran, failed" case.
+    const calls: Array<{ event: string; extra: Record<string, unknown> }> = [];
+    const hookFacade: SessionHooksDeps["hookFacade"] = {
+      async runFor(event, extra) { calls.push({ event, extra }); return []; },
+    };
+    const turns: AnthropicTurnScript[] = [PLACEHOLDER_TURN("Bash", [JSON.stringify({ command: "cat /this/path/genuinely/does/not/exist/8d" })]), DONE_TURN];
+    await withAnthropicLoopback(turns, async (fake) => {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto", { hookFacade });
+      await w.session.send("run that shell command for me");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      const result = w.events.find((e) => e.type === "tool_result") as (SessionEvent & { isError?: boolean }) | undefined;
+      expect(result?.isError).toBe(true); // the call genuinely ran and failed (not denied)
+      const postToolCalls = calls.filter((c) => c.event === "post-tool");
+      const failed = postToolCalls.find((c) => c.extra.isError === true);
+      console.warn(`[8d official-leg] PostToolUse/PostToolUseFailure calls observed for the failing Bash call: ${JSON.stringify(postToolCalls.map((c) => ({ isError: c.extra.isError, toolName: c.extra.toolName })))}`);
+      expect(failed).toBeDefined();
+      expect(failed?.extra).toMatchObject({ toolName: "Bash", isError: true, threadId: "main" });
+    });
+  }, 60_000);
+
+  test("8d MEASURED: the C1 control-plane fence denies BEFORE the tool runs — neither PostToolUse nor PostToolUseFailure fire for it", async () => {
+    const calls: Array<{ event: string; extra: Record<string, unknown> }> = [];
+    const hookFacade: SessionHooksDeps["hookFacade"] = {
+      async runFor(event, extra) { calls.push({ event, extra }); return []; },
+    };
+    const turns: AnthropicTurnScript[] = [PLACEHOLDER_TURN("Read", [JSON.stringify({ file_path: "/placeholder" })]), DONE_TURN];
+    await withAnthropicLoopback(turns, async (fake) => {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto", { hookFacade });
+      const runDir = join(w.home, "run");
+      mkdirSync(runDir, { recursive: true });
+      const probePath = join(runDir, "probe-8d.txt");
+      writeFileSync(probePath, "denied content");
+      turns[0] = PLACEHOLDER_TURN("Read", [JSON.stringify({ file_path: probePath })]);
+      await w.session.send("read that file for me");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      const result = w.events.find((e) => e.type === "tool_result") as (SessionEvent & { isError?: boolean }) | undefined;
+      expect(result?.isError).toBe(true); // the fence still denies it (C1, re-confirmed)
+      const postToolCalls = calls.filter((c) => c.event === "post-tool");
+      console.warn(`[8d official-leg] MEASURED: post-tool hook calls for a control-plane-denied Read: ${postToolCalls.length} (expected 0 — the deny happens before the tool ever runs)`);
+      expect(postToolCalls).toHaveLength(0);
+    });
+  }, 60_000);
+
+  // ── P8d-17 (Lane 3b): the OFFICIAL leg's own `advisor` tool call — ROOT-CAUSED AND FIXED ──
+  //
+  // Round 2 left this UNPROVEN with the diagnosis "something beyond resolveReviewer/
+  // connectionOverride must register the official leg's own standing-server tool (`advisor`) with
+  // the real 0.3.250 CLI before the model can call it at all" — correct as far as it went. Lane 3b
+  // found the EXACT mechanism, Norma-side, and fixed it:
+  //
+  // The router's own `officialCapabilityServers` (index.js, called from `openOfficialLeg` on EVERY
+  // official-leg session) builds the STANDING server (`winterMcpServerDescriptor` —
+  // SendMessage/ListAgents/ReadNotifications/advisor's canonical `mcp__<brand>__<tool>`
+  // registrations) ONLY when `RuntimeSdkOptions.toInputShape` (a CONSTRUCTION-time field) is set.
+  // `create.ts` never set it. Its own early-return is SILENT rather than a throw specifically
+  // because Norma's construction-level `capabilities` list is `[]` on purpose (P8b-36 — Norma's
+  // capability tools ride the PER-SESSION `officialCapabilityServersFor` door instead): `if
+  // (deps.toInputShape === undefined) { if (deps.capabilities === undefined) return; throw … }`,
+  // and an empty array normalizes to `undefined` one level up (`capabilityDescriptors`). So the
+  // standing server was never built for ANY official-leg session, for all four aliased builtins —
+  // not advisor alone. MEASURED (this test, before the fix): the official leg's tool list carried
+  // bare `SendMessage`/`ListAgents` (the underlying CLI's OWN native subagent-messaging tools,
+  // confirmed unrelated to Winter's canonical implementation) and NOTHING containing "advisor" or
+  // "notification" anywhere — not even the alias's own redirect target — which is what a genuinely
+  // unregistered tool looks like, as opposed to a denied/stripped one (ruling out (3) from the
+  // brief: `additionalDisallowedTools`/deny rules never touch it; there is nothing to deny).
+  //
+  // THE FIX (`create.ts`, `official-capabilities.ts`): `official-capabilities.ts`'s own
+  // `routerInputShape` (the JSON-Schema → zod-shape bridge Norma's PER-SESSION capability tools
+  // already use) is now exported and threaded into `createRouterSdk({..., toInputShape:
+  // routerInputShape})` at construction. MEASURED, AFTER: `mcp__norma__advisor`,
+  // `mcp__norma__send_message`, `mcp__norma__list_agents` and `mcp__norma__read_notifications` all
+  // now appear in the model-facing tool list, and a scripted bare `advisor` tool_use — via
+  // `officialToolAliases`'s redirect, now pointed at a REAL registered target — reaches
+  // `resolveReviewer()` and, once a credential is staged for F3's sync presence gate, the reviewer's
+  // own `generate()` call, whose text comes back verbatim in the tool result. PINNED below.
+  test("P8d-17 FIXED+PROVEN: toInputShape wired at construction registers the standing server; a bare 'advisor' call reaches resolveReviewer()/generate() end to end", async () => {
+    const turns: AnthropicTurnScript[] = [
+      { blocks: [{ type: "tool_use", id: "call_1", name: "advisor", jsonChunks: ["{}"] }], stopReason: "tool_use" },
+      DONE_TURN,
+    ];
+    let anthropicCallCount = 0;
+    const { startFake } = await import("@yanlinglabs/winter-provider-conformance");
+    const fake = await startFake({
+      routes: [{
+        path: "*",
+        handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            anthropicCallCount += 1;
+            return (await import("@yanlinglabs/winter-provider-conformance")).anthropicFake.anthropicTurnResponse(turns[Math.min(anthropicCallCount - 1, turns.length - 1)]!);
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    try {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8c-official-e2e-secrets-"));
+      const secretsForAdvisor = new FileSecretStore(secretsDir);
+      // Lane 3b: an anthropic credential must be PRESENT for `advisorReviewerFor`'s claude-family
+      // branch to resolve at all (F3's sync `credentialPresenceCache` gate) — absent, it answers
+      // `undefined` and the tool reports "no reviewer model is resolvable", never reaching
+      // `generate()`. This is a SEPARATE credential write from `buildWorld`'s own official-leg
+      // session credential (both point at the same loopback fake either way).
+      await writeCredentialMaterial(secretsForAdvisor, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-advisor-p8d17" });
+      const { advisorReviewerFor, familyOfModel } = await import("../../src/runtime-sdk/advisor-reviewer");
+      let reviewerGenerateCalled = false;
+      const advisorReviewer = advisorReviewerFor({
+        settings: () => undefined,
+        secrets: secretsForAdvisor,
+        familyOf: familyOfModel,
+        sessionModel: () => "claude-sonnet-5",
+        connectionOverride: () => ({ anthropicBaseUrl: fake.url }),
+      });
+      // Warm F3's background credential-presence cache (cold-start honesty: the FIRST call answers
+      // `undefined` synchronously and fires the probe) BEFORE the session can ever call this
+      // resolver for real — mirrors `advisor-reviewer.test.ts`'s own `waitForResolved` poll.
+      {
+        const t0 = Date.now();
+        while (advisorReviewer() === undefined && Date.now() - t0 < 2000) await Bun.sleep(5);
+      }
+      const wrappedResolver = () => {
+        const resolved = advisorReviewer();
+        if (resolved === undefined) return undefined;
+        return { ...resolved, provider: { generate: async (i: Parameters<typeof resolved.provider.generate>[0]) => { reviewerGenerateCalled = true; return resolved.provider.generate(i); } } };
+      };
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto", { advisorReviewer: wrappedResolver });
+      await w.session.send("please consult the advisor before you answer");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      const result = w.events.find((e) => e.type === "tool_result" && (w.events.find((c) => c.type === "tool_call" && (c as { callId?: string }).callId === (e as { callId?: string }).callId) as { name?: string } | undefined)?.name === "advisor") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
+      console.warn(`[P8d-17] PROVEN: advisor tool_result = ${JSON.stringify(result)}; reviewer's own generate() was called: ${reviewerGenerateCalled}; anthropic loopback saw ${anthropicCallCount} request(s)`);
+
+      // (2) the standing server's tool list — the brand-qualified advisor name is present now.
+      const messagesReq = fake.requests.find((r) => r.path === "/v1/messages" && r.body.length > 0);
+      const toolNames = (JSON.parse(messagesReq!.body) as { tools?: Array<{ name?: string }> }).tools?.map((t) => t.name) ?? [];
+      expect(toolNames).toContain("mcp__norma__advisor");
+      expect(toolNames).toContain("mcp__norma__send_message");
+      expect(toolNames).toContain("mcp__norma__list_agents");
+      expect(toolNames).toContain("mcp__norma__read_notifications");
+      // The bare alias name itself is never advertised (the CLI advertises the REGISTERED/canonical
+      // name; `officialToolAliases`'s redirect is what lets the model call the bare name anyway).
+      expect(toolNames).not.toContain("advisor");
+
+      // (4) the model's bare 'advisor' tool_use, through the alias, reaches a REAL registered
+      // tool, which calls `resolveReviewer()` and then the reviewer's own `generate()` — whose
+      // scripted text ("done") comes back verbatim in the tool result. Pinned shape:
+      // `{"advice": <reviewer text>, "model": <resolved reviewer model>}`, `isError: false`.
+      expect(result?.isError).toBe(false);
+      expect(result?.output).toBe(JSON.stringify({ advice: "done", model: "claude-fable-5.1" }));
+      expect(reviewerGenerateCalled).toBe(true);
+      // Three requests reach the loopback: the main turn's scripted tool_use, the reviewer's own
+      // `generate()` call (through `connectionOverride`), and the model's continuation after seeing
+      // the tool result.
+      expect(anthropicCallCount).toBe(3);
+    } finally {
+      await fake.close();
+    }
+  }, 60_000);
+
+  // P8d-18 (controller ruling; Lane 3b re-measured, STILL UNPROVEN): a TEST-ONLY crash seam
+  // (`onIncarnationStart` on `OfficialSessionDeps`, `official-session.ts`) was added so a test can
+  // grab each incarnation's own `AbortController` and simulate the crash `run()`'s own `finally`
+  // block needs to leave `state` at `"resumable"` (a deliberate `end()` is terminal for this leg —
+  // see that file's header).
+  //
+  // Round 2's two approaches (abort-by-controller, SIGKILL-by-PID) both measured unreliable. Lane
+  // 3b tried the brief's suggested "one remaining honest path" — driving a REAL upstream failure
+  // through the loopback fake, never touching a PID or the AbortController's own signal semantics —
+  // plus an independent, longer re-measurement of abort() with a request PROVABLY held open (two
+  // tests below). BOTH land on the SAME conclusion, now measured twice from two different angles:
+  //
+  //   (1) abort(): re-confirmed — 25s with a request genuinely in flight, `state` never leaves
+  //       "live". The router's official `Query` does not treat that signal as "the child died".
+  //   (2) a malformed/truncated upstream response mid-turn: the real `claude` 0.3.250 process is
+  //       ROBUST to it — one retry, then an in-band `agent_error`, turn completes, session stays
+  //       "live". Not a crash at all, from any angle this lane could drive externally.
+  //
+  // THE SHARPENED BLOCKER: `OfficialAdapter.spawnProxy` (the router's own process-exit surface —
+  // `OfficialSpawnedProcess.on("exit"|"error", …)`, exactly "the router's own crash/exit handling"
+  // the brief points at) is built INTERNALLY by `createRuntimeSdk` (`createOfficialAdapter(context)`
+  // called with no options, per that SDK's own doc comment) — router 0.0.3's `RuntimeSdkOptions`/
+  // `RouterOfficialPolicy`/`OfficialLegDeps` expose NO field a host can supply its own spawn proxy
+  // through. So there is no HOST-SIDE seam onto the actual exit event at all today; the only two
+  // externally-drivable failure classes (an aborted signal, a broken upstream connection) are both
+  // measured NOT to reach it. Unblocking this needs either a router 0.0.4 carry (a host-injectable
+  // `spawnProxy`, mirroring the Winter leg's own `spawnClaudeCodeProcess` hook) or literally killing
+  // the real OS process — which needs the process to be reliably locatable as a child in the first
+  // place, and round 2 already measured that unreliable. Recorded as a carry; the
+  // `onIncarnationStart` seam stays in place for whoever picks this up next.
+
+  // Lane 3b (item B): the ONE remaining honest path per the brief — not PID-hunting, not driving
+  // the AbortController (both already measured unreliable) — is to make the REAL upstream
+  // connection die mid-turn (a malformed HTTP response the real `claude` process cannot parse) and
+  // see whether the router's own `Query` treats THAT as "the child died", moving `state` off
+  // `"live"` on its own. Diagnostic only (kept even if it lands on "still live" — either answer is
+  // the measurement item B asks for).
+  test("P8d-18 (lane 3b): a malformed upstream response mid-turn — does the router's own Query end/error, moving state off 'live'?", async () => {
+    let requestNum = 0;
+    const { startFake, anthropicFake } = await import("@yanlinglabs/winter-provider-conformance");
+    const fake = await startFake({
+      routes: [{
+        path: "*",
+        handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            requestNum += 1;
+            if (requestNum === 1) return anthropicFake.anthropicTurnResponse({ blocks: [{ type: "text", chunks: ["hello"] }], stopReason: "end_turn" });
+            // Second turn: headers announce an SSE stream, but the body is neither valid SSE nor
+            // valid JSON, and the connection is torn down immediately after — the shape a real
+            // upstream connection reset produces, not a well-formed provider error frame.
+            return new Response("not-sse-not-json-garbage\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    try {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8d18-official-e2e-secrets-"));
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto");
+      await w.session.send("say hello");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      expect(w.session.state).toBe("live"); // sanity: the first, well-formed turn leaves it live
+      await w.session.send("say something else");
+      // No well-formed turn_completed/agent_error is guaranteed here — poll `state` directly for up
+      // to 20s rather than waiting on an event that a genuine crash path might never emit.
+      const t0 = Date.now();
+      while (w.session.state === "live" && Date.now() - t0 < 20_000) await Bun.sleep(50);
+      console.warn(`[P8d-18][3b] MEASURED: state after a malformed mid-turn upstream response = "${w.session.state}" (requests seen: ${requestNum}); events: ${JSON.stringify(w.events.map((e) => e.type))}`);
+      // PINNED, against the real 0.3.250 binary: a malformed/truncated upstream response is fully
+      // absorbed (one retry, then an in-band `agent_error`) without ending the generation — NOT the
+      // crash seam either. If a future pinned version starts treating this as fatal, this assertion
+      // is the tripwire that says so.
+      expect(w.session.state).toBe("live");
+    } finally {
+      await fake.close();
+    }
+  }, 60_000);
+
+  // Lane 3b (item B), second honest attempt: re-measure `.abort()` on the incarnation's OWN
+  // `AbortController` (the `onIncarnationStart` seam already in place) with a request PROVABLY held
+  // open at the fake (so abort has something real to interrupt) and a LONGER poll window than
+  // round 2's 10s, since a real spawned process's teardown may simply be slower than that.
+  test("P8d-18 (lane 3b): re-measure — abort() on the incarnation's own AbortController while a request is held open", async () => {
+    const { startFake, stalledResponse } = await import("@yanlinglabs/winter-provider-conformance");
+    let requestNum = 0;
+    const fake = await startFake({
+      routes: [{
+        path: "*",
+        handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            requestNum += 1;
+            if (requestNum === 1) {
+              const { anthropicFake } = await import("@yanlinglabs/winter-provider-conformance");
+              return anthropicFake.anthropicTurnResponse({ blocks: [{ type: "text", chunks: ["hello"] }], stopReason: "end_turn" });
+            }
+            return stalledResponse(30_000); // held open well past this test's own timeout
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    try {
+      const secretsDir = mkdtempSync(join(tmpdir(), "p8d18-official-e2e-secrets2-"));
+      let capturedAbort: AbortController | undefined;
+      const w = await buildWorld(selectionFor(), secretsDir, fake.url, "auto", { onIncarnationStart: (a) => { capturedAbort = a; } });
+      await w.session.send("say hello");
+      await waitFor(w.events, (e) => e.type === "turn_completed", 45_000);
+      expect(capturedAbort).toBeDefined();
+      await w.session.send("this one will be held open by the fake"); // resolves fast (just pushes into the stream); the TURN never completes on its own
+      // Give the fake time to actually receive the second request (so abort() has something live
+      // to interrupt) before firing it.
+      const t0req = Date.now();
+      while (requestNum < 2 && Date.now() - t0req < 10_000) await Bun.sleep(20);
+      expect(requestNum).toBeGreaterThanOrEqual(2);
+      capturedAbort!.abort();
+      const t0 = Date.now();
+      while (w.session.state === "live" && Date.now() - t0 < 25_000) await Bun.sleep(50);
+      console.warn(`[P8d-18][3b] MEASURED: state ${(Date.now() - t0)}ms after abort() = "${w.session.state}"`);
+      // PINNED (re-confirms round 2, independently, with a request PROVABLY held open and a longer
+      // window): abort() alone never moves the router's official Query off "live" — the router does
+      // not appear to treat that signal as "the child died". See this describe block's own P8d-18
+      // comment for the full blocker (no host-injectable spawn proxy exists in router 0.0.3 to drive
+      // a REAL exit/disconnect event from Norma's side; a bare OS-level kill was already measured
+      // unreliable — the child could not be reliably located as a direct process child).
+      expect(w.session.state).toBe("live");
+    } finally {
+      await fake.close();
+    }
+  }, 60_000);
+
+  // Lane 3b (item C, WS-17 §8 row 4): TWO official sessions sharing ONE spool (one NORMA_HOME, so
+  // both are `officialSpoolRoot(home)`-identical fresh-spool launches) AND one child HOME (so a
+  // PLANTED `~/.claude` is the SAME file for both) — SendMessage A->B delivered, and the planted
+  // file byte-identical (content + mtime) after both ran. Enabled by item A's fix: before it, a
+  // bare `SendMessage` reached the CLI's own NATIVE tool, never `mcp__norma__send_message`/the
+  // messaging port, so this row could not have been proven at all.
+  test("WS-17 §8 row 4: two official sessions, one spool, one child HOME — SendMessage A->B delivered; a planted ~/.claude untouched", async () => {
+    const home = mkdtempSync(join(tmpdir(), "p8d-row4-home-"));
+    const secrets = new FileSecretStore(join(home, "secrets"));
+    await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-row4" });
+    const credentialRef = credentialRefFor("anthropic")!;
+    // Both sessions run under `policy: "auto"` (a prompting, non-bypass policy) — `"prompts"` is
+    // the correct fixed class. Without SOME classifier, WS-10 §13's receiver-class-unknown rule
+    // fails closed to `held` rather than guessing (measured first, before this was added).
+    const runtime = await createNormaRuntimeSdk({ home, settings: () => null, secrets, capabilities: [], sessionPermissionClass: () => "prompts" });
+    const officialPeer = await runtime.officialPeer();
+    if (officialPeer === undefined) throw new Error("unreachable: the suite is skipped without a bed");
+
+    const hermetic = hermeticOfficialHome("row4"); // ONE child HOME, shared by A and B
+    const claudeDir = join(hermetic.home, ".claude");
+    mkdirSync(claudeDir, { recursive: true });
+    const plantedFile = join(claudeDir, "marker.json");
+    writeFileSync(plantedFile, JSON.stringify({ sentinel: "NORMA_ROW4_PLANT_9f21" }));
+    const before = { content: readFileSync(plantedFile, "utf8"), mtimeMs: statSync(plantedFile).mtimeMs };
+
+    const trust = new TrustStore(join(home, "trust.json"));
+    const cwd = join(home, "work");
+    mkdirSync(cwd, { recursive: true });
+    trust.trust(cwd);
+    const skills = new SkillStore({ normaHome: home, trust });
+    const assembler = new ContextAssembler({ normaHome: home, trust, skills });
+    const policy = "auto" as const;
+
+    const eventsFor = new Map<string, SessionEvent[]>();
+    let seq = 0;
+
+    const makeSession = (sessionId: string, baseUrl: string) => {
+      const events: SessionEvent[] = [];
+      eventsFor.set(sessionId, events);
+      const checkpoints = new MemCheckpoints();
+      const sessionInput: OfficialSessionInput = { sessionId, mode: "code", cwd };
+      const inputDeps: OfficialInputDeps = {
+        home,
+        selection: selectionFor(),
+        explicitCredentials: [{ variable: "ANTHROPIC_API_KEY", ref: credentialRef }],
+        explicitConnectionEnv: { ANTHROPIC_BASE_URL: baseUrl },
+        claudeExecutableFor: () => ({ path: claudeRuntimeForTests()!.executable }),
+        officialPeer,
+        assembler,
+        capabilities: {},
+        canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy, emit: () => {} },
+        policy,
+        env: { ...process.env, HOME: hermetic.home }, // the SAME child HOME for both sessions
+      };
+      return startOfficialSession({
+        sessionId,
+        backendSessionId: crypto.randomUUID(),
+        mode: "code",
+        runtime,
+        selection: selectionFor(),
+        sessionInput: () => sessionInput,
+        inputDeps: () => inputDeps,
+        projector: (generation) => createProjector({
+          sessionId, mode: "code", generation, runtimeKind: "claude-agent",
+          nextSeq: () => ++seq, checkpoint: checkpoints, now: () => new Date().toISOString(), log: { warn: () => {} },
+        }),
+        append: (e) => { const stamped = { ...e, seq: (e as { seq?: number }).seq ?? ++seq } as SessionEvent; events.push(stamped); return stamped; },
+        broadcast: (e) => { events.push(e as unknown as SessionEvent); },
+        log: () => {},
+        messaging: { attach: attachOfficialSession },
+      });
+    };
+
+    const { startFake, anthropicFake } = await import("@yanlinglabs/winter-provider-conformance");
+    const DONE = (text: string): AnthropicTurnScript => ({ blocks: [{ type: "text", chunks: [text] }], stopReason: "end_turn" });
+    let bTurns = 0;
+    // MEASURED (Lane 3b diagnosis): the delivered text never appears as a persisted `user_message`
+    // event in B's own event log at all — delivery pushes a RENDERED, ATTRIBUTED envelope
+    // (`<agent-message from="session:row4-a" message-id="..." sender-permission-class="prompts">
+    // ...<summary>...</summary>...hello from A...</agent-message>`, `renderAttributedTurn`'s own
+    // format — WS-10 §12) straight into B's prompt stream, bypassing `OfficialSession.deliver()`'s
+    // `appendUser` call. So this test asserts on the REAL wire evidence (B's own second model
+    // request body) rather than an event that never gets emitted — itself a finding: an official-leg
+    // delivery leaves no trace in the RECEIVER's own persisted transcript (carry, out of this row's
+    // scope — WS-17 §8 asks only whether delivery happens, not whether it is journaled).
+    let secondRequestBody: string | undefined;
+    const fakeB = await startFake({
+      routes: [{
+        path: "*", handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            bTurns += 1;
+            if (bTurns === 2) secondRequestBody = recorded.body;
+            return anthropicFake.anthropicTurnResponse(DONE(bTurns === 1 ? "hi, I'm B" : "got your message"));
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    let aTurns = 0;
+    const fakeA = await startFake({
+      routes: [{
+        path: "*", handler: async (_req, recorded) => {
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") {
+            aTurns += 1;
+            // `to` must be the CANONICAL serialized address (`session:<id>`) — `resolveTarget`'s own
+            // algorithm (winter-agent-sdk's messaging/resolution.ts) only matches a BARE string
+            // against the caller's own children by id/name or a peer's `name` field; a bare
+            // top-level sibling session id with no `name` set resolves nowhere ("not_found",
+            // measured first).
+            if (aTurns === 1) return anthropicFake.anthropicTurnResponse({ blocks: [{ type: "tool_use", id: "call_sm", name: "SendMessage", jsonChunks: [JSON.stringify({ to: "session:row4-b", message: "hello from A" })] }], stopReason: "tool_use" });
+            return anthropicFake.anthropicTurnResponse(DONE("sent"));
+          }
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+
+    try {
+      // B first, so it is LIVE + attached (a messaging receiver) before A ever calls SendMessage.
+      const sessionB = makeSession("row4-b", fakeB.url);
+      await sessionB.send("hello");
+      await waitFor(eventsFor.get("row4-b")!, (e) => e.type === "turn_completed", 45_000);
+
+      const sessionA = makeSession("row4-a", fakeA.url);
+      await sessionA.send("please message B for me");
+      await waitFor(eventsFor.get("row4-a")!, (e) => e.type === "turn_completed", 45_000);
+
+      const aResult = eventsFor.get("row4-a")!.find((e) => e.type === "tool_result") as (SessionEvent & { output?: string; isError?: boolean }) | undefined;
+      console.warn(`[row4] MEASURED: A's SendMessage tool_result = ${JSON.stringify(aResult)}`);
+      expect(aResult?.isError).not.toBe(true);
+      expect(aResult?.output).toContain('"status":"queued"');
+
+      // The delivery pushes straight into B's prompt stream as a RENDERED, ATTRIBUTED envelope
+      // (MEASURED: it never becomes a persisted `user_message` event in B's own log at all — see
+      // this test's own header comment) — so wait for B's SECOND real model request (its own reply
+      // to it) and assert on the wire body directly, the only place the delivery is observable.
+      const t0 = Date.now();
+      while (secondRequestBody === undefined && Date.now() - t0 < 45_000) await Bun.sleep(20);
+      expect(secondRequestBody).toBeDefined();
+      // The body is still JSON-encoded text at this point, so the envelope's own quotes are
+      // escaped (`\"`) inside it — match the escaped form rather than a literal `"`.
+      expect(secondRequestBody).toContain("agent-message from=\\\"session:row4-a\\\"");
+      expect(secondRequestBody).toContain("hello from A");
+      await waitFor(eventsFor.get("row4-b")!, (e) => eventsFor.get("row4-b")!.filter((x) => x.type === "turn_completed").length >= 2, 45_000);
+
+      // The planted `~/.claude` file: byte-identical (content AND mtime) after BOTH sessions ran —
+      // proving neither the config-dir redirect nor the messaging round-trip touches it.
+      const after = { content: readFileSync(plantedFile, "utf8"), mtimeMs: statSync(plantedFile).mtimeMs };
+      expect(after).toEqual(before);
+    } finally {
+      await fakeA.close();
+      await fakeB.close();
+      await runtime.dispose();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  // Lane 3b (item C, WS-17 §8 row 5): a parent with a COMPLETED (exited) child, a NEW runtime
+  // handle over the SAME durable directory db, the parent re-attached ("resumed"), then a NATIVE
+  // SendMessage addressed at the exited child — measured at the router's own messaging seam
+  // (`runtime.sdk.messaging.sendDetailed`, the exact call the standing server's `send_message`
+  // handler makes) rather than through a second real spawned CLI, mirroring row 6's own precedent
+  // of proving PERSISTENCE/ROUTING directly rather than re-proving a real spawn item A/row 4 already
+  // did. `messaging.ts`'s own header states the official leg's `coldResume` only ever calls
+  // `peers.winter.query(...)` — there is no official-runtime cold-resume path in router 0.0.3 at
+  // all — so the a-priori expectation is the SECOND half of this row's own either/or: a typed
+  // refusal, not an actual resume. This test PINS whichever the real router does, verbatim.
+  test("WS-17 §8 row 5: a parent's native SendMessage to its COMPLETED official child, across a directory restart", async () => {
+    const home = mkdtempSync(join(tmpdir(), "p8d-row5-home-"));
+    const secrets = new FileSecretStore(join(home, "secrets"));
+    const rs1 = openRuntimeStateDb(home);
+    const directory1 = createSqliteRuntimeDirectoryStore(rs1);
+    const runtime1 = await createNormaRuntimeSdk({ home, settings: () => null, secrets, capabilities: [], directoryStore: directory1, sessionPermissionClass: () => "prompts" });
+
+    const parentAddress = serializeRuntimeAddress(buildSessionAddress("row5-p"));
+    const childAddress = serializeRuntimeAddress(buildChildAddress("row5-p", "row5-c"));
+
+    // The parent, LIVE, attached — this writes the parent's own directory row.
+    const parentDelivered: string[] = [];
+    const parentHandle1 = attachOfficialSession(runtime1, { sessionId: "row5-p", backendSessionId: "be-row5-p", deliver: (t) => parentDelivered.push(t), mode: "code" });
+    await parentHandle1.ready;
+
+    // Manually seed a COMPLETED child row — the shape `attachOfficialSession` itself would have left
+    // behind had a real child session run and then exited (row 4 + item A already prove a REAL
+    // official child registers and messages correctly while live; this row is about what happens
+    // to a NO-LONGER-LIVE one).
+    await directory1.upsert({
+      address: childAddress,
+      parsed: buildChildAddress("row5-p", "row5-c"),
+      runtimeKind: "claude-agent",
+      objectKind: "agent",
+      transport: "claude-child",
+      status: "exited",
+      mode: "code",
+      generation: 1,
+      selection: selectionFor(),
+      parentAddress,
+      backendSessionId: "be-row5-c",
+      capabilities: { message: true, resume: false, notifyWhenIdle: false, reply: false },
+      updatedAt: new Date().toISOString(),
+    });
+
+    parentHandle1.detach();
+    await runtime1.dispose();
+
+    // ── "the daemon restarts" — a NEW handle, over the SAME db file ─────────────────────────────
+    const rs2 = openRuntimeStateDb(home);
+    const directory2 = createSqliteRuntimeDirectoryStore(rs2);
+    const runtime2 = await createNormaRuntimeSdk({ home, settings: () => null, secrets, capabilities: [], directoryStore: directory2, sessionPermissionClass: () => "prompts" });
+
+    // The child row survived the restart (row 6's own proof, re-confirmed here for the OFFICIAL
+    // side rather than a Winter one — `PersistedWinterChild`/`RuntimeChildren` is the Winter-only
+    // door; this is the router's own cross-runtime directory instead).
+    const rows = await directory2.load();
+    const reloadedChild = rows.find((r) => r.address === childAddress);
+    expect(reloadedChild).toBeDefined();
+    expect(reloadedChild?.status).toBe("exited");
+    expect(reloadedChild?.parentAddress).toBe(parentAddress);
+
+    // "parent resume" — the daemon re-attaches the parent's official session under the NEW handle
+    // (same session/backend ids; a real daemon would do this from `session.create`'s own resume
+    // path — this test skips spawning the real CLI, per this row's own header comment).
+    const parentHandle2 = attachOfficialSession(runtime2, { sessionId: "row5-p", backendSessionId: "be-row5-p", deliver: (t) => parentDelivered.push(t), mode: "code" });
+    await parentHandle2.ready;
+
+    // THE NATIVE SendMessage, addressed at the completed child — through the SAME seam the
+    // standing server's real `send_message` tool handler calls.
+    const outcome = await runtime2.sdk.messaging.sendDetailed({
+      from: buildSessionAddress("row5-p"),
+      to: childAddress,
+      body: "please resume and confirm",
+      originToolCallId: "call_row5_native",
+    });
+    console.warn(`[row5] MEASURED: native SendMessage to a completed official child = ${JSON.stringify(outcome)}`);
+
+    // PINNED, against the real router 0.0.3: no official-runtime cold-resume path exists
+    // (`messaging.ts`'s own header — `coldResume` only ever calls `peers.winter.query`), so this is
+    // the row's "or the router's refusal verbatim" branch, not an actual resume.
+    expect(outcome.outcome.status).not.toBe("resumed_and_delivered");
+    // Pinned to the SPECIFIC refusal the router gives today (lane-3b review, Minor): a drift to any
+    // other refusal shape is a behaviour change worth seeing, not a silently-still-green OR.
+    expect(outcome.outcome.status).toBe("unavailable");
+    expect(JSON.stringify(outcome)).toContain("is not active");
+
+    parentHandle2.detach();
+    await runtime2.dispose();
+    rmSync(home, { recursive: true, force: true });
   }, 60_000);
 });
 

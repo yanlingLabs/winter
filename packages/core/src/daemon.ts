@@ -70,14 +70,16 @@ import { RoutineAuditLog } from "./routines/audit";
 import { makeApply } from "./settings-apply";
 import { SettingsWatcher } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
+import { restampStep } from "./runtime-state/recovery";
 import { createNormaRuntimeSdk, type NormaRuntimeSdk } from "./runtime-sdk/create";
+import { advisorReviewerFor, familyOfModel, officialLegDefaultSessionModel } from "./runtime-sdk/advisor-reviewer";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
 import { configuredMcpServersFor } from "./runtime-sdk/external-mcp";
 import { planBridgeFor, type PlanBridge } from "./runtime-sdk/plan-bridge";
 import { importEngineEraSession } from "./runtime-sdk/import-legacy";
 import { registerHandoffParticipants, planAndApplySwitch } from "./runtime-sdk/handoff";
-import { sinksFor } from "./runtime-sdk/sinks";
+import { createSinkCallStore, sinksFor } from "./runtime-sdk/sinks";
 import { sessionHooksFor } from "./runtime-sdk/hooks";
 import { buildCapabilitiesFor, type CapabilityDeps, type CapabilityServerRecord, type CapabilitySession } from "./capabilities";
 import type { McpSdkServerConfigWithInstance } from "@yanlinglabs/winter-agent-sdk";
@@ -950,6 +952,23 @@ export async function startDaemon(opts: {
       // live facet for — a parked (`resumable`) Winter session answers `unavailable` instead of
       // holding its mail forever, and is never cold-resumed behind the daemon's back.
       sessionPermissionClass: sessionPermissionClassFor({ records: () => runtime?.records, store }),
+      // P8d-8 (D30): the OFFICIAL leg's ONE reviewer resolver, ALWAYS wired (never conditional on
+      // whether `runtimes.advisorModel` is set — `advisorReviewerFor` reads that setting live
+      // itself). `sessionModel` (review fix F1) is NEVER `settings.provider.model` — that is the
+      // WINTER leg's own default-provider model (openai/codex on a non-Anthropic-primary install),
+      // and feeding it here silently resolved an OpenAI reviewer on a Claude-only leg.
+      // `officialLegDefaultSessionModel()` states the one fact this deployment can promise instead:
+      // every session on THIS leg is Claude-family (D13-2 — no other family can route here at all),
+      // so the D30 default is unconditionally "claude -> fable" regardless of which session asked
+      // (`advisor-reviewer.ts`'s own header records why a single daemon-wide getter cannot
+      // disambiguate between concurrent official-leg sessions on different models, and why that is a
+      // non-issue today for exactly this reason).
+      advisorReviewer: advisorReviewerFor({
+        settings: () => settings ?? undefined,
+        secrets,
+        familyOf: familyOfModel,
+        sessionModel: officialLegDefaultSessionModel,
+      }),
       log: (line) => console.error(`runtime-sdk: ${line}`),
     });
   } catch (err) {
@@ -985,8 +1004,17 @@ export async function startDaemon(opts: {
         `runtime-sdk: directory recovery — ${recovered.entriesLoaded} entr(ies), ${recovered.staleMarked} stale, ` +
           `${recovered.cursorsRestored} cursor(s), ${recovered.heldMessagesFound} held, ${parked} parked`,
       );
+      // P8d-11 (ruling: 8b task-12 option (b)): step 10 ran LATE by design — the router handle is
+      // built after §13 — so the boot-time attempt row says `skipped`; re-stamp it with the real
+      // outcome so `norma doctor` reads one honest step 10.
+      if (runtime?.lastRecovery.step10AttemptId !== undefined) {
+        restampStep(runtime.db.db, runtime.lastRecovery.step10AttemptId, 10, "ok", { entriesLoaded: recovered.entriesLoaded, staleMarked: recovered.staleMarked });
+      }
     } catch (err) {
       console.error(`runtime-sdk: directory recovery failed (${(err as Error)?.name ?? "unknown"}) — messaging starts without it`);
+      if (runtime?.lastRecovery.step10AttemptId !== undefined) {
+        restampStep(runtime.db.db, runtime.lastRecovery.step10AttemptId, 10, "failed", { errorName: (err as Error)?.name ?? "unknown" });
+      }
     }
   }
 
@@ -1133,10 +1161,21 @@ export async function startDaemon(opts: {
     notifyFallback: (title, message) => notifyHeadless(title, message),
     cwdFor: (sid) => { try { return store.meta(sid).cwd ?? undefined; } catch { return undefined; } },
     log: { info: (m) => console.error(`sinks: ${m}`), error: (m) => console.error(`sinks: ${m}`) },
+    // P8d-13: the durable dedupe half (`runtime_sink_calls`), so a restarted daemon never re-fires
+    // a side effect for a call id it already served; absent only when the runtime spine is offline.
+    ...(runtime === undefined ? {} : { durable: createSinkCallStore(runtime.db) }),
   });
   hub.addObserver((event) => {
-    if (event.type === "tool_call") sinks.onToolCall(event);
-    else if (event.type === "tool_result") sinks.onToolResult(event);
+    // Nit 1 (whole-branch review): `hub.addObserver` fires for EVERY appended event of EVERY
+    // session, both legs — the generation lookup only matters to the two branches below, so it is
+    // computed inside each of them instead of once up front, and every other event type (the vast
+    // majority of traffic) never pays for a `records.get()` it has no use for.
+    if (event.type === "tool_call") {
+      // P8d-13: the generation scopes the durable key `(session, generation, callId)`.
+      sinks.onToolCall({ ...event, generation: runtime?.records.get(event.sessionId)?.generation });
+    } else if (event.type === "tool_result") {
+      sinks.onToolResult({ ...event, generation: runtime?.records.get(event.sessionId)?.generation });
+    }
   });
   const winterDrivers: WinterSessionDrivers = createWinterSessionDrivers({
     home: normaHome,
@@ -1932,6 +1971,9 @@ export async function startDaemon(opts: {
     buildSessionCapabilities,
     // P8b Task 16: the driver table — the Winter leg's door for every `session.*` handler.
     winter: winterDrivers,
+    // Winter Phase 8d (P8d-7, lane 4): a read-only door onto the 8a record — ipc/server.ts's
+    // session.list reads `record.providerId` off it (`opts.records?.get`, narrowed to Pick<…,"get">).
+    records: runtime?.records,
     // P8c integration round 3: lane 4's engine-era IMPORT door (`session.send`'s one-shot
     // conversion before the permanent refusal) and the handoff-aware `session.setModel` path
     // (`runtime-sdk/handoff.ts`'s `planAndApplySwitch`) — both bound to this daemon's OWN

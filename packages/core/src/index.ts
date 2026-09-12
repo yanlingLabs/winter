@@ -5,15 +5,24 @@ export { FileSecretStore, KeychainSecretStore } from "./auth/secret-store";
 export { TOKEN_NAMES } from "./auth/tokens";
 export {
   loadSettings, saveSettings, loadPermissionDirs, addLocalDir,
-  REASONING_EFFORTS, setProviderModel, setReasoningEffort, setOutputStyle, memoryEnabledFrom,
+  REASONING_EFFORTS, setProviderModel, setReasoningEffort, setOutputStyle, setAdvisorModel, memoryEnabledFrom,
   workflowsEnabledFrom, keywordTriggerEnabledFrom,
   type Settings,
 } from "./settings";
+// Winter Phase 8d (Task 4.3): `norma model --advisor <slug>` validates against the SAME pinned
+// catalog `session.setModel`'s handler consults (`catalogRowsFor`, `runtime-sdk/provider-
+// selection.ts`) — the CLI runs with no live daemon/RPC for this command (direct settings.json
+// read/write, `case "model"`'s own doc comment), so the STATIC compiled-in catalog, not a
+// `sync.config` round trip, is the only thing it can validate against without one.
+export { catalogRowsFor } from "./runtime-sdk/provider-selection";
 export { runWorkflowSubprocess } from "./workflows/subprocess-entry";
 // P8b-18: reached only by the CLI's static `__runtime-state-probe` argv route, which imports it
 // from THIS barrel — the same shape `runWorkflowSubprocess` above uses, and the only shape that
 // survives `bun build --compile` (a dynamic import keyed on a string does not resolve in $bunfs).
 export { runRuntimeStateProbe, type RuntimeStateProbeResult } from "./runtime-state/probe";
+export { runRuntimesProbe, type RuntimesProbeResult } from "./runtime-sdk/runtimes-probe";
+export { diagnoseRuntimes, type RuntimesReport } from "./runtime-sdk/runtimes-doctor";
+export { RUNTIME_BUNDLE_LAYOUT, bundleRuntimePath, parseVersionsJson, type VersionsJson, type RuntimeBundleEntry } from "./runtime-sdk/bundle-layout";
 export { WorkflowRuntime, type WorkflowRuntimeDeps, type WorkflowRuntimeEvent, type WorkflowLaunch } from "./workflows/runtime";
 export { WorkflowStore, type ResolvedWorkflow } from "./workflows/store";
 export {
@@ -32,12 +41,14 @@ export {
   type ConsentBlockPlugin,
 } from "./plugins/lifecycle";
 export { createProvider, OPENAI_API_KEY_SECRET, type ActiveProvider, type LiveModelSelection } from "./providers/manager";
-export { CodexAuthStore, CODEX_SECRET_NAMES } from "./providers/codex-oauth";
 export {
   CREDENTIAL_MATERIAL_NAMES,
   readCredentialMaterial, writeCredentialMaterial, clearCredentialMaterial,
   readOpenAiApiKey, writeOpenAiApiKey,
   migrateLegacyCredentialMaterial,
+  // Phase 8d task 2.4: relocated here from the now-deleted `providers/codex-oauth.ts` — see
+  // `CodexAuthStore`'s own doc comment in `auth/credential-material.ts`.
+  CodexAuthStore, CODEX_SECRET_NAMES,
   type CredentialMaterial, type ApiKeyMaterial, type OauthMaterial, type BearerMaterial, type CredentialMigrationReport,
 } from "./auth/credential-material";
 export { runLoginFlow } from "./providers/pkce";

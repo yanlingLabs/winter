@@ -29,7 +29,7 @@ import { backfillNativeSessions, type BackfillReport } from "./migrations/backfi
 import { applyMemoryKeyMigration, memoryKeyRelocations, planMemoryKeyMigration, reconcileMemoryKeyManifest, type MemoryKeyFs } from "./migrations/memory-keys";
 import { RuntimeSessionRecords } from "./records";
 import { recoverRuntimeState, type RecoveryHooks, type RecoveryReport } from "./recovery";
-import { deleteSessionRuntimeState, retentionFromSettings, sweepRetention } from "./retention";
+import { deleteSessionRuntimeState, pruneSinkCalls, retentionFromSettings, sweepRetention } from "./retention";
 
 /** WS-16 §16's housekeeping cadence. Hourly is deliberate: both windows are measured in DAYS, so a
  *  sweep is only ever removing rows that crossed a horizon since the last pass. */
@@ -38,14 +38,16 @@ export const RUNTIME_SWEEP_INTERVAL_MS = 60 * 60_000;
 /**
  * How long teardown waits for queued §16 deletions before it closes the handle anyway.
  *
- * MUST STAY UNDER THE APP'S GRACE PERIOD. `DaemonSupervisor.gracefulExitTimeout` (2.0 s,
+ * MUST STAY UNDER THE APP'S GRACE PERIOD. `DaemonSupervisor.gracefulExitTimeout` (5.0 s since Winter
+ * Phase 8d's P8d-6 — the quit runs behind `.terminateLater`, so macOS's own ~5 s window no longer binds;
  * `apple/Norma/Sources/App/DaemonSupervisor.swift`) is how long the app waits after SIGTERM before
  * escalating to SIGKILL — so a drain budgeted above that would be force-killed mid-drain, losing the
  * deletion it was waiting for AND the `lock.release()` behind it, which is what unlinks the socket.
- * A stale socket sends the supervisor into `.connectOnly` on the next launch. 1500 ms leaves the
- * rest of teardown room inside the 2 s and still covers a drain that is, in practice, microtasks.
+ * A stale socket sends the supervisor into `.connectOnly` on the next launch. 3500 ms leaves the
+ * rest of teardown room inside the 5 s and still covers a drain that is, in practice, microtasks
+ * (P8d-6: raised from 1500 ms together with the app's grace — never change one side alone).
  */
-export const RUNTIME_SHUTDOWN_DRAIN_MS = 1_500;
+export const RUNTIME_SHUTDOWN_DRAIN_MS = 3_500;
 
 /** The `schema_meta` key that makes §17 phase 5 a ONE-TIME relocation (P8b-17 writes it, 8a only
  *  read it). Written when a run finishes with NOTHING LEFT TO DO — no collision to clear, no
@@ -63,9 +65,12 @@ export interface DaemonRuntimeStateDeps {
   /** Default `RUNTIME_SWEEP_INTERVAL_MS`. Injectable so a test can prove the periodic pass runs
    *  without waiting an hour. */
   sweepIntervalMs?: number;
-  /** Recovery's own test seams (`RecoveryDeps`): the 8b/8c step hooks, step 4's process probe and
-   *  step 8's scan root, whose default is a REAL path on the developer's machine. */
-  recovery?: { hooks?: RecoveryHooks; probe?: LeaseProbe; tempScanRoot?: string };
+  /** Recovery's own test seams (`RecoveryDeps`): the 8b/8c step hooks, step 4's process probe,
+   *  step 8's scan root, and P8d-12's `claude-resume-*` staging root — the last two default to a
+   *  REAL path on the developer's machine (`canonicalTempScanRoot()` / `os.tmpdir()`), so every
+   *  caller of `startRuntimeState` that does not name one sweeps the real thing (whole-branch
+   *  review, Major 1). */
+  recovery?: { hooks?: RecoveryHooks; probe?: LeaseProbe; tempScanRoot?: string; claudeResumeScanRoot?: string };
   /** §17 phase 5's filesystem seam (`MemoryKeyFs`). Injectable for ONE reason: the two failures this
    *  wiring has to survive — a repair that throws, and an apply that throws after a committed move —
    *  are both mid-`rename` failures, and a test cannot produce either by arranging files. */
@@ -91,7 +96,7 @@ export interface RuntimeStateWiring {
   lastBackfill: BackfillReport | null;
   /** One retention pass, reading the windows LIVE. Also the door a test drives instead of waiting
    *  out the hourly interval. */
-  sweepNow(): Promise<{ deliveriesPruned: number; leasesPruned: number }>;
+  sweepNow(): Promise<{ deliveriesPruned: number; leasesPruned: number; sinkCallsPruned: number }>;
   /** The reaper's/cleaner's `onDelete` hook. Synchronous by signature because both callers are, so
    *  the async §16 deletion is queued onto one chain and never interleaves with itself. */
   onSessionDeleted(sessionId: string): void;
@@ -194,6 +199,14 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
       hooks: deps.recovery?.hooks,
       probe: deps.recovery?.probe,
       tempScanRoot: deps.recovery?.tempScanRoot,
+      // Major 1 fix: the SAME ladder `resolveWinterExecutable` (`runtime-sdk/executable.ts`) reads
+      // for `NORMA_WINTER_EXECUTABLE` — an explicit dep wins, then the env seam, and only then does
+      // `recovery.ts`'s own default (`canonicalTempScanRoot()`/`os.tmpdir()`) apply. The env seam
+      // exists so a daemon boot (which has no `recovery:` opts to thread through `startDaemon`) can
+      // still be pointed at a throwaway root — the shared test helper (`test/runtime-state/support.ts`'s
+      // `withTempHome`) sets it for the test's lifetime, which is what keeps every `startDaemon`-style
+      // test from sweeping the developer's real tmpdir.
+      claudeResumeScanRoot: deps.recovery?.claudeResumeScanRoot ?? (process.env.NORMA_CLAUDE_RESUME_SCAN_ROOT?.trim() || undefined),
     });
     for (const step of lastRecovery.steps) {
       if (step.outcome === "ok" || step.outcome === "skipped") continue;
@@ -368,15 +381,23 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
     runMemoryKeyMigration(deps.settings());
 
     // ── §16 retention: at boot, then hourly, always off the LIVE windows ─────────────────────────
-    const sweepNow = async (): Promise<{ deliveriesPruned: number; leasesPruned: number }> => {
-      if (closing) return { deliveriesPruned: 0, leasesPruned: 0 };
-      return await sweepRetention(directory, retentionFromSettings(deps.settings() ?? undefined));
+    const sweepNow = async (): Promise<{ deliveriesPruned: number; leasesPruned: number; sinkCallsPruned: number }> => {
+      if (closing) return { deliveriesPruned: 0, leasesPruned: 0, sinkCallsPruned: 0 };
+      const retention = retentionFromSettings(deps.settings() ?? undefined);
+      const swept = await sweepRetention(directory, retention);
+      // P8d-13: shares the SAME retention read as the router's own sinks above — one settings read,
+      // one window, never two sources of truth about what "old" means for a durable dedupe table.
+      const sinkCallsPruned = pruneSinkCalls(rs, retention);
+      return { ...swept, sinkCallsPruned };
     };
     const sweep = async (): Promise<void> => {
       try {
         const swept = await sweepNow();
-        if (swept.deliveriesPruned > 0 || swept.leasesPruned > 0) {
-          log(`runtime retention: pruned ${swept.deliveriesPruned} receipted deliver(ies), ${swept.leasesPruned} released name lease(s)`);
+        if (swept.deliveriesPruned > 0 || swept.leasesPruned > 0 || swept.sinkCallsPruned > 0) {
+          log(
+            `runtime retention: pruned ${swept.deliveriesPruned} receipted deliver(ies), ${swept.leasesPruned} released name lease(s), ` +
+              `${swept.sinkCallsPruned} sink call record(s)`,
+          );
         }
       } catch (e) {
         log(`runtime retention sweep failed (it runs again at the next interval): ${errName(e)}`);

@@ -16,8 +16,18 @@
 // this works regardless of import order and needs no dynamic `import()` gymnastics. It is undone in
 // `afterAll` so no other test file sharing this process sees a fake treated as real.
 import { afterAll, describe, expect, mock, test } from "bun:test";
+import { installMockModuleTripwire } from "../mock-module-tripwire";
 import * as winterRuntimeSdk from "@yanlinglabs/winter-runtime-sdk";
 
+// Minor 4 (whole-branch review, adopting m6): installed BEFORE the file's own top-level
+// `mock.module` call just below — the tripwire's own header requires the wrap to be in place
+// before the first call it must count, or that call is invisible to it and the restoring
+// `afterAll` right after it would misread as an odd (leaked) count on its own. Its CHECKING
+// `afterAll` still runs last regardless of this early call site: `installMockModuleTripwire`
+// defers that registration to a microtask, so it only fires once this file's whole synchronous
+// body — including the restoring `afterAll` two lines down and every `describe` below — has
+// already registered its own hooks.
+installMockModuleTripwire();
 mock.module("@yanlinglabs/winter-runtime-sdk", () => ({ ...winterRuntimeSdk, isOfficialQuery: () => true }));
 afterAll(() => {
   mock.module("@yanlinglabs/winter-runtime-sdk", () => winterRuntimeSdk);

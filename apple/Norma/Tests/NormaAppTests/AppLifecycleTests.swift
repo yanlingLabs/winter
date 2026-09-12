@@ -153,6 +153,15 @@ final class AppLifecycleTests: XCTestCase {
         XCTAssertEqual(applied, [.regular, .accessory, .accessory], "⌘Q/dock-quit must demote the dock icon back to accessory")
     }
 
+    /// Winter Phase 8d (P8d-6): a real quit now answers `.terminateLater`, not `.terminateNow`
+    /// directly — the (now 5s-bounded) supervised-daemon stop is deferred to run OUTSIDE
+    /// `applicationWillTerminate`'s own tighter window (see `applicationShouldTerminate`'s own
+    /// doc). `daemonSupervisor` is nil here (this test never calls `boot()`), so the deferred
+    /// `Task` body's `daemonSupervisor?.stop()` is a no-op; the `reply(toApplicationShouldTerminate:)`
+    /// call is skipped entirely under `isRunningUnitTests` (that method's own doc: calling it with
+    /// no genuine `NSApp.terminate()`-initiated sequence in flight — exactly what a direct delegate
+    /// call like this one is — is Apple-documented undefined behavior), so this test never touches
+    /// AppKit's real termination machinery at all, same posture as before this change.
     func testApplicationShouldTerminateAllowsTerminationAndLeavesWindowsAloneWhenReallyQuitting() {
         let delegate = AppDelegate()
         delegate.systemQuitReasonProvider = { false }
@@ -163,7 +172,7 @@ final class AppLifecycleTests: XCTestCase {
 
         let reply = delegate.applicationShouldTerminate(NSApp)
 
-        XCTAssertEqual(reply, .terminateNow)
+        XCTAssertEqual(reply, .terminateLater, "a real quit defers through .terminateLater (P8d-6) rather than answering .terminateNow directly")
         XCTAssertFalse(delegate.detachedWindows.isEmpty, "a real quit must not run the cancel-path window teardown — AppKit's own termination handles that")
         XCTAssertEqual(applied, [.regular], "a real quit doesn't demote — the register's promotion stands and no demotion was ever applied; the app is exiting")
     }
@@ -183,7 +192,10 @@ final class AppLifecycleTests: XCTestCase {
 
         let reply = delegate.applicationShouldTerminate(NSApp)
 
-        XCTAssertEqual(reply, .terminateNow, "a system logout/shutdown must never be refused")
+        // Winter Phase 8d (P8d-6): same deferral as the menu-bar-Quit case above — a system
+        // logout/restart/shutdown is still a real quit (never refused), it just answers via
+        // `.terminateLater` now instead of `.terminateNow` directly.
+        XCTAssertEqual(reply, .terminateLater, "a system logout/shutdown must never be refused, and (P8d-6) defers through .terminateLater like any other real quit")
         XCTAssertFalse(delegate.detachedWindows.isEmpty, "the cancel-path teardown must not run — applicationWillTerminate owns real-quit teardown")
     }
 

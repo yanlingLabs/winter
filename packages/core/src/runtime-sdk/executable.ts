@@ -7,7 +7,13 @@
 // published, a compiled `$bunfs` daemon cannot `createRequire` its way to a file that only exists
 // in a real `node_modules`. So the host ALWAYS passes `Options.pathToClaudeCodeExecutable`, and
 // this module is how it gets one.
-import { dirname, join } from "node:path";
+//
+// P8d-1: the "bundle" rung moved from a bare `<dirname(execPath)>/winter` sibling to
+// `<dirname(execPath)>/runtimes/winter` (`bundleRuntimePath`, the one place this layout is
+// spelled) — the Release app now embeds BOTH runtimes under one `Resources/runtimes/` subtree
+// rather than dropping `winter` next to `norma-core` itself.
+import { join } from "node:path";
+import { bundleRuntimePath } from "./bundle-layout";
 
 export type WinterExecutableSource = "setting" | "env" | "bundle" | "home";
 
@@ -34,7 +40,7 @@ export function resolveWinterExecutable(input: { setting?: string; env: Record<s
     if (!path) continue;
     return input.exists(path) ? { ok: true, path, source } : { ok: false, error: new WinterExecutableUnavailable([path]) };
   }
-  const implicit: Array<[WinterExecutableSource, string]> = [["bundle", join(dirname(input.execPath), "winter")], ["home", join(input.home, "runtimes", "bin", "winter")]];
+  const implicit: Array<[WinterExecutableSource, string]> = [["bundle", bundleRuntimePath(input.execPath, "winter")], ["home", join(input.home, "runtimes", "bin", "winter")]];
   const tried: string[] = [];
   for (const [source, path] of implicit) { tried.push(path); if (input.exists(path)) return { ok: true, path, source }; }
   return { ok: false, error: new WinterExecutableUnavailable(tried) };

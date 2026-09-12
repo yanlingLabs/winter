@@ -1,5 +1,6 @@
 import type { NewSessionEvent } from "@norma/protocol";
 import type { BridgeLogger } from "./bridge-common";
+import type { RuntimeStateDb } from "../runtime-state/db";
 
 /**
  * **Notification and schedule sinks** (P8c-11, Task 2.4) — the daemon's own effects for two of the
@@ -61,14 +62,19 @@ import type { BridgeLogger } from "./bridge-common";
  * ── IDEMPOTENCY (P8c-11's own obligation: "a replay never re-fires") ────────────────────────────
  *
  * A `seen` set keyed by `sessionId:callId` guards every side effect this module performs (the
- * notification fire, the create-args stash, the delete). It is **IN-MEMORY ONLY, for the lifetime
- * of this `sinksFor(...)` instance** — it protects a live session against the projector re-handing
- * it the same accepted message (a resume that mis-tracks its cursor, a driver bug), which is the
- * failure mode the projector's own idempotency contract is about. It does **NOT** survive a daemon
- * restart: a durable, persisted dedupe keyed by (winterSessionId, generation, callId) would need a
- * `runtime-state` schema addition, which is outside this lane's file ownership
- * (`runtime-state/records.ts` is not a lane-2 file) — carried to a later phase, and named plainly
- * in the lane report rather than silently left unstated.
+ * notification fire, the create-args stash, the delete) — the FAST path, in-memory, for the
+ * lifetime of this `sinksFor(...)` instance. It protects a live session against the projector
+ * re-handing it the same accepted message (a resume that mis-tracks its cursor, a driver bug),
+ * which is the failure mode the projector's own idempotency contract is about.
+ *
+ * P8d-13 adds the DURABLE half: `SinkCallStore` (`createSinkCallStore`, backed by
+ * `runtime-state.db`'s `runtime_sink_calls` table — now a lane-2 file, unlike when this obligation
+ * was first carried) — consulted only when `seen` does not already know the call, so a restarted
+ * daemon (a fresh `sinksFor(...)` instance, empty `seen`) still recognizes a call it fired before
+ * going down. `generation` is part of the durable key (`ProjectedToolCall.generation`, optional —
+ * every real event carries it once the caller supplies one; see `SinkCallStore`'s own doc) because
+ * the router mints a fresh `call_id` space per generation, and a replayed call from an EARLIER
+ * generation must never collide with the same id minted fresh in a later one.
  */
 
 const NOTIFICATION_DEFAULT_TITLE = "Norma";
@@ -81,6 +87,10 @@ export interface ProjectedToolCall {
    *  ignored by both sinks. */
   name: string;
   argsJson: string;
+  /** P8d-13: which GENERATION this call belongs to, for the durable dedupe key. Absent when the
+   *  caller cannot supply one — the durable door is then simply skipped and the in-memory `seen`
+   *  set is this call's only guard, exactly this module's pre-8d behaviour. */
+  generation?: number;
 }
 
 export interface ProjectedToolResult {
@@ -89,6 +99,53 @@ export interface ProjectedToolResult {
   callId: string;
   output: string;
   isError: boolean;
+  /** P8d-13, mirrors `ProjectedToolCall.generation` — see there. */
+  generation?: number;
+}
+
+/**
+ * P8d-13's durable half of the sink dedupe. `hasSeen`/`markSeen` never throw: a durable-store
+ * failure (a closed db mid-shutdown, say) costs only the durable guard for that one call — the
+ * in-memory `seen` set is still this process's guard for the rest of its life, and a real duplicate
+ * missed here is caught by the SAME restart-survival property one boot later at worst (the row
+ * would then already exist and `hasSeen` would answer true).
+ */
+export interface SinkCallStore {
+  hasSeen(winterSessionId: string, generation: number, callId: string): boolean;
+  markSeen(winterSessionId: string, generation: number, callId: string): void;
+}
+
+/** The production `SinkCallStore`, over `runtime-state.db`'s `runtime_sink_calls` table (schema
+ *  v6, P8d-13). `at` is epoch milliseconds — the same unit `retention.ts`'s `pruneSinkCalls` cutoff
+ *  uses, so the two never disagree about what "old" means. */
+export function createSinkCallStore(rs: RuntimeStateDb): SinkCallStore {
+  return {
+    hasSeen(winterSessionId, generation, callId) {
+      try {
+        return (
+          rs.db
+            .query<{ one: number }, [string, number, string]>(
+              "SELECT 1 AS one FROM runtime_sink_calls WHERE winter_session_id = ? AND generation = ? AND call_id = ?",
+            )
+            .get(winterSessionId, generation, callId) != null
+        );
+      } catch {
+        return false; // never let a durable-store READ failure suppress a real notification
+      }
+    },
+    markSeen(winterSessionId, generation, callId) {
+      try {
+        rs.db.run("INSERT OR IGNORE INTO runtime_sink_calls (winter_session_id, generation, call_id, at) VALUES (?, ?, ?, ?)", [
+          winterSessionId,
+          generation,
+          callId,
+          Date.now(),
+        ]);
+      } catch {
+        /* best-effort: the in-memory `seen` set is still this process's guard */
+      }
+    },
+  };
 }
 
 /** The structural subset of `RoutineStore` this module calls. */
@@ -112,6 +169,11 @@ export interface SinksDeps {
    *  own default (`process.cwd()`). */
   cwdFor?: (sessionId: string) => string | undefined;
   log?: BridgeLogger;
+  /** P8d-13's durable dedupe store (`createSinkCallStore`, over `runtime-state.db`). Optional —
+   *  omitted (every test that never exercises restart-survival, and any daemon whose runtime spine
+   *  could not open) leaves the in-memory `seen` set as the only guard, exactly this module's
+   *  pre-8d behaviour. */
+  durable?: SinkCallStore;
 }
 
 export interface Sinks {
@@ -121,8 +183,16 @@ export interface Sinks {
 
 interface PendingCronCreate { cron: string; prompt: string }
 
-function key(sessionId: string, callId: string): string {
-  return `${sessionId}:${callId}`;
+/** P8d-13: GENERATION-SCOPED when available. The router mints a fresh `call_id` space per
+ *  generation, and `sinksFor` is constructed ONCE per daemon boot (`hub.addObserver` routes every
+ *  session's, every generation's, projected events through the SAME instance) — so without
+ *  `generation` in the key, a call id reused across two generations of the SAME session would
+ *  collide in the in-memory `seen` set exactly as this module's own header warns it must not for
+ *  the durable store. Falls back to the un-scoped form when the caller cannot supply a generation
+ *  (this module's pre-8d behaviour), so an existing caller that never sets `generation` is
+ *  unaffected. */
+function key(sessionId: string, callId: string, generation?: number): string {
+  return generation === undefined ? `${sessionId}:${callId}` : `${sessionId}:${generation}:${callId}`;
 }
 
 function parsePushNotificationArgs(argsJson: string): { message: string } | undefined {
@@ -179,6 +249,26 @@ function parseCronCreateResultId(output: string): string | undefined {
 export function sinksFor(deps: SinksDeps): Sinks {
   const log = deps.log;
   const seen = new Set<string>();
+
+  /** P8d-13: `seen` first (the fast path — a hit never even reaches the durable store), then
+   *  `deps.durable` when a `generation` was supplied. A hit there ALSO warms `seen`, so the second
+   *  and later replays of the same call in this SAME process skip the durable round-trip too. */
+  function alreadySeen(sessionId: string, generation: number | undefined, callId: string): boolean {
+    const k = key(sessionId, callId, generation);
+    if (seen.has(k)) return true;
+    if (generation !== undefined && deps.durable?.hasSeen(sessionId, generation, callId)) {
+      seen.add(k);
+      return true;
+    }
+    return false;
+  }
+
+  /** The mirror of `alreadySeen`: records the call as seen in BOTH the fast path and (when a
+   *  generation is available) the durable one. */
+  function markSeen(sessionId: string, generation: number | undefined, callId: string): void {
+    seen.add(key(sessionId, callId, generation));
+    if (generation !== undefined) deps.durable?.markSeen(sessionId, generation, callId);
+  }
   /** `sessionId:callId` of a create call → its parsed args, awaiting the matching tool_result. */
   const pendingCreates = new Map<string, PendingCronCreate>();
   /** Winter's minted job id → the mirrored `RoutineStore` id, so a later `CronDelete` (which
@@ -229,10 +319,10 @@ export function sinksFor(deps: SinksDeps): Sinks {
 
   return {
     onToolCall(event: ProjectedToolCall): void {
-      const k = key(event.sessionId, event.callId);
+      const k = key(event.sessionId, event.callId, event.generation);
       if (event.name === "push_notification") {
-        if (seen.has(k)) return;
-        seen.add(k);
+        if (alreadySeen(event.sessionId, event.generation, event.callId)) return;
+        markSeen(event.sessionId, event.generation, event.callId);
         const parsed = parsePushNotificationArgs(event.argsJson);
         if (parsed === undefined) {
           log?.error(`push_notification sink: unparseable args session=${event.sessionId} call=${event.callId}`);
@@ -246,16 +336,16 @@ export function sinksFor(deps: SinksDeps): Sinks {
 
       const create = parseCronCreateArgs(event.argsJson);
       if (create !== undefined) {
-        if (seen.has(k)) return;
-        seen.add(k);
+        if (alreadySeen(event.sessionId, event.generation, event.callId)) return;
+        markSeen(event.sessionId, event.generation, event.callId);
         pendingCreates.set(k, create);
         return;
       }
 
       const del = parseCronDeleteArgs(event.argsJson);
       if (del !== undefined) {
-        if (seen.has(k)) return;
-        seen.add(k);
+        if (alreadySeen(event.sessionId, event.generation, event.callId)) return;
+        markSeen(event.sessionId, event.generation, event.callId);
         const normaId = winterToNormaRoutineId.get(del.id);
         if (normaId === undefined) {
           // Unknown to this daemon process — could be a durable job created by an earlier daemon
@@ -277,7 +367,7 @@ export function sinksFor(deps: SinksDeps): Sinks {
     },
 
     onToolResult(event: ProjectedToolResult): void {
-      const k = key(event.sessionId, event.callId);
+      const k = key(event.sessionId, event.callId, event.generation);
       const pending = pendingCreates.get(k);
       if (pending === undefined) return;
       pendingCreates.delete(k);

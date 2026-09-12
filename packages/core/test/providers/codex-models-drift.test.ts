@@ -3,7 +3,7 @@ import { CODEX, CODEX_MODELS, CODEX_MODELS_VERIFIED } from "../../src/providers/
 import { DEFAULT_COMPACT_THRESHOLD_FRAC } from "../../src/agent/compactor";
 import { KeychainSecretStore } from "../../src/auth/secret-store";
 import { keychainService } from "../../src/profile";
-import { CodexAuthStore } from "../../src/providers/codex-oauth";
+import { CodexAuthStore } from "../../src/auth/credential-material";
 
 /**
  * DRIFT GUARD for `CODEX_MODELS` (packages/core/src/providers/codex-config.ts).

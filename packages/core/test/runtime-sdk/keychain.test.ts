@@ -7,9 +7,8 @@ import { WEB_SEARCH_API_KEY_SECRET } from "../../src/agent/tools/web";
 import { FileSecretStore, type SecretStore } from "../../src/auth/secret-store";
 import { TOKEN_NAMES } from "../../src/auth/tokens";
 import { keychainService } from "../../src/profile";
-import { CODEX_SECRET_NAMES, CodexAuthStore } from "../../src/providers/codex-oauth";
 import { OPENAI_API_KEY_SECRET } from "../../src/providers/manager";
-import { CREDENTIAL_MATERIAL_NAMES, writeOpenAiApiKey } from "../../src/auth/credential-material";
+import { CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, CodexAuthStore, writeOpenAiApiKey } from "../../src/auth/credential-material";
 import { credentialPresenceFrom, credentialRefFor, keychainSeamFromSecretStore, NORMA_CREDENTIAL_INVENTORY } from "../../src/runtime-sdk/keychain";
 
 // The real `CredentialRef` (`@yanlinglabs/winter-agent-sdk` protocol/config.d.ts:317-333) is a

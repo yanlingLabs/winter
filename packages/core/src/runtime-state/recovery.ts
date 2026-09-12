@@ -22,7 +22,9 @@
 // error contributes only its `name`: an error MESSAGE routinely quotes the payload it choked on
 // (`JSON.parse` echoes the corrupt bytes verbatim), and that payload is exactly the content the
 // runtime-state tables are trusted never to leak.
-import { readdirSync } from "node:fs";
+import type { Database } from "bun:sqlite";
+import { readdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionStore } from "../sessions/store";
 import type { RuntimeStateDb } from "./db";
@@ -74,6 +76,10 @@ export interface RecoveryDeps {
   /** Step 8's scan root. Defaults to §2's canonical `/private/tmp/norma-<uid>`; a test MUST point it
    *  at a temp directory, because the default is a real path on the developer's machine. */
   tempScanRoot?: string;
+  /** Step 8's SECOND scan root (P8d-12, WS-16 §10): the official leg's `claude-resume-*` staging
+   *  sweep. Defaults to `os.tmpdir()` — ALSO a real path on the developer's machine — so a test
+   *  MUST point this at a throwaway directory too, for the identical reason `tempScanRoot` must. */
+  claudeResumeScanRoot?: string;
   /**
    * "The product index has ALREADY been rebuilt in this process, since the lock was taken."
    *
@@ -110,6 +116,15 @@ export interface RecoveryReport {
   corrupt: string[];
   /** "Every step completed." Orthogonal to `corrupt` — see this file's header. */
   ok: boolean;
+  /**
+   * P8d-11: the `id` of the `runtime_recovery_attempts` row THIS sweep wrote for step 10 —
+   * `undefined` only when the write itself failed (bounded, per this file's header). The daemon
+   * calls `restampStep(rs.db, report.step10AttemptId, 10, …)` once `sdk.directory.recover()` has
+   * actually run (still before `startIpcServer` — see 8b task-12's CONCERN 1), turning the honest
+   * `"skipped"` row this sweep left behind into the real outcome, in place, rather than leaving
+   * `norma doctor` reading a step that always says "skipped" on every boot.
+   */
+  step10AttemptId?: number;
 }
 
 /** §2's canonical ephemeral root. The numeric suffix is the ACTUAL uid, never a hard-coded value. */
@@ -141,21 +156,23 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
     outcome: string,
     detail: Record<string, number | string | string[]>,
     winterSessionId?: string,
-  ): void => {
+  ): number | undefined => {
     try {
-      rs.db.run(
+      const result = rs.db.run(
         `INSERT INTO runtime_recovery_attempts (started_at, finished_at, daemon_pid, daemon_started_at, step, winter_session_id, outcome, detail_json)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [startedAt, now(), self.pid, self.startedAt, step, winterSessionId ?? null, outcome, JSON.stringify(detail)],
       );
+      return typeof result.lastInsertRowid === "bigint" ? Number(result.lastInsertRowid) : result.lastInsertRowid;
     } catch {
       /* bounded: diagnostics are evidence, never a dependency */
+      return undefined;
     }
   };
 
-  const finishStep = (step: RecoveryStepReport["step"], outcome: RecoveryStepReport["outcome"], detail: RecoveryStepReport["detail"]): void => {
+  const finishStep = (step: RecoveryStepReport["step"], outcome: RecoveryStepReport["outcome"], detail: RecoveryStepReport["detail"]): number | undefined => {
     steps.push({ step, outcome, detail });
-    writeAttempt(step, outcome, detail);
+    const attemptId = writeAttempt(step, outcome, detail);
     // The sink is the CALLER's, and it is the last thing standing between a bad log target and a
     // daemon that will not boot. It is also called from inside the outer catch below, so an
     // unguarded throw here would escape the very guard that exists to contain it — a sink that
@@ -166,6 +183,7 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
     } catch {
       /* a logging sink must never take recovery down */
     }
+    return attemptId;
   };
 
   /** The per-session bound. Records the id once, writes ONE attempt row naming the step and the
@@ -198,6 +216,7 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
   // Assigned INSIDE the outer try below, not here: this is a db read like any other, and a read
   // above the guard is a read whose failure rejects the promise. Zero until the sweep has counted.
   let sessionsSeen = 0;
+  let step10AttemptId: number | undefined;
   const finish = (): RecoveryReport => ({
     startedAt,
     finishedAt: now(),
@@ -207,6 +226,7 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
     reclassified,
     corrupt,
     ok: steps.every((s) => s.outcome !== "failed"),
+    ...(step10AttemptId === undefined ? {} : { step10AttemptId }),
   });
 
   // Review r1 (Minor 4): the boundedness claim has to be TOTAL. The per-session guards cover every
@@ -473,7 +493,7 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
       });
     }
 
-    // ── 8. Lease-safe temp orphan scan — REPORT ONLY ─────────────────────────────────────────────
+    // ── 8. Lease-safe temp orphan scan — REPORT ONLY, plus P8d-12's staging SWEEP ────────────────
     // The canonical tree is `<scanRoot>/<temp-project-key>/<backend-session-uuid>/`, so an
     // authoritative root sits BELOW a direct child of the scan root. A child is an orphan only when no
     // recorded root lives inside it — anything shallower would report a whole project key as abandoned
@@ -489,11 +509,22 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
       );
       const scanRoot = deps.tempScanRoot ?? canonicalTempScanRoot();
       const scan = hooks.scanTempOrphans ?? (async (roots: string[]) => defaultTempScan(scanRoot, roots));
+      // P8d-12 (WS-16 §10): the ONE deletion this normally report-only step performs — a documented,
+      // narrow exception to this file's own header rule, bounded twice over (age AND unclaimed) and
+      // logged by COUNT only, never a path. `known` is reused as-is: a live `sdk-resume-staging` root
+      // is recorded in the SAME two columns the scan above already reads, under the SAME
+      // `active_local_write_root`/`local_write_root` names — no second query needed.
+      let claudeResumeRemoved = 0;
+      try {
+        claudeResumeRemoved = sweepClaudeResumeStaging(deps.claudeResumeScanRoot ?? tmpdir(), known);
+      } catch {
+        /* bounded: the staging sweep costs itself, never the rest of step 8 */
+      }
       try {
         const { orphans } = await scan([...known]);
-        finishStep(8, "ok", { root: scanRoot, known: known.size, orphans, deleted: 0 });
+        finishStep(8, "ok", { root: scanRoot, known: known.size, orphans, deleted: 0, claudeResumeRemoved });
       } catch (e) {
-        finishStep(8, "skipped", { root: scanRoot, known: known.size, errorName: e instanceof Error ? e.name : "unknown" });
+        finishStep(8, "skipped", { root: scanRoot, known: known.size, errorName: e instanceof Error ? e.name : "unknown", claudeResumeRemoved });
       }
     }
 
@@ -518,16 +549,18 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
         // router handle is constructed in `daemon.ts` AFTER this sweep — it needs the directory
         // store this sweep's own `startRuntimeState` opened, and its `capabilities` come from the
         // tool-registry block later still. So on a real boot this step runs from the runtime-sdk
-        // construction site instead, and the ORDERING is a recorded plan conflict rather than a
-        // silent no-op: see the Task 12 report. A caller that CAN supply the hook (every test, and
-        // any future two-phase boot) takes the branch below and the whole step happens here.
-        finishStep(10, "skipped", { ...detail, reason: "the router handle is built after §13; recovery runs at runtime-sdk construction" });
+        // construction site instead (P8d-11 sanctions the late run) — the daemon calls
+        // `restampStep` below once that construction has happened, so this "skipped" row is never
+        // the FINAL word `norma doctor` reads on a real boot; it is here only until the restamp
+        // lands. A caller that CAN supply the hook (every test, and any future two-phase boot)
+        // takes the branch below and the whole step happens here instead.
+        step10AttemptId = finishStep(10, "skipped", { ...detail, reason: "the router handle is built after §13; recovery runs at runtime-sdk construction" });
       } else {
         try {
           await hooks.recoverDirectory();
-          finishStep(10, "ok", detail);
+          step10AttemptId = finishStep(10, "ok", detail);
         } catch (e) {
-          finishStep(10, "failed", { ...detail, errorName: e instanceof Error ? e.name : "unknown" });
+          step10AttemptId = finishStep(10, "failed", { ...detail, errorName: e instanceof Error ? e.name : "unknown" });
         }
       }
     }
@@ -550,6 +583,69 @@ export async function recoverRuntimeState(deps: RecoveryDeps): Promise<RecoveryR
     finishStep(12, "failed", { errorName: e instanceof Error ? e.name : "unknown" });
   }
   return finish();
+}
+
+/** WS-16 §10's own literal — repeated (not imported) in `runtime-sdk/mode-options.ts`'s
+ *  `controlPlaneDenyRules`, which names this constant right back; the two subsystems this phase
+ *  does not bridge with a shared module. */
+const CLAUDE_RESUME_PREFIX = "claude-resume-";
+
+/** A resume genuinely in flight is never this old — every drain/timeout window the router or the
+ *  official leg itself imposes is far shorter. Anything past this age under the staging root is
+ *  leaked, not live. */
+const CLAUDE_RESUME_STALE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * P8d-12 (WS-16 §10): sweep `claude-resume-*` staging directories — a DOCUMENTED, NARROW EXCEPTION
+ * to this file's own header rule ("step 8 reports and never deletes"). Two bounds, BOTH required,
+ * so this can never reach for a directory a live generation still needs:
+ *
+ *   - older than `CLAUDE_RESUME_STALE_MS` (mtime, real disk time — never the injectable `now()`
+ *     this file uses for its own writes, because a directory's age has to be judged against the
+ *     clock that actually wrote it), and
+ *   - not named in `known` — the SAME `local_write_root`/`active_local_write_root` set the scan
+ *     just above already built from `runtime_generations`/`runtime_sessions`, which is where a live
+ *     `sdk-resume-staging` root is recorded.
+ *
+ * NAMES NEVER LEAVE THIS FUNCTION — the caller receives a bare count, matching this whole step's
+ * "look and never open" discipline one deletion further: `readdirSync`/`statSync`/`rmSync` only,
+ * never a read of what is INSIDE a candidate directory. A directory that cannot be stat'd or removed
+ * is left for the next boot's pass rather than treated as a failure.
+ */
+function sweepClaudeResumeStaging(scanRoot: string, known: ReadonlySet<string>): number {
+  let entries: string[];
+  try {
+    entries = readdirSync(scanRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && e.name.startsWith(CLAUDE_RESUME_PREFIX))
+      .map((e) => e.name);
+  } catch {
+    return 0; // no temp root at all — nothing to sweep
+  }
+  let removed = 0;
+  for (const name of entries) {
+    const path = join(scanRoot, name);
+    // PREFIX-AWARE, exactly like `defaultTempScan`'s own `claimed` predicate just below: a known
+    // root is not always the candidate directory itself — a generation's `local_write_root` can
+    // name a SUBDIRECTORY of a `claude-resume-<uuid>` dir (a nested working root inside the staged
+    // payload), and an exact-match check would have swept the whole dir out from under it. `known`
+    // protects `path` whenever some root equals it OR sits inside it.
+    const claimed = [...known].some((root) => root === path || root.startsWith(`${path}/`));
+    if (claimed) continue;
+    let ageMs: number;
+    try {
+      ageMs = Date.now() - statSync(path).mtimeMs;
+    } catch {
+      continue; // gone already, or unreadable — leave it for the next pass
+    }
+    if (ageMs < CLAUDE_RESUME_STALE_MS) continue;
+    try {
+      rmSync(path, { recursive: true, force: true });
+      removed++;
+    } catch {
+      /* best-effort: a directory that will not remove is left for the next pass */
+    }
+  }
+  return removed;
 }
 
 /**
@@ -576,4 +672,41 @@ function defaultTempScan(scanRoot: string, known: string[]): { orphans: string[]
     if (!claimed) orphans.push(path);
   }
   return { orphans };
+}
+
+/**
+ * P8d-11: turn a `"skipped"` step 10 into the real outcome once the router handle actually exists.
+ *
+ * `recoverRuntimeState` runs long before `daemon.ts` can build the router (see the step 10 block's
+ * own comment), so a real boot always leaves the `runtime_recovery_attempts` row for step 10 reading
+ * `"skipped"` — accurate at the moment it was written, but a permanently dishonest answer to "did
+ * §13 step 10 run" once the late `sdk.directory.recover()` call (8b task-12's own sanctioned
+ * ordering) actually completes moments later, still before `startIpcServer`. This function
+ * RE-STAMPS that SAME row — by `id`, matched against the step it names so a caller can never
+ * clobber the wrong step's evidence — with the outcome the late call actually had, so `norma
+ * doctor`'s attempt view (`latestRecoveryAttempts`, `runtime-state/doctor.ts`) reads one honest
+ * step 10 per boot instead of a `"skipped"` that never changes.
+ *
+ * Bounded like every other write in this file: a restamp that cannot land (the db closed under a
+ * fast shutdown race, say) costs the AUDIT ROW, never the boot — `sdk.directory.recover()` has
+ * already run either way.
+ */
+export function restampStep(
+  db: Database,
+  attemptId: number,
+  step: 10,
+  outcome: "ok" | "partial" | "failed" | "skipped",
+  detail: Record<string, unknown>,
+): void {
+  try {
+    db.run(`UPDATE runtime_recovery_attempts SET outcome = ?, detail_json = ?, finished_at = ? WHERE id = ? AND step = ?`, [
+      outcome,
+      JSON.stringify(detail),
+      new Date().toISOString(),
+      attemptId,
+      step,
+    ]);
+  } catch {
+    /* bounded: diagnostics are evidence, never a dependency — see this file's header */
+  }
 }

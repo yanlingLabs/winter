@@ -11,6 +11,7 @@ import { controlPlaneTargetForCall, controlPlaneDenialMessage } from "./control-
 import { outdirPath } from "../sessions/outdir";
 import { askUserQuestionBridge, ASK_USER_QUESTION_TOOL } from "./question-bridge";
 import { consoleBridgeLogger, NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
+import type { BridgedPlanRequest } from "./plan-bridge";
 
 export { NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
 
@@ -85,17 +86,20 @@ export interface CanUseToolDeps {
    * P8c-14 (integration round 2): lane 2's `planBridgeFor(...)` (`runtime-sdk/plan-bridge.ts`),
    * consulted here BEFORE the generic gate/never-prompt logic whenever the incoming call is
    * `ExitPlanMode` (Winter's own spelling — `tool-names.ts`'s `WINTER_NORMA_TOOL_PAIRS` maps it to
-   * `exit_plan_mode`, but the dispatch switch below sees the WIRE name). Typed as the Interfaces
-   * block's original `(req: BridgedApprovalRequest) => Promise<PermissionResult>` — the concrete
-   * `PlanBridge.onExitPlanMode` actually takes `BridgedPlanRequest` (`BridgedApprovalRequest` plus
-   * a `plan: string` field plan-bridge.ts's own header comment explains at length); a real
-   * `PlanBridge` still satisfies this narrower method-shorthand type (bivariant method checking,
-   * the same trick `WinterLegDeps.planBridge` uses), and `planRequestFor` below always builds the
-   * WIDER `BridgedPlanRequest`-shaped object so the concrete bridge gets its `plan` field regardless
-   * of what this deps type says. Absent ⇒ `ExitPlanMode` falls through to the ordinary gate path
-   * (today: an unclassified tool name, `"ask"`-shaped) — never a crash, matching every other
-   * optional dep in this file. */
-  planBridge?: { onExitPlanMode(req: BridgedApprovalRequest): Promise<PermissionResult> };
+   * `exit_plan_mode`, but the dispatch switch below sees the WIRE name).
+   *
+   * WIDENED (P8d, the deferred integration-review nit): this used to be typed as the Interfaces
+   * block's original `(req: BridgedApprovalRequest) => Promise<PermissionResult>` even though the
+   * concrete `PlanBridge.onExitPlanMode` always took the WIDER `BridgedPlanRequest`
+   * (`BridgedApprovalRequest` plus a `plan: string` field — `plan-bridge.ts`'s own header comment
+   * explains at length) — bivariant method-shorthand checking let a real `PlanBridge` satisfy the
+   * narrower declared type without TypeScript ever noticing the mismatch. Declaring it as
+   * `BridgedPlanRequest` outright is what `planRequestFor` below already builds and callers
+   * already pass; this makes the type say what has always been true rather than something merely
+   * tolerated. Absent ⇒ `ExitPlanMode` falls through to the ordinary gate path (today: an
+   * unclassified tool name, `"ask"`-shaped) — never a crash, matching every other optional dep in
+   * this file. */
+  planBridge?: { onExitPlanMode(req: BridgedPlanRequest): Promise<PermissionResult> };
 }
 
 /** The deny text a policy that never prompts hands back to the model. Copied VERBATIM from
@@ -274,15 +278,13 @@ export function approvalOptionsFromSuggestions(suggestions: readonly PermissionU
  */
 
 /**
- * `ExitPlanMode`'s `canUseTool` request → the `BridgedApprovalRequest`-shaped object
- * `deps.planBridge.onExitPlanMode` needs, WIDENED with `plan` (`BridgedPlanRequest`,
- * `plan-bridge.ts`) so the concrete `planBridgeFor(...)` bridge — which reads `sessionId`,
- * `callId` and `plan` and nothing else — gets its plan text regardless of what `CanUseToolDeps`'s
- * own (narrower) method type says. Building a typed variable rather than passing an object literal
- * is what lets the extra `plan` field through with no cast (an object literal assigned straight
- * into a call would fail TS's excess-property check; a variable reference structurally satisfying
- * the narrower type does not, per plan-bridge.ts's own header comment). Every other field mirrors
- * `raiseCard`'s own record for parity, even though the plan bridge does not read them.
+ * `ExitPlanMode`'s `canUseTool` request → the `BridgedPlanRequest` `deps.planBridge.onExitPlanMode`
+ * needs — `sessionId`, `callId` and `plan`, which is all `planBridgeFor(...)`'s concrete bridge
+ * reads. `CanUseToolDeps.planBridge` is now declared as exactly this type (P8d widened it; it used
+ * to be the narrower `BridgedApprovalRequest`, tolerated only by TypeScript's bivariant method
+ * checking), so no cast or excess-property workaround is needed here any more — the return type
+ * says what this function has always built. Every other field mirrors `raiseCard`'s own record for
+ * parity, even though the plan bridge does not read them.
  */
 function planRequestFor(
   deps: CanUseToolDeps,
@@ -291,7 +293,7 @@ function planRequestFor(
   input: Record<string, unknown>,
   ctx: Parameters<CanUseTool>[2],
   now: () => number,
-): BridgedApprovalRequest & { plan: string } {
+): BridgedPlanRequest {
   const argsJson = safeArgsJson(input);
   const summary = approvalCardSummary({ name: gateToolName, argsJson });
   const issuedAt = now();

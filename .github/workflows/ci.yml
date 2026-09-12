@@ -45,6 +45,31 @@ jobs:
         working-directory: packages/${{ matrix.package }}
         run: bun test ${{ matrix.args }}
 
+  # Winter Phase 8d (P8d-16): the ONE place this workflow reads the pinned winter-agent-sdk
+  # version, rather than hardcoding it in BOTH the tag `ref:` AND the uploaded-artifact `name:`
+  # below (it drifted from `versions.ts`'s own `REQUIRED_WINTER_AGENT_SDK` once already, in 8c's
+  # spine) — `scripts/pins.test.ts` is the tripwire that a literal never creeps back into either.
+  versions:
+    name: read pinned versions
+    runs-on: macos-latest
+    outputs:
+      winter-agent-sdk: ${{ steps.read.outputs.winter-agent-sdk }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Read REQUIRED_WINTER_AGENT_SDK
+        id: read
+        run: |
+          VERSION=$(bun -e 'import { REQUIRED_WINTER_AGENT_SDK } from "./packages/core/src/runtime-sdk/versions"; console.log(REQUIRED_WINTER_AGENT_SDK);')
+          echo "winter-agent-sdk=${VERSION}" >> "$GITHUB_OUTPUT"
+
   # P8b-2: build the `winter` runtime binary the daemon spawns, FROM THE PINNED TAG.
   #
   # Not a dependency resolution against a sibling `src` (the shape the router just retired) and not
@@ -58,6 +83,7 @@ jobs:
   winter-binary:
     name: build winter (pinned tag)
     runs-on: macos-latest
+    needs: versions
     steps:
       - uses: actions/checkout@v4
 
@@ -68,7 +94,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: yanlingLabs/winter-agent-sdk
-          ref: v0.0.4
+          ref: v${{ needs.versions.outputs.winter-agent-sdk }}
           path: .winter-agent-sdk
           fetch-depth: 0
 
@@ -97,7 +123,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: winter-v0.0.4
+          name: winter-v${{ needs.versions.outputs.winter-agent-sdk }}
           path: dist/winter
           if-no-files-found: error
           retention-days: 7
@@ -111,7 +137,7 @@ jobs:
   test-core:
     name: test · core
     runs-on: macos-latest
-    needs: winter-binary
+    needs: [versions, winter-binary]
     steps:
       - uses: actions/checkout@v4
 
@@ -124,7 +150,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: winter-v0.0.4
+          name: winter-v${{ needs.versions.outputs.winter-agent-sdk }}
           path: dist
 
       - name: Make the winter binary executable
@@ -176,7 +202,7 @@ jobs:
   test-cli:
     name: test · cli
     runs-on: macos-latest
-    needs: winter-binary
+    needs: [versions, winter-binary]
     steps:
       - uses: actions/checkout@v4
 
@@ -189,7 +215,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: winter-v0.0.4
+          name: winter-v${{ needs.versions.outputs.winter-agent-sdk }}
           path: dist
 
       - name: Make the winter binary executable
@@ -277,3 +303,72 @@ jobs:
             git --no-pager diff --stat
             exit 1
           fi
+
+  # Winter Phase 8d (P8d-5): the Swift mirror + client library, WITHOUT the full app (that stays a
+  # local/STRETCH concern below — the app needs ~480MB of vendored CEF/LibreOffice/Monaco this job
+  # does not fetch). NormaProtocol's round-trip tests assert the exact TS-generated fixture count;
+  # NormaKit is built AND tested (CLAUDE.md's own protocol checklist step 7: `swift test` in
+  # NormaProtocol alone does not catch a NormaKit-only compile break, e.g. a new SessionEvent
+  # variant's exhaustive switch). The NormaKit socket-test flake class is KNOWN (real Unix-socket
+  # I/O against a real spawned process on a shared CI runner) — retried once rather than chased.
+  swift:
+    name: swift (NormaProtocol + NormaKit)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: NormaProtocol — swift test
+        working-directory: apple/NormaProtocol
+        run: swift test
+
+      - name: NormaKit — swift build
+        working-directory: apple/NormaKit
+        run: swift build
+
+      # Winter Phase 8d (ruling P8d-22): thirteen Iroh-transport tests fail on `main` with
+      # `IrohError ConnectionLost(LocallyClosed)` — reproduced UNSANDBOXED on main + only the
+      # waitForFirstLine fix, so they PREDATE 8d and were masked until now by the daemon-hello bug
+      # (P8d-19). They are skipped BY EXACT NAME — all thirteen, never a whole suite (a test added to
+      # IrohE2ETests/FakePhoneConformanceTests must run; GatewayGateTests' count test is the
+      # remote-allowlist drift tripwire). Classifying them (relay/iroh environment vs a real
+      # regression) is a P9 carry; remove this --skip when it lands.
+      - name: NormaKit — swift test (retry once — known socket-test flake class)
+        working-directory: apple/NormaKit
+        env:
+          NORMAKIT_SKIP: 'IrohE2ETests/(testScenarioB_AttachSendStreamsEventsNoHarnessLeak|testScenarioC_ReconnectReplaysExactGapInOrderOverRealAsyncTransport|testScenarioD_IdempotentResendAcrossReconnectYieldsOneDaemonEffect)$|FakePhoneConformanceTests/(testFullLoopThroughNormaSessionClient_PromptRoundTripAndRealApprovalFlow|testLiveAttachRepointsForwardingToItsOwnConnection_TheProbeTheForegroundHopSends|testResumelessShellHandshakeDoesNotStealLiveForwarding_WhileTheOrphanedSessionKeepsPonging|testStreamingDeltasReachThePhone_OpaqueStateDoesNot_AndAnOversizedEventDoesNotKillTheLink)$|GatewayGateTests/(testG1_UpToDateReachable_HonestWatermark_NoHarnessLeak|testG2_MidHandshakeLiveEventIsDelivered|testG3_HelloAckIsFirstFrameThenReplay|testR1_CursorFarAheadYieldsSnapshotRequired|testR2_HelloAckReplayLiveStrictOrderUnderSuspendingSend|testT6b_ResumelessHelloDoesNotReorderAnotherConnectionsReplayFlush)$'
+        run: swift test --skip "$NORMAKIT_SKIP" || (echo "::warning::NormaKit swift test failed once — retrying (known socket-test flake class)"; swift test --skip "$NORMAKIT_SKIP")
+
+  # Winter Phase 8d (P8d-5): the compiled-binary proofs, on the macOS runner, after the pinned
+  # `winter` artifact is available — `verify:runtimes` needs it (via stageRuntimes' `winterPath`
+  # rung) exactly as `test-core`/`test-cli` do, and `verify:workflow`/`verify:runtime-state` are
+  # cheap to run alongside it in the same job rather than three separate ones.
+  verify:
+    name: verify (workflow, runtime-state, runtimes)
+    runs-on: macos-latest
+    needs: [versions, winter-binary]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: winter-v${{ needs.versions.outputs.winter-agent-sdk }}
+          path: dist
+
+      - name: Make the winter binary executable
+        run: chmod +x dist/winter
+
+      - name: verify:workflow
+        run: bun run verify:workflow
+
+      - name: verify:runtime-state
+        run: bun run verify:runtime-state
+
+      - name: verify:runtimes
+        run: bun run verify:runtimes

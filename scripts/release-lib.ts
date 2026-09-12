@@ -4,6 +4,7 @@
  * lookup, notary profile probe, gh auth, git tree/tag state) lives in release.ts and is wired
  * into `preflight()` as a closure; this module only aggregates results and renders text.
  */
+import { parseVersionsJson, type VersionsJson } from "../packages/core/src/runtime-sdk/bundle-layout";
 
 export interface Preflight {
   ok: boolean;
@@ -33,6 +34,12 @@ export const GH_REPO = "yanlingLabs/norma";
  * Renders one Sparkle appcast `<item>` for the update-check enclosure (the `.zip`). Schema
  * mirrors scripts/sparkle-feed-gate.ts's local test appcast: title/version/shortVersionString,
  * an optional `sparkle:channel` for beta, minimumSystemVersion, and the signed enclosure.
+ *
+ * P8d-2: `description` is OPTIONAL and, when given, renders as a standard RSS/Sparkle
+ * `<description>` element (CDATA-wrapped release notes — Sparkle has always supported this; it is
+ * new to THIS repo's template, never a new element invented for this) — never a bespoke element.
+ * `embeddedRuntimesDescriptionLine` is the one caller release.ts uses to fill it, naming the
+ * embedded runtime pair for a release.
  */
 export function appcastItem(i: {
   version: string;
@@ -41,11 +48,13 @@ export function appcastItem(i: {
   length: number;
   beta: boolean;
   minSystem: string;
+  description?: string;
 }): string {
   const url = `https://github.com/${GH_REPO}/releases/download/v${i.version}/${i.zipName}`;
   const channel = i.beta ? "\n      <sparkle:channel>beta</sparkle:channel>" : "";
+  const description = i.description ? `\n      <description><![CDATA[${i.description}]]></description>` : "";
   return `    <item>
-      <title>${i.version}</title>
+      <title>${i.version}</title>${description}
       <sparkle:version>${i.version}</sparkle:version>
       <sparkle:shortVersionString>${i.version}</sparkle:shortVersionString>${channel}
       <sparkle:minimumSystemVersion>${i.minSystem}</sparkle:minimumSystemVersion>
@@ -405,4 +414,111 @@ export function catalogueStaleness(i: { verified: string; now: Date; staleAfterD
       `This release ships CODEX_MODELS' context windows as constants; a stale window silently breaks ` +
       `auto-compaction. Re-derive: NORMA_CODEX_LIVE_DRIFT=1 bun test codex-models-drift`,
   };
+}
+
+/**
+ * P8d-2: the one line naming the embedded runtime pair, threaded into `appcastItem`'s
+ * `description` field (never a new Sparkle element — see that function's own doc).
+ */
+export function embeddedRuntimesDescriptionLine(v: { winterAgentSdk: string; officialSdk: string }): string {
+  return `Winter agent SDK ${v.winterAgentSdk} · Claude Agent SDK ${v.officialSdk}`;
+}
+
+export interface VersionsJsonPinCheck {
+  ok: boolean;
+  failures: string[];
+  /** The parsed record, when parsing itself succeeded (independent of whether the checksum check
+   *  below passed) — release.ts's own log line wants the staged versions either way. */
+  versions?: VersionsJson;
+}
+
+/**
+ * The PURE half of release.ts's `claude` gate (P8d-2): does the staged `VERSIONS.json` TEXT parse
+ * and match this build's pins (`parseVersionsJson` — `bundle-layout.ts`, the ladder's own gate,
+ * reused rather than re-typed here), AND does its recorded `checksums.claude` equal the ACTUAL
+ * SHA-256 of the binary release.ts just hashed off disk? The second check is what catches a stale
+ * or tampered embed that a valid-looking (even pin-matching) `VERSIONS.json` could otherwise paper
+ * over — the codesign/TeamIdentifier half of the gate stays in release.ts itself (real `codesign`
+ * shell-outs, not pure). Aggregates rather than throwing so release.ts can report every mismatch
+ * in one `fail()` call, same shape as `preflight`.
+ */
+export function verifyVersionsJsonAgainstPins(input: { versionsJsonText: string; claudeSha256: string }): VersionsJsonPinCheck {
+  let versions: VersionsJson;
+  try {
+    versions = parseVersionsJson(input.versionsJsonText);
+  } catch (err) {
+    return { ok: false, failures: [`VERSIONS.json: ${err instanceof Error ? err.message : String(err)}`] };
+  }
+  const failures: string[] = [];
+  if (versions.checksums.claude !== input.claudeSha256) {
+    failures.push(
+      `VERSIONS.json checksums.claude (${versions.checksums.claude}) does not match the embedded claude ` +
+        `binary's actual SHA-256 (${input.claudeSha256}) — the embedded file does not match what was staged/recorded`,
+    );
+  }
+  return { ok: failures.length === 0, failures, versions };
+}
+
+export interface Row16CheckInput {
+  /** Whether `buildWinter()` — which itself enforces the pinned-tag gate via `checkoutIsAtTag`
+   *  before it ever compiles anything — completed successfully. */
+  rebuildSucceeded: boolean;
+  /** The rebuild's own failure message when it did not succeed. `buildWinter()` surfaces a wrong/
+   *  missing tag and a genuine build failure the SAME way (both throw); this check does not need
+   *  to tell them apart, only that provenance could not be established either way. */
+  rebuildError?: string;
+  /** SHA-256 of the freshly rebuilt (pre-sign) winter binary — present only when `rebuildSucceeded`. */
+  freshHash?: string;
+  /** VERSIONS.json's recorded `winterPreSign` hash, from the STAGED build — a possibly different
+   *  `bun build --compile` invocation than this rebuild. */
+  recordedHash: string;
+}
+
+export interface Row16Record {
+  rebuildSucceeded: boolean;
+  rebuildError?: string;
+  freshHash?: string;
+  recordedHash: string;
+  /** Informational only — see `row16ProvenanceCheck`'s own doc for why this is never part of the
+   *  pass/fail decision. */
+  hashesMatch?: boolean;
+}
+
+export interface Row16CheckResult {
+  ok: boolean;
+  failure?: string;
+  record: Row16Record;
+}
+
+/**
+ * Row 16 ("identical versioned artifact") strong-path decision (P8d-2, revised by P8d-26). Verifies
+ * PROVENANCE — the embedded `winter` came from a build of the pinned tag that actually succeeds —
+ * NEVER hash equality of an independent rebuild against the staged binary. `bun build --compile` is
+ * not byte-reproducible across invocations: measured on the controller's own release rehearsal, a
+ * fresh rebuild of the SAME pinned tag hashed differently from the staged build. Comparing hashes
+ * as a pass/fail gate would make this check permanently, spuriously red on a genuinely correct
+ * embed — so a hash mismatch is recorded (`hashesMatch: false`) but never fails the check.
+ *
+ * FAILS only when the rebuild itself did not succeed (`rebuildSucceeded: false`) — which already
+ * covers a wrong/missing tag, since `buildWinter()` enforces `checkoutIsAtTag` before it ever
+ * compiles anything and throws with that exact reason on a mismatch; release.ts passes that
+ * already-computed outcome in here rather than this function re-deriving it, which is what makes
+ * this pure and unit-testable without a real SDK checkout or a real two-minute build.
+ */
+export function row16ProvenanceCheck(input: Row16CheckInput): Row16CheckResult {
+  const record: Row16Record = {
+    rebuildSucceeded: input.rebuildSucceeded,
+    ...(input.rebuildError === undefined ? {} : { rebuildError: input.rebuildError }),
+    ...(input.freshHash === undefined ? {} : { freshHash: input.freshHash }),
+    recordedHash: input.recordedHash,
+    ...(input.freshHash === undefined ? {} : { hashesMatch: input.freshHash === input.recordedHash }),
+  };
+  if (!input.rebuildSucceeded) {
+    return {
+      ok: false,
+      failure: `Row 16: could not establish provenance — rebuilding winter from the pinned tag failed: ${input.rebuildError ?? "unknown reason"}`,
+      record,
+    };
+  }
+  return { ok: true, record };
 }

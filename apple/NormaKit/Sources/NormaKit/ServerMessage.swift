@@ -24,6 +24,31 @@ public struct RpcError: Error, Equatable, Sendable {
     }
 }
 
+/// Winter Phase 8d (Task 4.2, Interfaces block): the handoff barrier's four typed refusal codes a
+/// `session.setModel` reply's `error.data.code` may carry (`ipc/server.ts`'s `RpcFailure` third
+/// argument, `session.setModel`'s own switch over `PlanSwitchOutcome`). Deliberately NOT every code
+/// that call can produce — `runtime_selection_refused`/`session_predates_winter_leg` (the `refused`
+/// outcome's other two codes) are plain refusals with no confirm/disable/error-class shape a picker
+/// treats differently, so `handoffCode` below answers `nil` for those, same as for any daemon error
+/// that carries no `code` at all.
+public enum HandoffRpcCode: String, Equatable, Sendable {
+    case confirmationRequired = "handoff_confirmation_required"
+    case disabled = "handoff_disabled"
+    case lossyFork = "handoff_lossy_fork"
+    case blocked = "handoff_blocked"
+}
+
+extension RpcError {
+    /// `nil` for every error that isn't one of the four handoff codes above — including a plain
+    /// `NOT_FOUND`/`INVALID_PARAMS` with no `data` at all, and the `refused` outcome's other two
+    /// codes (see `HandoffRpcCode`'s own doc). A caller that only cares "was this a handoff
+    /// refusal" should switch on this rather than string-matching `message`.
+    public var handoffCode: HandoffRpcCode? {
+        guard let raw = data?["code"]?.stringValue else { return nil }
+        return HandoffRpcCode(rawValue: raw)
+    }
+}
+
 public enum ServerMessage: Sendable {
     case response(id: Int, result: Result<JSONValue, RpcError>)
     case event(SessionEvent)

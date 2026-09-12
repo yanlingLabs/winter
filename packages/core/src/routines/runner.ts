@@ -2,17 +2,19 @@ import type { SessionStore } from "../sessions/store";
 import type { SessionHub } from "../sessions/hub";
 import type { RoutineRunner } from "./scheduler";
 
-// Every rate-limit ProviderEvent (providers/openai-compatible.ts's mapHttpError, shared by both
-// the openai-compatible and codex-oauth providers — see providers/quota.ts's withQuota) carries
-// `code: "rate_limit"` and a message starting with this exact prefix. Phase 5 routines T3 threads
-// that `code` through as an additive optional field on `agent_error` (protocol/src/events.ts's
-// AgentErrorEvent.code — engine.ts forwards `ev.code` when the error came from a live provider
-// stream), so quota detection below now PREFERS the structured `code === "rate_limit"` check.
-// This message-prefix match remains as the FALLBACK for an `agent_error` with no `code` at all
-// (an older log, or one of engine.ts's two synthetic agent_error emit sites — "no cwd" / context
-// cap — which have no provider code to carry). If a provider's error message shape ever changes,
-// the fallback silently stops detecting quota for code-less errors only — a comment at both ends
-// (here and mapHttpError) is the tripwire.
+// Every rate-limit ProviderEvent carries `code: "rate_limit"` and a message starting with this
+// exact prefix. Phase 5 routines T3 threads that `code` through as an additive optional field on
+// `agent_error` (protocol/src/events.ts's AgentErrorEvent.code — engine.ts forwards `ev.code` when
+// the error came from a live provider stream), so quota detection below now PREFERS the structured
+// `code === "rate_limit"` check. This message-prefix match remains as the FALLBACK for an
+// `agent_error` with no `code` at all (an older log, or one of engine.ts's two synthetic
+// agent_error emit sites — "no cwd" / context cap — which have no provider code to carry).
+// Phase 8d task 2.4: the message-prefix producer this fallback was originally paired with
+// (`providers/openai-compatible.ts`'s `mapHttpError`) is gone — Norma's internal model calls now
+// run over `@yanlinglabs/winter-provider-runtime` adapters (`providers/runtime-provider.ts`), whose
+// own error messages are NOT guaranteed to start with "HTTP 429". This fallback is therefore a
+// carry of unverified reach on today's provider layer, not a tripwire with a live producer to
+// watch — recorded here rather than silently left implying one still exists.
 const QUOTA_ERROR_PREFIX = "HTTP 429";
 
 /** Builds the RoutineRunner the daemon wires into makeRoutineScheduler — `runHeadless` reuses the

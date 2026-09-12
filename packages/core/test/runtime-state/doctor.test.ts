@@ -7,7 +7,8 @@ import { openRuntimeStateDb, RUNTIME_STATE_SCHEMA_VERSION, type RuntimeStateDb }
 import { RuntimeSessionRecords, type NewRuntimeSessionRecord } from "../../src/runtime-state/records";
 import { RuntimeChildren, type PersistedWinterChild } from "../../src/runtime-state/children";
 import { RuntimeLeases } from "../../src/runtime-state/leases";
-import { diagnoseRuntimeState, repairRuntimeState, type Finding } from "../../src/runtime-state/doctor";
+import { diagnoseRuntimeState, latestRecoveryAttempts, repairRuntimeState, type Finding } from "../../src/runtime-state/doctor";
+import { restampStep } from "../../src/runtime-state/recovery";
 import { SessionStore } from "../../src/sessions/store";
 import { ISO, withTempHome } from "./support";
 
@@ -560,6 +561,7 @@ describe("repairRuntimeState — WS-16 §15 explicit, recoverable repairs", () =
         { kind: "relink-backend", winterSessionId: id, backendSessionId: "11111111-2222-4333-8444-555555555555" },
         { kind: "detach-backend", winterSessionId: id },
         { kind: "restore-backup", backupPath: join(home, "runtimes", "backups", "nope.db") },
+        { kind: "memory-keys-rollback" },
       ] as const) {
         const refused = await repairRuntimeState(home, op);
         expect(refused.applied).toBe(false);
@@ -870,6 +872,132 @@ describe("diagnoseRuntimeState / restore-backup — a store written by an older 
       // The one irreversible repair did not run: the current store is byte-for-byte what it was.
       expect(readFileSync(dest)).toEqual(before);
       withDb(home, (_rs, records) => { expect(records.get("s_after_backup")).toBeDefined(); });
+    });
+  });
+});
+
+describe("latestRecoveryAttempts — P8d-11's attempt view", () => {
+  const seedAttempt = (rs: RuntimeStateDb, over: { daemonStartedAt: string; step: number; outcome: string; detail?: unknown; winterSessionId?: string | null }): number => {
+    const result = rs.db.run(
+      `INSERT INTO runtime_recovery_attempts (started_at, finished_at, daemon_pid, daemon_started_at, step, winter_session_id, outcome, detail_json)
+       VALUES (?, ?, 1, ?, ?, ?, ?, ?)`,
+      [ISO(), ISO(), over.daemonStartedAt, over.step, over.winterSessionId ?? null, over.outcome, JSON.stringify(over.detail ?? {})],
+    );
+    return typeof result.lastInsertRowid === "bigint" ? Number(result.lastInsertRowid) : result.lastInsertRowid;
+  };
+
+  test("returns only the MOST RECENT boot's step-summary rows, in step order", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, (rs) => {
+        seedAttempt(rs, { daemonStartedAt: "2026-09-01T00:00:00.000Z", step: 10, outcome: "skipped" });
+        seedAttempt(rs, { daemonStartedAt: "2026-09-12T00:00:00.000Z", step: 12, outcome: "ok", detail: { sessionsSeen: 2 } });
+        seedAttempt(rs, { daemonStartedAt: "2026-09-12T00:00:00.000Z", step: 10, outcome: "skipped", detail: { heldMessages: 0 } });
+        // A session-scoped row (step 2's per-session corrupt note) must never appear in the view —
+        // it is not one of the twelve step-summary rows.
+        seedAttempt(rs, { daemonStartedAt: "2026-09-12T00:00:00.000Z", step: 2, outcome: "failed", winterSessionId: "s_corrupt" });
+      });
+
+      const attempts = latestRecoveryAttempts(home);
+      expect(attempts.map((a) => a.step)).toEqual([10, 12]);
+      expect(attempts.find((a) => a.step === 10)?.outcome).toBe("skipped");
+      expect(attempts.every((a) => a.step !== 2)).toBe(true);
+    });
+  });
+
+  test("a restamped step 10 shows the restamped outcome, not the original `skipped` one", async () => {
+    await withTempHome(async (home) => {
+      let id = 0;
+      withDb(home, (rs) => {
+        id = seedAttempt(rs, { daemonStartedAt: "2026-09-12T00:00:00.000Z", step: 10, outcome: "skipped", detail: { heldMessages: 0 } });
+      });
+      withDb(home, (rs) => {
+        restampStep(rs.db, id, 10, "ok", { entriesLoaded: 4, staleMarked: 0 });
+      });
+
+      const attempts = latestRecoveryAttempts(home);
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]).toMatchObject({ step: 10, outcome: "ok", detail: { entriesLoaded: 4, staleMarked: 0 } });
+    });
+  });
+
+  test("a home with no runtime spine reports no attempts, never throws", async () => {
+    await withTempHome(async (home) => {
+      expect(latestRecoveryAttempts(home)).toEqual([]);
+    });
+  });
+});
+
+describe("memory-keys-migration finding + memory-keys-rollback repair (P8d-11)", () => {
+  /** A `moved` manifest row plus the file layout it describes — the destination holds the entry,
+   *  the source does not — without going through `planMemoryKeyMigration`/`applyMemoryKeyMigration`
+   *  at all: those are exhaustively covered by `memory-keys.test.ts`, and this file's own job is
+   *  `doctor.ts`'s wiring (the finding's counts, the repair's door, the daemon-lock gate above). */
+  function seedMovedEntry(home: string, oldKey: string, newKey: string, entry = "memory"): void {
+    mkdirSync(join(home, "projects", newKey, entry), { recursive: true });
+    writeFileSync(join(home, "projects", newKey, entry, "MEMORY.md"), "alpha");
+    withDb(home, (rs) => {
+      rs.db.run(
+        "INSERT INTO memory_key_manifest (old_key, entry, new_key, status, planned_at, moved_at, record_ids) VALUES (?, ?, ?, 'moved', ?, ?, '[]')",
+        [oldKey, entry, newKey, ISO(), ISO()],
+      );
+    });
+  }
+
+  test("diagnoseRuntimeState reports the manifest state, repairable only while something is `moved`", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      seedMovedEntry(home, "old-a", "new-a");
+
+      const findings = await diagnoseRuntimeState(home);
+      const finding = findings.find((f) => f.kind === "memory-keys-migration");
+      expect(finding?.detail).toContain("1 moved");
+      expect(finding?.repairable).toEqual(["memory-keys-rollback"]);
+    });
+  });
+
+  test("a home that never touched the migration reports no memory-keys-migration finding at all", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      const findings = await diagnoseRuntimeState(home);
+      expect(findings.find((f) => f.kind === "memory-keys-migration")).toBeUndefined();
+    });
+  });
+
+  test("memory-keys-rollback rolls the entry back, is idempotent, and the finding's repairable set empties once nothing is `moved`", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      seedMovedEntry(home, "old-b", "new-b");
+
+      const result = await repairRuntimeState(home, { kind: "memory-keys-rollback" });
+      expect(result.applied).toBe(true);
+      expect(result.detail).toContain("1 entrie(s) rolled back");
+      expect(existsSync(join(home, "projects", "old-b", "memory", "MEMORY.md"))).toBe(true);
+      expect(existsSync(join(home, "projects", "new-b", "memory"))).toBe(false);
+
+      const again = await repairRuntimeState(home, { kind: "memory-keys-rollback" });
+      expect(again).toEqual({ applied: false, detail: "no relocated memory-key entries to roll back" });
+
+      const findings = await diagnoseRuntimeState(home);
+      const finding = findings.find((f) => f.kind === "memory-keys-migration")!;
+      expect(finding.detail).toContain("1 rolled back");
+      expect(finding.repairable).toEqual([]);
+    });
+  });
+
+  test("a torn rollback (a′) is surfaced as a mid-undo count, never silently dropped", async () => {
+    await withTempHome(async (home) => {
+      withDb(home, () => {});
+      seedMovedEntry(home, "old-c", "new-c");
+      withDb(home, (rs) => {
+        rs.db.run("UPDATE memory_key_manifest SET status = 'undoing', undo_target = 'rolled-back' WHERE old_key = 'old-c'");
+      });
+
+      const findings = await diagnoseRuntimeState(home);
+      const finding = findings.find((f) => f.kind === "memory-keys-migration")!;
+      expect(finding.detail).toContain("mid-undo");
+      // Never offered as a repair here — that row belongs to the next daemon boot, not to this
+      // read-only-by-design diagnosis.
+      expect(finding.repairable).toEqual([]);
     });
   });
 });
