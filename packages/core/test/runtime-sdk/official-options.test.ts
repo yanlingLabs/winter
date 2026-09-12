@@ -318,6 +318,56 @@ describe("officialInputFor — the env shape + spool (P9c-1)", () => {
   });
 });
 
+// Minor (review r0): the api-key family's own matrix above proved base/spool/flag behaviour for
+// ONE family — brief Step 1 asked for BOTH families (`console-oauth` expects `ANTHROPIC_AUTH_TOKEN`
+// instead of the key, `apiKeySource: "none"`, and is exempt from the Step 3 assertion elsewhere in
+// this suite). This block pins that the base/spool/flag machinery is IDENTICAL across the two —
+// `officialInputFor` never branches on family for any of it — while the credential VARIABLE NAME
+// genuinely differs, which is the one thing the router's own `officialCredentialPlan` does branch on.
+describe("officialInputFor — the env shape + spool, console-oauth family (P9c-1)", () => {
+  const consoleOauthSelection: RuntimeSelection = {
+    runtimeKind: "claude-agent", providerId: "anthropic", modelRef: "anthropic/claude-sonnet-5",
+    family: "claude", authFamily: "console-oauth", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
+  };
+  const HOME = "/Users/x/.winter-test-home";
+  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+  const settingsWith = (subscriptionAuth: boolean): Settings => ({ runtimes: { official: { subscriptionAuth } } }) as unknown as Settings;
+
+  function build(overrides: Partial<OfficialInputDeps> = {}): { input: import("@yanlinglabs/winter-runtime-sdk").RouterOfficialInput } {
+    const result = officialInputFor(input, minimalDeps({ home: HOME, selection: consoleOauthSelection, ...overrides }));
+    if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
+    return result;
+  }
+
+  test("base is EXACTLY the minimalOsEnvironment allowlist — no FORBIDDEN_CHILD_ENV name leaks through, even when the host env carries every one of them as a sentinel", () => {
+    const hostEnv: Record<string, string> = { HOME: "/Users/x", PATH: "/usr/bin:/bin", LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8", TERM: "xterm-256color" };
+    for (const name of FORBIDDEN_CHILD_ENV) hostEnv[name] = `SENTINEL_${name}`;
+    const built = build({ env: hostEnv });
+    for (const name of FORBIDDEN_CHILD_ENV) expect(built.input.base?.[name]).toBeUndefined();
+    expect(built.input.base).toEqual({ HOME: "/Users/x", PATH: "/usr/bin:/bin", LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8", TERM: "xterm-256color" });
+  });
+
+  test("no settings (absent block) -> subscriptionAuth defaults OFF -> spool is officialConfigDirFor(home), same as the api-key family", () => {
+    const built = build({});
+    expect(built.input.spool).toBe(officialConfigDirFor(HOME));
+  });
+
+  test("subscriptionAuth true -> spool is left undefined, same as the api-key family", () => {
+    const built = build({ settings: settingsWith(true) });
+    expect(built.input.spool).toBeUndefined();
+  });
+
+  test("the credential plan injects ANTHROPIC_AUTH_TOKEN — NEVER the api-key family's ANTHROPIC_API_KEY — for console-oauth", () => {
+    const provider = { providerId: "anthropic", authRef: { kind: "inline" as const, value: "oauth-test-unit" } };
+    const built = officialInputFor(input, minimalDeps({
+      home: HOME, selection: consoleOauthSelection, provider, explicitCredentials: undefined, settings: settingsWith(false),
+    }));
+    if (!("input" in built)) throw new Error("unexpectedly refused");
+    expect(built.input.credentials).toEqual([{ variable: "ANTHROPIC_AUTH_TOKEN", ref: provider.authRef }]);
+    expect(built.input.credentials).not.toContainEqual(expect.objectContaining({ variable: "ANTHROPIC_API_KEY" }));
+  });
+});
+
 describe("ensureOfficialConfigDir", () => {
   test("creates the directory 0700, and re-hardens an already-existing, more-permissive one", () => {
     const root = mkdtempSync(join(tmpdir(), "winter-official-config-dir-"));

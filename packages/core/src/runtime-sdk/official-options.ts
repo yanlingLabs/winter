@@ -83,11 +83,19 @@ export function officialConfigDirFor(home: string): string {
  * directory already existed, so a stale, more permissive mode is corrected on every spawn, not just
  * the first.
  *
- * CALLED FROM `official-session.ts`'s `open()`, NEVER from `officialInputFor` itself: this file's
- * OWN tests (and every hand-built `OfficialInputDeps` fixture across the suite) pass a symbolic
- * `home` like `/Users/x/.winter-test-home` that was never meant to be filesystem-backed —
- * `officialInputFor` stays a pure(-ish) path computation, and only the real spawn path (a real
- * `WINTER_HOME`) actually touches disk.
+ * CALLED FROM `official-session.ts`'s `open()`, NEVER from `officialInputFor` itself — so
+ * `officialInputFor` stays a pure(-ish) path computation, and disk is touched only by a caller that
+ * is actually about to spawn (or fake-spawn) a session.
+ *
+ * WHO ACTUALLY REACHES `open()` (fix round 1, review r0's Major — corrected from an earlier,
+ * inaccurate claim that no test here touches disk at all): `official-options.test.ts`'s OWN tests
+ * call `officialInputFor` directly and never `open()`, so its `minimalDeps()`'s symbolic
+ * `/Users/x/.winter-test-home` is genuinely never filesystem-backed. `official-session.test.ts`'s
+ * `harness()` DOES call `open()` (over a fake `OfficialQuery`, never a real child) and so DOES
+ * create/chmod a real directory — its own `home` is `testHome()`, a fresh `mkdtempSync` root per
+ * `harness()` call, cleaned in that file's own `afterAll`. `official-leg.e2e.test.ts`'s
+ * `buildWorld`/`makeSession` DO call `open()` against a real spawned `claude` child and a real
+ * `mkdtempSync`-rooted `WINTER_HOME`, cleaned in that file's own `afterEach`/`finally` blocks.
  */
 export function ensureOfficialConfigDir(dir: string): void {
   mkdirSync(dir, { recursive: true });

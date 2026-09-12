@@ -16,6 +16,9 @@
 // this works regardless of import order and needs no dynamic `import()` gymnastics. It is undone in
 // `afterAll` so no other test file sharing this process sees a fake treated as real.
 import { afterAll, describe, expect, mock, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { installMockModuleTripwire } from "../mock-module-tripwire";
 import * as winterRuntimeSdk from "@yanlinglabs/winter-runtime-sdk";
 
@@ -50,6 +53,26 @@ import {
   type OfficialSessionDeps,
   type OfficialSessionRecords,
 } from "../../src/runtime-sdk/official-session";
+
+// ── hermetic per-harness home (fix round 1, review r0's Major) ─────────────────────────────────
+//
+// `open()` REALLY calls `ensureOfficialConfigDir(built.input.spool)` against `inputDeps.home`
+// (Phase 9c/P9c-1) — this file's `harness()` is one of the two real callers of `open()` in the
+// whole suite (`official-leg.e2e.test.ts` is the other), so a fixed, non-mkdtemp'd `home` here
+// really does create `<home>/runtimes/claude-config` (0700) on disk, on a shared literal path,
+// once per `bun test` run, never cleaned. Mirrors `hermeticOfficialHome`/`cleanupHermeticOfficialHomes`
+// (`test/helpers/claude-runtime.ts`): one fresh `mkdtemp` root per `harness()` call, tracked here
+// and removed in this file's own `afterAll` (kept local rather than importing that helper — this
+// file drives the fake wire directly and has no other need of `claude-runtime.ts`).
+const testHomes: string[] = [];
+function testHome(): string {
+  const home = mkdtempSync(join(tmpdir(), "winter-official-session-test-"));
+  testHomes.push(home);
+  return home;
+}
+afterAll(() => {
+  for (const home of testHomes.splice(0)) rmSync(home, { recursive: true, force: true });
+});
 
 // ── the fake wire ────────────────────────────────────────────────────────────────────────────────
 
@@ -155,7 +178,7 @@ function harness(overrides: Partial<OfficialSessionDeps> = {}): Harness {
   };
 
   const inputDeps: OfficialInputDeps = {
-    home: "/tmp/official-session-test-home",
+    home: testHome(),
     selection,
     // Empty (not absent) so `officialCredentialPlan` returns immediately rather than trying to
     // derive a family's variables this test does not care about (`official-options.ts`'s own
