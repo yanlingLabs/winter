@@ -122,12 +122,18 @@ export function cleanupHermeticOfficialHomes(): void {
 export async function withAnthropicLoopback<T>(
   turns: readonly AnthropicTurnScript[],
   fn: (fake: FakeServer, requests: () => RecordedRequest[]) => Promise<T>,
+  opts: { delayFirstResponseMs?: number } = {},
 ): Promise<T> {
+  let firstResponseServed = false;
   const fake = await startFake({
     routes: [
       {
         path: "*",
-        handler: (_req, recorded) => {
+        handler: async (_req, recorded) => {
+          if (opts.delayFirstResponseMs !== undefined && !firstResponseServed) {
+            firstResponseServed = true;
+            await new Promise((resolve) => setTimeout(resolve, opts.delayFirstResponseMs));
+          }
           if (recorded.path === "/v1/messages" && recorded.method === "POST") {
             // Turn selection is by CONVERSATION STATE (how many `tool_result` blocks this request's
             // own messages already carry), never by a raw request count — the router's own
