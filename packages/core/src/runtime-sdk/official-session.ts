@@ -21,7 +21,8 @@ import { createOfficialInputStream, isOfficialQuery, type OfficialInputStream, t
 import { MAIN_THREAD, ProjectorRefusedError, classifyThrown, createProjector, type CheckpointStore, type ProjectedBatch, type Projector, type ProtocolSdkMessage } from "../projector";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
 import type { SessionApprovalPolicy } from "../agent/gate";
-import { OfficialCredentialPlanRefused, officialInputFor, OfficialProjectKeyTooDeep, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
+import { officialSubscriptionAuthEnabled } from "../settings";
+import { ensureOfficialConfigDir, OfficialCredentialPlanRefused, officialInputFor, OfficialProjectKeyTooDeep, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { attachOfficialSession, type OfficialSessionAttachHandle, type OfficialSessionAttachment } from "./messaging";
 
@@ -32,6 +33,10 @@ export interface OfficialInitFacts {
   sessionId?: string;
   model?: string;
   tools: string[];
+  /** Phase 9c (P9c-1): the SDK init message's own `apiKeySource` — captured for observability
+   *  (and what Step 3's assertion, above, reads) regardless of auth family; `undefined` only when
+   *  the field itself was absent from the frame (never invented as a pass). */
+  apiKeySource?: string;
 }
 
 /** M6a: the structural subset of 8a's `RuntimeSessionRecords` this driver writes — the same shape
@@ -148,6 +153,55 @@ export class OfficialBackendIdMismatch extends Error {
   }
 }
 
+/**
+ * Phase 9c (P9c-1): the api-key family's own assertion on the REAL SDK init message — the child
+ * must have actually authenticated with the pinned `ANTHROPIC_API_KEY`, never a silent fallback to
+ * some OTHER credential source the vendor CLI's own precedence order might otherwise have reached
+ * (a managed settings block, a stray `apiKeyHelper`, environment credentials this leg did not
+ * intend). Fires only for the `api-key` family, and only while `runtimes.official.subscriptionAuth`
+ * is off (the shipped default) — `console-oauth` expects `apiKeySource: "none"` (a bearer token)
+ * and is never subject to this check. Ends the session before any turn runs, through the SAME
+ * `agent_error` + `end()` shape `OfficialBackendIdMismatch` already uses.
+ */
+export class OfficialAuthSourceRefused extends Error {
+  readonly code = "official_auth_source_refused" as const;
+  constructor(readonly apiKeySource: string) {
+    super(`the official runtime's init message reported apiKeySource=${apiKeySource}, not the pinned ANTHROPIC_API_KEY; runtimes.official.subscriptionAuth is off (P9c-1's shipped default), so this session refuses before any turn runs`);
+    this.name = "OfficialAuthSourceRefused";
+  }
+}
+
+/**
+ * Phase 9c (P9c-1, Step 5 — the documented failure mode): a managed `forceLoginOrgUUID` deployment
+ * BLOCKS environment credentials (`ANTHROPIC_API_KEY` included) at the vendor CLI's own startup,
+ * before it ever reaches `system/init` (the digest's own fact #5) — so this leg's child exits
+ * before `sawInit`, and the raw process error is the ONLY place the reason is visible. Surfaced
+ * typed, with the captured line, rather than left as an undifferentiated pre-init crash (the
+ * existing `!inc.sawInit && isExpectedEndError(err)` branch, which says only "exited before
+ * init"). CANNOT be proven end to end without a managed Mac (no fixture reproduces a real
+ * `forceLoginOrgUUID` deployment) — carried, with the unit-level proof on a scripted child exit
+ * (`official-session.test.ts`).
+ */
+export class OfficialAuthBlockedByPolicy extends Error {
+  readonly code = "official_auth_blocked_by_policy" as const;
+  constructor(readonly capturedLine: string) {
+    super(`the official runtime exited before reporting init, naming a managed-settings credential block (forceLoginOrgUUID / "environment credential"): ${capturedLine}`);
+    this.name = "OfficialAuthBlockedByPolicy";
+  }
+}
+
+/** The digest's own two phrases (fact #5) — matched case-insensitively against the raw error's
+ *  `message` (the only place a pre-init CLI exit's own explanation can live: no `system/init` ever
+ *  arrived for the projector to fold into a structured frame). Returns the matched message verbatim
+ *  (the "captured line" `OfficialAuthBlockedByPolicy` names), or `undefined` when neither phrase
+ *  appears — never a false positive on an ordinary pre-init crash (a dead loopback fake, a killed
+ *  process) that merely shares `isExpectedEndError`'s class. */
+function managedAuthPolicyBlockLine(err: unknown): string | undefined {
+  const text = err instanceof Error ? err.message : typeof err === "string" ? err : undefined;
+  if (text === undefined) return undefined;
+  return /forceLoginOrgUUID/i.test(text) || /environment credential/i.test(text) ? text : undefined;
+}
+
 interface Incarnation {
   stream: OfficialInputStream;
   projector: Projector;
@@ -158,6 +212,12 @@ interface Incarnation {
   sawInit: boolean;
   /** M6b: the messaging door's own handle, when `deps.messaging` is configured. */
   attachment?: OfficialSessionAttachHandle;
+  /** Phase 9c (P9c-1): `officialSubscriptionAuthEnabled` at THIS incarnation's own `open()` —
+   *  captured once, from the SAME `inputDeps().settings` `officialInputFor` itself read for this
+   *  generation, so the init-message assertion in `run()` agrees with whatever `officialInputFor`
+   *  actually decided (a `session.setPolicy`-style live re-read races nothing here: both reads
+   *  happen inside the same `open()` call, one turn of the event loop apart). */
+  subscriptionAuthEnabled: boolean;
 }
 
 const isExpectedEndError = (err: unknown): boolean => {
@@ -300,6 +360,11 @@ class OfficialSessionImpl implements OfficialSession {
       const inputDeps = await this.deps.inputDeps();
       const built = officialInputFor(this.deps.sessionInput(), inputDeps);
       if (built instanceof ClaudeExecutableUnavailable || built instanceof OfficialProjectKeyTooDeep || built instanceof OfficialCredentialPlanRefused) throw built;
+      // Phase 9c (P9c-1): create/harden the Winter-owned config dir NOW — the one point in this
+      // leg's whole lifecycle that is an actual spawn against a real `WINTER_HOME`, as opposed to
+      // `officialInputFor`'s own pure path computation (see `ensureOfficialConfigDir`'s own doc for
+      // why the mkdir does not live there).
+      if (built.input.spool !== undefined) ensureOfficialConfigDir(built.input.spool);
       const stream = createOfficialInputStream();
       const generation = this.gen + 1;
       const projector = this.deps.projector(generation);
@@ -325,7 +390,12 @@ class OfficialSessionImpl implements OfficialSession {
         },
       });
       if (!isOfficialQuery(routerQuery)) throw new Error(`the router opened ${this.sessionId} on the wrong leg (expected the official leg)`);
-      const inc: Incarnation = { stream, projector, query: routerQuery, abort, sawInit: false, done: Promise.resolve() };
+      // Phase 9c (P9c-1): the SAME settings `officialInputFor` just read (via this `inputDeps`
+      // object's own `settings` field) — read once, here, so `run()`'s own assertion never
+      // re-fetches settings independently and can never disagree with what THIS spawn was actually
+      // built against.
+      const subscriptionAuthEnabled = officialSubscriptionAuthEnabled(inputDeps.settings);
+      const inc: Incarnation = { stream, projector, query: routerQuery, abort, sawInit: false, done: Promise.resolve(), subscriptionAuthEnabled };
       this.inc = inc;
       // m7: `resumed` is honest about THIS instance's own history — generation 1 is a fresh start,
       // every later one (a prior incarnation ended `resumable`, e.g. an unexpected crash rather than
@@ -372,10 +442,23 @@ class OfficialSessionImpl implements OfficialSession {
             void this.end();
             continue;
           }
+          // Phase 9c (P9c-1): the api-key family's own assertion — `console-oauth` (and every other
+          // family) is exempt (`OfficialAuthSourceRefused`'s own doc), and the flag's only shipped
+          // value is `false`, so THIS branch is what runs in production today.
+          if (this.deps.selection.authFamily === "api-key" && !inc.subscriptionAuthEnabled) {
+            const apiKeySource = typeof msg.apiKeySource === "string" ? msg.apiKeySource : "unknown";
+            if (apiKeySource !== "ANTHROPIC_API_KEY") {
+              const err = new OfficialAuthSourceRefused(apiKeySource);
+              this.safeAppend({ type: "agent_error", sessionId: this.sessionId, threadId: MAIN_THREAD, message: err.message, code: err.code });
+              void this.end();
+              continue;
+            }
+          }
           this.initFacts = {
             ...(reportedId === undefined ? {} : { sessionId: reportedId }),
             ...(typeof msg.model === "string" ? { model: msg.model } : {}),
             tools: Array.isArray(msg.tools) ? (msg.tools as unknown[]).filter((t): t is string => typeof t === "string") : [],
+            ...(typeof msg.apiKeySource === "string" ? { apiKeySource: msg.apiKeySource } : {}),
           };
         }
         let batch: ProjectedBatch;
@@ -393,7 +476,14 @@ class OfficialSessionImpl implements OfficialSession {
         if (isResultFrame(msg)) this.onResult();
       }
     } catch (err) {
-      if (this.ending && this.inFlight === 0 && isExpectedEndError(err)) {
+      const policyBlockLine = !inc.sawInit && isExpectedEndError(err) ? managedAuthPolicyBlockLine(err) : undefined;
+      if (policyBlockLine !== undefined) {
+        // Phase 9c (P9c-1, Step 5): distinguish this from the undifferentiated pre-init crash
+        // branch below — the reason is visible ONLY here, in the raw process error's own text.
+        const refusal = new OfficialAuthBlockedByPolicy(policyBlockLine);
+        this.log(`the official child for ${this.sessionId} exited before init: ${refusal.message}`);
+        this.safeAppend({ type: "agent_error", sessionId: this.sessionId, threadId: MAIN_THREAD, message: refusal.message, code: refusal.code });
+      } else if (this.ending && this.inFlight === 0 && isExpectedEndError(err)) {
         // deliberate end, nothing running
       } else if (!inc.sawInit && isExpectedEndError(err)) {
         this.log(`the official child for ${this.sessionId} exited before init (${(err as Error).name})`);
@@ -479,7 +569,7 @@ class OfficialSessionImpl implements OfficialSession {
   private log(line: string): void { this.deps.log?.(line); }
 }
 
-function isInitFrame(msg: ProtocolSdkMessage): msg is ProtocolSdkMessage & { type: "system"; subtype: "init"; session_id?: string; model?: string; tools?: unknown } {
+function isInitFrame(msg: ProtocolSdkMessage): msg is ProtocolSdkMessage & { type: "system"; subtype: "init"; session_id?: string; model?: string; tools?: unknown; apiKeySource?: unknown } {
   const m = msg as unknown as Record<string, unknown>;
   return m["type"] === "system" && m["subtype"] === "init";
 }

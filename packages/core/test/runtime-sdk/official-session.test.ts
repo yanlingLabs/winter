@@ -16,6 +16,9 @@
 // this works regardless of import order and needs no dynamic `import()` gymnastics. It is undone in
 // `afterAll` so no other test file sharing this process sees a fake treated as real.
 import { afterAll, describe, expect, mock, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { installMockModuleTripwire } from "../mock-module-tripwire";
 import * as winterRuntimeSdk from "@yanlinglabs/winter-runtime-sdk";
 
@@ -50,6 +53,26 @@ import {
   type OfficialSessionDeps,
   type OfficialSessionRecords,
 } from "../../src/runtime-sdk/official-session";
+
+// ── hermetic per-harness home (fix round 1, review r0's Major) ─────────────────────────────────
+//
+// `open()` REALLY calls `ensureOfficialConfigDir(built.input.spool)` against `inputDeps.home`
+// (Phase 9c/P9c-1) — this file's `harness()` is one of the two real callers of `open()` in the
+// whole suite (`official-leg.e2e.test.ts` is the other), so a fixed, non-mkdtemp'd `home` here
+// really does create `<home>/runtimes/claude-config` (0700) on disk, on a shared literal path,
+// once per `bun test` run, never cleaned. Mirrors `hermeticOfficialHome`/`cleanupHermeticOfficialHomes`
+// (`test/helpers/claude-runtime.ts`): one fresh `mkdtemp` root per `harness()` call, tracked here
+// and removed in this file's own `afterAll` (kept local rather than importing that helper — this
+// file drives the fake wire directly and has no other need of `claude-runtime.ts`).
+const testHomes: string[] = [];
+function testHome(): string {
+  const home = mkdtempSync(join(tmpdir(), "winter-official-session-test-"));
+  testHomes.push(home);
+  return home;
+}
+afterAll(() => {
+  for (const home of testHomes.splice(0)) rmSync(home, { recursive: true, force: true });
+});
 
 // ── the fake wire ────────────────────────────────────────────────────────────────────────────────
 
@@ -155,7 +178,7 @@ function harness(overrides: Partial<OfficialSessionDeps> = {}): Harness {
   };
 
   const inputDeps: OfficialInputDeps = {
-    home: "/tmp/official-session-test-home",
+    home: testHome(),
     selection,
     // Empty (not absent) so `officialCredentialPlan` returns immediately rather than trying to
     // derive a family's variables this test does not care about (`official-options.ts`'s own
@@ -352,5 +375,169 @@ describe("m8 — backend id mismatch", () => {
       caught = e;
     }
     expect(caught).toBeInstanceOf(OfficialSessionEnded);
+  });
+});
+
+// ── Phase 9c (P9c-1) ─────────────────────────────────────────────────────────────────────────────
+//
+// The api-key family's own assertion on the REAL SDK init message (`official-options.ts`'s own
+// `OfficialAuthSourceRefused`) — scripted here with `init(BACKEND_ID, { apiKeySource })`, the SAME
+// `harness()`/`FakeOfficialQuery` this file's M6/m7/m8 suites already use, rather than a second,
+// duplicated harness in a new file. `harness({ selection })` overrides ONLY the outer
+// `OfficialSessionDeps.selection` this assertion reads (`this.deps.selection.authFamily`) — the
+// closure's own `inputDeps.selection` stays the harness default (`authFamily: "custom"`), which is
+// harmless here because `inputDeps.explicitCredentials: []` short-circuits `officialCredentialPlan`
+// before it ever branches on a family at all (`official-options.ts`'s own header).
+describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
+  const apiKeySelection: RuntimeSelection = {
+    runtimeKind: "claude-agent",
+    providerId: "anthropic",
+    modelRef: "anthropic/claude-sonnet-5",
+    family: "claude",
+    authFamily: "api-key",
+    sdkVersion: "0.0.3",
+    reason: "unit test",
+    decidedAt: new Date(0).toISOString(),
+  };
+
+  test("apiKeySource !== ANTHROPIC_API_KEY -> official_auth_source_refused, before any turn runs", async () => {
+    const h = harness({ selection: apiKeySelection });
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "none" }));
+    await h.settled();
+
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string; message?: string }) | undefined;
+    expect(err?.code).toBe("official_auth_source_refused");
+    expect(err?.message).toContain("apiKeySource=none");
+    expect(h.session.state).toBe("ended");
+    // No turn ever ran: the init frame refused before the projector saw an assistant/result frame.
+    expect(h.types()).not.toContain("assistant_message");
+    expect(h.types()).not.toContain("turn_completed");
+
+    let caught: unknown;
+    try {
+      await h.session.send("too late");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(OfficialSessionEnded);
+  });
+
+  test("apiKeySource === ANTHROPIC_API_KEY -> no refusal; the turn proceeds normally", async () => {
+    const h = harness({ selection: apiKeySelection });
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "ANTHROPIC_API_KEY" }));
+    h.q().emit(assistant("ok"));
+    h.q().emit(result());
+    await h.settled();
+    expect(h.events.some((e) => e.type === "agent_error")).toBe(false);
+    expect(h.types()).toContain("turn_completed");
+    expect(h.session.state).not.toBe("ended");
+  });
+
+  test("an unknown/missing apiKeySource (never invented as a pass) still refuses for the api-key family", async () => {
+    const h = harness({ selection: apiKeySelection });
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID)); // no apiKeySource field at all
+    await h.settled();
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string }) | undefined;
+    expect(err?.code).toBe("official_auth_source_refused");
+  });
+
+  test("the console-oauth family is EXEMPT — apiKeySource \"none\" (its own expected bearer shape) never refuses", async () => {
+    const consoleOauthSelection: RuntimeSelection = { ...apiKeySelection, authFamily: "console-oauth" };
+    const h = harness({ selection: consoleOauthSelection });
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "none" }));
+    h.q().emit(assistant("ok"));
+    h.q().emit(result());
+    await h.settled();
+    expect(h.events.some((e) => e.type === "agent_error")).toBe(false);
+    expect(h.types()).toContain("turn_completed");
+  });
+
+  test("a non-api-key, non-console-oauth family (custom, this harness's own default) is also never asserted on", async () => {
+    const h = harness(); // default selection: authFamily "custom"
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "none" }));
+    h.q().emit(assistant("ok"));
+    h.q().emit(result());
+    await h.settled();
+    expect(h.events.some((e) => e.type === "agent_error")).toBe(false);
+    expect(h.types()).toContain("turn_completed");
+  });
+});
+
+// ── Phase 9c (P9c-1), Step 5 — the documented forceLoginOrgUUID / managed-policy failure mode ──
+//
+// CARRY (the brief's own wording): a managed `forceLoginOrgUUID` deployment cannot be reproduced
+// without a managed Mac, so this is the unit-level proof on a SCRIPTED child exit — the real
+// binary's own text is never something this suite can generate.
+describe("P9c-1 (Step 5) — a pre-init exit naming a managed auth-policy block", () => {
+  test("forceLoginOrgUUID in the raw process error -> official_auth_blocked_by_policy, not the generic pre-init crash", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    const crash = new Error("Claude Code is configured with forceLoginOrgUUID and refuses environment credentials at startup");
+    crash.name = "ProcessError";
+    h.q().fail(crash);
+    await h.settled();
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string; message?: string }) | undefined;
+    expect(err?.code).toBe("official_auth_blocked_by_policy");
+    expect(err?.message).toContain("forceLoginOrgUUID");
+  });
+
+  test("\"environment credential\" (the digest's second phrase) also matches", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    const crash = new Error("this deployment blocks environment credential injection at startup");
+    crash.name = "ProcessError";
+    h.q().fail(crash);
+    await h.settled();
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string }) | undefined;
+    expect(err?.code).toBe("official_auth_blocked_by_policy");
+  });
+
+  test("an ordinary pre-init crash unrelated to a managed policy is left to the existing generic handling", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    const crash = new Error("connection reset by peer");
+    crash.name = "ProcessError";
+    h.q().fail(crash);
+    await h.settled();
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string }) | undefined;
+    expect(err).toBeDefined();
+    expect(err?.code).not.toBe("official_auth_blocked_by_policy");
+  });
+
+  test("a match AFTER init (a turn already started) never retroactively refuses — the phrase only matters pre-init", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID));
+    await h.settled();
+    const crash = new Error("forceLoginOrgUUID mentioned mid-turn, unrelated to startup");
+    crash.name = "ProcessError";
+    h.q().fail(crash);
+    await h.settled();
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string }) | undefined;
+    expect(err?.code).not.toBe("official_auth_blocked_by_policy");
+  });
+});
+
+// ── Phase 9c (P9c-1) — apiKeySource observability on OfficialInitFacts ─────────────────────────
+describe("P9c-1 — apiKeySource observability on OfficialInitFacts", () => {
+  test("session.init?.apiKeySource mirrors the init frame's own field, regardless of family", async () => {
+    const h = harness(); // default selection: authFamily "custom" (never asserted on)
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "ANTHROPIC_API_KEY" }));
+    await h.settled();
+    expect(h.session.init?.apiKeySource).toBe("ANTHROPIC_API_KEY");
+  });
+
+  test("absent from the frame -> undefined, never invented", async () => {
+    const h = harness();
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID)); // no apiKeySource field at all
+    await h.settled();
+    expect(h.session.init?.apiKeySource).toBeUndefined();
   });
 });

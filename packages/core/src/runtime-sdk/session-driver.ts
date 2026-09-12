@@ -607,6 +607,15 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         claudeExecutableFor: () => runtime.claudeExecutableFor(),
         assembler: deps.assembler ?? { assemble: () => "" },
         capabilities,
+        // Phase 9c (P9c-1): the LIVE settings snapshot (`deps.settings()` — the same hot holder
+        // `create()`/`legForNew` already read above; never a boot snapshot) — `official-options.ts`'s
+        // `officialInputFor` reads it ONLY through `officialSubscriptionAuthEnabled`, and
+        // `official-session.ts`'s own init-message assertion reads the SAME value off this object
+        // (never re-fetched separately) so the two agree within one incarnation. This is the one
+        // field `OfficialInputDeps` cannot get from `WinterRuntimeSdk` itself (that handle exposes
+        // no settings accessor of its own — only this driver's own `deps.settings` holds it), which
+        // is why it is threaded here rather than read inside `official-session.ts`/`official-options.ts`.
+        settings: deps.settings(),
         canUseToolDeps: {
           approvals: deps.approvals, questions: deps.questions, gate: deps.gate,
           emit: (event) => { deps.hub.append(sessionId, event); },
