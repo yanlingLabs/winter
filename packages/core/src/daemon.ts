@@ -1965,6 +1965,9 @@ export async function startDaemon(opts: {
     buildSessionCapabilities,
     // P8b Task 16: the driver table — the Winter leg's door for every `session.*` handler.
     winter: winterDrivers,
+    // Winter Phase 8d (P8d-7, lane 4): a read-only door onto the 8a record — ipc/server.ts's
+    // session.list reads `record.providerId` off it (`opts.records?.get`, narrowed to Pick<…,"get">).
+    records: runtime?.records,
     // P8c integration round 3: lane 4's engine-era IMPORT door (`session.send`'s one-shot
     // conversion before the permanent refusal) and the handoff-aware `session.setModel` path
     // (`runtime-sdk/handoff.ts`'s `planAndApplySwitch`) — both bound to this daemon's OWN
