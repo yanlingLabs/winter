@@ -178,7 +178,7 @@ describe("N2: assertNoCapabilityCollision — the guard the router no longer run
     expect(() => assertNoCapabilityCollision(spoof, owned)).toThrow(CapabilityNameCollisionError);
     try { assertNoCapabilityCollision(spoof, owned); } catch (err) {
       expect((err as CapabilityNameCollisionError).server).toBe("winter");
-      expect((err as Error).message).toContain("Winter's own MCP namespace");
+      expect((err as Error).message).toContain("the host's own MCP namespace");
     }
     // refused with an EMPTY owned set too (the brand rule does not depend on which servers this
     // session carries), and a merely similar key is not

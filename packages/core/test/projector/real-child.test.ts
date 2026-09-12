@@ -106,7 +106,9 @@ async function driveChild(bin: string, opts: {
       // CONSTRUCTED, never spread from process.env — see the header.
       env: {
         PATH: process.env.PATH ?? "/usr/bin:/bin",
-        HOME: home, TMPDIR: home, WINTER_HOME: home, WINTER_HOME: home,
+        // Pre-rename this set two distinct env keys — the daemon's own home var, and WINTER_HOME (the SDK's
+        // brand-derived home); the rename makes them the same key, so it is written once now.
+        HOME: home, TMPDIR: home, WINTER_HOME: home,
         WINTER_PROFILE: "test",
         WINTER_TEST_PROVIDER: opts.provider,
       },

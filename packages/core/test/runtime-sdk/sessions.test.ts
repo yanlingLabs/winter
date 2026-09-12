@@ -28,7 +28,9 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "p8b-sessions-"));
   elsewhere = mkdtempSync(join(tmpdir(), "p8b-notwinter-"));
   fakeHome = mkdtempSync(join(tmpdir(), "p8b-fakehome-"));
-  envBefore = { WINTER_HOME: process.env.WINTER_HOME, WINTER_PROFILE: process.env.WINTER_PROFILE, WINTER_HOME: process.env.WINTER_HOME, HOME: process.env.HOME };
+  // Pre-rename this set two distinct env keys — the daemon's own home var, and WINTER_HOME (the
+  // SDK's brand-derived home); the rename makes them the same key, so it is saved/restored once.
+  envBefore = { WINTER_HOME: process.env.WINTER_HOME, WINTER_PROFILE: process.env.WINTER_PROFILE, HOME: process.env.HOME };
 });
 afterEach(() => {
   for (const [k, v] of Object.entries(envBefore)) {
@@ -91,15 +93,23 @@ describe("the G-13 wrapper", () => {
 
   // The BRAND half, which the home binding does not subsume: a Winter-branded call with this
   // environment would read `<elsewhere>`, and it does not.
+  //
+  // The two session ids here MUST differ (fix wave, 9b T.1): pre-rename `home` seeded one brand's
+  // session id and `elsewhere` seeded the OTHER's — two distinct strings that happened to collapse
+  // onto the same literal once the generic rename pass ran. With one shared id the collision this
+  // test exists to catch (an implicit fall-through to `WINTER_HOME=elsewhere`) is indistinguishable
+  // from the passing case, so it silently stopped testing anything.
   test("WINTER_HOME is ignored — the brand decides which product's store this is", async () => {
-    seed(home, "-tmp-alpha", "s_winter", "hello from winter");
-    seed(elsewhere, "-tmp-alpha", "s_winter", "hello from winter");
+    seed(home, "-tmp-alpha", "s_this_home", "hello from this home");
+    seed(elsewhere, "-tmp-alpha", "s_elsewhere", "hello from elsewhere");
+    // Pre-rename this set two distinct env keys — the daemon's own home var, then WINTER_HOME; the
+    // rename makes them the same key, so it is written once now — even the env door for OUR OWN
+    // brand loses to the argument.
     process.env.WINTER_HOME = elsewhere;
-    process.env.WINTER_HOME = elsewhere; // even the env door for OUR OWN brand loses to the argument
 
     const listed = await winterSessions(home).listSessions();
-    expect(listed.map((s) => s.sessionId)).toEqual(["s_winter"]);
-    await expect(winterSessions(home).getSessionInfo("s_winter")).rejects.toThrow();
+    expect(listed.map((s) => s.sessionId)).toEqual(["s_this_home"]);
+    await expect(winterSessions(home).getSessionInfo("s_elsewhere")).rejects.toThrow();
   });
 
   test("a caller's `directory` passes through; `home` is not overridable through the options", async () => {

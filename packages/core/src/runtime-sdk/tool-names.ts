@@ -1,12 +1,12 @@
 import { WINTER_DEFAULT_TOOL_DEFINITIONS } from "@yanlinglabs/winter-agent-sdk/tools";
 
 /**
- * **The Winter ↔ Winter tool-name pairs** (P8b-25) — ONE literal table, both directions derived
+ * **The runtime ↔ host tool-name pairs** (P8b-25) — ONE literal table, both directions derived
  * from it so they can never drift.
  *
- * The gate's four class sets (`agent/gate.ts`) are keyed by WINTER's tool names — `bash`, `read`,
+ * The gate's four class sets (`agent/gate.ts`) are keyed by the HOST's tool names — `bash`, `read`,
  * `write`, `web_fetch`, `Search`, `ReadPage`, `browser`, `docs`… — because every caller it has
- * today is the engine's dispatch loop, which hands it `call.name` straight off Winter's own
+ * today is the engine's dispatch loop, which hands it `call.name` straight off the host's own
  * `ToolRegistry`. A Winter child calls the SAME actions under DIFFERENT names, so feeding the raw
  * Winter name to the gate is wrong in both directions and SILENTLY:
  *
@@ -28,11 +28,11 @@ import { WINTER_DEFAULT_TOOL_DEFINITIONS } from "@yanlinglabs/winter-agent-sdk/t
  * (P8b-12), not this module's.
  *
  * **Source of the rows:** the "WS-06 §5 successor" column of the Winter Phase 8b codebase map
- * §5.1/§5.3 (the class-(a) and class-(c) disposition tables) — one row per Winter tool, read off the
+ * §5.1/§5.3 (the class-(a) and class-(c) disposition tables) — one row per host tool, read off the
  * map rather than recalled. `AskUserQuestion` is pinned separately by the SDK surface map §5.6.
  * Names the map gives no successor (`ls`, `skill_write` — map §5.4) have no row here either.
  */
-export const RUNTIME_HOST_TOOL_PAIRS: ReadonlyArray<readonly [winter: string, winter: string]> = [
+export const RUNTIME_HOST_TOOL_PAIRS: ReadonlyArray<readonly [runtime: string, host: string]> = [
   // class (a) — CC-shaped tools the Winter SDK provides natively (map §5.1)
   ["Read", "read"],
   ["Glob", "glob"],
@@ -63,7 +63,7 @@ export const RUNTIME_HOST_TOOL_PAIRS: ReadonlyArray<readonly [winter: string, wi
   ["ListMcpResourcesTool", "list_mcp_resources"],
   ["ReadMcpResourceTool", "read_mcp_resource"],
   ["PushNotification", "push_notification"],
-  // The three cron names collapse onto Winter's single `schedule` tool, which is how `gate.ts`
+  // The three cron names collapse onto the host's single `schedule` tool, which is how `gate.ts`
   // already classifies every schedule op ("one tool, one gate decision, no op-dependent carve-out").
   // FIRST wins the reverse direction — `winterToolNameFor("schedule") === "CronCreate"` — which is
   // deterministic rather than meaningful; a caller needing a specific cron verb must not use the
@@ -90,8 +90,8 @@ export const RUNTIME_HOST_TOOL_PAIRS: ReadonlyArray<readonly [winter: string, wi
  * by a test instead, so the SDK adding a fifth widens this set automatically and the test says so.
  *
  * P8b-28: these four are allowed SILENTLY in every mode. Two of them (`SendMessage`, `ListAgents`)
- * also have Winter names in the pair table above, and both of those land in `gate.ts`'s `READ_ONLY`
- * — so the gate would allow them anyway. `ReadNotifications` and `advisor` have NO Winter
+ * also have host names in the pair table above, and both of those land in `gate.ts`'s `READ_ONLY`
+ * — so the gate would allow them anyway. `ReadNotifications` and `advisor` have NO host
  * counterpart at all (there is no tool to map them to, and inventing one would be a lie), so
  * without this set they would fall to the unclassified fail-closed `"ask"` branch: a card under
  * `auto` in code, and a typed deny in dispatch/chat. Membership here is what makes P8b-28 true for
@@ -106,9 +106,9 @@ export const WINTER_OWN_TOOL_NAMES: ReadonlySet<string> = new Set(
  * built binary (`dist/winter`) driven through `query()` with `model: "winter-test/echo"` under a
  * temp home and `CORE_BRAND`'s names. 31 tools, verbatim and sorted as the child sent them.
  *
- * **This, not Winter's pair table, is what `disallowedTools` must be derived from** (review F4). The
+ * **This, not the host's pair table, is what `disallowedTools` must be derived from** (review F4). The
  * brief's instruction to build the list from `WINTER_DEFAULT_TOOL_DEFINITIONS` rests on a wrong
- * premise — that export is only Winter's own four — and Winter's pair table is a different set
+ * premise — that export is only Winter's own four — and the host's pair table is a different set
  * again: it has rows for tools the child does NOT advertise (`LSP`, `ToolSearch`, `WebFetch`,
  * `WebSearch`, the two MCP-resource tools) and, more importantly, MISSES three the child DOES
  * advertise (`Monitor`, `ReportFindings`, `ScheduleWakeup`). Deriving chat's exclusions from the
@@ -178,14 +178,14 @@ export const WINTER_ADVERTISED_TOOLS_0_0_4: readonly string[] =
  * child's OWN `permissionClass` rather than from a name:
  *  - `Monitor` — `permissionClass: "execute"` (`descriptors/monitor.ts:49`) → gated as `bash`.
  *  - `ReportFindings` — `permissionClass: "task"` (`descriptors/report-findings.ts:36`), "a
- *    structured review result channel, not a scanner" → gated as `task_create`, Winter's own
+ *    structured review result channel, not a scanner" → gated as `task_create`, the host's own
  *    READ_ONLY class for in-session bookkeeping.
  *  - `ScheduleWakeup` — `permissionClass: "task"` (`descriptors/schedule-wakeup.ts:41`), an
- *    in-session self-wake with its delay clamped to 60-3600s. Deliberately NOT Winter's `schedule`
+ *    in-session self-wake with its delay clamped to 60-3600s. Deliberately NOT the host's `schedule`
  *    (MUTATING): that is the persistent cron surface, which is `CronCreate`/`CronDelete`/`CronList`
  *    in the pair table above, and a standing prompt-injection surface in a way a self-wake is not.
  *
- * The value is the WINTER name the gate should classify by — never what the card or the transcript
+ * The value is the HOST name the gate should classify by — never what the card or the transcript
  * displays, which stays `gateToolNameFor`'s answer.
  */
 export const WINTER_TOOL_GATE_CLASS: ReadonlyMap<string, string> = new Map([
@@ -195,17 +195,17 @@ export const WINTER_TOOL_GATE_CLASS: ReadonlyMap<string, string> = new Map([
   // --- the `winter.mcp` housekeeping trio the pair table has no row for ------------------------
   // All three are read-only bookkeeping over ALREADY-CONNECTED MCP servers, and none of them can
   // reach a server the session has not already declared. Classified as `list_mcp_resources` /
-  // `ToolSearch`, which are Winter's own `NETWORK` and `READ_ONLY` classes for exactly that work, so
-  // code and dispatch get them silently while chat — which has no MCP resources beyond Winter's own
+  // `ToolSearch`, which are the host's own `NETWORK` and `READ_ONLY` classes for exactly that work, so
+  // code and dispatch get them silently while chat — which has no MCP resources beyond the host's own
   // capability servers — keeps them in its disallow set.
   //
   //  - `ReadMcpResourceDirTool` — "Direct children of a directory resource."
   //    (`descriptors/read-mcp-resource-dir-tool.ts:14`). The same family as `ReadMcpResourceTool`,
-  //    so it takes the same Winter name the pair table already gives that one.
+  //    so it takes the same host name the pair table already gives that one.
   ["ReadMcpResourceDirTool", "read_mcp_resource"],
   //  - `RefreshMcpTools` — "Re-queries connected servers' tool lists; **never establishes a
   //    disconnected connection**" (`descriptors/refresh-mcp-tools.ts:13`). Purely a re-read of the
-  //    in-memory tool index, which is what Winter's own `ToolSearch` does.
+  //    in-memory tool index, which is what the host's own `ToolSearch` does.
   ["RefreshMcpTools", "ToolSearch"],
   //  - `WaitForMcpServers` — "Waits for connected MCP servers to finish handshaking"
   //    (`descriptors/wait-for-mcp-servers.ts:22`), and its own `permissionClass` is `"read"`. It
@@ -271,16 +271,16 @@ const HOST_TO_RUNTIME = ((): ReadonlyMap<string, string> => {
 })();
 
 /**
- * The WINTER name for a tool a Winter child just called, or `undefined` when nothing claims it.
+ * The HOST name for a tool a Winter child just called, or `undefined` when nothing claims it.
  *
  * Three cases, in order:
- *  1. a Winter capability tool — `mcp__winter__<key>__<tool>` whose `<key>` is one of the FIVE
+ *  1. a host capability tool — `mcp__winter__<key>__<tool>` whose `<key>` is one of the FIVE
  *     capability server keys — → the BARE `<tool>` name, which is exactly how `gate.ts` already
  *     classifies all five servers' tools (`Search`/`ReadPage` in `NETWORK`, `browser` in `NETWORK`,
  *     `computer`/`docs`/`sheets`/`slides`/`session_spawn` in `MUTATING`,
  *     `list_sessions`/`manage_session` in `READ_ONLY`);
- *  2. a mapped Winter built-in → its Winter name (the pair table);
- *  3. anything else → `undefined`. A third-party `mcp__…`/`plugin__…` name has no Winter name — and
+ *  2. a mapped Winter built-in → its host name (the pair table);
+ *  3. anything else → `undefined`. A third-party `mcp__…`/`plugin__…` name has no host name — and
  *     that INCLUDES an `mcp__winter__…` name whose server key is not one of the five, which is the
  *     spoof `WINTER_CAPABILITY_SERVER_KEYS` exists to refuse. Callers that fall back to the original
  *     keep its prefix, so `isExternalToolName` still classifies it as external; every other unknown
@@ -292,7 +292,7 @@ export function hostToolNameFor(winterToolName: string): string | undefined {
   if (winterToolName.startsWith(WINTER_CAPABILITY_TOOL_PREFIX)) {
     const rest = winterToolName.slice(WINTER_CAPABILITY_TOOL_PREFIX.length);
     // `<serverKey>__<tool>` — split at the FIRST `__`, so a tool name that itself contains `__`
-    // survives intact. Claimed ONLY when `<serverKey>` is one of Winter's own five: a malformed
+    // survives intact. Claimed ONLY when `<serverKey>` is one of the host's own five: a malformed
     // entry, or a third-party server spoofing the prefix, stays `mcp__`-prefixed for its caller and
     // is therefore still classified as an external MCP tool, never silently widened.
     const sep = rest.indexOf("__");
@@ -303,17 +303,17 @@ export function hostToolNameFor(winterToolName: string): string | undefined {
   return RUNTIME_TO_HOST.get(winterToolName);
 }
 
-/** The inverse: the WINTER name for one of Winter's tool names, or `undefined`. Capability tools
- *  have no single Winter spelling here (their `mcp__winter__<key>__<tool>` name depends on which
- *  server owns them — Task 7's `capabilityToolName` mints those), so this answers only for the
- *  built-in pairs. Where several Winter names share one Winter name (the three cron verbs) the
- *  FIRST pair wins. */
+/** The inverse: the WINTER (runtime) name for one of the host's tool names, or `undefined`.
+ *  Capability tools have no single runtime spelling here (their `mcp__winter__<key>__<tool>` name
+ *  depends on which server owns them — Task 7's `capabilityToolName` mints those), so this answers
+ *  only for the built-in pairs. Where several runtime names share one host name (the three cron
+ *  verbs) the FIRST pair wins. */
 export function winterToolNameFor(hostToolName: string): string | undefined {
   return HOST_TO_RUNTIME.get(hostToolName);
 }
 
-/** The name to hand `PermissionGate.evaluate` — the Winter name when one exists, otherwise the
- *  Winter name unchanged, which fails closed. The bridge's one-liner, kept here so the projector
+/** The name to hand `PermissionGate.evaluate` — the host name when one exists, otherwise the
+ *  runtime name unchanged, which fails closed. The bridge's one-liner, kept here so the projector
  *  lane and the bridge cannot disagree about the fallback. */
 export function gateToolNameFor(winterToolName: string): string {
   return hostToolNameFor(winterToolName) ?? winterToolName;
