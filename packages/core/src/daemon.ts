@@ -76,6 +76,8 @@ import { SettingsWatcher } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { restampStep } from "./runtime-state/recovery";
 import { createWinterRuntimeSdk, type WinterRuntimeSdk } from "./runtime-sdk/create";
+import { ClaudeExecutableUnavailable } from "./runtime-sdk/official-executable";
+import { createConsoleProfileBroker } from "./auth/console-profile-broker";
 import { advisorReviewerFor, familyOfModel, officialLegDefaultSessionModel } from "./runtime-sdk/advisor-reviewer";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
@@ -1105,6 +1107,38 @@ export async function startDaemon(opts: {
     runtimeSdk = undefined;
   }
 
+  // Winter Phase 10a (O6, P10a-2/4/6): the daemon's ONE console-profile broker. `claudeExecutable`
+  // is a closure (not a boot-time snapshot) over `runtimeSdk.claudeExecutableFor()` — the SAME
+  // live-resolved executable the official leg's own sessions use, so a `runtimes.claudeExecutable`
+  // edit takes effect for the broker with no daemon restart, exactly like every other reader of
+  // that setting. `antExecutable` is a STUB until Lane L's bundle-layout resolver lands (task L4) —
+  // // Lane L wires resolveAntExecutable here.
+  const consoleBroker = createConsoleProfileBroker({
+    home: winterHome,
+    claudeExecutable: () => {
+      if (runtimeSdk === undefined) return undefined;
+      const resolved = runtimeSdk.claudeExecutableFor();
+      return resolved instanceof ClaudeExecutableUnavailable ? undefined : resolved.path;
+    },
+    antExecutable: () => process.env.WINTER_ANT_EXECUTABLE,
+    secrets,
+  });
+  // Boot-time bearer refresh (P10a-4): if a console profile already exists on disk, refresh the
+  // bearer material once at boot (the daemon may have been down past the previous expiry) and arm
+  // the recurring refresher. Never fatal to boot — `UNAVAILABLE_SDK`'s own doc explains why
+  // `profileExists()` itself cannot throw; the `refreshBearer()` call is guarded here too, since
+  // the real SDK (once wired) reaches an actual network/process call this daemon must not die on.
+  if (consoleBroker.profileExists()) {
+    consoleBroker.refreshBearer()
+      .then((result) => {
+        if (!result.ok) console.error(`console-profile-broker: boot-time refreshBearer failed`);
+      })
+      .catch((err) => {
+        console.error(`console-profile-broker: boot-time refreshBearer threw (${err instanceof Error ? err.name : "unknown"})`);
+      })
+      .finally(() => { consoleBroker.startRefresher(); }); // the recurring safety net, regardless of the boot attempt's own outcome
+  }
+
   // ── §13 step 10, run from here because the handle does not exist where the step does ──────────
   //
   // WS-15 §6.4's directory recovery — mark previously-live handles unavailable, restore cursors,
@@ -2024,6 +2058,9 @@ export async function startDaemon(opts: {
     // OpenAI API key server-side. Chat Slice D task 3: also `sync.config`'s ONLY route to the Exa
     // key, never a second read path.
     secrets,
+    // Winter Phase 10a (O6, P10a-6): the ONE console-profile broker built above (boot-time
+    // refreshBearer + startRefresher already fired) — drives provider.login/loginCode/logout/status.
+    consoleBroker,
     // Chat Slice D task 3 (`sync.config`): the SAME shared getter Search/ReadPage/the research
     // runner already consult (constructed above, before the `if (agentProvider)` gate).
     dangerousDomainsAdded,

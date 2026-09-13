@@ -187,6 +187,28 @@ export function officialAuthChildEnvFor(family: OfficialAuthFamily, home: string
   return {};
 }
 
+/**
+ * Winter Phase 10a (O6): `provider.status`'s own "which credential will actually be used right
+ * now" decision — WIDER than `officialAuthFamilyFor` above (which always picks an arm to attempt
+ * and never answers `"none"`), because only a caller holding both presence booleans can tell
+ * "this arm was decided" apart from "this arm's own credential doesn't actually exist yet". An
+ * explicit `auth` pin (`"api-key"`/`"console"`) is only "effective" when ITS OWN credential is
+ * present — it never silently falls back to the other arm, matching `officialAuthFamilyFor`'s own
+ * "honoured even when not there yet" stance for the SPAWN decision. Only `"auto"` falls back
+ * (console first, per P10a-3's literal rule), and answers `"none"` when neither exists.
+ */
+export function effectiveOfficialAuthFor(
+  auth: "auto" | "api-key" | "console",
+  apiKey: boolean,
+  consoleProfile: boolean,
+): "api-key" | "console" | "none" {
+  if (auth === "console") return consoleProfile ? "console" : "none";
+  if (auth === "api-key") return apiKey ? "api-key" : "none";
+  if (consoleProfile) return "console";
+  if (apiKey) return "api-key";
+  return "none";
+}
+
 /** P8c-2: the six-valued mapping `mode-options.ts`'s `permissionModeFor` already has, adapted for
  *  the official leg's OWN enum — same literal spellings (`default`/`plan`/`acceptEdits`/`dontAsk`),
  *  EXCEPT `bypass`, which `mode-options.ts` maps to Winter's `bypassPermissions` and which the

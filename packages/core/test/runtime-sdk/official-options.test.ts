@@ -22,6 +22,7 @@ import {
   ANTHROPIC_PROFILE_NAME,
   anthropicConfigDirFor,
   autoMemoryDirectoryFor,
+  effectiveOfficialAuthFor,
   ensureOfficialConfigDir,
   FORBIDDEN_CHILD_ENV,
   minimalOsEnvironment,
@@ -494,6 +495,27 @@ describe("officialAuthChildEnvFor — the scrub matrix (P10a-2)", () => {
     for (const name of FORBIDDEN_CHILD_ENV) delete base[name];
     const merged = { ...base, ...officialAuthChildEnvFor("api-key", home) };
     for (const name of FORBIDDEN_CHILD_ENV) expect(merged[name]).toBeUndefined();
+  });
+});
+
+describe("effectiveOfficialAuthFor (O6, provider.status)", () => {
+  test("explicit \"console\" is effective ONLY when the profile actually exists — never falls back to api-key", () => {
+    expect(effectiveOfficialAuthFor("console", true, true)).toBe("console");
+    expect(effectiveOfficialAuthFor("console", true, false)).toBe("none");
+    expect(effectiveOfficialAuthFor("console", false, false)).toBe("none");
+  });
+
+  test("explicit \"api-key\" is effective ONLY when the key material actually exists — never falls back to console", () => {
+    expect(effectiveOfficialAuthFor("api-key", true, true)).toBe("api-key");
+    expect(effectiveOfficialAuthFor("api-key", false, true)).toBe("none");
+    expect(effectiveOfficialAuthFor("api-key", false, false)).toBe("none");
+  });
+
+  test("\"auto\" prefers console, then api-key, then none", () => {
+    expect(effectiveOfficialAuthFor("auto", true, true)).toBe("console");
+    expect(effectiveOfficialAuthFor("auto", true, false)).toBe("api-key");
+    expect(effectiveOfficialAuthFor("auto", false, true)).toBe("console");
+    expect(effectiveOfficialAuthFor("auto", false, false)).toBe("none");
   });
 });
 
