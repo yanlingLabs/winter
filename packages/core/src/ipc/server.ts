@@ -2878,7 +2878,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           // `.data` for any JSON-RPC error reply, so `LiveAnthropicAuthClient.logout()` (which
           // otherwise only guards a well-formed `{ok:false}`) already surfaces this to callers.
           const message = err instanceof Error ? err.message : String(err);
-          const code = message.includes(":") ? message.slice(0, message.indexOf(":")) : message;
+          const prefix = message.includes(":") ? message.slice(0, message.indexOf(":")) : message;
+          // Only a real `snake_case` reason travels as `data.code`; free text (e.g. a raw Keychain error
+          // bubbling up from the SDK's own `store.delete`) never masquerades as one.
+          const code = /^[a-z_]+$/.test(prefix) ? prefix : "console_logout_failed";
           throw new RpcFailure(ERR.INTERNAL, message, { code });
         }
         return { ok: true };
