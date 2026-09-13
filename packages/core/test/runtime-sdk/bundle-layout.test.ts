@@ -60,6 +60,19 @@ describe("bundle-layout (P8d-1)", () => {
     expect(antExecutablePath("/x/Resources/winter-core")).toBe(bundleRuntimePath("/x/Resources/winter-core", "ant"));
     expect(RUNTIME_BUNDLE_LAYOUT.ant).toBe("runtimes/ant/ant");
   });
+
+  // Winter Phase 10a (fix round 2): checksums.ant — the STAGE-TIME pre-sign hash embed-runtimes.sh
+  // records for ant, mirroring winterPreSign's own shape. Optional so a pre-fix-round-2 bundle (or
+  // one with no vendored ant) still parses.
+  test("parseVersionsJson accepts an optional checksums.ant and preserves its absence as absence", () => {
+    const antSha = "b".repeat(64);
+    expect(parseVersionsJson(JSON.stringify(good)).checksums.ant).toBeUndefined();
+    expect(parseVersionsJson(JSON.stringify({ ...good, checksums: { ...good.checksums, ant: antSha } })).checksums.ant).toBe(antSha);
+  });
+  test("parseVersionsJson refuses a malformed checksums.ant without silently dropping it", () => {
+    expect(() => parseVersionsJson(JSON.stringify({ ...good, checksums: { ...good.checksums, ant: "nope" } }))).toThrow(/checksums\.ant must be lowercase sha256 hex/);
+    expect(() => parseVersionsJson(JSON.stringify({ ...good, checksums: { ...good.checksums, ant: 123 } }))).toThrow(/checksums\.ant must be lowercase sha256 hex/);
+  });
 });
 
 // Winter Phase 10a (P10a-4/L4): resolveAntExecutable's ladder. `ant` is OPTIONAL — a total miss is

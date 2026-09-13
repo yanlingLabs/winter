@@ -53,7 +53,14 @@ export interface VersionsJson {
   winterRuntimeSdk: string;
   officialSdk: string;
   claudeCode: string;
-  checksums: { winterPreSign: string; claude: string };
+  /** Winter Phase 10a (fix round 2): `ant` is OPTIONAL — a bundle staged before embed-runtimes.sh
+   *  learned to record it (or one built without a vendored ant at all) still parses. When present,
+   *  it is the PRE-SIGN sha256 of the staged `runtimes/ant/ant` — computed immediately after the
+   *  copy, before `codesign` mutates the file — the exact same "hash before signing" shape as
+   *  `winterPreSign` above, recorded by embed-runtimes.sh directly (ant is never routed through
+   *  stage-runtimes.ts's own ladder). `release-lib.ts`'s `verifyAntEmbed` compares this against the
+   *  repo-root VERSIONS.json's git-committed `ant.binarySha256` pin. */
+  checksums: { winterPreSign: string; claude: string; ant?: string };
   stagedAt: string;
   winterSource?: "platform-package" | "checkout-build";
 }
@@ -97,6 +104,16 @@ export function parseVersionsJson(text: string): VersionsJson {
     if (typeof x !== "string" || !SHA256_RE.test(x)) throw new Error(`VERSIONS.json: checksums.${k} must be lowercase sha256 hex`);
     return x;
   };
+  // Winter Phase 10a (fix round 2): `checksums.ant` is OPTIONAL — absent entirely on a bundle
+  // staged before embed-runtimes.sh recorded it, or one built without a vendored ant. Present-but-
+  // malformed still refuses (never silently drop a corrupt pin).
+  let antChecksum: string | undefined;
+  if (c.ant !== undefined) {
+    if (typeof c.ant !== "string" || !SHA256_RE.test(c.ant)) {
+      throw new Error("VERSIONS.json: checksums.ant must be lowercase sha256 hex");
+    }
+    antChecksum = c.ant;
+  }
   let winterSource: VersionsJson["winterSource"];
   if (v.winterSource !== undefined) {
     if (typeof v.winterSource !== "string" || !(WINTER_SOURCES as readonly string[]).includes(v.winterSource)) {
@@ -110,7 +127,7 @@ export function parseVersionsJson(text: string): VersionsJson {
     winterRuntimeSdk: str("winterRuntimeSdk"),
     officialSdk: str("officialSdk"),
     claudeCode: str("claudeCode"),
-    checksums: { winterPreSign: sha("winterPreSign"), claude: sha("claude") },
+    checksums: { winterPreSign: sha("winterPreSign"), claude: sha("claude"), ...(antChecksum === undefined ? {} : { ant: antChecksum }) },
     stagedAt: str("stagedAt"),
     ...(winterSource === undefined ? {} : { winterSource }),
   };

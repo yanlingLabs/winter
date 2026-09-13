@@ -10,6 +10,7 @@
 // hard failure (the same CI-honesty shape `test/helpers/claude-runtime.ts` already uses).
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -111,6 +112,13 @@ describe("embed-runtimes.sh (P8d-1/P8d-2 postCompileScript body, standalone)", (
       const antMode = statSync(join(dest, "ant", "ant")).mode & 0o777;
       expect(antMode).toBe(0o755);
 
+      // Fix round 2: the staged VERSIONS.json's checksums.ant is the PRE-SIGN hash — computed on
+      // the fixture's bytes BEFORE codesign mutated the file — so it must equal a fresh hash of
+      // the ORIGINAL fixture content, never of the (now re-signed, different) file at dest.
+      const stagedVersions = JSON.parse(readFileSync(join(dest, "claude-official", "VERSIONS.json"), "utf8")) as { checksums: { ant?: string } };
+      const expectedPreSignSha256 = createHash("sha256").update(readFileSync(antFixture)).digest("hex");
+      expect(stagedVersions.checksums.ant).toBe(expectedPreSignSha256);
+
       expect(r.stdout).toContain("runtimes embedded + verified");
       expect(r.stdout).toContain("ant re-signed (Identifier=com.winter.ant)");
     } finally {
@@ -185,6 +193,12 @@ describe("embed-runtimes.sh (P8d-1/P8d-2 postCompileScript body, standalone)", (
       const dest = join(builtProducts, "Winter.app", "Contents", "Resources", "runtimes");
       const antDvv = spawnSync("codesign", ["-dvv", join(dest, "ant", "ant")], { encoding: "utf8" });
       expect(`${antDvv.stdout}${antDvv.stderr}`).toContain("Identifier=com.winter.ant");
+
+      // Fix round 2: the staged pre-sign hash matches the REAL vendored file's own sha256 (the
+      // vendored file itself is never mutated by this script — only the staged bundle copy is).
+      const stagedVersions = JSON.parse(readFileSync(join(dest, "claude-official", "VERSIONS.json"), "utf8")) as { checksums: { ant?: string } };
+      const expectedPreSignSha256 = createHash("sha256").update(readFileSync(vendoredAnt)).digest("hex");
+      expect(stagedVersions.checksums.ant).toBe(expectedPreSignSha256);
     } finally {
       rmSync(builtProducts, { recursive: true, force: true });
     }
