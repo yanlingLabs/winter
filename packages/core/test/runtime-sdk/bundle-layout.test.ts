@@ -6,6 +6,7 @@ import {
   RUNTIME_BUNDLE_LAYOUT,
   antExecutablePath,
   bundleRuntimePath,
+  isCompiledBinary,
   parseVersionsJson,
   resolveAntExecutable,
   winterSourceOf,
@@ -149,5 +150,44 @@ describe("resolveAntExecutable (P10a-4 ladder)", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  // Winter Phase 10a fix wave (M6): the `which ant` rung must be UNREACHABLE from a compiled
+  // binary, by construction — never merely "in effect" because the bundle rung above usually
+  // succeeds first. A missing/corrupt embedded `ant` in a Release build must never fall through to
+  // whatever happens to sit on the real machine's $PATH.
+  describe("M6 — the which-ant rung is gated by construction on a compiled binary", () => {
+    test("isCompiled: () => true skips which() ENTIRELY, even when it would resolve — reports undefined", () => {
+      let whichCalled = false;
+      const r = resolveAntExecutable({
+        ...base, isExecutableFile: () => false, isCompiled: () => true,
+        which: () => { whichCalled = true; return "/usr/local/bin/ant"; },
+      });
+      expect(r).toBeUndefined();
+      expect(whichCalled).toBe(false);
+    });
+
+    test("isCompiled: () => false (dev/test) still reaches which() exactly as before", () => {
+      const r = resolveAntExecutable({ ...base, isExecutableFile: () => false, isCompiled: () => false, which: () => "/usr/local/bin/ant" });
+      expect(r).toEqual({ path: "/usr/local/bin/ant", source: "path" });
+    });
+
+    test("the compiled gate never blocks the setting/env/bundle rungs — only the which() fallback", () => {
+      const settingResult = resolveAntExecutable({ ...base, setting: "/s/ant", isCompiled: () => true, which: () => "/nope" });
+      expect(settingResult).toEqual({ path: "/s/ant", source: "setting" });
+      const bundleResult = resolveAntExecutable({ ...base, isExecutableFile: (p) => p === BUNDLE_ANT, isCompiled: () => true, which: () => "/nope" });
+      expect(bundleResult).toEqual({ path: BUNDLE_ANT, source: "bundle" });
+    });
+
+    test("isCompiledBinary() itself reflects Bun.main — false under bun test, which never runs as a compiled $bunfs binary", () => {
+      expect(isCompiledBinary()).toBe(false);
+    });
+
+    test("the default resolveAntExecutable() call (no isCompiled override) uses the REAL isCompiledBinary() — false under bun test, so which() still fires", () => {
+      // No `isCompiled` override at all: proves the default wiring (not just the test seam) reaches
+      // which() under the real (uncompiled) `bun test` process.
+      const r = resolveAntExecutable({ ...base, isExecutableFile: () => false, which: () => "/usr/local/bin/ant" });
+      expect(r).toEqual({ path: "/usr/local/bin/ant", source: "path" });
+    });
   });
 });

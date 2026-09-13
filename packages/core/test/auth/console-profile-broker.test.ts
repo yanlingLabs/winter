@@ -4,7 +4,7 @@
 // refresh TIMER, however, is host-owned (no equivalent exists on the SDK side — see
 // console-profile-broker.ts's own header), so it IS tested here, over a fake clock.
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -99,6 +99,39 @@ describe("createConsoleProfileBroker — login", () => {
     });
     await expect(broker.login(() => {})).rejects.toThrow("claude_executable_unavailable");
     expect(calls).toEqual([]);
+  });
+
+  // Winter Phase 10a fix wave (M4): `official-session.ts`'s `open()` only ensures
+  // `anthropicConfigDirFor(home)` for a session actually launched on the console arm — which (per
+  // C1-interim) the pinned router refuses before that point is ever reached — so `login()` itself
+  // must harden the directory, or the very first `winter login --anthropic-console` could hand
+  // `claude auth login --console` a config dir that does not exist yet.
+  test("login() creates AND hardens anthropicConfigDirFor(home) to 0700 before spawning", async () => {
+    const home = freshHome();
+    const dir = anthropicConfigDirFor(home);
+    expect(existsSync(dir)).toBe(false);
+    const { sdk } = fakeSdk();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk,
+    });
+    await broker.login(() => {});
+    expect(existsSync(dir)).toBe(true);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+  });
+
+  test("login() re-hardens an already-existing, more-permissive anthropicConfigDirFor(home)", async () => {
+    const home = freshHome();
+    const dir = anthropicConfigDirFor(home);
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(dir, { recursive: true });
+    chmodSync(dir, 0o755);
+    expect(statSync(dir).mode & 0o777).toBe(0o755);
+    const { sdk } = fakeSdk();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk,
+    });
+    await broker.login(() => {});
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
   });
 
   test("calls sdk.startAnthropicConsoleBrokerLogin(store, options) with the right paths, profile, and onLine forwarded", async () => {
@@ -218,10 +251,19 @@ describe("createConsoleProfileBroker — profileExists / refreshBearer / logout"
   });
 });
 
+// Winter Phase 10a fix wave (M3-clamp): `normalizeExpiresAtMs` discriminates seconds-vs-ms by
+// comparing against a real-epoch-scale threshold (1e12 ms ~ year 2001) — so every test in this
+// describe block that asserts an EXACT re-arm delay must use a REALISTIC (>1e12) `now`/`expiresAt`
+// pair, never the small round numbers convenient elsewhere in this file (`1_000_000` et al. would
+// themselves be misread as a seconds-unit value and multiplied by 1000). The delta between `now`
+// and `expiresAt` — never their absolute scale — is what every delay assertion below actually
+// pins, so shifting both by the same REALISTIC_NOW base changes nothing about what each test proves.
+const REALISTIC_NOW = 1_700_000_000_000;
+
 describe("createConsoleProfileBroker — startRefresher / stopRefresher (host-owned timer, fake clock)", () => {
   test("startRefresher() refreshes IMMEDIATELY, then arms the next fire 60s before the returned expiresAt", async () => {
     const home = freshHome();
-    let now = 1_000_000;
+    let now = REALISTIC_NOW;
     const { sdk, calls } = fakeSdk({ refreshAnthropicBearer: async () => { calls.push({ fn: "refreshAnthropicBearer", args: [] }); return { ok: true, expiresAt: now + 120_000 }; } });
     const timers = fakeTimers();
     const broker = createConsoleProfileBroker({
@@ -251,18 +293,94 @@ describe("createConsoleProfileBroker — startRefresher / stopRefresher (host-ow
   test("each successive fire re-arms based on ITS OWN fresh expiresAt", async () => {
     const home = freshHome();
     let call = 0;
-    const expiries = [1_060_000, 1_130_000]; // seed + one re-fire
+    const expiries = [REALISTIC_NOW + 60_000, REALISTIC_NOW + 130_000]; // seed + one re-fire
     const { sdk } = fakeSdk({ refreshAnthropicBearer: async () => ({ ok: true, expiresAt: expiries[call++] }) });
     const timers = fakeTimers();
     const broker = createConsoleProfileBroker({
       home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
-      sdk, now: () => 1_000_000, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+      sdk, now: () => REALISTIC_NOW, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
     });
     broker.startRefresher();
     await flush();
-    expect(timers.delays).toEqual([0]); // 1_060_000 - 60_000 - 1_000_000 = 0 (clamped, not negative)
+    // M3-clamp: (REALISTIC_NOW + 60_000) - 60_000 - REALISTIC_NOW = 0, floored to
+    // MIN_REARM_DELAY_MS (30_000) — never fires "as soon as possible" any more (see the dedicated
+    // clamp test below for why).
+    expect(timers.delays).toEqual([30_000]);
     await timers.fire();
-    expect(timers.delays).toEqual([0, 70_000]); // 1_130_000 - 60_000 - 1_000_000
+    expect(timers.delays).toEqual([30_000, 70_000]); // (REALISTIC_NOW + 130_000) - 60_000 - REALISTIC_NOW, well above the floor
+  });
+
+  // Winter Phase 10a fix wave (M3-clamp): a computed re-arm delay of 0 (or negative) is exactly
+  // the tight-loop risk the floor exists to prevent — a profile that keeps coming back
+  // near-expired must never turn into a hot loop of refresh calls.
+  test("M3-clamp: a computed delay of 0 (expiresAt exactly REFRESH_LEAD_MS away) is floored to MIN_REARM_DELAY_MS, never 0", async () => {
+    const home = freshHome();
+    // REALISTIC_NOW + 60_000 - 60_000 - REALISTIC_NOW = 0
+    const { sdk } = fakeSdk({ refreshAnthropicBearer: async () => ({ ok: true, expiresAt: REALISTIC_NOW + 60_000 }) });
+    const timers = fakeTimers();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, now: () => REALISTIC_NOW, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    broker.startRefresher();
+    await flush();
+    expect(timers.delays).toEqual([30_000]);
+  });
+
+  // Winter Phase 10a fix wave (M3-clamp): a GENUINELY PAST expiresAt (e.g. clock skew, or a
+  // malformed timestamp) must also floor to MIN_REARM_DELAY_MS — never fire immediately, which
+  // would tight-loop against a broken profile.
+  test("M3-clamp: an already-past expiresAt is floored to MIN_REARM_DELAY_MS, never a negative/zero delay", async () => {
+    const home = freshHome();
+    const { sdk } = fakeSdk({ refreshAnthropicBearer: async () => ({ ok: true, expiresAt: REALISTIC_NOW - 500_000 }) }); // WAY before now()
+    const timers = fakeTimers();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, now: () => REALISTIC_NOW, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    broker.startRefresher();
+    await flush();
+    expect(timers.delays).toEqual([30_000]);
+  });
+
+  // Winter Phase 10a fix wave (M3-clamp): `expires_at`'s unit was never measured against a real
+  // profile — a SECONDS-since-epoch value (this broker's own `now()` is always ms) must be
+  // normalised to ms BEFORE the lead-time subtraction, or a seconds-unit profile would re-arm
+  // ~1000x too soon (immediately, in practice, since any real seconds-unit timestamp is far
+  // smaller than any real ms-unit `now()`).
+  test("M3-clamp: a SECONDS-unit expiresAt is normalised to ms before the lead-time subtraction", async () => {
+    const home = freshHome();
+    const nowMs = 1_700_000_000_000; // a real ms-since-epoch `now` (year ~2023)
+    const expiresAtSeconds = nowMs / 1000 + 120; // 120s from now, in SECONDS (well under the 1e12 threshold)
+    const { sdk } = fakeSdk({ refreshAnthropicBearer: async () => ({ ok: true, expiresAt: expiresAtSeconds }) });
+    const timers = fakeTimers();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, now: () => nowMs, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    broker.startRefresher();
+    await flush();
+    // Normalised to ms: (nowMs + 120_000) - 60_000 - nowMs = 60_000 — NOT the ~1000x-too-soon
+    // delay a raw seconds-as-ms misread would compute (which would floor to MIN_REARM_DELAY_MS
+    // instead, making this assertion the one that actually distinguishes the two).
+    expect(timers.delays).toEqual([60_000]);
+  });
+
+  // A genuine ms-unit expiresAt (comfortably above the 1e12 threshold for any real timestamp)
+  // must be left untouched by the normalisation — this is the sibling proof to the seconds test
+  // above, over the SAME code path.
+  test("M3-clamp: a genuine ms-unit expiresAt is left untouched by the normalisation", async () => {
+    const home = freshHome();
+    const nowMs = 1_700_000_000_000;
+    const { sdk } = fakeSdk({ refreshAnthropicBearer: async () => ({ ok: true, expiresAt: nowMs + 120_000 }) });
+    const timers = fakeTimers();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, now: () => nowMs, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    broker.startRefresher();
+    await flush();
+    expect(timers.delays).toEqual([60_000]);
   });
 
   test("a failed refresh retries after a fixed backoff rather than giving up", async () => {

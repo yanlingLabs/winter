@@ -772,6 +772,50 @@ test("Task 16 / P8b-30: a BYO `connection` rides provider.connection; without a 
   expect(buildWinterOptions(optionsInput({ model: "winter-test/echo", connection })).provider).toBeUndefined();
 });
 
+// Fix wave (M7): `Options.advisor` gains `authRef` when the advisor's own target model resolves to
+// the SAME provider as the session's model — the ONE lever the pinned SDK's `AdvisorConfig` shape
+// actually supports (`model`/`authRef` only; NO `connection` field exists at that level). Without
+// this, the advisor's own generation falls through to the runtime's independent
+// "<providerId>:default" credential resolution regardless of whatever `Options.provider.connection`
+// override the session itself is using (measured root cause of `advisor-winter-leg-e2e.test.ts`'s
+// F2 case hanging on a real machine's Keychain consent dialog against a freshly re-signed
+// `dist/winter`).
+test("M7: same-provider advisor gets authRef — the SAME ref providerSelectionFor already resolved for the session", () => {
+  const credentials: CredentialPresence = { byProvider: { openai: "keychain" } };
+  const o = buildWinterOptions(optionsInput({ model: "gpt-5.6-sol", advisorModel: "openai/gpt-6-astra", credentials }));
+  expect(o.advisor).toEqual({ model: "openai/gpt-6-astra", authRef: o.provider!.authRef });
+  expect(o.advisor!.authRef).toEqual(expect.objectContaining({ kind: "keychain" }));
+});
+
+test("M7: cross-provider (or unroutable) advisor NEVER gets an authRef — falls through to the SDK's own default, unchanged", () => {
+  const credentials: CredentialPresence = { byProvider: { openai: "keychain" } };
+  // The advisor's own model names no catalog identity at all (Winter's inventory cannot serve it) —
+  // `providerSelectionFor` answers `undefined`, so there is no ref to compare, let alone thread.
+  const o = buildWinterOptions(optionsInput({ model: "gpt-5.6-sol", advisorModel: "winter-test/echo", credentials }));
+  expect(o.advisor).toEqual({ model: "winter-test/echo" });
+  expect(o.advisor).not.toHaveProperty("authRef");
+});
+
+test("M7: no credential present for the shared provider -> no authRef to thread, even though both models resolve to it", () => {
+  const o = buildWinterOptions(optionsInput({ model: "gpt-5.6-sol", advisorModel: "openai/gpt-6-astra", credentials: NO_CREDS }));
+  expect(o.provider!.authRef).toBeUndefined();
+  expect(o.advisor).toEqual({ model: "openai/gpt-6-astra" });
+  expect(o.advisor).not.toHaveProperty("authRef");
+});
+
+test("M7: the session having NO resolvable provider at all (winter-test/*) never attaches an advisor authRef either", () => {
+  const credentials: CredentialPresence = { byProvider: { openai: "keychain" } };
+  const o = buildWinterOptions(optionsInput({ model: "winter-test/echo", advisorModel: "openai/gpt-6-astra", credentials }));
+  expect(o.provider).toBeUndefined();
+  expect(o.advisor).toEqual({ model: "openai/gpt-6-astra" });
+  expect(o.advisor).not.toHaveProperty("authRef");
+});
+
+test("M7: no advisorModel at all -> no Options.advisor key, unchanged from before this fix", () => {
+  const o = buildWinterOptions(optionsInput({ model: "gpt-5.6-sol", credentials: { byProvider: { openai: "keychain" } } }));
+  expect(o.advisor).toBeUndefined();
+});
+
 test("Task 16 / P8b-24: `resume` names the transcript through Options.resume and OMITS sessionId; a fresh start is the reverse", () => {
   const resumed = buildWinterOptions(optionsInput({ resume: true }));
   expect(resumed.resume).toBe("11111111-2222-3333-4444-555555555555");

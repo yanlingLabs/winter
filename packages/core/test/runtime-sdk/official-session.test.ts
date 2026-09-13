@@ -521,6 +521,12 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
       canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
       policy: "auto",
       officialAuthArm: "console",
+      // Fix wave (C1-interim): the installed router (0.0.3) is below `CONSOLE_AUTH_ROUTER_MIN` and
+      // would refuse the console arm typed before this test ever reaches the apiKeySource assertion
+      // under test here — simulate the future router upgrade so this stays a pure test of the
+      // assertion, not an accidental re-test of the gate (which has its own coverage in
+      // official-options.test.ts).
+      installedWinterRuntimeSdkVersion: () => "0.0.4",
     };
     const h = harness({ selection: apiKeySelection, inputDeps: () => consoleInputDeps });
     await h.session.send("hi");
@@ -545,6 +551,8 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
       canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
       policy: "auto",
       officialAuthArm: "console",
+      // Fix wave (C1-interim): see the sibling test above for why this override is here.
+      installedWinterRuntimeSdkVersion: () => "0.0.4",
     };
     const h = harness({ selection: apiKeySelection, inputDeps: () => consoleInputDeps });
     await h.session.send("hi");

@@ -67,6 +67,13 @@ export { CODEX, CODEX_MODELS, DEFAULT_CODEX_MODEL } from "./providers/codex-conf
 export { anthropicConfigDirFor, ANTHROPIC_PROFILE_NAME } from "./runtime-sdk/official-options";
 export { createConsoleProfileBroker, type ConsoleProfileBroker, type AnthropicLoginHandle } from "./auth/console-profile-broker";
 export { resolveClaudeExecutable, ClaudeExecutableUnavailable } from "./runtime-sdk/official-executable";
+// Fix wave (C2): `resolveAntExecutable`/`antExecutablePath` — the SAME ladder `daemon.ts` wires its
+// broker's `antExecutable` dep from (settings.runtimes.antExecutable -> $WINTER_ANT_EXECUTABLE ->
+// the bundle path -> `which ant` dev-only) — reached through this barrel by BOTH CLI doors
+// (`winter login/logout --anthropic-console`) so the CLI's own broker can actually refresh the
+// native-provider bearer on the very first sign-in, instead of the antExecutable-less broker that
+// left the CLI stuck reporting a failed refresh after a successful login.
+export { resolveAntExecutable, antExecutablePath } from "./runtime-sdk/bundle-layout";
 // WS-16 §15's `winter doctor` runs IN-PROCESS against WINTER_HOME — no RPC, because the whole point
 // is to work when the daemon does not — so the CLI reaches these two through the package barrel.
 export {

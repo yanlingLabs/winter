@@ -1158,7 +1158,11 @@ export const ProviderConfigureParams = z.union([
   }),
   z.object({
     provider: z.literal("anthropic"),
-    settings: z.object({ "runtimes.official.auth": z.enum(["api-key", "console"]) }),
+    // Fix wave (N3): widened to include "auto" — settings.ts's own `officialAuthModeSetting`
+    // (and `ProviderStatusResult.anthropic.auth` just below) already accept it as the DEFAULT
+    // value, so the app's Provider pane had no way to configure a session back to "auto" once an
+    // explicit "api-key"/"console" had been set, short of hand-editing settings.json.
+    settings: z.object({ "runtimes.official.auth": z.enum(["auto", "api-key", "console"]) }),
   }),
 ]);
 export const ProviderConfigureResult = z.object({ ok: z.literal(true) });

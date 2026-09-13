@@ -1,7 +1,6 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { createInterface } from "node:readline";
 import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, runRuntimesProbe, resolveWinterProfile } from "@yanlinglabs/winter-core";
 import type { Settings } from "@yanlinglabs/winter-core";
 import { METHODS, type ApprovalPolicy, type Task } from "@yanlinglabs/winter-protocol";
@@ -1858,7 +1857,7 @@ if (import.meta.main) {
     // reached through the SAME `createConsoleProfileBroker` thin adapter the daemon uses (never a
     // second core-side spawn).
     if (process.argv.includes("--anthropic-console")) {
-      const { createConsoleProfileBroker, resolveClaudeExecutable, ClaudeExecutableUnavailable } = await import("@yanlinglabs/winter-core");
+      const { createConsoleProfileBroker, resolveClaudeExecutable, resolveAntExecutable, ClaudeExecutableUnavailable } = await import("@yanlinglabs/winter-core");
       const home = resolveWinterHome();
       let settings: Settings | undefined;
       try { settings = loadSettings(join(home, "settings.json")); } catch { settings = undefined; }
@@ -1869,7 +1868,15 @@ if (import.meta.main) {
         console.error(`the official claude runtime is not available: ${resolved.message}`);
         process.exit(1);
       }
-      const broker = createConsoleProfileBroker({ home, claudeExecutable: () => resolved.path, antExecutable: () => undefined, secrets });
+      // Fix wave (C2): the SAME `runtimes.antExecutable` ladder `daemon.ts` wires its own broker
+      // from — without this, `antExecutable: () => undefined` made the SDK refuse the post-login
+      // bearer refresh (`console-profile-broker.ts`'s own `claude_executable_unavailable`-shaped
+      // throw for a missing `ant`), and this door reported failure right after a successful login.
+      const broker = createConsoleProfileBroker({
+        home, claudeExecutable: () => resolved.path,
+        antExecutable: () => resolveAntExecutable({ setting: settings?.runtimes?.antExecutable, env: process.env, execPath: process.execPath })?.path,
+        secrets,
+      });
       console.log(`${AQUA}signing in to Anthropic Console${RESET} — a browser window will open; paste the code it shows below, then press enter.`);
       let handle: Awaited<ReturnType<typeof broker.login>>;
       try {
@@ -1878,24 +1885,29 @@ if (import.meta.main) {
         console.error(`could not start the console login: ${err instanceof Error ? err.message : String(err)}`);
         process.exit(1);
       }
-      const rl = createInterface({ input: process.stdin, terminal: false });
-      // Every pasted line is forwarded verbatim — NEVER logged here (this file's own discipline
-      // for every other secret-entry branch: readSecret, invisibleKeyCharWarning, etc.). The login
-      // protocol takes exactly ONE code: `submitted` guards against a double Enter, a pasted
-      // multi-line blob, or any other stray extra `line` event calling `submitCode` a second time
-      // (the SDK's own child has already consumed/closed on the first submission by then).
+      // Fix wave (N4): read the pasted code WITHOUT ECHO — the SAME `readSecret` helper every
+      // other key-entry door in this file already uses (--anthropic-key et al.), instead of
+      // `createInterface({terminal:false})`, which left the pasted one-time code visible in the
+      // clear on the screen for however long it stays valid. `readSecret` masks each character
+      // with "*", matching the UX of every other secret entry in this CLI.
+      //
+      // A FLOATING promise (never awaited before `await handle.done` below) — same shape as the
+      // `rl.on("line", ...)` listener it replaces: a real login only completes once the code is
+      // submitted, so this read and `handle.done` must run CONCURRENTLY, and Node's event loop
+      // drives both independently of which one this function happens to be "at" in source order.
+      // `submitted` guards the same double-fire class the old comment named (a stray extra
+      // resolution can never call `submitCode` twice — the SDK's own child has already
+      // consumed/closed on the first submission by then). A login that ends BEFORE any code is
+      // ever pasted (an early SDK-side failure) calls `process.exit(1)` below immediately, so a
+      // still-pending `readSecret()` never gets the chance to hang the CLI waiting on stdin.
       let submitted = false;
-      rl.on("line", (line) => {
+      void (async () => {
+        const code = (await readSecret("Paste code here: ")).trim();
         if (submitted) return;
         submitted = true;
-        void handle.submitCode(line.trim());
-      });
-      let result: Awaited<typeof handle.done>;
-      try {
-        result = await handle.done;
-      } finally {
-        rl.close();
-      }
+        void handle.submitCode(code);
+      })();
+      const result: Awaited<typeof handle.done> = await handle.done;
       if (result.ok) {
         console.log(`${AQUA}signed in${RESET} — profile "${result.profile}"`);
         const refreshed = await broker.refreshBearer().catch((err) => ({ ok: false as const, reason: err instanceof Error ? err.name : "unknown" }));
@@ -1985,17 +1997,19 @@ if (import.meta.main) {
     // clears the bearer material — distinct from `--anthropic` below, which only ever clears an
     // api-key material and never touches the console profile.
     if (process.argv.includes("--anthropic-console")) {
-      const { createConsoleProfileBroker, resolveClaudeExecutable, ClaudeExecutableUnavailable } = await import("@yanlinglabs/winter-core");
+      const { createConsoleProfileBroker, resolveClaudeExecutable, resolveAntExecutable, ClaudeExecutableUnavailable } = await import("@yanlinglabs/winter-core");
       const home = resolveWinterHome();
       let settings: Settings | undefined;
       try { settings = loadSettings(join(home, "settings.json")); } catch { settings = undefined; }
       const resolved = resolveClaudeExecutable({
         setting: settings?.runtimes?.claudeExecutable, env: process.env, execPath: process.execPath, exists: existsSync,
       });
+      // Fix wave (C2): same ladder as the login door above, so logout tears down through the same
+      // `ant`-aware broker shape the daemon and login both use.
       const broker = createConsoleProfileBroker({
         home,
         claudeExecutable: () => (resolved instanceof ClaudeExecutableUnavailable ? undefined : resolved.path),
-        antExecutable: () => undefined,
+        antExecutable: () => resolveAntExecutable({ setting: settings?.runtimes?.antExecutable, env: process.env, execPath: process.execPath })?.path,
         secrets,
       });
       try {

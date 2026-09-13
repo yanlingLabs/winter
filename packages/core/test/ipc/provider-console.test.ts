@@ -133,6 +133,21 @@ describe("provider.configure — the anthropic auth-mode arm (P10a-3)", () => {
     expect(written.runtimes.official.auth).toBe("api-key");
     c.close();
   });
+
+  // Fix wave (N3): "auto" is settings.ts's own default value — this was previously refused by
+  // the protocol schema, so the only way back to it (after an explicit api-key/console pin) was
+  // hand-editing settings.json. Pinned here at the IPC layer too, not just the schema unit test.
+  test("\"auto\" is accepted and writes exactly that value (N3)", async () => {
+    const { settingsPath, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    await c.request(METHODS.providerConfigure, { provider: "anthropic", settings: { "runtimes.official.auth": "console" } });
+    const result = await c.request(METHODS.providerConfigure, { provider: "anthropic", settings: { "runtimes.official.auth": "auto" } });
+    expect(result.result).toEqual({ ok: true });
+    const written = JSON.parse(readFileSync(settingsPath, "utf8"));
+    expect(written.runtimes.official.auth).toBe("auto");
+    c.close();
+  });
 });
 
 describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", () => {
@@ -165,6 +180,50 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
     c.close();
   });
 
+  // Fix wave (N1): the first https:// URL any progress line carries becomes the RPC's own
+  // best-effort urlHint — captured from whatever the broker's onLine callback fires SYNCHRONOUSLY
+  // during login() (this fake, and a fast local spawn, both do), stripped of any query string a
+  // second time (defence in depth — the SDK/broker is documented to already strip it).
+  test("provider.login's result carries urlHint, stripped of any query string, from the first URL-bearing line (N1)", async () => {
+    const { socketPath, harnessToken } = await boot({
+      login: async (onLine) => {
+        onLine("Opening browser to sign in...");
+        onLine("If the browser didn't open, visit: https://platform.claude.com/oauth/authorize?code=true&state=abc123");
+        return { submitCode: async () => {}, done: new Promise(() => {}) };
+      },
+    });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
+    expect(result.result).toEqual({ started: true, urlHint: "https://platform.claude.com/oauth/authorize" });
+    c.close();
+  });
+
+  test("provider.login's result has NO urlHint key when no progress line carries a URL", async () => {
+    const { socketPath, harnessToken } = await boot(); // default fake: "Opening browser to sign in..." only
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
+    expect(result.result).toEqual({ started: true });
+    expect("urlHint" in result.result).toBe(false);
+    c.close();
+  });
+
+  test("provider.login's result keeps the FIRST url when multiple lines carry one", async () => {
+    const { socketPath, harnessToken } = await boot({
+      login: async (onLine) => {
+        onLine("visit https://first.example.com/a?x=1");
+        onLine("or https://second.example.com/b?y=2");
+        return { submitCode: async () => {}, done: new Promise(() => {}) };
+      },
+    });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
+    expect(result.result).toEqual({ started: true, urlHint: "https://first.example.com/a" });
+    c.close();
+  });
+
   test("provider.login's handle resolving ok broadcasts provider_login_finished {ok:true}", async () => {
     const { socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
@@ -176,8 +235,23 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
     c.close();
   });
 
+  // Fix wave (M2): an RPC-driven (app/CLI-over-socket) login left the native-provider bearer
+  // material un-refreshed until the NEXT daemon restart's own boot-time `profileExists()` check
+  // (`daemon.ts`) — nothing here ever started the refresher for a login that happened while the
+  // daemon was already up. `startRefresher()` must fire once the login handle resolves `ok: true`.
+  test("a successful login also starts the broker's own refresher (M2)", async () => {
+    const { socketPath, harnessToken, calls } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
+    await waitFor(() => c.events.some((e) => e.type === "provider_login_finished"));
+    await waitFor(() => calls.includes("startRefresher"));
+    expect(calls).toContain("startRefresher");
+    c.close();
+  });
+
   test("a failed login broadcasts provider_login_finished {ok:false, reason}", async () => {
-    const { socketPath, harnessToken } = await boot({
+    const { socketPath, harnessToken, calls } = await boot({
       login: async () => ({ submitCode: async () => {}, done: Promise.resolve({ ok: false, reason: "exit_code_1" }) }),
     });
     const c = await TestClient.connect(socketPath);
@@ -185,6 +259,8 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
     await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
     await waitFor(() => c.events.some((e) => e.type === "provider_login_finished"));
     expect(c.events.find((e) => e.type === "provider_login_finished")).toMatchObject({ ok: false, reason: "exit_code_1" });
+    // M2: a FAILED login has no bearer to keep fresh — the refresher must never start on this path.
+    expect(calls).not.toContain("startRefresher");
     c.close();
   });
 
@@ -237,6 +313,40 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
     const result = await c.request(METHODS.providerLogout, { provider: "anthropic", kind: "console" });
     expect(result.result).toEqual({ ok: true });
     expect(calls).toContain("logout");
+    c.close();
+  });
+
+  // Fix wave (N5): a progress line longer than the 1024-char clip must never reach the wire
+  // uncapped, well under the protocol's own 2048-char schema ceiling.
+  test("a provider_login_progress line longer than 1024 chars is clipped before broadcast (N5)", async () => {
+    const longLine = "x".repeat(5000);
+    const { socketPath, harnessToken } = await boot({
+      login: async (onLine) => {
+        onLine(longLine);
+        return { submitCode: async () => {}, done: new Promise(() => {}) };
+      },
+    });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
+    await waitFor(() => c.events.some((e) => e.type === "provider_login_progress"));
+    const progress = c.events.find((e) => e.type === "provider_login_progress");
+    expect((progress.line as string).length).toBe(1024);
+    expect(progress.line).toBe("x".repeat(1024));
+    c.close();
+  });
+
+  test("a provider_login_finished reason longer than 1024 chars is clipped before broadcast (N5)", async () => {
+    const longReason = "y".repeat(5000);
+    const { socketPath, harnessToken } = await boot({
+      login: async () => ({ submitCode: async () => {}, done: Promise.resolve({ ok: false, reason: longReason }) }),
+    });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
+    await waitFor(() => c.events.some((e) => e.type === "provider_login_finished"));
+    const finished = c.events.find((e) => e.type === "provider_login_finished");
+    expect((finished.reason as string).length).toBe(1024);
     c.close();
   });
 
