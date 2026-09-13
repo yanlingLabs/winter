@@ -133,6 +133,21 @@ describe("provider.configure — the anthropic auth-mode arm (P10a-3)", () => {
     expect(written.runtimes.official.auth).toBe("api-key");
     c.close();
   });
+
+  // Fix wave (N3): "auto" is settings.ts's own default value — this was previously refused by
+  // the protocol schema, so the only way back to it (after an explicit api-key/console pin) was
+  // hand-editing settings.json. Pinned here at the IPC layer too, not just the schema unit test.
+  test("\"auto\" is accepted and writes exactly that value (N3)", async () => {
+    const { settingsPath, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    await c.request(METHODS.providerConfigure, { provider: "anthropic", settings: { "runtimes.official.auth": "console" } });
+    const result = await c.request(METHODS.providerConfigure, { provider: "anthropic", settings: { "runtimes.official.auth": "auto" } });
+    expect(result.result).toEqual({ ok: true });
+    const written = JSON.parse(readFileSync(settingsPath, "utf8"));
+    expect(written.runtimes.official.auth).toBe("auto");
+    c.close();
+  });
 });
 
 describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", () => {

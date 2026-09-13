@@ -1407,6 +1407,15 @@ describe("ProviderConfigureParams (P10a-3 — the anthropic auth-mode arm)", () 
     expect(ProviderConfigureParams.safeParse({ provider: "anthropic", settings: { "runtimes.official.auth": "subscription" } }).success).toBe(false);
   });
 
+  // Fix wave (N3): settings.ts's own officialAuthModeSetting/schema (and ProviderStatusResult.
+  // anthropic.auth just below in this same file) already accept "auto" as the DEFAULT value — this
+  // arm had no way to configure a session back to it once an explicit "api-key"/"console" had been
+  // set, short of hand-editing settings.json.
+  test("\"auto\" is accepted on the anthropic arm (N3)", () => {
+    const parsed = ProviderConfigureParams.parse({ provider: "anthropic", settings: { "runtimes.official.auth": "auto" } });
+    expect(parsed).toEqual({ provider: "anthropic", settings: { "runtimes.official.auth": "auto" } });
+  });
+
   test("a params object naming neither arm's discriminant is refused", () => {
     expect(ProviderConfigureParams.safeParse({ foo: "bar" }).success).toBe(false);
   });
