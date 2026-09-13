@@ -1403,7 +1403,10 @@ export async function startDaemon(opts: {
   // `runtimeSdk` can be undefined (a packaging fault) — either absence already means every
   // `session.*` Winter-leg call refuses typed, so a handoff has nothing live to register against.
   if (runtime !== undefined && runtimeSdk !== undefined) {
-    registerHandoffParticipants({ runtime: runtimeSdk, winter: winterDrivers, records: runtime.records, store, settings: () => settings });
+    // Winter Phase 10b (D1-2, W18-7): `home` lets `confirmInit` derive the destination's own
+    // credential locator via `credentialRefFor` — the same `winterHome` every other `HandoffDeps`-
+    // adjacent construction in this file already threads through (see `winterHome` above).
+    registerHandoffParticipants({ runtime: runtimeSdk, winter: winterDrivers, records: runtime.records, store, settings: () => settings, home: winterHome });
   }
   /** A deleted session takes its Winter child (bounded `end()`, out of the table) AND its runtime
    *  rows with it — the reaper's 600 s grace is shorter than the 900 s idle timer, so without the

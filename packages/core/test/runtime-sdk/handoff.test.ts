@@ -574,6 +574,49 @@ describe("registerHandoffParticipants: destination.confirmInit (m4 — the plan-
     };
   }
 
+  /**
+   * Winter Phase 10b (D1-2, W18-6): unlike `fakeWinterThatOpens` above (a bare function that hands
+   * back a NEW driver object on every `ensure()` call, with no memory of what it already handed
+   * out), this fake models the REAL driver table's own caching contract (`session-driver.ts`'s
+   * `ensure`: "the live driver, if any" — a registered entry is returned AS-IS, never re-consulted
+   * against the record) closely enough to prove the eviction fix: a destination attempt that dies
+   * before init registers a dead entry, and only an actual `evict()` call removes it. Without D1-2's
+   * fix, that dead entry would still answer the very next `ensure(winterSessionId)` — the measured
+   * "exited before init" repeat this lane closes.
+   */
+  function fakeWinterTable(opts: { diesBeforeInit?: boolean }): WinterSessionDrivers & { evictCalls: string[] } {
+    const never = (): never => { throw new Error("not reached by this test"); };
+    const drivers = new Map<string, LegSession>();
+    const evictCalls: string[] = [];
+    let ensureCount = 0;
+    const makeSession = (): LegSession => ({
+      sessionId: "s1", backendSessionId: `be-1-new-${++ensureCount}`, mode: "code", state: "live", generation: ensureCount, resumed: true,
+      init: opts.diesBeforeInit === true ? undefined : { tools: [] },
+      turnRunning: false, turnStartedAt: undefined,
+      done: opts.diesBeforeInit === true ? Promise.resolve() : new Promise<void>(() => { /* never settles */ }),
+      pendingSends: [], heldDeliveries: [],
+      send: never, steer: never, interrupt: never, compact: never, setModel: never, setPolicy: never,
+      end: never, deliver: never, open: never, idle: never,
+    });
+    return {
+      legForNewSession: () => "winter", legOf: never, assertAvailable: () => {},
+      create: never,
+      get: (id) => drivers.get(id),
+      runTurn: never,
+      ensure: async (id) => {
+        const live = drivers.get(id);
+        if (live !== undefined) return live;
+        const fresh = makeSession();
+        drivers.set(id, fresh);
+        return fresh;
+      },
+      evict: async (id) => { evictCalls.push(id); drivers.delete(id); },
+      list: () => [...drivers.values()],
+      endAll: never,
+      evictCalls,
+    };
+  }
+
   test("the session's state at PLAN time is unchanged at execute time: confirmInit SUCCEEDS (P8d-24)", async () => {
     // Round 1 found that `destinationRuntimeFor`'s patch call went through `transition(id,
     // fresh.state, patch)` — a SELF-transition, which `ALLOWED_TRANSITIONS` refuses for every one
@@ -591,6 +634,40 @@ describe("registerHandoffParticipants: destination.confirmInit (m4 — the plan-
       expect(record.runtimeKind).toBe("claude-agent");
       expect(record.state).toBe("ready"); // untouched — `patch` never writes `state`
       expect(record.backendSessionId).toBe(targetFor("s1").backendSessionId);
+    });
+  });
+
+  // Winter Phase 10b (D1-2, W18-7): a successful handoff must not leave the record still naming
+  // the SOURCE's provider/model/credential — `seedRecord`'s own SELECTION is `providerId: "p"`,
+  // `modelRef: "m"`, no `authRef`, so a destination selection naming a REAL inventory provider
+  // (`openai`) proves both that the columns move AND that the credential locator is derived fresh,
+  // never carried over from the source.
+  test("W18-7: confirmInit patches providerId, modelRef and authRef from the DESTINATION selection", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1"); // providerId: "p", modelRef: "m", no authRef
+      const destination = registerDestination(records, fakeWinterThatOpens());
+      const built = destination({ projectKey: "pk", sessionId: "be-1" }, "winter-agent");
+      const destinationSelection = { ...SELECTION("winter-agent"), providerId: "openai", modelRef: "gpt-5.6-sol" };
+      const result = await built!.confirmInit({ backendSessionId: "be-1-new", selection: destinationSelection } as unknown as HandoffResumeTarget);
+      expect(result).toMatchObject({ ok: true });
+      const record = records.get("s1")!;
+      expect(record.providerId).toBe("openai");
+      expect(record.modelRef).toBe("gpt-5.6-sol");
+      expect(record.authRef).toBe("keychain:openai:default");
+    });
+  });
+
+  test("W18-7: a destination provider with no keychain slot CLEARS a stale authRef rather than carrying the source's", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      records.patch("s1", "ready", { authRef: "keychain:openai:default" }); // the SOURCE had one
+      const destination = registerDestination(records, fakeWinterThatOpens());
+      const built = destination({ projectKey: "pk", sessionId: "be-1" }, "winter-agent");
+      // "custom" (BYO endpoint) has no row in WINTER_CREDENTIAL_INVENTORY at all.
+      const destinationSelection = { ...SELECTION("winter-agent"), providerId: "custom", modelRef: "byo-model" };
+      const result = await built!.confirmInit({ backendSessionId: "be-1-new", selection: destinationSelection } as unknown as HandoffResumeTarget);
+      expect(result).toMatchObject({ ok: true });
+      expect(records.get("s1")!.authRef).toBeUndefined();
     });
   });
 
@@ -612,6 +689,31 @@ describe("registerHandoffParticipants: destination.confirmInit (m4 — the plan-
       const record = records.get("s1")!;
       expect(record.runtimeKind).toBe("winter-agent");
       expect(record.backendSessionId).toBe("be-1");
+      // W18-7: the revert restores providerId/modelRef too — `seedRecord`'s own SELECTION.
+      expect(record.providerId).toBe("p");
+      expect(record.modelRef).toBe("m");
+    });
+  });
+
+  // Winter Phase 10b (D1-2, W18-6): the destination driver `confirmInit`'s own retry loop
+  // registered must be gone by the time this function returns its refusal — otherwise the very
+  // next `ensure(winterSessionId)` (session.send's own resume path) would hand back that same dead
+  // entry instead of re-assembling the (reverted) SOURCE leg, reproducing the measured "exited
+  // before init" / `process_death` defect this lane fixes.
+  test("W18-6: confirmInit evicts the destination driver it created BEFORE reverting — no stale dead driver survives", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1"); // ready, recorded as winter-agent (seedRecord's own SELECTION)
+      const winter = fakeWinterTable({ diesBeforeInit: true });
+      const destination = registerDestination(records, winter);
+      const built = destination({ projectKey: "pk", sessionId: "be-1" }, "claude-agent");
+      const result = await built!.confirmInit(targetFor("s1"));
+      expect(result.ok).toBe(false);
+      // The dead destination attempt's own driver-table entry is gone — not merely reverted.
+      expect(winter.get("s1")).toBeUndefined();
+      expect(winter.evictCalls.length).toBeGreaterThan(0);
+      expect(winter.evictCalls.at(-1)).toBe("s1");
+      // The record itself reverted too (belt-and-suspenders with the test above).
+      expect(records.get("s1")!.runtimeKind).toBe("winter-agent");
     });
   });
 

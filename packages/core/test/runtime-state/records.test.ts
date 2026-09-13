@@ -228,6 +228,46 @@ describe("RuntimeSessionRecords", () => {
           expect(patched.modelRef).toBe("gpt-5.6-sol");
         })));
 
+    // Winter Phase 10b (D1-2, W18-7): the destination-side `confirmInit` patches these three
+    // columns TOO, alongside `runtimeKind`/`selection`/`backendSessionId` — a handoff that lands
+    // on a different provider/model/credential must not leave the record's own `providerId`/
+    // `modelRef`/`authRef` still naming the SOURCE's.
+    test("W18-7: patches providerId, modelRef and authRef alongside the other handoff columns", () =>
+      withTempHome((home) =>
+        use(home, (rs) => {
+          let tick = 0;
+          const clocked = new RuntimeSessionRecords(rs, () => `2026-09-13T00:00:0${tick++}.000Z`);
+          clocked.create(newRecord(home, "s_p"));
+          clocked.transition("s_p", "ready");
+          const patched = clocked.patch("s_p", "ready", {
+            runtimeKind: "claude-agent",
+            backendSessionId: UUID,
+            providerId: "anthropic",
+            modelRef: "claude-opus",
+            authRef: "keychain:anthropic-api-key",
+          });
+          expect(patched.runtimeKind).toBe("claude-agent");
+          expect(patched.providerId).toBe("anthropic");
+          expect(patched.modelRef).toBe("claude-opus");
+          expect(patched.authRef).toBe("keychain:anthropic-api-key");
+        })));
+
+    test("W18-7: providerId/modelRef ignore an explicit undefined (NOT NULL); authRef clears (nullable)", () =>
+      withTempHome((home) =>
+        use(home, (_rs, records) => {
+          records.create(newRecord(home, "s_u"));
+          records.transition("s_u", "ready", { selection: selection() });
+          records.patch("s_u", "ready", { authRef: "keychain:openai-api-key" });
+          const patched = records.patch("s_u", "ready", {
+            providerId: undefined,
+            modelRef: undefined,
+            authRef: undefined,
+          });
+          expect(patched.providerId).toBe("openai"); // NOT NULL — undefined means "no change"
+          expect(patched.modelRef).toBe("gpt-5.6-sol");
+          expect(patched.authRef).toBeUndefined(); // nullable — undefined CLEARS it
+        })));
+
     test("refuses typed (RuntimeSessionStateMismatchError) when the row's state is not the expected one", () =>
       withTempHome((home) =>
         use(home, (_rs, records) => {

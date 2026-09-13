@@ -56,6 +56,7 @@ import type { HandoffParticipants, WinterRuntimeSdk, SessionMode } from "./creat
 import { RuntimeSessionRecords, type RuntimeSessionRecord } from "../runtime-state/records";
 import { handoffCrossRuntimeEnabled, type Settings } from "../settings";
 import { sessionLegOf } from "./leg";
+import { credentialRefFor } from "./keychain";
 import { catalogRowsFor, testProviderNameFor } from "./provider-selection";
 import type { LegSession, WinterSessionDrivers } from "./session-driver";
 
@@ -83,6 +84,17 @@ export interface HandoffDeps {
   /** Fix wave (C2 / P8c-18): the LIVE settings holder — read hot, at call time, in
    *  `planAndApplySwitch`, never a boot snapshot (`winterOptionsFromSettings`'s own pattern). */
   settings: () => Settings | null | undefined;
+  /**
+   * Winter Phase 10b (D1-2, W18-7): the daemon's own `WINTER_HOME`, threaded through to
+   * `credentialRefFor` so `confirmInit` can name the DESTINATION's own credential locator
+   * (`keychain:<account>`) the same way `session-driver.ts`'s `create()`/`createOfficial()` already
+   * do for a brand-new session — never credential material, only which account it would be. Optional
+   * so a test double that never exercises the success patch (every existing `handoff.test.ts` case
+   * that stubs `confirmInit` via a fake barrier) needs no home at all; `credentialRefFor` itself is
+   * total over an absent `home`, and simply keeps the OLD, unconditional `anthropic:default` account
+   * for the one provider whose account name depends on it.
+   */
+  home?: string;
   log?: (line: string) => void;
   /**
    * Test seam: a fake `{plan, execute}` in place of `runtimeSdkInternals(runtime.sdk)?.barrier`.
@@ -236,13 +248,31 @@ function destinationRuntimeFor(deps: HandoffDeps, session: SessionKey, to: Runti
       if (fresh.state !== planState) {
         return { ok: false, reason: `the session moved from ${planState} to ${fresh.state} between plan and execute` };
       }
-      const before = { runtimeKind: fresh.runtimeKind, selection: fresh.selection, backendSessionId: fresh.backendSessionId };
+      // Winter Phase 10b (D1-2, W18-7): `providerId`/`modelRef`/`authRef` join the snapshot — the
+      // destination-side patch below now writes all three (alongside the four it already patched),
+      // so a failed handoff's revert must be able to restore ALL of them, not just the leg triple.
+      const before = {
+        runtimeKind: fresh.runtimeKind,
+        selection: fresh.selection,
+        backendSessionId: fresh.backendSessionId,
+        providerId: fresh.providerId,
+        modelRef: fresh.modelRef,
+        authRef: fresh.authRef,
+      };
       // P10a-h: the ACTUAL destination (see `pendingHandoffModel`'s own doc comment above) —
       // `target.selection` alone is never it. `.get`, never `.delete`: `planAndApplySwitch` owns
       // cleanup so a fake-barrier test (which never calls this function at all) cannot leak an entry
       // into a later, unrelated test that reuses the same session id.
       const pending = pendingHandoffModel.get(winterSessionId);
       const destinationSelection = pending?.selection ?? target.selection;
+      // Winter Phase 10b (D1-2, W18-7): the destination's OWN credential locator — never material,
+      // just which account it names (`records.ts`'s own "opaque locator" rule) — mirroring the SAME
+      // `credentialRefFor` call `session-driver.ts`'s `create()`/`createOfficial()` already make for
+      // a brand-new session. `undefined` when the destination provider has no keychain-backed slot
+      // at all (a `custom`/env-backed provider), which explicitly CLEARS the column below rather
+      // than leaving the SOURCE's stale locator in place.
+      const destinationAuthRef = credentialRefFor(destinationSelection.providerId, deps.home, deps.settings());
+      const destinationAuthRefLocator = destinationAuthRef?.kind === "keychain" ? `keychain:${destinationAuthRef.account}` : undefined;
       try {
         // P8d-24: `patch`, never `transition` — this never changes the lifecycle `state`, only the
         // runtime/selection/backendSessionId fields, so it must not be spelled as a transition TO
@@ -252,6 +282,11 @@ function destinationRuntimeFor(deps: HandoffDeps, session: SessionKey, to: Runti
           runtimeKind: to,
           selection: destinationSelection,
           backendSessionId: target.backendSessionId,
+          // W18-7: the destination's own identity — a handoff that lands on a different
+          // provider/model/credential must not leave the record still naming the SOURCE's.
+          providerId: destinationSelection.providerId,
+          modelRef: destinationSelection.modelRef,
+          authRef: destinationAuthRefLocator,
         });
       } catch (err) {
         return { ok: false, reason: `the record could not be patched to the target leg: ${err instanceof Error ? err.name : "unknown"}` };
@@ -295,6 +330,18 @@ function destinationRuntimeFor(deps: HandoffDeps, session: SessionKey, to: Runti
         if (!initCheck.ok) throw new Error(initCheck.reason);
         return { ok: true, producer: { sdkVersion: destinationSelection.sdkVersion, engineVersion: destinationSelection.engineVersion } };
       } catch (err) {
+        // Winter Phase 10b (D1-2, W18-6): evict the DESTINATION driver this very attempt just
+        // registered (the retry loop above's own `evict()`+`ensure()` leaves a live — or freshly
+        // dead — entry in the driver table under `winterSessionId`) BEFORE reverting the record.
+        // `WinterSessionDrivers.ensure()` returns an already-registered table entry FIRST, without
+        // ever consulting the record, so leaving a dead destination driver behind here would make
+        // the very next `ensure()` call (against the record this catch is about to revert to the
+        // SOURCE leg) hand back that same dead driver instead of re-assembling the source — exactly
+        // the measured "exited before init" / stale `providerId` defect this lane fixes (see
+        // `handoff-official-to-winter-e2e.test.ts`'s own header). `evict()` is documented to never
+        // throw (`session-driver.ts`), so no extra try/catch is needed around it, unlike the record
+        // and store reverts below, which touch state this catch does not control.
+        await deps.winter.evict(winterSessionId);
         try {
           // P10a-h (measured against the real winter binary): a destination attempt that spawns and
           // then dies is not a no-op on the record — the dying incarnation ends its OWN generation,
