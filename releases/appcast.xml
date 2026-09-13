@@ -94,5 +94,13 @@
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/yanlingLabs/norma/releases/download/v0.2.014/Norma-0.2.014.zip" sparkle:edSignature="2UdQG9lx30hetYeb88TaI6Ul+cnjlOt0u8fUqFMZ2XdY2c0s/9ksyOjFnwK2A5+tW3JWZNBm6FqIW5Nt8bYODg==" length="388824463" type="application/octet-stream"/>
     </item>
+      <item>
+      <title>0.2.015</title>
+      <description><![CDATA[Winter agent SDK 0.0.5 · Claude Agent SDK 0.3.250]]></description>
+      <sparkle:version>0.2.015</sparkle:version>
+      <sparkle:shortVersionString>0.2.015</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.2.015/Norma-0.2.015.zip" sparkle:edSignature="vlXS2CprnWZwVd3yHt3TvKfigzeznHOMCta+8ojuE2/fBhEJCzAEc9lE5nLrNi+0hvpPC74Q5HLI39TVmISYBg==" length="998382774" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
