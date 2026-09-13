@@ -379,11 +379,17 @@ describe("officialInputFor — the env shape + spool, console-oauth family (P9c-
 // never actually wired into the env `officialInputFor` hands the SDK — this closes that gap and
 // proves BOTH arms of the real env the official child receives, the same way the console-oauth
 // block above proves its own family's `credentials` shape.
-describe("officialInputFor — the console arm's real env (fix round 2, P10a-2)", () => {
+describe("officialInputFor — the console arm's real env (fix round 2, P10a-2; router 0.0.4 wiring)", () => {
   const apiKeySelection: RuntimeSelection = {
     runtimeKind: "claude-agent", providerId: "anthropic", modelRef: "anthropic/claude-sonnet-5",
     family: "claude", authFamily: "api-key", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
   };
+  // Winter Phase 10a (router 0.0.4, C1): the console arm is now carried on the `RuntimeSelection`
+  // itself (`authFamily: "console-profile"`, the literal router 0.0.4 published) — never a parallel
+  // `officialAuthArm` field. `session-driver.ts`'s `assembleOfficial` is what actually widens a
+  // session's persisted `"api-key"` selection to this; this suite builds the widened selection
+  // directly, exactly the shape that widening produces.
+  const consoleSelection: RuntimeSelection = { ...apiKeySelection, authFamily: "console-profile" };
   const HOME = "/Users/x/.winter-test-home";
   const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
   // A REAL anthropic authRef present on the provider — the strongest proof that the console arm's
@@ -395,79 +401,88 @@ describe("officialInputFor — the console arm's real env (fix round 2, P10a-2)"
   // the console arm's ENV SHAPE, never the gate itself (that has its own describe block below).
   const ROUTER_UPGRADED = () => "0.0.4";
 
-  function build(officialAuthArm: "api-key" | "console" | undefined): { input: import("@yanlinglabs/winter-runtime-sdk").RouterOfficialInput; anthropicConfigDirToEnsure?: string } {
+  function build(selection: RuntimeSelection): { input: import("@yanlinglabs/winter-runtime-sdk").RouterOfficialInput; anthropicConfigDirToEnsure?: string } {
     const result = officialInputFor(input, minimalDeps({
-      home: HOME, selection: apiKeySelection, provider, explicitCredentials: undefined,
+      home: HOME, selection, provider, explicitCredentials: undefined,
       installedWinterRuntimeSdkVersion: ROUTER_UPGRADED,
-      ...(officialAuthArm === undefined ? {} : { officialAuthArm }),
     }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     return result;
   }
 
-  test("console arm: ANTHROPIC_PROFILE + ANTHROPIC_CONFIG_DIR are set, ANTHROPIC_API_KEY is absent from base AND from credentials", () => {
-    const built = build("console");
-    expect(built.input.base?.ANTHROPIC_PROFILE).toBe(ANTHROPIC_PROFILE_NAME);
-    expect(built.input.base?.ANTHROPIC_CONFIG_DIR).toBe(anthropicConfigDirFor(HOME));
+  test("console arm: ANTHROPIC_PROFILE + ANTHROPIC_CONFIG_DIR are set in connectionEnv (never base), ANTHROPIC_API_KEY is absent from base, connectionEnv AND credentials", () => {
+    const built = build(consoleSelection);
+    expect(built.input.connectionEnv?.ANTHROPIC_PROFILE).toBe(ANTHROPIC_PROFILE_NAME);
+    expect(built.input.connectionEnv?.ANTHROPIC_CONFIG_DIR).toBe(anthropicConfigDirFor(HOME));
+    expect(built.input.base?.ANTHROPIC_PROFILE).toBeUndefined();
+    expect(built.input.base?.ANTHROPIC_CONFIG_DIR).toBeUndefined();
     expect(built.input.base?.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(built.input.connectionEnv?.ANTHROPIC_API_KEY).toBeUndefined();
     expect(built.input.credentials ?? []).toEqual([]);
     expect(built.input.credentials ?? []).not.toContainEqual(expect.objectContaining({ variable: "ANTHROPIC_API_KEY" }));
   });
 
   test("console arm: anthropicConfigDirToEnsure is set so official-session.ts's open() hardens it 0700", () => {
-    const built = build("console");
+    const built = build(consoleSelection);
     expect(built.anthropicConfigDirToEnsure).toBe(anthropicConfigDirFor(HOME));
   });
 
-  test("api-key arm (explicit, or officialAuthArm absent entirely): base carries neither console var; ANTHROPIC_API_KEY IS injected via the credential plan", () => {
-    for (const arm of ["api-key", undefined] as const) {
-      const built = build(arm);
-      expect(built.input.base?.ANTHROPIC_PROFILE).toBeUndefined();
-      expect(built.input.base?.ANTHROPIC_CONFIG_DIR).toBeUndefined();
-      expect(built.input.credentials).toEqual([{ variable: "ANTHROPIC_API_KEY", ref: provider.authRef }]);
-      expect(built.anthropicConfigDirToEnsure).toBeUndefined();
-    }
+  test("api-key arm (selection.authFamily === \"api-key\"): base/connectionEnv carry neither console var; ANTHROPIC_API_KEY IS injected via the credential plan", () => {
+    const built = build(apiKeySelection);
+    expect(built.input.base?.ANTHROPIC_PROFILE).toBeUndefined();
+    expect(built.input.base?.ANTHROPIC_CONFIG_DIR).toBeUndefined();
+    expect(built.input.connectionEnv?.ANTHROPIC_PROFILE).toBeUndefined();
+    expect(built.input.connectionEnv?.ANTHROPIC_CONFIG_DIR).toBeUndefined();
+    expect(built.input.credentials).toEqual([{ variable: "ANTHROPIC_API_KEY", ref: provider.authRef }]);
+    expect(built.anthropicConfigDirToEnsure).toBeUndefined();
   });
 
   // The scrub matrix stays green THROUGH this real door too, not just at officialAuthChildEnvFor's
   // own unit level (official-options.test.ts's earlier describe block covers that unit level).
-  test("scrub matrix: every FORBIDDEN_CHILD_ENV sentinel is gone from the console arm's real base except this door's own two", () => {
+  test("scrub matrix: every FORBIDDEN_CHILD_ENV sentinel is gone from the console arm's real base; the door's own two ride connectionEnv instead", () => {
     const hostEnv: Record<string, string> = { HOME: "/Users/x", PATH: "/usr/bin:/bin" };
     for (const name of FORBIDDEN_CHILD_ENV) hostEnv[name] = `SENTINEL_${name}`;
     const result = officialInputFor(input, minimalDeps({
-      home: HOME, selection: apiKeySelection, provider, explicitCredentials: undefined, officialAuthArm: "console", env: hostEnv,
+      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined, env: hostEnv,
       installedWinterRuntimeSdkVersion: ROUTER_UPGRADED,
     }));
     if (!("input" in result)) throw new Error("unexpectedly refused");
     for (const name of FORBIDDEN_CHILD_ENV) {
-      if (name === "ANTHROPIC_PROFILE") { expect(result.input.base?.[name]).toBe(ANTHROPIC_PROFILE_NAME); continue; }
-      if (name === "CLAUDE_CONFIG_DIR") { expect(result.input.base?.[name]).toBeUndefined(); continue; } // set via `spool`, not `base`
       expect(result.input.base?.[name]).not.toBe(`SENTINEL_${name}`);
       expect(result.input.base?.[name]).toBeUndefined();
     }
+    expect(result.input.connectionEnv?.ANTHROPIC_PROFILE).toBe(ANTHROPIC_PROFILE_NAME);
+    expect(result.input.connectionEnv?.ANTHROPIC_CONFIG_DIR).toBe(anthropicConfigDirFor(HOME));
   });
 });
 
 // Winter Phase 10a fix wave (C1-interim): against the PINNED router (`@yanlinglabs/winter-runtime-sdk@0.0.3`)
-// the console arm cannot work — the router forwards only its own minimal OS environment and runs
-// its api-key credential plan itself regardless of arm, so a console child would get the OAuth
-// bearer profile injected as ANTHROPIC_API_KEY. `officialAuthFamilyFor(...) === "console"` must
-// therefore refuse typed BEFORE anything is spawned, gated on a single constant
+// the console arm could not work — the router forwarded only its own minimal OS environment and ran
+// its api-key credential plan itself regardless of arm, so a console child would have gotten the
+// OAuth bearer profile injected as ANTHROPIC_API_KEY. `officialAuthFamilyFor(...) === "console"`
+// therefore refused typed BEFORE anything was spawned, gated on a single constant
 // (`CONSOLE_AUTH_ROUTER_MIN`) compared against the INSTALLED router version — never the daemon's own
-// pin — so the refusal flips off automatically the moment a future bump actually installs a
-// matching router.
+// pin — so the refusal flips off automatically the moment a bump actually installs a matching
+// router. Winter Phase 10a pin flip: the router IS now `@yanlinglabs/winter-runtime-sdk@0.0.4`
+// (`versions.ts`'s `REQUIRED_WINTER_RUNTIME_SDK`), so the gate no longer fires with NO override —
+// this suite now simulates the pre-upgrade router via `installedWinterRuntimeSdkVersion` fakes to
+// keep proving the gate itself still exists and still refuses below the floor.
 describe("officialInputFor — the console arm refuses until the router supports it (C1-interim)", () => {
   const apiKeySelection: RuntimeSelection = {
     runtimeKind: "claude-agent", providerId: "anthropic", modelRef: "anthropic/claude-sonnet-5",
     family: "claude", authFamily: "api-key", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
   };
+  // Winter Phase 10a (router 0.0.4, C1): `session-driver.ts`'s `assembleOfficial` is the one that
+  // widens `authFamily` to `"console-profile"` — this suite builds the widened selection directly.
+  const consoleSelection: RuntimeSelection = { ...apiKeySelection, authFamily: "console-profile" };
   const HOME = "/Users/x/.winter-test-home";
   const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
   const provider = { providerId: "anthropic", authRef: { kind: "keychain" as const, account: "anthropic:default" } };
 
-  test("the REAL installed router (0.0.3, no override) refuses the console arm typed", () => {
+  test("a fake pre-upgrade router (0.0.3) refuses the console arm typed", () => {
     const result = officialInputFor(input, minimalDeps({
-      home: HOME, selection: apiKeySelection, provider, explicitCredentials: undefined, officialAuthArm: "console",
+      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
+      installedWinterRuntimeSdkVersion: () => "0.0.3",
     }));
     expect(result).toBeInstanceOf(OfficialConsoleRouterUnsupported);
     expect((result as OfficialConsoleRouterUnsupported).code).toBe("official_console_router_unsupported");
@@ -481,21 +496,29 @@ describe("officialInputFor — the console arm refuses until the router supports
     // credential plan already ran), this would still pass by accident. Asserting the RETURN TYPE
     // (never `"input" in result`) is what actually proves nothing downstream ran.
     const result = officialInputFor(input, minimalDeps({
-      home: HOME, selection: apiKeySelection, provider, explicitCredentials: undefined, officialAuthArm: "console",
+      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
+      installedWinterRuntimeSdkVersion: () => "0.0.3",
     }));
     expect("input" in result).toBe(false);
   });
 
+  test("the REAL installed router (0.0.4, no override) no longer refuses the console arm — the pin flip landed", () => {
+    const result = officialInputFor(input, minimalDeps({
+      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
+    }));
+    expect("input" in result).toBe(true);
+  });
+
   test("the api-key arm is completely unaffected by the router-version gate", () => {
     const result = officialInputFor(input, minimalDeps({
-      home: HOME, selection: apiKeySelection, provider, explicitCredentials: undefined, officialAuthArm: "api-key",
+      home: HOME, selection: apiKeySelection, provider, explicitCredentials: undefined,
     }));
     expect("input" in result).toBe(true);
   });
 
   test("a fake version below the floor (0.0.3.x-style patch, e.g. \"0.0.3\") still refuses", () => {
     const result = officialInputFor(input, minimalDeps({
-      home: HOME, selection: apiKeySelection, provider, explicitCredentials: undefined, officialAuthArm: "console",
+      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
       installedWinterRuntimeSdkVersion: () => "0.0.3",
     }));
     expect(result).toBeInstanceOf(OfficialConsoleRouterUnsupported);
@@ -503,7 +526,7 @@ describe("officialInputFor — the console arm refuses until the router supports
 
   test("a fake version AT the floor (0.0.4) lets the console arm build normally", () => {
     const result = officialInputFor(input, minimalDeps({
-      home: HOME, selection: apiKeySelection, provider, explicitCredentials: undefined, officialAuthArm: "console",
+      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
       installedWinterRuntimeSdkVersion: () => "0.0.4",
     }));
     expect("input" in result).toBe(true);
@@ -511,7 +534,7 @@ describe("officialInputFor — the console arm refuses until the router supports
 
   test("a fake version ABOVE the floor (0.0.10 — numeric, never lexicographic, comparison) also lets it build", () => {
     const result = officialInputFor(input, minimalDeps({
-      home: HOME, selection: apiKeySelection, provider, explicitCredentials: undefined, officialAuthArm: "console",
+      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
       installedWinterRuntimeSdkVersion: () => "0.0.10",
     }));
     expect("input" in result).toBe(true);
@@ -519,7 +542,7 @@ describe("officialInputFor — the console arm refuses until the router supports
 
   test("an unresolvable router version (undefined) is never treated as \"at least\" anything — refuses", () => {
     const result = officialInputFor(input, minimalDeps({
-      home: HOME, selection: apiKeySelection, provider, explicitCredentials: undefined, officialAuthArm: "console",
+      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
       installedWinterRuntimeSdkVersion: () => undefined,
     }));
     expect(result).toBeInstanceOf(OfficialConsoleRouterUnsupported);
@@ -530,13 +553,14 @@ describe("officialInputFor — the console arm refuses until the router supports
   // standing guard, not retired when the gate above stops firing.
   test("even with a supported router, the console arm NEVER hands the router credentials containing an anthropic key", () => {
     const result = officialInputFor(input, minimalDeps({
-      home: HOME, selection: apiKeySelection, provider, explicitCredentials: undefined, officialAuthArm: "console",
+      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
       installedWinterRuntimeSdkVersion: () => "0.0.4",
     }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     expect(result.input.credentials ?? []).toEqual([]);
     expect(result.input.credentials ?? []).not.toContainEqual(expect.objectContaining({ variable: "ANTHROPIC_API_KEY" }));
     expect(result.input.base?.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(result.input.connectionEnv?.ANTHROPIC_API_KEY).toBeUndefined();
   });
 });
 
