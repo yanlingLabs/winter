@@ -165,4 +165,27 @@ describe("KeychainSeam over SecretStore", () => {
     expect(credentialRefFor("codex-oauth")).toEqual({ kind: "keychain", account: "codex-oauth:default", service: keychainService() });
     expect(credentialRefFor("nope")).toBeUndefined();
   });
+
+  // Test-keychain-isolation TRIPWIRE: `test/preload.ts` sets `WINTER_KEYCHAIN_SERVICE` for the
+  // whole run, and every real daemon/session in this test process runs on a temp (non-default)
+  // `WINTER_HOME` — so a resolution built for ANY test home must never land back on the real
+  // `com.winter.core[.dev]` service, no matter which function does the resolving. This fails loudly
+  // the moment either the preload's override or `keychainService()`'s default-home guard regresses.
+  test("TRIPWIRE: a test-homed credentialRefFor/keychainSeamFromSecretStore resolution never equals the REAL Keychain service", async () => {
+    expect(process.env.WINTER_KEYCHAIN_SERVICE).toBeTruthy(); // preload precondition — if this is unset, the tripwire is meaningless
+    const ref = credentialRefFor("openai", dir); // `dir` (beforeEach) is a temp, non-default home
+    if (ref?.kind !== "keychain") throw new Error("expected a keychain CredentialRef for a known provider");
+    expect(ref.service).toBeDefined();
+    expect(ref.service).not.toBe("com.winter.core");
+    expect(ref.service).not.toBe("com.winter.core.dev");
+    expect(ref.service).toBe(process.env.WINTER_KEYCHAIN_SERVICE);
+
+    // The seam built for that same test home must accept a ref stamped with the ISOLATED service
+    // (what the child would actually send) and refuse one stamped with the REAL service (proof the
+    // isolation is not merely cosmetic — a real-service ref really is treated as "some other vendor").
+    await writeOpenAiApiKey(store, "sk-test");
+    const seam = keychainSeamFromSecretStore(store, dir);
+    expect(await seam.read({ kind: "keychain", account: CREDENTIAL_MATERIAL_NAMES.openai, service: ref.service })).toBe("sk-test");
+    expect(await seam.read({ kind: "keychain", account: CREDENTIAL_MATERIAL_NAMES.openai, service: "com.winter.core" })).toBeUndefined();
+  });
 });

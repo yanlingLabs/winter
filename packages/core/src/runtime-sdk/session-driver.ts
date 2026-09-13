@@ -385,7 +385,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // daemon's configured provider model.
       const model = mode === "dispatch" ? (live.model ?? DISPATCH_MODEL) : (live.model ?? settings?.provider?.model);
       const effort = mode === "dispatch" ? sdkEffortOf(live.effort ?? DISPATCH_EFFORT) : sdkEffortOf(live.effort);
-      const selection = providerSelectionFor(model, credentials);
+      const selection = providerSelectionFor(model, credentials, deps.home);
       // P8b-30: a BYO `openai-compatible` endpoint travels as the provider's connection, or the
       // catalog's `openai` row would route it to api.openai.com.
       //
@@ -612,7 +612,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // incarnation — `officialCredentialPlan`'s auto-derivation (`official-options.ts`) needs this
       // provider's `authRef` to inject `ANTHROPIC_API_KEY` at spawn.
       const credentials = await credentialPresenceFrom(deps.secrets);
-      const provider = providerSelectionFor(live.model, credentials);
+      const provider = providerSelectionFor(live.model, credentials, deps.home);
       // TEST-ONLY (`WinterLegDeps.officialConnectionOverride`, fix round 1 M2 — never an ambient
       // env var, never set by production `daemon.ts` wiring): a loopback fake needs
       // `ANTHROPIC_BASE_URL` beside the key, which the `api-key` family's own variable set does
@@ -622,7 +622,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // this still derives the REAL keychain ref for the provider the router actually selected —
       // only the CONNECTION is test-injected, never the credential material.
       const testOverrides = connectionOverride === undefined || provider?.providerId === undefined ? {} : {
-        explicitCredentials: [{ variable: "ANTHROPIC_API_KEY", ref: credentialRefFor(provider.providerId) ?? provider.authRef! }],
+        explicitCredentials: [{ variable: "ANTHROPIC_API_KEY", ref: credentialRefFor(provider.providerId, deps.home) ?? provider.authRef! }],
         ...(connectionOverride.explicitConnectionEnv === undefined ? {} : { explicitConnectionEnv: connectionOverride.explicitConnectionEnv }),
       };
       // Winter Phase 10a (router 0.0.4, C1): the console-vs-api-key decision now lives entirely in
@@ -775,7 +775,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     // path's `explicitCredentials` build already calls (`credentialRefFor(provider.providerId) ??
     // provider.authRef!` above). `selection.providerId` is "anthropic" for a real Claude selection,
     // so this resolves to `keychain:anthropic:default`.
-    const authRef = credentialRefFor(selection.providerId);
+    const authRef = credentialRefFor(selection.providerId, deps.home);
     try {
       records.create({
         winterSessionId: sessionId,
@@ -837,7 +837,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     const backendSessionId = randomUUID();
     const transcriptKey = transcriptProjectKey(cwd);
     const credentials = await credentialPresenceFrom(deps.secrets);
-    const selection = providerSelectionFor(meta.model, credentials);
+    const selection = providerSelectionFor(meta.model, credentials, deps.home);
     const providerId = decided?.providerId ?? selection?.providerId ?? settings?.provider?.type ?? "unstated";
     const authFamily: RuntimeSelection["authFamily"] = settings?.provider?.type === "openai-compatible" ? "api-key" : "custom";
     try {

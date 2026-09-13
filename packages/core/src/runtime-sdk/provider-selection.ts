@@ -68,13 +68,14 @@ function qualifiedProviderFor(model: string): string | undefined {
 export function providerSelectionFor(
   model: string | undefined,
   credentials: CredentialPresence,
+  home?: string,
 ): ProviderSelection | undefined {
   if (!model) return undefined;
   if (model.startsWith(WINTER_TEST_MODEL_PREFIX)) return undefined;
 
   const qualified = qualifiedProviderFor(model);
   if (qualified) {
-    const ref = credentials.byProvider[qualified] ? credentialRefFor(qualified) : undefined;
+    const ref = credentials.byProvider[qualified] ? credentialRefFor(qualified, home) : undefined;
     return ref ? { providerId: qualified, authRef: ref } : { providerId: qualified };
   }
 
@@ -86,7 +87,7 @@ export function providerSelectionFor(
 
   const withCredential = inInventory.find((s) => credentials.byProvider[s.provider] !== undefined);
   const chosen = withCredential ?? inInventory[0]!;
-  const ref = withCredential ? credentialRefFor(chosen.provider) : undefined;
+  const ref = withCredential ? credentialRefFor(chosen.provider, home) : undefined;
   return ref ? { providerId: chosen.provider, authRef: ref } : { providerId: chosen.provider };
 }
 

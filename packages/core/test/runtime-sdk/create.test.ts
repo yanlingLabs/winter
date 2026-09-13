@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { DEFAULT_DELIVERIES_DAYS, DEFAULT_NAME_LEASES_DAYS } from "../../src/runtime-state/retention";
 import { RUNTIME_SHUTDOWN_DRAIN_MS } from "../../src/runtime-state/wiring";
-import { CORE_BRAND } from "../../src/runtime-sdk/brand";
+import { buildCoreBrand, CORE_BRAND } from "../../src/runtime-sdk/brand";
 import { createWinterRuntimeSdk, SHUTDOWN_QUERY_GRACE_MS, type WinterRuntimeSdk, type WinterRuntimeSdkDeps } from "../../src/runtime-sdk/create";
 import { WinterExecutableUnavailable } from "../../src/runtime-sdk/executable";
 import { WINTER_PEER_VERSIONS, REQUIRED_CLAUDE_AGENT_SDK } from "../../src/runtime-sdk/versions";
@@ -107,7 +107,13 @@ describe("createWinterRuntimeSdk — the options it hands the router", () => {
     // Resolved through the injected peer's own `resolveBrand`, and it is OURS.
     expect(handle.sdk.brand.mcpServerName).toBe("winter");
     expect(handle.sdk.brand.homeDirName).toBe(".winter");
-    expect(opts.brand).toBe(CORE_BRAND);
+    // test-keychain-isolation fix: no longer the frozen `CORE_BRAND` singleton by identity — it is
+    // built fresh from THIS call's own `deps.home` (`buildCoreBrand(undefined, home)`) so its
+    // `keychainService` can honour `WINTER_KEYCHAIN_SERVICE` for a non-default home (P9c-15's
+    // guard), which a module-load-time singleton with no home in scope never could. Every other
+    // field is unchanged from `CORE_BRAND`.
+    expect(opts.brand).not.toBe(CORE_BRAND);
+    expect(opts.brand).toEqual(buildCoreBrand(undefined, home));
     expect(opts.brand!.presetName).toBe("winter_code");
   });
 

@@ -137,12 +137,12 @@ function describeError(err: unknown): string {
  * as `undefined` — a missing credential at spawn is a typed refusal one layer up, never a throw
  * from the middle of a launch.
  */
-export function keychainSeamFromSecretStore(store: SecretStore): KeychainSeam {
+export function keychainSeamFromSecretStore(store: SecretStore, home?: string): KeychainSeam {
   const known = new Set(WINTER_CREDENTIAL_INVENTORY.map((slot) => slot.secretName));
   return {
     async read(ref: CredentialRef): Promise<string | undefined> {
       if (ref.kind !== "keychain") return undefined;
-      if (ref.service !== undefined && ref.service !== keychainService()) return undefined;
+      if (ref.service !== undefined && ref.service !== keychainService(undefined, home)) return undefined;
       if (!known.has(ref.account)) return undefined;
       try {
         const material = await readCredentialMaterial(store, ref.account);
@@ -181,10 +181,10 @@ export function keychainSeamFromSecretStore(store: SecretStore): KeychainSeam {
  * ``keychain:${ref.account}`` from this function's result, rather than hand-building either form
  * separately — this function is the one place that knows both.
  */
-export function credentialRefFor(provider: string): CredentialRef | undefined {
+export function credentialRefFor(provider: string, home?: string): CredentialRef | undefined {
   const slot = WINTER_CREDENTIAL_INVENTORY.find((s) => s.provider === provider);
   if (!slot) return undefined;
-  return { kind: "keychain", account: slot.secretName, service: keychainService() };
+  return { kind: "keychain", account: slot.secretName, service: keychainService(undefined, home) };
 }
 
 /**
