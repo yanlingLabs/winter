@@ -645,8 +645,8 @@ targets:
         CFBundleDisplayName: "$(NORMA_APP_NAME)"
         CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
         CFBundleIconFile: "$(NORMA_APP_ICON)"
-        CFBundleShortVersionString: "0.2.014"
-        CFBundleVersion: "0.2.014"
+        CFBundleShortVersionString: "0.2.015"
+        CFBundleVersion: "0.2.015"
         LSUIElement: true
         LSMinimumSystemVersion: "26.0"
         # panel-cef Task 3: NSPrincipalClass is DELIBERATELY ABSENT. `NSPrincipalClass:
