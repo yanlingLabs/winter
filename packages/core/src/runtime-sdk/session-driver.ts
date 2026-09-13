@@ -66,7 +66,7 @@ import type { ContextAssembler } from "../agent/context";
 import { startWinterSession, unconsumedUserMessages, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { startOfficialSession, type OfficialSession } from "./official-session";
-import type { OfficialInputDeps, OfficialSessionInput } from "./official-options";
+import { officialAuthFamilyFor, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
 
 export type WinterLegRefusalCode =
   | "winter_executable_unavailable"   // P8b-2: no `winter` binary resolves (setting → env → bundle → home)
@@ -598,6 +598,18 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         explicitCredentials: [{ variable: "ANTHROPIC_API_KEY", ref: credentialRefFor(provider.providerId) ?? provider.authRef! }],
         ...(connectionOverride.explicitConnectionEnv === undefined ? {} : { explicitConnectionEnv: connectionOverride.explicitConnectionEnv }),
       };
+      // Winter Phase 10a (fix round 1 item 3): wires the console arm of `official-session.ts`'s
+      // apiKeySource assertion for REAL. ONLY when the router's OWN decision already put this
+      // session in the `api-key` family (never `custom`/`console-oauth`/etc — their own exemption
+      // stays untouched) AND no test-only `officialConnectionOverride` is widening the family (a
+      // loopback fake has no console profile to check at all) does Winter's OWN
+      // `officialAuthFamilyFor` get the final say between the two arms `RuntimeSelection.
+      // authFamily`'s pinned union has no literal for — see `OfficialInputDeps.officialAuthArm`'s
+      // own doc for why this lives as a SEPARATE field rather than trying to widen that union.
+      const officialAuthArm: "api-key" | "console" | undefined =
+        connectionOverride?.authFamily === undefined && selection.authFamily === "api-key"
+          ? officialAuthFamilyFor(deps.home, deps.settings(), credentials.byProvider.anthropic !== undefined)
+          : undefined;
       return {
         home: deps.home,
         selection,
@@ -616,6 +628,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // no settings accessor of its own — only this driver's own `deps.settings` holds it), which
         // is why it is threaded here rather than read inside `official-session.ts`/`official-options.ts`.
         settings: deps.settings(),
+        ...(officialAuthArm === undefined ? {} : { officialAuthArm }),
         canUseToolDeps: {
           approvals: deps.approvals, questions: deps.questions, gate: deps.gate,
           emit: (event) => { deps.hub.append(sessionId, event); },

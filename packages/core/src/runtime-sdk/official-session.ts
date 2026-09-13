@@ -177,10 +177,35 @@ export class OfficialBackendIdMismatch extends Error {
  */
 export class OfficialAuthSourceRefused extends Error {
   readonly code = "official_auth_source_refused" as const;
-  constructor(readonly apiKeySource: string) {
-    super(`the official runtime's init message reported apiKeySource=${apiKeySource}, not the pinned ANTHROPIC_API_KEY; runtimes.official.subscriptionAuth is off (P9c-1's shipped default), so this session refuses before any turn runs`);
+  constructor(readonly apiKeySource: string, readonly expected: string = "ANTHROPIC_API_KEY") {
+    super(`the official runtime's init message reported apiKeySource=${apiKeySource}, not the pinned ${expected}; runtimes.official.subscriptionAuth is off (P9c-1's shipped default), so this session refuses before any turn runs`);
     this.name = "OfficialAuthSourceRefused";
   }
+}
+
+/**
+ * Winter Phase 10a (O3, P10a-3/P10a-7 M1): the console profile's own `system/init.apiKeySource`
+ * value is UNMEASURED against the real 0.3.250 runtime — the controller's M1 task runs that
+ * measurement once, at the keyboard, and pins the literal here. Until then this placeholder makes
+ * `expectedApiKeySource("console")` a real, importable value rather than a TODO: any test written
+ * against it today keeps passing after the controller's one-line edit (the literal changes; the
+ * shape and every call site do not), and a console-arm session that reaches this assertion before
+ * the pin lands refuses loudly (mismatch against an unmeasured placeholder can never coincidentally
+ * equal a real SDK value) rather than silently accepting whatever the child reports.
+ */
+export const CONSOLE_API_KEY_SOURCE = "<M1-unmeasured>";
+
+/**
+ * Winter Phase 10a (O3): which `system/init.apiKeySource` string this session's auth arm is
+ * expected to report — the api-key arm's `ANTHROPIC_API_KEY` (P9c-1, unchanged) or the console
+ * arm's `CONSOLE_API_KEY_SOURCE` placeholder above. A pure lookup, so the api-key branch below can
+ * call it instead of repeating the literal, and so a future console-arm assertion (wiring the
+ * `officialAuthFamilyFor`-decided arm into THIS check is `session-driver.ts`'s
+ * `RuntimeSelection.authFamily` plumbing — outside this lane's file cluster, P10a's Lane O brief)
+ * has one function to call rather than a second hand-copied string.
+ */
+export function expectedApiKeySource(family: "api-key" | "console"): string {
+  return family === "api-key" ? "ANTHROPIC_API_KEY" : CONSOLE_API_KEY_SOURCE;
 }
 
 /**
@@ -230,6 +255,10 @@ interface Incarnation {
    *  actually decided (a `session.setPolicy`-style live re-read races nothing here: both reads
    *  happen inside the same `open()` call, one turn of the event loop apart). */
   subscriptionAuthEnabled: boolean;
+  /** Winter Phase 10a (fix round 1 item 3): captured from THIS incarnation's own `inputDeps()`
+   *  call (`OfficialInputDeps.officialAuthArm`), the same "read once, at open(), from the SAME
+   *  object officialInputFor itself read" posture as `subscriptionAuthEnabled` above. */
+  officialAuthArm: "api-key" | "console" | undefined;
 }
 
 const isExpectedEndError = (err: unknown): boolean => {
@@ -398,6 +427,10 @@ class OfficialSessionImpl implements OfficialSession {
       // `officialInputFor`'s own pure path computation (see `ensureOfficialConfigDir`'s own doc for
       // why the mkdir does not live there).
       if (built.input.spool !== undefined) ensureOfficialConfigDir(built.input.spool);
+      // Winter Phase 10a (fix round 2): same "not created until an actual spawn" posture as the
+      // spool dir above — `officialInputFor` only computes this path (console arm only); hardening
+      // it 0700 happens here, the one real spawn point.
+      if (built.anthropicConfigDirToEnsure !== undefined) ensureOfficialConfigDir(built.anthropicConfigDirToEnsure);
       const stream = createOfficialInputStream();
       const generation = this.gen + 1;
       const projector = this.deps.projector(generation);
@@ -428,7 +461,7 @@ class OfficialSessionImpl implements OfficialSession {
       // re-fetches settings independently and can never disagree with what THIS spawn was actually
       // built against.
       const subscriptionAuthEnabled = officialSubscriptionAuthEnabled(inputDeps.settings);
-      const inc: Incarnation = { stream, projector, query: routerQuery, abort, sawInit: false, done: Promise.resolve(), subscriptionAuthEnabled };
+      const inc: Incarnation = { stream, projector, query: routerQuery, abort, sawInit: false, done: Promise.resolve(), subscriptionAuthEnabled, officialAuthArm: inputDeps.officialAuthArm };
       this.inc = inc;
       // m7: `resumed` is honest about THIS instance's own history — generation 1 is a fresh start,
       // every later one (a prior incarnation ended `resumable`, e.g. an unexpected crash rather than
@@ -479,9 +512,14 @@ class OfficialSessionImpl implements OfficialSession {
           // family) is exempt (`OfficialAuthSourceRefused`'s own doc), and the flag's only shipped
           // value is `false`, so THIS branch is what runs in production today.
           if (this.deps.selection.authFamily === "api-key" && !inc.subscriptionAuthEnabled) {
+            // Winter Phase 10a (fix round 1 item 3): `officialAuthArm` (session-driver.ts's own
+            // `officialAuthFamilyFor` decision) picks WHICH arm's expected value applies —
+            // `undefined` (every pre-P10a caller, and every OTHER family's own exemption above)
+            // still means "assume api-key", so this is a no-op until a real caller sets it.
+            const expected = expectedApiKeySource(inc.officialAuthArm ?? "api-key");
             const apiKeySource = typeof msg.apiKeySource === "string" ? msg.apiKeySource : "unknown";
-            if (apiKeySource !== "ANTHROPIC_API_KEY") {
-              const err = new OfficialAuthSourceRefused(apiKeySource);
+            if (apiKeySource !== expected) {
+              const err = new OfficialAuthSourceRefused(apiKeySource, expected);
               this.safeAppend({ type: "agent_error", sessionId: this.sessionId, threadId: MAIN_THREAD, message: err.message, code: err.code });
               void this.end();
               continue;

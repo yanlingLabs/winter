@@ -144,6 +144,13 @@ import {
   METHODS,
   PanelTabSchema,
   PanelOpenTabParams,
+  ProviderConfigureParams,
+  ProviderLoginParams,
+  ProviderLoginResult,
+  ProviderLoginCodeParams,
+  ProviderLoginCodeResult,
+  ProviderLogoutParams,
+  ProviderStatusResult,
 } from "../src/methods";
 
 describe("SessionAttachParams", () => {
@@ -1379,5 +1386,68 @@ describe("PanelOpenTabParams diffId/kind pairing (fix-wave 2026-08-14, Item 1)",
     // An id-less diff tab is a supported render state (PanelDiffTabModel's unavailable-by-
     // inspection branch) — the params schema must not start requiring diffId on kind "diff".
     expect(PanelOpenTabParams.safeParse({ sessionId: "s1", kind: "diff" }).success).toBe(true);
+  });
+});
+
+// Winter Phase 10a (O5): provider.configure's SECOND arm (the Anthropic auth-mode radio) — a
+// z.union, so both the original openai-compatible shape and this new one must parse independently
+// and neither must accept the other's fields.
+describe("ProviderConfigureParams (P10a-3 — the anthropic auth-mode arm)", () => {
+  test("the anthropic arm parses exactly {provider, settings: {'runtimes.official.auth'}}", () => {
+    const parsed = ProviderConfigureParams.parse({ provider: "anthropic", settings: { "runtimes.official.auth": "console" } });
+    expect(parsed).toEqual({ provider: "anthropic", settings: { "runtimes.official.auth": "console" } });
+  });
+
+  test("the original openai-compatible arm still parses, unchanged", () => {
+    const parsed = ProviderConfigureParams.parse({ type: "openai-compatible", baseUrl: "https://example.com", apiKey: "sk-1" });
+    expect(parsed).toEqual({ type: "openai-compatible", baseUrl: "https://example.com", apiKey: "sk-1" });
+  });
+
+  test("an unknown auth value on the anthropic arm is refused", () => {
+    expect(ProviderConfigureParams.safeParse({ provider: "anthropic", settings: { "runtimes.official.auth": "subscription" } }).success).toBe(false);
+  });
+
+  test("a params object naming neither arm's discriminant is refused", () => {
+    expect(ProviderConfigureParams.safeParse({ foo: "bar" }).success).toBe(false);
+  });
+});
+
+describe("provider.login / provider.loginCode / provider.logout (O5, P10a-6)", () => {
+  test("provider.login params/result", () => {
+    expect(ProviderLoginParams.parse({ provider: "anthropic", kind: "console" })).toEqual({ provider: "anthropic", kind: "console" });
+    expect(ProviderLoginResult.parse({ started: true })).toEqual({ started: true });
+    expect(ProviderLoginResult.parse({ started: true, urlHint: "https://console.anthropic.com/oauth/authorize" }).urlHint)
+      .toBe("https://console.anthropic.com/oauth/authorize");
+  });
+
+  test("provider.login refuses a provider/kind this phase does not support", () => {
+    expect(ProviderLoginParams.safeParse({ provider: "openai", kind: "console" }).success).toBe(false);
+    expect(ProviderLoginParams.safeParse({ provider: "anthropic", kind: "oauth" }).success).toBe(false);
+  });
+
+  test("provider.loginCode carries the one-time code and nothing else required", () => {
+    const parsed = ProviderLoginCodeParams.parse({ provider: "anthropic", kind: "console", code: "ABC123" });
+    expect(parsed.code).toBe("ABC123");
+    expect(ProviderLoginCodeParams.safeParse({ provider: "anthropic", kind: "console", code: "" }).success).toBe(false);
+    expect(ProviderLoginCodeResult.parse({ ok: true })).toEqual({ ok: true });
+  });
+
+  test("provider.logout params shape matches provider.login's", () => {
+    expect(ProviderLogoutParams.parse({ provider: "anthropic", kind: "console" })).toEqual({ provider: "anthropic", kind: "console" });
+  });
+});
+
+describe("provider.status (O5, P10a-3)", () => {
+  test("the anthropic block's four fields parse with the pinned enums", () => {
+    const parsed = ProviderStatusResult.parse({
+      anthropic: { apiKey: true, consoleProfile: false, auth: "auto", effective: "api-key" },
+    });
+    expect(parsed.anthropic).toEqual({ apiKey: true, consoleProfile: false, auth: "auto", effective: "api-key" });
+  });
+
+  test("effective accepts \"none\" — auth accepts only auto/api-key/console", () => {
+    expect(ProviderStatusResult.safeParse({ anthropic: { apiKey: false, consoleProfile: false, auth: "auto", effective: "none" } }).success).toBe(true);
+    expect(ProviderStatusResult.safeParse({ anthropic: { apiKey: false, consoleProfile: false, auth: "subscription", effective: "none" } }).success).toBe(false);
+    expect(ProviderStatusResult.safeParse({ anthropic: { apiKey: false, consoleProfile: false, auth: "auto", effective: "bearer" } }).success).toBe(false);
   });
 });

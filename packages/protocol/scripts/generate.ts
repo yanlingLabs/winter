@@ -202,6 +202,10 @@ const fixtures: Record<string, unknown> = {
   // carries one, but an office command addresses a document by `path` (in `args`), not an existing
   // panel tab (design doc §3), so `tabId` staying optional on the wire is what this fixture pins.
   "panel_command_office": { ...base, type: "panel_command", commandId: "cmd_4", action: "office.sheets.read", args: { path: "/tmp/fixture.ods", sheet: "Sheet1", range: "A1:B2" }, deadlineMs: 35000 },
+  // Winter Phase 10a (O5, P10a-6): the console-login pair — SYSTEM_SESSION_ID-scoped, same
+  // `$system` convention as `plugin_tile_updated`/`shortcut_invoke`/`tile_action` above.
+  "provider_login_progress": { type: "provider_login_progress", sessionId: "$system", seq: 34, ts: 1700000000024, provider: "anthropic", line: "Opening browser to sign in..." },
+  "provider_login_finished": { type: "provider_login_finished", sessionId: "$system", seq: 35, ts: 1700000000025, provider: "anthropic", ok: false, reason: "exit_code_1" },
 };
 for (const [name, value] of Object.entries(fixtures)) {
   SessionEvent.parse(value); // fixtures must be valid by construction

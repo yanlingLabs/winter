@@ -47,6 +47,8 @@ import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import type { OfficialInputDeps, OfficialSessionInput } from "../../src/runtime-sdk/official-options";
 import type { OfficialSessionAttachment } from "../../src/runtime-sdk/messaging";
 import {
+  CONSOLE_API_KEY_SOURCE,
+  expectedApiKeySource,
   OfficialSessionEnded,
   startOfficialSession,
   type OfficialSession,
@@ -502,6 +504,58 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
     expect(err?.code).toBe("official_auth_source_refused");
   });
 
+  // Winter Phase 10a (fix round 1 item 3): `session-driver.ts`'s own `officialAuthArm` decision
+  // (threaded through `OfficialInputDeps`, never `selection.authFamily` — see that field's own
+  // doc) now picks WHICH value this assertion expects, for a REAL api-key-family session that
+  // Winter's own `officialAuthFamilyFor` decided belongs to the console arm instead.
+  test("officialAuthArm=\"console\" -> the assertion expects CONSOLE_API_KEY_SOURCE, not ANTHROPIC_API_KEY", async () => {
+    const consoleInputDeps: OfficialInputDeps = {
+      home: testHome(),
+      selection: apiKeySelection,
+      explicitCredentials: [],
+      explicitConnectionEnv: {},
+      officialPeer: undefined,
+      claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
+      assembler: { assemble: () => "" },
+      capabilities: {},
+      canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
+      policy: "auto",
+      officialAuthArm: "console",
+    };
+    const h = harness({ selection: apiKeySelection, inputDeps: () => consoleInputDeps });
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "ANTHROPIC_API_KEY" })); // the api-key arm's own value — wrong for this arm
+    await h.settled();
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string; message?: string }) | undefined;
+    expect(err?.code).toBe("official_auth_source_refused");
+    expect(err?.message).toContain("apiKeySource=ANTHROPIC_API_KEY");
+    expect(err?.message).toContain(CONSOLE_API_KEY_SOURCE);
+  });
+
+  test("officialAuthArm=\"console\" with a matching apiKeySource never refuses; the turn proceeds normally", async () => {
+    const consoleInputDeps: OfficialInputDeps = {
+      home: testHome(),
+      selection: apiKeySelection,
+      explicitCredentials: [],
+      explicitConnectionEnv: {},
+      officialPeer: undefined,
+      claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
+      assembler: { assemble: () => "" },
+      capabilities: {},
+      canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
+      policy: "auto",
+      officialAuthArm: "console",
+    };
+    const h = harness({ selection: apiKeySelection, inputDeps: () => consoleInputDeps });
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: CONSOLE_API_KEY_SOURCE }));
+    h.q().emit(assistant("ok"));
+    h.q().emit(result());
+    await h.settled();
+    expect(h.events.some((e) => e.type === "agent_error")).toBe(false);
+    expect(h.types()).toContain("turn_completed");
+  });
+
   test("the console-oauth family is EXEMPT — apiKeySource \"none\" (its own expected bearer shape) never refuses", async () => {
     const consoleOauthSelection: RuntimeSelection = { ...apiKeySelection, authFamily: "console-oauth" };
     const h = harness({ selection: consoleOauthSelection });
@@ -523,6 +577,27 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
     await h.settled();
     expect(h.events.some((e) => e.type === "agent_error")).toBe(false);
     expect(h.types()).toContain("turn_completed");
+  });
+});
+
+// Winter Phase 10a (O3, P10a-3/P10a-7 M1): `expectedApiKeySource` as a standalone pure lookup — the
+// console arm's own placeholder literal, and proof the api-key arm's assertion (tested end to end
+// above) is now DERIVED from this function rather than a second hand-typed "ANTHROPIC_API_KEY"
+// string. Wiring a real console-arm session through `run()`'s own assertion is `session-driver.ts`'s
+// `RuntimeSelection.authFamily` plumbing (outside this lane's file cluster) — carried; see the lane
+// report.
+describe("O3 — expectedApiKeySource / CONSOLE_API_KEY_SOURCE", () => {
+  test("api-key arm expects the pinned ANTHROPIC_API_KEY — unchanged from P9c-1", () => {
+    expect(expectedApiKeySource("api-key")).toBe("ANTHROPIC_API_KEY");
+  });
+
+  test("console arm expects the M1 placeholder literal — a one-line edit once the controller measures the real value", () => {
+    expect(expectedApiKeySource("console")).toBe(CONSOLE_API_KEY_SOURCE);
+    expect(CONSOLE_API_KEY_SOURCE).toBe("<M1-unmeasured>");
+  });
+
+  test("the two arms never expect the same value — a mismatch against one can never coincidentally pass as the other", () => {
+    expect(expectedApiKeySource("api-key")).not.toBe(expectedApiKeySource("console"));
   });
 });
 

@@ -1,0 +1,8 @@
+{
+  "type": "provider_login_progress",
+  "sessionId": "$system",
+  "seq": 34,
+  "ts": 1700000000024,
+  "provider": "anthropic",
+  "line": "Opening browser to sign in..."
+}

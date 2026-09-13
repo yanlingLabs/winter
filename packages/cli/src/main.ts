@@ -1,6 +1,7 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
+import { createInterface } from "node:readline";
 import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, runRuntimesProbe, resolveWinterProfile } from "@yanlinglabs/winter-core";
 import type { Settings } from "@yanlinglabs/winter-core";
 import { METHODS, type ApprovalPolicy, type Task } from "@yanlinglabs/winter-protocol";
@@ -1318,6 +1319,20 @@ if (import.meta.main) {
         console.log(`${AQUA}migration:${RESET} ${DIM}unavailable (${err instanceof Error ? err.message : "unknown error"})${RESET}`);
       }
     };
+    // Winter Phase 10a (O7, P10a-2): IN-PROCESS like the two sections above — a plain filesystem
+    // presence check (`anthropicConsoleProfileExists`'s own daemon-side equivalent, without
+    // spawning the daemon or the SDK at all), so this stays true to "works when the daemon does
+    // not". Never crashes the diagnostic tool on a read error, same posture as its siblings.
+    const printAnthropicConsoleSection = async (): Promise<void> => {
+      try {
+        const { anthropicConfigDirFor, ANTHROPIC_PROFILE_NAME } = await import("@yanlinglabs/winter-core");
+        const dir = anthropicConfigDirFor(home);
+        const present = existsSync(join(dir, "credentials", `${ANTHROPIC_PROFILE_NAME}.json`));
+        console.log(`${AQUA}anthropic console profile:${RESET} ${present ? "present" : "absent"} ${DIM}(config dir ${dir})${RESET}`);
+      } catch (err) {
+        console.log(`${AQUA}anthropic console profile:${RESET} ${DIM}unavailable (${err instanceof Error ? err.message : "unknown error"})${RESET}`);
+      }
+    };
     // `--repair` with nothing after it must reach the usage branch, not silently run a diagnosis.
     const repair = args.includes("--repair") ? (flag("--repair") ?? "") : undefined;
     if (repair === undefined) {
@@ -1333,6 +1348,7 @@ if (import.meta.main) {
       }
       await printRuntimesSection();
       await printMigrationSection();
+      await printAnthropicConsoleSection();
       break;
     }
     const session = flag("--session");
@@ -1833,6 +1849,65 @@ if (import.meta.main) {
     const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, writeOpenAiApiKey, writeAnthropicApiKey, WEB_SEARCH_API_KEY_SECRET, EXA_API_KEY_SECRET, profileDisplayName } = await import("@yanlinglabs/winter-core");
     console.log(`${AQUA}${profileDisplayName()} login${RESET}`);
     const secrets = new KeychainSecretStore();
+    // Winter Phase 10a (O7, P10a-6): the Anthropic Console login door. Per the design amendment
+    // (M2, the code-paste protocol) this is NOT an RPC — the daemon may not even be running, and
+    // the interaction is inherently interactive (the SDK's own login streams progress lines this
+    // process prints, and blocks on a pasted code this process's own stdin supplies via
+    // `handle.submitCode`). "Attached to the terminal" here means this JS-level relay, never a raw
+    // OS-level stdio inheritance of a spawned child — the actual spawn/redaction is the SDK's,
+    // reached through the SAME `createConsoleProfileBroker` thin adapter the daemon uses (never a
+    // second core-side spawn).
+    if (process.argv.includes("--anthropic-console")) {
+      const { createConsoleProfileBroker, resolveClaudeExecutable, ClaudeExecutableUnavailable } = await import("@yanlinglabs/winter-core");
+      const home = resolveWinterHome();
+      let settings: Settings | undefined;
+      try { settings = loadSettings(join(home, "settings.json")); } catch { settings = undefined; }
+      const resolved = resolveClaudeExecutable({
+        setting: settings?.runtimes?.claudeExecutable, env: process.env, execPath: process.execPath, exists: existsSync,
+      });
+      if (resolved instanceof ClaudeExecutableUnavailable) {
+        console.error(`the official claude runtime is not available: ${resolved.message}`);
+        process.exit(1);
+      }
+      const broker = createConsoleProfileBroker({ home, claudeExecutable: () => resolved.path, antExecutable: () => undefined, secrets });
+      console.log(`${AQUA}signing in to Anthropic Console${RESET} — a browser window will open; paste the code it shows below, then press enter.`);
+      let handle: Awaited<ReturnType<typeof broker.login>>;
+      try {
+        handle = await broker.login((line) => console.log(line));
+      } catch (err) {
+        console.error(`could not start the console login: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      const rl = createInterface({ input: process.stdin, terminal: false });
+      // Every pasted line is forwarded verbatim — NEVER logged here (this file's own discipline
+      // for every other secret-entry branch: readSecret, invisibleKeyCharWarning, etc.). The login
+      // protocol takes exactly ONE code: `submitted` guards against a double Enter, a pasted
+      // multi-line blob, or any other stray extra `line` event calling `submitCode` a second time
+      // (the SDK's own child has already consumed/closed on the first submission by then).
+      let submitted = false;
+      rl.on("line", (line) => {
+        if (submitted) return;
+        submitted = true;
+        void handle.submitCode(line.trim());
+      });
+      let result: Awaited<typeof handle.done>;
+      try {
+        result = await handle.done;
+      } finally {
+        rl.close();
+      }
+      if (result.ok) {
+        console.log(`${AQUA}signed in${RESET} — profile "${result.profile}"`);
+        const refreshed = await broker.refreshBearer().catch((err) => ({ ok: false as const, reason: err instanceof Error ? err.name : "unknown" }));
+        if (!refreshed.ok) {
+          console.error(`warning: could not refresh the native-provider bearer token yet (${refreshed.reason}) — a running daemon retries this on its own schedule`);
+        }
+      } else {
+        console.error(`sign-in failed: ${result.reason}`);
+        process.exit(1);
+      }
+      break;
+    }
     // P8c-10: the official leg's own credential — same shape as --api-key below (prefix check,
     // the invisible-char guard, Keychain-only), keyed under the anthropic row's own name.
     if (process.argv.includes("--anthropic-key")) {
@@ -1905,6 +1980,33 @@ if (import.meta.main) {
   case "logout": {
     const { KeychainSecretStore, CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, clearCredentialMaterial, ANTHROPIC_CREDENTIAL_SECRET_NAME } = await import("@yanlinglabs/winter-core");
     const secrets = new KeychainSecretStore();
+    // Winter Phase 10a (O7, P10a-6): `--anthropic-console` runs the SDK's own `claude auth logout`
+    // (via the SAME broker adapter the daemon and `winter login --anthropic-console` use) and then
+    // clears the bearer material — distinct from `--anthropic` below, which only ever clears an
+    // api-key material and never touches the console profile.
+    if (process.argv.includes("--anthropic-console")) {
+      const { createConsoleProfileBroker, resolveClaudeExecutable, ClaudeExecutableUnavailable } = await import("@yanlinglabs/winter-core");
+      const home = resolveWinterHome();
+      let settings: Settings | undefined;
+      try { settings = loadSettings(join(home, "settings.json")); } catch { settings = undefined; }
+      const resolved = resolveClaudeExecutable({
+        setting: settings?.runtimes?.claudeExecutable, env: process.env, execPath: process.execPath, exists: existsSync,
+      });
+      const broker = createConsoleProfileBroker({
+        home,
+        claudeExecutable: () => (resolved instanceof ClaudeExecutableUnavailable ? undefined : resolved.path),
+        antExecutable: () => undefined,
+        secrets,
+      });
+      try {
+        await broker.logout();
+        console.log("anthropic console profile signed out");
+      } catch (err) {
+        console.error(`sign-out failed: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      break;
+    }
     // P8c-10: `--anthropic` clears ONLY the official leg's own credential — Codex sign-out
     // (the bare command, unchanged) must not touch it, and this flag must not touch Codex's.
     if (process.argv.includes("--anthropic")) {

@@ -394,6 +394,11 @@ export const Settings = z.object({
     // official leg's `claude` executable (`official-executable.ts`'s `resolveClaudeExecutable`,
     // ahead of env `WINTER_CLAUDE_EXECUTABLE`, the 8d bundle drop and the dev-only package door).
     claudeExecutable: z.string().optional(),
+    // Winter Phase 10a (Lane L's own rung — `bundle-layout.ts`'s `resolveAntExecutable` ladder):
+    // same blank-is-absent shape as `claudeExecutable` above, for the bundled Anthropic Platform
+    // CLI (`ant`) the console-profile broker spawns. Lane O adds only the schema line here; Lane L
+    // owns the resolver that reads it.
+    antExecutable: z.string().optional(),
     // Task 17 Step 4: the engine is retired — every mode runs on the Winter leg. The block stays
     // ACCEPTED for one release (the `migrations.memoryKeys` pattern): a `false` is read, logged
     // ("the engine leg no longer exists; ignored") and ignored by `winterOptionsFromSettings`.
@@ -420,7 +425,16 @@ export const Settings = z.object({
     // `CLAUDE_CONFIG_DIR`, an env scrubbed of every auth-injecting variable except the one the
     // credential plan names, and a per-session assertion on the SDK's reported `apiKeySource`.
     // Read HOT (`official-options.ts`), never a boot snapshot.
-    official: z.object({ subscriptionAuth: z.boolean().default(false) }).optional(),
+    official: z.object({
+      subscriptionAuth: z.boolean().default(false),
+      // Winter Phase 10a (P10a-3): which credential the official leg's spawned `claude` child
+      // authenticates with. "auto" (the default) picks the console profile when one exists
+      // (`<home>/runtimes/anthropic-config/credentials/winter.json`) and falls back to the
+      // Anthropic API-key material otherwise; "api-key"/"console" pin one arm explicitly. Read
+      // HOT via `officialAuthModeSetting` below, never a boot snapshot — same posture as
+      // `subscriptionAuth` beside it.
+      auth: z.enum(["auto", "api-key", "console"]).default("auto"),
+    }).optional(),
   }).optional(),
   // Phase 9c (P9c-4, the user's ruling on WS-00 §8 #7): Winter reads a project's unconverted legacy
   // instructions file / project dir (`legacy-names.ts`'s `LEGACY_INSTRUCTIONS_FILE` / `LEGACY_PROJECT_DIR`) READ-ONLY when the Winter-named file/dir is absent and this is true —
@@ -443,6 +457,16 @@ export function legacyProjectFilesReadEnabled(settings: Settings | null | undefi
  *  (blocked); only an explicit `true` opens the door, and that value must not ship before approval. */
 export function officialSubscriptionAuthEnabled(settings: Settings | null | undefined): boolean {
   return settings?.runtimes?.official?.subscriptionAuth ?? false;
+}
+
+/** Winter Phase 10a (P10a-3): the ONE reader of `runtimes.official.auth` — absent block or absent
+ *  field both mean `"auto"` (the schema's own default only materializes once `runtimes.official`
+ *  itself is present, same "an absent block is not unknown" rule every sibling getter in this file
+ *  follows). Deliberately total (`null`/`undefined` settings both answer `"auto"`) for the same
+ *  boot-degraded-to-`settings=null` reason `handoffCrossRuntimeEnabled` is total. Read HOT by
+ *  `official-options.ts`'s `officialAuthFamilyFor`, never a boot snapshot. */
+export function officialAuthModeSetting(settings: Settings | null | undefined): "auto" | "api-key" | "console" {
+  return settings?.runtimes?.official?.auth ?? "auto";
 }
 
 /** The one place `hooks.enabled`'s default-ON semantics live (4f Task 2): absent block, absent
