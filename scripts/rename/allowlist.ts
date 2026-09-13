@@ -129,7 +129,7 @@ export const RENAME_ALLOWLIST: readonly AllowlistEntry[] = [
     id: "frozen-norma-feed",
     regex: /norma|Norma|NORMA/g,
     files: ["releases/appcast.xml"],
-    why: "the live Sparkle feed for shipped Norma installs — 9c's terminal handoff entry lands here (WS-16 §19)",
+    why: "the live Sparkle feed for shipped Norma installs — it holds 9c's terminal handoff entry (0.2.015, the copy of norma-final's item per P9c-13) and is frozen again from here on (WS-16 §19)",
   },
   {
     id: "claude-md-legacy-trap",
