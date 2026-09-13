@@ -3,5 +3,13 @@
   <channel>
     <title>Winter</title>
     <!-- release items are appended by the release pipeline (Phase 6 sub-project D; the Winter feed since Phase 9b) -->
+      <item>
+      <title>0.111.0</title>
+      <description><![CDATA[Winter agent SDK 0.0.5 · Claude Agent SDK 0.3.250]]></description>
+      <sparkle:version>0.111.0</sparkle:version>
+      <sparkle:shortVersionString>0.111.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.111.0/Winter-0.111.0.zip" sparkle:edSignature="whVM3UgqT5KfR8MEN0TuAtx963reO/d0LbWnEESDSmjb7rLk/gyehEjaCCKut4eJ6vBcgNo1JYMqOL0iSdQMAA==" length="498940607" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
