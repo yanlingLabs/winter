@@ -1,0 +1,9 @@
+{
+  "type": "provider_login_finished",
+  "sessionId": "$system",
+  "seq": 35,
+  "ts": 1700000000025,
+  "provider": "anthropic",
+  "ok": false,
+  "reason": "exit_code_1"
+}

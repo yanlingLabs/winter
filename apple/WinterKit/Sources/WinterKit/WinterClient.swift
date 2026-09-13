@@ -314,6 +314,8 @@ extension SessionEvent {
         case .panelTabActivated(let v): return v.seq
         case .panelTabNavigated(let v): return v.seq
         case .panelCommand(let v): return v.seq
+        case .providerLoginProgress(let v): return v.seq
+        case .providerLoginFinished(let v): return v.seq
         }
     }
 
@@ -369,6 +371,8 @@ extension SessionEvent {
         case .panelTabActivated(let v): return v.sessionId
         case .panelTabNavigated(let v): return v.sessionId
         case .panelCommand(let v): return v.sessionId
+        case .providerLoginProgress(let v): return v.sessionId
+        case .providerLoginFinished(let v): return v.sessionId
         }
     }
 }

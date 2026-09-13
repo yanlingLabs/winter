@@ -22,8 +22,9 @@ final class SessionEventTransientTests: XCTestCase {
     /// `packages/core/test/ipc/remote-live-stream.test.ts`, which pins the identical nine strings.
     ///
     /// Growth log: 7 → 8 (session-activity-hygiene T4, `session_activity`); 8 → 9 (panel-shell T3,
-    /// `panel_command`).
-    private static let nine: Set<String> = [
+    /// `panel_command`); 9 → 11 (Winter Phase 10a O5, P10a-6: `provider_login_progress`,
+    /// `provider_login_finished`).
+    private static let eleven: Set<String> = [
         "assistant_delta",
         "lease_granted",
         "lease_lost",
@@ -33,12 +34,14 @@ final class SessionEventTransientTests: XCTestCase {
         "plugin_tile_updated",
         "session_activity",
         "panel_command",
+        "provider_login_progress",
+        "provider_login_finished",
     ]
 
-    func testTransientTypesIsExactlyTheNine() {
-        XCTAssertEqual(SessionEvent.transientTypes, Self.nine,
+    func testTransientTypesIsExactlyTheEleven() {
+        XCTAssertEqual(SessionEvent.transientTypes, Self.eleven,
                        "SessionEvent.transientTypes must stay in lockstep with TRANSIENT_EVENT_TYPES in packages/protocol/src/events.ts")
-        XCTAssertEqual(SessionEvent.transientTypes.count, 9)
+        XCTAssertEqual(SessionEvent.transientTypes.count, 11)
     }
 
     /// `isTransient` (the case switch, used by `WinterClient` on decoded events) and

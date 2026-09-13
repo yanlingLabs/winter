@@ -285,7 +285,7 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
   // The correction the plan itself nearly got wrong: transients must SURVIVE this filter
   // ---------------------------------------------------------------------------------------------
 
-  test("all nine TRANSIENT types reach a remote client — the live policy is history's allowlist PLUS these", async () => {
+  test("all eleven TRANSIENT types reach a remote client — the live policy is history's allowlist PLUS these", async () => {
     const { store, hub, socketPath, remoteToken } = await boot();
     const sessionId = store.createSession("global", { mode: "code" });
 
@@ -307,10 +307,14 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     // variant, so this is a reach-the-wire proof, not an endorsement of phone-side rendering.
     hub.broadcastTransient(sessionId, { type: "panel_command", sessionId, commandId: "c1", tabId: "t1", action: "navigate", url: "https://example.com", deadlineMs: 15000 });
     hub.broadcastTransient(sessionId, { type: "session_activity", sessionId, activity: "background" });
+    // Winter Phase 10a (O5, P10a-6): the console-login pair — SYSTEM_SESSION_ID-scoped, same as
+    // plugin_tile_updated above.
+    hub.broadcastTransient(sessionId, { type: "provider_login_progress", sessionId, provider: "anthropic", line: "Opening browser to sign in..." });
+    hub.broadcastTransient(sessionId, { type: "provider_login_finished", sessionId, provider: "anthropic", ok: true });
 
     // Keyed to this broadcast's own VALUE, not just its type: since T5 the attach above emits a
     // `session_activity` of its own ("active"), so a type-only wait would already be satisfied
-    // before any of the nine broadcasts had crossed the socket.
+    // before any of the eleven broadcasts had crossed the socket.
     await waitFor(() => phone.ofType("session_activity").some((e: any) => e.activity === "background"), "the last transient");
     for (const t of TRANSIENT_EVENT_TYPES) {
       expect(phone.types()).toContain(t);
@@ -386,7 +390,7 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
   // The policy itself
   // ---------------------------------------------------------------------------------------------
 
-  test("REMOTE_STREAM_EVENT_TYPES is EXACTLY history's allowlist + the nine transients + the three stream-control types", () => {
+  test("REMOTE_STREAM_EVENT_TYPES is EXACTLY history's allowlist + the eleven transients + the three stream-control types", () => {
     const expected = new Set<string>([
       ...HISTORY_EVENT_TYPES,
       ...TRANSIENT_EVENT_TYPES,
@@ -400,20 +404,24 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     // 21 → 22 (panel-shell T3, `panel_command` — via the transients). Unlike every prior growth
     // line here, this one is DELIBERATE rather than incidental: panel_command reaching the remote
     // stream is accepted, not worked around (see events.ts's TRANSIENT_EVENT_TYPES comment on it).
-    expect(REMOTE_STREAM_EVENT_TYPES.size).toBe(22);
+    // 22 → 24 (Winter Phase 10a O5, P10a-6: provider_login_progress/provider_login_finished — via
+    // the transients; both are SYSTEM_SESSION_ID-scoped like plugin_tile_updated, so this is a
+    // reach-the-wire proof, never an endorsement of phone-side rendering).
+    expect(REMOTE_STREAM_EVENT_TYPES.size).toBe(24);
     // The one exclusion the whole first half of this file is about.
     expect(REMOTE_STREAM_EVENT_TYPES.has("reasoning_item" as SessionEvent["type"])).toBe(false);
     // ...and the ones that would have quietly reverted the phone-client streaming fix.
     for (const t of TRANSIENT_EVENT_TYPES) expect(REMOTE_STREAM_EVENT_TYPES.has(t)).toBe(true);
   });
 
-  test("TRANSIENT_EVENT_TYPES is EXACTLY the nine — the Swift mirror pins the same literals", () => {
+  test("TRANSIENT_EVENT_TYPES is EXACTLY the eleven — the Swift mirror pins the same literals", () => {
     // Parity, remote-allowlist style: neither side imports the other, each pins its own copy to
     // these literal strings, so editing one alone fails here or in
     // `apple/WinterProtocol/.../SessionEventTransientTests.swift` (SessionEvent.transientTypes).
     //
     // Growth log: 7 → 8 (session-activity-hygiene T4, `session_activity`).
     // 8 → 9 (panel-shell T3, `panel_command`).
+    // 9 → 11 (Winter Phase 10a O5, P10a-6: provider_login_progress, provider_login_finished).
     expect([...TRANSIENT_EVENT_TYPES].sort()).toEqual([
       "assistant_delta",
       "hardware_requested",
@@ -423,9 +431,11 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
       "peripheral_call_requested",
       "plugin_tile_updated",
       "plugin_tool_invoke",
+      "provider_login_finished",
+      "provider_login_progress",
       "session_activity",
     ]);
-    expect(TRANSIENT_EVENT_TYPES.size).toBe(9);
+    expect(TRANSIENT_EVENT_TYPES.size).toBe(11);
   });
 
   // ---------------------------------------------------------------------------------------------

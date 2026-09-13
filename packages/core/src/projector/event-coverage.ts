@@ -110,6 +110,11 @@ export const SUBAGENT_TRANSCRIPT_INCLUDE = {
   plugin_tile_updated: false,
   shortcut_invoke: false,
   tile_action: false,
+  // Winter Phase 10a (O5, P10a-6): SYSTEM_SESSION_ID-scoped daemon pushes, same bucket as
+  // plugin_tile_updated/shortcut_invoke/tile_action above — the console-profile broker/IPC layer
+  // is the sole producer, never the projector.
+  provider_login_progress: false,
+  provider_login_finished: false,
   // session-activity-hygiene T4: TRANSIENT and SESSION-scoped (it carries no threadId at all — it
   // is a fact about the whole session's lifecycle, not about any thread), so it is in the same
   // bucket as harness_attached/session_created above twice over. It also never reaches the engine's
@@ -251,6 +256,10 @@ export const PROJECTED_EVENT_COVERAGE = {
   panel_tab_activated: false,
   panel_tab_navigated: false,
   panel_command: false,
+  // Winter Phase 10a (O5, P10a-6): same non-projector, non-transcript bucket as
+  // plugin_tile_updated/shortcut_invoke/tile_action above.
+  provider_login_progress: false,
+  provider_login_finished: false,
   // ---- engine-only PRODUCT events whose fate follows the tool that raised them (Winter map §3's
   // fourth bucket — "the one a plan forgets", because nothing in the type system notices their
   // producer vanishing). None of them is projected from a wire message; each needs its successor

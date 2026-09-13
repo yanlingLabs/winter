@@ -62,19 +62,20 @@ describe("cross-language parity fixtures (Chat Slice D, Task 4): regeneration fr
   });
 
   // Guards the generate.ts sync-selectivity fix (see its own comment): these two new fixtures live
-  // in the SAME fixDir as the 69 SessionEvent fixtures, but must never be swept into the Swift
+  // in the SAME fixDir as the 71 SessionEvent fixtures, but must never be swept into the Swift
   // WinterProtocol test bundle — RoundTripTests.swift decodes EVERY .json file it finds there as a
   // SessionEvent and hard-asserts an exact count (panel-shell T3: 58 → 63, five panel variants;
   // B2 T2: 63 → 65, two more panel_command shapes; diff-tabs Task 3: 65 → 67, two more diff-tab
   // fixtures; editor-product Task 2: 67 → 68, one more panel-kind fixture; office-agent-tools T1:
-  // 68 → 69, one more panel_command shape — the first OFFICE verb). THIS assertion tracks the count
+  // 68 → 69, one more panel_command shape — the first OFFICE verb; Winter Phase 10a O5: 69 → 71,
+  // provider_login_progress + provider_login_finished). THIS assertion tracks the count
   // on disk, so it moves in this task's own commit; the Swift LITERAL in RoundTripTests.swift is a
   // separate, later edit — the same two-commit split diff-tabs Task 4 established, and `swift test`
   // is expected red between the two commits by design.
-  test("did not leak into the Swift-synced fixture bundle, which now has exactly 69 files", () => {
+  test("did not leak into the Swift-synced fixture bundle, which now has exactly 71 files", () => {
     const swiftFixDir = join(import.meta.dir, "..", "..", "..", "apple", "WinterProtocol", "Tests", "WinterProtocolTests", "Fixtures");
     const swiftFiles = readdirSync(swiftFixDir).filter((f) => f.endsWith(".json"));
-    expect(swiftFiles.length).toBe(69);
+    expect(swiftFiles.length).toBe(71);
     expect(swiftFiles).not.toContain("dangerous-domains.json");
     expect(swiftFiles).not.toContain("cleaner-vectors.json");
   });
