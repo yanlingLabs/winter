@@ -30,7 +30,7 @@ import type { PermissionClassLabel } from "@yanlinglabs/winter-agent-sdk/messagi
 import type { SecretStore } from "../auth/secret-store";
 import { retentionFromSettings } from "../runtime-state/retention";
 import { winterOptionsFromSettings, type Settings } from "../settings";
-import { CORE_BRAND } from "./brand";
+import { buildCoreBrand } from "./brand";
 import { resolveWinterExecutable, type WinterExecutableUnavailable } from "./executable";
 import { resolveClaudeExecutable, ClaudeExecutableUnavailable } from "./official-executable";
 import { credentialPresenceFrom, keychainSeamFromSecretStore } from "./keychain";
@@ -372,6 +372,16 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
   // here is enough — nothing calls a handoff before lane 4 registers, and this handle simply has
   // no participants until then (the router's own barrier reports "no participant" for either side).
   const handoffParticipants: { current: HandoffParticipants | undefined } = { current: undefined };
+  // test-keychain-isolation fix: built from `deps.home` — the daemon's ACTUAL home — rather than
+  // reusing the frozen, env-only `CORE_BRAND` singleton. `CORE_BRAND` resolves its `keychainService`
+  // once at module load from `WINTER_HOME`/`WINTER_PROFILE` env vars alone, which a daemon booted
+  // via `startDaemon({ home })` (every real-binary e2e test) never sets — so the singleton could
+  // never see `deps.home` and therefore could never honour `WINTER_KEYCHAIN_SERVICE`'s default-home
+  // guard for it. This IS the value the router hands to a spawned Winter child (`brand.keychainService`
+  // seeds the child's OWN Bun.secrets read, including the D30 advisor default fallback with no
+  // explicit `authRef` — see `mode-options.ts`'s `buildWinterOptions` header), so it is the one that
+  // must be home-aware.
+  const homeAwareBrand = buildCoreBrand(undefined, deps.home);
   const sdk = factory({
     // A `claude` peer is injected ONLY when the import actually resolved (P8c-1) — the namespace is
     // injected as an INSTANCE, same as `winter`; the router never imports either SDK by name.
@@ -385,9 +395,9 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
     },
     // Required even though the Winter leg resolves its own credentials runtime-side (surface map
     // §1.3): the field has no `?`, and the official leg is the only caller.
-    keychain: keychainSeamFromSecretStore(deps.secrets),
+    keychain: keychainSeamFromSecretStore(deps.secrets, deps.home),
     // R-1. Resolved once here, through the injected peer's own `resolveBrand`.
-    brand: CORE_BRAND,
+    brand: homeAwareBrand,
     // P8c-3: the ladder's answer AT CONSTRUCTION TIME. Omitted (never a bare "claude") when it does
     // not resolve — the door then refuses ONLY a session that selects the official leg
     // (`claude_executable_unavailable`), and every Winter session proceeds unaffected. A later

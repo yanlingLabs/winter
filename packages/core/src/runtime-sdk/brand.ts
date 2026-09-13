@@ -49,12 +49,22 @@ import type { WinterProfile } from "../profile";
  * Build the brand. `profile` is threaded only so a test can assert both halves of the dev/dist
  * split without mutating `process.env` — production always takes the default, which resolves
  * `WINTER_PROFILE` exactly as `auth/secret-store.ts` does.
+ *
+ * `home` (test-keychain-isolation fix) is the daemon's ACTUAL `WINTER_HOME` — never inferred from
+ * the `WINTER_HOME` env var here, since a daemon booted via `startDaemon({ home })` (every real
+ * test) never sets that env var at all. Passing it through lets `keychainService(profile, home)`
+ * decide whether `WINTER_KEYCHAIN_SERVICE` may override the returned service name (P9c-15's
+ * default-home guard) — `CORE_BRAND` below omits it and keeps today's env-only resolution for
+ * every OTHER brand field's consumer, but `create.ts` builds its OWN brand from this function with
+ * the real `deps.home` for the object actually handed to the router, which is what the spawned
+ * child's own Keychain resolution (`brand.keychainService`, the D30 advisor default fallback
+ * included) is seeded from.
  */
-export function buildCoreBrand(profile?: WinterProfile): BrandProfile {
+export function buildCoreBrand(profile?: WinterProfile, home?: string): BrandProfile {
   return {
     ...WINTER_BRAND,
     packageName: "winter-core",
-    keychainService: keychainService(profile),
+    keychainService: keychainService(profile, home),
     // `resolveBrand` parses this with `new URL` and requires `https:` (and no control bytes).
     contactUrl: "https://github.com/yanlingLabs/winter",
   };

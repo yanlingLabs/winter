@@ -443,7 +443,7 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
   if (input.outputStyle !== undefined) options.outputStyle = input.outputStyle;
   if (input.policy === "bypass") options.allowDangerouslySkipPermissions = true;
   if (input.hooks !== undefined) options.hooks = input.hooks;
-  const provider = providerSelectionFor(input.model, input.credentials);
+  const provider = providerSelectionFor(input.model, input.credentials, input.home);
   if (input.advisorModel !== undefined) {
     // Fix wave (M7): when the advisor's own target model resolves to the SAME provider as the
     // session's own model, thread the SESSION's already-resolved `authRef` onto `Options.advisor`
@@ -466,7 +466,7 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     //
     // A CROSS-provider advisor is UNCHANGED: it keeps falling through to the SDK's documented
     // "target provider's own keychain record" default, exactly as today (never guessed at here).
-    const advisorProvider = providerSelectionFor(input.advisorModel, input.credentials);
+    const advisorProvider = providerSelectionFor(input.advisorModel, input.credentials, input.home);
     const sameProviderAuthRef =
       provider !== undefined && advisorProvider !== undefined && provider.providerId === advisorProvider.providerId
         ? provider.authRef

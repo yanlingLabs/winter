@@ -18,3 +18,13 @@ process.env.WINTER_CLAUDE_RESUME_SCAN_ROOT = mkdtempSync(join(tmpdir(), "winter-
 // specifically wants to exercise Migration B passes an explicit `migration.legacyHome` override to
 // `startDaemon` instead (see `daemon-migration-boot.test.ts`), which always wins over this default.
 process.env[LEGACY_HOME_ENV] = mkdtempSync(join(tmpdir(), "winter-test-legacy-home-"));
+// Test-keychain-isolation fix: a real-binary e2e test's spawned `winter`/`claude` child resolves
+// its OWN Keychain credential refs (`profile.ts`'s `keychainService()`, `runtime-sdk/keychain.ts`)
+// against a REAL Keychain service (`com.winter.core[.dev]`) — never the test's own injected
+// `FileSecretStore`, which only the daemon's IN-PROCESS reads go through. `keychainService()` only
+// ever honours this override for a NON-default `WINTER_HOME` (P9c-15's `isDefaultWinterHome` guard),
+// so setting it here is inert for anyone running against a real `~/.winter[-dev]` home and active
+// only for these tests' own temp homes. The named service has NO items — a lookup misses instantly
+// instead of blocking on a macOS Keychain consent dialog or, worse, reading the user's real
+// `openai:default`/`codex-oauth:default`/`anthropic:default` material.
+process.env.WINTER_KEYCHAIN_SERVICE = "com.winter.core.test-isolated";
