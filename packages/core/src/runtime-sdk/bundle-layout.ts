@@ -159,6 +159,17 @@ function realIsExecutableFile(path: string): boolean {
 }
 
 /**
+ * Winter Phase 10a fix wave (M6): "compiled vs dev", the SAME discriminator
+ * `workflows/runtime.ts`'s own `defaultWorkerCommand` already uses (`Bun.main` is the compiled/dev
+ * tell; `execPath` is not — it is always the file to spawn either way). Exported as a function
+ * (not inlined) so `resolveAntExecutable` below can accept a test seam that overrides it, exactly
+ * like every other real-vs-fake probe in this ladder.
+ */
+export function isCompiledBinary(): boolean {
+  return Bun.main.startsWith("/$bunfs/");
+}
+
+/**
  * Winter Phase 10a (P10a-4/L4): where the daemon's console-profile broker
  * (`auth/console-profile-broker.ts`, Lane O) finds Anthropic's Platform CLI `ant` — the binary
  * `ant auth print-credentials` is shelled out to for the native provider's bearer material.
@@ -171,14 +182,27 @@ function realIsExecutableFile(path: string): boolean {
  *
  * The ladder, exactly (Interfaces): `settings.runtimes.antExecutable` → `$WINTER_ANT_EXECUTABLE` →
  * the bundle path (`antExecutablePath`, gated on existing AND being executable) → `which ant`
- * (dev-only in EFFECT, never by an explicit CONFIGURATION branch: a Release bundle's own rung
- * above always succeeds, so this is only ever reached when nothing was embedded) → `undefined`.
+ * (dev-only) → `undefined`.
+ *
+ * Winter Phase 10a fix wave (M6): the `which ant` rung used to be dev-only in EFFECT ONLY ("a
+ * Release bundle's own rung above always succeeds, so this is only ever reached when nothing was
+ * embedded") rather than by construction — unlike the claude ladder's package-door rung, which
+ * `createRequire` makes UNREACHABLE from inside a compiled `$bunfs` binary's own module graph, a
+ * `Bun.which`/PATH search works identically whether this process is compiled or not. A staging bug
+ * or a tampered Release install missing its embedded `ant` would previously fall through to
+ * whatever `ant` happened to sit on the real machine's `$PATH` — a binary this daemon never
+ * vetted, in a leg (the official app bundle) that otherwise embeds and re-signs everything it
+ * runs. This rung is now gated the same way the claude ladder's is IN EFFECT: `isCompiledBinary()`
+ * (overridable via `isCompiled`, the same test-seam shape as every other rung here) skips it
+ * entirely for a compiled process, so a Release binary with a missing/corrupt embedded `ant`
+ * reports "not found" (the broker's own typed failure), never a silent substitution.
  *
  * An explicit setting/env value is trusted as given, with NO existence check — unlike the
  * winter/claude ladders' "an explicit-but-missing path IS the failure" rule. There is no typed
  * refusal type here to carry that distinction through, and the broker's own spawn attempt is what
  * surfaces a genuinely bad explicit path; this resolver's job is only "best guess at where `ant`
- * lives", never a hard gate.
+ * lives", never a hard gate. (Also unaffected by the compiled gate above — an explicit
+ * configuration is never a "guess".)
  */
 export function resolveAntExecutable(input: {
   setting?: string;
@@ -190,6 +214,10 @@ export function resolveAntExecutable(input: {
    *  file's own tests — never exercised against the ambient PATH, which may or may not have `ant`
    *  installed on any given machine. */
   which?: (cmd: string) => string | null;
+  /** Test seam (M6) for "is this a compiled binary" — defaults to `isCompiledBinary()`. Real
+   *  `bun test` always runs uncompiled, so this file's own tests must inject `true` to exercise
+   *  the compiled-gate branch at all. */
+  isCompiled?: () => boolean;
 }): { path: string; source: AntExecutableSource } | undefined {
   const settingPath = input.setting?.trim() || undefined;
   if (settingPath) return { path: settingPath, source: "setting" };
@@ -199,6 +227,9 @@ export function resolveAntExecutable(input: {
   const bundlePath = antExecutablePath(input.execPath);
   const isExecutableFile = input.isExecutableFile ?? realIsExecutableFile;
   if (isExecutableFile(bundlePath)) return { path: bundlePath, source: "bundle" };
+
+  const isCompiled = input.isCompiled ?? isCompiledBinary;
+  if (isCompiled()) return undefined; // M6: never reach the real system $PATH from a compiled binary
 
   const which = input.which ?? ((cmd: string) => Bun.which(cmd));
   const found = which("ant");
