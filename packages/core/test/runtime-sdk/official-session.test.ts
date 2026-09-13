@@ -351,6 +351,64 @@ describe("m7 — end() is terminal", () => {
     expect(h.queries).toHaveLength(2);
     expect(h.session.resumed).toBe(true); // the SECOND incarnation is
   });
+
+  // P10a-h (measured live against the real official runtime): `end()` used to only close the input
+  // stream and await the incarnation's own `done` — a child that does not exit merely because its
+  // input closed left `end()` (and therefore a handoff's own `HandoffSourceOwner.close()`, which
+  // calls this) hanging, or — against a real process — returning anyway once a DIFFERENT frame
+  // ended the read loop, leaving the actual OS process alive and its resume-lock held (which is
+  // what made a destination's own resume of the SAME backend uuid fail typed with the winter
+  // runtime's own "in use by another live process"). `end()` now falls back to `abort()`, mirroring
+  // `WinterSession.end()`'s exact race-then-abort-then-race shape.
+  test("P10a-h: end() falls back to abort() when the child never exits on its own after the input closes", async () => {
+    // A fake `OfficialQuery` that deliberately IGNORES its prompt stream closing (the bug's own
+    // precondition) and only ever ends when its incarnation's `AbortController` fires — proving
+    // `end()`'s fallback is what makes it finish, not merely that it eventually would have anyway.
+    class StuckFakeOfficialQuery {
+      interrupts = 0;
+      private endedByAbort = false;
+      private waiters: Array<(r: IteratorResult<Frame>) => void> = [];
+      constructor(prompt: AsyncIterable<string>, abort: AbortController) {
+        void (async () => { for await (const _t of prompt) { /* drained, deliberately never ends itself */ } })();
+        abort.signal.addEventListener("abort", () => {
+          this.endedByAbort = true;
+          for (const w of this.waiters.splice(0)) w({ value: undefined as never, done: true });
+        });
+      }
+      next(): Promise<IteratorResult<Frame>> {
+        if (this.endedByAbort) return Promise.resolve({ value: undefined as never, done: true });
+        return new Promise((resolve) => { this.waiters.push(resolve); });
+      }
+      return(): Promise<IteratorResult<Frame>> { return Promise.resolve({ value: undefined as never, done: true }); }
+      throw(e: unknown): Promise<IteratorResult<Frame>> { return Promise.reject(e); }
+      [Symbol.asyncIterator](): this { return this; }
+      async interrupt(): Promise<unknown> { this.interrupts++; return undefined; }
+    }
+    const stuckQueries: StuckFakeOfficialQuery[] = [];
+    const stuckRuntime = {
+      sdk: {
+        query: ({ prompt, options }: { prompt: AsyncIterable<string>; options: { abortController: AbortController } }) => {
+          const q = new StuckFakeOfficialQuery(prompt, options.abortController);
+          stuckQueries.push(q);
+          return q as unknown;
+        },
+      },
+      trackQuery: () => {},
+      untrack: () => {},
+    } as unknown as WinterRuntimeSdk;
+    // A short grace (never the 120 ms production default) so a REGRESSION back to "only await
+    // inc.done" fails this test by timing out, rather than by hanging the whole suite.
+    const h = harness({ runtime: stuckRuntime, endGraceMs: 20 });
+    await h.session.open();
+    expect(h.session.state).toBe("live");
+
+    await Promise.race([
+      h.session.end(),
+      Bun.sleep(2_000).then(() => { throw new Error("end() did not resolve — the abort fallback regressed"); }),
+    ]);
+    expect(h.session.state).toBe("ended");
+    expect(stuckQueries).toHaveLength(1);
+  });
 });
 
 // ── m8 ───────────────────────────────────────────────────────────────────────────────────────────
