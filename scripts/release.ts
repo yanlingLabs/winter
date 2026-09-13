@@ -107,8 +107,10 @@ import {
   row16Gate,
   row16IdentityCheck,
   row16ProvenanceCheck,
+  verifyAntEmbed,
   verifyVersionsJsonAgainstPins,
 } from "./release-lib";
+import { parseAntPin } from "./fetch-ant";
 import { CODEX_MODELS_VERIFIED } from "../packages/core/src/providers/codex-config";
 import { winterSourceOf } from "../packages/core/src/runtime-sdk/bundle-layout";
 import { REQUIRED_WINTER_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
@@ -484,6 +486,34 @@ if (!versionsCheck.ok) {
 const embeddedVersions = versionsCheck.versions!;
 console.log(`Embedded runtimes verified: winter re-signed (TeamIdentifier=${TEAM_ID}), claude untouched (TeamIdentifier=${CLAUDE_TEAM_ID}, hardened runtime, checksum matches VERSIONS.json).`);
 
+// --- Winter Phase 10a (P10a-4/P10a-5, Task L3, fix round 1): the THIRD embedded runtime — ant ---
+// `ant` is embed-time RE-SIGNED under Winter's own team identity (embed-runtimes.sh, --identifier
+// com.winter.ant) — it fits `assertSigned`'s existing generic check exactly, same as `winter`
+// above (never claude's "verify untouched" shape — L1's licence finding (MIT,
+// github.com/anthropics/anthropic-cli) is what permits Winter to redistribute + re-sign it).
+const embeddedAntPath = join(embeddedRuntimesDir, "ant", "ant");
+assertSigned(embeddedAntPath, "ant (embedded runtime)");
+
+// Checksum: like winter's own row16 identity check, this compares the PRE-SIGN vendor source
+// (vendor/ant/<tag>/ant, still on disk in THIS checkout) against the repo-root VERSIONS.json's
+// committed `ant.binarySha256` pin — NEVER the post-sign embedded copy just verified above:
+// codesigning embeds a signature blob that changes the file's bytes, so an already-re-signed file
+// can never hash-equal a pre-sign pin (the same reasoning `checksums.winterPreSign` applies to
+// `winter`). `verifyAntEmbed` (release-lib.ts) is the pure half of this gate; a failure here fails
+// the release before a single byte is notarized, same as every other embedded-runtime check above.
+const rootVersionsJsonText = readFileSync(join(ROOT, "VERSIONS.json"), "utf8");
+const antPin = parseAntPin(rootVersionsJsonText);
+const vendoredAntPath = join(ROOT, "vendor", "ant", antPin.tag, "ant");
+if (!existsSync(vendoredAntPath)) {
+  fail(`vendored ant not found at ${vendoredAntPath} (VERSIONS.json pins ant.tag=${antPin.tag}) — run \`bun run scripts/fetch-ant.ts\` first`);
+}
+const vendoredAntSha256 = createHash("sha256").update(readFileSync(vendoredAntPath)).digest("hex");
+const antEmbedCheck = verifyAntEmbed({ versionsJsonText: rootVersionsJsonText, actualSha256: vendoredAntSha256 });
+if (!antEmbedCheck.ok) {
+  fail(`ant (embedded runtime) failed the pin/checksum gate:\n  ${antEmbedCheck.failures.join("\n  ")}`);
+}
+console.log(`ant (embedded runtime) verified: re-signed (TeamIdentifier=${TEAM_ID}), vendored binary checksum matches VERSIONS.json ant.binarySha256.`);
+
 // Row 16 STRONG (P9a-8): a literal checksum equality against the CURRENTLY installed npm platform
 // package — meaningful only when the embed's own VERSIONS.json records winterSource=platform-
 // package (`row16IdentityCheck`, release-lib.ts). A non-dry-run release REQUIRES this path unless
@@ -716,6 +746,11 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   // this entitlements-relaxation check — which only has an opinion about code THIS repo signs —
   // does not apply to it; its identity/checksum are verified separately, above this array.
   { path: embeddedWinterPath, label: "winter (embedded runtime)", expect: [] },
+  // Winter Phase 10a (P10a-4/P10a-5, Task L3 fix round 1) — `ant` joins `winter` above: it too is
+  // re-signed at embed time under Winter's own team identity (embed-runtimes.sh, --identifier
+  // com.winter.ant), so the SAME "no hardening relaxation" posture applies. `claude`'s own
+  // reasoning above (embedded unmodified, out of scope for THIS array) does not apply here.
+  { path: embeddedAntPath, label: "ant (embedded runtime)", expect: [] },
   // panel-cef Task 6a: the GPU helper joined the Renderer. Chromium routes the GPU process to the
   // `(GPU)` bundle only when it needs the JIT-capable variant — SwiftShader — which a Mac with a
   // working Metal path never reaches, so this was invisible until Task 6a forced the software path
