@@ -104,27 +104,32 @@ export function ensureOfficialConfigDir(dir: string): void {
 }
 
 /**
- * Winter Phase 10a (P10a-2): "one profile, one config dir" — the Anthropic Platform CLI (`ant`)
- * and the embedded `claude` binary's `auth login --console` both read/write profiles under this
- * SAME directory (`ANTHROPIC_CONFIG_DIR`), a sibling of `officialConfigDirFor`'s own
- * `claude-config` directory rather than the same one: `CLAUDE_CONFIG_DIR` (the vendor CLI's own
- * session-transcript spool) and `ANTHROPIC_CONFIG_DIR` (the profile-credential store both `claude
- * auth login --console` and `ant` read) are two different vendor-defined roots that happen to be
- * set on the same child at once (P10a-2) — collapsing them into one directory would let a future
- * vendor CLI change have the transcript spool and the credential store collide.
+ * Winter Phase 10a (P10a-2, corrected fix wave 3 M-A): "one profile, one config dir" — the
+ * Anthropic Platform CLI (`ant`) reads/writes its login profile under this directory
+ * (`ANTHROPIC_CONFIG_DIR`), a sibling of `officialConfigDirFor`'s own `claude-config` directory
+ * rather than the same one: `CLAUDE_CONFIG_DIR` (the vendor `claude` CLI's own session-transcript
+ * spool) and `ANTHROPIC_CONFIG_DIR` (the profile-credential store `ant` reads/writes) are two
+ * different vendor-defined roots, still both set on an official-leg child at once (P10a-2) —
+ * collapsing them into one directory would let a future vendor CLI change have the transcript
+ * spool and the credential store collide. MEASURED (2026-09-13): `claude auth login --console`
+ * does NOT write anything under this directory at all — it mints a Console API key into
+ * `CLAUDE_CONFIG_DIR` instead — so `claude` is never a second writer here; the single login/logout
+ * door is `ant auth login`/`logout --profile winter` (`console-profile-broker.ts`, fix wave 3 M-A).
  *
- * Hardened 0700 at `login()`'s own call site (`console-profile-broker.ts`), the SAME
- * `ensureOfficialConfigDir` helper above — that function is already dir-path-agnostic, so this
- * door does not need its own copy.
+ * Hardened 0700 at `login()`'s own call site AND the watcher's own `startWatcher()`
+ * (`console-profile-broker.ts`), the SAME `ensureOfficialConfigDir` helper above — that function
+ * is already dir-path-agnostic, so neither door needs its own copy.
  */
 export function anthropicConfigDirFor(home: string): string {
   return join(home, "runtimes", "anthropic-config");
 }
 
-/** P10a-2: the ONE profile name every login/refresh/logout call names — `claude auth login
- *  --console` writes `<anthropicConfigDirFor(home)>/credentials/${ANTHROPIC_PROFILE_NAME}.json`,
- *  and `ant auth print-credentials --profile ${ANTHROPIC_PROFILE_NAME}` reads the identical file.
- *  Winter never supports more than one Anthropic Console profile — a literal, not a setting. */
+/** P10a-2: the ONE profile name every login/refresh/logout call names — `ant auth login --profile
+ *  ${ANTHROPIC_PROFILE_NAME}` writes `<anthropicConfigDirFor(home)>/credentials/${ANTHROPIC_PROFILE_NAME}.json`,
+ *  and `ant auth print-credentials --profile ${ANTHROPIC_PROFILE_NAME}` reads the identical file
+ *  (fix wave 3 M-A: `claude auth login --console` was measured to write neither this file nor
+ *  anything else under `ANTHROPIC_CONFIG_DIR` at all). Winter never supports more than one
+ *  Anthropic Console profile — a literal, not a setting. */
 export const ANTHROPIC_PROFILE_NAME = "winter";
 
 /** The console profile's own credential file — `officialAuthFamilyFor`'s "auto" arm probes this

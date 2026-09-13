@@ -40,31 +40,30 @@ export const WINTER_PEER_VERSIONS: { winterAgentSdk: string; claudeAgentSdk?: st
 };
 
 /**
- * Winter Phase 10a fix wave (C1-interim): the router version the console auth arm needs. The
- * PINNED `@yanlinglabs/winter-runtime-sdk@0.0.3` forwards only `MINIMAL_OS_VARIABLES` from `base`
- * and runs `officialCredentialPlan` itself regardless of arm — so a console child spawned against
- * it would get the OAuth bearer profile injected as `ANTHROPIC_API_KEY` by the router's own
+ * Winter Phase 10a fix wave (C1-interim; F1 corrected the comparison target): the router version
+ * the console auth arm needs. A router below this floor forwards only `MINIMAL_OS_VARIABLES` from
+ * `base` and runs `officialCredentialPlan` itself regardless of arm — so a console child spawned
+ * against it would get the OAuth bearer profile injected as `ANTHROPIC_API_KEY` by the router's own
  * api-key-family logic, not read the profile file at all. `official-options.ts`'s
- * `officialInputFor` compares the INSTALLED router version (never `REQUIRED_WINTER_RUNTIME_SDK`,
- * the daemon's own pin) against this constant, so the refusal flips off automatically the moment a
- * future pin bump actually installs a matching router — no second edit required here.
+ * `officialInputFor` compares the COMPILE-TIME PIN (`REQUIRED_WINTER_RUNTIME_SDK`, above) against
+ * this constant — never a runtime probe of the installed package (F1: that probe always answers
+ * `undefined` inside a compiled `$bunfs` binary) — so the refusal flips off automatically the
+ * moment a future pin bump actually raises `REQUIRED_WINTER_RUNTIME_SDK` to this floor or above.
  */
 export const CONSOLE_AUTH_ROUTER_MIN = "0.0.4";
 
 /**
- * The installed `@yanlinglabs/winter-runtime-sdk`'s own declared version — same `createRequire`
- * doorway as `installedClaudeAgentSdkVersion` above, for the identical reason (works from a real
- * `node_modules`; answers `undefined` inside a compiled `$bunfs` binary, where this required
- * dependency's own manifest cannot be resolved either).
+ * Winter Phase 10a fix wave (F2 corrected design, M-A): the `@yanlinglabs/winter-agent-sdk` floor
+ * the console login/logout doors need. Below this floor (measured against the installed 0.0.7) the
+ * SDK's `startAnthropicConsoleBrokerLogin`/`logoutAnthropicConsole` spawn `claude auth login
+ * --console`/`claude auth logout` — which was measured NOT to write the profile file at all (it
+ * mints a Console API key into `CLAUDE_CONFIG_DIR` instead) — rather than the single intended door,
+ * `ant auth login --profile winter`. Compared against the COMPILE-TIME PIN
+ * (`REQUIRED_WINTER_AGENT_SDK`, above), same F1 pattern as `CONSOLE_AUTH_ROUTER_MIN`: never a
+ * runtime probe of the installed package, so the refusal flips off automatically the moment a pin
+ * bump actually raises `REQUIRED_WINTER_AGENT_SDK` to this floor or above.
  */
-export function installedWinterRuntimeSdkVersion(): string | undefined {
-  try {
-    const pkgJsonPath = createRequire(import.meta.url).resolve("@yanlinglabs/winter-runtime-sdk/package.json");
-    return (JSON.parse(readFileSync(pkgJsonPath, "utf8")) as { version: string }).version;
-  } catch {
-    return undefined;
-  }
-}
+export const CONSOLE_BROKER_SDK_MIN = "0.0.9";
 
 /**
  * A plain per-component numeric comparison (`"0.0.10"` sorts ABOVE `"0.0.4"`, unlike a

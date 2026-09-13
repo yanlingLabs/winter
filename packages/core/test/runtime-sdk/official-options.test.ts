@@ -39,7 +39,6 @@ import {
   type OfficialSessionInput,
 } from "../../src/runtime-sdk/official-options";
 import { CONSOLE_AUTH_ROUTER_MIN } from "../../src/runtime-sdk/versions";
-import * as versionsModule from "../../src/runtime-sdk/versions";
 
 // ⚠️ Bun's `mock.module` overwrites properties on the ALREADY-LOADED module's own namespace object
 // IN PLACE (its own doc comment: "exports are overwritten") — so `winterAgentSdk.transcriptProjectKey`
@@ -48,9 +47,6 @@ import * as versionsModule from "../../src/runtime-sdk/versions";
 // anything in this file ever mocks the module, so restoring means naming this constant — never
 // re-reading the (by-then-mutated) namespace import.
 const REAL_TRANSCRIPT_PROJECT_KEY = winterAgentSdk.transcriptProjectKey;
-// Same trap, same fix, for `versions.ts`'s `installedWinterRuntimeSdkVersion` (F1's own "simulate
-// the compiled $bunfs binary" test, below) — captured before this file ever mocks that module.
-const REAL_INSTALLED_WINTER_RUNTIME_SDK_VERSION = versionsModule.installedWinterRuntimeSdkVersion;
 
 // ── officialPermissionModeFor ───────────────────────────────────────────────────────────────────
 
@@ -472,12 +468,11 @@ describe("officialInputFor — the console arm's real env (fix round 2, P10a-2; 
 // refuses typed BEFORE anything is spawned, gated on a single constant (`CONSOLE_AUTH_ROUTER_MIN`)
 // compared against the COMPILE-TIME PIN (`REQUIRED_WINTER_RUNTIME_SDK`) — never a runtime probe of
 // the installed package, which is exactly what made the gate dead inside a compiled `$bunfs`
-// Release binary (`installedWinterRuntimeSdkVersion()` always answers `undefined` there, and
-// `versionAtLeast(undefined, …)` is always `false`, so every Release console session refused
-// permanently). This suite simulates a pin below/at/above the floor via
-// `OfficialInputDeps.requiredWinterRuntimeSdkVersion` fakes to keep proving the gate itself still
-// exists and still refuses below the floor, plus one test that reproduces the exact compiled-binary
-// condition directly and shows the gate is now unaffected by it.
+// Release binary (the OLD `installedWinterRuntimeSdkVersion()` probe always answered `undefined`
+// there, and `versionAtLeast(undefined, …)` is always `false`, so every Release console session
+// refused permanently — that probe is now deleted, fix wave 3 Minor 3). This suite simulates a pin
+// below/at/above the floor via `OfficialInputDeps.requiredWinterRuntimeSdkVersion` fakes to keep
+// proving the gate itself still exists and still refuses below the floor.
 describe("officialInputFor — the console arm refuses until the router pin supports it (F1)", () => {
   const apiKeySelection: RuntimeSelection = {
     runtimeKind: "claude-agent", providerId: "anthropic", modelRef: "anthropic/claude-sonnet-5",
@@ -543,27 +538,13 @@ describe("officialInputFor — the console arm refuses until the router pin supp
     expect("input" in result).toBe(true);
   });
 
-  // F1's own regression test: reproduce the EXACT compiled-`$bunfs`-binary condition
-  // (`installedWinterRuntimeSdkVersion()` unresolvable) directly, rather than only via the deps
-  // override, and show the gate is unaffected — this is the precise scenario that made every
-  // Release console session refuse `official_console_router_unsupported` before this fix.
-  test("the compiled-$bunfs case (installedWinterRuntimeSdkVersion unresolvable) still passes the gate — it no longer reads that resolver at all", async () => {
-    await mock.module("../../src/runtime-sdk/versions", () => ({
-      ...versionsModule,
-      installedWinterRuntimeSdkVersion: () => undefined,
-    }));
-    try {
-      const result = officialInputFor(input, minimalDeps({
-        home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
-      }));
-      expect("input" in result).toBe(true);
-    } finally {
-      await mock.module("../../src/runtime-sdk/versions", () => ({
-        ...versionsModule,
-        installedWinterRuntimeSdkVersion: REAL_INSTALLED_WINTER_RUNTIME_SDK_VERSION,
-      }));
-    }
-  });
+  // Fix wave 3 (Minor 3): `installedWinterRuntimeSdkVersion()` (the runtime probe this gate used
+  // to read, before F1) is DELETED from versions.ts now that nothing but this file's own test ever
+  // called it — the gate has read only the compile-time pin since F1, so there is no runtime probe
+  // left in this file to simulate the compiled-$bunfs case against. The pin-based coverage above
+  // (below/at/above the floor, plus "no override uses the real pin") is the complete proof; the
+  // compiled-binary scenario specifically is that the pin resolves at COMPILE time, so it can never
+  // be `undefined` the way a `createRequire`-based runtime probe could.
 
   test("an unresolvable STUBBED pin (undefined override, falls back to the real pin) does not refuse", () => {
     const result = officialInputFor(input, minimalDeps({
