@@ -1857,23 +1857,17 @@ if (import.meta.main) {
     // reached through the SAME `createConsoleProfileBroker` thin adapter the daemon uses (never a
     // second core-side spawn).
     if (process.argv.includes("--anthropic-console")) {
-      const { createConsoleProfileBroker, resolveClaudeExecutable, resolveAntExecutable, ClaudeExecutableUnavailable } = await import("@yanlinglabs/winter-core");
+      const { createConsoleProfileBroker, resolveAntExecutable } = await import("@yanlinglabs/winter-core");
       const home = resolveWinterHome();
       let settings: Settings | undefined;
       try { settings = loadSettings(join(home, "settings.json")); } catch { settings = undefined; }
-      const resolved = resolveClaudeExecutable({
-        setting: settings?.runtimes?.claudeExecutable, env: process.env, execPath: process.execPath, exists: existsSync,
-      });
-      if (resolved instanceof ClaudeExecutableUnavailable) {
-        console.error(`the official claude runtime is not available: ${resolved.message}`);
-        process.exit(1);
-      }
-      // Fix wave (C2): the SAME `runtimes.antExecutable` ladder `daemon.ts` wires its own broker
-      // from — without this, `antExecutable: () => undefined` made the SDK refuse the post-login
-      // bearer refresh (`console-profile-broker.ts`'s own `claude_executable_unavailable`-shaped
-      // throw for a missing `ant`), and this door reported failure right after a successful login.
+      // Fix wave 3 (M-A): the `claude` executable requirement is GONE — the single login door is
+      // `ant auth login --profile winter`, which never touches `claude` at all (measured: `claude
+      // auth login --console` does not even write the profile file). `createConsoleProfileBroker`'s
+      // own `login()` refuses typed (`ant_executable_unavailable`, after the version-gate check) if
+      // `ant` itself is unresolved — no separate, earlier CLI-side check is needed or wanted.
       const broker = createConsoleProfileBroker({
-        home, claudeExecutable: () => resolved.path,
+        home,
         antExecutable: () => resolveAntExecutable({ setting: settings?.runtimes?.antExecutable, env: process.env, execPath: process.execPath })?.path,
         secrets,
       });
@@ -1912,7 +1906,10 @@ if (import.meta.main) {
         console.log(`${AQUA}signed in${RESET} — profile "${result.profile}"`);
         const refreshed = await broker.refreshBearer().catch((err) => ({ ok: false as const, reason: err instanceof Error ? err.name : "unknown" }));
         if (!refreshed.ok) {
-          console.error(`warning: could not refresh the native-provider bearer token yet (${refreshed.reason}) — a running daemon retries this on its own schedule`);
+          // Fix wave (F2): this login ran in a SEPARATE, short-lived process from any daemon
+          // (this door's own header, above) — a daemon watches the profile file and reacts on its
+          // own (see ConsoleProfileBroker.startWatcher), but only if one is actually running.
+          console.error(`warning: could not refresh the native-provider bearer token yet (${refreshed.reason}) — a running daemon will notice this profile and retry automatically; otherwise this refreshes the next time a daemon with this profile starts`);
         }
       } else {
         console.error(`sign-in failed: ${result.reason}`);
@@ -1992,23 +1989,20 @@ if (import.meta.main) {
   case "logout": {
     const { KeychainSecretStore, CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, clearCredentialMaterial, ANTHROPIC_CREDENTIAL_SECRET_NAME } = await import("@yanlinglabs/winter-core");
     const secrets = new KeychainSecretStore();
-    // Winter Phase 10a (O7, P10a-6): `--anthropic-console` runs the SDK's own `claude auth logout`
-    // (via the SAME broker adapter the daemon and `winter login --anthropic-console` use) and then
-    // clears the bearer material — distinct from `--anthropic` below, which only ever clears an
-    // api-key material and never touches the console profile.
+    // Winter Phase 10a (O7, P10a-6; fix wave 3 M-A corrected the door): `--anthropic-console` runs
+    // the SDK's own `ant auth logout --profile winter` (via the SAME broker adapter the daemon and
+    // `winter login --anthropic-console` use) and then clears the bearer material — distinct from
+    // `--anthropic` below, which only ever clears an api-key material and never touches the console
+    // profile. The `claude` binary's own `auth logout` is never used for this door.
     if (process.argv.includes("--anthropic-console")) {
-      const { createConsoleProfileBroker, resolveClaudeExecutable, resolveAntExecutable, ClaudeExecutableUnavailable } = await import("@yanlinglabs/winter-core");
+      const { createConsoleProfileBroker, resolveAntExecutable } = await import("@yanlinglabs/winter-core");
       const home = resolveWinterHome();
       let settings: Settings | undefined;
       try { settings = loadSettings(join(home, "settings.json")); } catch { settings = undefined; }
-      const resolved = resolveClaudeExecutable({
-        setting: settings?.runtimes?.claudeExecutable, env: process.env, execPath: process.execPath, exists: existsSync,
-      });
-      // Fix wave (C2): same ladder as the login door above, so logout tears down through the same
-      // `ant`-aware broker shape the daemon and login both use.
+      // Fix wave 3 (M-A): same ladder as the login door above, `claude` requirement dropped —
+      // `createConsoleProfileBroker`'s own `logout()` refuses typed if `ant` is unresolved.
       const broker = createConsoleProfileBroker({
         home,
-        claudeExecutable: () => (resolved instanceof ClaudeExecutableUnavailable ? undefined : resolved.path),
         antExecutable: () => resolveAntExecutable({ setting: settings?.runtimes?.antExecutable, env: process.env, execPath: process.execPath })?.path,
         secrets,
       });

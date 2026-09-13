@@ -30,7 +30,7 @@ import { officialCapabilityServersFor, type OfficialMcpModule } from "./official
 import { winterSystemPromptFor } from "./system-prompt";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import type { OfficialPeer } from "./create";
-import { CONSOLE_AUTH_ROUTER_MIN, installedWinterRuntimeSdkVersion, versionAtLeast } from "./versions";
+import { CONSOLE_AUTH_ROUTER_MIN, REQUIRED_WINTER_RUNTIME_SDK, versionAtLeast } from "./versions";
 
 /**
  * Phase 9c (P9c-1, WS-00 §8 #1): env names the official leg's spawned child must NEVER inherit
@@ -104,27 +104,32 @@ export function ensureOfficialConfigDir(dir: string): void {
 }
 
 /**
- * Winter Phase 10a (P10a-2): "one profile, one config dir" — the Anthropic Platform CLI (`ant`)
- * and the embedded `claude` binary's `auth login --console` both read/write profiles under this
- * SAME directory (`ANTHROPIC_CONFIG_DIR`), a sibling of `officialConfigDirFor`'s own
- * `claude-config` directory rather than the same one: `CLAUDE_CONFIG_DIR` (the vendor CLI's own
- * session-transcript spool) and `ANTHROPIC_CONFIG_DIR` (the profile-credential store both `claude
- * auth login --console` and `ant` read) are two different vendor-defined roots that happen to be
- * set on the same child at once (P10a-2) — collapsing them into one directory would let a future
- * vendor CLI change have the transcript spool and the credential store collide.
+ * Winter Phase 10a (P10a-2, corrected fix wave 3 M-A): "one profile, one config dir" — the
+ * Anthropic Platform CLI (`ant`) reads/writes its login profile under this directory
+ * (`ANTHROPIC_CONFIG_DIR`), a sibling of `officialConfigDirFor`'s own `claude-config` directory
+ * rather than the same one: `CLAUDE_CONFIG_DIR` (the vendor `claude` CLI's own session-transcript
+ * spool) and `ANTHROPIC_CONFIG_DIR` (the profile-credential store `ant` reads/writes) are two
+ * different vendor-defined roots, still both set on an official-leg child at once (P10a-2) —
+ * collapsing them into one directory would let a future vendor CLI change have the transcript
+ * spool and the credential store collide. MEASURED (2026-09-13): `claude auth login --console`
+ * does NOT write anything under this directory at all — it mints a Console API key into
+ * `CLAUDE_CONFIG_DIR` instead — so `claude` is never a second writer here; the single login/logout
+ * door is `ant auth login`/`logout --profile winter` (`console-profile-broker.ts`, fix wave 3 M-A).
  *
- * Hardened 0700 at `login()`'s own call site (`console-profile-broker.ts`), the SAME
- * `ensureOfficialConfigDir` helper above — that function is already dir-path-agnostic, so this
- * door does not need its own copy.
+ * Hardened 0700 at `login()`'s own call site AND the watcher's own `startWatcher()`
+ * (`console-profile-broker.ts`), the SAME `ensureOfficialConfigDir` helper above — that function
+ * is already dir-path-agnostic, so neither door needs its own copy.
  */
 export function anthropicConfigDirFor(home: string): string {
   return join(home, "runtimes", "anthropic-config");
 }
 
-/** P10a-2: the ONE profile name every login/refresh/logout call names — `claude auth login
- *  --console` writes `<anthropicConfigDirFor(home)>/credentials/${ANTHROPIC_PROFILE_NAME}.json`,
- *  and `ant auth print-credentials --profile ${ANTHROPIC_PROFILE_NAME}` reads the identical file.
- *  Winter never supports more than one Anthropic Console profile — a literal, not a setting. */
+/** P10a-2: the ONE profile name every login/refresh/logout call names — `ant auth login --profile
+ *  ${ANTHROPIC_PROFILE_NAME}` writes `<anthropicConfigDirFor(home)>/credentials/${ANTHROPIC_PROFILE_NAME}.json`,
+ *  and `ant auth print-credentials --profile ${ANTHROPIC_PROFILE_NAME}` reads the identical file
+ *  (fix wave 3 M-A: `claude auth login --console` was measured to write neither this file nor
+ *  anything else under `ANTHROPIC_CONFIG_DIR` at all). Winter never supports more than one
+ *  Anthropic Console profile — a literal, not a setting. */
 export const ANTHROPIC_PROFILE_NAME = "winter";
 
 /** The console profile's own credential file — `officialAuthFamilyFor`'s "auto" arm probes this
@@ -288,14 +293,26 @@ export class OfficialProjectKeyTooDeep extends Error {
 }
 
 /**
- * Winter Phase 10a fix wave (C1-interim): the console auth arm refuses typed, before anything is
- * spawned, while the installed `@yanlinglabs/winter-runtime-sdk` is older than
- * `CONSOLE_AUTH_ROUTER_MIN` (`versions.ts`'s own doc explains why: the pinned 0.0.3 router would
- * inject the OAuth bearer profile as `ANTHROPIC_API_KEY`, which is exactly the leak `officialAuthChildEnvFor`'s
- * console arm exists to prevent). This refusal is a STANDING guard, not a one-time migration note —
- * it re-evaluates the installed version on every call (or the test-injected
- * `OfficialInputDeps.installedWinterRuntimeSdkVersion` override) and stops refusing automatically
- * the moment a router upgrade actually lands.
+ * Winter Phase 10a fix wave (F1): the console auth arm refuses typed, before anything is spawned,
+ * while the PINNED `@yanlinglabs/winter-runtime-sdk` (`versions.ts`'s `REQUIRED_WINTER_RUNTIME_SDK`
+ * — the compile-time constant, never a runtime probe of the installed package) is older than
+ * `CONSOLE_AUTH_ROUTER_MIN` (`versions.ts`'s own doc explains why: a pre-upgrade router would
+ * inject the OAuth bearer profile as `ANTHROPIC_API_KEY`, which is exactly the leak
+ * `officialAuthChildEnvFor`'s console arm exists to prevent).
+ *
+ * Fix wave F1: this USED to compare the runtime-resolved `installedWinterRuntimeSdkVersion()`
+ * against the floor — but that resolver depends on `createRequire` finding a real `node_modules`
+ * manifest, which does not exist inside a compiled `$bunfs` binary (`versions.ts:57`'s own doc), so
+ * it always answered `undefined` there and `versionAtLeast(undefined, …)` is always `false`
+ * (`versions.ts:76`): every Release console session refused typed, permanently. The pin is the
+ * right thing to compare in the first place — `bundle-layout.ts`'s `parseAndValidateVersionsJson`
+ * (asserted by the pins test) already refuses to stage a Release bundle whose `VERSIONS.json`
+ * disagrees with `REQUIRED_WINTER_RUNTIME_SDK`, so the pin and the actually-installed/staged router
+ * are guaranteed equal in every environment that matters — no runtime probe is needed at all. This
+ * refusal is still a STANDING guard, not a one-time migration note: it re-evaluates the pin on every
+ * call (or the test-injected `OfficialInputDeps.requiredWinterRuntimeSdkVersion` override, used only
+ * to simulate a pin below/at/above the floor) and stops refusing automatically the moment a pin bump
+ * actually lands.
  */
 export class OfficialConsoleRouterUnsupported extends Error {
   readonly code = "official_console_router_unsupported" as const;
@@ -303,10 +320,45 @@ export class OfficialConsoleRouterUnsupported extends Error {
     super(
       `the console auth arm needs @yanlinglabs/winter-runtime-sdk >= ${requiredRouterVersion} (the pinned router forwards ` +
       `only its own minimal OS environment and runs its api-key credential plan unconditionally, which would inject the ` +
-      `console profile's OAuth bearer as ANTHROPIC_API_KEY); installed ${installedRouterVersion ?? "unknown"} — sign in with ` +
+      `console profile's OAuth bearer as ANTHROPIC_API_KEY); pinned ${installedRouterVersion ?? "unknown"} — sign in with ` +
       `an API key instead, or wait for the router upgrade`,
     );
     this.name = "OfficialConsoleRouterUnsupported";
+  }
+}
+
+/**
+ * Winter Phase 10a fix wave (F3, load-bearing guard): the console arm's OWN pre-spawn refusal when
+ * `consoleProfileCredentialFile(home)` does not exist. This is NOT a convenience check — it is the
+ * console arm's actual subscription guard. Measured (controller, 2026-09-13): a spawn's PRECEDENCE
+ * is "the explicit profile outranks a stored claude.ai login" (an `ANTHROPIC_PROFILE`/
+ * `ANTHROPIC_CONFIG_DIR` pair pointed at a real Console profile reports `authMethod: "oauth_token"`
+ * even when a subscription login sits in the SAME config dir), but a MISSING profile silently FALLS
+ * BACK to whatever claude.ai login is already stored there instead of refusing — so without this
+ * check, `officialInputFor` would still assemble a spawn (`ANTHROPIC_PROFILE`/`ANTHROPIC_CONFIG_DIR`
+ * set unconditionally on the console arm) that authenticates via a subscription Winter never
+ * intended it to use. `CONSOLE_API_KEY_SOURCE`'s own doc explains why `apiKeySource` alone cannot
+ * catch this after the fact (a subscription login reports the identical `"none"`) — THIS check,
+ * run BEFORE that spawn, is what actually keeps P9c-1's "no subscription auth" rule while
+ * `runtimes.official.subscriptionAuth` is off.
+ *
+ * MUST STAY A LIVE `existsSync` CALL ON EVERY SPAWN, never a cached/memoized answer or a decision
+ * reused from an earlier call (e.g. `officialAuthFamilyFor`'s own arm SELECTION, computed once when
+ * "auto" first resolves) — the profile can disappear between calls (`winter logout
+ * --anthropic-console` deleting it out from under an already-open, about-to-resume session is
+ * exactly the case this guard exists for), and reusing a stale "yes" would silently re-open the
+ * same fallback-to-subscription hole this check exists to close.
+ */
+export class OfficialConsoleProfileMissing extends Error {
+  readonly code = "console_profile_missing" as const;
+  constructor(readonly home: string) {
+    super(
+      `the console auth arm has no on-disk profile at "${consoleProfileCredentialFile(home)}" — a missing profile falls ` +
+      `back to any claude.ai login already stored in the same config dir instead of refusing, so this session refuses ` +
+      `before spawning rather than risk authenticating as that login; sign in with \`winter login --anthropic-console\` ` +
+      `(or \`ant auth login --profile ${ANTHROPIC_PROFILE_NAME}\` directly) first`,
+    );
+    this.name = "OfficialConsoleProfileMissing";
   }
 }
 
@@ -368,11 +420,20 @@ export interface OfficialInputDeps {
    *  incarnation with no daemon restart. `undefined`/`null` behaves exactly like an absent block
    *  (`officialSubscriptionAuthEnabled`'s own default: off). */
   settings?: Settings | null;
-  /** Winter Phase 10a fix wave (C1-interim): test-only override of `versions.ts`'s
-   *  `installedWinterRuntimeSdkVersion` — lets a test simulate a router upgrade (`() => "0.0.4"`)
-   *  without a real second package install. `undefined` (every production caller, and every test
-   *  that does not need to touch this gate) means "read the real installed version". */
-  installedWinterRuntimeSdkVersion?: () => string | undefined;
+  /** Winter Phase 10a fix wave (F1): test-only override of `versions.ts`'s
+   *  `REQUIRED_WINTER_RUNTIME_SDK` compile-time pin — lets a test simulate a pin below/at/above
+   *  `CONSOLE_AUTH_ROUTER_MIN` (e.g. `"0.0.3"`) without editing the real constant. `undefined`
+   *  (every production caller, and every test that does not need to touch this gate) means "use the
+   *  real pin". */
+  requiredWinterRuntimeSdkVersion?: string;
+  /** Winter Phase 10a fix wave (F3): test-only override of the console arm's LIVE
+   *  `existsSync(consoleProfileCredentialFile(home))` check — official-options.test.ts's own
+   *  `minimalDeps()` uses a symbolic, never-filesystem-backed `home`, so every console-arm test
+   *  that isn't specifically about this guard needs a way to say "the profile is present" without
+   *  actually writing one to disk. `undefined` (every production caller) means "read the real
+   *  file"; this is consulted FRESH on every call, exactly like the real check, so a test can still
+   *  flip it between calls to prove the guard is live rather than memoized. */
+  consoleProfileExists?: () => boolean;
 }
 
 /** `winterSystemPromptFor`'s memory-bucket choice, verbatim (chat/dispatch share `_assistant`; code
@@ -410,7 +471,7 @@ export interface OfficialInput {
 export function officialInputFor(
   input: OfficialSessionInput,
   deps: OfficialInputDeps,
-): OfficialInput | ClaudeExecutableUnavailable | OfficialProjectKeyTooDeep | OfficialCredentialPlanRefused | OfficialConsoleRouterUnsupported {
+): OfficialInput | ClaudeExecutableUnavailable | OfficialProjectKeyTooDeep | OfficialCredentialPlanRefused | OfficialConsoleRouterUnsupported | OfficialConsoleProfileMissing {
   const executable = deps.claudeExecutableFor();
   if (executable instanceof ClaudeExecutableUnavailable) return executable;
 
@@ -426,15 +487,23 @@ export function officialInputFor(
   // now carries what that parallel field used to.
   const officialAuthArm: "api-key" | "console" = deps.selection.authFamily === "console-profile" ? "console" : "api-key";
 
-  // Fix wave (C1-interim): the router-version gate — checked BEFORE anything else in this function
-  // builds a bridge, reads a credential, or touches disk, so a session refuses typed the instant
-  // the console arm is decided, never partway through assembling an input nothing could safely
-  // launch with. See `OfficialConsoleRouterUnsupported`'s own doc for why this is standing, not
-  // one-time.
+  // Fix wave (F1): the router-version gate — checked BEFORE anything else in this function builds a
+  // bridge, reads a credential, or touches disk, so a session refuses typed the instant the console
+  // arm is decided, never partway through assembling an input nothing could safely launch with.
+  // Compared against the COMPILE-TIME PIN (`REQUIRED_WINTER_RUNTIME_SDK`), never a runtime probe of
+  // the installed package — see `OfficialConsoleRouterUnsupported`'s own doc for why the pin alone
+  // is sufficient and why the old runtime probe was dead in every compiled Release binary.
   if (officialAuthArm === "console") {
-    const installedRouterVersion = (deps.installedWinterRuntimeSdkVersion ?? installedWinterRuntimeSdkVersion)();
-    if (!versionAtLeast(installedRouterVersion, CONSOLE_AUTH_ROUTER_MIN)) {
-      return new OfficialConsoleRouterUnsupported(installedRouterVersion, CONSOLE_AUTH_ROUTER_MIN);
+    const pinnedRouterVersion = deps.requiredWinterRuntimeSdkVersion ?? REQUIRED_WINTER_RUNTIME_SDK;
+    if (!versionAtLeast(pinnedRouterVersion, CONSOLE_AUTH_ROUTER_MIN)) {
+      return new OfficialConsoleRouterUnsupported(pinnedRouterVersion, CONSOLE_AUTH_ROUTER_MIN);
+    }
+    // Fix wave (F3, load-bearing guard): a LIVE existence check, on EVERY console-arm spawn — see
+    // `OfficialConsoleProfileMissing`'s own doc for why this is the console arm's actual
+    // subscription guard, not a convenience check, and why it must never be memoized/cached.
+    const consoleProfilePresent = (deps.consoleProfileExists ?? (() => existsSync(consoleProfileCredentialFile(deps.home))))();
+    if (!consoleProfilePresent) {
+      return new OfficialConsoleProfileMissing(deps.home);
     }
   }
 

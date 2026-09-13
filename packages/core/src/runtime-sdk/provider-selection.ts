@@ -2,6 +2,7 @@ import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import type { ModelFamilyListing, ProviderSelection } from "@yanlinglabs/winter-agent-sdk";
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { WINTER_CREDENTIAL_INVENTORY, credentialRefFor } from "./keychain";
+import type { Settings } from "../settings";
 
 /** The `winter-test/<name>` namespace (Winter map §11.6): selection is BY NAME through
  *  `model: "winter-test/<name>"` plus the env var `WINTER_TEST_PROVIDER`, precisely because a
@@ -69,13 +70,18 @@ export function providerSelectionFor(
   model: string | undefined,
   credentials: CredentialPresence,
   home?: string,
+  // Winter Phase 10a fix wave 3 (M-B, "Native sessions"): threaded through to `credentialRefFor`
+  // so the "anthropic" provider's ref picks `anthropic:console` vs `anthropic:default` the SAME
+  // way the official leg decides its own arm (`officialAuthFamilyFor`) — "both legs agree".
+  // `undefined` (a caller with no settings handy) keeps the old, unconditional `anthropic:default`.
+  settings?: Settings | null,
 ): ProviderSelection | undefined {
   if (!model) return undefined;
   if (model.startsWith(WINTER_TEST_MODEL_PREFIX)) return undefined;
 
   const qualified = qualifiedProviderFor(model);
   if (qualified) {
-    const ref = credentials.byProvider[qualified] ? credentialRefFor(qualified, home) : undefined;
+    const ref = credentials.byProvider[qualified] ? credentialRefFor(qualified, home, settings) : undefined;
     return ref ? { providerId: qualified, authRef: ref } : { providerId: qualified };
   }
 
@@ -87,7 +93,7 @@ export function providerSelectionFor(
 
   const withCredential = inInventory.find((s) => credentials.byProvider[s.provider] !== undefined);
   const chosen = withCredential ?? inInventory[0]!;
-  const ref = withCredential ? credentialRefFor(chosen.provider, home) : undefined;
+  const ref = withCredential ? credentialRefFor(chosen.provider, home, settings) : undefined;
   return ref ? { providerId: chosen.provider, authRef: ref } : { providerId: chosen.provider };
 }
 

@@ -95,6 +95,16 @@ WINTER_RUNTIME_EXECUTABLE="$PWD/../../dist/winter" WINTER_HOME=~/.winter-dev WIN
 # `~/.claude` itself is unreachable from this leg regardless of the flag (the vendored router refuses any config dir under a
 # `.claude` path segment outright); flipping the flag on today only widens which config dir this leg uses and skips the
 # assertion — it does not grant subscription access, which needs router-level work gated on Anthropic's approval.
+# P10a ADDENDUM: since Phase 10a the official leg also accepts the Console profile arm
+# (`runtimes.official.auth` = auto|api-key|console) alongside the api-key arm above. The single login door is
+# `ant auth login --profile winter` with `ANTHROPIC_CONFIG_DIR=<home>/runtimes/anthropic-config`, driven by the
+# SDK's own broker — the `claude` binary's own `auth login` is never used for this. A spawned child on this arm
+# gets exactly `ANTHROPIC_PROFILE`/`ANTHROPIC_CONFIG_DIR` and is asserted to report `apiKeySource: "none"`. A
+# LIVE, uncached pre-spawn check refuses typed as `console_profile_missing` on every spawn, because a missing
+# profile silently falls back to whatever login is already stored in that config dir instead of refusing.
+# `apiKeySource: "none"` is NOT a subscription discriminator — a claude.ai subscription login reports the
+# identical value. Nothing in Winter may ever log `claude` into Winter's own `CLAUDE_CONFIG_DIR`
+# (`officialConfigDirFor`'s `claude-config` dir) — the console arm's single login/logout door is `ant`, always.
 
 # Versioning (Phase 9c, P9c-2) — never edit versions by hand; VERSION file (#.###.# format: 0 . three-digit feature
 # counter . single-digit patch, e.g. 0.111.0) is canonical. The first digit moves only for a rebrand-scale event.

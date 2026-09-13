@@ -61,7 +61,7 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     const req = createRequire(import.meta.url);
     const pkgPath = req.resolve("@yanlinglabs/winter-agent-sdk/package.json");
     const pkg = require(pkgPath) as { version: string };
-    expect(pkg.version).toBe("0.0.7"); // 0.0.6 → 0.0.7 (P10a-int2 pin flip): the published changelog for this bump is "the anthropic-beta header now rides bearer material on the console provider; profile expires_at units normalised" — both changes are scoped to the "bearer" arm (the console-profile path), which this mirror's own header already excludes ("no test below exercises a bearer round-trip through this file's own coerceMaterial mirror yet"); the api-key/oauth arms this mirror actually exercises are untouched by this bump, so mirror re-verified for those two.
+    expect(pkg.version).toBe("0.0.9"); // 0.0.7 → 0.0.9 (P10a integration 3; 0.0.8 skipped): `packages/runtime/src/provider/keychain-store.ts` is byte-identical across v0.0.7..v0.0.9 (`git diff v0.0.7 v0.0.9` on it is empty) — the bump moved only the console bearer's Keychain account and its request-time refusal (console-broker.ts, messages.ts), so the api-key/oauth arms this mirror exercises are unchanged; mirror re-verified.
   });
 
 

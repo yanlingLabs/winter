@@ -16,7 +16,7 @@
 // this works regardless of import order and needs no dynamic `import()` gymnastics. It is undone in
 // `afterAll` so no other test file sharing this process sees a fake treated as real.
 import { afterAll, describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installMockModuleTripwire } from "../mock-module-tripwire";
@@ -43,8 +43,20 @@ import { PermissionGate } from "../../src/agent/gate";
 import { QuestionBroker } from "../../src/agent/questions";
 import { createProjector, type Projector } from "../../src/projector";
 import { FakeCheckpoints } from "../projector/harness";
+import { FileSecretStore } from "../../src/auth/secret-store";
+import { writeCredentialMaterial } from "../../src/auth/credential-material";
+import { Settings } from "../../src/settings";
+import { openRuntimeStateDb, ProjectionCheckpoints, RuntimeSessionRecords } from "../../src/runtime-state";
+import { SessionHub } from "../../src/sessions/hub";
+import { SessionStore } from "../../src/sessions/store";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
-import type { OfficialInputDeps, OfficialSessionInput } from "../../src/runtime-sdk/official-options";
+import { createWinterSessionDrivers } from "../../src/runtime-sdk/session-driver";
+import {
+  ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME,
+  ANTHROPIC_CREDENTIAL_SECRET_NAME,
+  keychainSeamFromSecretStore,
+} from "../../src/runtime-sdk/keychain";
+import { ANTHROPIC_PROFILE_NAME, anthropicConfigDirFor, type OfficialInputDeps, type OfficialSessionInput } from "../../src/runtime-sdk/official-options";
 import type { OfficialSessionAttachment } from "../../src/runtime-sdk/messaging";
 import {
   CONSOLE_API_KEY_SOURCE,
@@ -524,12 +536,16 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
       capabilities: {},
       canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
       policy: "auto",
-      // Fix wave (C1-interim): the installed router (0.0.3) is below `CONSOLE_AUTH_ROUTER_MIN` and
-      // would refuse the console arm typed before this test ever reaches the apiKeySource assertion
-      // under test here — simulate the future router upgrade so this stays a pure test of the
-      // assertion, not an accidental re-test of the gate (which has its own coverage in
+      // Fix wave (F1): the router-version gate now compares the compile-time pin
+      // (`REQUIRED_WINTER_RUNTIME_SDK`, "0.0.4") against `CONSOLE_AUTH_ROUTER_MIN` ("0.0.4"), never
+      // a runtime probe of the installed package — so no override is needed to reach the
+      // apiKeySource assertion under test here (that gate has its own coverage in
       // official-options.test.ts).
-      installedWinterRuntimeSdkVersion: () => "0.0.4",
+      // Fix wave (F3): this test's own `home` is a REAL mkdtempSync dir with no console profile
+      // ever written to it — without this override the new console_profile_missing guard would
+      // refuse before the apiKeySource assertion under test here is ever reached (that guard has
+      // its own coverage in official-options.test.ts).
+      consoleProfileExists: () => true,
     };
     const h = harness({ selection: consoleSelection, inputDeps: () => consoleInputDeps });
     await h.session.send("hi");
@@ -553,8 +569,10 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
       capabilities: {},
       canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
       policy: "auto",
-      // Fix wave (C1-interim): see the sibling test above for why this override is here.
-      installedWinterRuntimeSdkVersion: () => "0.0.4",
+      // Fix wave (F1): see the sibling test above — no router-version override needed any more.
+      // Fix wave (F3): see the sibling test above — this test's own real, empty `home` needs the
+      // same override to reach the apiKeySource assertion under test here.
+      consoleProfileExists: () => true,
     };
     const h = harness({ selection: consoleSelection, inputDeps: () => consoleInputDeps });
     await h.session.send("hi");
@@ -590,20 +608,20 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
   });
 });
 
-// Winter Phase 10a (O3, P10a-3/P10a-7 M1): `expectedApiKeySource` as a standalone pure lookup — the
-// console arm's own placeholder literal, and proof the api-key arm's assertion (tested end to end
-// above) is now DERIVED from this function rather than a second hand-typed "ANTHROPIC_API_KEY"
-// string. Wiring a real console-arm session through `run()`'s own assertion is `session-driver.ts`'s
-// `RuntimeSelection.authFamily` plumbing (outside this lane's file cluster) — carried; see the lane
-// report.
+// Winter Phase 10a (O3, P10a-3/P10a-7 M1, MEASURED 2026-09-13): `expectedApiKeySource` as a
+// standalone pure lookup — the console arm's own MEASURED literal, and proof the api-key arm's
+// assertion (tested end to end above) is now DERIVED from this function rather than a second
+// hand-typed "ANTHROPIC_API_KEY" string. Wiring a real console-arm session through `run()`'s own
+// assertion is `session-driver.ts`'s `RuntimeSelection.authFamily` plumbing (outside this lane's
+// file cluster) — carried; see the lane report.
 describe("O3 — expectedApiKeySource / CONSOLE_API_KEY_SOURCE", () => {
   test("api-key arm expects the pinned ANTHROPIC_API_KEY — unchanged from P9c-1", () => {
     expect(expectedApiKeySource("api-key")).toBe("ANTHROPIC_API_KEY");
   });
 
-  test("console arm expects the M1 placeholder literal — a one-line edit once the controller measures the real value", () => {
+  test("console arm expects the measured \"none\" — shared with a claude.ai subscription login, so this alone is never the subscription discriminator (see CONSOLE_API_KEY_SOURCE's own doc — that's officialInputFor's console_profile_missing guard, F3)", () => {
     expect(expectedApiKeySource("console")).toBe(CONSOLE_API_KEY_SOURCE);
-    expect(CONSOLE_API_KEY_SOURCE).toBe("<M1-unmeasured>");
+    expect(CONSOLE_API_KEY_SOURCE).toBe("none");
   });
 
   test("the two arms never expect the same value — a mismatch against one can never coincidentally pass as the other", () => {
@@ -682,5 +700,219 @@ describe("P9c-1 — apiKeySource observability on OfficialInitFacts", () => {
     h.q().emit(init(BACKEND_ID)); // no apiKeySource field at all
     await h.settled();
     expect(h.session.init?.apiKeySource).toBeUndefined();
+  });
+});
+
+// ── Winter Phase 10a fix wave 4 (Major M-C) — end to end, through the REAL session-driver.ts ───
+//
+// Every OTHER describe block in this file drives `startOfficialSession` directly with a STATIC
+// `inputDeps` object (`harness()`, above) — deliberately, per this file's own header, keeping
+// `official-session.ts`'s state machine isolated from `session-driver.ts`'s own wiring. THIS block
+// is the one exception: M-C's bug lives in `session-driver.ts`'s `assembleOfficial`/`inputDeps()`
+// closure — a private function this file cannot import directly — so proving the fix means driving
+// the REAL `createWinterSessionDrivers` (the same factory `daemon.ts` wires in production) over a
+// real `FileSecretStore`-backed home, with a fake `runtime.sdk.query` that records the exact
+// `options` each incarnation was actually launched with.
+describe("session-driver.ts (real) — the official leg's own anthropic ref must never drift with live settings mid-session (P10a fix wave 4, M-C)", () => {
+  const MODEL = "anthropic/claude-fable-5"; // a real pinned-catalog qualified anthropic key
+  const API_KEY_MATERIAL = "sk-test-real-api-key-material";
+  const CONSOLE_BEARER_MATERIAL = "CONSOLE-OAUTH-BEARER-must-never-reach-ANTHROPIC_API_KEY";
+
+  interface CapturedOptions {
+    provider?: { providerId: string; authRef?: { kind: string; account?: string } };
+    runtime?: {
+      official?: {
+        credentials?: Array<{ variable: string; ref: { kind: string; account?: string } }>;
+        connectionEnv?: Record<string, string>;
+      };
+    };
+  }
+
+  /**
+   * `existing` lets a second call SHARE one world's `home`/`store`/`hub`/`records`/`checkpoints`/
+   * `secrets` while building a completely FRESH `drivers` table (its own empty in-memory driver
+   * map, its own `runtime`/`capturedOptions`/`queries`) — the same "simulate a daemon restart
+   * without actually reopening the sqlite files" shape `session-driver.test.ts`'s own `table()`
+   * uses for its n7 test. A driver built this way has no live session for `sid`, so `ensure()`/
+   * `resume()` must go through `assembleOfficial` FRESH — exactly the `resumeOfficial` path a
+   * handoff INTO the official leg takes (`session.setModel` → `handoff.ts` → `ensure()`).
+   */
+  function driverWorld(existing?: {
+    home: string; store: SessionStore; hub: SessionHub; records: RuntimeSessionRecords;
+    checkpoints: ProjectionCheckpoints; secrets: FileSecretStore;
+  }) {
+    const home = existing?.home ?? testHome();
+    const store = existing?.store ?? new SessionStore(home);
+    const hub = existing?.hub ?? new SessionHub(store);
+    const rs = existing === undefined ? openRuntimeStateDb(home) : undefined;
+    const records = existing?.records ?? new RuntimeSessionRecords(rs!);
+    const checkpoints = existing?.checkpoints ?? new ProjectionCheckpoints(rs!);
+    const secrets = existing?.secrets ?? new FileSecretStore(join(home, "secrets"));
+    // "auto" mode — no `runtimes.official.auth` pin — exactly the review's own scenario.
+    const settings = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" } });
+    const officialSelection: RuntimeSelection = {
+      runtimeKind: "claude-agent", providerId: "anthropic", modelRef: MODEL,
+      family: "claude", authFamily: "api-key", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
+    };
+    const capturedOptions: CapturedOptions[] = [];
+    const queries: FakeOfficialQuery[] = [];
+    const runtime = {
+      sdk: {
+        query: ({ prompt, options }: { prompt: AsyncIterable<string>; options: CapturedOptions }) => {
+          capturedOptions.push(options);
+          const q = new FakeOfficialQuery(prompt);
+          queries.push(q);
+          return q as unknown;
+        },
+      },
+      spawnHookFor: () => ({ pathToClaudeCodeExecutable: "/usr/bin/true" }),
+      claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
+      officialPeerSync: () => undefined,
+      // `decideRuntime` (session-driver.ts) routes this session to the official leg.
+      selectRuntimeFor: async () => officialSelection,
+      trackQuery: () => {},
+      untrack: () => {},
+    } as unknown as WinterRuntimeSdk;
+    const drivers = createWinterSessionDrivers({
+      home, settings: () => settings, runtime, records, checkpoints, store, hub, secrets,
+      buildSessionCapabilities: () => ({}),
+      approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(),
+      rootsOf: () => [], tmpDirOf: () => home, outDirOf: () => home, memoryKeyOf: () => "k",
+      log: () => {},
+    });
+    const close = (): void => { try { store.close(); } catch { /* closed */ } try { rs?.close(); } catch { /* closed */ } };
+    return {
+      home, store, hub, records, checkpoints, secrets, drivers, close, capturedOptions, queries,
+      q: () => queries[queries.length - 1]!,
+    };
+  }
+
+  test("a session assembled on the api-key arm, resumed after a Console sign-in, still injects the api-key material — never the Console bearer", async () => {
+    const w = driverWorld();
+    try {
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+
+      const sid = w.store.createSession("t", { mode: "code", model: MODEL });
+      const session = await w.drivers.create(sid);
+
+      // Generation 1 (session assembly time): no console profile on disk yet -> the api-key arm.
+      expect(w.capturedOptions).toHaveLength(1);
+      expect(w.capturedOptions[0]!.provider?.authRef).toMatchObject({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME });
+      expect(w.capturedOptions[0]!.runtime?.official?.credentials).toEqual([
+        { variable: "ANTHROPIC_API_KEY", ref: expect.objectContaining({ account: ANTHROPIC_CREDENTIAL_SECRET_NAME }) },
+      ]);
+
+      // The child runs one turn, then exits ON ITS OWN (never a deliberate `session.end()`) —
+      // leaving the session "resumable", exactly the review's own step 3.
+      w.q().emit(init(session.backendSessionId, { apiKeySource: "ANTHROPIC_API_KEY" }));
+      w.q().emit(assistant("ok"));
+      w.q().emit(result());
+      await Bun.sleep(10);
+      w.q().end();
+      await Bun.sleep(10);
+      expect(session.state).toBe("resumable");
+
+      // The drift: the user signs in with Console — `ant`'s own profile file appears, and the
+      // console broker seeds its OWN bearer at the separate `anthropic:console` account. Nothing
+      // about THIS session's own `RuntimeSelection.authFamily` (fixed at assembly, above) changes.
+      const profileDir = join(anthropicConfigDirFor(w.home), "credentials");
+      mkdirSync(profileDir, { recursive: true });
+      writeFileSync(join(profileDir, `${ANTHROPIC_PROFILE_NAME}.json`), JSON.stringify({ ok: true }));
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, { kind: "bearer", token: CONSOLE_BEARER_MATERIAL });
+
+      // "The next send re-opens it" — a REAL second incarnation, through the REAL `inputDeps()`.
+      await session.send("resume me");
+      expect(w.capturedOptions).toHaveLength(2);
+      const gen2 = w.capturedOptions[1]!;
+
+      // THE ASSERTION: even after the Console sign-in, this session's own `provider.authRef` and
+      // the credential plan's `ANTHROPIC_API_KEY` ref must STILL name `anthropic:default` — never
+      // `anthropic:console` — because `selection.authFamily` never moved off "api-key". Before the
+      // fix, `inputDeps()` threaded live `settings` into `providerSelectionFor`'s "anthropic"
+      // resolution and this assertion failed (the ref named `anthropic:console`).
+      expect(gen2.provider?.authRef).toMatchObject({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME });
+      expect(gen2.runtime?.official?.credentials).toEqual([
+        { variable: "ANTHROPIC_API_KEY", ref: expect.objectContaining({ account: ANTHROPIC_CREDENTIAL_SECRET_NAME }) },
+      ]);
+
+      // And the material a real spawn would actually read through that ref is the api-key string —
+      // never the Console bearer (the actual leak the review named).
+      const ref = gen2.runtime!.official!.credentials![0]!.ref;
+      const value = await keychainSeamFromSecretStore(w.secrets, w.home).read(ref as never);
+      expect(value).toBe(API_KEY_MATERIAL);
+      expect(value).not.toBe(CONSOLE_BEARER_MATERIAL);
+
+      w.q().emit(init(session.backendSessionId, { apiKeySource: "ANTHROPIC_API_KEY" }));
+      w.q().emit(result());
+      await Bun.sleep(10);
+      await session.end();
+    } finally {
+      w.close();
+    }
+  });
+
+  // Coordinator addendum (cross-runtime handoff must keep working in BOTH directions): the M-C fix
+  // pins ONLY the credential ref for the LIFETIME of one already-assembled official incarnation
+  // set (the `inputDeps()` path, re-run on every `open()`/resume of the SAME `OfficialSession`
+  // instance) to that instance's fixed `selection.authFamily`. It must NEVER touch
+  // `assembleOfficial`'s own per-ASSEMBLY decision (session-driver.ts ~559-565,
+  // `officialAuthFamilyFor` against LIVE settings/profile presence) — a FRESH assembly of the SAME
+  // session (a daemon restart, or `resumeOfficial`, which is exactly the path a `session.setModel`
+  // handoff INTO the official leg resumes through) must still re-decide the arm from whatever is
+  // true RIGHT NOW. This test proves the contrast directly: the SAME session, the SAME Console
+  // sign-in, but assembled FRESH instead of re-opened on the old instance, ends up on the console
+  // arm — never pinned to the stale api-key arm the way the M-C test above (correctly) pins the
+  // SAME incarnation set.
+  test("a FRESH assembly of the same session (resumeOfficial / handoff-into-official) re-decides the arm from LIVE state and picks console — assembleOfficial's own per-assembly decision is untouched by the M-C fix", async () => {
+    const w = driverWorld();
+    try {
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+
+      const sid = w.store.createSession("t", { mode: "code", model: MODEL });
+      const session = await w.drivers.create(sid);
+      expect(w.capturedOptions[0]!.runtime?.official?.credentials).toEqual([
+        { variable: "ANTHROPIC_API_KEY", ref: expect.objectContaining({ account: ANTHROPIC_CREDENTIAL_SECRET_NAME }) },
+      ]);
+
+      // End this incarnation — a genuine restart discards the in-memory driver table entirely, so
+      // nothing about how this one ends matters beyond letting its query settle first.
+      w.q().emit(init(session.backendSessionId, { apiKeySource: "ANTHROPIC_API_KEY" }));
+      w.q().emit(result());
+      await Bun.sleep(10);
+      w.q().end();
+      await Bun.sleep(10);
+
+      // The drift: sign in with Console — same as the M-C test above.
+      const profileDir = join(anthropicConfigDirFor(w.home), "credentials");
+      mkdirSync(profileDir, { recursive: true });
+      writeFileSync(join(profileDir, `${ANTHROPIC_PROFILE_NAME}.json`), JSON.stringify({ ok: true }));
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, { kind: "bearer", token: CONSOLE_BEARER_MATERIAL });
+
+      // A FRESH driver table sharing the SAME store/records/checkpoints/secrets/home — "a daemon
+      // restart", the same shape `session-driver.test.ts`'s own n7 test uses, and the state a
+      // handoff INTO the official leg resumes through (`resumeOfficial` reads `record.selection`
+      // and calls `assembleOfficial` from scratch — never a live in-memory session). Nothing here
+      // is the SAME `OfficialSession` JS instance the first half of this test used.
+      const w2 = driverWorld({ home: w.home, store: w.store, hub: w.hub, records: w.records, checkpoints: w.checkpoints, secrets: w.secrets });
+      const resumed = await w2.drivers.ensure(sid);
+      expect(resumed).toBeDefined();
+
+      // THE CONTRAST with the M-C regression test: this FRESH assembly is NOT pinned to the OLD
+      // incarnation-set's api-key arm — it re-reads the now-present profile and widens
+      // `selection.authFamily` to `"console-profile"`, so this incarnation carries NO
+      // `ANTHROPIC_API_KEY` credential at all, only `ANTHROPIC_PROFILE`/`ANTHROPIC_CONFIG_DIR`.
+      expect(w2.capturedOptions).toHaveLength(1);
+      const gen = w2.capturedOptions[0]!;
+      expect(gen.runtime?.official?.credentials ?? []).toEqual([]);
+      expect(gen.runtime?.official?.connectionEnv?.ANTHROPIC_PROFILE).toBe(ANTHROPIC_PROFILE_NAME);
+      expect(gen.runtime?.official?.connectionEnv?.ANTHROPIC_CONFIG_DIR).toBe(anthropicConfigDirFor(w.home));
+
+      w2.q().emit(init(resumed!.backendSessionId, { apiKeySource: CONSOLE_API_KEY_SOURCE }));
+      w2.q().emit(result());
+      await Bun.sleep(10);
+      await resumed!.end();
+    } finally {
+      w.close();
+    }
   });
 });

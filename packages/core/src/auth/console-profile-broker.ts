@@ -30,6 +30,8 @@
 // names at 0.0.6 exactly as Lane S described above — wired below as `REAL_SDK`, now the default
 // `sdk` dependency. `UNAVAILABLE_SDK` stays as an explicit, still-tested defensive fallback shape
 // (never the default any more) rather than being deleted outright.
+import fs from "node:fs";
+import { join } from "node:path";
 import { credentialStoreOverSecretStore } from "../providers/credential-store";
 import {
   DEFAULT_ANTHROPIC_CONSOLE_PROFILE,
@@ -41,7 +43,9 @@ import {
 } from "@yanlinglabs/winter-provider-runtime";
 import type { SecretStore } from "./secret-store";
 import { keychainService } from "../profile";
-import { ANTHROPIC_PROFILE_NAME, anthropicConfigDirFor, ensureOfficialConfigDir, officialConfigDirFor } from "../runtime-sdk/official-options";
+import { ANTHROPIC_PROFILE_NAME, anthropicConfigDirFor, ensureOfficialConfigDir } from "../runtime-sdk/official-options";
+import { ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME } from "../runtime-sdk/keychain";
+import { CONSOLE_BROKER_SDK_MIN, REQUIRED_WINTER_AGENT_SDK, versionAtLeast } from "../runtime-sdk/versions";
 
 // Tripwire (Winter Phase 10a, v0.0.6 wiring): Winter's own profile name (`ANTHROPIC_PROFILE_NAME`,
 // `runtime-sdk/official-options.ts`) is a separate literal from the SDK's own default — they are
@@ -56,16 +60,17 @@ if (DEFAULT_ANTHROPIC_CONSOLE_PROFILE !== ANTHROPIC_PROFILE_NAME) {
   );
 }
 
-/** The options bag every SDK function below takes, per Lane S's pinned shape. `claudeExecutable`
- *  is a plain (possibly empty) string rather than `string | undefined` — the HOST decides whether a
- *  missing executable refuses (see `login`'s own guard below) rather than pushing that judgment
- *  call into the SDK function, which has no Winter-specific concept of "unavailable" to refuse
- *  with. */
+/**
+ * The options bag every SDK function below takes. Fix wave 3 (M-A, corrected design): `claudeExecutable`/
+ * `claudeConfigDir` are GONE from this daemon-level shape — the single login/logout door is `ant
+ * auth login`/`logout --profile winter`, which needs neither (the SDK ignores both from 0.0.8 on).
+ * `antExecutable` stays optional: the HOST decides whether a missing executable refuses (see
+ * `login`'s own guard below) rather than pushing that judgment call into the SDK function, which
+ * has no Winter-specific concept of "unavailable" to refuse with.
+ */
 export interface AnthropicLoginOptions {
-  claudeExecutable: string;
   antExecutable?: string;
   anthropicConfigDir: string;
-  claudeConfigDir: string;
   profile?: string;
   service?: string;
   onLine?: (line: string) => void;
@@ -102,6 +107,28 @@ export interface AnthropicConsoleSdk {
  *  that only need the CODE (e.g. a wire `reason` field) should match on this constant; it is a
  *  substring of every `UNAVAILABLE_SDK` error message below, never the whole message. */
 export const CONSOLE_BROKER_UNAVAILABLE_REASON = "console_broker_unavailable";
+
+/** Winter Phase 10a fix wave 3 (M-A): the refusal reason `login()`/`logout()` throw when the
+ *  compile-time `REQUIRED_WINTER_AGENT_SDK` pin is below `CONSOLE_BROKER_SDK_MIN` — see that
+ *  constant's own doc (`versions.ts`) for why this exists: below the floor, the SDK's own
+ *  login/logout still spawn `claude auth login/logout --console` into Winter's OWN
+ *  `CLAUDE_CONFIG_DIR`, never the intended `ant`-driven door. Distinct from
+ *  `CONSOLE_BROKER_UNAVAILABLE_REASON` (a missing/too-old PACKAGE) — this is a too-old PIN with the
+ *  package present. */
+export const CONSOLE_BROKER_SDK_UNSUPPORTED_REASON = "console_broker_sdk_unsupported";
+
+/** Winter Phase 10a fix wave 4 (Minor 2): the refusal reason `logout()` throws when
+ *  `sdk.logoutAnthropicConsole` resolves WITHOUT actually removing the on-disk profile. The SDK's
+ *  own `ant auth logout` call ignores its own child's exit code (measured) — a stale `ant`, a
+ *  broken profile, or a permissions fault can all leave the profile file untouched while still
+ *  resolving successfully, so `logout()` re-checks the exact same on-disk fact `profileExists()`
+ *  reports everywhere else in this file, LIVE, right after the SDK call returns, rather than
+ *  trusting that a resolved promise means the profile is actually gone. Left unchecked, the
+ *  console arm would keep authenticating off the still-present profile and the next daemon boot's
+ *  own `consoleBroker.profileExists()` check (`daemon.ts`) would re-mint the bearer right back —
+ *  `provider.logout`/`winter logout --anthropic-console` must report this as a FAILURE, never a
+ *  silent success. */
+export const CONSOLE_LOGOUT_INCOMPLETE_REASON = "console_logout_incomplete";
 
 /** Fix round 1 item 4: the exact package + minimum version `UNAVAILABLE_SDK`'s own error messages
  *  name — confirmed by reading the SDK worktree's own `packages/provider-runtime/package.json`
@@ -140,6 +167,9 @@ export const UNAVAILABLE_SDK: AnthropicConsoleSdk = {
  * returns its handle SYNCHRONOUSLY on the real SDK (`Bun.spawn` can throw before any process exists,
  * per its own doc comment) — wrapped in `Promise.resolve` here only to satisfy this file's
  * pre-existing `AnthropicConsoleSdk` interface, which every caller already awaits.
+ *
+ * Since the 0.0.9 integration the installed SDK's own options type carries no claude fields either, so
+ * every call passes this daemon's `AnthropicLoginOptions` straight through.
  */
 export const REAL_SDK: AnthropicConsoleSdk = {
   startAnthropicConsoleBrokerLogin: (store, options) => Promise.resolve(sdkStartAnthropicConsoleBrokerLogin(store, options)),
@@ -161,12 +191,28 @@ export interface ConsoleProfileBroker {
    *  why no equivalent exists on the SDK side. */
   startRefresher(): void;
   stopRefresher(): void;
+  /**
+   * Winter Phase 10a fix wave (F2): watches the console profile's own credential file for
+   * appearing or disappearing, from ANY process or door — a CLI `winter login`/`logout
+   * --anthropic-console` (a separate, short-lived process from the daemon), the daemon's own
+   * RPC-driven `provider.login`/`provider.logout`, or a human running `ant auth login`/`logout
+   * --profile winter` directly — and reacts the same way that door's own call already would:
+   * `startRefresher()` (its own seed refresh IS `refreshBearer()`, bundled) on appear, and
+   * `stopRefresher()` + deleting the bearer material on disappear.
+   *
+   * Exists because the CLI's login/logout doors build their OWN, short-lived broker instance in a
+   * SEPARATE PROCESS from the daemon (`main.ts`'s own header: "NOT an RPC — the daemon may not
+   * even be running") — a daemon that booted before that CLI process ran, or is simply a different
+   * process from it, has no other way to learn the profile changed. Idempotent: a second
+   * `startWatcher()` while already running, or `stopWatcher()` while already stopped, is a no-op.
+   */
+  startWatcher(): void;
+  stopWatcher(): void;
 }
 
 export interface ConsoleProfileBrokerDeps {
   /** WINTER_HOME. */
   home: string;
-  claudeExecutable: () => string | undefined;
   antExecutable?: () => string | undefined;
   /** The daemon's OWN SecretStore — bridged to the SDK's `CredentialStore` via
    *  `credentialStoreOverSecretStore` (`providers/credential-store.ts`), the SAME bridge
@@ -181,6 +227,15 @@ export interface ConsoleProfileBrokerDeps {
    *  v0.0.6 exports); tests pass a fake, and a caller can still pass `UNAVAILABLE_SDK` explicitly
    *  (see that constant's own doc). */
   sdk?: AnthropicConsoleSdk;
+  /** Winter Phase 10a fix wave (F2): test seam for the watcher's `fs.watch` call — mirrors
+   *  `settings-watcher.ts`'s own `watch?` seam shape exactly. Defaults to the real `fs.watch`. */
+  watchDirFn?: (path: string, cb: () => void) => { close(): void };
+  /** Winter Phase 10a fix wave 3 (M-A): test-only override of `versions.ts`'s
+   *  `REQUIRED_WINTER_AGENT_SDK` compile-time pin — same F1 pattern as
+   *  `OfficialInputDeps.requiredWinterRuntimeSdkVersion`, lets a test simulate a pin below/at/above
+   *  `CONSOLE_BROKER_SDK_MIN` without editing the real constant. `undefined` (every production
+   *  caller) means "use the real pin". */
+  requiredWinterAgentSdkVersion?: string;
 }
 
 /** 60s before expiry (P10a-4's own rule); on a FAILED refresh, retry after this same window rather
@@ -188,6 +243,23 @@ export interface ConsoleProfileBrokerDeps {
  *  then, and a broker that silently stops retrying forever is worse than one that retries too
  *  often. */
 const REFRESH_LEAD_MS = 60_000;
+
+/** Winter Phase 10a fix wave (F2): the watcher's debounce window after an `fs.watch` event fires —
+ *  short enough to react quickly, long enough to coalesce a burst (e.g. a login writing the profile
+ *  file in more than one syscall) into one check. */
+const WATCHER_DEBOUNCE_MS = 500;
+
+/** Winter Phase 10a fix wave (F2): the watcher's fallback poll interval — self-heals against a
+ *  missed or coalesced `fs.watch` event (macOS `fs.watch` is not perfectly reliable) without being
+ *  so frequent it is meaningfully more expensive than the `fs.watch` path itself. */
+const WATCHER_POLL_MS = 60_000;
+
+/** Winter Phase 10a fix wave 3 (Minor, M-B): a SECOND presence check this long after the first one
+ *  observed a potential transition, on BOTH the debounced fs-event path and the (previously
+ *  undebounced) poll path — only if the SECOND check still agrees does the watcher actually act.
+ *  Guards against a brief flicker (e.g. `ant` rewriting the profile file as part of its own
+ *  refresh/re-login, momentarily unlinking then recreating it) reading as a real appear/disappear. */
+const WATCHER_CONFIRM_MS = 1_000;
 
 /**
  * Winter Phase 10a fix wave (M3-clamp): `armAt`'s own floor on the NEXT fire delay — never sooner
@@ -221,7 +293,6 @@ export function createConsoleProfileBroker(deps: ConsoleProfileBrokerDeps): Cons
   const sdk = deps.sdk ?? REAL_SDK;
   const store = credentialStoreOverSecretStore(deps.secrets);
   const anthropicConfigDir = anthropicConfigDirFor(deps.home);
-  const claudeConfigDir = officialConfigDirFor(deps.home);
   const now = deps.now ?? Date.now;
   // Belt-and-braces (fix round 1 item 2): the REAL timer is `unref()`'d so a forgotten
   // `stopRefresher()` can never by itself keep the daemon process alive — `stop()` still calls it
@@ -238,10 +309,8 @@ export function createConsoleProfileBroker(deps: ConsoleProfileBrokerDeps): Cons
   const optionsFor = (onLine?: (line: string) => void): AnthropicLoginOptions => {
     const ant = deps.antExecutable?.();
     return {
-      claudeExecutable: deps.claudeExecutable() ?? "",
       ...(ant === undefined ? {} : { antExecutable: ant }),
       anthropicConfigDir,
-      claudeConfigDir,
       profile: ANTHROPIC_PROFILE_NAME,
       service: keychainService(),
       ...(onLine === undefined ? {} : { onLine }),
@@ -249,8 +318,36 @@ export function createConsoleProfileBroker(deps: ConsoleProfileBrokerDeps): Cons
     };
   };
 
+  /** Winter Phase 10a fix wave 3 (M-A): the version gate `login()`/`logout()` both check BEFORE
+   *  any spawn — see `CONSOLE_BROKER_SDK_UNSUPPORTED_REASON`'s own doc. Re-evaluated on every call
+   *  (or the test-injected `ConsoleProfileBrokerDeps.requiredWinterAgentSdkVersion` override),
+   *  never cached, so the refusal flips off automatically the moment a pin bump actually lands. */
+  function assertSdkSupportsConsoleBroker(): void {
+    const pinnedAgentSdkVersion = deps.requiredWinterAgentSdkVersion ?? REQUIRED_WINTER_AGENT_SDK;
+    if (!versionAtLeast(pinnedAgentSdkVersion, CONSOLE_BROKER_SDK_MIN)) {
+      throw new Error(
+        `${CONSOLE_BROKER_SDK_UNSUPPORTED_REASON}: the console login/logout door needs ` +
+          `@yanlinglabs/winter-agent-sdk >= ${CONSOLE_BROKER_SDK_MIN} (pinned ${pinnedAgentSdkVersion}) — below that floor its ` +
+          `own SDK spawns claude auth login/logout --console into Winter's own CLAUDE_CONFIG_DIR instead of the intended ` +
+          `ant-driven door; wait for the pin to catch up`,
+      );
+    }
+  }
+
+  // Winter Phase 10a fix wave 3 (M-B, Minor 2): the CURRENTLY in-flight refresh call, if any — the
+  // watcher's own disappear-action awaits this BEFORE deleting `anthropic:console`, so a refresh
+  // that was already mid-flight when the profile vanished can never `store.set` a fresh bearer
+  // back into existence microseconds AFTER the delete runs (a late `.then()` racing the delete).
+  let inFlightRefresh: Promise<AnthropicRefreshResult> | undefined;
+
   async function doRefresh(): Promise<AnthropicRefreshResult> {
-    return sdk.refreshAnthropicBearer(store, optionsFor());
+    const attempt = sdk.refreshAnthropicBearer(store, optionsFor());
+    inFlightRefresh = attempt;
+    try {
+      return await attempt;
+    } finally {
+      if (inFlightRefresh === attempt) inFlightRefresh = undefined;
+    }
   }
 
   // `undefined` = not running; a real timer handle = running and waiting; the string "starting" =
@@ -282,16 +379,137 @@ export function createConsoleProfileBroker(deps: ConsoleProfileBrokerDeps): Cons
       });
   }
 
+  // Winter Phase 10a fix wave (F2): the console profile's own credentials directory —
+  // `<anthropicConfigDir>/credentials/` — is what the watcher below watches, and what `login()`/
+  // `logout()` (both now `ant`-driven, per the corrected P10a-6 design) need present before either
+  // door spawns anything.
+  const credentialsDir = join(anthropicConfigDir, "credentials");
+  const watchDir = deps.watchDirFn ?? ((p: string, cb: () => void) => {
+    const w = fs.watch(p, () => cb());
+    return { close: () => w.close() };
+  });
+
+  // Watcher state — deliberately separate from the refresh timer's own `timer` slot above (a
+  // different concern: THIS is "has the profile appeared/disappeared", not "when to refresh next").
+  let watcherRunning = false;
+  let watchHandle: { close(): void } | undefined;
+  let debounceTimer: unknown;
+  let pollTimer: unknown;
+  let confirmTimer: unknown;
+  let confirmTarget: boolean | undefined;
+  let watcherKnownExists = false;
+
+  function watcherProfileExists(): boolean {
+    return sdk.anthropicConsoleProfileExists(anthropicConfigDir, ANTHROPIC_PROFILE_NAME);
+  }
+
+  /**
+   * Winter Phase 10a fix wave 3 (M-B, Minor 2): the disappear-action. `store.get` (never
+   * `sdk.logoutAnthropicConsole`) is the SDK logout path's own store deletion, reused directly —
+   * NEVER a second `ant auth logout` spawn here: either this disappearance IS this broker's OWN
+   * `logout()` call (which already ran that spawn once) or it is an external removal with nothing
+   * left to log out of. Deletes ONLY `anthropic:console`, and ONLY when the material actually
+   * reads as `bearer` there (M-B: never touch the user's own `anthropic:default` api-key slot, and
+   * never delete a kind this account should not hold in the first place — `keychainSeamFromSecretStore`'s
+   * own per-account restriction is the READ-side half of that same discipline).
+   */
+  async function handleDisappearance(): Promise<void> {
+    stopRefresherImpl();
+    // Minor 2: await any refresh that was ALREADY in flight before deleting — otherwise a late
+    // `store.set` from that refresh could resurrect the material microseconds after this delete.
+    if (inFlightRefresh !== undefined) await inFlightRefresh.catch(() => {});
+    const consoleRef = { kind: "keychain" as const, account: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME };
+    try {
+      const material = await store.get(consoleRef);
+      if (material !== null && material.kind === "bearer") {
+        await store.delete(consoleRef);
+      }
+    } catch {
+      // A read/delete failure here is a Keychain-layer concern `keychain.ts`'s own doors already
+      // log at `warn` — never let it propagate out of a background watcher reaction.
+    }
+  }
+
+  /**
+   * Winter Phase 10a fix wave 3 (M-B, Minor 2): the SECOND, CONFIRMING check — runs
+   * `WATCHER_CONFIRM_MS` after `checkPresence` first observed `target` differing from
+   * `watcherKnownExists`. Only acts if presence STILL reads as `target` now (a flicker that
+   * reverted in between is silently dropped, never treated as two transitions). This is the ONE
+   * place either side effect (`startRefresherImpl`/`handleDisappearance`) actually fires.
+   */
+  function confirmPresence(): void {
+    confirmTimer = undefined;
+    const target = confirmTarget;
+    confirmTarget = undefined;
+    if (!watcherRunning || target === undefined) return;
+    const confirmedExists = watcherProfileExists();
+    if (confirmedExists !== target) return; // flickered back — not a real transition
+    if (confirmedExists === watcherKnownExists) return; // already handled via another path meanwhile
+    watcherKnownExists = confirmedExists;
+    if (confirmedExists) {
+      startRefresherImpl();
+    } else {
+      void handleDisappearance();
+    }
+  }
+
+  /**
+   * The level-triggered entry point both the fs-event path (debounced) and the poll path (fix wave
+   * 3, M-B: now ALSO gated on the confirm delay, not just the fs-event path) call. Recomputes
+   * presence; if it differs from the last KNOWN state, (re)arms `confirmPresence` above rather than
+   * acting immediately — never on every fs event/poll tick (a burst of unrelated writes inside
+   * `credentialsDir`, or a poll landing while nothing changed, must not re-fire
+   * `startRefresher()`/re-delete already-deleted material, and must not treat a flicker as real).
+   */
+  function checkPresence(): void {
+    if (!watcherRunning) return;
+    const exists = watcherProfileExists();
+    if (exists === watcherKnownExists) {
+      // No change (or a flicker that already reverted before this check ran) — cancel any pending
+      // confirmation rather than let a stale target fire later.
+      if (confirmTimer !== undefined) { clearT(confirmTimer); confirmTimer = undefined; confirmTarget = undefined; }
+      return;
+    }
+    if (confirmTimer !== undefined) clearT(confirmTimer);
+    confirmTarget = exists;
+    confirmTimer = setT(confirmPresence, WATCHER_CONFIRM_MS);
+  }
+
+  function schedulePoll(): void {
+    if (!watcherRunning) return;
+    pollTimer = setT(() => {
+      checkPresence();
+      schedulePoll();
+    }, WATCHER_POLL_MS);
+  }
+
+  function onFsEvent(): void {
+    if (!watcherRunning) return;
+    if (debounceTimer !== undefined) clearT(debounceTimer);
+    debounceTimer = setT(() => {
+      debounceTimer = undefined;
+      checkPresence();
+    }, WATCHER_DEBOUNCE_MS);
+  }
+
   return {
     async login(onLine: (line: string) => void): Promise<AnthropicLoginHandle> {
-      if (!deps.claudeExecutable()) throw new Error("claude_executable_unavailable");
+      // Fix wave 3 (M-A): the version gate FIRST — before even the antExecutable check below, so
+      // this refuses the instant it is decided, never partway through hardening a directory. See
+      // `assertSdkSupportsConsoleBroker`'s own doc.
+      assertSdkSupportsConsoleBroker();
+      // Fix wave (F2 corrected design): the single login door is `ant auth login --profile
+      // winter` (SDK 0.0.9) — `claude auth login --console` was measured NOT to write the profile
+      // file at all (it mints a Console API key into CLAUDE_CONFIG_DIR instead), so
+      // `antExecutable`, not `claudeExecutable`, is what this door actually needs resolved.
+      if (!deps.antExecutable?.()) throw new Error("ant_executable_unavailable");
       // Winter Phase 10a fix wave (M4): harden `anthropicConfigDirFor(home)` 0700 BEFORE the
       // login child ever spawns — `official-session.ts`'s `open()` only ensures this directory
       // for a session actually launched on the console arm, which (per C1-interim) never happens
       // against the pinned router yet; without this, the very first `winter login
-      // --anthropic-console` could hand `claude auth login --console` a config dir that does not
-      // exist at all, or one left over-permissive by something else. Same helper, same 0700 shape
-      // as every other caller of `ensureOfficialConfigDir` — never a second, hand-rolled mkdir/chmod.
+      // --anthropic-console` could hand the login a config dir that does not exist at all, or one
+      // left over-permissive by something else. Same helper, same 0700 shape as every other caller
+      // of `ensureOfficialConfigDir` — never a second, hand-rolled mkdir/chmod.
       ensureOfficialConfigDir(anthropicConfigDir);
       return sdk.startAnthropicConsoleBrokerLogin(store, optionsFor(onLine));
     },
@@ -305,12 +523,30 @@ export function createConsoleProfileBroker(deps: ConsoleProfileBrokerDeps): Cons
     },
 
     async logout(): Promise<void> {
+      // Fix wave 3 (M-A): same version gate as login() above, checked first.
+      assertSdkSupportsConsoleBroker();
+      // Fix wave (F2 corrected design): same single door as login() above — `logout()` also needs
+      // `ant` resolved BEFORE any spawn, never a partial/best-effort logout that clears Winter's
+      // own bearer material while leaving `ant`'s own on-disk profile dangling (the exact stale-
+      // access shape `OfficialConsoleProfileMissing`, F3, exists to keep closed).
+      if (!deps.antExecutable?.()) throw new Error("ant_executable_unavailable");
       // Fix round 1 item 1: a signed-out profile has nothing left to refresh — running
       // `stopRefresher()` FIRST (before the SDK call, which may itself throw) guarantees the timer
       // is never left ticking against a profile this call is in the middle of tearing down,
       // regardless of whether `logoutAnthropicConsole` itself succeeds.
       stopRefresherImpl();
       await sdk.logoutAnthropicConsole(store, optionsFor());
+      // Winter Phase 10a fix wave 4 (Minor 2): verify the logout actually happened — see
+      // `CONSOLE_LOGOUT_INCOMPLETE_REASON`'s own doc for why the SDK call resolving is not itself
+      // proof of that. The SAME live on-disk check `profileExists()` exposes, run here rather than
+      // through that method so this call site reads as self-contained.
+      if (sdk.anthropicConsoleProfileExists(anthropicConfigDir, ANTHROPIC_PROFILE_NAME)) {
+        throw new Error(
+          `${CONSOLE_LOGOUT_INCOMPLETE_REASON}: the Anthropic Console profile is still present after ` +
+          `logout (ant auth logout exited without removing it) — sign-out did not complete; try again ` +
+          `or remove the profile manually`,
+        );
+      }
     },
 
     startRefresher(): void {
@@ -319,6 +555,36 @@ export function createConsoleProfileBroker(deps: ConsoleProfileBrokerDeps): Cons
 
     stopRefresher(): void {
       stopRefresherImpl();
+    },
+
+    startWatcher(): void {
+      if (watcherRunning) return;
+      watcherRunning = true;
+      // Fix wave 3 (Minor 1): harden the PARENT `anthropicConfigDir` explicitly FIRST — a single
+      // recursive `mkdirSync(credentialsDir, {recursive:true})` only `chmodSync`s the LEAF path it
+      // was called on, leaving a freshly-created parent at the default 0755 if it didn't already
+      // exist. Both calls are `ensureOfficialConfigDir`'s own idempotent mkdir+chmod, so an
+      // already-0700 parent (the common case — `login()` already hardens it) is a harmless no-op.
+      ensureOfficialConfigDir(anthropicConfigDir);
+      ensureOfficialConfigDir(credentialsDir);
+      watcherKnownExists = watcherProfileExists();
+      try {
+        watchHandle = watchDir(credentialsDir, onFsEvent);
+      } catch {
+        // fs.watch can throw synchronously (e.g. the dir vanished between the mkdir above and
+        // here) — the poll below is a complete fallback on its own, so this is never fatal.
+        watchHandle = undefined;
+      }
+      schedulePoll();
+    },
+
+    stopWatcher(): void {
+      watcherRunning = false;
+      watchHandle?.close();
+      watchHandle = undefined;
+      if (debounceTimer !== undefined) { clearT(debounceTimer); debounceTimer = undefined; }
+      if (pollTimer !== undefined) { clearT(pollTimer); pollTimer = undefined; }
+      if (confirmTimer !== undefined) { clearT(confirmTimer); confirmTimer = undefined; confirmTarget = undefined; }
     },
   };
 

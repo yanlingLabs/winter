@@ -14,7 +14,10 @@
  *
  * The pin lives in the repo-root VERSIONS.json's `ant` entry (`{ tag, asset, sha256, binarySha256 }`,
  * both hashes git-committed, real values — never floated to "latest"; bumping either is a
- * deliberate edit there). This script:
+ * deliberate edit there). Note: this ROOT `VERSIONS.json` (this vendoring pin) is a DIFFERENT file
+ * from the STAGED `runtimes/claude-official/VERSIONS.json` (`bundle-layout.ts`'s `VersionsJson`,
+ * written per-build by `stage-runtimes.ts`/`embed-runtimes.sh`) — same filename, unrelated
+ * lifecycles; don't conflate the two when reading either. This script:
  *   1. reads + validates that pin (`parseAntPin`),
  *   2. downloads the named GitHub release asset (a `.zip` — Anthropic's own darwin-arm64 archive
  *      also bundles shell completions + a man page alongside the `ant` binary) with a hard byte cap

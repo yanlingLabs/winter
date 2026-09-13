@@ -24,8 +24,9 @@ test("every inventory provider id exists in the PINNED catalog", () => {
   }
   // The alignment itself, pinned: `codex` (Task 4's spelling) is NOT a catalog id and must not
   // return — `CredentialPresence.byProvider` is keyed by these, so a wrong id silently un-routes
-  // every session on that provider.
-  expect(WINTER_CREDENTIAL_INVENTORY.map((s) => s.provider)).toEqual(["openai", "codex-oauth", "anthropic"]);
+  // every session on that provider. Fix wave 3 (M-B): "anthropic" now appears TWICE (the api-key
+  // row and the console-bearer row, keychain.ts's own doc explains why) — still the same catalog id.
+  expect(WINTER_CREDENTIAL_INVENTORY.map((s) => s.provider)).toEqual(["openai", "codex-oauth", "anthropic", "anthropic"]);
   expect(ids.has("codex")).toBe(false);
 });
 

@@ -17,7 +17,17 @@ import { QuestionBroker } from "../../src/agent/questions";
 import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { assistantMemoryDirFor, memoryDirFor } from "../../src/agent/memory-dir";
 import { controlPlaneDenyRules, disallowedToolsFor, sandboxConfigFor } from "../../src/runtime-sdk/mode-options";
-import type { Settings } from "../../src/settings";
+import { Settings } from "../../src/settings";
+import { FileSecretStore } from "../../src/auth/secret-store";
+import { writeCredentialMaterial } from "../../src/auth/credential-material";
+import { keychainService } from "../../src/profile";
+import {
+  ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME,
+  ANTHROPIC_CREDENTIAL_SECRET_NAME,
+  credentialPresenceFrom,
+  keychainSeamFromSecretStore,
+} from "../../src/runtime-sdk/keychain";
+import { providerSelectionFor } from "../../src/runtime-sdk/provider-selection";
 import {
   ANTHROPIC_PROFILE_NAME,
   anthropicConfigDirFor,
@@ -31,6 +41,7 @@ import {
   officialConfigDirFor,
   officialInputFor,
   officialPermissionModeFor,
+  OfficialConsoleProfileMissing,
   OfficialConsoleRouterUnsupported,
   OfficialProjectKeyTooDeep,
   type OfficialInputDeps,
@@ -154,6 +165,12 @@ function minimalDeps(overrides: Partial<OfficialInputDeps> = {}): OfficialInputD
     capabilities: {},
     canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
     policy: "auto",
+    // Fix wave (F3): every test in this file uses a symbolic, never-filesystem-backed `home`
+    // (above) — default the console arm's live profile-existence guard to "present" so every
+    // EXISTING console-arm test (env shape, router-version gate, …) keeps testing what it already
+    // tests, undisturbed by a guard those tests are not about. F3's own describe block overrides
+    // this explicitly to `() => false` to test the guard itself.
+    consoleProfileExists: () => true,
     ...overrides,
   };
 }
@@ -396,15 +413,14 @@ describe("officialInputFor — the console arm's real env (fix round 2, P10a-2; 
   // ANTHROPIC_API_KEY omission is structural (the credential plan is never even asked), not an
   // accident of no credential existing to inject in the first place.
   const provider = { providerId: "anthropic", authRef: { kind: "keychain" as const, account: "anthropic:default" } };
-  // Fix wave (C1-interim): the installed router (0.0.3) is BELOW `CONSOLE_AUTH_ROUTER_MIN`, so every
-  // console-arm build in this block simulates the future router upgrade — this block's own job is
-  // the console arm's ENV SHAPE, never the gate itself (that has its own describe block below).
-  const ROUTER_UPGRADED = () => "0.0.4";
+  // Fix wave (F1): the router-version gate now compares the PINNED `REQUIRED_WINTER_RUNTIME_SDK`
+  // ("0.0.4") against `CONSOLE_AUTH_ROUTER_MIN` ("0.0.4"), never a runtime probe of the installed
+  // package — so no override is needed here at all any more; this block's own job is the console
+  // arm's ENV SHAPE, never the gate itself (that has its own describe block below).
 
   function build(selection: RuntimeSelection): { input: import("@yanlinglabs/winter-runtime-sdk").RouterOfficialInput; anthropicConfigDirToEnsure?: string } {
     const result = officialInputFor(input, minimalDeps({
       home: HOME, selection, provider, explicitCredentials: undefined,
-      installedWinterRuntimeSdkVersion: ROUTER_UPGRADED,
     }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     return result;
@@ -444,7 +460,6 @@ describe("officialInputFor — the console arm's real env (fix round 2, P10a-2; 
     for (const name of FORBIDDEN_CHILD_ENV) hostEnv[name] = `SENTINEL_${name}`;
     const result = officialInputFor(input, minimalDeps({
       home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined, env: hostEnv,
-      installedWinterRuntimeSdkVersion: ROUTER_UPGRADED,
     }));
     if (!("input" in result)) throw new Error("unexpectedly refused");
     for (const name of FORBIDDEN_CHILD_ENV) {
@@ -456,18 +471,19 @@ describe("officialInputFor — the console arm's real env (fix round 2, P10a-2; 
   });
 });
 
-// Winter Phase 10a fix wave (C1-interim): against the PINNED router (`@yanlinglabs/winter-runtime-sdk@0.0.3`)
-// the console arm could not work — the router forwarded only its own minimal OS environment and ran
-// its api-key credential plan itself regardless of arm, so a console child would have gotten the
-// OAuth bearer profile injected as ANTHROPIC_API_KEY. `officialAuthFamilyFor(...) === "console"`
-// therefore refused typed BEFORE anything was spawned, gated on a single constant
-// (`CONSOLE_AUTH_ROUTER_MIN`) compared against the INSTALLED router version — never the daemon's own
-// pin — so the refusal flips off automatically the moment a bump actually installs a matching
-// router. Winter Phase 10a pin flip: the router IS now `@yanlinglabs/winter-runtime-sdk@0.0.4`
-// (`versions.ts`'s `REQUIRED_WINTER_RUNTIME_SDK`), so the gate no longer fires with NO override —
-// this suite now simulates the pre-upgrade router via `installedWinterRuntimeSdkVersion` fakes to
-// keep proving the gate itself still exists and still refuses below the floor.
-describe("officialInputFor — the console arm refuses until the router supports it (C1-interim)", () => {
+// Winter Phase 10a fix wave (F1): against a router BELOW `CONSOLE_AUTH_ROUTER_MIN` the console arm
+// could not work — a pre-upgrade router forwards only its own minimal OS environment and runs its
+// api-key credential plan itself regardless of arm, so a console child would get the OAuth bearer
+// profile injected as ANTHROPIC_API_KEY. `officialAuthFamilyFor(...) === "console"` therefore
+// refuses typed BEFORE anything is spawned, gated on a single constant (`CONSOLE_AUTH_ROUTER_MIN`)
+// compared against the COMPILE-TIME PIN (`REQUIRED_WINTER_RUNTIME_SDK`) — never a runtime probe of
+// the installed package, which is exactly what made the gate dead inside a compiled `$bunfs`
+// Release binary (the OLD `installedWinterRuntimeSdkVersion()` probe always answered `undefined`
+// there, and `versionAtLeast(undefined, …)` is always `false`, so every Release console session
+// refused permanently — that probe is now deleted, fix wave 3 Minor 3). This suite simulates a pin
+// below/at/above the floor via `OfficialInputDeps.requiredWinterRuntimeSdkVersion` fakes to keep
+// proving the gate itself still exists and still refuses below the floor.
+describe("officialInputFor — the console arm refuses until the router pin supports it (F1)", () => {
   const apiKeySelection: RuntimeSelection = {
     runtimeKind: "claude-agent", providerId: "anthropic", modelRef: "anthropic/claude-sonnet-5",
     family: "claude", authFamily: "api-key", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
@@ -479,10 +495,10 @@ describe("officialInputFor — the console arm refuses until the router supports
   const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
   const provider = { providerId: "anthropic", authRef: { kind: "keychain" as const, account: "anthropic:default" } };
 
-  test("a fake pre-upgrade router (0.0.3) refuses the console arm typed", () => {
+  test("a stubbed pin below the floor (0.0.3) refuses the console arm typed", () => {
     const result = officialInputFor(input, minimalDeps({
       home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
-      installedWinterRuntimeSdkVersion: () => "0.0.3",
+      requiredWinterRuntimeSdkVersion: "0.0.3",
     }));
     expect(result).toBeInstanceOf(OfficialConsoleRouterUnsupported);
     expect((result as OfficialConsoleRouterUnsupported).code).toBe("official_console_router_unsupported");
@@ -497,12 +513,12 @@ describe("officialInputFor — the console arm refuses until the router supports
     // (never `"input" in result`) is what actually proves nothing downstream ran.
     const result = officialInputFor(input, minimalDeps({
       home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
-      installedWinterRuntimeSdkVersion: () => "0.0.3",
+      requiredWinterRuntimeSdkVersion: "0.0.3",
     }));
     expect("input" in result).toBe(false);
   });
 
-  test("the REAL installed router (0.0.4, no override) no longer refuses the console arm — the pin flip landed", () => {
+  test("the REAL pin (0.0.4, no override) does not refuse the console arm", () => {
     const result = officialInputFor(input, minimalDeps({
       home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
     }));
@@ -516,51 +532,243 @@ describe("officialInputFor — the console arm refuses until the router supports
     expect("input" in result).toBe(true);
   });
 
-  test("a fake version below the floor (0.0.3.x-style patch, e.g. \"0.0.3\") still refuses", () => {
+  test("a stubbed pin AT the floor (0.0.4) lets the console arm build normally", () => {
     const result = officialInputFor(input, minimalDeps({
       home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
-      installedWinterRuntimeSdkVersion: () => "0.0.3",
-    }));
-    expect(result).toBeInstanceOf(OfficialConsoleRouterUnsupported);
-  });
-
-  test("a fake version AT the floor (0.0.4) lets the console arm build normally", () => {
-    const result = officialInputFor(input, minimalDeps({
-      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
-      installedWinterRuntimeSdkVersion: () => "0.0.4",
+      requiredWinterRuntimeSdkVersion: "0.0.4",
     }));
     expect("input" in result).toBe(true);
   });
 
-  test("a fake version ABOVE the floor (0.0.10 — numeric, never lexicographic, comparison) also lets it build", () => {
+  test("a stubbed pin ABOVE the floor (0.0.10 — numeric, never lexicographic, comparison) also lets it build", () => {
     const result = officialInputFor(input, minimalDeps({
       home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
-      installedWinterRuntimeSdkVersion: () => "0.0.10",
+      requiredWinterRuntimeSdkVersion: "0.0.10",
     }));
     expect("input" in result).toBe(true);
   });
 
-  test("an unresolvable router version (undefined) is never treated as \"at least\" anything — refuses", () => {
+  // Fix wave 3 (Minor 3): `installedWinterRuntimeSdkVersion()` (the runtime probe this gate used
+  // to read, before F1) is DELETED from versions.ts now that nothing but this file's own test ever
+  // called it — the gate has read only the compile-time pin since F1, so there is no runtime probe
+  // left in this file to simulate the compiled-$bunfs case against. The pin-based coverage above
+  // (below/at/above the floor, plus "no override uses the real pin") is the complete proof; the
+  // compiled-binary scenario specifically is that the pin resolves at COMPILE time, so it can never
+  // be `undefined` the way a `createRequire`-based runtime probe could.
+
+  test("an unresolvable STUBBED pin (undefined override, falls back to the real pin) does not refuse", () => {
     const result = officialInputFor(input, minimalDeps({
       home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
-      installedWinterRuntimeSdkVersion: () => undefined,
+      requiredWinterRuntimeSdkVersion: undefined,
     }));
-    expect(result).toBeInstanceOf(OfficialConsoleRouterUnsupported);
+    expect("input" in result).toBe(true);
   });
 
-  // C1-interim's own second requirement: even once the router DOES support the console arm, the
-  // console arm must never hand `credentials` containing an anthropic key to the router — kept as a
-  // standing guard, not retired when the gate above stops firing.
-  test("even with a supported router, the console arm NEVER hands the router credentials containing an anthropic key", () => {
+  // even once the router pin DOES support the console arm, the console arm must never hand
+  // `credentials` containing an anthropic key to the router — kept as a standing guard, not retired
+  // when the gate above stops firing.
+  test("even with a supported pin, the console arm NEVER hands the router credentials containing an anthropic key", () => {
     const result = officialInputFor(input, minimalDeps({
       home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
-      installedWinterRuntimeSdkVersion: () => "0.0.4",
     }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     expect(result.input.credentials ?? []).toEqual([]);
     expect(result.input.credentials ?? []).not.toContainEqual(expect.objectContaining({ variable: "ANTHROPIC_API_KEY" }));
     expect(result.input.base?.ANTHROPIC_API_KEY).toBeUndefined();
     expect(result.input.connectionEnv?.ANTHROPIC_API_KEY).toBeUndefined();
+  });
+});
+
+// Winter Phase 10a fix wave (F3, load-bearing guard): the console arm's own subscription guard —
+// see `OfficialConsoleProfileMissing`'s own doc for the measured precedence fact this check exists
+// to enforce ("an explicit profile outranks a stored claude.ai login; a MISSING profile falls back
+// to it instead of refusing"). `minimalDeps()` defaults `consoleProfileExists` to `() => true`
+// (its own comment explains why); this block is the one place that flips it to prove the guard.
+describe("officialInputFor — the console arm's own subscription guard: console_profile_missing (F3)", () => {
+  const apiKeySelection: RuntimeSelection = {
+    runtimeKind: "claude-agent", providerId: "anthropic", modelRef: "anthropic/claude-sonnet-5",
+    family: "claude", authFamily: "api-key", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
+  };
+  const consoleSelection: RuntimeSelection = { ...apiKeySelection, authFamily: "console-profile" };
+  const HOME = "/Users/x/.winter-test-home";
+  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+  const provider = { providerId: "anthropic", authRef: { kind: "keychain" as const, account: "anthropic:default" } };
+
+  test("an explicit console pin with no profile yet refuses typed console_profile_missing", () => {
+    const result = officialInputFor(input, minimalDeps({
+      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
+      consoleProfileExists: () => false,
+    }));
+    expect(result).toBeInstanceOf(OfficialConsoleProfileMissing);
+    expect((result as OfficialConsoleProfileMissing).code).toBe("console_profile_missing");
+    expect((result as OfficialConsoleProfileMissing).home).toBe(HOME);
+  });
+
+  test("the refusal fires BEFORE any credential is read — the router is never consulted at all", () => {
+    // A REAL anthropic authRef present on the provider, same proof shape as the F1 gate's own
+    // identical test: if the refusal fired late, this would still pass by accident.
+    const result = officialInputFor(input, minimalDeps({
+      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
+      consoleProfileExists: () => false,
+    }));
+    expect("input" in result).toBe(false);
+  });
+
+  test("a resume after winter logout --anthropic-console deleted the profile also refuses — the check is LIVE, not a cached decision from an earlier call", () => {
+    // Simulates the exact scenario the guard's own doc names: the SAME deps shape a resume would
+    // rebuild, but the profile is now gone. A single mutable flag proves this is re-read on every
+    // call, never memoized from an earlier "yes" (e.g. the very login that opened this session).
+    let present = true;
+    const deps = minimalDeps({
+      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
+      consoleProfileExists: () => present,
+    });
+    const beforeLogout = officialInputFor(input, deps);
+    expect("input" in beforeLogout).toBe(true);
+    present = false; // `winter logout --anthropic-console` ran between the two calls
+    const afterLogout = officialInputFor(input, deps);
+    expect(afterLogout).toBeInstanceOf(OfficialConsoleProfileMissing);
+  });
+
+  test("the api-key arm is completely unaffected by this guard", () => {
+    const result = officialInputFor(input, minimalDeps({
+      home: HOME, selection: apiKeySelection, provider, explicitCredentials: undefined,
+      consoleProfileExists: () => false,
+    }));
+    expect("input" in result).toBe(true);
+  });
+
+  test("a present profile (the default) builds normally", () => {
+    const result = officialInputFor(input, minimalDeps({
+      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
+    }));
+    expect("input" in result).toBe(true);
+  });
+
+  test("with no override at all, the REAL existsSync check runs against the symbolic home and refuses (never silently treated as present)", () => {
+    // No `consoleProfileExists` override — proves the REAL `existsSync(consoleProfileCredentialFile(home))`
+    // path is what runs by default, and that a never-filesystem-backed home reads as "missing", not
+    // "present" (the opposite default would silently defeat the guard for every caller that forgot
+    // to wire the override).
+    const deps = minimalDeps({ home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined });
+    delete (deps as { consoleProfileExists?: unknown }).consoleProfileExists;
+    const result = officialInputFor(input, deps);
+    expect(result).toBeInstanceOf(OfficialConsoleProfileMissing);
+  });
+});
+
+// Winter Phase 10a fix wave 4 (Major M-C, Opus review, reproduced): the official leg's own
+// "anthropic" credential ref must NEVER move with live settings mid-session — only the session's
+// own FIXED `RuntimeSelection.authFamily` (decided once, at assembly, by `session-driver.ts`'s
+// `assembleOfficial`) may decide it. `session-driver.ts`'s `inputDeps()` is a private per-`open()`
+// closure this file cannot import directly, so this suite reproduces its exact call shape against
+// a REAL `FileSecretStore`-backed home: `providerSelectionFor(live.model, credentials, deps.home
+// [, deps.settings()])` — the literal expression at `session-driver.ts`'s `inputDeps()` (search
+// "Winter Phase 10a fix wave 4 (M-C)" there for the fixed call site) — then feeds the result into
+// the REAL, unmodified `officialInputFor` to prove the end-to-end credential plan.
+//
+// THE SCENARIO (the review's own words): (1) a user with an API key has a live official session
+// assembled on the api-key arm in "auto" mode; (2) they sign in with Console — the profile file and
+// the `anthropic:console` bearer both appear; (3) the child exits, leaving the session resumable;
+// (4) the next send re-opens it. Before the fix, step 4's credential build (still threading live
+// `settings` into `providerSelectionFor`) re-points `provider.authRef` at `anthropic:console` even
+// though `selection.authFamily` is still the assembly-time `"api-key"` — and the router's own
+// `officialCredentialPlan` derives `ANTHROPIC_API_KEY` from `provider.authRef` for the api-key
+// family regardless of which account that ref names, so the child receives
+// `ANTHROPIC_API_KEY=<the Console OAuth bearer>`.
+describe("the official leg's own anthropic ref must never drift with live settings mid-session (P10a fix wave 4, M-C)", () => {
+  const MODEL = "anthropic/claude-fable-5"; // a real pinned-catalog qualified anthropic key
+  const API_KEY_MATERIAL = "sk-test-real-api-key-material";
+  const CONSOLE_BEARER_MATERIAL = "CONSOLE-OAUTH-BEARER-must-never-reach-ANTHROPIC_API_KEY";
+  const fixedApiKeySelection: RuntimeSelection = {
+    runtimeKind: "claude-agent", providerId: "anthropic", modelRef: MODEL,
+    family: "claude", authFamily: "api-key", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
+  };
+  const input: OfficialSessionInput = { sessionId: "s_mc", mode: "code", cwd: "/repo" };
+
+  function fixture(): { home: string; store: FileSecretStore } {
+    const home = mkdtempSync(join(tmpdir(), "winter-official-mc-"));
+    return { home, store: new FileSecretStore(join(home, "secrets")) };
+  }
+
+  /** Writes the console profile's own presence marker (content is never validated — presence
+   *  only, per `officialAuthFamilyFor`'s own doc) and seeds the console broker's bearer material,
+   *  reproducing "the user signs in with Console" between the two calls a test makes. */
+  async function signInWithConsole(home: string, store: FileSecretStore): Promise<void> {
+    const profileDir = join(anthropicConfigDirFor(home), "credentials");
+    mkdirSync(profileDir, { recursive: true });
+    writeFileSync(join(profileDir, `${ANTHROPIC_PROFILE_NAME}.json`), JSON.stringify({ ok: true }));
+    await writeCredentialMaterial(store, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, { kind: "bearer", token: CONSOLE_BEARER_MATERIAL });
+  }
+
+  test("REPRODUCTION (fails before the fix): the old call shape (WITH live settings) re-points ANTHROPIC_API_KEY at the Console bearer after a Console sign-in", async () => {
+    const { home, store } = fixture();
+    try {
+      await writeCredentialMaterial(store, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+      const settings = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" } }); // "auto" — no runtimes.official.auth override
+
+      // Session assembly time: no console profile yet -> the api-key arm, exactly what
+      // `officialAuthFamilyFor` + `assembleOfficial` decide when the session is first created.
+      // This is the session's FIXED selection (`fixedApiKeySelection`) — never recomputed below.
+      expect(officialAuthFamilyFor(home, settings, false)).toBe("api-key");
+
+      // Sanity: before the Console sign-in, even the OLD (settings-threaded) call shape agrees.
+      const credentialsBefore = await credentialPresenceFrom(store);
+      const providerBefore = providerSelectionFor(MODEL, credentialsBefore, home, settings);
+      expect(providerBefore?.authRef).toEqual({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, home) });
+
+      // The drift: nothing about `fixedApiKeySelection.authFamily` changes.
+      await signInWithConsole(home, store);
+
+      // "The next send re-opens it" — the OLD `inputDeps()` call shape, reproduced verbatim.
+      const credentialsAfter = await credentialPresenceFrom(store);
+      const providerAfterWithSettings = providerSelectionFor(MODEL, credentialsAfter, home, settings);
+
+      // THE BUG: `selection.authFamily` is still "api-key" (untouched), but the live-settings call
+      // now names the CONSOLE account.
+      expect(providerAfterWithSettings?.authRef).toEqual({ kind: "keychain", account: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, home) });
+
+      // Feeding that into the REAL router-facing `officialInputFor`, against the session's own
+      // FIXED api-key selection, shows the actual leak.
+      const builtBuggy = officialInputFor(input, minimalDeps({
+        home, selection: fixedApiKeySelection, provider: providerAfterWithSettings, explicitCredentials: undefined,
+      }));
+      if (!("input" in builtBuggy)) throw new Error("unexpectedly refused");
+      const leakedRef = builtBuggy.input.credentials?.find((c) => c.variable === "ANTHROPIC_API_KEY")?.ref;
+      expect(leakedRef).toEqual({ kind: "keychain", account: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, home) });
+      const leakedValue = leakedRef === undefined ? undefined : await keychainSeamFromSecretStore(store, home).read(leakedRef);
+      expect(leakedValue).toBe(CONSOLE_BEARER_MATERIAL); // the OAuth bearer, injected as ANTHROPIC_API_KEY — the leak
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("THE FIX: the settings-independent call session-driver.ts now makes stays on anthropic:default after the SAME Console sign-in — the api-key material, never the bearer", async () => {
+    const { home, store } = fixture();
+    try {
+      await writeCredentialMaterial(store, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+      const settings = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" } });
+      expect(officialAuthFamilyFor(home, settings, false)).toBe("api-key");
+
+      await signInWithConsole(home, store);
+
+      // `session-driver.ts`'s `inputDeps()`, post-fix: `providerSelectionFor(live.model,
+      // credentials, deps.home)` — no `settings` argument, ever.
+      const credentialsAfter = await credentialPresenceFrom(store);
+      const providerFixed = providerSelectionFor(MODEL, credentialsAfter, home);
+      expect(providerFixed?.authRef).toEqual({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, home) });
+
+      const built = officialInputFor(input, minimalDeps({
+        home, selection: fixedApiKeySelection, provider: providerFixed, explicitCredentials: undefined,
+      }));
+      if (!("input" in built)) throw new Error("unexpectedly refused");
+      const injectedRef = built.input.credentials?.find((c) => c.variable === "ANTHROPIC_API_KEY")?.ref;
+      expect(injectedRef).toEqual({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, home) });
+      const injectedValue = injectedRef === undefined ? undefined : await keychainSeamFromSecretStore(store, home).read(injectedRef);
+      expect(injectedValue).toBe(API_KEY_MATERIAL); // the user's own api-key material — never the bearer
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 

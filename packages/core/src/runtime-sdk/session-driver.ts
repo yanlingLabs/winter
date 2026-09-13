@@ -66,7 +66,7 @@ import type { ContextAssembler } from "../agent/context";
 import { startWinterSession, unconsumedUserMessages, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { startOfficialSession, type OfficialSession } from "./official-session";
-import { officialAuthFamilyFor, OfficialConsoleRouterUnsupported, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
+import { officialAuthFamilyFor, OfficialConsoleProfileMissing, OfficialConsoleRouterUnsupported, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
 
 export type WinterLegRefusalCode =
   | "winter_executable_unavailable"   // P8b-2: no `winter` binary resolves (setting → env → bundle → home)
@@ -78,7 +78,8 @@ export type WinterLegRefusalCode =
   | "not_supported_on_winter_leg"     // `session.compact` (SDK 0.0.4 carry)
   | "claude_executable_unavailable"   // P8c-3: no `claude` binary resolves for an official-leg create
   | "runtime_selection_refused"       // P8c-14: the router's selectRuntime refused this session's model
-  | "official_console_router_unsupported"; // C1-interim: the pinned router cannot support the console auth arm yet
+  | "official_console_router_unsupported" // C1-interim: the pinned router cannot support the console auth arm yet
+  | "console_profile_missing"; // Winter Phase 10a fix wave (F3): the console arm's on-disk profile is missing
 
 /**
  * P8c-14: the intersection of `WinterSession`'s and `OfficialSession`'s public members — everything
@@ -385,7 +386,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // daemon's configured provider model.
       const model = mode === "dispatch" ? (live.model ?? DISPATCH_MODEL) : (live.model ?? settings?.provider?.model);
       const effort = mode === "dispatch" ? sdkEffortOf(live.effort ?? DISPATCH_EFFORT) : sdkEffortOf(live.effort);
-      const selection = providerSelectionFor(model, credentials, deps.home);
+      const selection = providerSelectionFor(model, credentials, deps.home, settings);
       // P8b-30: a BYO `openai-compatible` endpoint travels as the provider's connection, or the
       // catalog's `openai` row would route it to api.openai.com.
       //
@@ -447,6 +448,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         cwd,
         model,
         credentials,
+        settings,
         effort,
         ...(systemPrompt === undefined ? {} : { systemPrompt }),
         spawn: hook,
@@ -612,6 +614,32 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // incarnation — `officialCredentialPlan`'s auto-derivation (`official-options.ts`) needs this
       // provider's `authRef` to inject `ANTHROPIC_API_KEY` at spawn.
       const credentials = await credentialPresenceFrom(deps.secrets);
+      // Winter Phase 10a fix wave 4 (M-C): NEVER thread `deps.settings()` into this call — fix
+      // wave 3 (M-B, "Native sessions") used to, on the theory that it was "inert for the console
+      // arm itself" and merely kept this leg's own ref decision agreeing with the Winter leg's.
+      // Measured wrong: `selection.authFamily` (this session's ARM) is fixed ONCE, at session
+      // ASSEMBLY (`assembleOfficial`, above) — it is never re-widened by a later `open()` — while
+      // `inputDeps()` runs fresh on EVERY `open()`/resume. A session assembled on the "api-key" arm
+      // before a Console sign-in, then re-opened after one (the profile file and `anthropic:console`
+      // bearer both now present), would have THIS call re-point `provider.authRef` at
+      // `anthropic:console` on the very next open — while `selection.authFamily` stayed the
+      // assembly-time `"api-key"`. The router's own `officialCredentialPlan` derives
+      // `ANTHROPIC_API_KEY` from `provider.authRef` for the api-key family regardless of which
+      // account that ref names, so the child would receive `ANTHROPIC_API_KEY=<the Console OAuth
+      // bearer>` — and `official-session.ts`'s own `apiKeySource === "ANTHROPIC_API_KEY"` assertion
+      // still passes, because it only checks WHICH env var the vendor CLI read from, never which
+      // account produced its value. Fix: never let this leg's own credential ref move with live
+      // settings — `credentialRefFor`'s own doc says an absent `settings` argument keeps its OLD,
+      // unconditional `anthropic:default` answer, which is exactly what the api-key arm must
+      // ALWAYS get; the console arm never reads `provider.authRef` at all regardless of what it
+      // holds (`officialCredentialPlan`'s own `AUTH_FAMILY_VARIABLES["console-profile"]` injects
+      // nothing), so leaving it at the same settings-independent `anthropic:default` value costs
+      // the console arm nothing. (Simplest of the two fixes the review offered — dropping the
+      // argument — chosen over threading `selection.authFamily` through explicitly, since the
+      // settings-independent default already IS "api-key arm -> anthropic:default" with no new
+      // branch needed.) The native Winter leg's own `optionsFor` (this file, above) is UNCHANGED —
+      // it re-derives its OWN per-incarnation live choice every `open()`, which is correct for that
+      // leg because it has no separately-fixed `selection.authFamily` to disagree with.
       const provider = providerSelectionFor(live.model, credentials, deps.home);
       // TEST-ONLY (`WinterLegDeps.officialConnectionOverride`, fix round 1 M2 — never an ambient
       // env var, never set by production `daemon.ts` wiring): a loopback fake needs
@@ -813,6 +841,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       if (err instanceof WinterLegRefusal) throw err;
       if (err instanceof ClaudeExecutableUnavailable) throw new WinterLegRefusal("claude_executable_unavailable", err.message);
       if (err instanceof OfficialConsoleRouterUnsupported) throw new WinterLegRefusal("official_console_router_unsupported", err.message);
+      if (err instanceof OfficialConsoleProfileMissing) throw new WinterLegRefusal("console_profile_missing", err.message);
       throw new WinterLegRefusal("winter_leg_unavailable", `the official child for ${sessionId} could not be started (${err instanceof Error ? err.name : "unknown"})`);
     }
     return session;
@@ -837,7 +866,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     const backendSessionId = randomUUID();
     const transcriptKey = transcriptProjectKey(cwd);
     const credentials = await credentialPresenceFrom(deps.secrets);
-    const selection = providerSelectionFor(meta.model, credentials, deps.home);
+    const selection = providerSelectionFor(meta.model, credentials, deps.home, settings);
     const providerId = decided?.providerId ?? selection?.providerId ?? settings?.provider?.type ?? "unstated";
     const authFamily: RuntimeSelection["authFamily"] = settings?.provider?.type === "openai-compatible" ? "api-key" : "custom";
     try {
@@ -909,6 +938,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       if (err instanceof WinterLegRefusal) throw err;
       if (err instanceof ClaudeExecutableUnavailable) throw new WinterLegRefusal("claude_executable_unavailable", err.message);
       if (err instanceof OfficialConsoleRouterUnsupported) throw new WinterLegRefusal("official_console_router_unsupported", err.message);
+      if (err instanceof OfficialConsoleProfileMissing) throw new WinterLegRefusal("console_profile_missing", err.message);
       throw new WinterLegRefusal("winter_leg_unavailable", `the official child for ${sessionId} could not be resumed (${err instanceof Error ? err.name : "unknown"})`);
     }
     return session;
