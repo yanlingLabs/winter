@@ -65,6 +65,7 @@ import { ImportLegacySessionError } from "../runtime-sdk/import-legacy";
 import type { PlanSwitchOutcome } from "../runtime-sdk/handoff";
 import type { RuntimeSessionRecords } from "../runtime-state/records";
 import { loadCatalog, CLAUDE_FAMILY_ID } from "@yanlinglabs/winter-provider-catalog";
+import { catalogRowsFor } from "../runtime-sdk/provider-selection";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import { resolveModelAlias } from "../agent/model-aliases";
 import type { ApprovalBroker } from "../agent/approvals";
@@ -673,12 +674,30 @@ function isClaudeCatalogModel(model: string): boolean {
  *  resolution and membership and returns `model` unchanged — the exact `known.length > 0` gate
  *  `assertEffortSelectable` uses for effort, so neither surface can be bricked by a provider it
  *  cannot ask. Otherwise a resolved id that still isn't a member throws
- *  `RpcFailure(INVALID_PARAMS)`. */
+ *  `RpcFailure(INVALID_PARAMS)` — UNLESS the pinned catalog itself has a row for it
+ *  (`catalogRowsFor`, `runtime-sdk/provider-selection.ts`).
+ *
+ *  That catalog fallback is the fix for a shipped defect (measured live 2026-09-13): `knownModels`
+ *  is `engine.knownModels()` — the daemon's INTERNAL-calls provider's own fixed list (e.g.
+ *  `CODEX_MODELS` for a `codex-oauth` deployment) — which has never listed a Claude model and never
+ *  will; it describes what the daemon's OWN background calls can use, not what a SESSION can run.
+ *  A session's actual model can instead be served by the runtime SDK's official Claude leg
+ *  (`runtime-sdk/session-driver.ts`'s `decideRuntime`, `runtime-sdk/handoff.ts`'s
+ *  `planAndApplySwitch`), which resolves against the pinned catalog, not `knownModels`. Gating a
+ *  catalog-servable model out HERE meant it could never reach that decision at all — a bare
+ *  INVALID_PARAMS with no `data.code`, never the leg's own typed `runtime_selection_refused` /
+ *  `confirmation_required` / `handoff_disabled`. This function stays a MEMBERSHIP gate, not an
+ *  availability one: it does not check credentials or leg eligibility (the runtime decision still
+ *  owns that, and still refuses typed when the catalog row exists but nothing can actually serve
+ *  it) — it only stops widening to a string neither source recognizes as a real model. */
 function resolveModelSelection(model: string, knownModels: { id: string }[]): string {
   if (knownModels.length === 0) return model;
   const resolved = resolveModelAlias(model, knownModels.map((m) => m.id));
-  if (!knownModels.some((m) => m.id === resolved)) {
-    throw new RpcFailure(ERR.INVALID_PARAMS, `unknown model '${resolved}' — available models: ${knownModels.map((m) => m.id).join(", ")}`);
+  if (!knownModels.some((m) => m.id === resolved) && catalogRowsFor(resolved).length === 0) {
+    throw new RpcFailure(
+      ERR.INVALID_PARAMS,
+      `unknown model '${resolved}' — available models: ${knownModels.map((m) => m.id).join(", ")} (a pinned-catalog model id/alias is also accepted, even when it isn't in that list)`,
+    );
   }
   return resolved;
 }
