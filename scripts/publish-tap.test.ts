@@ -165,6 +165,14 @@ describe("findUnfilledTemplateSlot", () => {
   test("a Ruby string-interpolation `#{...}` is not a template slot (different delimiter)", () => {
     expect(findUnfilledTemplateSlot('url "https://example.com/#{version}/x.dmg"')).toBeUndefined();
   });
+  test("a slot name spelled inside a Ruby comment line is not an unfilled slot", () => {
+    expect(
+      findUnfilledTemplateSlot('# CONTROLLER: replace {{version}} and {{sha256}} by hand\n  version "0.2.015"\n'),
+    ).toBeUndefined();
+  });
+  test("a live-stanza slot is still found when comments also spell it", () => {
+    expect(findUnfilledTemplateSlot('#   {{version}} -> "0.2.015"\n  version "{{version}}"\n')).toBe("{{version}}");
+  });
 });
 
 describe("renderDryRunEntry — fix wave M3 (whole-branch review, Major)", () => {

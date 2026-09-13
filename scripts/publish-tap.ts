@@ -54,7 +54,15 @@ const TEMPLATE_SLOT_RE = /\{\{[a-z0-9_]+\}\}/;
  *  repo with `{{version}}`/`{{sha256}}` literally in place — a `--dry-run` or `--publish` before the
  *  controller hand-fills them must never treat that text as ready-to-ship cask content. */
 export function findUnfilledTemplateSlot(content: string): string | undefined {
-  return content.match(TEMPLATE_SLOT_RE)?.[0];
+  // Ruby comment lines are skipped: packaging/norma-deprecated.rb's own header comments SPELL the
+  // slot names (`{{version}}`, `{{sha256}}`, "no `{{token}}`-substitution pass") as instructions to
+  // the controller — only a placeholder in a live stanza is an unfilled slot (found at the first
+  // real --publish, 2026-09-13: the filled template was refused on its comments alone).
+  const live = content
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+  return live.match(TEMPLATE_SLOT_RE)?.[0];
 }
 
 /** Runs `gh` with the given args and returns its stdout. Thrown on a nonzero exit — mirrors
