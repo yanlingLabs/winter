@@ -41,7 +41,7 @@ import {
 } from "@yanlinglabs/winter-provider-runtime";
 import type { SecretStore } from "./secret-store";
 import { keychainService } from "../profile";
-import { ANTHROPIC_PROFILE_NAME, anthropicConfigDirFor, officialConfigDirFor } from "../runtime-sdk/official-options";
+import { ANTHROPIC_PROFILE_NAME, anthropicConfigDirFor, ensureOfficialConfigDir, officialConfigDirFor } from "../runtime-sdk/official-options";
 
 // Tripwire (Winter Phase 10a, v0.0.6 wiring): Winter's own profile name (`ANTHROPIC_PROFILE_NAME`,
 // `runtime-sdk/official-options.ts`) is a separate literal from the SDK's own default — they are
@@ -285,6 +285,14 @@ export function createConsoleProfileBroker(deps: ConsoleProfileBrokerDeps): Cons
   return {
     async login(onLine: (line: string) => void): Promise<AnthropicLoginHandle> {
       if (!deps.claudeExecutable()) throw new Error("claude_executable_unavailable");
+      // Winter Phase 10a fix wave (M4): harden `anthropicConfigDirFor(home)` 0700 BEFORE the
+      // login child ever spawns — `official-session.ts`'s `open()` only ensures this directory
+      // for a session actually launched on the console arm, which (per C1-interim) never happens
+      // against the pinned router yet; without this, the very first `winter login
+      // --anthropic-console` could hand `claude auth login --console` a config dir that does not
+      // exist at all, or one left over-permissive by something else. Same helper, same 0700 shape
+      // as every other caller of `ensureOfficialConfigDir` — never a second, hand-rolled mkdir/chmod.
+      ensureOfficialConfigDir(anthropicConfigDir);
       return sdk.startAnthropicConsoleBrokerLogin(store, optionsFor(onLine));
     },
 

@@ -4,7 +4,7 @@
 // refresh TIMER, however, is host-owned (no equivalent exists on the SDK side — see
 // console-profile-broker.ts's own header), so it IS tested here, over a fake clock.
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -99,6 +99,39 @@ describe("createConsoleProfileBroker — login", () => {
     });
     await expect(broker.login(() => {})).rejects.toThrow("claude_executable_unavailable");
     expect(calls).toEqual([]);
+  });
+
+  // Winter Phase 10a fix wave (M4): `official-session.ts`'s `open()` only ensures
+  // `anthropicConfigDirFor(home)` for a session actually launched on the console arm — which (per
+  // C1-interim) the pinned router refuses before that point is ever reached — so `login()` itself
+  // must harden the directory, or the very first `winter login --anthropic-console` could hand
+  // `claude auth login --console` a config dir that does not exist yet.
+  test("login() creates AND hardens anthropicConfigDirFor(home) to 0700 before spawning", async () => {
+    const home = freshHome();
+    const dir = anthropicConfigDirFor(home);
+    expect(existsSync(dir)).toBe(false);
+    const { sdk } = fakeSdk();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk,
+    });
+    await broker.login(() => {});
+    expect(existsSync(dir)).toBe(true);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+  });
+
+  test("login() re-hardens an already-existing, more-permissive anthropicConfigDirFor(home)", async () => {
+    const home = freshHome();
+    const dir = anthropicConfigDirFor(home);
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(dir, { recursive: true });
+    chmodSync(dir, 0o755);
+    expect(statSync(dir).mode & 0o777).toBe(0o755);
+    const { sdk } = fakeSdk();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk,
+    });
+    await broker.login(() => {});
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
   });
 
   test("calls sdk.startAnthropicConsoleBrokerLogin(store, options) with the right paths, profile, and onLine forwarded", async () => {
