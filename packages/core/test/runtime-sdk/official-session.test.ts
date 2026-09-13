@@ -720,17 +720,34 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
 
   interface CapturedOptions {
     provider?: { providerId: string; authRef?: { kind: string; account?: string } };
-    runtime?: { official?: { credentials?: Array<{ variable: string; ref: { kind: string; account?: string } }> } };
+    runtime?: {
+      official?: {
+        credentials?: Array<{ variable: string; ref: { kind: string; account?: string } }>;
+        connectionEnv?: Record<string, string>;
+      };
+    };
   }
 
-  function driverWorld() {
-    const home = testHome();
-    const store = new SessionStore(home);
-    const hub = new SessionHub(store);
-    const rs = openRuntimeStateDb(home);
-    const records = new RuntimeSessionRecords(rs);
-    const checkpoints = new ProjectionCheckpoints(rs);
-    const secrets = new FileSecretStore(join(home, "secrets"));
+  /**
+   * `existing` lets a second call SHARE one world's `home`/`store`/`hub`/`records`/`checkpoints`/
+   * `secrets` while building a completely FRESH `drivers` table (its own empty in-memory driver
+   * map, its own `runtime`/`capturedOptions`/`queries`) — the same "simulate a daemon restart
+   * without actually reopening the sqlite files" shape `session-driver.test.ts`'s own `table()`
+   * uses for its n7 test. A driver built this way has no live session for `sid`, so `ensure()`/
+   * `resume()` must go through `assembleOfficial` FRESH — exactly the `resumeOfficial` path a
+   * handoff INTO the official leg takes (`session.setModel` → `handoff.ts` → `ensure()`).
+   */
+  function driverWorld(existing?: {
+    home: string; store: SessionStore; hub: SessionHub; records: RuntimeSessionRecords;
+    checkpoints: ProjectionCheckpoints; secrets: FileSecretStore;
+  }) {
+    const home = existing?.home ?? testHome();
+    const store = existing?.store ?? new SessionStore(home);
+    const hub = existing?.hub ?? new SessionHub(store);
+    const rs = existing === undefined ? openRuntimeStateDb(home) : undefined;
+    const records = existing?.records ?? new RuntimeSessionRecords(rs!);
+    const checkpoints = existing?.checkpoints ?? new ProjectionCheckpoints(rs!);
+    const secrets = existing?.secrets ?? new FileSecretStore(join(home, "secrets"));
     // "auto" mode — no `runtimes.official.auth` pin — exactly the review's own scenario.
     const settings = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" } });
     const officialSelection: RuntimeSelection = {
@@ -763,8 +780,11 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
       rootsOf: () => [], tmpDirOf: () => home, outDirOf: () => home, memoryKeyOf: () => "k",
       log: () => {},
     });
-    const close = (): void => { try { store.close(); } catch { /* closed */ } try { rs.close(); } catch { /* closed */ } };
-    return { home, secrets, drivers, store, close, capturedOptions, queries, q: () => queries[queries.length - 1]! };
+    const close = (): void => { try { store.close(); } catch { /* closed */ } try { rs?.close(); } catch { /* closed */ } };
+    return {
+      home, store, hub, records, checkpoints, secrets, drivers, close, capturedOptions, queries,
+      q: () => queries[queries.length - 1]!,
+    };
   }
 
   test("a session assembled on the api-key arm, resumed after a Console sign-in, still injects the api-key material — never the Console bearer", async () => {
@@ -826,6 +846,71 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
       w.q().emit(result());
       await Bun.sleep(10);
       await session.end();
+    } finally {
+      w.close();
+    }
+  });
+
+  // Coordinator addendum (cross-runtime handoff must keep working in BOTH directions): the M-C fix
+  // pins ONLY the credential ref for the LIFETIME of one already-assembled official incarnation
+  // set (the `inputDeps()` path, re-run on every `open()`/resume of the SAME `OfficialSession`
+  // instance) to that instance's fixed `selection.authFamily`. It must NEVER touch
+  // `assembleOfficial`'s own per-ASSEMBLY decision (session-driver.ts ~559-565,
+  // `officialAuthFamilyFor` against LIVE settings/profile presence) — a FRESH assembly of the SAME
+  // session (a daemon restart, or `resumeOfficial`, which is exactly the path a `session.setModel`
+  // handoff INTO the official leg resumes through) must still re-decide the arm from whatever is
+  // true RIGHT NOW. This test proves the contrast directly: the SAME session, the SAME Console
+  // sign-in, but assembled FRESH instead of re-opened on the old instance, ends up on the console
+  // arm — never pinned to the stale api-key arm the way the M-C test above (correctly) pins the
+  // SAME incarnation set.
+  test("a FRESH assembly of the same session (resumeOfficial / handoff-into-official) re-decides the arm from LIVE state and picks console — assembleOfficial's own per-assembly decision is untouched by the M-C fix", async () => {
+    const w = driverWorld();
+    try {
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+
+      const sid = w.store.createSession("t", { mode: "code", model: MODEL });
+      const session = await w.drivers.create(sid);
+      expect(w.capturedOptions[0]!.runtime?.official?.credentials).toEqual([
+        { variable: "ANTHROPIC_API_KEY", ref: expect.objectContaining({ account: ANTHROPIC_CREDENTIAL_SECRET_NAME }) },
+      ]);
+
+      // End this incarnation — a genuine restart discards the in-memory driver table entirely, so
+      // nothing about how this one ends matters beyond letting its query settle first.
+      w.q().emit(init(session.backendSessionId, { apiKeySource: "ANTHROPIC_API_KEY" }));
+      w.q().emit(result());
+      await Bun.sleep(10);
+      w.q().end();
+      await Bun.sleep(10);
+
+      // The drift: sign in with Console — same as the M-C test above.
+      const profileDir = join(anthropicConfigDirFor(w.home), "credentials");
+      mkdirSync(profileDir, { recursive: true });
+      writeFileSync(join(profileDir, `${ANTHROPIC_PROFILE_NAME}.json`), JSON.stringify({ ok: true }));
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, { kind: "bearer", token: CONSOLE_BEARER_MATERIAL });
+
+      // A FRESH driver table sharing the SAME store/records/checkpoints/secrets/home — "a daemon
+      // restart", the same shape `session-driver.test.ts`'s own n7 test uses, and the state a
+      // handoff INTO the official leg resumes through (`resumeOfficial` reads `record.selection`
+      // and calls `assembleOfficial` from scratch — never a live in-memory session). Nothing here
+      // is the SAME `OfficialSession` JS instance the first half of this test used.
+      const w2 = driverWorld({ home: w.home, store: w.store, hub: w.hub, records: w.records, checkpoints: w.checkpoints, secrets: w.secrets });
+      const resumed = await w2.drivers.ensure(sid);
+      expect(resumed).toBeDefined();
+
+      // THE CONTRAST with the M-C regression test: this FRESH assembly is NOT pinned to the OLD
+      // incarnation-set's api-key arm — it re-reads the now-present profile and widens
+      // `selection.authFamily` to `"console-profile"`, so this incarnation carries NO
+      // `ANTHROPIC_API_KEY` credential at all, only `ANTHROPIC_PROFILE`/`ANTHROPIC_CONFIG_DIR`.
+      expect(w2.capturedOptions).toHaveLength(1);
+      const gen = w2.capturedOptions[0]!;
+      expect(gen.runtime?.official?.credentials ?? []).toEqual([]);
+      expect(gen.runtime?.official?.connectionEnv?.ANTHROPIC_PROFILE).toBe(ANTHROPIC_PROFILE_NAME);
+      expect(gen.runtime?.official?.connectionEnv?.ANTHROPIC_CONFIG_DIR).toBe(anthropicConfigDirFor(w.home));
+
+      w2.q().emit(init(resumed!.backendSessionId, { apiKeySource: CONSOLE_API_KEY_SOURCE }));
+      w2.q().emit(result());
+      await Bun.sleep(10);
+      await resumed!.end();
     } finally {
       w.close();
     }
