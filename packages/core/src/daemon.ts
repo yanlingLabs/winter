@@ -1108,22 +1108,15 @@ export async function startDaemon(opts: {
     runtimeSdk = undefined;
   }
 
-  // Winter Phase 10a (O6, P10a-2/4/6): the daemon's ONE console-profile broker. `claudeExecutable`
-  // is a closure (not a boot-time snapshot) over `runtimeSdk.claudeExecutableFor()` — the SAME
-  // live-resolved executable the official leg's own sessions use, so a `runtimes.claudeExecutable`
-  // edit takes effect for the broker with no daemon restart, exactly like every other reader of
-  // that setting. `antExecutable` is likewise a closure over `resolveAntExecutable` (Lane L,
+  // Winter Phase 10a (O6, P10a-2/4/6): the daemon's ONE console-profile broker. Fix wave 3 (M-A):
+  // `claudeExecutable` is GONE — the single login/logout door is `ant`-driven, never `claude`'s own
+  // `auth login`. `antExecutable` is a closure over `resolveAntExecutable` (Lane L,
   // `bundle-layout.ts`), fed `winterOptionsFromSettings(settings).antExecutable` LIVE (re-read per
-  // call, never a boot snapshot) exactly the way `claudeExecutableFor()` above and `create.ts`'s own
-  // `winterExecutable`/`claudeExecutable` rungs read their settings — so `runtimes.antExecutable`
-  // also takes effect with no daemon restart.
+  // call, never a boot snapshot) exactly the way `create.ts`'s own `winterExecutable`/
+  // `claudeExecutable` rungs read their settings — so `runtimes.antExecutable` takes effect with no
+  // daemon restart.
   const consoleBroker = createConsoleProfileBroker({
     home: winterHome,
-    claudeExecutable: () => {
-      if (runtimeSdk === undefined) return undefined;
-      const resolved = runtimeSdk.claudeExecutableFor();
-      return resolved instanceof ClaudeExecutableUnavailable ? undefined : resolved.path;
-    },
     antExecutable: () => resolveAntExecutable({
       setting: winterOptionsFromSettings(settings).antExecutable,
       env: process.env,
@@ -1143,7 +1136,14 @@ export async function startDaemon(opts: {
   // separate process (a CLI `winter login`/`logout --anthropic-console`, which is deliberately NOT
   // an RPC and so cannot tell a running daemon directly, or a human running `ant auth
   // login`/`logout --profile winter` by hand). See `ConsoleProfileBroker.startWatcher`'s own doc.
-  consoleBroker.startWatcher();
+  // Fix wave 3 (Minor 1): guarded — a synchronous throw here (e.g. a permissions error hardening
+  // `anthropic-config`) must never fail daemon boot; log one line and continue without the watcher
+  // rather than crash. `startRefresher()` above already has the identical guarantee internally.
+  try {
+    consoleBroker.startWatcher();
+  } catch (err) {
+    console.error(`console-profile-broker: startWatcher() failed (${err instanceof Error ? err.message : String(err)}) — continuing boot without it`);
+  }
 
   // ── §13 step 10, run from here because the handle does not exist where the step does ──────────
   //
