@@ -322,6 +322,41 @@ export class OfficialConsoleRouterUnsupported extends Error {
   }
 }
 
+/**
+ * Winter Phase 10a fix wave (F3, load-bearing guard): the console arm's OWN pre-spawn refusal when
+ * `consoleProfileCredentialFile(home)` does not exist. This is NOT a convenience check — it is the
+ * console arm's actual subscription guard. Measured (controller, 2026-09-13): a spawn's PRECEDENCE
+ * is "the explicit profile outranks a stored claude.ai login" (an `ANTHROPIC_PROFILE`/
+ * `ANTHROPIC_CONFIG_DIR` pair pointed at a real Console profile reports `authMethod: "oauth_token"`
+ * even when a subscription login sits in the SAME config dir), but a MISSING profile silently FALLS
+ * BACK to whatever claude.ai login is already stored there instead of refusing — so without this
+ * check, `officialInputFor` would still assemble a spawn (`ANTHROPIC_PROFILE`/`ANTHROPIC_CONFIG_DIR`
+ * set unconditionally on the console arm) that authenticates via a subscription Winter never
+ * intended it to use. `CONSOLE_API_KEY_SOURCE`'s own doc explains why `apiKeySource` alone cannot
+ * catch this after the fact (a subscription login reports the identical `"none"`) — THIS check,
+ * run BEFORE that spawn, is what actually keeps P9c-1's "no subscription auth" rule while
+ * `runtimes.official.subscriptionAuth` is off.
+ *
+ * MUST STAY A LIVE `existsSync` CALL ON EVERY SPAWN, never a cached/memoized answer or a decision
+ * reused from an earlier call (e.g. `officialAuthFamilyFor`'s own arm SELECTION, computed once when
+ * "auto" first resolves) — the profile can disappear between calls (`winter logout
+ * --anthropic-console` deleting it out from under an already-open, about-to-resume session is
+ * exactly the case this guard exists for), and reusing a stale "yes" would silently re-open the
+ * same fallback-to-subscription hole this check exists to close.
+ */
+export class OfficialConsoleProfileMissing extends Error {
+  readonly code = "console_profile_missing" as const;
+  constructor(readonly home: string) {
+    super(
+      `the console auth arm has no on-disk profile at "${consoleProfileCredentialFile(home)}" — a missing profile falls ` +
+      `back to any claude.ai login already stored in the same config dir instead of refusing, so this session refuses ` +
+      `before spawning rather than risk authenticating as that login; sign in with \`winter login --anthropic-console\` ` +
+      `(or \`ant auth login --profile ${ANTHROPIC_PROFILE_NAME}\` directly) first`,
+    );
+    this.name = "OfficialConsoleProfileMissing";
+  }
+}
+
 export interface OfficialSessionInput {
   sessionId: string;
   parentSessionId?: string;
@@ -386,6 +421,14 @@ export interface OfficialInputDeps {
    *  (every production caller, and every test that does not need to touch this gate) means "use the
    *  real pin". */
   requiredWinterRuntimeSdkVersion?: string;
+  /** Winter Phase 10a fix wave (F3): test-only override of the console arm's LIVE
+   *  `existsSync(consoleProfileCredentialFile(home))` check — official-options.test.ts's own
+   *  `minimalDeps()` uses a symbolic, never-filesystem-backed `home`, so every console-arm test
+   *  that isn't specifically about this guard needs a way to say "the profile is present" without
+   *  actually writing one to disk. `undefined` (every production caller) means "read the real
+   *  file"; this is consulted FRESH on every call, exactly like the real check, so a test can still
+   *  flip it between calls to prove the guard is live rather than memoized. */
+  consoleProfileExists?: () => boolean;
 }
 
 /** `winterSystemPromptFor`'s memory-bucket choice, verbatim (chat/dispatch share `_assistant`; code
@@ -423,7 +466,7 @@ export interface OfficialInput {
 export function officialInputFor(
   input: OfficialSessionInput,
   deps: OfficialInputDeps,
-): OfficialInput | ClaudeExecutableUnavailable | OfficialProjectKeyTooDeep | OfficialCredentialPlanRefused | OfficialConsoleRouterUnsupported {
+): OfficialInput | ClaudeExecutableUnavailable | OfficialProjectKeyTooDeep | OfficialCredentialPlanRefused | OfficialConsoleRouterUnsupported | OfficialConsoleProfileMissing {
   const executable = deps.claudeExecutableFor();
   if (executable instanceof ClaudeExecutableUnavailable) return executable;
 
@@ -449,6 +492,13 @@ export function officialInputFor(
     const pinnedRouterVersion = deps.requiredWinterRuntimeSdkVersion ?? REQUIRED_WINTER_RUNTIME_SDK;
     if (!versionAtLeast(pinnedRouterVersion, CONSOLE_AUTH_ROUTER_MIN)) {
       return new OfficialConsoleRouterUnsupported(pinnedRouterVersion, CONSOLE_AUTH_ROUTER_MIN);
+    }
+    // Fix wave (F3, load-bearing guard): a LIVE existence check, on EVERY console-arm spawn — see
+    // `OfficialConsoleProfileMissing`'s own doc for why this is the console arm's actual
+    // subscription guard, not a convenience check, and why it must never be memoized/cached.
+    const consoleProfilePresent = (deps.consoleProfileExists ?? (() => existsSync(consoleProfileCredentialFile(deps.home))))();
+    if (!consoleProfilePresent) {
+      return new OfficialConsoleProfileMissing(deps.home);
     }
   }
 

@@ -22,7 +22,7 @@ import { MAIN_THREAD, ProjectorRefusedError, classifyThrown, createProjector, ty
 import type { WinterRuntimeSdk, SessionMode } from "./create";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { officialSubscriptionAuthEnabled } from "../settings";
-import { ensureOfficialConfigDir, OfficialConsoleRouterUnsupported, OfficialCredentialPlanRefused, officialInputFor, OfficialProjectKeyTooDeep, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
+import { ensureOfficialConfigDir, OfficialConsoleProfileMissing, OfficialConsoleRouterUnsupported, OfficialCredentialPlanRefused, officialInputFor, OfficialProjectKeyTooDeep, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { attachOfficialSession, type OfficialSessionAttachHandle, type OfficialSessionAttachment } from "./messaging";
 // P10a-h: the SAME grace window `WinterSession.end()` races against — reused, not reinvented, so
@@ -184,25 +184,35 @@ export class OfficialAuthSourceRefused extends Error {
 }
 
 /**
- * Winter Phase 10a (O3, P10a-3/P10a-7 M1): the console profile's own `system/init.apiKeySource`
- * value is UNMEASURED against the real 0.3.250 runtime — the controller's M1 task runs that
- * measurement once, at the keyboard, and pins the literal here. Until then this placeholder makes
- * `expectedApiKeySource("console")` a real, importable value rather than a TODO: any test written
- * against it today keeps passing after the controller's one-line edit (the literal changes; the
- * shape and every call site do not), and a console-arm session that reaches this assertion before
- * the pin lands refuses loudly (mismatch against an unmeasured placeholder can never coincidentally
- * equal a real SDK value) rather than silently accepting whatever the child reports.
+ * Winter Phase 10a (O3, P10a-3/P10a-7 M1, MEASURED 2026-09-13): the console profile's own
+ * `system/init.apiKeySource` value, measured at the keyboard against the real runtime with a
+ * planted `user_oauth` profile (`auth status` reported `{loggedIn:true, authMethod:"oauth_token"}`).
+ *
+ * `"none"` is NOT unique to the console profile: a claude.ai SUBSCRIPTION login reports the exact
+ * same `apiKeySource: "none"` (also measured) — so this assertion alone can never tell "the console
+ * profile authenticated" apart from "a subscription login authenticated instead". What it DOES
+ * reliably refuse is the two sources P9c-1 exists to keep off this leg while
+ * `runtimes.official.subscriptionAuth` is off: the api-key arm's own `"ANTHROPIC_API_KEY"`, and
+ * `claude auth login`'s own "/login managed key" source — either of those reaching a console-arm
+ * session would be a real leak this assertion still catches.
+ *
+ * The actual subscription guard for the console arm is NOT this string comparison — it is
+ * `officialInputFor`'s own LIVE pre-spawn `console_profile_missing` check (`OfficialConsoleProfileMissing`,
+ * fix wave F3) plus always setting both `ANTHROPIC_PROFILE`/`ANTHROPIC_CONFIG_DIR`: measured, an
+ * EXPLICIT profile outranks any claude.ai login already stored in the same config dir (the spawn
+ * reports `authMethod: "oauth_token"` for a genuine Console profile even when a subscription login
+ * sits in the same directory), while a MISSING profile silently falls back to that stored login
+ * instead of refusing. See that check's own doc for why it must stay a live filesystem check, never
+ * a cached answer.
  */
-export const CONSOLE_API_KEY_SOURCE = "<M1-unmeasured>";
+export const CONSOLE_API_KEY_SOURCE = "none";
 
 /**
  * Winter Phase 10a (O3): which `system/init.apiKeySource` string this session's auth arm is
  * expected to report — the api-key arm's `ANTHROPIC_API_KEY` (P9c-1, unchanged) or the console
- * arm's `CONSOLE_API_KEY_SOURCE` placeholder above. A pure lookup, so the api-key branch below can
- * call it instead of repeating the literal, and so a future console-arm assertion (wiring the
- * `officialAuthFamilyFor`-decided arm into THIS check is `session-driver.ts`'s
- * `RuntimeSelection.authFamily` plumbing — outside this lane's file cluster, P10a's Lane O brief)
- * has one function to call rather than a second hand-copied string.
+ * arm's measured `CONSOLE_API_KEY_SOURCE` above (`"none"` — see that constant's own doc for why
+ * this string alone does not distinguish a console profile from a subscription login). A pure
+ * lookup, so the api-key branch below can call it instead of repeating the literal.
  */
 export function expectedApiKeySource(family: "api-key" | "console"): string {
   return family === "api-key" ? "ANTHROPIC_API_KEY" : CONSOLE_API_KEY_SOURCE;
@@ -417,7 +427,7 @@ class OfficialSessionImpl implements OfficialSession {
       await this.lastDone;
       const inputDeps = await this.deps.inputDeps();
       const built = officialInputFor(this.deps.sessionInput(), inputDeps);
-      if (built instanceof ClaudeExecutableUnavailable || built instanceof OfficialProjectKeyTooDeep || built instanceof OfficialCredentialPlanRefused || built instanceof OfficialConsoleRouterUnsupported) throw built;
+      if (built instanceof ClaudeExecutableUnavailable || built instanceof OfficialProjectKeyTooDeep || built instanceof OfficialCredentialPlanRefused || built instanceof OfficialConsoleRouterUnsupported || built instanceof OfficialConsoleProfileMissing) throw built;
       // Phase 9c (P9c-1): create/harden the Winter-owned config dir NOW — the one point in this
       // leg's whole lifecycle that is an actual spawn against a real `WINTER_HOME`, as opposed to
       // `officialInputFor`'s own pure path computation (see `ensureOfficialConfigDir`'s own doc for

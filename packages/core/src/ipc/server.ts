@@ -450,7 +450,7 @@ function rpcFromWinterRefusal(err: unknown): never {
     // configure a credential, pick a servable model) rather than a daemon-internal fault.
     const invalid = err.code === "session_predates_winter_leg" || err.code === "not_supported_on_winter_leg"
       || err.code === "claude_executable_unavailable" || err.code === "runtime_selection_refused"
-      || err.code === "official_console_router_unsupported";
+      || err.code === "official_console_router_unsupported" || err.code === "console_profile_missing";
     throw new RpcFailure(invalid ? ERR.INVALID_PARAMS : ERR.INTERNAL, err.message, { code: err.code });
   }
   const code = (err as { code?: unknown } | null)?.code;

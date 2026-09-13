@@ -31,6 +31,7 @@ import {
   officialConfigDirFor,
   officialInputFor,
   officialPermissionModeFor,
+  OfficialConsoleProfileMissing,
   OfficialConsoleRouterUnsupported,
   OfficialProjectKeyTooDeep,
   type OfficialInputDeps,
@@ -158,6 +159,12 @@ function minimalDeps(overrides: Partial<OfficialInputDeps> = {}): OfficialInputD
     capabilities: {},
     canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
     policy: "auto",
+    // Fix wave (F3): every test in this file uses a symbolic, never-filesystem-backed `home`
+    // (above) — default the console arm's live profile-existence guard to "present" so every
+    // EXISTING console-arm test (env shape, router-version gate, …) keeps testing what it already
+    // tests, undisturbed by a guard those tests are not about. F3's own describe block overrides
+    // this explicitly to `() => false` to test the guard itself.
+    consoleProfileExists: () => true,
     ...overrides,
   };
 }
@@ -578,6 +585,84 @@ describe("officialInputFor — the console arm refuses until the router pin supp
     expect(result.input.credentials ?? []).not.toContainEqual(expect.objectContaining({ variable: "ANTHROPIC_API_KEY" }));
     expect(result.input.base?.ANTHROPIC_API_KEY).toBeUndefined();
     expect(result.input.connectionEnv?.ANTHROPIC_API_KEY).toBeUndefined();
+  });
+});
+
+// Winter Phase 10a fix wave (F3, load-bearing guard): the console arm's own subscription guard —
+// see `OfficialConsoleProfileMissing`'s own doc for the measured precedence fact this check exists
+// to enforce ("an explicit profile outranks a stored claude.ai login; a MISSING profile falls back
+// to it instead of refusing"). `minimalDeps()` defaults `consoleProfileExists` to `() => true`
+// (its own comment explains why); this block is the one place that flips it to prove the guard.
+describe("officialInputFor — the console arm's own subscription guard: console_profile_missing (F3)", () => {
+  const apiKeySelection: RuntimeSelection = {
+    runtimeKind: "claude-agent", providerId: "anthropic", modelRef: "anthropic/claude-sonnet-5",
+    family: "claude", authFamily: "api-key", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
+  };
+  const consoleSelection: RuntimeSelection = { ...apiKeySelection, authFamily: "console-profile" };
+  const HOME = "/Users/x/.winter-test-home";
+  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+  const provider = { providerId: "anthropic", authRef: { kind: "keychain" as const, account: "anthropic:default" } };
+
+  test("an explicit console pin with no profile yet refuses typed console_profile_missing", () => {
+    const result = officialInputFor(input, minimalDeps({
+      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
+      consoleProfileExists: () => false,
+    }));
+    expect(result).toBeInstanceOf(OfficialConsoleProfileMissing);
+    expect((result as OfficialConsoleProfileMissing).code).toBe("console_profile_missing");
+    expect((result as OfficialConsoleProfileMissing).home).toBe(HOME);
+  });
+
+  test("the refusal fires BEFORE any credential is read — the router is never consulted at all", () => {
+    // A REAL anthropic authRef present on the provider, same proof shape as the F1 gate's own
+    // identical test: if the refusal fired late, this would still pass by accident.
+    const result = officialInputFor(input, minimalDeps({
+      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
+      consoleProfileExists: () => false,
+    }));
+    expect("input" in result).toBe(false);
+  });
+
+  test("a resume after winter logout --anthropic-console deleted the profile also refuses — the check is LIVE, not a cached decision from an earlier call", () => {
+    // Simulates the exact scenario the guard's own doc names: the SAME deps shape a resume would
+    // rebuild, but the profile is now gone. A single mutable flag proves this is re-read on every
+    // call, never memoized from an earlier "yes" (e.g. the very login that opened this session).
+    let present = true;
+    const deps = minimalDeps({
+      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
+      consoleProfileExists: () => present,
+    });
+    const beforeLogout = officialInputFor(input, deps);
+    expect("input" in beforeLogout).toBe(true);
+    present = false; // `winter logout --anthropic-console` ran between the two calls
+    const afterLogout = officialInputFor(input, deps);
+    expect(afterLogout).toBeInstanceOf(OfficialConsoleProfileMissing);
+  });
+
+  test("the api-key arm is completely unaffected by this guard", () => {
+    const result = officialInputFor(input, minimalDeps({
+      home: HOME, selection: apiKeySelection, provider, explicitCredentials: undefined,
+      consoleProfileExists: () => false,
+    }));
+    expect("input" in result).toBe(true);
+  });
+
+  test("a present profile (the default) builds normally", () => {
+    const result = officialInputFor(input, minimalDeps({
+      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
+    }));
+    expect("input" in result).toBe(true);
+  });
+
+  test("with no override at all, the REAL existsSync check runs against the symbolic home and refuses (never silently treated as present)", () => {
+    // No `consoleProfileExists` override — proves the REAL `existsSync(consoleProfileCredentialFile(home))`
+    // path is what runs by default, and that a never-filesystem-backed home reads as "missing", not
+    // "present" (the opposite default would silently defeat the guard for every caller that forgot
+    // to wire the override).
+    const deps = minimalDeps({ home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined });
+    delete (deps as { consoleProfileExists?: unknown }).consoleProfileExists;
+    const result = officialInputFor(input, deps);
+    expect(result).toBeInstanceOf(OfficialConsoleProfileMissing);
   });
 });
 

@@ -66,7 +66,7 @@ import type { ContextAssembler } from "../agent/context";
 import { startWinterSession, unconsumedUserMessages, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { startOfficialSession, type OfficialSession } from "./official-session";
-import { officialAuthFamilyFor, OfficialConsoleRouterUnsupported, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
+import { officialAuthFamilyFor, OfficialConsoleProfileMissing, OfficialConsoleRouterUnsupported, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
 
 export type WinterLegRefusalCode =
   | "winter_executable_unavailable"   // P8b-2: no `winter` binary resolves (setting → env → bundle → home)
@@ -78,7 +78,8 @@ export type WinterLegRefusalCode =
   | "not_supported_on_winter_leg"     // `session.compact` (SDK 0.0.4 carry)
   | "claude_executable_unavailable"   // P8c-3: no `claude` binary resolves for an official-leg create
   | "runtime_selection_refused"       // P8c-14: the router's selectRuntime refused this session's model
-  | "official_console_router_unsupported"; // C1-interim: the pinned router cannot support the console auth arm yet
+  | "official_console_router_unsupported" // C1-interim: the pinned router cannot support the console auth arm yet
+  | "console_profile_missing"; // Winter Phase 10a fix wave (F3): the console arm's on-disk profile is missing
 
 /**
  * P8c-14: the intersection of `WinterSession`'s and `OfficialSession`'s public members — everything
@@ -813,6 +814,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       if (err instanceof WinterLegRefusal) throw err;
       if (err instanceof ClaudeExecutableUnavailable) throw new WinterLegRefusal("claude_executable_unavailable", err.message);
       if (err instanceof OfficialConsoleRouterUnsupported) throw new WinterLegRefusal("official_console_router_unsupported", err.message);
+      if (err instanceof OfficialConsoleProfileMissing) throw new WinterLegRefusal("console_profile_missing", err.message);
       throw new WinterLegRefusal("winter_leg_unavailable", `the official child for ${sessionId} could not be started (${err instanceof Error ? err.name : "unknown"})`);
     }
     return session;
@@ -909,6 +911,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       if (err instanceof WinterLegRefusal) throw err;
       if (err instanceof ClaudeExecutableUnavailable) throw new WinterLegRefusal("claude_executable_unavailable", err.message);
       if (err instanceof OfficialConsoleRouterUnsupported) throw new WinterLegRefusal("official_console_router_unsupported", err.message);
+      if (err instanceof OfficialConsoleProfileMissing) throw new WinterLegRefusal("console_profile_missing", err.message);
       throw new WinterLegRefusal("winter_leg_unavailable", `the official child for ${sessionId} could not be resumed (${err instanceof Error ? err.name : "unknown"})`);
     }
     return session;

@@ -529,6 +529,11 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
       // a runtime probe of the installed package — so no override is needed to reach the
       // apiKeySource assertion under test here (that gate has its own coverage in
       // official-options.test.ts).
+      // Fix wave (F3): this test's own `home` is a REAL mkdtempSync dir with no console profile
+      // ever written to it — without this override the new console_profile_missing guard would
+      // refuse before the apiKeySource assertion under test here is ever reached (that guard has
+      // its own coverage in official-options.test.ts).
+      consoleProfileExists: () => true,
     };
     const h = harness({ selection: consoleSelection, inputDeps: () => consoleInputDeps });
     await h.session.send("hi");
@@ -552,7 +557,10 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
       capabilities: {},
       canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
       policy: "auto",
-      // Fix wave (F1): see the sibling test above — no override needed any more.
+      // Fix wave (F1): see the sibling test above — no router-version override needed any more.
+      // Fix wave (F3): see the sibling test above — this test's own real, empty `home` needs the
+      // same override to reach the apiKeySource assertion under test here.
+      consoleProfileExists: () => true,
     };
     const h = harness({ selection: consoleSelection, inputDeps: () => consoleInputDeps });
     await h.session.send("hi");
@@ -588,20 +596,20 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
   });
 });
 
-// Winter Phase 10a (O3, P10a-3/P10a-7 M1): `expectedApiKeySource` as a standalone pure lookup — the
-// console arm's own placeholder literal, and proof the api-key arm's assertion (tested end to end
-// above) is now DERIVED from this function rather than a second hand-typed "ANTHROPIC_API_KEY"
-// string. Wiring a real console-arm session through `run()`'s own assertion is `session-driver.ts`'s
-// `RuntimeSelection.authFamily` plumbing (outside this lane's file cluster) — carried; see the lane
-// report.
+// Winter Phase 10a (O3, P10a-3/P10a-7 M1, MEASURED 2026-09-13): `expectedApiKeySource` as a
+// standalone pure lookup — the console arm's own MEASURED literal, and proof the api-key arm's
+// assertion (tested end to end above) is now DERIVED from this function rather than a second
+// hand-typed "ANTHROPIC_API_KEY" string. Wiring a real console-arm session through `run()`'s own
+// assertion is `session-driver.ts`'s `RuntimeSelection.authFamily` plumbing (outside this lane's
+// file cluster) — carried; see the lane report.
 describe("O3 — expectedApiKeySource / CONSOLE_API_KEY_SOURCE", () => {
   test("api-key arm expects the pinned ANTHROPIC_API_KEY — unchanged from P9c-1", () => {
     expect(expectedApiKeySource("api-key")).toBe("ANTHROPIC_API_KEY");
   });
 
-  test("console arm expects the M1 placeholder literal — a one-line edit once the controller measures the real value", () => {
+  test("console arm expects the measured \"none\" — shared with a claude.ai subscription login, so this alone is never the subscription discriminator (see CONSOLE_API_KEY_SOURCE's own doc — that's officialInputFor's console_profile_missing guard, F3)", () => {
     expect(expectedApiKeySource("console")).toBe(CONSOLE_API_KEY_SOURCE);
-    expect(CONSOLE_API_KEY_SOURCE).toBe("<M1-unmeasured>");
+    expect(CONSOLE_API_KEY_SOURCE).toBe("none");
   });
 
   test("the two arms never expect the same value — a mismatch against one can never coincidentally pass as the other", () => {
