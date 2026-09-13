@@ -2865,8 +2865,21 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (!opts.consoleBroker) throw new RpcFailure(ERR.INTERNAL, "provider.logout is not available on this server (no console broker configured)");
         try {
           await opts.consoleBroker.logout();
-        } catch {
-          return { ok: false };
+        } catch (err) {
+          // Pre-release hardening (P10a-harden T1): the broker's own thrown Error already carries
+          // a typed reason as its message's leading `<code>[: detail]` (e.g.
+          // `console_logout_incomplete` when `ant auth logout` leaves the profile on disk,
+          // `ant_executable_unavailable`, `console_broker_sdk_unsupported`) — collapsing that to a
+          // bare `{ok:false}` silently dropped the reason, leaving the app/CLI able to say "failed"
+          // but never why. Failing the RPC itself with the reason in `error.data.code` matches this
+          // same file's own precedent for typed refusals (`session_predates_winter_leg`,
+          // `session_import_failed`, `not_supported_on_winter_leg`) and needs no protocol change —
+          // WinterKit's `WinterClient.request` already throws an `RpcError` carrying `.message`/
+          // `.data` for any JSON-RPC error reply, so `LiveAnthropicAuthClient.logout()` (which
+          // otherwise only guards a well-formed `{ok:false}`) already surfaces this to callers.
+          const message = err instanceof Error ? err.message : String(err);
+          const code = message.includes(":") ? message.slice(0, message.indexOf(":")) : message;
+          throw new RpcFailure(ERR.INTERNAL, message, { code });
         }
         return { ok: true };
       }
