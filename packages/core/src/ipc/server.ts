@@ -426,6 +426,11 @@ export interface IpcServerOptions {
   helloTimeoutMs?: number;   // default 5000
   maxConnections?: number;   // default 64
   preAuthMaxLine?: number;   // default 64 KiB
+  // Fix wave (F4): test-only override of the ceiling `provider.login` waits for the first
+  // URL-bearing progress line (or the login finishing) before returning — production never sets
+  // this (default 3000); a test whose fake broker never emits a URL and never settles `done` would
+  // otherwise pay the full real-world ceiling per test.
+  providerLoginUrlHintWaitMs?: number;
 }
 
 export interface IpcServer { stop(): void }
@@ -913,6 +918,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
 
   const helloTimeoutMs = opts.helloTimeoutMs ?? 5000;
   const maxConnections = opts.maxConnections ?? 64;
+  const providerLoginUrlHintWaitMs = opts.providerLoginUrlHintWaitMs ?? 3000;
   const preAuthMaxLine = opts.preAuthMaxLine ?? 64 * 1024;
   let connections = 0;
 
@@ -2775,18 +2781,31 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         parseParams(ProviderLoginParams, params);
         if (!opts.consoleBroker) throw new RpcFailure(ERR.INTERNAL, "provider.login is not available on this server (no console broker configured)");
         if (activeAnthropicLogin) throw new RpcFailure(ERR.INVALID_PARAMS, "an Anthropic Console login is already in progress");
-        // Fix wave (N1): best-effort — captures the FIRST `https://` URL any progress line
+        // Fix wave (N1/F4): best-effort — captures the FIRST `https://` URL any progress line
         // carries, so the RPC's own return value can hand the app a fallback link even before its
-        // very first `provider_login_progress` event round-trips back over the wire. `login()`'s
-        // fake/real onLine callback can fire synchronously during the call (this file's own tests,
-        // and a fast local spawn), which is the only way this is ever populated — a later line
-        // (after this handler has already returned) only ever reaches the broadcast, never this
-        // return value, and that is fine: `urlHint` is documented optional/best-effort.
+        // very first `provider_login_progress` event round-trips back over the wire.
+        //
+        // Fix wave (F4): the REAL SDK's stdout pump is async — `login()` resolves once the child is
+        // SPAWNED, not once that pump has actually emitted the login URL line, so a synchronous-only
+        // capture (the ORIGINAL N1 shape) left `urlHint` permanently undefined for every real login;
+        // only a fake broker whose `onLine` fires synchronously during `login()` itself ever
+        // populated it. This now WAITS (races) for whichever comes first: the first progress line
+        // that actually carries a URL, the login finishing (ok or not — e.g. an immediate SDK
+        // failure), or a short timeout — so the common case returns a usable link without blocking
+        // the caller indefinitely when the SDK is slow, or never emits one at all.
         let urlHint: string | undefined;
+        let resolveUrlHintFound: (() => void) | undefined;
+        const urlHintFound = new Promise<void>((resolve) => { resolveUrlHintFound = resolve; });
         let handle: Awaited<ReturnType<ConsoleProfileBroker["login"]>>;
         try {
           handle = await opts.consoleBroker.login((line) => {
-            if (urlHint === undefined) urlHint = extractUrlHint(line);
+            if (urlHint === undefined) {
+              const hint = extractUrlHint(line);
+              if (hint !== undefined) {
+                urlHint = hint;
+                resolveUrlHintFound?.();
+              }
+            }
             broadcastAnthropicLoginEvent({ type: "provider_login_progress", provider: "anthropic", line });
           });
         } catch (err) {
@@ -2813,6 +2832,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             broadcastAnthropicLoginEvent({ type: "provider_login_finished", provider: "anthropic", ok: false, reason: err instanceof Error ? err.name : "unknown" });
           })
           .finally(() => { if (activeAnthropicLogin === handle) activeAnthropicLogin = undefined; });
+        // Fix wave (F4): the race itself — `handle.done` is never rejected past this point in
+        // practice (the chain above always resolves the `{ok, reason?}` shape and only a thrown,
+        // pre-`login()`-return error would reach `.catch`), but it is guarded here too so a
+        // pathological rejection can never leave this RPC hanging until the timeout.
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<void>((resolve) => { timeoutHandle = setTimeout(resolve, providerLoginUrlHintWaitMs); });
+        try {
+          await Promise.race([urlHintFound, handle.done.then(() => undefined, () => undefined), timeout]);
+        } finally {
+          if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+        }
         return { started: true, ...(urlHint === undefined ? {} : { urlHint }) };
       }
 

@@ -154,7 +154,7 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
 
-  async function boot(brokerOverrides: Partial<ConsoleProfileBroker> = {}) {
+  async function boot(brokerOverrides: Partial<ConsoleProfileBroker> = {}, ipcOpts: { providerLoginUrlHintWaitMs?: number } = {}) {
     const home = mkdtempSync(join(tmpdir(), "winter-provider-login-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
@@ -162,7 +162,14 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
     const authority = new TokenAuthority(secrets);
     const tokens = await authority.ensureTokens();
     const { broker, calls } = fakeBroker(brokerOverrides);
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets, consoleBroker: broker });
+    // Fix wave (F4): a small ceiling by default — this suite's fakes that never emit a URL and
+    // never settle `done` (the "second login refused"/"line clipped" tests below) would otherwise
+    // pay the full 3s production default per test; 200ms is still comfortably above the async
+    // 50ms-delayed-URL test's own delay, below.
+    const server = startIpcServer({
+      socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets, consoleBroker: broker,
+      providerLoginUrlHintWaitMs: ipcOpts.providerLoginUrlHintWaitMs ?? 200,
+    });
     stop = () => { server.stop(); store.close(); };
     return { socketPath, harnessToken: tokens.harness, calls };
   }
@@ -221,6 +228,42 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
     await c.hello(harnessToken, "cli");
     const result = await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
     expect(result.result).toEqual({ started: true, urlHint: "https://first.example.com/a" });
+    c.close();
+  });
+
+  // Fix wave (F4): the REAL SDK's stdout pump is async — `login()` resolves once the child is
+  // spawned, before the URL line ever arrives, so the ORIGINAL N1 shape (capture only whatever
+  // fired SYNCHRONOUSLY during `login()`) never actually worked outside a fake that cheated by
+  // calling `onLine` inline. This fake reproduces the real timing: `login()` resolves immediately
+  // with no URL yet emitted, and the URL-bearing line arrives 50ms later on its own timer — proving
+  // `provider.login` now WAITS for it rather than returning `urlHint`-less every time.
+  test("provider.login waits for a URL line that arrives asynchronously AFTER login() resolves (F4)", async () => {
+    const { socketPath, harnessToken } = await boot({
+      login: async (onLine) => {
+        setTimeout(() => onLine("Opening browser to sign in: https://platform.claude.com/oauth/authorize?state=abc"), 50);
+        return { submitCode: async () => {}, done: new Promise(() => {}) };
+      },
+    });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
+    expect(result.result).toEqual({ started: true, urlHint: "https://platform.claude.com/oauth/authorize" });
+    c.close();
+  });
+
+  // The mirror case: the login finishes (fails) before any URL ever arrives — the wait must not
+  // outlast that either, and must never fabricate a urlHint that was never actually seen.
+  test("provider.login stops waiting once the login finishes, even with no URL ever seen (F4)", async () => {
+    const { socketPath, harnessToken } = await boot({
+      login: async () => ({ submitCode: async () => {}, done: Promise.resolve({ ok: false, reason: "exit_code_1" }) }),
+    });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const started = Date.now();
+    const result = await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
+    expect(Date.now() - started).toBeLessThan(200); // 200 is this boot()'s own providerLoginUrlHintWaitMs
+    expect(result.result).toEqual({ started: true });
+    expect("urlHint" in result.result).toBe(false);
     c.close();
   });
 
