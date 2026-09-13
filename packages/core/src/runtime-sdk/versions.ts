@@ -66,6 +66,23 @@ export const CONSOLE_AUTH_ROUTER_MIN = "0.0.4";
 export const CONSOLE_BROKER_SDK_MIN = "0.0.9";
 
 /**
+ * Pre-release hardening (P9c-1 amendment): the compile-time approval gate on
+ * `runtimes.official.subscriptionAuth` — same posture as the router's own
+ * `D14_CLAUDE_OAUTH_APPROVED_DEFAULT` (a compile-time approval constant kept separate from any
+ * runtime setting; `runtime-sdk/create.ts` reads it, never a settings key, at its own two call
+ * sites). The official Claude leg must never authenticate with a claude.ai subscription until
+ * Anthropic approves it for this integration — so the settings flag ALONE must never be able to
+ * open that door. `officialSubscriptionAuthEnabled` (`../settings.ts`) ANDs the flag against this
+ * constant; flipping the flag in settings.json while this constant stays `false` is INERT (logged
+ * once per settings change, `settings-apply.ts`/`daemon.ts`), never a silent widen. Only a reviewed
+ * code change to THIS constant — never a test, never a settings override in production — may flip
+ * it. Tests that need to exercise the "approved" branch use the injectable override parameter
+ * `officialSubscriptionAuthEnabled`/`OfficialInputDeps.officialSubscriptionAuthApproved` accept,
+ * never by editing this constant.
+ */
+export const OFFICIAL_SUBSCRIPTION_AUTH_APPROVED = false;
+
+/**
  * A plain per-component numeric comparison (`"0.0.10"` sorts ABOVE `"0.0.4"`, unlike a
  * lexicographic string compare) — every version this function ever sees is a bare
  * `MAJOR.MINOR.PATCH` triplet (this repo's own pins, the router's own releases), never a

@@ -13,7 +13,12 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { writeCredentialMaterial } from "../../src/auth/credential-material";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
-import type { ConsoleProfileBroker } from "../../src/auth/console-profile-broker";
+import {
+  createConsoleProfileBroker,
+  CONSOLE_LOGOUT_INCOMPLETE_REASON,
+  type ConsoleProfileBroker,
+  type AnthropicConsoleSdk,
+} from "../../src/auth/console-profile-broker";
 import { Settings, saveSettings } from "../../src/settings";
 
 /** Minimal raw test client speaking NDJSON JSON-RPC — duplicated from remote-role.test.ts's copy,
@@ -361,6 +366,40 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
     const result = await c.request(METHODS.providerLogout, { provider: "anthropic", kind: "console" });
     expect(result.result).toEqual({ ok: true });
     expect(calls).toContain("logout");
+    c.close();
+  });
+
+  // Pre-release hardening (P10a-harden T1): the REAL `createConsoleProfileBroker` over an injected
+  // fake SDK (never `fakeBroker` above, which only records calls) — so this exercises the broker's
+  // own `CONSOLE_LOGOUT_INCOMPLETE_REASON` post-check (console-profile-broker.ts's `logout()`)
+  // THROUGH the RPC layer, proving `provider.logout` no longer collapses that thrown reason into a
+  // bare `{ok:false}`.
+  test("provider.logout surfaces the broker's typed reason as an RPC error when the profile survives (console_logout_incomplete)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-provider-logout-incomplete-"));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const secrets = new FileSecretStore(join(home, "secrets"));
+    const authority = new TokenAuthority(secrets);
+    const tokens = await authority.ensureTokens();
+    // Simulates `ant auth logout` resolving without actually removing the on-disk profile
+    // (measured behaviour this fix wave's own doc describes) — `anthropicConsoleProfileExists`
+    // stays `true` no matter what `logoutAnthropicConsole` does.
+    const sdk: AnthropicConsoleSdk = {
+      startAnthropicConsoleBrokerLogin: async () => ({ submitCode: async () => {}, done: Promise.resolve({ ok: true, profile: "winter" }) }),
+      refreshAnthropicBearer: async () => ({ ok: true, expiresAt: 1 }),
+      anthropicConsoleProfileExists: () => true,
+      logoutAnthropicConsole: async () => {},
+    };
+    const broker = createConsoleProfileBroker({ home, antExecutable: () => "/bin/ant", secrets, sdk });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets, consoleBroker: broker });
+    stop = () => { server.stop(); store.close(); };
+    const c = await TestClient.connect(socketPath);
+    await c.hello(tokens.harness, "cli");
+    const result = await c.request(METHODS.providerLogout, { provider: "anthropic", kind: "console" });
+    expect(result.result).toBeUndefined();
+    expect(result.error?.code).toBe(ERR.INTERNAL);
+    expect(result.error?.data?.code).toBe(CONSOLE_LOGOUT_INCOMPLETE_REASON);
+    expect(result.error?.message).toContain(CONSOLE_LOGOUT_INCOMPLETE_REASON);
     c.close();
   });
 

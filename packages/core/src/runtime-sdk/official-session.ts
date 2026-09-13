@@ -178,7 +178,7 @@ export class OfficialBackendIdMismatch extends Error {
 export class OfficialAuthSourceRefused extends Error {
   readonly code = "official_auth_source_refused" as const;
   constructor(readonly apiKeySource: string, readonly expected: string = "ANTHROPIC_API_KEY") {
-    super(`the official runtime's init message reported apiKeySource=${apiKeySource}, not the pinned ${expected}; runtimes.official.subscriptionAuth is off (P9c-1's shipped default), so this session refuses before any turn runs`);
+    super(`the official runtime's init message reported apiKeySource=${apiKeySource}, not the pinned ${expected}; claude.ai subscription auth is not approved for this build (P9c-1; a hand-set runtimes.official.subscriptionAuth stays inert), so this session refuses before any turn runs`);
     this.name = "OfficialAuthSourceRefused";
   }
 }
@@ -466,7 +466,7 @@ class OfficialSessionImpl implements OfficialSession {
       // object's own `settings` field) — read once, here, so `run()`'s own assertion never
       // re-fetches settings independently and can never disagree with what THIS spawn was actually
       // built against.
-      const subscriptionAuthEnabled = officialSubscriptionAuthEnabled(inputDeps.settings);
+      const subscriptionAuthEnabled = officialSubscriptionAuthEnabled(inputDeps.settings, inputDeps.officialSubscriptionAuthApproved);
       const inc: Incarnation = { stream, projector, query: routerQuery, abort, sawInit: false, done: Promise.resolve(), subscriptionAuthEnabled };
       this.inc = inc;
       // m7: `resumed` is honest about THIS instance's own history — generation 1 is a fresh start,

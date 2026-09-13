@@ -313,14 +313,29 @@ describe("officialInputFor — the env shape + spool (P9c-1)", () => {
     expect(built.input.spool).toBe(officialConfigDirFor(HOME));
   });
 
-  test("subscriptionAuth true -> spool is left undefined (the router's own default applies instead)", () => {
+  // Pre-release hardening (P9c-1 amendment): the settings flag ALONE can no longer widen this —
+  // `OFFICIAL_SUBSCRIPTION_AUTH_APPROVED` (versions.ts) stays `false` until Anthropic approves
+  // subscription auth, so `subscriptionAuth: true` with NO override is now the SAME as off.
+  test("subscriptionAuth true, with NO approval override -> spool is STILL officialConfigDirFor(home) (the compile-time gate stays closed)", () => {
     const built = build({ settings: settingsWith(true) });
+    expect(built.input.spool).toBe(officialConfigDirFor(HOME));
+  });
+
+  // The only way to reach the widened behaviour is the injectable test seam — never by editing
+  // the real constant.
+  test("subscriptionAuth true WITH the approval override -> spool is left undefined (the router's own default applies instead)", () => {
+    const built = build({ settings: settingsWith(true), officialSubscriptionAuthApproved: true });
     expect(built.input.spool).toBeUndefined();
   });
 
-  test("flipping the flag between two calls with the SAME deps object otherwise -> spool changes with no other field touched (hot, no restart)", () => {
-    const off = build({ settings: settingsWith(false) });
-    const on = build({ settings: settingsWith(true) });
+  test("the override alone (no flag) changes nothing -> approval without the flag never widens", () => {
+    const built = build({ settings: settingsWith(false), officialSubscriptionAuthApproved: true });
+    expect(built.input.spool).toBe(officialConfigDirFor(HOME));
+  });
+
+  test("flipping the flag between two calls with the SAME deps object otherwise, BOTH under the approval override -> spool changes with no other field touched (hot, no restart)", () => {
+    const off = build({ settings: settingsWith(false), officialSubscriptionAuthApproved: true });
+    const on = build({ settings: settingsWith(true), officialSubscriptionAuthApproved: true });
     expect(off.input.spool).toBe(officialConfigDirFor(HOME));
     expect(on.input.spool).toBeUndefined();
     // Nothing else about the assembled input moved with the flag.
@@ -376,8 +391,15 @@ describe("officialInputFor — the env shape + spool, console-oauth family (P9c-
     expect(built.input.spool).toBe(officialConfigDirFor(HOME));
   });
 
-  test("subscriptionAuth true -> spool is left undefined, same as the api-key family", () => {
+  // Pre-release hardening (P9c-1 amendment): see the api-key family's own matrix above — the
+  // settings flag alone no longer widens this; the approval override is required.
+  test("subscriptionAuth true, with NO approval override -> spool is STILL officialConfigDirFor(home), same as the api-key family", () => {
     const built = build({ settings: settingsWith(true) });
+    expect(built.input.spool).toBe(officialConfigDirFor(HOME));
+  });
+
+  test("subscriptionAuth true WITH the approval override -> spool is left undefined, same as the api-key family", () => {
+    const built = build({ settings: settingsWith(true), officialSubscriptionAuthApproved: true });
     expect(built.input.spool).toBeUndefined();
   });
 

@@ -540,4 +540,30 @@ describe("makeApply: the runtime options diff (P8b Task 15)", () => {
     await apply(Settings.parse({ ...BASE_SETTINGS, runtimes: {} }), Settings.parse({ ...BASE_SETTINGS, runtimes: { winterIdleTimeoutSec: 60 } }));
     expect(lines).toEqual(["runtimes.winterIdleTimeoutSec changed — it takes effect for new sessions"]);
   });
+
+  // Pre-release hardening (P9c-1 amendment): `runtimes.official.subscriptionAuth: true` is inert
+  // (the compile-time approval constant stays `false`) — every settings change that carries it
+  // must say so exactly once, same "accepted, logged, ignored" posture as winterLeg above.
+  test("official.subscriptionAuth = true is reported inert on every settings change that carries it", async () => {
+    const lines: string[] = [];
+    const apply = makeApply(baseDeps({ log: (m) => lines.push(m) }));
+    await apply(Settings.parse(BASE_SETTINGS), Settings.parse({ ...BASE_SETTINGS, runtimes: { official: { subscriptionAuth: true } } }));
+    expect(lines.some((l) => l.includes("runtimes.official.subscriptionAuth") && l.includes("inert until Anthropic approves"))).toBe(true);
+  });
+
+  test("official.subscriptionAuth = false, or the block absent, never narrates", async () => {
+    const lines: string[] = [];
+    const apply = makeApply(baseDeps({ log: (m) => lines.push(m) }));
+    await apply(Settings.parse(BASE_SETTINGS), Settings.parse({ ...BASE_SETTINGS, runtimes: { official: { subscriptionAuth: false } } }));
+    await apply(Settings.parse(BASE_SETTINGS), Settings.parse({ ...BASE_SETTINGS, runtimes: { winterIdleTimeoutSec: 60 } }));
+    expect(lines.filter((l) => l.includes("subscriptionAuth"))).toEqual([]);
+  });
+
+  test("an UNRELATED settings change re-narrates the SAME still-inert flag — one line per settings change, not a one-time transition", async () => {
+    const lines: string[] = [];
+    const apply = makeApply(baseDeps({ log: (m) => lines.push(m) }));
+    const withFlag = (idle: number) => Settings.parse({ ...BASE_SETTINGS, runtimes: { official: { subscriptionAuth: true }, winterIdleTimeoutSec: idle } });
+    await apply(withFlag(900), withFlag(60)); // only winterIdleTimeoutSec actually changed
+    expect(lines.filter((l) => l.includes("subscriptionAuth") && l.includes("inert"))).toHaveLength(1);
+  });
 });

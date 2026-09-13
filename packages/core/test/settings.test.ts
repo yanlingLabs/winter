@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialAuthModeSetting } from "../src/settings";
+import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialAuthModeSetting, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert } from "../src/settings";
 import { DEFAULT_CODEX_MODEL } from "../src/providers/codex-config";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 
@@ -883,5 +883,65 @@ describe("winterOptionsFromSettings", () => {
   test("the schema default and the absent-block answer are the same number", () => {
     expect(Settings.parse({ ...base, runtimes: {} }).runtimes?.winterIdleTimeoutSec).toBe(DEFAULT_WINTER_IDLE_TIMEOUT_SEC);
     expect(winterOptionsFromSettings(Settings.parse(base)).idleTimeoutSec).toBe(DEFAULT_WINTER_IDLE_TIMEOUT_SEC);
+  });
+});
+
+// Pre-release hardening (P9c-1 amendment): the settings flag alone must never be able to widen the
+// official leg's subscription posture — only ANDing it against the compile-time approval constant
+// (`OFFICIAL_SUBSCRIPTION_AUTH_APPROVED`, versions.ts, real value `false`) does that. These tests
+// use the function's own injectable `approved` override rather than the real constant, exactly the
+// seam the constant's own doc says tests must use.
+describe("officialSubscriptionAuthEnabled (P9c-1 amendment)", () => {
+  const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } };
+
+  test("null/undefined settings answer false, never a throw", () => {
+    expect(officialSubscriptionAuthEnabled(null)).toBe(false);
+    expect(officialSubscriptionAuthEnabled(undefined)).toBe(false);
+  });
+
+  test("an absent runtimes/official block answers false", () => {
+    expect(officialSubscriptionAuthEnabled(Settings.parse(base))).toBe(false);
+  });
+
+  test("the flag true, with NO override -> false on the REAL compile-time constant (the shipped default, OFFICIAL_SUBSCRIPTION_AUTH_APPROVED = false)", () => {
+    const on = Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: true } } });
+    expect(officialSubscriptionAuthEnabled(on)).toBe(false);
+  });
+
+  test("the flag true, with the injectable override explicitly false -> still false", () => {
+    const on = Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: true } } });
+    expect(officialSubscriptionAuthEnabled(on, false)).toBe(false);
+  });
+
+  test("the flag true, with the injectable override true -> true (the only way to reach the widened branch)", () => {
+    const on = Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: true } } });
+    expect(officialSubscriptionAuthEnabled(on, true)).toBe(true);
+  });
+
+  test("the override alone, with the flag false/absent -> still false (approval without the flag never widens)", () => {
+    expect(officialSubscriptionAuthEnabled(Settings.parse(base), true)).toBe(false);
+    const off = Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: false } } });
+    expect(officialSubscriptionAuthEnabled(off, true)).toBe(false);
+  });
+});
+
+describe("officialSubscriptionAuthFlagInert (P9c-1 amendment)", () => {
+  const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } };
+
+  test("absent/false flag is never \"inert\" — it is simply off", () => {
+    expect(officialSubscriptionAuthFlagInert(null)).toBe(false);
+    expect(officialSubscriptionAuthFlagInert(Settings.parse(base))).toBe(false);
+    const off = Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: false } } });
+    expect(officialSubscriptionAuthFlagInert(off)).toBe(false);
+  });
+
+  test("flag true, on the real compile-time constant -> inert (true)", () => {
+    const on = Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: true } } });
+    expect(officialSubscriptionAuthFlagInert(on)).toBe(true);
+  });
+
+  test("flag true, WITH the approval override -> never inert (false) — approved means it's actually in effect, not stuck", () => {
+    const on = Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: true } } });
+    expect(officialSubscriptionAuthFlagInert(on, true)).toBe(false);
   });
 });

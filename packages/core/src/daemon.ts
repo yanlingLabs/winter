@@ -17,7 +17,7 @@ import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterLegDisabledKeys, winterOptionsFromSettings } from "./settings";
+import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
@@ -447,6 +447,10 @@ export async function startDaemon(opts: {
     // Task 17: the engine leg no longer exists — a `winterLeg.<mode>: false` is accepted for one
     // release, reported here (and by settings-apply on a hot edit), never obeyed.
     for (const key of winterLegDisabledKeys(settings)) console.error(`settings: runtimes.winterLeg.${key} = false — the engine leg no longer exists; ignored`);
+    // Pre-release hardening (P9c-1 amendment): a `runtimes.official.subscriptionAuth: true` that
+    // predates or bypasses the hot-reload path (a migrated/hand-edited settings.json present at
+    // boot) is reported here too, same "accepted, logged, ignored" posture as winterLeg above.
+    if (officialSubscriptionAuthFlagInert(settings)) console.error("settings: runtimes.official.subscriptionAuth = true — inert until Anthropic approves subscription auth for the official leg (P9c-1); the per-session apiKeySource assertion and Winter-owned config dir stay in force");
   } catch (err) {
     console.error(`settings unavailable, agent disabled: ${(err as Error).message}`);
     settings = null;

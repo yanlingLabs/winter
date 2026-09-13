@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { DEFAULT_CODEX_MODEL } from "./providers/codex-config";
 import { ensureGlobalGitignore, WINTER_PERSONAL_IGNORES } from "./global-gitignore";
+import { OFFICIAL_SUBSCRIPTION_AUTH_APPROVED } from "./runtime-sdk/versions";
 
 /** Reasoning-effort slugs valid on the wire — measured LIVE against the Codex OAuth endpoint
  *  (2026-07-30), one model at a time, NOT read off the /models catalogue text. That distinction
@@ -453,10 +454,36 @@ export function legacyProjectFilesReadEnabled(settings: Settings | null | undefi
   return settings?.legacy?.readLegacyProjectFiles ?? true;
 }
 
-/** Phase 9c (P9c-1): the ONE reader of `runtimes.official.subscriptionAuth` — absent means OFF
- *  (blocked); only an explicit `true` opens the door, and that value must not ship before approval. */
-export function officialSubscriptionAuthEnabled(settings: Settings | null | undefined): boolean {
-  return settings?.runtimes?.official?.subscriptionAuth ?? false;
+/**
+ * Phase 9c (P9c-1) / pre-release hardening: the ONE reader of `runtimes.official.subscriptionAuth`
+ * — absent means OFF (blocked); only an explicit `true` on the SETTINGS FLAG opens the door, and
+ * even then only while the compile-time approval gate (`OFFICIAL_SUBSCRIPTION_AUTH_APPROVED`,
+ * `runtime-sdk/versions.ts`) is also `true`. Before this hardening the settings flag alone could
+ * flip the official leg's subscription posture — this ANDs the two so a hand-set (or migrated,
+ * or mis-synced) `true` in settings.json can never do that on its own; only a reviewed code change
+ * to the compile-time constant can. `approved` defaults to the real constant and exists ONLY as an
+ * injectable seam for tests that need to exercise the "approved" branch — production callers must
+ * never pass it.
+ */
+export function officialSubscriptionAuthEnabled(
+  settings: Settings | null | undefined,
+  approved: boolean = OFFICIAL_SUBSCRIPTION_AUTH_APPROVED,
+): boolean {
+  return approved && (settings?.runtimes?.official?.subscriptionAuth ?? false);
+}
+
+/**
+ * Pre-release hardening (P9c-1 amendment): true when the settings file's raw flag is `true` but
+ * the compile-time approval gate is not — i.e. the flag is currently INERT and every settings
+ * change while it stays set should say so exactly once (`settings-apply.ts`'s hot-reload diff,
+ * `daemon.ts`'s boot-time check). Never the inverse of `officialSubscriptionAuthEnabled`: an
+ * absent/false raw flag is not "inert", it is simply off and unremarkable.
+ */
+export function officialSubscriptionAuthFlagInert(
+  settings: Settings | null | undefined,
+  approved: boolean = OFFICIAL_SUBSCRIPTION_AUTH_APPROVED,
+): boolean {
+  return !approved && (settings?.runtimes?.official?.subscriptionAuth ?? false);
 }
 
 /** Winter Phase 10a (P10a-3): the ONE reader of `runtimes.official.auth` — absent block or absent
