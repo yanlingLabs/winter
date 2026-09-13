@@ -73,6 +73,15 @@ final class AnthropicLoginSheetModel: ObservableObject, Identifiable {
         }
     }
 
+    /// `lines`, filtered for display (fix round 1, MAJOR): a line with no extractable URL that
+    /// still contains `code=` is DROPPED entirely, never rendered as plain text — the one-time code
+    /// could appear there verbatim (e.g. a raw callback URL the regex didn't match, or a diagnostic
+    /// line echoing it). A line WITH a URL is safe regardless — `urlFallback` strips the query
+    /// before that URL is ever shown, and the Link's label is fixed text, never the line itself.
+    var displayLines: [String] {
+        lines.filter { Self.urlFallback(in: $0) != nil || !$0.contains("code=") }
+    }
+
     /// Trimmed, sent once, and the field is cleared IMMEDIATELY — before the RPC even resolves —
     /// regardless of outcome: a one-time code is as unwritable as a password once submitted, never
     /// retained in the field for a "fix a typo and resubmit" affordance.
@@ -90,11 +99,17 @@ final class AnthropicLoginSheetModel: ObservableObject, Identifiable {
         }
     }
 
-    /// The first `https://` URL in `line`, if any — the sheet's clickable fallback link (P10a-6:
-    /// the daemon opens the browser itself; this is only for when that fails or the user closed it).
+    /// The first `https://` URL in `line`, if any, SANITIZED (query/fragment stripped — fix round
+    /// 1, MAJOR: a Console login URL carries the one-time code in its query, so the raw match is
+    /// never usable as-is) — the sheet's clickable fallback link (P10a-6: the daemon opens the
+    /// browser itself; this is only for when that fails or the user closed it).
     static func urlFallback(in line: String) -> URL? {
-        guard let range = line.range(of: #"https://\S+"#, options: .regularExpression) else { return nil }
-        return URL(string: String(line[range]))
+        guard let range = line.range(of: #"https://\S+"#, options: .regularExpression),
+              var components = URLComponents(string: String(line[range]))
+        else { return nil }
+        components.query = nil
+        components.fragment = nil
+        return components.url
     }
 
     deinit {
@@ -141,12 +156,15 @@ struct AnthropicLoginSheet: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if !model.lines.isEmpty {
+            if !model.displayLines.isEmpty {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(model.lines.enumerated()), id: \.offset) { _, line in
+                        ForEach(Array(model.displayLines.enumerated()), id: \.offset) { _, line in
                             if let url = AnthropicLoginSheetModel.urlFallback(in: line) {
-                                Link(line, destination: url)
+                                // Fixed generic label, never the raw line (fix round 1, MAJOR): the
+                                // line itself may still carry the one-time code even though the
+                                // LINK target has already been sanitized.
+                                Link("Open in browser", destination: url)
                                     .font(Typography.labelMono())
                             } else {
                                 Text(line)

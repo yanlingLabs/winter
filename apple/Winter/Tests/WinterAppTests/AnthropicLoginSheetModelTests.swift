@@ -12,13 +12,48 @@ import WinterKit
 final class AnthropicLoginSheetModelTests: XCTestCase {
     // MARK: - line → URL extraction
 
+    /// Fix round 1, MAJOR: the extracted URL must have its query (where the one-time code lives)
+    /// stripped — `?code=abc123` must be GONE, not merely hidden behind a generic link label.
     func testUrlFallbackExtractsHttpsUrlFromLine() {
         let url = AnthropicLoginSheetModel.urlFallback(in: "Open this to continue: https://console.anthropic.com/oauth?code=abc123")
-        XCTAssertEqual(url?.absoluteString, "https://console.anthropic.com/oauth?code=abc123")
+        XCTAssertEqual(url?.absoluteString, "https://console.anthropic.com/oauth")
+        XCTAssertFalse(url?.absoluteString.contains("code=") ?? true)
+    }
+
+    /// A fragment (`#...`) must be stripped too, same as a query.
+    func testUrlFallbackStripsFragmentToo() {
+        let url = AnthropicLoginSheetModel.urlFallback(in: "https://console.anthropic.com/oauth#code=abc123")
+        XCTAssertEqual(url?.absoluteString, "https://console.anthropic.com/oauth")
     }
 
     func testUrlFallbackReturnsNilWhenLineHasNoUrl() {
         XCTAssertNil(AnthropicLoginSheetModel.urlFallback(in: "waiting for the browser…"))
+    }
+
+    // MARK: - displayLines (fix round 1, MAJOR: never render a code-carrying line as plain text)
+
+    /// A line with NO extractable URL that still contains `code=` must be dropped entirely.
+    func testDisplayLinesDropsNonUrlLineContainingCode() async {
+        let fake = FakeAnthropicAuthClient()
+        let model = AnthropicLoginSheetModel(client: fake)
+        await model.start()
+        fake.emit(.progress("your code=abc123 is shown on the page"))
+        fake.emit(.progress("waiting for the browser…"))
+
+        await feedWaitUntil { model.lines.count >= 2 }
+        XCTAssertEqual(model.displayLines, ["waiting for the browser…"])
+    }
+
+    /// A line WITH an extractable URL is kept even though its raw text contains `code=` — it's
+    /// rendered as a fixed-label `Link` to the SANITIZED url, never as the raw line.
+    func testDisplayLinesKeepsUrlLineEvenThoughItContainsCode() async {
+        let fake = FakeAnthropicAuthClient()
+        let model = AnthropicLoginSheetModel(client: fake)
+        await model.start()
+        fake.emit(.progress("Open https://console.anthropic.com/oauth?code=abc123 to continue"))
+
+        await feedWaitUntil { !model.lines.isEmpty }
+        XCTAssertEqual(model.displayLines, ["Open https://console.anthropic.com/oauth?code=abc123 to continue"])
     }
 
     // MARK: - success/failure transitions
