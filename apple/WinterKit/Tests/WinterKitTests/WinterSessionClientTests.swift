@@ -170,14 +170,15 @@ final class WinterSessionClientTests: XCTestCase {
     /// instead of silently diverging.
     ///
     /// Growth log: 7 → 8 (session-activity-hygiene T4, `session_activity`); 8 → 9 (panel-shell T3,
-    /// `panel_command`).
+    /// `panel_command`); 9 → 11 (Winter Phase 10a O5, P10a-6: `provider_login_progress`,
+    /// `provider_login_finished`).
     private static let transientTypes = [
         "assistant_delta", "lease_granted", "lease_lost", "peripheral_call_requested",
         "plugin_tool_invoke", "hardware_requested", "plugin_tile_updated", "session_activity",
-        "panel_command",
+        "panel_command", "provider_login_progress", "provider_login_finished",
     ]
 
-    /// Parity: this suite's literal nine ARE the protocol's canonical nine. Without this, a type
+    /// Parity: this suite's literal eleven ARE the protocol's canonical eleven. Without this, a type
     /// added to `SessionEvent.transientTypes` (and therefore honoured by the shipped client) would
     /// silently go untested here, and a type dropped from it would leave these tests passing
     /// against a list the client no longer uses.

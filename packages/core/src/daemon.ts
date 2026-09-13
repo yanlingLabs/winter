@@ -76,6 +76,8 @@ import { SettingsWatcher } from "./settings-watcher";
 import { startRuntimeState, runtimeStateOnline, type DaemonRuntimeState } from "./runtime-state/wiring";
 import { restampStep } from "./runtime-state/recovery";
 import { createWinterRuntimeSdk, type WinterRuntimeSdk } from "./runtime-sdk/create";
+import { ClaudeExecutableUnavailable } from "./runtime-sdk/official-executable";
+import { createConsoleProfileBroker } from "./auth/console-profile-broker";
 import { advisorReviewerFor, familyOfModel, officialLegDefaultSessionModel } from "./runtime-sdk/advisor-reviewer";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
@@ -1105,6 +1107,30 @@ export async function startDaemon(opts: {
     runtimeSdk = undefined;
   }
 
+  // Winter Phase 10a (O6, P10a-2/4/6): the daemon's ONE console-profile broker. `claudeExecutable`
+  // is a closure (not a boot-time snapshot) over `runtimeSdk.claudeExecutableFor()` — the SAME
+  // live-resolved executable the official leg's own sessions use, so a `runtimes.claudeExecutable`
+  // edit takes effect for the broker with no daemon restart, exactly like every other reader of
+  // that setting. `antExecutable` is a STUB until Lane L's bundle-layout resolver lands (task L4) —
+  // // Lane L wires resolveAntExecutable here.
+  const consoleBroker = createConsoleProfileBroker({
+    home: winterHome,
+    claudeExecutable: () => {
+      if (runtimeSdk === undefined) return undefined;
+      const resolved = runtimeSdk.claudeExecutableFor();
+      return resolved instanceof ClaudeExecutableUnavailable ? undefined : resolved.path;
+    },
+    antExecutable: () => process.env.WINTER_ANT_EXECUTABLE,
+    secrets,
+  });
+  // Boot-time bearer refresh (P10a-4): if a console profile already exists on disk, arm the
+  // refresher — its own `startRefresher()` performs an IMMEDIATE refresh (the daemon may have been
+  // down past the previous expiry) and then re-arms itself 60s before whatever `expiresAt` that (or
+  // each subsequent) refresh reports, retrying on a fixed backoff if a refresh fails. Never fatal to
+  // boot: every await inside `startRefresher()`'s own refresh chain is caught internally (its own
+  // doc comment), so this call itself never throws.
+  if (consoleBroker.profileExists()) consoleBroker.startRefresher();
+
   // ── §13 step 10, run from here because the handle does not exist where the step does ──────────
   //
   // WS-15 §6.4's directory recovery — mark previously-live handles unavailable, restore cursors,
@@ -2024,6 +2050,9 @@ export async function startDaemon(opts: {
     // OpenAI API key server-side. Chat Slice D task 3: also `sync.config`'s ONLY route to the Exa
     // key, never a second read path.
     secrets,
+    // Winter Phase 10a (O6, P10a-6): the ONE console-profile broker built above (boot-time
+    // refreshBearer + startRefresher already fired) — drives provider.login/loginCode/logout/status.
+    consoleBroker,
     // Chat Slice D task 3 (`sync.config`): the SAME shared getter Search/ReadPage/the research
     // runner already consult (constructed above, before the `if (agentProvider)` gate).
     dangerousDomainsAdded,
@@ -2149,6 +2178,7 @@ export async function startDaemon(opts: {
       settingsWatcher?.stop(); // closes the fs.watch handle on settings.json — no leaked watcher past shutdown
       routineScheduler.stop(); routineStore.close(); // no orphan tick timer past drain
       dreamer?.stop(); // no orphan dream tick timer past shutdown (unref'd already, but never left running)
+      consoleBroker.stopRefresher(); // Winter Phase 10a (fix round 1 item 2): no orphan bearer-refresh timer past shutdown (unref'd already, belt-and-braces)
       // P8a Task 12 — SHUTDOWN ORDER, and it is an order, not a list. `server.stop()` above has
       // already run, so no RPC can arrive after this point and reach a closed handle; the reaper's
       // mint-time sweep (the one caller that could still queue a runtime deletion) lives inside that

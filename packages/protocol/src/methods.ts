@@ -1142,13 +1142,73 @@ export const MemoryAuditResult = z.object({ lines: z.array(MemoryAuditLineSchema
  *  required (non-optional) `model` field for openai-compatible. Provider-TYPE changes need a
  *  daemon restart to take effect (providers/manager.ts fixes `providerType` at boot) — this RPC
  *  only persists the new config; triggering the restart is the caller's job (T2's Dashboard pane). */
-export const ProviderConfigureParams = z.object({
-  type: z.literal("openai-compatible"),
-  baseUrl: z.string().url(),
-  apiKey: z.string().min(1),
-  model: z.string().min(1).optional(),
-});
+// Winter Phase 10a (P10a-3): a SECOND arm — the Anthropic auth-mode radio in the app's Provider
+// pane. Deliberately a `z.union` rather than a `z.discriminatedUnion` (the two arms don't share a
+// discriminant KEY — the original arm has no `provider` field at all, only `type`, and adding one
+// would be an unrelated wire-shape break for the shipped BYOK caller) — each arm keeps its own
+// shape exactly as it shipped. This arm writes exactly ONE hot-reloaded settings key
+// (`runtimes.official.auth`) and never touches `settings.provider` at all, unlike the
+// openai-compatible arm below, which REPLACES that whole block.
+export const ProviderConfigureParams = z.union([
+  z.object({
+    type: z.literal("openai-compatible"),
+    baseUrl: z.string().url(),
+    apiKey: z.string().min(1),
+    model: z.string().min(1).optional(),
+  }),
+  z.object({
+    provider: z.literal("anthropic"),
+    settings: z.object({ "runtimes.official.auth": z.enum(["api-key", "console"]) }),
+  }),
+]);
 export const ProviderConfigureResult = z.object({ ok: z.literal(true) });
+
+// ---------------------------------------------------------------------------------------------
+// Winter Phase 10a (O5, P10a-6): the Anthropic Console login RPC surface. `provider.login` is a
+// STARTER, never a blocker — the real login is interactive (the user pastes a one-time code off
+// Anthropic's own page, M2's measured "code-paste protocol"), so this method spawns it and returns
+// immediately; completion is reported ASYNCHRONOUSLY via the `provider_login_finished` transient
+// event (events.ts), and progress lines stream via `provider_login_progress` as they arrive.
+// `provider.loginCode` is the SEPARATE call that supplies the pasted code — it travels over this
+// SAME local socket, never a second channel, and is never logged/persisted/echoed anywhere.
+// `{provider, kind}` on every param (rather than a single literal) is deliberately wide: a later
+// provider or a later login KIND (a future non-console Anthropic flow, say) can share this same
+// three-method shape without new wire methods.
+// ---------------------------------------------------------------------------------------------
+export const ProviderLoginParams = z.object({ provider: z.literal("anthropic"), kind: z.literal("console") });
+/** `urlHint` is best-effort and often absent: `provider.login` returns before the child has
+ *  necessarily printed its "visit this URL" line yet — the authoritative place to see that URL is
+ *  the `provider_login_progress` stream, sanitized of any query string. */
+export const ProviderLoginResult = z.object({ started: z.literal(true), urlHint: z.string().min(1).optional() });
+
+export const ProviderLoginCodeParams = z.object({
+  provider: z.literal("anthropic"),
+  kind: z.literal("console"),
+  /** The one-time code the user copies off Anthropic's own console page. NEVER logged, NEVER
+   *  persisted, NEVER echoed back on the wire — the daemon passes it straight to the in-progress
+   *  login's own `submitCode`, which is the SDK's, not this protocol's, to store or discard. */
+  code: z.string().min(1),
+});
+export const ProviderLoginCodeResult = z.object({ ok: z.boolean() });
+
+export const ProviderLogoutParams = z.object({ provider: z.literal("anthropic"), kind: z.literal("console") });
+export const ProviderLogoutResult = z.object({ ok: z.boolean() });
+
+/** Winter Phase 10a (O5): read-only status for the Provider pane's Anthropic section.
+ *  `effective` is the same "auto resolved against on-disk presence" decision
+ *  `official-options.ts`'s `officialAuthFamilyFor` makes for the official leg's own spawn, WIDENED
+ *  with an explicit `"none"` for the case neither credential actually exists yet — a case that
+ *  function itself never answers (it always picks an arm to attempt), because only the caller here
+ *  has both presence booleans in hand to tell "decided" apart from "actually usable". */
+export const ProviderStatusParams = z.object({});
+export const ProviderStatusResult = z.object({
+  anthropic: z.object({
+    apiKey: z.boolean(),
+    consoleProfile: z.boolean(),
+    auth: z.enum(["auto", "api-key", "console"]),
+    effective: z.enum(["api-key", "console", "none"]),
+  }),
+});
 
 // ---------------------------------------------------------------------------------------------
 // Workflows (CC-parity phase 3, Track C Task C2): the RPC surface over `WorkflowRuntime` (live
@@ -1829,6 +1889,10 @@ export const METHODS = {
   memoryDelete: "memory.delete",
   memoryAudit: "memory.audit",
   providerConfigure: "provider.configure",
+  providerLogin: "provider.login",
+  providerLoginCode: "provider.loginCode",
+  providerLogout: "provider.logout",
+  providerStatus: "provider.status",
   workflowList: "workflow.list",
   workflowRun: "workflow.run",
   workflowStop: "workflow.stop",

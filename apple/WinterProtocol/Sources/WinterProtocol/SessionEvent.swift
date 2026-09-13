@@ -50,6 +50,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     case panelTabActivated(PanelTabActivated)
     case panelTabNavigated(PanelTabNavigated)
     case panelCommand(PanelCommand)
+    case providerLoginProgress(ProviderLoginProgress)
+    case providerLoginFinished(ProviderLoginFinished)
 
     public struct SessionCreated: Codable, Equatable, Sendable {
         public let seq: Int
@@ -607,6 +609,33 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     }
 
     /// TRANSIENT (broadcast-only, never appended to the session log/replayed on attach —
+    /// `sessionId` is always the `$system` sentinel, same convention as `PluginTileUpdated` above)
+    /// — Winter Phase 10a (P10a-6): one sanitized stdout/stderr line from the console-profile
+    /// broker's in-progress `claude auth login --console`, streamed live so the app's login sheet
+    /// can show progress (and the "visit this URL" line as a clickable fallback). Already
+    /// sanitized of any URL query string by the daemon before this event exists — this type does
+    /// not re-sanitize.
+    public struct ProviderLoginProgress: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let provider: String
+        public let line: String
+    }
+
+    /// TRANSIENT, same `$system`-scoped shape as `ProviderLoginProgress` above — Winter Phase 10a
+    /// (P10a-6): the terminal outcome of one `provider.login` attempt. `reason` NAMES the failure
+    /// only (never raw process output).
+    public struct ProviderLoginFinished: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let provider: String
+        public let ok: Bool
+        public let reason: String?
+    }
+
+    /// TRANSIENT (broadcast-only, never appended to the session log/replayed on attach —
     /// `sessionId` is always the `$system` sentinel) — Phase 4d Task 2's harness→plugin push: core
     /// sends this directly to a plugin's own connection when a future UI fires one of that
     /// plugin's registered shortcuts (`shortcut.invoke`, methods.ts). Extends the plain
@@ -913,6 +942,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case panel_tab_activated
         case panel_tab_navigated
         case panel_command
+        case provider_login_progress
+        case provider_login_finished
     }
 
     private enum TypeKey: String, CodingKey { case type }
@@ -969,6 +1000,8 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case .panel_tab_activated:  self = .panelTabActivated(try PanelTabActivated(from: decoder))
         case .panel_tab_navigated:  self = .panelTabNavigated(try PanelTabNavigated(from: decoder))
         case .panel_command:        self = .panelCommand(try PanelCommand(from: decoder))
+        case .provider_login_progress: self = .providerLoginProgress(try ProviderLoginProgress(from: decoder))
+        case .provider_login_finished: self = .providerLoginFinished(try ProviderLoginFinished(from: decoder))
         }
     }
 
@@ -1170,6 +1203,14 @@ public enum SessionEvent: Codable, Equatable, Sendable {
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)
             try c.encode(Discriminator.panel_command.rawValue, forKey: .type)
+        case .providerLoginProgress(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.provider_login_progress.rawValue, forKey: .type)
+        case .providerLoginFinished(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.provider_login_finished.rawValue, forKey: .type)
         }
     }
 }
@@ -1210,6 +1251,9 @@ extension SessionEvent {
         // panel-shell T3: the daemon->app command channel (8 → 9) — see `PanelCommand`'s own doc
         // comment above for why transient.
         "panel_command",
+        // Winter Phase 10a (O5, P10a-6): the console-login progress/outcome pair (9 → 11).
+        "provider_login_progress",
+        "provider_login_finished",
     ]
 
     /// Case-level mirror of `transientTypes`, for callers holding a DECODED event (`WinterClient`)
@@ -1222,7 +1266,7 @@ extension SessionEvent {
         switch self {
         case .assistantDelta, .leaseGranted, .leaseLost, .peripheralCallRequested,
              .pluginToolInvoke, .hardwareRequested, .pluginTileUpdated, .sessionActivity,
-             .panelCommand:
+             .panelCommand, .providerLoginProgress, .providerLoginFinished:
             return true
         default:
             return false

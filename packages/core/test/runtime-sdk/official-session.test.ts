@@ -47,6 +47,8 @@ import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import type { OfficialInputDeps, OfficialSessionInput } from "../../src/runtime-sdk/official-options";
 import type { OfficialSessionAttachment } from "../../src/runtime-sdk/messaging";
 import {
+  CONSOLE_API_KEY_SOURCE,
+  expectedApiKeySource,
   OfficialSessionEnded,
   startOfficialSession,
   type OfficialSession,
@@ -351,6 +353,64 @@ describe("m7 — end() is terminal", () => {
     expect(h.queries).toHaveLength(2);
     expect(h.session.resumed).toBe(true); // the SECOND incarnation is
   });
+
+  // P10a-h (measured live against the real official runtime): `end()` used to only close the input
+  // stream and await the incarnation's own `done` — a child that does not exit merely because its
+  // input closed left `end()` (and therefore a handoff's own `HandoffSourceOwner.close()`, which
+  // calls this) hanging, or — against a real process — returning anyway once a DIFFERENT frame
+  // ended the read loop, leaving the actual OS process alive and its resume-lock held (which is
+  // what made a destination's own resume of the SAME backend uuid fail typed with the winter
+  // runtime's own "in use by another live process"). `end()` now falls back to `abort()`, mirroring
+  // `WinterSession.end()`'s exact race-then-abort-then-race shape.
+  test("P10a-h: end() falls back to abort() when the child never exits on its own after the input closes", async () => {
+    // A fake `OfficialQuery` that deliberately IGNORES its prompt stream closing (the bug's own
+    // precondition) and only ever ends when its incarnation's `AbortController` fires — proving
+    // `end()`'s fallback is what makes it finish, not merely that it eventually would have anyway.
+    class StuckFakeOfficialQuery {
+      interrupts = 0;
+      private endedByAbort = false;
+      private waiters: Array<(r: IteratorResult<Frame>) => void> = [];
+      constructor(prompt: AsyncIterable<string>, abort: AbortController) {
+        void (async () => { for await (const _t of prompt) { /* drained, deliberately never ends itself */ } })();
+        abort.signal.addEventListener("abort", () => {
+          this.endedByAbort = true;
+          for (const w of this.waiters.splice(0)) w({ value: undefined as never, done: true });
+        });
+      }
+      next(): Promise<IteratorResult<Frame>> {
+        if (this.endedByAbort) return Promise.resolve({ value: undefined as never, done: true });
+        return new Promise((resolve) => { this.waiters.push(resolve); });
+      }
+      return(): Promise<IteratorResult<Frame>> { return Promise.resolve({ value: undefined as never, done: true }); }
+      throw(e: unknown): Promise<IteratorResult<Frame>> { return Promise.reject(e); }
+      [Symbol.asyncIterator](): this { return this; }
+      async interrupt(): Promise<unknown> { this.interrupts++; return undefined; }
+    }
+    const stuckQueries: StuckFakeOfficialQuery[] = [];
+    const stuckRuntime = {
+      sdk: {
+        query: ({ prompt, options }: { prompt: AsyncIterable<string>; options: { abortController: AbortController } }) => {
+          const q = new StuckFakeOfficialQuery(prompt, options.abortController);
+          stuckQueries.push(q);
+          return q as unknown;
+        },
+      },
+      trackQuery: () => {},
+      untrack: () => {},
+    } as unknown as WinterRuntimeSdk;
+    // A short grace (never the 120 ms production default) so a REGRESSION back to "only await
+    // inc.done" fails this test by timing out, rather than by hanging the whole suite.
+    const h = harness({ runtime: stuckRuntime, endGraceMs: 20 });
+    await h.session.open();
+    expect(h.session.state).toBe("live");
+
+    await Promise.race([
+      h.session.end(),
+      Bun.sleep(2_000).then(() => { throw new Error("end() did not resolve — the abort fallback regressed"); }),
+    ]);
+    expect(h.session.state).toBe("ended");
+    expect(stuckQueries).toHaveLength(1);
+  });
 });
 
 // ── m8 ───────────────────────────────────────────────────────────────────────────────────────────
@@ -444,6 +504,58 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
     expect(err?.code).toBe("official_auth_source_refused");
   });
 
+  // Winter Phase 10a (fix round 1 item 3): `session-driver.ts`'s own `officialAuthArm` decision
+  // (threaded through `OfficialInputDeps`, never `selection.authFamily` — see that field's own
+  // doc) now picks WHICH value this assertion expects, for a REAL api-key-family session that
+  // Winter's own `officialAuthFamilyFor` decided belongs to the console arm instead.
+  test("officialAuthArm=\"console\" -> the assertion expects CONSOLE_API_KEY_SOURCE, not ANTHROPIC_API_KEY", async () => {
+    const consoleInputDeps: OfficialInputDeps = {
+      home: testHome(),
+      selection: apiKeySelection,
+      explicitCredentials: [],
+      explicitConnectionEnv: {},
+      officialPeer: undefined,
+      claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
+      assembler: { assemble: () => "" },
+      capabilities: {},
+      canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
+      policy: "auto",
+      officialAuthArm: "console",
+    };
+    const h = harness({ selection: apiKeySelection, inputDeps: () => consoleInputDeps });
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "ANTHROPIC_API_KEY" })); // the api-key arm's own value — wrong for this arm
+    await h.settled();
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string; message?: string }) | undefined;
+    expect(err?.code).toBe("official_auth_source_refused");
+    expect(err?.message).toContain("apiKeySource=ANTHROPIC_API_KEY");
+    expect(err?.message).toContain(CONSOLE_API_KEY_SOURCE);
+  });
+
+  test("officialAuthArm=\"console\" with a matching apiKeySource never refuses; the turn proceeds normally", async () => {
+    const consoleInputDeps: OfficialInputDeps = {
+      home: testHome(),
+      selection: apiKeySelection,
+      explicitCredentials: [],
+      explicitConnectionEnv: {},
+      officialPeer: undefined,
+      claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
+      assembler: { assemble: () => "" },
+      capabilities: {},
+      canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
+      policy: "auto",
+      officialAuthArm: "console",
+    };
+    const h = harness({ selection: apiKeySelection, inputDeps: () => consoleInputDeps });
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: CONSOLE_API_KEY_SOURCE }));
+    h.q().emit(assistant("ok"));
+    h.q().emit(result());
+    await h.settled();
+    expect(h.events.some((e) => e.type === "agent_error")).toBe(false);
+    expect(h.types()).toContain("turn_completed");
+  });
+
   test("the console-oauth family is EXEMPT — apiKeySource \"none\" (its own expected bearer shape) never refuses", async () => {
     const consoleOauthSelection: RuntimeSelection = { ...apiKeySelection, authFamily: "console-oauth" };
     const h = harness({ selection: consoleOauthSelection });
@@ -465,6 +577,27 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
     await h.settled();
     expect(h.events.some((e) => e.type === "agent_error")).toBe(false);
     expect(h.types()).toContain("turn_completed");
+  });
+});
+
+// Winter Phase 10a (O3, P10a-3/P10a-7 M1): `expectedApiKeySource` as a standalone pure lookup — the
+// console arm's own placeholder literal, and proof the api-key arm's assertion (tested end to end
+// above) is now DERIVED from this function rather than a second hand-typed "ANTHROPIC_API_KEY"
+// string. Wiring a real console-arm session through `run()`'s own assertion is `session-driver.ts`'s
+// `RuntimeSelection.authFamily` plumbing (outside this lane's file cluster) — carried; see the lane
+// report.
+describe("O3 — expectedApiKeySource / CONSOLE_API_KEY_SOURCE", () => {
+  test("api-key arm expects the pinned ANTHROPIC_API_KEY — unchanged from P9c-1", () => {
+    expect(expectedApiKeySource("api-key")).toBe("ANTHROPIC_API_KEY");
+  });
+
+  test("console arm expects the M1 placeholder literal — a one-line edit once the controller measures the real value", () => {
+    expect(expectedApiKeySource("console")).toBe(CONSOLE_API_KEY_SOURCE);
+    expect(CONSOLE_API_KEY_SOURCE).toBe("<M1-unmeasured>");
+  });
+
+  test("the two arms never expect the same value — a mismatch against one can never coincidentally pass as the other", () => {
+    expect(expectedApiKeySource("api-key")).not.toBe(expectedApiKeySource("console"));
   });
 });
 

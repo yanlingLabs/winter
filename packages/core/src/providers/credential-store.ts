@@ -13,8 +13,15 @@ function toWinterMaterial(material: RuntimeCredentialMaterial): WinterCredential
   switch (material.kind) {
     case "api-key":
       return { kind: "api-key", key: material.key };
-    case "bearer":
-      return { kind: "bearer", token: material.token };
+    case "bearer": {
+      // Winter Phase 10a (P10a-4): `expiresAt` is optional/additive on Winter's OWN `BearerMaterial`
+      // (auth/credential-material.ts) already, but the pinned `@yanlinglabs/winter-provider-runtime`
+      // (0.0.5) has not published its matching bearer field yet (the controller's own carry, tied
+      // to the SDK's v0.0.6) — read it defensively off the runtime value rather than the (currently
+      // narrower) declared type, so this line needs no further edit the day the package catches up.
+      const expiresAt = (material as { expiresAt?: number }).expiresAt;
+      return { kind: "bearer", token: material.token, ...(expiresAt !== undefined ? { expiresAt } : {}) };
+    }
     case "oauth":
       return {
         kind: "oauth",

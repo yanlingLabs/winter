@@ -24,6 +24,7 @@ import {
   RoutinesCreateParams, RoutinesListParams, RoutinesUpdateParams, RoutinesDeleteParams,
   MemoryListParams, MemoryReadParams, MemoryWriteParams, MemoryDeleteParams, MemoryAuditParams,
   ProviderConfigureParams,
+  ProviderLoginParams, ProviderLoginCodeParams, ProviderLogoutParams, ProviderStatusParams,
   WorkflowListParams, WorkflowRunParams, WorkflowStopParams, WorkflowGetParams,
   SyncHeadsParams, SyncPullParams, SyncPushParams, SyncConfigParams, SyncMemoryParams,
   PanelListParams, PanelOpenTabParams, PanelCloseTabParams, PanelActivateTabParams, PanelReportNavigationParams,
@@ -33,7 +34,10 @@ import {
 } from "@yanlinglabs/winter-protocol";
 import type { TokenAuthority } from "../auth/tokens";
 import type { SecretStore } from "../auth/secret-store";
-import { writeOpenAiApiKey } from "../auth/credential-material";
+import { readCredentialMaterial, writeOpenAiApiKey } from "../auth/credential-material";
+import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../runtime-sdk/keychain";
+import { effectiveOfficialAuthFor } from "../runtime-sdk/official-options";
+import type { ConsoleProfileBroker } from "../auth/console-profile-broker";
 import type { RoutineStore } from "../routines/store";
 import type { WorkflowRuntime } from "../workflows/runtime";
 import type { WorkflowStore } from "../workflows/store";
@@ -94,7 +98,7 @@ import type { ProviderLink } from "../peripheral/provider-link";
 import type { HardwareBroker } from "../peripheral/hardware";
 import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
-import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, type Settings } from "../settings";
+import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, officialAuthModeSetting, saveSettings, Settings } from "../settings";
 import { DISPATCH_PIN_MESSAGE } from "../agent/dispatch-config";
 import {
   deriveInstallName, installPluginFromDir, missingConsents, buildConsentBlock, applyFreshPluginConsent,
@@ -294,6 +298,11 @@ export interface IpcServerOptions {
   // for tests) into this field. Also `sync.config`'s ONLY route to the Exa key (Chat Slice D task
   // 3) — the SAME instance, never a second read path.
   secrets?: SecretStore;
+  // Winter Phase 10a (O6, P10a-6): the daemon's ONE console-profile broker instance — threaded here
+  // so `provider.login`/`provider.loginCode`/`provider.logout`/`provider.status` can drive it.
+  // Optional, same "typed INTERNAL failure, never a crash" precedent as `winterHome`/`secrets`
+  // above: a server built without one (most existing tests) makes the four RPCs typed failures.
+  consoleBroker?: ConsoleProfileBroker;
   // Chat Slice D task 3 (`sync.config`): the user-ADDED half of the dangerous-domains list —
   // daemon.ts's own shared `dangerousDomainsAdded` const, the SAME live getter Search/ReadPage/the
   // research runner already consult (see those callers' own doc comments). `sync.config` calls
@@ -978,6 +987,28 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     };
     for (const conn of harnessConns) {
       try { conn.writer.enqueue(encodeLine({ jsonrpc: "2.0", method: METHODS.event, params: event })); }
+      catch { /* dead socket — its close() handler will evict it from harnessConns */ }
+    }
+  }
+
+  // Winter Phase 10a (O6, P10a-6): the ONE in-progress Anthropic Console login this daemon can
+  // have at a time — `provider.login` sets it, `provider.loginCode` reads it, and the `done`
+  // continuation below clears it once the SDK's own login handle settles. A single slot (never a
+  // map) is deliberate: the console-profile broker itself is one-login-at-a-time (its own doc),
+  // and a second `provider.login` while one is already running would either orphan the first
+  // child's stdin or race two of them against the SAME profile file — refused outright below
+  // rather than silently letting either happen.
+  let activeAnthropicLogin: { submitCode(code: string): Promise<void> } | undefined;
+
+  /** Broadcasts `provider_login_progress`/`provider_login_finished` to every authed harness —
+   *  modeled EXACTLY on `broadcastTileUpdated` above (same `harnessConns` set, same `systemSeq`
+   *  counter, same enqueue/encodeLine, same swallow-on-dead-socket): neither event is scoped to any
+   *  session (`SYSTEM_SESSION_ID`), so both go out over the harness broadcast set rather than the
+   *  per-session `SessionHub`. */
+  function broadcastAnthropicLoginEvent(event: { type: "provider_login_progress"; provider: string; line: string } | { type: "provider_login_finished"; provider: string; ok: boolean; reason?: string }): void {
+    const full = { ...event, sessionId: SYSTEM_SESSION_ID, seq: ++systemSeq, ts: Date.now() };
+    for (const conn of harnessConns) {
+      try { conn.writer.enqueue(encodeLine({ jsonrpc: "2.0", method: METHODS.event, params: full })); }
       catch { /* dead socket — its close() handler will evict it from harnessConns */ }
     }
   }
@@ -2662,6 +2693,26 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.providerConfigure: {
         const p = parseParams(ProviderConfigureParams, params);
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "provider.configure is not available on this server (no winterHome configured)");
+        // Winter Phase 10a (P10a-3): the SECOND arm — the app's Anthropic auth-mode radio. Writes
+        // EXACTLY the one hot-reloaded settings key (`runtimes.official.auth`); never touches
+        // `settings.provider` (unlike the openai-compatible arm below, which replaces that whole
+        // block) and never writes a secret — there is no key to store on this arm.
+        if ("provider" in p) {
+          const settingsPath = join(opts.winterHome, "settings.json");
+          const settings = loadSettings(settingsPath);
+          // `Settings.parse` (not a hand-built literal) fills every OTHER `runtimes.*` default
+          // (retention/migrations/winterLeg/handoff/winterIdleTimeoutSec) when the block was
+          // previously absent — the same "an absent block is not unknown" rule this file's own
+          // settings.ts documents, without this handler re-deriving those defaults by hand.
+          saveSettings(settingsPath, Settings.parse({
+            ...settings,
+            runtimes: {
+              ...(settings.runtimes ?? {}),
+              official: { ...(settings.runtimes?.official ?? {}), auth: p.settings["runtimes.official.auth"] },
+            },
+          }));
+          return { ok: true };
+        }
         if (!opts.secrets) throw new RpcFailure(ERR.INTERNAL, "provider.configure is not available on this server (no secret store configured)");
         await writeOpenAiApiKey(opts.secrets, p.apiKey);
         const settingsPath = join(opts.winterHome, "settings.json");
@@ -2671,6 +2722,79 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           provider: { type: "openai-compatible", baseUrl: p.baseUrl, model: p.model ?? "gpt-4o" },
         });
         return { ok: true };
+      }
+
+      // -----------------------------------------------------------------------------------------
+      // Winter Phase 10a (O6, P10a-6): the Anthropic Console login RPC trio + status.
+      //
+      // `provider.login` is a STARTER: it calls the broker's `login()`, which returns once the SDK
+      // has actually SPAWNED the child (fast) — never once the interactive login itself finishes
+      // (that needs a pasted code, M2's own protocol). The returned handle's `submitCode` is stashed
+      // in `activeAnthropicLogin` for `provider.loginCode` to reach, and its `done` promise is
+      // chained (fire-and-forget) to broadcast `provider_login_finished` and clear the slot —
+      // this handler itself never awaits `done`.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.providerLogin: {
+        parseParams(ProviderLoginParams, params);
+        if (!opts.consoleBroker) throw new RpcFailure(ERR.INTERNAL, "provider.login is not available on this server (no console broker configured)");
+        if (activeAnthropicLogin) throw new RpcFailure(ERR.INVALID_PARAMS, "an Anthropic Console login is already in progress");
+        let handle: Awaited<ReturnType<ConsoleProfileBroker["login"]>>;
+        try {
+          handle = await opts.consoleBroker.login((line) => broadcastAnthropicLoginEvent({ type: "provider_login_progress", provider: "anthropic", line }));
+        } catch (err) {
+          throw new RpcFailure(ERR.INTERNAL, err instanceof Error ? err.message : String(err));
+        }
+        activeAnthropicLogin = handle;
+        void handle.done
+          .then((result) => {
+            broadcastAnthropicLoginEvent(
+              result.ok
+                ? { type: "provider_login_finished", provider: "anthropic", ok: true }
+                : { type: "provider_login_finished", provider: "anthropic", ok: false, reason: result.reason },
+            );
+          })
+          .catch((err) => {
+            broadcastAnthropicLoginEvent({ type: "provider_login_finished", provider: "anthropic", ok: false, reason: err instanceof Error ? err.name : "unknown" });
+          })
+          .finally(() => { if (activeAnthropicLogin === handle) activeAnthropicLogin = undefined; });
+        return { started: true };
+      }
+
+      // `provider.loginCode`: the pasted one-time code, over this SAME local socket. NEVER logged
+      // here (see this file's own credential-handling discipline elsewhere) — passed straight to
+      // the in-progress handle's own `submitCode`.
+      case METHODS.providerLoginCode: {
+        const p = parseParams(ProviderLoginCodeParams, params);
+        if (!activeAnthropicLogin) throw new RpcFailure(ERR.INVALID_PARAMS, "no Anthropic Console login is in progress");
+        try {
+          await activeAnthropicLogin.submitCode(p.code);
+        } catch {
+          return { ok: false };
+        }
+        return { ok: true };
+      }
+
+      case METHODS.providerLogout: {
+        parseParams(ProviderLogoutParams, params);
+        if (!opts.consoleBroker) throw new RpcFailure(ERR.INTERNAL, "provider.logout is not available on this server (no console broker configured)");
+        try {
+          await opts.consoleBroker.logout();
+        } catch {
+          return { ok: false };
+        }
+        return { ok: true };
+      }
+
+      // `provider.status`: read-only, re-read LIVE on every call (settings + Keychain presence +
+      // the broker's own on-disk profile check) — never a boot snapshot, same posture as every
+      // other settings-derived RPC in this file.
+      case METHODS.providerStatus: {
+        parseParams(ProviderStatusParams, params);
+        const auth = opts.winterHome ? officialAuthModeSetting(loadSettings(join(opts.winterHome, "settings.json"))) : "auto";
+        const material = opts.secrets ? await readCredentialMaterial(opts.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME) : null;
+        const apiKey = material?.kind === "api-key";
+        const consoleProfile = opts.consoleBroker?.profileExists() ?? false;
+        return { anthropic: { apiKey, consoleProfile, auth, effective: effectiveOfficialAuthFor(auth, apiKey, consoleProfile) } };
       }
 
       // -----------------------------------------------------------------------------------------

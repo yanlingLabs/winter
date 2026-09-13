@@ -11,5 +11,13 @@
       <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
       <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.111.0/Winter-0.111.0.zip" sparkle:edSignature="whVM3UgqT5KfR8MEN0TuAtx963reO/d0LbWnEESDSmjb7rLk/gyehEjaCCKut4eJ6vBcgNo1JYMqOL0iSdQMAA==" length="498940607" type="application/octet-stream"/>
     </item>
+      <item>
+      <title>0.111.1</title>
+      <description><![CDATA[Winter agent SDK 0.0.5 · Claude Agent SDK 0.3.250]]></description>
+      <sparkle:version>0.111.1</sparkle:version>
+      <sparkle:shortVersionString>0.111.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/yanlingLabs/winter/releases/download/v0.111.1/Winter-0.111.1.zip" sparkle:edSignature="n3/tkeTGJXs2fGo9rPOWvGpo3E9mTU60cpeGNK05LdT6v+Htk0jQTN0sPHZkCDt9NQramMpK/EbHVpeF493rCA==" length="498940638" type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>

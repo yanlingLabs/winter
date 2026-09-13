@@ -426,6 +426,42 @@ export const PluginTileUpdatedEvent = Base.extend({
   tile: z.record(z.string(), z.unknown()).nullable(),
 });
 
+/** Winter Phase 10a (O5, P10a-6): the `winter-shape` cap on a single `provider_login_progress`
+ *  line — well above any real CLI progress line, far below the caps CLAUDE.md names as
+ *  "unreachable by honest content" for a similar reason (`PANEL_TITLE_MAX_LENGTH`'s own doc). Never
+ *  truncated in place by a producer; an over-cap line simply fails to parse, same "refused, never
+ *  truncated" reasoning `PANEL_URL_MAX_LENGTH`'s doc gives (a truncated progress line could read as
+ *  a different, misleading instruction to the user watching the login sheet). */
+export const PROVIDER_LOGIN_LINE_MAX_LENGTH = 2048;
+
+/** TRANSIENT (broadcast-only, never persisted to the session log/replayed on attach — there's no
+ *  session to attach to; `sessionId` is always the `$system` sentinel, same as
+ *  `PluginTileUpdatedEvent` above) — Winter Phase 10a (P10a-6): one sanitized stdout/stderr line
+ *  from the console-profile broker's in-progress `claude auth login --console` (or `logoutAnthropicConsole`),
+ *  streamed to every authed harness as it arrives so the app's login sheet can show live progress
+ *  (and the "visit this URL" line as a clickable fallback). `line` is ALREADY sanitized of any URL
+ *  query string by the broker/SDK before this event is ever constructed (`console-profile-broker.ts`'s
+ *  own header) — this schema does not re-sanitize; it only bounds length. `provider` is a bare
+ *  string (not yet a literal enum) so a later provider's login can reuse this exact event without a
+ *  protocol change — today's only producer names `"anthropic"`. */
+export const ProviderLoginProgressEvent = Base.extend({
+  type: z.literal("provider_login_progress"),
+  provider: z.string().min(1),
+  line: z.string().max(PROVIDER_LOGIN_LINE_MAX_LENGTH),
+});
+
+/** TRANSIENT, same `$system`-scoped shape as `ProviderLoginProgressEvent` above — Winter Phase 10a
+ *  (P10a-6): the terminal outcome of one `provider.login` attempt, fired once the broker's login
+ *  handle's own `done` promise settles. `reason` NAMES the failure only (an SDK-provided code, e.g.
+ *  `exit_code_1`/`console_broker_unavailable`) — NEVER the raw process output, which is what
+ *  `provider_login_progress`'s stream already carried, sanitized, while the login was running. */
+export const ProviderLoginFinishedEvent = Base.extend({
+  type: z.literal("provider_login_finished"),
+  provider: z.string().min(1),
+  ok: z.boolean(),
+  reason: z.string().max(PROVIDER_LOGIN_LINE_MAX_LENGTH).optional(),
+});
+
 /** TRANSIENT (broadcast-only, never persisted to the session log/replayed on attach — there's no
  *  session to attach to; `sessionId` is always the `$system` sentinel) — Phase 4d Task 2's
  *  harness→plugin push: core sends this directly to a plugin's own connection when a future UI
@@ -826,6 +862,8 @@ export const SessionEvent = z.discriminatedUnion("type", [
   PanelTabActivatedEvent,
   PanelTabNavigatedEvent,
   PanelCommandEvent,
+  ProviderLoginProgressEvent,
+  ProviderLoginFinishedEvent,
 ]);
 export type SessionEvent = z.infer<typeof SessionEvent>;
 
@@ -888,6 +926,11 @@ export const TRANSIENT_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<
   // Panel STATE stays Mac-only the real way: the four persisted panel variants are absent from
   // `HISTORY_EVENT_TYPES`.
   "panel_command",
+  // Winter Phase 10a (O5, P10a-6): the console-login progress/outcome pair — SYSTEM_SESSION_ID-
+  // scoped, exactly like `plugin_tile_updated` above (a login attempt isn't scoped to any session
+  // either). 9 → 11.
+  "provider_login_progress",
+  "provider_login_finished",
 ]);
 
 /** Event payload before the store assigns seq/ts (distributes Omit over the union). */
