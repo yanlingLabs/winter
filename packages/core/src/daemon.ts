@@ -2178,6 +2178,7 @@ export async function startDaemon(opts: {
       settingsWatcher?.stop(); // closes the fs.watch handle on settings.json — no leaked watcher past shutdown
       routineScheduler.stop(); routineStore.close(); // no orphan tick timer past drain
       dreamer?.stop(); // no orphan dream tick timer past shutdown (unref'd already, but never left running)
+      consoleBroker.stopRefresher(); // Winter Phase 10a (fix round 1 item 2): no orphan bearer-refresh timer past shutdown (unref'd already, belt-and-braces)
       // P8a Task 12 — SHUTDOWN ORDER, and it is an order, not a list. `server.stop()` above has
       // already run, so no RPC can arrive after this point and reach a closed handle; the reaper's
       // mint-time sweep (the one caller that could still queue a runtime deletion) lives inside that

@@ -37,6 +37,31 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/** A scripted `setTimeout`/`clearTimeout` pair: `fire()` runs the LATEST scheduled callback
+ *  synchronously (simulating the clock reaching that delay), `delays` records every scheduled delay
+ *  in order, and `cleared` records every handle passed to `clearTimeoutFn`. */
+function fakeTimers() {
+  const delays: number[] = [];
+  const cleared: unknown[] = [];
+  let pending: (() => void) | undefined;
+  let nextHandle = 0;
+  const setTimeoutFn = (fn: () => void, ms: number): unknown => {
+    delays.push(ms);
+    pending = fn;
+    return ++nextHandle;
+  };
+  const clearTimeoutFn = (h: unknown): void => { cleared.push(h); };
+  const fire = async (): Promise<void> => {
+    const fn = pending;
+    pending = undefined;
+    fn?.();
+    // Let the refresh promise chain (`doRefresh().then(...)`) settle before the caller inspects
+    // `delays`/re-fires.
+    await flush();
+  };
+  return { delays, cleared, setTimeoutFn, clearTimeoutFn, fire };
+}
+
 /** A fake `AnthropicConsoleSdk` that records every call it receives, so tests assert on the
  *  options/args this door built without any real process ever spawning. */
 function fakeSdk(overrides: Partial<AnthropicConsoleSdk> = {}) {
@@ -151,34 +176,47 @@ describe("createConsoleProfileBroker — profileExists / refreshBearer / logout"
     await broker.logout();
     expect(calls[0]!.fn).toBe("logoutAnthropicConsole");
   });
+
+  // Fix round 1 item 1: a signed-out profile must never keep refreshing itself.
+  test("logout() stops the refresher — no further timer firings on the fake clock", async () => {
+    const home = freshHome();
+    const { sdk, calls } = fakeSdk();
+    const timers = fakeTimers();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, now: () => 1_000_000, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    broker.startRefresher();
+    await flush();
+    expect(calls.filter((c) => c.fn === "refreshAnthropicBearer").length).toBe(1);
+    expect(timers.delays.length).toBe(1); // the seed refresh armed a next fire
+
+    await broker.logout();
+    expect(timers.cleared.length).toBe(1); // the pending timer was cleared, not left ticking
+
+    // Starting a NEW refresher afterward still works (logout does not permanently wedge the
+    // broker) — but nothing from the OLD chain ever fires again.
+    broker.startRefresher();
+    await flush();
+    expect(calls.filter((c) => c.fn === "refreshAnthropicBearer").length).toBe(2);
+  });
+
+  test("logout() stops the refresher even when logoutAnthropicConsole itself rejects", async () => {
+    const home = freshHome();
+    const timers = fakeTimers();
+    const { sdk } = fakeSdk({ logoutAnthropicConsole: async () => { throw new Error("boom"); } });
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, now: () => 1_000_000, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    broker.startRefresher();
+    await flush();
+    await expect(broker.logout()).rejects.toThrow("boom");
+    expect(timers.cleared.length).toBe(1);
+  });
 });
 
 describe("createConsoleProfileBroker — startRefresher / stopRefresher (host-owned timer, fake clock)", () => {
-  /** A scripted `setTimeout`/`clearTimeout` pair: `fire()` runs the LATEST scheduled callback
-   *  synchronously (simulating the clock reaching that delay), `delays` records every scheduled
-   *  delay in order, and `cleared` records every handle passed to `clearTimeoutFn`. */
-  function fakeTimers() {
-    const delays: number[] = [];
-    const cleared: unknown[] = [];
-    let pending: (() => void) | undefined;
-    let nextHandle = 0;
-    const setTimeoutFn = (fn: () => void, ms: number): unknown => {
-      delays.push(ms);
-      pending = fn;
-      return ++nextHandle;
-    };
-    const clearTimeoutFn = (h: unknown): void => { cleared.push(h); };
-    const fire = async (): Promise<void> => {
-      const fn = pending;
-      pending = undefined;
-      fn?.();
-      // Let the refresh promise chain (`doRefresh().then(...)`) settle before the caller inspects
-      // `delays`/re-fires.
-      await flush();
-    };
-    return { delays, cleared, setTimeoutFn, clearTimeoutFn, fire };
-  }
-
   test("startRefresher() refreshes IMMEDIATELY, then arms the next fire 60s before the returned expiresAt", async () => {
     const home = freshHome();
     let now = 1_000_000;
@@ -275,6 +313,25 @@ describe("createConsoleProfileBroker — startRefresher / stopRefresher (host-ow
     const { sdk } = fakeSdk();
     const broker = createConsoleProfileBroker({ home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk });
     expect(() => broker.stopRefresher()).not.toThrow();
+  });
+
+  // Fix round 1 item 2: repeated calls (a duplicate shutdown-path stop, a manual stop before
+  // logout's own internal one, etc.) must stay safe and never clear an already-cleared/stale handle.
+  test("stopRefresher() is idempotent — repeated calls never throw and never double-clear", async () => {
+    const home = freshHome();
+    const { sdk } = fakeSdk();
+    const timers = fakeTimers();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, now: () => 1_000_000, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    broker.startRefresher();
+    await flush();
+    broker.stopRefresher();
+    expect(timers.cleared.length).toBe(1);
+    expect(() => broker.stopRefresher()).not.toThrow();
+    expect(() => broker.stopRefresher()).not.toThrow();
+    expect(timers.cleared.length).toBe(1); // no second clear — nothing left to clear
   });
 
   test("stopRefresher() called WHILE the seed refresh is still in flight prevents the first arm entirely", async () => {

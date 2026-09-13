@@ -1880,8 +1880,16 @@ if (import.meta.main) {
       }
       const rl = createInterface({ input: process.stdin, terminal: false });
       // Every pasted line is forwarded verbatim — NEVER logged here (this file's own discipline
-      // for every other secret-entry branch: readSecret, invisibleKeyCharWarning, etc.).
-      rl.on("line", (line) => { void handle.submitCode(line.trim()); });
+      // for every other secret-entry branch: readSecret, invisibleKeyCharWarning, etc.). The login
+      // protocol takes exactly ONE code: `submitted` guards against a double Enter, a pasted
+      // multi-line blob, or any other stray extra `line` event calling `submitCode` a second time
+      // (the SDK's own child has already consumed/closed on the first submission by then).
+      let submitted = false;
+      rl.on("line", (line) => {
+        if (submitted) return;
+        submitted = true;
+        void handle.submitCode(line.trim());
+      });
       let result: Awaited<typeof handle.done>;
       try {
         result = await handle.done;
