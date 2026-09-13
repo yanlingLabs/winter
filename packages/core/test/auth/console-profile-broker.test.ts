@@ -1,7 +1,8 @@
-// Winter Phase 10a (O4) — REVISED per the "providers system lives on the agent SDKs" ruling: this
-// module is a thin host adapter, so its tests exercise WIRING against a FAKE `AnthropicConsoleSdk`
-// — never a stub binary, never a real spawn. Lane S's own SDK repo tests the actual spawn/redaction/
-// timer behaviour; nothing here duplicates that.
+// Winter Phase 10a (O4) — thin host adapter over Lane S's SDK functions, so its tests exercise
+// WIRING against a FAKE `AnthropicConsoleSdk` — never a stub binary, never a real spawn. Lane S's
+// own SDK repo tests the actual spawn/redaction behaviour; nothing here duplicates that. The
+// refresh TIMER, however, is host-owned (no equivalent exists on the SDK side — see
+// console-profile-broker.ts's own header), so it IS tested here, over a fake clock.
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,6 +16,7 @@ import {
   type AnthropicConsoleSdk,
   type AnthropicLoginHandle,
   type AnthropicLoginOptions,
+  type AnthropicRefreshResult,
 } from "../../src/auth/console-profile-broker";
 
 const roots: string[] = [];
@@ -27,14 +29,22 @@ afterEach(() => {
   for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
 });
 
+/** Drains the microtask queue past any depth a `.then()`/`async` chain can create — a fixed count
+ *  of `await Promise.resolve()` calls is fragile (it depends on exactly how many `.then()` hops the
+ *  implementation happens to use); yielding to a real macrotask via `setTimeout(0)` is robust
+ *  regardless. */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 /** A fake `AnthropicConsoleSdk` that records every call it receives, so tests assert on the
  *  options/args this door built without any real process ever spawning. */
 function fakeSdk(overrides: Partial<AnthropicConsoleSdk> = {}) {
   const calls: { fn: string; args: unknown[] }[] = [];
   const record = (fn: string, args: unknown[]) => calls.push({ fn, args });
   const sdk: AnthropicConsoleSdk = {
-    startProviderLogin: async (provider, store, options) => {
-      record("startProviderLogin", [provider, store, options]);
+    startAnthropicConsoleBrokerLogin: async (store, options) => {
+      record("startAnthropicConsoleBrokerLogin", [store, options]);
       return { submitCode: async () => {}, done: Promise.resolve({ ok: true, profile: ANTHROPIC_PROFILE_NAME }) };
     },
     refreshAnthropicBearer: async (store, options) => {
@@ -47,10 +57,6 @@ function fakeSdk(overrides: Partial<AnthropicConsoleSdk> = {}) {
     },
     logoutAnthropicConsole: async (store, options) => {
       record("logoutAnthropicConsole", [store, options]);
-    },
-    createAnthropicBearerRefresher: (store, options, clock) => {
-      record("createAnthropicBearerRefresher", [store, options, clock]);
-      return { start: () => record("refresher.start", []), stop: () => record("refresher.stop", []) };
     },
     ...overrides,
   };
@@ -68,7 +74,7 @@ describe("createConsoleProfileBroker — login", () => {
     expect(calls).toEqual([]);
   });
 
-  test("calls sdk.startProviderLogin(\"anthropic\", store, options) with the right paths, profile, and onLine forwarded", async () => {
+  test("calls sdk.startAnthropicConsoleBrokerLogin(store, options) with the right paths, profile, and onLine forwarded", async () => {
     const home = freshHome();
     const { sdk, calls } = fakeSdk();
     const lines: string[] = [];
@@ -79,9 +85,8 @@ describe("createConsoleProfileBroker — login", () => {
     });
     const handle = await broker.login(onLine);
     expect(calls.length).toBe(1);
-    expect(calls[0]!.fn).toBe("startProviderLogin");
-    const [provider, , options] = calls[0]!.args as [string, unknown, AnthropicLoginOptions];
-    expect(provider).toBe("anthropic");
+    expect(calls[0]!.fn).toBe("startAnthropicConsoleBrokerLogin");
+    const [, options] = calls[0]!.args as [unknown, AnthropicLoginOptions];
     expect(options.claudeExecutable).toBe("/bin/claude");
     expect(options.antExecutable).toBe("/bin/ant");
     expect(options.anthropicConfigDir).toBe(anthropicConfigDirFor(home));
@@ -99,7 +104,7 @@ describe("createConsoleProfileBroker — login", () => {
       home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk,
     });
     await broker.login(() => {});
-    const options = calls[0]!.args[2] as AnthropicLoginOptions;
+    const options = calls[0]!.args[1] as AnthropicLoginOptions;
     expect("antExecutable" in options).toBe(false);
   });
 
@@ -107,7 +112,7 @@ describe("createConsoleProfileBroker — login", () => {
     const home = freshHome();
     const submitted: string[] = [];
     const { sdk } = fakeSdk({
-      startProviderLogin: async (): Promise<AnthropicLoginHandle> => ({
+      startAnthropicConsoleBrokerLogin: async (): Promise<AnthropicLoginHandle> => ({
         submitCode: async (code) => { submitted.push(code); },
         done: Promise.resolve({ ok: true, profile: ANTHROPIC_PROFILE_NAME }),
       }),
@@ -148,36 +153,121 @@ describe("createConsoleProfileBroker — profileExists / refreshBearer / logout"
   });
 });
 
-describe("createConsoleProfileBroker — startRefresher / stopRefresher", () => {
-  test("startRefresher() builds ONE refresher via sdk.createAnthropicBearerRefresher and calls .start()", () => {
+describe("createConsoleProfileBroker — startRefresher / stopRefresher (host-owned timer, fake clock)", () => {
+  /** A scripted `setTimeout`/`clearTimeout` pair: `fire()` runs the LATEST scheduled callback
+   *  synchronously (simulating the clock reaching that delay), `delays` records every scheduled
+   *  delay in order, and `cleared` records every handle passed to `clearTimeoutFn`. */
+  function fakeTimers() {
+    const delays: number[] = [];
+    const cleared: unknown[] = [];
+    let pending: (() => void) | undefined;
+    let nextHandle = 0;
+    const setTimeoutFn = (fn: () => void, ms: number): unknown => {
+      delays.push(ms);
+      pending = fn;
+      return ++nextHandle;
+    };
+    const clearTimeoutFn = (h: unknown): void => { cleared.push(h); };
+    const fire = async (): Promise<void> => {
+      const fn = pending;
+      pending = undefined;
+      fn?.();
+      // Let the refresh promise chain (`doRefresh().then(...)`) settle before the caller inspects
+      // `delays`/re-fires.
+      await flush();
+    };
+    return { delays, cleared, setTimeoutFn, clearTimeoutFn, fire };
+  }
+
+  test("startRefresher() refreshes IMMEDIATELY, then arms the next fire 60s before the returned expiresAt", async () => {
     const home = freshHome();
-    const { sdk, calls } = fakeSdk();
-    const broker = createConsoleProfileBroker({ home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk });
+    let now = 1_000_000;
+    const { sdk, calls } = fakeSdk({ refreshAnthropicBearer: async () => { calls.push({ fn: "refreshAnthropicBearer", args: [] }); return { ok: true, expiresAt: now + 120_000 }; } });
+    const timers = fakeTimers();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, now: () => now, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
     broker.startRefresher();
-    expect(calls.map((c) => c.fn)).toEqual(["createAnthropicBearerRefresher", "refresher.start"]);
+    await flush(); // let the seed refresh's promise settle
+    expect(calls.filter((c) => c.fn === "refreshAnthropicBearer").length).toBe(1);
+    expect(timers.delays).toEqual([60_000]); // 120_000 - 60_000 (REFRESH_LEAD_MS)
   });
 
-  test("a second startRefresher() before stopRefresher() is a no-op — never a second refresher instance", () => {
+  test("a second startRefresher() before stopRefresher() is a no-op — never a second refresh chain", async () => {
     const home = freshHome();
     const { sdk, calls } = fakeSdk();
-    const broker = createConsoleProfileBroker({ home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk });
+    const timers = fakeTimers();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, now: () => 0, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
     broker.startRefresher();
     broker.startRefresher();
-    expect(calls.filter((c) => c.fn === "createAnthropicBearerRefresher").length).toBe(1);
+    await flush();
+    expect(calls.filter((c) => c.fn === "refreshAnthropicBearer").length).toBe(1);
   });
 
-  test("stopRefresher() calls .stop() on the current refresher and allows a fresh one to start again", () => {
+  test("each successive fire re-arms based on ITS OWN fresh expiresAt", async () => {
+    const home = freshHome();
+    let call = 0;
+    const expiries = [1_060_000, 1_130_000]; // seed + one re-fire
+    const { sdk } = fakeSdk({ refreshAnthropicBearer: async () => ({ ok: true, expiresAt: expiries[call++] }) });
+    const timers = fakeTimers();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, now: () => 1_000_000, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    broker.startRefresher();
+    await flush();
+    expect(timers.delays).toEqual([0]); // 1_060_000 - 60_000 - 1_000_000 = 0 (clamped, not negative)
+    await timers.fire();
+    expect(timers.delays).toEqual([0, 70_000]); // 1_130_000 - 60_000 - 1_000_000
+  });
+
+  test("a failed refresh retries after a fixed backoff rather than giving up", async () => {
+    const home = freshHome();
+    const results: AnthropicRefreshResult[] = [{ ok: false, reason: "ant_exit_1" }, { ok: true, expiresAt: 2_000_000 }];
+    let call = 0;
+    const { sdk } = fakeSdk({ refreshAnthropicBearer: async () => results[call++]! });
+    const timers = fakeTimers();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, now: () => 1_000_000, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    broker.startRefresher();
+    await flush();
+    expect(timers.delays).toEqual([60_000]); // backoff, not a permanent stop
+  });
+
+  test("a rejected refresh (thrown) ALSO retries after the same backoff", async () => {
+    const home = freshHome();
+    const { sdk } = fakeSdk({ refreshAnthropicBearer: async () => { throw new Error("boom"); } });
+    const timers = fakeTimers();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, now: () => 1_000_000, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    broker.startRefresher();
+    await flush();
+    expect(timers.delays).toEqual([60_000]);
+  });
+
+  test("stopRefresher() clears the pending timer and allows a fresh chain to start again", async () => {
     const home = freshHome();
     const { sdk, calls } = fakeSdk();
-    const broker = createConsoleProfileBroker({ home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk });
+    const timers = fakeTimers();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, now: () => 1_000_000, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
     broker.startRefresher();
+    await flush();
     broker.stopRefresher();
+    expect(timers.cleared.length).toBe(1);
     broker.startRefresher();
-    expect(calls.map((c) => c.fn)).toEqual([
-      "createAnthropicBearerRefresher", "refresher.start",
-      "refresher.stop",
-      "createAnthropicBearerRefresher", "refresher.start",
-    ]);
+    await flush();
+    expect(calls.filter((c) => c.fn === "refreshAnthropicBearer").length).toBe(2);
   });
 
   test("stopRefresher() with no refresher running is a harmless no-op", () => {
@@ -185,6 +275,22 @@ describe("createConsoleProfileBroker — startRefresher / stopRefresher", () => 
     const { sdk } = fakeSdk();
     const broker = createConsoleProfileBroker({ home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk });
     expect(() => broker.stopRefresher()).not.toThrow();
+  });
+
+  test("stopRefresher() called WHILE the seed refresh is still in flight prevents the first arm entirely", async () => {
+    const home = freshHome();
+    const timers = fakeTimers();
+    let resolveRefresh!: (r: AnthropicRefreshResult) => void;
+    const { sdk } = fakeSdk({ refreshAnthropicBearer: () => new Promise((resolve) => { resolveRefresh = resolve; }) });
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, now: () => 1_000_000, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    broker.startRefresher();
+    broker.stopRefresher(); // the "starting" sentinel — clearTimeoutFn is never called for it
+    resolveRefresh({ ok: true, expiresAt: 2_000_000 });
+    await flush();
+    expect(timers.delays).toEqual([]); // no timer was ever armed
   });
 });
 
@@ -196,11 +302,17 @@ describe("UNAVAILABLE_SDK — the default before the real package publishes (con
     await expect(broker.logout()).rejects.toThrow(CONSOLE_BROKER_UNAVAILABLE_REASON);
   });
 
-  test("the sync calls answer a SAFE inert default rather than throwing — profileExists() must never crash daemon boot", () => {
+  test("profileExists() answers a SAFE inert default rather than throwing — it must never crash daemon boot", () => {
     const home = freshHome();
     const broker = createConsoleProfileBroker({ home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")) });
     expect(broker.profileExists()).toBe(false);
+  });
+
+  test("startRefresher()/stopRefresher() never throw even though every refresh attempt rejects", async () => {
+    const home = freshHome();
+    const broker = createConsoleProfileBroker({ home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")) });
     expect(() => broker.startRefresher()).not.toThrow();
+    await flush();
     expect(() => broker.stopRefresher()).not.toThrow();
   });
 

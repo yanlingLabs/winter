@@ -1123,21 +1123,13 @@ export async function startDaemon(opts: {
     antExecutable: () => process.env.WINTER_ANT_EXECUTABLE,
     secrets,
   });
-  // Boot-time bearer refresh (P10a-4): if a console profile already exists on disk, refresh the
-  // bearer material once at boot (the daemon may have been down past the previous expiry) and arm
-  // the recurring refresher. Never fatal to boot — `UNAVAILABLE_SDK`'s own doc explains why
-  // `profileExists()` itself cannot throw; the `refreshBearer()` call is guarded here too, since
-  // the real SDK (once wired) reaches an actual network/process call this daemon must not die on.
-  if (consoleBroker.profileExists()) {
-    consoleBroker.refreshBearer()
-      .then((result) => {
-        if (!result.ok) console.error(`console-profile-broker: boot-time refreshBearer failed`);
-      })
-      .catch((err) => {
-        console.error(`console-profile-broker: boot-time refreshBearer threw (${err instanceof Error ? err.name : "unknown"})`);
-      })
-      .finally(() => { consoleBroker.startRefresher(); }); // the recurring safety net, regardless of the boot attempt's own outcome
-  }
+  // Boot-time bearer refresh (P10a-4): if a console profile already exists on disk, arm the
+  // refresher — its own `startRefresher()` performs an IMMEDIATE refresh (the daemon may have been
+  // down past the previous expiry) and then re-arms itself 60s before whatever `expiresAt` that (or
+  // each subsequent) refresh reports, retrying on a fixed backoff if a refresh fails. Never fatal to
+  // boot: every await inside `startRefresher()`'s own refresh chain is caught internally (its own
+  // doc comment), so this call itself never throws.
+  if (consoleBroker.profileExists()) consoleBroker.startRefresher();
 
   // ── §13 step 10, run from here because the handle does not exist where the step does ──────────
   //

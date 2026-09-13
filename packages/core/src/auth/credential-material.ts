@@ -26,12 +26,14 @@ export type OauthMaterial = {
   accountId?: string;
   idToken?: string;
 };
-/** A bearer credential (Console OAuth, or an approved gateway) — Winter does not write this kind
- *  today (no inventory row uses it), but the seam (`runtime-sdk/keychain.ts`) must still be able to
- *  EXTRACT one correctly for the day a `console-oauth`-family row is added, per the router's
- *  `fetchAuthCredentials` contract (`winter-runtime-sdk` `src/official/auth.ts`), which injects the
- *  seam's returned string verbatim as an env var. */
-export type BearerMaterial = { kind: "bearer"; token: string };
+/** A bearer credential (Console OAuth, or an approved gateway). `expiresAt` (Winter Phase 10a,
+ *  P10a-4) is optional/additive: the console-profile broker's `refreshAnthropicBearer` (SDK-side,
+ *  `@yanlinglabs/winter-provider-runtime`) writes it so the daemon's own refresh timer
+ *  (`auth/console-profile-broker.ts`) can re-arm itself 60s before expiry without a second read of
+ *  the profile file — but the seam (`runtime-sdk/keychain.ts`) only ever hands the CHILD the bare
+ *  `token` string, per the router's `fetchAuthCredentials` contract (`winter-runtime-sdk`
+ *  `src/official/auth.ts`), so `expiresAt`'s only consumer is this daemon's own refresh logic. */
+export type BearerMaterial = { kind: "bearer"; token: string; expiresAt?: number };
 export type CredentialMaterial = ApiKeyMaterial | OauthMaterial | BearerMaterial;
 
 /**
@@ -81,7 +83,9 @@ function coerceMaterial(value: unknown): CredentialMaterial | undefined {
           }
         : undefined;
     case "bearer":
-      return typeof v.token === "string" ? { kind: "bearer", token: v.token } : undefined;
+      return typeof v.token === "string"
+        ? { kind: "bearer", token: v.token, ...(typeof v.expiresAt === "number" ? { expiresAt: v.expiresAt } : {}) }
+        : undefined;
     default:
       return undefined; // aws / gcp — Winter never writes or reads these
   }
