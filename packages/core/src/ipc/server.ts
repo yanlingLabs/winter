@@ -2753,6 +2753,14 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
                 ? { type: "provider_login_finished", provider: "anthropic", ok: true }
                 : { type: "provider_login_finished", provider: "anthropic", ok: false, reason: result.reason },
             );
+            // Fix wave (M2): a successful RPC-driven login left the native-provider bearer
+            // material un-refreshed until the NEXT daemon restart's own boot-time
+            // `consoleBroker.profileExists()` check (`daemon.ts`) — the CLI door's own login
+            // already called `refreshBearer()` once and relied on a running daemon's refresher for
+            // everything after, but an app-driven login through this RPC never started one at all.
+            // `startRefresher()` is idempotent (a no-op while already running) and performs its own
+            // immediate refresh, so this is the one missing call, not a duplicate of anything above.
+            if (result.ok) opts.consoleBroker?.startRefresher();
           })
           .catch((err) => {
             broadcastAnthropicLoginEvent({ type: "provider_login_finished", provider: "anthropic", ok: false, reason: err instanceof Error ? err.name : "unknown" });

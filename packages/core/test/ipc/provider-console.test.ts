@@ -176,8 +176,23 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
     c.close();
   });
 
+  // Fix wave (M2): an RPC-driven (app/CLI-over-socket) login left the native-provider bearer
+  // material un-refreshed until the NEXT daemon restart's own boot-time `profileExists()` check
+  // (`daemon.ts`) — nothing here ever started the refresher for a login that happened while the
+  // daemon was already up. `startRefresher()` must fire once the login handle resolves `ok: true`.
+  test("a successful login also starts the broker's own refresher (M2)", async () => {
+    const { socketPath, harnessToken, calls } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
+    await waitFor(() => c.events.some((e) => e.type === "provider_login_finished"));
+    await waitFor(() => calls.includes("startRefresher"));
+    expect(calls).toContain("startRefresher");
+    c.close();
+  });
+
   test("a failed login broadcasts provider_login_finished {ok:false, reason}", async () => {
-    const { socketPath, harnessToken } = await boot({
+    const { socketPath, harnessToken, calls } = await boot({
       login: async () => ({ submitCode: async () => {}, done: Promise.resolve({ ok: false, reason: "exit_code_1" }) }),
     });
     const c = await TestClient.connect(socketPath);
@@ -185,6 +200,8 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
     await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
     await waitFor(() => c.events.some((e) => e.type === "provider_login_finished"));
     expect(c.events.find((e) => e.type === "provider_login_finished")).toMatchObject({ ok: false, reason: "exit_code_1" });
+    // M2: a FAILED login has no bearer to keep fresh — the refresher must never start on this path.
+    expect(calls).not.toContain("startRefresher");
     c.close();
   });
 
