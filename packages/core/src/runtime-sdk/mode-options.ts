@@ -443,8 +443,36 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
   if (input.outputStyle !== undefined) options.outputStyle = input.outputStyle;
   if (input.policy === "bypass") options.allowDangerouslySkipPermissions = true;
   if (input.hooks !== undefined) options.hooks = input.hooks;
-  if (input.advisorModel !== undefined) options.advisor = { model: input.advisorModel };
   const provider = providerSelectionFor(input.model, input.credentials);
+  if (input.advisorModel !== undefined) {
+    // Fix wave (M7): when the advisor's own target model resolves to the SAME provider as the
+    // session's own model, thread the SESSION's already-resolved `authRef` onto `Options.advisor`
+    // too. The pinned `@yanlinglabs/winter-agent-sdk@0.0.6`'s own `AdvisorConfig`
+    // (`protocol/config.d.ts`) has NO `connection` field at all — only `model`/`authRef` — so
+    // `authRef` is the entire lever this door has, not a partial stand-in for a wider fix.
+    //
+    // Measured root cause (`advisor-winter-leg-e2e.test.ts`'s F2 case, gated on the REAL compiled
+    // `dist/winter`): with no `authRef` at all, the advisor's own generation falls through to the
+    // runtime's OWN independent "<providerId>:default" credential resolution — a SEPARATE keychain
+    // read that knows nothing about whatever `input.connection` override the session itself is
+    // using (a BYO/loopback `openai-compatible` endpoint, say), and on a real machine with real
+    // credential material under the SAME keychain service name (`profile.ts`'s `keychainService()`,
+    // shared with the user's own daily-driver install) that independent read can reach a DIFFERENT,
+    // never-consented item and block on a macOS consent dialog no test harness can click through.
+    // The SDK's own doc on `AdvisorConfig.authRef` ("uses the route's ref, else the target
+    // provider's own keychain record") is exactly the escape hatch: an explicit, matching authRef
+    // is the same credential (and therefore the same already-configured provider connection) the
+    // session's own turn already resolved — never an independent, uninstructed lookup.
+    //
+    // A CROSS-provider advisor is UNCHANGED: it keeps falling through to the SDK's documented
+    // "target provider's own keychain record" default, exactly as today (never guessed at here).
+    const advisorProvider = providerSelectionFor(input.advisorModel, input.credentials);
+    const sameProviderAuthRef =
+      provider !== undefined && advisorProvider !== undefined && provider.providerId === advisorProvider.providerId
+        ? provider.authRef
+        : undefined;
+    options.advisor = { model: input.advisorModel, ...(sameProviderAuthRef === undefined ? {} : { authRef: sameProviderAuthRef }) };
+  }
   if (provider) options.provider = input.connection === undefined ? provider : { ...provider, connection: input.connection };
   // P8b-36: the session's own servers, spread under their own names (see `capabilities` above).
   if (input.capabilities !== undefined) options.mcpServers = { ...input.capabilities };
