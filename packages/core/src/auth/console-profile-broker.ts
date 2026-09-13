@@ -25,11 +25,36 @@
 // `setTimeout` loop in `startRefresher`/`stopRefresher` below is HOST lifecycle wiring (deciding
 // *when* to call `refreshAnthropicBearer` again), not provider logic, and stays in core under the
 // same ruling that moved the spawn/redaction/write logic to the SDK.
+//
+// P10a integration (v0.0.6 pin flip): `@yanlinglabs/winter-provider-runtime` published these five
+// names at 0.0.6 exactly as Lane S described above — wired below as `REAL_SDK`, now the default
+// `sdk` dependency. `UNAVAILABLE_SDK` stays as an explicit, still-tested defensive fallback shape
+// (never the default any more) rather than being deleted outright.
 import { credentialStoreOverSecretStore } from "../providers/credential-store";
-import type { CredentialStore } from "@yanlinglabs/winter-provider-runtime";
+import {
+  DEFAULT_ANTHROPIC_CONSOLE_PROFILE,
+  anthropicConsoleProfileExists as sdkAnthropicConsoleProfileExists,
+  logoutAnthropicConsole as sdkLogoutAnthropicConsole,
+  refreshAnthropicBearer as sdkRefreshAnthropicBearer,
+  startAnthropicConsoleBrokerLogin as sdkStartAnthropicConsoleBrokerLogin,
+  type CredentialStore,
+} from "@yanlinglabs/winter-provider-runtime";
 import type { SecretStore } from "./secret-store";
 import { keychainService } from "../profile";
 import { ANTHROPIC_PROFILE_NAME, anthropicConfigDirFor, officialConfigDirFor } from "../runtime-sdk/official-options";
+
+// Tripwire (Winter Phase 10a, v0.0.6 wiring): Winter's own profile name (`ANTHROPIC_PROFILE_NAME`,
+// `runtime-sdk/official-options.ts`) is a separate literal from the SDK's own default — they are
+// both `"winter"` today by coincidence of the two repos agreeing, not by one importing the other
+// (`optionsFor` below always passes `ANTHROPIC_PROFILE_NAME` explicitly, so the SDK's default is
+// never actually consulted at runtime). This throws at import time rather than letting the two
+// drift silently the day either repo renames its default.
+if (DEFAULT_ANTHROPIC_CONSOLE_PROFILE !== ANTHROPIC_PROFILE_NAME) {
+  throw new Error(
+    `console-profile-broker: ANTHROPIC_PROFILE_NAME (${JSON.stringify(ANTHROPIC_PROFILE_NAME)}) no longer matches ` +
+      `@yanlinglabs/winter-provider-runtime's DEFAULT_ANTHROPIC_CONSOLE_PROFILE (${JSON.stringify(DEFAULT_ANTHROPIC_CONSOLE_PROFILE)})`,
+  );
+}
 
 /** The options bag every SDK function below takes, per Lane S's pinned shape. `claudeExecutable`
  *  is a plain (possibly empty) string rather than `string | undefined` — the HOST decides whether a
@@ -63,8 +88,8 @@ export interface AnthropicRefreshResult {
 }
 
 /** The SDK surface this adapter drives. Injectable so this file's own tests use a FAKE; production
- *  wiring (`daemon.ts`, O6) passes nothing and gets `UNAVAILABLE_SDK` until the controller wires the
- *  real `@yanlinglabs/winter-provider-runtime` import after its v0.0.6 publish. */
+ *  wiring (`daemon.ts`, O6) passes nothing and gets `REAL_SDK` — the real
+ *  `@yanlinglabs/winter-provider-runtime` v0.0.6 exports, wired below. */
 export interface AnthropicConsoleSdk {
   startAnthropicConsoleBrokerLogin(store: CredentialStore, options: AnthropicLoginOptions): Promise<AnthropicLoginHandle>;
   refreshAnthropicBearer(store: CredentialStore, options: AnthropicLoginOptions): Promise<AnthropicRefreshResult>;
@@ -90,20 +115,37 @@ function unavailableSdkError(): Error {
 }
 
 /**
- * controller wires the real SDK exports after the v0.0.6 publish
- * (`@yanlinglabs/winter-provider-runtime`'s `adapters/anthropic/console-broker.ts`, Lane S).
- * Until then this is what every production `ConsoleProfileBroker` actually calls: the three ASYNC
- * calls a caller already awaits/catches reject with `unavailableSdkError()` (named package +
- * version, never a bare "not implemented"); the one SYNC call (`anthropicConsoleProfileExists`)
- * answers a SAFE, INERT default (`false`) instead of throwing — it runs at daemon BOOT (O6),
- * unconditionally, and a throw there would crash boot rather than simply reporting "no profile yet"
- * (the honest answer before the real SDK exists).
+ * DEFENSIVE FALLBACK ONLY (Winter Phase 10a, v0.0.6 wiring): `@yanlinglabs/winter-provider-runtime`
+ * v0.0.6 IS installed and its `console-broker.ts` exports ARE wired below as `REAL_SDK` — this is no
+ * longer the default `sdk` a production broker gets (see `createConsoleProfileBroker`). It is kept,
+ * exported, and still covered by tests only as the deliberate "SDK unavailable" shape a caller can
+ * still ask for explicitly (`sdk: UNAVAILABLE_SDK`) — e.g. a build that strips the optional peer, or
+ * a future defensive check this file does not currently perform. The three ASYNC calls reject with
+ * `unavailableSdkError()` (named package + version, never a bare "not implemented"); the one SYNC
+ * call (`anthropicConsoleProfileExists`) answers a SAFE, INERT default (`false`) instead of throwing
+ * — it runs at daemon BOOT (O6), unconditionally, and a throw there would crash boot.
  */
 export const UNAVAILABLE_SDK: AnthropicConsoleSdk = {
   startAnthropicConsoleBrokerLogin: () => Promise.reject(unavailableSdkError()),
   refreshAnthropicBearer: () => Promise.reject(unavailableSdkError()),
   anthropicConsoleProfileExists: () => false,
   logoutAnthropicConsole: () => Promise.reject(unavailableSdkError()),
+};
+
+/**
+ * THE REAL SDK (Winter Phase 10a, v0.0.6 wiring): `@yanlinglabs/winter-provider-runtime`'s
+ * `adapters/anthropic/console-broker.ts` (Lane S), now the default `sdk` dependency for every
+ * production `ConsoleProfileBroker` (`createConsoleProfileBroker` below never wires `UNAVAILABLE_SDK`
+ * itself — only a caller that passes it explicitly, or a test, does). `startAnthropicConsoleBrokerLogin`
+ * returns its handle SYNCHRONOUSLY on the real SDK (`Bun.spawn` can throw before any process exists,
+ * per its own doc comment) — wrapped in `Promise.resolve` here only to satisfy this file's
+ * pre-existing `AnthropicConsoleSdk` interface, which every caller already awaits.
+ */
+export const REAL_SDK: AnthropicConsoleSdk = {
+  startAnthropicConsoleBrokerLogin: (store, options) => Promise.resolve(sdkStartAnthropicConsoleBrokerLogin(store, options)),
+  refreshAnthropicBearer: (store, options) => sdkRefreshAnthropicBearer(store, options),
+  anthropicConsoleProfileExists: (anthropicConfigDir, profile) => sdkAnthropicConsoleProfileExists(anthropicConfigDir, profile),
+  logoutAnthropicConsole: (store, options) => sdkLogoutAnthropicConsole(store, options),
 };
 
 /** The host-facing door `ipc/server.ts` (O6) and `winter login/logout --anthropic-console` (O7)
@@ -135,7 +177,9 @@ export interface ConsoleProfileBrokerDeps {
   /** Test seams for `startRefresher`'s timer — default to the real `setTimeout`/`clearTimeout`. */
   setTimeoutFn?: (fn: () => void, delayMs: number) => unknown;
   clearTimeoutFn?: (handle: unknown) => void;
-  /** Test seam — defaults to `UNAVAILABLE_SDK` (see that constant's own doc). */
+  /** Test/defensive seam — defaults to `REAL_SDK` (the wired `@yanlinglabs/winter-provider-runtime`
+   *  v0.0.6 exports); tests pass a fake, and a caller can still pass `UNAVAILABLE_SDK` explicitly
+   *  (see that constant's own doc). */
   sdk?: AnthropicConsoleSdk;
 }
 
@@ -146,7 +190,7 @@ export interface ConsoleProfileBrokerDeps {
 const REFRESH_LEAD_MS = 60_000;
 
 export function createConsoleProfileBroker(deps: ConsoleProfileBrokerDeps): ConsoleProfileBroker {
-  const sdk = deps.sdk ?? UNAVAILABLE_SDK;
+  const sdk = deps.sdk ?? REAL_SDK;
   const store = credentialStoreOverSecretStore(deps.secrets);
   const anthropicConfigDir = anthropicConfigDirFor(deps.home);
   const claudeConfigDir = officialConfigDirFor(deps.home);

@@ -8,10 +8,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
+import { credentialStoreOverSecretStore } from "../../src/providers/credential-store";
 import { anthropicConfigDirFor, ANTHROPIC_PROFILE_NAME, officialConfigDirFor } from "../../src/runtime-sdk/official-options";
 import {
   CONSOLE_BROKER_UNAVAILABLE_REASON,
   createConsoleProfileBroker,
+  REAL_SDK,
   UNAVAILABLE_SDK,
   type AnthropicConsoleSdk,
   type AnthropicLoginHandle,
@@ -351,23 +353,29 @@ describe("createConsoleProfileBroker — startRefresher / stopRefresher (host-ow
   });
 });
 
-describe("UNAVAILABLE_SDK — the default before the real package publishes (controller wires it after v0.0.6)", () => {
+describe("UNAVAILABLE_SDK — explicit defensive fallback (no longer the default now that v0.0.6 is wired)", () => {
   test("the async calls reject with CONSOLE_BROKER_UNAVAILABLE_REASON, never a raw/unnamed error", async () => {
     const home = freshHome();
-    const broker = createConsoleProfileBroker({ home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")) });
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk: UNAVAILABLE_SDK,
+    });
     await expect(broker.refreshBearer()).rejects.toThrow(CONSOLE_BROKER_UNAVAILABLE_REASON);
     await expect(broker.logout()).rejects.toThrow(CONSOLE_BROKER_UNAVAILABLE_REASON);
   });
 
   test("profileExists() answers a SAFE inert default rather than throwing — it must never crash daemon boot", () => {
     const home = freshHome();
-    const broker = createConsoleProfileBroker({ home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")) });
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk: UNAVAILABLE_SDK,
+    });
     expect(broker.profileExists()).toBe(false);
   });
 
   test("startRefresher()/stopRefresher() never throw even though every refresh attempt rejects", async () => {
     const home = freshHome();
-    const broker = createConsoleProfileBroker({ home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")) });
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk: UNAVAILABLE_SDK,
+    });
     expect(() => broker.startRefresher()).not.toThrow();
     await flush();
     expect(() => broker.stopRefresher()).not.toThrow();
@@ -375,5 +383,31 @@ describe("UNAVAILABLE_SDK — the default before the real package publishes (con
 
   test("UNAVAILABLE_SDK is exported directly, so a caller can identify the not-yet-wired state without constructing a broker", () => {
     expect(UNAVAILABLE_SDK.anthropicConsoleProfileExists("x", "winter")).toBe(false);
+  });
+});
+
+describe("REAL_SDK — the default now that @yanlinglabs/winter-provider-runtime v0.0.6 is installed", () => {
+  test("createConsoleProfileBroker's default sdk is REAL_SDK, not UNAVAILABLE_SDK — profileExists() no longer answers the inert default for a real (if nonexistent) config dir", () => {
+    const home = freshHome();
+    const broker = createConsoleProfileBroker({ home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")) });
+    // REAL_SDK's anthropicConsoleProfileExists is a plain file-exists check; a fresh temp home has
+    // no credentials file yet, so this still reads `false` — but for a DIFFERENT reason than
+    // UNAVAILABLE_SDK's hardcoded stub, which the next assertion distinguishes directly.
+    expect(broker.profileExists()).toBe(false);
+    expect(REAL_SDK).not.toBe(UNAVAILABLE_SDK);
+    expect(REAL_SDK.anthropicConsoleProfileExists).not.toBe(UNAVAILABLE_SDK.anthropicConsoleProfileExists);
+  });
+
+  test("REAL_SDK's async calls are wired to the installed package, not the UNAVAILABLE_SDK rejection", async () => {
+    const home = freshHome();
+    const store = credentialStoreOverSecretStore(new FileSecretStore(join(home, "secrets")));
+    // No `antExecutable` supplied: the real SDK's own typed "not installed/resolved" answer (never
+    // a spawn, never CONSOLE_BROKER_UNAVAILABLE_REASON) — proving REAL_SDK, not UNAVAILABLE_SDK, is
+    // actually in the loop.
+    await expect(REAL_SDK.refreshAnthropicBearer(store, {
+      claudeExecutable: "/nonexistent/claude-binary",
+      anthropicConfigDir: join(home, "anthropic-config"),
+      claudeConfigDir: join(home, "claude-config"),
+    })).resolves.toEqual({ ok: false, reason: expect.stringContaining("ant") });
   });
 });

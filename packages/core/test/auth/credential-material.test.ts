@@ -47,7 +47,9 @@ function coerceMaterial(value: unknown): CredentialMaterial | undefined {
             ...(typeof v.idToken === "string" ? { idToken: v.idToken } : {}),
           }
         : undefined;
-    // (bearer / aws / gcp arms omitted — Winter never writes them)
+    // (bearer / aws / gcp arms omitted here — no test below exercises a bearer round-trip through
+    // this file's own coerceMaterial mirror yet, even though Winter's console-broker DOES write
+    // "bearer" material as of Winter Phase 10a; see the tripwire test's own comment above)
     default:
       return undefined;
   }
@@ -59,7 +61,7 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     const req = createRequire(import.meta.url);
     const pkgPath = req.resolve("@yanlinglabs/winter-agent-sdk/package.json");
     const pkg = require(pkgPath) as { version: string };
-    expect(pkg.version).toBe("0.0.5"); // 0.0.4 → 0.0.5 (P9a pin flip): `git diff v0.0.4 v0.0.5 -- packages/runtime/src/provider/keychain-store.ts` is EMPTY — coerceMaterial unchanged, mirror re-verified
+    expect(pkg.version).toBe("0.0.6"); // 0.0.5 → 0.0.6 (P10a pin flip): `git diff v0.0.5 v0.0.6 -- packages/runtime/src/provider/keychain-store.ts` ADDS an optional `expiresAt` to the "bearer" arm only (P10a-4) — this mirror's own "bearer / aws / gcp arms omitted — Winter never writes them" comment is now stale for "bearer" (Winter's console-broker DOES write bearer material as of this phase, via `providers/credential-store.ts`'s `toWinterMaterial`), but the api-key/oauth arms this mirror actually exercises are unchanged, so mirror re-verified for those two.
   });
 
 

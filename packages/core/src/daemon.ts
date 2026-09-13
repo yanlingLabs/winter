@@ -17,7 +17,7 @@ import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterLegDisabledKeys } from "./settings";
+import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterLegDisabledKeys, winterOptionsFromSettings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
@@ -78,6 +78,7 @@ import { restampStep } from "./runtime-state/recovery";
 import { createWinterRuntimeSdk, type WinterRuntimeSdk } from "./runtime-sdk/create";
 import { ClaudeExecutableUnavailable } from "./runtime-sdk/official-executable";
 import { createConsoleProfileBroker } from "./auth/console-profile-broker";
+import { resolveAntExecutable } from "./runtime-sdk/bundle-layout";
 import { advisorReviewerFor, familyOfModel, officialLegDefaultSessionModel } from "./runtime-sdk/advisor-reviewer";
 import { attachedFacetFor, parkRecoveredSessions } from "./runtime-sdk/messaging";
 import { createWinterSessionDrivers, sessionPermissionClassFor, type WinterLegDeps, type WinterSessionDrivers } from "./runtime-sdk/session-driver";
@@ -1111,8 +1112,11 @@ export async function startDaemon(opts: {
   // is a closure (not a boot-time snapshot) over `runtimeSdk.claudeExecutableFor()` — the SAME
   // live-resolved executable the official leg's own sessions use, so a `runtimes.claudeExecutable`
   // edit takes effect for the broker with no daemon restart, exactly like every other reader of
-  // that setting. `antExecutable` is a STUB until Lane L's bundle-layout resolver lands (task L4) —
-  // // Lane L wires resolveAntExecutable here.
+  // that setting. `antExecutable` is likewise a closure over `resolveAntExecutable` (Lane L,
+  // `bundle-layout.ts`), fed `winterOptionsFromSettings(settings).antExecutable` LIVE (re-read per
+  // call, never a boot snapshot) exactly the way `claudeExecutableFor()` above and `create.ts`'s own
+  // `winterExecutable`/`claudeExecutable` rungs read their settings — so `runtimes.antExecutable`
+  // also takes effect with no daemon restart.
   const consoleBroker = createConsoleProfileBroker({
     home: winterHome,
     claudeExecutable: () => {
@@ -1120,7 +1124,11 @@ export async function startDaemon(opts: {
       const resolved = runtimeSdk.claudeExecutableFor();
       return resolved instanceof ClaudeExecutableUnavailable ? undefined : resolved.path;
     },
-    antExecutable: () => process.env.WINTER_ANT_EXECUTABLE,
+    antExecutable: () => resolveAntExecutable({
+      setting: winterOptionsFromSettings(settings).antExecutable,
+      env: process.env,
+      execPath: process.execPath,
+    })?.path,
     secrets,
   });
   // Boot-time bearer refresh (P10a-4): if a console profile already exists on disk, arm the
