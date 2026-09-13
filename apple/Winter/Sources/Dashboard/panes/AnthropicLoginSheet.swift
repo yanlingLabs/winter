@@ -29,6 +29,10 @@ final class AnthropicLoginSheetModel: ObservableObject, Identifiable {
 
     @Published private(set) var phase: Phase = .waiting
     @Published private(set) var lines: [String] = []
+    /// `provider.login`'s own `urlHint` (fix round 1) — the PRIMARY fallback link, already
+    /// sanitized by `LiveAnthropicAuthClient.login()`. `nil` until `start()`'s `login()` call
+    /// resolves, and whenever the daemon didn't send one at all.
+    @Published private(set) var urlHint: URL?
     @Published var code: String = ""
     @Published private(set) var submitting = false
     @Published var submitErrorText: String?
@@ -58,7 +62,7 @@ final class AnthropicLoginSheetModel: ObservableObject, Identifiable {
             }
         }
         do {
-            try await client.login()
+            urlHint = try await client.login()
         } catch {
             phase = .failure(reason: "couldn't start sign-in")
         }
@@ -100,9 +104,11 @@ final class AnthropicLoginSheetModel: ObservableObject, Identifiable {
     }
 
     /// The first `https://` URL in `line`, if any, SANITIZED (query/fragment stripped — fix round
-    /// 1, MAJOR: a Console login URL carries the one-time code in its query, so the raw match is
-    /// never usable as-is) — the sheet's clickable fallback link (P10a-6: the daemon opens the
-    /// browser itself; this is only for when that fails or the user closed it).
+    /// 1, MAJOR: a Console login URL carries the one-time code in its query) — the sheet's BACKUP
+    /// fallback link behind `urlHint` (`AnthropicAuthClient.swift`'s `login()`, WinterKit — the two
+    /// don't share a helper on purpose: only WinterKit's copy can serve both call sites' dependency
+    /// direction, so duplicating five lines beat reaching across it). P10a-6: the daemon opens the
+    /// browser itself; either fallback is only for when that fails or the user closed it.
     static func urlFallback(in line: String) -> URL? {
         guard let range = line.range(of: #"https://\S+"#, options: .regularExpression),
               var components = URLComponents(string: String(line[range]))
@@ -155,6 +161,13 @@ struct AnthropicLoginSheet: View {
                 .font(Typography.label())
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            // `urlHint` (provider.login's own hint, sanitized) is the PRIMARY fallback — shown
+            // unconditionally once known, ahead of any line-scraped backup below.
+            if let urlHint = model.urlHint {
+                Link("Open in browser", destination: urlHint)
+                    .font(Typography.label(.semibold))
+            }
 
             if !model.displayLines.isEmpty {
                 ScrollView {

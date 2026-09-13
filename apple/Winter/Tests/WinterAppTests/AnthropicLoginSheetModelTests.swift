@@ -56,6 +56,28 @@ final class AnthropicLoginSheetModelTests: XCTestCase {
         XCTAssertEqual(model.displayLines, ["Open https://console.anthropic.com/oauth?code=abc123 to continue"])
     }
 
+    // MARK: - urlHint (fix round 1: provider.login's own hint is the PRIMARY fallback)
+
+    func testStartSetsUrlHintFromLoginResult() async {
+        let fake = FakeAnthropicAuthClient()
+        fake.loginResult = .success(URL(string: "https://console.anthropic.com/oauth"))
+        let model = AnthropicLoginSheetModel(client: fake)
+
+        await model.start()
+
+        XCTAssertEqual(model.urlHint?.absoluteString, "https://console.anthropic.com/oauth")
+    }
+
+    func testStartLeavesUrlHintNilWhenLoginReturnsNone() async {
+        let fake = FakeAnthropicAuthClient()
+        fake.loginResult = .success(nil)
+        let model = AnthropicLoginSheetModel(client: fake)
+
+        await model.start()
+
+        XCTAssertNil(model.urlHint)
+    }
+
     // MARK: - success/failure transitions
 
     /// `start()` subscribes to `loginUpdates()` before `login()` even resolves — a progress line

@@ -80,12 +80,18 @@ public protocol AnthropicAuthClient: Sendable {
     /// Lane O owns the real wire schema). Never called for the disabled "Claude subscription" row.
     func configureAuth(_ mode: AnthropicAuthMode) async throws
     /// Starts a console login attempt. Returns once the daemon confirms it told the login binary
-    /// to open the browser — NOT once the user has finished signing in (M2 amendment). The
-    /// terminal outcome arrives later on `loginUpdates()`.
-    func login() async throws
+    /// to open the browser — NOT once the user has finished signing in (M2 amendment). Returns the
+    /// login binary's own hint URL when it has one (`provider.login`'s `urlHint`, ALREADY sanitized
+    /// via `sanitizedLoginURL` — query/fragment stripped) — the sheet's PRIMARY fallback link, with
+    /// a line-scraped URL from `loginUpdates()` as backup. The terminal outcome arrives later on
+    /// `loginUpdates()`, never as this call's own return value.
+    func login() async throws -> URL?
     /// Submits the one-time code Anthropic's page shows the user, completing the attempt `login()`
-    /// started. Never log the code.
+    /// started. Never log the code. Throws on a thrown transport/RPC error OR on a well-formed
+    /// `{ok:false}` reply (fix round 1: `ok:false` is a failure, not just a possible thrown error).
     func submitLoginCode(_ code: String) async throws
+    /// Throws on a thrown transport/RPC error OR on a well-formed `{ok:false}` reply, same as
+    /// `submitLoginCode(_:)`.
     func logout() async throws
     /// Progress lines + the terminal outcome for the CURRENT/most recent login attempt. A fresh
     /// subscriber only sees updates from the point of subscription forward (mirrors
@@ -103,8 +109,11 @@ public final class LiveAnthropicAuthClient: AnthropicAuthClient, Sendable {
         self.client = client
     }
 
+    /// `provider.status` takes NO params (fix round 1: Lane O's final shape is `{}`, not
+    /// `{provider:"anthropic"}`) and returns `{ anthropic: {...} }` directly — it's a status of
+    /// every provider, keyed by name, not a per-provider query.
     public func status() async throws -> AnthropicAuthStatus {
-        let r = try await client.request("provider.status", params: .object(["provider": .string("anthropic")]))
+        let r = try await client.request("provider.status", params: .object([:]))
         let a = r["anthropic"]
         return AnthropicAuthStatus(
             apiKey: a?["apiKey"]?.boolValue ?? false,
@@ -121,22 +130,43 @@ public final class LiveAnthropicAuthClient: AnthropicAuthClient, Sendable {
         ]))
     }
 
-    public func login() async throws {
-        _ = try await client.request("provider.login", params: .object([
+    /// `provider.login` returns `{ started: true, urlHint?: string }` (fix round 1, Lane O's final
+    /// shape) — `started` carries no independent meaning here (a thrown error is still how a
+    /// failed START surfaces); `urlHint`, when present, is sanitized (query/fragment stripped —
+    /// Console login URLs carry the one-time code/state there) and returned as the sheet's PRIMARY
+    /// fallback link, ahead of any line-scraped backup (`AnthropicLoginSheetModel.urlFallback`,
+    /// `apple/Winter/Sources/Dashboard/panes/AnthropicLoginSheet.swift`, which strips the same way
+    /// independently — the two call sites don't share a helper on purpose, since only ONE of them
+    /// (this one) can live in a module the other depends on, and duplicating five lines beat
+    /// reaching across the dependency direction for it).
+    public func login() async throws -> URL? {
+        let r = try await client.request("provider.login", params: .object([
             "provider": .string("anthropic"), "kind": .string("console"),
         ]))
+        guard let hint = r["urlHint"]?.stringValue,
+              var components = URLComponents(string: hint)
+        else { return nil }
+        components.query = nil
+        components.fragment = nil
+        return components.url
     }
 
     public func submitLoginCode(_ code: String) async throws {
-        _ = try await client.request("provider.loginCode", params: .object([
+        let r = try await client.request("provider.loginCode", params: .object([
             "provider": .string("anthropic"), "kind": .string("console"), "code": .string(code),
         ]))
+        guard r["ok"]?.boolValue == true else {
+            throw RpcError(code: -3, message: "provider.loginCode returned ok:false")
+        }
     }
 
     public func logout() async throws {
-        _ = try await client.request("provider.logout", params: .object([
+        let r = try await client.request("provider.logout", params: .object([
             "provider": .string("anthropic"), "kind": .string("console"),
         ]))
+        guard r["ok"]?.boolValue == true else {
+            throw RpcError(code: -3, message: "provider.logout returned ok:false")
+        }
     }
 
     public func loginUpdates() -> AsyncStream<AnthropicLoginEvent> {

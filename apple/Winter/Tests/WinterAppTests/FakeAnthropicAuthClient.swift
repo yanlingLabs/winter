@@ -1,3 +1,4 @@
+import Foundation
 import WinterKit
 
 /// Hand-written `AnthropicAuthClient` test double — Winter Phase 10a Tasks A1/A2. Shared by
@@ -22,8 +23,8 @@ final class FakeAnthropicAuthClient: AnthropicAuthClient, @unchecked Sendable {
     var configureAuthResult: Result<Void, Error> = .success(())
     private(set) var configureAuthCalls: [AnthropicAuthMode] = []
 
-    // login()
-    var loginResult: Result<Void, Error> = .success(())
+    // login() — fix round 1: returns the sanitized `urlHint` (may be nil), not Void.
+    var loginResult: Result<URL?, Error> = .success(nil)
     private(set) var loginCallCount = 0
 
     // submitLoginCode(_:)
@@ -47,9 +48,9 @@ final class FakeAnthropicAuthClient: AnthropicAuthClient, @unchecked Sendable {
         try configureAuthResult.get()
     }
 
-    func login() async throws {
+    func login() async throws -> URL? {
         loginCallCount += 1
-        try loginResult.get()
+        return try loginResult.get()
     }
 
     func submitLoginCode(_ code: String) async throws {
