@@ -219,6 +219,72 @@ describe("runMigrationB — Keychain (Step 4)", () => {
     expect(joined).not.toContain("should-never-be-read");
     expect(joined).not.toContain("already-there-do-not-clobber");
   });
+
+  // Fix wave C3 (P9c-17, Critical): a per-item Keychain failure is non-fatal — the run completes,
+  // the refused item is recorded `absent` (the pinned MigrationKeychainStatus union has no separate
+  // "failed" state), and every OTHER item still migrates normally.
+  test("a from.get that rejects for one name still lets the run complete — that item is absent, others copied", async () => {
+    const legacyHome = tempDir();
+    const home = tempDir();
+    const plan = await seedTo(legacyHome, home);
+
+    const real = new FileSecretStore(tempDir());
+    await real.set("openai-api-key", "sk-legacy-should-still-be-unreadable-here");
+    const from = {
+      get: async (name: string) => {
+        if (name === "openai-api-key") throw new Error("keychain daemon unreachable: sk-should-never-leak");
+        return real.get(name);
+      },
+      set: async (name: string, value: string) => real.set(name, value),
+    };
+    const to = new FileSecretStore(tempDir());
+
+    const lines: string[] = [];
+    const manifest = await runMigrationB(plan, { from, to, log: (l) => lines.push(l) });
+
+    expect(manifest.status).toBe("complete"); // one refused item never aborts the run
+    const byName = new Map(manifest.keychain.map((k) => [k.name, k.status]));
+    expect(byName.get("openai-api-key")).toBe("absent");
+    // A sibling name still migrates normally through the same run.
+    expect(byName.get("harness-token")).toBe("absent"); // genuinely absent from `from` — never set
+
+    const joined = lines.join("\n");
+    expect(joined).toContain("keychain unavailable: openai-api-key");
+    expect(joined).not.toContain("sk-should-never-leak"); // never the error's own message text
+    expect(joined).not.toContain("sk-legacy-should-still-be-unreadable-here");
+  });
+
+  test("a to.set that rejects for one name still lets the run complete — that item is absent, others copied", async () => {
+    const legacyHome = tempDir();
+    const home = tempDir();
+    const plan = await seedTo(legacyHome, home);
+
+    const from = new FileSecretStore(tempDir());
+    await from.set("openai-api-key", "sk-legacy-secret-value");
+    await from.set("web-search-api-key", "ws-legacy-secret-value");
+    const realTo = new FileSecretStore(tempDir());
+    const to = {
+      get: async (name: string) => realTo.get(name),
+      set: async (name: string, value: string) => {
+        if (name === "openai-api-key") throw new Error("keychain write refused: sk-should-never-leak");
+        return realTo.set(name, value);
+      },
+    };
+
+    const lines: string[] = [];
+    const manifest = await runMigrationB(plan, { from, to, log: (l) => lines.push(l) });
+
+    expect(manifest.status).toBe("complete");
+    const byName = new Map(manifest.keychain.map((k) => [k.name, k.status]));
+    expect(byName.get("openai-api-key")).toBe("absent"); // the refused item
+    expect(byName.get("web-search-api-key")).toBe("copied"); // a sibling item still migrates
+    expect(await realTo.get("web-search-api-key")).toBe("ws-legacy-secret-value");
+
+    const joined = lines.join("\n");
+    expect(joined).toContain("keychain unavailable: openai-api-key");
+    expect(joined).not.toContain("sk-should-never-leak");
+    expect(joined).not.toContain("sk-legacy-secret-value");
+  });
 });
 
 describe("isPristineHome (Step 3, P9c-10)", () => {
@@ -253,6 +319,27 @@ describe("isPristineHome (Step 3, P9c-10)", () => {
   test("false once settings.json (or any other top-level file) exists", () => {
     const home = tempDir();
     writeFileSync(join(home, "settings.json"), "{}");
+    expect(isPristineHome(home)).toBe(false);
+  });
+
+  // Fix wave C2 (P9c-16, whole-branch review): Winter.app may have written a UI marker into
+  // `app-state/` before the daemon's first successful connect — that must never block Migration B.
+  test("an app-state marker beside otherwise-empty bootstrap dirs is still pristine", () => {
+    const home = tempDir();
+    for (const d of ["agents", "hooks", "logs", "memory", "outputs", "plugins", "projects", "runtimes", "sessions", "skills"]) {
+      mkdirSync(join(home, d), { recursive: true });
+    }
+    mkdirSync(join(home, "app-state"), { recursive: true });
+    writeFileSync(join(home, "app-state", "cli-install-offered"), "1");
+    expect(isPristineHome(home)).toBe(true);
+  });
+
+  test("an app-state marker does NOT exempt the rest of the home — a real session file elsewhere still makes it not pristine", () => {
+    const home = tempDir();
+    mkdirSync(join(home, "app-state"), { recursive: true });
+    writeFileSync(join(home, "app-state", "cli-install-offered"), "1");
+    mkdirSync(join(home, "sessions"), { recursive: true });
+    writeFileSync(join(home, "sessions", "index.db"), "already has real content");
     expect(isPristineHome(home)).toBe(false);
   });
 

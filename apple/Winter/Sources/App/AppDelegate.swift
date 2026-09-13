@@ -1304,9 +1304,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let mb = MenuBarController(
-            statusLine: { [weak model] in
-                tokenMissing ? "no daemon token — run `winter daemon run`, then relaunch"
-                             : (model?.connectionSummary ?? "starting…")
+            statusLine: { [weak self, weak model] in
+                guard tokenMissing else { return model?.connectionSummary ?? "starting…" }
+                // Fix wave M2 (whole-branch review, Major; P9c-20: corrected copy ONLY — no retry
+                // logic yet, that's a post-9c follow-up). A SUPERVISED app (Release/dist — it spawned
+                // its own bundled `winter-core` child) can never usefully tell the user to run
+                // `winter daemon run` by hand: there is no terminal for them to type it into, and the
+                // app itself owns the daemon's lifecycle. The CLI hint stays correct ONLY in
+                // `.connectOnly` mode (Debug/dev, or a hand-run daemon this app never spawned) —
+                // exactly the case where the user DOES have a shell and IS expected to run the daemon
+                // themselves.
+                return self?.daemonSupervisor?.mode == .supervising
+                    ? "Winter is finishing setup — quit and reopen Winter"
+                    : "no daemon token — run `winter daemon run`, then relaunch"
             },
             toggleOrb: { [weak self] in
                 self?.orbController?.toggle()

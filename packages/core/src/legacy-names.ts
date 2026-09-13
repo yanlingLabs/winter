@@ -38,7 +38,11 @@ export const LEGACY_KEYCHAIN_SERVICE = "com.norma.core";
 export const LEGACY_KEYCHAIN_SERVICE_DEV = "com.norma.core.dev";
 
 /** The pre-rename dist CLI symlink path. 9c's migrator input (the retirement of this link, and of
- *  the wrapper below, is a 9c step — never touched here). */
+ *  the wrapper below, is a 9c step — never touched here). Fix wave m3 ruling: the handoff retires
+ *  this path ONLY when it is a symlink whose resolved target sits inside `/Applications/Norma.app`
+ *  (or the running bundle's own path) — never a plain, user-owned file that happens to sit at this
+ *  exact path (someone's own `norma` script, unrelated to this app). See
+ *  `apple/Norma/Sources/App/Handoff.swift` (norma-final) for the actual teardown logic. */
 export const LEGACY_CLI_LINK = "/usr/local/bin/norma";
 
 /** The pre-rename global dev-wrapper names `removeLegacyDevWrapper` may remove, IFF the sibling's

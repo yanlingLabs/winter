@@ -80,6 +80,21 @@ describe("winter migrate — --status", () => {
     expect(summary).toContain(legacyHome);
     expect(summary).toContain(deps.home); // the destination home — the Minor review ask
   });
+
+  // Fix wave M1 (review Minor): `readMigrationManifest` reads absent AND unreadable/corrupt alike as
+  // `null`, so `--status` must reach for `manifestFileState` instead — otherwise a corrupt manifest
+  // is reported as "never run Migration B", which is actively misleading (one DOES exist there).
+  test("fix wave M1: reports 'unreadable' explicitly, distinct from 'none', when the manifest exists but does not parse", async () => {
+    const { deps, lines } = baseDeps({ argv: ["--status"] });
+    mkdirSync(join(deps.home, "migration"), { recursive: true });
+    writeFileSync(join(deps.home, "migration", "manifest.json"), "{ this is not valid json");
+    const code = await runMigrateCommand(deps);
+    expect(code).toBe(0);
+    const summary = lines.join("\n");
+    expect(summary).toContain("unreadable");
+    expect(summary).not.toContain("none");
+    expect(summary).toContain(deps.home);
+  });
 });
 
 describe("winter migrate — refuses every writing action while the daemon is running", () => {

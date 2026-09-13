@@ -285,6 +285,36 @@ final class AppLifecycleTests: XCTestCase {
         XCTAssertEqual(delegate.daemonSupervisor?.state, .running, "the menu item's action must call restart()")
     }
 
+    // MARK: - Fix wave M2 (whole-branch review, Major): the degraded "no daemon token" status line
+    // is supervised-mode-aware. Both tests boot with a missing token (always true under
+    // `Self.isRunningUnitTests` — `production` is forced nil) and differ only in `daemonSupervisor.mode`.
+
+    /// Default `boot()` under unit tests: no `daemonSupervisorDeps` override resolves to
+    /// `.neverSupervise` -> `.connectOnly` — the SAME mode a real Debug/dev app boots into. The CLI
+    /// hint stays exactly as it always has: the user has a shell and is expected to run the daemon
+    /// themselves.
+    func testDegradedStatusLineKeepsTheCliHintWhenConnectOnly() {
+        let delegate = AppDelegate()
+        XCTAssertTrue(delegate.boot())
+        XCTAssertEqual(delegate.daemonSupervisor?.mode, .connectOnly)
+        XCTAssertEqual(delegate.menuBar?.stateItem.title, "no daemon token — run `winter daemon run`, then relaunch")
+    }
+
+    /// A SUPERVISED app (Release/dist — it spawned its own bundled daemon child, via the same
+    /// `fakeSupervisorDeps` seam `testApplicationWillTerminateStopsTheDaemonSupervisor` uses above)
+    /// must never print a CLI hint the user cannot act on — there is no terminal for them to type
+    /// `winter daemon run` into. P9c-20: this is corrected copy only, no retry logic yet.
+    func testDegradedStatusLineIsSupervisedCopyWhenSupervising() {
+        var procs: [FakeDaemonProcess] = []
+        let delegate = AppDelegate()
+        delegate.daemonSupervisorDeps = fakeSupervisorDeps(onSpawn: { procs.append($0) })
+        XCTAssertTrue(delegate.boot())
+        XCTAssertEqual(delegate.daemonSupervisor?.mode, .supervising)
+        XCTAssertEqual(delegate.menuBar?.stateItem.title, "Winter is finishing setup — quit and reopen Winter")
+        XCTAssertFalse((delegate.menuBar?.stateItem.title ?? "").contains("winter daemon run"),
+                       "a supervised app must never suggest a CLI command the user has no terminal to run")
+    }
+
     // MARK: - applicationShouldHandleReopen
 
     func testApplicationShouldHandleReopenReturnsTrueWhenAMainWindowAlreadyExists() {

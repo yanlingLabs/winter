@@ -360,6 +360,9 @@ export function publishGuard(i: PublishGuardInputs): PublishGuardResult {
       action: "dry-run-skip",
       lines: [
         `gh release create v${v} --title "Winter ${v}" + upload Winter-${v}.zip + Winter-${v}.dmg`,
+        // Fix wave M4 (P9c-19): explicit, idempotent — Winter's release is asserted "latest" rather
+        // than relying on create-order against the handoff release.
+        `gh release edit v${v} --latest`,
         `commit + push releases/winter/appcast.xml`,
         `git tag v${v} && git push origin v${v}`,
       ],

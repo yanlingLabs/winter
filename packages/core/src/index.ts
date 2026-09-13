@@ -126,6 +126,8 @@ export {
   legacyHomeFor,
   planMigrationB,
   readMigrationManifest,
+  manifestFileState,
+  manifestPath,
   resumeMigrationB,
   rollbackMigrationB,
   runMigrationB,

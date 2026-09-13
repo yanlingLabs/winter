@@ -5,7 +5,7 @@ import { bootstrapWinterDir, resolveWinterHome, isDefaultWinterHome } from "./wi
 import { acquireLock, type Lock } from "./lock";
 import { resolveWinterProfile } from "./profile";
 import { describeHomePristineness, legacyHomeFor, planMigrationB, runMigrationB, MigrationRefused } from "./migration/migrate-b";
-import { manifestFileState } from "./migration/manifest";
+import { manifestFileState, manifestPath } from "./migration/manifest";
 import { LegacyKeychainSecretStore } from "./migration/legacy-keychain-store";
 import { TokenAuthority } from "./auth/tokens";
 import { KeychainSecretStore, type SecretStore } from "./auth/secret-store";
@@ -323,8 +323,22 @@ export async function startDaemon(opts: {
   // (fail-closed: a torn manifest is evidence of an interruption too, never evidence nothing
   // happened) refuses typed — the daemon NEVER auto-resumes, because the operator may be mid
   // `winter migrate --rollback`.
+  //
+  // Fix wave M1 (review Minor): the two flavours get DIFFERENT operator advice, because `--resume`
+  // is only useful when there is a manifest to resume FROM — an unreadable manifest has nothing
+  // `resumeMigrationB`/`rollbackMigrationB` can parse (both need a READABLE manifest; see
+  // `rollbackMigrationB`'s own doc comment in migrate-b.ts), so pointing an operator at `--resume`
+  // there is a dead end. The unreadable case instead tells them to move the corrupt file aside and
+  // let the migration re-run from scratch on what is then, again, a pristine home — `--rollback`
+  // stays available too, for the case where files were already copied before the manifest tore.
   const manifestState = manifestFileState(home);
-  if (manifestState.kind === "unreadable" || (manifestState.kind === "parsed" && manifestState.manifest.status === "in-progress")) {
+  if (manifestState.kind === "unreadable") {
+    throw new MigrationRefused(
+      "home_half_migrated",
+      `migration: move ${manifestPath(home)} aside (e.g. to manifest.json.bad), then restart — the migration re-runs from scratch on a pristine home, or run \`winter migrate --rollback\` if files were already copied`,
+    );
+  }
+  if (manifestState.kind === "parsed" && manifestState.manifest.status === "in-progress") {
     throw new MigrationRefused("home_half_migrated", "migration: half-migrated home — run `winter migrate --resume` or `winter migrate --rollback`");
   }
 
@@ -357,7 +371,26 @@ export async function startDaemon(opts: {
       const check = describeHomePristineness(home);
       if (check.pristine) {
         const plan = await planMigrationB({ legacyHome, home, profile });
-        const manifest = await runMigrationB(plan, { from: legacySecrets, to: secrets, log: (line) => console.error(`migration: ${line}`) });
+        // Fix wave C3 (P9c-17, Critical): most per-item failures are already absorbed inside
+        // `runMigrationB` itself (a single Keychain item never aborts the run — see
+        // `migrateOneSecret`), but this catches whatever residual throw still gets through (a
+        // thrown SecretStore on the unwrapped destination existence-check, an fs error mid-copy,
+        // …). The manifest is written to disk after EVERY step, so whatever ran before the throw is
+        // already durably "in-progress" on disk — `winter migrate --resume`/`--rollback` stays the
+        // door. Converting to ONE typed refusal here is what stops the daemon from crash-looping on
+        // an uncaught exception (the CLI's `daemon run` prints `MigrationRefused.message` and exits
+        // cleanly; see `packages/cli/src/main.ts`'s `case "daemon run"`).
+        let manifest;
+        try {
+          manifest = await runMigrationB(plan, { from: legacySecrets, to: secrets, log: (line) => console.error(`migration: ${line}`) });
+        } catch (err) {
+          if (err instanceof MigrationRefused) throw err;
+          const detail = err instanceof Error ? err.message : String(err);
+          throw new MigrationRefused(
+            "migration_failed",
+            `migration: failed (${detail}) — the home is left half-migrated; run \`winter migrate --resume\` or \`winter migrate --rollback\``,
+          );
+        }
         const filesMoved = manifest.entries.filter((e) => e.status === "copied" || e.status === "rekeyed").length;
         const rekeyed = manifest.entries.filter((e) => e.status === "rekeyed").length;
         const kcCopied = manifest.keychain.filter((k) => k.status === "copied").length;
@@ -366,10 +399,13 @@ export async function startDaemon(opts: {
       } else {
         // A legacy home exists, but this home already has content of its own (not pristine) — never
         // auto-migrate over it (P9c-10). One line so an operator isn't left wondering why the legacy
-        // home was never picked up; `winter migrate --from <legacyHome>` is the explicit door.
-        // Review M2: names the actual offending entry, not just "not pristine" — the same reason
-        // `winter doctor`'s migration row surfaces.
-        console.error(`migration: a legacy home was found at ${legacyHome}, but ${home} is not pristine (${check.reason}) — skipping (run \`winter migrate --from ${legacyHome}\` manually if you want it copied)`);
+        // home was never picked up. Review M2: names the actual offending entry, not just "not
+        // pristine" — the same reason `winter doctor`'s migration row surfaces. Fix wave C2: the
+        // advice is the SAME instruction the `winter migrate`/`planMigrationB` refusal itself prints
+        // (`mv <home> <home>.bak`, then restart) — advice and refusal must always agree, since
+        // `winter migrate --from <legacyHome>` into a non-pristine `home` would just hit that same
+        // refusal.
+        console.error(`migration: a legacy home was found at ${legacyHome}, but ${home} is not pristine (${check.reason}) — move it aside, e.g. \`mv ${home} ${home}.bak\`, then restart to migrate`);
       }
     }
   }

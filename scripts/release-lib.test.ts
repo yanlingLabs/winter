@@ -490,6 +490,13 @@ describe("publishGuard", () => {
     expect(g.lines.join("\n")).toContain("v0.2.002");
   });
 
+  // Fix wave M4 (whole-branch review, Major, P9c-19): the skip-list documents the explicit
+  // `gh release edit --latest` step too — Winter's release must never rely on create-order alone.
+  test("the skip-list names the explicit gh release edit --latest step", () => {
+    const g = publishGuard({ dryRun: true, resumePublish: false, tagExists: false, releaseExists: false, ...base });
+    expect(g.lines).toContain("gh release edit v0.2.002 --latest");
+  });
+
   test("tag already exists -> abort with the exact line", () => {
     const g = publishGuard({ dryRun: false, resumePublish: false, tagExists: true, releaseExists: false, ...base });
     expect(g.action).toBe("abort");

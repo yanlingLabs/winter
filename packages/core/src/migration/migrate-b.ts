@@ -39,21 +39,32 @@ import {
 import { rekeySettings } from "./rekey-settings";
 
 export { MIGRATION_B_SECRET_NAMES } from "../auth/legacy-secret-names";
-export { readMigrationManifest } from "./manifest";
+export { readMigrationManifest, manifestFileState, manifestPath } from "./manifest";
 export type { MigrationEntryStatus, MigrationFileEntry, MigrationKeychainEntry, MigrationManifest } from "./manifest";
 
 /** Thrown by `planMigrationB` (destination not pristine, P9c-10), the daemon boot hook
- *  (`home_half_migrated`), and the resume/rollback guards below (nothing to act on). `code` is
- *  intentionally a superset of the two names the Interfaces block pins — the extra codes are
- *  internal-only refusals that were never meant to be part of the daemon's typed boot refusal. */
+ *  (`home_half_migrated`, and — fix wave C3, P9c-17 — `migration_failed` for a residual throw the
+ *  daemon converts rather than crash-looping on), and the resume/rollback guards below (nothing to
+ *  act on). `code` is intentionally a superset of the two names the Interfaces block pins — the
+ *  extra codes are internal-only refusals that were never meant to be part of the daemon's typed
+ *  boot refusal. */
 export class MigrationRefused extends Error {
   constructor(
-    public readonly code: "destination_not_pristine" | "home_half_migrated" | "nothing_to_resume" | "nothing_to_rollback",
+    public readonly code: "destination_not_pristine" | "home_half_migrated" | "nothing_to_resume" | "nothing_to_rollback" | "migration_failed",
     message: string,
   ) {
     super(message);
     this.name = "MigrationRefused";
   }
+}
+
+/** Fix wave C3: the tag used in the "keychain unavailable" log line — the error's `name` (for a real
+ *  `Error`) or `code` (for a Node-style errno object), NEVER `err.message`, which could echo a
+ *  Keychain-provided value on some store implementations. */
+function errorTag(err: unknown): string {
+  if (err instanceof Error) return err.name || "Error";
+  if (err && typeof err === "object" && "code" in err) return String((err as { code: unknown }).code);
+  return "unknown";
 }
 
 /** `legacyHomeFor` — the legacy home override env var if set, else the legacy dist/dev home
@@ -66,6 +77,16 @@ export function legacyHomeFor(profile: WinterProfile, env: NodeJS.ProcessEnv = p
 }
 
 const BOOTSTRAP_TOP_LEVEL = new Set(["agents", "hooks", "logs", "memory", "outputs", "plugins", "projects", "run", "runtimes", "sessions", "skills"]);
+
+/** P9c-16 (whole-branch review, Critical C2): named app-owned top-level directories the pristine
+ *  check tolerates WITHOUT recursing into them at all — unlike `BOOTSTRAP_TOP_LEVEL`, their content
+ *  is never required to be empty. Winter.app must never write into `WINTER_HOME` before the
+ *  daemon's first successful connect, but a UI marker file (today: `app-state/cli-install-offered`)
+ *  is impractical to avoid — this is the ONE named exception, not a general escape hatch: any FUTURE
+ *  app-side home write is a deliberate addition to this list, reviewed the same way. A legacy
+ *  `app-state` directory in the SOURCE home still migrates normally (`copyFileWithHash` overwrites
+ *  the destination file byte-for-byte), so tolerating it here creates no divergence. */
+const TOLERATED_APP_OWNED_TOP_LEVEL = new Set(["app-state"]);
 
 /** Review M2: known macOS/Finder noise that must never block the first-boot migration — a mere
  *  Finder browse of a fresh `~/.winter` drops a `.DS_Store` (and `.localized` on some volumes; an
@@ -129,9 +150,11 @@ export interface PristineCheck {
  * Full report for: an absent home, an empty directory, or a directory containing ONLY entries from
  * the bootstrap set (`agents hooks logs memory outputs plugins projects run runtimes sessions
  * skills`), each of which must itself be empty (`run/` may additionally hold `core.lock`/
- * `core.sock`) — ignoring known top-level OS noise (`isIgnorableTopLevelNoise`, review M2).
- * `pristine: false` the moment any OTHER entry exists anywhere — at the top level, or inside a
- * bootstrap-set directory — and `reason` names the first one found, full path.
+ * `core.sock`) — ignoring known top-level OS noise (`isIgnorableTopLevelNoise`, review M2) and any
+ * NAMED app-owned top-level directory (`TOLERATED_APP_OWNED_TOP_LEVEL`, P9c-16 — content never
+ * inspected, unlike the bootstrap set). `pristine: false` the moment any OTHER entry exists
+ * anywhere — at the top level, or inside a bootstrap-set directory — and `reason` names the first
+ * one found, full path.
  */
 export function describeHomePristineness(home: string): PristineCheck {
   let topEntries: string[];
@@ -142,6 +165,7 @@ export function describeHomePristineness(home: string): PristineCheck {
   }
   for (const entry of topEntries) {
     if (isIgnorableTopLevelNoise(entry)) continue; // Finder/AppleDouble noise — never blocks migration
+    if (TOLERATED_APP_OWNED_TOP_LEVEL.has(entry)) continue; // P9c-16: app-owned UI markers — content never inspected
     if (!BOOTSTRAP_TOP_LEVEL.has(entry)) return { pristine: false, reason: join(home, entry) };
     const full = join(home, entry);
     let st;
@@ -325,15 +349,26 @@ async function executeFileEntry(plan: MigrationPlanFileEntry): Promise<Migration
   return { src, dest, sha256: "", bytes: 0, status };
 }
 
-async function migrateOneSecret(name: string, deps: Pick<MigrationDeps, "from" | "to">, fromService: string, toService: string): Promise<MigrationKeychainEntry> {
+async function migrateOneSecret(name: string, deps: Pick<MigrationDeps, "from" | "to" | "log">, fromService: string, toService: string): Promise<MigrationKeychainEntry> {
   // Check the DESTINATION first — P9c-10 never overwrites an existing destination item, and this
   // also means an already-present item's legacy value is never even read.
   const existing = await deps.to.get(name);
   if (existing !== null) return { name, from: fromService, to: toService, status: "skipped-existing" };
-  const value = await deps.from.get(name);
-  if (value === null) return { name, from: fromService, to: toService, status: "absent" };
-  await deps.to.set(name, value);
-  return { name, from: fromService, to: toService, status: "copied" };
+  // P9c-17 (fix wave C3, Critical): a Keychain failure reading the LEGACY item or writing the
+  // destination item is per-item and non-fatal — one refused item must never abort the whole
+  // migration run. Recorded exactly like a genuine absence (the pinned `MigrationKeychainStatus`
+  // union has no separate "failed" state); the distinct log line is what preserves the failure for
+  // an operator. Never logs `err.message` — only `name` and the error's own `name`/`code` — a
+  // Keychain error message can echo back material on some store implementations.
+  try {
+    const value = await deps.from.get(name);
+    if (value === null) return { name, from: fromService, to: toService, status: "absent" };
+    await deps.to.set(name, value);
+    return { name, from: fromService, to: toService, status: "copied" };
+  } catch (err) {
+    deps.log(`keychain unavailable: ${name} (${errorTag(err)})`);
+    return { name, from: fromService, to: toService, status: "absent" };
+  }
 }
 
 function freshManifest(plan: MigrationPlan): MigrationManifest {
@@ -429,6 +464,16 @@ export async function resumeMigrationB(home: string, deps: MigrationDeps): Promi
  * next time that store opens — never a second copy of the guard the OTHER two statuses get. Never
  * touches the legacy home. Ends with the working `manifest.json`/`COMPLETE` cleared and a final
  * `status: "rolled-back"` copy at `manifest.rolled-back.json`, inside the same `migration/` directory.
+ *
+ * Fix wave M1 (review Minor) — RULING: rollback needs a READABLE manifest. `readMigrationManifest`
+ * (below) reads absent and unreadable/corrupt alike as `null`, so an UNREADABLE manifest hits the
+ * exact same `nothing_to_rollback` refusal as no manifest at all — there is no partial-entry
+ * fallback to salvage from a manifest this function cannot even parse. The daemon boot hook's
+ * `unreadable` refusal message (`daemon.ts`) therefore never points an operator at `--rollback` as
+ * the FIRST move for that flavour — moving the corrupt file aside and re-running from scratch is;
+ * `--rollback` only helps once files are known to have already been copied. `winter migrate
+ * --status` is the one place that surfaces the `unreadable` state explicitly (via
+ * `manifestFileState`, not `readMigrationManifest`), rather than reporting it as "never run".
  */
 export async function rollbackMigrationB(home: string, deps: { log: (line: string) => void }): Promise<MigrationManifest> {
   const manifest = readMigrationManifest(home);
