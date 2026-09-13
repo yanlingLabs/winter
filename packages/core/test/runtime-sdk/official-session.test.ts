@@ -606,6 +606,62 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
     expect(h.events.some((e) => e.type === "agent_error")).toBe(false);
     expect(h.types()).toContain("turn_completed");
   });
+
+  // Pre-release hardening (P9c-1 amendment): `runtimes.official.subscriptionAuth: true` on its own
+  // must NOT skip this assertion any more — `OFFICIAL_SUBSCRIPTION_AUTH_APPROVED` (versions.ts)
+  // stays `false` until Anthropic approves subscription auth, so a hand-set/migrated `true` flag
+  // is inert. Only the injectable test override (never the real constant) reaches the "approved"
+  // branch, exercised by the sibling test right below.
+  test("subscriptionAuth: true with NO approval override -> the assertion still runs (the compile-time gate stays closed)", async () => {
+    const subscriptionAuthOnDeps: OfficialInputDeps = {
+      home: testHome(),
+      selection: apiKeySelection,
+      explicitCredentials: [],
+      explicitConnectionEnv: {},
+      officialPeer: undefined,
+      claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
+      assembler: { assemble: () => "" },
+      capabilities: {},
+      canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
+      policy: "auto",
+      settings: { runtimes: { official: { subscriptionAuth: true } } } as unknown as Settings,
+      // NO officialSubscriptionAuthApproved override — this is the production default.
+    };
+    const h = harness({ selection: apiKeySelection, inputDeps: () => subscriptionAuthOnDeps });
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "none" })); // wrong for the api-key family
+    await h.settled();
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string }) | undefined;
+    expect(err?.code).toBe("official_auth_source_refused");
+    expect(h.session.state).toBe("ended");
+  });
+
+  // The ONLY way to reach the widened (assertion-skipped) behaviour: the injectable override, set
+  // explicitly by the test, never by editing `OFFICIAL_SUBSCRIPTION_AUTH_APPROVED` itself.
+  test("subscriptionAuth: true WITH the approval override -> the assertion is skipped, same as today's widened behaviour", async () => {
+    const subscriptionAuthApprovedDeps: OfficialInputDeps = {
+      home: testHome(),
+      selection: apiKeySelection,
+      explicitCredentials: [],
+      explicitConnectionEnv: {},
+      officialPeer: undefined,
+      claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
+      assembler: { assemble: () => "" },
+      capabilities: {},
+      canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
+      policy: "auto",
+      settings: { runtimes: { official: { subscriptionAuth: true } } } as unknown as Settings,
+      officialSubscriptionAuthApproved: true,
+    };
+    const h = harness({ selection: apiKeySelection, inputDeps: () => subscriptionAuthApprovedDeps });
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "none" })); // would refuse if the assertion ran
+    h.q().emit(assistant("ok"));
+    h.q().emit(result());
+    await h.settled();
+    expect(h.events.some((e) => e.type === "agent_error")).toBe(false);
+    expect(h.types()).toContain("turn_completed");
+  });
 });
 
 // Winter Phase 10a (O3, P10a-3/P10a-7 M1, MEASURED 2026-09-13): `expectedApiKeySource` as a

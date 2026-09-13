@@ -1,5 +1,5 @@
 import type { Settings } from "./settings";
-import { memoryEnabledFrom, winterLegDisabledKeys, winterOptionsFromSettings } from "./settings";
+import { memoryEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings } from "./settings";
 import { retentionFromSettings } from "./runtime-state/retention";
 import type { ToolRegistry } from "./agent/tools/registry";
 import type { ComputerUseService } from "./agent/computer-use";
@@ -220,6 +220,10 @@ export function makeApply(deps: SettingsApplyDeps): (prev: Settings | null, next
     // is reported here (and at boot) and never obeyed.
     const disabled = winterLegDisabledKeys(next);
     if (disabled.length > 0) log(`runtimes.winterLeg.{${disabled.join(",")}} = false: the engine leg no longer exists; ignored (every session runs on the Winter leg)`);
+    // Pre-release hardening (P9c-1 amendment): the settings flag alone can no longer widen the
+    // official leg's subscription posture — reported here (and at boot) so a hand-set/migrated
+    // `true` is never a silent no-op, same "accepted, logged, ignored" posture as winterLeg above.
+    if (officialSubscriptionAuthFlagInert(next)) log("runtimes.official.subscriptionAuth = true: inert until Anthropic approves subscription auth for the official leg (P9c-1); the per-session apiKeySource assertion and Winter-owned config dir stay in force");
     if (before.winterExecutable !== after.winterExecutable) log("runtimes.winterExecutable changed — it takes effect for new sessions");
     if (before.claudeExecutable !== after.claudeExecutable) log("runtimes.claudeExecutable changed — it takes effect for new sessions on the official leg");
     if (before.advisorModel !== after.advisorModel) log("runtimes.advisorModel changed — it takes effect for new sessions");

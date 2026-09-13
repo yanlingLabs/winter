@@ -420,6 +420,13 @@ export interface OfficialInputDeps {
    *  incarnation with no daemon restart. `undefined`/`null` behaves exactly like an absent block
    *  (`officialSubscriptionAuthEnabled`'s own default: off). */
   settings?: Settings | null;
+  /** Pre-release hardening (P9c-1 amendment): test-only override of `versions.ts`'s
+   *  `OFFICIAL_SUBSCRIPTION_AUTH_APPROVED` compile-time approval gate — lets a test exercise the
+   *  "approved" branch of `officialSubscriptionAuthEnabled` (widened spool, `official-session.ts`'s
+   *  assertion skipped) without ever editing the real constant, which stays `false` until Anthropic
+   *  approves subscription auth for this integration. `undefined` (every production caller) means
+   *  "use the real compile-time constant" — same shape as `requiredWinterRuntimeSdkVersion` below. */
+  officialSubscriptionAuthApproved?: boolean;
   /** Winter Phase 10a fix wave (F1): test-only override of `versions.ts`'s
    *  `REQUIRED_WINTER_RUNTIME_SDK` compile-time pin — lets a test simulate a pin below/at/above
    *  `CONSOLE_AUTH_ROUTER_MIN` (e.g. `"0.0.3"`) without editing the real constant. `undefined`
@@ -550,7 +557,7 @@ export function officialInputFor(
   // vendor's own home.
   // The directory itself is NOT created here (see `ensureOfficialConfigDir`'s own doc) — the
   // caller (`official-session.ts`'s `open()`) ensures it exists right before the real spawn.
-  const subscriptionAuth = officialSubscriptionAuthEnabled(deps.settings);
+  const subscriptionAuth = officialSubscriptionAuthEnabled(deps.settings, deps.officialSubscriptionAuthApproved);
   const spool: string | undefined = subscriptionAuth ? undefined : officialConfigDirFor(deps.home);
   const sharedTempRoot = env.WINTER_TMPDIR?.trim() ? env.WINTER_TMPDIR : tmpdir();
   // WS-14 §12: the router derives ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN for console-oauth)

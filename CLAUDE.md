@@ -93,8 +93,11 @@ WINTER_RUNTIME_EXECUTABLE="$PWD/../../dist/winter" WINTER_HOME=~/.winter-dev WIN
 # auth-injecting variable (`FORBIDDEN_CHILD_ENV`), and a per-session assertion that the SDK's own `system/init` message reports
 # `apiKeySource: "ANTHROPIC_API_KEY"` — a mismatch refuses typed as `official_auth_source_refused` before any turn runs.
 # `~/.claude` itself is unreachable from this leg regardless of the flag (the vendored router refuses any config dir under a
-# `.claude` path segment outright); flipping the flag on today only widens which config dir this leg uses and skips the
-# assertion — it does not grant subscription access, which needs router-level work gated on Anthropic's approval.
+# `.claude` path segment outright). Pre-release hardening: the settings flag ALONE is now inert — `officialSubscriptionAuthEnabled`
+# (settings.ts) ANDs it against a compile-time approval constant (`OFFICIAL_SUBSCRIPTION_AUTH_APPROVED`, runtime-sdk/versions.ts,
+# shipped `false`, same posture as the router's own `D14_CLAUDE_OAUTH_APPROVED_DEFAULT`); flipping the settings flag on today
+# does nothing (logged once per settings change) until that constant is also flipped true in a reviewed code change — it does
+# not grant subscription access, which needs router-level work gated on Anthropic's approval.
 # P10a ADDENDUM: since Phase 10a the official leg also accepts the Console profile arm
 # (`runtimes.official.auth` = auto|api-key|console) alongside the api-key arm above. The single login door is
 # `ant auth login --profile winter` with `ANTHROPIC_CONFIG_DIR=<home>/runtimes/anthropic-config`, driven by the

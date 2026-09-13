@@ -466,7 +466,7 @@ class OfficialSessionImpl implements OfficialSession {
       // object's own `settings` field) — read once, here, so `run()`'s own assertion never
       // re-fetches settings independently and can never disagree with what THIS spawn was actually
       // built against.
-      const subscriptionAuthEnabled = officialSubscriptionAuthEnabled(inputDeps.settings);
+      const subscriptionAuthEnabled = officialSubscriptionAuthEnabled(inputDeps.settings, inputDeps.officialSubscriptionAuthApproved);
       const inc: Incarnation = { stream, projector, query: routerQuery, abort, sawInit: false, done: Promise.resolve(), subscriptionAuthEnabled };
       this.inc = inc;
       // m7: `resumed` is honest about THIS instance's own history — generation 1 is a fresh start,
