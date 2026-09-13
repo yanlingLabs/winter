@@ -155,23 +155,14 @@ export const UNAVAILABLE_SDK: AnthropicConsoleSdk = {
  * per its own doc comment) — wrapped in `Promise.resolve` here only to satisfy this file's
  * pre-existing `AnthropicConsoleSdk` interface, which every caller already awaits.
  *
- * INTERIM SCAFFOLDING (fix wave 3, M-A) — DELETE THE SPREAD BELOW AT THE 0.0.9 INTEGRATION: the
- * INSTALLED package is still 0.0.7 as of this fix wave, whose own `AnthropicConsoleBrokerOptions`
- * still REQUIRES `claudeExecutable`/`claudeConfigDir` (its own `.d.ts`) — but this daemon's own
- * `AnthropicLoginOptions` no longer carries either field at all (dropped, this fix wave). The two
- * placeholder empty strings below exist ONLY to satisfy that OLDER installed type; they are never
- * meaningfully read at runtime today because `login()`/`logout()` (below) refuse before ever
- * reaching this point while `REQUIRED_WINTER_AGENT_SDK` sits below `CONSOLE_BROKER_SDK_MIN` (i.e.
- * always, today) — `refreshAnthropicBearer` is the one call that DOES still run against the
- * installed 0.0.7 today, and that SDK version already resolves `ant` independently of these two
- * fields (P10a-4's own refresh door). Once the 0.0.9 integration lands, the installed package's own
- * options type drops both fields too, and this spread becomes a plain type error to delete.
+ * Since the 0.0.9 integration the installed SDK's own options type carries no claude fields either, so
+ * every call passes this daemon's `AnthropicLoginOptions` straight through.
  */
 export const REAL_SDK: AnthropicConsoleSdk = {
-  startAnthropicConsoleBrokerLogin: (store, options) => Promise.resolve(sdkStartAnthropicConsoleBrokerLogin(store, { claudeExecutable: "", claudeConfigDir: "", ...options })),
-  refreshAnthropicBearer: (store, options) => sdkRefreshAnthropicBearer(store, { claudeExecutable: "", claudeConfigDir: "", ...options }),
+  startAnthropicConsoleBrokerLogin: (store, options) => Promise.resolve(sdkStartAnthropicConsoleBrokerLogin(store, options)),
+  refreshAnthropicBearer: (store, options) => sdkRefreshAnthropicBearer(store, options),
   anthropicConsoleProfileExists: (anthropicConfigDir, profile) => sdkAnthropicConsoleProfileExists(anthropicConfigDir, profile),
-  logoutAnthropicConsole: (store, options) => sdkLogoutAnthropicConsole(store, { claudeExecutable: "", claudeConfigDir: "", ...options }),
+  logoutAnthropicConsole: (store, options) => sdkLogoutAnthropicConsole(store, options),
 };
 
 /** The host-facing door `ipc/server.ts` (O6) and `winter login/logout --anthropic-console` (O7)

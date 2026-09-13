@@ -256,15 +256,16 @@ describe("createConsoleProfileBroker — login", () => {
 // pin case below pins exactly that, so this suite fails the moment someone bumps
 // `REQUIRED_WINTER_AGENT_SDK` without ALSO raising `CONSOLE_BROKER_SDK_MIN` to match, or vice versa.
 describe("createConsoleProfileBroker — the console-broker-SDK version gate (M-A)", () => {
-  test("the REAL pin (0.0.7, no override) refuses BOTH login() and logout() typed, without ever calling the sdk", async () => {
+  test("the REAL pin (0.0.9 since integration 3, no override) is at the floor, so login() and logout() both reach the sdk", async () => {
     const home = freshHome();
     const { sdk, calls } = fakeSdk();
     const broker = createConsoleProfileBroker({
       home, antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")), sdk,
     });
-    await expect(broker.login(() => {})).rejects.toThrow("console_broker_sdk_unsupported");
-    await expect(broker.logout()).rejects.toThrow("console_broker_sdk_unsupported");
-    expect(calls).toEqual([]);
+    await broker.login(() => {});
+    await broker.logout();
+    expect(calls.some((c) => c.fn === "startAnthropicConsoleBrokerLogin")).toBe(true);
+    expect(calls.some((c) => c.fn === "logoutAnthropicConsole")).toBe(true);
   });
 
   test("a stubbed pin below the floor (0.0.8 — the daemon skips it) still refuses", async () => {

@@ -10,6 +10,7 @@ import { keychainService } from "../../src/profile";
 import { OPENAI_API_KEY_SECRET } from "../../src/providers/manager";
 import { CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, CodexAuthStore, writeOpenAiApiKey } from "../../src/auth/credential-material";
 import { credentialPresenceFrom, credentialRefFor, keychainSeamFromSecretStore, WINTER_CREDENTIAL_INVENTORY, ANTHROPIC_CREDENTIAL_SECRET_NAME, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
+import { ANTHROPIC_CONSOLE_CREDENTIAL_ACCOUNT } from "@yanlinglabs/winter-provider-runtime";
 import { Settings } from "../../src/settings";
 
 // The real `CredentialRef` (`@yanlinglabs/winter-agent-sdk` protocol/config.d.ts:317-333) is a
@@ -258,5 +259,12 @@ describe("KeychainSeam over SecretStore", () => {
     const seam = keychainSeamFromSecretStore(store, dir);
     expect(await seam.read({ kind: "keychain", account: CREDENTIAL_MATERIAL_NAMES.openai, service: ref.service })).toBe("sk-test");
     expect(await seam.read({ kind: "keychain", account: CREDENTIAL_MATERIAL_NAMES.openai, service: "com.winter.core" })).toBeUndefined();
+  });
+});
+
+describe("the console bearer's Keychain account (P10a R-10a-6, 0.0.9 integration)", () => {
+  test("the daemon's local literal equals the SDK's exported console account, and is never the API-key slot", () => {
+    expect(ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME).toBe(ANTHROPIC_CONSOLE_CREDENTIAL_ACCOUNT);
+    expect(ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME).not.toBe(ANTHROPIC_CREDENTIAL_SECRET_NAME);
   });
 });
