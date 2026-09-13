@@ -386,7 +386,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // daemon's configured provider model.
       const model = mode === "dispatch" ? (live.model ?? DISPATCH_MODEL) : (live.model ?? settings?.provider?.model);
       const effort = mode === "dispatch" ? sdkEffortOf(live.effort ?? DISPATCH_EFFORT) : sdkEffortOf(live.effort);
-      const selection = providerSelectionFor(model, credentials, deps.home);
+      const selection = providerSelectionFor(model, credentials, deps.home, settings);
       // P8b-30: a BYO `openai-compatible` endpoint travels as the provider's connection, or the
       // catalog's `openai` row would route it to api.openai.com.
       //
@@ -448,6 +448,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         cwd,
         model,
         credentials,
+        settings,
         effort,
         ...(systemPrompt === undefined ? {} : { systemPrompt }),
         spawn: hook,
@@ -613,7 +614,11 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // incarnation — `officialCredentialPlan`'s auto-derivation (`official-options.ts`) needs this
       // provider's `authRef` to inject `ANTHROPIC_API_KEY` at spawn.
       const credentials = await credentialPresenceFrom(deps.secrets);
-      const provider = providerSelectionFor(live.model, credentials, deps.home);
+      // Fix wave 3 (M-B, "Native sessions"): threaded so this leg's own OWN "anthropic" ref
+      // decision agrees with the Winter leg's (both read officialAuthFamilyFor the same way) —
+      // inert for the console arm itself, which never consumes `provider.authRef` at all
+      // (officialInputFor's own "never hands credentials containing an anthropic key" guarantee).
+      const provider = providerSelectionFor(live.model, credentials, deps.home, deps.settings());
       // TEST-ONLY (`WinterLegDeps.officialConnectionOverride`, fix round 1 M2 — never an ambient
       // env var, never set by production `daemon.ts` wiring): a loopback fake needs
       // `ANTHROPIC_BASE_URL` beside the key, which the `api-key` family's own variable set does
@@ -839,7 +844,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     const backendSessionId = randomUUID();
     const transcriptKey = transcriptProjectKey(cwd);
     const credentials = await credentialPresenceFrom(deps.secrets);
-    const selection = providerSelectionFor(meta.model, credentials, deps.home);
+    const selection = providerSelectionFor(meta.model, credentials, deps.home, settings);
     const providerId = decided?.providerId ?? selection?.providerId ?? settings?.provider?.type ?? "unstated";
     const authFamily: RuntimeSelection["authFamily"] = settings?.provider?.type === "openai-compatible" ? "api-key" : "custom";
     try {

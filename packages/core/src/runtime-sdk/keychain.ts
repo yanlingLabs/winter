@@ -3,6 +3,8 @@ import type { CredentialPresence, KeychainSeam } from "@yanlinglabs/winter-runti
 import type { SecretStore } from "../auth/secret-store";
 import { keychainService } from "../profile";
 import { CREDENTIAL_MATERIAL_NAMES, readCredentialMaterial, writeCredentialMaterial } from "../auth/credential-material";
+import { officialAuthFamilyFor } from "./official-options";
+import type { Settings } from "../settings";
 
 /**
  * One row of the credential inventory: a provider id, the `SecretStore` name that backs it, and
@@ -79,6 +81,19 @@ export interface CredentialSlot {
  */
 export const ANTHROPIC_CREDENTIAL_SECRET_NAME = "anthropic:default";
 
+/**
+ * Winter Phase 10a fix wave 3 (M-B): the console profile's OWN Keychain slot — a SEPARATE account
+ * from `anthropic:default` above. `anthropic:default` is the user's own API-KEY material
+ * (`winter login --anthropic-key`); the console broker's bearer material (refreshed off
+ * `ant auth print-credentials`, `console-profile-broker.ts`) now lands here instead, never mixed
+ * into the api-key slot. Same LOCAL-literal convention as `ANTHROPIC_CREDENTIAL_SECRET_NAME` above
+ * — the controller adds the equality test against the SDK's own export at the 0.0.9 integration.
+ * `keychainSeamFromSecretStore.read()` below refuses to unpack anything but `bearer` material at
+ * this account, and anything but `api-key` material at the default account, so an `auth:"api-key"`
+ * official session can never accidentally inject a stray OAuth bearer as `ANTHROPIC_API_KEY`.
+ */
+export const ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME = "anthropic:console";
+
 /** `winter login --anthropic-key` (`cli/main.ts`) — the SAME `{kind:"api-key", key}` material shape
  *  `writeOpenAiApiKey` writes, under the anthropic row's own name. No legacy raw-key record exists
  *  for this provider (it is new in 8c), so there is no blank-the-legacy-name step to mirror. */
@@ -90,6 +105,14 @@ export const WINTER_CREDENTIAL_INVENTORY: readonly CredentialSlot[] = [
   { provider: "openai", secretName: CREDENTIAL_MATERIAL_NAMES.openai, kind: "keychain" },
   { provider: "codex-oauth", secretName: CREDENTIAL_MATERIAL_NAMES.codexOauth, kind: "keychain" },
   { provider: "anthropic", secretName: ANTHROPIC_CREDENTIAL_SECRET_NAME, kind: "keychain" },
+  // Fix wave 3 (M-B): a SECOND row for the SAME "anthropic" provider — registers the console
+  // account in the seam's "known accounts" set (`keychainSeamFromSecretStore`'s `known` set below)
+  // and makes `credentialPresenceFrom`'s presence probe see a console-only install as present, so
+  // `providerSelectionFor` still picks "anthropic" as a candidate. `credentialRefFor` below never
+  // reaches this row via the generic `.find()` lookup for "anthropic" — it special-cases that
+  // provider id and picks the actual account itself (`officialAuthFamilyFor`-driven), so this row's
+  // own ORDER relative to the row above never matters for that path.
+  { provider: "anthropic", secretName: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, kind: "keychain" },
 ];
 
 /** Error code/class only — NEVER `.message`, which could embed material for some future
@@ -137,6 +160,20 @@ function describeError(err: unknown): string {
  * as `undefined` — a missing credential at spawn is a typed refusal one layer up, never a throw
  * from the middle of a launch.
  */
+/**
+ * Winter Phase 10a fix wave 3 (M-B): the two anthropic accounts each answer EXACTLY ONE material
+ * kind — `anthropic:default` is the user's own api-key, `anthropic:console` is the console
+ * broker's own bearer — never the other. Every OTHER account (`openai:default`,
+ * `codex-oauth:default`) is unrestricted here (absent from this map), unpacking whatever kind it
+ * actually holds, exactly as before this fix wave. This is a SEPARATE, narrower check than the
+ * generic per-kind unpack switch below it: that switch still runs afterward for whatever passes
+ * this gate, so adding a kind here still needs its own case there too.
+ */
+const ANTHROPIC_ACCOUNT_ALLOWED_KIND: Readonly<Record<string, "api-key" | "bearer">> = {
+  [ANTHROPIC_CREDENTIAL_SECRET_NAME]: "api-key",
+  [ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME]: "bearer",
+};
+
 export function keychainSeamFromSecretStore(store: SecretStore, home?: string): KeychainSeam {
   const known = new Set(WINTER_CREDENTIAL_INVENTORY.map((slot) => slot.secretName));
   return {
@@ -147,6 +184,14 @@ export function keychainSeamFromSecretStore(store: SecretStore, home?: string): 
       try {
         const material = await readCredentialMaterial(store, ref.account);
         if (material === null) return undefined;
+        // Fix wave 3 (M-B): refuse the WRONG kind at either anthropic account outright — a
+        // one-line warning that carries no value (never the material, never even the found kind's
+        // actual content, only its NAME).
+        const allowedKind = ANTHROPIC_ACCOUNT_ALLOWED_KIND[ref.account];
+        if (allowedKind !== undefined && material.kind !== allowedKind) {
+          console.warn(`[keychain] "${ref.account}" holds "${material.kind}" material, but only "${allowedKind}" is served from this account — refusing`);
+          return undefined;
+        }
         switch (material.kind) {
           case "api-key": return material.key;
           case "oauth": return material.accessToken;
@@ -180,8 +225,24 @@ export function keychainSeamFromSecretStore(store: SecretStore, home?: string): 
  * the account-name rename). Callers that need that string form derive it as
  * ``keychain:${ref.account}`` from this function's result, rather than hand-building either form
  * separately — this function is the one place that knows both.
+ *
+ * Winter Phase 10a fix wave 3 (M-B, "Native sessions"): for `provider === "anthropic"` the account
+ * is no longer the inventory row's fixed `secretName` — it is decided FRESH, by reusing
+ * `officialAuthFamilyFor(home, settings, …)` (the SAME decision the official leg's own console-vs-
+ * api-key arm makes), so both legs agree on which credential a session actually gets. `settings`
+ * absent (every pre-existing caller — `advisor-reviewer.ts`'s own internal Anthropic-Messages
+ * reviewer deliberately never passes it, since it always wants the plain api-key material) keeps
+ * the OLD, unconditional `anthropic:default` behavior — `officialAuthFamilyFor` needs a real
+ * `home` to check profile presence, so this new behavior also requires `home`, not just `settings`.
+ * Every OTHER provider is unaffected: still the inventory's one fixed row, `.find()`ed as before.
  */
-export function credentialRefFor(provider: string, home?: string): CredentialRef | undefined {
+export function credentialRefFor(provider: string, home?: string, settings?: Settings | null): CredentialRef | undefined {
+  if (provider === "anthropic") {
+    const account = home !== undefined && settings !== undefined && officialAuthFamilyFor(home, settings, false) === "console"
+      ? ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME
+      : ANTHROPIC_CREDENTIAL_SECRET_NAME;
+    return { kind: "keychain", account, service: keychainService(undefined, home) };
+  }
   const slot = WINTER_CREDENTIAL_INVENTORY.find((s) => s.provider === provider);
   if (!slot) return undefined;
   return { kind: "keychain", account: slot.secretName, service: keychainService(undefined, home) };

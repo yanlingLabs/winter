@@ -5,6 +5,7 @@ import type {
 } from "@yanlinglabs/winter-agent-sdk";
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import type { SessionApprovalPolicy } from "../agent/gate";
+import type { Settings } from "../settings";
 import type { Mode as SessionMode } from "../agent/tools/registry";
 import { CONTROL_PLANE_FILENAMES } from "./control-plane";
 import { providerSelectionFor, testProviderNameFor } from "./provider-selection";
@@ -210,6 +211,12 @@ export interface WinterOptionsInput {
    * possibly `undefined`) — in which case no `advisor` key is set and the child's own default applies.
    */
   advisorModel?: string;
+  /** Winter Phase 10a fix wave 3 (M-B, "Native sessions"): threaded to `providerSelectionFor` (for
+   *  both `Options.provider` and, when set, `Options.advisor`) so the WINTER leg's own "anthropic"
+   *  credential ref picks `anthropic:console` vs `anthropic:default` the SAME way the official
+   *  leg's own console-vs-api-key arm decides (`officialAuthFamilyFor`) — "both legs agree".
+   *  `undefined` (a caller with no settings handy) keeps the old, unconditional `anthropic:default`. */
+  settings?: Settings | null;
 }
 
 /**
@@ -443,7 +450,7 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
   if (input.outputStyle !== undefined) options.outputStyle = input.outputStyle;
   if (input.policy === "bypass") options.allowDangerouslySkipPermissions = true;
   if (input.hooks !== undefined) options.hooks = input.hooks;
-  const provider = providerSelectionFor(input.model, input.credentials, input.home);
+  const provider = providerSelectionFor(input.model, input.credentials, input.home, input.settings);
   if (input.advisorModel !== undefined) {
     // Fix wave (M7): when the advisor's own target model resolves to the SAME provider as the
     // session's own model, thread the SESSION's already-resolved `authRef` onto `Options.advisor`
@@ -466,7 +473,7 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     //
     // A CROSS-provider advisor is UNCHANGED: it keeps falling through to the SDK's documented
     // "target provider's own keychain record" default, exactly as today (never guessed at here).
-    const advisorProvider = providerSelectionFor(input.advisorModel, input.credentials, input.home);
+    const advisorProvider = providerSelectionFor(input.advisorModel, input.credentials, input.home, input.settings);
     const sameProviderAuthRef =
       provider !== undefined && advisorProvider !== undefined && provider.providerId === advisorProvider.providerId
         ? provider.authRef

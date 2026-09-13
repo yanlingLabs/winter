@@ -9,7 +9,8 @@ import { TOKEN_NAMES } from "../../src/auth/tokens";
 import { keychainService } from "../../src/profile";
 import { OPENAI_API_KEY_SECRET } from "../../src/providers/manager";
 import { CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, CodexAuthStore, writeOpenAiApiKey } from "../../src/auth/credential-material";
-import { credentialPresenceFrom, credentialRefFor, keychainSeamFromSecretStore, WINTER_CREDENTIAL_INVENTORY } from "../../src/runtime-sdk/keychain";
+import { credentialPresenceFrom, credentialRefFor, keychainSeamFromSecretStore, WINTER_CREDENTIAL_INVENTORY, ANTHROPIC_CREDENTIAL_SECRET_NAME, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
+import { Settings } from "../../src/settings";
 
 // The real `CredentialRef` (`@yanlinglabs/winter-agent-sdk` protocol/config.d.ts:317-333) is a
 // discriminated union with NO `api_key` kind and NO `provider`/`secretName` fields — the brief's
@@ -131,6 +132,11 @@ describe("KeychainSeam over SecretStore", () => {
       { provider: "openai", secretName: "openai:default", kind: "keychain" },
       { provider: "codex-oauth", secretName: "codex-oauth:default", kind: "keychain" },
       { provider: "anthropic", secretName: "anthropic:default", kind: "keychain" },
+      // Fix wave 3 (M-B): a SECOND "anthropic" row for the console bearer account — see this
+      // row's own comment in keychain.ts for why `credentialRefFor` never reaches it via the
+      // generic per-provider `.find()` lookup, and why its presence here still matters (the
+      // seam's "known accounts" set, and `credentialPresenceFrom`'s console-only presence case).
+      { provider: "anthropic", secretName: "anthropic:console", kind: "keychain" },
     ]);
   });
 
@@ -164,6 +170,71 @@ describe("KeychainSeam over SecretStore", () => {
     expect(credentialRefFor("openai")).toEqual({ kind: "keychain", account: "openai:default", service: keychainService() });
     expect(credentialRefFor("codex-oauth")).toEqual({ kind: "keychain", account: "codex-oauth:default", service: keychainService() });
     expect(credentialRefFor("nope")).toBeUndefined();
+  });
+
+  // Fix wave 3 (M-B): the two anthropic accounts each answer EXACTLY ONE material kind.
+  describe("the two anthropic accounts each serve exactly one material kind (M-B)", () => {
+    test("anthropic:default (api-key) refuses bearer material — the api-key arm can never inject an OAuth token as ANTHROPIC_API_KEY", async () => {
+      await store.set(ANTHROPIC_CREDENTIAL_SECRET_NAME, JSON.stringify({ kind: "bearer", token: "console-bearer-should-never-leak-here" }));
+      const seam = keychainSeamFromSecretStore(store);
+      expect(await seam.read({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME })).toBeUndefined();
+    });
+
+    test("anthropic:default (api-key) refuses oauth material too — not just bearer", async () => {
+      await store.set(ANTHROPIC_CREDENTIAL_SECRET_NAME, JSON.stringify({ kind: "oauth", accessToken: "should-never-leak-here" }));
+      const seam = keychainSeamFromSecretStore(store);
+      expect(await seam.read({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME })).toBeUndefined();
+    });
+
+    test("anthropic:default (api-key) still serves its own kind normally", async () => {
+      await store.set(ANTHROPIC_CREDENTIAL_SECRET_NAME, JSON.stringify({ kind: "api-key", key: "sk-ant-real" }));
+      const seam = keychainSeamFromSecretStore(store);
+      expect(await seam.read({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME })).toBe("sk-ant-real");
+    });
+
+    test("anthropic:console (bearer) refuses api-key material — the console arm can never accidentally serve the user's own api-key", async () => {
+      await store.set(ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, JSON.stringify({ kind: "api-key", key: "sk-ant-should-never-leak-here" }));
+      const seam = keychainSeamFromSecretStore(store);
+      expect(await seam.read({ kind: "keychain", account: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME })).toBeUndefined();
+    });
+
+    test("anthropic:console (bearer) still serves its own kind normally", async () => {
+      await store.set(ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, JSON.stringify({ kind: "bearer", token: "console-bearer-real" }));
+      const seam = keychainSeamFromSecretStore(store);
+      expect(await seam.read({ kind: "keychain", account: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME })).toBe("console-bearer-real");
+    });
+
+    test("every OTHER account is unrestricted — openai still serves whatever kind it actually holds", async () => {
+      await writeOpenAiApiKey(store, "sk-test");
+      const seam = keychainSeamFromSecretStore(store);
+      expect(await seam.read({ kind: "keychain", account: CREDENTIAL_MATERIAL_NAMES.openai })).toBe("sk-test");
+    });
+  });
+
+  describe("credentialRefFor — the console-vs-default anthropic account (M-B, \"Native sessions\")", () => {
+    test("with no settings (every pre-existing caller, e.g. advisor-reviewer.ts) — unconditionally anthropic:default, unchanged", () => {
+      expect(credentialRefFor("anthropic", dir)).toEqual({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, dir) });
+    });
+
+    test("settings.runtimes.official.auth = \"console\" -> anthropic:console", () => {
+      const settings = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" }, runtimes: { official: { auth: "console" } } });
+      expect(credentialRefFor("anthropic", dir, settings)).toEqual({ kind: "keychain", account: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, dir) });
+    });
+
+    test("settings.runtimes.official.auth = \"api-key\" -> anthropic:default", () => {
+      const settings = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" }, runtimes: { official: { auth: "api-key" } } });
+      expect(credentialRefFor("anthropic", dir, settings)).toEqual({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, dir) });
+    });
+
+    test("\"auto\" (the default) with no console profile on disk -> anthropic:default — both legs agree with officialAuthFamilyFor", () => {
+      const settings = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" } });
+      expect(credentialRefFor("anthropic", dir, settings)).toEqual({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, dir) });
+    });
+
+    test("every OTHER provider is unaffected by the settings parameter", () => {
+      const settings = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" }, runtimes: { official: { auth: "console" } } });
+      expect(credentialRefFor("openai", dir, settings)).toEqual({ kind: "keychain", account: "openai:default", service: keychainService(undefined, dir) });
+    });
   });
 
   // Test-keychain-isolation TRIPWIRE: `test/preload.ts` sets `WINTER_KEYCHAIN_SERVICE` for the
