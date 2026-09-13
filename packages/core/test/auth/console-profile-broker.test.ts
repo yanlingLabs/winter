@@ -14,6 +14,7 @@ import { anthropicConfigDirFor, ANTHROPIC_PROFILE_NAME } from "../../src/runtime
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
 import {
   CONSOLE_BROKER_UNAVAILABLE_REASON,
+  CONSOLE_LOGOUT_INCOMPLETE_REASON,
   createConsoleProfileBroker,
   REAL_SDK,
   UNAVAILABLE_SDK,
@@ -113,13 +114,23 @@ function fakeMultiTimers() {
 }
 
 /** A fake `AnthropicConsoleSdk` that records every call it receives, so tests assert on the
- *  options/args this door built without any real process ever spawning. */
+ *  options/args this door built without any real process ever spawning.
+ *
+ *  P10a fix wave 4 (Minor 2): the default `anthropicConsoleProfileExists`/`logoutAnthropicConsole`
+ *  pair is STATEFUL — the profile "exists" until `logoutAnthropicConsole` actually runs, matching
+ *  what a REAL successful `ant auth logout` does — so every existing test in this file that calls
+ *  `broker.logout()` for some OTHER reason (the version gate, the refresher, forwarding) keeps
+ *  passing under `logout()`'s own post-call verification (`CONSOLE_LOGOUT_INCOMPLETE_REASON`)
+ *  without having to know that check exists. A test specifically about an INCOMPLETE logout
+ *  overrides `anthropicConsoleProfileExists` to stay `true` regardless (see that describe block). */
 function fakeSdk(overrides: Partial<AnthropicConsoleSdk> = {}) {
   const calls: { fn: string; args: unknown[] }[] = [];
   const record = (fn: string, args: unknown[]) => calls.push({ fn, args });
+  let profilePresent = true;
   const sdk: AnthropicConsoleSdk = {
     startAnthropicConsoleBrokerLogin: async (store, options) => {
       record("startAnthropicConsoleBrokerLogin", [store, options]);
+      profilePresent = true;
       return { submitCode: async () => {}, done: Promise.resolve({ ok: true, profile: ANTHROPIC_PROFILE_NAME }) };
     },
     refreshAnthropicBearer: async (store, options) => {
@@ -128,32 +139,34 @@ function fakeSdk(overrides: Partial<AnthropicConsoleSdk> = {}) {
     },
     anthropicConsoleProfileExists: (dir, profile) => {
       record("anthropicConsoleProfileExists", [dir, profile]);
-      return true;
+      return profilePresent;
     },
     logoutAnthropicConsole: async (store, options) => {
       record("logoutAnthropicConsole", [store, options]);
+      profilePresent = false;
     },
     ...overrides,
   };
   return { sdk, calls };
 }
 
-// Fix wave 3 (M-A): every test in this file that actually reaches the SDK through `login()`/
-// `logout()` needs `requiredWinterAgentSdkVersion: "0.0.9"` — the REAL pin is 0.0.7 today, below
-// `CONSOLE_BROKER_SDK_MIN`, so without this override BOTH doors refuse
-// `console_broker_sdk_unsupported` before ever reaching anything this file is actually testing (the
-// dedicated gate describe block below covers that refusal itself). A plain object spread at each
-// call site, not a shared default in `fakeSdk()`/a helper, so every test's own deps stay legible on
-// their own.
-const SDK_SUPPORTS_CONSOLE_BROKER = { requiredWinterAgentSdkVersion: "0.0.9" };
-
+// Fix wave 3 (M-A) note, CORRECTED (P10a fix wave 4, Minor 3): this file used to need a
+// `requiredWinterAgentSdkVersion: "0.0.9"` override on every test that reaches the SDK through
+// `login()`/`logout()`, because the REAL pin (`versions.ts`'s `REQUIRED_WINTER_AGENT_SDK`) was
+// `0.0.7` then — below `CONSOLE_BROKER_SDK_MIN` — so without an override both doors refused
+// `console_broker_sdk_unsupported` before ever reaching anything this file was actually testing.
+// The REAL pin is `0.0.9` now (integration 3) — AT `CONSOLE_BROKER_SDK_MIN`, not below it — so
+// every test in this file reaches the SDK on the compile-time default alone; the override added
+// nothing but a value identical to that default, and has been removed everywhere except the
+// version-gate describe block below, which still needs explicit stubs to simulate a pin BELOW
+// (`0.0.8`) and ABOVE the floor.
 describe("createConsoleProfileBroker — login", () => {
   // Fix wave (F2 corrected design): the single login door is `ant auth login --profile winter`.
   test("refuses ant_executable_unavailable WITHOUT ever calling the sdk, once the version gate is satisfied", async () => {
     const home = freshHome();
     const { sdk, calls } = fakeSdk();
     const broker = createConsoleProfileBroker({
-      home, secrets: new FileSecretStore(join(home, "secrets")), sdk, ...SDK_SUPPORTS_CONSOLE_BROKER,
+      home, secrets: new FileSecretStore(join(home, "secrets")), sdk,
     });
     await expect(broker.login(() => {})).rejects.toThrow("ant_executable_unavailable");
     expect(calls).toEqual([]);
@@ -170,7 +183,7 @@ describe("createConsoleProfileBroker — login", () => {
     expect(existsSync(dir)).toBe(false);
     const { sdk } = fakeSdk();
     const broker = createConsoleProfileBroker({
-      home, antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")), sdk, ...SDK_SUPPORTS_CONSOLE_BROKER,
+      home, antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")), sdk,
     });
     await broker.login(() => {});
     expect(existsSync(dir)).toBe(true);
@@ -186,7 +199,7 @@ describe("createConsoleProfileBroker — login", () => {
     expect(statSync(dir).mode & 0o777).toBe(0o755);
     const { sdk } = fakeSdk();
     const broker = createConsoleProfileBroker({
-      home, antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")), sdk, ...SDK_SUPPORTS_CONSOLE_BROKER,
+      home, antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")), sdk,
     });
     await broker.login(() => {});
     expect(statSync(dir).mode & 0o777).toBe(0o700);
@@ -199,7 +212,7 @@ describe("createConsoleProfileBroker — login", () => {
     const onLine = (l: string) => lines.push(l);
     const broker = createConsoleProfileBroker({
       home, antExecutable: () => "/bin/ant",
-      secrets: new FileSecretStore(join(home, "secrets")), sdk, ...SDK_SUPPORTS_CONSOLE_BROKER,
+      secrets: new FileSecretStore(join(home, "secrets")), sdk,
     });
     const handle = await broker.login(onLine);
     expect(calls.length).toBe(1);
@@ -241,7 +254,7 @@ describe("createConsoleProfileBroker — login", () => {
       }),
     });
     const broker = createConsoleProfileBroker({
-      home, antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")), sdk, ...SDK_SUPPORTS_CONSOLE_BROKER,
+      home, antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")), sdk,
     });
     const handle = await broker.login(() => {});
     await handle.submitCode("123456");
@@ -252,9 +265,12 @@ describe("createConsoleProfileBroker — login", () => {
 // Winter Phase 10a fix wave 3 (M-A): the version gate `login()`/`logout()` both check FIRST, before
 // even the antExecutable check — same F1 pattern as `official-options.ts`'s router-version gate:
 // compared against the COMPILE-TIME PIN (`REQUIRED_WINTER_AGENT_SDK`), never a runtime probe.
-// "Today it refuses, because the pin is 0.0.7" (the coordinator's own words) — the REAL, no-override
-// pin case below pins exactly that, so this suite fails the moment someone bumps
-// `REQUIRED_WINTER_AGENT_SDK` without ALSO raising `CONSOLE_BROKER_SDK_MIN` to match, or vice versa.
+// CORRECTED (P10a fix wave 4, Minor 3): the real pin is `0.0.9` now (integration 3), sitting AT
+// `CONSOLE_BROKER_SDK_MIN`, not below it as it was when this suite was first written (`0.0.7`) —
+// the REAL, no-override pin case right below pins exactly that, so this suite fails the moment
+// someone bumps `REQUIRED_WINTER_AGENT_SDK` without ALSO raising `CONSOLE_BROKER_SDK_MIN` to
+// match, or vice versa. The `0.0.8`-stub case stays the one place this file still simulates a pin
+// BELOW the floor by hand.
 describe("createConsoleProfileBroker — the console-broker-SDK version gate (M-A)", () => {
   test("the REAL pin (0.0.9 since integration 3, no override) is at the floor, so login() and logout() both reach the sdk", async () => {
     const home = freshHome();
@@ -331,7 +347,7 @@ describe("createConsoleProfileBroker — profileExists / refreshBearer / logout"
   test("logout() forwards to sdk.logoutAnthropicConsole(store, options) and awaits it — options carry the resolved antExecutable (F2)", async () => {
     const home = freshHome();
     const { sdk, calls } = fakeSdk();
-    const broker = createConsoleProfileBroker({ home, antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")), sdk, ...SDK_SUPPORTS_CONSOLE_BROKER });
+    const broker = createConsoleProfileBroker({ home, antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")), sdk });
     await broker.logout();
     expect(calls[0]!.fn).toBe("logoutAnthropicConsole");
     const [, options] = calls[0]!.args as [unknown, AnthropicLoginOptions];
@@ -343,7 +359,7 @@ describe("createConsoleProfileBroker — profileExists / refreshBearer / logout"
   test("logout() refuses ant_executable_unavailable WITHOUT ever calling the sdk", async () => {
     const home = freshHome();
     const { sdk, calls } = fakeSdk();
-    const broker = createConsoleProfileBroker({ home, secrets: new FileSecretStore(join(home, "secrets")), sdk, ...SDK_SUPPORTS_CONSOLE_BROKER });
+    const broker = createConsoleProfileBroker({ home, secrets: new FileSecretStore(join(home, "secrets")), sdk });
     await expect(broker.logout()).rejects.toThrow("ant_executable_unavailable");
     expect(calls).toEqual([]);
   });
@@ -356,7 +372,6 @@ describe("createConsoleProfileBroker — profileExists / refreshBearer / logout"
     const broker = createConsoleProfileBroker({
       home, antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")),
       sdk, now: () => 1_000_000, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
-      ...SDK_SUPPORTS_CONSOLE_BROKER,
     });
     broker.startRefresher();
     await flush();
@@ -380,12 +395,38 @@ describe("createConsoleProfileBroker — profileExists / refreshBearer / logout"
     const broker = createConsoleProfileBroker({
       home, antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")),
       sdk, now: () => 1_000_000, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
-      ...SDK_SUPPORTS_CONSOLE_BROKER,
     });
     broker.startRefresher();
     await flush();
     await expect(broker.logout()).rejects.toThrow("boom");
     expect(timers.cleared.length).toBe(1);
+  });
+
+  // Winter Phase 10a fix wave 4 (Minor 2): `logoutAnthropicConsole` resolving is NOT itself proof
+  // the profile is gone — see `CONSOLE_LOGOUT_INCOMPLETE_REASON`'s own doc. These two tests are the
+  // "fake logout that leaves the file refuses typed" / "one that removes it succeeds" pair.
+  test("a fake logout that resolves WITHOUT removing the profile refuses typed console_logout_incomplete", async () => {
+    const home = freshHome();
+    // The profile stays "present" no matter what `logoutAnthropicConsole` does — simulates `ant
+    // auth logout` ignoring its own child's non-zero exit code (measured).
+    const { sdk, calls } = fakeSdk({ anthropicConsoleProfileExists: () => true });
+    const broker = createConsoleProfileBroker({
+      home, antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")), sdk,
+    });
+    await expect(broker.logout()).rejects.toThrow(CONSOLE_LOGOUT_INCOMPLETE_REASON);
+    // The SDK call itself DID run — this is a post-hoc verification, never a refusal to attempt.
+    expect(calls.some((c) => c.fn === "logoutAnthropicConsole")).toBe(true);
+  });
+
+  test("a fake logout that actually removes the profile succeeds (the default fakeSdk() shape)", async () => {
+    const home = freshHome();
+    const { sdk, calls } = fakeSdk(); // default: stateful, profile gone once logoutAnthropicConsole runs
+    const broker = createConsoleProfileBroker({
+      home, antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")), sdk,
+    });
+    await expect(broker.logout()).resolves.toBeUndefined();
+    expect(calls.some((c) => c.fn === "logoutAnthropicConsole")).toBe(true);
+    expect(broker.profileExists()).toBe(false);
   });
 });
 
@@ -617,7 +658,6 @@ describe("UNAVAILABLE_SDK — explicit defensive fallback (no longer the default
     // THAT rejection, not either guard.
     const broker = createConsoleProfileBroker({
       home, antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")), sdk: UNAVAILABLE_SDK,
-      ...SDK_SUPPORTS_CONSOLE_BROKER,
     });
     await expect(broker.refreshBearer()).rejects.toThrow(CONSOLE_BROKER_UNAVAILABLE_REASON);
     await expect(broker.logout()).rejects.toThrow(CONSOLE_BROKER_UNAVAILABLE_REASON);
@@ -941,7 +981,6 @@ describe("createConsoleProfileBroker — M-B: the api-key slot survives a full c
     const broker = createConsoleProfileBroker({
       home, antExecutable: () => "/bin/ant", secrets, sdk, now: () => REALISTIC_NOW,
       watchDirFn: watch.watchDirFn, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
-      ...SDK_SUPPORTS_CONSOLE_BROKER,
     });
     broker.startWatcher();
 

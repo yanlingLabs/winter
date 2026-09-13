@@ -117,6 +117,19 @@ export const CONSOLE_BROKER_UNAVAILABLE_REASON = "console_broker_unavailable";
  *  package present. */
 export const CONSOLE_BROKER_SDK_UNSUPPORTED_REASON = "console_broker_sdk_unsupported";
 
+/** Winter Phase 10a fix wave 4 (Minor 2): the refusal reason `logout()` throws when
+ *  `sdk.logoutAnthropicConsole` resolves WITHOUT actually removing the on-disk profile. The SDK's
+ *  own `ant auth logout` call ignores its own child's exit code (measured) — a stale `ant`, a
+ *  broken profile, or a permissions fault can all leave the profile file untouched while still
+ *  resolving successfully, so `logout()` re-checks the exact same on-disk fact `profileExists()`
+ *  reports everywhere else in this file, LIVE, right after the SDK call returns, rather than
+ *  trusting that a resolved promise means the profile is actually gone. Left unchecked, the
+ *  console arm would keep authenticating off the still-present profile and the next daemon boot's
+ *  own `consoleBroker.profileExists()` check (`daemon.ts`) would re-mint the bearer right back —
+ *  `provider.logout`/`winter logout --anthropic-console` must report this as a FAILURE, never a
+ *  silent success. */
+export const CONSOLE_LOGOUT_INCOMPLETE_REASON = "console_logout_incomplete";
+
 /** Fix round 1 item 4: the exact package + minimum version `UNAVAILABLE_SDK`'s own error messages
  *  name — confirmed by reading the SDK worktree's own `packages/provider-runtime/package.json`
  *  (name `@yanlinglabs/winter-provider-runtime`; Lane S's `console-broker.ts` ships in it). The
@@ -523,6 +536,17 @@ export function createConsoleProfileBroker(deps: ConsoleProfileBrokerDeps): Cons
       // regardless of whether `logoutAnthropicConsole` itself succeeds.
       stopRefresherImpl();
       await sdk.logoutAnthropicConsole(store, optionsFor());
+      // Winter Phase 10a fix wave 4 (Minor 2): verify the logout actually happened — see
+      // `CONSOLE_LOGOUT_INCOMPLETE_REASON`'s own doc for why the SDK call resolving is not itself
+      // proof of that. The SAME live on-disk check `profileExists()` exposes, run here rather than
+      // through that method so this call site reads as self-contained.
+      if (sdk.anthropicConsoleProfileExists(anthropicConfigDir, ANTHROPIC_PROFILE_NAME)) {
+        throw new Error(
+          `${CONSOLE_LOGOUT_INCOMPLETE_REASON}: the Anthropic Console profile is still present after ` +
+          `logout (ant auth logout exited without removing it) — sign-out did not complete; try again ` +
+          `or remove the profile manually`,
+        );
+      }
     },
 
     startRefresher(): void {
