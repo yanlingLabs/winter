@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CanUseTool, PermissionMode } from "@yanlinglabs/winter-agent-sdk";
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
+import { RESUME_STAGING_PREFIX, isResumeStagingRoot, resumeStagingRoot } from "@yanlinglabs/winter-runtime-sdk";
 import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
@@ -190,15 +191,41 @@ test("the control-plane deny rules cover the four write tools × the control-pla
     expect(deny).toContain(`${tool}(//h/run/**)`);
     expect(deny).toContain(`${tool}(//h/runtimes/**)`);
   }
-  // P8d-12 (WS-16 §10): the official leg's SDK-parent staging root, denied to BOTH the write and
-  // the read-class tools — rooted at the SYSTEM temp dir, never under `home`. `fsRootAnchored`
-  // prepends exactly ONE more slash onto an already-absolute pattern (`tmpdir()` is absolute), so
-  // the wire form carries two leading slashes total, not three.
-  const claudeResumeTarget = `/${join(tmpdir(), "claude-resume-*", "**")}`;
+  // P8d-12 (WS-16 §10); Winter Phase 10b (D1-3, W18-9): the official leg's SDK-parent staging root,
+  // denied to BOTH the write and the read-class tools — rooted at the SYSTEM temp dir, never under
+  // `home`. `fsRootAnchored` prepends exactly ONE more slash onto an already-absolute pattern
+  // (`tmpdir()` is absolute), so the wire form carries two leading slashes total, not three. Built
+  // from the router's own `RESUME_STAGING_PREFIX` (not a hand-typed duplicate) so this test fails if
+  // `mode-options.ts` ever drifts from the router's own definition of a staging root's name.
+  const claudeResumeTarget = `/${join(tmpdir(), `${RESUME_STAGING_PREFIX}*`, "**")}`;
   for (const tool of ["Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Glob", "Grep"]) {
     expect(deny).toContain(`${tool}(${claudeResumeTarget})`);
   }
   expect(deny).toHaveLength(4 * 8 + 3 * 3);
+});
+
+// Winter Phase 10b (D1-3, W18-9): a read of a `claude-resume-*` staging root is denied — proved
+// against a REAL staging-root path the router itself would build (`resumeStagingRoot`, the SAME
+// helper `official/spool.ts` calls for a store-backed resume, WS-16 §10), not a hand-typed string.
+// `isResumeStagingRoot` is the router's own recognition function for exactly this shape (used
+// elsewhere for staging-root cleanup/reconciliation); this test ties the two together so the SDK
+// deny rule and the router's own definition of a staging root can never silently disagree.
+test("W18-9: a real router-shaped claude-resume staging root is caught by the Read/Glob/Grep deny rule", () => {
+  const deny = buildWinterOptions(optionsInput({ home: "/h" })).permissions!.deny!;
+  const root = resumeStagingRoot("9f2c1e40-0000-4000-8000-abcdefabcdef", tmpdir());
+  expect(isResumeStagingRoot(root)).toBe(true); // the router agrees this IS a staging root
+  const fileInsideRoot = join(root, "projects", "some-project-key", "session.jsonl");
+  // The glob's `**` suffix covers arbitrary depth under the root — a model reading a specific
+  // transcript FILE inside the staging tree, not just the bare root directory, must be denied too.
+  const withinDeniedTree = fileInsideRoot.startsWith(`${root}/`);
+  expect(withinDeniedTree).toBe(true);
+  for (const tool of ["Read", "Glob", "Grep"]) {
+    // The deny rule targets `<tmpdir>/<prefix>*/**` — `root` (built with the SAME `tmpdir()` base)
+    // must fall under it, which is exactly what the rule exists to guarantee for every real staging
+    // directory the router creates, whatever uuid it happens to mint.
+    expect(root.startsWith(join(tmpdir(), RESUME_STAGING_PREFIX))).toBe(true);
+    expect(deny).toContain(`${tool}(/${join(tmpdir(), `${RESUME_STAGING_PREFIX}*`, "**")})`);
+  }
 });
 
 /**
