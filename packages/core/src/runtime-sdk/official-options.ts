@@ -344,6 +344,16 @@ export interface OfficialInputDeps {
    *  incarnation with no daemon restart. `undefined`/`null` behaves exactly like an absent block
    *  (`officialSubscriptionAuthEnabled`'s own default: off). */
   settings?: Settings | null;
+  /** Winter Phase 10a (P10a-3, fix round 1 item 3): which auth arm THIS incarnation's `api-key`-
+   *  family session actually spawns against — `session-driver.ts`'s `assembleOfficial` sets this
+   *  to `officialAuthFamilyFor(home, settings, hasApiKey)`'s own answer ONLY when the router's own
+   *  `selection.authFamily` is `"api-key"` and no test-only `officialConnectionOverride` is active;
+   *  every other family (`custom`, `console-oauth`, …) leaves it `undefined`, preserving their own
+   *  exemption from `official-session.ts`'s `apiKeySource` assertion untouched. `official-session.ts`
+   *  captures it once per incarnation (same posture as `subscriptionAuthEnabled`) and uses it to
+   *  pick `expectedApiKeySource`'s argument — `undefined` there still means "assume api-key",
+   *  matching every pre-P10a call site that never set this field. */
+  officialAuthArm?: "api-key" | "console";
 }
 
 /** `winterSystemPromptFor`'s memory-bucket choice, verbatim (chat/dispatch share `_assistant`; code

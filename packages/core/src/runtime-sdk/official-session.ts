@@ -243,6 +243,10 @@ interface Incarnation {
    *  actually decided (a `session.setPolicy`-style live re-read races nothing here: both reads
    *  happen inside the same `open()` call, one turn of the event loop apart). */
   subscriptionAuthEnabled: boolean;
+  /** Winter Phase 10a (fix round 1 item 3): captured from THIS incarnation's own `inputDeps()`
+   *  call (`OfficialInputDeps.officialAuthArm`), the same "read once, at open(), from the SAME
+   *  object officialInputFor itself read" posture as `subscriptionAuthEnabled` above. */
+  officialAuthArm: "api-key" | "console" | undefined;
 }
 
 const isExpectedEndError = (err: unknown): boolean => {
@@ -420,7 +424,7 @@ class OfficialSessionImpl implements OfficialSession {
       // re-fetches settings independently and can never disagree with what THIS spawn was actually
       // built against.
       const subscriptionAuthEnabled = officialSubscriptionAuthEnabled(inputDeps.settings);
-      const inc: Incarnation = { stream, projector, query: routerQuery, abort, sawInit: false, done: Promise.resolve(), subscriptionAuthEnabled };
+      const inc: Incarnation = { stream, projector, query: routerQuery, abort, sawInit: false, done: Promise.resolve(), subscriptionAuthEnabled, officialAuthArm: inputDeps.officialAuthArm };
       this.inc = inc;
       // m7: `resumed` is honest about THIS instance's own history — generation 1 is a fresh start,
       // every later one (a prior incarnation ended `resumable`, e.g. an unexpected crash rather than
@@ -471,7 +475,11 @@ class OfficialSessionImpl implements OfficialSession {
           // family) is exempt (`OfficialAuthSourceRefused`'s own doc), and the flag's only shipped
           // value is `false`, so THIS branch is what runs in production today.
           if (this.deps.selection.authFamily === "api-key" && !inc.subscriptionAuthEnabled) {
-            const expected = expectedApiKeySource("api-key");
+            // Winter Phase 10a (fix round 1 item 3): `officialAuthArm` (session-driver.ts's own
+            // `officialAuthFamilyFor` decision) picks WHICH arm's expected value applies —
+            // `undefined` (every pre-P10a caller, and every OTHER family's own exemption above)
+            // still means "assume api-key", so this is a no-op until a real caller sets it.
+            const expected = expectedApiKeySource(inc.officialAuthArm ?? "api-key");
             const apiKeySource = typeof msg.apiKeySource === "string" ? msg.apiKeySource : "unknown";
             if (apiKeySource !== expected) {
               const err = new OfficialAuthSourceRefused(apiKeySource, expected);
