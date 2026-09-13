@@ -339,11 +339,14 @@ describe("planAndApplySwitch", () => {
   });
 });
 
-// Fix wave C2 (whole-branch review / ruling P8c-18): the cross-runtime handoff fence. Every case
-// here reaches the point where a FRESH destination decision genuinely differs from the recorded
-// leg — the fence must refuse BEFORE the barrier is ever consulted and BEFORE anything is written.
+// Fix wave C2 (whole-branch review / ruling P8c-18); Winter Phase 10b (D1-1, W18-10, R-10b-1): the
+// cross-runtime handoff fence. Every case here reaches the point where a FRESH destination decision
+// genuinely differs from the recorded leg — the fence must refuse BEFORE the barrier is ever
+// consulted and BEFORE anything is written. As of 10b the fence defaults ON for Code sessions (the
+// real round-trip against the live barrier is now measured end to end); an explicit setting always
+// overrides that default, in every mode; chat/dispatch keep the pre-10b OFF default.
 describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.handoff.crossRuntime)", () => {
-  test("disabled (the schema default): a cross-runtime destination is refused typed, no barrier call", async () => {
+  test("an explicit false refuses typed, no barrier call, regardless of mode defaulting ON", async () => {
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1");
       let planCalled = false;
@@ -352,6 +355,7 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
         deps({
           records, barrier,
           runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+          store: { meta: () => ({ mode: "code", cwd: "/x" }) }, // Code would default ON — the explicit false still wins
           settings: () => ({ runtimes: { handoff: { crossRuntime: false } } }) as unknown as Settings,
         }),
         "s1", "claude-sonnet-5", false,
@@ -361,18 +365,75 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
     });
   });
 
-  test("no runtimes block at all (an absent settings.json): the fence still refuses (absent means off)", async () => {
+  test("no runtimes block at all, Code session (an absent settings.json): the fence steps ASIDE — 10b's default-ON", async () => {
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1");
+      let planCalled = false;
+      const plan: HandoffPlan = {
+        session: { projectKey: "pk", sessionId: "be-1" }, from: "winter-agent", to: "claude-agent",
+        steps: [{ step: 1, name: "lease" }],
+        decorationDoor: "fallback", tempContinuity: "clone-copy",
+        selection: { kind: "servable", selection: SELECTION("claude-agent"), review: { checked: true } as never },
+      };
+      const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return plan; }, execute: async () => ({ kind: "resumed", selection: SELECTION("claude-agent") }) };
       const out = await planAndApplySwitch(
         deps({
-          records,
+          records, barrier,
           runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+          store: { meta: () => ({ mode: "code", cwd: "/x" }) },
           settings: () => null,
         }),
+        "s1", "claude-sonnet-5", true,
+      );
+      expect(planCalled).toBe(true);
+      expect(out).toEqual({ kind: "resumed", selection: SELECTION("claude-agent") });
+    });
+  });
+
+  test("no runtimes block at all, chat or dispatch session: the fence still refuses (unaffected by 10b)", async () => {
+    for (const mode of ["chat", "dispatch"] as const) {
+      await withRs(async (_rs, records) => {
+        seedRecord(records, "s1"); // fresh records per mode — `seedRecord` pins one backendSessionId
+        let planCalled = false;
+        const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return null as unknown as HandoffPlan; }, execute: async () => null as unknown as HandoffOutcome };
+        const out = await planAndApplySwitch(
+          deps({
+            records, barrier,
+            runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+            store: { meta: () => ({ mode, cwd: "/x" }) },
+            settings: () => null,
+          }),
+          "s1", "claude-sonnet-5", false,
+        );
+        expect(out).toEqual({ kind: "refused", code: "handoff_disabled", detail: expect.any(String) });
+        expect(planCalled).toBe(false);
+      });
+    }
+  });
+
+  test("a hot-reload flip takes effect on the very next call — no restart, no cached decision", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      let live: Settings | null = null; // absent block, Code session: defaults ON
+      const barrier: HandoffBarrier = { plan: async () => ({
+        session: { projectKey: "pk", sessionId: "be-1" }, from: "winter-agent", to: "claude-agent",
+        steps: [{ step: 1, name: "lease" }],
+        decorationDoor: "fallback", tempContinuity: "clone-copy",
+        selection: { kind: "servable", selection: SELECTION("claude-agent"), review: { checked: true } as never },
+      }), execute: async () => ({ kind: "resumed", selection: SELECTION("claude-agent") }) };
+      const runtime = fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) });
+      const out1 = await planAndApplySwitch(
+        deps({ records, barrier, runtime, store: { meta: () => ({ mode: "code", cwd: "/x" }) }, settings: () => live }),
+        "s1", "claude-sonnet-5", true,
+      );
+      expect(out1).toEqual({ kind: "resumed", selection: SELECTION("claude-agent") });
+      // Flip the SAME getter to an explicit false — no daemon restart, no new `deps` object.
+      live = { runtimes: { handoff: { crossRuntime: false } } } as unknown as Settings;
+      const out2 = await planAndApplySwitch(
+        deps({ records, barrier, runtime, store: { meta: () => ({ mode: "code", cwd: "/x" }) }, settings: () => live }),
         "s1", "claude-sonnet-5", false,
       );
-      expect(out).toEqual({ kind: "refused", code: "handoff_disabled", detail: expect.any(String) });
+      expect(out2).toEqual({ kind: "refused", code: "handoff_disabled", detail: expect.any(String) });
     });
   });
 

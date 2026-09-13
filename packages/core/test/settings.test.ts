@@ -682,8 +682,10 @@ describe("settings.runtimes", () => {
       // and Task 17 Step 1 flipped dispatch once its e2e proof landed.
       winterLeg: { chat: true, dispatch: true, code: true },
       winterIdleTimeoutSec: 900,
-      // Fix wave (C2 / P8c-18): defaults OFF — see `handoffCrossRuntimeEnabled`'s own tests below.
-      handoff: { crossRuntime: false },
+      // Fix wave (C2 / P8c-18); Winter Phase 10b (D1-1): `crossRuntime` stays UNSET rather than
+      // filled with a schema default — the mode-aware default (ON for Code, OFF for chat/dispatch)
+      // lives in `handoffCrossRuntimeEnabled`'s own tests below, not in the raw parse.
+      handoff: {},
     });
     // The two optional strings stay ABSENT rather than becoming "": a present-but-empty value would
     // be a path/model the consumers have to special-case forever.
@@ -761,33 +763,60 @@ describe("settings.runtimes", () => {
     expect(() => Settings.parse({ ...base, runtimes: { winterLeg: { chat: "true" } } })).toThrow();
   });
 
-  // Fix wave (whole-branch review C2 / ruling P8c-18): the cross-runtime handoff fence.
-  test("crossRuntime defaults to false and accepts an explicit true", () => {
-    expect(Settings.parse({ ...base, runtimes: {} }).runtimes?.handoff).toEqual({ crossRuntime: false });
+  // Fix wave (whole-branch review C2 / ruling P8c-18); Winter Phase 10b (D1-1): `crossRuntime`
+  // stays UNSET by default — no schema-level default at all — so the raw parse can never be
+  // confused with an explicit choice. The mode-aware default lives entirely in
+  // `handoffCrossRuntimeEnabled`, exercised below.
+  test("crossRuntime stays unset by default and accepts an explicit true/false", () => {
+    expect(Settings.parse({ ...base, runtimes: {} }).runtimes?.handoff).toEqual({});
     expect(Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: true } } }).runtimes?.handoff)
       .toEqual({ crossRuntime: true });
+    expect(Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: false } } }).runtimes?.handoff)
+      .toEqual({ crossRuntime: false });
   });
 });
 
+// Winter Phase 10b (D1-1, W18-10, R-10b-1): `runtimes.handoff.crossRuntime` now defaults ON for
+// Code sessions (the real round-trip against the live barrier is measured end to end) and stays
+// OFF for chat/dispatch, which never reach the official leg regardless
+// (`select-runtime.ts`'s own mode gate). An explicit setting always overrides the mode-aware
+// default, in every mode.
 describe("handoffCrossRuntimeEnabled", () => {
   const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } };
 
-  test("null/undefined settings (a boot-degraded daemon) answer false, never a throw", () => {
-    expect(handoffCrossRuntimeEnabled(null)).toBe(false);
-    expect(handoffCrossRuntimeEnabled(undefined)).toBe(false);
+  test("null/undefined settings (a boot-degraded daemon) fall back to the mode-aware default, never a throw", () => {
+    expect(handoffCrossRuntimeEnabled(null)).toBe(true); // omitted mode reads as Code
+    expect(handoffCrossRuntimeEnabled(undefined)).toBe(true);
+    expect(handoffCrossRuntimeEnabled(null, "code")).toBe(true);
+    expect(handoffCrossRuntimeEnabled(null, "chat")).toBe(false);
+    expect(handoffCrossRuntimeEnabled(null, "dispatch")).toBe(false);
   });
 
-  test("an absent runtimes block answers false — the same 'absent means the safe default' rule every sibling getter follows", () => {
-    expect(handoffCrossRuntimeEnabled(Settings.parse(base))).toBe(false);
+  test("an absent runtimes block answers the mode-aware default: ON for Code, OFF for chat/dispatch", () => {
+    expect(handoffCrossRuntimeEnabled(Settings.parse(base))).toBe(true);
+    expect(handoffCrossRuntimeEnabled(Settings.parse(base), "code")).toBe(true);
+    expect(handoffCrossRuntimeEnabled(Settings.parse(base), "chat")).toBe(false);
+    expect(handoffCrossRuntimeEnabled(Settings.parse(base), "dispatch")).toBe(false);
   });
 
-  test("an empty runtimes block answers false (the schema's own default)", () => {
-    expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: {} }))).toBe(false);
+  test("an empty runtimes block answers the same mode-aware default — crossRuntime stays unset, not schema-defaulted", () => {
+    expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: {} }))).toBe(true);
+    expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: {} }), "dispatch")).toBe(false);
   });
 
-  test("explicit true flips it on; explicit false stays off", () => {
-    expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: true } } }))).toBe(true);
+  test("an explicit value overrides the mode-aware default, in every mode", () => {
+    expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: true } } }), "chat")).toBe(true);
+    expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: true } } }), "dispatch")).toBe(true);
     expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: false } } }))).toBe(false);
+    expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: false } } }), "code")).toBe(false);
+  });
+
+  test("a hot-reload flip takes effect immediately through the same getter — no restart, no cached decision", () => {
+    let live: Settings = Settings.parse(base);
+    const read = () => live;
+    expect(handoffCrossRuntimeEnabled(read(), "code")).toBe(true); // Code default ON, nothing set yet
+    live = Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: false } } });
+    expect(handoffCrossRuntimeEnabled(read(), "code")).toBe(false); // same getter, flipped off, no restart
   });
 });
 

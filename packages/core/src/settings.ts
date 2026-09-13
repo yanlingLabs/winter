@@ -412,13 +412,18 @@ export const Settings = z.object({
     winterIdleTimeoutSec: z.number().int().min(10).default(DEFAULT_WINTER_IDLE_TIMEOUT_SEC),
     // Fix wave (whole-branch review C2 / ruling P8c-18): a `session.setModel` whose FRESH
     // destination decision names a DIFFERENT runtime leg than the session's recorded one is a
-    // cross-runtime HANDOFF (`runtime-sdk/handoff.ts`) — a real round-trip against the live
-    // barrier is still unmeasured in production (only a typed refusal has been proven end to end,
-    // `handoff-cross-runtime-e2e.test.ts`'s own header). Default OFF: production stays on today's
-    // "never actually reaches the barrier" behaviour until the measurement lands; `handoff.ts`
-    // reads this HOT (`handoffCrossRuntimeEnabled(deps.settings())`), never a boot snapshot, same
-    // as every other setting in this file.
-    handoff: z.object({ crossRuntime: z.boolean().default(false) }).prefault({}),
+    // cross-runtime HANDOFF (`runtime-sdk/handoff.ts`). Winter Phase 10b (D1-1, W18-10, R-10b-1):
+    // the real round-trip is now measured end to end (the whole-branch parity e2e coverage), so the
+    // fence flips to default ON for Code sessions — chat and dispatch never reach the official leg
+    // regardless (`select-runtime.ts`'s own mode gate), so they stay at the pre-10b "off" posture.
+    // `crossRuntime` is deliberately left `.optional()` here rather than `.default()`ed, so a raw
+    // parse can tell "never set" from an explicit `true`/`false` — same "absent isn't a value"
+    // shape `winterExecutable`/`advisorModel` already have on this block. The MODE-AWARE default
+    // lives in `handoffCrossRuntimeEnabled` below, the one door every reader goes through; an
+    // explicit value here always overrides it, in every mode. `handoff.ts` reads this HOT
+    // (`handoffCrossRuntimeEnabled(deps.settings(), mode)`), never a boot snapshot, same as every
+    // other setting in this file.
+    handoff: z.object({ crossRuntime: z.boolean().optional() }).prefault({}),
     // Phase 9c (P9c-1, the user's ruling on WS-00 §8 #1): the official leg authenticates ONLY with
     // Anthropic API-key material the user supplied to Winter. `subscriptionAuth: false` (the
     // default, and the ONLY shipped value until Anthropic approves subscription auth for Winter's
@@ -503,15 +508,25 @@ export function officialAuthModeSetting(settings: Settings | null | undefined): 
  *  providers/manager.ts's `liveModel`) and this file's own tests exercise the SAME decision. */
 export const hooksEnabledFrom = (s: Settings): boolean => s.hooks?.enabled !== false;
 
-/** Fix wave (C2 / P8c-18): the ONE door `runtime-sdk/handoff.ts` reads before letting a
- *  `session.setModel` cross a runtime leg. Absent block OR absent field both mean OFF (the
- *  schema's own `.default(false)` only materializes once `runtimes` itself is present — same
- *  "an absent block is not unknown" rule `winterOptionsFromSettings` states for its own siblings),
- *  so a home that has never touched `runtimes` gets the safe default without this function lying
- *  about what the raw block says. Deliberately total (`null`/`undefined` settings both answer
- *  `false`) for the same boot-degraded-to-`settings=null` reason every getter here is total. */
-export function handoffCrossRuntimeEnabled(s: Settings | null | undefined): boolean {
-  return s?.runtimes?.handoff?.crossRuntime === true;
+/** Fix wave (C2 / P8c-18); Winter Phase 10b (D1-1, W18-10, R-10b-1): the ONE door
+ *  `runtime-sdk/handoff.ts` reads before letting a `session.setModel` cross a runtime leg.
+ *
+ *  An EXPLICIT `true`/`false` on `runtimes.handoff.crossRuntime` always wins, in every mode — the
+ *  schema leaves the field `.optional()` (no `.default()`) precisely so this function can tell
+ *  "the user never set it" from "the user set it to false" (see the schema comment above).
+ *
+ *  Absent (never set) falls back to the MODE-AWARE default: ON for Code, OFF for chat/dispatch.
+ *  `mode` follows the file-wide `mode ?? "code"` convention (`clientEffortEligible` above is the
+ *  same shape) — an omitted mode reads as Code, never as "unknown". Chat and dispatch sessions
+ *  never reach the official leg regardless of this flag (`select-runtime.ts`'s own mode gate), so
+ *  their OFF default is belt-and-suspenders, not a behavioural fence on its own.
+ *
+ *  Deliberately total (`null`/`undefined` settings both fall through to the mode-aware default,
+ *  never a throw) for the same boot-degraded-to-`settings=null` reason every getter here is total. */
+export function handoffCrossRuntimeEnabled(s: Settings | null | undefined, mode?: string): boolean {
+  const explicit = s?.runtimes?.handoff?.crossRuntime;
+  if (explicit !== undefined) return explicit;
+  return mode === undefined || mode === "code";
 }
 
 /** What the Winter leg actually runs with, for a home whose `runtimes` block may not exist at all. */

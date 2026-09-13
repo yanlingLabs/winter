@@ -443,14 +443,16 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
   if (legOfRuntimeKind(decided.runtimeKind) === currentLeg) {
     return { kind: "same-runtime" };
   }
-  // C2 fence (whole-branch review / ruling P8c-18): a cross-runtime handoff's real behaviour
-  // against the live barrier is unmeasured in production (this file's header + the e2e's own —
-  // only a typed refusal has been proven end to end). Refuse BEFORE any barrier call and BEFORE
-  // `session.setModel`'s own store write (this return short-circuits both), typed, so a deployment
-  // that has not opted in never executes an unconfirmed cross-runtime switch. Read HOT, at call
-  // time, per this file's own `HandoffDeps.settings` doc — never a boot snapshot. Same-runtime
-  // model changes (the branch above) are entirely unaffected.
-  if (!handoffCrossRuntimeEnabled(deps.settings())) {
+  // C2 fence (whole-branch review / ruling P8c-18); Winter Phase 10b (D1-1, W18-10): defaults ON
+  // for Code sessions now that the real round-trip against the live barrier is measured end to
+  // end (the whole-branch parity e2e coverage) — `mode` (already decided above, for the fresh
+  // selection call) makes the default mode-aware without this call site knowing the default
+  // itself. Refuse BEFORE any barrier call and BEFORE `session.setModel`'s own store write (this
+  // return short-circuits both), typed, so a deployment that has explicitly opted OUT never
+  // executes an unconfirmed cross-runtime switch. Read HOT, at call time, per this file's own
+  // `HandoffDeps.settings` doc — never a boot snapshot. Same-runtime model changes (the branch
+  // above) are entirely unaffected.
+  if (!handoffCrossRuntimeEnabled(deps.settings(), mode)) {
     return {
       kind: "refused",
       code: "handoff_disabled",
