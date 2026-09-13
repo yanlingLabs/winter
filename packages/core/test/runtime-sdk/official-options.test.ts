@@ -373,6 +373,73 @@ describe("officialInputFor — the env shape + spool, console-oauth family (P9c-
   });
 });
 
+// Winter Phase 10a (fix round 2, P10a-2/3): `officialAuthChildEnvFor` was UNIT-tested (O2) but
+// never actually wired into the env `officialInputFor` hands the SDK — this closes that gap and
+// proves BOTH arms of the real env the official child receives, the same way the console-oauth
+// block above proves its own family's `credentials` shape.
+describe("officialInputFor — the console arm's real env (fix round 2, P10a-2)", () => {
+  const apiKeySelection: RuntimeSelection = {
+    runtimeKind: "claude-agent", providerId: "anthropic", modelRef: "anthropic/claude-sonnet-5",
+    family: "claude", authFamily: "api-key", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
+  };
+  const HOME = "/Users/x/.winter-test-home";
+  const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
+  // A REAL anthropic authRef present on the provider — the strongest proof that the console arm's
+  // ANTHROPIC_API_KEY omission is structural (the credential plan is never even asked), not an
+  // accident of no credential existing to inject in the first place.
+  const provider = { providerId: "anthropic", authRef: { kind: "keychain" as const, account: "anthropic:default" } };
+
+  function build(officialAuthArm: "api-key" | "console" | undefined): { input: import("@yanlinglabs/winter-runtime-sdk").RouterOfficialInput; anthropicConfigDirToEnsure?: string } {
+    const result = officialInputFor(input, minimalDeps({
+      home: HOME, selection: apiKeySelection, provider, explicitCredentials: undefined,
+      ...(officialAuthArm === undefined ? {} : { officialAuthArm }),
+    }));
+    if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
+    return result;
+  }
+
+  test("console arm: ANTHROPIC_PROFILE + ANTHROPIC_CONFIG_DIR are set, ANTHROPIC_API_KEY is absent from base AND from credentials", () => {
+    const built = build("console");
+    expect(built.input.base?.ANTHROPIC_PROFILE).toBe(ANTHROPIC_PROFILE_NAME);
+    expect(built.input.base?.ANTHROPIC_CONFIG_DIR).toBe(anthropicConfigDirFor(HOME));
+    expect(built.input.base?.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(built.input.credentials ?? []).toEqual([]);
+    expect(built.input.credentials ?? []).not.toContainEqual(expect.objectContaining({ variable: "ANTHROPIC_API_KEY" }));
+  });
+
+  test("console arm: anthropicConfigDirToEnsure is set so official-session.ts's open() hardens it 0700", () => {
+    const built = build("console");
+    expect(built.anthropicConfigDirToEnsure).toBe(anthropicConfigDirFor(HOME));
+  });
+
+  test("api-key arm (explicit, or officialAuthArm absent entirely): base carries neither console var; ANTHROPIC_API_KEY IS injected via the credential plan", () => {
+    for (const arm of ["api-key", undefined] as const) {
+      const built = build(arm);
+      expect(built.input.base?.ANTHROPIC_PROFILE).toBeUndefined();
+      expect(built.input.base?.ANTHROPIC_CONFIG_DIR).toBeUndefined();
+      expect(built.input.credentials).toEqual([{ variable: "ANTHROPIC_API_KEY", ref: provider.authRef }]);
+      expect(built.anthropicConfigDirToEnsure).toBeUndefined();
+    }
+  });
+
+  // The scrub matrix stays green THROUGH this real door too, not just at officialAuthChildEnvFor's
+  // own unit level (official-options.test.ts's earlier describe block covers that unit level).
+  test("scrub matrix: every FORBIDDEN_CHILD_ENV sentinel is gone from the console arm's real base except this door's own two", () => {
+    const hostEnv: Record<string, string> = { HOME: "/Users/x", PATH: "/usr/bin:/bin" };
+    for (const name of FORBIDDEN_CHILD_ENV) hostEnv[name] = `SENTINEL_${name}`;
+    const result = officialInputFor(input, minimalDeps({
+      home: HOME, selection: apiKeySelection, provider, explicitCredentials: undefined, officialAuthArm: "console", env: hostEnv,
+    }));
+    if (!("input" in result)) throw new Error("unexpectedly refused");
+    for (const name of FORBIDDEN_CHILD_ENV) {
+      if (name === "ANTHROPIC_PROFILE") { expect(result.input.base?.[name]).toBe(ANTHROPIC_PROFILE_NAME); continue; }
+      if (name === "CLAUDE_CONFIG_DIR") { expect(result.input.base?.[name]).toBeUndefined(); continue; } // set via `spool`, not `base`
+      expect(result.input.base?.[name]).not.toBe(`SENTINEL_${name}`);
+      expect(result.input.base?.[name]).toBeUndefined();
+    }
+  });
+});
+
 describe("ensureOfficialConfigDir", () => {
   test("creates the directory 0700, and re-hardens an already-existing, more-permissive one", () => {
     const root = mkdtempSync(join(tmpdir(), "winter-official-config-dir-"));

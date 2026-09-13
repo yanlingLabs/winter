@@ -376,6 +376,12 @@ export function autoMemoryDirectoryFor(input: OfficialSessionInput, home: string
 export interface OfficialInput {
   input: RouterOfficialInput;
   pathToClaudeCodeExecutable: string;
+  /** Winter Phase 10a (fix round 2): set to `anthropicConfigDirFor(deps.home)` ONLY on the console
+   *  arm — `official-session.ts`'s `open()` hardens it 0700 right beside `input.spool`, the SAME
+   *  "not created here, only computed here" split `ensureOfficialConfigDir`'s own doc states for
+   *  that field (disk is touched only by a caller actually about to spawn). `undefined` on the
+   *  api-key arm (or when `officialAuthArm` was never threaded at all) — nothing to ensure. */
+  anthropicConfigDirToEnsure?: string;
 }
 
 /**
@@ -394,6 +400,12 @@ export function officialInputFor(
 
   const env = deps.env ?? process.env;
   const permissionMode: RouterOfficialPermissionMode = officialPermissionModeFor(deps.policy);
+  // Winter Phase 10a (fix round 2): `officialAuthArm` was threaded onto `OfficialInputDeps` (fix
+  // round 1 item 3) for `official-session.ts`'s own assertion but never actually drove THIS
+  // function's env/credential construction — this is that wiring. `undefined` (every pre-P10a
+  // caller, and every non-api-key family, which `session-driver.ts`'s own gate never sets this
+  // field for) means "api-key", byte-identical to today's behaviour.
+  const officialAuthArm: "api-key" | "console" = deps.officialAuthArm ?? "api-key";
 
   // Fix round 1 (item 0): the REAL bridge (router 0.0.3) — never the fail-closed default a bare
   // broker used to fall through to. `mode` here is the SAME `permissionMode` this session's
@@ -421,6 +433,14 @@ export function officialInputFor(
   // Phase 9c (P9c-1): defence in depth (see `FORBIDDEN_CHILD_ENV`'s own doc) — a no-op today given
   // `minimalOsEnvironment`'s allowlist, but load-bearing against a future change to it.
   for (const name of FORBIDDEN_CHILD_ENV) delete base[name];
+  // Winter Phase 10a (fix round 2, P10a-2): the ONE place the official child's env is assembled —
+  // `officialAuthChildEnvFor`'s own two arms, AFTER the forbidden-name strip above (so a host
+  // ambient `ANTHROPIC_PROFILE`/`CLAUDE_CONFIG_DIR` can never masquerade as this door's own
+  // deliberate injection) and BEFORE nothing else touches `base` again. api-key arm: `{}` — byte-
+  // identical to pre-P10a `base`. console arm: `ANTHROPIC_PROFILE` + `ANTHROPIC_CONFIG_DIR` set,
+  // `ANTHROPIC_API_KEY` never — that omission is enforced by SKIPPING the credential plan entirely
+  // for this arm, below, not by anything in `base`.
+  Object.assign(base, officialAuthChildEnvFor(officialAuthArm, deps.home));
   // Phase 9c (P9c-1): the flag's ONLY shipped value is `false` — this branch is what runs in
   // production. `spool` left `undefined` (flag on) is NOT "no isolation": the router's own
   // `officialSpoolRoot(home)` default still applies, and `VENDOR_HOME_SEGMENT_RE` still refuses
@@ -437,16 +457,30 @@ export function officialInputFor(
   // are the `custom`-family escape hatch a hermetic loopback bed needs (WS-14's own precedent: name
   // each variable and its ref). Neither call ever touches a `SecretStore` — the read happens at
   // spawn, through the router's own `KeychainSeam`.
+  // Winter Phase 10a (fix round 2): the console arm authenticates entirely off the profile FILE
+  // (`ANTHROPIC_PROFILE`/`ANTHROPIC_CONFIG_DIR`, injected into `base` above) — it never asks the
+  // router's own credential plan for anything, which is what keeps `ANTHROPIC_API_KEY` OUT: that
+  // plan's `api-key`-family arm would otherwise inject it from `deps.selection`/`deps.provider`
+  // regardless of this arm (the router has no concept of "console" at all — see
+  // `OfficialInputDeps.officialAuthArm`'s own doc for why `selection.authFamily` itself still reads
+  // `"api-key"` here). Skipping the call is simpler and safer than trying to filter its output.
   let credentials: readonly { variable: string; ref: CredentialRef }[];
-  try {
-    credentials = officialCredentialPlan({ selection: deps.selection, provider: deps.provider, explicit: deps.explicitCredentials as never }) as never;
-  } catch (err) {
-    return new OfficialCredentialPlanRefused(err instanceof Error ? err.message : String(err));
+  if (officialAuthArm === "console") {
+    credentials = [];
+  } else {
+    try {
+      credentials = officialCredentialPlan({ selection: deps.selection, provider: deps.provider, explicit: deps.explicitCredentials as never }) as never;
+    } catch (err) {
+      return new OfficialCredentialPlanRefused(err instanceof Error ? err.message : String(err));
+    }
   }
-  const connectionEnv = officialConnectionEnv({ selection: deps.selection, provider: deps.provider, explicit: deps.explicitConnectionEnv });
+  const connectionEnv = officialAuthArm === "console"
+    ? {}
+    : officialConnectionEnv({ selection: deps.selection, provider: deps.provider, explicit: deps.explicitConnectionEnv });
 
   return {
     pathToClaudeCodeExecutable: executable.path,
+    ...(officialAuthArm === "console" ? { anthropicConfigDirToEnsure: anthropicConfigDirFor(deps.home) } : {}),
     input: {
       sessionId: input.sessionId,
       ...(input.parentSessionId === undefined ? {} : { parentSessionId: input.parentSessionId }),

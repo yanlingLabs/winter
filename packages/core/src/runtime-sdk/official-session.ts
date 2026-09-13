@@ -394,6 +394,10 @@ class OfficialSessionImpl implements OfficialSession {
       // `officialInputFor`'s own pure path computation (see `ensureOfficialConfigDir`'s own doc for
       // why the mkdir does not live there).
       if (built.input.spool !== undefined) ensureOfficialConfigDir(built.input.spool);
+      // Winter Phase 10a (fix round 2): same "not created until an actual spawn" posture as the
+      // spool dir above — `officialInputFor` only computes this path (console arm only); hardening
+      // it 0700 happens here, the one real spawn point.
+      if (built.anthropicConfigDirToEnsure !== undefined) ensureOfficialConfigDir(built.anthropicConfigDirToEnsure);
       const stream = createOfficialInputStream();
       const generation = this.gen + 1;
       const projector = this.deps.projector(generation);
