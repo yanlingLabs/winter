@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled } from "../src/settings";
+import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialAuthModeSetting } from "../src/settings";
 import { DEFAULT_CODEX_MODEL } from "../src/providers/codex-config";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 
@@ -788,6 +788,59 @@ describe("handoffCrossRuntimeEnabled", () => {
   test("explicit true flips it on; explicit false stays off", () => {
     expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: true } } }))).toBe(true);
     expect(handoffCrossRuntimeEnabled(Settings.parse({ ...base, runtimes: { handoff: { crossRuntime: false } } }))).toBe(false);
+  });
+});
+
+// Winter Phase 10a (P10a-3): the official leg's auth-family selector setting. Same "absent means
+// the default, read live, never a boot snapshot" shape as `handoffCrossRuntimeEnabled` above.
+describe("runtimes.official.auth schema", () => {
+  const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } };
+
+  test("absent runtimes.official block defaults auth to \"auto\" once official is present", () => {
+    expect(Settings.parse({ ...base, runtimes: { official: {} } }).runtimes?.official?.auth).toBe("auto");
+  });
+
+  test("accepts the three literal values", () => {
+    for (const v of ["auto", "api-key", "console"] as const) {
+      expect(Settings.parse({ ...base, runtimes: { official: { auth: v } } }).runtimes?.official?.auth).toBe(v);
+    }
+  });
+
+  test("an unknown value is rejected — never silently coerced to a default", () => {
+    expect(() => Settings.parse({ ...base, runtimes: { official: { auth: "subscription" } } })).toThrow();
+  });
+
+  test("antExecutable parses as an optional string beside winterExecutable/claudeExecutable", () => {
+    expect(Settings.parse({ ...base, runtimes: { antExecutable: "/opt/ant/ant" } }).runtimes?.antExecutable).toBe("/opt/ant/ant");
+    expect(Settings.parse({ ...base, runtimes: {} }).runtimes?.antExecutable).toBeUndefined();
+  });
+});
+
+describe("officialAuthModeSetting", () => {
+  const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } };
+
+  test("null/undefined settings (a boot-degraded daemon) answer \"auto\", never a throw", () => {
+    expect(officialAuthModeSetting(null)).toBe("auto");
+    expect(officialAuthModeSetting(undefined)).toBe("auto");
+  });
+
+  test("an absent runtimes block, or an absent official block, both answer \"auto\"", () => {
+    expect(officialAuthModeSetting(Settings.parse(base))).toBe("auto");
+    expect(officialAuthModeSetting(Settings.parse({ ...base, runtimes: {} }))).toBe("auto");
+  });
+
+  test("an absent auth field (official block present, subscriptionAuth-only) answers \"auto\"", () => {
+    expect(officialAuthModeSetting(Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: false } } }))).toBe("auto");
+  });
+
+  test("reads an explicit value straight off the live settings object — no caching, no boot snapshot", () => {
+    const withApiKey = Settings.parse({ ...base, runtimes: { official: { auth: "api-key" } } });
+    const withConsole = Settings.parse({ ...base, runtimes: { official: { auth: "console" } } });
+    expect(officialAuthModeSetting(withApiKey)).toBe("api-key");
+    expect(officialAuthModeSetting(withConsole)).toBe("console");
+    // Same function, a DIFFERENT settings object each call — proves this is a pure read, never a
+    // memoized/boot-bound value (the hot-reload contract every getter in this file follows).
+    expect(officialAuthModeSetting(withApiKey)).not.toBe(officialAuthModeSetting(withConsole));
   });
 });
 
