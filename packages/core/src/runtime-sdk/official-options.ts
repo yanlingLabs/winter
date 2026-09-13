@@ -12,7 +12,7 @@
 // `officialInputFor` wraps it with the router's real `createApprovalBridge({broker, brand, mode,
 // containment})` at construction — the 0.0.2-era fail-closed-default workaround and its
 // `P8c-L1-BLOCKER` note are DELETED.
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { isVendorCompliantProjectKey, transcriptProjectKey, type CredentialRef, type PermissionResult, type ProviderSelection } from "@yanlinglabs/winter-agent-sdk";
@@ -22,7 +22,7 @@ import type { SessionApprovalPolicy } from "../agent/gate";
 import type { Mode as SessionMode } from "../agent/tools/registry";
 import { assistantMemoryDirFor, memoryDirFor, type MemoryDirOptions } from "../agent/memory-dir";
 import type { CapabilityServerRecord } from "../capabilities";
-import { officialSubscriptionAuthEnabled, type Settings } from "../settings";
+import { officialAuthModeSetting, officialSubscriptionAuthEnabled, type Settings } from "../settings";
 import { canUseToolFor, type CanUseToolDeps } from "./approval-bridge";
 import { CORE_BRAND } from "./brand";
 import { controlPlaneDenyRules, disallowedToolsFor, sandboxConfigFor } from "./mode-options";
@@ -100,6 +100,91 @@ export function officialConfigDirFor(home: string): string {
 export function ensureOfficialConfigDir(dir: string): void {
   mkdirSync(dir, { recursive: true });
   chmodSync(dir, 0o700);
+}
+
+/**
+ * Winter Phase 10a (P10a-2): "one profile, one config dir" — the Anthropic Platform CLI (`ant`)
+ * and the embedded `claude` binary's `auth login --console` both read/write profiles under this
+ * SAME directory (`ANTHROPIC_CONFIG_DIR`), a sibling of `officialConfigDirFor`'s own
+ * `claude-config` directory rather than the same one: `CLAUDE_CONFIG_DIR` (the vendor CLI's own
+ * session-transcript spool) and `ANTHROPIC_CONFIG_DIR` (the profile-credential store both `claude
+ * auth login --console` and `ant` read) are two different vendor-defined roots that happen to be
+ * set on the same child at once (P10a-2) — collapsing them into one directory would let a future
+ * vendor CLI change have the transcript spool and the credential store collide.
+ *
+ * Hardened 0700 at `login()`'s own call site (`console-profile-broker.ts`), the SAME
+ * `ensureOfficialConfigDir` helper above — that function is already dir-path-agnostic, so this
+ * door does not need its own copy.
+ */
+export function anthropicConfigDirFor(home: string): string {
+  return join(home, "runtimes", "anthropic-config");
+}
+
+/** P10a-2: the ONE profile name every login/refresh/logout call names — `claude auth login
+ *  --console` writes `<anthropicConfigDirFor(home)>/credentials/${ANTHROPIC_PROFILE_NAME}.json`,
+ *  and `ant auth print-credentials --profile ${ANTHROPIC_PROFILE_NAME}` reads the identical file.
+ *  Winter never supports more than one Anthropic Console profile — a literal, not a setting. */
+export const ANTHROPIC_PROFILE_NAME = "winter";
+
+/** The console profile's own credential file — `officialAuthFamilyFor`'s "auto" arm probes this
+ *  path's existence, and nothing else (presence, never validity — same "presence is not validity"
+ *  discipline `keychain.ts`'s `credentialPresenceFrom` documents for the Keychain-backed rows). */
+function consoleProfileCredentialFile(home: string): string {
+  return join(anthropicConfigDirFor(home), "credentials", `${ANTHROPIC_PROFILE_NAME}.json`);
+}
+
+/** The official leg's two shippable, mutually-exclusive auth arms (P10a-3) — a NARROWER type than
+ *  the router's own `RuntimeSelection["authFamily"]` (which also has `console-oauth`/`bedrock`/
+ *  `vertex`/`claude-oauth`/`local-none`, none of which this decision touches): this door decides
+ *  only "does THIS session's child read a Console profile off disk, or an env-injected API key",
+ *  never which router-level credential family carries it. */
+export type OfficialAuthFamily = "api-key" | "console";
+
+/**
+ * Winter Phase 10a (P10a-3): `settings.runtimes.official.auth` resolved against the console
+ * profile's own on-disk presence. `"api-key"`/`"console"` are explicit pins — honoured even when
+ * the pinned arm's own credential is not actually there yet (a user who picked "console" before
+ * finishing `winter login --anthropic-console` gets a real, typed refusal further down the launch
+ * path, never a silent substitution of the other arm). `"auto"` (the default) is the ruling's own
+ * literal rule: the console profile wins when its credential file exists, otherwise API key —
+ * unconditionally, regardless of `hasApiKey`.
+ *
+ * `hasApiKey` is accepted (not merely tolerated) as part of this door's PINNED signature because
+ * the caller building `provider.status`'s `effective` field needs it to tell "this arm was
+ * DECIDED" apart from "this arm's own credential actually EXISTS" — e.g. `auto` with no console
+ * profile and no API key material still decides `"api-key"` here, and the caller is the one who
+ * turns that into `effective: "none"` by combining this result with the presence booleans it
+ * already has (`ipc/server.ts`'s `provider.status` handler). Kept as a real parameter (not
+ * dropped) so that combination stays a one-function read rather than a second, independently
+ * drifting copy of this same decision.
+ */
+export function officialAuthFamilyFor(home: string, settings: Settings | null | undefined, hasApiKey: boolean): OfficialAuthFamily {
+  void hasApiKey; // see this function's own doc comment — accepted for the caller's use, not consulted here
+  const mode = officialAuthModeSetting(settings);
+  if (mode === "api-key" || mode === "console") return mode;
+  return existsSync(consoleProfileCredentialFile(home)) ? "console" : "api-key";
+}
+
+/**
+ * Winter Phase 10a (P10a-2): the child-env contribution for ONE auth arm, on top of
+ * `minimalOsEnvironment`'s allowlist and the `FORBIDDEN_CHILD_ENV` strip — never a substitute for
+ * either. The console arm sets exactly `ANTHROPIC_PROFILE` + `ANTHROPIC_CONFIG_DIR` (P10a-2: "one
+ * profile, one config dir") and NEVER `ANTHROPIC_API_KEY` (that variable belongs to the api-key
+ * arm's own credential plan, `officialCredentialPlan`'s `AUTH_FAMILY_VARIABLES["api-key"]`, which
+ * this door has nothing to do with); the api-key arm sets nothing at all — no `ANTHROPIC_PROFILE`,
+ * so a stray on-disk console profile can never outrank the pinned API key at the vendor CLI's own
+ * precedence order.
+ *
+ * A plain, pure `(family, home) -> env` function rather than a branch inlined into
+ * `officialInputFor` — the plan's own O2 task tests this door directly, independent of the
+ * `RuntimeSelection`-keyed spawn decision `officialInputFor`/`session-driver.ts` make (out of this
+ * lane's file cluster; see this module's own header for the split).
+ */
+export function officialAuthChildEnvFor(family: OfficialAuthFamily, home: string): Record<string, string> {
+  if (family === "console") {
+    return { ANTHROPIC_PROFILE: ANTHROPIC_PROFILE_NAME, ANTHROPIC_CONFIG_DIR: anthropicConfigDirFor(home) };
+  }
+  return {};
 }
 
 /** P8c-2: the six-valued mapping `mode-options.ts`'s `permissionModeFor` already has, adapted for

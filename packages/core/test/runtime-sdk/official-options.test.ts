@@ -5,7 +5,7 @@
 // that test's own comment), and the auto-memory-directory equality with the Winter leg's own MEMDIR
 // helper (WS-14 §2: "identical for both branches").
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installMockModuleTripwire } from "../mock-module-tripwire";
@@ -19,10 +19,14 @@ import { assistantMemoryDirFor, memoryDirFor } from "../../src/agent/memory-dir"
 import { controlPlaneDenyRules, disallowedToolsFor, sandboxConfigFor } from "../../src/runtime-sdk/mode-options";
 import type { Settings } from "../../src/settings";
 import {
+  ANTHROPIC_PROFILE_NAME,
+  anthropicConfigDirFor,
   autoMemoryDirectoryFor,
   ensureOfficialConfigDir,
   FORBIDDEN_CHILD_ENV,
   minimalOsEnvironment,
+  officialAuthChildEnvFor,
+  officialAuthFamilyFor,
   officialConfigDirFor,
   officialInputFor,
   officialPermissionModeFor,
@@ -386,6 +390,110 @@ describe("ensureOfficialConfigDir", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+// Winter Phase 10a (O2, P10a-2/P10a-3): the console-login building blocks — `anthropicConfigDirFor`,
+// `officialAuthFamilyFor`, and the env builder for the two auth arms. These are standalone, pure(-ish)
+// helpers exercised directly here; they are NOT wired into `officialInputFor`'s own spawn decision in
+// this lane (that decision is `session-driver.ts`'s, out of this file cluster) — see this describe
+// block's own header in the lane report for why.
+
+describe("anthropicConfigDirFor / ANTHROPIC_PROFILE_NAME", () => {
+  test("is <home>/runtimes/anthropic-config — a sibling of officialConfigDirFor's claude-config, never the same directory", () => {
+    const home = "/Users/x/.winter-test-home";
+    expect(anthropicConfigDirFor(home)).toBe(join(home, "runtimes", "anthropic-config"));
+    expect(anthropicConfigDirFor(home)).not.toBe(officialConfigDirFor(home));
+  });
+
+  test("a different home produces a different path — never a constant", () => {
+    expect(anthropicConfigDirFor("/a")).not.toBe(anthropicConfigDirFor("/b"));
+  });
+
+  test("the profile name is the literal \"winter\" (P10a-2: one profile, one config dir)", () => {
+    expect(ANTHROPIC_PROFILE_NAME).toBe("winter");
+  });
+});
+
+describe("officialAuthFamilyFor (P10a-3)", () => {
+  const home = mkdtempSync(join(tmpdir(), "winter-official-auth-family-"));
+  const settingsWith = (auth?: "auto" | "api-key" | "console"): Settings =>
+    ({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" }, ...(auth === undefined ? {} : { runtimes: { official: { auth } } }) }) as unknown as Settings;
+
+  test("explicit \"api-key\" always wins, profile or no profile", () => {
+    expect(officialAuthFamilyFor(home, settingsWith("api-key"), true)).toBe("api-key");
+    expect(officialAuthFamilyFor(home, settingsWith("api-key"), false)).toBe("api-key");
+  });
+
+  test("explicit \"console\" always wins, api-key material or none", () => {
+    expect(officialAuthFamilyFor(home, settingsWith("console"), true)).toBe("console");
+    expect(officialAuthFamilyFor(home, settingsWith("console"), false)).toBe("console");
+  });
+
+  test("\"auto\" (absent settings, absent block, or explicit \"auto\") picks api-key when no console profile file exists", () => {
+    expect(officialAuthFamilyFor(home, null, true)).toBe("api-key");
+    expect(officialAuthFamilyFor(home, settingsWith(), true)).toBe("api-key");
+    expect(officialAuthFamilyFor(home, settingsWith("auto"), true)).toBe("api-key");
+  });
+
+  test("\"auto\" picks console once <dir>/credentials/winter.json exists on disk", () => {
+    const dir = join(anthropicConfigDirFor(home), "credentials");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${ANTHROPIC_PROFILE_NAME}.json`), "{}");
+    try {
+      expect(officialAuthFamilyFor(home, settingsWith("auto"), true)).toBe("console");
+      expect(officialAuthFamilyFor(home, settingsWith("auto"), false)).toBe("console");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("officialAuthChildEnvFor — the scrub matrix (P10a-2)", () => {
+  const home = "/Users/x/.winter-test-home";
+
+  test("console arm sets ANTHROPIC_PROFILE + ANTHROPIC_CONFIG_DIR and nothing else", () => {
+    expect(officialAuthChildEnvFor("console", home)).toEqual({
+      ANTHROPIC_PROFILE: ANTHROPIC_PROFILE_NAME,
+      ANTHROPIC_CONFIG_DIR: anthropicConfigDirFor(home),
+    });
+  });
+
+  test("api-key arm sets nothing — no ANTHROPIC_PROFILE, no ANTHROPIC_CONFIG_DIR", () => {
+    expect(officialAuthChildEnvFor("api-key", home)).toEqual({});
+  });
+
+  test("neither arm ever sets ANTHROPIC_API_KEY (the credential plan's own variable, never this door's)", () => {
+    expect(officialAuthChildEnvFor("console", home)).not.toHaveProperty("ANTHROPIC_API_KEY");
+    expect(officialAuthChildEnvFor("api-key", home)).not.toHaveProperty("ANTHROPIC_API_KEY");
+  });
+
+  // The scrub matrix proper: for EVERY name in FORBIDDEN_CHILD_ENV, seed a sentinel into the host
+  // env, run it through minimalOsEnvironment + the FORBIDDEN_CHILD_ENV strip exactly as
+  // `officialInputFor` does, THEN merge in this arm's own env — the two intentionally-forbidden
+  // names this door itself sets (ANTHROPIC_PROFILE, CLAUDE_CONFIG_DIR is untouched by this door)
+  // must come back from THIS call, never from a leaked host sentinel.
+  test("console arm: every FORBIDDEN_CHILD_ENV sentinel is scrubbed from base; ANTHROPIC_PROFILE/CONFIG_DIR come from this door only", () => {
+    const hostEnv: Record<string, string> = { HOME: "/Users/x", PATH: "/usr/bin" };
+    for (const name of FORBIDDEN_CHILD_ENV) hostEnv[name] = `SENTINEL_${name}`;
+    const base: Record<string, string> = minimalOsEnvironment(hostEnv);
+    for (const name of FORBIDDEN_CHILD_ENV) delete base[name];
+    const merged = { ...base, ...officialAuthChildEnvFor("console", home) };
+    for (const name of FORBIDDEN_CHILD_ENV) {
+      if (name === "ANTHROPIC_PROFILE") { expect(merged[name]).toBe(ANTHROPIC_PROFILE_NAME); continue; }
+      if (name === "CLAUDE_CONFIG_DIR") { expect(merged[name]).toBeUndefined(); continue; } // this door never sets it
+      expect(merged[name]).not.toBe(`SENTINEL_${name}`);
+      expect(merged[name]).toBeUndefined();
+    }
+  });
+
+  test("api-key arm: every FORBIDDEN_CHILD_ENV sentinel is scrubbed, and none of them comes back (this arm sets nothing)", () => {
+    const hostEnv: Record<string, string> = { HOME: "/Users/x", PATH: "/usr/bin" };
+    for (const name of FORBIDDEN_CHILD_ENV) hostEnv[name] = `SENTINEL_${name}`;
+    const base: Record<string, string> = minimalOsEnvironment(hostEnv);
+    for (const name of FORBIDDEN_CHILD_ENV) delete base[name];
+    const merged = { ...base, ...officialAuthChildEnvFor("api-key", home) };
+    for (const name of FORBIDDEN_CHILD_ENV) expect(merged[name]).toBeUndefined();
   });
 });
 
