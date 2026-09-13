@@ -62,6 +62,17 @@
  * reapplied; Autoupdate is the only one with a real entitlement — see resignPreserving below),
  * then re-signing Sparkle.framework and finally the outer Winter.app so their seals pick up the
  * changed nested content.
+ *
+ * Fix wave M4 (whole-branch review, Major, P9c-19): right after `gh release create`/the resume
+ * branch's asset uploads, this script explicitly runs `gh release edit v<version> --latest` — a
+ * plain `gh release create` only becomes GitHub's "latest" release by virtue of being the most
+ * recently created one, which is exactly the ordering this repo's handoff release (norma-final,
+ * created by a DIFFERENT pipeline, possibly AFTER this one) could otherwise steal. The edit is
+ * idempotent (safe to re-run on --resume-publish, and a no-op if already latest) and is Winter's
+ * own half of the pairing: the handoff release passes `--latest=false` on ITS side (agent B / the
+ * norma-final `release.ts`), so between the two, `/releases/latest` on the shared repo always
+ * resolves to Winter regardless of which release was created second — the controller verifies this
+ * after both publishes actually run.
  */
 import { execSync } from "node:child_process";
 import {
@@ -1288,6 +1299,12 @@ if (guard.action === "publish") {
     }
   }
 }
+
+// Fix wave M4 (whole-branch review, Major, P9c-19) — see this file's header for the full reasoning:
+// explicitly (re)assert Winter's release as GitHub's "latest", rather than relying on create-order.
+// Idempotent by design (`gh release edit --latest` on an already-latest release is a no-op), so it
+// runs on BOTH the fresh-publish and the --resume-publish path.
+sh(`gh release edit v${version} --latest`);
 
 // Appcast write + commit+push. The actual releases/winter/appcast.xml write lives HERE — inside
 // `!DRY_RUN`, past every abort/exit above (F1 fix, see section 10) — never earlier. Resume-safe
