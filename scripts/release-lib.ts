@@ -483,30 +483,24 @@ export interface AntEmbedCheck {
 }
 
 /**
- * Winter Phase 10a (Task L3): the PURE half of release.ts's `ant` gate — mirrors
- * `verifyVersionsJsonAgainstPins`'s shape for `claude`, adapted for the fact that `ant` never goes
- * through `stage-runtimes.ts`'s ladder (`embed-runtimes.sh` copies it straight from
- * `vendor/ant/<tag>/ant`, per Task L3) and the repo-root VERSIONS.json's `ant` pin
- * (`{ tag, asset, sha256 }`, `scripts/fetch-ant.ts`'s `parseAntPin`) verifies the DOWNLOADED ZIP —
- * a different digest than the extracted binary's own content necessarily hashes to, so it cannot
- * be compared against a re-hash of the embedded FILE directly.
+ * Winter Phase 10a (Task L3, fix round 1 item 2): the PURE half of release.ts's `ant` gate —
+ * mirrors `verifyVersionsJsonAgainstPins`'s shape for `claude`. `ant` never goes through
+ * `stage-runtimes.ts`'s ladder (`embed-runtimes.sh` copies it straight from
+ * `vendor/ant/<tag>/ant`, per Task L3); the repo-root VERSIONS.json's `ant` pin now carries BOTH
+ * digests (`scripts/fetch-ant.ts`'s `parseAntPin`: `sha256` for the downloaded zip, `binarySha256`
+ * for the extracted binary — a real, git-committed value, not a runtime-computed stamp) so this
+ * check compares `pin.binarySha256` directly against the ACTUAL sha256 of the file release.ts is
+ * about to embed — no separate vendor stamp file, no network re-fetch.
  *
- * Instead this checks the CHAIN: (1) VERSIONS.json's `ant` pin parses at all (a missing/malformed
- * pin is refused, same as a missing/malformed `winter`/`claude` pin would be), and (2) the vendor
- * stamp `fetch-ant.ts` wrote alongside `vendor/ant/<tag>/ant` at fetch time
- * (`readVendorStamp`/`vendorStampPath`, a plain-text sha256 of the EXTRACTED BINARY) still matches
- * the ACTUAL sha256 of the file release.ts is about to embed. Together these prove: the vendored
- * copy came from a download that was checksum-verified against the pin (step 1 + the stamp's own
- * provenance), AND nothing has modified/swapped/corrupted it since (step 2) — without re-fetching
- * over the network at release time or requiring VERSIONS.json to carry a second, extracted-binary-
- * shaped checksum field (L2's contract is exactly `{ tag, asset, sha256 }`, unchanged).
- *
- * `vendorStampText` is `undefined` when no stamp exists (a vendor/ant/<tag>/ directory that was
- * never actually produced by `fetch-ant.ts`, e.g. hand-placed) — a named failure, never a silent
- * pass. Aggregates rather than throwing so release.ts can report every mismatch in one `fail()`
- * call, same shape as `preflight`/`verifyVersionsJsonAgainstPins`.
+ * `actualSha256` should be the PRE-SIGN hash — i.e. of `vendor/ant/<tag>/ant` (or an
+ * identical copy taken before `embed-runtimes.sh`'s `codesign --force --sign` step), never the
+ * ALREADY RE-SIGNED bundle copy: codesigning embeds a signature blob that changes the file's
+ * bytes, so a post-sign hash can never equal a pre-sign pin — exactly the same reasoning
+ * `row16IdentityCheck` applies to `winter`'s own `checksums.winterPreSign`. Aggregates rather than
+ * throwing so release.ts can report every mismatch in one `fail()` call, same shape as
+ * `preflight`/`verifyVersionsJsonAgainstPins`.
  */
-export function verifyAntEmbed(input: { versionsJsonText: string; vendorStampText: string | undefined; actualSha256: string }): AntEmbedCheck {
+export function verifyAntEmbed(input: { versionsJsonText: string; actualSha256: string }): AntEmbedCheck {
   let pin: AntPin;
   try {
     pin = parseAntPin(input.versionsJsonText);
@@ -514,16 +508,11 @@ export function verifyAntEmbed(input: { versionsJsonText: string; vendorStampTex
     return { ok: false, failures: [`VERSIONS.json: ${err instanceof Error ? err.message : String(err)}`] };
   }
   const failures: string[] = [];
-  if (input.vendorStampText === undefined) {
+  if (pin.binarySha256 !== input.actualSha256) {
     failures.push(
-      `no vendor stamp found for the pinned ant tag ${pin.tag} — the vendored vendor/ant/${pin.tag}/ant was not ` +
-        `produced by \`bun run scripts/fetch-ant.ts\` (or its stamp was removed); refusing to embed an unverified file`,
-    );
-  } else if (input.vendorStampText !== input.actualSha256) {
-    failures.push(
-      `the vendored ant binary's stamped sha256 (${input.vendorStampText}) does not match its ACTUAL sha256 ` +
-        `(${input.actualSha256}) — vendor/ant/${pin.tag}/ant has changed since \`fetch-ant.ts\` verified it; ` +
-        `re-run \`bun run scripts/fetch-ant.ts\` before releasing`,
+      `VERSIONS.json ant.binarySha256 (${pin.binarySha256}) does not match the vendored ant binary's actual SHA-256 ` +
+        `(${input.actualSha256}) — vendor/ant/${pin.tag}/ant does not match the pinned, committed digest; re-run ` +
+        `\`bun run scripts/fetch-ant.ts\` (or investigate tampering) before releasing`,
     );
   }
   return { ok: failures.length === 0, failures, pin };

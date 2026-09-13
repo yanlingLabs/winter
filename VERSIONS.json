@@ -2,6 +2,7 @@
   "ant": {
     "tag": "v1.32.0",
     "asset": "ant_1.32.0_macos_arm64.zip",
-    "sha256": "f542fc99af185b197458e4b672f77fe91fe610b436acb9675b6839ce3f02bfeb"
+    "sha256": "f542fc99af185b197458e4b672f77fe91fe610b436acb9675b6839ce3f02bfeb",
+    "binarySha256": "89a972752b2dc2d80c93a3ce5e4a9e304acf720e5853c76e94836dab510cef5b"
   }
 }

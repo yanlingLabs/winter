@@ -148,36 +148,29 @@ describe("verifyVersionsJsonAgainstPins (P8d-2's claude gate, pure half)", () =>
   });
 });
 
-describe("verifyAntEmbed (Winter Phase 10a, Task L3's ant gate, pure half)", () => {
+describe("verifyAntEmbed (Winter Phase 10a, Task L3's ant gate, pure half, fix round 1 item 2: binarySha256, no stamp)", () => {
   const antSha = "c".repeat(64);
-  const goodAntVersionsJson = JSON.stringify({ ant: { tag: "v1.32.0", asset: "ant_1.32.0_macos_arm64.zip", sha256: antSha } });
+  const antBinarySha = "d".repeat(64);
+  const goodAntVersionsJson = JSON.stringify({ ant: { tag: "v1.32.0", asset: "ant_1.32.0_macos_arm64.zip", sha256: antSha, binarySha256: antBinarySha } });
 
-  test("a vendor stamp matching the actual on-disk sha256 -> ok, pin returned", () => {
-    const r = verifyAntEmbed({ versionsJsonText: goodAntVersionsJson, vendorStampText: "d".repeat(64), actualSha256: "d".repeat(64) });
+  test("the actual sha256 matches VERSIONS.json's committed binarySha256 pin -> ok, pin returned", () => {
+    const r = verifyAntEmbed({ versionsJsonText: goodAntVersionsJson, actualSha256: antBinarySha });
     expect(r.ok).toBe(true);
     expect(r.failures).toEqual([]);
-    expect(r.pin).toEqual({ tag: "v1.32.0", asset: "ant_1.32.0_macos_arm64.zip", sha256: antSha });
+    expect(r.pin).toEqual({ tag: "v1.32.0", asset: "ant_1.32.0_macos_arm64.zip", sha256: antSha, binarySha256: antBinarySha });
   });
 
-  test("a stamp/actual mismatch fails, names both hashes and the pinned tag, but still returns the parsed pin", () => {
-    const r = verifyAntEmbed({ versionsJsonText: goodAntVersionsJson, vendorStampText: "d".repeat(64), actualSha256: "e".repeat(64) });
+  test("a mismatch fails, names both hashes and the pinned tag, but still returns the parsed pin", () => {
+    const r = verifyAntEmbed({ versionsJsonText: goodAntVersionsJson, actualSha256: "e".repeat(64) });
     expect(r.ok).toBe(false);
-    expect(r.failures[0]).toContain("d".repeat(64));
+    expect(r.failures[0]).toContain(antBinarySha);
     expect(r.failures[0]).toContain("e".repeat(64));
     expect(r.failures[0]).toContain("v1.32.0");
     expect(r.pin).toBeDefined();
   });
 
-  test("no vendor stamp at all is a named failure (never a silent pass), naming fetch-ant.ts", () => {
-    const r = verifyAntEmbed({ versionsJsonText: goodAntVersionsJson, vendorStampText: undefined, actualSha256: "d".repeat(64) });
-    expect(r.ok).toBe(false);
-    expect(r.failures[0]).toContain("no vendor stamp found");
-    expect(r.failures[0]).toContain("fetch-ant.ts");
-    expect(r.pin).toBeDefined();
-  });
-
   test("unparseable or missing 'ant' VERSIONS.json entry fails via parseAntPin, pin omitted", () => {
-    const r = verifyAntEmbed({ versionsJsonText: "{not json", vendorStampText: "d".repeat(64), actualSha256: "d".repeat(64) });
+    const r = verifyAntEmbed({ versionsJsonText: "{not json", actualSha256: antBinarySha });
     expect(r.ok).toBe(false);
     expect(r.pin).toBeUndefined();
     expect(r.failures[0]).toContain("VERSIONS.json");
