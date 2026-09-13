@@ -189,6 +189,34 @@ export interface ConsoleProfileBrokerDeps {
  *  often. */
 const REFRESH_LEAD_MS = 60_000;
 
+/**
+ * Winter Phase 10a fix wave (M3-clamp): `armAt`'s own floor on the NEXT fire delay — never sooner
+ * than this, regardless of how close (or already past) the computed `at` is. Two independent
+ * failure modes land here: (1) `expires_at`'s UNIT was never actually measured against a real
+ * profile (the ledger's own open doubt) — `normalizeExpiresAtMs` below handles a seconds-unit
+ * value, but a genuinely malformed/garbage value could still compute an `at` far in the past; (2)
+ * even a correctly-computed `at` a few seconds from `now()` (a profile refreshed just under the
+ * 60s `REFRESH_LEAD_MS` window) would otherwise re-arm almost immediately, and if THAT refresh
+ * again returns a near-expired token, the broker tight-loops calling `ant`/the SDK. 30s is short
+ * enough that a legitimately fast-expiring token still gets refreshed well ahead of time, and long
+ * enough that a malformed timestamp can never turn into a hot loop.
+ */
+const MIN_REARM_DELAY_MS = 30_000;
+
+/**
+ * Winter Phase 10a fix wave (M3-clamp): `expires_at`/`AnthropicRefreshResult.expiresAt`'s unit was
+ * never actually measured against a real console profile — the ledger's own open doubt ("expires_at
+ * unit assumed ms"). A SECONDS-since-epoch value (`ant`'s underlying JSON field, and many OAuth
+ * token responses generally) would otherwise be treated as ms and compute an `at` roughly 1000x too
+ * soon — every SECONDS-unit epoch value for decades on either side of "now" is many orders of
+ * magnitude below 1e12 ms-since-epoch (year 2001), and every genuine ms-since-epoch value for the
+ * foreseeable future is comfortably above it, so this is an unambiguous discriminator, never a
+ * heuristic that could misfire on a real value.
+ */
+function normalizeExpiresAtMs(expiresAt: number): number {
+  return expiresAt < 1e12 ? expiresAt * 1000 : expiresAt;
+}
+
 export function createConsoleProfileBroker(deps: ConsoleProfileBrokerDeps): ConsoleProfileBroker {
   const sdk = deps.sdk ?? REAL_SDK;
   const store = credentialStoreOverSecretStore(deps.secrets);
@@ -230,21 +258,23 @@ export function createConsoleProfileBroker(deps: ConsoleProfileBrokerDeps): Cons
   // `startRefresher()` call during that gap would start a SECOND chain).
   let timer: unknown | "starting" | undefined;
 
-  /** Arms the NEXT fire at the given absolute time (ms since epoch, `now()`'s own units) — never
-   *  negative (a past `at` fires as soon as possible, never "in the past"). */
+  /** Arms the NEXT fire at the given absolute time (ms since epoch, `now()`'s own units) — clamped
+   *  to `MIN_REARM_DELAY_MS` (M3-clamp), never merely `>= 0`: a past or near-past `at` (a malformed
+   *  timestamp, or a token refreshed just under the lead window) fires no sooner than the floor,
+   *  never "as soon as possible". */
   function armAt(at: number): void {
     if (timer === undefined) return; // stopRefresher() ran while a refresh was in flight
-    timer = setT(runOnce, Math.max(0, at - now()));
+    timer = setT(runOnce, Math.max(MIN_REARM_DELAY_MS, at - now()));
   }
 
-  /** One refresh attempt, then re-arm: 60s before the fresh `expiresAt` on success, or after a
-   *  fixed `REFRESH_LEAD_MS` backoff on a failure/thrown rejection (never a permanent give-up —
-   *  see `REFRESH_LEAD_MS`'s own doc). */
+  /** One refresh attempt, then re-arm: 60s before the fresh `expiresAt` on success (its unit
+   *  normalised first — M3-clamp), or after a fixed `REFRESH_LEAD_MS` backoff on a failure/thrown
+   *  rejection (never a permanent give-up — see `REFRESH_LEAD_MS`'s own doc). */
   function runOnce(): void {
     doRefresh()
       .then((result) => {
         if (timer === undefined) return; // stopped while this refresh was in flight
-        armAt(result.ok && result.expiresAt !== undefined ? result.expiresAt - REFRESH_LEAD_MS : now() + REFRESH_LEAD_MS);
+        armAt(result.ok && result.expiresAt !== undefined ? normalizeExpiresAtMs(result.expiresAt) - REFRESH_LEAD_MS : now() + REFRESH_LEAD_MS);
       })
       .catch(() => {
         if (timer === undefined) return;
