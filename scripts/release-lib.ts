@@ -14,6 +14,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parseVersionsJson, winterSourceOf, type VersionsJson } from "../packages/core/src/runtime-sdk/bundle-layout";
+import { parseAntPin, type AntPin } from "./fetch-ant";
 
 export interface Preflight {
   ok: boolean;
@@ -472,6 +473,60 @@ export function verifyVersionsJsonAgainstPins(input: { versionsJsonText: string;
     );
   }
   return { ok: failures.length === 0, failures, versions };
+}
+
+export interface AntEmbedCheck {
+  ok: boolean;
+  failures: string[];
+  /** The parsed pin, when parsing itself succeeded — release.ts's own log line wants it either way. */
+  pin?: AntPin;
+}
+
+/**
+ * Winter Phase 10a (Task L3): the PURE half of release.ts's `ant` gate — mirrors
+ * `verifyVersionsJsonAgainstPins`'s shape for `claude`, adapted for the fact that `ant` never goes
+ * through `stage-runtimes.ts`'s ladder (`embed-runtimes.sh` copies it straight from
+ * `vendor/ant/<tag>/ant`, per Task L3) and the repo-root VERSIONS.json's `ant` pin
+ * (`{ tag, asset, sha256 }`, `scripts/fetch-ant.ts`'s `parseAntPin`) verifies the DOWNLOADED ZIP —
+ * a different digest than the extracted binary's own content necessarily hashes to, so it cannot
+ * be compared against a re-hash of the embedded FILE directly.
+ *
+ * Instead this checks the CHAIN: (1) VERSIONS.json's `ant` pin parses at all (a missing/malformed
+ * pin is refused, same as a missing/malformed `winter`/`claude` pin would be), and (2) the vendor
+ * stamp `fetch-ant.ts` wrote alongside `vendor/ant/<tag>/ant` at fetch time
+ * (`readVendorStamp`/`vendorStampPath`, a plain-text sha256 of the EXTRACTED BINARY) still matches
+ * the ACTUAL sha256 of the file release.ts is about to embed. Together these prove: the vendored
+ * copy came from a download that was checksum-verified against the pin (step 1 + the stamp's own
+ * provenance), AND nothing has modified/swapped/corrupted it since (step 2) — without re-fetching
+ * over the network at release time or requiring VERSIONS.json to carry a second, extracted-binary-
+ * shaped checksum field (L2's contract is exactly `{ tag, asset, sha256 }`, unchanged).
+ *
+ * `vendorStampText` is `undefined` when no stamp exists (a vendor/ant/<tag>/ directory that was
+ * never actually produced by `fetch-ant.ts`, e.g. hand-placed) — a named failure, never a silent
+ * pass. Aggregates rather than throwing so release.ts can report every mismatch in one `fail()`
+ * call, same shape as `preflight`/`verifyVersionsJsonAgainstPins`.
+ */
+export function verifyAntEmbed(input: { versionsJsonText: string; vendorStampText: string | undefined; actualSha256: string }): AntEmbedCheck {
+  let pin: AntPin;
+  try {
+    pin = parseAntPin(input.versionsJsonText);
+  } catch (err) {
+    return { ok: false, failures: [`VERSIONS.json: ${err instanceof Error ? err.message : String(err)}`] };
+  }
+  const failures: string[] = [];
+  if (input.vendorStampText === undefined) {
+    failures.push(
+      `no vendor stamp found for the pinned ant tag ${pin.tag} — the vendored vendor/ant/${pin.tag}/ant was not ` +
+        `produced by \`bun run scripts/fetch-ant.ts\` (or its stamp was removed); refusing to embed an unverified file`,
+    );
+  } else if (input.vendorStampText !== input.actualSha256) {
+    failures.push(
+      `the vendored ant binary's stamped sha256 (${input.vendorStampText}) does not match its ACTUAL sha256 ` +
+        `(${input.actualSha256}) — vendor/ant/${pin.tag}/ant has changed since \`fetch-ant.ts\` verified it; ` +
+        `re-run \`bun run scripts/fetch-ant.ts\` before releasing`,
+    );
+  }
+  return { ok: failures.length === 0, failures, pin };
 }
 
 export interface Row16CheckInput {

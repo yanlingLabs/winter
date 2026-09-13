@@ -126,7 +126,36 @@ export interface FetchAntOpts {
 
 export interface FetchAntResult {
   path: string;
+  /** sha256 of the DOWNLOADED ASSET (the .zip) — matches `pin.sha256`, the value this function
+   *  actually verifies against before extracting anything. */
   sha256: string;
+  /** sha256 of the EXTRACTED BINARY itself (a different digest than `sha256` above — a zip and its
+   *  contents never hash the same) — also written to the vendor stamp (`vendorStampPath`) so a
+   *  LATER, separate step (Task L3's `release-lib.ts` embed check) can prove the exact file it is
+   *  about to embed is the exact one this run verified and extracted, without re-downloading. */
+  binarySha256: string;
+}
+
+/** `<outDir>/.vendored-sha256` — a plain-text stamp (Winter Phase 10a, Task L3) recording the
+ *  EXTRACTED BINARY's own sha256 at fetch time, sibling to fetch-cef.ts's `.vendored-version`
+ *  idempotency stamp. VERSIONS.json's `ant` pin (`{ tag, asset, sha256 }`) verifies the DOWNLOADED
+ *  ZIP; this stamp is what lets a later step verify the CURRENT on-disk `<outDir>/ant` file still
+ *  matches what was extracted and verified here — a zip's sha256 and its extracted content's
+ *  sha256 are necessarily different digests, so this is a second, purpose-built value, not a
+ *  re-statement of the pin. */
+export function vendorStampPath(outDir: string): string {
+  return join(outDir, ".vendored-sha256");
+}
+
+/** Reads a vendor stamp written by `fetchAnt`, or `undefined` if absent/unreadable — never a
+ *  throw, since "no stamp yet" (a fresh checkout that hasn't fetched) is a legitimate state the
+ *  caller (release-lib.ts's `verifyAntEmbed`) reports as its own named failure. */
+export function readVendorStamp(outDir: string): string | undefined {
+  try {
+    return readFileSync(vendorStampPath(outDir), "utf8").trim();
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -158,11 +187,14 @@ export async function fetchAnt(opts: FetchAntOpts): Promise<FetchAntResult> {
     if (!existsSync(extractedBin)) {
       throw new Error(`fetch-ant: extraction did not produce an "ant" binary at ${extractedBin}`);
     }
+    const binaryBytes = readFileSync(extractedBin);
+    const binarySha256 = sha256Hex(binaryBytes);
     mkdirSync(opts.outDir, { recursive: true });
     const finalPath = join(opts.outDir, "ant");
-    writeFileSync(finalPath, readFileSync(extractedBin));
+    writeFileSync(finalPath, binaryBytes);
     chmodSync(finalPath, 0o755);
-    return { path: finalPath, sha256: actual };
+    writeFileSync(vendorStampPath(opts.outDir), `${binarySha256}\n`);
+    return { path: finalPath, sha256: actual, binarySha256 };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -173,7 +205,7 @@ if (import.meta.main) {
   const outDir = join(VENDOR_ANT_ROOT, pin.tag);
   console.log(`fetch-ant: fetching ${pin.asset} @ ${pin.tag} -> ${outDir}/ant`);
   fetchAnt({ pin, outDir }).then(
-    (result) => console.log(`fetch-ant: OK — sha256 ${result.sha256} verified, wrote ${result.path}`),
+    (result) => console.log(`fetch-ant: OK — asset sha256 ${result.sha256} verified, wrote ${result.path} (binary sha256 ${result.binarySha256})`),
     (err: unknown) => {
       console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);

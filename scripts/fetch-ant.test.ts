@@ -15,7 +15,9 @@ import {
   extractAntFromZipReal,
   fetchAnt,
   parseAntPin,
+  readVendorStamp,
   sha256Hex,
+  vendorStampPath,
   type AntPin,
 } from "./fetch-ant";
 
@@ -98,6 +100,15 @@ describe("fetchAnt (loopback fake server)", () => {
     // chmod 755
     const mode = statSync(result.path).mode & 0o777;
     expect(mode).toBe(0o755);
+
+    // Winter Phase 10a (Task L3): the extracted binary's OWN sha256 (a different digest than the
+    // zip's) is both returned and stamped to <outDir>/.vendored-sha256 — release-lib.ts's later
+    // embed check reads this stamp to prove the on-disk vendor copy is unchanged since this fetch.
+    const expectedBinarySha256 = createHash("sha256").update(readFileSync(result.path)).digest("hex");
+    expect(result.binarySha256).toBe(expectedBinarySha256);
+    expect(result.binarySha256).not.toBe(result.sha256); // zip vs. extracted content never match
+    expect(readVendorStamp(outDir)).toBe(expectedBinarySha256);
+    expect(readFileSync(vendorStampPath(outDir), "utf8")).toBe(`${expectedBinarySha256}\n`);
   });
 
   test("wrong-digest refusal: a checksum mismatch throws AntChecksumMismatch, extraction never runs, outDir untouched", async () => {
@@ -177,5 +188,13 @@ describe("sha256Hex", () => {
   test("matches node's own crypto digest", () => {
     const bytes = new TextEncoder().encode("hello ant");
     expect(sha256Hex(bytes)).toBe(createHash("sha256").update(bytes).digest("hex"));
+  });
+});
+
+describe("readVendorStamp", () => {
+  test("returns undefined when no stamp exists — never a throw", () => {
+    const dir = mkdtempSync(join(tmpdir(), "fetch-ant-stamp-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    expect(readVendorStamp(dir)).toBeUndefined();
   });
 });
