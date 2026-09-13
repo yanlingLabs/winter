@@ -494,6 +494,10 @@ export interface WinterOptions {
   /** P8c-3's own rung, same blank-is-absent rule. Read only by the official leg's ladder — inert on
    *  a Winter-only session. */
   claudeExecutable?: string;
+  /** Winter Phase 10a (Lane L's `bundle-layout.ts` `resolveAntExecutable` ladder), same
+   *  blank-is-absent rule. Read only by the console-profile broker (`daemon.ts`, O6) — inert
+   *  everywhere else. */
+  antExecutable?: string;
   advisorModel?: string;
   idleTimeoutSec: number;
   winterLeg: { chat: boolean; dispatch: boolean; code: boolean };
@@ -536,6 +540,7 @@ export function winterOptionsFromSettings(s: Settings | null | undefined): Winte
   return {
     ...(blankIsAbsent(r?.winterExecutable) === undefined ? {} : { winterExecutable: blankIsAbsent(r?.winterExecutable)! }),
     ...(blankIsAbsent(r?.claudeExecutable) === undefined ? {} : { claudeExecutable: blankIsAbsent(r?.claudeExecutable)! }),
+    ...(blankIsAbsent(r?.antExecutable) === undefined ? {} : { antExecutable: blankIsAbsent(r?.antExecutable)! }),
     ...(blankIsAbsent(r?.advisorModel) === undefined ? {} : { advisorModel: blankIsAbsent(r?.advisorModel)! }),
     idleTimeoutSec: r?.winterIdleTimeoutSec ?? DEFAULT_WINTER_IDLE_TIMEOUT_SEC,
     // Task 17 Step 4: the engine leg no longer exists. Every mode answers `true` whatever the block
