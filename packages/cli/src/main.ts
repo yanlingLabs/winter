@@ -1,7 +1,6 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { createInterface } from "node:readline";
 import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, runRuntimesProbe, resolveWinterProfile } from "@yanlinglabs/winter-core";
 import type { Settings } from "@yanlinglabs/winter-core";
 import { METHODS, type ApprovalPolicy, type Task } from "@yanlinglabs/winter-protocol";
@@ -1886,24 +1885,29 @@ if (import.meta.main) {
         console.error(`could not start the console login: ${err instanceof Error ? err.message : String(err)}`);
         process.exit(1);
       }
-      const rl = createInterface({ input: process.stdin, terminal: false });
-      // Every pasted line is forwarded verbatim — NEVER logged here (this file's own discipline
-      // for every other secret-entry branch: readSecret, invisibleKeyCharWarning, etc.). The login
-      // protocol takes exactly ONE code: `submitted` guards against a double Enter, a pasted
-      // multi-line blob, or any other stray extra `line` event calling `submitCode` a second time
-      // (the SDK's own child has already consumed/closed on the first submission by then).
+      // Fix wave (N4): read the pasted code WITHOUT ECHO — the SAME `readSecret` helper every
+      // other key-entry door in this file already uses (--anthropic-key et al.), instead of
+      // `createInterface({terminal:false})`, which left the pasted one-time code visible in the
+      // clear on the screen for however long it stays valid. `readSecret` masks each character
+      // with "*", matching the UX of every other secret entry in this CLI.
+      //
+      // A FLOATING promise (never awaited before `await handle.done` below) — same shape as the
+      // `rl.on("line", ...)` listener it replaces: a real login only completes once the code is
+      // submitted, so this read and `handle.done` must run CONCURRENTLY, and Node's event loop
+      // drives both independently of which one this function happens to be "at" in source order.
+      // `submitted` guards the same double-fire class the old comment named (a stray extra
+      // resolution can never call `submitCode` twice — the SDK's own child has already
+      // consumed/closed on the first submission by then). A login that ends BEFORE any code is
+      // ever pasted (an early SDK-side failure) calls `process.exit(1)` below immediately, so a
+      // still-pending `readSecret()` never gets the chance to hang the CLI waiting on stdin.
       let submitted = false;
-      rl.on("line", (line) => {
+      void (async () => {
+        const code = (await readSecret("Paste code here: ")).trim();
         if (submitted) return;
         submitted = true;
-        void handle.submitCode(line.trim());
-      });
-      let result: Awaited<typeof handle.done>;
-      try {
-        result = await handle.done;
-      } finally {
-        rl.close();
-      }
+        void handle.submitCode(code);
+      })();
+      const result: Awaited<typeof handle.done> = await handle.done;
       if (result.ok) {
         console.log(`${AQUA}signed in${RESET} — profile "${result.profile}"`);
         const refreshed = await broker.refreshBearer().catch((err) => ({ ok: false as const, reason: err instanceof Error ? err.name : "unknown" }));
