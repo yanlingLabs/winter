@@ -488,14 +488,27 @@ describe("registerHandoffParticipants: destination.confirmInit (m4 — the plan-
     return registered.destination;
   }
 
-  /** Unlike `fakeWinter`, `ensure` actually resolves — needed for the ONE test in this block that
-   *  drives `confirmInit`'s SUCCESS path all the way through. */
-  function fakeWinterThatOpens(): WinterSessionDrivers {
+  /** Unlike `fakeWinter`, `ensure` actually resolves — needed for the tests in this block that drive
+   *  `confirmInit` past its own `ensure()` call. P10a-h: `confirmInit` now also awaits
+   *  `awaitDestinationInit` (`session.init`/`session.done`), so the resolved driver must be a
+   *  genuine (if minimal) `LegSession` shape — an already-inited one by default (`init: { tools: [] }`,
+   *  `done` a promise that never settles, exactly like a healthy long-running session), or the
+   *  "exited before init" shape a caller opts into via `opts.diesBeforeInit`. */
+  function fakeWinterThatOpens(opts?: { diesBeforeInit?: boolean }): WinterSessionDrivers {
     const never = (): never => { throw new Error("not reached by this test"); };
+    const session: LegSession = {
+      sessionId: "s1", backendSessionId: "be-1-new", mode: "code", state: "live", generation: 1, resumed: true,
+      init: opts?.diesBeforeInit === true ? undefined : { tools: [] },
+      turnRunning: false, turnStartedAt: undefined,
+      done: opts?.diesBeforeInit === true ? Promise.resolve() : new Promise<void>(() => { /* never settles — a healthy session */ }),
+      pendingSends: [], heldDeliveries: [],
+      send: never, steer: never, interrupt: never, compact: never, setModel: never, setPolicy: never,
+      end: never, deliver: never, open: never, idle: never,
+    };
     return {
       legForNewSession: () => "winter", legOf: never, assertAvailable: () => {},
       create: never, get: () => undefined, runTurn: never,
-      ensure: async () => ({}) as LegSession,
+      ensure: async () => session,
       evict: async () => {}, list: () => [], endAll: never,
     };
   }
@@ -517,6 +530,27 @@ describe("registerHandoffParticipants: destination.confirmInit (m4 — the plan-
       expect(record.runtimeKind).toBe("claude-agent");
       expect(record.state).toBe("ready"); // untouched — `patch` never writes `state`
       expect(record.backendSessionId).toBe(targetFor("s1").backendSessionId);
+    });
+  });
+
+  // P10a-h (measured live 2026-09-13): `ensure()` resolving used to be treated as success even
+  // though `open()` returns before the destination's first frame ever arrives — the destination
+  // child can exit "before init" milliseconds later, and the handoff had already been reported
+  // `applied`. `confirmInit` now awaits `awaitDestinationInit`; a driver whose `init` never becomes
+  // defined before its `done` settles is a typed refusal, and the record reverts to what it was.
+  test("P10a-h: the destination child exits before init — confirmInit refuses typed and reverts the record", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1"); // ready, recorded as winter-agent (seedRecord's own SELECTION)
+      const destination = registerDestination(records, fakeWinterThatOpens({ diesBeforeInit: true }));
+      const built = destination({ projectKey: "pk", sessionId: "be-1" }, "claude-agent");
+      const result = await built!.confirmInit(targetFor("s1"));
+      expect(result.ok).toBe(false);
+      expect((result as { reason: string }).reason).toContain("exited before it reached init");
+      // Reverted: the record still names the SOURCE leg/selection/backend id — a refusal here keeps
+      // the source owner (the barrier's own contract), which only holds if the record still agrees.
+      const record = records.get("s1")!;
+      expect(record.runtimeKind).toBe("winter-agent");
+      expect(record.backendSessionId).toBe("be-1");
     });
   });
 
