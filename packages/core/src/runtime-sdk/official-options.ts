@@ -30,6 +30,7 @@ import { officialCapabilityServersFor, type OfficialMcpModule } from "./official
 import { winterSystemPromptFor } from "./system-prompt";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import type { OfficialPeer } from "./create";
+import { CONSOLE_AUTH_ROUTER_MIN, installedWinterRuntimeSdkVersion, versionAtLeast } from "./versions";
 
 /**
  * Phase 9c (P9c-1, WS-00 §8 #1): env names the official leg's spawned child must NEVER inherit
@@ -286,6 +287,29 @@ export class OfficialProjectKeyTooDeep extends Error {
   }
 }
 
+/**
+ * Winter Phase 10a fix wave (C1-interim): the console auth arm refuses typed, before anything is
+ * spawned, while the installed `@yanlinglabs/winter-runtime-sdk` is older than
+ * `CONSOLE_AUTH_ROUTER_MIN` (`versions.ts`'s own doc explains why: the pinned 0.0.3 router would
+ * inject the OAuth bearer profile as `ANTHROPIC_API_KEY`, which is exactly the leak `officialAuthChildEnvFor`'s
+ * console arm exists to prevent). This refusal is a STANDING guard, not a one-time migration note —
+ * it re-evaluates the installed version on every call (or the test-injected
+ * `OfficialInputDeps.installedWinterRuntimeSdkVersion` override) and stops refusing automatically
+ * the moment a router upgrade actually lands.
+ */
+export class OfficialConsoleRouterUnsupported extends Error {
+  readonly code = "official_console_router_unsupported" as const;
+  constructor(readonly installedRouterVersion: string | undefined, readonly requiredRouterVersion: string) {
+    super(
+      `the console auth arm needs @yanlinglabs/winter-runtime-sdk >= ${requiredRouterVersion} (the pinned router forwards ` +
+      `only its own minimal OS environment and runs its api-key credential plan unconditionally, which would inject the ` +
+      `console profile's OAuth bearer as ANTHROPIC_API_KEY); installed ${installedRouterVersion ?? "unknown"} — sign in with ` +
+      `an API key instead, or wait for the router upgrade`,
+    );
+    this.name = "OfficialConsoleRouterUnsupported";
+  }
+}
+
 export interface OfficialSessionInput {
   sessionId: string;
   parentSessionId?: string;
@@ -354,6 +378,11 @@ export interface OfficialInputDeps {
    *  pick `expectedApiKeySource`'s argument — `undefined` there still means "assume api-key",
    *  matching every pre-P10a call site that never set this field. */
   officialAuthArm?: "api-key" | "console";
+  /** Winter Phase 10a fix wave (C1-interim): test-only override of `versions.ts`'s
+   *  `installedWinterRuntimeSdkVersion` — lets a test simulate a router upgrade (`() => "0.0.4"`)
+   *  without a real second package install. `undefined` (every production caller, and every test
+   *  that does not need to touch this gate) means "read the real installed version". */
+  installedWinterRuntimeSdkVersion?: () => string | undefined;
 }
 
 /** `winterSystemPromptFor`'s memory-bucket choice, verbatim (chat/dispatch share `_assistant`; code
@@ -391,7 +420,7 @@ export interface OfficialInput {
 export function officialInputFor(
   input: OfficialSessionInput,
   deps: OfficialInputDeps,
-): OfficialInput | ClaudeExecutableUnavailable | OfficialProjectKeyTooDeep | OfficialCredentialPlanRefused {
+): OfficialInput | ClaudeExecutableUnavailable | OfficialProjectKeyTooDeep | OfficialCredentialPlanRefused | OfficialConsoleRouterUnsupported {
   const executable = deps.claudeExecutableFor();
   if (executable instanceof ClaudeExecutableUnavailable) return executable;
 
@@ -406,6 +435,18 @@ export function officialInputFor(
   // caller, and every non-api-key family, which `session-driver.ts`'s own gate never sets this
   // field for) means "api-key", byte-identical to today's behaviour.
   const officialAuthArm: "api-key" | "console" = deps.officialAuthArm ?? "api-key";
+
+  // Fix wave (C1-interim): the router-version gate — checked BEFORE anything else in this function
+  // builds a bridge, reads a credential, or touches disk, so a session refuses typed the instant
+  // the console arm is decided, never partway through assembling an input nothing could safely
+  // launch with. See `OfficialConsoleRouterUnsupported`'s own doc for why this is standing, not
+  // one-time.
+  if (officialAuthArm === "console") {
+    const installedRouterVersion = (deps.installedWinterRuntimeSdkVersion ?? installedWinterRuntimeSdkVersion)();
+    if (!versionAtLeast(installedRouterVersion, CONSOLE_AUTH_ROUTER_MIN)) {
+      return new OfficialConsoleRouterUnsupported(installedRouterVersion, CONSOLE_AUTH_ROUTER_MIN);
+    }
+  }
 
   // Fix round 1 (item 0): the REAL bridge (router 0.0.3) — never the fail-closed default a bare
   // broker used to fall through to. `mode` here is the SAME `permissionMode` this session's

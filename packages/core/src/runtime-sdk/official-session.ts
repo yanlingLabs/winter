@@ -22,7 +22,7 @@ import { MAIN_THREAD, ProjectorRefusedError, classifyThrown, createProjector, ty
 import type { WinterRuntimeSdk, SessionMode } from "./create";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import { officialSubscriptionAuthEnabled } from "../settings";
-import { ensureOfficialConfigDir, OfficialCredentialPlanRefused, officialInputFor, OfficialProjectKeyTooDeep, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
+import { ensureOfficialConfigDir, OfficialConsoleRouterUnsupported, OfficialCredentialPlanRefused, officialInputFor, OfficialProjectKeyTooDeep, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { attachOfficialSession, type OfficialSessionAttachHandle, type OfficialSessionAttachment } from "./messaging";
 // P10a-h: the SAME grace window `WinterSession.end()` races against — reused, not reinvented, so
@@ -421,7 +421,7 @@ class OfficialSessionImpl implements OfficialSession {
       await this.lastDone;
       const inputDeps = await this.deps.inputDeps();
       const built = officialInputFor(this.deps.sessionInput(), inputDeps);
-      if (built instanceof ClaudeExecutableUnavailable || built instanceof OfficialProjectKeyTooDeep || built instanceof OfficialCredentialPlanRefused) throw built;
+      if (built instanceof ClaudeExecutableUnavailable || built instanceof OfficialProjectKeyTooDeep || built instanceof OfficialCredentialPlanRefused || built instanceof OfficialConsoleRouterUnsupported) throw built;
       // Phase 9c (P9c-1): create/harden the Winter-owned config dir NOW — the one point in this
       // leg's whole lifecycle that is an actual spawn against a real `WINTER_HOME`, as opposed to
       // `officialInputFor`'s own pure path computation (see `ensureOfficialConfigDir`'s own doc for
