@@ -17,9 +17,10 @@ const RELEASE_TS_PATH = join(import.meta.dir, "release.ts");
 const source = readFileSync(RELEASE_TS_PATH, "utf8");
 
 describe("release.ts wires the full ant content-identity chain into the embedded-runtime gate sequence (fix round 2)", () => {
-  test("imports verifyAntEmbed from ./release-lib and parseAntPin from ./fetch-ant", () => {
+  test("imports verifyAntEmbed from ./release-lib and parseAntPin (+ fetchAnt, fix wave F5) from ./fetch-ant", () => {
     expect(source).toMatch(/import\s*\{[^}]*verifyAntEmbed[^}]*\}\s*from\s*"\.\/release-lib"/);
-    expect(source).toMatch(/import\s*\{\s*parseAntPin\s*\}\s*from\s*"\.\/fetch-ant"/);
+    expect(source).toMatch(/import\s*\{[^}]*\bfetchAnt\b[^}]*\}\s*from\s*"\.\/fetch-ant"/);
+    expect(source).toMatch(/import\s*\{[^}]*\bparseAntPin\b[^}]*\}\s*from\s*"\.\/fetch-ant"/);
   });
 
   test("asserts the embedded ant binary's TeamIdentifier/timestamp via the SAME generic assertSigned() winter uses (never claude's separate 'verify untouched' shape)", () => {
@@ -46,9 +47,37 @@ describe("release.ts wires the full ant content-identity chain into the embedded
     expect(stagedCheckIdx).toBeGreaterThan(vendorCheckIdx);
   });
 
-  test("refuses loudly (never a silent skip) when the vendored ant source is missing, naming fetch-ant.ts", () => {
+  // Fix wave (F5): a missing vendor/ant/<tag>/ant used to be a hard release-preflight failure — but
+  // `embed-runtimes.sh` (the Xcode build's own postCompileScript) needs it to already exist, so
+  // that failure fired only AFTER xcodebuild had already aborted the build for the same reason, and
+  // the post-build "vendoredAntPath" sanity check below never even ran. release.ts now auto-fetches
+  // it (via the already-verifying `fetchAnt`) BEFORE the build starts, instead of hard-failing.
+  test("auto-fetches the vendored ant BEFORE the build when it is missing, via the existing verifying fetchAnt (F5)", () => {
+    expect(source).toMatch(/if \(!existsSync\(vendoredAntPath\)\)\s*\{[\s\S]{0,400}?fetchAnt\(\{\s*pin:\s*antPin,\s*outDir:/);
+    // One line, printed before the fetch actually runs.
+    expect(source).toMatch(/console\.log\(`vendor\/ant\/\$\{antPin\.tag\}\/ant not found — fetching it now/);
+  });
+
+  test("the auto-fetch check sits BEFORE the xcodebuild invocation, not after (fix wave F5) — the earlier the post-build vendoredAntPath check never runs otherwise", () => {
+    const autoFetchIdx = source.indexOf("fetchAnt({ pin: antPin, outDir:");
+    const xcodebuildIdx = source.indexOf("xcodebuild -project Winter.xcodeproj");
+    expect(autoFetchIdx).toBeGreaterThan(-1);
+    expect(xcodebuildIdx).toBeGreaterThan(-1);
+    expect(autoFetchIdx).toBeLessThan(xcodebuildIdx);
+  });
+
+  // The post-build "vendoredAntPath" check (below) is now a SUPPLEMENTARY safety net, not the
+  // primary handling of a missing file — with the pre-build auto-fetch above, it should never
+  // actually fire in practice, but it still refuses loudly (never a silent skip) if it somehow
+  // does (e.g. something removed the file mid-build).
+  test("still refuses loudly (never a silent skip) if the vendored ant is somehow still missing post-build, naming fetch-ant.ts", () => {
     expect(source).toMatch(/if \(!existsSync\(vendoredAntPath\)\)\s*\{\s*fail\(/);
     expect(source).toContain("bun run scripts/fetch-ant.ts");
+  });
+
+  test("documents that the root VERSIONS.json (the ant vendoring pin) is a different file from the staged runtimes/claude-official/VERSIONS.json", () => {
+    expect(source).toContain("runtimes/claude-official/VERSIONS.json");
+    expect(source.toLowerCase()).toContain("different file");
   });
 
   test("the ant gate (vendor check -> staged-hash check -> embedded codesign check) sits AFTER the claude embedded-runtime check and BEFORE the Row 16 winter-source section — the same sequence position as the winter/claude checks it mirrors", () => {

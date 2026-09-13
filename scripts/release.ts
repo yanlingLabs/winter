@@ -110,7 +110,7 @@ import {
   verifyAntEmbed,
   verifyVersionsJsonAgainstPins,
 } from "./release-lib";
-import { parseAntPin } from "./fetch-ant";
+import { fetchAnt, parseAntPin } from "./fetch-ant";
 import { CODEX_MODELS_VERIFIED } from "../packages/core/src/providers/codex-config";
 import { winterSourceOf } from "../packages/core/src/runtime-sdk/bundle-layout";
 import { REQUIRED_WINTER_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
@@ -335,6 +335,32 @@ if (!NO_BUMP) {
 }
 const version = readCanonical();
 console.log(`Releasing version ${version}${BETA ? " (beta)" : ""}`);
+
+// ---------------------------------------------------------------------------
+// 2b. Ensure the vendored `ant` binary is present BEFORE the build (fix wave, F5). NOTE: the
+//     repo-root `VERSIONS.json` read here (the `ant` vendoring pin — tag/asset/sha256/binarySha256)
+//     is a DIFFERENT file from the STAGED `runtimes/claude-official/VERSIONS.json` this same script
+//     verifies post-build (`verifyVersionsJsonAgainstPins`/`verifyAntEmbed`, below) — the former is
+//     this checkout's pin, the latter is what a specific build actually staged.
+//
+//     `embed-runtimes.sh` (the Xcode build's own postCompileScript, invoked by section 3's
+//     `xcodebuild` below) hard-fails immediately if `vendor/ant/<tag>/ant` is missing, so a missing
+//     vendor copy has to be caught — and fixed — HERE, before that invocation, not in the
+//     post-build "vendoredAntPath" sanity check further down (which never even runs: the build
+//     itself already aborted by the time execution would reach it). Previously this same absence
+//     was a hard release-preflight failure telling the operator to run `fetch-ant.ts` by hand; it
+//     now runs the existing, already-verifying `fetchAnt` (asset sha256 THEN extracted-binary
+//     sha256, both against the committed pin) automatically instead.
+// ---------------------------------------------------------------------------
+{
+  const rootVersionsJsonText = readFileSync(join(ROOT, "VERSIONS.json"), "utf8");
+  const antPin = parseAntPin(rootVersionsJsonText);
+  const vendoredAntPath = join(ROOT, "vendor", "ant", antPin.tag, "ant");
+  if (!existsSync(vendoredAntPath)) {
+    console.log(`vendor/ant/${antPin.tag}/ant not found — fetching it now (pinned asset ${antPin.asset})...`);
+    await fetchAnt({ pin: antPin, outDir: join(ROOT, "vendor", "ant", antPin.tag) });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // 3. Build — T1's canonical override invocation, -derivedDataPath <OUT>/dd (OUT is
