@@ -165,6 +165,50 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
     c.close();
   });
 
+  // Fix wave (N1): the first https:// URL any progress line carries becomes the RPC's own
+  // best-effort urlHint — captured from whatever the broker's onLine callback fires SYNCHRONOUSLY
+  // during login() (this fake, and a fast local spawn, both do), stripped of any query string a
+  // second time (defence in depth — the SDK/broker is documented to already strip it).
+  test("provider.login's result carries urlHint, stripped of any query string, from the first URL-bearing line (N1)", async () => {
+    const { socketPath, harnessToken } = await boot({
+      login: async (onLine) => {
+        onLine("Opening browser to sign in...");
+        onLine("If the browser didn't open, visit: https://platform.claude.com/oauth/authorize?code=true&state=abc123");
+        return { submitCode: async () => {}, done: new Promise(() => {}) };
+      },
+    });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
+    expect(result.result).toEqual({ started: true, urlHint: "https://platform.claude.com/oauth/authorize" });
+    c.close();
+  });
+
+  test("provider.login's result has NO urlHint key when no progress line carries a URL", async () => {
+    const { socketPath, harnessToken } = await boot(); // default fake: "Opening browser to sign in..." only
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
+    expect(result.result).toEqual({ started: true });
+    expect("urlHint" in result.result).toBe(false);
+    c.close();
+  });
+
+  test("provider.login's result keeps the FIRST url when multiple lines carry one", async () => {
+    const { socketPath, harnessToken } = await boot({
+      login: async (onLine) => {
+        onLine("visit https://first.example.com/a?x=1");
+        onLine("or https://second.example.com/b?y=2");
+        return { submitCode: async () => {}, done: new Promise(() => {}) };
+      },
+    });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
+    expect(result.result).toEqual({ started: true, urlHint: "https://first.example.com/a" });
+    c.close();
+  });
+
   test("provider.login's handle resolving ok broadcasts provider_login_finished {ok:true}", async () => {
     const { socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
@@ -254,6 +298,40 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
     const result = await c.request(METHODS.providerLogout, { provider: "anthropic", kind: "console" });
     expect(result.result).toEqual({ ok: true });
     expect(calls).toContain("logout");
+    c.close();
+  });
+
+  // Fix wave (N5): a progress line longer than the 1024-char clip must never reach the wire
+  // uncapped, well under the protocol's own 2048-char schema ceiling.
+  test("a provider_login_progress line longer than 1024 chars is clipped before broadcast (N5)", async () => {
+    const longLine = "x".repeat(5000);
+    const { socketPath, harnessToken } = await boot({
+      login: async (onLine) => {
+        onLine(longLine);
+        return { submitCode: async () => {}, done: new Promise(() => {}) };
+      },
+    });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
+    await waitFor(() => c.events.some((e) => e.type === "provider_login_progress"));
+    const progress = c.events.find((e) => e.type === "provider_login_progress");
+    expect((progress.line as string).length).toBe(1024);
+    expect(progress.line).toBe("x".repeat(1024));
+    c.close();
+  });
+
+  test("a provider_login_finished reason longer than 1024 chars is clipped before broadcast (N5)", async () => {
+    const longReason = "y".repeat(5000);
+    const { socketPath, harnessToken } = await boot({
+      login: async () => ({ submitCode: async () => {}, done: Promise.resolve({ ok: false, reason: longReason }) }),
+    });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    await c.request(METHODS.providerLogin, { provider: "anthropic", kind: "console" });
+    await waitFor(() => c.events.some((e) => e.type === "provider_login_finished"));
+    const finished = c.events.find((e) => e.type === "provider_login_finished");
+    expect((finished.reason as string).length).toBe(1024);
     c.close();
   });
 

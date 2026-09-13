@@ -30,7 +30,7 @@ import {
   PanelListParams, PanelOpenTabParams, PanelCloseTabParams, PanelActivateTabParams, PanelReportNavigationParams,
   PanelCommandResultParams, PanelReadDiffParams,
   SYSTEM_SESSION_ID,
-  type SessionEvent, ConnWriter, type WritableSocket,
+  SessionEvent, ConnWriter, type WritableSocket,
 } from "@yanlinglabs/winter-protocol";
 import type { TokenAuthority } from "../auth/tokens";
 import type { SecretStore } from "../auth/secret-store";
@@ -1001,15 +1001,51 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
   // rather than silently letting either happen.
   let activeAnthropicLogin: { submitCode(code: string): Promise<void> } | undefined;
 
+  /** Fix wave (N1): the FIRST `https://` URL substring in a progress line, for `provider.login`'s
+   *  own best-effort `urlHint` return field (the app's login sheet shows this as a clickable
+   *  fallback link before the very first `provider_login_progress` event has even arrived). The
+   *  SDK's own console-broker already strips a query string from every line it streams
+   *  (`console-profile-broker.ts`'s own header) — this strips again, defensively, so a query
+   *  string (which could carry a one-time code/state param) is never forwarded as `urlHint` even
+   *  if a future SDK change stops sanitizing at the source. `undefined` when the line carries no
+   *  URL at all — never a throw, never a guess. */
+  function extractUrlHint(line: string): string | undefined {
+    const match = line.match(/https:\/\/\S+/);
+    if (!match) return undefined;
+    const [withoutQuery] = match[0].split("?");
+    return withoutQuery;
+  }
+
+  /** Fix wave (N5): a defensive clip well under the protocol's own `PROVIDER_LOGIN_LINE_MAX_LENGTH`
+   *  (2048) — applied BEFORE the event is even built, so a pathological line from a future
+   *  SDK/binary change can never reach the zod validation below only 1 byte under that ceiling. */
+  const PROVIDER_LOGIN_LINE_CLIP_LENGTH = 1024;
+
   /** Broadcasts `provider_login_progress`/`provider_login_finished` to every authed harness —
    *  modeled EXACTLY on `broadcastTileUpdated` above (same `harnessConns` set, same `systemSeq`
    *  counter, same enqueue/encodeLine, same swallow-on-dead-socket): neither event is scoped to any
    *  session (`SYSTEM_SESSION_ID`), so both go out over the harness broadcast set rather than the
-   *  per-session `SessionHub`. */
+   *  per-session `SessionHub`.
+   *
+   *  Fix wave (N5): `line`/`reason` are clipped to `PROVIDER_LOGIN_LINE_CLIP_LENGTH` before the
+   *  event is assembled, and the assembled event is validated through the SAME `SessionEvent` zod
+   *  schema every other producer is bound by — log-and-drop on a failed parse (never throw out of
+   *  a broadcast helper, never forward a shape a client is entitled to assume already passed this
+   *  gate). In practice this should never actually fire (the clip plus the two literal `type`s and
+   *  a non-empty `provider` already satisfy the schema) — it exists as defence in depth against a
+   *  FUTURE change to either shape, not a gap known to exist today. */
   function broadcastAnthropicLoginEvent(event: { type: "provider_login_progress"; provider: string; line: string } | { type: "provider_login_finished"; provider: string; ok: boolean; reason?: string }): void {
-    const full = { ...event, sessionId: SYSTEM_SESSION_ID, seq: ++systemSeq, ts: Date.now() };
+    const clipped = event.type === "provider_login_progress"
+      ? { ...event, line: event.line.slice(0, PROVIDER_LOGIN_LINE_CLIP_LENGTH) }
+      : { ...event, ...(event.reason === undefined ? {} : { reason: event.reason.slice(0, PROVIDER_LOGIN_LINE_CLIP_LENGTH) }) };
+    const full = { ...clipped, sessionId: SYSTEM_SESSION_ID, seq: ++systemSeq, ts: Date.now() };
+    const parsed = SessionEvent.safeParse(full);
+    if (!parsed.success) {
+      console.error(`broadcastAnthropicLoginEvent: dropped an invalid ${event.type} event: ${parsed.error.message}`);
+      return;
+    }
     for (const conn of harnessConns) {
-      try { conn.writer.enqueue(encodeLine({ jsonrpc: "2.0", method: METHODS.event, params: full })); }
+      try { conn.writer.enqueue(encodeLine({ jsonrpc: "2.0", method: METHODS.event, params: parsed.data })); }
       catch { /* dead socket — its close() handler will evict it from harnessConns */ }
     }
   }
@@ -2739,9 +2775,20 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         parseParams(ProviderLoginParams, params);
         if (!opts.consoleBroker) throw new RpcFailure(ERR.INTERNAL, "provider.login is not available on this server (no console broker configured)");
         if (activeAnthropicLogin) throw new RpcFailure(ERR.INVALID_PARAMS, "an Anthropic Console login is already in progress");
+        // Fix wave (N1): best-effort — captures the FIRST `https://` URL any progress line
+        // carries, so the RPC's own return value can hand the app a fallback link even before its
+        // very first `provider_login_progress` event round-trips back over the wire. `login()`'s
+        // fake/real onLine callback can fire synchronously during the call (this file's own tests,
+        // and a fast local spawn), which is the only way this is ever populated — a later line
+        // (after this handler has already returned) only ever reaches the broadcast, never this
+        // return value, and that is fine: `urlHint` is documented optional/best-effort.
+        let urlHint: string | undefined;
         let handle: Awaited<ReturnType<ConsoleProfileBroker["login"]>>;
         try {
-          handle = await opts.consoleBroker.login((line) => broadcastAnthropicLoginEvent({ type: "provider_login_progress", provider: "anthropic", line }));
+          handle = await opts.consoleBroker.login((line) => {
+            if (urlHint === undefined) urlHint = extractUrlHint(line);
+            broadcastAnthropicLoginEvent({ type: "provider_login_progress", provider: "anthropic", line });
+          });
         } catch (err) {
           throw new RpcFailure(ERR.INTERNAL, err instanceof Error ? err.message : String(err));
         }
@@ -2766,7 +2813,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             broadcastAnthropicLoginEvent({ type: "provider_login_finished", provider: "anthropic", ok: false, reason: err instanceof Error ? err.name : "unknown" });
           })
           .finally(() => { if (activeAnthropicLogin === handle) activeAnthropicLogin = undefined; });
-        return { started: true };
+        return { started: true, ...(urlHint === undefined ? {} : { urlHint }) };
       }
 
       // `provider.loginCode`: the pasted one-time code, over this SAME local socket. NEVER logged
