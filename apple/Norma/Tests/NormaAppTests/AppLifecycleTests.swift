@@ -31,8 +31,14 @@ final class AppLifecycleTests: XCTestCase {
     /// (armed by `UpdaterCoordinator.onWillInstall` right before Sparkle's install handler —
     /// Sparkle quits the host via a CANCELLABLE quit event with no kAEQuitReason, so without
     /// this axis the gate would answer it `.terminateCancel` like a ⌘Q and silently defeat the
-    /// whole update). ONLY all-false — a plain user ⌘Q/dock-quit — cancels; refusing a
-    /// system-initiated quit would block the user's logout indefinitely.
+    /// whole update). P9c fix wave (Critical C1, ruling P9c-18): the fourth axis is
+    /// `handoffQuitting` — the Winter handoff's own `NSApp.terminate(nil)` is likewise a
+    /// cancellable, Apple-Event-less programmatic quit, armed by `HandoffDeps.armHandoffQuit`
+    /// right before `terminateSelf` (see that field's own doc for the pre-fix bug: without this
+    /// axis the handoff's own quit resolved to `.terminateCancel` and Norma stayed alive as an
+    /// invisible `LSUIElement` process after already installing and launching Winter). ONLY
+    /// all-false — a plain user ⌘Q/dock-quit — cancels; refusing a system-initiated quit would
+    /// block the user's logout indefinitely.
     func testTerminateDecision() {
         XCTAssertEqual(terminateDecision(reallyQuitting: true, systemInitiated: true), .terminateNow)
         XCTAssertEqual(terminateDecision(reallyQuitting: true, systemInitiated: false), .terminateNow)
@@ -42,6 +48,10 @@ final class AppLifecycleTests: XCTestCase {
         // through; all-false (the default param) still cancels — existing behavior unchanged.
         XCTAssertEqual(terminateDecision(reallyQuitting: false, systemInitiated: false, updaterQuitting: true), .terminateNow)
         XCTAssertEqual(terminateDecision(reallyQuitting: false, systemInitiated: false, updaterQuitting: false), .terminateCancel)
+        // P9c fix wave (Critical C1, P9c-18): the handoff's own axis — same truth-table shape as
+        // updaterQuitting, its own dedicated flag, never reused for anything else.
+        XCTAssertEqual(terminateDecision(reallyQuitting: false, systemInitiated: false, handoffQuitting: true), .terminateNow)
+        XCTAssertEqual(terminateDecision(reallyQuitting: false, systemInitiated: false, handoffQuitting: false), .terminateCancel)
     }
 
     // MARK: - fixtures
@@ -197,6 +207,29 @@ final class AppLifecycleTests: XCTestCase {
         // `.terminateLater` now instead of `.terminateNow` directly.
         XCTAssertEqual(reply, .terminateLater, "a system logout/shutdown must never be refused, and (P8d-6) defers through .terminateLater like any other real quit")
         XCTAssertFalse(delegate.detachedWindows.isEmpty, "the cancel-path teardown must not run — applicationWillTerminate owns real-quit teardown")
+    }
+
+    /// P9c fix wave (Critical C1): `boot()`'s handoff block returns `true` early (before
+    /// `daemonSupervisor`, `appModel`, `menuBar`, or anything else below it in `boot()` is ever
+    /// constructed) on a fresh install/already-current outcome — `HandoffDeps.live.terminateSelf`
+    /// then drives AppKit's REAL termination sequence through THIS SAME delegate instance. Both
+    /// callbacks below must survive every one of those properties reading `nil`, exactly the state
+    /// a bare, never-`boot()`ed `AppDelegate()` already models here (no `boot()` call at all is the
+    /// identical "nothing constructed yet" shape the handoff's early return leaves behind).
+    /// Reaching the end with no crash IS the assertion — `daemonSupervisor?.stop()`,
+    /// `appModel?.stop()`, `peripheralProvider?.terminate()`, `outputsWatcher?.stop()`, and
+    /// `closeMainWindows()`'s own `appWindow?.hide()` all read as harmless no-ops over nil/empty
+    /// state.
+    func testApplicationShouldTerminateAndWillTerminateAreNilSafeWhenNothingWasEverConstructed() {
+        let delegate = AppDelegate()
+        delegate.systemQuitReasonProvider = { false }
+        delegate.reallyQuitting = true // stand-in true-quit axis — proves the SHAPE, not this specific flag
+
+        let reply = delegate.applicationShouldTerminate(NSApp)
+        XCTAssertEqual(reply, .terminateLater, "a real quit still defers through .terminateLater even with nothing booted")
+
+        delegate.applicationWillTerminate(Notification(name: Notification.Name("test")))
+        // No crash reaching here — the whole point of this test.
     }
 
     /// The host process has no current quit Apple Event, so the REAL default provider must read

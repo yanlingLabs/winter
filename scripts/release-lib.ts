@@ -732,6 +732,22 @@ export function handoffReleaseBody(i: { version: string; beta: boolean; embedded
   );
 }
 
+/**
+ * The handoff release's exact `gh release create` command (fix wave, Minor M4, ruling P9c-19):
+ * `--latest=false` so `/releases/latest` on the shared `yanlingLabs/winter` repo always resolves
+ * to a WINTER release, never this final Norma one, regardless of which of the two publishes runs
+ * last. `main`'s own `scripts/release.ts` (a separate worktree/branch — the renamed tree) carries
+ * the mirror-image fix: it runs `gh release edit v<version> --latest` right after ITS OWN `gh
+ * release create`, unconditionally, so it always re-claims "latest" even if the handoff publish
+ * lands afterward — the controller verifies both sides after both publishes actually run.
+ */
+export function handoffReleaseCreateCommand(i: { version: string; notesPath: string; zipPath: string; dmgPath: string }): string {
+  return (
+    `gh release create v${i.version} --title "${handoffReleaseTitle(i.version)}" ` +
+    `--notes-file "${i.notesPath}" --latest=false "${i.zipPath}" "${i.dmgPath}"`
+  );
+}
+
 export interface Row16Gate {
   proceed: boolean;
   failure?: string;
