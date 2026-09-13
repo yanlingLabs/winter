@@ -25,6 +25,14 @@ import { officialSubscriptionAuthEnabled } from "../settings";
 import { ensureOfficialConfigDir, OfficialCredentialPlanRefused, officialInputFor, OfficialProjectKeyTooDeep, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { attachOfficialSession, type OfficialSessionAttachHandle, type OfficialSessionAttachment } from "./messaging";
+// P10a-h: the SAME grace window `WinterSession.end()` races against — reused, not reinvented, so
+// the two legs' "does the process actually die on end()" behaviour is one tuned constant, not two.
+import { WINTER_SESSION_END_GRACE_MS } from "./winter-session";
+
+/** Mirrors `winter-session.ts`'s own private `sleep` exactly (including the `unref` so a pending
+ *  grace timer never keeps the process alive on its own) — kept local rather than exported from
+ *  that file, since nothing else needs it and duplicating ~1 line beats a cross-file export for it. */
+const sleep = (ms: number): Promise<"timeout"> => new Promise((r) => { const t = setTimeout(() => r("timeout"), ms); (t as { unref?: () => void }).unref?.(); });
 
 export type OfficialSessionState = "live" | "resumable" | "ended";
 
@@ -90,6 +98,10 @@ export interface OfficialSessionDeps {
    * internals.
    */
   onIncarnationStart?: (abort: AbortController) => void;
+  /** P10a-h: test seam for `WINTER_SESSION_END_GRACE_MS` — mirrors `WinterLegDeps.endGraceMs`
+   *  exactly, so a test that wants `end()`'s abort fallback to fire without waiting out the
+   *  production grace twice over can shorten it. Never set by production `daemon.ts` wiring. */
+  endGraceMs?: number;
 }
 
 export interface OfficialSession {
@@ -340,10 +352,31 @@ class OfficialSessionImpl implements OfficialSession {
     const inc = this.inc;
     if (this.stateValue !== "live" || inc === undefined) return this.done;
     this.ending = true;
+    const grace = this.deps.endGraceMs ?? WINTER_SESSION_END_GRACE_MS;
     this.endingPromise = (async () => {
       try {
         try { inc.stream.close(); } catch { /* already closed */ }
-        await inc.done;
+        // P10a-h: mirrors `WinterSession.end()`'s exact shape (`winter-session.ts`) — closing the
+        // input alone does not guarantee the underlying process actually exits. Measured live: a
+        // real official `claude` child can keep running (and keep the handoff barrier's own
+        // resume-lock on this session's backend uuid held) well past `inc.stream.close()`, which is
+        // what made a DESTINATION's own resume attempt on that SAME uuid fail typed with the winter
+        // runtime's own "session … is in use by another live process". Race the grace window, THEN
+        // fall back to aborting the incarnation's own `AbortController` (the same one `Options
+        // .abortController` carries into the router's spawn — `open()`'s own doc comment), THEN
+        // race the SAME grace window once more before giving up.
+        if ((await Promise.race([inc.done.then(() => "done" as const), sleep(grace)])) === "done") return;
+        try { inc.abort.abort(); } catch { /* an already-aborted controller is the outcome we wanted */ }
+        if ((await Promise.race([inc.done.then(() => "done" as const), sleep(grace)])) === "done") return;
+        // The child outlived the abort by more than the grace (Winter's own precedent: measured
+        // ~50 ms tail there). Unlike `WinterSession`, a deliberate `end()` on THIS leg is terminal
+        // by design (m7: "multi-incarnation resume on this leg is unmeasured") — so this instance
+        // still reports itself `ended`, never `resumable`, rather than inventing a resume path
+        // nothing here has proven; `run()`'s own iteration, whenever the process eventually does
+        // exit, settles the identical state through its own `finally` block (`this.ending` is still
+        // true there, so it writes the same value this branch already committed).
+        this.log(`the official child for ${this.sessionId} outlived abort by ${grace} ms — treated as ended; its iteration closes later`);
+        if (this.inc === inc) { this.inc = undefined; this.stateValue = "ended"; }
       } finally {
         this.endingPromise = undefined;
       }

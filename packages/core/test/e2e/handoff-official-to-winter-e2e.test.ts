@@ -27,27 +27,39 @@
 // resolve against its own catalog at all, per `handoff-cross-runtime-e2e.test.ts`'s own header).
 // Gated exactly like that file.
 //
-// MEASURED, NOT ASSUMED (this file's own finding): driving this exact scenario against the real
-// `dist/winter` + platform `claude` binaries surfaces a THIRD, separate, pre-existing defect that
-// this task's fix does not touch — `OfficialSession.end()` (`runtime-sdk/official-session.ts`) only
-// closes the input stream and awaits `inc.done`; unlike `WinterSession.end()` it never falls back to
-// aborting the incarnation's `AbortController` when the underlying process does not exit on its own.
-// The barrier's own step 6 (`await owner.close()`) DOES run before step 8's `confirmInit` — this
-// module's `sourceOwnerFor.close()` is exactly that door — but the real `claude` child here does not
-// exit merely because its input stream closed, so the destination Winter child's own attempt to
-// resume the SAME backend uuid (WS-05 §12 step 8's "resume the SAME backend UUID") hits the winter
-// runtime's own `ResumeTargetError: session <id> is in use by another live process (pid …)` and dies
-// before init — on every one of this fix's own bounded retries, because the lock is held by a
-// genuinely still-alive process, not a short timing race. `official-session.ts`'s own file header
-// already flags this class of thing as measured-but-carried ("multi-incarnation resume-lock races
-// are UNMEASURED against the real runtime"), so fixing it is a separate, dedicated change — out of
-// this fix's scope (`runtime-sdk/handoff.ts`) and risk budget. What THIS test proves instead: the
-// fix's own gate (issue 1) correctly turns that real failure into a TYPED refusal with the record
-// REVERTED — never a silent `applied` — and the ORIGINAL (official) session is left fully usable
-// afterward. The model/provider threading fix (issue 2) is proven separately, at the unit level
-// (`test/runtime-sdk/handoff.test.ts`'s own confirmInit cases) and by direct measurement during this
-// file's own development (the freshly-ensured Winter driver's `store.model`/`selection` were
-// confirmed correct — `openai/gpt-5.4` / providerId `openai` — before the unrelated lock error fired).
+// MEASURED, NOT ASSUMED (this file's own finding, P10a-h follow-up): driving this exact scenario
+// against the real `dist/winter` + platform `claude` binaries surfaces a THIRD, separate,
+// pre-existing defect. `OfficialSession.end()` (`runtime-sdk/official-session.ts`) has SINCE been
+// fixed to fall back to aborting the incarnation's `AbortController` (SIGTERM-equivalent → bounded
+// grace → give-up), mirroring `WinterSession.end()`'s exact shape — proven at the unit level
+// (`official-session.test.ts`'s own "end() falls back to abort()" case, against a fake child that
+// never exits on its own). That fix did NOT resolve this file's own real-binary failure, which
+// measurement now shows is unrelated to whether the SOURCE's child process is alive at all: the
+// real winter binary's own `resolveEngineSession` refuses the destination's resume attempt with
+// `ResumeTargetError: session <id> is in use by another live process (pid <the DAEMON's own pid>)`
+// — the reported "live process" is THIS TEST'S OWN DAEMON, not the official child, and it is (of
+// course) still alive throughout, so no amount of ending or aborting the source's child process can
+// ever satisfy this check. This points at the handoff barrier's own step 6 ("close the owner;
+// persist the producer record, cursor and generation; TRANSFER THE WRITER LEASE") not actually
+// releasing whatever ownership marker the winter runtime's resume gate reads for this backend uuid
+// before `confirmInit` (step 8) ever runs — and since that marker is (as far as this measurement
+// can tell) transferred only as PART OF a successful commit, which itself requires the destination
+// to already have confirmed init, official → Winter looks like it may need the SAME-UUID resume
+// door reworked at the `winter-runtime-sdk` level, not a daemon-side fix. Recorded here as an open,
+// unresolved finding — deliberately not forced into a false green. What THIS file proves instead:
+// (a) the fix's own init-confirmation gate (issue 1) correctly turns the real failure into a TYPED
+// refusal with the record REVERTED, never a silent `applied` (first describe block, real binaries);
+// (b) the SAME gate + revert, proven fast and deterministically with a STUBBED Winter executable
+// that exits before ever speaking the wire protocol at all (second describe block) — the coordinator's
+// own suggested technique for a controlled repro of "the dead child" that does not depend on any of
+// the real winter binary's own internal resume-locking; (c) the model/provider threading fix (issue
+// 2) is proven at the unit level (`test/runtime-sdk/handoff.test.ts`'s own confirmInit cases) and by
+// direct measurement during this file's own development (the freshly-ensured Winter driver's
+// `store.model`/`selection` were confirmed correct — `openai/gpt-5.4` / providerId `openai` — before
+// the unrelated resume-lock error fired). The FULL round trip (official turn → setModel → applied →
+// next send answers on Winter → session.list shows the destination providerId) remains BLOCKED on
+// this machine by the resume-lock finding above; it is not something this file can fake past without
+// hiding a real, unresolved defect.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -252,18 +264,118 @@ describeWithWinterBinary("official -> Winter handoff (P10a-h, the measured live 
         expect(caught.rpc?.message).toContain("exited before it reached init");
         // Reverted: the record and the live leg still name the SOURCE — a refusal here keeps the
         // source owner (the barrier's own contract), which only holds if the record still agrees.
-        // (A further "the source leg is still usable after this" assertion was deliberately dropped
-        // here — measured to hit the SAME `official-session.ts` `end()` gap this file's header
-        // documents: `deps.winter.evict()` at this attempt's own first step ends the SOURCE's live
-        // official driver too, per WS-05 §12's own design, and that leg's `end()` has the identical
-        // "never falls back to aborting" gap as the destination side, so a resume immediately after
-        // can hit the SAME real "exited before init" this fixture already measures. Proving the
-        // source stays USABLE needs that separate fix first; this test's own job — the fix this task
-        // owns — stops at "reverted, typed, never silently applied", proven above.)
+        // (A further "the source leg is still usable after this" assertion is deliberately absent —
+        // `official-session.ts`'s `end()` NOW falls back to aborting the source's own child, so THAT
+        // half of the original gap is fixed, but measurement shows the resume-lock this file's own
+        // header documents is keyed to the DAEMON's pid, not the child's aliveness, so a resume
+        // attempt right after this one would plausibly hit the identical real "exited before init"
+        // for the unrelated, still-open reason recorded there. This test's own job — the fix this
+        // task owns — stops at "reverted, typed, never silently applied", proven below.)
         expect(d.winter.legOf(sessionId)).toBe("official");
         expect(rt.records.get(sessionId)?.runtimeKind).toBe("claude-agent");
         expect(rt.records.get(sessionId)?.providerId).toBe("anthropic");
       }
     }, 120_000);
   });
+});
+
+// P10a-h follow-up: a DETERMINISTIC proof of the typed-refusal/revert path, independent of the real
+// winter binary's own (separately tracked, unresolved) resume-lock behaviour documented above.
+// `runtimes.winterExecutable` points at `/usr/bin/true` — a real, on-disk executable that exits(0)
+// immediately without ever speaking a single frame of the wire protocol, so the SDK's own query()
+// wrapper throws `CLIConnectionError("runtime exited before init")` deterministically, every run,
+// with no real `dist/winter` dependency and no `describeWithWinterBinary` gating needed at all —
+// exactly the coordinator's own suggested technique for a controlled "the dead child" repro.
+describeWithClaudeRuntime("official -> Winter handoff, DETERMINISTIC dead-child case (P10a-h follow-up)", () => {
+  let home: string;
+  let daemon: RunningDaemon | undefined;
+  let client: TestClient;
+  let anthropicFakeUrl = "";
+  let anthropicFakeClose: (() => Promise<void>) | undefined;
+  const anthropicRequests: Array<{ path: string; body: string }> = [];
+  const anthropicScript: AnthropicTurnScript = { blocks: [{ type: "text", chunks: ["hello from the official leg"] }], stopReason: "end_turn" };
+
+  beforeAll(async () => {
+    home = realpathSync(mkdtempSync(join(tmpdir(), "winter-handoff-o2w-stub-")));
+
+    const { startFake, anthropicFake } = await import("@yanlinglabs/winter-provider-conformance");
+    const anthropicFakeServer = await startFake({
+      routes: [{
+        path: "*",
+        handler: async (_req, recorded) => {
+          anthropicRequests.push({ path: recorded.path, body: recorded.body });
+          if (recorded.path === "/v1/messages" && recorded.method === "POST") return anthropicFake.anthropicTurnResponse(anthropicScript);
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        },
+      }],
+    });
+    anthropicFakeUrl = anthropicFakeServer.url;
+    anthropicFakeClose = () => anthropicFakeServer.close();
+
+    writeFileSync(join(home, "settings.json"), JSON.stringify({
+      schemaVersion: 2,
+      provider: { type: "openai-compatible", model: CATALOG_OPENAI_MODEL, baseUrl: "http://127.0.0.1:9/v1" },
+      runtimes: {
+        // A real, on-disk executable that exits before ever reaching the wire protocol's own init
+        // handshake — the deterministic "dead child" this describe block's whole point is proving
+        // the fix's own gate catches, with no dependency on dist/winter's real internal behaviour.
+        winterExecutable: "/usr/bin/true",
+        claudeExecutable: claudeRuntimeForTests()!.executable,
+        winterIdleTimeoutSec: 10,
+        handoff: { crossRuntime: true },
+      },
+    }, null, 2));
+
+    const secrets = new FileSecretStore(join(home, "test-secrets"));
+    await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test-stub" });
+    await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-stub-anthropic" });
+
+    daemon = await startDaemon({
+      home, secrets, agentProvider: null,
+      officialConnectionOverride: () => ({ explicitConnectionEnv: { ANTHROPIC_BASE_URL: anthropicFakeUrl }, authFamily: "custom" }),
+    });
+    if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
+    client = await TestClient.connect(daemon.socketPath);
+    await client.hello(daemon.tokens.harness, "e2e");
+  });
+
+  afterAll(async () => {
+    try { client?.close(); } catch { /* closed */ }
+    const stopping = daemon?.stop();
+    daemon = undefined;
+    await stopping;
+    await anthropicFakeClose?.();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("the destination's exited-before-init failure is a typed refusal with the record reverted, deterministically", async () => {
+    const d = daemon!;
+    if ("unavailable" in d.runtimeState) throw d.runtimeState.unavailable;
+    const rt = d.runtimeState;
+
+    const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, {
+      scope: "e2e", mode: "code", model: CATALOG_CLAUDE_MODEL,
+    });
+    await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+    expect(d.winter.legOf(sessionId)).toBe("official");
+
+    await client.call(METHODS.sessionSend, { sessionId, text: "remember the number stub-1" });
+    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 45_000);
+    expect(anthropicRequests.length).toBeGreaterThan(0);
+
+    let caught: { rpc?: { message?: string; data?: { code?: string } } } | undefined;
+    try {
+      await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_OPENAI_MODEL, confirmLossy: true });
+    } catch (err) {
+      caught = err as { rpc?: { message?: string; data?: { code?: string } } };
+    }
+
+    expect(caught).toBeDefined();
+    expect(caught!.rpc?.data?.code).toBe("handoff_lossy_fork");
+    expect(caught!.rpc?.message).toContain("exited before it reached init");
+    // Reverted: the record still names the SOURCE, deterministically, every run.
+    expect(d.winter.legOf(sessionId)).toBe("official");
+    expect(rt.records.get(sessionId)?.runtimeKind).toBe("claude-agent");
+    expect(rt.records.get(sessionId)?.providerId).toBe("anthropic");
+  }, 30_000);
 });
