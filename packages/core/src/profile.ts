@@ -26,9 +26,10 @@ export function resolveWinterProfile(env: NodeJS.ProcessEnv = process.env): Wint
  * a caller who passed `profile: "dev"` for its literal alone (`console-profile-broker.ts`,
  * `migrate-b.ts`, a bare `keychainService("dev")`) and wrongly treating that as a "non-default home".
  * Omitting `home` therefore means "I'm not asserting anything about which home this is" and NEVER
- * engages the override — a production daemon (which never threads `home` through anything but its
- * own real `deps.home`) can never be redirected by an env var some other process happens to have
- * set. This is the ONE function every consumer of the Keychain service name must derive from — the
+ * engages the override. A daemon on its profile's DEFAULT home (`~/.winter`, `~/.winter-dev`) can
+ * never be redirected by an env var some other process happens to have set; a daemon deliberately
+ * run on a custom `WINTER_HOME` DOES honour it (and warns), so the variable belongs only in a test
+ * preload. This is the ONE function every consumer of the Keychain service name must derive from — the
  * brand handed to the router (`runtime-sdk/brand.ts`) and every `CredentialRef` the child resolves
  * against (`runtime-sdk/keychain.ts`, `runtime-sdk/provider-selection.ts`) thread their caller's
  * REAL `home` through explicitly. `test/preload.ts` sets the env var to a throwaway service name
