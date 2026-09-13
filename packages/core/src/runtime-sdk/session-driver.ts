@@ -533,9 +533,35 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     // env-allowlist's family-shape check does not itself refuse `ANTHROPIC_BASE_URL`) — never the
     // PERSISTED record, which keeps the router's real decision.
     const connectionOverride = deps.officialConnectionOverride?.();
-    const selection: RuntimeSelection = connectionOverride?.authFamily === undefined
-      ? persistedSelection
-      : { ...persistedSelection, authFamily: connectionOverride.authFamily };
+    // Winter Phase 10a (router 0.0.4, C1): Winter's OWN console-vs-api-key decision now widens THIS
+    // session's `RuntimeSelection.authFamily` to `"console-profile"` directly, rather than riding a
+    // parallel `officialAuthArm` field the way the C1-interim fix wave did — the router's own
+    // `openOfficialLeg` re-derives `credentials`/`connectionEnv` from `Options.runtime.selection`
+    // AT SPAWN (measured: `officialCredentialPlan`/`officialConnectionEnv` are called a SECOND time
+    // inside the router, keyed on `request.selection`, not merely on whatever `officialInputFor`
+    // pre-computed) — so a selection left at `"api-key"` would have the router re-inject
+    // `ANTHROPIC_API_KEY` from the provider's own authRef regardless of what this host built, and a
+    // widened `connectionEnv` paired with an unwidened `"api-key"` selection would fail the router's
+    // own `validateAuthEnvironment` ("a variable outside the family's set") before the child ever
+    // spawned. Evaluated HERE (session assembly, same posture as the `connectionOverride` widening
+    // above and as every other family this leg persists) rather than per-incarnation inside
+    // `inputDeps()`: `officialAuthFamilyFor`'s `hasApiKey` argument is accepted only for
+    // `provider.status`'s own "effective auth" combination (its own doc: "accepted for the caller's
+    // use, not consulted here") — the family decision itself needs no async credential read, so
+    // nothing here is losing liveness by moving out of the per-`open()` closure; `officialAuthFamilyFor`
+    // still re-reads `deps.settings()` (hot) and the console profile file's live on-disk presence
+    // each time THIS function runs (once per session assembly — fresh session create, or resume from
+    // a record after a driver restart), the same "no daemon restart required" contract every other
+    // settings-hot-reload call site in this file already has.
+    const officialAuthArm: "api-key" | "console" | undefined =
+      connectionOverride?.authFamily === undefined && persistedSelection.authFamily === "api-key"
+        ? officialAuthFamilyFor(deps.home, deps.settings(), false)
+        : undefined;
+    const selection: RuntimeSelection = connectionOverride?.authFamily !== undefined
+      ? { ...persistedSelection, authFamily: connectionOverride.authFamily }
+      : officialAuthArm === "console"
+        ? { ...persistedSelection, authFamily: "console-profile" }
+        : persistedSelection;
 
     let claimedInBatch = 0;
     const append = (event: Parameters<SessionHub["append"]>[1]) => {
@@ -599,18 +625,13 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         explicitCredentials: [{ variable: "ANTHROPIC_API_KEY", ref: credentialRefFor(provider.providerId) ?? provider.authRef! }],
         ...(connectionOverride.explicitConnectionEnv === undefined ? {} : { explicitConnectionEnv: connectionOverride.explicitConnectionEnv }),
       };
-      // Winter Phase 10a (fix round 1 item 3): wires the console arm of `official-session.ts`'s
-      // apiKeySource assertion for REAL. ONLY when the router's OWN decision already put this
-      // session in the `api-key` family (never `custom`/`console-oauth`/etc — their own exemption
-      // stays untouched) AND no test-only `officialConnectionOverride` is widening the family (a
-      // loopback fake has no console profile to check at all) does Winter's OWN
-      // `officialAuthFamilyFor` get the final say between the two arms `RuntimeSelection.
-      // authFamily`'s pinned union has no literal for — see `OfficialInputDeps.officialAuthArm`'s
-      // own doc for why this lives as a SEPARATE field rather than trying to widen that union.
-      const officialAuthArm: "api-key" | "console" | undefined =
-        connectionOverride?.authFamily === undefined && selection.authFamily === "api-key"
-          ? officialAuthFamilyFor(deps.home, deps.settings(), credentials.byProvider.anthropic !== undefined)
-          : undefined;
+      // Winter Phase 10a (router 0.0.4, C1): the console-vs-api-key decision now lives entirely in
+      // `selection.authFamily` (widened once, above, in `assembleOfficial` — see that widening's own
+      // doc for why the parallel `officialAuthArm` field from the C1-interim fix wave is gone). This
+      // closure captures `selection` from the outer scope, so `official-session.ts`'s init-message
+      // assertion (`this.deps.selection.authFamily`) and this leg's `officialInputFor` call
+      // (`deps.selection.authFamily` below) read the identical value with no separate field to keep
+      // in sync.
       return {
         home: deps.home,
         selection,
@@ -629,7 +650,6 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         // no settings accessor of its own — only this driver's own `deps.settings` holds it), which
         // is why it is threaded here rather than read inside `official-session.ts`/`official-options.ts`.
         settings: deps.settings(),
-        ...(officialAuthArm === undefined ? {} : { officialAuthArm }),
         canUseToolDeps: {
           approvals: deps.approvals, questions: deps.questions, gate: deps.gate,
           emit: (event) => { deps.hub.append(sessionId, event); },

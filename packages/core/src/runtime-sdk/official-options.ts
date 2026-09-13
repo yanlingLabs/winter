@@ -368,16 +368,6 @@ export interface OfficialInputDeps {
    *  incarnation with no daemon restart. `undefined`/`null` behaves exactly like an absent block
    *  (`officialSubscriptionAuthEnabled`'s own default: off). */
   settings?: Settings | null;
-  /** Winter Phase 10a (P10a-3, fix round 1 item 3): which auth arm THIS incarnation's `api-key`-
-   *  family session actually spawns against — `session-driver.ts`'s `assembleOfficial` sets this
-   *  to `officialAuthFamilyFor(home, settings, hasApiKey)`'s own answer ONLY when the router's own
-   *  `selection.authFamily` is `"api-key"` and no test-only `officialConnectionOverride` is active;
-   *  every other family (`custom`, `console-oauth`, …) leaves it `undefined`, preserving their own
-   *  exemption from `official-session.ts`'s `apiKeySource` assertion untouched. `official-session.ts`
-   *  captures it once per incarnation (same posture as `subscriptionAuthEnabled`) and uses it to
-   *  pick `expectedApiKeySource`'s argument — `undefined` there still means "assume api-key",
-   *  matching every pre-P10a call site that never set this field. */
-  officialAuthArm?: "api-key" | "console";
   /** Winter Phase 10a fix wave (C1-interim): test-only override of `versions.ts`'s
    *  `installedWinterRuntimeSdkVersion` — lets a test simulate a router upgrade (`() => "0.0.4"`)
    *  without a real second package install. `undefined` (every production caller, and every test
@@ -429,12 +419,12 @@ export function officialInputFor(
 
   const env = deps.env ?? process.env;
   const permissionMode: RouterOfficialPermissionMode = officialPermissionModeFor(deps.policy);
-  // Winter Phase 10a (fix round 2): `officialAuthArm` was threaded onto `OfficialInputDeps` (fix
-  // round 1 item 3) for `official-session.ts`'s own assertion but never actually drove THIS
-  // function's env/credential construction — this is that wiring. `undefined` (every pre-P10a
-  // caller, and every non-api-key family, which `session-driver.ts`'s own gate never sets this
-  // field for) means "api-key", byte-identical to today's behaviour.
-  const officialAuthArm: "api-key" | "console" = deps.officialAuthArm ?? "api-key";
+  // Winter Phase 10a (router 0.0.4, C1): the console arm now reads directly off
+  // `deps.selection.authFamily` (the union the router 0.0.4 itself grew a `"console-profile"`
+  // literal for — `session-driver.ts`'s `assembleOfficial` widens the session's persisted selection
+  // to it) — the C1-interim `officialAuthArm` field on `OfficialInputDeps` is gone; the family alone
+  // now carries what that parallel field used to.
+  const officialAuthArm: "api-key" | "console" = deps.selection.authFamily === "console-profile" ? "console" : "api-key";
 
   // Fix wave (C1-interim): the router-version gate — checked BEFORE anything else in this function
   // builds a bridge, reads a credential, or touches disk, so a session refuses typed the instant
@@ -474,14 +464,15 @@ export function officialInputFor(
   // Phase 9c (P9c-1): defence in depth (see `FORBIDDEN_CHILD_ENV`'s own doc) — a no-op today given
   // `minimalOsEnvironment`'s allowlist, but load-bearing against a future change to it.
   for (const name of FORBIDDEN_CHILD_ENV) delete base[name];
-  // Winter Phase 10a (fix round 2, P10a-2): the ONE place the official child's env is assembled —
-  // `officialAuthChildEnvFor`'s own two arms, AFTER the forbidden-name strip above (so a host
-  // ambient `ANTHROPIC_PROFILE`/`CLAUDE_CONFIG_DIR` can never masquerade as this door's own
-  // deliberate injection) and BEFORE nothing else touches `base` again. api-key arm: `{}` — byte-
-  // identical to pre-P10a `base`. console arm: `ANTHROPIC_PROFILE` + `ANTHROPIC_CONFIG_DIR` set,
-  // `ANTHROPIC_API_KEY` never — that omission is enforced by SKIPPING the credential plan entirely
-  // for this arm, below, not by anything in `base`.
-  Object.assign(base, officialAuthChildEnvFor(officialAuthArm, deps.home));
+  // Winter Phase 10a (router 0.0.4, C1): `ANTHROPIC_PROFILE`/`ANTHROPIC_CONFIG_DIR` now ride
+  // `RouterOfficialInput.connectionEnv`, NEVER `base` — the router's own `openOfficialLeg` re-derives
+  // credentials/connectionEnv from `Options.runtime.selection` at spawn (measured:
+  // `officialCredentialPlan`/`officialConnectionEnv` are called a SECOND time inside the router,
+  // keyed on the REAL selection, not on whatever this function pre-computes), so the pairing rule
+  // ("`console-profile`'s ANTHROPIC_PROFILE/ANTHROPIC_CONFIG_DIR travel in `connectionEnv` exactly
+  // like `console-oauth`'s base URL") is the router's own contract, not a Winter-side convenience —
+  // stuffing them into `base` instead would leave the router's own env builder never seeing them at
+  // all. `CLAUDE_CONFIG_DIR` is unaffected: it still rides `spool`, below, unchanged.
   // Phase 9c (P9c-1): the flag's ONLY shipped value is `false` — this branch is what runs in
   // production. `spool` left `undefined` (flag on) is NOT "no isolation": the router's own
   // `officialSpoolRoot(home)` default still applies, and `VENDOR_HOME_SEGMENT_RE` still refuses
@@ -498,26 +489,28 @@ export function officialInputFor(
   // are the `custom`-family escape hatch a hermetic loopback bed needs (WS-14's own precedent: name
   // each variable and its ref). Neither call ever touches a `SecretStore` — the read happens at
   // spawn, through the router's own `KeychainSeam`.
-  // Winter Phase 10a (fix round 2): the console arm authenticates entirely off the profile FILE
-  // (`ANTHROPIC_PROFILE`/`ANTHROPIC_CONFIG_DIR`, injected into `base` above) — it never asks the
-  // router's own credential plan for anything, which is what keeps `ANTHROPIC_API_KEY` OUT: that
-  // plan's `api-key`-family arm would otherwise inject it from `deps.selection`/`deps.provider`
-  // regardless of this arm (the router has no concept of "console" at all — see
-  // `OfficialInputDeps.officialAuthArm`'s own doc for why `selection.authFamily` itself still reads
-  // `"api-key"` here). Skipping the call is simpler and safer than trying to filter its output.
+  // Winter Phase 10a (router 0.0.4, C1): `officialCredentialPlan` is now called UNCONDITIONALLY, for
+  // every family including `console-profile` — the router's own table (`AUTH_FAMILY_VARIABLES`)
+  // documents that family as one of the three that "inject nothing" (alongside `claude-oauth` and
+  // `local-none`), so this call returns `[]` on its own for the console arm; no special-case branch
+  // is needed to keep `ANTHROPIC_API_KEY` out (the "even with a supported router, the console arm
+  // NEVER hands credentials containing an anthropic key" guard below is now the router's own
+  // contract, not a Winter-side skip).
   let credentials: readonly { variable: string; ref: CredentialRef }[];
-  if (officialAuthArm === "console") {
-    credentials = [];
-  } else {
-    try {
-      credentials = officialCredentialPlan({ selection: deps.selection, provider: deps.provider, explicit: deps.explicitCredentials as never }) as never;
-    } catch (err) {
-      return new OfficialCredentialPlanRefused(err instanceof Error ? err.message : String(err));
-    }
+  try {
+    credentials = officialCredentialPlan({ selection: deps.selection, provider: deps.provider, explicit: deps.explicitCredentials as never }) as never;
+  } catch (err) {
+    return new OfficialCredentialPlanRefused(err instanceof Error ? err.message : String(err));
   }
-  const connectionEnv = officialAuthArm === "console"
-    ? {}
-    : officialConnectionEnv({ selection: deps.selection, provider: deps.provider, explicit: deps.explicitConnectionEnv });
+  // The console arm's own non-secret pair rides `explicit` here exactly like `console-oauth`'s base
+  // URL does (router 0.0.4's own doc on `officialConnectionEnv`: "they ride through `explicit` here
+  // unchanged") — `officialAuthChildEnvFor` still produces the literal object, just as `connectionEnv`
+  // input rather than a `base` mutation now.
+  const connectionEnv = officialConnectionEnv({
+    selection: deps.selection,
+    provider: deps.provider,
+    explicit: officialAuthArm === "console" ? officialAuthChildEnvFor("console", deps.home) : deps.explicitConnectionEnv,
+  });
 
   return {
     pathToClaudeCodeExecutable: executable.path,

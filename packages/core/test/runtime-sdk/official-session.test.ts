@@ -504,14 +504,18 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
     expect(err?.code).toBe("official_auth_source_refused");
   });
 
-  // Winter Phase 10a (fix round 1 item 3): `session-driver.ts`'s own `officialAuthArm` decision
-  // (threaded through `OfficialInputDeps`, never `selection.authFamily` — see that field's own
-  // doc) now picks WHICH value this assertion expects, for a REAL api-key-family session that
-  // Winter's own `officialAuthFamilyFor` decided belongs to the console arm instead.
-  test("officialAuthArm=\"console\" -> the assertion expects CONSOLE_API_KEY_SOURCE, not ANTHROPIC_API_KEY", async () => {
+  // Winter Phase 10a (router 0.0.4, C1): `session-driver.ts`'s own `assembleOfficial` now widens a
+  // console-arm session's `RuntimeSelection.authFamily` to `"console-profile"` DIRECTLY (the C1-interim
+  // fix wave's parallel `officialAuthArm` field on `OfficialInputDeps` is gone) — this test builds
+  // that widened selection and passes it as BOTH `OfficialSessionDeps.selection` (what the assertion
+  // gate reads) and `OfficialInputDeps.selection` (what `officialInputFor` itself reads), exactly the
+  // way production threads one selection object through both.
+  const consoleSelection: RuntimeSelection = { ...apiKeySelection, authFamily: "console-profile" };
+
+  test("selection.authFamily === \"console-profile\" -> the assertion expects CONSOLE_API_KEY_SOURCE, not ANTHROPIC_API_KEY", async () => {
     const consoleInputDeps: OfficialInputDeps = {
       home: testHome(),
-      selection: apiKeySelection,
+      selection: consoleSelection,
       explicitCredentials: [],
       explicitConnectionEnv: {},
       officialPeer: undefined,
@@ -520,7 +524,6 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
       capabilities: {},
       canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
       policy: "auto",
-      officialAuthArm: "console",
       // Fix wave (C1-interim): the installed router (0.0.3) is below `CONSOLE_AUTH_ROUTER_MIN` and
       // would refuse the console arm typed before this test ever reaches the apiKeySource assertion
       // under test here — simulate the future router upgrade so this stays a pure test of the
@@ -528,7 +531,7 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
       // official-options.test.ts).
       installedWinterRuntimeSdkVersion: () => "0.0.4",
     };
-    const h = harness({ selection: apiKeySelection, inputDeps: () => consoleInputDeps });
+    const h = harness({ selection: consoleSelection, inputDeps: () => consoleInputDeps });
     await h.session.send("hi");
     h.q().emit(init(BACKEND_ID, { apiKeySource: "ANTHROPIC_API_KEY" })); // the api-key arm's own value — wrong for this arm
     await h.settled();
@@ -538,10 +541,10 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
     expect(err?.message).toContain(CONSOLE_API_KEY_SOURCE);
   });
 
-  test("officialAuthArm=\"console\" with a matching apiKeySource never refuses; the turn proceeds normally", async () => {
+  test("selection.authFamily === \"console-profile\" with a matching apiKeySource never refuses; the turn proceeds normally", async () => {
     const consoleInputDeps: OfficialInputDeps = {
       home: testHome(),
-      selection: apiKeySelection,
+      selection: consoleSelection,
       explicitCredentials: [],
       explicitConnectionEnv: {},
       officialPeer: undefined,
@@ -550,11 +553,10 @@ describe("P9c-1 — the api-key family's own apiKeySource assertion", () => {
       capabilities: {},
       canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
       policy: "auto",
-      officialAuthArm: "console",
       // Fix wave (C1-interim): see the sibling test above for why this override is here.
       installedWinterRuntimeSdkVersion: () => "0.0.4",
     };
-    const h = harness({ selection: apiKeySelection, inputDeps: () => consoleInputDeps });
+    const h = harness({ selection: consoleSelection, inputDeps: () => consoleInputDeps });
     await h.session.send("hi");
     h.q().emit(init(BACKEND_ID, { apiKeySource: CONSOLE_API_KEY_SOURCE }));
     h.q().emit(assistant("ok"));
