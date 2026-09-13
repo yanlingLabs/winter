@@ -60,6 +60,13 @@ export { runLoginFlow } from "./providers/pkce";
 // P8c-10: `winter login --anthropic-key` (cli/main.ts) writes through this door.
 export { writeAnthropicApiKey, ANTHROPIC_CREDENTIAL_SECRET_NAME } from "./runtime-sdk/keychain";
 export { CODEX, CODEX_MODELS, DEFAULT_CODEX_MODEL } from "./providers/codex-config";
+// Winter Phase 10a (O7, P10a-2/6): `winter login/logout --anthropic-console` and `winter doctor`'s
+// console-profile row all run IN-PROCESS against WINTER_HOME (the CLI door inherits stdio and
+// drives the SDK's login directly — see console-profile-broker.ts's own header — never an RPC), so
+// they reach these through the package barrel exactly like the doctor exports just below.
+export { anthropicConfigDirFor, ANTHROPIC_PROFILE_NAME } from "./runtime-sdk/official-options";
+export { createConsoleProfileBroker, type ConsoleProfileBroker, type AnthropicLoginHandle } from "./auth/console-profile-broker";
+export { resolveClaudeExecutable, ClaudeExecutableUnavailable } from "./runtime-sdk/official-executable";
 // WS-16 §15's `winter doctor` runs IN-PROCESS against WINTER_HOME — no RPC, because the whole point
 // is to work when the daemon does not — so the CLI reaches these two through the package barrel.
 export {
