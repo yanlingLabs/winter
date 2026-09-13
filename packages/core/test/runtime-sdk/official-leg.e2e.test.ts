@@ -168,7 +168,7 @@ async function buildWorld(
   // `custom` (the loopback endpoint needs `ANTHROPIC_BASE_URL` beside the key, which the `api-key`
   // family's own variable set does not include — WS-14 §12; see `official-options.ts`'s header).
   await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-e2e-material" });
-  const credentialRef = credentialRefFor("anthropic")!;
+  const credentialRef = credentialRefFor("anthropic", home)!;
   const runtime = await createWinterRuntimeSdk({
     home,
     settings: () => null,
@@ -1004,7 +1004,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     const home = mkdtempSync(join(tmpdir(), "p8d-row4-home-"));
     const secrets = new FileSecretStore(join(home, "secrets"));
     await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-row4" });
-    const credentialRef = credentialRefFor("anthropic")!;
+    const credentialRef = credentialRefFor("anthropic", home)!;
     // Both sessions run under `policy: "auto"` (a prompting, non-bypass policy) — `"prompts"` is
     // the correct fixed class. Without SOME classifier, WS-10 §13's receiver-class-unknown rule
     // fails closed to `held` rather than guessing (measured first, before this was added).
@@ -1383,7 +1383,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
     const home = mkdtempSync(join(tmpdir(), `p9a-${prefix}-home-`));
     const secrets = new FileSecretStore(join(home, "secrets"));
     await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: `sk-test-${prefix}` });
-    const credentialRef = credentialRefFor("anthropic")!;
+    const credentialRef = credentialRefFor("anthropic", home)!;
     const runtime = await createWinterRuntimeSdk({ home, settings: () => null, secrets, capabilities: [], sessionPermissionClass: () => "prompts" });
     const officialPeer = await runtime.officialPeer();
     if (officialPeer === undefined) throw new Error("unreachable: the suite is skipped without a bed");

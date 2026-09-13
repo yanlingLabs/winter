@@ -12,3 +12,9 @@ process.env.WINTER_CLAUDE_RESUME_SCAN_ROOT = mkdtempSync(join(tmpdir(), "winter-
 // legacy dev/dist home whenever that subprocess doesn't inject its own `secrets`. Redirected here to
 // a throwaway, guaranteed-empty directory for the whole run.
 process.env[LEGACY_HOME_ENV] = mkdtempSync(join(tmpdir(), "winter-test-legacy-home-"));
+// Test-keychain-isolation fix: the SAME redirect packages/core/test/preload.ts sets — a CLI test
+// that spawns `daemon run` (or drives a real `winter`/`claude` child) inherits `process.env`, and
+// `keychainService()` (`@yanlinglabs/winter-core`) only ever honours this override for a
+// NON-default `WINTER_HOME` (P9c-15's guard), so it is inert against a real `~/.winter[-dev]` home
+// and active only for these tests' own temp homes. The named service has no items.
+process.env.WINTER_KEYCHAIN_SERVICE = "com.winter.core.test-isolated";
