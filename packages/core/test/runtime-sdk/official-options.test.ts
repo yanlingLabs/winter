@@ -38,6 +38,7 @@ import {
   type OfficialSessionInput,
 } from "../../src/runtime-sdk/official-options";
 import { CONSOLE_AUTH_ROUTER_MIN } from "../../src/runtime-sdk/versions";
+import * as versionsModule from "../../src/runtime-sdk/versions";
 
 // ⚠️ Bun's `mock.module` overwrites properties on the ALREADY-LOADED module's own namespace object
 // IN PLACE (its own doc comment: "exports are overwritten") — so `winterAgentSdk.transcriptProjectKey`
@@ -46,6 +47,9 @@ import { CONSOLE_AUTH_ROUTER_MIN } from "../../src/runtime-sdk/versions";
 // anything in this file ever mocks the module, so restoring means naming this constant — never
 // re-reading the (by-then-mutated) namespace import.
 const REAL_TRANSCRIPT_PROJECT_KEY = winterAgentSdk.transcriptProjectKey;
+// Same trap, same fix, for `versions.ts`'s `installedWinterRuntimeSdkVersion` (F1's own "simulate
+// the compiled $bunfs binary" test, below) — captured before this file ever mocks that module.
+const REAL_INSTALLED_WINTER_RUNTIME_SDK_VERSION = versionsModule.installedWinterRuntimeSdkVersion;
 
 // ── officialPermissionModeFor ───────────────────────────────────────────────────────────────────
 
@@ -396,15 +400,14 @@ describe("officialInputFor — the console arm's real env (fix round 2, P10a-2; 
   // ANTHROPIC_API_KEY omission is structural (the credential plan is never even asked), not an
   // accident of no credential existing to inject in the first place.
   const provider = { providerId: "anthropic", authRef: { kind: "keychain" as const, account: "anthropic:default" } };
-  // Fix wave (C1-interim): the installed router (0.0.3) is BELOW `CONSOLE_AUTH_ROUTER_MIN`, so every
-  // console-arm build in this block simulates the future router upgrade — this block's own job is
-  // the console arm's ENV SHAPE, never the gate itself (that has its own describe block below).
-  const ROUTER_UPGRADED = () => "0.0.4";
+  // Fix wave (F1): the router-version gate now compares the PINNED `REQUIRED_WINTER_RUNTIME_SDK`
+  // ("0.0.4") against `CONSOLE_AUTH_ROUTER_MIN` ("0.0.4"), never a runtime probe of the installed
+  // package — so no override is needed here at all any more; this block's own job is the console
+  // arm's ENV SHAPE, never the gate itself (that has its own describe block below).
 
   function build(selection: RuntimeSelection): { input: import("@yanlinglabs/winter-runtime-sdk").RouterOfficialInput; anthropicConfigDirToEnsure?: string } {
     const result = officialInputFor(input, minimalDeps({
       home: HOME, selection, provider, explicitCredentials: undefined,
-      installedWinterRuntimeSdkVersion: ROUTER_UPGRADED,
     }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     return result;
@@ -444,7 +447,6 @@ describe("officialInputFor — the console arm's real env (fix round 2, P10a-2; 
     for (const name of FORBIDDEN_CHILD_ENV) hostEnv[name] = `SENTINEL_${name}`;
     const result = officialInputFor(input, minimalDeps({
       home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined, env: hostEnv,
-      installedWinterRuntimeSdkVersion: ROUTER_UPGRADED,
     }));
     if (!("input" in result)) throw new Error("unexpectedly refused");
     for (const name of FORBIDDEN_CHILD_ENV) {
@@ -456,18 +458,20 @@ describe("officialInputFor — the console arm's real env (fix round 2, P10a-2; 
   });
 });
 
-// Winter Phase 10a fix wave (C1-interim): against the PINNED router (`@yanlinglabs/winter-runtime-sdk@0.0.3`)
-// the console arm could not work — the router forwarded only its own minimal OS environment and ran
-// its api-key credential plan itself regardless of arm, so a console child would have gotten the
-// OAuth bearer profile injected as ANTHROPIC_API_KEY. `officialAuthFamilyFor(...) === "console"`
-// therefore refused typed BEFORE anything was spawned, gated on a single constant
-// (`CONSOLE_AUTH_ROUTER_MIN`) compared against the INSTALLED router version — never the daemon's own
-// pin — so the refusal flips off automatically the moment a bump actually installs a matching
-// router. Winter Phase 10a pin flip: the router IS now `@yanlinglabs/winter-runtime-sdk@0.0.4`
-// (`versions.ts`'s `REQUIRED_WINTER_RUNTIME_SDK`), so the gate no longer fires with NO override —
-// this suite now simulates the pre-upgrade router via `installedWinterRuntimeSdkVersion` fakes to
-// keep proving the gate itself still exists and still refuses below the floor.
-describe("officialInputFor — the console arm refuses until the router supports it (C1-interim)", () => {
+// Winter Phase 10a fix wave (F1): against a router BELOW `CONSOLE_AUTH_ROUTER_MIN` the console arm
+// could not work — a pre-upgrade router forwards only its own minimal OS environment and runs its
+// api-key credential plan itself regardless of arm, so a console child would get the OAuth bearer
+// profile injected as ANTHROPIC_API_KEY. `officialAuthFamilyFor(...) === "console"` therefore
+// refuses typed BEFORE anything is spawned, gated on a single constant (`CONSOLE_AUTH_ROUTER_MIN`)
+// compared against the COMPILE-TIME PIN (`REQUIRED_WINTER_RUNTIME_SDK`) — never a runtime probe of
+// the installed package, which is exactly what made the gate dead inside a compiled `$bunfs`
+// Release binary (`installedWinterRuntimeSdkVersion()` always answers `undefined` there, and
+// `versionAtLeast(undefined, …)` is always `false`, so every Release console session refused
+// permanently). This suite simulates a pin below/at/above the floor via
+// `OfficialInputDeps.requiredWinterRuntimeSdkVersion` fakes to keep proving the gate itself still
+// exists and still refuses below the floor, plus one test that reproduces the exact compiled-binary
+// condition directly and shows the gate is now unaffected by it.
+describe("officialInputFor — the console arm refuses until the router pin supports it (F1)", () => {
   const apiKeySelection: RuntimeSelection = {
     runtimeKind: "claude-agent", providerId: "anthropic", modelRef: "anthropic/claude-sonnet-5",
     family: "claude", authFamily: "api-key", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
@@ -479,10 +483,10 @@ describe("officialInputFor — the console arm refuses until the router supports
   const input: OfficialSessionInput = { sessionId: "s_1", mode: "code", cwd: "/Users/x/repo" };
   const provider = { providerId: "anthropic", authRef: { kind: "keychain" as const, account: "anthropic:default" } };
 
-  test("a fake pre-upgrade router (0.0.3) refuses the console arm typed", () => {
+  test("a stubbed pin below the floor (0.0.3) refuses the console arm typed", () => {
     const result = officialInputFor(input, minimalDeps({
       home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
-      installedWinterRuntimeSdkVersion: () => "0.0.3",
+      requiredWinterRuntimeSdkVersion: "0.0.3",
     }));
     expect(result).toBeInstanceOf(OfficialConsoleRouterUnsupported);
     expect((result as OfficialConsoleRouterUnsupported).code).toBe("official_console_router_unsupported");
@@ -497,12 +501,12 @@ describe("officialInputFor — the console arm refuses until the router supports
     // (never `"input" in result`) is what actually proves nothing downstream ran.
     const result = officialInputFor(input, minimalDeps({
       home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
-      installedWinterRuntimeSdkVersion: () => "0.0.3",
+      requiredWinterRuntimeSdkVersion: "0.0.3",
     }));
     expect("input" in result).toBe(false);
   });
 
-  test("the REAL installed router (0.0.4, no override) no longer refuses the console arm — the pin flip landed", () => {
+  test("the REAL pin (0.0.4, no override) does not refuse the console arm", () => {
     const result = officialInputFor(input, minimalDeps({
       home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
     }));
@@ -516,45 +520,58 @@ describe("officialInputFor — the console arm refuses until the router supports
     expect("input" in result).toBe(true);
   });
 
-  test("a fake version below the floor (0.0.3.x-style patch, e.g. \"0.0.3\") still refuses", () => {
+  test("a stubbed pin AT the floor (0.0.4) lets the console arm build normally", () => {
     const result = officialInputFor(input, minimalDeps({
       home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
-      installedWinterRuntimeSdkVersion: () => "0.0.3",
-    }));
-    expect(result).toBeInstanceOf(OfficialConsoleRouterUnsupported);
-  });
-
-  test("a fake version AT the floor (0.0.4) lets the console arm build normally", () => {
-    const result = officialInputFor(input, minimalDeps({
-      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
-      installedWinterRuntimeSdkVersion: () => "0.0.4",
+      requiredWinterRuntimeSdkVersion: "0.0.4",
     }));
     expect("input" in result).toBe(true);
   });
 
-  test("a fake version ABOVE the floor (0.0.10 — numeric, never lexicographic, comparison) also lets it build", () => {
+  test("a stubbed pin ABOVE the floor (0.0.10 — numeric, never lexicographic, comparison) also lets it build", () => {
     const result = officialInputFor(input, minimalDeps({
       home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
-      installedWinterRuntimeSdkVersion: () => "0.0.10",
+      requiredWinterRuntimeSdkVersion: "0.0.10",
     }));
     expect("input" in result).toBe(true);
   });
 
-  test("an unresolvable router version (undefined) is never treated as \"at least\" anything — refuses", () => {
-    const result = officialInputFor(input, minimalDeps({
-      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
+  // F1's own regression test: reproduce the EXACT compiled-`$bunfs`-binary condition
+  // (`installedWinterRuntimeSdkVersion()` unresolvable) directly, rather than only via the deps
+  // override, and show the gate is unaffected — this is the precise scenario that made every
+  // Release console session refuse `official_console_router_unsupported` before this fix.
+  test("the compiled-$bunfs case (installedWinterRuntimeSdkVersion unresolvable) still passes the gate — it no longer reads that resolver at all", async () => {
+    await mock.module("../../src/runtime-sdk/versions", () => ({
+      ...versionsModule,
       installedWinterRuntimeSdkVersion: () => undefined,
     }));
-    expect(result).toBeInstanceOf(OfficialConsoleRouterUnsupported);
+    try {
+      const result = officialInputFor(input, minimalDeps({
+        home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
+      }));
+      expect("input" in result).toBe(true);
+    } finally {
+      await mock.module("../../src/runtime-sdk/versions", () => ({
+        ...versionsModule,
+        installedWinterRuntimeSdkVersion: REAL_INSTALLED_WINTER_RUNTIME_SDK_VERSION,
+      }));
+    }
   });
 
-  // C1-interim's own second requirement: even once the router DOES support the console arm, the
-  // console arm must never hand `credentials` containing an anthropic key to the router — kept as a
-  // standing guard, not retired when the gate above stops firing.
-  test("even with a supported router, the console arm NEVER hands the router credentials containing an anthropic key", () => {
+  test("an unresolvable STUBBED pin (undefined override, falls back to the real pin) does not refuse", () => {
     const result = officialInputFor(input, minimalDeps({
       home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
-      installedWinterRuntimeSdkVersion: () => "0.0.4",
+      requiredWinterRuntimeSdkVersion: undefined,
+    }));
+    expect("input" in result).toBe(true);
+  });
+
+  // even once the router pin DOES support the console arm, the console arm must never hand
+  // `credentials` containing an anthropic key to the router — kept as a standing guard, not retired
+  // when the gate above stops firing.
+  test("even with a supported pin, the console arm NEVER hands the router credentials containing an anthropic key", () => {
+    const result = officialInputFor(input, minimalDeps({
+      home: HOME, selection: consoleSelection, provider, explicitCredentials: undefined,
     }));
     if (!("input" in result)) throw new Error(`officialInputFor unexpectedly refused: ${String((result as { message?: string }).message)}`);
     expect(result.input.credentials ?? []).toEqual([]);

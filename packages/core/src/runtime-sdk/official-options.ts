@@ -30,7 +30,7 @@ import { officialCapabilityServersFor, type OfficialMcpModule } from "./official
 import { winterSystemPromptFor } from "./system-prompt";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import type { OfficialPeer } from "./create";
-import { CONSOLE_AUTH_ROUTER_MIN, installedWinterRuntimeSdkVersion, versionAtLeast } from "./versions";
+import { CONSOLE_AUTH_ROUTER_MIN, REQUIRED_WINTER_RUNTIME_SDK, versionAtLeast } from "./versions";
 
 /**
  * Phase 9c (P9c-1, WS-00 §8 #1): env names the official leg's spawned child must NEVER inherit
@@ -288,14 +288,26 @@ export class OfficialProjectKeyTooDeep extends Error {
 }
 
 /**
- * Winter Phase 10a fix wave (C1-interim): the console auth arm refuses typed, before anything is
- * spawned, while the installed `@yanlinglabs/winter-runtime-sdk` is older than
- * `CONSOLE_AUTH_ROUTER_MIN` (`versions.ts`'s own doc explains why: the pinned 0.0.3 router would
- * inject the OAuth bearer profile as `ANTHROPIC_API_KEY`, which is exactly the leak `officialAuthChildEnvFor`'s
- * console arm exists to prevent). This refusal is a STANDING guard, not a one-time migration note —
- * it re-evaluates the installed version on every call (or the test-injected
- * `OfficialInputDeps.installedWinterRuntimeSdkVersion` override) and stops refusing automatically
- * the moment a router upgrade actually lands.
+ * Winter Phase 10a fix wave (F1): the console auth arm refuses typed, before anything is spawned,
+ * while the PINNED `@yanlinglabs/winter-runtime-sdk` (`versions.ts`'s `REQUIRED_WINTER_RUNTIME_SDK`
+ * — the compile-time constant, never a runtime probe of the installed package) is older than
+ * `CONSOLE_AUTH_ROUTER_MIN` (`versions.ts`'s own doc explains why: a pre-upgrade router would
+ * inject the OAuth bearer profile as `ANTHROPIC_API_KEY`, which is exactly the leak
+ * `officialAuthChildEnvFor`'s console arm exists to prevent).
+ *
+ * Fix wave F1: this USED to compare the runtime-resolved `installedWinterRuntimeSdkVersion()`
+ * against the floor — but that resolver depends on `createRequire` finding a real `node_modules`
+ * manifest, which does not exist inside a compiled `$bunfs` binary (`versions.ts:57`'s own doc), so
+ * it always answered `undefined` there and `versionAtLeast(undefined, …)` is always `false`
+ * (`versions.ts:76`): every Release console session refused typed, permanently. The pin is the
+ * right thing to compare in the first place — `bundle-layout.ts`'s `parseAndValidateVersionsJson`
+ * (asserted by the pins test) already refuses to stage a Release bundle whose `VERSIONS.json`
+ * disagrees with `REQUIRED_WINTER_RUNTIME_SDK`, so the pin and the actually-installed/staged router
+ * are guaranteed equal in every environment that matters — no runtime probe is needed at all. This
+ * refusal is still a STANDING guard, not a one-time migration note: it re-evaluates the pin on every
+ * call (or the test-injected `OfficialInputDeps.requiredWinterRuntimeSdkVersion` override, used only
+ * to simulate a pin below/at/above the floor) and stops refusing automatically the moment a pin bump
+ * actually lands.
  */
 export class OfficialConsoleRouterUnsupported extends Error {
   readonly code = "official_console_router_unsupported" as const;
@@ -303,7 +315,7 @@ export class OfficialConsoleRouterUnsupported extends Error {
     super(
       `the console auth arm needs @yanlinglabs/winter-runtime-sdk >= ${requiredRouterVersion} (the pinned router forwards ` +
       `only its own minimal OS environment and runs its api-key credential plan unconditionally, which would inject the ` +
-      `console profile's OAuth bearer as ANTHROPIC_API_KEY); installed ${installedRouterVersion ?? "unknown"} — sign in with ` +
+      `console profile's OAuth bearer as ANTHROPIC_API_KEY); pinned ${installedRouterVersion ?? "unknown"} — sign in with ` +
       `an API key instead, or wait for the router upgrade`,
     );
     this.name = "OfficialConsoleRouterUnsupported";
@@ -368,11 +380,12 @@ export interface OfficialInputDeps {
    *  incarnation with no daemon restart. `undefined`/`null` behaves exactly like an absent block
    *  (`officialSubscriptionAuthEnabled`'s own default: off). */
   settings?: Settings | null;
-  /** Winter Phase 10a fix wave (C1-interim): test-only override of `versions.ts`'s
-   *  `installedWinterRuntimeSdkVersion` — lets a test simulate a router upgrade (`() => "0.0.4"`)
-   *  without a real second package install. `undefined` (every production caller, and every test
-   *  that does not need to touch this gate) means "read the real installed version". */
-  installedWinterRuntimeSdkVersion?: () => string | undefined;
+  /** Winter Phase 10a fix wave (F1): test-only override of `versions.ts`'s
+   *  `REQUIRED_WINTER_RUNTIME_SDK` compile-time pin — lets a test simulate a pin below/at/above
+   *  `CONSOLE_AUTH_ROUTER_MIN` (e.g. `"0.0.3"`) without editing the real constant. `undefined`
+   *  (every production caller, and every test that does not need to touch this gate) means "use the
+   *  real pin". */
+  requiredWinterRuntimeSdkVersion?: string;
 }
 
 /** `winterSystemPromptFor`'s memory-bucket choice, verbatim (chat/dispatch share `_assistant`; code
@@ -426,15 +439,16 @@ export function officialInputFor(
   // now carries what that parallel field used to.
   const officialAuthArm: "api-key" | "console" = deps.selection.authFamily === "console-profile" ? "console" : "api-key";
 
-  // Fix wave (C1-interim): the router-version gate — checked BEFORE anything else in this function
-  // builds a bridge, reads a credential, or touches disk, so a session refuses typed the instant
-  // the console arm is decided, never partway through assembling an input nothing could safely
-  // launch with. See `OfficialConsoleRouterUnsupported`'s own doc for why this is standing, not
-  // one-time.
+  // Fix wave (F1): the router-version gate — checked BEFORE anything else in this function builds a
+  // bridge, reads a credential, or touches disk, so a session refuses typed the instant the console
+  // arm is decided, never partway through assembling an input nothing could safely launch with.
+  // Compared against the COMPILE-TIME PIN (`REQUIRED_WINTER_RUNTIME_SDK`), never a runtime probe of
+  // the installed package — see `OfficialConsoleRouterUnsupported`'s own doc for why the pin alone
+  // is sufficient and why the old runtime probe was dead in every compiled Release binary.
   if (officialAuthArm === "console") {
-    const installedRouterVersion = (deps.installedWinterRuntimeSdkVersion ?? installedWinterRuntimeSdkVersion)();
-    if (!versionAtLeast(installedRouterVersion, CONSOLE_AUTH_ROUTER_MIN)) {
-      return new OfficialConsoleRouterUnsupported(installedRouterVersion, CONSOLE_AUTH_ROUTER_MIN);
+    const pinnedRouterVersion = deps.requiredWinterRuntimeSdkVersion ?? REQUIRED_WINTER_RUNTIME_SDK;
+    if (!versionAtLeast(pinnedRouterVersion, CONSOLE_AUTH_ROUTER_MIN)) {
+      return new OfficialConsoleRouterUnsupported(pinnedRouterVersion, CONSOLE_AUTH_ROUTER_MIN);
     }
   }
 
