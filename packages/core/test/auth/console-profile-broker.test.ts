@@ -8,8 +8,10 @@ import { chmodSync, existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
+import { readCredentialMaterial, writeCredentialMaterial } from "../../src/auth/credential-material";
 import { credentialStoreOverSecretStore } from "../../src/providers/credential-store";
 import { anthropicConfigDirFor, ANTHROPIC_PROFILE_NAME, officialConfigDirFor } from "../../src/runtime-sdk/official-options";
+import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
 import {
   CONSOLE_BROKER_UNAVAILABLE_REASON,
   createConsoleProfileBroker,
@@ -64,6 +66,52 @@ function fakeTimers() {
   return { delays, cleared, setTimeoutFn, clearTimeoutFn, fire };
 }
 
+/**
+ * Winter Phase 10a fix wave (F2): a fake `fs.watch` seam — records every registration, and lets a
+ * test fire the LATEST one's callback directly (simulating a real fs event) without ever touching
+ * a real filesystem watch. `closedCount` proves `stopWatcher()` actually closes the handle.
+ */
+function fakeWatchDir() {
+  const registrations: { path: string; cb: () => void }[] = [];
+  let closedCount = 0;
+  const watchDirFn = (path: string, cb: () => void): { close(): void } => {
+    registrations.push({ path, cb });
+    return { close: () => { closedCount++; } };
+  };
+  const trigger = (): void => { registrations.at(-1)?.cb(); };
+  return { watchDirFn, trigger, registrations, get closedCount() { return closedCount; } };
+}
+
+/**
+ * Winter Phase 10a fix wave (F2): unlike `fakeTimers()` above (one pending slot — fine for the
+ * refresh timer alone), the watcher can have its OWN debounce timer and poll timer pending AT THE
+ * SAME TIME as each other (and, once a refresh actually runs, the refresh timer's own re-arm) — so
+ * this tracks every pending timer and lets a test fire the one scheduled with a SPECIFIC delay
+ * (`WATCHER_DEBOUNCE_MS` vs `WATCHER_POLL_MS` are distinct literals, so this disambiguates without
+ * needing handle identity at the call site). Every watcher test below arranges its fake
+ * `refreshAnthropicBearer` to never resolve, so no re-arm timer is ever scheduled to collide with
+ * `WATCHER_POLL_MS` — see those tests' own comments.
+ */
+function fakeMultiTimers() {
+  let nextId = 0;
+  const pending = new Map<number, { fn: () => void; ms: number }>();
+  const cleared: unknown[] = [];
+  const setTimeoutFn = (fn: () => void, ms: number): unknown => {
+    const id = ++nextId;
+    pending.set(id, { fn, ms });
+    return id;
+  };
+  const clearTimeoutFn = (h: unknown): void => { cleared.push(h); pending.delete(h as number); };
+  const fireByDelay = async (ms: number): Promise<void> => {
+    const entry = [...pending.entries()].find(([, e]) => e.ms === ms);
+    if (entry === undefined) throw new Error(`fakeMultiTimers: no pending timer with delay ${ms} (pending: ${[...pending.values()].map((e) => e.ms).join(",")})`);
+    pending.delete(entry[0]);
+    entry[1].fn();
+    await flush();
+  };
+  return { setTimeoutFn, clearTimeoutFn, fireByDelay, cleared, pendingDelays: () => [...pending.values()].map((e) => e.ms) };
+}
+
 /** A fake `AnthropicConsoleSdk` that records every call it receives, so tests assert on the
  *  options/args this door built without any real process ever spawning. */
 function fakeSdk(overrides: Partial<AnthropicConsoleSdk> = {}) {
@@ -91,13 +139,16 @@ function fakeSdk(overrides: Partial<AnthropicConsoleSdk> = {}) {
 }
 
 describe("createConsoleProfileBroker — login", () => {
-  test("refuses claude_executable_unavailable WITHOUT ever calling the sdk", async () => {
+  // Fix wave (F2 corrected design): the single login door is `ant auth login --profile winter` —
+  // `claudeExecutable` is no longer what this door needs resolved (present here, deliberately, to
+  // prove that alone is not enough any more).
+  test("refuses ant_executable_unavailable WITHOUT ever calling the sdk, even with claudeExecutable present", async () => {
     const home = freshHome();
     const { sdk, calls } = fakeSdk();
     const broker = createConsoleProfileBroker({
-      home, claudeExecutable: () => undefined, secrets: new FileSecretStore(join(home, "secrets")), sdk,
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk,
     });
-    await expect(broker.login(() => {})).rejects.toThrow("claude_executable_unavailable");
+    await expect(broker.login(() => {})).rejects.toThrow("ant_executable_unavailable");
     expect(calls).toEqual([]);
   });
 
@@ -112,7 +163,7 @@ describe("createConsoleProfileBroker — login", () => {
     expect(existsSync(dir)).toBe(false);
     const { sdk } = fakeSdk();
     const broker = createConsoleProfileBroker({
-      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk,
+      home, claudeExecutable: () => "/bin/claude", antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")), sdk,
     });
     await broker.login(() => {});
     expect(existsSync(dir)).toBe(true);
@@ -128,7 +179,7 @@ describe("createConsoleProfileBroker — login", () => {
     expect(statSync(dir).mode & 0o777).toBe(0o755);
     const { sdk } = fakeSdk();
     const broker = createConsoleProfileBroker({
-      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk,
+      home, claudeExecutable: () => "/bin/claude", antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")), sdk,
     });
     await broker.login(() => {});
     expect(statSync(dir).mode & 0o777).toBe(0o700);
@@ -157,13 +208,18 @@ describe("createConsoleProfileBroker — login", () => {
     expect(await handle.done).toEqual({ ok: true, profile: ANTHROPIC_PROFILE_NAME });
   });
 
-  test("antExecutable is OMITTED from options (not even undefined) when the resolver isn't supplied", async () => {
+  // Fix wave (F2 corrected design): moved off `login()` — omitting `antExecutable` now makes
+  // `login()` refuse outright (its own describe block above), so `options` is never even built.
+  // `refreshBearer()`'s door is UNCHANGED by this fix wave ("refresh is unchanged" — the
+  // coordinator's own words) and still silently omits the field when unresolved, so that is the
+  // one this premise is actually about.
+  test("antExecutable is OMITTED from refreshBearer's options (not even undefined) when the resolver isn't supplied", async () => {
     const home = freshHome();
     const { sdk, calls } = fakeSdk();
     const broker = createConsoleProfileBroker({
       home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk,
     });
-    await broker.login(() => {});
+    await broker.refreshBearer();
     const options = calls[0]!.args[1] as AnthropicLoginOptions;
     expect("antExecutable" in options).toBe(false);
   });
@@ -178,7 +234,7 @@ describe("createConsoleProfileBroker — login", () => {
       }),
     });
     const broker = createConsoleProfileBroker({
-      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk,
+      home, claudeExecutable: () => "/bin/claude", antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")), sdk,
     });
     const handle = await broker.login(() => {});
     await handle.submitCode("123456");
@@ -204,12 +260,23 @@ describe("createConsoleProfileBroker — profileExists / refreshBearer / logout"
     expect(calls[0]!.fn).toBe("refreshAnthropicBearer");
   });
 
-  test("logout() forwards to sdk.logoutAnthropicConsole(store, options) and awaits it", async () => {
+  test("logout() forwards to sdk.logoutAnthropicConsole(store, options) and awaits it — options carry the resolved antExecutable (F2)", async () => {
+    const home = freshHome();
+    const { sdk, calls } = fakeSdk();
+    const broker = createConsoleProfileBroker({ home, claudeExecutable: () => "/bin/claude", antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")), sdk });
+    await broker.logout();
+    expect(calls[0]!.fn).toBe("logoutAnthropicConsole");
+    const [, options] = calls[0]!.args as [unknown, AnthropicLoginOptions];
+    expect(options.antExecutable).toBe("/bin/ant");
+  });
+
+  // Fix wave (F2 corrected design): logout() now needs ant resolved before any spawn.
+  test("logout() refuses ant_executable_unavailable WITHOUT ever calling the sdk", async () => {
     const home = freshHome();
     const { sdk, calls } = fakeSdk();
     const broker = createConsoleProfileBroker({ home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk });
-    await broker.logout();
-    expect(calls[0]!.fn).toBe("logoutAnthropicConsole");
+    await expect(broker.logout()).rejects.toThrow("ant_executable_unavailable");
+    expect(calls).toEqual([]);
   });
 
   // Fix round 1 item 1: a signed-out profile must never keep refreshing itself.
@@ -218,7 +285,7 @@ describe("createConsoleProfileBroker — profileExists / refreshBearer / logout"
     const { sdk, calls } = fakeSdk();
     const timers = fakeTimers();
     const broker = createConsoleProfileBroker({
-      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      home, claudeExecutable: () => "/bin/claude", antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")),
       sdk, now: () => 1_000_000, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
     });
     broker.startRefresher();
@@ -241,7 +308,7 @@ describe("createConsoleProfileBroker — profileExists / refreshBearer / logout"
     const timers = fakeTimers();
     const { sdk } = fakeSdk({ logoutAnthropicConsole: async () => { throw new Error("boom"); } });
     const broker = createConsoleProfileBroker({
-      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      home, claudeExecutable: () => "/bin/claude", antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")),
       sdk, now: () => 1_000_000, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
     });
     broker.startRefresher();
@@ -474,8 +541,10 @@ describe("createConsoleProfileBroker — startRefresher / stopRefresher (host-ow
 describe("UNAVAILABLE_SDK — explicit defensive fallback (no longer the default now that v0.0.6 is wired)", () => {
   test("the async calls reject with CONSOLE_BROKER_UNAVAILABLE_REASON, never a raw/unnamed error", async () => {
     const home = freshHome();
+    // antExecutable supplied so logout()'s own F2 guard doesn't short-circuit before ever reaching
+    // the SDK's own unavailable rejection — this test is about THAT rejection, not the guard.
     const broker = createConsoleProfileBroker({
-      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")), sdk: UNAVAILABLE_SDK,
+      home, claudeExecutable: () => "/bin/claude", antExecutable: () => "/bin/ant", secrets: new FileSecretStore(join(home, "secrets")), sdk: UNAVAILABLE_SDK,
     });
     await expect(broker.refreshBearer()).rejects.toThrow(CONSOLE_BROKER_UNAVAILABLE_REASON);
     await expect(broker.logout()).rejects.toThrow(CONSOLE_BROKER_UNAVAILABLE_REASON);
@@ -527,5 +596,184 @@ describe("REAL_SDK — the default now that @yanlinglabs/winter-provider-runtime
       anthropicConfigDir: join(home, "anthropic-config"),
       claudeConfigDir: join(home, "claude-config"),
     })).resolves.toEqual({ ok: false, reason: expect.stringContaining("ant") });
+  });
+});
+
+// Winter Phase 10a fix wave (F2): the watcher — reacts to the console profile appearing/
+// disappearing from ANY process/door, not just the one this broker instance's own login()/
+// logout() ran. Every test below arranges `refreshAnthropicBearer` to never resolve UNLESS a test
+// specifically needs a real re-arm timer to prove `stopRefresher()` clears it (the one disappear
+// test) — see `fakeMultiTimers`'s own doc for why that avoids a delay collision with
+// `WATCHER_POLL_MS`. `500`/`60000` below mirror the source's own private `WATCHER_DEBOUNCE_MS`/
+// `WATCHER_POLL_MS` constants (not exported — these tests observe behavior, not the constants).
+describe("createConsoleProfileBroker — startWatcher / stopWatcher (F2)", () => {
+  test("startWatcher() creates AND hardens <anthropicConfigDir>/credentials/ to 0700, and registers on it", () => {
+    const home = freshHome();
+    const credentialsDir = join(anthropicConfigDirFor(home), "credentials");
+    expect(existsSync(credentialsDir)).toBe(false);
+    const { sdk } = fakeSdk();
+    const watch = fakeWatchDir();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, watchDirFn: watch.watchDirFn,
+    });
+    broker.startWatcher();
+    expect(existsSync(credentialsDir)).toBe(true);
+    expect(statSync(credentialsDir).mode & 0o777).toBe(0o700);
+    expect(watch.registrations).toEqual([{ path: credentialsDir, cb: expect.any(Function) }]);
+  });
+
+  test("profile appears via an fs.watch event (debounced) -> refreshBearer runs and the refresher starts", async () => {
+    const home = freshHome();
+    let exists = false;
+    const { sdk, calls } = fakeSdk({
+      anthropicConsoleProfileExists: () => exists,
+      refreshAnthropicBearer: async () => { calls.push({ fn: "refreshAnthropicBearer", args: [] }); return new Promise<AnthropicRefreshResult>(() => {}); },
+    });
+    const watch = fakeWatchDir();
+    const timers = fakeMultiTimers();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, watchDirFn: watch.watchDirFn, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    broker.startWatcher();
+    exists = true; // e.g. `ant auth login --profile winter`, run by a totally separate process
+    watch.trigger();
+    await timers.fireByDelay(500); // the debounce window elapses
+    expect(calls.filter((c) => c.fn === "refreshAnthropicBearer").length).toBe(1);
+    // The refresher is now marked running (its seed refresh never resolves in this fake, so it
+    // stays "starting" forever) — a direct startRefresher() call afterward is a no-op, proving the
+    // watcher's OWN reaction is what started it, not a coincidence of the test calling it directly.
+    broker.startRefresher();
+    await flush();
+    expect(calls.filter((c) => c.fn === "refreshAnthropicBearer").length).toBe(1);
+  });
+
+  test("profile appears via the poll fallback alone (no fs.watch event at all) -> refreshBearer runs and the refresher starts", async () => {
+    const home = freshHome();
+    let exists = false;
+    const { sdk, calls } = fakeSdk({
+      anthropicConsoleProfileExists: () => exists,
+      refreshAnthropicBearer: async () => { calls.push({ fn: "refreshAnthropicBearer", args: [] }); return new Promise<AnthropicRefreshResult>(() => {}); },
+    });
+    const watch = fakeWatchDir();
+    const timers = fakeMultiTimers();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, watchDirFn: watch.watchDirFn, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    broker.startWatcher();
+    exists = true;
+    // Never call watch.trigger() — only the poll (armed by startWatcher() itself) ever fires.
+    await timers.fireByDelay(60_000);
+    expect(calls.filter((c) => c.fn === "refreshAnthropicBearer").length).toBe(1);
+  });
+
+  test("profile disappears -> stopRefresher runs and the bearer material is deleted, WITHOUT spawning logoutAnthropicConsole again", async () => {
+    const home = freshHome();
+    let exists = true;
+    const secrets = new FileSecretStore(join(home, "secrets"));
+    await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "bearer", token: "tok" });
+    const { sdk, calls } = fakeSdk({
+      anthropicConsoleProfileExists: () => exists,
+      refreshAnthropicBearer: async () => { calls.push({ fn: "refreshAnthropicBearer", args: [] }); return { ok: true, expiresAt: REALISTIC_NOW + 150_000 }; },
+    });
+    const watch = fakeWatchDir();
+    const timers = fakeMultiTimers();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets,
+      sdk, now: () => REALISTIC_NOW, watchDirFn: watch.watchDirFn, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    // Simulate daemon.ts's own boot-time call (profile already exists) BEFORE the watcher starts —
+    // a REAL re-arm timer this test can prove gets cleared, distinct from the watcher's own poll.
+    broker.startRefresher();
+    await flush();
+    expect(timers.pendingDelays()).toContain(90_000); // 150_000 - REFRESH_LEAD_MS (60_000)
+    broker.startWatcher(); // captures watcherKnownExists = true; no false transition
+    expect(timers.pendingDelays()).toContain(60_000); // the watcher's own poll, now also pending
+
+    exists = false; // e.g. `winter logout --anthropic-console`, run by a totally separate process
+    watch.trigger();
+    await timers.fireByDelay(500);
+
+    expect(timers.pendingDelays()).not.toContain(90_000); // the refresh re-arm was cleared
+    expect(timers.pendingDelays()).toContain(60_000); // the watcher's OWN poll is unaffected
+    expect(await readCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME)).toBeNull();
+    expect(calls.every((c) => c.fn !== "logoutAnthropicConsole")).toBe(true);
+  });
+
+  test("stopWatcher() closes the fs.watch handle and cancels a pending debounce AND the poll timer", async () => {
+    const home = freshHome();
+    const { sdk } = fakeSdk({ refreshAnthropicBearer: async () => new Promise<AnthropicRefreshResult>(() => {}) });
+    const watch = fakeWatchDir();
+    const timers = fakeMultiTimers();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, watchDirFn: watch.watchDirFn, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    broker.startWatcher();
+    expect(watch.closedCount).toBe(0);
+    watch.trigger(); // arm a pending debounce timer too, not just the poll
+    expect(timers.pendingDelays().sort()).toEqual([500, 60_000]);
+    broker.stopWatcher();
+    expect(watch.closedCount).toBe(1);
+    expect(timers.pendingDelays()).toEqual([]);
+  });
+
+  test("startWatcher() is idempotent — a second call does not re-register fs.watch", () => {
+    const home = freshHome();
+    const { sdk } = fakeSdk();
+    const watch = fakeWatchDir();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, watchDirFn: watch.watchDirFn,
+    });
+    broker.startWatcher();
+    broker.startWatcher();
+    expect(watch.registrations.length).toBe(1);
+  });
+
+  test("a burst of fs.watch events within the debounce window coalesces into ONE reaction", async () => {
+    const home = freshHome();
+    let exists = false;
+    const { sdk, calls } = fakeSdk({
+      anthropicConsoleProfileExists: () => exists,
+      refreshAnthropicBearer: async () => { calls.push({ fn: "refreshAnthropicBearer", args: [] }); return new Promise<AnthropicRefreshResult>(() => {}); },
+    });
+    const watch = fakeWatchDir();
+    const timers = fakeMultiTimers();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, watchDirFn: watch.watchDirFn, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    broker.startWatcher();
+    exists = true;
+    watch.trigger();
+    watch.trigger();
+    watch.trigger();
+    // Each trigger cleared the previous debounce timer and armed a fresh one — only ONE is ever
+    // actually pending at a time, not three.
+    expect(timers.pendingDelays().filter((d) => d === 500).length).toBe(1);
+    await timers.fireByDelay(500);
+    expect(calls.filter((c) => c.fn === "refreshAnthropicBearer").length).toBe(1);
+  });
+
+  test("starting the watcher when the profile ALREADY exists captures that as the baseline — no false 'appeared' reaction from starting, nor from a no-op fs event afterward", async () => {
+    const home = freshHome();
+    const { sdk, calls } = fakeSdk({
+      anthropicConsoleProfileExists: () => true, // already present when the watcher starts
+      refreshAnthropicBearer: async () => { calls.push({ fn: "refreshAnthropicBearer", args: [] }); return new Promise<AnthropicRefreshResult>(() => {}); },
+    });
+    const watch = fakeWatchDir();
+    const timers = fakeMultiTimers();
+    const broker = createConsoleProfileBroker({
+      home, claudeExecutable: () => "/bin/claude", secrets: new FileSecretStore(join(home, "secrets")),
+      sdk, watchDirFn: watch.watchDirFn, setTimeoutFn: timers.setTimeoutFn, clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    broker.startWatcher();
+    expect(calls.length).toBe(0); // no refresh just from starting
+    watch.trigger(); // presence unchanged (still true) — a no-op fs event
+    await timers.fireByDelay(500);
+    expect(calls.length).toBe(0);
   });
 });

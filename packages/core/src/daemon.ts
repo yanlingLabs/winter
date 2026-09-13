@@ -1138,6 +1138,12 @@ export async function startDaemon(opts: {
   // boot: every await inside `startRefresher()`'s own refresh chain is caught internally (its own
   // doc comment), so this call itself never throws.
   if (consoleBroker.profileExists()) consoleBroker.startRefresher();
+  // Winter Phase 10a fix wave (F2): starts UNCONDITIONALLY, regardless of the boot-time check
+  // above — its whole job is to notice the profile appearing/disappearing AFTER boot, from a
+  // separate process (a CLI `winter login`/`logout --anthropic-console`, which is deliberately NOT
+  // an RPC and so cannot tell a running daemon directly, or a human running `ant auth
+  // login`/`logout --profile winter` by hand). See `ConsoleProfileBroker.startWatcher`'s own doc.
+  consoleBroker.startWatcher();
 
   // ── §13 step 10, run from here because the handle does not exist where the step does ──────────
   //
@@ -2187,6 +2193,7 @@ export async function startDaemon(opts: {
       routineScheduler.stop(); routineStore.close(); // no orphan tick timer past drain
       dreamer?.stop(); // no orphan dream tick timer past shutdown (unref'd already, but never left running)
       consoleBroker.stopRefresher(); // Winter Phase 10a (fix round 1 item 2): no orphan bearer-refresh timer past shutdown (unref'd already, belt-and-braces)
+      consoleBroker.stopWatcher(); // Winter Phase 10a fix wave (F2): closes the fs.watch handle + cancels its own debounce/poll timers past shutdown
       // P8a Task 12 — SHUTDOWN ORDER, and it is an order, not a list. `server.stop()` above has
       // already run, so no RPC can arrive after this point and reach a closed handle; the reaper's
       // mint-time sweep (the one caller that could still queue a runtime deletion) lives inside that

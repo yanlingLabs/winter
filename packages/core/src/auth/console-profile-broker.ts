@@ -30,6 +30,8 @@
 // names at 0.0.6 exactly as Lane S described above — wired below as `REAL_SDK`, now the default
 // `sdk` dependency. `UNAVAILABLE_SDK` stays as an explicit, still-tested defensive fallback shape
 // (never the default any more) rather than being deleted outright.
+import fs from "node:fs";
+import { join } from "node:path";
 import { credentialStoreOverSecretStore } from "../providers/credential-store";
 import {
   DEFAULT_ANTHROPIC_CONSOLE_PROFILE,
@@ -42,6 +44,7 @@ import {
 import type { SecretStore } from "./secret-store";
 import { keychainService } from "../profile";
 import { ANTHROPIC_PROFILE_NAME, anthropicConfigDirFor, ensureOfficialConfigDir, officialConfigDirFor } from "../runtime-sdk/official-options";
+import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../runtime-sdk/keychain";
 
 // Tripwire (Winter Phase 10a, v0.0.6 wiring): Winter's own profile name (`ANTHROPIC_PROFILE_NAME`,
 // `runtime-sdk/official-options.ts`) is a separate literal from the SDK's own default — they are
@@ -161,6 +164,23 @@ export interface ConsoleProfileBroker {
    *  why no equivalent exists on the SDK side. */
   startRefresher(): void;
   stopRefresher(): void;
+  /**
+   * Winter Phase 10a fix wave (F2): watches the console profile's own credential file for
+   * appearing or disappearing, from ANY process or door — a CLI `winter login`/`logout
+   * --anthropic-console` (a separate, short-lived process from the daemon), the daemon's own
+   * RPC-driven `provider.login`/`provider.logout`, or a human running `ant auth login`/`logout
+   * --profile winter` directly — and reacts the same way that door's own call already would:
+   * `startRefresher()` (its own seed refresh IS `refreshBearer()`, bundled) on appear, and
+   * `stopRefresher()` + deleting the bearer material on disappear.
+   *
+   * Exists because the CLI's login/logout doors build their OWN, short-lived broker instance in a
+   * SEPARATE PROCESS from the daemon (`main.ts`'s own header: "NOT an RPC — the daemon may not
+   * even be running") — a daemon that booted before that CLI process ran, or is simply a different
+   * process from it, has no other way to learn the profile changed. Idempotent: a second
+   * `startWatcher()` while already running, or `stopWatcher()` while already stopped, is a no-op.
+   */
+  startWatcher(): void;
+  stopWatcher(): void;
 }
 
 export interface ConsoleProfileBrokerDeps {
@@ -181,6 +201,9 @@ export interface ConsoleProfileBrokerDeps {
    *  v0.0.6 exports); tests pass a fake, and a caller can still pass `UNAVAILABLE_SDK` explicitly
    *  (see that constant's own doc). */
   sdk?: AnthropicConsoleSdk;
+  /** Winter Phase 10a fix wave (F2): test seam for the watcher's `fs.watch` call — mirrors
+   *  `settings-watcher.ts`'s own `watch?` seam shape exactly. Defaults to the real `fs.watch`. */
+  watchDirFn?: (path: string, cb: () => void) => { close(): void };
 }
 
 /** 60s before expiry (P10a-4's own rule); on a FAILED refresh, retry after this same window rather
@@ -188,6 +211,16 @@ export interface ConsoleProfileBrokerDeps {
  *  then, and a broker that silently stops retrying forever is worse than one that retries too
  *  often. */
 const REFRESH_LEAD_MS = 60_000;
+
+/** Winter Phase 10a fix wave (F2): the watcher's debounce window after an `fs.watch` event fires —
+ *  short enough to react quickly, long enough to coalesce a burst (e.g. a login writing the profile
+ *  file in more than one syscall) into one check. */
+const WATCHER_DEBOUNCE_MS = 500;
+
+/** Winter Phase 10a fix wave (F2): the watcher's fallback poll interval — self-heals against a
+ *  missed or coalesced `fs.watch` event (macOS `fs.watch` is not perfectly reliable) without being
+ *  so frequent it is meaningfully more expensive than the `fs.watch` path itself. */
+const WATCHER_POLL_MS = 60_000;
 
 /**
  * Winter Phase 10a fix wave (M3-clamp): `armAt`'s own floor on the NEXT fire delay — never sooner
@@ -282,16 +315,84 @@ export function createConsoleProfileBroker(deps: ConsoleProfileBrokerDeps): Cons
       });
   }
 
+  // Winter Phase 10a fix wave (F2): the console profile's own credentials directory —
+  // `<anthropicConfigDir>/credentials/` — is what the watcher below watches, and what `login()`/
+  // `logout()` (both now `ant`-driven, per the corrected P10a-6 design) need present before either
+  // door spawns anything.
+  const credentialsDir = join(anthropicConfigDir, "credentials");
+  const watchDir = deps.watchDirFn ?? ((p: string, cb: () => void) => {
+    const w = fs.watch(p, () => cb());
+    return { close: () => w.close() };
+  });
+
+  // Watcher state — deliberately separate from the refresh timer's own `timer` slot above (a
+  // different concern: THIS is "has the profile appeared/disappeared", not "when to refresh next").
+  let watcherRunning = false;
+  let watchHandle: { close(): void } | undefined;
+  let debounceTimer: unknown;
+  let pollTimer: unknown;
+  let watcherKnownExists = false;
+
+  function watcherProfileExists(): boolean {
+    return sdk.anthropicConsoleProfileExists(anthropicConfigDir, ANTHROPIC_PROFILE_NAME);
+  }
+
+  /**
+   * The level-triggered core: recompute presence and react ONLY on an actual flip — never on every
+   * fs event/poll tick (a burst of unrelated writes inside `credentialsDir`, or a poll landing
+   * while nothing changed, must not re-fire `startRefresher()`/re-delete already-deleted material).
+   * Appear -> `startRefresherImpl()` (its own seed refresh already IS `refreshBearer()`, bundled —
+   * see that function's own doc). Disappear -> `stopRefresherImpl()` + delete the bearer material
+   * via the SAME `store.delete` the SDK's own `logoutAnthropicConsole` would call — NEVER by
+   * spawning `logoutAnthropicConsole`/`ant auth logout` again here: either this disappearance IS
+   * this broker's OWN `logout()` call (which already ran that spawn once — a second one is pure
+   * waste) or it is an external removal with nothing left to log out of (a spawn against an
+   * already-gone profile is pointless at best).
+   */
+  function reactToPresenceChange(): void {
+    if (!watcherRunning) return;
+    const exists = watcherProfileExists();
+    if (exists === watcherKnownExists) return;
+    watcherKnownExists = exists;
+    if (exists) {
+      startRefresherImpl();
+    } else {
+      stopRefresherImpl();
+      void store.delete({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME }).catch(() => {});
+    }
+  }
+
+  function schedulePoll(): void {
+    if (!watcherRunning) return;
+    pollTimer = setT(() => {
+      reactToPresenceChange();
+      schedulePoll();
+    }, WATCHER_POLL_MS);
+  }
+
+  function onFsEvent(): void {
+    if (!watcherRunning) return;
+    if (debounceTimer !== undefined) clearT(debounceTimer);
+    debounceTimer = setT(() => {
+      debounceTimer = undefined;
+      reactToPresenceChange();
+    }, WATCHER_DEBOUNCE_MS);
+  }
+
   return {
     async login(onLine: (line: string) => void): Promise<AnthropicLoginHandle> {
-      if (!deps.claudeExecutable()) throw new Error("claude_executable_unavailable");
+      // Fix wave (F2 corrected design): the single login door is `ant auth login --profile
+      // winter` (SDK 0.0.8, in flight) — `claude auth login --console` was measured NOT to write
+      // the profile file at all (it mints a Console API key into CLAUDE_CONFIG_DIR instead), so
+      // `antExecutable`, not `claudeExecutable`, is what this door actually needs resolved.
+      if (!deps.antExecutable?.()) throw new Error("ant_executable_unavailable");
       // Winter Phase 10a fix wave (M4): harden `anthropicConfigDirFor(home)` 0700 BEFORE the
       // login child ever spawns — `official-session.ts`'s `open()` only ensures this directory
       // for a session actually launched on the console arm, which (per C1-interim) never happens
       // against the pinned router yet; without this, the very first `winter login
-      // --anthropic-console` could hand `claude auth login --console` a config dir that does not
-      // exist at all, or one left over-permissive by something else. Same helper, same 0700 shape
-      // as every other caller of `ensureOfficialConfigDir` — never a second, hand-rolled mkdir/chmod.
+      // --anthropic-console` could hand the login a config dir that does not exist at all, or one
+      // left over-permissive by something else. Same helper, same 0700 shape as every other caller
+      // of `ensureOfficialConfigDir` — never a second, hand-rolled mkdir/chmod.
       ensureOfficialConfigDir(anthropicConfigDir);
       return sdk.startAnthropicConsoleBrokerLogin(store, optionsFor(onLine));
     },
@@ -305,6 +406,11 @@ export function createConsoleProfileBroker(deps: ConsoleProfileBrokerDeps): Cons
     },
 
     async logout(): Promise<void> {
+      // Fix wave (F2 corrected design): same single door as login() above — `logout()` also needs
+      // `ant` resolved BEFORE any spawn, never a partial/best-effort logout that clears Winter's
+      // own bearer material while leaving `ant`'s own on-disk profile dangling (the exact stale-
+      // access shape `OfficialConsoleProfileMissing`, F3, exists to keep closed).
+      if (!deps.antExecutable?.()) throw new Error("ant_executable_unavailable");
       // Fix round 1 item 1: a signed-out profile has nothing left to refresh — running
       // `stopRefresher()` FIRST (before the SDK call, which may itself throw) guarantees the timer
       // is never left ticking against a profile this call is in the middle of tearing down,
@@ -319,6 +425,29 @@ export function createConsoleProfileBroker(deps: ConsoleProfileBrokerDeps): Cons
 
     stopRefresher(): void {
       stopRefresherImpl();
+    },
+
+    startWatcher(): void {
+      if (watcherRunning) return;
+      watcherRunning = true;
+      ensureOfficialConfigDir(credentialsDir);
+      watcherKnownExists = watcherProfileExists();
+      try {
+        watchHandle = watchDir(credentialsDir, onFsEvent);
+      } catch {
+        // fs.watch can throw synchronously (e.g. the dir vanished between the mkdir above and
+        // here) — the poll below is a complete fallback on its own, so this is never fatal.
+        watchHandle = undefined;
+      }
+      schedulePoll();
+    },
+
+    stopWatcher(): void {
+      watcherRunning = false;
+      watchHandle?.close();
+      watchHandle = undefined;
+      if (debounceTimer !== undefined) { clearT(debounceTimer); debounceTimer = undefined; }
+      if (pollTimer !== undefined) { clearT(pollTimer); pollTimer = undefined; }
     },
   };
 

@@ -1912,7 +1912,10 @@ if (import.meta.main) {
         console.log(`${AQUA}signed in${RESET} — profile "${result.profile}"`);
         const refreshed = await broker.refreshBearer().catch((err) => ({ ok: false as const, reason: err instanceof Error ? err.name : "unknown" }));
         if (!refreshed.ok) {
-          console.error(`warning: could not refresh the native-provider bearer token yet (${refreshed.reason}) — a running daemon retries this on its own schedule`);
+          // Fix wave (F2): this login ran in a SEPARATE, short-lived process from any daemon
+          // (this door's own header, above) — a daemon watches the profile file and reacts on its
+          // own (see ConsoleProfileBroker.startWatcher), but only if one is actually running.
+          console.error(`warning: could not refresh the native-provider bearer token yet (${refreshed.reason}) — a running daemon will notice this profile and retry automatically; otherwise this refreshes the next time a daemon with this profile starts`);
         }
       } else {
         console.error(`sign-in failed: ${result.reason}`);

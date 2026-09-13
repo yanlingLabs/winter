@@ -87,6 +87,11 @@ function fakeBroker(overrides: Partial<ConsoleProfileBroker> = {}): { broker: Co
     logout: async () => { calls.push("logout"); },
     startRefresher: () => { calls.push("startRefresher"); },
     stopRefresher: () => { calls.push("stopRefresher"); },
+    // Fix wave (F2): not exercised by this file's own tests (the watcher lifecycle is daemon.ts's
+    // job, never ipc/server.ts's) — present only so this fake satisfies the (now wider)
+    // ConsoleProfileBroker interface.
+    startWatcher: () => { calls.push("startWatcher"); },
+    stopWatcher: () => { calls.push("stopWatcher"); },
     ...overrides,
   };
   return { broker, calls };
