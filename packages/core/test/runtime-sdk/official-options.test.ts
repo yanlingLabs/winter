@@ -17,7 +17,17 @@ import { QuestionBroker } from "../../src/agent/questions";
 import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { assistantMemoryDirFor, memoryDirFor } from "../../src/agent/memory-dir";
 import { controlPlaneDenyRules, disallowedToolsFor, sandboxConfigFor } from "../../src/runtime-sdk/mode-options";
-import type { Settings } from "../../src/settings";
+import { Settings } from "../../src/settings";
+import { FileSecretStore } from "../../src/auth/secret-store";
+import { writeCredentialMaterial } from "../../src/auth/credential-material";
+import { keychainService } from "../../src/profile";
+import {
+  ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME,
+  ANTHROPIC_CREDENTIAL_SECRET_NAME,
+  credentialPresenceFrom,
+  keychainSeamFromSecretStore,
+} from "../../src/runtime-sdk/keychain";
+import { providerSelectionFor } from "../../src/runtime-sdk/provider-selection";
 import {
   ANTHROPIC_PROFILE_NAME,
   anthropicConfigDirFor,
@@ -644,6 +654,121 @@ describe("officialInputFor — the console arm's own subscription guard: console
     delete (deps as { consoleProfileExists?: unknown }).consoleProfileExists;
     const result = officialInputFor(input, deps);
     expect(result).toBeInstanceOf(OfficialConsoleProfileMissing);
+  });
+});
+
+// Winter Phase 10a fix wave 4 (Major M-C, Opus review, reproduced): the official leg's own
+// "anthropic" credential ref must NEVER move with live settings mid-session — only the session's
+// own FIXED `RuntimeSelection.authFamily` (decided once, at assembly, by `session-driver.ts`'s
+// `assembleOfficial`) may decide it. `session-driver.ts`'s `inputDeps()` is a private per-`open()`
+// closure this file cannot import directly, so this suite reproduces its exact call shape against
+// a REAL `FileSecretStore`-backed home: `providerSelectionFor(live.model, credentials, deps.home
+// [, deps.settings()])` — the literal expression at `session-driver.ts`'s `inputDeps()` (search
+// "Winter Phase 10a fix wave 4 (M-C)" there for the fixed call site) — then feeds the result into
+// the REAL, unmodified `officialInputFor` to prove the end-to-end credential plan.
+//
+// THE SCENARIO (the review's own words): (1) a user with an API key has a live official session
+// assembled on the api-key arm in "auto" mode; (2) they sign in with Console — the profile file and
+// the `anthropic:console` bearer both appear; (3) the child exits, leaving the session resumable;
+// (4) the next send re-opens it. Before the fix, step 4's credential build (still threading live
+// `settings` into `providerSelectionFor`) re-points `provider.authRef` at `anthropic:console` even
+// though `selection.authFamily` is still the assembly-time `"api-key"` — and the router's own
+// `officialCredentialPlan` derives `ANTHROPIC_API_KEY` from `provider.authRef` for the api-key
+// family regardless of which account that ref names, so the child receives
+// `ANTHROPIC_API_KEY=<the Console OAuth bearer>`.
+describe("the official leg's own anthropic ref must never drift with live settings mid-session (P10a fix wave 4, M-C)", () => {
+  const MODEL = "anthropic/claude-fable-5"; // a real pinned-catalog qualified anthropic key
+  const API_KEY_MATERIAL = "sk-test-real-api-key-material";
+  const CONSOLE_BEARER_MATERIAL = "CONSOLE-OAUTH-BEARER-must-never-reach-ANTHROPIC_API_KEY";
+  const fixedApiKeySelection: RuntimeSelection = {
+    runtimeKind: "claude-agent", providerId: "anthropic", modelRef: MODEL,
+    family: "claude", authFamily: "api-key", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
+  };
+  const input: OfficialSessionInput = { sessionId: "s_mc", mode: "code", cwd: "/repo" };
+
+  function fixture(): { home: string; store: FileSecretStore } {
+    const home = mkdtempSync(join(tmpdir(), "winter-official-mc-"));
+    return { home, store: new FileSecretStore(join(home, "secrets")) };
+  }
+
+  /** Writes the console profile's own presence marker (content is never validated — presence
+   *  only, per `officialAuthFamilyFor`'s own doc) and seeds the console broker's bearer material,
+   *  reproducing "the user signs in with Console" between the two calls a test makes. */
+  async function signInWithConsole(home: string, store: FileSecretStore): Promise<void> {
+    const profileDir = join(anthropicConfigDirFor(home), "credentials");
+    mkdirSync(profileDir, { recursive: true });
+    writeFileSync(join(profileDir, `${ANTHROPIC_PROFILE_NAME}.json`), JSON.stringify({ ok: true }));
+    await writeCredentialMaterial(store, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, { kind: "bearer", token: CONSOLE_BEARER_MATERIAL });
+  }
+
+  test("REPRODUCTION (fails before the fix): the old call shape (WITH live settings) re-points ANTHROPIC_API_KEY at the Console bearer after a Console sign-in", async () => {
+    const { home, store } = fixture();
+    try {
+      await writeCredentialMaterial(store, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+      const settings = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" } }); // "auto" — no runtimes.official.auth override
+
+      // Session assembly time: no console profile yet -> the api-key arm, exactly what
+      // `officialAuthFamilyFor` + `assembleOfficial` decide when the session is first created.
+      // This is the session's FIXED selection (`fixedApiKeySelection`) — never recomputed below.
+      expect(officialAuthFamilyFor(home, settings, false)).toBe("api-key");
+
+      // Sanity: before the Console sign-in, even the OLD (settings-threaded) call shape agrees.
+      const credentialsBefore = await credentialPresenceFrom(store);
+      const providerBefore = providerSelectionFor(MODEL, credentialsBefore, home, settings);
+      expect(providerBefore?.authRef).toEqual({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, home) });
+
+      // The drift: nothing about `fixedApiKeySelection.authFamily` changes.
+      await signInWithConsole(home, store);
+
+      // "The next send re-opens it" — the OLD `inputDeps()` call shape, reproduced verbatim.
+      const credentialsAfter = await credentialPresenceFrom(store);
+      const providerAfterWithSettings = providerSelectionFor(MODEL, credentialsAfter, home, settings);
+
+      // THE BUG: `selection.authFamily` is still "api-key" (untouched), but the live-settings call
+      // now names the CONSOLE account.
+      expect(providerAfterWithSettings?.authRef).toEqual({ kind: "keychain", account: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, home) });
+
+      // Feeding that into the REAL router-facing `officialInputFor`, against the session's own
+      // FIXED api-key selection, shows the actual leak.
+      const builtBuggy = officialInputFor(input, minimalDeps({
+        home, selection: fixedApiKeySelection, provider: providerAfterWithSettings, explicitCredentials: undefined,
+      }));
+      if (!("input" in builtBuggy)) throw new Error("unexpectedly refused");
+      const leakedRef = builtBuggy.input.credentials?.find((c) => c.variable === "ANTHROPIC_API_KEY")?.ref;
+      expect(leakedRef).toEqual({ kind: "keychain", account: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, home) });
+      const leakedValue = leakedRef === undefined ? undefined : await keychainSeamFromSecretStore(store, home).read(leakedRef);
+      expect(leakedValue).toBe(CONSOLE_BEARER_MATERIAL); // the OAuth bearer, injected as ANTHROPIC_API_KEY — the leak
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("THE FIX: the settings-independent call session-driver.ts now makes stays on anthropic:default after the SAME Console sign-in — the api-key material, never the bearer", async () => {
+    const { home, store } = fixture();
+    try {
+      await writeCredentialMaterial(store, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+      const settings = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" } });
+      expect(officialAuthFamilyFor(home, settings, false)).toBe("api-key");
+
+      await signInWithConsole(home, store);
+
+      // `session-driver.ts`'s `inputDeps()`, post-fix: `providerSelectionFor(live.model,
+      // credentials, deps.home)` — no `settings` argument, ever.
+      const credentialsAfter = await credentialPresenceFrom(store);
+      const providerFixed = providerSelectionFor(MODEL, credentialsAfter, home);
+      expect(providerFixed?.authRef).toEqual({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, home) });
+
+      const built = officialInputFor(input, minimalDeps({
+        home, selection: fixedApiKeySelection, provider: providerFixed, explicitCredentials: undefined,
+      }));
+      if (!("input" in built)) throw new Error("unexpectedly refused");
+      const injectedRef = built.input.credentials?.find((c) => c.variable === "ANTHROPIC_API_KEY")?.ref;
+      expect(injectedRef).toEqual({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, home) });
+      const injectedValue = injectedRef === undefined ? undefined : await keychainSeamFromSecretStore(store, home).read(injectedRef);
+      expect(injectedValue).toBe(API_KEY_MATERIAL); // the user's own api-key material — never the bearer
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 

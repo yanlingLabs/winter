@@ -16,7 +16,7 @@
 // this works regardless of import order and needs no dynamic `import()` gymnastics. It is undone in
 // `afterAll` so no other test file sharing this process sees a fake treated as real.
 import { afterAll, describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { installMockModuleTripwire } from "../mock-module-tripwire";
@@ -43,8 +43,20 @@ import { PermissionGate } from "../../src/agent/gate";
 import { QuestionBroker } from "../../src/agent/questions";
 import { createProjector, type Projector } from "../../src/projector";
 import { FakeCheckpoints } from "../projector/harness";
+import { FileSecretStore } from "../../src/auth/secret-store";
+import { writeCredentialMaterial } from "../../src/auth/credential-material";
+import { Settings } from "../../src/settings";
+import { openRuntimeStateDb, ProjectionCheckpoints, RuntimeSessionRecords } from "../../src/runtime-state";
+import { SessionHub } from "../../src/sessions/hub";
+import { SessionStore } from "../../src/sessions/store";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
-import type { OfficialInputDeps, OfficialSessionInput } from "../../src/runtime-sdk/official-options";
+import { createWinterSessionDrivers } from "../../src/runtime-sdk/session-driver";
+import {
+  ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME,
+  ANTHROPIC_CREDENTIAL_SECRET_NAME,
+  keychainSeamFromSecretStore,
+} from "../../src/runtime-sdk/keychain";
+import { ANTHROPIC_PROFILE_NAME, anthropicConfigDirFor, type OfficialInputDeps, type OfficialSessionInput } from "../../src/runtime-sdk/official-options";
 import type { OfficialSessionAttachment } from "../../src/runtime-sdk/messaging";
 import {
   CONSOLE_API_KEY_SOURCE,
@@ -688,5 +700,134 @@ describe("P9c-1 — apiKeySource observability on OfficialInitFacts", () => {
     h.q().emit(init(BACKEND_ID)); // no apiKeySource field at all
     await h.settled();
     expect(h.session.init?.apiKeySource).toBeUndefined();
+  });
+});
+
+// ── Winter Phase 10a fix wave 4 (Major M-C) — end to end, through the REAL session-driver.ts ───
+//
+// Every OTHER describe block in this file drives `startOfficialSession` directly with a STATIC
+// `inputDeps` object (`harness()`, above) — deliberately, per this file's own header, keeping
+// `official-session.ts`'s state machine isolated from `session-driver.ts`'s own wiring. THIS block
+// is the one exception: M-C's bug lives in `session-driver.ts`'s `assembleOfficial`/`inputDeps()`
+// closure — a private function this file cannot import directly — so proving the fix means driving
+// the REAL `createWinterSessionDrivers` (the same factory `daemon.ts` wires in production) over a
+// real `FileSecretStore`-backed home, with a fake `runtime.sdk.query` that records the exact
+// `options` each incarnation was actually launched with.
+describe("session-driver.ts (real) — the official leg's own anthropic ref must never drift with live settings mid-session (P10a fix wave 4, M-C)", () => {
+  const MODEL = "anthropic/claude-fable-5"; // a real pinned-catalog qualified anthropic key
+  const API_KEY_MATERIAL = "sk-test-real-api-key-material";
+  const CONSOLE_BEARER_MATERIAL = "CONSOLE-OAUTH-BEARER-must-never-reach-ANTHROPIC_API_KEY";
+
+  interface CapturedOptions {
+    provider?: { providerId: string; authRef?: { kind: string; account?: string } };
+    runtime?: { official?: { credentials?: Array<{ variable: string; ref: { kind: string; account?: string } }> } };
+  }
+
+  function driverWorld() {
+    const home = testHome();
+    const store = new SessionStore(home);
+    const hub = new SessionHub(store);
+    const rs = openRuntimeStateDb(home);
+    const records = new RuntimeSessionRecords(rs);
+    const checkpoints = new ProjectionCheckpoints(rs);
+    const secrets = new FileSecretStore(join(home, "secrets"));
+    // "auto" mode — no `runtimes.official.auth` pin — exactly the review's own scenario.
+    const settings = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" } });
+    const officialSelection: RuntimeSelection = {
+      runtimeKind: "claude-agent", providerId: "anthropic", modelRef: MODEL,
+      family: "claude", authFamily: "api-key", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
+    };
+    const capturedOptions: CapturedOptions[] = [];
+    const queries: FakeOfficialQuery[] = [];
+    const runtime = {
+      sdk: {
+        query: ({ prompt, options }: { prompt: AsyncIterable<string>; options: CapturedOptions }) => {
+          capturedOptions.push(options);
+          const q = new FakeOfficialQuery(prompt);
+          queries.push(q);
+          return q as unknown;
+        },
+      },
+      spawnHookFor: () => ({ pathToClaudeCodeExecutable: "/usr/bin/true" }),
+      claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
+      officialPeerSync: () => undefined,
+      // `decideRuntime` (session-driver.ts) routes this session to the official leg.
+      selectRuntimeFor: async () => officialSelection,
+      trackQuery: () => {},
+      untrack: () => {},
+    } as unknown as WinterRuntimeSdk;
+    const drivers = createWinterSessionDrivers({
+      home, settings: () => settings, runtime, records, checkpoints, store, hub, secrets,
+      buildSessionCapabilities: () => ({}),
+      approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(),
+      rootsOf: () => [], tmpDirOf: () => home, outDirOf: () => home, memoryKeyOf: () => "k",
+      log: () => {},
+    });
+    const close = (): void => { try { store.close(); } catch { /* closed */ } try { rs.close(); } catch { /* closed */ } };
+    return { home, secrets, drivers, store, close, capturedOptions, queries, q: () => queries[queries.length - 1]! };
+  }
+
+  test("a session assembled on the api-key arm, resumed after a Console sign-in, still injects the api-key material — never the Console bearer", async () => {
+    const w = driverWorld();
+    try {
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+
+      const sid = w.store.createSession("t", { mode: "code", model: MODEL });
+      const session = await w.drivers.create(sid);
+
+      // Generation 1 (session assembly time): no console profile on disk yet -> the api-key arm.
+      expect(w.capturedOptions).toHaveLength(1);
+      expect(w.capturedOptions[0]!.provider?.authRef).toMatchObject({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME });
+      expect(w.capturedOptions[0]!.runtime?.official?.credentials).toEqual([
+        { variable: "ANTHROPIC_API_KEY", ref: expect.objectContaining({ account: ANTHROPIC_CREDENTIAL_SECRET_NAME }) },
+      ]);
+
+      // The child runs one turn, then exits ON ITS OWN (never a deliberate `session.end()`) —
+      // leaving the session "resumable", exactly the review's own step 3.
+      w.q().emit(init(session.backendSessionId, { apiKeySource: "ANTHROPIC_API_KEY" }));
+      w.q().emit(assistant("ok"));
+      w.q().emit(result());
+      await Bun.sleep(10);
+      w.q().end();
+      await Bun.sleep(10);
+      expect(session.state).toBe("resumable");
+
+      // The drift: the user signs in with Console — `ant`'s own profile file appears, and the
+      // console broker seeds its OWN bearer at the separate `anthropic:console` account. Nothing
+      // about THIS session's own `RuntimeSelection.authFamily` (fixed at assembly, above) changes.
+      const profileDir = join(anthropicConfigDirFor(w.home), "credentials");
+      mkdirSync(profileDir, { recursive: true });
+      writeFileSync(join(profileDir, `${ANTHROPIC_PROFILE_NAME}.json`), JSON.stringify({ ok: true }));
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, { kind: "bearer", token: CONSOLE_BEARER_MATERIAL });
+
+      // "The next send re-opens it" — a REAL second incarnation, through the REAL `inputDeps()`.
+      await session.send("resume me");
+      expect(w.capturedOptions).toHaveLength(2);
+      const gen2 = w.capturedOptions[1]!;
+
+      // THE ASSERTION: even after the Console sign-in, this session's own `provider.authRef` and
+      // the credential plan's `ANTHROPIC_API_KEY` ref must STILL name `anthropic:default` — never
+      // `anthropic:console` — because `selection.authFamily` never moved off "api-key". Before the
+      // fix, `inputDeps()` threaded live `settings` into `providerSelectionFor`'s "anthropic"
+      // resolution and this assertion failed (the ref named `anthropic:console`).
+      expect(gen2.provider?.authRef).toMatchObject({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME });
+      expect(gen2.runtime?.official?.credentials).toEqual([
+        { variable: "ANTHROPIC_API_KEY", ref: expect.objectContaining({ account: ANTHROPIC_CREDENTIAL_SECRET_NAME }) },
+      ]);
+
+      // And the material a real spawn would actually read through that ref is the api-key string —
+      // never the Console bearer (the actual leak the review named).
+      const ref = gen2.runtime!.official!.credentials![0]!.ref;
+      const value = await keychainSeamFromSecretStore(w.secrets, w.home).read(ref as never);
+      expect(value).toBe(API_KEY_MATERIAL);
+      expect(value).not.toBe(CONSOLE_BEARER_MATERIAL);
+
+      w.q().emit(init(session.backendSessionId, { apiKeySource: "ANTHROPIC_API_KEY" }));
+      w.q().emit(result());
+      await Bun.sleep(10);
+      await session.end();
+    } finally {
+      w.close();
+    }
   });
 });

@@ -89,8 +89,19 @@ export const ANTHROPIC_CREDENTIAL_SECRET_NAME = "anthropic:default";
  * into the api-key slot. Same LOCAL-literal convention as `ANTHROPIC_CREDENTIAL_SECRET_NAME` above
  * — the controller adds the equality test against the SDK's own export at the 0.0.9 integration.
  * `keychainSeamFromSecretStore.read()` below refuses to unpack anything but `bearer` material at
- * this account, and anything but `api-key` material at the default account, so an `auth:"api-key"`
- * official session can never accidentally inject a stray OAuth bearer as `ANTHROPIC_API_KEY`.
+ * this account, and anything but `api-key` material at the default account — but that check is
+ * keyed on the ACCOUNT the seam is asked to read, never on the ENV VARIABLE a caller wires the
+ * result to. A ref that names THIS account still hands back its bearer, verbatim, to whatever
+ * variable a caller pairs it with — including `ANTHROPIC_API_KEY`, if some upstream caller ever
+ * built a ref naming this account for the api-key family. (CORRECTED, P10a fix wave 4/M-C: this
+ * comment used to claim the seam itself made that "can never accidentally happen" — measured
+ * false. `session-driver.ts`'s official-leg `inputDeps()` used to thread live `settings` into
+ * `providerSelectionFor`'s "anthropic" resolution, which could hand `officialCredentialPlan` a
+ * `provider.authRef` naming THIS account while `selection.authFamily` still said `"api-key"` — the
+ * router then dutifully derives `ANTHROPIC_API_KEY` from that ref, and this seam, keyed only on the
+ * account, serves the bearer exactly as documented above. What actually keeps the api-key arm off
+ * this account is upstream of the seam entirely: that call site is now settings-independent and
+ * always names `anthropic:default` — see its own doc comment for the fix.)
  */
 export const ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME = "anthropic:console";
 

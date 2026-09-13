@@ -614,11 +614,33 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // incarnation — `officialCredentialPlan`'s auto-derivation (`official-options.ts`) needs this
       // provider's `authRef` to inject `ANTHROPIC_API_KEY` at spawn.
       const credentials = await credentialPresenceFrom(deps.secrets);
-      // Fix wave 3 (M-B, "Native sessions"): threaded so this leg's own OWN "anthropic" ref
-      // decision agrees with the Winter leg's (both read officialAuthFamilyFor the same way) —
-      // inert for the console arm itself, which never consumes `provider.authRef` at all
-      // (officialInputFor's own "never hands credentials containing an anthropic key" guarantee).
-      const provider = providerSelectionFor(live.model, credentials, deps.home, deps.settings());
+      // Winter Phase 10a fix wave 4 (M-C): NEVER thread `deps.settings()` into this call — fix
+      // wave 3 (M-B, "Native sessions") used to, on the theory that it was "inert for the console
+      // arm itself" and merely kept this leg's own ref decision agreeing with the Winter leg's.
+      // Measured wrong: `selection.authFamily` (this session's ARM) is fixed ONCE, at session
+      // ASSEMBLY (`assembleOfficial`, above) — it is never re-widened by a later `open()` — while
+      // `inputDeps()` runs fresh on EVERY `open()`/resume. A session assembled on the "api-key" arm
+      // before a Console sign-in, then re-opened after one (the profile file and `anthropic:console`
+      // bearer both now present), would have THIS call re-point `provider.authRef` at
+      // `anthropic:console` on the very next open — while `selection.authFamily` stayed the
+      // assembly-time `"api-key"`. The router's own `officialCredentialPlan` derives
+      // `ANTHROPIC_API_KEY` from `provider.authRef` for the api-key family regardless of which
+      // account that ref names, so the child would receive `ANTHROPIC_API_KEY=<the Console OAuth
+      // bearer>` — and `official-session.ts`'s own `apiKeySource === "ANTHROPIC_API_KEY"` assertion
+      // still passes, because it only checks WHICH env var the vendor CLI read from, never which
+      // account produced its value. Fix: never let this leg's own credential ref move with live
+      // settings — `credentialRefFor`'s own doc says an absent `settings` argument keeps its OLD,
+      // unconditional `anthropic:default` answer, which is exactly what the api-key arm must
+      // ALWAYS get; the console arm never reads `provider.authRef` at all regardless of what it
+      // holds (`officialCredentialPlan`'s own `AUTH_FAMILY_VARIABLES["console-profile"]` injects
+      // nothing), so leaving it at the same settings-independent `anthropic:default` value costs
+      // the console arm nothing. (Simplest of the two fixes the review offered — dropping the
+      // argument — chosen over threading `selection.authFamily` through explicitly, since the
+      // settings-independent default already IS "api-key arm -> anthropic:default" with no new
+      // branch needed.) The native Winter leg's own `optionsFor` (this file, above) is UNCHANGED —
+      // it re-derives its OWN per-incarnation live choice every `open()`, which is correct for that
+      // leg because it has no separately-fixed `selection.authFamily` to disagree with.
+      const provider = providerSelectionFor(live.model, credentials, deps.home);
       // TEST-ONLY (`WinterLegDeps.officialConnectionOverride`, fix round 1 M2 — never an ambient
       // env var, never set by production `daemon.ts` wiring): a loopback fake needs
       // `ANTHROPIC_BASE_URL` beside the key, which the `api-key` family's own variable set does
