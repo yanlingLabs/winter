@@ -2078,10 +2078,16 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             case "refused":
               throw new RpcFailure(ERR.INVALID_PARAMS, outcome.detail, { code: outcome.code });
             case "confirmation_required":
+              // Winter Phase 10b (D1-4, W18-23): `portable` is additive in the error data — a
+              // static `[]` here until D1-6 wires `PlanSwitchOutcome.confirmation_required` to the
+              // router's own `reviewSwitch` and can name what actually still carries. Never
+              // "runtime" in the message text (R-10b-4): as of 10b this same outcome also fires for
+              // a same-leg family change (gpt -> deepseek on Winter), which never moves a runtime
+              // at all.
               throw new RpcFailure(
                 ERR.INVALID_PARAMS,
-                "this model change would move the session to a different runtime and may lose in-flight provider state; resend with confirmLossy to proceed",
-                { code: "handoff_confirmation_required", warnings: outcome.warnings },
+                "this model change may lose some of the conversation's carried state; resend with confirmLossy to proceed",
+                { code: "handoff_confirmation_required", warnings: outcome.warnings, portable: [] },
               );
             case "lossy_fork":
               throw new RpcFailure(ERR.INVALID_PARAMS, outcome.reason, { code: "handoff_lossy_fork" });

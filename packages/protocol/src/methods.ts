@@ -537,9 +537,13 @@ export const SessionSetModelParams = z.object({
   // state moving to a foreign target, chiefly). Absent/false means "the caller has not confirmed
   // anything yet"; the daemon refuses a lossy, unconfirmed switch typed
   // (`handoff_confirmation_required`, carrying the warnings) rather than performing it or silently
-  // downgrading to an in-place model change. Meaningless (and ignored) for a same-leg model change,
-  // which is never lossy. `true` is a one-shot confirmation for THIS call only — it is never stored,
-  // so confirming once does not waive the warning on a later, different switch.
+  // downgrading to an in-place model change. `true` is a one-shot confirmation for THIS call only —
+  // it is never stored, so confirming once does not waive the warning on a later, different switch.
+  // Winter Phase 10b (D1-6, W18-20/W18-21): AS OF 10b this ALSO applies to a SAME-leg family change
+  // (e.g. gpt -> deepseek on Winter) — the pre-flight review runs on every provider/model change
+  // that crosses families, not only a cross-runtime one, so `confirmLossy` is no longer meaningless
+  // there. It stays a no-op for a same-family change (Sonnet <-> Opus, Terra <-> Luna): the router
+  // skips the review entirely for those, and there is nothing to confirm.
   confirmLossy: z.boolean().optional(),
 });
 export const SessionSetModelResult = z.object({});

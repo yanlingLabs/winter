@@ -103,6 +103,31 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
     });
   }
 
+  // Winter Phase 10b (D1-4, W18-23): `portable` is additive in the error data — a static `[]`
+  // until D1-6 wires `PlanSwitchOutcome.confirmation_required` to the router's own review and can
+  // name what actually still carries. Proved separately from the parameterized table above so the
+  // `[]` default (not merely "the field is present") is pinned by name.
+  test("confirmation_required: error data carries portable: [] (additive, filled in by D1-6)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-setmodel-handoff-portable-"));
+    const store = new SessionStore(home);
+    const sessionId = store.createSession("global");
+    const { server, c } = await boot(store, home, { kind: "confirmation_required", warnings: ["lossy"] });
+    try {
+      const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet" });
+      expect(res.error).toBeDefined();
+      expect(res.error.data?.code).toBe("handoff_confirmation_required");
+      expect(res.error.data?.warnings).toEqual(["lossy"]);
+      expect(res.error.data?.portable).toEqual([]);
+      // Never names an SDK or runtime (R-10b-4) — this outcome now also fires for a same-leg
+      // family change, which never moves a runtime at all.
+      expect(res.error.message).not.toMatch(/\bruntime\b/i);
+    } finally {
+      c.close();
+      server.stop();
+      store.close();
+    }
+  });
+
   // Fix round 1 (item 5): "deferred" is neither a refusal NOR an immediate write — the RPC
   // succeeds (a turn is running; the caller's model preference was accepted, not rejected) but
   // `meta.model` must stay exactly what it was before this call, because `planAndApplySwitch`'s

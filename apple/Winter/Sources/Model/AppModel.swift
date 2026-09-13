@@ -510,8 +510,11 @@ final class AppModel: ObservableObject {
 enum ModelChangeOutcome: Equatable {
     case ok
     /// `error.data.warnings` verbatim (WS-13 §8.2's own list) — the confirm sheet's bullet list.
-    /// Resending with `confirmLossy: true` is the caller's job (`AppModel.applyModelChange` again).
-    case confirmationRequired(warnings: [String])
+    /// `portable` is `error.data.portable` verbatim (Winter Phase 10b, D1-4, W18-23): additive, so
+    /// it defaults to `[]` on a daemon that hasn't filled it in yet (today — D1-6 fills it from the
+    /// router's own review). Resending with `confirmLossy: true` is the caller's job
+    /// (`AppModel.applyModelChange` again).
+    case confirmationRequired(warnings: [String], portable: [String])
     /// The daemon's own refusal message, which NAMES the setting (`runtimes.handoff.crossRuntime`)
     /// — surfaced verbatim rather than re-worded, so a support conversation can grep for it.
     case disabled(String)
@@ -542,7 +545,10 @@ extension AppModel {
             switch err.handoffCode {
             case .confirmationRequired:
                 let warnings = (err.data?["warnings"]?.arrayValue ?? []).compactMap { $0.stringValue }
-                return .confirmationRequired(warnings: warnings)
+                // Additive field (W18-23): absent on an older daemon or a not-yet-filled-in one
+                // (today, D1-6 fills it) decodes as `[]`, never a throw.
+                let portable = (err.data?["portable"]?.arrayValue ?? []).compactMap { $0.stringValue }
+                return .confirmationRequired(warnings: warnings, portable: portable)
             case .disabled: return .disabled(err.message)
             case .lossyFork: return .lossyFork(err.message)
             case .blocked: return .blocked(err.message)

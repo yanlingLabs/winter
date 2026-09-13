@@ -23,6 +23,25 @@ final class ModelPickerTests: XCTestCase {
         XCTAssertEqual(modelDisplayLabel(nil), "Default", "no override shows the labeled default, not a blank/misleading value")
     }
 
+    /// Winter Phase 10b (D1-4, W18-23): the "Switch model?" confirm dialog's body — warnings
+    /// verbatim, plus a trailing portable-models line when the review named any; the no-warnings
+    /// fallback never names an SDK or runtime.
+    func testModelSwitchConfirmMessageJoinsWarningsAndPortable() {
+        XCTAssertEqual(
+            modelSwitchConfirmMessage(warnings: ["reasoning state may be lost"], portable: []),
+            "reasoning state may be lost"
+        )
+        XCTAssertEqual(
+            modelSwitchConfirmMessage(warnings: ["reasoning state may be lost"], portable: ["deepseek", "GLM"]),
+            "reasoning state may be lost\nStill carries over: deepseek, GLM"
+        )
+        let fallback = modelSwitchConfirmMessage(warnings: [], portable: [])
+        XCTAssertFalse(fallback.isEmpty)
+        for named in ["runtime", "SDK", "Claude Agent", "Winter Agent"] {
+            XCTAssertFalse(fallback.localizedCaseInsensitiveContains(named), "must never name \(named)")
+        }
+    }
+
     /// provider-correctness T6: the picker's offered slugs come from the SYNCED CATALOGUE. This test
     /// replaced one that pinned a hardcoded three-slug mirror — the mirror is gone, and with it the
     /// class of bug where a picker offers a slug it cannot prove exists.
@@ -182,9 +201,11 @@ final class ModelPickerTests: XCTestCase {
         await waitUntilSent(t, 2)
         let confirmReq = lineJSON(t.sent[1])
         XCTAssertEqual((confirmReq["params"] as? [String: Any])?["confirmLossy"] as? Bool, false, "omitting confirmLossy must still send it explicitly false")
+        // Winter Phase 10b (D1-4, W18-23): no `portable` key at all in this fixture — an OLDER
+        // daemon's exact wire shape — decodes to `portable: []`, never a throw or a missing case.
         t.feed(#"{"jsonrpc":"2.0","id":\#(confirmReq["id"] as! Int),"error":{"code":-32602,"message":"x","data":{"code":"handoff_confirmation_required","warnings":["reasoning state may be lost"]}}}"#)
         let outcome1 = await confirmationOutcome
-        XCTAssertEqual(outcome1, .confirmationRequired(warnings: ["reasoning state may be lost"]))
+        XCTAssertEqual(outcome1, .confirmationRequired(warnings: ["reasoning state may be lost"], portable: []))
 
         async let disabledOutcome = AppModel.applyModelChange(client: client, sessionId: "s_1", model: "claude-opus-5")
         await waitUntilSent(t, 3)
@@ -224,6 +245,27 @@ final class ModelPickerTests: XCTestCase {
         t.feed(#"{"jsonrpc":"2.0","id":\#(okReq["id"] as! Int),"result":{}}"#)
         let outcome6 = await okOutcome
         XCTAssertEqual(outcome6, .ok)
+    }
+
+    /// Winter Phase 10b (D1-4, W18-23): `error.data.portable` is additive — decoded verbatim
+    /// alongside `warnings` once a daemon starts filling it in (D1-6). This is the "present" half
+    /// of the additive-field contract; the test above pins the "absent → []" half.
+    @MainActor
+    func testApplyModelChangeDecodesThePortableListWhenTheDaemonSendsOne() async throws {
+        let t = AppScriptedTransport()
+        let client = WinterClient(makeTransport: { t }, token: "tok", clientName: "apply-model-change-portable-test")
+        let connectTask = Task { try? await client.connect() }
+        await waitUntilSent(t, 1)
+        let hello = lineJSON(t.sent[0])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(hello["id"] as! Int),"result":{"ok":true}}"#)
+        await connectTask.value
+
+        async let confirmationOutcome = AppModel.applyModelChange(client: client, sessionId: "s_1", model: "gpt-5.6-sol")
+        await waitUntilSent(t, 2)
+        let confirmReq = lineJSON(t.sent[1])
+        t.feed(#"{"jsonrpc":"2.0","id":\#(confirmReq["id"] as! Int),"error":{"code":-32602,"message":"x","data":{"code":"handoff_confirmation_required","warnings":["reasoning state may be lost"],"portable":["deepseek","GLM"]}}}"#)
+        let outcome = await confirmationOutcome
+        XCTAssertEqual(outcome, .confirmationRequired(warnings: ["reasoning state may be lost"], portable: ["deepseek", "GLM"]))
     }
 
     // MARK: - T1 deferred item, closed: listSessions() → SessionSummary.model, end to end

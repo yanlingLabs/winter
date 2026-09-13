@@ -3437,8 +3437,8 @@ final class ShellSessionHost: ObservableObject {
                 case .ok:
                     await self.directory.refresh()
                     adapter?.armProbation(model: .some(model))
-                case .confirmationRequired(let warnings):
-                    adapter?.pendingModelConfirmation = .init(model: model, warnings: warnings)
+                case .confirmationRequired(let warnings, let portable):
+                    adapter?.pendingModelConfirmation = .init(model: model, warnings: warnings, portable: portable)
                 case .disabled(let reason), .lossyFork(let reason), .blocked(let reason), .failed(let reason):
                     adapter?.modelChangeError = reason
                 }
@@ -3460,7 +3460,7 @@ final class ShellSessionHost: ObservableObject {
                     await self.directory.refresh()
                     adapter?.armProbation(model: .some(model))
                 case .confirmationRequired:
-                    adapter?.modelChangeError = "the runtime switch could not be confirmed"
+                    adapter?.modelChangeError = "the model switch could not be confirmed"
                 case .disabled(let reason), .lossyFork(let reason), .blocked(let reason), .failed(let reason):
                     adapter?.modelChangeError = reason
                 }
