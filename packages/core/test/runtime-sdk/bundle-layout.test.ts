@@ -1,5 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { RUNTIME_BUNDLE_LAYOUT, bundleRuntimePath, parseVersionsJson, winterSourceOf, type VersionsJson } from "../../src/runtime-sdk/bundle-layout";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  RUNTIME_BUNDLE_LAYOUT,
+  antExecutablePath,
+  bundleRuntimePath,
+  parseVersionsJson,
+  resolveAntExecutable,
+  winterSourceOf,
+  type VersionsJson,
+} from "../../src/runtime-sdk/bundle-layout";
 import { REQUIRED_CLAUDE_AGENT_SDK, REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../../src/runtime-sdk/versions";
 
 const sha = "a".repeat(64);
@@ -39,5 +50,91 @@ describe("bundle-layout (P8d-1)", () => {
   test("parseVersionsJson rejects any winterSource spelling other than the two", () => {
     expect(() => parseVersionsJson(JSON.stringify({ ...good, winterSource: "npm" }))).toThrow(/winterSource must be one of/);
     expect(() => parseVersionsJson(JSON.stringify({ ...good, winterSource: 1 }))).toThrow(/winterSource must be one of/);
+  });
+
+  // Winter Phase 10a (P10a-4/L4): the `ant` bundle-layout entry + path helper.
+  test("antExecutablePath is dirname(execPath)/runtimes/ant/ant, same shape as bundleRuntimePath(execPath, 'ant')", () => {
+    expect(antExecutablePath("/Applications/Winter.app/Contents/Resources/winter-core")).toBe(
+      "/Applications/Winter.app/Contents/Resources/runtimes/ant/ant",
+    );
+    expect(antExecutablePath("/x/Resources/winter-core")).toBe(bundleRuntimePath("/x/Resources/winter-core", "ant"));
+    expect(RUNTIME_BUNDLE_LAYOUT.ant).toBe("runtimes/ant/ant");
+  });
+});
+
+// Winter Phase 10a (P10a-4/L4): resolveAntExecutable's ladder. `ant` is OPTIONAL — a total miss is
+// `undefined`, never a typed refusal (unlike resolveWinterExecutable/resolveClaudeExecutable).
+describe("resolveAntExecutable (P10a-4 ladder)", () => {
+  const base = { env: {}, execPath: "/bundle/Contents/MacOS/winter-core" };
+  const BUNDLE_ANT = antExecutablePath(base.execPath);
+
+  test("setting wins over everything, trusted as given (no existence check)", () => {
+    const r = resolveAntExecutable({ ...base, setting: "/s/ant", env: { WINTER_ANT_EXECUTABLE: "/e/ant" }, isExecutableFile: () => true, which: () => "/usr/local/bin/ant" });
+    expect(r).toEqual({ path: "/s/ant", source: "setting" });
+  });
+
+  test("env beats the bundle rung and the PATH lookup", () => {
+    const r = resolveAntExecutable({ ...base, env: { WINTER_ANT_EXECUTABLE: "/e/ant" }, isExecutableFile: () => true, which: () => "/usr/local/bin/ant" });
+    expect(r).toEqual({ path: "/e/ant", source: "env" });
+  });
+
+  test("the bundle rung is <dirname(execPath)>/runtimes/ant/ant, gated on exists-and-executable", () => {
+    const r = resolveAntExecutable({ ...base, isExecutableFile: (p) => p === BUNDLE_ANT, which: () => null });
+    expect(r).toEqual({ path: BUNDLE_ANT, source: "bundle" });
+  });
+
+  test("a bundle file that exists but is NOT executable is treated as absent — falls through to which", () => {
+    const r = resolveAntExecutable({ ...base, isExecutableFile: () => false, which: (cmd) => (cmd === "ant" ? "/opt/homebrew/bin/ant" : null) });
+    expect(r).toEqual({ path: "/opt/homebrew/bin/ant", source: "path" });
+  });
+
+  test("which ant is the last rung, only reached when the bundle rung misses", () => {
+    const r = resolveAntExecutable({ ...base, isExecutableFile: () => false, which: () => "/usr/local/bin/ant" });
+    expect(r).toEqual({ path: "/usr/local/bin/ant", source: "path" });
+  });
+
+  test("the bundle rung still wins over which, even when both would resolve", () => {
+    const r = resolveAntExecutable({ ...base, isExecutableFile: (p) => p === BUNDLE_ANT, which: () => "/usr/local/bin/ant" });
+    expect(r).toEqual({ path: BUNDLE_ANT, source: "bundle" });
+  });
+
+  test("nothing resolves anywhere -> undefined, never a throw", () => {
+    const r = resolveAntExecutable({ ...base, isExecutableFile: () => false, which: () => null });
+    expect(r).toBeUndefined();
+  });
+
+  test("a whitespace-only setting or env value is treated as UNSET, not as a configured path", () => {
+    const r = resolveAntExecutable({ ...base, setting: "   ", env: { WINTER_ANT_EXECUTABLE: "\t\n" }, isExecutableFile: (p) => p === BUNDLE_ANT, which: () => null });
+    expect(r).toEqual({ path: BUNDLE_ANT, source: "bundle" });
+  });
+
+  test("the real (non-injected) filesystem check: an actual mkdtemp'd executable file resolves via the bundle rung", () => {
+    const root = mkdtempSync(join(tmpdir(), "winter-ant-bundle-"));
+    try {
+      const execPath = join(root, "Contents", "Resources", "winter-core");
+      const antPath = antExecutablePath(execPath);
+      mkdirSync(join(root, "Contents", "Resources", "runtimes", "ant"), { recursive: true });
+      writeFileSync(antPath, "#!/bin/sh\necho fixture-ant\n");
+      chmodSync(antPath, 0o755);
+      const r = resolveAntExecutable({ env: {}, execPath, which: () => null });
+      expect(r).toEqual({ path: antPath, source: "bundle" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the real (non-injected) filesystem check: an mkdtemp'd file that exists but is NOT chmod executable is treated as absent", () => {
+    const root = mkdtempSync(join(tmpdir(), "winter-ant-bundle-"));
+    try {
+      const execPath = join(root, "Contents", "Resources", "winter-core");
+      const antPath = antExecutablePath(execPath);
+      mkdirSync(join(root, "Contents", "Resources", "runtimes", "ant"), { recursive: true });
+      writeFileSync(antPath, "#!/bin/sh\necho fixture-ant\n");
+      chmodSync(antPath, 0o644); // NOT executable
+      const r = resolveAntExecutable({ env: {}, execPath, which: () => null });
+      expect(r).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
