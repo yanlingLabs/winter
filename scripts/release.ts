@@ -85,7 +85,7 @@ import {
   embedWinterFlagGate,
   embeddedRuntimesDescriptionLine,
   handoffReleaseBody,
-  handoffReleaseTitle,
+  handoffReleaseCreateCommand,
   preflight,
   nameScanPlan,
   publishGuard,
@@ -1260,7 +1260,10 @@ if (guard.action === "publish") {
   const notes = handoffReleaseBody({ version, beta: BETA, embeddedWinterSizeBytes });
   const notesPath = join(OUT, "release-notes.md");
   writeFileSync(notesPath, notes);
-  sh(`gh release create v${version} --title "${handoffReleaseTitle(version)}" --notes-file "${notesPath}" "${zipPath}" "${dmgPath}"`);
+  // Fix wave, Minor M4 (ruling P9c-19): --latest=false — this is the LAST Norma release, and
+  // /releases/latest on the shared repo must always resolve to Winter, never here. See
+  // `handoffReleaseCreateCommand`'s own doc for the mirror-image fix on the renamed `main` side.
+  sh(handoffReleaseCreateCommand({ version, notesPath, zipPath, dmgPath }));
 } else {
   // guard.action === "resume": upload only whatever assets aren't already on the release.
   console.log(`Resuming publish of v${version}...`);

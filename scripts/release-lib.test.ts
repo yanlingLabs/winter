@@ -13,6 +13,7 @@ import {
   embeddedRuntimesDescriptionLine,
   GH_REPO,
   handoffReleaseBody,
+  handoffReleaseCreateCommand,
   handoffReleaseTitle,
   NAME_SCAN_EXCLUSIONS,
   nameScanPlan,
@@ -843,5 +844,21 @@ describe("handoffReleaseTitle / handoffReleaseBody (Winter Phase 9c, Lane H)", (
   test("beta threads into the body the same way the pre-existing notes string did", () => {
     const body = handoffReleaseBody({ version: "0.2.015", beta: true, embeddedWinterSizeBytes: null });
     expect(body).toContain("0.2.015 (beta)");
+  });
+});
+
+describe("handoffReleaseCreateCommand (fix wave, Minor M4, ruling P9c-19)", () => {
+  test("always carries --latest=false — the shared repo's /releases/latest must never resolve to the final Norma release", () => {
+    const cmd = handoffReleaseCreateCommand({
+      version: "0.2.015",
+      notesPath: "/tmp/release-notes.md",
+      zipPath: "/tmp/Norma-0.2.015.zip",
+      dmgPath: "/tmp/Norma-0.2.015.dmg",
+    });
+    expect(cmd).toContain("--latest=false");
+    expect(cmd).toBe(
+      'gh release create v0.2.015 --title "Norma 0.2.015 — Norma is now Winter" ' +
+        '--notes-file "/tmp/release-notes.md" --latest=false "/tmp/Norma-0.2.015.zip" "/tmp/Norma-0.2.015.dmg"',
+    );
   });
 });
