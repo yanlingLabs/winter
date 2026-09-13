@@ -156,6 +156,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// would corrupt later ⌘Q semantics (the ONE-true-quit-source contract above).
     private var updaterQuitting = false
 
+    /// P9c fix wave (Critical C1, ruling P9c-18): the handoff's DEDICATED true-quit axis — armed
+    /// by `HandoffDeps.armHandoffQuit` (wired below in `boot()`'s handoff block) immediately
+    /// before `performHandoffIfNeeded` calls `terminateSelf` (`NSApp.terminate(nil)`). That call is
+    /// a plain PROGRAMMATIC terminate with no current Apple Event at all, so
+    /// `systemQuitReasonProvider` reads it as `false` — exactly like the menu-bar Quit's own
+    /// `NSApp.terminate(nil)` — and `reallyQuitting` is reserved for that one call site alone (see
+    /// its own doc just above). Without a dedicated axis here, `terminateDecision` answered
+    /// `.terminateCancel` for the handoff's own quit, and Norma stayed alive as an invisible
+    /// `LSUIElement` process — with no window, no dock icon, nothing for the user to see — right
+    /// after it had already installed and launched Winter. A dedicated flag rather than reusing
+    /// `reallyQuitting`, for the identical reason `updaterQuitting`'s own doc gives just above:
+    /// a stale `true` on a shared flag would corrupt later plain-⌘Q semantics.
+    private var handoffQuitting = false
+
     /// Lifecycle T3 review fix: seam for the Apple-Event quit-reason read
     /// (`isSystemInitiatedQuitEvent()` below the class) — injectable so a unit test can drive the
     /// systemInitiated axis of `applicationShouldTerminate` without synthesizing a real
@@ -901,6 +915,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if handoffDepsOverride == nil && !Self.isRunningUnitTests {
             let handoffSupervisor = DaemonSupervisor(deps: .live)
             handoffDeps.stopDaemon = handoffSupervisor.stop
+            // P9c fix wave (Critical C1, ruling P9c-18): `.live.armHandoffQuit` is a no-op — `.live`
+            // is a static var with no `AppDelegate` instance to arm `handoffQuitting` on. THIS is
+            // the one place with a real instance (`self`) to close over, same "layer in what only
+            // the caller can supply" posture as `stopDaemon` right above.
+            handoffDeps.armHandoffQuit = { [weak self] in self?.handoffQuitting = true }
         }
         switch performHandoffIfNeeded(deps: handoffDeps) {
         case .installed, .alreadyCurrent:
@@ -1714,7 +1733,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let reply = terminateDecision(
             reallyQuitting: reallyQuitting,
             systemInitiated: systemQuitReasonProvider(),
-            updaterQuitting: updaterQuitting)
+            updaterQuitting: updaterQuitting,
+            handoffQuitting: handoffQuitting)
         if reply == .terminateCancel {
             closeMainWindows()
             hideDockIcon()
@@ -1759,11 +1779,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 /// OR `updaterQuitting` (Sparkle whole-branch review fix: Sparkle's installer quits the host via
 /// a CANCELLABLE quit event with no kAEQuitReason — `AppDelegate.updaterQuitting`, armed by
 /// `UpdaterCoordinator.onWillInstall` right before the install handler, is the third true-quit
-/// axis that lets the install relaunch through); everything else — ⌘Q, dock-tile quit — cancels.
-/// Window state never gates a quit: the T3 spec's original `hasMainWindow` param was
-/// truth-table-inert and was dropped when `systemInitiated` (the real second axis) replaced it.
-func terminateDecision(reallyQuitting: Bool, systemInitiated: Bool, updaterQuitting: Bool = false) -> NSApplication.TerminateReply {
-    (reallyQuitting || systemInitiated || updaterQuitting) ? .terminateNow : .terminateCancel
+/// axis that lets the install relaunch through) OR `handoffQuitting` (P9c fix wave, Critical C1,
+/// ruling P9c-18: the Winter handoff's own `NSApp.terminate(nil)` is likewise a cancellable,
+/// Apple-Event-less programmatic quit — `AppDelegate.handoffQuitting`, armed by
+/// `HandoffDeps.armHandoffQuit` right before `terminateSelf`, is the fourth true-quit axis, never
+/// a reuse of `reallyQuitting` — see that property's own doc); everything else — ⌘Q, dock-tile
+/// quit — cancels. Window state never gates a quit: the T3 spec's original `hasMainWindow` param
+/// was truth-table-inert and was dropped when `systemInitiated` (the real second axis) replaced it.
+func terminateDecision(
+    reallyQuitting: Bool, systemInitiated: Bool, updaterQuitting: Bool = false, handoffQuitting: Bool = false
+) -> NSApplication.TerminateReply {
+    (reallyQuitting || systemInitiated || updaterQuitting || handoffQuitting) ? .terminateNow : .terminateCancel
 }
 
 /// Lifecycle T3 review fix: TRUE when the in-flight quit Apple Event carries a system quit reason

@@ -84,8 +84,40 @@ struct HandoffDeps {
     /// elapsed) — see `.live`'s own doc for why `terminateSelf` itself stays a single,
     /// unconditional call with no async choreography of its own.
     var launch: (_ dest: URL) throws -> Void
-    /// Quits Norma. Called last, after everything above has succeeded.
+    /// P9c fix wave, Critical C1 (ruling P9c-18): arms the handoff's DEDICATED true-quit axis —
+    /// `AppDelegate.handoffQuitting` — called by `performHandoffIfNeeded` immediately BEFORE
+    /// `terminateSelf`, so the flag is already `true` by the time `terminateSelf`'s
+    /// `NSApp.terminate(nil)` drives AppKit into `applicationShouldTerminate`. Without this, that
+    /// programmatic terminate carries no Apple Event and no `reallyQuitting` (that axis is
+    /// reserved for the menu-bar Quit alone — see its own doc), so `terminateDecision` answered
+    /// `.terminateCancel` and Norma stayed alive as an invisible `LSUIElement` process right after
+    /// installing and launching Winter. `.live`'s own instance is a no-op — `.live` is a static
+    /// var with no `AppDelegate` instance to close over — `AppDelegate.boot()` overwrites this
+    /// field right after reading `.live`, same "layer in what only the caller can supply" posture
+    /// as `stopDaemon` above. This split (a dedicated seam, not folded into `terminateSelf` itself)
+    /// is what makes the ordering claim unit-testable through fakes (`HandoffTests`) without ever
+    /// touching `NSApp` or a real `AppDelegate`.
+    var armHandoffQuit: () -> Void
+    /// Quits Norma. Called last, after everything above (including `armHandoffQuit`) has run.
     var terminateSelf: () -> Void
+    /// m3 ruling (P9c fix wave, Minor m3): the legacy `/usr/local/bin/norma` CLI symlink's path
+    /// (`CliInstaller.linkPath` in production) — a test points this at a file inside its own temp
+    /// dir instead, so `retireLegacyCliLinkIfOwned` below never touches the real path.
+    var cliLinkURL: URL
+    /// Resolves `cliLinkURL`'s symlink destination, or `nil` when it is absent OR a regular file
+    /// (not a symlink at all) — both read as "leave it alone" by `retireLegacyCliLinkIfOwned`.
+    /// `.live` wraps `FileManager.destinationOfSymbolicLink(atPath:)`; a test exercises the SAME
+    /// real call against a planted temp-dir fixture, mirroring `installedVersion`'s posture.
+    var cliLinkTarget: (URL) -> String?
+    /// Deletes `cliLinkURL` — called ONLY when `cliLinkTarget` resolved to a path inside
+    /// `normaAppBundlePath` (m3's own safety condition). `.live` wraps `FileManager.removeItem`.
+    var removeCliLink: (URL) throws -> Void
+    /// The Norma.app bundle path a resolved CLI-link target must sit inside to count as "ours" to
+    /// retire (m3 ruling: never a user-owned file, never a symlink pointing anywhere else) —
+    /// `.live` is `Bundle.main.bundlePath` (wherever THIS running Norma actually is, covering both
+    /// the ordinary `/Applications/Norma.app` case and the `~/Applications` fallback
+    /// `liveApplicationsDir()` uses); a test supplies a fake bundle path instead.
+    var normaAppBundlePath: String
     /// `NORMA_HANDOFF_DISABLED=1` — an unconditional escape hatch independent of
     /// `embeddedWinterURL`, for any harness that boots the real app end-to-end without wanting
     /// this file's real side effects even when a Winter.app happens to be present.
@@ -128,12 +160,21 @@ func performHandoffIfNeeded(deps: HandoffDeps) -> HandoffOutcome {
         do {
             try deps.unregisterLoginItem()
             try deps.unregisterHelper()
+            // m3 ruling: right after the helper/login-item teardown, before stopDaemon — matches
+            // the brief's own ordering ("after unregisterHelper"). Never throws (best-effort,
+            // logged internally): a stray permissions error tidying up a legacy symlink must never
+            // abort the handoff itself.
+            retireLegacyCliLinkIfOwned(deps: deps)
             deps.stopDaemon()
             deliverHandoffNotice(deps: deps)
             try deps.launch(dest)
         } catch {
             return "\(error)"
         }
+        // P9c-18: arm the dedicated true-quit axis BEFORE the actual quit call — see
+        // `HandoffDeps.armHandoffQuit`'s own doc for why this must be a distinct step rather than
+        // folded into `terminateSelf` itself.
+        deps.armHandoffQuit()
         deps.terminateSelf()
         return nil
     }
@@ -156,6 +197,32 @@ func performHandoffIfNeeded(deps: HandoffDeps) -> HandoffOutcome {
     return .installed(dest)
 }
 
+/// m3 ruling (P9c fix wave, Minor m3): true when `target` — a resolved CLI-symlink destination —
+/// sits inside the Norma.app bundle at `bundlePath`. Pure, no filesystem access, so it is unit
+/// tested directly, the same way `versionAtLeast` is; `retireLegacyCliLinkIfOwned` below is its
+/// only caller.
+func cliLinkTargetIsInsideNormaApp(_ target: String, bundlePath: String) -> Bool {
+    target.hasPrefix(bundlePath + "/")
+}
+
+/// m3 ruling (P9c fix wave, Minor m3): retires the legacy `/usr/local/bin/norma` CLI symlink
+/// (`CliInstaller.linkPath`) ONLY when it points inside the Norma.app this handoff is replacing —
+/// never a user-owned file, and never a symlink pointing anywhere else (a user's own
+/// `norma -> ~/mytools/norma`, say — that's user data we did not create). Best-effort: a removal
+/// failure is logged, never thrown — the handoff's own success must never hinge on a stray
+/// permissions error tidying up a symlink nobody will resolve once Norma.app itself is gone.
+func retireLegacyCliLinkIfOwned(deps: HandoffDeps) {
+    guard let target = deps.cliLinkTarget(deps.cliLinkURL),
+          cliLinkTargetIsInsideNormaApp(target, bundlePath: deps.normaAppBundlePath)
+    else { return }
+    do {
+        try deps.removeCliLink(deps.cliLinkURL)
+        NSLog("[Handoff] retired the legacy `norma` CLI link at \(deps.cliLinkURL.path)")
+    } catch {
+        NSLog("[Handoff] failed to retire the legacy `norma` CLI link at \(deps.cliLinkURL.path): \(error)")
+    }
+}
+
 /// Component-wise numeric comparison of dotted version strings (e.g. "0.111.0", a plain
 /// `CFBundleVersion`). Non-numeric/missing components read as 0; a mismatched depth pads the
 /// shorter side with zeros. Never asked to compare across differently-shaped version schemes —
@@ -176,9 +243,15 @@ func versionAtLeast(_ a: String, _ b: String) -> Bool {
 /// through this same seam without standing up a real `UNUserNotificationCenter`/`NSAlert`.
 enum HandoffNotice {
     static let title = "Norma is now Winter"
+    // C3/M2 copy fix (P9c fix wave): two sentences added to the shipped notice — the Keychain
+    // consent dialog Winter's first boot triggers while reading the credentials this handoff left
+    // behind (C3), and a nudge for the M2-flagged degraded-first-boot case (P9c-20's accepted
+    // follow-up: the app itself doesn't retry yet, so the notice tells the user how to unstick it).
     static let body =
         "Winter has been installed in Applications and opened; your sessions and settings move " +
-        "over on its first start. You can delete Norma."
+        "over on its first start. You can delete Norma. macOS may ask permission for Winter to " +
+        "read the credentials Norma saved — click Always Allow. If Winter's menu shows it is " +
+        "still finishing setup, quit and reopen Winter once."
 }
 
 /// Review r0, Major M2: delivers Step 3's notice through whichever of the two `HandoffDeps`
@@ -222,7 +295,12 @@ extension HandoffDeps {
         postNotificationNotice: { fatalError("neverHandoff.postNotificationNotice is unreachable — embeddedWinterURL is always nil") },
         showNoticeAlert: { fatalError("neverHandoff.showNoticeAlert is unreachable — embeddedWinterURL is always nil") },
         launch: { _ in fatalError("neverHandoff.launch is unreachable — embeddedWinterURL is always nil") },
+        armHandoffQuit: { fatalError("neverHandoff.armHandoffQuit is unreachable — embeddedWinterURL is always nil") },
         terminateSelf: { fatalError("neverHandoff.terminateSelf is unreachable — embeddedWinterURL is always nil") },
+        cliLinkURL: URL(fileURLWithPath: "/dev/null"),
+        cliLinkTarget: { _ in fatalError("neverHandoff.cliLinkTarget is unreachable — embeddedWinterURL is always nil") },
+        removeCliLink: { _ in fatalError("neverHandoff.removeCliLink is unreachable — embeddedWinterURL is always nil") },
+        normaAppBundlePath: "/dev/null",
         disabled: true
     )
 
@@ -251,7 +329,15 @@ extension HandoffDeps {
             postNotificationNotice: { SystemNotificationPoster().post(title: HandoffNotice.title, body: HandoffNotice.body) },
             showNoticeAlert: liveShowNoticeAlert,
             launch: liveLaunch,
+            // P9c-18: a no-op HERE — `.live` is a static var with no `AppDelegate` instance to
+            // arm `handoffQuitting` on. `AppDelegate.boot()` overwrites this field right after
+            // reading `.live`, same posture as `stopDaemon` right above.
+            armHandoffQuit: {},
             terminateSelf: { NSApp.terminate(nil) },
+            cliLinkURL: URL(fileURLWithPath: CliInstaller.linkPath),
+            cliLinkTarget: { url in try? FileManager.default.destinationOfSymbolicLink(atPath: url.path) },
+            removeCliLink: { url in try FileManager.default.removeItem(at: url) },
+            normaAppBundlePath: Bundle.main.bundlePath,
             disabled: ProcessInfo.processInfo.environment["NORMA_HANDOFF_DISABLED"] == "1"
         )
     }

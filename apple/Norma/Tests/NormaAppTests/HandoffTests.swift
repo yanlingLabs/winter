@@ -58,12 +58,20 @@ final class HandoffTests: XCTestCase {
         return plist["CFBundleVersion"] as? String
     }
 
+    /// P9c fix wave, m3: `cliLinkURL`/`normaAppBundlePath` default to paths INSIDE `tempDir` that
+    /// don't exist by default (a symlink-less "absent" fixture) — never the real `/usr/local/bin`.
+    /// `cliLinkTarget`/`removeCliLink` stay wired to the REAL `FileManager` calls (mirroring
+    /// `installedVersion`'s own `realInstalledVersion` posture above): a test that wants the
+    /// removal path to actually fire plants a real symlink/file at `cliLinkURL` and asserts on the
+    /// real filesystem afterward, rather than faking the decision.
     private func makeDeps(
         recorder: HandoffRecorder,
         embeddedWinterURL: URL?,
         applicationsDir: URL,
         disabled: Bool = false,
-        notificationsAuthorized: Bool = true
+        notificationsAuthorized: Bool = true,
+        cliLinkURL: URL? = nil,
+        normaAppBundlePath: String? = nil
     ) -> HandoffDeps {
         HandoffDeps(
             embeddedWinterURL: embeddedWinterURL,
@@ -89,7 +97,12 @@ final class HandoffTests: XCTestCase {
                 recorder.record("launch")
                 if let e = recorder.launchError { throw e }
             },
+            armHandoffQuit: { recorder.record("armHandoffQuit") },
             terminateSelf: { recorder.record("terminateSelf") },
+            cliLinkURL: cliLinkURL ?? tempDir.appendingPathComponent("usr-local-bin-norma"),
+            cliLinkTarget: { url in try? FileManager.default.destinationOfSymbolicLink(atPath: url.path) },
+            removeCliLink: { url in try FileManager.default.removeItem(at: url) },
+            normaAppBundlePath: normaAppBundlePath ?? tempDir.appendingPathComponent("Applications/Norma.app").path,
             disabled: disabled
         )
     }
@@ -132,9 +145,32 @@ final class HandoffTests: XCTestCase {
         XCTAssertEqual(outcome, .installed(dest))
         XCTAssertEqual(recorder.calls, [
             "copyBundle", "verifySignature", "unregisterLoginItem", "unregisterHelper", "stopDaemon",
-            "postNotificationNotice", "launch", "terminateSelf",
+            "postNotificationNotice", "launch", "armHandoffQuit", "terminateSelf",
         ])
         XCTAssertEqual(realInstalledVersion(dest), "0.111.0", "the real copy must actually land the embedded bundle's content at dest")
+    }
+
+    // MARK: - P9c fix wave, Critical C1 (ruling P9c-18): the handoff's own true-quit axis
+
+    /// **The claim the C1 fix exists to prove**: the true-quit axis is armed BEFORE the actual
+    /// quit call, through the `HandoffDeps` seam alone — never touching `NSApp` or a real
+    /// `AppDelegate.handoffQuitting` (that field is `private`; this test doesn't need it, because
+    /// `armHandoffQuit` and `terminateSelf` are independent closures on the SAME deps struct
+    /// `AppDelegate.boot()` wires in production). A closure that combined "set the flag" and
+    /// "call NSApp.terminate" into one step would make this ordering untestable without a live
+    /// AppDelegate/NSApp — exactly why `armHandoffQuit` is its own seam (see its own doc).
+    func testArmHandoffQuitFiresBeforeTerminateSelf() throws {
+        let embedded = makeFakeBundle(named: "embedded/Winter.app", version: "0.111.0")
+        let appsDir = tempDir.appendingPathComponent("Applications", isDirectory: true)
+        try FileManager.default.createDirectory(at: appsDir, withIntermediateDirectories: true)
+        let recorder = HandoffRecorder()
+        let deps = makeDeps(recorder: recorder, embeddedWinterURL: embedded, applicationsDir: appsDir)
+
+        _ = performHandoffIfNeeded(deps: deps)
+
+        let armedIndex = try XCTUnwrap(recorder.calls.firstIndex(of: "armHandoffQuit"))
+        let terminatedIndex = try XCTUnwrap(recorder.calls.firstIndex(of: "terminateSelf"))
+        XCTAssertLessThan(armedIndex, terminatedIndex, "the axis must be armed strictly before the quit call fires")
     }
 
     // MARK: - already current
@@ -152,7 +188,8 @@ final class HandoffTests: XCTestCase {
         let dest = appsDir.appendingPathComponent("Winter.app", isDirectory: true)
         XCTAssertEqual(outcome, .alreadyCurrent(dest))
         XCTAssertEqual(recorder.calls, [
-            "unregisterLoginItem", "unregisterHelper", "stopDaemon", "postNotificationNotice", "launch", "terminateSelf",
+            "unregisterLoginItem", "unregisterHelper", "stopDaemon", "postNotificationNotice", "launch",
+            "armHandoffQuit", "terminateSelf",
         ], "an already-current dest must still tear down, notify, launch, and quit — never re-copy")
     }
 
@@ -253,6 +290,7 @@ final class HandoffTests: XCTestCase {
             "copyBundle", "verifySignature", "unregisterLoginItem", "unregisterHelper", "stopDaemon", "postNotificationNotice", "launch",
         ])
         XCTAssertFalse(recorder.calls.contains("terminateSelf"), "must never quit Norma after a failed launch")
+        XCTAssertFalse(recorder.calls.contains("armHandoffQuit"), "must never arm the true-quit axis after a failed launch either")
     }
 
     // MARK: - stale-staging cleanup sweeps every pid's leftover, not just this process's own (review r0, Minor m3)
@@ -284,6 +322,91 @@ final class HandoffTests: XCTestCase {
         // No leftover staging dir for THIS run either — swapped into dest and cleaned up.
         let remainingEntries = try FileManager.default.contentsOfDirectory(atPath: appsDir.path)
         XCTAssertFalse(remainingEntries.contains { $0.hasPrefix(".Winter.app.staging-") }, "this run's own staging dir must not survive either")
+    }
+
+    // MARK: - P9c fix wave, Minor m3: retire the legacy CLI symlink ONLY when it's ours
+
+    func testCliLinkTargetIsInsideNormaAppPureDecision() {
+        XCTAssertTrue(cliLinkTargetIsInsideNormaApp("/Applications/Norma.app/Contents/Resources/norma-core", bundlePath: "/Applications/Norma.app"))
+        XCTAssertFalse(cliLinkTargetIsInsideNormaApp("/Users/x/mytools/norma", bundlePath: "/Applications/Norma.app"))
+        XCTAssertFalse(cliLinkTargetIsInsideNormaApp("/Applications/Norma.app-evil/norma", bundlePath: "/Applications/Norma.app"), "a mere string-prefix match on the bundle name (no path separator) must not count as inside it")
+    }
+
+    /// A planted symlink into a fake Norma.app bundle must be removed — the ordinary case (the
+    /// running Norma is exactly what installed it).
+    func testRetireLegacyCliLinkRemovesASymlinkIntoTheNormaAppBundle() throws {
+        let fakeBundle = tempDir.appendingPathComponent("Applications/Norma.app", isDirectory: true)
+        let fakeCore = fakeBundle.appendingPathComponent("Contents/Resources/norma-core")
+        try FileManager.default.createDirectory(at: fakeCore.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data().write(to: fakeCore)
+        let cliLink = tempDir.appendingPathComponent("usr-local-bin-norma")
+        try FileManager.default.createSymbolicLink(at: cliLink, withDestinationURL: fakeCore)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cliLink.path), "setup: the symlink must resolve")
+
+        let embedded = makeFakeBundle(named: "embedded/Winter.app", version: "0.111.0")
+        let appsDir = tempDir.appendingPathComponent("Applications", isDirectory: true)
+        let recorder = HandoffRecorder()
+        let deps = makeDeps(recorder: recorder, embeddedWinterURL: embedded, applicationsDir: appsDir,
+                             cliLinkURL: cliLink, normaAppBundlePath: fakeBundle.path)
+
+        _ = performHandoffIfNeeded(deps: deps)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: cliLink.path) || (try? FileManager.default.destinationOfSymbolicLink(atPath: cliLink.path)) != nil,
+                       "a symlink pointing inside the Norma.app being replaced must be retired")
+    }
+
+    /// A regular file at the CLI-link path — never a symlink at all — must never be touched: we
+    /// never created a plain file there, so it can only be user data.
+    func testRetireLegacyCliLinkLeavesARegularFileUntouched() throws {
+        let cliLink = tempDir.appendingPathComponent("usr-local-bin-norma")
+        try Data("#!/bin/sh\necho not ours\n".utf8).write(to: cliLink)
+
+        let embedded = makeFakeBundle(named: "embedded/Winter.app", version: "0.111.0")
+        let appsDir = tempDir.appendingPathComponent("Applications", isDirectory: true)
+        try FileManager.default.createDirectory(at: appsDir, withIntermediateDirectories: true)
+        let recorder = HandoffRecorder()
+        let deps = makeDeps(recorder: recorder, embeddedWinterURL: embedded, applicationsDir: appsDir, cliLinkURL: cliLink)
+
+        _ = performHandoffIfNeeded(deps: deps)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cliLink.path), "a regular (non-symlink) file must never be removed")
+    }
+
+    /// A symlink that resolves OUTSIDE the Norma.app bundle (a user's own `norma -> ~/mytools/norma`)
+    /// must be left alone — it is user data we did not create.
+    func testRetireLegacyCliLinkLeavesAForeignSymlinkUntouched() throws {
+        let foreignTarget = tempDir.appendingPathComponent("mytools/norma")
+        try FileManager.default.createDirectory(at: foreignTarget.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data().write(to: foreignTarget)
+        let cliLink = tempDir.appendingPathComponent("usr-local-bin-norma")
+        try FileManager.default.createSymbolicLink(at: cliLink, withDestinationURL: foreignTarget)
+
+        let embedded = makeFakeBundle(named: "embedded/Winter.app", version: "0.111.0")
+        let appsDir = tempDir.appendingPathComponent("Applications", isDirectory: true)
+        try FileManager.default.createDirectory(at: appsDir, withIntermediateDirectories: true)
+        let recorder = HandoffRecorder()
+        let deps = makeDeps(recorder: recorder, embeddedWinterURL: embedded, applicationsDir: appsDir,
+                             cliLinkURL: cliLink, normaAppBundlePath: tempDir.appendingPathComponent("Applications/Norma.app").path)
+
+        _ = performHandoffIfNeeded(deps: deps)
+
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: cliLink.path), foreignTarget.path,
+                       "a foreign symlink must survive untouched")
+    }
+
+    /// Nothing at all at the CLI-link path (the common case — most machines never installed the
+    /// `norma` command) must be a silent no-op, never a crash.
+    func testRetireLegacyCliLinkNoOpsWhenAbsent() throws {
+        let embedded = makeFakeBundle(named: "embedded/Winter.app", version: "0.111.0")
+        let appsDir = tempDir.appendingPathComponent("Applications", isDirectory: true)
+        try FileManager.default.createDirectory(at: appsDir, withIntermediateDirectories: true)
+        let recorder = HandoffRecorder()
+        let deps = makeDeps(recorder: recorder, embeddedWinterURL: embedded, applicationsDir: appsDir)
+        // (default `cliLinkURL` from `makeDeps` — a temp path that was never created — is absent by construction)
+
+        let outcome = performHandoffIfNeeded(deps: deps)
+
+        guard case .installed = outcome else { return XCTFail("expected .installed, got \(outcome)") }
     }
 
     // MARK: - the notice must never silently vanish (review r0, Major M2)
@@ -339,7 +462,7 @@ final class HandoffTests: XCTestCase {
         XCTAssertEqual(HandoffNotice.title, "Norma is now Winter")
         XCTAssertEqual(
             HandoffNotice.body,
-            "Winter has been installed in Applications and opened; your sessions and settings move over on its first start. You can delete Norma."
+            "Winter has been installed in Applications and opened; your sessions and settings move over on its first start. You can delete Norma. macOS may ask permission for Winter to read the credentials Norma saved — click Always Allow. If Winter's menu shows it is still finishing setup, quit and reopen Winter once."
         )
     }
 
