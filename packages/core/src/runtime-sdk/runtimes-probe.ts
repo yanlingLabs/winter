@@ -8,7 +8,7 @@
 // the real user's homes are never touched.
 import { accessSync, constants as fsConstants, existsSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { bundleRuntimePath, parseVersionsJson, type VersionsJson } from "./bundle-layout";
+import { bundleRuntimePath, parseVersionsJson, resolveAntExecutable, type VersionsJson } from "./bundle-layout";
 import { resolveWinterExecutable } from "./executable";
 import { ClaudeExecutableUnavailable, resolveClaudeExecutable } from "./official-executable";
 
@@ -16,6 +16,12 @@ export interface RuntimesProbeResult {
   ok: boolean;
   winter: { path?: string; source?: string; executable: boolean; signature?: string };
   claude: { path?: string; source?: string; executable: boolean; version?: string; teamIdentifier?: string };
+  /** Winter Phase 10a (P10a-4): OPTIONAL, unlike winter/claude above — a miss never affects `ok`
+   *  (`resolveAntExecutable` itself has no typed refusal; see bundle-layout.ts). Reported purely
+   *  for `scripts/verify-runtimes-compiled.ts`'s fixture-driven proof that the bundle rung
+   *  resolves ant inside a REAL compiled `$bunfs` binary, the same way it already proves this for
+   *  winter/claude. */
+  ant: { path?: string; source?: string; executable: boolean; signature?: string };
   versions?: VersionsJson;
   errors: string[];
 }
@@ -83,6 +89,10 @@ export async function runRuntimesProbe(input: {
    *  (`resolvePlatformPackageWinter`) — never a behaviour change for the real `__runtimes-probe`
    *  route, which never sets this. */
   resolvePlatformPackageBin?: () => string | undefined;
+  /** Winter Phase 10a (P10a-4): test seam for `resolveAntExecutable`'s dev-only `which ant` rung
+   *  — never real-PATH-dependent in this file's own tests (M1's own lesson, applied here too);
+   *  defaults to `resolveAntExecutable`'s own default (`Bun.which`) for the real probe route. */
+  resolveAntWhich?: (cmd: string) => string | null;
 }): Promise<RuntimesProbeResult> {
   const errors: string[] = [];
   const exists = (p: string): boolean => existsSync(p);
@@ -122,6 +132,24 @@ export async function runRuntimesProbe(input: {
     errors.push(claudeResolution.message);
   }
 
+  // --- ant (Winter Phase 10a, P10a-4) — OPTIONAL: a miss is recorded, never pushed into `errors`
+  // or `ok`, since resolveAntExecutable has no typed refusal (an absent ant never refuses a
+  // session on either leg; only the native-provider console-profile broker's own bearer refresh
+  // depends on it, with its own failure path at that point). ------------------------------------
+  const antResolution = resolveAntExecutable({
+    setting: undefined,
+    env: input.env,
+    execPath: input.execPath,
+    ...(input.resolveAntWhich === undefined ? {} : { which: input.resolveAntWhich }),
+  });
+  const ant: RuntimesProbeResult["ant"] = { executable: false };
+  if (antResolution !== undefined) {
+    ant.path = antResolution.path;
+    ant.source = antResolution.source;
+    ant.executable = isExecutable(antResolution.path);
+    ant.signature = formatSignature(codesignInfo(antResolution.path));
+  }
+
   // --- versions.json (independent of whether the claude ladder resolved through the bundle rung
   // — a bundle claude that itself refused on a mismatched VERSIONS.json is exactly the case a
   // diagnostic reader most wants to see the record for) -----------------------------------------
@@ -136,5 +164,5 @@ export async function runRuntimesProbe(input: {
   }
 
   const ok = winter.executable && claude.executable;
-  return { ok, winter, claude, ...(versions === undefined ? {} : { versions }), errors };
+  return { ok, winter, claude, ant, ...(versions === undefined ? {} : { versions }), errors };
 }

@@ -36,17 +36,19 @@
  * NEVER run the compiled binary against a real home — see step 4/7 above.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveInstalledWinterPackage, stageRuntimes, type StageRuntimesOpts } from "./stage-runtimes";
+import { parseAntPin } from "./fetch-ant";
 import { REQUIRED_CLAUDE_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(SCRIPTS_DIR, "..");
 const DIST_BINARY = join(REPO_ROOT, "dist", "winter-core");
 const DIST_WINTER = join(REPO_ROOT, "dist", "winter");
+const VERSIONS_JSON_PATH = join(REPO_ROOT, "VERSIONS.json");
 const COMPILE_TIMEOUT_MS = 180_000;
 /** The probe resolves two ladders, best-effort `codesign`s them, and runs one real `claude
  *  --version` — seconds in practice; this only guards against a genuine hang. */
@@ -144,6 +146,28 @@ async function main(): Promise<void> {
   log(`staged: winter=${staged.winterPath} claude=${staged.claudePath} versions=${staged.versionsPath}`);
   log(`VERSIONS.json: ${JSON.stringify(staged.versions)}`);
 
+  // ---- Step 3b: stage ant (Winter Phase 10a, P10a-4) — best-effort, mirrors the DIST_WINTER
+  // fallback above: this proof's PRIMARY point is winter/claude's bundle-rung resolution inside
+  // the compiled binary, unchanged by this addition; ant coverage is additive when a vendored copy
+  // is available (`bun run scripts/fetch-ant.ts`), never a hard requirement of this script.
+  let antStaged = false;
+  try {
+    const antPin = parseAntPin(readFileSync(VERSIONS_JSON_PATH, "utf8"));
+    const vendoredAnt = join(REPO_ROOT, "vendor", "ant", antPin.tag, "ant");
+    if (existsSync(vendoredAnt)) {
+      const antDest = join(resources, "runtimes", "ant");
+      mkdirSync(antDest, { recursive: true });
+      copyFileSync(vendoredAnt, join(antDest, "ant"));
+      chmodSync(join(antDest, "ant"), 0o755);
+      antStaged = true;
+      log(`staged: ant=${join(antDest, "ant")} (from ${vendoredAnt})`);
+    } else {
+      log(`WARNING: no vendored ant at ${vendoredAnt} (VERSIONS.json pins ant.tag=${antPin.tag}) — run \`bun run scripts/fetch-ant.ts\` to also exercise the ant bundle-rung assertions below`);
+    }
+  } catch (err) {
+    log(`WARNING: could not resolve/stage ant (${err instanceof Error ? err.message : String(err)}) — the ant bundle-rung assertions below are skipped`);
+  }
+
   const tmpHome = mkdtempSync(join(tmpdir(), "winter-runtimes-probe-home-"));
   log(`\n--- Step 4: temp WINTER_HOME = ${tmpHome} ---`);
   const before = REAL_HOMES.map(homeSignature);
@@ -202,6 +226,7 @@ async function main(): Promise<void> {
 
     const winter = result.winter as Record<string, unknown> | undefined;
     const claude = result.claude as Record<string, unknown> | undefined;
+    const ant = result.ant as Record<string, unknown> | undefined;
     const versions = result.versions as Record<string, unknown> | undefined;
     const claudeVersion = typeof claude?.version === "string" ? claude.version : undefined;
 
@@ -216,6 +241,19 @@ async function main(): Promise<void> {
       [`result.versions.officialSdk === ${REQUIRED_CLAUDE_AGENT_SDK} (this build's pin)`, versions?.officialSdk === REQUIRED_CLAUDE_AGENT_SDK],
       [`result.versions.winterSource === '${staged.versions.winterSource}' (P9a-8: matches what Step 3 actually staged)`, versions?.winterSource === staged.versions.winterSource],
       ["probe exited 0", exitCode === 0],
+      // Winter Phase 10a (P10a-4): ant resolves via the SAME 'bundle' rung inside the compiled
+      // binary, the way winter/claude do above — asserted for real when Step 3b staged a vendored
+      // copy (`antStaged`); a vacuous pass (never a silent green) when it did not, since ant
+      // coverage here is additive to this proof's primary winter/claude subject, not a new hard
+      // requirement of every environment that runs this script.
+      [
+        antStaged ? "result.ant.source === 'bundle'" : "result.ant.source === 'bundle' (SKIPPED — no vendored ant staged, see WARNING above)",
+        antStaged ? ant?.source === "bundle" : true,
+      ],
+      [
+        antStaged ? "result.ant.executable === true" : "result.ant.executable === true (SKIPPED — no vendored ant staged, see WARNING above)",
+        antStaged ? ant?.executable === true : true,
+      ],
       ...untouched.map(([dir, ok]) => [`${dir}: unchanged`, ok] as [string, boolean]),
     ];
 

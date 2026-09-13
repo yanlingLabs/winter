@@ -54,6 +54,13 @@ apple/Winter/vendor/cef/
 # if this tree is absent (project.yml preBuildScripts).
 apple/Winter/vendor/monaco/
 
+# Anthropic's Platform CLI `ant` (github.com/anthropics/anthropic-cli, MIT-licensed — Winter Phase
+# 10a Task L1's licence finding) darwin-arm64 release binary — fetched + sha256-verified via
+# scripts/fetch-ant.ts against the repo-root VERSIONS.json `ant` pin ({ tag, asset, sha256 }).
+# Never committed; embed-runtimes.sh stages `<tag>/ant` into the Release app bundle and re-signs it
+# under Winter's own team identity (--identifier com.winter.ant), same shape as `winter` itself.
+vendor/ant/
+
 # LibreOffice (LibreOfficeKit) headless macOS arm64 product-set, from-source build
 # (--enable-headless, svp VCL backend, zero source patches) — ~488MB unpacked, ~154MiB
 # compressed; too large to commit. Fetched + sha256-verified via scripts/fetch-libreoffice.ts
