@@ -4,8 +4,8 @@ import { SDK_VERSION } from "@yanlinglabs/winter-agent-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.9";
-export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.4";
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.10";
+export const REQUIRED_WINTER_RUNTIME_SDK = "0.0.5";
 /** P8c-3/versions: the official peer is pinned EXACT (`"0.3.250"` in package.json, no `^`) — the
  *  ladder's package door and the router's own `assertVersionMatrix` both key off this string
  *  matching the installed wrapper's manifest, never a range. */
