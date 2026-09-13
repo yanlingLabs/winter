@@ -17,6 +17,7 @@ import {
   row16Gate,
   row16IdentityCheck,
   row16ProvenanceCheck,
+  verifyAntEmbed,
   verifyVersionsJsonAgainstPins,
 } from "./release-lib";
 import { sha256File } from "./stage-runtimes";
@@ -143,6 +144,42 @@ describe("verifyVersionsJsonAgainstPins (P8d-2's claude gate, pure half)", () =>
     const r = verifyVersionsJsonAgainstPins({ versionsJsonText: "{not json", claudeSha256: sha });
     expect(r.ok).toBe(false);
     expect(r.versions).toBeUndefined();
+    expect(r.failures[0]).toContain("VERSIONS.json");
+  });
+});
+
+describe("verifyAntEmbed (Winter Phase 10a, Task L3's ant CONTENT-IDENTITY gate, pure half, fix round 2: staged pre-sign hash, never the vendor source or the post-sign embedded file)", () => {
+  const antSha = "c".repeat(64);
+  const antBinarySha = "d".repeat(64);
+  const goodAntVersionsJson = JSON.stringify({ ant: { tag: "v1.32.0", asset: "ant_1.32.0_macos_arm64.zip", sha256: antSha, binarySha256: antBinarySha } });
+
+  test("the STAGED pre-sign sha256 matches VERSIONS.json's committed binarySha256 pin -> ok, pin returned", () => {
+    const r = verifyAntEmbed({ versionsJsonText: goodAntVersionsJson, stagedAntPreSignSha256: antBinarySha });
+    expect(r.ok).toBe(true);
+    expect(r.failures).toEqual([]);
+    expect(r.pin).toEqual({ tag: "v1.32.0", asset: "ant_1.32.0_macos_arm64.zip", sha256: antSha, binarySha256: antBinarySha });
+  });
+
+  test("a mismatch fails, names both hashes and the pinned tag, but still returns the parsed pin", () => {
+    const r = verifyAntEmbed({ versionsJsonText: goodAntVersionsJson, stagedAntPreSignSha256: "e".repeat(64) });
+    expect(r.ok).toBe(false);
+    expect(r.failures[0]).toContain(antBinarySha);
+    expect(r.failures[0]).toContain("e".repeat(64));
+    expect(r.failures[0]).toContain("does not match");
+    expect(r.pin).toBeDefined();
+  });
+
+  test("an undefined staged pre-sign hash (staged VERSIONS.json carries no checksums.ant) is a named failure, never a silent pass — pin still returned", () => {
+    const r = verifyAntEmbed({ versionsJsonText: goodAntVersionsJson, stagedAntPreSignSha256: undefined });
+    expect(r.ok).toBe(false);
+    expect(r.failures[0]).toContain("checksums.ant");
+    expect(r.pin).toBeDefined();
+  });
+
+  test("unparseable or missing 'ant' VERSIONS.json entry fails via parseAntPin, pin omitted", () => {
+    const r = verifyAntEmbed({ versionsJsonText: "{not json", stagedAntPreSignSha256: antBinarySha });
+    expect(r.ok).toBe(false);
+    expect(r.pin).toBeUndefined();
     expect(r.failures[0]).toContain("VERSIONS.json");
   });
 });

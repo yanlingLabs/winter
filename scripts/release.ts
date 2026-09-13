@@ -107,8 +107,10 @@ import {
   row16Gate,
   row16IdentityCheck,
   row16ProvenanceCheck,
+  verifyAntEmbed,
   verifyVersionsJsonAgainstPins,
 } from "./release-lib";
+import { parseAntPin } from "./fetch-ant";
 import { CODEX_MODELS_VERIFIED } from "../packages/core/src/providers/codex-config";
 import { winterSourceOf } from "../packages/core/src/runtime-sdk/bundle-layout";
 import { REQUIRED_WINTER_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
@@ -484,6 +486,65 @@ if (!versionsCheck.ok) {
 const embeddedVersions = versionsCheck.versions!;
 console.log(`Embedded runtimes verified: winter re-signed (TeamIdentifier=${TEAM_ID}), claude untouched (TeamIdentifier=${CLAUDE_TEAM_ID}, hardened runtime, checksum matches VERSIONS.json).`);
 
+// --- Winter Phase 10a (P10a-4/P10a-5, Task L3, fix round 2): the THIRD embedded runtime — ant ---
+// `ant` is embed-time RE-SIGNED under Winter's own team identity (embed-runtimes.sh, --identifier
+// com.winter.ant) — it fits `assertSigned`'s existing generic check (TeamIdentifier + secure
+// timestamp), same as `winter` above (never claude's "verify untouched" shape — L1's licence
+// finding (MIT, github.com/anthropics/anthropic-cli) is what permits Winter to redistribute +
+// re-sign it).
+const embeddedAntPath = join(embeddedRuntimesDir, "ant", "ant");
+assertSigned(embeddedAntPath, "ant (embedded runtime)");
+
+// Fix round 2: an EARLY, SUPPLEMENTARY sanity check on the local checkout's vendor source — never
+// the sole proof (see below for why). A missing vendor copy fails fast with the obvious fix.
+const rootVersionsJsonText = readFileSync(join(ROOT, "VERSIONS.json"), "utf8");
+const antPin = parseAntPin(rootVersionsJsonText);
+const vendoredAntPath = join(ROOT, "vendor", "ant", antPin.tag, "ant");
+if (!existsSync(vendoredAntPath)) {
+  fail(`vendored ant not found at ${vendoredAntPath} (VERSIONS.json pins ant.tag=${antPin.tag}) — run \`bun run scripts/fetch-ant.ts\` first`);
+}
+const vendoredAntSha256 = createHash("sha256").update(readFileSync(vendoredAntPath)).digest("hex");
+if (vendoredAntSha256 !== antPin.binarySha256) {
+  fail(
+    `vendor/ant/${antPin.tag}/ant's actual SHA-256 (${vendoredAntSha256}) does not match VERSIONS.json's committed ` +
+      `ant.binarySha256 (${antPin.binarySha256}) — the LOCAL CHECKOUT's vendor copy is stale/tampered; re-run ` +
+      `\`bun run scripts/fetch-ant.ts\` before releasing`,
+  );
+}
+
+// The AUTHORITATIVE checks — proving what actually shipped in THIS build's bundle, not just the
+// local checkout's vendor/ directory (measured: `codesign --remove-signature` does NOT restore a
+// Go binary's original pre-sign bytes — it produced a copy ~256KB smaller than the real vendored
+// ant, so "strip the signature back off and re-hash the embedded file" is not viable here):
+//   (a) `verifyAntEmbed` compares the STAGED pre-sign hash embed-runtimes.sh recorded into
+//       `embeddedVersions.checksums.ant` (computed on the STAGED Contents/Resources/runtimes/ant/ant,
+//       immediately after the copy, before signing — never a re-hash of the vendor source or the
+//       post-sign embedded file) against the git-committed `ant.binarySha256` pin: proves the file
+//       embed-runtimes.sh SIGNED is the pinned one.
+//   (b) `codesign --verify --strict` on the CURRENTLY EMBEDDED file, right here, right now, is what
+//       cryptographically proves today's on-disk bytes are UNCHANGED since the moment that signing
+//       happened — closing the gap (a) alone leaves open (a tampered/swapped bundle file, re-signed
+//       under a legitimate identity, would otherwise pass unnoticed). `assertSigned` above already
+//       covers TeamIdentifier/timestamp; this adds the strict verify and the SPECIFIC identifier,
+//       naming exactly which re-sign step this must have gone through.
+const antEmbedCheck = verifyAntEmbed({ versionsJsonText: rootVersionsJsonText, stagedAntPreSignSha256: embeddedVersions.checksums.ant });
+if (!antEmbedCheck.ok) {
+  fail(`ant (embedded runtime) failed the pin/checksum gate:\n  ${antEmbedCheck.failures.join("\n  ")}`);
+}
+try {
+  sh(`codesign --verify --strict "${embeddedAntPath}"`);
+} catch {
+  fail(`codesign --verify --strict failed on the embedded ant at ${embeddedAntPath} — its signature no longer verifies (tampered or corrupted since embed-runtimes.sh signed it)`);
+}
+const antDvv = probe(`codesign -dvv "${embeddedAntPath}" 2>&1`).stdout;
+if (!antDvv.includes("Identifier=com.winter.ant")) {
+  fail(`ant (embedded runtime): expected Identifier=com.winter.ant (embed-runtimes.sh's own re-sign step) — got:\n${antDvv}`);
+}
+console.log(
+  `ant (embedded runtime) verified: re-signed (TeamIdentifier=${TEAM_ID}, Identifier=com.winter.ant), codesign --verify --strict passes, ` +
+    `staged pre-sign checksum matches VERSIONS.json ant.binarySha256.`,
+);
+
 // Row 16 STRONG (P9a-8): a literal checksum equality against the CURRENTLY installed npm platform
 // package — meaningful only when the embed's own VERSIONS.json records winterSource=platform-
 // package (`row16IdentityCheck`, release-lib.ts). A non-dry-run release REQUIRES this path unless
@@ -716,6 +777,11 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   // this entitlements-relaxation check — which only has an opinion about code THIS repo signs —
   // does not apply to it; its identity/checksum are verified separately, above this array.
   { path: embeddedWinterPath, label: "winter (embedded runtime)", expect: [] },
+  // Winter Phase 10a (P10a-4/P10a-5, Task L3 fix round 1) — `ant` joins `winter` above: it too is
+  // re-signed at embed time under Winter's own team identity (embed-runtimes.sh, --identifier
+  // com.winter.ant), so the SAME "no hardening relaxation" posture applies. `claude`'s own
+  // reasoning above (embedded unmodified, out of scope for THIS array) does not apply here.
+  { path: embeddedAntPath, label: "ant (embedded runtime)", expect: [] },
   // panel-cef Task 6a: the GPU helper joined the Renderer. Chromium routes the GPU process to the
   // `(GPU)` bundle only when it needs the JIT-capable variant — SwiftShader — which a Mac with a
   // working Metal path never reaches, so this was invisible until Task 6a forced the software path

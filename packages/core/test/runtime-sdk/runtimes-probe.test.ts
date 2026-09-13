@@ -13,6 +13,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runRuntimesProbe } from "../../src/runtime-sdk/runtimes-probe";
+import { antExecutablePath } from "../../src/runtime-sdk/bundle-layout";
 import { REQUIRED_CLAUDE_AGENT_SDK, REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK } from "../../src/runtime-sdk/versions";
 
 const temps: string[] = [];
@@ -37,11 +38,11 @@ function goodVersionsJson(overrides: Partial<Record<string, unknown>> = {}): str
   });
 }
 
-/** Builds `<resources>/winter-core` + `<resources>/runtimes/{winter,claude-official/{claude,VERSIONS.json}}`
+/** Builds `<resources>/winter-core` + `<resources>/runtimes/{winter,claude-official/{claude,VERSIONS.json},ant/ant}`
  *  under a fresh mkdtemp "Resources" dir, returns the `execPath` (the `winter-core` path) a real
  *  daemon would report. `claude` is a REAL executable shell script (the probe spawns it for
- *  `--version`); `winter` is a plain chmod'd file (the probe must never spawn it). */
-function bundleFixture(opts: { versionsJson?: string | null } = {}): { execPath: string; resources: string } {
+ *  `--version`); `winter`/`ant` are plain chmod'd files (the probe must never spawn either). */
+function bundleFixture(opts: { versionsJson?: string | null; ant?: boolean } = {}): { execPath: string; resources: string } {
   const resources = tempDir("runtimes-probe-resources-");
   const execPath = join(resources, "winter-core");
   writeFileSync(execPath, "not a real daemon\n");
@@ -53,6 +54,12 @@ function bundleFixture(opts: { versionsJson?: string | null } = {}): { execPath:
   writeFileSync(join(claudeDir, "claude"), "#!/bin/sh\necho '2.1.250 (Fake Claude Code)'\nexit 0\n");
   chmodSync(join(claudeDir, "claude"), 0o755);
   if (opts.versionsJson !== null) writeFileSync(join(claudeDir, "VERSIONS.json"), opts.versionsJson ?? goodVersionsJson());
+  if (opts.ant !== false) {
+    const antDir = join(runtimesDir, "ant");
+    mkdirSync(antDir, { recursive: true });
+    writeFileSync(join(antDir, "ant"), "fake ant, never spawned\n");
+    chmodSync(join(antDir, "ant"), 0o755);
+  }
   return { execPath, resources };
 }
 
@@ -68,6 +75,29 @@ describe("runRuntimesProbe (P8d-1 bundle layout, real fs, no daemon)", () => {
     expect(result.claude.executable).toBe(true);
     expect(result.claude.version).toBe("2.1.250 (Fake Claude Code)");
     expect(result.versions?.officialSdk).toBe(REQUIRED_CLAUDE_AGENT_SDK);
+    expect(result.ok).toBe(true);
+    expect(result.errors).toEqual([]);
+
+    // Winter Phase 10a (P10a-4): ant resolves via the bundle rung too — OPTIONAL, so its absence
+    // (tested separately below) never affects `ok`/`errors`.
+    expect(result.ant.source).toBe("bundle");
+    expect(result.ant.executable).toBe(true);
+    expect(result.ant.path).toBe(antExecutablePath(execPath));
+  });
+
+  test("ant absent entirely (no bundle, no PATH ant): reported as not executable, but ok/errors are UNAFFECTED — ant is optional", async () => {
+    const { execPath } = bundleFixture({ ant: false });
+    const home = tempDir("runtimes-probe-home-noant-");
+    // M1's own lesson (never assert against the ambient tree/PATH): inject the miss rather than
+    // trusting this machine has no real `ant` on PATH.
+    const result = await runRuntimesProbe({ execPath, home, env: {}, resolveAntWhich: () => null });
+
+    expect(result.ant.path).toBeUndefined();
+    expect(result.ant.executable).toBe(false);
+    // The rest of the probe is unaffected by ant's absence — same winter/claude bundle result as
+    // the fully-staged test above.
+    expect(result.winter.source).toBe("bundle");
+    expect(result.claude.source).toBe("bundle");
     expect(result.ok).toBe(true);
     expect(result.errors).toEqual([]);
   });

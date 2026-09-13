@@ -14,6 +14,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parseVersionsJson, winterSourceOf, type VersionsJson } from "../packages/core/src/runtime-sdk/bundle-layout";
+import { parseAntPin, type AntPin } from "./fetch-ant";
 
 export interface Preflight {
   ok: boolean;
@@ -472,6 +473,69 @@ export function verifyVersionsJsonAgainstPins(input: { versionsJsonText: string;
     );
   }
   return { ok: failures.length === 0, failures, versions };
+}
+
+export interface AntEmbedCheck {
+  ok: boolean;
+  failures: string[];
+  /** The parsed pin, when parsing itself succeeded — release.ts's own log line wants it either way. */
+  pin?: AntPin;
+}
+
+/**
+ * Winter Phase 10a (Task L3, fix round 2): the PURE half of release.ts's `ant` CONTENT-IDENTITY
+ * gate — mirrors `row16IdentityCheck`'s shape for `winter` far more closely than
+ * `verifyVersionsJsonAgainstPins`'s shape for `claude` does, because `ant`, like `winter`, is
+ * RE-SIGNED at embed time (never claude's "embedded unmodified" shape): a signature blob changes
+ * a Mach-O's bytes, so no hash of the ALREADY-SIGNED embedded file can ever equal a pre-sign pin
+ * (measured: codesign --remove-signature on the real vendored ant binary does NOT restore the
+ * original bytes — it produced a file ~256KB smaller — so "strip the signature back off and
+ * re-hash" is not a viable path for this Go-toolchain binary; verified empirically before choosing
+ * this design).
+ *
+ * So this checks the STAGE-TIME PRE-SIGN hash instead — `stagedAntPreSignSha256`, the value
+ * `embed-runtimes.sh` computes on the staged `Contents/Resources/runtimes/ant/ant` IMMEDIATELY
+ * after copying it from `vendor/ant/<tag>/ant` and BEFORE `codesign` ever touches it, recorded
+ * into the staged `claude-official/VERSIONS.json`'s `checksums.ant` field (`bundle-layout.ts`'s
+ * `VersionsJson`) — against the repo-root VERSIONS.json's git-committed `ant.binarySha256` pin.
+ * This proves "the file embed-runtimes.sh signed is the pinned, committed one".
+ *
+ * That alone does not prove "the file sitting at `embeddedAntPath` TODAY is still that exact
+ * signed file" — release.ts supplies the OTHER half of that proof itself (real `codesign` shell-
+ * outs, not pure): `codesign --verify --strict` on the embedded copy is what cryptographically
+ * establishes today's on-disk bytes are unchanged since the moment `embed-runtimes.sh`'s own
+ * `codesign --sign` ran on it, plus `TeamIdentifier`/`Identifier=com.winter.ant` naming WHOSE
+ * signature and WHICH re-sign step. Together: pinned-source -> staged-and-hashed -> signed ->
+ * verified-unchanged-since-signing — a complete, unbroken chain, never just the vendor source
+ * hashed in isolation (which proves nothing about what actually shipped in the bundle).
+ *
+ * `stagedAntPreSignSha256` is `undefined` when the staged VERSIONS.json carries no `checksums.ant`
+ * at all (a bundle built by an embed-runtimes.sh that predates this recording, or one with no
+ * vendored ant) — a named failure, never a silent pass. Aggregates rather than throwing so
+ * release.ts can report every mismatch in one `fail()` call, same shape as
+ * `preflight`/`verifyVersionsJsonAgainstPins`.
+ */
+export function verifyAntEmbed(input: { versionsJsonText: string; stagedAntPreSignSha256: string | undefined }): AntEmbedCheck {
+  let pin: AntPin;
+  try {
+    pin = parseAntPin(input.versionsJsonText);
+  } catch (err) {
+    return { ok: false, failures: [`VERSIONS.json: ${err instanceof Error ? err.message : String(err)}`] };
+  }
+  const failures: string[] = [];
+  if (input.stagedAntPreSignSha256 === undefined) {
+    failures.push(
+      `the staged claude-official/VERSIONS.json carries no checksums.ant — it was not staged by a fix-round-2-or-later ` +
+        `embed-runtimes.sh (or the vendored ant was absent at stage time); rebuild before releasing`,
+    );
+  } else if (pin.binarySha256 !== input.stagedAntPreSignSha256) {
+    failures.push(
+      `VERSIONS.json ant.binarySha256 (${pin.binarySha256}) does not match the STAGED ant binary's recorded pre-sign ` +
+        `SHA-256 (${input.stagedAntPreSignSha256}) — the file embed-runtimes.sh signed does not match the pinned, ` +
+        `committed digest; re-run \`bun run scripts/fetch-ant.ts\` (or investigate tampering) before releasing`,
+    );
+  }
+  return { ok: failures.length === 0, failures, pin };
 }
 
 export interface Row16CheckInput {

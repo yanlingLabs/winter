@@ -631,6 +631,11 @@ targets:
       # CONTENTS_FOLDER_PATH, CONFIGURATION and EXPANDED_CODE_SIGN_IDENTITY into a Run Script
       # phase's environment — the script reads them exactly as this file's other postCompileScripts
       # do; nothing extra to pass here.
+      # Winter Phase 10a (P10a-4/P10a-5, Task L3) added a THIRD embedded binary to this same
+      # script: `runtimes/ant/ant` (Anthropic's Platform CLI, MIT-licensed — L1's licence finding
+      # permits redistribution), staged from `vendor/ant/<tag>/ant` (scripts/fetch-ant.ts) and
+      # re-signed with the SAME stable-identifier shape as winter above (`--identifier
+      # com.winter.ant`) — never claude's "verify untouched" shape.
       - name: Embed runtimes
         basedOnDependencyAnalysis: false
         script: |

@@ -56,6 +56,14 @@ final class ProviderPaneModel: ObservableObject {
     private let client: WinterClient
     private let onConfigured: () -> Void
 
+    /// Winter Phase 10a Task A1/A2: the Anthropic (Claude) block's own view-model
+    /// (`AnthropicAuthSection.swift`) — built around `AnthropicAuthClient` (a protocol), not this
+    /// class's own `WinterClient`, so IT stays independently unit-testable against a fake. Wired to
+    /// the SAME live connection via `LiveAnthropicAuthClient(client:)`; owned here (rather than a
+    /// second `DashboardWiring` field) so `ProviderPane`'s existing construction site in
+    /// `AppDelegate.makeDashboardWiring` needs no changes.
+    let anthropicAuth: AnthropicAuthSectionModel
+
     @Published private(set) var providerId: String?
     @Published private(set) var providerModel: String?
     @Published private(set) var statusLoading = false
@@ -78,6 +86,7 @@ final class ProviderPaneModel: ObservableObject {
     init(client: WinterClient, onConfigured: @escaping () -> Void = {}) {
         self.client = client
         self.onConfigured = onConfigured
+        self.anthropicAuth = AnthropicAuthSectionModel(client: LiveAnthropicAuthClient(client: client))
     }
 
     /// Save is blocked on an empty (or whitespace-only) base URL or API key — `provider.configure`'s
@@ -159,6 +168,8 @@ struct ProviderPane: View {
                 byoKeyForm
                 Divider()
                 chatGptSignIn
+                Divider()
+                AnthropicAuthSection(model: model.anthropicAuth)
                 Divider()
                 disclosure
             }
