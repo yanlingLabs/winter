@@ -480,6 +480,7 @@ class OfficialSessionImpl implements OfficialSession {
       // Tracked BEFORE the iteration starts (`winter-session.ts`'s own precedent) — a shutdown
       // landing between the spawn and the first frame must still end this child.
       this.deps.runtime.trackQuery(this.sessionId, abort, () => this.end());
+      this.armControlReadySignal(inc);
       // M6b: attach BEFORE the loop starts — `open()` is the door's own call site, not gated on the
       // child's `system/init` the way Winter's messaging attach is (this leg's simpler design).
       this.attachMessaging(inc, generation);
@@ -487,6 +488,53 @@ class OfficialSessionImpl implements OfficialSession {
       this.lastDone = inc.done;
     })().finally(() => { this.opening = undefined; });
     return this.opening;
+  }
+
+  /**
+   * Fix round 2 (Defect 1, controller ruling): `system/init` is the CLI's "session metadata …
+   * emitted at the start of EACH TURN" (the pinned 0.3.250 `sdk.d.ts`'s own doc on
+   * `SDKSystemMessage`) — never at process startup — so a destination official child that has not
+   * yet been sent a first message structurally CANNOT report it. `handoff.ts`'s
+   * `confirmInit`/`awaitDestinationInit` must prove the destination alive BEFORE the router's own
+   * barrier delivers that first message (WS-05 §12 step 8: confirm, then deliver), so waiting on
+   * `session.init` there deadlocked every Winter -> official handoff (measured: `handoff_lossy_fork`
+   * after ~31s, every time).
+   *
+   * MEASURED against the pinned 0.3.250 SDK, a loopback fake, with ZERO messages ever pushed:
+   * `Query.initializationResult()` — the control-protocol `initialize` handshake, independent of
+   * any turn — resolved in ~264ms, and its `account.apiKeySource` already carried the exact same
+   * value the LATER real `system/init` frame reported for the same session (`ANTHROPIC_API_KEY` in
+   * both). This is a genuine turn-free "the process is up and the SDK completed its control-
+   * protocol handshake" signal.
+   *
+   * The router's own `OfficialQuery` seam deliberately narrows this away (`interrupt()` only —
+   * `official-sdk-shapes.d.ts`'s own doc: "reduced to what the router's own surface touches"), but
+   * that same file also documents that the object handed back IS the raw pinned SDK `Query`,
+   * "passed through verbatim" — the router never re-shapes it — so reaching past its DECLARED
+   * (narrower) type to call a method the CONCRETE object actually implements is safe in production.
+   * A test double that does not implement it (every `official-session.test.ts` fake `Query`) is
+   * skipped by the guard below rather than crashing `open()`.
+   *
+   * Deliberately narrow: `sessionId`/`model`/`tools` are left unset (the control response carries
+   * none of them), and this never runs if the REAL per-turn `system/init` handler in `run()`
+   * already fired (`inc.sawInit`) — that handler still sets `initFacts` UNCONDITIONALLY the moment
+   * a real turn lands, overwriting whatever this set. The WS-16 §6 backend-id match and the P9c-1
+   * `apiKeySource`-family assertion both still run ONLY there, on that first real turn, exactly as
+   * for a freshly-created (non-handoff) official session — never weakened, never moved earlier.
+   * This is purely a liveness signal for `awaitDestinationInit`, nothing more.
+   */
+  private armControlReadySignal(inc: Incarnation): void {
+    const raw = inc.query as unknown as { initializationResult?: () => Promise<{ account?: { apiKeySource?: string } }> };
+    if (typeof raw.initializationResult !== "function") return; // a fake test Query — fall back to the per-turn signal only
+    raw.initializationResult().then(
+      (res) => {
+        if (inc.sawInit || this.inc !== inc) return; // the real system/init already arrived, or a newer incarnation superseded this one
+        this.initFacts = { tools: [], ...(typeof res.account?.apiKeySource === "string" ? { apiKeySource: res.account.apiKeySource } : {}) };
+      },
+      (err) => {
+        this.log(`initializationResult() failed for ${this.sessionId} (${err instanceof Error ? err.name : "unknown"}) — falling back to the per-turn system/init signal`);
+      },
+    );
   }
 
   private async run(inc: Incarnation): Promise<void> {
