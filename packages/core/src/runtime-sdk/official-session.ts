@@ -52,6 +52,30 @@ export interface OfficialInitFacts {
  *  Optional as a whole (a unit test hands in a counting fake or nothing). */
 export interface OfficialSessionRecords {
   setTranscriptHealth(winterSessionId: string, health: "repair-required"): void;
+  /**
+   * Fix round 2 (Defect 2, controller ruling): the SAME durable, monotonically-increasing
+   * generation counter `WinterSession.open()` uses (`RuntimeSessionRecords.bumpGeneration`).
+   * Without it, this leg's own private `this.gen` counter starts at 0 for EVERY fresh incarnation
+   * — including one opened as a handoff DESTINATION — regardless of what generation the OTHER leg
+   * already used for ITS OWN turns. MEASURED (fix round 2): a session that starts on Winter (whose
+   * `open()` already bumps the durable counter 0 -> 1) and hands off to official reaches an
+   * official incarnation that independently computes local generation 1 too (`0 + 1`, ignorant of
+   * the shared counter) — and symmetrically, a session that starts on official (never touching the
+   * durable counter, which stays at its schema default of 0) and hands off to Winter makes Winter's
+   * OWN `bumpGeneration()` read that untouched 0 and also compute 1. Either way the destination's
+   * generation number collides with a generation the source already wrote checkpoints under, and
+   * `projector/index.ts`'s checkpoint (keyed `{winterSessionId, generation, sourceId}`) mistakes
+   * the destination's genuinely-new events for an already-committed replay of the SAME generation —
+   * "[projector] source already projected — skipping" — and silently drops them (this leg's own
+   * `system/init`/messages, this file's `run()` loop, none of it reaching the client).
+   *
+   * Optional so a hand-built test double that only cares about `setTranscriptHealth` (every
+   * `official-session.test.ts` / `official-leg.e2e.test.ts` harness — none of them exercise a
+   * cross-leg handoff against a real durable counter) keeps compiling and behaving unchanged; the
+   * local `this.gen + 1` counter remains `open()`'s own fallback when this is absent, exactly
+   * mirroring `winter-session.ts`'s own `?? this.gen + 1` fallback for the identical reason.
+   */
+  bumpGeneration?(winterSessionId: string, input: { runtimeKind: "claude-agent"; backendSessionId?: string }): { generation: number };
 }
 
 export interface OfficialSessionDeps {
@@ -438,7 +462,13 @@ class OfficialSessionImpl implements OfficialSession {
       // it 0700 happens here, the one real spawn point.
       if (built.anthropicConfigDirToEnsure !== undefined) ensureOfficialConfigDir(built.anthropicConfigDirToEnsure);
       const stream = createOfficialInputStream();
-      const generation = this.gen + 1;
+      // Fix round 2 (Defect 2, controller ruling): draw from the SAME durable counter
+      // `WinterSession.open()` uses (`OfficialSessionRecords.bumpGeneration`'s own doc above) —
+      // never a private, per-instance counter that starts at 0 regardless of what the OTHER leg
+      // already used. Falls back to the old local counter when `records`/`bumpGeneration` is
+      // absent (every unit/e2e test double in this file's own test suites), byte-identical to
+      // pre-fix behavior there.
+      const generation = this.deps.records?.bumpGeneration?.(this.sessionId, { runtimeKind: "claude-agent", backendSessionId: this.backendSessionId }).generation ?? this.gen + 1;
       const projector = this.deps.projector(generation);
       // Fix round 1 (M1): ONE `AbortController` per incarnation, the SAME one Winter sessions
       // carry — `runtime.trackQuery` is what makes G-14's "every live Query ends BEFORE the

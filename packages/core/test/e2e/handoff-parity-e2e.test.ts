@@ -243,8 +243,15 @@ describeWithWinterBinary("A-1: GPT -> Claude (Winter -> official)", (winterBin) 
       expect(d.winter.legOf(sessionId)).toBe("official");
 
       const anthropicRequestsBefore = anthropicRequests.length;
+      // Fix round 2 (test-authoring bug, unmasked once Defects 1/2 stopped blocking this far):
+      // TWO pre-handoff turn_completed events for this SAME sessionId already sit in `client.events`
+      // (FIRST_TEXT, SECOND_TEXT) — an un-disambiguated predicate matches the OLDEST one instantly,
+      // exactly the trap the SECOND_TEXT wait above already guards against with its own
+      // `indexOf(e) > findIndex(...)` — generalized here to a COUNT since there are now two priors.
+      const turnCompletedSoFar = () => client.events.filter((e) => e.type === "turn_completed" && e.sessionId === sessionId).length;
+      const priorTurnCompletedCount = turnCompletedSoFar();
       await client.call(METHODS.sessionSend, { sessionId, text: "one more, after the handoff" });
-      await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 45_000);
+      await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && turnCompletedSoFar() > priorTurnCompletedCount, 45_000);
       expect(anthropicRequests.length).toBeGreaterThan(anthropicRequestsBefore);
       const body = JSON.parse(anthropicRequests[anthropicRequests.length - 1]!.body) as { messages?: Array<{ role: string; content: unknown }> };
       const userTexts = (body.messages ?? []).filter((m) => m.role === "user").map((m) => JSON.stringify(m.content));
