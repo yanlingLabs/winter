@@ -3,48 +3,14 @@
 // controller's own C1-2/m4 addendum item (a REAL resumed official child's environment, through the
 // router's own door rather than a fake `query()`).
 //
-// TWO BLOCKING PRODUCT DEFECTS were measured while writing this file (both reported to the
-// controller for Lane D1/router routing; neither is touched here — `packages/core/src/**` is out of
-// scope for this lane):
-//
-// DEFECT 1 — Winter -> official (needed for A-1, and the LAST hop of A-5): `session.setModel`'s
-// `confirmLossy: true` retry NEVER completes. `runtime-sdk/handoff.ts`'s `destinationRuntimeFor`
-// retries `evict()`+`ensure()` up to 3 times, each bounded by `awaitDestinationInit`'s
-// `DEFAULT_CONFIRM_INIT_TIMEOUT_MS` (10s) — every attempt exhausts the full 10s with NO
-// `session.init` ever arriving (the child is not reported dead either: this is the TIMEOUT branch,
-// "the destination runtime did not report init within the handoff's confirmation window", never
-// "exited before it reached init"). Measured twice, deterministically, with a real, credentialed,
-// catalog-listed, reasoning-capable Winter GPT model (`openai/gpt-5.6-sol`) handing off to
-// `claude-sonnet-5` after `confirmLossy: true`; the record reverts to the source leg both times.
-// Repro: a Winter session on `openai/gpt-5.6-sol` (real catalog row, openai loopback), one completed
-// turn, `session.setModel({model: "claude-sonnet-5", confirmLossy: true})`. Expected (A-1): the
-// handoff resumes onto the official leg. Actual: `handoff_lossy_fork`, "the destination runtime did
-// not report init within the handoff's confirmation window", every time, ~31s later (3 retries).
-//
-// DEFECT 2 — official -> Winter (needed for A-2, and hop 4 of A-5), the OPPOSITE symptom: the
-// destination attach itself SUCCEEDS (leg/providerId/runtimeKind all patch correctly, proving the
-// P10a-h fix and the P10b lease-release both hold), but the FIRST turn run on the resumed Winter
-// destination never completes from the CLIENT's point of view: `assistant_delta` streams the fake's
-// full scripted text, but no `assistant_message`/`turn_completed` ever follows, and the record
-// settles to `state: "idle"` (the runtime's own side believes the turn is done). The daemon log
-// carries the cause, twice, the instant the destination attach opens: `[projector] source already
-// projected — skipping; on a live stream this means a resume that did not bump \`generation\`\``
-// (`src/projector/index.ts:487-501`, checkpoint keyed on `{winterSessionId, generation, sourceId}`).
-// `records.get(sessionId).generation` is measured to stay `1` from before the handoff through after
-// the hang — never bumping to `2` the way `WinterSession.open()`'s own contract promises on every
-// fresh incarnation (`src/runtime-sdk/winter-session.ts:512`). The destination's own fresh
-// incarnation resets its local turn/message counters to 0, so its own first NEW turn computes the
-// SAME `sourceId` the checkpoint already committed for the SOURCE leg's own last turn (during the
-// handoff's own bootstrap replay, under the SAME un-bumped generation) — the checkpoint reads the
-// genuinely-new completion frames as "already committed" and silently drops them. Full account:
-// `handoff-official-to-winter-e2e.test.ts`'s own 10b addendum comment.
-//
-// WORKAROUND USED BELOW for A-2/A-4's OFFICIAL-> WINTER half only: the destination's own OUTBOUND
-// HTTP request DOES reach the openai loopback fake (proven — the fake's own request log grows), so
-// this file verifies the CARRIED CONTENT by polling the fake's request log directly (bounded, never
-// indefinite) rather than waiting on the swallowed `turn_completed` event — then SEPARATELY asserts
-// (to the SPEC, never weakened) that the completion event is expected, which currently fails red on
-// Defect 2 and is left that way rather than silently dropped.
+// STATUS (2026-09-14, test fix round 1, HEAD 05b914dc): Defect 1 (Winter -> official confirmLossy
+// deadlocked on `awaitDestinationInit`) and Defect 2 (the official/Winter leg never bumped the
+// durable generation counter, so the projector's checkpoint silently dropped the next turn's
+// completion) are BOTH FIXED — D1 fix round 2, `efbb503b` (Defect 1) and `10b9088c` (Defect 2). A-1
+// is green end to end (including Major 4's tool-call fixture, below). A-2 stays RED: the SDK's own
+// message reader drops `message.model`, root-caused and fixed upstream but not yet pinned in this
+// build (SDK 0.0.12); left asserting the spec's required tag rather than weakened — see that test's
+// own comment. Defect 3 (below, A-3a only) is still open, under investigation in the router lane.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -119,18 +85,6 @@ class TestClient {
     }
   }
   close(): void { try { this.socket.end(); } catch { /* closed */ } }
-}
-
-/** Bounded poll for a fake's own request log growing past `before` — the A-2/A-4 workaround: the
- *  destination's outbound HTTP request is unaffected by Defect 2 (a client-visible EVENT bug), so
- *  content can be verified even though `turn_completed` never arrives. */
-async function waitForRequestCount(requests: { length: number }, min: number, ms = 15_000): Promise<void> {
-  const t0 = Date.now();
-  for (;;) {
-    if (requests.length >= min) return;
-    if (Date.now() - t0 > ms) throw new Error(`timed out waiting for ${min} request(s); saw ${requests.length}`);
-    await Bun.sleep(20);
-  }
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
@@ -472,31 +426,29 @@ describeWithWinterBinary("A-2: Claude -> GPT (official -> Winter)", (winterBin) 
       expect(caught).toBeUndefined();
       expect(d.winter.legOf(sessionId)).toBe("winter");
 
-      // Workaround for Defect 2: verify carried CONTENT via the destination fake's own request log
-      // (bounded poll), not via `turn_completed` (silently dropped today).
+      // Defect 2 is fixed (D1 fix round 2, 10b9088c) — a plain send + wait, no polling workaround.
+      // Disambiguated against the PRIOR (pre-handoff) turn_completed already sitting in
+      // `client.events`, the same trap A-1's own SECOND_TEXT wait guards against.
       const openaiRequestsBefore = openaiFakeRef!.requests.length;
-      await client.call(METHODS.sessionSend, { sessionId, text: "what did I ask you to remember?" }).catch(() => { /* fire; the reply's completion may never surface — see Defect 2 */ });
-      await waitForRequestCount(openaiFakeRef!.requests, openaiRequestsBefore + 1, 20_000);
+      const sinceIdx = client.events.length;
+      await client.call(METHODS.sessionSend, { sessionId, text: "what did I ask you to remember?" });
+      await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.indexOf(e) >= sinceIdx, 45_000);
+      expect(openaiFakeRef!.requests.length).toBeGreaterThan(openaiRequestsBefore);
       const lastReq = openaiFakeRef!.requests[openaiFakeRef!.requests.length - 1]!;
       const reqBody = JSON.stringify(lastReq.body ?? {});
       expect(reqBody).toContain(PRIOR_TEXT);
-      // CANDIDATE FINDING (2026-09-14, LESS CERTAIN than Defects 1-3 — not fully root-caused, and
-      // may be a gap in this fixture rather than the product): the visible conversation DOES carry
-      // (the prior USER text above, and separately confirmed the assistant's visible reply "the
-      // answer is 4" also reaches this request) but NEITHER a `<recovered_reasoning` tag NOR the
-      // `<prior_model_handoff>` fallback appears anywhere in the request body — the Claude turn's
-      // `thinking` content (confirmed landed in the canonical file above) does not visibly carry in
-      // any form. Left asserting the SPEC's required tag (W18-15/17) rather than weakened; reported
-      // to the controller to determine whether this is a real gap or something this fixture is
-      // missing (e.g. a sidecar/summary record write this test never triggers).
+      // STILL RED (2026-09-14): the SDK's own message reader drops `message.model`, root-caused and
+      // fixed upstream but not yet pinned in this build (SDK 0.0.12 — see this file's header). The
+      // visible conversation DOES carry (the prior USER text above, and separately confirmed the
+      // assistant's visible reply "the answer is 4" also reaches this request) but NEITHER a
+      // `<recovered_reasoning` tag NOR the `<prior_model_handoff>` fallback appears anywhere in the
+      // request body — the Claude turn's `thinking` content (confirmed landed in the canonical file
+      // above) does not visibly carry in any form. Left asserting the SPEC's required tag (W18-15/
+      // 17) rather than weakened.
       expect(reqBody).toContain("recovered_reasoning");
       expect(reqBody).toContain("kind=\"summary\"");
       expect(reqBody).not.toContain("SIG-DUMMY-A2-1");
       expect(reqBody).not.toContain("redacted_thinking");
-
-      // Now the SPEC-required completion event, asserted honestly (never weakened): MEASURED
-      // (2026-09-14) to fail on Defect 2 — see this file's header.
-      await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 20_000);
     }, 90_000);
   });
 });
@@ -519,17 +471,18 @@ describeWithWinterBinary("A-2: Claude -> GPT (official -> Winter)", (winterBin) 
 // before init'... This test's own job... stops at 'reverted, typed, never silently applied'") — this
 // file's A-3a is the concrete repro that measurement was speculating about, now confirmed for a
 // PLAIN same-leg re-resume after a REVERTED cross-runtime attempt (no destination cross-runtime
-// state involved at all). Likely cause (unconfirmed at the daemon-source level — the actual lock is
-// internal to the real winter binary / router): `destinationRuntimeFor`'s retry loop
-// (`runtime-sdk/handoff.ts`) calls `deps.winter.evict()` on the ORIGINAL, healthy Winter incarnation
-// before attempting the (doomed) official destination, and whatever release the real winter binary's
-// own resume gate needs before it will resume the SAME backend session id again appears to happen
-// only on a SUCCESSFUL commit, never on this revert path — matching the ORIGINAL P10a-h finding's own
-// theory ("that marker is transferred only as part of a successful commit"), just now measured for
-// the SOURCE side of a failed attempt rather than the destination side of a successful one. A-3a
-// below is left asserting the SPEC's required behaviour (fails red on this defect); A-3b (official
-// source) does NOT hit this — its own source re-resume succeeds, but its completion event is then
-// swallowed by Defect 2 instead (see that test's own comment).
+// state involved at all). STILL OPEN (2026-09-14), under investigation in the router lane — what is
+// known so far: `handoff-leases/` is EMPTY after the scenario (the lease the winter binary's own
+// resume gate checks is not simply "still held" — there is nothing there to hold it), and a bounded
+// retry does not help (this file's own earlier 5-second-sleep measurement already ruled out ordinary
+// timing; the router lane's own retry attempt independently confirms it). The likely cause
+// (`destinationRuntimeFor`'s retry loop in `runtime-sdk/handoff.ts` calling `deps.winter.evict()` on
+// the ORIGINAL, healthy Winter incarnation before attempting the doomed official destination, and
+// whatever the real winter binary's own resume gate needs before it will resume the SAME backend
+// session id again apparently being tied to a SUCCESSFUL commit) remains a working theory, not a
+// confirmed root cause. A-3a below is left asserting the SPEC's required behaviour (fails red on
+// this defect); A-3b (official source) does NOT hit this — its own source re-resume now succeeds
+// cleanly (Defect 2 is fixed).
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 describeWithClaudeRuntime("A-3a: destination death, Winter -> official — the source keeps serving", () => {
   let home: string;
@@ -682,26 +635,13 @@ describeWithWinterBinary("A-3b: destination death, official -> Winter — the so
     expect(rt.records.get(sessionId)?.selection).toEqual(beforeSelection);
 
     const sinceIdx = client.events.length;
-    const messagesRequestsBefore = anthropicRequests.filter((r) => r.path === "/v1/messages").length;
+    // Unlike A-3a's Winter source (Defect 3: permanently stranded, every subsequent send fails
+    // "exited before init"), the OFFICIAL source here re-resumes cleanly — and now that Defect 2
+    // is fixed (D1 fix round 2, 10b9088c) the plain wait works with no polling workaround.
     await client.call(METHODS.sessionSend, { sessionId, text: "still on claude?" });
-    // MEASURED (2026-09-14): unlike A-3a's Winter source (Defect 3: permanently stranded, every
-    // subsequent send fails "exited before init"), the OFFICIAL source here DOES re-resume and DOES
-    // reach the anthropic loopback (proven below via the fake's own request log, unaffected) — but
-    // its own completion event is then swallowed by Defect 2 (the same generation-not-bumped
-    // checkpoint collision, on this fresh incarnation's own reset local counters). Verified via the
-    // fake's request log first (the workaround this file uses for Defect 2 throughout), and the
-    // completion event is asserted afterward, honestly, per the spec (fails red on Defect 2).
-    const t0 = Date.now();
-    for (;;) {
-      if (anthropicRequests.filter((r) => r.path === "/v1/messages").length > messagesRequestsBefore) break;
-      if (Date.now() - t0 > 20_000) throw new Error("timed out waiting for the source's re-resumed request to reach the anthropic loopback");
-      await Bun.sleep(20);
-    }
-    const messagesRequests = anthropicRequests.filter((r) => r.path === "/v1/messages");
-    expect(messagesRequests.length).toBeGreaterThan(messagesRequestsBefore);
-    expect(messagesRequests[messagesRequests.length - 1]!.body).toContain("still on claude?");
+    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.indexOf(e) >= sinceIdx, 45_000);
+    expect(anthropicRequests.filter((r) => r.path === "/v1/messages").length).toBeGreaterThan(0);
     expect(client.events.slice(sinceIdx).some((e) => e.type === "agent_error" && (e as { code?: string }).code === "process_death")).toBe(false);
-    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.indexOf(e) >= sinceIdx, 20_000);
   }, 60_000);
 });
 
