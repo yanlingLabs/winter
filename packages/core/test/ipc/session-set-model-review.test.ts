@@ -264,14 +264,25 @@ describeWithWinterBinary("A-7a: two OpenAI-family models never prompt on Winter"
   });
 
   test("openai/gpt-5.4 -> openai/gpt-5.6-sol never prompts (sameFamily, real catalog facts)", async () => {
-    // Real, catalog-driven premise this test rests on (measured against SDK 0.0.11):
-    const resolve = daemonResolveEndpoint();
-    const a = resolve({ providerId: "openai", modelKey: "openai/gpt-5.4", family: "openai" });
-    const b = resolve({ providerId: "openai", modelKey: "openai/gpt-5.6-sol", family: "openai" });
-    expect(sameFamily(a, b)).toBe(true);
-
     const d = daemon!;
     if ("unavailable" in d.runtimeState) throw d.runtimeState.unavailable;
+
+    // 5a fix (review-lane-d2.md): `RuntimeSelection.family` is the catalog FRAMING id ("gpt"), a
+    // DIFFERENT vocabulary from `ContinuityEndpoint.family` ("openai") — a hardcoded `family:
+    // "openai"` string here only happened to match `daemonResolveEndpoint`'s own reading; provider-
+    // runtime 0.0.11's `createEndpointResolver` memoizes by `modelKey` ALONE and keeps whichever
+    // family the FIRST caller in this process supplied, so a hardcoded probe silently goes stale
+    // the instant an earlier test in the same `bun test` invocation resolves the same model id
+    // through a real `setModel` first (measured: this exact test flaked when run alongside
+    // `five-hop-chain-e2e.test.ts` in one invocation). Deriving the family from a REAL decision
+    // (`selectRuntimeFor`) instead of a hardcoded literal makes the probe immune to that ordering.
+    const decidedA = await d.runtimeSdk!.selectRuntimeFor({ mode: "code", model: "openai/gpt-5.4" });
+    const decidedB = await d.runtimeSdk!.selectRuntimeFor({ mode: "code", model: "openai/gpt-5.6-sol" });
+    if ("refused" in decidedA || "refused" in decidedB) throw new Error("both models must resolve for this probe");
+    const resolve = daemonResolveEndpoint();
+    const a = resolve({ providerId: "openai", modelKey: "openai/gpt-5.4", family: decidedA.family });
+    const b = resolve({ providerId: "openai", modelKey: "openai/gpt-5.6-sol", family: decidedB.family });
+    expect(sameFamily(a, b)).toBe(true);
     const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "openai/gpt-5.4" });
     await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
     await client.call(METHODS.sessionSend, { sessionId, text: "one turn" });
