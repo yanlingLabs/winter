@@ -2,35 +2,45 @@
 // `claude -> deepseek -> GLM -> gpt -> claude` keeps one conversation." W18-19's own table and its
 // prompt rule ("prompts appear exactly at claude -> deepseek and gpt -> claude") is BINDING.
 //
-// STRUCTURAL FINDING (2026-09-14, blocks the request-body-carriage half of this task end to end):
-// `session.create`/`session.setModel` can NEVER route to `deepseek` or `zai` (GLM) on this daemon
-// build, REGARDLESS of loopback wiring or settings.json tricks. `providerSelectionFor`
-// (`src/runtime-sdk/provider-selection.ts:69-98`) refuses any model whose provider has no row in
-// `WINTER_CREDENTIAL_INVENTORY` (`src/runtime-sdk/keychain.ts:115-127`) — and that inventory is a
-// FIXED, hand-written array with exactly THREE rows: `openai`, `codex-oauth`, `anthropic`. There is
-// no `deepseek`/`zai` row, and (measured) no `startDaemon` test seam analogous to
-// `officialConnectionOverride` to inject one. `session.create({model: "deepseek/deepseek-reasoner"})`
-// against a real daemon refuses immediately: `"the model \"deepseek/deepseek-reasoner\" … is served
-// by no row this session can use: … belongs to a provider with no configured credential ref
-// (configured: none)"` — BEFORE any HTTP request is ever attempted, so no loopback fake, however
-// wired, can be reached. This is true even though the pinned SDK's own catalog (0.0.11) carries
-// full, real reasoning-continuity facts for both providers (proven below, directly against the
-// REAL `daemonResolveEndpoint()`/`classifySwitch`) — the gap is in THIS daemon's own credential
-// inventory, not the catalog. Reported to the controller: A-5's own request-body carriage
-// assertions for the DeepSeek/GLM hops cannot be proven end to end until `WINTER_CREDENTIAL_INVENTORY`
-// (or an equivalent test seam) gains rows for these two providers.
+// STRUCTURAL FINDING (2026-09-14, test fix round 1 — DEEPER than the original: reviewer's own
+// suggested workaround was tried and does NOT work either): `session.create`/`session.setModel` can
+// NEVER route to `deepseek` or `zai` (GLM) on this daemon build, REGARDLESS of loopback wiring.
+// `providerSelectionFor` (`src/runtime-sdk/provider-selection.ts:69-98`) refuses any model whose
+// provider has no row in `WINTER_CREDENTIAL_INVENTORY` (`src/runtime-sdk/keychain.ts:115-127`) — a
+// FIXED array with exactly THREE rows (`openai`, `codex-oauth`, `anthropic`). review-lane-d2.md
+// suggested pushing a `deepseek`/`zai` row into that array at test runtime (it is a real, mutable JS
+// array despite its `readonly` TYPE) plus writing matching credential material — TRIED, SAFELY
+// (no real network reached): this DOES get `session.create`/`setModel` to route the record to
+// `winter-agent`/`deepseek` (the daemon's OWN bookkeeping succeeds), but the REAL spawned `dist/
+// winter` child still refuses outright: `"...no credential is configured for provider \"deepseek\"
+// — an OpenAI-compatible endpoint that is not a declared local installation needs one"` — a clean,
+// typed refusal, not a network attempt. Root cause: `session-driver.ts`'s `optionsFor` builds a
+// `connection`/local-declaration object for the child ONLY when `selection?.providerId === "openai"`
+// (line ~406); there is no equivalent for any other provider, and no `startDaemon` test seam
+// analogous to `officialConnectionOverride` to add one. The credential-inventory row makes the
+// DAEMON believe a credential is configured; it does nothing for the CHILD's own separate need for
+// an explicit connection/credential, which only the `openai` provider ever receives. This is true
+// even though the pinned SDK's own catalog (0.0.11) carries full, real reasoning-continuity facts
+// for both providers (proven below, directly against the REAL `daemonResolveEndpoint()`/
+// `classifySwitch`) — the gap is in THIS daemon's own connection-building code, not the catalog, and
+// not fixable from test code without a new seam in `packages/core/src/**` (out of scope for this
+// lane). Reported to the controller: A-5's own request-body carriage assertions for the DeepSeek/GLM
+// hops cannot be proven end to end until such a seam exists.
 //
 // SCOPE THIS FILE ACTUALLY COVERS, given that finding:
 //   1. The PROMPT-TIMING half of A-5 (W18-19's own binding rule), proven against the REAL daemon
 //      resolver and the REAL `classifySwitch` — never a fixture that fakes `readableState`/
 //      `continuation` (the same discipline `test/providers/registry.test.ts`'s own D1-6 describe
-//      block already established for two of these four pairs; this file computes all FOUR of the
-//      chain's transitions the same way, including the two SILENT ones W18-19 also requires).
+//      block already established for two of these four pairs). The gpt -> claude cell is deliberately
+//      NOT duplicated here as a classifySwitch-only check (review-lane-d2.md: "drop every substitute
+//      a real session now covers") — Defect 1 is fixed, so Part 2 below and
+//      `handoff-parity-e2e.test.ts`'s own A-1 already prove that exact pairing end to end through a
+//      REAL session; only the two structurally-unreachable transitions (claude -> deepseek,
+//      deepseek -> GLM, GLM -> gpt) keep a resolver-only check, each labeled as such.
 //   2. The two REACHABLE endpoints of the chain (claude, gpt) through REAL daemon wiring — the
 //      SAME two directions `handoff-parity-e2e.test.ts`'s A-1/A-2 already prove in depth, so this
 //      file does not re-implement them; it only confirms the chain's own FIRST and LAST prompts
-//      fire against a REAL session (not just the resolver), referencing Defects 1/2 from that
-//      file's own header where the ACTUAL round trip is blocked.
+//      fire against a REAL session (not just the resolver).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -87,12 +97,10 @@ describe("A-5 part 1: the five-hop chain's prompt rule, against the REAL daemon 
     expect(c.lossClass).not.toBe("warned-lossy");
   });
 
-  test("gpt -> claude PROMPTS (a hidden-reasoning source crossing to a different domain is warned-lossy)", () => {
-    const c = classifySwitch(endpoints.gpt, endpoints.claude, {});
-    expect(c.lossClass).toBe("warned-lossy");
-    expect(c.warnings.length).toBeGreaterThan(0);
-    for (const w of c.warnings) expect(w).not.toMatch(/\bSDK\b|\bruntime\b|Claude Agent|Winter Agent/i); // R-10b-4
-  });
+  // gpt -> claude's OWN prompt is deliberately NOT a classifySwitch-only check here (review-lane-
+  // d2.md: "drop every substitute a real session now covers") — Defect 1 is fixed, so Part 2 below
+  // (and handoff-parity-e2e.test.ts's own A-1) prove this exact pairing end to end through a REAL
+  // session instead.
 });
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════

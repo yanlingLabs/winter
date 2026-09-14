@@ -3,12 +3,16 @@
 // must not leave the pre-flight review reading a STALE recorded model before a later cross-runtime
 // move).
 //
-// STRUCTURAL FINDING (2026-09-14, same root cause `five-hop-chain-e2e.test.ts` documents in depth):
-// `WINTER_CREDENTIAL_INVENTORY` (`src/runtime-sdk/keychain.ts:115-127`) has exactly three rows —
-// `openai`, `codex-oauth`, `anthropic` — so NEITHER `deepseek` NOR `zai` (GLM) NOR any OpenRouter-style
-// row can ever be routed to (`session.create`/`session.setModel` both refuse `runtime_selection_refused`
-// before any HTTP request is attempted, MEASURED against this exact daemon build). This blocks, via
-// REAL daemon wiring:
+// STRUCTURAL FINDING (2026-09-14, test fix round 1 — same root cause `five-hop-chain-e2e.test.ts`
+// documents in full depth, including the DEEPER attempt: review-lane-d2.md's own suggested
+// workaround, pushing a `deepseek`/`zai` row into `WINTER_CREDENTIAL_INVENTORY` at test runtime plus
+// writing matching credential material, was TRIED and does NOT work — the real `dist/winter` child
+// still refuses "no credential is configured for provider deepseek", because `session-driver.ts`'s
+// `optionsFor` only ever builds a connection/local-declaration object for `providerId === "openai"`;
+// see that file's header for the full account): `WINTER_CREDENTIAL_INVENTORY`
+// (`src/runtime-sdk/keychain.ts:115-127`) has exactly three rows — `openai`, `codex-oauth`,
+// `anthropic` — so NEITHER `deepseek` NOR `zai` (GLM) NOR any OpenRouter-style row can ever be routed
+// to end to end. This blocks, via REAL daemon wiring:
 //   - A-7's OWN literal pairing ("gpt -> deepseek on Winter prompts; deepseek -> GLM does not");
 //   - A-7a's OWN literal "Claude on Anthropic -> Claude on OpenRouter" case;
 //   - the controller's OWN C1 addendum's literal "GPT -> DeepSeek -> GPT -> Claude" chain (it cannot
