@@ -701,6 +701,70 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
       expect(reviewCalled).toBe(false);
     });
   });
+
+  // Fix round 2 (A-7 zero-turn, MEASURED against the real router): a session CAN have a real
+  // `backendSessionId` (`sessionKeyFor` answers a real key, unlike the test above) while STILL
+  // never having had a live incarnation register in the router's own runtime directory — a genuine
+  // "session.create then IMMEDIATELY session.setModel, no turns at all" call. Both `reviewSwitch`
+  // and `plan()` throw the router's own `HandoffPlanError` for exactly this shape ("... it is not
+  // in the runtime directory ..."); both must fail safe as "nothing to hand off", never a prompt
+  // and never an uncaught rejection.
+  test("A-7 zero-turn: a session never yet in the runtime directory applies with NO prompt when BOTH reviewSwitch and plan() throw that shape", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1"); // has a real backendSessionId — sessionKeyFor answers a real key
+      // Realistic: since `decided.runtimeKind` differs from the recorded leg (cross-leg), the
+      // review's own `{prompt: false}` fallback does NOT short-circuit before `plan()` — the SAME
+      // "never opened" fact makes `plan()` throw the identical shape too, which needs its OWN catch.
+      const notInDirectory = () => { throw new Error("winter-runtime-sdk: no handoff can be planned for pk/be-1 — it is not in the runtime directory, so there is no record of which runtime owns it or which backend session it is"); };
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+          barrier: { plan: async () => notInDirectory(), execute: async () => { throw new Error("not reached"); }, reviewSwitch: async () => notInDirectory() },
+        }),
+        "s1", "claude-sonnet-5", false,
+      );
+      expect(out).toEqual({ kind: "same-runtime", decided: SELECTION("claude-agent") });
+    });
+  });
+
+  test("A-7 zero-turn: a session never yet in the runtime directory applies with NO prompt when plan() throws that shape (reviewSwitch itself did not)", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+          barrier: {
+            plan: async () => { throw new Error("winter-runtime-sdk: no handoff can be planned for pk/be-1 — it is not in the runtime directory, so there is no record of which runtime owns it or which backend session it is"); },
+            execute: async () => { throw new Error("not reached"); },
+            reviewSwitch: async () => ({ prompt: false, skipped: "no-source-turns" }),
+          },
+        }),
+        "s1", "claude-sonnet-5", false,
+      );
+      expect(out).toEqual({ kind: "same-runtime", decided: SELECTION("claude-agent") });
+    });
+  });
+
+  test("a DIFFERENT reviewSwitch throw (not the runtime-directory shape) still fails safe as a prompt, never same-runtime", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+          barrier: {
+            plan: async () => { throw new Error("not reached — the generic fail-safe prompts instead of proceeding to plan()"); },
+            execute: async () => { throw new Error("not reached"); },
+            reviewSwitch: async () => { throw new Error("ECONNRESET: transient sidecar read failure"); },
+          },
+        }),
+        "s1", "claude-sonnet-5", false,
+      );
+      expect(out.kind).toBe("confirmation_required");
+    });
+  });
 });
 
 // Fix round 1 (MAJOR, controller ruling): a throw from `barrier.reviewSwitch` must never reject

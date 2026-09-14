@@ -209,6 +209,26 @@ function sessionKeyFor(record: RuntimeSessionRecord): SessionKey | undefined {
   return { projectKey: record.transcriptProjectKey, sessionId: record.backendSessionId };
 }
 
+/**
+ * Fix round 2 (A-7 zero-turn, MEASURED): a session can have a `backendSessionId` allocated
+ * (`sessionKeyFor` above answers a real key) while STILL never having had a live incarnation
+ * register in the router's own runtime directory — a genuine "session.create then IMMEDIATELY
+ * session.setModel, no turns at all" call, since the directory row is written only from inside a
+ * live incarnation's own `attachMessaging()` (itself reached only once the child's first real
+ * frame arrives). BOTH `barrier.reviewSwitch` AND `barrier.plan()` throw the router's own
+ * `HandoffPlanError` for exactly this shape ("... it is not in the runtime directory, so there is
+ * no record of which runtime owns it or which backend session it is" — MEASURED verbatim against
+ * the real router) rather than treating it as "nothing recorded yet". `HandoffPlanError` itself is
+ * NOT part of `@yanlinglabs/winter-runtime-sdk`'s declared public exports (only its TYPES are
+ * re-exported from `store/handoff-barrier.js`; the class lives in an internal `store/index.js` this
+ * package's own "exports" map does not expose), so this checks the message text instead of
+ * `instanceof` — read here ONLY to branch, never logged, matching this file's own "names and error
+ * CLASS only" discipline elsewhere in this file.
+ */
+function isNotYetInRuntimeDirectory(err: unknown): boolean {
+  return err instanceof Error && /not in the runtime directory/.test(err.message);
+}
+
 // ── Participants (registered once; consulted lazily by the router at handoff time) ────────────────
 
 /** The live session this handoff is draining FROM — `undefined` when nothing is live (a cold
@@ -638,22 +658,40 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
     try {
       review = await barrier.reviewSwitch(sessionKey, decided);
     } catch (err) {
-      // Fix round 1 (MAJOR, controller ruling): `reviewSwitch` can throw (a transient store or
-      // sidecar read error) — an unreviewable switch must never be waved through silently NOR
-      // refused outright (R-10b-0: a cross-family move MUST work), so this fails safe as a PROMPT
-      // rather than propagating the rejection into an RPC-level INTERNAL error. `confirmLossy: true`
-      // still applies it, exactly like any other prompt. Logged ONCE, names and the error CLASS
-      // only — never `err.message`, which could embed opaque provider state or other payload text
-      // this file's own header forbids logging.
-      deps.log?.(`handoff: reviewSwitch threw for session ${sessionId} (${err instanceof Error ? err.name : "unknown"}) — treating the switch as unreviewable and prompting instead of refusing or applying it silently`);
-      review = {
-        prompt: true,
-        classification: {
-          lossClass: "warned-lossy",
-          warnings: [`Winter couldn't check what carries over to ${modelLabelFor(model)}. The conversation carries over; reasoning private to the current model may not.`],
-          portable: [],
-        },
-      };
+      // Fix round 2 (A-7 zero-turn, MEASURED): `sessionKeyFor` can be DEFINED (a `backendSessionId`
+      // was already allocated by `session.create`/`session.attach`) while the session has NEVER had
+      // a live incarnation register in the router's OWN runtime directory (nothing has ever
+      // attached one — `messaging.ts`'s directory row is written from inside `attachMessaging()`,
+      // itself reached only once a live incarnation's OWN first real frame arrives; a genuine
+      // "session.create then IMMEDIATELY session.setModel, no turns at all" call never gets that
+      // far). `reviewSwitch` throws the router's own `HandoffPlanError` for exactly this shape
+      // ("... it is not in the runtime directory, so there is no record of which runtime owns it or
+      // which backend session it is" — MEASURED verbatim against the real router) rather than
+      // answering "zero source turns, skip". That message text is read here ONLY to branch — never
+      // logged, matching this file's own "names and error CLASS only" discipline below — and is
+      // treated as the SAME "nothing to lose" fact `sessionKeyFor === undefined` already carves out,
+      // never routed through the generic fail-safe prompt underneath: a session that was never even
+      // opened cannot possibly have anything a prompt would be honestly warning about.
+      if (isNotYetInRuntimeDirectory(err)) {
+        review = { prompt: false };
+      } else {
+        // Fix round 1 (MAJOR, controller ruling): `reviewSwitch` can throw (a transient store or
+        // sidecar read error) — an unreviewable switch must never be waved through silently NOR
+        // refused outright (R-10b-0: a cross-family move MUST work), so this fails safe as a PROMPT
+        // rather than propagating the rejection into an RPC-level INTERNAL error. `confirmLossy: true`
+        // still applies it, exactly like any other prompt. Logged ONCE, names and the error CLASS
+        // only — never `err.message`, which could embed opaque provider state or other payload text
+        // this file's own header forbids logging.
+        deps.log?.(`handoff: reviewSwitch threw for session ${sessionId} (${err instanceof Error ? err.name : "unknown"}) — treating the switch as unreviewable and prompting instead of refusing or applying it silently`);
+        review = {
+          prompt: true,
+          classification: {
+            lossClass: "warned-lossy",
+            warnings: [`Winter couldn't check what carries over to ${modelLabelFor(model)}. The conversation carries over; reasoning private to the current model may not.`],
+            portable: [],
+          },
+        };
+      }
     }
     if (review.prompt && !confirmLossy) {
       return {
@@ -704,7 +742,22 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
   // `plan.selection.selection` (and from there to `confirmInit`'s `target.selection`) — see
   // `pendingHandoffModelString`'s own doc comment for what this replaces and why one piece of the
   // old side channel still has no other pipe.
-  const plan = await barrier.plan(sessionKey, decided.runtimeKind, { requested: decided });
+  let plan: HandoffPlan;
+  try {
+    plan = await barrier.plan(sessionKey, decided.runtimeKind, { requested: decided });
+  } catch (err) {
+    // Fix round 2 (A-7 zero-turn, MEASURED): the SAME "not in the runtime directory" shape
+    // `reviewSwitch` can throw (this function's own `isNotYetInRuntimeDirectory` doc) can ALSO
+    // throw here, from `plan()` — a session that has never had a live incarnation cannot be
+    // handed off at all (there is nothing running to drain, nothing addressable to plan against).
+    // Falling through to `same-runtime` is correct, not a workaround: `ipc/server.ts`'s own
+    // ordinary store write still commits the new model preference, and the NEXT real incarnation
+    // this session ever opens (`session-driver.ts`'s `decideRuntime`) reads that fresh preference
+    // and routes to the correct leg from a cold start — exactly what would have happened had
+    // `session.setModel` been called before `session.create`'s own (eager, empty) child ever spawned.
+    if (isNotYetInRuntimeDirectory(err)) return { kind: "same-runtime", decided };
+    throw err;
+  }
   if (plan.selection.kind === "refused") {
     return { kind: "refused", code: "runtime_selection_refused", detail: plan.selection.detail };
   }
