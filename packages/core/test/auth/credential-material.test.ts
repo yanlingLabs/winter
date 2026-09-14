@@ -61,16 +61,18 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     const req = createRequire(import.meta.url);
     const pkgPath = req.resolve("@yanlinglabs/winter-agent-sdk/package.json");
     const pkg = require(pkgPath) as { version: string };
-    // 0.0.9 → 0.0.10 (Winter Phase 10b, D1-5 pin): NOT literally re-diffed against
+    // 0.0.9 → 0.0.10 → 0.0.11 (Winter Phase 10b, D1-5/D1-9 pins): NOT literally re-diffed against
     // `packages/runtime/src/provider/keychain-store.ts` — this worktree has no checkout of the
-    // sibling `winter-agent-sdk` repo to diff against. The 0.0.10 release's own documented scope
-    // (the phase 10b plan's Lane S tasks S1-S10: the Claude-shape transcript writer/reader, the
-    // Claude-ready copy, the switch-review helpers, the carry-tag rename, `releaseSessionLease`,
-    // and the resume conformance test) never touches credential/keychain material parsing at all,
-    // which is the circumstantial basis for keeping this mirror unchanged rather than the byte-diff
-    // certainty the 0.0.7→0.0.9 note above had. Flagged in the D1 dispatch report for a real re-diff
-    // when the sibling repo is reachable.
-    expect(pkg.version).toBe("0.0.10");
+    // sibling `winter-agent-sdk` repo to diff against. Neither release's own documented scope
+    // touches credential/keychain material parsing: 0.0.10 was the phase 10b plan's Lane S tasks
+    // S1-S10 (the Claude-shape transcript writer/reader, the Claude-ready copy, the switch-review
+    // helpers, the carry-tag rename, `releaseSessionLease`, the resume conformance test); 0.0.11 is
+    // a catalog-data-only patch (GLM reasoning evidence) plus the switch review's same-family skip
+    // moving from the provider wire dialect to model lineage — a `continuity`/`selection` change,
+    // not a `keychain-store.ts` one. That is the circumstantial basis for keeping this mirror
+    // unchanged rather than the byte-diff certainty the 0.0.7→0.0.9 note above had. Flagged in the
+    // D1 dispatch report for a real re-diff when the sibling repo is reachable.
+    expect(pkg.version).toBe("0.0.11");
   });
 
 
