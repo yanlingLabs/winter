@@ -61,17 +61,22 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     const req = createRequire(import.meta.url);
     const pkgPath = req.resolve("@yanlinglabs/winter-agent-sdk/package.json");
     const pkg = require(pkgPath) as { version: string };
-    // 0.0.9 → 0.0.10 → 0.0.11 (Winter Phase 10b, D1-5/D1-9 pins): NOT literally re-diffed against
-    // `packages/runtime/src/provider/keychain-store.ts` — this worktree has no checkout of the
-    // sibling `winter-agent-sdk` repo to diff against. Neither release's own documented scope
-    // touches credential/keychain material parsing: 0.0.10 was the phase 10b plan's Lane S tasks
-    // S1-S10 (the Claude-shape transcript writer/reader, the Claude-ready copy, the switch-review
-    // helpers, the carry-tag rename, `releaseSessionLease`, the resume conformance test); 0.0.11 is
-    // a catalog-data-only patch (GLM reasoning evidence) plus the switch review's same-family skip
-    // moving from the provider wire dialect to model lineage — a `continuity`/`selection` change,
-    // not a `keychain-store.ts` one. That is the circumstantial basis for keeping this mirror
-    // unchanged rather than the byte-diff certainty the 0.0.7→0.0.9 note above had. Flagged in the
-    // D1 dispatch report for a real re-diff when the sibling repo is reachable.
+    // 0.0.9 → 0.0.10 → 0.0.11 (Winter Phase 10b, D1-5/D1-9 pins; re-diffed for fix round 1 item 3):
+    // this mirror WAS re-diffed at 0.0.11, line by line, against a local sibling checkout of the
+    // `winter-agent-sdk` repo (branch main, commit 4f76696, `package.json` version 0.0.11) —
+    // `packages/runtime/src/provider/keychain-store.ts`'s own `coerceMaterial` (its
+    // `MATERIAL_KINDS` at line 124, the function at lines 134-171).
+    // Confirmed semantically identical to this file's mirror (lines 32-56) for every arm the mirror
+    // implements: the `MATERIAL_KINDS` set is byte-identical (same six kinds, same order); the
+    // `api-key` arm is identical; the `oauth` arm is identical (`accessToken` required,
+    // `refreshToken`/`expiresAt`/`accountId`/`idToken` all optional via the same conditional-spread
+    // pattern); the `bearer` arm is identical, including the optional `expiresAt` (the SDK's own
+    // P10a-4 comment there names the exact same host-brokered-Console-refresh reason this repo's
+    // `credential-material.ts` doc gives for the same field). The only divergence is the SDK's
+    // `aws`/`gcp-service-account`/`gcp-access-token` arms, which this mirror deliberately omits
+    // (falls through to `default: undefined`, matching the child's own refusal for a kind Winter
+    // never sends) — an intentional narrowing already documented above, not a drift. Re-diff again
+    // on the next bump.
     expect(pkg.version).toBe("0.0.11");
   });
 
