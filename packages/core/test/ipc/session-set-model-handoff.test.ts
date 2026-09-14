@@ -8,7 +8,7 @@
 // preference itself, exactly once, when it settles to "resumed"; this RPC must reply success
 // (never a refusal) but must NOT write `meta.model` now, or the continuation's later write would
 // either double it or race a preference this RPC never actually applied.
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -150,5 +150,88 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
       server.stop();
       store.close();
     }
+  });
+
+  // M1 (whole-branch review, fix round 2): `blocked` NEVER surfaces the raw `reason`/`detail` to
+  // the user (either can name router/daemon internals) — the user copy is one neutral sentence
+  // naming the session's CURRENT model, and `detail` (router 0.0.6's `revert-pending` reason)
+  // goes to the daemon log only, as a CATEGORY, never raw text.
+  describe("blocked: never surfaces the raw reason/detail to the user", () => {
+    test("the error message is the neutral copy, naming the session's current model, never the raw reason", async () => {
+      const home = mkdtempSync(join(tmpdir(), "winter-setmodel-handoff-blocked-copy-"));
+      const store = new SessionStore(home);
+      const sessionId = store.createSession("global");
+      store.setModel(sessionId, "openai/gpt-5.6-sol"); // the session's CURRENT model, before this failed attempt
+      const { server, c } = await boot(store, home, { kind: "blocked", reason: "revert-pending", detail: "the pending-revert note was written; this will self-converge" });
+      try {
+        const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "claude-sonnet-5", confirmLossy: true });
+        expect(res.error).toBeDefined();
+        expect(res.error.data?.code).toBe("handoff_blocked");
+        expect(res.error.message).toBe("Couldn't finish switching models; the session stays on openai/gpt-5.6-sol. Try again in a moment.");
+        // Never the raw reason enum or any part of the router's own detail text.
+        expect(res.error.message).not.toContain("revert-pending");
+        expect(res.error.message).not.toContain("self-converge");
+        expect(res.error.message).not.toMatch(/\bSDK\b|\brouter\b|Claude Agent|Winter Agent/i);
+        // The model preference never applied — the source stays authoritative.
+        expect(store.meta(sessionId).model).toBe("openai/gpt-5.6-sol");
+      } finally {
+        c.close();
+        server.stop();
+        store.close();
+      }
+    });
+
+    test("the SAME neutral copy fires regardless of what detail says — self-converge or needing manual reconciliation", async () => {
+      const home = mkdtempSync(join(tmpdir(), "winter-setmodel-handoff-blocked-copy2-"));
+      const store = new SessionStore(home);
+      const sessionId = store.createSession("global");
+      store.setModel(sessionId, "openai/gpt-5.6-sol");
+      const { server, c } = await boot(store, home, { kind: "blocked", reason: "revert-pending", detail: "the pending-revert note ALSO failed; this needs manual reconciliation" });
+      try {
+        const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "claude-sonnet-5", confirmLossy: true });
+        expect(res.error.message).toBe("Couldn't finish switching models; the session stays on openai/gpt-5.6-sol. Try again in a moment.");
+        expect(res.error.message).not.toContain("manual reconciliation");
+      } finally {
+        c.close();
+        server.stop();
+        store.close();
+      }
+    });
+
+    test("no current model on record: the copy falls back to \"the default model\", never a blank", async () => {
+      const home = mkdtempSync(join(tmpdir(), "winter-setmodel-handoff-blocked-nodefault-"));
+      const store = new SessionStore(home);
+      const sessionId = store.createSession("global"); // no model ever set
+      const { server, c } = await boot(store, home, { kind: "blocked", reason: "lease-held" });
+      try {
+        const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "claude-sonnet-5", confirmLossy: true });
+        expect(res.error.message).toBe("Couldn't finish switching models; the session stays on the default model. Try again in a moment.");
+      } finally {
+        c.close();
+        server.stop();
+        store.close();
+      }
+    });
+
+    test("detail reaches the daemon log as a CATEGORY only — never its raw text", async () => {
+      const home = mkdtempSync(join(tmpdir(), "winter-setmodel-handoff-blocked-log-"));
+      const store = new SessionStore(home);
+      const sessionId = store.createSession("global");
+      store.setModel(sessionId, "openai/gpt-5.6-sol");
+      const errSpy = spyOn(console, "error").mockImplementation(() => {});
+      const { server, c } = await boot(store, home, { kind: "blocked", reason: "revert-pending", detail: "the pending-revert note was written; this will self-converge" });
+      try {
+        await c.request(METHODS.sessionSetModel, { sessionId, model: "claude-sonnet-5", confirmLossy: true });
+        const logged = errSpy.mock.calls.map((call) => String(call[0])).join("\n");
+        expect(logged).toContain("revert-pending"); // the reason enum — a safe, closed vocabulary
+        expect(logged).toContain("self-converge"); // the DERIVED category, not raw prose
+        expect(logged).not.toContain("the pending-revert note was written"); // never the raw sentence
+      } finally {
+        errSpy.mockRestore();
+        c.close();
+        server.stop();
+        store.close();
+      }
+    });
   });
 });

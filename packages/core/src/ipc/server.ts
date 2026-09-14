@@ -705,6 +705,20 @@ function isClaudeCatalogModel(model: string): boolean {
  *  availability one: it does not check credentials or leg eligibility (the runtime decision still
  *  owns that, and still refuses typed when the catalog row exists but nothing can actually serve
  *  it) — it only stops widening to a string neither source recognizes as a real model. */
+/**
+ * M1 (whole-branch review, fix round 2): a CATEGORY for the daemon log, never `detail`'s raw text
+ * (this file's "names only" logging discipline). Router 0.0.6's `revert-pending` `detail` says
+ * whether the pending-revert note was written ("will self-converge") or ALSO failed ("needs manual
+ * reconciliation") — the two words this classifies on are the router's own documented vocabulary
+ * for that outcome, never guessed at; anything else is `"unrecognized"` rather than logged verbatim.
+ */
+function detailCategoryFor(detail: string): "self-converge" | "needs-manual-reconciliation" | "unrecognized" {
+  const lower = detail.toLowerCase();
+  if (lower.includes("manual reconciliation")) return "needs-manual-reconciliation";
+  if (lower.includes("self-converge")) return "self-converge";
+  return "unrecognized";
+}
+
 function resolveModelSelection(model: string, knownModels: { id: string }[]): string {
   if (knownModels.length === 0) return model;
   const resolved = resolveModelAlias(model, knownModels.map((m) => m.id));
@@ -2090,8 +2104,24 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
               );
             case "lossy_fork":
               throw new RpcFailure(ERR.INVALID_PARAMS, outcome.reason, { code: "handoff_lossy_fork" });
-            case "blocked":
-              throw new RpcFailure(ERR.INTERNAL, outcome.reason, { code: "handoff_blocked" });
+            case "blocked": {
+              // M1 (whole-branch review, fix round 2): NEVER surface the raw `reason`/`detail` to
+              // the user — either can name router/daemon internals (R-10b-4's discipline applies
+              // here too). `detail` (present as of router 0.0.6 on the `revert-pending` reason —
+              // `DetailedHandoffOutcome`'s own doc: "widened with the detail the pinned union has
+              // no room for") goes to the daemon log ONLY, and as a CATEGORY derived from it, never
+              // its raw text (this file's own "names only" logging discipline). The user copy is
+              // the SAME neutral sentence for every `blocked` reason — never conditioned on
+              // `detail`'s content, which would risk leaking what it says.
+              let currentModel: string | undefined;
+              try { currentModel = opts.store.meta(p.sessionId).model; } catch { /* unknown id: the fallback copy still reads fine */ }
+              console.error(`session.setModel: handoff blocked for ${p.sessionId} (reason=${outcome.reason}${outcome.detail === undefined ? "" : `, detail=${detailCategoryFor(outcome.detail)}`})`);
+              throw new RpcFailure(
+                ERR.INTERNAL,
+                `Couldn't finish switching models; the session stays on ${currentModel ?? "the default model"}. Try again in a moment.`,
+                { code: "handoff_blocked" },
+              );
+            }
             // Fix round 1 (item 5, Lane 2's handoff m5 change): a turn is running and the switch's
             // OWN continuation now commits the model preference itself, exactly once, when it
             // settles to "resumed" — this RPC must NOT also write it now. Writing here too would

@@ -40,6 +40,7 @@
 // default — `persisted` is still passed to IT, because reviewing "is the persisted family still
 // servable on the destination" is exactly the barrier's job, not the initial leg decision's.
 import type {
+  DetailedHandoffOutcome,
   HandoffBarrier,
   HandoffDestinationRuntime,
   HandoffOutcome,
@@ -462,7 +463,12 @@ export type PlanSwitchOutcome =
   | { kind: "deferred" } // a turn is running; the switch is applied when it settles
   | { kind: "resumed"; selection: RuntimeSelection }
   | { kind: "lossy_fork"; reason: string }
-  | { kind: "blocked"; reason: string };
+  // Fix round 2 (M1, router 0.0.6): `detail` is the router's own OWN human-readable explanation
+  // (`DetailedHandoffOutcome.detail` — the pinned `HandoffOutcome` union has no room for it, but the
+  // concrete object the barrier hands back always carries it). NEVER surfaced to the user raw
+  // (R-10b-4 also covers this: it may name router/SDK internals) — `ipc/server.ts` logs it (names
+  // only) and renders its OWN generic copy instead.
+  | { kind: "blocked"; reason: string; detail?: string };
 
 /** WS-13 §8.2's warning list: a plan step the barrier already knows is unprovable (a lossy step) —
  *  the concrete case named there is a source carrying reasoning state moving to a foreign target,
@@ -511,8 +517,15 @@ async function executePlan(deps: HandoffDeps, plan: HandoffPlan): Promise<PlanSw
       return { kind: "resumed", selection: outcome.selection };
     case "lossy-fork-offered":
       return { kind: "lossy_fork", reason: outcome.reason };
-    case "blocked":
-      return { kind: "blocked", reason: outcome.reason };
+    case "blocked": {
+      // Fix round 2 (M1, router 0.0.6): the pinned `HandoffOutcome` union has no room for `detail`,
+      // but the concrete object the barrier hands back always carries it (`DetailedHandoffOutcome`
+      // — that type's own doc: "widened with the detail the pinned union has no room for. Assignable
+      // to it."). Read defensively (`typeof === "string"`) rather than assuming every barrier
+      // implementation (including this file's own test fakes) populates it.
+      const detail = (outcome as DetailedHandoffOutcome).detail;
+      return { kind: "blocked", reason: outcome.reason, ...(typeof detail === "string" ? { detail } : {}) };
+    }
   }
 }
 
