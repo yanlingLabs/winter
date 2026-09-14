@@ -17,6 +17,17 @@
 // `resolved.descriptor`/`resolved.continuationDomain`, never `adapter.streamTurn`), but because an
 // adapter's mere PRESENCE is what lets `resolve()` return the row at all.
 //
+// COVERAGE, STATED PLAINLY (ledger-claim correction, whole-branch review, fix round 2):
+// `createShippedAdapters(catalog)` registers one adapter per SHIPPED CATALOG adapter id — this
+// resolver is CATALOG-ONLY, exactly like the router's own registry-free default it replaces
+// (`defaultEndpointResolver`'s own `buildCatalogRegistry`, measured against the published router
+// source). A session on a BYO/custom `provider.baseUrl` endpoint (no catalog row at all —
+// `catalogRowsFor`'s own bail-out in `runtime-sdk/handoff.ts`) has NO adapter here and none in the
+// router's own default either: neither resolver covers custom providers today. Wiring custom
+// providers into this registry (and the router's own door for them) is a tracked follow-up, not
+// something this module already does — any claim elsewhere that this registry "covers custom
+// providers" is describing the router 0.0.6 amendment's own OPEN item, not this file's contents.
+//
 // NO CREDENTIALS, NO NETWORK. `createShippedAdapters(catalog)` is pure catalog-shape construction —
 // every shipped factory takes only `descriptors`/`identityHeaders`/`catalog`, never a `ProviderContext`
 // or a credential — so this registry is safe to build at import time, in every process, including a
