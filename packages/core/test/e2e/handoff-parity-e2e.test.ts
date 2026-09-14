@@ -149,16 +149,36 @@ describeWithWinterBinary("A-1: GPT -> Claude (Winter -> official)", (winterBin) 
     const anthropicRequests: Array<{ path: string; body: string }> = [];
     const anthropicScript: AnthropicTurnScript = { blocks: [{ type: "text", chunks: ["hello from claude, after the handoff"] }], stopReason: "end_turn" };
 
+    let openaiRequestCount = 0;
+
     beforeAll(async () => {
       home = realpathSync(mkdtempSync(join(tmpdir(), "parity-a1-")));
       const openaiFake = await openaiResponsesFake.startOpenAiResponsesFake({
         scenarios: {},
-        // A hidden reasoning item (opaque `encrypted_content`) plus visible text — the fixture A-8's
-        // sweep later greps for `ENC-DUMMY` never leaking into a foreign-family body/UI surface.
-        unknownModel: async () => openaiResponsesFake.responsesStream({
-          text: ["noted: P10B-A1-7"],
-          reasoningItems: [{ index: 0, encrypted: "ENC-DUMMY-A1-1", summaryText: "thinking about the number" }],
-        }),
+        // Major 4 (review-lane-d2.md): the FIRST source turn issues a REAL tool call (Winter's own
+        // built-in, parameterless `advisor` — the SAME proven technique
+        // `advisor-winter-leg-e2e.test.ts` already uses with a real model over this exact fake, so
+        // it needs no approval policy and is known to round-trip against the real winter binary).
+        // request 1: the tool call itself; request 2: the advisor's OWN internal generation
+        // (triggered automatically); request 3+: the turn's own continuation (after its tool
+        // result) and every later turn. A hidden reasoning item (opaque `encrypted_content`) rides
+        // the continuation — the fixture A-8's sweep later greps for `ENC-DUMMY` never leaking into
+        // a foreign-family body/UI surface.
+        unknownModel: async () => {
+          openaiRequestCount += 1;
+          if (openaiRequestCount === 1) {
+            return openaiResponsesFake.responsesStream({
+              calls: [{ index: 0, itemId: "item_1", callId: "call_1", name: "advisor", argumentsJson: "{}" }],
+            });
+          }
+          if (openaiRequestCount === 2) {
+            return openaiResponsesFake.responsesStream({ text: ["consulted"] });
+          }
+          return openaiResponsesFake.responsesStream({
+            text: ["noted: P10B-A1-7"],
+            reasoningItems: [{ index: 0, encrypted: "ENC-DUMMY-A1-1", summaryText: "thinking about the number" }],
+          });
+        },
       });
       openaiFakeRef = openaiFake;
       const { startFake, anthropicFake } = await import("@yanlinglabs/winter-provider-conformance");
@@ -217,6 +237,43 @@ describeWithWinterBinary("A-1: GPT -> Claude (Winter -> official)", (winterBin) 
       const FIRST_TEXT = "remember P10B-A1-7";
       await client.call(METHODS.sessionSend, { sessionId, text: FIRST_TEXT });
       await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 45_000);
+
+      // Major 4 (review-lane-d2.md): the canonical file now holds a REAL tool round trip for this
+      // FIRST turn — assistant(tool_use) -> user(tool_result) -> assistant(text) — never merged.
+      {
+        const record = rt.records.get(sessionId);
+        if (record === undefined || record.backendSessionId === undefined) throw new Error("no record/backendSessionId yet");
+        const findTranscriptFile = (root: string, backendSessionId: string): string | undefined => {
+          if (!existsSync(root)) return undefined;
+          for (const entry of readdirSync(root, { withFileTypes: true })) {
+            const full = join(root, entry.name);
+            if (entry.isDirectory()) {
+              const found = findTranscriptFile(full, backendSessionId);
+              if (found !== undefined) return found;
+            } else if (entry.name === `${backendSessionId}.jsonl`) {
+              return full;
+            }
+          }
+          return undefined;
+        };
+        const transcriptFile = findTranscriptFile(home, record.backendSessionId);
+        if (transcriptFile === undefined) throw new Error(`no canonical transcript file for ${record.backendSessionId}`);
+        const entries = readFileSync(transcriptFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+        const kinds = entries.map((e) => {
+          const msg = e["message"] as { role?: string; content?: unknown } | undefined;
+          if (msg === undefined) return e["type"];
+          const content = Array.isArray(msg.content) ? msg.content : [];
+          if (msg.role === "assistant" && content.some((b: { type?: string }) => b.type === "tool_use")) return "assistant(tool_use)";
+          if (msg.role === "user" && content.some((b: { type?: string }) => b.type === "tool_result")) return "user(tool_result)";
+          return `${msg.role}(${e["type"]})`;
+        });
+        const toolUseIdx = kinds.indexOf("assistant(tool_use)");
+        const toolResultIdx = kinds.indexOf("user(tool_result)");
+        expect(toolUseIdx).toBeGreaterThanOrEqual(0);
+        expect(toolResultIdx).toBeGreaterThan(toolUseIdx); // in order, never merged/reordered
+        expect(kinds.slice(toolResultIdx + 1).some((k) => k === "assistant(text)" || String(k).startsWith("assistant("))).toBe(true);
+      }
+
       const SECOND_TEXT = "what number did I ask you to remember?";
       await client.call(METHODS.sessionSend, { sessionId, text: SECOND_TEXT });
       await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.indexOf(e) > client.events.findIndex((ev) => ev.type === "turn_completed"), 45_000);
@@ -254,14 +311,38 @@ describeWithWinterBinary("A-1: GPT -> Claude (Winter -> official)", (winterBin) 
       await client.call(METHODS.sessionSend, { sessionId, text: "one more, after the handoff" });
       await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && turnCompletedSoFar() > priorTurnCompletedCount, 45_000);
       expect(anthropicRequests.length).toBeGreaterThan(anthropicRequestsBefore);
-      const body = JSON.parse(anthropicRequests[anthropicRequests.length - 1]!.body) as { messages?: Array<{ role: string; content: unknown }> };
-      const userTexts = (body.messages ?? []).filter((m) => m.role === "user").map((m) => JSON.stringify(m.content));
-      // Both prior turns' text reaches the request, in order, and no assistant entry merged into
-      // another (distinct message.id per Winter's own claude-shape write, W18-11).
-      expect(userTexts.some((t) => t.includes(FIRST_TEXT))).toBe(true);
-      expect(userTexts.some((t) => t.includes(SECOND_TEXT))).toBe(true);
-      const assistantCount = (body.messages ?? []).filter((m) => m.role === "assistant").length;
-      expect(assistantCount).toBeGreaterThanOrEqual(2); // not merged into one
+      const body = JSON.parse(anthropicRequests[anthropicRequests.length - 1]!.body) as {
+        messages?: Array<{ role: string; content: Array<{ type?: string; text?: string; id?: string; tool_use_id?: string }> | string }>;
+      };
+      const messages = body.messages ?? [];
+      const contentOf = (m: (typeof messages)[number]): Array<{ type?: string; text?: string; id?: string; tool_use_id?: string }> =>
+        Array.isArray(m.content) ? m.content : [];
+      const flatText = (m: (typeof messages)[number]): string => (typeof m.content === "string" ? m.content : JSON.stringify(m.content));
+      // Both prior turns' text reaches the request, and in EXACT order (FIRST before SECOND).
+      const firstIdx = messages.findIndex((m) => m.role === "user" && flatText(m).includes(FIRST_TEXT));
+      const secondIdx = messages.findIndex((m) => m.role === "user" && flatText(m).includes(SECOND_TEXT));
+      expect(firstIdx).toBeGreaterThanOrEqual(0);
+      expect(secondIdx).toBeGreaterThan(firstIdx);
+
+      // Major 4: the tool_use / tool_result pair from the FIRST turn crosses intact, and no
+      // assistant message merged ACROSS the tool_result boundary (P2 / distinct `message.id`
+      // per-entry, W18-11) — asserted here as distinct assistant message OBJECTS in the wire body,
+      // never one combined block spanning both sides of the tool_result.
+      const toolUseMsgIdx = messages.findIndex((m) => m.role === "assistant" && contentOf(m).some((b) => b.type === "tool_use"));
+      expect(toolUseMsgIdx).toBeGreaterThanOrEqual(0);
+      const toolUseBlock = contentOf(messages[toolUseMsgIdx]!).find((b) => b.type === "tool_use");
+      expect(toolUseBlock?.id).toBeDefined();
+      const toolResultMsgIdx = messages.findIndex((m, i) => i > toolUseMsgIdx && m.role === "user" && contentOf(m).some((b) => b.type === "tool_result"));
+      expect(toolResultMsgIdx).toBeGreaterThan(toolUseMsgIdx);
+      const toolResultBlock = contentOf(messages[toolResultMsgIdx]!).find((b) => b.type === "tool_result");
+      expect(toolResultBlock?.tool_use_id).toBe(toolUseBlock?.id); // valid, paired
+      // The assistant message immediately after the tool_result is a SEPARATE object from the one
+      // that made the tool_use call — never merged into a single assistant entry spanning both.
+      const nextAssistantIdx = messages.findIndex((m, i) => i > toolResultMsgIdx && m.role === "assistant");
+      expect(nextAssistantIdx).toBeGreaterThan(toolResultMsgIdx);
+      expect(nextAssistantIdx).not.toBe(toolUseMsgIdx);
+      const assistantCount = messages.filter((m) => m.role === "assistant").length;
+      expect(assistantCount).toBeGreaterThanOrEqual(3); // tool_use call + its own continuation + the second turn's reply — none merged
 
       rmSync(cwd, { recursive: true, force: true });
     }, 90_000);
