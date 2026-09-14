@@ -70,7 +70,7 @@ const cases: Array<{ name: string; outcome: PlanSwitchOutcome; expectWrite: bool
   { name: "same-runtime", outcome: { kind: "same-runtime" }, expectWrite: true },
   { name: "resumed", outcome: { kind: "resumed", selection: { runtimeKind: "claude-agent", providerId: "p", modelRef: "m", family: "f", authFamily: "api-key", sdkVersion: "x", reason: "r", decidedAt: "t" } }, expectWrite: true },
   { name: "refused", outcome: { kind: "refused", code: "runtime_selection_refused", detail: "no credential" }, expectWrite: false, expectedCode: "runtime_selection_refused" },
-  { name: "confirmation_required", outcome: { kind: "confirmation_required", warnings: ["lossy"] }, expectWrite: false, expectedCode: "handoff_confirmation_required" },
+  { name: "confirmation_required", outcome: { kind: "confirmation_required", warnings: ["lossy"], portable: ["deepseek"] }, expectWrite: false, expectedCode: "handoff_confirmation_required" },
   { name: "lossy_fork", outcome: { kind: "lossy_fork", reason: "cannot compare tails" }, expectWrite: false, expectedCode: "handoff_lossy_fork" },
   { name: "blocked", outcome: { kind: "blocked", reason: "lease held" }, expectWrite: false, expectedCode: "handoff_blocked" },
 ];
@@ -103,21 +103,22 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
     });
   }
 
-  // Winter Phase 10b (D1-4, W18-23): `portable` is additive in the error data — a static `[]`
-  // until D1-6 wires `PlanSwitchOutcome.confirmation_required` to the router's own review and can
-  // name what actually still carries. Proved separately from the parameterized table above so the
-  // `[]` default (not merely "the field is present") is pinned by name.
-  test("confirmation_required: error data carries portable: [] (additive, filled in by D1-6)", async () => {
+  // Winter Phase 10b (D1-4/D1-6, W18-23): `portable` is additive in the error data — threaded
+  // verbatim from `PlanSwitchOutcome.confirmation_required.portable` (D1-6 fills that from the
+  // router's own `reviewSwitch` classification). Proved separately from the parameterized table
+  // above with a NON-EMPTY value, so this pins real threading rather than two `[]`s matching by
+  // coincidence.
+  test("confirmation_required: error data carries portable verbatim from the outcome", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-setmodel-handoff-portable-"));
     const store = new SessionStore(home);
     const sessionId = store.createSession("global");
-    const { server, c } = await boot(store, home, { kind: "confirmation_required", warnings: ["lossy"] });
+    const { server, c } = await boot(store, home, { kind: "confirmation_required", warnings: ["lossy"], portable: ["deepseek", "GLM"] });
     try {
       const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet" });
       expect(res.error).toBeDefined();
       expect(res.error.data?.code).toBe("handoff_confirmation_required");
       expect(res.error.data?.warnings).toEqual(["lossy"]);
-      expect(res.error.data?.portable).toEqual([]);
+      expect(res.error.data?.portable).toEqual(["deepseek", "GLM"]);
       // Never names an SDK or runtime (R-10b-4) — this outcome now also fires for a same-leg
       // family change, which never moves a runtime at all.
       expect(res.error.message).not.toMatch(/\bruntime\b/i);

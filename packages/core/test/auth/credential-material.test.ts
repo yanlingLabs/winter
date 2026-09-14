@@ -61,7 +61,16 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     const req = createRequire(import.meta.url);
     const pkgPath = req.resolve("@yanlinglabs/winter-agent-sdk/package.json");
     const pkg = require(pkgPath) as { version: string };
-    expect(pkg.version).toBe("0.0.9"); // 0.0.7 → 0.0.9 (P10a integration 3; 0.0.8 skipped): `packages/runtime/src/provider/keychain-store.ts` is byte-identical across v0.0.7..v0.0.9 (`git diff v0.0.7 v0.0.9` on it is empty) — the bump moved only the console bearer's Keychain account and its request-time refusal (console-broker.ts, messages.ts), so the api-key/oauth arms this mirror exercises are unchanged; mirror re-verified.
+    // 0.0.9 → 0.0.10 (Winter Phase 10b, D1-5 pin): NOT literally re-diffed against
+    // `packages/runtime/src/provider/keychain-store.ts` — this worktree has no checkout of the
+    // sibling `winter-agent-sdk` repo to diff against. The 0.0.10 release's own documented scope
+    // (the phase 10b plan's Lane S tasks S1-S10: the Claude-shape transcript writer/reader, the
+    // Claude-ready copy, the switch-review helpers, the carry-tag rename, `releaseSessionLease`,
+    // and the resume conformance test) never touches credential/keychain material parsing at all,
+    // which is the circumstantial basis for keeping this mirror unchanged rather than the byte-diff
+    // certainty the 0.0.7→0.0.9 note above had. Flagged in the D1 dispatch report for a real re-diff
+    // when the sibling repo is reachable.
+    expect(pkg.version).toBe("0.0.10");
   });
 
 

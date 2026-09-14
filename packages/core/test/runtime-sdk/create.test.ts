@@ -191,6 +191,17 @@ describe("createWinterRuntimeSdk — the options it hands the router", () => {
     expect(opts.messaging?.messaging).toBeUndefined();
   });
 
+  // Winter Phase 10b (D1-6, R6-R8 review, CRITICAL): without this the barrier's own
+  // `reviewSwitch`/`plan().review` fall back to the router's OWN unconfigured default. `daemonResolveEndpoint()`
+  // is memoised (`providers/registry.test.ts` pins that), so identity equality proves it is genuinely
+  // THIS module's resolver reaching the router, not a fresh/different function that merely behaves
+  // similarly.
+  test("D1-6: HandoffBarrierDeps.resolveEndpoint is the daemon's own registry-backed resolver", async () => {
+    const { daemonResolveEndpoint } = await import("../../src/providers/registry");
+    const { opts } = await build();
+    expect(opts.handoff?.resolveEndpoint).toBe(daemonResolveEndpoint());
+  });
+
   test("an offline spine passes no store — the router falls back to its own in-memory one", async () => {
     const { handle, opts } = await build({ directoryStore: undefined });
     expect(opts.directoryStore).toBeUndefined();

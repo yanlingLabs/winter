@@ -12,7 +12,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { HandoffBarrier, HandoffOutcome, HandoffPlan, HandoffResumeTarget, RuntimeKind, RuntimeSelection, SelectionInput } from "@yanlinglabs/winter-runtime-sdk";
+import type { HandoffBarrier, HandoffOutcome, HandoffPlan, HandoffResumeTarget, RuntimeKind, RuntimeSelection, SelectionInput, SessionKey } from "@yanlinglabs/winter-runtime-sdk";
 import { planAndApplySwitch, registerHandoffParticipants, type HandoffDeps } from "../../src/runtime-sdk/handoff";
 import { openRuntimeStateDb, RuntimeSessionRecords } from "../../src/runtime-state";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
@@ -120,7 +120,7 @@ describe("planAndApplySwitch", () => {
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1");
       let planCalled = false;
-      const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return null as unknown as HandoffPlan; }, execute: async () => null as unknown as HandoffOutcome };
+      const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return null as unknown as HandoffPlan; }, reviewSwitch: async () => ({ prompt: false }), execute: async () => null as unknown as HandoffOutcome };
       const out = await planAndApplySwitch(
         deps({ records, barrier, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")) }) }),
         "s1", "openai/gpt-5.4", false,
@@ -152,12 +152,12 @@ describe("planAndApplySwitch", () => {
       };
       let executeCalled = false;
       let planCalled: RuntimeKind | undefined;
-      const barrier: HandoffBarrier = { plan: async (_session, to) => { planCalled = to; return plan; }, execute: async () => { executeCalled = true; return { kind: "resumed", selection: SELECTION("claude-agent") }; } };
+      const barrier: HandoffBarrier = { plan: async (_session, to) => { planCalled = to; return plan; }, reviewSwitch: async () => ({ prompt: false }), execute: async () => { executeCalled = true; return { kind: "resumed", selection: SELECTION("claude-agent") }; } };
       const out = await planAndApplySwitch(
         deps({ records, barrier, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }) }),
         "s1", "claude-sonnet-5", false,
       );
-      expect(out).toEqual({ kind: "confirmation_required", warnings: ["reasoning state does not survive a move to the official leg"] });
+      expect(out).toEqual({ kind: "confirmation_required", warnings: ["reasoning state does not survive a move to the official leg"], portable: [] });
       // A fresh selection landing on a DIFFERENT leg from the recorded one must reach the barrier's
       // own plan() -- the P8c bug was exactly that this call never happened.
       expect(planCalled).toBe("claude-agent");
@@ -176,7 +176,7 @@ describe("planAndApplySwitch", () => {
       };
       let executedPlan: HandoffPlan | undefined;
       let planCalled = false;
-      const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return plan; }, execute: async (p) => { executedPlan = p; return { kind: "resumed", selection: SELECTION("claude-agent") }; } };
+      const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return plan; }, reviewSwitch: async () => ({ prompt: false }), execute: async (p) => { executedPlan = p; return { kind: "resumed", selection: SELECTION("claude-agent") }; } };
       const out = await planAndApplySwitch(
         deps({ records, barrier, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }) }),
         "s1", "claude-sonnet-5", true,
@@ -207,7 +207,7 @@ describe("planAndApplySwitch", () => {
         send: never, steer: never, interrupt: never, compact: never, setModel: never, setPolicy: never,
         end: never, deliver: never, open: never, idle: () => idlePromise,
       };
-      const barrier: HandoffBarrier = { plan: async () => plan, execute: async () => { executeCalled = true; return { kind: "resumed", selection: SELECTION("claude-agent") }; } };
+      const barrier: HandoffBarrier = { plan: async () => plan, reviewSwitch: async () => ({ prompt: false }), execute: async () => { executeCalled = true; return { kind: "resumed", selection: SELECTION("claude-agent") }; } };
       const out = await planAndApplySwitch(
         deps({ records, barrier, winter: fakeWinter({ live }), runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }) }),
         "s1", "claude-sonnet-5", true,
@@ -248,7 +248,7 @@ describe("planAndApplySwitch", () => {
             decorationDoor: "fallback", tempContinuity: "clone-copy",
             selection: { kind: "servable", selection: SELECTION("claude-agent"), review: { checked: true } as never },
           };
-          const barrier: HandoffBarrier = { plan: async () => plan, execute: async () => outcome };
+          const barrier: HandoffBarrier = { plan: async () => plan, reviewSwitch: async () => ({ prompt: false }), execute: async () => outcome };
           return await withRs(async (_rs, records) => {
             seedRecord(records, "s1");
             const out = await planAndApplySwitch(
@@ -350,7 +350,7 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1");
       let planCalled = false;
-      const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return null as unknown as HandoffPlan; }, execute: async () => null as unknown as HandoffOutcome };
+      const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return null as unknown as HandoffPlan; }, reviewSwitch: async () => ({ prompt: false }), execute: async () => null as unknown as HandoffOutcome };
       const out = await planAndApplySwitch(
         deps({
           records, barrier,
@@ -360,7 +360,14 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
         }),
         "s1", "claude-sonnet-5", false,
       );
-      expect(out).toEqual({ kind: "refused", code: "handoff_disabled", detail: expect.stringContaining("disabled") });
+      // Carried Minor m1 (D1 review, W18-23): reworded to name the SETTING, never a runtime. The
+      // setting's own key path ("crossRuntime") is allowed to contain the substring "runtime" — it
+      // is excluded from the regex check below, per the resume note's own instruction — everything
+      // ELSE in the detail must not match it.
+      expect(out).toEqual({ kind: "refused", code: "handoff_disabled", detail: expect.stringContaining("turned off") });
+      const detail = (out as { detail: string }).detail;
+      expect(detail).toContain("settings.runtimes.handoff.crossRuntime");
+      expect(detail.replace("settings.runtimes.handoff.crossRuntime", "")).not.toMatch(/\bSDK\b|runtime|Claude Agent|Winter Agent/i);
       expect(planCalled).toBe(false);
     });
   });
@@ -375,7 +382,7 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
         decorationDoor: "fallback", tempContinuity: "clone-copy",
         selection: { kind: "servable", selection: SELECTION("claude-agent"), review: { checked: true } as never },
       };
-      const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return plan; }, execute: async () => ({ kind: "resumed", selection: SELECTION("claude-agent") }) };
+      const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return plan; }, reviewSwitch: async () => ({ prompt: false }), execute: async () => ({ kind: "resumed", selection: SELECTION("claude-agent") }) };
       const out = await planAndApplySwitch(
         deps({
           records, barrier,
@@ -395,7 +402,7 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
       await withRs(async (_rs, records) => {
         seedRecord(records, "s1"); // fresh records per mode — `seedRecord` pins one backendSessionId
         let planCalled = false;
-        const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return null as unknown as HandoffPlan; }, execute: async () => null as unknown as HandoffOutcome };
+        const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return null as unknown as HandoffPlan; }, reviewSwitch: async () => ({ prompt: false }), execute: async () => null as unknown as HandoffOutcome };
         const out = await planAndApplySwitch(
           deps({
             records, barrier,
@@ -420,7 +427,7 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
         steps: [{ step: 1, name: "lease" }],
         decorationDoor: "fallback", tempContinuity: "clone-copy",
         selection: { kind: "servable", selection: SELECTION("claude-agent"), review: { checked: true } as never },
-      }), execute: async () => ({ kind: "resumed", selection: SELECTION("claude-agent") }) };
+      }), reviewSwitch: async () => ({ prompt: false }), execute: async () => ({ kind: "resumed", selection: SELECTION("claude-agent") }) };
       const runtime = fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) });
       const out1 = await planAndApplySwitch(
         deps({ records, barrier, runtime, store: { meta: () => ({ mode: "code", cwd: "/x" }) }, settings: () => live }),
@@ -447,7 +454,7 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
         decorationDoor: "fallback", tempContinuity: "clone-copy",
         selection: { kind: "servable", selection: SELECTION("claude-agent"), review: { checked: true } as never },
       };
-      const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return plan; }, execute: async () => ({ kind: "resumed", selection: SELECTION("claude-agent") }) };
+      const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return plan; }, reviewSwitch: async () => ({ prompt: false }), execute: async () => ({ kind: "resumed", selection: SELECTION("claude-agent") }) };
       const out = await planAndApplySwitch(
         deps({
           records, barrier,
@@ -475,6 +482,86 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
         );
         expect(out).toEqual({ kind: "same-runtime" });
       }
+    });
+  });
+});
+
+// Winter Phase 10b (D1-6, W18-4/W18-20/W18-21; P10b-1/2): `barrier.reviewSwitch(sessionKey,
+// decided)` fires for EVERY provider/model change, BEFORE the same-runtime shortcut — a same-LEG
+// family crossing (gpt -> deepseek, both on Winter) never reaches `barrier.plan()`/`execute()` at
+// all, so the review has to run earlier than that to ever see it. The ROUTER decides every skip
+// (same-profile/same-family/zero-source-turns); this file's fake barrier plays the router's part.
+describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs before the same-runtime shortcut", () => {
+  function fakeBarrierWithReview(review: { prompt: boolean; skipped?: "same-family" | "no-source-turns" | "same-profile"; classification?: { lossClass: string; warnings: string[]; portable: string[] } }, opts?: { onReviewSwitch?: (session: SessionKey, requested: RuntimeSelection) => void }): HandoffBarrier {
+    return {
+      plan: async () => { throw new Error("this test's scenario never reaches plan() — it settles as same-runtime before that"); },
+      execute: async () => { throw new Error("not reached"); },
+      reviewSwitch: async (session, requested) => {
+        opts?.onReviewSwitch?.(session, requested);
+        return review as never;
+      },
+    };
+  }
+
+  test("same-leg gpt -> deepseek WITH a prompt: confirmation_required (warnings + portable); confirmLossy applies it", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1"); // recorded leg: winter-agent (seedRecord's own SELECTION)
+      const review = { prompt: true, classification: { lossClass: "warned-lossy", warnings: ["reasoning state may be lost"], portable: ["the visible conversation"] } };
+      const runtime = fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")) }); // deepseek stays on Winter
+      const refused = await planAndApplySwitch(
+        deps({ records, runtime, barrier: fakeBarrierWithReview(review) }),
+        "s1", "deepseek-chat", false,
+      );
+      expect(refused).toEqual({ kind: "confirmation_required", warnings: ["reasoning state may be lost"], portable: ["the visible conversation"] });
+
+      // confirmLossy: true applies it — the SAME-LEG change proceeds as an ordinary same-runtime
+      // model change (barrier.plan()/execute() are never reached for a same-leg switch at all).
+      const confirmed = await planAndApplySwitch(
+        deps({ records, runtime, barrier: fakeBarrierWithReview(review) }),
+        "s1", "deepseek-chat", true,
+      );
+      expect(confirmed).toEqual({ kind: "same-runtime" });
+    });
+  });
+
+  test("deepseek -> GLM (both winter, complete exposed reasoning): no prompt", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const review = { prompt: false, classification: { lossClass: "lossless-portable", warnings: [], portable: ["the visible conversation", "DeepSeek's reasoning (carried as data)"] } };
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")) }),
+          barrier: fakeBarrierWithReview(review),
+        }),
+        "s1", "glm-4.6", false,
+      );
+      expect(out).toEqual({ kind: "same-runtime" });
+    });
+  });
+
+  test("Sonnet -> Opus (same family, both official): same-runtime with no prompt, and the router's own reviewSwitch decided skipped:\"same-family\" — the daemon never computes families itself", async () => {
+    await withRs(async (_rs, records) => {
+      // Recorded leg is winter-agent by default (seedRecord); this session's CURRENT leg must be
+      // official for a same-leg (official <-> official) comparison, so patch it there first.
+      seedRecord(records, "s1");
+      records.patch("s1", "ready", { runtimeKind: "claude-agent", selection: SELECTION("claude-agent") });
+      let reviewedWith: RuntimeSelection | undefined;
+      const review = { prompt: false, skipped: "same-family" as const };
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+          barrier: fakeBarrierWithReview(review, { onReviewSwitch: (_s, requested) => { reviewedWith = requested; } }),
+        }),
+        "s1", "claude-opus-5", false,
+      );
+      expect(out).toEqual({ kind: "same-runtime" });
+      // The review DID run (proving the daemon calls it on every change, same-leg or not) and the
+      // ROUTER'S OWN answer was "same-family" — the daemon never inspected `requested.family` itself
+      // to reach that same conclusion.
+      expect(reviewedWith).toBeDefined();
+      expect(reviewedWith?.runtimeKind).toBe("claude-agent");
     });
   });
 });
@@ -668,6 +755,36 @@ describe("registerHandoffParticipants: destination.confirmInit (m4 — the plan-
       const result = await built!.confirmInit({ backendSessionId: "be-1-new", selection: destinationSelection } as unknown as HandoffResumeTarget);
       expect(result).toMatchObject({ ok: true });
       expect(records.get("s1")!.authRef).toBeUndefined();
+    });
+  });
+
+  // Winter Phase 10b (D1-6, W18-4): "a second `setModel` while one is deferred never falls back to
+  // the persisted [selection]" — the P8c-era bug this guards was `pendingHandoffModel`'s own SHARED
+  // map: a second overlapping deferred call's `.set()` clobbered the first's `{model, selection}`
+  // entry, so when the FIRST plan's `confirmInit` finally ran it silently fell back to
+  // `target.selection`, which pre-10b was ALWAYS the stale D13-stamped SOURCE selection ("a handoff
+  // moves the runtime, not the model"). As of 10b `target.selection` is no longer read from any
+  // shared map at all — it is `plan.selection.selection`, threaded straight from THIS plan's own
+  // `requested: decided` (W18-4) — so this test drives `confirmInit` with NOTHING in the model-string
+  // map for this session (exactly what a second, overlapping `setModel` would have left: cleared or
+  // pointing at a DIFFERENT model), and proves the destination selection used is still the ONE this
+  // specific plan/target carries, never a fallback to anything "persisted".
+  test("W18-4: confirmInit uses target.selection even with no matching pending-model entry (a second overlapping setModel could have cleared it) — never a persisted fallback", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1"); // persisted/SOURCE selection: providerId "p", modelRef "m" (winter-agent)
+      const destination = registerDestination(records, fakeWinterThatOpens());
+      const built = destination({ projectKey: "pk", sessionId: "be-1" }, "claude-agent");
+      // THIS plan's own fresh destination — deliberately named nothing like the persisted "p"/"m",
+      // so a silent fallback to the persisted selection would be caught immediately.
+      const thisPlansDestination = { ...SELECTION("claude-agent"), providerId: "anthropic", modelRef: "claude-opus-5" };
+      const result = await built!.confirmInit({ backendSessionId: "be-1-new", selection: thisPlansDestination } as unknown as HandoffResumeTarget);
+      expect(result).toMatchObject({ ok: true });
+      const record = records.get("s1")!;
+      expect(record.providerId).toBe("anthropic");
+      expect(record.modelRef).toBe("claude-opus-5");
+      // NOT the persisted/source values a fallback-to-`target.selection`-being-stale bug would leave.
+      expect(record.providerId).not.toBe("p");
+      expect(record.modelRef).not.toBe("m");
     });
   });
 
