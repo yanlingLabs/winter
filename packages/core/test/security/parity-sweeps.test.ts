@@ -288,6 +288,7 @@ describeWithWinterBinary("A-8 part B: real captures (official Claude -> Winter G
         }
         return undefined;
       };
+      if (record.backendSessionId === undefined) throw new Error("no backendSessionId on the record");
       const transcriptFile = findTranscriptFile(home, record.backendSessionId);
       if (transcriptFile === undefined) throw new Error(`no canonical transcript file found for ${record.backendSessionId}`);
       const canonicalRaw = readFileSync(transcriptFile, "utf8");

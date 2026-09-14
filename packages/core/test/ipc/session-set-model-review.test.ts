@@ -293,7 +293,7 @@ describe("A-7: same-leg loss, against the REAL daemon resolver (no fixture)", ()
   test("gpt -> deepseek on Winter prompts (a hidden-reasoning source crossing families is warned-lossy)", () => {
     const gpt = resolve({ providerId: "openai", modelKey: "openai/gpt-5.6-sol", family: "openai" });
     const deepseek = resolve({ providerId: "deepseek", modelKey: "deepseek/deepseek-reasoner", family: "deepseek" });
-    const c = classifySwitch(gpt, deepseek, { sourceTurns: 1 });
+    const c = classifySwitch(gpt, deepseek, {});
     expect(c.lossClass).toBe("warned-lossy");
   });
 
@@ -301,7 +301,7 @@ describe("A-7: same-leg loss, against the REAL daemon resolver (no fixture)", ()
     const deepseek = resolve({ providerId: "deepseek", modelKey: "deepseek/deepseek-reasoner", family: "deepseek" });
     const glm = resolve({ providerId: "zai", modelKey: "zai/glm-5", family: "glm" });
     expect(deepseek.readableState).toBe("full-exposed"); // the premise this case rests on
-    const c = classifySwitch(deepseek, glm, { exposedComplete: true, sourceTurns: 1 });
+    const c = classifySwitch(deepseek, glm, { exposedComplete: true });
     expect(c.lossClass).not.toBe("warned-lossy");
   });
 });

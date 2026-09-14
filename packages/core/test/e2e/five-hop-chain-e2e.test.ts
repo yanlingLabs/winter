@@ -72,23 +72,23 @@ describe("A-5 part 1: the five-hop chain's prompt rule, against the REAL daemon 
   });
 
   test("claude -> deepseek PROMPTS (a native/summary-only source crossing to a foreign family is warned-lossy)", () => {
-    const c = classifySwitch(endpoints.claude, endpoints.deepseek, { sourceTurns: 1 });
+    const c = classifySwitch(endpoints.claude, endpoints.deepseek, {});
     expect(c.lossClass).toBe("warned-lossy");
     expect(c.warnings.length).toBeGreaterThan(0);
   });
 
   test("deepseek -> GLM is SILENT (complete exposed reasoning carries unmodified)", () => {
-    const c = classifySwitch(endpoints.deepseek, endpoints.glm, { exposedComplete: true, sourceTurns: 1 });
+    const c = classifySwitch(endpoints.deepseek, endpoints.glm, { exposedComplete: true });
     expect(c.lossClass).not.toBe("warned-lossy");
   });
 
   test("GLM -> gpt is SILENT (complete exposed reasoning still carries, now as a tag on a hidden-reasoning destination)", () => {
-    const c = classifySwitch(endpoints.glm, endpoints.gpt, { exposedComplete: true, sourceTurns: 1 });
+    const c = classifySwitch(endpoints.glm, endpoints.gpt, { exposedComplete: true });
     expect(c.lossClass).not.toBe("warned-lossy");
   });
 
   test("gpt -> claude PROMPTS (a hidden-reasoning source crossing to a different domain is warned-lossy)", () => {
-    const c = classifySwitch(endpoints.gpt, endpoints.claude, { sourceTurns: 1 });
+    const c = classifySwitch(endpoints.gpt, endpoints.claude, {});
     expect(c.lossClass).toBe("warned-lossy");
     expect(c.warnings.length).toBeGreaterThan(0);
     for (const w of c.warnings) expect(w).not.toMatch(/\bSDK\b|\bruntime\b|Claude Agent|Winter Agent/i); // R-10b-4

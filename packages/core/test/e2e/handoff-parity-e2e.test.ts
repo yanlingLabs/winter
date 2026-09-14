@@ -361,6 +361,7 @@ describeWithWinterBinary("A-2: Claude -> GPT (official -> Winter)", (winterBin) 
         }
         return undefined;
       };
+      if (record.backendSessionId === undefined) throw new Error("no backendSessionId on the record");
       const transcriptFile = findTranscriptFile(home, record.backendSessionId);
       if (transcriptFile === undefined) throw new Error(`no canonical transcript file found for backendSessionId ${record.backendSessionId} under ${home}`);
       const canonicalLines = readFileSync(transcriptFile, "utf8").trim().split("\n").filter(Boolean);
@@ -726,7 +727,11 @@ describeWithClaudeRuntime("m4: a REAL resumed official child's environment", () 
     // so a harness client alone cannot see it (mirrors `official-leg.e2e.test.ts`'s own `w.session
     // .init?.apiKeySource`, just through the real socket-facing driver table instead of a
     // lower-level test bed).
-    const resumedDriver = d.winter.get(sessionId);
+    // `LegSession.init`'s declared type is deliberately the WinterSession/OfficialSession
+    // INTERSECTION (`session-driver.ts:97`'s own doc: "excludes… nothing outside… reads them"), so
+    // it does not name `apiKeySource` (an official-only field) — this session IS genuinely on the
+    // official leg (asserted throughout this test), so the cast is a real narrowing, not a guess.
+    const resumedDriver = d.winter.get(sessionId) as { init?: { apiKeySource?: string } } | undefined;
     expect(resumedDriver?.init?.apiKeySource).toBe("ANTHROPIC_API_KEY");
 
     // CLAUDE_CONFIG_DIR stays Winter-owned across the resume — never `~/.claude`, never re-created
