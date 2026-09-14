@@ -151,6 +151,10 @@ interface Harness {
   attachments: Array<{ session: OfficialSessionAttachment; detached: number }>;
   tracked: Array<{ abort: AbortController; end: () => Promise<void> }>;
   untracked: number;
+  /** Winter Phase 10b (D1-8, I-4): the exact `options` object `runtime.sdk.query()` was called
+   *  with, once per incarnation (fresh or resumed) — so a test can assert on the wire shape
+   *  itself, not just on the frames a fake `Query` was later fed. */
+  capturedOptions: Array<Record<string, unknown>>;
   q(): FakeOfficialQuery;
   settled(): Promise<void>;
   types(): string[];
@@ -158,6 +162,7 @@ interface Harness {
 
 function harness(overrides: Partial<OfficialSessionDeps> = {}): Harness {
   const queries: FakeOfficialQuery[] = [];
+  const capturedOptions: Array<Record<string, unknown>> = [];
   const events: SessionEvent[] = [];
   const broadcasts: SessionEvent[] = [];
   const attachments: Harness["attachments"] = [];
@@ -168,14 +173,21 @@ function harness(overrides: Partial<OfficialSessionDeps> = {}): Harness {
 
   const h: Harness = {
     session: undefined as unknown as OfficialSession,
-    queries, events, broadcasts, healthCalls, attachments, tracked, untracked: 0,
+    queries, events, broadcasts, healthCalls, attachments, tracked, untracked: 0, capturedOptions,
     q: () => queries[queries.length - 1]!,
     settled: () => Bun.sleep(5),
     types: () => events.map((e) => e.type),
   };
 
   const runtime = {
-    sdk: { query: ({ prompt }: { prompt: AsyncIterable<string> }) => { const q = new FakeOfficialQuery(prompt); queries.push(q); return q as unknown; } },
+    sdk: {
+      query: ({ prompt, options }: { prompt: AsyncIterable<string>; options: Record<string, unknown> }) => {
+        capturedOptions.push(options);
+        const q = new FakeOfficialQuery(prompt);
+        queries.push(q);
+        return q as unknown;
+      },
+    },
     trackQuery: (_sid: string, abort: AbortController, end: () => Promise<void>) => { tracked.push({ abort, end }); },
     untrack: () => { h.untracked++; },
   } as unknown as WinterRuntimeSdk;
@@ -969,6 +981,191 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
       await resumed!.end();
     } finally {
       w.close();
+    }
+  });
+
+  // Winter Phase 10b (D1-8, I-4): "the child env NAMES after GPT -> Claude contain no codex/openai
+  // names." `driverWorld()`'s own daemon `settings` is ALREADY `provider.type: "codex-oauth"` (its
+  // definition above) while the session it creates is assembled on the Claude selection — exactly
+  // the shape a GPT(codex)->Claude handoff leaves behind (the DAEMON's own configured provider is
+  // still codex, the SESSION is now on Claude). `official-options.ts`'s `minimalOsEnvironment` is
+  // an ALLOWLIST (HOME/PATH/LANG/LC_ALL/TERM ONLY, never a denylist that could miss a name), so this
+  // pollutes `process.env` with real codex/openai-shaped names and proves none of them cross into
+  // the spawned child's `base` OR anywhere else in the captured options — the daemon's own env vars
+  // never leaking is a STRUCTURAL property of the allowlist, not a per-name scrub this test could
+  // silently fall behind on.
+  test("D1-8: the official child's env NAMES after a GPT(codex) -> Claude handoff carry no codex/openai names", async () => {
+    const POLLUTED_NAMES = ["OPENAI_API_KEY", "CODEX_HOME", "CODEX_API_KEY", "OPENAI_ORG_ID"];
+    const prior: Record<string, string | undefined> = {};
+    for (const name of POLLUTED_NAMES) { prior[name] = process.env[name]; process.env[name] = "leaked-value-must-never-cross"; }
+    const w = driverWorld();
+    try {
+      await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
+      const sid = w.store.createSession("t", { mode: "code", model: MODEL });
+      const session = await w.drivers.create(sid);
+      expect(w.capturedOptions).toHaveLength(1);
+
+      // Every field this leg's own `RouterOfficialInput` can carry a NAME in: `base` (the child's
+      // process environment), `credentials`' variable NAMES, and `connectionEnv`'s own keys.
+      const opts = w.capturedOptions[0] as unknown as { runtime?: { official?: { base?: Record<string, string> } } };
+      const base = opts.runtime?.official?.base ?? {};
+      const credentialVariables = w.capturedOptions[0]!.runtime?.official?.credentials?.map((c) => c.variable) ?? [];
+      const connectionEnvKeys = Object.keys(w.capturedOptions[0]!.runtime?.official?.connectionEnv ?? {});
+      const allNames = [...Object.keys(base), ...credentialVariables, ...connectionEnvKeys];
+      for (const polluted of POLLUTED_NAMES) {
+        expect(allNames).not.toContain(polluted);
+      }
+      // The allowlist's own positive half — proving this isn't vacuously true because NOTHING was
+      // captured at all.
+      expect(Object.keys(base)).toContain("HOME");
+
+      w.q().emit(init(session.backendSessionId, { apiKeySource: "ANTHROPIC_API_KEY" }));
+      w.q().emit(result());
+      await Bun.sleep(10);
+      await session.end();
+    } finally {
+      w.close();
+      for (const name of POLLUTED_NAMES) {
+        if (prior[name] === undefined) delete process.env[name]; else process.env[name] = prior[name];
+      }
+    }
+  });
+});
+
+// Winter Phase 10b (D1-8, I-4): R7's resume door (router 0.0.5) applies to EVERY official reopen
+// now, not only a handoff destination — so the P9c-1/P10a assertions this file already pins for a
+// FRESH incarnation must keep holding on a RESUMED one too. `open()`'s own code path is identical
+// for every incarnation (no `this.gen`/resumed special-casing anywhere in it), so these are
+// regression-pinning tests: nothing here changes `official-session.ts`'s behaviour, they PROVE the
+// existing behaviour already covers the resumed case.
+describe("D1-8 — the P9c-1/P10a assertions on a RESUMED official init", () => {
+  const apiKeySelection: RuntimeSelection = {
+    runtimeKind: "claude-agent", providerId: "anthropic", modelRef: "anthropic/claude-sonnet-5",
+    family: "claude", authFamily: "api-key", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
+  };
+  const consoleSelection: RuntimeSelection = {
+    runtimeKind: "claude-agent", providerId: "anthropic", modelRef: "anthropic/claude-sonnet-5",
+    family: "claude", authFamily: "console-profile", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
+  };
+
+  /** Crash the current incarnation (never `end()`) and wait for it to settle "resumable" — the
+   *  SAME shape `m7`'s own "an unexpected crash… leaves the session resumable" test uses above. */
+  async function crashToResumable(h: Harness): Promise<void> {
+    const crash = new Error("child died");
+    crash.name = "ProcessError";
+    h.q().fail(crash);
+    await h.settled();
+    expect(h.session.state).toBe("resumable");
+  }
+
+  test("api-key arm: a wrong apiKeySource on the RESUMED (second) incarnation still refuses official_auth_source_refused — the assertion is not skipped for a resume", async () => {
+    const h = harness({ selection: apiKeySelection });
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "ANTHROPIC_API_KEY" })); // gen 1: correct
+    h.q().emit(result());
+    await h.settled();
+    await crashToResumable(h);
+
+    await h.session.send("resume me");
+    expect(h.session.resumed).toBe(true); // genuinely the SECOND incarnation
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "none" })); // gen 2: WRONG for this family
+    await h.settled();
+
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string; message?: string }) | undefined;
+    expect(err?.code).toBe("official_auth_source_refused");
+    expect(err?.message).toContain("apiKeySource=none");
+    expect(h.session.state).toBe("ended");
+  });
+
+  test("console arm: a wrong apiKeySource on the RESUMED (second) incarnation still refuses — \"none\" is required, not merely tolerated", async () => {
+    // The console arm's own `officialInputFor` gate needs a present profile on every spawn
+    // (F3) — stubbed present for BOTH incarnations here, since this test is about the apiKeySource
+    // assertion, not the profile-existence one (that is the next test's own job).
+    const h = harness({
+      selection: consoleSelection,
+      inputDeps: () => ({
+        home: testHome(), selection: consoleSelection, explicitCredentials: [], explicitConnectionEnv: {},
+        officialPeer: undefined, claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
+        assembler: { assemble: () => "" }, capabilities: {},
+        canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
+        policy: "auto", consoleProfileExists: () => true,
+      }),
+    });
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: CONSOLE_API_KEY_SOURCE })); // gen 1: correct ("none")
+    h.q().emit(result());
+    await h.settled();
+    await crashToResumable(h);
+
+    await h.session.send("resume me");
+    expect(h.session.resumed).toBe(true);
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "ANTHROPIC_API_KEY" })); // gen 2: WRONG for this family
+    await h.settled();
+
+    const err = h.events.find((e) => e.type === "agent_error") as (SessionEvent & { code?: string; message?: string }) | undefined;
+    expect(err?.code).toBe("official_auth_source_refused");
+    expect(h.session.state).toBe("ended");
+  });
+
+  test("console arm: the LIVE console_profile_missing check re-runs on the RESUMED incarnation, not just the first spawn", async () => {
+    // Present on the FIRST call (gen 1 succeeds), gone by the SECOND (gen 2 must refuse) — a
+    // deterministic stand-in for "the user logged out of the Console profile mid-session", never
+    // touching the real filesystem (`consoleProfileExists` is `officialInputFor`'s own injectable
+    // seam for exactly this live check, per its own doc: "must never be memoized/cached").
+    let profilePresent = true;
+    const h = harness({
+      selection: consoleSelection,
+      inputDeps: () => ({
+        home: testHome(), selection: consoleSelection, explicitCredentials: [], explicitConnectionEnv: {},
+        officialPeer: undefined, claudeExecutableFor: () => ({ path: "/usr/bin/true" }),
+        assembler: { assemble: () => "" }, capabilities: {},
+        canUseToolDeps: { approvals: new ApprovalBroker(), questions: new QuestionBroker(), gate: new PermissionGate(), policy: "auto", emit: () => {} },
+        policy: "auto", consoleProfileExists: () => profilePresent,
+      }),
+    });
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: CONSOLE_API_KEY_SOURCE }));
+    h.q().emit(result());
+    await h.settled();
+    await crashToResumable(h);
+
+    profilePresent = false; // the drift: the Console profile is gone by the time of the resume
+    let caught: unknown;
+    try {
+      await h.session.send("resume me");
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as { code?: string } | undefined)?.code).toBe("console_profile_missing");
+    // No second incarnation was ever opened — the check refuses BEFORE the child spawns.
+    expect(h.queries).toHaveLength(1);
+  });
+
+  test("the daemon never passes resume and sessionId together — session-driver.ts's own query options never carry both, on a fresh OR a resumed incarnation", async () => {
+    // `runtime-sdk/official-session.ts`'s `open()` (:449-463) sets ONLY `options.sessionId`
+    // (`this.backendSessionId`) — it has no `resume` field at all in its own constructed
+    // `RouterOptions`. The router's OWN door (`official/spool.ts`/`door.ts`, R7 — router 0.0.5)
+    // decides internally, from the canonical transcript's own content, whether to treat that as a
+    // fresh `sessionId` or promote it to a `resume`; the daemon's side of the contract is simply
+    // "never set both", which this test pins directly against the REAL query options this file
+    // captures for every incarnation, fresh and resumed alike.
+    const h = harness({ selection: apiKeySelection });
+    await h.session.send("hi");
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "ANTHROPIC_API_KEY" }));
+    h.q().emit(result());
+    await h.settled();
+    await crashToResumable(h);
+    await h.session.send("resume me");
+    expect(h.session.resumed).toBe(true);
+    h.q().emit(init(BACKEND_ID, { apiKeySource: "ANTHROPIC_API_KEY" }));
+    await h.settled();
+
+    expect(h.capturedOptions).toHaveLength(2);
+    for (const opts of h.capturedOptions) {
+      const hasResume = "resume" in opts && (opts as { resume?: unknown }).resume !== undefined;
+      const hasSessionId = "sessionId" in opts && (opts as { sessionId?: unknown }).sessionId !== undefined;
+      expect(hasResume && hasSessionId).toBe(false);
+      expect(hasSessionId).toBe(true); // the daemon's own half of the contract: always sessionId
     }
   });
 });
