@@ -46,7 +46,7 @@
 // (to the SPEC, never weakened) that the completion event is expected, which currently fails red on
 // Defect 2 and is left that way rather than silently dropped.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openaiResponsesFake } from "@yanlinglabs/winter-provider-conformance/fakes";
@@ -57,6 +57,7 @@ import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/au
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
 import { officialConfigDirFor } from "../../src/runtime-sdk/official-options";
+import { FORBIDDEN_CHILD_ENV } from "../../src/runtime-sdk/official-options";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
 import { claudeRuntimeForTests, describeWithClaudeRuntime, type AnthropicTurnScript } from "../helpers/claude-runtime";
 
@@ -635,8 +636,21 @@ describeWithClaudeRuntime("m4: a REAL resumed official child's environment", () 
   let client: TestClient;
   let anthropicFakeUrl = "";
   let anthropicFakeClose: (() => Promise<void>) | undefined;
+  let shimPath: string;
+  let captureLog: string;
   const anthropicRequests: Array<{ path: string; body: string }> = [];
   const anthropicScript: AnthropicTurnScript = { blocks: [{ type: "text", chunks: ["hello"] }], stopReason: "end_turn" };
+
+  /** The set of env var NAMES (never values) the real child's own spawn carried, for the invocation
+   *  whose block starts at or after `sinceByteOffset` in the growing capture log. */
+  function envNamesSince(sinceByteOffset: number): { names: Set<string>; claudeConfigDir: string | undefined } {
+    const raw = readFileSync(captureLog, "utf8").slice(sinceByteOffset);
+    const block = raw.split("=== invocation ===\n").filter(Boolean)[0] ?? raw;
+    const lines = block.trim().split("\n").filter(Boolean);
+    const claudeConfigDirLine = lines.find((l) => l.startsWith("CLAUDE_CONFIG_DIR_VALUE="));
+    const names = new Set(lines.filter((l) => l !== claudeConfigDirLine));
+    return { names, claudeConfigDir: claudeConfigDirLine?.slice("CLAUDE_CONFIG_DIR_VALUE=".length) };
+  }
 
   beforeAll(async () => {
     home = realpathSync(mkdtempSync(join(tmpdir(), "parity-m4-")));
@@ -653,16 +667,44 @@ describeWithClaudeRuntime("m4: a REAL resumed official child's environment", () 
     });
     anthropicFakeUrl = anthropicFakeServer.url;
     anthropicFakeClose = () => anthropicFakeServer.close();
+
+    // Critical 1 (review-lane-d2.md): a real env-capturing SHIM in place of the platform `claude`
+    // binary, so the assertions below read the ACTUAL spawned child's environment rather than
+    // recomputing what the daemon INTENDED to send. `resolveClaudeExecutable`'s explicit
+    // (setting/env) rungs only ever check `existsSync` — no VERSIONS.json/identity gate applies
+    // outside the bundle rung — so a plain executable script here is accepted exactly like a real
+    // binary path would be. The shim never inspects or transforms anything: it snapshots `env`'s
+    // NAMES (never values, via `cut -d= -f1`), separately records the single VALUE of
+    // `CLAUDE_CONFIG_DIR` (a path, not a secret), appends both to a growing log (one block per
+    // invocation, so the test can isolate the SECOND/resumed launch), then `exec`s the real
+    // platform `claude` binary with the untouched argument vector — the turn itself still runs for
+    // real, against the real binary.
+    const realClaudeBin = claudeRuntimeForTests()!.executable;
+    shimPath = join(home, "claude-env-shim.sh");
+    captureLog = join(home, "captured-env.log");
+    writeFileSync(shimPath, [
+      "#!/bin/sh",
+      "{",
+      "  echo '=== invocation ==='",
+      "  env | cut -d= -f1",
+      '  printf \'CLAUDE_CONFIG_DIR_VALUE=%s\\n\' "$CLAUDE_CONFIG_DIR"',
+      `} >> "${captureLog}"`,
+      `exec "${realClaudeBin}" "$@"`,
+      "",
+    ].join("\n"));
+    chmodSync(shimPath, 0o755);
+
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 2,
       provider: { type: "openai-compatible", model: "winter-test/unused", baseUrl: "http://127.0.0.1:9/v1" },
-      runtimes: { claudeExecutable: claudeRuntimeForTests()!.executable },
+      runtimes: { claudeExecutable: shimPath },
     }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-m4" });
-    // Contamination probe (best-effort, filesystem/env-name level — see this block's own doc): a
-    // codex/openai-named credential material present in this SAME secret store, so a spawn that
-    // ever forwarded FORBIDDEN_CHILD_ENV names would have something real to leak.
+    // Contamination probe: a codex/openai-named credential material present in this SAME secret
+    // store, so a spawn that ever forwarded a FORBIDDEN_CHILD_ENV name or an OPENAI*/CODEX* name
+    // would have something real to leak — and the shim above now actually PROVES the absence,
+    // rather than checking a filesystem side effect that a leak would never touch.
     await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-should-never-reach-claude" });
     daemon = await startDaemon({
       home, secrets, agentProvider: null,
@@ -692,6 +734,7 @@ describeWithClaudeRuntime("m4: a REAL resumed official child's environment", () 
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 45_000);
 
     const stagingBefore = new Set(readdirSync(tmpdir()).filter((n) => n.startsWith(RESUME_STAGING_PREFIX)));
+    const captureOffsetBeforeResume = existsSync(captureLog) ? statSync(captureLog).size : 0;
 
     // Force a COLD resume: stop the daemon, restart on the SAME home. At least one canonical entry
     // now exists, so the router's own door opens the NEXT official incarnation with `resume`.
@@ -707,27 +750,10 @@ describeWithClaudeRuntime("m4: a REAL resumed official child's environment", () 
     await client.hello(daemon.tokens.harness, "e2e");
     await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
     const sinceIdx = client.events.length;
-    const messagesBefore = anthropicRequests.filter((r) => r.path === "/v1/messages").length;
-    await client.call(METHODS.sessionSend, { sessionId, text: "second, after the resume" }).catch(() => { /* fire; see Defect 2 below */ });
-    // MEASURED (2026-09-14): this PLAIN, SAME-LEG cold resume (daemon restart, no handoff at all)
-    // ALSO hits Defect 2 (see this file's header) — the resumed official incarnation's own fresh
-    // local counters collide with generation 1's already-committed checkpoint, and `turn_completed`
-    // never arrives. This BROADENS Defect 2's scope beyond cross-runtime handoffs: it is measured
-    // here to affect ANY fresh incarnation after the first on a backend session with existing
-    // history, including an ordinary crash/restart resume. Workaround: poll the destination fake's
-    // own request log (unaffected) to reach the env/config-dir assertions below; the completion
-    // event is asserted honestly afterward (fails red on Defect 2).
-    {
-      const t0 = Date.now();
-      for (;;) {
-        if (anthropicRequests.filter((r) => r.path === "/v1/messages").length > messagesBefore) break;
-        if (Date.now() - t0 > 20_000) throw new Error("timed out waiting for the resumed official child's request to reach the loopback");
-        await Bun.sleep(20);
-      }
-    }
-    const messagesAfter = anthropicRequests.filter((r) => r.path === "/v1/messages");
-    expect(messagesAfter.length).toBeGreaterThan(messagesBefore);
-    expect(messagesAfter[messagesAfter.length - 1]!.body).toContain("second, after the resume");
+    // Defect 2 (generation-not-bumped) is FIXED (D1 fix round 2, 10b9088c) — the plain wait is the
+    // spec-required idiom again, no polling workaround needed.
+    await client.call(METHODS.sessionSend, { sessionId, text: "second, after the resume" });
+    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.indexOf(e) >= sinceIdx, 45_000);
 
     // apiKeySource: I-4 holds on every official init, including a resumed one. Read directly off
     // the live driver (`LegSession.init`) — apiKeySource is never a projected `SessionEvent` field,
@@ -741,30 +767,47 @@ describeWithClaudeRuntime("m4: a REAL resumed official child's environment", () 
     const resumedDriver = d.winter.get(sessionId) as { init?: { apiKeySource?: string } } | undefined;
     expect(resumedDriver?.init?.apiKeySource).toBe("ANTHROPIC_API_KEY");
 
-    // CLAUDE_CONFIG_DIR stays Winter-owned across the resume — never `~/.claude`, never re-created
-    // under a codex/openai-named path.
-    const spool = officialConfigDirFor(home);
-    expect(existsSync(spool)).toBe(true);
-    expect(statSync(spool).mode & 0o777).toBe(0o700);
+    // Critical 1 (review-lane-d2.md): the REAL spawned child's own environment, captured by the
+    // shim — never a recomputation. Isolated to the SECOND (resumed) invocation's own block.
+    const { names: childEnvNames, claudeConfigDir } = envNamesSince(captureOffsetBeforeResume);
+    expect(childEnvNames.size).toBeGreaterThan(0); // non-vacuous: the shim really captured something
+    expect(claudeConfigDir).toBeDefined();
+
+    // The P9c-1 api-key arm's own required name is present; every OTHER FORBIDDEN_CHILD_ENV name
+    // (the console/OAuth/Bedrock/Vertex/Foundry arms' own auth names) is absent — this arm never
+    // needs them, and their presence would mean an ambient leak the strip failed to catch.
+    expect(childEnvNames.has("ANTHROPIC_API_KEY")).toBe(true);
+    for (const name of FORBIDDEN_CHILD_ENV) {
+      if (name === "ANTHROPIC_API_KEY" || name === "CLAUDE_CONFIG_DIR") continue; // both expected, asserted separately
+      expect(childEnvNames.has(name)).toBe(false);
+    }
+    // No codex/openai-named credential env reached the child at all, despite one being present in
+    // the SAME secret store this session's own credential resolution reads from.
+    for (const name of childEnvNames) {
+      expect(name).not.toMatch(/codex|openai/i);
+    }
+
+    // CLAUDE_CONFIG_DIR's REAL value: Winter-owned, never `~/.claude`, never the FRESH-launch
+    // `officialConfigDirFor(home)` dir reused across a resume (it must be a per-resume staging
+    // root instead — I-4).
+    expect(claudeConfigDir).toBeDefined();
+    expect(claudeConfigDir).not.toBe(officialConfigDirFor(home));
+    expect(claudeConfigDir!.split("/")).not.toContain(".claude");
     const home200 = process.env.HOME;
-    if (home200 !== undefined) expect(existsSync(join(home200, ".claude", "projects", sessionId))).toBe(false);
-    expect(existsSync(join(spool, ".credentials.json"))).toBe(false);
-    expect(existsSync(join(spool, "codex"))).toBe(false);
-    expect(existsSync(join(spool, "openai"))).toBe(false);
+    if (home200 !== undefined) expect(claudeConfigDir!.startsWith(join(home200, ".claude"))).toBe(false);
+    expect(claudeConfigDir).toContain(RESUME_STAGING_PREFIX);
 
     // A resume-staging root (`claude-resume-<uuid>`, router-owned, under system tmpdir — never
-    // under `home`) may appear for this cross-generation resume; if it does, it must be FRESH (not
-    // reused across generations) and must never itself carry a codex/openai-named file.
+    // under `home`) appears for this cross-generation resume; the loop below is non-vacuous
+    // (Critical 2) and confirms it is FRESH (not reused across generations) and never itself
+    // carries a codex/openai-named file.
     const stagingAfter = readdirSync(tmpdir()).filter((n) => n.startsWith(RESUME_STAGING_PREFIX));
     const newStaging = stagingAfter.filter((n) => !stagingBefore.has(n));
+    expect(newStaging.length).toBeGreaterThan(0);
     for (const dir of newStaging) {
       const full = join(tmpdir(), dir);
       const names = existsSync(full) ? readdirSync(full) : [];
       expect(names.some((n) => /codex|openai/i.test(n))).toBe(false);
     }
-
-    // The SPEC-required completion event, asserted honestly last (never weakened): MEASURED
-    // (2026-09-14) to fail here on Defect 2.
-    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.indexOf(e) >= sinceIdx, 20_000);
   }, 90_000);
 });
