@@ -564,6 +564,42 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
       expect(reviewedWith?.runtimeKind).toBe("claude-agent");
     });
   });
+
+  // Fix round 1 (MINOR, P10b-2's zero-turn carve-out): a session with no backend transcript at
+  // all has no source turns for the review to weigh — `sessionKeyFor` answers `undefined` for
+  // exactly this record shape, and the pre-flight review is skipped entirely rather than routed
+  // through the throw-handling fail-safe below (this is a KNOWN "nothing to lose" case, not an
+  // unreviewable one).
+  test("a session with no backendSessionId (no sessionKey): a family-crossing switch applies with NO prompt and reviewSwitch is never called", async () => {
+    await withRs(async (_rs, records) => {
+      records.create({
+        winterSessionId: "s1", runtimeKind: "winter-agent",
+        // No `backendSessionId` at all — `sessionKeyFor` returns `undefined` for this record.
+        providerId: "p", modelRef: "m", backendRoot: "/x", transcriptProjectKey: "pk",
+        memoryProjectKey: "pk", tempProjectKey: "pk", transcriptHealth: "clean",
+        compatibilityLevel: "agent-state", conformanceCorpusVersion: "unverified",
+        versionProvenance: "recorded", sdkVersion: "0.0.4", engineVersion: "0.0.4",
+        providerCatalogVersion: "t", providerAdapterVersion: "t", capabilities: [],
+        selection: SELECTION("winter-agent"),
+      });
+      records.transition("s1", "ready");
+      let reviewCalled = false;
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")) }), // deepseek: a genuine family crossing
+          barrier: {
+            plan: async () => { throw new Error("not reached — no sessionKey means no barrier call at all"); },
+            execute: async () => { throw new Error("not reached"); },
+            reviewSwitch: async () => { reviewCalled = true; throw new Error("not reached — no sessionKey means reviewSwitch is never called"); },
+          },
+        }),
+        "s1", "deepseek-chat", false,
+      );
+      expect(out).toEqual({ kind: "same-runtime" });
+      expect(reviewCalled).toBe(false);
+    });
+  });
 });
 
 // Winter Phase 10b (D1-7, W18-3): the no-credential hint — built FROM the router's own

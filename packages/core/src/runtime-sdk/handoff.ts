@@ -559,6 +559,11 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
   // as it always has — this review is simply reached first when both ARE available.
   const sessionKey = sessionKeyFor(record);
   const barrier = barrierFor(deps);
+  // P10b-2's own zero-turn carve-out: a session with no backend transcript at all has no source
+  // turns for the review to weigh (`sessionKeyFor` returning `undefined` is exactly "this session
+  // has no backend transcript to hand off from" — the same fact the `session_predates_winter_leg`
+  // refusal below is about). Skipped ENTIRELY (no review, no prompt) rather than routed through the
+  // fail-safe catch below: this is a KNOWN, provable "nothing to lose" case, not an unreviewable one.
   if (sessionKey !== undefined && barrier !== undefined) {
     const review: SwitchReview = await barrier.reviewSwitch(sessionKey, decided);
     if (review.prompt && !confirmLossy) {
