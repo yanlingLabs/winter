@@ -565,7 +565,27 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
   // refusal below is about). Skipped ENTIRELY (no review, no prompt) rather than routed through the
   // fail-safe catch below: this is a KNOWN, provable "nothing to lose" case, not an unreviewable one.
   if (sessionKey !== undefined && barrier !== undefined) {
-    const review: SwitchReview = await barrier.reviewSwitch(sessionKey, decided);
+    let review: SwitchReview;
+    try {
+      review = await barrier.reviewSwitch(sessionKey, decided);
+    } catch (err) {
+      // Fix round 1 (MAJOR, controller ruling): `reviewSwitch` can throw (a transient store or
+      // sidecar read error) — an unreviewable switch must never be waved through silently NOR
+      // refused outright (R-10b-0: a cross-family move MUST work), so this fails safe as a PROMPT
+      // rather than propagating the rejection into an RPC-level INTERNAL error. `confirmLossy: true`
+      // still applies it, exactly like any other prompt. Logged ONCE, names and the error CLASS
+      // only — never `err.message`, which could embed opaque provider state or other payload text
+      // this file's own header forbids logging.
+      deps.log?.(`handoff: reviewSwitch threw for session ${sessionId} (${err instanceof Error ? err.name : "unknown"}) — treating the switch as unreviewable and prompting instead of refusing or applying it silently`);
+      review = {
+        prompt: true,
+        classification: {
+          lossClass: "warned-lossy",
+          warnings: [`Winter couldn't check what carries over to ${model}. The conversation carries over; reasoning private to the current model may not.`],
+          portable: [],
+        },
+      };
+    }
     if (review.prompt && !confirmLossy) {
       return {
         kind: "confirmation_required",

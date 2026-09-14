@@ -602,6 +602,93 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
   });
 });
 
+// Fix round 1 (MAJOR, controller ruling): a throw from `barrier.reviewSwitch` must never reject
+// `planAndApplySwitch` (an unreviewable switch silently refused via an RPC-level INTERNAL error is
+// exactly the "silent refusal" R-10b-0 forbids) — it fails safe as a PROMPT instead.
+describe("planAndApplySwitch: a throwing reviewSwitch fails safe as a prompt, never a rejection", () => {
+  function fakeBarrierWhoseReviewThrows(err: unknown): HandoffBarrier {
+    return {
+      plan: async () => { throw new Error("not reached in the refused case"); },
+      execute: async () => { throw new Error("not reached in the refused case"); },
+      reviewSwitch: async () => { throw err; },
+    };
+  }
+
+  test("a throwing review returns confirmation_required with the generic warning — never a rejection", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const err = new Error("sidecar read failed: ECONNRESET");
+      err.name = "SidecarReadError";
+      const logs: string[] = [];
+      let caught: unknown;
+      let out: unknown;
+      try {
+        out = await planAndApplySwitch(
+          deps({
+            records,
+            runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")) }),
+            barrier: fakeBarrierWhoseReviewThrows(err),
+            log: (line) => logs.push(line),
+          }),
+          "s1", "deepseek-chat", false,
+        );
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeUndefined(); // never a rejection
+      expect(out).toEqual({
+        kind: "confirmation_required",
+        warnings: ["Winter couldn't check what carries over to deepseek-chat. The conversation carries over; reasoning private to the current model may not."],
+        portable: [],
+      });
+      // Logged ONCE, naming the error CLASS only — never `.message` (which could carry payload
+      // text this file's own header forbids logging, e.g. "ECONNRESET" above never appears).
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toContain("SidecarReadError");
+      expect(logs[0]).not.toContain("ECONNRESET");
+      // Never names an SDK or runtime (R-10b-4).
+      expect(logs[0]).not.toMatch(/\bSDK\b|Claude Agent|Winter Agent/i);
+      expect((out as { warnings: string[] }).warnings[0]).not.toMatch(/\bSDK\b|\bruntime\b|Claude Agent|Winter Agent/i);
+    });
+  });
+
+  test("a throwing review, with confirmLossy: true, applies the switch instead of prompting", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")) }),
+          barrier: fakeBarrierWhoseReviewThrows(new Error("transient store error")),
+        }),
+        "s1", "deepseek-chat", true,
+      );
+      // A same-leg change proceeds as an ordinary same-runtime model change once "confirmed" —
+      // barrier.plan()/execute() are never reached for a same-leg switch at all.
+      expect(out).toEqual({ kind: "same-runtime" });
+    });
+  });
+
+  test("a non-Error throw is still handled — the error class falls back to \"unknown\", never propagated raw", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const logs: string[] = [];
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")) }),
+          barrier: fakeBarrierWhoseReviewThrows("a bare string throw"),
+          log: (line) => logs.push(line),
+        }),
+        "s1", "deepseek-chat", false,
+      );
+      expect(out.kind).toBe("confirmation_required");
+      expect(logs[0]).toContain("unknown");
+      expect(logs[0]).not.toContain("a bare string throw");
+    });
+  });
+});
+
 // Winter Phase 10b (D1-7, W18-3): the no-credential hint — built FROM the router's own
 // `alternatives`, never a hardcoded provider list.
 describe("renderNoCredentialHint", () => {
