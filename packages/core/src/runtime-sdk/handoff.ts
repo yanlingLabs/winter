@@ -146,7 +146,22 @@ function barrierFor(deps: HandoffDeps): HandoffBarrier | undefined {
  * BEFORE the destination spawns, and `session-driver.ts`'s own `create()`/`decideRuntime` re-read
  * that exact value on the destination's next incarnation — substituting `modelRef` there would
  * silently change what `session.list` shows and what a later incarnation re-resolves from.
+ *
+ * m2 (whole-branch review, fix round 2): keyed by `(sessionId, modelRef)`, never `sessionId` alone.
+ * `confirmInit` (via `destinationRuntimeFor`) has no OTHER call-scoped correlator to the SPECIFIC
+ * `planAndApplySwitch` invocation that set this entry — the router calls `HandoffParticipants
+ * .destination(session, to)` fresh per plan, but hands it no plan id, so the only thing both ends
+ * agree on is `session`/`to` plus whatever rides on `target.selection` (which IS `decided`,
+ * unmerged — this file's own D1-6 doc above). A bare `sessionId` key meant TWO deferred cross-leg
+ * `setModel` calls racing the SAME running turn (the second overwrites the first's entry before
+ * either's `confirmInit` ever reads it) always committed the LATER call's model string for BOTH —
+ * silently wrong for whichever settled first. `modelRef` travels on `target.selection` for free
+ * and differs whenever the two calls actually named different models (the only case this file can
+ * do anything about: two raw strings that happen to alias the SAME catalog row are, by definition,
+ * requesting the identical destination, so sharing an entry is correct, not a collision).
  */
+const PENDING_MODEL_KEY_SEP = "\u0000"; // never a legal byte in a session id or a catalog row key, so the join can never be ambiguous
+const pendingModelKey = (sessionId: string, modelRef: string): string => `${sessionId}${PENDING_MODEL_KEY_SEP}${modelRef}`;
 const pendingHandoffModelString = new Map<string, string>();
 
 /** Production bound for `awaitDestinationInit` below. */
@@ -273,8 +288,11 @@ function destinationRuntimeFor(deps: HandoffDeps, session: SessionKey, to: Runti
       const destinationSelection = target.selection;
       // `.get`, never `.delete`: `planAndApplySwitch` owns cleanup of the model-string map so a
       // fake-barrier test (which never calls this function at all) cannot leak an entry into a
-      // later, unrelated test that reuses the same session id.
-      const pendingModel = pendingHandoffModelString.get(winterSessionId);
+      // later, unrelated test that reuses the same session id. m2 (fix round 2): keyed by
+      // `(sessionId, modelRef)` — `destinationSelection` IS `decided` unmerged (the comment two
+      // lines up), so its `modelRef` is guaranteed to match whatever `planAndApplySwitch` set this
+      // entry under for THIS specific plan, never a DIFFERENT deferred plan racing the same session.
+      const pendingModel = pendingHandoffModelString.get(pendingModelKey(winterSessionId, destinationSelection.modelRef));
       // Winter Phase 10b (D1-2, W18-7): the destination's OWN credential locator — never material,
       // just which account it names (`records.ts`'s own "opaque locator" rule) — mirroring the SAME
       // `credentialRefFor` call `session-driver.ts`'s `create()`/`createOfficial()` already make for
@@ -428,7 +446,14 @@ export function registerHandoffParticipants(deps: HandoffDeps): void {
 // ── The RPC-facing door: plan, then (maybe) execute ────────────────────────────────────────────────
 
 export type PlanSwitchOutcome =
-  | { kind: "same-runtime" } // an ordinary in-runtime model change — the caller's existing path
+  // Fix round 2 (C1, belt-and-braces): `decided` is the FRESH selection `planAndApplySwitch` chose
+  // for this move — present ONLY when a real leg decision actually ran (the router's
+  // `selectRuntimeFor`/review), never on the early bail-outs (`model === null`, no record, an
+  // engine-era row, a `winter-test/*` double, an off-catalog model) that never touch the router at
+  // all. `ipc/server.ts` uses it to keep the 8a record's `selection`/`providerId`/`modelRef`/
+  // `authRef` in step with an applied SAME-LEG family change (gpt -> deepseek on Winter), which
+  // never goes through `confirmInit`'s own record patch (that only fires on a cross-runtime move).
+  | { kind: "same-runtime"; decided?: RuntimeSelection } // an ordinary in-runtime model change — the caller's existing path
   | { kind: "refused"; code: "runtime_selection_refused" | "session_predates_winter_leg" | "handoff_disabled"; detail: string }
   // Winter Phase 10b (D1-6, W18-22): `portable` names what the pre-flight review found still
   // carries (`SwitchClassification.portable`) — additive alongside `warnings`, `[]` when the review
@@ -492,6 +517,19 @@ async function executePlan(deps: HandoffDeps, plan: HandoffPlan): Promise<PlanSw
 }
 
 /**
+ * m5 (whole-branch review, fix round 2): user-facing copy never interpolates a raw, possibly-empty
+ * model string — `session.setModel({model: null})` (clearing an override, reverting to the
+ * session's default) is intercepted by `planAndApplySwitch`'s own unconditional early return below
+ * BEFORE either warning site that names the requested model is ever reached, so neither can print
+ * a literal "null" today; this exists so a future refactor that loosens that early return (or a
+ * caller that passes `""` rather than `null` for the identical "no override" intent) still renders
+ * something a user can read, never a blank or a stray `null`.
+ */
+export function modelLabelFor(model: string): string {
+  return model.length > 0 ? model : "the default model";
+}
+
+/**
  * The whole decision, up to (and including, when nothing defers it) execution.
  *
  * `model === null` (clearing an override) never triggers a leg decision — see this file's header:
@@ -540,6 +578,24 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
       : "";
     return { kind: "refused", code: "runtime_selection_refused", detail: `${decided.detail}${hint}` };
   }
+  // m1 (whole-branch review, fix round 2): the `crossRuntime` off switch gates CROSS-LEG moves
+  // ONLY, and must be checked HERE — before the pre-flight review/prompt below — never after it.
+  // Checking it after the review let a deployment with the switch OFF see "Switch model?" (a real,
+  // reviewed prompt backed by `confirmLossy`) and then get refused typed anyway the moment it
+  // resent with `confirmLossy: true`: a prompt that lied about what confirming would do. Same-leg
+  // moves (gpt -> deepseek on Winter) are NEVER gated by this setting and always reach the review
+  // below exactly as before — computed once, right here, since both `decided` and `currentLeg` are
+  // already known and nothing below this point changes either.
+  const isSameLeg = legOfRuntimeKind(decided.runtimeKind) === currentLeg;
+  if (!isSameLeg && !handoffCrossRuntimeEnabled(deps.settings(), mode)) {
+    // Never names a runtime (R-10b-4) — this is reached only for an actual cross-runtime refusal
+    // (a same-leg change never reaches this branch at all, `isSameLeg` above already excludes it).
+    return {
+      kind: "refused",
+      code: "handoff_disabled",
+      detail: `switching this session to ${modelLabelFor(model)} is turned off (settings.runtimes.handoff.crossRuntime)`,
+    };
+  }
   // Winter Phase 10b (D1-6, W18-4/W18-20/W18-21; P10b-1/2): the ONE pre-flight review, for EVERY
   // provider/model change, BEFORE the same-runtime shortcut below — a same-LEG family crossing
   // (gpt -> deepseek, both on Winter) never reaches the barrier's `plan()`/`execute()` at all (it
@@ -581,7 +637,7 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
         prompt: true,
         classification: {
           lossClass: "warned-lossy",
-          warnings: [`Winter couldn't check what carries over to ${model}. The conversation carries over; reasoning private to the current model may not.`],
+          warnings: [`Winter couldn't check what carries over to ${modelLabelFor(model)}. The conversation carries over; reasoning private to the current model may not.`],
           portable: [],
         },
       };
@@ -594,29 +650,39 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
       };
     }
   }
-  if (legOfRuntimeKind(decided.runtimeKind) === currentLeg) {
-    return { kind: "same-runtime" };
+  if (isSameLeg) {
+    // Fix round 2 (C1, belt-and-braces): keep the 8a record's identity columns in step with an
+    // APPLIED same-leg family change (gpt -> deepseek on Winter) — `confirmInit`'s OWN identical
+    // patch (this file's own doc on it, above) only fires on a CROSS-runtime move, so without this
+    // a same-leg switch away from the family the session was CREATED with left `selection`/
+    // `providerId`/`modelRef`/`authRef` naming the ORIGINAL family forever, even though the session
+    // actually runs `decided`'s — stale for `session.list`, a cold resume, `winter doctor`, and
+    // anything else that reads the record. Router 0.0.6 already fixed `reviewSwitch`'s OWN read
+    // (the live tip's identity, never the stale persisted selection) — this is belt-and-braces for
+    // everything ELSE, so a failure here is logged and never fails the switch itself (the model
+    // DID apply; only this record's own bookkeeping would lag).
+    try {
+      const current = deps.records.get(sessionId);
+      if (current !== undefined) {
+        const destinationAuthRef = credentialRefFor(decided.providerId, deps.home, deps.settings());
+        const destinationAuthRefLocator = destinationAuthRef?.kind === "keychain" ? `keychain:${destinationAuthRef.account}` : undefined;
+        deps.records.patch(sessionId, current.state, {
+          selection: decided,
+          providerId: decided.providerId,
+          modelRef: decided.modelRef,
+          authRef: destinationAuthRefLocator,
+        });
+      }
+    } catch (err) {
+      deps.log?.(`handoff: C1 same-leg record patch failed for ${sessionId} (${err instanceof Error ? err.name : "unknown"}) — the switch still applied; only the record's own bookkeeping may lag`);
+    }
+    return { kind: "same-runtime", decided };
   }
-  // C2 fence (whole-branch review / ruling P8c-18); Winter Phase 10b (D1-1, W18-10): defaults ON
-  // for Code sessions now that the real round-trip against the live barrier is measured end to
-  // end (the whole-branch parity e2e coverage) — `mode` (already decided above, for the fresh
-  // selection call) makes the default mode-aware without this call site knowing the default
-  // itself. Refuse BEFORE any barrier call and BEFORE `session.setModel`'s own store write (this
-  // return short-circuits both), typed, so a deployment that has explicitly opted OUT never
-  // executes an unconfirmed cross-runtime switch. Read HOT, at call time, per this file's own
-  // `HandoffDeps.settings` doc — never a boot snapshot. Same-runtime model changes (the branch
-  // above) are entirely unaffected.
-  if (!handoffCrossRuntimeEnabled(deps.settings(), mode)) {
-    // Carried Minor m1 (D1 review): never names a runtime (R-10b-4) — this outcome now also fires
-    // for a same-leg family change reaching THIS branch is impossible (the leg check above already
-    // returned `same-runtime` for those), so the text only ever describes an actual cross-runtime
-    // refusal, but it still must not say which leg is which — only the setting that gates it.
-    return {
-      kind: "refused",
-      code: "handoff_disabled",
-      detail: `switching this session to ${model} is turned off (settings.runtimes.handoff.crossRuntime)`,
-    };
-  }
+  // C2 fence (whole-branch review / ruling P8c-18); Winter Phase 10b (D1-1, W18-10): the
+  // `crossRuntime` off-switch check itself now lives ABOVE the review (m1, fix round 2) — this
+  // point is reached only when a cross-leg move already passed that gate, so nothing more to
+  // refuse here on that account. Same-runtime model changes (the branch above) were never gated by
+  // it at all.
   if (sessionKey === undefined) {
     return { kind: "refused", code: "session_predates_winter_leg", detail: "this session has no backend transcript to hand off from" };
   }
@@ -641,8 +707,11 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
   // — refused, handoff_disabled, confirmation_required — must leave nothing pending) and always
   // cleared by THIS call, never left for `confirmInit` to clean up, so a fake-barrier test that
   // never reaches `confirmInit` at all cannot leak an entry into a later, unrelated test reusing
-  // the same id.
-  pendingHandoffModelString.set(sessionId, model);
+  // the same id. m2 (fix round 2): keyed by `(sessionId, decided.modelRef)`, not `sessionId` alone —
+  // see the map's own doc comment for why a bare session key let two deferred cross-leg calls
+  // racing the same running turn clobber each other's pending string.
+  const pendingKey = pendingModelKey(sessionId, decided.modelRef);
+  pendingHandoffModelString.set(pendingKey, model);
   const live = deps.winter.get(sessionId);
   if (live?.turnRunning === true) {
     // Deferred, fire-and-forget: `session.setModel`'s own "best-effort, never delays the reply"
@@ -676,14 +745,14 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
             }
           },
           (err) => deps.log?.(`deferred handoff for ${sessionId} failed: ${err instanceof Error ? err.name : "unknown"}`),
-        ).finally(() => pendingHandoffModelString.delete(sessionId)),
-      () => { pendingHandoffModelString.delete(sessionId); /* the session ended before settling — nothing left to hand off */ },
+        ).finally(() => pendingHandoffModelString.delete(pendingKey)),
+      () => { pendingHandoffModelString.delete(pendingKey); /* the session ended before settling — nothing left to hand off */ },
     );
     return { kind: "deferred" };
   }
   try {
     return await executePlan(deps, plan);
   } finally {
-    pendingHandoffModelString.delete(sessionId);
+    pendingHandoffModelString.delete(pendingKey);
   }
 }

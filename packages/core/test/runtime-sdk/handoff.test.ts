@@ -13,7 +13,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HandoffBarrier, HandoffOutcome, HandoffPlan, HandoffResumeTarget, RuntimeKind, RuntimeSelection, SelectionAlternative, SelectionInput, SessionKey } from "@yanlinglabs/winter-runtime-sdk";
-import { planAndApplySwitch, registerHandoffParticipants, renderNoCredentialHint, type HandoffDeps } from "../../src/runtime-sdk/handoff";
+import { modelLabelFor, planAndApplySwitch, registerHandoffParticipants, renderNoCredentialHint, type HandoffDeps } from "../../src/runtime-sdk/handoff";
 import { openRuntimeStateDb, RuntimeSessionRecords } from "../../src/runtime-state";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import type { LegSession, WinterSessionDrivers } from "../../src/runtime-sdk/session-driver";
@@ -121,11 +121,15 @@ describe("planAndApplySwitch", () => {
       seedRecord(records, "s1");
       let planCalled = false;
       const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return null as unknown as HandoffPlan; }, reviewSwitch: async () => ({ prompt: false }), execute: async () => null as unknown as HandoffOutcome };
+      // Hoisted (not called twice): `SELECTION()` stamps `decidedAt: new Date().toISOString()` at
+      // CALL time, so two separate calls can disagree by a millisecond and flake this comparison.
+      const sameLegSelection = SELECTION("winter-agent");
       const out = await planAndApplySwitch(
-        deps({ records, barrier, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")) }) }),
+        deps({ records, barrier, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => sameLegSelection) }) }),
         "s1", "openai/gpt-5.4", false,
       );
-      expect(out).toEqual({ kind: "same-runtime" });
+      // C1 (fix round 2): `decided` now rides along on an applied same-leg change.
+      expect(out).toEqual({ kind: "same-runtime", decided: sameLegSelection });
       expect(planCalled).toBe(false);
     });
   });
@@ -329,11 +333,13 @@ describe("planAndApplySwitch", () => {
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1");
       let selectorCalled = false;
+      const sameLegSelection = SELECTION("winter-agent"); // hoisted — see the earlier test's own note on why
       const runtime = fakeRuntime({
-        selectRuntimeFor: freshOnlySelector(() => { selectorCalled = true; return SELECTION("winter-agent"); }),
+        selectRuntimeFor: freshOnlySelector(() => { selectorCalled = true; return sameLegSelection; }),
       });
       const out = await planAndApplySwitch(deps({ records, runtime }), "s1", "claude-sonnet-5", false);
-      expect(out).toEqual({ kind: "same-runtime" }); // same leg as recorded — but the selector DID run
+      // same leg as recorded — but the selector DID run; C1 (fix round 2) carries its decision along.
+      expect(out).toEqual({ kind: "same-runtime", decided: sameLegSelection });
       expect(selectorCalled).toBe(true);
     });
   });
@@ -369,6 +375,55 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
       expect(detail).toContain("settings.runtimes.handoff.crossRuntime");
       expect(detail.replace("settings.runtimes.handoff.crossRuntime", "")).not.toMatch(/\bSDK\b|runtime|Claude Agent|Winter Agent/i);
       expect(planCalled).toBe(false);
+    });
+  });
+
+  // m1 (whole-branch review, fix round 2): the off switch must be checked BEFORE the pre-flight
+  // review/prompt for a CROSS-LEG move — checking it after let a disabled deployment see "Switch
+  // model?" (a real, reviewed prompt) and then get refused typed anyway once confirmLossy resent
+  // it, a prompt that lied about what confirming would do.
+  test("crossRuntime: false refuses a CROSS-LEG move before the review ever runs — reviewSwitch is never called", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1"); // recorded leg: winter-agent
+      let reviewCalled = false;
+      const barrier: HandoffBarrier = {
+        plan: async () => { throw new Error("not reached — the off switch refuses before plan()"); },
+        execute: async () => { throw new Error("not reached"); },
+        reviewSwitch: async () => { reviewCalled = true; return { prompt: true, classification: { lossClass: "warned-lossy", warnings: ["would have prompted"], portable: [] } }; },
+      };
+      const out = await planAndApplySwitch(
+        deps({
+          records, barrier,
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }), // a genuine cross-leg move
+          settings: () => ({ runtimes: { handoff: { crossRuntime: false } } }) as unknown as Settings,
+        }),
+        "s1", "claude-sonnet-5", false,
+      );
+      expect(out).toEqual({ kind: "refused", code: "handoff_disabled", detail: expect.stringContaining("turned off") });
+      expect(reviewCalled).toBe(false);
+    });
+  });
+
+  test("crossRuntime: false still runs the review for a SAME-LEG move (the off switch never gates those)", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1"); // recorded leg: winter-agent
+      let reviewCalled = false;
+      const sameLegSelection = SELECTION("winter-agent"); // hoisted — see the earlier test's own note on why
+      const barrier: HandoffBarrier = {
+        plan: async () => { throw new Error("not reached — a same-leg move never reaches plan()/execute()"); },
+        execute: async () => { throw new Error("not reached"); },
+        reviewSwitch: async () => { reviewCalled = true; return { prompt: false }; },
+      };
+      const out = await planAndApplySwitch(
+        deps({
+          records, barrier,
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => sameLegSelection) }), // deepseek stays on Winter — same leg
+          settings: () => ({ runtimes: { handoff: { crossRuntime: false } } }) as unknown as Settings,
+        }),
+        "s1", "deepseek-chat", false,
+      );
+      expect(out).toEqual({ kind: "same-runtime", decided: sameLegSelection });
+      expect(reviewCalled).toBe(true);
     });
   });
 
@@ -471,16 +526,17 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
   test("a SAME-runtime model change is never fenced, flag on or off", async () => {
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1"); // recorded leg: winter-agent
+      const sameLegSelection = SELECTION("winter-agent"); // hoisted — see the earlier test's own note on why
       for (const crossRuntime of [true, false]) {
         const out = await planAndApplySwitch(
           deps({
             records,
-            runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")) }),
+            runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => sameLegSelection) }),
             settings: () => ({ runtimes: { handoff: { crossRuntime } } }) as unknown as Settings,
           }),
           "s1", "claude-sonnet-5", false,
         );
-        expect(out).toEqual({ kind: "same-runtime" });
+        expect(out).toEqual({ kind: "same-runtime", decided: sameLegSelection });
       }
     });
   });
@@ -507,7 +563,11 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1"); // recorded leg: winter-agent (seedRecord's own SELECTION)
       const review = { prompt: true, classification: { lossClass: "warned-lossy", warnings: ["reasoning state may be lost"], portable: ["the visible conversation"] } };
-      const runtime = fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")) }); // deepseek stays on Winter
+      // Hoisted (called from BOTH planAndApplySwitch calls below, not re-`SELECTION()`-ed per call):
+      // `SELECTION()` stamps `decidedAt` at call time, so two separate calls could disagree by a
+      // millisecond and flake the `decided` comparison below.
+      const sameLegSelection = SELECTION("winter-agent");
+      const runtime = fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => sameLegSelection) }); // deepseek stays on Winter
       const refused = await planAndApplySwitch(
         deps({ records, runtime, barrier: fakeBarrierWithReview(review) }),
         "s1", "deepseek-chat", false,
@@ -520,7 +580,45 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
         deps({ records, runtime, barrier: fakeBarrierWithReview(review) }),
         "s1", "deepseek-chat", true,
       );
-      expect(confirmed).toEqual({ kind: "same-runtime" });
+      expect(confirmed).toEqual({ kind: "same-runtime", decided: sameLegSelection });
+    });
+  });
+
+  // C1 (whole-branch review, belt-and-braces, fix round 2): an APPLIED same-leg family change
+  // must leave the 8a record naming what the session ACTUALLY runs, not what it was created with
+  // — `confirmInit`'s own identical patch never fires here (this path never reaches it). A cold
+  // resume reads `record.selection`/`providerId`/`modelRef` directly (`session-driver.ts`'s own
+  // `decideRuntime`), so asserting the record's own final state after each switch IS the same
+  // guarantee a real cold resume relies on — no separate resume simulation needed.
+  test("C1: GPT -> DeepSeek (same leg, confirmed) leaves the record on DeepSeek; DeepSeek -> GPT then leaves it on GPT", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1"); // persisted: winter-agent, providerId "p", modelRef "m"
+      const DEEPSEEK = { ...SELECTION("winter-agent"), providerId: "deepseek", modelRef: "deepseek/deepseek-chat", family: "deepseek" };
+      const GPT = { ...SELECTION("winter-agent"), providerId: "openai", modelRef: "openai/gpt-5.6-sol", family: "openai" };
+      const runtime = fakeRuntime({
+        selectRuntimeFor: freshOnlySelector((model) => (model === "deepseek-chat" ? DEEPSEEK : GPT)),
+      });
+      const barrier = fakeBarrierWithReview({ prompt: false });
+      const d = deps({ records, runtime, barrier });
+
+      const toDeepseek = await planAndApplySwitch(d, "s1", "deepseek-chat", false);
+      expect(toDeepseek).toEqual({ kind: "same-runtime", decided: DEEPSEEK });
+      const afterDeepseek = records.get("s1")!;
+      expect(afterDeepseek.providerId).toBe("deepseek");
+      expect(afterDeepseek.modelRef).toBe("deepseek/deepseek-chat");
+      expect(afterDeepseek.selection).toEqual(DEEPSEEK);
+
+      const toGpt = await planAndApplySwitch(d, "s1", "openai/gpt-5.6-sol", false);
+      expect(toGpt).toEqual({ kind: "same-runtime", decided: GPT });
+      const afterGpt = records.get("s1")!;
+      expect(afterGpt.providerId).toBe("openai");
+      expect(afterGpt.modelRef).toBe("openai/gpt-5.6-sol");
+      expect(afterGpt.selection).toEqual(GPT);
+      // A cold resume after this reads exactly these columns (`session-driver.ts`'s own
+      // `decideRuntime`) — the record no longer names the DeepSeek switch, let alone the original
+      // "p"/"m" it was created with.
+      expect(afterGpt.providerId).not.toBe("deepseek");
+      expect(afterGpt.modelRef).not.toBe("m");
     });
   });
 
@@ -548,15 +646,18 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
       records.patch("s1", "ready", { runtimeKind: "claude-agent", selection: SELECTION("claude-agent") });
       let reviewedWith: RuntimeSelection | undefined;
       const review = { prompt: false, skipped: "same-family" as const };
+      // Hoisted — see the earlier "hoisted" tests' own note: two separate `SELECTION()` calls can
+      // disagree on `decidedAt` by a millisecond and flake this comparison.
+      const officialSelection = SELECTION("claude-agent");
       const out = await planAndApplySwitch(
         deps({
           records,
-          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => officialSelection) }),
           barrier: fakeBarrierWithReview(review, { onReviewSwitch: (_s, requested) => { reviewedWith = requested; } }),
         }),
         "s1", "claude-opus-5", false,
       );
-      expect(out).toEqual({ kind: "same-runtime" });
+      expect(out).toEqual({ kind: "same-runtime", decided: officialSelection });
       // The review DID run (proving the daemon calls it on every change, same-leg or not) and the
       // ROUTER'S OWN answer was "same-family" — the daemon never inspected `requested.family` itself
       // to reach that same conclusion.
@@ -655,17 +756,20 @@ describe("planAndApplySwitch: a throwing reviewSwitch fails safe as a prompt, ne
   test("a throwing review, with confirmLossy: true, applies the switch instead of prompting", async () => {
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1");
+      // Hoisted — see the earlier "hoisted" tests' own note: two separate `SELECTION()` calls can
+      // disagree on `decidedAt` by a millisecond and flake this comparison.
+      const sameLegSelection = SELECTION("winter-agent");
       const out = await planAndApplySwitch(
         deps({
           records,
-          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("winter-agent")) }),
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => sameLegSelection) }),
           barrier: fakeBarrierWhoseReviewThrows(new Error("transient store error")),
         }),
         "s1", "deepseek-chat", true,
       );
       // A same-leg change proceeds as an ordinary same-runtime model change once "confirmed" —
       // barrier.plan()/execute() are never reached for a same-leg switch at all.
-      expect(out).toEqual({ kind: "same-runtime" });
+      expect(out).toEqual({ kind: "same-runtime", decided: sameLegSelection });
     });
   });
 
@@ -686,6 +790,22 @@ describe("planAndApplySwitch: a throwing reviewSwitch fails safe as a prompt, ne
       expect(logs[0]).toContain("unknown");
       expect(logs[0]).not.toContain("a bare string throw");
     });
+  });
+});
+
+// m5 (whole-branch review, fix round 2): the copy naming "the model this switch is about" must
+// never show a raw, possibly-empty value — `session.setModel({model: null})` (resetting to the
+// session's default) is intercepted by `planAndApplySwitch`'s own early return before either
+// warning site that uses this helper is ever reached (see `modelLabelFor`'s own doc comment for
+// why the guard exists anyway: a future refactor, or a caller passing `""` for the same "no
+// override" intent, must still render something readable).
+describe("modelLabelFor", () => {
+  test("an ordinary model string passes through unchanged", () => {
+    expect(modelLabelFor("claude-sonnet-5")).toBe("claude-sonnet-5");
+  });
+
+  test("an empty string renders as \"the default model\", never a blank or a literal null", () => {
+    expect(modelLabelFor("")).toBe("the default model");
   });
 });
 
@@ -1010,6 +1130,82 @@ describe("registerHandoffParticipants: destination.confirmInit (m4 — the plan-
       // NOT the persisted/source values a fallback-to-`target.selection`-being-stale bug would leave.
       expect(record.providerId).not.toBe("p");
       expect(record.modelRef).not.toBe("m");
+    });
+  });
+
+  // m2 (whole-branch review, fix round 2): the RAW as-typed model string `confirmInit` commits to
+  // `store.meta(id).model` BEFORE the destination spawns (P10a-h) used to be keyed by `sessionId`
+  // alone in `pendingHandoffModelString` — a SECOND, overlapping deferred `session.setModel` for
+  // the SAME session (a turn still running when both are issued) clobbered the first call's entry
+  // before either one's `confirmInit` ever read it, so BOTH committed the LATER call's raw string.
+  // Keyed by `(sessionId, decided.modelRef)` as of this fix — two DIFFERENT destination models
+  // never share a slot. Drives the REAL registered `destination` participant (never the module's
+  // private map directly, which nothing outside this file can reach) for two overlapping deferred
+  // plans on the SAME session, and reads each plan's own pre-spawn commit off a store spy.
+  test("m2: two deferred cross-leg setModel calls racing the same running turn each commit their OWN raw model string", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1"); // persisted: winter-agent, providerId "p", modelRef "m"
+      const SELECTION_SONNET = { ...SELECTION("claude-agent"), providerId: "anthropic", modelRef: "anthropic/claude-sonnet-5" };
+      const SELECTION_OPUS = { ...SELECTION("claude-agent"), providerId: "anthropic", modelRef: "anthropic/claude-opus-5" };
+      const runtime = fakeRuntime({
+        selectRuntimeFor: freshOnlySelector((model) => (model === "claude-sonnet-5" ? SELECTION_SONNET : SELECTION_OPUS)),
+      });
+      const never = (): never => { throw new Error("not reached by this test"); };
+      // Never resolves — both calls stay deferred for this test's whole life, exactly the window
+      // during which the pre-fix bug let the second `.set()` clobber the first's entry.
+      const idlePromise = new Promise<void>(() => { /* intentionally never settles */ });
+      const live: LegSession = {
+        sessionId: "s1", backendSessionId: "be-1", mode: "code", state: "live", generation: 1, resumed: true,
+        init: undefined, turnRunning: true, turnStartedAt: Date.now(), done: Promise.resolve(),
+        pendingSends: [], heldDeliveries: [],
+        send: never, steer: never, interrupt: never, compact: never, setModel: never, setPolicy: never,
+        end: never, deliver: never, open: never, idle: () => idlePromise,
+      };
+      const barrier: HandoffBarrier = {
+        plan: async (session, to, opts) => ({
+          session, from: "winter-agent", to,
+          steps: [{ step: 1, name: "lease" }],
+          decorationDoor: "fallback", tempContinuity: "clone-copy",
+          selection: { kind: "servable", selection: opts!.requested!, review: { checked: true } as never },
+          requested: opts?.requested,
+        }),
+        execute: async () => { throw new Error("not reached — this half only exercises planAndApplySwitch's own .set(), never barrier.execute()"); },
+        reviewSwitch: async () => ({ prompt: false }),
+      };
+      const d = deps({ records, barrier, runtime, winter: fakeWinter({ live }) });
+
+      // Call A defers, leaving ITS OWN pending entry set. Call B is a SECOND, overlapping deferred
+      // call for the SAME session, issued before A's own confirmInit ever runs (idle() never
+      // resolves here) — exactly the pre-fix collision window.
+      expect(await planAndApplySwitch(d, "s1", "claude-sonnet-5", true)).toEqual({ kind: "deferred" });
+      expect(await planAndApplySwitch(d, "s1", "claude-opus-5", true)).toEqual({ kind: "deferred" });
+
+      // Read each plan's own pending entry through the REAL registered destination participant.
+      // Both confirmInit attempts die before init (never patching the record's backendSessionId),
+      // so BOTH can address the SAME original session key — a real race has both calls starting
+      // from the identical pre-handoff sessionKey too.
+      const committed: Array<{ sessionId: string; model: string | null }> = [];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let registered: any;
+      registerHandoffParticipants({
+        ...d,
+        runtime: { ...runtime, registerHandoffParticipants: (p) => { registered = p; } },
+        winter: fakeWinterThatOpens({ diesBeforeInit: true }),
+        store: { meta: () => ({ mode: "code", cwd: "/x" }), setModel: (sessionId, model) => { committed.push({ sessionId, model }); } },
+      });
+      const destination = registered.destination as (
+        session: { projectKey: string; sessionId: string }, to: RuntimeKind,
+      ) => { confirmInit(target: HandoffResumeTarget): Promise<{ ok: boolean }> } | undefined;
+
+      const builtA = destination({ projectKey: "pk", sessionId: "be-1" }, "claude-agent");
+      await builtA!.confirmInit({ backendSessionId: "be-1-new-a", selection: SELECTION_SONNET } as unknown as HandoffResumeTarget);
+      const builtB = destination({ projectKey: "pk", sessionId: "be-1" }, "claude-agent");
+      await builtB!.confirmInit({ backendSessionId: "be-1-new-b", selection: SELECTION_OPUS } as unknown as HandoffResumeTarget);
+
+      // Each commits the raw string ITS OWN plan set — never the other's (the pre-m2 bug: a bare
+      // sessionId key meant the SECOND .set() clobbered the first, so BOTH would show "claude-opus-5").
+      expect(committed).toContainEqual({ sessionId: "s1", model: "claude-sonnet-5" });
+      expect(committed).toContainEqual({ sessionId: "s1", model: "claude-opus-5" });
     });
   });
 
