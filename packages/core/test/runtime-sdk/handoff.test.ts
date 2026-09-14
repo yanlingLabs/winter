@@ -12,8 +12,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { HandoffBarrier, HandoffOutcome, HandoffPlan, HandoffResumeTarget, RuntimeKind, RuntimeSelection, SelectionInput, SessionKey } from "@yanlinglabs/winter-runtime-sdk";
-import { planAndApplySwitch, registerHandoffParticipants, type HandoffDeps } from "../../src/runtime-sdk/handoff";
+import type { HandoffBarrier, HandoffOutcome, HandoffPlan, HandoffResumeTarget, RuntimeKind, RuntimeSelection, SelectionAlternative, SelectionInput, SessionKey } from "@yanlinglabs/winter-runtime-sdk";
+import { planAndApplySwitch, registerHandoffParticipants, renderNoCredentialHint, type HandoffDeps } from "../../src/runtime-sdk/handoff";
 import { openRuntimeStateDb, RuntimeSessionRecords } from "../../src/runtime-state";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import type { LegSession, WinterSessionDrivers } from "../../src/runtime-sdk/session-driver";
@@ -562,6 +562,108 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
       // to reach that same conclusion.
       expect(reviewedWith).toBeDefined();
       expect(reviewedWith?.runtimeKind).toBe("claude-agent");
+    });
+  });
+});
+
+// Winter Phase 10b (D1-7, W18-3): the no-credential hint — built FROM the router's own
+// `alternatives`, never a hardcoded provider list.
+describe("renderNoCredentialHint", () => {
+  const NEVER_NAMES_SDK_OR_RUNTIME = /\bSDK\b|runtime|Claude Agent|Winter Agent/i;
+
+  test("every alternative is listed, with winter login --anthropic-key, winter login --anthropic-console and the Providers settings", () => {
+    const alternatives: SelectionAlternative[] = [
+      { providerId: "anthropic", authKind: "api-key", label: "Anthropic API key" },
+      { providerId: "anthropic", authKind: "console-profile", label: "Anthropic Console login" },
+      { providerId: "openrouter", authKind: "api-key", label: "OpenRouter" },
+      { providerId: "bedrock", authKind: "cloud-credential-chain", label: "Amazon Bedrock" },
+      { providerId: "vertex", authKind: "cloud-credential-chain", label: "Google Vertex AI" },
+    ];
+    const hint = renderNoCredentialHint(alternatives, { subscriptionEnabled: false });
+    expect(hint).toContain("winter login --anthropic-key");
+    expect(hint).toContain("winter login --anthropic-console");
+    expect(hint).toContain("Providers settings");
+    expect(hint).toContain("Anthropic API key");
+    expect(hint).toContain("Anthropic Console login");
+    expect(hint).toContain("OpenRouter");
+    expect(hint).toContain("Amazon Bedrock");
+    expect(hint).toContain("Google Vertex AI");
+  });
+
+  test("the claude.ai subscription alternative appears ONLY when subscriptionEnabled is true", () => {
+    const alternatives: SelectionAlternative[] = [
+      { providerId: "anthropic", authKind: "api-key", label: "Anthropic API key" },
+      { providerId: "anthropic", authKind: "claude-oauth", label: "claude.ai subscription" },
+    ];
+    const disabled = renderNoCredentialHint(alternatives, { subscriptionEnabled: false });
+    expect(disabled).not.toContain("claude.ai subscription");
+    const enabled = renderNoCredentialHint(alternatives, { subscriptionEnabled: true });
+    expect(enabled).toContain("claude.ai subscription");
+  });
+
+  test("never matches /\\bSDK\\b|runtime|Claude Agent|Winter Agent/i, with every door present", () => {
+    const alternatives: SelectionAlternative[] = [
+      { providerId: "anthropic", authKind: "api-key", label: "Anthropic API key" },
+      { providerId: "anthropic", authKind: "console-profile", label: "Anthropic Console login" },
+      { providerId: "anthropic", authKind: "claude-oauth", label: "claude.ai subscription" },
+      { providerId: "openrouter", authKind: "api-key", label: "OpenRouter" },
+      { providerId: "bedrock", authKind: "cloud-credential-chain", label: "Amazon Bedrock" },
+      { providerId: "vertex", authKind: "cloud-credential-chain", label: "Google Vertex AI" },
+    ];
+    for (const subscriptionEnabled of [true, false]) {
+      const hint = renderNoCredentialHint(alternatives, { subscriptionEnabled });
+      expect(hint).not.toMatch(NEVER_NAMES_SDK_OR_RUNTIME);
+    }
+  });
+
+  test("an empty alternatives list still names the Providers settings, never a blank hint", () => {
+    const hint = renderNoCredentialHint([], { subscriptionEnabled: false });
+    expect(hint.length).toBeGreaterThan(0);
+    expect(hint).toContain("Providers settings");
+    expect(hint).not.toMatch(NEVER_NAMES_SDK_OR_RUNTIME);
+  });
+});
+
+// Winter Phase 10b (D1-7, W18-3): end to end through `planAndApplySwitch` — the SAME hint reaches
+// the refusal's `detail`, folded onto the router's own `decided.detail`.
+describe("planAndApplySwitch: the no-credential refusal carries the hint", () => {
+  test("a no-credential SelectionRefusal's alternatives are rendered into the refusal detail", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const alternatives: SelectionAlternative[] = [
+        { providerId: "anthropic", authKind: "api-key", label: "Anthropic API key" },
+        { providerId: "anthropic", authKind: "console-profile", label: "Anthropic Console login" },
+      ];
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          runtime: fakeRuntime({
+            selectRuntimeFor: async () => ({ refused: true, reason: "no-credential", detail: "no door can serve claude-opus-5", alternatives }),
+          }),
+        }),
+        "s1", "claude-opus-5", false,
+      );
+      expect(out.kind).toBe("refused");
+      const detail = (out as { detail: string }).detail;
+      expect(detail).toContain("no door can serve claude-opus-5");
+      expect(detail).toContain("winter login --anthropic-key");
+      expect(detail).toContain("winter login --anthropic-console");
+    });
+  });
+
+  test("a refusal with no `no-credential` reason is untouched — no hint appended", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          runtime: fakeRuntime({
+            selectRuntimeFor: async () => ({ refused: true, reason: "mode-forbids-runtime", detail: "chat/dispatch never route to the official leg" }),
+          }),
+        }),
+        "s1", "claude-opus-5", false,
+      );
+      expect(out).toEqual({ kind: "refused", code: "runtime_selection_refused", detail: "chat/dispatch never route to the official leg" });
     });
   });
 });

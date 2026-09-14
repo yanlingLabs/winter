@@ -529,7 +529,16 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
   // persisted-selection review happens later, inside the barrier's own plan (`selectionInputFor`).
   const decided = await deps.runtime.selectRuntimeFor({ mode, model });
   if ("refused" in decided) {
-    return { kind: "refused", code: "runtime_selection_refused", detail: decided.detail };
+    // Winter Phase 10b (D1-7, W18-3): a `no-credential` refusal carries `alternatives` — the
+    // router's own list of every catalog row able to serve the requested model, whichever door.
+    // The hint is built FROM that list, never a hardcoded provider list, so a catalog change
+    // widens it automatically; `officialSubscriptionAuthEnabled` is the daemon's OWN gate on the
+    // claude.ai subscription door, independent of the router's own D14 compile-time approval that
+    // already governs whether that alternative is even in the list at all.
+    const hint = decided.reason === "no-credential" && decided.alternatives !== undefined
+      ? ` ${renderNoCredentialHint(decided.alternatives, { subscriptionEnabled: officialSubscriptionAuthEnabled(deps.settings()) })}`
+      : "";
+    return { kind: "refused", code: "runtime_selection_refused", detail: `${decided.detail}${hint}` };
   }
   // Winter Phase 10b (D1-6, W18-4/W18-20/W18-21; P10b-1/2): the ONE pre-flight review, for EVERY
   // provider/model change, BEFORE the same-runtime shortcut below — a same-LEG family crossing
