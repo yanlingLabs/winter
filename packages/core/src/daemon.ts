@@ -2170,7 +2170,16 @@ export async function startDaemon(opts: {
     ...(runtime === undefined || runtimeSdk === undefined ? {} : ((sdk: WinterRuntimeSdk) => ({
       handoff: {
         planAndApplySwitch: (sessionId: string, model: string | null, confirmLossy: boolean) =>
-          planAndApplySwitch({ runtime: sdk, winter: winterDrivers, records: runtime.records, store, settings: () => settings }, sessionId, model, confirmLossy),
+          // Winter Phase 10b (D1 fix round 4, MINOR 4): `home` — the SAME `winterHome` the
+          // `registerHandoffParticipants` call above already threads through, and for the same
+          // reason. `planAndApplySwitch` itself calls `credentialRefFor(decided.providerId, home,
+          // …)` twice now (the C1 same-leg patch and the zero-turn re-selection), and that function
+          // keeps the old unconditional `anthropic:default` account when `home` is absent — so
+          // without this the record's `authRef` column could persist a DIFFERENT account name than
+          // the one `confirmInit` (which HAS the home) would have written for the very same
+          // provider. Record hygiene only — every spawn recomputes the ref with the home — but the
+          // two writers must not disagree about what they persist.
+          planAndApplySwitch({ runtime: sdk, winter: winterDrivers, records: runtime.records, store, settings: () => settings, home: winterHome }, sessionId, model, confirmLossy),
       },
     }))(runtimeSdk)),
     ...opts.server,

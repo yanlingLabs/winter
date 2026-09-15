@@ -109,7 +109,7 @@ interface Bed {
  * `winter`/`claude` binaries. Mirrors `handoff-parity-e2e.test.ts`'s own bed; each case gets its own
  * so a directory row deleted by one can never affect another.
  */
-async function bootBed(winterBin: string, prefix: string, defaultModel: string): Promise<Bed> {
+async function bootBed(winterBin: string, prefix: string, defaultModel: string, officialAuth?: "console"): Promise<Bed> {
   const home = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
   const openaiFake = await openaiResponsesFake.startOpenAiResponsesFake({
     scenarios: {},
@@ -135,7 +135,15 @@ async function bootBed(winterBin: string, prefix: string, defaultModel: string):
   writeFileSync(join(home, "settings.json"), JSON.stringify({
     schemaVersion: 2,
     provider: { type: "openai-compatible", model: defaultModel, baseUrl: openaiFake.url },
-    runtimes: { winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
+    runtimes: {
+      winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable, winterIdleTimeoutSec: 60,
+      handoff: { crossRuntime: true },
+      // Fix round 4 (MINOR 4): `official.auth` is the ONE setting that makes `credentialRefFor`
+      // answer differently with and without a `home`, which is what the authRef pin below reads.
+      // Only the MINOR-4 bed sets it — a `console` arm would refuse to spawn a real `claude` child
+      // (`console_profile_missing`), so that bed never sends a turn on the official leg.
+      ...(officialAuth === undefined ? {} : { official: { auth: officialAuth } }),
+    },
   }, null, 2));
   const secrets = new FileSecretStore(join(home, "test-secrets"));
   await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test-dirwin" });
@@ -312,5 +320,41 @@ describeWithWinterBinary("the runtime-directory window: a session WITH turns", (
       expect(lastBody).toContain(PRIOR_TEXT); // the conversation carried across the leg
       expect(lastBody).not.toContain("ENC-DUMMY-DIRWIN"); // opaque provider state never crosses
     }, 180_000);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// MINOR 4 — the DAEMON's own wiring passes `home` into `planAndApplySwitch`.
+//
+// `credentialRefFor` keeps the old unconditional `anthropic:default` account when it has no `home`,
+// and consults `officialAuthFamilyFor` when it does. `confirmInit` has always had the home (through
+// `registerHandoffParticipants`); `planAndApplySwitch` did not, so the two writers of the record's
+// `authRef` column could persist different account names for the very same provider. This pins the
+// fix at `daemon.ts`'s own construction site, not at a hand-built deps object.
+//
+// A zero-turn re-selection is the vehicle because it reaches the patch WITHOUT spawning anything on
+// the destination — which matters here, since a `console` auth arm has no profile in a temp home
+// and a real `claude` child would refuse (`console_profile_missing`). No turn is ever sent.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describeWithWinterBinary("MINOR 4: the daemon's own handoff wiring carries WINTER_HOME", (winterBin) => {
+  describeWithClaudeRuntime("so the account persisted in the record is the one the official leg's auth mode names", () => {
+    let bed: Bed;
+    beforeAll(async () => { bed = await bootBed(winterBin, "dirwin-authref-", CATALOG_GPT_MODEL, "console"); });
+    afterAll(async () => { await bed?.close(); });
+
+    test("a zero-turn re-selection onto an Anthropic model records the CONSOLE account, not the default one", async () => {
+      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "dirwin-authref-cwd-")));
+      const { sessionId } = await bed.client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: CATALOG_GPT_MODEL, cwd });
+      await bed.client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+      await bed.client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL });
+
+      const rt = bed.daemon.runtimeState;
+      if ("unavailable" in rt) throw rt.unavailable;
+      const record = rt.records.get(sessionId);
+      expect(record?.runtimeKind).toBe("claude-agent");
+      // `keychain:anthropic:default` here is the pre-fix answer — a `planAndApplySwitch` with no
+      // home. The account name is a LOCATOR, never material (records.ts's own rule).
+      expect(record?.authRef).toBe("keychain:anthropic:console");
+    }, 120_000);
   });
 });

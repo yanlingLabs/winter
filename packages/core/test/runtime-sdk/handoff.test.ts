@@ -1166,6 +1166,49 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
     r.close();
   });
 
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // Fix round 4, MINOR 4 — `home` reaches `credentialRefFor` on the paths THIS file writes `authRef`
+  // from (the zero-turn re-selection and the C1 same-leg patch), so the account name it persists is
+  // the one `confirmInit` — which has always had the home (daemon.ts's `registerHandoffParticipants`
+  // call) — would have written for the same provider. Record hygiene only (every spawn recomputes
+  // the ref), but two writers must not disagree about what they persist.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  const ANTHROPIC_SELECTION: RuntimeSelection = {
+    runtimeKind: "claude-agent", providerId: "anthropic", modelRef: "anthropic/claude-sonnet-5",
+    family: "claude", authFamily: "api-key", sdkVersion: "0.0.4", reason: "test", decidedAt: new Date().toISOString(),
+  };
+  async function reselectAnthropicAuthRef(home: string | undefined): Promise<string | undefined> {
+    return await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      await planAndApplySwitch(
+        deps({
+          records,
+          ...(home === undefined ? {} : { home }),
+          // `runtimes.official.auth: "console"` is what makes the two answers DIFFER: with a home,
+          // `credentialRefFor` consults `officialAuthFamilyFor` and names the console account;
+          // without one it keeps the old unconditional `anthropic:default`.
+          settings: () => ({ runtimes: { handoff: { crossRuntime: true }, official: { auth: "console" } } }) as unknown as Settings,
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => ANTHROPIC_SELECTION) }),
+          barrier: {
+            plan: async (session, to) => ({ session, from: "winter-agent", to, steps: [], selection: { kind: "unchanged", selection: ANTHROPIC_SELECTION } } as unknown as HandoffPlan),
+            execute: async () => ({ kind: "lossy-fork-offered", reason: "there is no canonical transcript at /tmp/x/y.jsonl to validate", step: 5 } as HandoffOutcome),
+            reviewSwitch: async () => ({ prompt: false, skipped: "no-source-turns" }),
+          },
+        }),
+        "s1", "claude-sonnet-5", false,
+      );
+      return records.get("s1")!.authRef;
+    });
+  }
+
+  test("MINOR 4: with a home, the re-selection persists the account the official leg's own auth mode names", async () => {
+    expect(await reselectAnthropicAuthRef(mkdtempSync(join(tmpdir(), "winter-handoff-home-")))).toBe("keychain:anthropic:console");
+  });
+
+  test("MINOR 4: without a home it falls back to the unconditional default account — the gap daemon.ts:2173 closes", async () => {
+    expect(await reselectAnthropicAuthRef(undefined)).toBe("keychain:anthropic:default");
+  });
+
   // Fix round 4 (NIT 5): a patch that throws leaves the LIVE incarnation alone. Before this, the
   // driver was evicted anyway, so the caller's invariant check told the user "the session stays on
   // <model>" after its child had already been killed.
