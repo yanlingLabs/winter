@@ -1614,6 +1614,115 @@ describe("planAndApplySwitch: the no-credential refusal carries the hint", () =>
   });
 });
 
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// Fix round 4, ITEM 6 — a same-leg switch that changes PROVIDER replaces the child.
+//
+// A live Winter child's `Options.provider`/`connection` is fixed at spawn. A model change is told to
+// it hot (`Query.setModel`); a PROVIDER change cannot be, so the child keeps posting to the old
+// endpoint until something else replaces it.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describe("item 6: a same-leg PROVIDER change replaces the live child", () => {
+  const winterSelection = (providerId: string, modelRef: string): RuntimeSelection => ({
+    runtimeKind: "winter-agent", providerId, modelRef, family: "f", authFamily: "api-key",
+    sdkVersion: "0.0.4", reason: "test", decidedAt: new Date().toISOString(),
+  });
+  function idleLive(turnRunning: boolean, idle: () => Promise<void>): LegSession {
+    const never = (): never => { throw new Error("not reached by this test"); };
+    return {
+      sessionId: "s1", backendSessionId: "be-1", mode: "code", state: "live", generation: 1, resumed: true,
+      init: undefined, turnRunning, turnStartedAt: Date.now(), done: Promise.resolve(),
+      pendingSends: [], heldDeliveries: [],
+      send: never, steer: never, interrupt: never, compact: never, setModel: never, setPolicy: never,
+      end: never, deliver: never, open: never, idle,
+    };
+  }
+
+  test("a different providerId with no turn running evicts immediately", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1"); // seeded providerId "p"
+      const evicted: string[] = [];
+      const winter = fakeWinter({ live: idleLive(false, async () => {}) });
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          winter: { ...winter, evict: async (id: string) => { evicted.push(id); } },
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-reasoner")) }),
+          barrier: { plan: async () => { throw new Error("not reached — same leg"); }, execute: async () => { throw new Error("not reached"); }, reviewSwitch: async () => ({ prompt: false }) },
+        }),
+        "s1", "deepseek-chat", false,
+      );
+      expect(out.kind).toBe("same-runtime");
+      expect(evicted).toEqual(["s1"]);
+      // …and the record agrees with the destination, so the caller's invariant guard lets the store
+      // write through — the next `ensure()` then spawns against the NEW provider.
+      expect(records.get("s1")!.providerId).toBe("deepseek");
+    });
+  });
+
+  test("the SAME providerId (an ordinary model change) stays hot — no evict", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1"); // seeded providerId "p"
+      const evicted: string[] = [];
+      const winter = fakeWinter({ live: idleLive(false, async () => {}) });
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          winter: { ...winter, evict: async (id: string) => { evicted.push(id); } },
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("p", "p/other-model")) }),
+          barrier: { plan: async () => { throw new Error("not reached — same leg"); }, execute: async () => { throw new Error("not reached"); }, reviewSwitch: async () => ({ prompt: false }) },
+        }),
+        "s1", "deepseek-chat", false,
+      );
+      expect(out.kind).toBe("same-runtime");
+      expect(evicted).toEqual([]);
+    });
+  });
+
+  test("a running turn is never interrupted — the evict waits for the idle boundary", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const evicted: string[] = [];
+      let resolveIdle: (() => void) | undefined;
+      const idlePromise = new Promise<void>((resolve) => { resolveIdle = resolve; });
+      const winter = fakeWinter({ live: idleLive(true, () => idlePromise) });
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          winter: { ...winter, evict: async (id: string) => { evicted.push(id); } },
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-reasoner")) }),
+          barrier: { plan: async () => { throw new Error("not reached — same leg"); }, execute: async () => { throw new Error("not reached"); }, reviewSwitch: async () => ({ prompt: false }) },
+        }),
+        "s1", "deepseek-chat", false,
+      );
+      expect(out.kind).toBe("same-runtime");
+      expect(evicted).toEqual([]);   // the reply never waited, and the turn was never cut short
+      resolveIdle!();
+      await idlePromise;
+      await Bun.sleep(20);
+      expect(evicted).toEqual(["s1"]); // …and the child WAS replaced, at the boundary
+    });
+  });
+
+  test("no live child at all is a no-op — the next resume reads the record", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const evicted: string[] = [];
+      const winter = fakeWinter({});
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          winter: { ...winter, evict: async (id: string) => { evicted.push(id); } },
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-reasoner")) }),
+          barrier: { plan: async () => { throw new Error("not reached — same leg"); }, execute: async () => { throw new Error("not reached"); }, reviewSwitch: async () => ({ prompt: false }) },
+        }),
+        "s1", "deepseek-chat", false,
+      );
+      expect(out.kind).toBe("same-runtime");
+      expect(evicted).toEqual([]);
+    });
+  });
+});
+
 describe("registerHandoffParticipants: selectionInputFor wiring", () => {
   test("selectionInputFor delegates to WinterRuntimeSdk.buildSelectionInput, with mode from the record's session and persisted from the barrier's own args", async () => {
     await withRs(async (_rs, records) => {

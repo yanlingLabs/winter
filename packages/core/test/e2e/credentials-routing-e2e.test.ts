@@ -301,3 +301,115 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
     rmSync(cwd, { recursive: true, force: true });
   }, 120_000);
 });
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// D1 fix round 4, ITEM 6 — A SAME-LEG SWITCH THAT CHANGES PROVIDER REACHES THE CHILD.
+//
+// This closes CONCERN 1 of Lane P's own report, which this file's B-1 block made newly reachable: a
+// live Winter child's `Options.provider`/`connection` is FIXED AT SPAWN (`session-driver.ts`'s
+// `optionsFor`, once per incarnation). A same-leg model change that also moves PROVIDER is answered
+// `same-runtime`, the store write lands, and `Query.setModel` tells the child its new model — but
+// the child keeps posting to the OLD endpoint with the OLD credential, silently, until an idle reap
+// or a daemon restart happens to replace it. Nothing errors, and `session.list` already shows the
+// new model, so there is no surface on which a user could notice.
+//
+// `planAndApplySwitch`'s same-leg arm now evicts the live child when `decided.providerId` differs
+// (at the next idle boundary if a turn is running), so the NEXT send re-spawns against the new
+// endpoint. A same-provider model change stays hot, exactly as before.
+//
+// TWO loopback fakes, one per provider, each recording its own requests — the assertion is that
+// turn 2 lands on B and NOT on A, which no single-fake bed could distinguish.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describeWithWinterBinary("WS-19 + D1 item 6: a same-leg PROVIDER change routes the NEXT turn to the new endpoint", (winterBin) => {
+  const ZAI_MODEL = "zai/glm-5";
+  let home: string;
+  let daemon: RunningDaemon | undefined;
+  let client: TestClient;
+  let deepseekFake: FakeServer | undefined;
+  let zaiFake: FakeServer | undefined;
+  const deepseekChats: string[] = [];
+  const zaiChats: string[] = [];
+
+  const chatFake = (sink: string[]): Parameters<typeof startFake>[0] => ({
+    routes: [{
+      path: "*",
+      handler: (_req, recorded) => {
+        if (!recorded.path.endsWith("/chat/completions")) {
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        }
+        sink.push(recorded.body);
+        return openaiChatFake.chatStream({ text: ["answered"], finishReason: "stop" });
+      },
+    }],
+  });
+
+  beforeAll(async () => {
+    home = realpathSync(mkdtempSync(join(tmpdir(), "ws19-provider-switch-")));
+    deepseekFake = await startFake(chatFake(deepseekChats));
+    zaiFake = await startFake(chatFake(zaiChats));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({
+      schemaVersion: 2,
+      provider: { type: "openai-compatible", model: DEEPSEEK_MODEL, baseUrl: "http://127.0.0.1:9/v1" },
+      // W19-6's seam, one entry per provider — the ONLY thing pointing either at a fake.
+      providers: { deepseek: { baseUrl: `${deepseekFake.url}/v1` }, zai: { baseUrl: `${zaiFake.url}/v1` } },
+      runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 600, handoff: { crossRuntime: true } },
+    }, null, 2));
+    const secrets = new FileSecretStore(join(home, "test-secrets"));
+    daemon = await startDaemon({ home, secrets, agentProvider: null });
+    if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
+    client = await TestClient.connect(daemon.socketPath);
+    await client.hello(daemon.tokens.harness, "e2e");
+    await client.call(METHODS.credentialSet, { providerId: "deepseek", apiKey: `${SENTINEL}-ds` });
+    await client.call(METHODS.credentialSet, { providerId: "zai", apiKey: `${SENTINEL}-zai` });
+  });
+
+  afterAll(async () => {
+    try { client?.close(); } catch { /* closed */ }
+    const stopping = daemon?.stop();
+    daemon = undefined;
+    await stopping;
+    await deepseekFake?.close();
+    await zaiFake?.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("turn 1 on deepseek, setModel to a zai row, turn 2 hits the zai fake and never deepseek again", async () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ws19-provider-switch-cwd-")));
+    const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: DEEPSEEK_MODEL, cwd });
+    await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+
+    let since = client.events.length;
+    await client.call(METHODS.sessionSend, { sessionId, text: "turn one" });
+    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 45_000);
+    expect(deepseekChats.length).toBeGreaterThan(0);
+    expect(zaiChats.length).toBe(0);
+    // `winterIdleTimeoutSec: 600` above keeps the child alive, so an idle reap can never be the
+    // thing that replaces it — only the switch can.
+    expect(daemon!.winter.get(sessionId)).toBeDefined();
+
+    // Same LEG (both Winter), different PROVIDER. `confirmLossy: true` so the assertion does not
+    // depend on whether this particular pair prompts — the claim under test is where the NEXT turn
+    // goes, not whether the move asked first.
+    await client.call(METHODS.sessionSetModel, { sessionId, model: ZAI_MODEL, confirmLossy: true });
+
+    const rt = daemon!.runtimeState;
+    if ("unavailable" in rt) throw rt.unavailable;
+    expect(rt.records.get(sessionId)?.providerId).toBe("zai");
+    expect(daemon!.winter.legOf(sessionId)).toBe("winter"); // never a runtime move
+    // The child is GONE — replaced, not killed: the next send resumes from the transcript.
+    expect(daemon!.winter.get(sessionId)).toBeUndefined();
+
+    const deepseekBefore = deepseekChats.length;
+    since = client.events.length;
+    await client.call(METHODS.sessionSend, { sessionId, text: "turn two" });
+    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.indexOf(e) >= since, 45_000);
+
+    // THE POINT: turn 2 reached the NEW provider's endpoint, and the old one saw nothing more.
+    expect(zaiChats.length).toBeGreaterThan(0);
+    expect(deepseekChats.length).toBe(deepseekBefore);
+    // …with no restart, and no crash surfacing as a dead runtime.
+    expect(client.events.some((e) => e.type === "agent_error" && JSON.stringify(e).includes("process_death"))).toBe(false);
+
+    rmSync(cwd, { recursive: true, force: true });
+  }, 180_000);
+});

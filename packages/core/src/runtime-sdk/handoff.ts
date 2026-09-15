@@ -1012,6 +1012,9 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
     // `meta.model` unless the record it re-reads actually names `decided` (`recordNamesSelection`).
     // A patch that failed therefore surfaces as a typed `blocked` there, never as a success over a
     // record that disagrees.
+    // Winter Phase 10b (D1 fix round 4, item 6 — Lane P's product finding). Captured BEFORE the C1
+    // patch below overwrites it: the provider the LIVE child was actually spawned against.
+    const providerBeforeSwitch = deps.records.get(sessionId)?.providerId;
     try {
       const current = deps.records.get(sessionId);
       if (current !== undefined) {
@@ -1026,6 +1029,45 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
       }
     } catch (err) {
       deps.log?.(`handoff: C1 same-leg record patch failed for ${sessionId} (${err instanceof Error ? err.name : "unknown"}) — the caller's own invariant check will refuse the switch rather than let meta.model and the record disagree`);
+    }
+    // ══════════════════════════════════════════════════════════════════════════════════════════
+    // Fix round 4, ITEM 6 — A SAME-LEG SWITCH THAT CHANGES PROVIDER MUST REACH THE CHILD.
+    //
+    // Lane P's product finding, newly reachable now that a second provider is actually routable
+    // (W19-1's derived inventory + W19-6's per-provider `baseUrl` seam): a live Winter child's
+    // `Options.provider`/`connection` is FIXED AT SPAWN — `session-driver.ts`'s `optionsFor` builds
+    // it once, per incarnation. A same-leg model change (`openai/gpt-4.1` ->
+    // `openrouter/openai/gpt-4.1`, or gpt -> deepseek) is answered `same-runtime`, the store write
+    // lands, `Query.setModel` tells the child its new MODEL — and the child keeps posting to the
+    // OLD endpoint, with the OLD credential, until an idle reap or a daemon restart happens to
+    // replace it. Silently: nothing errors, and the model name in `session.list` is already right.
+    //
+    // A MODEL change stays hot, exactly as before — `Query.setModel` is the whole mechanism for it,
+    // and evicting for every model change would throw away a warm child for nothing. Only a
+    // PROVIDER change needs a new incarnation, because only the provider is baked into the spawn.
+    //
+    // A RUNNING TURN IS NEVER INTERRUPTED: the evict waits for the same idle boundary the barrier's
+    // own drain step would have waited for. The turn in flight legitimately finishes on the old
+    // provider — it was issued there — and the NEXT one re-spawns. Fire-and-forget for the same
+    // reason the deferred handoff below is: `session.setModel` never delays its reply.
+    //
+    // `evict()` ends the child RESUMABLY (it is `end()`, not a kill) and is documented never to
+    // throw, so the next `send`/`ensure` re-assembles from the record and the transcript — the same
+    // mechanism `tryReselectWithNothingToCarry` relies on, and the same one an idle reap uses.
+    if (providerBeforeSwitch !== undefined && providerBeforeSwitch !== decided.providerId) {
+      const liveChild = deps.winter.get(sessionId);
+      if (liveChild !== undefined) {
+        if (liveChild.turnRunning === true) {
+          deps.log?.(`handoff: ${sessionId} changed provider (${providerBeforeSwitch} -> ${decided.providerId}) while a turn was running — the child will be replaced at the next idle boundary`);
+          void liveChild.idle().then(
+            () => deps.winter.evict(sessionId),
+            () => { /* the session ended before settling — nothing left to replace */ },
+          );
+        } else {
+          deps.log?.(`handoff: ${sessionId} changed provider (${providerBeforeSwitch} -> ${decided.providerId}) — replacing its child so the next turn spawns against the new endpoint`);
+          await deps.winter.evict(sessionId);
+        }
+      }
     }
     return { kind: "same-runtime", decided };
   }
