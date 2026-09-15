@@ -53,6 +53,25 @@ final class CredentialsSectionModelTests: XCTestCase {
         XCTAssertNotNil(model.loadErrorText)
     }
 
+    /// WS-19 §9 A-4, the model half: an unreadable reply reaches the user as "couldn't load", never
+    /// as a silently empty list. The wire half — `list()` THROWING instead of answering `[]` — is
+    /// `LiveCredentialsClientTests`; this pins that the model doesn't then swallow it.
+    func testAMalformedListReplySurfacesAsCouldntLoadRatherThanAnEmptyList() async {
+        let fake = FakeCredentialsClient()
+        fake.listResults = [
+            .success([FakeCredentialsClient.row(providerId: "openai", present: true)]),
+            .failure(CredentialsClientError.malformedListReply),
+        ]
+        let model = CredentialsSectionModel(client: fake)
+        await model.refresh()
+        XCTAssertEqual(model.rows.count, 1)
+
+        await model.refresh()
+
+        XCTAssertNotNil(model.loadErrorText)
+        XCTAssertTrue(model.loadErrorText?.contains("couldn't load credentials") == true)
+    }
+
     // MARK: - save clears the field + refreshes
 
     /// The headline behaviour (W19-12: "the key never reaches a log, `UserDefaults`, or the view

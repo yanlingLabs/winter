@@ -120,6 +120,20 @@ extension RpcError {
     public var credentialDoor: String? { data?["door"]?.stringValue }
 }
 
+/// Failures that are this CLIENT's own reading of a reply, rather than something the daemon
+/// refused. Separate from `RpcError` on purpose: an `RpcError` means the daemon answered "no" and
+/// said why, while this means the daemon answered something this client could not make sense of.
+public enum CredentialsClientError: Error, Equatable, Sendable {
+    /// `credential.list` returned a result with no `providers` array (WS-19 §9 A-4).
+    ///
+    /// This is a THROW rather than an empty list, and the distinction is the whole point of the
+    /// ruling: "no credentials are stored" and "I could not read the reply" look identical on
+    /// screen if the second degrades into the first, and the harm is asymmetric. A user shown a
+    /// spuriously empty list concludes their keys are gone and re-enters them — the one situation
+    /// where a UI bug turns into the user handling their own secrets unnecessarily.
+    case malformedListReply
+}
+
 /// The app's one seam onto the three WS-19 credential RPCs. `CredentialsSectionModel` depends on
 /// THIS protocol, never on `WinterClient` directly.
 ///
@@ -129,7 +143,9 @@ extension RpcError {
 public protocol CredentialsClient: Sendable {
     /// Every credential slot the daemon knows, present or not. A live read on every call (W19-3) —
     /// never a cached boot snapshot, so a key added from the phone or the CLI shows up on the next
-    /// refresh with no restart.
+    /// refresh with no restart. Throws rather than answering `[]` when the reply cannot be read at
+    /// all (`CredentialsClientError.malformedListReply`, WS-19 §9 A-4): an empty list is a claim
+    /// about the user's keys, and must only ever be made when the daemon actually made it.
     func list() async throws -> [CredentialRow]
     /// Stores `apiKey` as `providerId`'s material. Throws on transport/RPC failure OR on a
     /// well-formed `{ok:false}` reply. The key is never echoed back, in a result or an error.
@@ -148,13 +164,19 @@ public final class LiveCredentialsClient: CredentialsClient, Sendable {
         self.client = client
     }
 
-    /// `credential.list` takes no params and returns `{ providers: Row[] }`. A row missing any of
-    /// the six REQUIRED fields is skipped rather than thrown on: one malformed row from a newer
-    /// daemon must not blank the whole credentials section. `kind` is genuinely optional (W19-3);
-    /// `authKinds` defaults to empty since it is display-only here.
+    /// `credential.list` takes no params and returns `{ providers: Row[] }`.
+    ///
+    /// The two malformed-input cases are deliberately asymmetric (WS-19 §9 A-4). A reply with NO
+    /// `providers` array throws — the client could not read the reply at all, and reporting that as
+    /// "no credentials stored" would tell a user their keys are gone. A SINGLE unreadable row is
+    /// skipped — the other rows are perfectly good, and one unknown shape from a newer daemon must
+    /// not blank the whole section. `kind` is genuinely optional (W19-3) and so is never a reason
+    /// to skip; `authKinds` defaults to empty since it is display-only here.
     public func list() async throws -> [CredentialRow] {
         let r = try await client.request("credential.list", params: .object([:]))
-        guard let rows = r["providers"]?.arrayValue else { return [] }
+        guard let rows = r["providers"]?.arrayValue else {
+            throw CredentialsClientError.malformedListReply
+        }
         return rows.compactMap { row in
             guard let providerId = row["providerId"]?.stringValue,
                   let displayName = row["displayName"]?.stringValue,
