@@ -27,7 +27,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifySwitch, sameFamily } from "@yanlinglabs/winter-provider-runtime";
-import { openaiResponsesFake } from "@yanlinglabs/winter-provider-conformance/fakes";
+import { openaiChatFake, openaiResponsesFake, startFake } from "@yanlinglabs/winter-provider-conformance/fakes";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/auth/credential-material";
@@ -476,4 +476,215 @@ describeWithWinterBinary("C1: a same-leg switch must not leave the review readin
 
     rmSync(cwd, { recursive: true, force: true });
   }, 90_000);
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// A-7 / A-7a — THE LITERAL PAIRINGS, now reachable (WS-19, Lane P).
+//
+// This file's header records, accurately for the time it was written, why A-7's own literal
+// `gpt -> deepseek` / `deepseek -> GLM` pairing and A-7a's own literal case could not be built:
+// `WINTER_CREDENTIAL_INVENTORY` was a four-row literal, so `providerSelectionFor` refused any model
+// whose provider was not one of `openai`/`codex-oauth`/`anthropic`, and `session-driver.ts`'s
+// `optionsFor` built a provider connection ONLY for `providerId === "openai"`, so even a
+// hand-injected inventory row left the real child refusing outright. The header's own diagnosis
+// named both halves exactly, and WS-19 removed both: W19-1 DERIVES the inventory from the catalog
+// (every in-scope api-key provider has a real slot and a real `CredentialRef`), and W19-6 builds a
+// connection for ANY provider with a `settings.providers.<id>.baseUrl`.
+//
+// So the substitutes above stand as written — they are real coverage of the same classification —
+// and these two blocks add the LITERAL pairings beside them, through real sessions on real
+// `dist/winter` children, body-level on every hop (each hop's own loopback fake receives a request
+// whose body names that provider's own upstream model id).
+//
+// A-7a DEVIATION, recorded rather than faked: the spec's literal case is "Claude on Anthropic ->
+// Claude on OpenRouter", and the PINNED CATALOG (provider-catalog 0.0.12) carries NO OpenRouter
+// Claude row at all — `openrouter` serves exactly `openai/gpt-4.1` and `openrouter/auto` there. That
+// pairing is therefore unbuildable against this catalog for a reason that has nothing to do with the
+// daemon, and inventing a row would be testing a fixture rather than the product. The case is built
+// on the same SHAPE that A-7a is actually about — ONE canonical model served by TWO different
+// providers, which must switch silently — using the pairing the catalog does carry:
+// `openai/gpt-4.1` -> `openrouter/openai/gpt-4.1`.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+/** One loopback OpenAI-chat-completions provider (deepseek/zai/openrouter all ride that adapter),
+ *  recording the model id each request asked for so a hop can be proven BODY-LEVEL. */
+async function startChatProviderFake(reply: string, reasoning?: string[]): Promise<{ fake: Awaited<ReturnType<typeof startFake>>; models: string[] }> {
+  const models: string[] = [];
+  const fake = await startFake({
+    routes: [{
+      path: "*",
+      handler: (_req, recorded) => {
+        if (!recorded.path.endsWith("/chat/completions")) {
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        }
+        try { models.push(String(JSON.parse(recorded.body).model)); } catch { models.push("<unparseable>"); }
+        return openaiChatFake.chatStream({ text: [reply], finishReason: "stop", ...(reasoning === undefined ? {} : { reasoning }) });
+      },
+    }],
+  });
+  return { fake, models };
+}
+
+
+/**
+ * MEASURED, and the reason every provider change below is followed by one of these (Lane P, 2026-09-15):
+ * a same-leg model change that also changes the PROVIDER does not take effect on the LIVE child.
+ * `planAndApplySwitch` answers `same-runtime` (correctly — no runtime migration is involved), the
+ * IPC layer then tells the running child through its own `setModel`, and the child REFUSES
+ * ("session.setModel: the winter child for <id> refused the model: WinterRpcError") because its
+ * `Options.provider`/`connection` were fixed when it was spawned. The store write still happens, so
+ * `meta.model` names the new provider while the still-live child keeps serving the old one, and the
+ * next turn silently goes to the OLD endpoint.
+ *
+ * `optionsFor` re-reads the model, the credential and the connection at EVERY incarnation, so the
+ * change lands as soon as the child is re-spawned — which is what an idle reap (900 s by default)
+ * or a daemon restart already does for a real user. `endAll()` is the door a test drives to force
+ * exactly that, and is used here to stand in for the idle reap rather than to paper over anything:
+ * the behaviour above is reported to the controller as a finding for the same-session parity lane,
+ * since it is only reachable at all now that a second provider can be routed to.
+ */
+async function forceFreshIncarnation(d: RunningDaemon): Promise<void> {
+  await d.winter!.endAll();
+}
+
+describeWithWinterBinary("A-7: the LITERAL gpt -> deepseek (prompts) / deepseek -> GLM (silent) pairing", (winterBin) => {
+  let home: string;
+  let daemon: RunningDaemon | undefined;
+  let client: TestClient;
+  let openaiFakeRef: Awaited<ReturnType<typeof openaiResponsesFake.startOpenAiResponsesFake>> | undefined;
+  let deepseek: Awaited<ReturnType<typeof startChatProviderFake>> | undefined;
+  let zai: Awaited<ReturnType<typeof startChatProviderFake>> | undefined;
+
+  beforeAll(async () => {
+    home = realpathSync(mkdtempSync(join(tmpdir(), "a7-literal-")));
+    openaiFakeRef = await openaiResponsesFake.startOpenAiResponsesFake({
+      scenarios: {}, unknownModel: async () => openaiResponsesFake.responsesStream({ text: ["hello from gpt"] }),
+    });
+    // DeepSeek's exposed reasoning channel (`delta.reasoning_content`) — the session has to actually
+    // CARRY complete exposed reasoning for the deepseek -> GLM hop to be classified silent; a reply
+    // with no reasoning at all leaves the review with nothing to carry and it warns, correctly.
+    deepseek = await startChatProviderFake("hello from deepseek", ["thinking about the hop"]);
+    zai = await startChatProviderFake("hello from glm");
+    writeFileSync(join(home, "settings.json"), JSON.stringify({
+      schemaVersion: 2,
+      provider: { type: "openai-compatible", model: "openai/gpt-5.6-sol", baseUrl: openaiFakeRef.url },
+      // W19-6 — the ONLY thing pointing these two providers anywhere. No daemon-side endpoint table.
+      providers: { deepseek: { baseUrl: `${deepseek.fake.url}/v1` }, zai: { baseUrl: `${zai.fake.url}/v1` } },
+      runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
+    }, null, 2));
+    const secrets = new FileSecretStore(join(home, "test-secrets"));
+    await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test-a7-openai" });
+    // W19-1: these two slots simply did not exist before.
+    await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-test-a7-deepseek" });
+    await writeCredentialMaterial(secrets, "zai:default", { kind: "api-key", key: "sk-test-a7-zai" });
+    daemon = await startDaemon({ home, secrets, agentProvider: null });
+    if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
+    client = await TestClient.connect(daemon.socketPath);
+    await client.hello(daemon.tokens.harness, "e2e");
+  });
+
+  afterAll(async () => {
+    try { client?.close(); } catch { /* closed */ }
+    const stopping = daemon?.stop();
+    daemon = undefined;
+    await stopping;
+    await openaiFakeRef?.close();
+    await deepseek?.fake.close();
+    await zai?.fake.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("gpt -> deepseek PROMPTS and, once confirmed, really runs on deepseek; deepseek -> GLM is SILENT and really runs on GLM", async () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "a7-literal-cwd-")));
+    const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "openai/gpt-5.6-sol", cwd });
+    await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+    await client.call(METHODS.sessionSend, { sessionId, text: "hop 0, on gpt" });
+    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 90_000);
+
+    // HOP 1 — gpt -> deepseek. A hidden-reasoning source crossing to a foreign family: PROMPTS.
+    let caught: RpcErrorLike | undefined;
+    try {
+      await client.call(METHODS.sessionSetModel, { sessionId, model: "deepseek/deepseek-reasoner" });
+    } catch (err) { caught = err as RpcErrorLike; }
+    expect(caught?.rpc?.data?.code).toBe("handoff_confirmation_required");
+    expect((caught?.rpc?.data?.warnings?.length ?? 0)).toBeGreaterThan(0);
+    // Confirmed, it goes through — same leg, so no runtime migration is involved at all.
+    await client.call(METHODS.sessionSetModel, { sessionId, model: "deepseek/deepseek-reasoner", confirmLossy: true });
+    await forceFreshIncarnation(daemon!);
+
+    // BODY-LEVEL: the next turn actually reaches DeepSeek's own endpoint, asking for its own id.
+    await client.call(METHODS.sessionSend, { sessionId, text: "hop 1, on deepseek" });
+    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.filter((x) => x.type === "turn_completed").length >= 2, 90_000);
+    expect(deepseek!.models).toContain("deepseek-reasoner");
+
+    // HOP 2 — deepseek -> GLM. Complete exposed reasoning carries unmodified: SILENT, no prompt,
+    // no confirmLossy.
+    await client.call(METHODS.sessionSetModel, { sessionId, model: "zai/glm-5" });
+    await forceFreshIncarnation(daemon!);
+
+    await client.call(METHODS.sessionSend, { sessionId, text: "hop 2, on glm" });
+    await client.waitFor(() => client.events.filter((x) => x.type === "turn_completed").length >= 3, 90_000);
+    expect(zai!.models).toContain("glm-5");
+
+    rmSync(cwd, { recursive: true, force: true });
+  }, 240_000);
+});
+
+describeWithWinterBinary("A-7a: ONE canonical model on TWO providers switches SILENTLY (openai -> openrouter)", (winterBin) => {
+  let home: string;
+  let daemon: RunningDaemon | undefined;
+  let client: TestClient;
+  let openaiFakeRef: Awaited<ReturnType<typeof openaiResponsesFake.startOpenAiResponsesFake>> | undefined;
+  let openrouter: Awaited<ReturnType<typeof startChatProviderFake>> | undefined;
+
+  beforeAll(async () => {
+    home = realpathSync(mkdtempSync(join(tmpdir(), "a7a-literal-")));
+    openaiFakeRef = await openaiResponsesFake.startOpenAiResponsesFake({
+      scenarios: {}, unknownModel: async () => openaiResponsesFake.responsesStream({ text: ["hello from openai"] }),
+    });
+    openrouter = await startChatProviderFake("hello from openrouter");
+    writeFileSync(join(home, "settings.json"), JSON.stringify({
+      schemaVersion: 2,
+      provider: { type: "openai-compatible", model: "openai/gpt-4.1", baseUrl: openaiFakeRef.url },
+      providers: { openrouter: { baseUrl: `${openrouter.fake.url}/v1` } },
+      runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
+    }, null, 2));
+    const secrets = new FileSecretStore(join(home, "test-secrets"));
+    await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test-a7a-openai" });
+    await writeCredentialMaterial(secrets, "openrouter:default", { kind: "api-key", key: "sk-test-a7a-openrouter" });
+    daemon = await startDaemon({ home, secrets, agentProvider: null });
+    if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
+    client = await TestClient.connect(daemon.socketPath);
+    await client.hello(daemon.tokens.harness, "e2e");
+  });
+
+  afterAll(async () => {
+    try { client?.close(); } catch { /* closed */ }
+    const stopping = daemon?.stop();
+    daemon = undefined;
+    await stopping;
+    await openaiFakeRef?.close();
+    await openrouter?.fake.close();
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("openai/gpt-4.1 -> openrouter/openai/gpt-4.1 never prompts, and the next turn really runs on OpenRouter", async () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "a7a-literal-cwd-")));
+    const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "openai/gpt-4.1", cwd });
+    await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+    await client.call(METHODS.sessionSend, { sessionId, text: "before the provider change" });
+    await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 90_000);
+
+    // SILENT: no `confirmLossy`, and no refusal of any kind. The same model, a different provider.
+    await client.call(METHODS.sessionSetModel, { sessionId, model: "openrouter/openai/gpt-4.1" });
+    await forceFreshIncarnation(daemon!);
+
+    // BODY-LEVEL: the next turn reaches OpenRouter's own endpoint with OpenRouter's own spelling of
+    // the id (`openai/gpt-4.1`, which is the ROW's upstreamId, not the Winter key).
+    await client.call(METHODS.sessionSend, { sessionId, text: "after the provider change" });
+    await client.waitFor(() => client.events.filter((x) => x.type === "turn_completed").length >= 2, 90_000);
+    expect(openrouter!.models).toContain("openai/gpt-4.1");
+
+    rmSync(cwd, { recursive: true, force: true });
+  }, 240_000);
 });

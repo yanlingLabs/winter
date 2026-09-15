@@ -46,7 +46,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { classifySwitch, type ContinuityEndpoint } from "@yanlinglabs/winter-provider-runtime";
-import { openaiResponsesFake } from "@yanlinglabs/winter-provider-conformance/fakes";
+import { openaiChatFake, openaiResponsesFake, startFake, type FakeServer } from "@yanlinglabs/winter-provider-conformance/fakes";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/auth/credential-material";
@@ -235,5 +235,173 @@ describeWithWinterBinary("A-5 part 2: the chain's LAST hop (gpt -> claude) promp
 
       rmSync(cwd, { recursive: true, force: true });
     }, 90_000);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// Part 3 — THE WHOLE CHAIN, BODY-LEVEL ON EVERY HOP (WS-19, Lane P).
+//
+// This file's header records, accurately for when it was written, why the two middle hops were
+// structurally unreachable: `WINTER_CREDENTIAL_INVENTORY` was a four-row literal so
+// `providerSelectionFor` could never name `deepseek` or `zai`, and `session-driver.ts`'s
+// `optionsFor` built a provider connection ONLY for `providerId === "openai"`, so even the
+// reviewer's own suggested workaround (injecting an inventory row at runtime) left the real child
+// refusing outright. The header's diagnosis named BOTH halves exactly, and WS-19 removed both:
+// W19-1 derives the inventory from the catalog, W19-6 builds a connection for any provider with a
+// `settings.providers.<id>.baseUrl`. Parts 1 and 2 stand as written; this part adds the chain they
+// could not run.
+//
+// "Body-level" here means each hop's own loopback fake received a request whose BODY names that
+// provider's own upstream model id — never inferred from the resolver, never from `session.list`.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+const CATALOG_DEEPSEEK_MODEL = "deepseek/deepseek-reasoner";
+const CATALOG_GLM_MODEL = "zai/glm-5";
+
+/** One loopback OpenAI-chat-completions provider (deepseek and zai both ride that adapter),
+ *  recording the model id each request asked for. */
+async function startChainChatFake(reply: string, reasoning?: string[]): Promise<{ fake: FakeServer; models: string[] }> {
+  const models: string[] = [];
+  const fake = await startFake({
+    routes: [{
+      path: "*",
+      handler: (_req, recorded) => {
+        if (!recorded.path.endsWith("/chat/completions")) {
+          return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        }
+        try { models.push(String(JSON.parse(recorded.body).model)); } catch { models.push("<unparseable>"); }
+        return openaiChatFake.chatStream({ text: [reply], finishReason: "stop", ...(reasoning === undefined ? {} : { reasoning }) });
+      },
+    }],
+  });
+  return { fake, models };
+}
+
+describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude, every hop on its own provider", (winterBin) => {
+  describeWithClaudeRuntime("the chain", () => {
+    let home: string;
+    let daemon: RunningDaemon | undefined;
+    let client: TestClient;
+    let openaiFakeRef: Awaited<ReturnType<typeof openaiResponsesFake.startOpenAiResponsesFake>> | undefined;
+    let anthropicFakeServer: FakeServer | undefined;
+    let deepseek: Awaited<ReturnType<typeof startChainChatFake>> | undefined;
+    let glm: Awaited<ReturnType<typeof startChainChatFake>> | undefined;
+
+    beforeAll(async () => {
+      home = realpathSync(mkdtempSync(join(tmpdir(), "five-hop-chain-")));
+      openaiFakeRef = await openaiResponsesFake.startOpenAiResponsesFake({
+        scenarios: {}, unknownModel: async () => openaiResponsesFake.responsesStream({ text: ["hello from gpt"] }),
+      });
+      const { startFake: startAnthropic, anthropicFake } = await import("@yanlinglabs/winter-provider-conformance");
+      anthropicFakeServer = await startAnthropic({
+        routes: [{
+          path: "*",
+          handler: async (_req, recorded) => (recorded.path === "/v1/messages" && recorded.method === "POST"
+            ? anthropicFake.anthropicTurnResponse({ blocks: [{ type: "text", chunks: ["hello from claude"] }], stopReason: "end_turn" } as AnthropicTurnScript)
+            : new Response("{}", { status: 200, headers: { "content-type": "application/json" } })),
+        }],
+      });
+      // DeepSeek's exposed reasoning channel: the deepseek -> GLM hop is only classified SILENT when
+      // the session actually carries complete exposed reasoning, so the fake has to produce some.
+      deepseek = await startChainChatFake("hello from deepseek", ["reasoning on the deepseek hop"]);
+      glm = await startChainChatFake("hello from glm", ["reasoning on the glm hop"]);
+      writeFileSync(join(home, "settings.json"), JSON.stringify({
+        schemaVersion: 2,
+        provider: { type: "openai-compatible", model: CATALOG_GPT_MODEL, baseUrl: openaiFakeRef.url },
+        providers: { deepseek: { baseUrl: `${deepseek.fake.url}/v1` }, zai: { baseUrl: `${glm.fake.url}/v1` } },
+        runtimes: {
+          winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable,
+          winterIdleTimeoutSec: 60, handoff: { crossRuntime: true },
+        },
+      }, null, 2));
+      const secrets = new FileSecretStore(join(home, "test-secrets"));
+      await writeCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.openai, { kind: "api-key", key: "sk-test-chain-openai" });
+      await writeCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: "sk-test-chain-anthropic" });
+      // W19-1: these two slots did not exist before WS-19.
+      await writeCredentialMaterial(secrets, "deepseek:default", { kind: "api-key", key: "sk-test-chain-deepseek" });
+      await writeCredentialMaterial(secrets, "zai:default", { kind: "api-key", key: "sk-test-chain-zai" });
+      daemon = await startDaemon({
+        home, secrets, agentProvider: null,
+        officialConnectionOverride: () => ({ explicitConnectionEnv: { ANTHROPIC_BASE_URL: anthropicFakeServer!.url }, authFamily: "custom" }),
+      });
+      if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
+      client = await TestClient.connect(daemon.socketPath);
+      await client.hello(daemon.tokens.harness, "e2e");
+    });
+
+    afterAll(async () => {
+      try { client?.close(); } catch { /* closed */ }
+      const stopping = daemon?.stop();
+      daemon = undefined;
+      await stopping;
+      await openaiFakeRef?.close();
+      await anthropicFakeServer?.close();
+      await deepseek?.fake.close();
+      await glm?.fake.close();
+      rmSync(home, { recursive: true, force: true });
+    });
+
+    test("every hop runs on its own provider, and the prompts fall exactly where W18-19's table says", async () => {
+      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "five-hop-chain-cwd-")));
+      const turns = (): number => client.events.filter((e) => e.type === "turn_completed").length;
+      // A same-leg provider change does not reach the LIVE child (its `Options.provider`/`connection`
+      // were fixed at spawn — measured, and recorded in `session-set-model-review.test.ts`'s own
+      // A-7 block); `optionsFor` re-reads all three at every incarnation, so forcing a fresh one is
+      // what an idle reap already does for a real user.
+      const freshIncarnation = async (): Promise<void> => { await daemon!.winter!.endAll(); };
+
+      // HOP 0 — claude, on the OFFICIAL leg.
+      const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: CATALOG_CLAUDE_MODEL, cwd });
+      await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+      expect(daemon!.winter!.legOf(sessionId)).toBe("official");
+      await client.call(METHODS.sessionSend, { sessionId, text: "hop 0, on claude" });
+      await client.waitFor(() => turns() >= 1, 120_000);
+      expect(anthropicFakeServer!.requests.some((r) => r.path === "/v1/messages")).toBe(true);
+
+      // HOP 1 — claude -> deepseek. A native/summary-only source crossing to a foreign family, AND
+      // a cross-runtime move: PROMPTS (part 1's own table).
+      let caught: RpcErrorLike | undefined;
+      try {
+        await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_DEEPSEEK_MODEL });
+      } catch (err) { caught = err as RpcErrorLike; }
+      expect(caught?.rpc?.data?.code).toBe("handoff_confirmation_required");
+      await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_DEEPSEEK_MODEL, confirmLossy: true });
+      expect(daemon!.winter!.legOf(sessionId)).toBe("winter");
+      await freshIncarnation();
+      await client.call(METHODS.sessionSend, { sessionId, text: "hop 1, on deepseek" });
+      await client.waitFor(() => turns() >= 2, 120_000);
+      expect(deepseek!.models).toContain("deepseek-reasoner");
+
+      // HOP 2 — deepseek -> GLM. Complete exposed reasoning carries unmodified: SILENT.
+      await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_GLM_MODEL });
+      await freshIncarnation();
+      await client.call(METHODS.sessionSend, { sessionId, text: "hop 2, on glm" });
+      await client.waitFor(() => turns() >= 3, 120_000);
+      expect(glm!.models).toContain("glm-5");
+
+      // HOP 3 — GLM -> gpt. Still SILENT: the exposed state carries as a tag on a hidden-reasoning
+      // destination.
+      await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_GPT_MODEL });
+      await freshIncarnation();
+      await client.call(METHODS.sessionSend, { sessionId, text: "hop 3, on gpt" });
+      await client.waitFor(() => turns() >= 4, 120_000);
+      expect(openaiFakeRef!.requests.some((r) => r.path.includes("/responses"))).toBe(true);
+
+      // HOP 4 — gpt -> claude. PROMPTS, and moves back to the official leg.
+      let caught2: RpcErrorLike | undefined;
+      try {
+        await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL });
+      } catch (err) { caught2 = err as RpcErrorLike; }
+      expect(caught2?.rpc?.data?.code).toBe("handoff_confirmation_required");
+
+      // ONE conversation throughout: every hop's user message is still in the session's own log.
+      const history = await client.call<{ events: Array<{ type: string; text?: string }> }>(METHODS.sessionHistory, { sessionId, limit: 500 });
+      const userTexts = history.events.filter((e) => e.type === "user_message").map((e) => e.text ?? "");
+      for (const hop of ["hop 0, on claude", "hop 1, on deepseek", "hop 2, on glm", "hop 3, on gpt"]) {
+        expect(userTexts.some((t) => t.includes(hop))).toBe(true);
+      }
+
+      rmSync(cwd, { recursive: true, force: true });
+    }, 600_000);
   });
 });
