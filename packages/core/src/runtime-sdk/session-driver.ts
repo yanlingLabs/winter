@@ -47,12 +47,13 @@ import type { RuntimeSessionRecord, RuntimeSessionRecords } from "../runtime-sta
 import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { winterOptionsFromSettings, type Settings } from "../settings";
+import { providerBaseUrlFor, winterOptionsFromSettings, type Settings } from "../settings";
 import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
 import { clearSession } from "./diff-attach";
 import { credentialPresenceFrom, credentialRefFor } from "./keychain";
+import { apiKeyProviderIsUnauthenticated, missingCredentialDetail } from "./credentials";
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
 import { attachOfficialSession, attachWinterSession } from "./messaging";
 import { buildWinterOptions, permissionModeFor } from "./mode-options";
@@ -401,10 +402,45 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // never had an endpoint allowlist ("arbitrary API models are legitimate there" — the SAME
       // doc comment `runtime-provider.ts` cites). A no-op for an ordinary public HTTPS endpoint
       // (the address-class check never triggers for one).
-      const connection: ProviderConnectionConfig | undefined =
+      //
+      // WS-19 (W19-6): the SAME connection shape is now available for ANY provider, through
+      // `settings.providers.<catalogId>.baseUrl`. There is deliberately NO daemon-side endpoint
+      // table: the catalog ships each provider's own `defaultEndpoints` and the SDK's
+      // `connectionFrom` copies them for the multi-provider adapters (deepseek/zai/openrouter/xai
+      // all ride `winter.openai-chat-completions`), so an unconfigured provider needs no
+      // `connection` at all and gets the right endpoint anyway. This block is for the case the SDK
+      // cannot answer — a self-hosted or proxied endpoint, and the loopback fakes the parity e2e
+      // tests point at.
+      //
+      // THE LEGACY ARM KEEPS PRECEDENCE and stays byte-identical: a home that configured BYO OpenAI
+      // through `settings.provider` is unaffected by this block existing, even if it ALSO happens to
+      // carry a `providers.openai.baseUrl`. Read hot, per incarnation, like everything else here.
+      const legacyOpenAiConnection: ProviderConnectionConfig | undefined =
         settings?.provider?.type === "openai-compatible" && selection?.providerId === "openai"
           ? { baseUrl: settings.provider.baseUrl, endpointOrigin: "user", local: true }
           : undefined;
+      const perProviderBaseUrl = selection === undefined ? undefined : providerBaseUrlFor(settings, selection.providerId);
+      const connection: ProviderConnectionConfig | undefined =
+        legacyOpenAiConnection
+        ?? (perProviderBaseUrl === undefined ? undefined : { baseUrl: perProviderBaseUrl, endpointOrigin: "user", local: true });
+      // WS-19 (W19-7) — THE PRE-FLIGHT CREDENTIAL REFUSAL, and the reason it lives HERE rather than
+      // in `create()`: this is the one place every incarnation passes (a fresh create, a resume
+      // after an idle reap, a resume after a daemon restart), and it runs BEFORE the child is
+      // spawned. Without it, W19-1's derived inventory would happily name a provider with an empty
+      // slot, the child would fall through Ruling E-1's rung 2 to `{kind:"none"}`, and the user
+      // would get a vendor 401 in the middle of a turn instead of a sentence telling them what to
+      // add and where.
+      //
+      // The EXEMPTION is today's behaviour, preserved byte-for-byte: the legacy `openai-compatible`
+      // arm (a BYO `settings.provider.baseUrl`) is never refused, because a self-hosted or LAN
+      // endpoint — Ollama, LM Studio, a local gateway — legitimately wants no key at all, and that
+      // configuration works today. The NEW per-provider `providers.<id>.baseUrl` arm is NOT exempt:
+      // nothing depends on it yet, and pointing a provider at your own proxy does not make its
+      // credential optional. A `local-none` provider is excluded a layer down, by auth family.
+      if (legacyOpenAiConnection === undefined && selection !== undefined
+          && apiKeyProviderIsUnauthenticated(selection.providerId, credentials.byProvider[selection.providerId] !== undefined)) {
+        throw new WinterLegRefusal("runtime_selection_refused", missingCredentialDetail(selection.providerId));
+      }
       const capSession: CapabilitySession = {
         sessionId, mode, cwd,
         roots: deps.rootsOf(sessionId),

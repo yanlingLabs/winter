@@ -21,6 +21,6 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@yanlinglabs/winter-provider-conformance": "0.0.7"
+    "@yanlinglabs/winter-provider-conformance": "0.0.12"
   }
 }

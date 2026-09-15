@@ -26,6 +26,7 @@ import {
   ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME,
   ANTHROPIC_CREDENTIAL_SECRET_NAME,
   credentialInventory,
+  PROVIDER_AUTH_FAMILY,
   type CredentialSlot,
 } from "./keychain";
 
@@ -297,4 +298,36 @@ export function credentialDisplayNameFor(providerId: string): string {
   const tool = TOOL_ROWS.find((r) => r.providerId === providerId);
   if (tool !== undefined) return tool.displayName;
   return loadCatalog().providers.find((p) => p.id === providerId)?.displayName ?? providerId;
+}
+
+/**
+ * W19-7's refusal text: the existing no-credential hint (`handoff.ts`'s `renderNoCredentialHint`,
+ * which renders the ROUTER's own `alternatives` for a model) generalised to the case this one
+ * answers — we know exactly WHICH provider this session resolved to, and it has nothing stored.
+ *
+ * Names the provider and all THREE doors ruling R-10b-12 opened, because a user who cannot reach the
+ * Mac right now still has two of them. Never names an SDK or a runtime (R-10b-4).
+ *
+ * The leading `no-credential:` is the machine-readable half: `WinterLegRefusal` carries a `code`
+ * and a message and has no room for the router's separate `reason` field, so the reason is spelled
+ * at the head of the detail where a client (and the tests) can key on it.
+ */
+export function missingCredentialDetail(providerId: string): string {
+  return `no-credential: ${credentialDisplayNameFor(providerId)} has no stored credential — add one with \`winter credentials set ${providerId}\`, from the app's Providers settings, or from Winter on your iPhone`;
+}
+
+/**
+ * W19-7's gate: does this provider need a credential Winter does not have?
+ *
+ * TRUE only for a provider whose auth family is a bare API KEY (`PROVIDER_AUTH_FAMILY`, itself
+ * derived) and whose slot is empty. Everything else is false, and each exclusion is load-bearing:
+ * a `local-none` provider (Ollama, LM Studio, a local gateway) has no row in that map at all and
+ * must never be refused for lacking a key it does not want; `codex-oauth` is `"custom"` and signs in
+ * its own way; a provider Winter has no inventory row for is the child's question, not ours.
+ */
+export function apiKeyProviderIsUnauthenticated(providerId: string, present: boolean): boolean {
+  if (present) return false;
+  const slot = credentialInventory().find((s) => s.provider === providerId);
+  if (slot === undefined) return false;
+  return PROVIDER_AUTH_FAMILY[providerId] === "api-key";
 }

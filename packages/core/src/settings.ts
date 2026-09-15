@@ -449,6 +449,34 @@ export const Settings = z.object({
   // OPTIONAL (not prefaulted) for the same reason `runtimes` is: a prefaulted block becomes REQUIRED on
   // the inferred `Settings` type and breaks every hand-built settings literal. Absent block = default
   // ON; readers go through `legacyProjectFilesReadEnabled()` below, never the raw block.
+  /**
+   * WS-19 (W19-6): per-provider connection overrides, keyed by the CATALOG provider id
+   * (`deepseek`, `zai`, `openrouter`, …) — the same ids `credential.list` reports and
+   * `credential.set` writes a slot for.
+   *
+   * There is NO daemon-side endpoint table and there must never be one: the catalog ships every
+   * provider's own `defaultEndpoints`, and the SDK's `connectionFrom` copies them for the
+   * multi-provider adapters (deepseek/zai/openrouter/xai all ride `winter.openai-chat-completions`).
+   * This block exists only for the case the SDK cannot answer — a self-hosted or proxied endpoint
+   * for a provider whose shipped endpoint is not where the user's account lives, and the loopback
+   * fakes the parity e2e tests point at.
+   *
+   * ABSENT IS THE NORMAL CASE. An entry without a `baseUrl` is the same as no entry: the session
+   * gets no `connection` at all and the SDK fills the catalog endpoint.
+   *
+   * `settings.provider.baseUrl` (the legacy single-provider `openai-compatible` arm) KEEPS
+   * PRECEDENCE for `openai` and is byte-identical to what it was — a home that configured BYO
+   * OpenAI that way is untouched by this block existing.
+   *
+   * Read HOT at every incarnation (`session-driver.ts`'s `optionsFor` calls `deps.settings()`), so
+   * adding or changing an endpoint takes effect on the next turn with no daemon restart — the
+   * project's standing rule.
+   *
+   * `.url()` rather than a bare string, unlike `runtimes.winterExecutable`: a malformed endpoint
+   * cannot be treated as "absent" the way a blank executable path can, because the only other
+   * reading is "send the user's credential to whatever this parses as".
+   */
+  providers: z.record(z.string(), z.object({ baseUrl: z.string().url().optional() })).optional(),
   legacy: z.object({ readLegacyProjectFiles: z.boolean().default(true) }).optional(),
 });
 export type Settings = z.infer<typeof Settings>;
@@ -457,6 +485,15 @@ export type Settings = z.infer<typeof Settings>;
  *  means ON (the shipped default); only an explicit `false` turns the legacy read-only fallback off. */
 export function legacyProjectFilesReadEnabled(settings: Settings | null | undefined): boolean {
   return settings?.legacy?.readLegacyProjectFiles ?? true;
+}
+
+/** WS-19 (W19-6): the ONE reader of `providers.<id>.baseUrl` — absent block, absent entry, absent
+ *  key and a blank string all mean "no override", so callers never have to spell that themselves.
+ *  The legacy `provider.baseUrl` arm is NOT consulted here; `session-driver.ts` checks it first and
+ *  only reaches this when it did not apply. */
+export function providerBaseUrlFor(settings: Settings | null | undefined, providerId: string): string | undefined {
+  const url = settings?.providers?.[providerId]?.baseUrl;
+  return url === undefined || url.length === 0 ? undefined : url;
 }
 
 /**
