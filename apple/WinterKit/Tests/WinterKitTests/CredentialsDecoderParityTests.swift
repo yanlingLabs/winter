@@ -14,8 +14,9 @@ import WinterProtocol
 /// Without this pin the two drift silently, and the shape the drift takes is a row quietly
 /// vanishing from one surface — a credential the user stored on the Mac and cannot see on the
 /// phone, or the reverse. The fixture is built to sit on every leniency the two decoders have to
-/// agree about: `anthropic` twice (§9 A-1, kept apart only by the composite `id`), a tool row with
-/// no `kind`, a row missing the required `displayName` that is SKIPPED, a row with no `authKinds`
+/// agree about: `anthropic` twice (§9 A-1, kept apart only by the composite `id`), both tool rows
+/// (§9 A-2 — Exa present with no `kind`, Web search absent with one), a row
+/// missing the required `displayName` that is SKIPPED, a row with no `authKinds`
 /// at all, and a row whose `authKinds` holds a non-string element. The last two are where a
 /// synthesized `Decodable` would throw the whole row away instead of shrugging.
 final class CredentialsDecoderParityTests: XCTestCase {
@@ -34,28 +35,32 @@ final class CredentialsDecoderParityTests: XCTestCase {
             "anthropic|credential.set|api-key",
             "anthropic|provider.login|bearer",
             "exa|credential.set|",
+            "web-search|credential.set|api-key",
             "deepseek|credential.set|api-key",
             "zai|credential.set|api-key",
             "openrouter|credential.set|api-key",
             "codex-oauth|cli-oauth|oauth",
         ])
         XCTAssertEqual(rows.map(\.displayName), [
-            "OpenAI", "Anthropic", "Anthropic (Console)", "Exa", "DeepSeek", "Z.ai", "OpenRouter", "ChatGPT (Codex)",
+            "OpenAI", "Anthropic", "Anthropic (Console)", "Exa", "Web search", "DeepSeek", "Z.ai", "OpenRouter", "ChatGPT (Codex)",
         ])
-        XCTAssertEqual(rows.map(\.group), ["provider", "provider", "provider", "tool", "provider", "provider", "provider", "provider"])
+        XCTAssertEqual(rows.map(\.group), [
+            "provider", "provider", "provider", "tool", "tool", "provider", "provider", "provider", "provider",
+        ])
         XCTAssertEqual(rows.map(\.authKinds), [
-            ["api-key"], ["api-key"], ["oauth"], ["api-key"], ["api-key"], [], ["api-key"], ["oauth"],
+            ["api-key"], ["api-key"], ["oauth"], ["api-key"], ["api-key"], ["api-key"], [], ["api-key"], ["oauth"],
         ])
-        XCTAssertEqual(rows.map(\.manageable), [true, true, false, true, true, true, true, false])
-        XCTAssertEqual(rows.map(\.present), [true, true, true, true, false, false, true, true])
+        XCTAssertEqual(rows.map(\.manageable), [true, true, false, true, true, true, true, true, false])
+        XCTAssertEqual(rows.map(\.present), [true, true, true, true, false, false, false, true, true])
         XCTAssertEqual(rows.map(\.risk), [
-            "approved", "approved", "approved", "approved", "review-required", "review-required", "review-required", "approved",
+            "approved", "approved", "approved", "approved", "approved",
+            "review-required", "review-required", "review-required", "approved",
         ])
         // §9 A-3, spelled out rather than called: the Mac's `credentialRowOffersRemove` lives in the
         // app module (`apple/Winter/Sources/Dashboard/panes/CredentialsSection.swift`), which this
         // kit-level target does not link. The rule itself is the thing under test.
         XCTAssertEqual(rows.map { $0.present && $0.door != "provider.login" },
-                       [true, true, false, true, false, false, true, true])
+                       [true, true, false, true, false, false, false, true, true])
     }
 
     /// A non-empty `providers` array in which NOT ONE row decodes throws, on the same bytes

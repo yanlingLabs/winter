@@ -418,33 +418,38 @@ enum CredentialFixture {
     }
 
     /// The agreed decode of that fixture — the table BOTH decoders must produce. Its interesting
-    /// entries: `anthropic` twice (A-1, kept apart only by the composite id), a tool row with no
-    /// `kind`, a row missing `displayName` that is SKIPPED, a row with no `authKinds` at all
-    /// (`[]`, not a skip), and a row whose `authKinds` holds a non-string element (dropped, not a
-    /// skip) — the last two being exactly where a synthesized `Decodable` would throw the row away.
+    /// entries: `anthropic` twice (A-1, kept apart only by the composite id), BOTH tool rows (A-2:
+    /// Exa present with no `kind`, Web search absent with one), a row missing `displayName` that is
+    /// SKIPPED, a row with no `authKinds` at all (`[]`, not a skip), and a row whose `authKinds`
+    /// holds a non-string element (dropped, not a skip) — the last two being exactly where a
+    /// synthesized `Decodable` would throw the row away.
     static let expectedIDs = [
         "openai|credential.set|api-key",
         "anthropic|credential.set|api-key",
         "anthropic|provider.login|bearer",
         "exa|credential.set|",
+        "web-search|credential.set|api-key",
         "deepseek|credential.set|api-key",
         "zai|credential.set|api-key",
         "openrouter|credential.set|api-key",
         "codex-oauth|cli-oauth|oauth",
     ]
     static let expectedDisplayNames = [
-        "OpenAI", "Anthropic", "Anthropic (Console)", "Exa", "DeepSeek", "Z.ai", "OpenRouter", "ChatGPT (Codex)",
+        "OpenAI", "Anthropic", "Anthropic (Console)", "Exa", "Web search", "DeepSeek", "Z.ai", "OpenRouter", "ChatGPT (Codex)",
     ]
-    static let expectedGroups = ["provider", "provider", "provider", "tool", "provider", "provider", "provider", "provider"]
+    static let expectedGroups = [
+        "provider", "provider", "provider", "tool", "tool", "provider", "provider", "provider", "provider",
+    ]
     static let expectedAuthKinds = [
-        ["api-key"], ["api-key"], ["oauth"], ["api-key"], ["api-key"], [], ["api-key"], ["oauth"],
+        ["api-key"], ["api-key"], ["oauth"], ["api-key"], ["api-key"], ["api-key"], [], ["api-key"], ["oauth"],
     ]
-    static let expectedManageable = [true, true, false, true, true, true, true, false]
-    static let expectedPresent = [true, true, true, true, false, false, true, true]
+    static let expectedManageable = [true, true, false, true, true, true, true, true, false]
+    static let expectedPresent = [true, true, true, true, false, false, false, true, true]
     static let expectedRisks = [
-        "approved", "approved", "approved", "approved", "review-required", "review-required", "review-required", "approved",
+        "approved", "approved", "approved", "approved", "approved",
+        "review-required", "review-required", "review-required", "approved",
     ]
     /// A-3: present && door != "provider.login" — so the console slot is out, the absent rows are
-    /// out, and Codex is IN despite `manageable: false`.
-    static let expectedOffersRemove = [true, true, false, true, false, false, true, true]
+    /// out (the new Web search row among them), and Codex is IN despite `manageable: false`.
+    static let expectedOffersRemove = [true, true, false, true, false, false, false, true, true]
 }
