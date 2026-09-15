@@ -65,15 +65,27 @@ const CATALOG_CLAUDE_MODEL = "claude-sonnet-5";
 // from the REAL catalog resolver + the REAL classifySwitch (never a fixture).
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 describe("A-5 part 1: the five-hop chain's prompt rule, against the REAL daemon resolver (no fixture)", () => {
-  const resolve = daemonResolveEndpoint();
-  const endpoints: Record<"claude" | "deepseek" | "glm" | "gpt", ContinuityEndpoint> = {
-    claude: resolve({ providerId: "anthropic", modelKey: "anthropic/claude-sonnet-5", family: "anthropic" }),
-    deepseek: resolve({ providerId: "deepseek", modelKey: "deepseek/deepseek-reasoner", family: "deepseek" }),
-    glm: resolve({ providerId: "zai", modelKey: "zai/glm-5", family: "glm" }),
-    gpt: resolve({ providerId: "openai", modelKey: "openai/gpt-5.6-sol", family: "openai" }),
+  // Minor 5 (review-lane-d2-fix1.md): these `family` strings are HARDCODED literals, not derived
+  // from a real `selectRuntimeFor` decision — there is no live daemon at this point to decide one
+  // from. `createEndpointResolver` (provider-runtime 0.0.11+) memoizes by `modelKey` ALONE and keeps
+  // whichever family the FIRST caller in the PROCESS supplied, so this is a real memo-poisoning
+  // hazard for any OTHER test in the same `bun test` invocation that resolves the SAME model ids
+  // with a DIFFERENT (real) family. Mitigated, not eliminated, by computing fresh inside each `test`
+  // (module/describe-scope code runs during COLLECTION, before any test body, which is the worse
+  // ordering) rather than once at describe scope — labeled here per that review's own instruction,
+  // since a real decision genuinely isn't available without spinning up a daemon per case.
+  const endpointsFresh = (): Record<"claude" | "deepseek" | "glm" | "gpt", ContinuityEndpoint> => {
+    const resolve = daemonResolveEndpoint();
+    return {
+      claude: resolve({ providerId: "anthropic", modelKey: "anthropic/claude-sonnet-5", family: "anthropic" }),
+      deepseek: resolve({ providerId: "deepseek", modelKey: "deepseek/deepseek-reasoner", family: "deepseek" }),
+      glm: resolve({ providerId: "zai", modelKey: "zai/glm-5", family: "glm" }),
+      gpt: resolve({ providerId: "openai", modelKey: "openai/gpt-5.6-sol", family: "openai" }),
+    };
   };
 
   test("catalog premises this whole table rests on (measured against SDK 0.0.11, the amendment's own GLM overlay)", () => {
+    const endpoints = endpointsFresh();
     expect(endpoints.gpt.readableState).toBe("none"); // hidden reasoning source
     expect(endpoints.gpt.continuation).not.toBe("none");
     expect(endpoints.claude.readableState).not.toBe("full-exposed"); // native replay only within claude
@@ -83,17 +95,20 @@ describe("A-5 part 1: the five-hop chain's prompt rule, against the REAL daemon 
   });
 
   test("claude -> deepseek PROMPTS (a native/summary-only source crossing to a foreign family is warned-lossy)", () => {
+    const endpoints = endpointsFresh();
     const c = classifySwitch(endpoints.claude, endpoints.deepseek, {});
     expect(c.lossClass).toBe("warned-lossy");
     expect(c.warnings.length).toBeGreaterThan(0);
   });
 
   test("deepseek -> GLM is SILENT (complete exposed reasoning carries unmodified)", () => {
+    const endpoints = endpointsFresh();
     const c = classifySwitch(endpoints.deepseek, endpoints.glm, { exposedComplete: true });
     expect(c.lossClass).not.toBe("warned-lossy");
   });
 
   test("GLM -> gpt is SILENT (complete exposed reasoning still carries, now as a tag on a hidden-reasoning destination)", () => {
+    const endpoints = endpointsFresh();
     const c = classifySwitch(endpoints.glm, endpoints.gpt, { exposedComplete: true });
     expect(c.lossClass).not.toBe("warned-lossy");
   });

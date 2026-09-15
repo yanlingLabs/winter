@@ -306,6 +306,14 @@ describeWithWinterBinary("A-7a: two OpenAI-family models never prompt on Winter"
 describe("A-7: same-leg loss, against the REAL daemon resolver (no fixture)", () => {
   const resolve = daemonResolveEndpoint();
 
+  // Minor 5 (review-lane-d2-fix1.md): the `family` strings below are HARDCODED literals, not
+  // derived from a real `selectRuntimeFor` decision — there is no live daemon in this describe
+  // block to decide one from. `createEndpointResolver` (provider-runtime 0.0.11+) memoizes by
+  // `modelKey` ALONE and keeps whichever family the FIRST caller in the PROCESS supplied, so this
+  // remains a real memo-poisoning hazard for any OTHER test in the same `bun test` invocation that
+  // resolves these SAME model ids with a DIFFERENT (real) family — even though each `resolve(...)`
+  // call below already lives inside its own `test()` body (never at describe/module scope), the
+  // cross-FILE ordering risk is not eliminated. Labeled here per that review's own instruction.
   test("gpt -> deepseek on Winter prompts (a hidden-reasoning source crossing families is warned-lossy)", () => {
     const gpt = resolve({ providerId: "openai", modelKey: "openai/gpt-5.6-sol", family: "openai" });
     const deepseek = resolve({ providerId: "deepseek", modelKey: "deepseek/deepseek-reasoner", family: "deepseek" });

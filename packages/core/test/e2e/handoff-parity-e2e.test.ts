@@ -14,7 +14,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { openaiResponsesFake } from "@yanlinglabs/winter-provider-conformance/fakes";
 import { RESUME_STAGING_PREFIX } from "@yanlinglabs/winter-runtime-sdk";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@yanlinglabs/winter-protocol";
@@ -789,6 +789,10 @@ describeWithClaudeRuntime("m4: a REAL resumed official child's environment", () 
       if (name === "ANTHROPIC_API_KEY" || name === "CLAUDE_CONFIG_DIR") continue; // both expected, asserted separately
       expect(childEnvNames.has(name)).toBe(false);
     }
+    // Minor 6 (review-lane-d2-fix1.md): `ANTHROPIC_CONFIG_DIR` is NOT in `FORBIDDEN_CHILD_ENV` (it
+    // is the CONSOLE arm's own env name, `official-options.ts:46-57,189-194`) but this session is on
+    // the api-key arm, which must never set it either.
+    expect(childEnvNames.has("ANTHROPIC_CONFIG_DIR")).toBe(false);
     // No codex/openai-named credential env reached the child at all, despite one being present in
     // the SAME secret store this session's own credential resolution reads from.
     for (const name of childEnvNames) {
@@ -797,13 +801,16 @@ describeWithClaudeRuntime("m4: a REAL resumed official child's environment", () 
 
     // CLAUDE_CONFIG_DIR's REAL value: Winter-owned, never `~/.claude`, never the FRESH-launch
     // `officialConfigDirFor(home)` dir reused across a resume (it must be a per-resume staging
-    // root instead — I-4).
-    expect(claudeConfigDir).toBeDefined();
+    // root instead — I-4), and physically UNDER system tmpdir(), never under this session's `home`.
+    // Nit 7 (review-lane-d2-fix1.md): dropped the tautological second `toBeDefined()` (already
+    // asserted above) and the HOME-relative `.claude` check, which the path-segment check below
+    // already subsumes (no segment is literally `.claude` => it cannot start with `$HOME/.claude`
+    // either); added the tmpdir()-vs-home check that check was standing in for.
     expect(claudeConfigDir).not.toBe(officialConfigDirFor(home));
     expect(claudeConfigDir!.split("/")).not.toContain(".claude");
-    const home200 = process.env.HOME;
-    if (home200 !== undefined) expect(claudeConfigDir!.startsWith(join(home200, ".claude"))).toBe(false);
     expect(claudeConfigDir).toContain(RESUME_STAGING_PREFIX);
+    expect(realpathSync(dirname(claudeConfigDir!))).toBe(realpathSync(tmpdir()));
+    expect(claudeConfigDir!.startsWith(home)).toBe(false);
 
     // A resume-staging root (`claude-resume-<uuid>`, router-owned, under system tmpdir — never
     // under `home`) appears for this cross-generation resume; the loop below is non-vacuous
