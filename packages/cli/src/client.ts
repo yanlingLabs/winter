@@ -90,7 +90,13 @@ export class WinterClient {
             if (msg.id !== undefined && msg.id !== null && client.pending.has(msg.id)) {
               const p = client.pending.get(msg.id)!;
               client.pending.delete(msg.id);
-              if (msg.error) p.reject(new Error(`${msg.error.message} (code ${msg.error.code})`));
+              // WS-19 (Lane P fix round 4): the JSON-RPC envelope's own `data` rides ALONG WITH the
+              // message, additively. Every existing caller reads `.message` and is byte-unaffected;
+              // what this unlocks is a caller branching on a TYPED refusal (`data.code` /
+              // `data.reason` / `data.door`) instead of string-matching prose — which is how the
+              // `winter credentials` doors surface the daemon's own refusal vocabulary unchanged
+              // when they go through the socket rather than writing the Keychain themselves.
+              if (msg.error) p.reject(Object.assign(new Error(`${msg.error.message} (code ${msg.error.code})`), { rpc: msg.error }));
               else p.resolve(msg.result);
             } else if (msg.method === METHODS.event) {
               const parsed = SessionEvent.safeParse(msg.params);
