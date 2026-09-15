@@ -61,7 +61,13 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     const req = createRequire(import.meta.url);
     const pkgPath = req.resolve("@yanlinglabs/winter-agent-sdk/package.json");
     const pkg = require(pkgPath) as { version: string };
-    // 0.0.9 → 0.0.10 → 0.0.11 (Winter Phase 10b, D1-5/D1-9 pins; re-diffed for fix round 1 item 3):
+    // 0.0.9 → 0.0.10 → 0.0.11 → 0.0.12 (Winter Phase 10b, D1-5/D1-9 pins; re-diffed for fix rounds
+    // 1 and 3): at 0.0.12 the re-diff was a `git diff 4f76696 HEAD --
+    // packages/runtime/src/provider/keychain-store.ts` in that same sibling checkout (branch main,
+    // commit a40303e, `packages/runtime/package.json` version 0.0.12) and came back EMPTY — the
+    // child's parser is byte-identical to the 0.0.11 source the paragraph below describes, so that
+    // line-by-line account stands unchanged and nothing in the mirror needed to move.
+    //
     // this mirror WAS re-diffed at 0.0.11, line by line, against a local sibling checkout of the
     // `winter-agent-sdk` repo (branch main, commit 4f76696, `package.json` version 0.0.11) —
     // `packages/runtime/src/provider/keychain-store.ts`'s own `coerceMaterial` (its
@@ -77,7 +83,7 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     // (falls through to `default: undefined`, matching the child's own refusal for a kind Winter
     // never sends) — an intentional narrowing already documented above, not a drift. Re-diff again
     // on the next bump.
-    expect(pkg.version).toBe("0.0.11");
+    expect(pkg.version).toBe("0.0.12");
   });
 
 
