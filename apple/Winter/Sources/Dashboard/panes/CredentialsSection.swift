@@ -315,7 +315,12 @@ struct CredentialsSection: View {
             LazyVStack(alignment: .leading, spacing: 8) {
                 ForEach(model.rows) { row in
                     credentialRow(row)
-                    Divider()
+                    // BETWEEN rows only. A divider after the LAST row lands immediately above the
+                    // one `ProviderPane` draws between this section and the next, so the section
+                    // ended in a visible double rule.
+                    if row.id != model.rows.last?.id {
+                        Divider()
+                    }
                 }
             }
         }
