@@ -171,6 +171,20 @@ struct RealDaemon {
         process.currentDirectoryURL = cliPackageDir
         var env = ProcessInfo.processInfo.environment
         env["WINTER_HOME"] = home
+        // WS-19 (Lane P fix round 2, item 1A) — KEYCHAIN ISOLATION, the Swift mirror of what the TS
+        // suite has pinned in `packages/core/test/preload.ts` since the test-keychain-isolation fix.
+        //
+        // Without this the daemon's `keychainService()` resolves to the LIVE `com.winter.core` even
+        // on this throwaway temp home, so any `CredentialRef` it minted would name the user's real
+        // Keychain — a standing CLAUDE.md violation ("Tests must never resolve credentials against
+        // `com.winter.core`/`com.winter.core.dev`"). It has been latent rather than live only
+        // because this harness stores no credentials and a ref is minted only for a slot that is
+        // PRESENT; the moment anything here seeds one, the gap becomes real. The daemon honours this
+        // override only for a NON-default home (`winter-dir.ts`'s `isDefaultWinterHome` guard), so it
+        // is inert against a real `~/.winter[-dev]` and active only for temp homes like this one.
+        //
+        // The named service holds no items, and nothing in this suite writes to it.
+        env["WINTER_KEYCHAIN_SERVICE"] = "com.winter.core.winterkit-tests-throwaway"
         process.environment = env
         process.standardOutput = stdoutHandle
         process.standardError = stderrHandle

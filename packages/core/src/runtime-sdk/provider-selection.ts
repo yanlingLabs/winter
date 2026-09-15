@@ -27,8 +27,10 @@ export function catalogRowsFor(model: string): Array<{ key: string; providerId: 
   );
 }
 
-/** Is this a fully-qualified `<providerId>/<model>` catalog key? */
-function qualifiedProviderFor(model: string): string | undefined {
+/** Is this a fully-qualified `<providerId>/<model>` catalog key? Exported since WS-19 (W19-7): the
+ *  pre-turn credential gate refuses only for a provider Winter actually DECIDED on, and a qualified
+ *  key is one of the two ways it does. */
+export function qualifiedProviderFor(model: string): string | undefined {
   const row = loadCatalog().models.find((m) => m.key === model);
   return row?.providerId;
 }

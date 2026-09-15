@@ -147,6 +147,22 @@ export interface WinterSessionDeps {
    *  re-resolves the spawn hook, so a `session.setModel` while resumable is honoured on resume. May
    *  throw a typed refusal (an executable that has gone away) — `open()` surfaces it. */
   options: (incarnation: WinterIncarnationShape) => Options | Promise<Options>;
+  /**
+   * WS-19 (W19-7, fix round 2): a PRE-TURN gate, run before anything a turn does — before `open()`
+   * spawns an incarnation and before the `user_message` is appended — so a refusal leaves no orphan
+   * log entry and no child. May throw a typed refusal (`WinterLegRefusal`); `send`/`steer` surface
+   * it to their caller unchanged.
+   *
+   * It lives HERE rather than in the options thunk because `options` runs at every `open()`,
+   * including the one `session.create`/`session.dispatch` do eagerly — and a session with no
+   * credential must still be CREATABLE (a fresh install has no key yet, and the Mac app dispatches a
+   * session at launch). What must not happen is a TURN against a provider Winter has no credential
+   * for, and this is the one place every turn passes.
+   *
+   * `deliver` is deliberately NOT gated: it never opens an incarnation of its own (a delivery with
+   * no live child is HELD, not pushed), so it can never be what spawns one.
+   */
+  beforeTurn?: () => Promise<void>;
   /** A projector for ONE incarnation, built on ITS generation. */
   projector: (incarnation: WinterIncarnation) => Projector;
   /** A fresh queue per incarnation (a closed queue cannot be reused). */
@@ -372,6 +388,9 @@ class WinterSessionImpl implements WinterSession {
 
   async send(text: string, clientName = "session"): Promise<{ seq: number; queued: boolean }> {
     this.assertNotEnded();
+    // WS-19 (W19-7): the pre-turn gate, BEFORE the open and before the append — a refusal here
+    // leaves the session exactly as it was, with no child and no orphan `user_message`.
+    await this.deps.beforeTurn?.();
     // Open FIRST: a refused open (the binary is gone) then leaves no orphan `user_message`, and a
     // delivery held while resumable is appended by `open()` BEFORE this text — chronological.
     await this.open();
@@ -395,6 +414,7 @@ class WinterSessionImpl implements WinterSession {
 
   async steer(text: string, clientName = "steer"): Promise<{ seq: number; injected: boolean }> {
     this.assertNotEnded();
+    await this.deps.beforeTurn?.();
     await this.open();
     const seq = this.appendUser(text, clientName);
     const wasRunning = this.inFlight > 0;

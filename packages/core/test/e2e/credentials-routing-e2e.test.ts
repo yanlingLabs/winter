@@ -166,6 +166,11 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
     const cwd0 = realpathSync(mkdtempSync(join(tmpdir(), "ws19-route-cwd0-")));
     let caught: RpcErrorLike | undefined;
     try {
+      // NAMING an uncredentialled provider is refused by the ROUTER at create, and always was —
+      // `selectRuntimeFor` answers `slot-unservable` for a model no candidate row can serve, long
+      // before Winter's own gate is consulted. W19-7 only re-describes that refusal actionably
+      // (`refusalForSelection`). The DEFAULT path — a session that names no model — is a different
+      // story and is covered in its own test below: it must CREATE fine and refuse at the first turn.
       await client.call(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: DEEPSEEK_MODEL, cwd: cwd0 });
     } catch (err) { caught = err as RpcErrorLike; }
     expect(caught?.rpc?.data?.code).toBe("runtime_selection_refused");
@@ -299,7 +304,26 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
     const after = await client.call<{ sessions: Array<{ sessionId: string }> }>(METHODS.sessionList, {});
     expect(after.sessions.some((s) => s.sessionId === liveSessionId)).toBe(true);
 
-    // A NEW session on the same provider now refuses typed, pre-flight.
+    // ...but its NEXT TURN refuses typed, which is W19-7's own case and the one that matters most:
+    // a session that was running happily until the key was taken away must say so before the spawn,
+    // not hand the user a vendor 401 mid-turn (fix round 2 — this is where the gate lives now).
+    const seqBefore = after.sessions.find((r) => r.sessionId === liveSessionId) as { lastSeq?: number } | undefined;
+    let turnRefusal: RpcErrorLike | undefined;
+    try {
+      await client.call(METHODS.sessionSend, { sessionId: liveSessionId, text: "the key is gone now" });
+    } catch (err) { turnRefusal = err as RpcErrorLike; }
+    expect(turnRefusal?.rpc?.data?.code).toBe("runtime_selection_refused");
+    expect(turnRefusal?.rpc?.data?.reason).toBe("no-credential");
+    expect(turnRefusal?.rpc?.message).toContain("winter credentials set deepseek");
+    // The gate runs before `open()` AND before the append, so the refusal left the session's log
+    // exactly as it was — no orphan `user_message`, no `turn_started`.
+    const afterRefusal = await client.call<{ sessions: Array<{ sessionId: string; lastSeq?: number }> }>(METHODS.sessionList, {});
+    expect(afterRefusal.sessions.find((r) => r.sessionId === liveSessionId)?.lastSeq).toBe(seqBefore?.lastSeq);
+    expect(afterRefusal.sessions.length).toBe(after.sessions.length);
+
+    // A NEW session on the same provider refuses too — at CREATE, and that half is the ROUTER's, not
+    // Winter's gate: `selectRuntimeFor` answers `slot-unservable` for a model no candidate row can
+    // serve, and W19-7 only re-describes it actionably (`refusalForSelection`).
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ws19-route-cwd2-")));
     let caught: RpcErrorLike | undefined;
     try {
@@ -422,4 +446,77 @@ describeWithWinterBinary("WS-19 + D1 item 6: a same-leg PROVIDER change routes t
 
     rmSync(cwd, { recursive: true, force: true });
   }, 180_000);
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// W19-7, FIX ROUND 2 — THE GATE IS A TURN GATE, AND IT NEVER FIRES ON A FALLBACK.
+//
+// A REGRESSION THIS PINS SO IT CANNOT COME BACK (measured by bisect to Lane P's own f640744f), in
+// two halves, because the first round got BOTH wrong:
+//
+//   1. IT REFUSED AT CREATE. The check lived in `optionsFor`, which runs at every `open()` —
+//      including the eager one `session.create`/`session.dispatch` perform — so a credential-less
+//      home could not create ANY session. A fresh install with no key yet could not start one, and
+//      the Mac app, which dispatches a session at launch, produced the "orb Enter silently
+//      no-op'd" failure.
+//   2. IT REFUSED ON A NAME NOBODY CHOSE. `providerSelectionFor` answers `inInventory[0]` for a bare
+//      model id that several inventory providers serve and none is credentialled — a name, not a
+//      decision. So a home configured for Codex OAuth, asking for the default `gpt-5.6-sol`, was
+//      told to run `winter credentials set openai`: a provider the user never chose, through a door
+//      that would not have helped.
+//
+// Both halves broke five real-daemon WinterKit gateway tests, whose harness dispatches and sends on
+// exactly such a home. The rule that actually matters is unchanged and is asserted in the suite
+// above (B-1/B-3): no TURN runs against a provider Winter HAS decided on and holds no credential for.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describeWithWinterBinary("W19-7: a credential-less, Codex-configured home creates, dispatches AND sends", (winterBin) => {
+  let home: string;
+  let daemon: RunningDaemon | undefined;
+  let client: TestClient;
+
+  beforeAll(async () => {
+    home = realpathSync(mkdtempSync(join(tmpdir(), "ws19-turn-gate-")));
+    // What `bootstrapWinterDir` + `loadSettings` leave a FRESH home looking like: the Codex OAuth
+    // default provider and its default model, and nothing stored anywhere.
+    writeFileSync(join(home, "settings.json"), JSON.stringify({
+      schemaVersion: 2,
+      provider: { type: "codex-oauth", model: "gpt-5.6-sol" },
+      runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60 },
+    }, null, 2));
+    daemon = await startDaemon({ home, secrets: new FileSecretStore(join(home, "test-secrets")), agentProvider: null });
+    if ("unavailable" in daemon.runtimeState) throw daemon.runtimeState.unavailable;
+    client = await TestClient.connect(daemon.socketPath);
+    await client.hello(daemon.tokens.harness, "e2e");
+  });
+
+  afterAll(async () => {
+    try { client?.close(); } catch { /* closed */ }
+    const stopping = daemon?.stop();
+    daemon = undefined;
+    await stopping;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("create, dispatch and the first send all succeed — the gate never fires on an inventory-order fallback", async () => {
+    const cwd = realpathSync(mkdtempSync(join(tmpdir(), "ws19-turn-gate-cwd-")));
+    const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", cwd });
+    await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+
+    // The singleton the Mac app mints at launch, and the exact call the WinterKit gateway harness
+    // seeds every one of its real-daemon tests with.
+    const dispatched = await client.call<{ sessionId: string; created: boolean }>(METHODS.sessionDispatch, {});
+    expect(dispatched.created).toBe(true);
+
+    // And the turn itself: `gpt-5.6-sol` is served by SIX inventory providers, none credentialled,
+    // so Winter has decided nothing and says nothing. The send lands; whatever the child then makes
+    // of an unauthenticated provider is the child's own typed error to report, exactly as before
+    // WS-19 existed.
+    const sent = await client.call<{ seq: number }>(METHODS.sessionSend, { sessionId, text: "this send must not be refused" });
+    expect(typeof sent.seq).toBe("number");
+    await client.call(METHODS.sessionAttach, { sessionId: dispatched.sessionId, fromSeq: 0 });
+    const dispatchSent = await client.call<{ seq: number }>(METHODS.sessionSend, { sessionId: dispatched.sessionId, text: "nor this one" });
+    expect(typeof dispatchSent.seq).toBe("number");
+
+    rmSync(cwd, { recursive: true, force: true });
+  }, 120_000);
 });

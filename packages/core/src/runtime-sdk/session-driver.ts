@@ -58,7 +58,7 @@ import { renderNoCredentialHint } from "./handoff";
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
 import { attachOfficialSession, attachWinterSession } from "./messaging";
 import { buildWinterOptions, permissionModeFor } from "./mode-options";
-import { catalogRowsFor, providerSelectionFor, testProviderNameFor } from "./provider-selection";
+import { catalogRowsFor, inventoryProvidersServing, providerSelectionFor, qualifiedProviderFor, testProviderNameFor } from "./provider-selection";
 import { winterSessions } from "./sessions";
 import { WINTER_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
@@ -454,24 +454,6 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       const connection: ProviderConnectionConfig | undefined =
         legacyOpenAiConnection
         ?? (perProviderBaseUrl === undefined ? undefined : { baseUrl: perProviderBaseUrl, endpointOrigin: "user", local: true });
-      // WS-19 (W19-7) — THE PRE-FLIGHT CREDENTIAL REFUSAL, and the reason it lives HERE rather than
-      // in `create()`: this is the one place every incarnation passes (a fresh create, a resume
-      // after an idle reap, a resume after a daemon restart), and it runs BEFORE the child is
-      // spawned. Without it, W19-1's derived inventory would happily name a provider with an empty
-      // slot, the child would fall through Ruling E-1's rung 2 to `{kind:"none"}`, and the user
-      // would get a vendor 401 in the middle of a turn instead of a sentence telling them what to
-      // add and where.
-      //
-      // The EXEMPTION is today's behaviour, preserved byte-for-byte: the legacy `openai-compatible`
-      // arm (a BYO `settings.provider.baseUrl`) is never refused, because a self-hosted or LAN
-      // endpoint — Ollama, LM Studio, a local gateway — legitimately wants no key at all, and that
-      // configuration works today. The NEW per-provider `providers.<id>.baseUrl` arm is NOT exempt:
-      // nothing depends on it yet, and pointing a provider at your own proxy does not make its
-      // credential optional. A `local-none` provider is excluded a layer down, by auth family.
-      if (legacyOpenAiConnection === undefined && selection !== undefined
-          && apiKeyProviderIsUnauthenticated(selection.providerId, credentials.byProvider[selection.providerId] !== undefined)) {
-        throw new WinterLegRefusal("runtime_selection_refused", missingCredentialDetail(selection.providerId), "no-credential");
-      }
       const capSession: CapabilitySession = {
         sessionId, mode, cwd,
         roots: deps.rootsOf(sessionId),
@@ -556,9 +538,70 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       try { await winterSessions(home).getSessionInfo(backendSessionId); return true; } catch { return false; }
     };
 
+    /**
+     * WS-19 (W19-7) — THE PRE-TURN CREDENTIAL REFUSAL.
+     *
+     * WHY IT IS A TURN GATE AND NOT PART OF `optionsFor` (fix round 2, and the correction of a real
+     * regression): `optionsFor` runs at EVERY `open()`, including the eager one `session.create` and
+     * `session.dispatch` perform — so refusing there made a credential-less home unable to create
+     * ANY session at all. A fresh install has no key yet, and the Mac app dispatches a session at
+     * launch, so that is the "orb Enter silently no-op'd" class of failure, not a safety win. The
+     * thing that must not happen is a TURN against a provider Winter holds no credential for, and
+     * `beforeTurn` is the one place every turn passes — still strictly BEFORE the child is spawned
+     * (it runs ahead of `send`/`steer`'s own `open()`), so it is never a vendor 401 mid-turn.
+     *
+     * Everything else about the rule is unchanged from the first round: the refusal is typed
+     * (`runtime_selection_refused`, reason `no-credential`), it names the provider and the three
+     * doors, and it fires on EVERY incarnation's first turn — a fresh create, a resume after an idle
+     * reap, a resume after a daemon restart.
+     *
+     * THE EXEMPTION is today's behaviour preserved byte-for-byte: the legacy `openai-compatible` arm
+     * (a BYO `settings.provider.baseUrl`) is never refused, because a self-hosted or LAN endpoint —
+     * Ollama, LM Studio, a local gateway — legitimately wants no key at all. The per-provider
+     * `providers.<id>.baseUrl` arm is NOT exempt. A `local-none` provider is excluded a layer down,
+     * by auth family (`apiKeyProviderIsUnauthenticated`).
+     */
+    const beforeTurn = async (): Promise<void> => {
+      const live = deps.store.meta(sessionId);
+      const settings = deps.settings();
+      const model = mode === "dispatch" ? (live.model ?? DISPATCH_MODEL) : (live.model ?? settings?.provider?.model);
+      if (model === undefined) return;
+      // ONLY A PROVIDER WINTER ACTUALLY DECIDED ON — never `providerSelectionFor`'s inventory-order
+      // FALLBACK, and this is the second half of the fix round 2 correction.
+      //
+      // When a BARE model id is served by several inventory providers and NONE of them is
+      // credentialled, `providerSelectionFor` returns `inInventory[0]` — a name, deliberately, not a
+      // decision (its own doc: "a provider that serves the model but has NO stored credential still
+      // returns a selection WITHOUT an authRef — the child then refuses with its own typed provider
+      // error, which is a better message than anything the host could invent"). Refusing on that
+      // fallback is exactly the invention it warns against: a fresh home configured for Codex OAuth,
+      // asking for `gpt-5.6-sol`, was being told to run `winter credentials set openai` — a provider
+      // the user never chose, through a door that would not have helped. It is also what broke the
+      // WinterKit gateway suite, whose harness dispatches on precisely that home.
+      //
+      // So the gate fires for the two cases where the provider IS Winter's answer:
+      //   - a fully-qualified `<provider>/<model>` key (`deepseek/deepseek-reasoner`), which names
+      //     one provider and no other;
+      //   - a bare id only ONE inventory provider serves, where there is nothing to be ambiguous
+      //     about.
+      // Anything else falls through to the child's own typed provider error, exactly as before
+      // WS-19. Codex OAuth is additionally never in scope at all — its auth family is `custom`, and
+      // `winter login`, not an API key, is its door (`apiKeyProviderIsUnauthenticated`).
+      const servingProviders = inventoryProvidersServing(model);
+      if (qualifiedProviderFor(model) === undefined && servingProviders.length !== 1) return;
+      const credentials = await credentialPresenceFrom(deps.secrets);
+      const selection = providerSelectionFor(model, credentials, deps.home, settings);
+      if (selection === undefined) return;
+      if (settings?.provider?.type === "openai-compatible" && selection.providerId === "openai") return;
+      if (apiKeyProviderIsUnauthenticated(selection.providerId, credentials.byProvider[selection.providerId] !== undefined)) {
+        throw new WinterLegRefusal("runtime_selection_refused", missingCredentialDetail(selection.providerId), "no-credential");
+      }
+    };
+
     const session = startWinterSession({
       sessionId, backendSessionId, mode, runtime,
       options: optionsFor,
+      beforeTurn,
       projector: projectorFor,
       append,
       broadcast: (event) => { deps.hub.broadcastTransient(sessionId, event); },
