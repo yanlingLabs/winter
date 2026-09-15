@@ -93,8 +93,10 @@ WINTER_RUNTIME_EXECUTABLE="$PWD/../../dist/winter" WINTER_HOME=~/.winter-dev WIN
 # provider (deepseek, zai/GLM, openrouter, google, xai, …) has a Keychain slot at `<providerId>:default`, managed through
 # `credential.list` / `credential.set` / `credential.remove` (the only provider-family verbs the phone may call) and, on
 # the terminal, `winter credentials [list] | set <id> | remove <id>` (masked prompt only — never a flag, a pipe or an env
-# var). A key added, rotated or removed REPLACES every live child on that provider, so it takes effect on the next turn
-# with no restart; a session whose provider Winter decided on (a qualified `<provider>/<model>` key, or a bare id only one
+# var). A key added, rotated or removed through the DAEMON — the three RPCs, and the CLI verbs whenever the socket is
+# live, which they use in preference to writing the Keychain themselves — REPLACES every live child on that provider, so
+# it is in effect on that session's next turn with no restart; a CLI write with NO daemon running stores the key and says
+# so, and live sessions pick it up at their next incarnation (an idle reap, a restart). a session whose provider Winter decided on (a qualified `<provider>/<model>` key, or a bare id only one
 # inventory provider serves) and has no key for refuses TYPED at the first turn (`runtime_selection_refused`,
 # `data.reason: "no-credential"`) rather than a vendor 401 mid-turn. There is NO daemon-side endpoint table: the catalog
 # ships each provider's own endpoints, and `settings.providers.<catalogId>.baseUrl` is the only override — hot, per
