@@ -677,6 +677,27 @@ function warningsOf(plan: HandoffPlan): string[] {
  * Never names an SDK or runtime (R-10b-4) — a test pins this with a regex that excludes only the
  * literal CLI flags/setting path this function itself prints.
  */
+/**
+ * Fix round 4 (item 5, reviewer): a refusal's `detail` is the ROUTER's own sentence, and the router
+ * writes it for a developer, not for this product's user. Measured against the pinned selector:
+ * `"… must run on the official runtime under a Claude OAuth credential, and this router holds no
+ * official runtime; a Claude OAuth credential never routes to the Winter runtime (D28)"`, and
+ * `reviewPersistedSelection`'s own `"this session is persisted on claude-agent (…) … (WS-00 §2,
+ * D13)"`. Both name a RUNTIME, which R-10b-4 forbids outright ("never warn about which SDK serves a
+ * Claude model"), and both cite internal spec ids. `session.setModel` was surfacing them verbatim.
+ *
+ * So the raw detail is logged as a CATEGORY and never as text (this file's own logging discipline),
+ * and the user gets copy this file owns. The `no-credential` arm keeps its full hint, because that
+ * hint is BUILT here (`renderNoCredentialHint`) out of the router's structured `alternatives` and is
+ * already pinned by a test that forbids it naming an SDK or a runtime — it is the one refusal whose
+ * text is actionable, and losing it would leave the user with no way to find the door.
+ */
+function refusalDetailCategoryFor(detail: string): "names-a-runtime" | "names-a-spec-id" | "opaque" {
+  if (/\b(winter|official|claude)[- ]?(runtime|agent)\b/i.test(detail)) return "names-a-runtime";
+  if (/\b(WS-\d|D\d{1,2}\b|R-\d)/.test(detail)) return "names-a-spec-id";
+  return "opaque";
+}
+
 export function renderNoCredentialHint(alternatives: readonly SelectionAlternative[], opts: { subscriptionEnabled: boolean }): string {
   const doors: string[] = [];
   for (const alt of alternatives) {
@@ -772,10 +793,20 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
     // widens it automatically; `officialSubscriptionAuthEnabled` is the daemon's OWN gate on the
     // claude.ai subscription door, independent of the router's own D14 compile-time approval that
     // already governs whether that alternative is even in the list at all.
-    const hint = decided.reason === "no-credential" && decided.alternatives !== undefined
-      ? ` ${renderNoCredentialHint(decided.alternatives, { subscriptionEnabled: officialSubscriptionAuthEnabled(deps.settings()) })}`
-      : "";
-    return { kind: "refused", code: "runtime_selection_refused", detail: `${decided.detail}${hint}` };
+    //
+    // Fix round 4 (item 5): `decided.detail` itself NEVER reaches the user — see
+    // `refusalDetailCategoryFor` for the two measured shapes that name a runtime or a spec id. The
+    // no-credential hint DOES, because this file builds it out of the router's structured
+    // `alternatives` and a test pins that it never names an SDK or a runtime.
+    deps.log?.(`handoff: selectRuntimeFor refused ${modelLabelFor(model)} for ${sessionId} (reason=${decided.reason}, detail=${refusalDetailCategoryFor(decided.detail)})`);
+    if (decided.reason === "no-credential" && decided.alternatives !== undefined) {
+      return {
+        kind: "refused",
+        code: "runtime_selection_refused",
+        detail: `Winter can't switch to ${modelLabelFor(model)} yet — ${renderNoCredentialHint(decided.alternatives, { subscriptionEnabled: officialSubscriptionAuthEnabled(deps.settings()) })}`,
+      };
+    }
+    return { kind: "refused", code: "runtime_selection_refused", detail: `Winter can't switch to ${modelLabelFor(model)} right now.` };
   }
   // m1 (whole-branch review, fix round 2): the `crossRuntime` off switch gates CROSS-LEG moves
   // ONLY, and must be checked HERE — before the pre-flight review/prompt below — never after it.
@@ -1050,7 +1081,11 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
     }
   }
   if (plan.selection.kind === "refused") {
-    return { kind: "refused", code: "runtime_selection_refused", detail: plan.selection.detail };
+    // Fix round 4 (item 5): the barrier's own persisted-selection review writes this detail, and its
+    // measured text names both runtime kinds and cites `WS-00 §2, D13` — R-10b-4 forbids every word
+    // of that reaching the user. Category only in the log, neutral copy out.
+    deps.log?.(`handoff: the barrier refused the destination selection for ${sessionId} (detail=${refusalDetailCategoryFor(plan.selection.detail)})`);
+    return { kind: "refused", code: "runtime_selection_refused", detail: `Winter can't switch to ${modelLabelFor(model)} right now.` };
   }
   const warnings = warningsOf(plan);
   if (warnings.length > 0 && !confirmLossy) {

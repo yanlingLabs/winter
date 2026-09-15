@@ -187,7 +187,10 @@ describe("planAndApplySwitch", () => {
         deps({ records, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => ({ refused: true, reason: "runtime-unavailable", detail: "no claude executable" })) }) }),
         "s1", "claude-sonnet-5", false,
       );
-      expect(out).toEqual({ kind: "refused", code: "runtime_selection_refused", detail: "no claude executable" });
+      // Fix round 4 (item 5): the ROUTER's own detail never reaches the user — measured shapes name
+      // a runtime ("… never routes to the Winter runtime (D28)") or cite a spec id, both of which
+      // R-10b-4 forbids. It goes to the log as a category; this copy is the daemon's own.
+      expect(out).toEqual({ kind: "refused", code: "runtime_selection_refused", detail: "Winter can't switch to claude-sonnet-5 right now." });
     });
   });
 
@@ -1545,25 +1548,68 @@ describe("planAndApplySwitch: the no-credential refusal carries the hint", () =>
       );
       expect(out.kind).toBe("refused");
       const detail = (out as { detail: string }).detail;
-      expect(detail).toContain("no door can serve claude-opus-5");
+      // Fix round 4 (item 5): the router's OWN sentence is gone — it is logged as a category. The
+      // HINT survives, and is the whole reason this arm is treated differently from every other
+      // refusal: it is built HERE out of the router's structured `alternatives`, it is the only
+      // refusal text that tells the user what to actually do, and the sweep below pins that it
+      // never names an SDK or a runtime.
+      expect(detail).not.toContain("no door can serve claude-opus-5");
       expect(detail).toContain("winter login --anthropic-key");
       expect(detail).toContain("winter login --anthropic-console");
+      expect(detail).not.toMatch(/\bSDK\b|runtime|Claude Agent|Winter Agent/i);
     });
   });
 
-  test("a refusal with no `no-credential` reason is untouched — no hint appended", async () => {
+  test("a refusal with no `no-credential` reason gets the neutral copy — never the router's own words", async () => {
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1");
+      const logLines: string[] = [];
       const out = await planAndApplySwitch(
         deps({
           records,
+          log: (line) => { logLines.push(line); },
           runtime: fakeRuntime({
-            selectRuntimeFor: async () => ({ refused: true, reason: "mode-forbids-runtime", detail: "chat/dispatch never route to the official leg" }),
+            // The MEASURED shape: a real `mode-forbids-runtime` detail names the leg outright.
+            selectRuntimeFor: async () => ({ refused: true, reason: "mode-forbids-runtime", detail: "chat/dispatch never route to the official runtime (D28)" }),
           }),
         }),
         "s1", "claude-opus-5", false,
       );
-      expect(out).toEqual({ kind: "refused", code: "runtime_selection_refused", detail: "chat/dispatch never route to the official leg" });
+      expect(out).toEqual({ kind: "refused", code: "runtime_selection_refused", detail: "Winter can't switch to claude-opus-5 right now." });
+      // Logged as a CATEGORY, never as text — the router's own words leave no trace anywhere a user
+      // or a log reader could reconstruct them from.
+      expect(logLines).toHaveLength(1);
+      expect(logLines[0]).toContain("reason=mode-forbids-runtime");
+      expect(logLines[0]).toContain("detail=names-a-runtime");
+      expect(logLines[0]).not.toContain("chat/dispatch never route");
+    });
+  });
+
+  test("a barrier that refuses the DESTINATION selection is neutral too — its detail names both legs and a spec id", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const logLines: string[] = [];
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          log: (line) => { logLines.push(line); },
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+          barrier: {
+            // `reviewPersistedSelection`'s own MEASURED text.
+            plan: async (session, to) => ({
+              session, from: "winter-agent", to, steps: [],
+              selection: { kind: "refused", detail: "this session is persisted on winter-agent (m) and a fresh decision would choose claude-agent (m); the difference is in runtimeKind. Changing it is the certified handoff or a visible fork, never a silent rewrite (WS-00 §2, D13)" },
+            } as unknown as HandoffPlan),
+            execute: async () => { throw new Error("not reached"); },
+            reviewSwitch: async () => ({ prompt: false }),
+          },
+        }),
+        "s1", "claude-sonnet-5", false,
+      );
+      expect(out).toEqual({ kind: "refused", code: "runtime_selection_refused", detail: "Winter can't switch to claude-sonnet-5 right now." });
+      expect(logLines).toHaveLength(1);
+      expect(logLines[0]).toContain("detail=names-a-runtime");
+      expect(logLines[0]).not.toContain("WS-00");
     });
   });
 });
