@@ -32,7 +32,7 @@ import { describeWithWinterBinary } from "../helpers/winter-binary";
 const SENTINEL = "WS19-SENTINEL-e2e-6d41af9c";
 const DEEPSEEK_MODEL = "deepseek/deepseek-reasoner";
 
-interface RpcErrorLike { rpc?: { message?: string; data?: { code?: string } } }
+interface RpcErrorLike { rpc?: { message?: string; data?: { code?: string; reason?: string } } }
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -169,6 +169,10 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
       await client.call(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: DEEPSEEK_MODEL, cwd: cwd0 });
     } catch (err) { caught = err as RpcErrorLike; }
     expect(caught?.rpc?.data?.code).toBe("runtime_selection_refused");
+    // The machine-readable half (review Nit 8): `code` alone covers several situations, and
+    // `reason` is what a client branches on to say "you have no key for DeepSeek" rather than
+    // "the model could not be selected". The sentence is pinned beside it, not instead of it.
+    expect(caught?.rpc?.data?.reason).toBe("no-credential");
     expect(caught?.rpc?.message).toContain("no-credential");
     expect(caught?.rpc?.message).toContain("winter credentials set deepseek");
     // Never reached the provider at all: a typed refusal, not a 401.
@@ -226,10 +230,14 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
   test("B-8 / W19-14: the sentinel appears in NO log line, NO session file, NO history page, NO replay frame and NO credential.list", async () => {
     // The daemon logs through console.* in-process here, so this captures exactly the lines a
     // production daemon would write to its log file.
-    const errors: string[] = [];
-    const warns: string[] = [];
-    const errSpy = spyOn(console, "error").mockImplementation((...a: unknown[]) => { errors.push(a.map(String).join(" ")); });
-    const warnSpy = spyOn(console, "warn").mockImplementation((...a: unknown[]) => { warns.push(a.map(String).join(" ")); });
+    // All THREE console channels (review Minor 3): the daemon writes progress through `console.log`
+    // as well as `error`/`warn`, and a log line is a log line — a sweep that watched only two of
+    // them would have been quiet about the third.
+    const lines: string[] = [];
+    const push = (...a: unknown[]): void => { lines.push(a.map(String).join(" ")); };
+    const errSpy = spyOn(console, "error").mockImplementation(push);
+    const warnSpy = spyOn(console, "warn").mockImplementation(push);
+    const logSpy = spyOn(console, "log").mockImplementation(push);
     try {
       // Exercise every door again WHILE capturing, including the remote role (W19-10) and the
       // error paths, since an error message is the easiest place for a value to slip out.
@@ -257,10 +265,11 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
       }
       remote.close();
 
-      for (const line of [...errors, ...warns]) expect(line).not.toContain(SENTINEL);
+      for (const line of lines) expect(line).not.toContain(SENTINEL);
     } finally {
       errSpy.mockRestore();
       warnSpy.mockRestore();
+      logSpy.mockRestore();
     }
 
     // Every file under the temp home EXCEPT the test secret store itself (which is where the value
@@ -297,6 +306,7 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
       await client.call(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: DEEPSEEK_MODEL, cwd });
     } catch (err) { caught = err as RpcErrorLike; }
     expect(caught?.rpc?.data?.code).toBe("runtime_selection_refused");
+    expect(caught?.rpc?.data?.reason).toBe("no-credential");
     expect(caught?.rpc?.message).toContain("no-credential");
     rmSync(cwd, { recursive: true, force: true });
   }, 120_000);
