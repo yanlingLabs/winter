@@ -1243,6 +1243,55 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
     });
   });
 
+  // Fix round 4 review (N1): the re-selection path evicted UNCONDITIONALLY. "Nothing to carry" is a
+  // statement about the TRANSCRIPT, not about whether a turn is in flight right now — a turn that
+  // started after the review, or one whose first message has not landed, is exactly that shape — so
+  // an unconditional evict could cut a live turn. Same deferral the item-6 provider arm uses.
+  test("N1: a re-selection while a turn is RUNNING defers the evict to the idle boundary, and the reply never waits", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const evicted: string[] = [];
+      let resolveIdle: (() => void) | undefined;
+      const idlePromise = new Promise<void>((resolve) => { resolveIdle = resolve; });
+      // THE RACE, reproduced exactly: `turnRunning` is FALSE when `planAndApplySwitch`'s own
+      // deferred gate reads it (so the immediate path runs, which is the path under test) and TRUE
+      // by the time the re-selection reaches its evict — a turn that started in between. That is
+      // precisely the shape "nothing to carry" cannot rule out: the phrase is about the TRANSCRIPT,
+      // not about what is in flight right now.
+      let reads = 0;
+      const running = {
+        sessionId: "s1", backendSessionId: "be-1", mode: "code", state: "live", generation: 1, resumed: true,
+        init: undefined, get turnRunning() { return reads++ > 0; }, turnStartedAt: Date.now(), done: Promise.resolve(),
+        pendingSends: [], heldDeliveries: [],
+        send: () => { throw new Error("x"); }, steer: () => { throw new Error("x"); },
+        interrupt: () => { throw new Error("x"); }, compact: () => { throw new Error("x"); },
+        setModel: () => { throw new Error("x"); }, setPolicy: () => { throw new Error("x"); },
+        end: () => { throw new Error("x"); }, deliver: () => { throw new Error("x"); },
+        open: () => { throw new Error("x"); }, idle: () => idlePromise,
+      } as unknown as LegSession;
+      const winter = fakeWinter({ live: running });
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          winter: { ...winter, evict: async (id: string) => { evicted.push(id); } },
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+          barrier: {
+            plan: async (session, to) => ({ session, from: "winter-agent", to, steps: [], selection: { kind: "unchanged", selection: SELECTION("claude-agent") } } as unknown as HandoffPlan),
+            execute: async () => ({ kind: "lossy-fork-offered", reason: "there is no canonical transcript at /tmp/x/y.jsonl to validate", step: 5 } as HandoffOutcome),
+            reviewSwitch: async () => ({ prompt: false, skipped: "no-source-turns" }),
+          },
+        }),
+        "s1", "claude-sonnet-5", true,
+      );
+      expect(out.kind).toBe("same-runtime");
+      expect(evicted).toEqual([]);      // THE POINT: the turn in flight was not cut
+      resolveIdle!();
+      await idlePromise;
+      await Bun.sleep(20);
+      expect(evicted).toEqual(["s1"]);  // ...and the child WAS replaced, at the boundary
+    });
+  });
+
   // The same carve-out on the OTHER refusal shape the real router actually produces: `plan()`
   // succeeds (all eight steps) and `execute` answers `lossy-fork-offered` because step 5 has no
   // canonical transcript to validate. MEASURED — that reason was reaching the user verbatim,

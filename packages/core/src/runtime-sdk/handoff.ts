@@ -923,14 +923,32 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
       deps.log?.(`handoff: the zero-turn re-selection patch failed for ${sessionId} (${err instanceof Error ? err.name : "unknown"}) — the live incarnation is left running and the switch is refused`);
       return undefined;
     }
+    // The evict, then the repoint. The barrier's own commit would have flipped the directory row's
+    // `runtimeKind` too; a re-selection skipped the barrier, so this does that half by hand. It
+    // matters for exactly one case: a SECOND pre-turn switch, whose review reads `entry.runtimeKind`
+    // as its `from` — a stale one would name a leg this session no longer runs on. Ordered AFTER the
+    // evict, so no live child on the source leg is still attached to the row being re-pointed, and
+    // best-effort throughout (a park landing after it simply rewrites the row, and the very next
+    // incarnation's own attach rewrites it again).
+    //
+    // D1 round-4 review N1: A RUNNING TURN IS NEVER CUT. This path is reached when the fresh review
+    // says there are NO SOURCE TURNS to carry — which is a statement about the TRANSCRIPT, not about
+    // whether a turn is in flight right now. The DEFERRED caller reaches this continuation right
+    // after `idle()` resolves, i.e. right after the turn that was streaming when the review ran, and
+    // a new turn can already have started. An unconditional evict would kill it mid-flight. The same
+    // deferral the item-6 provider-change arm below uses: wait for the idle boundary, fire-and-forget
+    // so `session.setModel` never delays its reply, and keep the evict-then-repoint ORDER on both
+    // branches.
+    const liveAtReselect = deps.winter.get(sessionId);
+    if (liveAtReselect?.turnRunning === true) {
+      deps.log?.(`handoff: ${sessionId} re-selected while a turn was running — its child will be replaced at the next idle boundary`);
+      void liveAtReselect.idle().then(
+        async () => { await deps.winter.evict(sessionId); await repointDirectoryRow(deps, sessionId); },
+        () => { /* the session ended before settling — nothing left to replace */ },
+      );
+      return { kind: "same-runtime", decided };
+    }
     await deps.winter.evict(sessionId);
-    // The barrier's own commit would have flipped the directory row's `runtimeKind` too; a
-    // re-selection skipped the barrier, so this does that half by hand. It matters for exactly one
-    // case: a SECOND pre-turn switch, whose review reads `entry.runtimeKind` as its `from` — a
-    // stale one would name a leg this session no longer runs on. Ordered AFTER the evict, so no
-    // live child on the source leg is still attached to the row being re-pointed, and best-effort
-    // throughout (a park landing after it simply rewrites the row, and the very next incarnation's
-    // own attach rewrites it again).
     await repointDirectoryRow(deps, sessionId);
     return { kind: "same-runtime", decided };
   };
