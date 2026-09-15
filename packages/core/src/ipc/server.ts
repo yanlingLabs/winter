@@ -67,6 +67,7 @@ import { WinterLegRefusal, type LegSession, type WinterSessionDrivers } from "..
 import { readWinterTasks } from "../runtime-sdk/tasks-reader";
 import { ImportLegacySessionError } from "../runtime-sdk/import-legacy";
 import type { PlanSwitchOutcome } from "../runtime-sdk/handoff";
+import { recordNamesSelection } from "../runtime-sdk/handoff";
 import type { RuntimeSessionRecords } from "../runtime-state/records";
 import { loadCatalog, CLAUDE_FAMILY_ID } from "@yanlinglabs/winter-provider-catalog";
 import { catalogRowsFor } from "../runtime-sdk/provider-selection";
@@ -2132,8 +2133,43 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             case "deferred":
               return {};
             case "same-runtime":
-            case "resumed":
+            case "resumed": {
+              // Winter Phase 10b (D1 fix round 3, INVARIANT 1c): `meta.model` and the 8a record may
+              // NEVER disagree about which leg/selection this session runs on.
+              //
+              // `session-driver.ts`'s `resume()` picks the leg from `record.runtimeKind` and
+              // `resumeOfficial` hands `record.selection` on BY IDENTITY; `meta.model` is read only
+              // by the Winter leg's own `optionsFor`. So a `session.setModel` that writes
+              // `meta.model` while the record still names the SOURCE has not switched anything — it
+              // has made `session.list` show the new model while every future turn runs the old one,
+              // silently and permanently. That is exactly what round 2's "not in the runtime
+              // directory ⇒ same-runtime" mapping produced, and it is why this guard is here rather
+              // than only inside `planAndApplySwitch`: the store write itself lives on this side.
+              //
+              // Guarded ONLY when the outcome actually carries a decided selection. A bare
+              // `same-runtime` with no `decided` is one of `planAndApplySwitch`'s early bail-outs
+              // (`model === null`, no record at all, an engine-era row, a `winter-test/*` double, an
+              // off-catalog model) — no leg decision ever ran, so there is nothing for a record to
+              // agree or disagree with, and those keep their ordinary store-write behaviour. Also
+              // inert when no `records` door is wired (a daemon whose 8a spine is offline, and every
+              // test that boots the server without one): the pre-10b behaviour, unchanged.
+              const decidedSelection = outcome.kind === "resumed" ? outcome.selection : outcome.decided;
+              if (decidedSelection !== undefined && opts.records !== undefined
+                  && !recordNamesSelection(opts.records.get(p.sessionId), decidedSelection)) {
+                let currentModel: string | undefined;
+                try { currentModel = opts.store.meta(p.sessionId).model; } catch { /* unknown id: the fallback copy still reads fine */ }
+                // Category only — never the selection itself, which names a provider and a model
+                // ref and rides alongside credential-adjacent facts (this file's own "names only"
+                // logging discipline, and the runtime-state header's rule about record contents).
+                console.error(`session.setModel: refusing to report ${outcome.kind} for ${p.sessionId} — the durable runtime record does not name the requested model's leg/selection (category=record-disagrees)`);
+                throw new RpcFailure(
+                  ERR.INTERNAL,
+                  `Couldn't finish switching models; the session stays on ${currentModel ?? "the default model"}. Try again in a moment.`,
+                  { code: "handoff_blocked" },
+                );
+              }
               break; // the ordinary store write below still applies
+            }
           }
         }
         try {

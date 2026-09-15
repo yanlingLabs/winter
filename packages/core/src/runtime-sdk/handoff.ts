@@ -39,6 +39,11 @@
 // credentials (via `WinterRuntimeSdk.buildSelectionInput`) instead of the router's own unreviewed
 // default — `persisted` is still passed to IT, because reviewing "is the persisted family still
 // servable on the destination" is exactly the barrier's job, not the initial leg decision's.
+// Winter Phase 10b (D1 fix round 3, item 1a): the SAME address derivation `messaging.ts`'s two
+// attach doors use — a materialized directory row must land at the address a real incarnation
+// would later overwrite, never a second one.
+import { buildSessionAddress, serializeRuntimeAddress } from "@yanlinglabs/winter-agent-sdk/messaging";
+import type { SerializedRuntimeAddress } from "@yanlinglabs/winter-runtime-sdk";
 import type {
   DetailedHandoffOutcome,
   HandoffBarrier,
@@ -221,12 +226,138 @@ function sessionKeyFor(record: RuntimeSessionRecord): SessionKey | undefined {
  * the real router) rather than treating it as "nothing recorded yet". `HandoffPlanError` itself is
  * NOT part of `@yanlinglabs/winter-runtime-sdk`'s declared public exports (only its TYPES are
  * re-exported from `store/handoff-barrier.js`; the class lives in an internal `store/index.js` this
- * package's own "exports" map does not expose), so this checks the message text instead of
- * `instanceof` — read here ONLY to branch, never logged, matching this file's own "names and error
- * CLASS only" discipline elsewhere in this file.
+ * package's own "exports" map does not expose — re-confirmed against router 0.0.7), so this checks
+ * the message text instead of `instanceof` — read here ONLY to branch, never logged, matching this
+ * file's own "names and error CLASS only" discipline elsewhere in this file.
+ *
+ * ⚠️ FIX ROUND 3 (the round-2 CRITICAL): THIS FACT IS NOT "NOTHING TO LOSE". Round 2 mapped it
+ * straight onto `{prompt: false}` / `{kind: "same-runtime"}`, i.e. "apply silently, no prompt, no
+ * handoff" — and `sessionKeyFor` is satisfied by `record.backendSessionId`, which is written
+ * SYNCHRONOUSLY (`session-driver.ts`'s `create()`, and `import-legacy.ts`'s engine-era conversion
+ * on the first `session.send`) while the directory row lands only on the first FRAME. That is a
+ * real window in which a session WITH prior turns — an imported engine-era one above all — is
+ * keyed but absent from the directory, and in that window a cross-leg move silently updated
+ * `meta.model` while the record's `runtimeKind`/`selection` (what `resume()`/`ensure()` actually
+ * route on) kept naming the OLD leg: `session.list` showed the new model and the next turn ran on
+ * the old one, with no prompt and no error. What the shape actually means is "the ROUTER cannot
+ * see this session yet", never "this session has nothing to lose" — so it is now a trigger to
+ * MATERIALIZE the row from the durable record and retry once (`materializeDirectoryRow` below),
+ * and, failing that, to fail SAFE (a prompt on the review, `blocked` on the apply).
  */
 function isNotYetInRuntimeDirectory(err: unknown): boolean {
   return err instanceof Error && /not in the runtime directory/.test(err.message);
+}
+
+/**
+ * Fix round 3 (INVARIANT, tested): does the DURABLE record now route this session the way the
+ * requested model's own fresh selection says it should?
+ *
+ * `session-driver.ts`'s `resume()` picks the leg from `sessionLegOf(record)` — i.e.
+ * `record.runtimeKind` — and `resumeOfficial` then hands `record.selection` to `assembleOfficial`
+ * BY IDENTITY (P8c-14's "the persisted selection wins"). `meta.model` is read only by the WINTER
+ * leg's own `optionsFor`. So a `session.setModel` that reports success while the record still
+ * names the source leg/selection has not switched anything — it has only made `meta.model` lie,
+ * invisibly, until the next resume runs the OLD model. Every door that reports success (or writes
+ * `meta.model`) checks this first; `ipc/server.ts`'s `same-runtime`/`resumed` arm is the one that
+ * turns a mismatch into a typed `blocked`.
+ *
+ * Compared: the three fields those two routing reads consult. `family`/`reason`/`decidedAt` and
+ * friends are deliberately NOT compared — `decidedAt` is a timestamp that differs on every
+ * decision, and nothing resumes on it.
+ */
+export function recordNamesSelection(record: RuntimeSessionRecord | undefined, want: RuntimeSelection): boolean {
+  if (record === undefined) return false;
+  return record.runtimeKind === want.runtimeKind
+    && record.selection.runtimeKind === want.runtimeKind
+    && record.selection.providerId === want.providerId
+    && record.selection.modelRef === want.modelRef;
+}
+
+/**
+ * Fix round 3 (item 1a): write the runtime-directory row this session should already have had.
+ *
+ * The row is normally written from inside a live incarnation's own `attachMessaging()`
+ * (`messaging.ts`'s `attachWinterSession`/`attachOfficialSession`), so a session that has a durable
+ * 8a record but has never had a live child — or whose child was evicted before its first frame —
+ * is invisible to the barrier even though every fact the barrier needs is sitting in
+ * `runtime_sessions`. This re-derives the row FROM that record, through the SAME door those two
+ * functions use (`runtime.sdk.directory.record`) and at the SAME address (`buildSessionAddress`
+ * over the backend session id, which is what `findEntry` matches on — either as the row's own
+ * `backendSessionId` or as `parsed.winterSessionId`).
+ *
+ * THE PARKED SHAPE, DELIBERATELY: `status: "exited"`, no `backendSessionId`, every capability
+ * false — byte-for-byte what `attachWinterSession`'s own `entry(false)` writes. A row that says
+ * "running, with a backend id, and no live handle" is exactly what the router's `deliverIntoSession`
+ * reads as "cold-resume this transcript", spawning a second `winter` process the daemon never
+ * tracked (that function's own ⚠️ note). Nothing is lost by omitting the id: the barrier's own
+ * resume target falls back to `session.sessionId`, which IS that id.
+ *
+ * NEVER CLOBBERS A LIVE ROW: `directory.get` first. A real incarnation that raced this call (its
+ * first frame landing between the barrier's throw and this write) owns the row, and overwriting it
+ * with a parked one would un-attach a session that is genuinely live.
+ *
+ * Returns whether the barrier can now find the session — `false` when the daemon has no directory
+ * facet at all (a hand-built `WinterRuntimeSdk` test double), when the record has no backend id
+ * (nothing to address), or when the write itself failed. Every caller treats `false` as "fail
+ * safe", never as "proceed".
+ */
+async function materializeDirectoryRow(deps: HandoffDeps, record: RuntimeSessionRecord): Promise<boolean> {
+  const directory = deps.runtime.sdk?.directory;
+  if (directory === undefined || typeof directory.record !== "function") return false;
+  if (record.backendSessionId === undefined) return false;
+  try {
+    const parsed = buildSessionAddress(record.backendSessionId);
+    const address = serializeRuntimeAddress(parsed) as SerializedRuntimeAddress;
+    if (typeof directory.get === "function" && (await directory.get(address)) !== undefined) return true;
+    const meta = deps.store.meta(record.winterSessionId);
+    await directory.record({
+      address,
+      parsed,
+      runtimeKind: record.runtimeKind,
+      objectKind: "session",
+      // `messaging.ts`'s own two values for the two legs — never guessed from the other one.
+      transport: record.runtimeKind === "claude-agent" ? "claude-handle" : "winter-session",
+      status: "exited",
+      mode: modeOf(meta.mode),
+      ...(meta.cwd === undefined || meta.cwd === null ? {} : { cwd: meta.cwd }),
+      generation: record.generation,
+      selection: record.selection,
+      capabilities: { message: false, resume: false, notifyWhenIdle: false, reply: false },
+      updatedAt: new Date().toISOString(),
+    });
+    return true;
+  } catch (err) {
+    // Names and the error CLASS only — a directory write's own message can quote the entry it
+    // choked on, and an entry carries a selection (this file's own header rule).
+    deps.log?.(`handoff: could not materialize the runtime-directory row for ${record.winterSessionId} (${err instanceof Error ? err.name : "unknown"}) — the switch will fail safe rather than apply silently`);
+    return false;
+  }
+}
+
+/**
+ * Fix round 3: re-point an EXISTING runtime-directory row at the leg/selection the durable record
+ * now names — the half of the barrier's own commit a zero-turn re-selection (which never reaches
+ * the barrier) would otherwise leave undone.
+ *
+ * A PATCH, never a replace: only `runtimeKind`/`selection`/`updatedAt` move, so a row carrying a
+ * title, a cwd, a parent address or a staging `configDir` keeps every one of them. Absent row ⇒
+ * nothing to do (the next incarnation's own attach writes a fresh, correct one). Best-effort by
+ * design: a failure here costs a stale `from` on a SECOND pre-turn switch, never correctness of the
+ * switch itself, which rides on the durable record.
+ */
+async function repointDirectoryRow(deps: HandoffDeps, winterSessionId: string): Promise<void> {
+  const directory = deps.runtime.sdk?.directory;
+  if (directory === undefined || typeof directory.record !== "function" || typeof directory.get !== "function") return;
+  const record = deps.records.get(winterSessionId);
+  if (record?.backendSessionId === undefined) return;
+  try {
+    const address = serializeRuntimeAddress(buildSessionAddress(record.backendSessionId)) as SerializedRuntimeAddress;
+    const existing = await directory.get(address);
+    if (existing === undefined) return;
+    await directory.record({ ...existing, runtimeKind: record.runtimeKind, selection: record.selection, updatedAt: new Date().toISOString() });
+  } catch (err) {
+    deps.log?.(`handoff: could not re-point the runtime-directory row for ${winterSessionId} (${err instanceof Error ? err.name : "unknown"}) — the next incarnation's own attach rewrites it`);
+  }
 }
 
 // ── Participants (registered once; consulted lazily by the router at handoff time) ────────────────
@@ -653,27 +784,100 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
   // has no backend transcript to hand off from" — the same fact the `session_predates_winter_leg`
   // refusal below is about). Skipped ENTIRELY (no review, no prompt) rather than routed through the
   // fail-safe catch below: this is a KNOWN, provable "nothing to lose" case, not an unreviewable one.
+  /**
+   * Fix round 3 (item 1a): at most ONE materialize attempt per `planAndApplySwitch` call, shared by
+   * the review's catch and `plan()`'s. `undefined` = not tried yet; a boolean = the answer, so the
+   * plan catch never re-attempts a write the review already made (or already failed to make).
+   */
+  let materialized: boolean | undefined;
+  const materializeOnce = async (): Promise<boolean> => {
+    if (materialized === undefined) materialized = await materializeDirectoryRow(deps, record);
+    return materialized;
+  };
+  /**
+   * Fix round 3: the ROUTER's own zero-turn verdict (`SwitchReview.skipped === "no-source-turns"`),
+   * never a count this file made up — P10b-2 and the Interfaces block both put that decision in the
+   * router, which is the only component that can actually read the transcript. Set from the review
+   * below; consulted by `reselectWithNothingToCarry` when `plan()` refuses.
+   */
+  let zeroSourceTurns = false;
+  /**
+   * Fix round 3: A ZERO-TURN SESSION IS RE-SELECTED, NOT HANDED OFF — and re-selection is a REAL
+   * write, not the round-2 no-op.
+   *
+   * The real router refuses to PLAN a handoff for a session with no canonical transcript at all
+   * ("there is no canonical transcript at … to validate" — MEASURED, and honest: there is nothing
+   * to drain, stage or validate). But R-10b-8/P10b-2 say that session must still switch, silently.
+   * The switch it needs is not a handoff: it is a change of which leg the NEXT incarnation opens
+   * on, which is exactly the two fields `session-driver.ts`'s `resume()`/`ensure()` route by. So
+   * this patches the record to `decided` and EVICTS the (empty) live driver — without the evict,
+   * `ensure()` hands back the already-registered table entry for the OLD leg without ever consulting
+   * the record, and the next turn would run on the source leg regardless of what the record says.
+   *
+   * Returns `same-runtime` with `decided`, so the caller's own 1c invariant check re-reads the
+   * record and turns a patch that did not land into a typed `blocked` rather than a false success.
+   */
+  const reselectWithNothingToCarry = async (): Promise<PlanSwitchOutcome> => {
+    try {
+      const current = deps.records.get(sessionId);
+      if (current !== undefined) {
+        const destinationAuthRef = credentialRefFor(decided.providerId, deps.home, deps.settings());
+        const destinationAuthRefLocator = destinationAuthRef?.kind === "keychain" ? `keychain:${destinationAuthRef.account}` : undefined;
+        deps.records.patch(sessionId, current.state, {
+          runtimeKind: decided.runtimeKind,
+          selection: decided,
+          providerId: decided.providerId,
+          modelRef: decided.modelRef,
+          authRef: destinationAuthRefLocator,
+        });
+      }
+    } catch (err) {
+      deps.log?.(`handoff: the zero-turn re-selection patch failed for ${sessionId} (${err instanceof Error ? err.name : "unknown"}) — the caller's invariant check will refuse the switch`);
+    }
+    await deps.winter.evict(sessionId);
+    // The barrier's own commit would have flipped the directory row's `runtimeKind` too; a
+    // re-selection skipped the barrier, so this does that half by hand. It matters for exactly one
+    // case: a SECOND pre-turn switch, whose review reads `entry.runtimeKind` as its `from` — a
+    // stale one would name a leg this session no longer runs on. Ordered AFTER the evict, so no
+    // live child on the source leg is still attached to the row being re-pointed, and best-effort
+    // throughout: the very next incarnation's own attach re-records the row regardless.
+    await repointDirectoryRow(deps, sessionId);
+    return { kind: "same-runtime", decided };
+  };
+  /** The generic fail-safe review (fix round 1's MAJOR): unreviewable ⇒ PROMPT, never silent. */
+  const unreviewablePrompt = (): SwitchReview => ({
+    prompt: true,
+    classification: {
+      lossClass: "warned-lossy",
+      warnings: [`Winter couldn't check what carries over to ${modelLabelFor(model)}. The conversation carries over; reasoning private to the current model may not.`],
+      portable: [],
+    },
+  });
   if (sessionKey !== undefined && barrier !== undefined) {
     let review: SwitchReview;
     try {
       review = await barrier.reviewSwitch(sessionKey, decided);
     } catch (err) {
-      // Fix round 2 (A-7 zero-turn, MEASURED): `sessionKeyFor` can be DEFINED (a `backendSessionId`
-      // was already allocated by `session.create`/`session.attach`) while the session has NEVER had
-      // a live incarnation register in the router's OWN runtime directory (nothing has ever
-      // attached one — `messaging.ts`'s directory row is written from inside `attachMessaging()`,
-      // itself reached only once a live incarnation's OWN first real frame arrives; a genuine
-      // "session.create then IMMEDIATELY session.setModel, no turns at all" call never gets that
-      // far). `reviewSwitch` throws the router's own `HandoffPlanError` for exactly this shape
-      // ("... it is not in the runtime directory, so there is no record of which runtime owns it or
-      // which backend session it is" — MEASURED verbatim against the real router) rather than
-      // answering "zero source turns, skip". That message text is read here ONLY to branch — never
-      // logged, matching this file's own "names and error CLASS only" discipline below — and is
-      // treated as the SAME "nothing to lose" fact `sessionKeyFor === undefined` already carves out,
-      // never routed through the generic fail-safe prompt underneath: a session that was never even
-      // opened cannot possibly have anything a prompt would be honestly warning about.
-      if (isNotYetInRuntimeDirectory(err)) {
-        review = { prompt: false };
+      // Fix round 3 (the round-2 CRITICAL — see `isNotYetInRuntimeDirectory`'s own ⚠️): the
+      // "not in the runtime directory" shape means the ROUTER cannot see this session, never that
+      // the session has nothing to lose. `sessionKeyFor` is satisfied by `record.backendSessionId`,
+      // written synchronously long before the first frame ever writes the directory row, so this
+      // shape is reachable by a session WITH turns (an engine-era import above all) — mapping it to
+      // `{prompt: false}` is what made a cross-leg move in that window apply silently onto a record
+      // that still routed to the OLD leg. So: MATERIALIZE the row from the durable record (every
+      // fact the barrier needs is already in `runtime_sessions`) and ask the router again, ONCE. A
+      // genuinely zero-turn session then gets the router's OWN `zero-source-turns` skip — the real
+      // P10b-2 carve-out, decided by the component that can actually count the turns — and an
+      // imported session with turns gets a real, honest review. If materializing is impossible (no
+      // directory facet, no backend id) or the retry still throws, the switch is UNREVIEWABLE and
+      // falls into fix round 1's generic fail-safe prompt below; it is never waved through.
+      if (isNotYetInRuntimeDirectory(err) && (await materializeOnce())) {
+        try {
+          review = await barrier.reviewSwitch(sessionKey, decided);
+        } catch (retryErr) {
+          deps.log?.(`handoff: reviewSwitch still threw for session ${sessionId} after its runtime-directory row was materialized (${retryErr instanceof Error ? retryErr.name : "unknown"}) — treating the switch as unreviewable and prompting`);
+          review = unreviewablePrompt();
+        }
       } else {
         // Fix round 1 (MAJOR, controller ruling): `reviewSwitch` can throw (a transient store or
         // sidecar read error) — an unreviewable switch must never be waved through silently NOR
@@ -683,16 +887,10 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
         // only — never `err.message`, which could embed opaque provider state or other payload text
         // this file's own header forbids logging.
         deps.log?.(`handoff: reviewSwitch threw for session ${sessionId} (${err instanceof Error ? err.name : "unknown"}) — treating the switch as unreviewable and prompting instead of refusing or applying it silently`);
-        review = {
-          prompt: true,
-          classification: {
-            lossClass: "warned-lossy",
-            warnings: [`Winter couldn't check what carries over to ${modelLabelFor(model)}. The conversation carries over; reasoning private to the current model may not.`],
-            portable: [],
-          },
-        };
+        review = unreviewablePrompt();
       }
     }
+    zeroSourceTurns = review.skipped === "no-source-turns";
     if (review.prompt && !confirmLossy) {
       return {
         kind: "confirmation_required",
@@ -710,8 +908,14 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
     // actually runs `decided`'s — stale for `session.list`, a cold resume, `winter doctor`, and
     // anything else that reads the record. Router 0.0.6 already fixed `reviewSwitch`'s OWN read
     // (the live tip's identity, never the stale persisted selection) — this is belt-and-braces for
-    // everything ELSE, so a failure here is logged and never fails the switch itself (the model
-    // DID apply; only this record's own bookkeeping would lag).
+    // everything ELSE.
+    //
+    // ⚠️ FIX ROUND 3 (the 1c INVARIANT): this patch is no longer cosmetic. A failure here is still
+    // logged rather than thrown, but it is no longer "the switch still applied" — `decided` rides
+    // out on this outcome and `ipc/server.ts`'s `same-runtime` arm now REFUSES to write
+    // `meta.model` unless the record it re-reads actually names `decided` (`recordNamesSelection`).
+    // A patch that failed therefore surfaces as a typed `blocked` there, never as a success over a
+    // record that disagrees.
     try {
       const current = deps.records.get(sessionId);
       if (current !== undefined) {
@@ -725,7 +929,7 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
         });
       }
     } catch (err) {
-      deps.log?.(`handoff: C1 same-leg record patch failed for ${sessionId} (${err instanceof Error ? err.name : "unknown"}) — the switch still applied; only the record's own bookkeeping may lag`);
+      deps.log?.(`handoff: C1 same-leg record patch failed for ${sessionId} (${err instanceof Error ? err.name : "unknown"}) — the caller's own invariant check will refuse the switch rather than let meta.model and the record disagree`);
     }
     return { kind: "same-runtime", decided };
   }
@@ -746,17 +950,46 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
   try {
     plan = await barrier.plan(sessionKey, decided.runtimeKind, { requested: decided });
   } catch (err) {
-    // Fix round 2 (A-7 zero-turn, MEASURED): the SAME "not in the runtime directory" shape
-    // `reviewSwitch` can throw (this function's own `isNotYetInRuntimeDirectory` doc) can ALSO
-    // throw here, from `plan()` — a session that has never had a live incarnation cannot be
-    // handed off at all (there is nothing running to drain, nothing addressable to plan against).
-    // Falling through to `same-runtime` is correct, not a workaround: `ipc/server.ts`'s own
-    // ordinary store write still commits the new model preference, and the NEXT real incarnation
-    // this session ever opens (`session-driver.ts`'s `decideRuntime`) reads that fresh preference
-    // and routes to the correct leg from a cold start — exactly what would have happened had
-    // `session.setModel` been called before `session.create`'s own (eager, empty) child ever spawned.
-    if (isNotYetInRuntimeDirectory(err)) return { kind: "same-runtime", decided };
-    throw err;
+    // Fix round 3 (the round-2 CRITICAL): the SAME "not in the runtime directory" shape
+    // `reviewSwitch` can throw can ALSO throw here, from `plan()`. Round 2 answered it with
+    // `{kind: "same-runtime", decided}` — which `ipc/server.ts` treats exactly like `resumed` and
+    // follows with the ordinary `store.setModel` write. That was the CRITICAL: no handoff ran, so
+    // the record's `runtimeKind`/`selection` still named the SOURCE leg while `meta.model` named
+    // the destination's model, and `session-driver.ts`'s `resume()` (which routes on
+    // `record.runtimeKind` and never re-reads `meta.model` for the leg) kept running the OLD leg
+    // forever. Silent, invisible, and strictly worse than the pre-fix refusal.
+    //
+    // Now: materialize the row from the durable record and plan ONCE more. The retry gives a real
+    // handoff — `confirmInit` patches the record, so the invariant actually holds afterwards. If
+    // materializing is impossible or the retry still throws, this is a `blocked`, which
+    // `ipc/server.ts` renders with its neutral "couldn't finish switching models; the session
+    // stays on <current model>" copy and NO store write. Never a silent success.
+    if (isNotYetInRuntimeDirectory(err)) {
+      if (!(await materializeOnce())) {
+        // Fix round 3: a session the ROUTER says has no source turns has nothing to carry, so a
+        // handoff it cannot plan is not a failure — it is a plain re-selection (that function's own
+        // doc). Only a session with real turns behind it is `blocked` here.
+        if (zeroSourceTurns) return await reselectWithNothingToCarry();
+        return { kind: "blocked", reason: "the session is not in the runtime directory and its row could not be rebuilt from the durable record" };
+      }
+      try {
+        plan = await barrier.plan(sessionKey, decided.runtimeKind, { requested: decided });
+      } catch (retryErr) {
+        if (zeroSourceTurns) return await reselectWithNothingToCarry();
+        deps.log?.(`handoff: plan() still threw for session ${sessionId} after its runtime-directory row was materialized (${retryErr instanceof Error ? retryErr.name : "unknown"})`);
+        return { kind: "blocked", reason: "the session could not be planned for a handoff even after its runtime-directory row was rebuilt" };
+      }
+    } else if (zeroSourceTurns) {
+      // MEASURED against the real router (the A-7 zero-turn case): with the directory row present,
+      // `plan()`'s NEXT refusal for a session that has never run a turn is its transcript
+      // validation ("there is no canonical transcript at … to validate"). Re-selecting is the
+      // honest answer — see `reselectWithNothingToCarry`. Matched on the router's own
+      // zero-source-turns verdict, never on that message text: a session with real turns whose
+      // `plan()` throws is still an error, and still propagates.
+      return await reselectWithNothingToCarry();
+    } else {
+      throw err;
+    }
   }
   if (plan.selection.kind === "refused") {
     return { kind: "refused", code: "runtime_selection_refused", detail: plan.selection.detail };
@@ -795,6 +1028,17 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
         executePlan(deps, plan).then(
           (outcome) => {
             if (outcome.kind === "resumed") {
+              // Fix round 3 (the 1c INVARIANT, this path's own half): `ipc/server.ts`'s guard
+              // cannot cover this write — the RPC returned `{}` at defer time, long before this
+              // continuation ran — so the identical check lives here, over the SAME
+              // `recordNamesSelection` predicate. A `resumed` whose record does not name the
+              // destination means `confirmInit` did not actually land it; writing `meta.model`
+              // anyway would leave exactly the disagreement this invariant exists to forbid, and
+              // silently. Log-only, because there is no longer a caller to refuse to.
+              if (!recordNamesSelection(deps.records.get(sessionId), outcome.selection)) {
+                deps.log?.(`deferred handoff for ${sessionId} reported resumed but the durable record does not name the destination leg/selection — the model preference is NOT committed`);
+                return;
+              }
               deps.store.setModel?.(sessionId, model);
               return;
             }
@@ -808,16 +1052,59 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
             // the other kind is narrowed explicitly rather than asserted.
             if (outcome.kind === "lossy_fork" || outcome.kind === "blocked") {
               deps.log?.(`deferred handoff for ${sessionId} settled ${outcome.kind}: ${outcome.reason}`);
+              // Fix round 3: the deferred half of the immediate path's own zero-turn re-selection
+              // (see below) — a fork that would lose nothing still has to land the switch, and this
+              // continuation owns the model commit for the deferred outcome (m5).
+              if (zeroSourceTurns) {
+                return void reselectWithNothingToCarry().then(() => {
+                  if (recordNamesSelection(deps.records.get(sessionId), decided)) deps.store.setModel?.(sessionId, model);
+                });
+              }
             }
           },
-          (err) => deps.log?.(`deferred handoff for ${sessionId} failed: ${err instanceof Error ? err.name : "unknown"}`),
+          // Fix round 3: a THROWING `barrier.execute` (see the immediate path's own catch below)
+          // reaches here on the deferred path. A zero-turn session still has to end up on the leg
+          // it asked for, so it re-selects and commits the model from inside this handler, exactly
+          // as the `resumed` branch above does — the invariant check rides along in
+          // `reselectWithNothingToCarry`'s own caller-side contract, re-read here.
+          async (err) => {
+            deps.log?.(`deferred handoff for ${sessionId} failed: ${err instanceof Error ? err.name : "unknown"}`);
+            if (!zeroSourceTurns) return;
+            await reselectWithNothingToCarry();
+            if (recordNamesSelection(deps.records.get(sessionId), decided)) deps.store.setModel?.(sessionId, model);
+          },
         ).finally(() => pendingHandoffModelString.delete(pendingKey)),
       () => { pendingHandoffModelString.delete(pendingKey); /* the session ended before settling — nothing left to hand off */ },
     );
     return { kind: "deferred" };
   }
   try {
-    return await executePlan(deps, plan);
+    const outcome = await executePlan(deps, plan);
+    // Fix round 3 (item 1b / P10b-2, MEASURED against the real router): a session that has never
+    // run a turn PLANS fine (all eight steps) and then loses at step 5, whose transcript validation
+    // has no file to validate — the barrier answers `lossy-fork-offered` carrying that path as its
+    // reason. A "fork" that would lose nothing is not a fork, and `session.setModel` was surfacing
+    // that reason to the user verbatim, absolute path and all. Zero source turns is the ROUTER's
+    // own verdict, so this re-selects (see `reselectWithNothingToCarry`) instead: the switch lands,
+    // silently, exactly as R-10b-8/P10b-2 require. A session WITH turns keeps every outcome it had.
+    if (zeroSourceTurns && (outcome.kind === "lossy_fork" || outcome.kind === "blocked")) {
+      return await reselectWithNothingToCarry();
+    }
+    return outcome;
+  } catch (err) {
+    // Fix round 3 (item 1b): `barrier.execute` can THROW rather than answer `blocked` — MEASURED
+    // against the real router for a session that has never run a turn: `plan()` builds all eight
+    // steps happily, and step 5's own transcript validation then throws ("there is no canonical
+    // transcript at … to validate") from inside `execute`. Before this, that rejection propagated
+    // out of `session.setModel` as a raw RPC error carrying a filesystem path — both a leak and,
+    // for a zero-turn session, flatly wrong: P10b-2 says that switch is silent.
+    //
+    // A zero-turn session therefore RE-SELECTS (there is nothing to carry, so there is nothing a
+    // handoff would have done that the record patch does not); anything else fails SAFE as
+    // `blocked`, whose neutral copy `ipc/server.ts` already owns, with NO store write.
+    if (zeroSourceTurns) return await reselectWithNothingToCarry();
+    deps.log?.(`handoff: barrier.execute threw for session ${sessionId} (${err instanceof Error ? err.name : "unknown"}) — reporting blocked rather than surfacing it raw`);
+    return { kind: "blocked", reason: "the handoff barrier could not execute the plan" };
   } finally {
     pendingHandoffModelString.delete(pendingKey);
   }
