@@ -719,6 +719,22 @@ describeWithWinterBinary("A-7a: ONE canonical model on TWO providers switches SI
     // the router does not think the provider changed at all. Both halves are pinned below so the
     // divergence is executable evidence rather than prose, and neither is the "right" answer this
     // lane gets to choose — reported to the controller.
+    //
+    // THE ONE-LINE FIX WAS MEASURED AND IS NOT SAFE TO TAKE HERE (fix round 2, item 4). The daemon
+    // builds the router's input as `requested: { model }` and never sets `provider`, though
+    // `candidatesFor` filters on it and `qualifiedProviderFor` already has the answer. Against the
+    // pinned router 0.0.7, with the ONLY change being whether `requested.provider` is set:
+    //
+    //   openrouter/openai/gpt-4.1, both credentialled   → "openai"        | with provider → "openrouter"  ✅ fixes this
+    //   gpt-5.6-sol, codex-oauth only                    → "codex-oauth"   | (unqualified; unaffected)      ✅ safe
+    //   openai/gpt-5.6-sol, codex-oauth only             → "codex-oauth"   | with provider → slot-unservable ❌ BREAKS
+    //
+    // The third row is the caution the review raised, confirmed: a Codex-only install whose session
+    // model is the QUALIFIED `openai/gpt-5.6-sol` runs on Codex OAuth today and would stop running
+    // at all. The shipped default (`DEFAULT_CODEX_MODEL`) is unqualified, so no default install is
+    // affected — but "you typed a qualified key while signed in with ChatGPT" is a real
+    // configuration, and turning it from working into refused is a routing change with a blast
+    // radius this lane may not choose. Left as a router follow-up, per the ruling.
     // ════════════════════════════════════════════════════════════════════════════════════════════
     await client.call(METHODS.sessionSend, { sessionId, text: "on the live child" });
     await client.waitFor(() => client.events.filter((x) => x.type === "turn_completed").length >= 2, 90_000);
