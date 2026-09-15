@@ -454,7 +454,15 @@ function rpcFromWinterRefusal(err: unknown): never {
     const invalid = err.code === "session_predates_winter_leg" || err.code === "not_supported_on_winter_leg"
       || err.code === "claude_executable_unavailable" || err.code === "runtime_selection_refused"
       || err.code === "official_console_router_unsupported" || err.code === "console_profile_missing";
-    throw new RpcFailure(invalid ? ERR.INVALID_PARAMS : ERR.INTERNAL, err.message, { code: err.code });
+    // WS-19 (W19-7): `reason` is additive beside `code` — one `runtime_selection_refused` covers
+    // several distinct situations, and `"no-credential"` is the one a client should render as "you
+    // have no key for <provider>" rather than "the model could not be selected". Same `data.reason`
+    // slot `session.setModel`'s own review refusals already use; omitted entirely when absent, so
+    // every existing error is byte-identical on the wire.
+    throw new RpcFailure(invalid ? ERR.INVALID_PARAMS : ERR.INTERNAL, err.message, {
+      code: err.code,
+      ...(err.reason === undefined ? {} : { reason: err.reason }),
+    });
   }
   const code = (err as { code?: unknown } | null)?.code;
   if (code === "winter_session_ended" || code === "not_supported_on_winter_leg") {

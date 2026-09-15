@@ -308,9 +308,9 @@ export function credentialDisplayNameFor(providerId: string): string {
  * Names the provider and all THREE doors ruling R-10b-12 opened, because a user who cannot reach the
  * Mac right now still has two of them. Never names an SDK or a runtime (R-10b-4).
  *
- * The leading `no-credential:` is the machine-readable half: `WinterLegRefusal` carries a `code`
- * and a message and has no room for the router's separate `reason` field, so the reason is spelled
- * at the head of the detail where a client (and the tests) can key on it.
+ * The machine-readable half rides beside it, not inside it: `WinterLegRefusal` carries a `reason`
+ * (`"no-credential"`) that `ipc/server.ts` forwards as `error.data.reason`, so a client branches on
+ * that rather than string-matching this sentence.
  */
 export function missingCredentialDetail(providerId: string): string {
   return `no-credential: ${credentialDisplayNameFor(providerId)} has no stored credential — add one with \`winter credentials set ${providerId}\`, from the app's Providers settings, or from Winter on your iPhone`;

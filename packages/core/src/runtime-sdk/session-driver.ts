@@ -36,7 +36,7 @@ import type { PermissionClassLabel } from "@yanlinglabs/winter-agent-sdk/messagi
 import type { EffortLevel, McpServerConfig, Options, PermissionResult, ProviderConnectionConfig } from "@yanlinglabs/winter-agent-sdk";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
-import { isSelectionRefusal, type RuntimeDirectoryEntry, type RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
+import { isSelectionRefusal, type RuntimeDirectoryEntry, type RuntimeSelection, type SelectionAlternative } from "@yanlinglabs/winter-runtime-sdk";
 import type { SecretStore } from "../auth/secret-store";
 import type { ApprovalBroker } from "../agent/approvals";
 import type { PermissionGate, SessionApprovalPolicy } from "../agent/gate";
@@ -47,13 +47,14 @@ import type { RuntimeSessionRecord, RuntimeSessionRecords } from "../runtime-sta
 import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { providerBaseUrlFor, winterOptionsFromSettings, type Settings } from "../settings";
+import { officialSubscriptionAuthEnabled, providerBaseUrlFor, winterOptionsFromSettings, type Settings } from "../settings";
 import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
 import { clearSession } from "./diff-attach";
 import { credentialPresenceFrom, credentialRefFor } from "./keychain";
 import { apiKeyProviderIsUnauthenticated, missingCredentialDetail } from "./credentials";
+import { renderNoCredentialHint } from "./handoff";
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
 import { attachOfficialSession, attachWinterSession } from "./messaging";
 import { buildWinterOptions, permissionModeFor } from "./mode-options";
@@ -117,7 +118,14 @@ export interface LegSession {
 }
 
 export class WinterLegRefusal extends Error {
-  constructor(readonly code: WinterLegRefusalCode, message: string) {
+  /**
+   * `reason` (WS-19, W19-7) is the refusal's own sub-classification, additive beside `code` and
+   * carried through to `error.data.reason` by `ipc/server.ts` — the same slot `session.setModel`'s
+   * review refusals already use. `runtime_selection_refused` is one code covering several distinct
+   * situations, and a client that wants to say "you have no key for DeepSeek" rather than "the model
+   * could not be selected" needs to tell them apart without string-matching the message.
+   */
+  constructor(readonly code: WinterLegRefusalCode, message: string, readonly reason?: string) {
     super(message);
     this.name = "WinterLegRefusal";
   }
@@ -439,7 +447,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // credential optional. A `local-none` provider is excluded a layer down, by auth family.
       if (legacyOpenAiConnection === undefined && selection !== undefined
           && apiKeyProviderIsUnauthenticated(selection.providerId, credentials.byProvider[selection.providerId] !== undefined)) {
-        throw new WinterLegRefusal("runtime_selection_refused", missingCredentialDetail(selection.providerId));
+        throw new WinterLegRefusal("runtime_selection_refused", missingCredentialDetail(selection.providerId), "no-credential");
       }
       const capSession: CapabilitySession = {
         sessionId, mode, cwd,
@@ -819,8 +827,45 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     if (model === undefined || testProviderNameFor(model) !== undefined) return undefined;
     if (catalogRowsFor(model).length === 0) return undefined;
     const decided = await deps.runtime.selectRuntimeFor({ mode, model });
-    if (isSelectionRefusal(decided)) throw new WinterLegRefusal("runtime_selection_refused", decided.detail);
+    if (isSelectionRefusal(decided)) throw await refusalForSelection(decided, model);
     return decided;
+  };
+
+  /**
+   * WS-19 (W19-7): the router's refusal, made ACTIONABLE, without taking its authority away.
+   *
+   * Three cases, in order:
+   *
+   *  1. `no-credential` WITH `alternatives` — the router's own W18-3 list of every catalog row able
+   *     to serve this model, whichever door. `renderNoCredentialHint` turns it into doors. This is
+   *     the SAME hint `session.setModel` has rendered since D1-7 (`handoff.ts`); `session.create`
+   *     simply never rendered it, so a user creating a Claude session with no Anthropic credential
+   *     got the bare one-sentence detail and no way in. Only the Claude family produces this list.
+   *  2. Outside that family the router has no alternatives to offer — but WINTER knows exactly which
+   *     provider this model resolves to and whether its slot is empty, so it answers with its own
+   *     door hint naming that provider. This is the `deepseek`/`zai`/`openrouter` case the derived
+   *     inventory made reachable: without it the user gets the router's honest but unhelpful "every
+   *     candidate row … belongs to a provider with no configured credential ref".
+   *  3. Anything else — a genuinely unservable slot, a mode that forbids a runtime — passes through
+   *     verbatim, with the router's own `reason`.
+   *
+   * The credential probe happens ONLY on this path (a refusal), never on the hot create path, which
+   * has already done its own.
+   */
+  const refusalForSelection = async (refusal: { reason: string; detail: string; alternatives?: readonly SelectionAlternative[] }, model: string): Promise<WinterLegRefusal> => {
+    if (refusal.reason === "no-credential" && refusal.alternatives !== undefined) {
+      const hint = renderNoCredentialHint(refusal.alternatives, { subscriptionEnabled: officialSubscriptionAuthEnabled(deps.settings()) });
+      return new WinterLegRefusal("runtime_selection_refused", `${refusal.detail} ${hint}`, "no-credential");
+    }
+    try {
+      const credentials = await credentialPresenceFrom(deps.secrets);
+      const selection = providerSelectionFor(model, credentials, deps.home, deps.settings());
+      if (selection !== undefined
+          && apiKeyProviderIsUnauthenticated(selection.providerId, credentials.byProvider[selection.providerId] !== undefined)) {
+        return new WinterLegRefusal("runtime_selection_refused", missingCredentialDetail(selection.providerId), "no-credential");
+      }
+    } catch { /* a store that will not answer must not turn one refusal into a different one */ }
+    return new WinterLegRefusal("runtime_selection_refused", refusal.detail, refusal.reason);
   };
 
   const createOfficial = async (sessionId: string, selection: RuntimeSelection): Promise<LegSession> => {
