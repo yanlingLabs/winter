@@ -525,6 +525,19 @@ class WinterSessionImpl implements WinterSession {
     this.opening = (async () => {
       this.assertNotEnded();
       await this.lastDone;
+      // WS-19 (review N2): A REPLAY IS A TURN, so it passes the same gate `send`/`steer` do.
+      //
+      // `open()` re-pushes what the log still OWES (`deps.unconsumed`) and any delivery HELD while
+      // the session was resumable — real turns, on a child this call is about to spawn. `send` gates
+      // itself before calling `open()`, but this path is reached with the driver table EMPTY (a
+      // daemon restart, an idle reap, or the credential eviction `credential.set`/`remove` now
+      // performs), which is exactly the window in which a credential can have changed underneath.
+      // Without this, an owed text ran ungated against a provider whose key had been removed, and
+      // only the NEXT text was refused.
+      //
+      // Nothing is owed on a fresh `create()`, so this costs that path nothing.
+      const owedAtOpen = this.deps.unconsumed !== undefined ? this.deps.unconsumed() : this.pending;
+      if (owedAtOpen.length + this.held.length > 0) await this.deps.beforeTurn?.();
       const abort = new AbortController();
       const resume = await this.deps.hasTranscript();
       // Options FIRST: a refused executable throws here and leaves NO generation row behind it.

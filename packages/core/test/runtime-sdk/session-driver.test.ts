@@ -23,6 +23,7 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { CORE_BRAND } from "../../src/runtime-sdk/brand";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import { createWinterSessionDrivers, refusalMayBeCredentialShaped, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
+import { unconsumedUserMessages } from "../../src/runtime-sdk/winter-session";
 import { WINTER_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
 import { backfillNativeSessions, openRuntimeStateDb, ProjectionCheckpoints, RuntimeSessionRecords } from "../../src/runtime-state";
 import { SessionHub } from "../../src/sessions/hub";
@@ -376,6 +377,61 @@ describe("refusalForSelection — only credential-shaped reasons are re-describe
       try { await t.drivers.create(sid); } catch (err) { caught = err; }
       expect((caught as { reason?: string })?.reason).toBe("no-credential");
       expect((caught as Error)?.message).toContain("winter credentials set deepseek");
+    } finally { t.close(); }
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// WS-19 (review N2) — THE REPLAY PATH IS GATED TOO.
+//
+// `open()` re-pushes what the log still owes (an interrupted or held `user_message`) and any
+// delivery held while the session was resumable. Those are real turns, and `send` gates itself
+// BEFORE calling `open()` — but this path is reached with the driver table EMPTY (a daemon restart,
+// an idle reap, or the eviction `credential.set`/`credential.remove` now performs), which is exactly
+// the window in which a credential can have changed underneath. Before this, the owed text ran
+// ungated against a provider whose key had been removed and only the NEXT text was refused.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
+  test("an owed user_message is NOT replayed against a provider with no credential — a typed refusal, and no child", async () => {
+    const t = table();
+    try {
+      // A `winter-test/*` model is never gated (it is selected by env var, not by the catalog), so
+      // the session is created and driven normally.
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      await session.send("A", "cli");        // pushed; its turn is begun
+      const held = await session.send("B", "cli");
+      expect(held.queued).toBe(true);        // in the log, with no turn of its own — the OWED text
+      // The session's model now names a provider with an empty slot — the same state a
+      // `credential.remove` leaves behind — and the driver is EVICTED, which is what
+      // `credential.set`/`credential.remove` now do to every live child on the affected provider
+      // (and what a daemon restart or an idle reap does anyway). `end()` alone leaves the driver in
+      // the table, and `ensure` then hands it back without re-opening: the replay path needs an
+      // EMPTY table, which is precisely the window N2 is about.
+      t.store.setModel(sid, "deepseek/deepseek-reasoner");
+      await t.drivers.evict(sid);
+      const spawnsBefore = t.queries.length;
+
+      // The next `ensure` re-opens from the record — and the replay is gated.
+      let caught: unknown;
+      try { await t.drivers.ensure(sid); } catch (err) { caught = err; }
+      expect((caught as { code?: string })?.code).toBe("runtime_selection_refused");
+      expect((caught as { reason?: string })?.reason).toBe("no-credential");
+      // NO CHILD was spawned for the replay: the gate runs before the query is created.
+      expect(t.queries.length).toBe(spawnsBefore);
+      // ...and the owed text is still owed — nothing was consumed by the refusal.
+      expect(unconsumedUserMessages(t.store.read(sid))).toEqual(["B"]);
+    } finally { t.close(); }
+  });
+
+  test("a fresh create with nothing owed never consults the gate on the open path", async () => {
+    // The cost of N2 on the hot path is zero: `create()` opens with an empty log.
+    const t = table();
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "deepseek/deepseek-reasoner" });
+      const session = await t.drivers.create(sid);
+      expect(t.queries.length).toBe(1);   // the child spawned; the gate had nothing to gate
+      await session.end();
     } finally { t.close(); }
   });
 });
