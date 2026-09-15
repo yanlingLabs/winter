@@ -258,6 +258,25 @@ describe("credential.list / credential.set / credential.remove (WS-19)", () => {
     c.close();
   });
 
+  test("Minor 7's BAND: raw over the limit but TRIMMED within it is accepted, exactly as the CLI door accepts it", async () => {
+    const { socketPath, harnessToken, secrets } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "test");
+
+    // A pasted key with a lot of trailing whitespace: 4000 real characters, 200 spaces. The CLI
+    // trims and stores it; before fix round 2 the RPC's own `.max(4096)` saw the RAW string and
+    // refused it as a bare INVALID_PARAMS with no `data.code` to branch on.
+    const key = `${"k".repeat(4000)}${" ".repeat(200)}`;
+    expect(key.length).toBeGreaterThan(4096);
+    expect(key.trim().length).toBeLessThanOrEqual(4096);
+    const res = await c.request(METHODS.credentialSet, { providerId: "deepseek", apiKey: key });
+    expect(res.error).toBeUndefined();
+    expect(res.result).toEqual({ ok: true });
+    // ...and what was STORED is the trimmed value, the same thing the CLI would have stored.
+    expect(await readCredentialMaterial(secrets, "deepseek:default")).toEqual({ kind: "api-key", key: "k".repeat(4000) });
+    c.close();
+  });
+
   test("B-5: a REMOTE (phone) client may call all three; provider.configure stays refused for remote", async () => {
     const { socketPath, remoteToken, secrets } = await boot();
     const c = await TestClient.connect(socketPath);

@@ -37,7 +37,7 @@ import type { TokenAuthority } from "../auth/tokens";
 import type { SecretStore } from "../auth/secret-store";
 import { readCredentialMaterial, writeOpenAiApiKey } from "../auth/credential-material";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../runtime-sdk/keychain";
-import { credentialRows, credentialValueRefusal, removeCredential, setCredential, CREDENTIAL_VALUE_MAX_CHARS, CredentialStoreUnavailable } from "../runtime-sdk/credentials";
+import { credentialRows, credentialValueRefusal, removeCredential, setCredential, CredentialStoreUnavailable } from "../runtime-sdk/credentials";
 import { effectiveOfficialAuthFor } from "../runtime-sdk/official-options";
 import type { ConsoleProfileBroker } from "../auth/console-profile-broker";
 import type { RoutineStore } from "../routines/store";
@@ -3078,15 +3078,23 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }
 
       case METHODS.credentialSet: {
-        // Review Minor 7: W19-4 names `credential_value_invalid` for a value over the limit, but the
-        // wire schema's own `.max()` would refuse it FIRST as a plain INVALID_PARAMS with no
-        // `data.code` at all — a client branching on the typed vocabulary would see nothing to
-        // branch on. Checked here, BEFORE `parseParams`, so the §5 schema stays exactly as Lane Q
-        // and Lane I mirror it. A LENGTH TEST ONLY: the value is never read, quoted or logged, and
-        // the refusal never says how long it was.
+        // Review Minor 7 (+ its BAND, fix round 2): W19-4 names `credential_value_invalid` for an
+        // unusable value, but the wire schema's own `min`/`max` would refuse one FIRST as a plain
+        // INVALID_PARAMS with no `data.code` at all — a client branching on the typed vocabulary
+        // would see nothing to branch on. So the value rule runs HERE, before `parseParams`, and the
+        // §5 schema stays exactly as Lane Q and Lane I mirror it.
+        //
+        // THE BAND the first pass left open: a value whose RAW length is over the limit but whose
+        // TRIMMED length is not (a pasted key with a lot of trailing whitespace). The CLI trims and
+        // accepts it; the RPC's `.max()` saw the raw string and refused it untyped. Both doors now
+        // apply the SAME trim-based rule and hand the TRIMMED value on, so the two agree on every
+        // input. The refusal is names-and-shape only: the value is never read, quoted or logged, and
+        // it never says how long it was.
         const rawKey = (params as { apiKey?: unknown } | null | undefined)?.apiKey;
-        if (typeof rawKey === "string" && rawKey.trim().length > CREDENTIAL_VALUE_MAX_CHARS) {
-          throw credentialRpcFailure(credentialValueRefusal(rawKey)!);
+        if (typeof rawKey === "string") {
+          const invalid = credentialValueRefusal(rawKey);
+          if (invalid !== undefined) throw credentialRpcFailure(invalid);
+          params = { ...(params as Record<string, unknown>), apiKey: rawKey.trim() };
         }
         const p = parseParams(CredentialSetParams, params);
         if (!opts.secrets) throw new RpcFailure(ERR.INTERNAL, "credential.set is not available on this server (no secret store configured)", { code: "credential_store_unavailable" });
