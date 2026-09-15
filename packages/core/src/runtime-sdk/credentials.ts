@@ -369,7 +369,19 @@ export async function evictSessionsForCredential(deps: CredentialEvictionDeps, p
     if (session.turnRunning) {
       deps.log?.(`credentials: ${session.sessionId} is mid-turn on ${providerId} — its child will be replaced at the next idle boundary`);
       void session.idle().then(
-        () => deps.evict(session.sessionId),
+        () => {
+          // RE-CHECKED AT THE BOUNDARY (fix-3 review nit C). A turn can take minutes, and anything
+          // can happen inside one: a `session.setModel` may have moved this session to a different
+          // provider, in which case the handoff's OWN eviction has already replaced the child and
+          // this one would throw away a fresh, correct incarnation for a credential it no longer
+          // uses — one needless cold start and a resume, for nothing. The record is the same source
+          // of truth the match above used, so re-reading it is the whole check.
+          if (deps.providerOf(session.sessionId) !== providerId) {
+            deps.log?.(`credentials: ${session.sessionId} moved off ${providerId} while its turn ran — leaving its child alone`);
+            return;
+          }
+          return deps.evict(session.sessionId);
+        },
         () => { /* the session ended before settling — nothing left to replace */ },
       );
     } else {
