@@ -223,6 +223,7 @@ describe("daemon.ts boot hook — Migration B (P9c-15: default-home gate)", () =
     const throwingSecrets = {
       get: async (): Promise<string | null> => { throw new Error("keychain daemon unreachable"); },
       set: async (): Promise<void> => {},
+      delete: async (): Promise<boolean> => false,
     };
 
     let caught: unknown;

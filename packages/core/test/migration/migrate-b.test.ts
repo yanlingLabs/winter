@@ -236,6 +236,7 @@ describe("runMigrationB — Keychain (Step 4)", () => {
         return real.get(name);
       },
       set: async (name: string, value: string) => real.set(name, value),
+      delete: async (name: string) => real.delete(name),
     };
     const to = new FileSecretStore(tempDir());
 
@@ -269,6 +270,7 @@ describe("runMigrationB — Keychain (Step 4)", () => {
         if (name === "openai-api-key") throw new Error("keychain write refused: sk-should-never-leak");
         return realTo.set(name, value);
       },
+      delete: async (name: string) => realTo.delete(name),
     };
 
     const lines: string[] = [];

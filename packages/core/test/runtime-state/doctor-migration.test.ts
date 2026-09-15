@@ -35,7 +35,7 @@ describe("diagnoseMigration / formatMigrationDoctorLines", () => {
   test("absent + no legacy home present: never reads the Keychain at all (avoids a consent dialog for nothing)", async () => {
     const parent = tempDir();
     let reads = 0;
-    const spyingStore = { get: async (_n: string) => { reads++; return null; }, set: async () => {} };
+    const spyingStore = { get: async (_n: string) => { reads++; return null; }, set: async () => {}, delete: async () => false };
     await diagnoseMigration({
       home: join(parent, "home"),
       legacyHome: join(parent, "legacy"),

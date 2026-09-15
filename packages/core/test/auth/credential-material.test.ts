@@ -110,10 +110,22 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     expect(coerced).toEqual({ kind: "api-key", key: "sk-x" });
   });
 
-  test("a blanked record ('') is what clearCredentialMaterial writes, and readCredentialMaterial returns null for it — presence must gate the spawn because the child JSON.parses ANY non-null string", async () => {
+  // WS-19 (W19-2) CHANGED THE WRITE SIDE DELIBERATELY: `clearCredentialMaterial` now DELETES the
+  // item (`SecretStore.delete`, which did not exist before) instead of writing an empty string, so
+  // a cleared credential leaves no row behind at all. The READ side is unchanged and must stay so —
+  // a home written by an older build still holds blanked items, and they must keep reading as
+  // absent. Both halves are pinned here, in that order.
+  test("clearCredentialMaterial DELETES the record outright (W19-2) — nothing is left behind", async () => {
     const s = store();
     await writeOpenAiApiKey(s, "sk-x");
     await clearCredentialMaterial(s, CREDENTIAL_MATERIAL_NAMES.openai);
+    expect(await s.get(CREDENTIAL_MATERIAL_NAMES.openai)).toBeNull();
+    expect(await readCredentialMaterial(s, CREDENTIAL_MATERIAL_NAMES.openai)).toBeNull();
+  });
+
+  test("MIGRATION COMPATIBILITY: a blanked record ('') written by an OLDER build still reads as absent — presence must gate the spawn because the child JSON.parses ANY non-null string", async () => {
+    const s = store();
+    await s.set(CREDENTIAL_MATERIAL_NAMES.openai, ""); // exactly what pre-WS-19 `clearCredentialMaterial` wrote
     expect(await s.get(CREDENTIAL_MATERIAL_NAMES.openai)).toBe("");
     expect(await readCredentialMaterial(s, CREDENTIAL_MATERIAL_NAMES.openai)).toBeNull();
   });
@@ -206,6 +218,9 @@ describe("migrateLegacyCredentialMaterial", () => {
       }
       async set(name: string, value: string): Promise<void> {
         await this.inner.set(name, value);
+      }
+      async delete(name: string): Promise<boolean> {
+        return await this.inner.delete(name);
       }
     }
     const inner = store();

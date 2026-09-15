@@ -27,4 +27,11 @@ export class LegacyKeychainSecretStore implements SecretStore {
   async set(name: string, value: string): Promise<void> {
     await Bun.secrets.set({ service: this.service, name, value });
   }
+  /** WS-19 (W19-2) completes the `SecretStore` interface here too, but NOTHING in Migration B calls
+   *  it: the legacy Keychain items are the ROLLBACK SOURCE (CLAUDE.md's own hard rule — "the legacy
+   *  `Norma.app`/`~/.norma`/`com.norma.core` items stay untouched"), so the migration only ever
+   *  READS this store. It exists so the type is total, not so a caller can erase the fallback. */
+  async delete(name: string): Promise<boolean> {
+    return await Bun.secrets.delete({ service: this.service, name });
+  }
 }
