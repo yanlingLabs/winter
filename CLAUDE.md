@@ -85,7 +85,21 @@ WINTER_RUNTIME_EXECUTABLE="$PWD/../../dist/winter" WINTER_HOME=~/.winter-dev WIN
 # typed even though the binary itself exists) → node_modules (dev only) — and (2) an Anthropic API key material
 # (`winter login --anthropic-key`); without either the session refuses typed (`claude_executable_unavailable` /
 # `runtime_selection_refused`). Winter-leg sessions are unaffected. Cross-runtime handoff via `session.setModel` is fenced
-# by `runtimes.handoff.crossRuntime` (default false).
+# by `runtimes.handoff.crossRuntime` — which since Phase 10b (D1-1, W18-10, R-10b-1) DEFAULTS ON FOR CODE, the round trip
+# having been measured end to end; chat and dispatch never reach the official leg at all, so they keep the pre-10b "off"
+# posture. The key is deliberately `.optional()` rather than defaulted, so an explicit `true`/`false` still overrides the
+# mode-aware default in either direction (`handoffCrossRuntimeEnabled`, settings.ts).
+# FIFTH TRAP (Phase 10b, WS-19): the credential inventory is DERIVED from the pinned catalog — every in-scope api-key
+# provider (deepseek, zai/GLM, openrouter, google, xai, …) has a Keychain slot at `<providerId>:default`, managed through
+# `credential.list` / `credential.set` / `credential.remove` (the only provider-family verbs the phone may call) and, on
+# the terminal, `winter credentials [list] | set <id> | remove <id>` (masked prompt only — never a flag, a pipe or an env
+# var). A key added, rotated or removed REPLACES every live child on that provider, so it takes effect on the next turn
+# with no restart; a session whose provider Winter decided on (a qualified `<provider>/<model>` key, or a bare id only one
+# inventory provider serves) and has no key for refuses TYPED at the first turn (`runtime_selection_refused`,
+# `data.reason: "no-credential"`) rather than a vendor 401 mid-turn. There is NO daemon-side endpoint table: the catalog
+# ships each provider's own endpoints, and `settings.providers.<catalogId>.baseUrl` is the only override — hot, per
+# provider, for a self-hosted or proxied endpoint (`settings.provider.baseUrl`, the legacy single-provider
+# `openai-compatible` arm, keeps precedence for `openai` and is byte-identical).
 # P9c-1 AMENDMENT (Phase 9c): the official leg authenticates ONLY with the user's own Anthropic API-key material — never a
 # claude.ai subscription — until Anthropic approves it for this integration. While `runtimes.official.subscriptionAuth` is
 # `false` (the default, and the only shipped value), every spawned `claude` child gets its own Winter-owned `CLAUDE_CONFIG_DIR`
