@@ -72,6 +72,28 @@ func credentialRowOffersRemove(_ row: CredentialRow) -> Bool {
     row.present && row.door != "provider.login"
 }
 
+/// The confirmation title for a Remove (WS-19 review item 3). Names the provider, because the
+/// button that opened this dialog sits in a list of ~100 near-identical rows and "Remove
+/// credential?" would not tell the user WHICH one they are about to delete.
+func credentialRemovalTitle(_ row: CredentialRow) -> String {
+    "Remove the \(row.displayName) credential?"
+}
+
+/// The confirmation body. Removal is destructive and, unlike most destructive actions in the app,
+/// UNDOABLE ONLY BY THE USER: Winter keeps no copy of a key (Keychain is the only store), so a
+/// mistaken Remove means finding or reissuing the credential at the provider.
+///
+/// The Codex row gets an extra sentence because its recovery is not "paste the key again" — there
+/// is no key to paste. `credential.remove codex-oauth` clears the OAuth token pair, and the only
+/// way back is the terminal sign-in flow, which the user cannot start from this window. Telling
+/// them that AFTER the fact would be telling them too late.
+func credentialRemovalMessage(_ row: CredentialRow) -> String {
+    let base = "Winter keeps no copy — you'll need the key again to restore it."
+    guard row.providerId == "codex-oauth" else { return base }
+    return "This signs Winter out of ChatGPT (Codex). To use it again you'll need to sign in "
+        + "from a terminal with `winter login` — it can't be redone from this window."
+}
+
 @MainActor
 final class CredentialsSectionModel: ObservableObject {
     private let client: CredentialsClient
@@ -105,6 +127,17 @@ final class CredentialsSectionModel: ObservableObject {
     /// Values are the same compile-time constants `refusalText` produces: never daemon prose,
     /// never anything derived from a typed key.
     @Published private(set) var rowErrors: [String: String] = [:]
+
+    /// The row awaiting a Remove confirmation, if any — non-nil is what presents the dialog
+    /// (`.confirmationDialog(_:isPresented:presenting:)`), the same "setting this opens it" idiom
+    /// as `AnthropicAuthSectionModel.loginSheet`.
+    ///
+    /// The confirmation exists because Remove is destructive in a way the rest of this section is
+    /// not: Winter keeps no copy of a credential (Keychain is the only store), so an accidental
+    /// Remove is recoverable only by the user going back to the provider for the key — and the
+    /// button sits in a list of ~100 near-identical rows, which is exactly the shape that produces
+    /// mis-clicks.
+    @Published var pendingRemoval: CredentialRow?
 
     init(client: CredentialsClient) {
         self.client = client
@@ -160,6 +193,26 @@ final class CredentialsSectionModel: ObservableObject {
         } catch {
             rowErrors[providerId] = refusalText(error, fallback: "couldn't save that key — try again")
         }
+    }
+
+    /// The Remove BUTTON's action — it only opens the confirmation; nothing is deleted here. The
+    /// daemon call happens in `confirmRemoval()`, which is the only caller of `remove` the view
+    /// has.
+    func requestRemoval(_ row: CredentialRow) {
+        pendingRemoval = row
+    }
+
+    /// Dismissing the dialog (Cancel, Esc, click-away) — no call, no state change beyond closing.
+    func cancelRemoval() {
+        pendingRemoval = nil
+    }
+
+    /// The confirmed Remove. Clears `pendingRemoval` BEFORE awaiting the call so the dialog cannot
+    /// still be on screen while the deletion runs (and so a second confirm can't re-enter).
+    func confirmRemoval() async {
+        guard let row = pendingRemoval else { return }
+        pendingRemoval = nil
+        await remove(providerId: row.providerId)
     }
 
     /// Delete this row's material. `remove` answering `false` (nothing was stored) is a SUCCESS,
@@ -238,6 +291,24 @@ struct CredentialsSection: View {
             }
         }
         .task { await model.refresh() }
+        // ONE dialog for the whole section, driven by `pendingRemoval` — attaching it inside the
+        // row builder would mint a presentation modifier per row (~100 of them), and SwiftUI's
+        // behaviour when several claim to present at once is not something to rely on.
+        .confirmationDialog(
+            model.pendingRemoval.map(credentialRemovalTitle) ?? "",
+            isPresented: Binding(
+                get: { model.pendingRemoval != nil },
+                // Covers every dismissal SwiftUI performs itself (Esc, click-away), not just the
+                // Cancel button below.
+                set: { presented in if !presented { model.cancelRemoval() } }
+            ),
+            presenting: model.pendingRemoval
+        ) { _ in
+            Button("Remove", role: .destructive) { Task { await model.confirmRemoval() } }
+            Button("Cancel", role: .cancel) { model.cancelRemoval() }
+        } message: { row in
+            Text(credentialRemovalMessage(row))
+        }
     }
 
     @ViewBuilder
@@ -264,7 +335,8 @@ struct CredentialsSection: View {
                         .disabled(!model.canSave(row.providerId))
                 }
                 if credentialRowOffersRemove(row) {
-                    Button("Remove") { Task { await model.remove(providerId: row.providerId) } }
+                    // Opens the confirmation only — the delete itself is `confirmRemoval()`.
+                    Button("Remove") { model.requestRemoval(row) }
                         .disabled(model.busyProviderId != nil)
                 }
             }

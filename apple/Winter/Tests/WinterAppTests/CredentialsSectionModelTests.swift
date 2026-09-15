@@ -163,6 +163,88 @@ final class CredentialsSectionModelTests: XCTestCase {
         XCTAssertEqual(fake.listCallCount, 1, "the refresh still runs")
     }
 
+    // MARK: - Remove is confirmed before anything is deleted
+
+    /// The Remove BUTTON must not delete anything — it only opens the confirmation. The whole
+    /// point is that the button sits in a list of ~100 near-identical rows, and Winter keeps no
+    /// copy of a credential, so a mis-click is recoverable only by going back to the provider.
+    func testRequestRemovalOnlyOpensTheConfirmation() async {
+        let fake = FakeCredentialsClient()
+        let model = CredentialsSectionModel(client: fake)
+        let row = FakeCredentialsClient.row(providerId: "deepseek", present: true)
+
+        model.requestRemoval(row)
+
+        XCTAssertEqual(model.pendingRemoval, row)
+        XCTAssertTrue(fake.removeCalls.isEmpty, "opening the dialog must not call the daemon")
+    }
+
+    /// Cancelling (the button, Esc, or a click-away — all route here) closes it and calls nothing.
+    func testCancelRemovalClosesTheDialogWithoutCalling() async {
+        let fake = FakeCredentialsClient()
+        let model = CredentialsSectionModel(client: fake)
+        model.requestRemoval(FakeCredentialsClient.row(providerId: "deepseek", present: true))
+
+        model.cancelRemoval()
+
+        XCTAssertNil(model.pendingRemoval)
+        XCTAssertTrue(fake.removeCalls.isEmpty)
+    }
+
+    /// Confirming is the ONLY path to the daemon call, and it closes the dialog first so it cannot
+    /// still be on screen while the deletion runs.
+    func testConfirmRemovalCallsRemoveAndClosesTheDialog() async {
+        let fake = FakeCredentialsClient()
+        fake.listResults = [.success([FakeCredentialsClient.row(providerId: "deepseek", present: false)])]
+        let model = CredentialsSectionModel(client: fake)
+        model.requestRemoval(FakeCredentialsClient.row(providerId: "deepseek", present: true))
+
+        await model.confirmRemoval()
+
+        XCTAssertEqual(fake.removeCalls, ["deepseek"])
+        XCTAssertNil(model.pendingRemoval)
+    }
+
+    /// Nothing pending → nothing happens. (A second confirm can't re-enter and delete twice.)
+    func testConfirmRemovalWithNothingPendingIsANoOp() async {
+        let fake = FakeCredentialsClient()
+        let model = CredentialsSectionModel(client: fake)
+
+        await model.confirmRemoval()
+
+        XCTAssertTrue(fake.removeCalls.isEmpty)
+    }
+
+    /// The copy names the provider — "Remove credential?" in a list of a hundred near-identical
+    /// rows doesn't say WHICH one is about to go.
+    func testTheConfirmationTitleNamesTheProvider() {
+        let row = FakeCredentialsClient.row(providerId: "deepseek", displayName: "DeepSeek", present: true)
+
+        XCTAssertTrue(credentialRemovalTitle(row).contains("DeepSeek"))
+    }
+
+    /// Codex gets its own body text: its recovery is not "paste the key again" (there is no key),
+    /// it's a terminal sign-in the user cannot start from this window — which is worth knowing
+    /// BEFORE confirming rather than after.
+    func testTheCodexConfirmationSaysSignInMustBeRedoneFromTheTerminal() {
+        let codex = FakeCredentialsClient.row(
+            providerId: "codex-oauth", displayName: "ChatGPT (Codex)", authKinds: ["oauth"],
+            manageable: false, present: true, kind: "oauth", door: "cli-oauth"
+        )
+        let message = credentialRemovalMessage(codex)
+
+        XCTAssertTrue(message.contains("winter login"))
+        XCTAssertTrue(message.contains("terminal"))
+    }
+
+    /// An ordinary api-key row says the ordinary thing: Winter kept no copy.
+    func testAnApiKeyRowsConfirmationSaysWinterKeepsNoCopy() {
+        let message = credentialRemovalMessage(FakeCredentialsClient.row(providerId: "deepseek", present: true))
+
+        XCTAssertTrue(message.contains("no copy"))
+        XCTAssertFalse(message.contains("winter login"), "only the Codex row names the terminal flow")
+    }
+
     // MARK: - typed refusals
 
     /// `credential_kind_unsupported` is the one refusal that carries a destination — the view must
