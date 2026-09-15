@@ -3,14 +3,23 @@
 // controller's own C1-2/m4 addendum item (a REAL resumed official child's environment, through the
 // router's own door rather than a fake `query()`).
 //
-// STATUS (2026-09-14, test fix round 1, HEAD 05b914dc): Defect 1 (Winter -> official confirmLossy
-// deadlocked on `awaitDestinationInit`) and Defect 2 (the official/Winter leg never bumped the
-// durable generation counter, so the projector's checkpoint silently dropped the next turn's
-// completion) are BOTH FIXED — D1 fix round 2, `efbb503b` (Defect 1) and `10b9088c` (Defect 2). A-1
-// is green end to end (including Major 4's tool-call fixture, below). A-2 stays RED: the SDK's own
-// message reader drops `message.model`, root-caused and fixed upstream but not yet pinned in this
-// build (SDK 0.0.12); left asserting the spec's required tag rather than weakened — see that test's
-// own comment. Defect 3 (below, A-3a only) is still open, under investigation in the router lane.
+// STATUS (2026-09-15, Lane P fix round 2, HEAD 1caabb0d — nothing in this file is red):
+//
+//   Defect 1 (Winter -> official `confirmLossy` deadlocked on `awaitDestinationInit`) — FIXED,
+//     D1 fix round 2, `efbb503b`.
+//   Defect 2 (neither leg bumped the durable generation counter, so the projector's checkpoint
+//     silently dropped the next turn's completion) — FIXED, D1 fix round 2, `10b9088c`.
+//   Defect 3 (after a FAILED Winter -> official attempt the reverted Winter SOURCE was permanently
+//     stranded — every later send died `process_death "runtime exited before init"`) — FIXED by the
+//     router 0.0.7 pin: the winter binary now releases its `handoff-leases/` entry at step 6 on a
+//     reverted, never-committed attempt. A-3a proves it end to end; see the A-3 section header.
+//   A-2 (Claude's thinking carrying to a Winter GPT destination as a `kind="summary"` tag) — GREEN
+//     on the SDK 0.0.12 pin, which restores `message.model` in the reader so official-written
+//     thinking resolves an origin. The assertion was never weakened while it was red.
+//
+// A-1 is green end to end, including Major 4's tool-call fixture below. W18-19's row 4 (an OFFICIAL
+// destination receiving a foreign-family source's reasoning as a tag) is covered in
+// `five-hop-chain-e2e.test.ts`'s Part 3, hop 4.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -620,9 +629,10 @@ describeWithWinterBinary("A-3b: destination death, official -> Winter — the so
     // right before this send, plus a check that the NEW request's body actually carries this send's
     // own text — never a vacuous "some request, at some point, existed" check.
     const messagesRequestsBefore = anthropicRequests.filter((r) => r.path === "/v1/messages").length;
-    // Unlike A-3a's Winter source (Defect 3, still open — see this file's header), the OFFICIAL
-    // source here re-resumes cleanly — and now that Defect 2 is fixed (D1 fix round 2, 10b9088c) the
-    // plain wait works with no polling workaround.
+    // A-3a's Winter source hit Defect 3 (the reverted source left permanently stranded); that is
+    // FIXED by the router 0.0.7 pin — see the A-3 section header. The OFFICIAL source here never hit
+    // it at all and re-resumes cleanly, and now that Defect 2 is fixed (D1 fix round 2, 10b9088c)
+    // the plain wait works with no polling workaround.
     await client.call(METHODS.sessionSend, { sessionId, text: "still on claude?" });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.indexOf(e) >= sinceIdx, 45_000);
     const messagesRequestsAfter = anthropicRequests.filter((r) => r.path === "/v1/messages");
