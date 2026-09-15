@@ -1,5 +1,7 @@
 import type { CredentialRef } from "@yanlinglabs/winter-agent-sdk";
 import type { CredentialPresence, KeychainSeam } from "@yanlinglabs/winter-runtime-sdk";
+import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
+import type { WinterProviderDescriptor } from "@yanlinglabs/winter-provider-catalog";
 import type { SecretStore } from "../auth/secret-store";
 import { keychainService } from "../profile";
 import { CREDENTIAL_MATERIAL_NAMES, readCredentialMaterial, writeCredentialMaterial } from "../auth/credential-material";
@@ -45,9 +47,11 @@ export interface CredentialSlot {
  * source (`migrateLegacyCredentialMaterial`, run once at daemon boot) and `winter logout`'s blank
  * target — never read through this seam, and `CodexAuthStore` no longer writes them at all.
  *
- * The list is a LITERAL array on purpose (not derived, not spread from elsewhere): adding a
- * provider here is meant to be a deliberate, reviewable edit — `keychain.test.ts` pins the exact
- * contents as a tripwire.
+ * SUPERSEDED BY WS-19 (W19-1): the list used to be a LITERAL array on purpose, so that adding a
+ * provider was a deliberate, reviewable edit. That is exactly what the standing "providers live in
+ * the SDKs" ruling reversed — the inventory is now DERIVED from the pinned catalog
+ * (`credentialInventory()` below), and `keychain.test.ts` pins the DERIVATION (today's four-row
+ * prefix, the count formula, spot rows in and out) instead of the contents.
  *
  * PRESENCE IS NOT VALIDITY. `credentialPresenceFrom` (below) reports whether a slot's secret is
  * stored, never whether it still works — an expired Codex access token with a dead refresh token
@@ -112,19 +116,77 @@ export async function writeAnthropicApiKey(store: SecretStore, key: string): Pro
   await writeCredentialMaterial(store, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key });
 }
 
-export const WINTER_CREDENTIAL_INVENTORY: readonly CredentialSlot[] = [
-  { provider: "openai", secretName: CREDENTIAL_MATERIAL_NAMES.openai, kind: "keychain" },
-  { provider: "codex-oauth", secretName: CREDENTIAL_MATERIAL_NAMES.codexOauth, kind: "keychain" },
-  { provider: "anthropic", secretName: ANTHROPIC_CREDENTIAL_SECRET_NAME, kind: "keychain" },
-  // Fix wave 3 (M-B): a SECOND row for the SAME "anthropic" provider — registers the console
-  // account in the seam's "known accounts" set (`keychainSeamFromSecretStore`'s `known` set below)
-  // and makes `credentialPresenceFrom`'s presence probe see a console-only install as present, so
-  // `providerSelectionFor` still picks "anthropic" as a candidate. `credentialRefFor` below never
-  // reaches this row via the generic `.find()` lookup for "anthropic" — it special-cases that
-  // provider id and picks the actual account itself (`officialAuthFamilyFor`-driven), so this row's
-  // own ORDER relative to the row above never matters for that path.
-  { provider: "anthropic", secretName: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, kind: "keychain" },
-];
+/**
+ * WS-19 (W19-1): the inventory is DERIVED FROM THE CATALOG, never hand-extended again.
+ *
+ * The four-row literal this replaced is the reason WS-18's five-hop chain was unreachable in the
+ * product: `providerSelectionFor` refuses any model whose provider has no row here, so DeepSeek,
+ * GLM and OpenRouter could not be routed to at all no matter what the user stored. The standing
+ * ruling ("providers and login systems live in the agent SDKs; the daemon owns only storage slots")
+ * makes derivation the only correct shape: a catalog bump that adds a provider adds its credential
+ * slot, with no edit here.
+ *
+ * WHICH ROWS (spec §3): every catalog provider whose `authKinds` includes `"api-key"`, whose
+ * `risk.class` is not `"blocked"`, and which does not require the user's own endpoint
+ * (`requiresUserEndpoint` — `azure-ai`, `oci`, whose shipped endpoint is a placeholder host). Every
+ * `local-none` row, every `cloud-credential-chain`-only row and every blocked row is absent by
+ * construction rather than by a denylist anyone has to maintain.
+ *
+ * THE ORDER IS LOAD-BEARING and starts with today's four rows VERBATIM. `providerSelectionFor`
+ * breaks a tie between several providers serving the same bare model id by inventory order
+ * (presence-preferred first), so moving `openai` off the front would silently re-point every
+ * credential-less `gpt-5.6-*` session at some third-party reseller. Today's prefix is therefore
+ * pinned byte-for-byte and the derived remainder is appended in catalog order behind it.
+ *
+ * The two OAuth rows are NOT derived — they are the fixed accounts Winter's own bespoke login doors
+ * write (`codex-oauth:default` from `winter login`, `anthropic:console` from the console broker) and
+ * they carry no api-key slot of their own.
+ *
+ * Memoised: `loadCatalog()` is itself memoised for the life of the process and the catalog is
+ * immutable, so this array is computed once and handed back by reference (callers treat it as
+ * `readonly`, and `WINTER_CREDENTIAL_INVENTORY` below is exactly this call's result).
+ */
+let memoisedInventory: readonly CredentialSlot[] | undefined;
+
+/** The SDK's own account convention (`keychain-store.ts`'s `DEFAULT_PROVIDER_ACCOUNT_ID`): one
+ *  fixed account per provider — multi-account is explicitly out of WS-19's scope. Spelled here so
+ *  the derived secret names and `auth/credential-material.ts`'s two hand-written literals
+ *  (`openai:default`, `codex-oauth:default`) are visibly the same convention. */
+export const DEFAULT_CREDENTIAL_ACCOUNT_ID = "default";
+
+/** Spec §3's membership test, spelled once so `credentialInventory` and `credentialRows` (and any
+ *  test that wants to reason about the same set) cannot drift. */
+export function isInScopeApiKeyProvider(p: WinterProviderDescriptor): boolean {
+  return p.authKinds.includes("api-key") && p.risk.class !== "blocked" && p.requiresUserEndpoint !== true;
+}
+
+export function credentialInventory(): readonly CredentialSlot[] {
+  if (memoisedInventory !== undefined) return memoisedInventory;
+  // Today's four, verbatim and first — see the order note above.
+  const head: CredentialSlot[] = [
+    { provider: "openai", secretName: CREDENTIAL_MATERIAL_NAMES.openai, kind: "keychain" },
+    { provider: "codex-oauth", secretName: CREDENTIAL_MATERIAL_NAMES.codexOauth, kind: "keychain" },
+    { provider: "anthropic", secretName: ANTHROPIC_CREDENTIAL_SECRET_NAME, kind: "keychain" },
+    // Fix wave 3 (M-B): a SECOND row for the SAME "anthropic" provider — registers the console
+    // account in the seam's "known accounts" set (`keychainSeamFromSecretStore`'s `known` set below)
+    // and makes `credentialPresenceFrom`'s presence probe see a console-only install as present, so
+    // `providerSelectionFor` still picks "anthropic" as a candidate. `credentialRefFor` below never
+    // reaches this row via the generic `.find()` lookup for "anthropic" — it special-cases that
+    // provider id and picks the actual account itself (`officialAuthFamilyFor`-driven), so this row's
+    // own ORDER relative to the row above never matters for that path.
+    { provider: "anthropic", secretName: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, kind: "keychain" },
+  ];
+  const already = new Set(head.map((s) => s.provider));
+  const derived = loadCatalog().providers
+    .filter((p) => isInScopeApiKeyProvider(p) && !already.has(p.id))
+    .map<CredentialSlot>((p) => ({ provider: p.id, secretName: `${p.id}:${DEFAULT_CREDENTIAL_ACCOUNT_ID}`, kind: "keychain" }));
+  memoisedInventory = [...head, ...derived];
+  return memoisedInventory;
+}
+
+/** The exported constant name every existing caller already reads — now the derivation's result
+ *  rather than a literal (WS-19 §5 keeps the name deliberately: nothing downstream changes). */
+export const WINTER_CREDENTIAL_INVENTORY: readonly CredentialSlot[] = credentialInventory();
 
 /** Error code/class only — NEVER `.message`, which could embed material for some future
  *  `SecretStore` implementation even though today's two (`Bun.secrets`, file read) do not put
@@ -289,30 +351,54 @@ export function credentialRefFor(provider: string, home?: string, settings?: Set
  * OAuth material shape, which the router's selector treats as `"custom"` (never `"claude-oauth"` —
  * that family is reserved for the Anthropic subscription login this daemon does not have, D14).
  */
-const PROVIDER_AUTH_FAMILY: Readonly<Record<string, "api-key" | "custom">> = {
-  openai: "api-key",
-  anthropic: "api-key",
-  "codex-oauth": "custom",
-};
+/** WS-19 (W19-1): DERIVED alongside the inventory rather than a three-row literal — every derived
+ *  api-key row is `"api-key"`, and `codex-oauth` (Winter's own OAuth material shape) stays
+ *  `"custom"`, exactly as before. The anthropic console arm needs no entry of its own: it shares the
+ *  `"anthropic"` provider id with the api-key row, and the router's selector reads this map by
+ *  PROVIDER, not by account — which is what "the anthropic console arm as today" means here. */
+let memoisedAuthFamily: Readonly<Record<string, "api-key" | "custom">> | undefined;
+function providerAuthFamilyMap(): Readonly<Record<string, "api-key" | "custom">> {
+  if (memoisedAuthFamily !== undefined) return memoisedAuthFamily;
+  const map: Record<string, "api-key" | "custom"> = { "codex-oauth": "custom" };
+  for (const p of loadCatalog().providers) {
+    if (isInScopeApiKeyProvider(p)) map[p.id] = "api-key";
+  }
+  memoisedAuthFamily = map;
+  return map;
+}
+
+/** Kept as an exported binding for readers that want the table itself (it was a module-private
+ *  literal before WS-19); it is the derivation's result, computed once. */
+export const PROVIDER_AUTH_FAMILY: Readonly<Record<string, "api-key" | "custom">> = providerAuthFamilyMap();
 
 export async function credentialPresenceFrom(
   store: SecretStore,
   inventory: readonly CredentialSlot[] = WINTER_CREDENTIAL_INVENTORY,
 ): Promise<CredentialPresence> {
+  // WS-19: the inventory went from 4 rows to ~150, and this probe runs on every session
+  // create/open and every `selectRuntimeFor`. Sequential awaits would turn one presence probe into
+  // ~150 round-trips to the Keychain in series; the reads are independent, so they are issued
+  // together and the RESULT is folded in inventory order afterwards, which keeps the answer (and
+  // the order of any warning) identical to the sequential version.
+  const probed = await Promise.all(inventory.map(async (slot) => {
+    try {
+      return { slot, material: await readCredentialMaterial(store, slot.secretName) };
+    } catch (err) {
+      return { slot, failure: describeError(err) };
+    }
+  }));
   const byProvider: Record<string, CredentialRef["kind"]> = {};
   const authByProvider: Record<string, { authFamily: "api-key" | "custom" }> = {};
-  for (const slot of inventory) {
-    let material: Awaited<ReturnType<typeof readCredentialMaterial>>;
-    try {
-      material = await readCredentialMaterial(store, slot.secretName);
-    } catch (err) {
-      console.warn(`[keychain] presence probe failed for "${slot.secretName}": ${describeError(err)}`);
+  const authFamilies = providerAuthFamilyMap();
+  for (const row of probed) {
+    if ("failure" in row) {
+      console.warn(`[keychain] presence probe failed for "${row.slot.secretName}": ${row.failure}`);
       continue;
     }
-    if (material) {
-      byProvider[slot.provider] = slot.kind;
-      const authFamily = PROVIDER_AUTH_FAMILY[slot.provider];
-      if (authFamily !== undefined) authByProvider[slot.provider] = { authFamily };
+    if (row.material) {
+      byProvider[row.slot.provider] = row.slot.kind;
+      const authFamily = authFamilies[row.slot.provider];
+      if (authFamily !== undefined) authByProvider[row.slot.provider] = { authFamily };
     }
   }
   return { byProvider, ...(Object.keys(authByProvider).length === 0 ? {} : { authByProvider }) };

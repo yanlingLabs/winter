@@ -26,7 +26,10 @@ test("every inventory provider id exists in the PINNED catalog", () => {
   // return — `CredentialPresence.byProvider` is keyed by these, so a wrong id silently un-routes
   // every session on that provider. Fix wave 3 (M-B): "anthropic" now appears TWICE (the api-key
   // row and the console-bearer row, keychain.ts's own doc explains why) — still the same catalog id.
-  expect(WINTER_CREDENTIAL_INVENTORY.map((s) => s.provider)).toEqual(["openai", "codex-oauth", "anthropic", "anthropic"]);
+  // WS-19 (W19-1): the inventory is derived, so this pins the PREFIX — the four rows whose ORDER
+  // decides every tie `providerSelectionFor` breaks below. The remaining ~144 derived rows are the
+  // catalog's, in catalog order, and `keychain.test.ts` owns the derivation's own pins.
+  expect(WINTER_CREDENTIAL_INVENTORY.slice(0, 4).map((s) => s.provider)).toEqual(["openai", "codex-oauth", "anthropic", "anthropic"]);
   expect(ids.has("codex")).toBe(false);
 });
 
@@ -53,11 +56,22 @@ test("FINDING CLOSED at winter-provider-catalog 0.0.4: all three CODEX_MODELS ar
   // Catalog 0.0.4 adds the missing `codex-oauth` rows for terra/luna (P8b-34's "codex terra/luna"
   // carve-out) — the finding is closed. Pinned as an exact map so drift in EITHER direction fails:
   // the catalog losing a row, or Winter's table changing, both land here.
+  //
+  // WS-19 (W19-1) CHANGED THESE ANSWERS DELIBERATELY: the inventory is now every in-scope api-key
+  // catalog provider, so the third-party resellers that also serve these ids (agentrouter,
+  // freeaiapikey, kie, kilocode) are now inventory rows too and appear here. That is the POINT of
+  // the derivation — a user who stores a kilocode key can route to it — and it is safe because
+  // `providerSelectionFor` prefers a provider whose credential is actually PRESENT and falls back
+  // to INVENTORY ORDER, whose first row is still `openai` (asserted just below, and in the
+  // ambiguity test further down).
   expect(Object.fromEntries(CODEX_MODELS.map((m) => [m.id, inventoryProvidersServing(m.id)]))).toEqual({
-    "gpt-5.6-sol": ["openai", "codex-oauth"],
-    "gpt-5.6-terra": ["openai", "codex-oauth"],
-    "gpt-5.6-luna": ["openai", "codex-oauth"],
+    "gpt-5.6-sol": ["openai", "codex-oauth", "agentrouter", "freeaiapikey", "kie", "kilocode"],
+    "gpt-5.6-terra": ["openai", "codex-oauth", "kie"],
+    "gpt-5.6-luna": ["openai", "codex-oauth", "kie"],
   });
+  // The tie-break that matters: with NO credential at all, every one of these still names `openai`
+  // — never a reseller — because `openai` leads the inventory.
+  for (const m of CODEX_MODELS) expect(providerSelectionFor(m.id, NONE)?.providerId).toBe("openai");
   expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.6-sol");
 });
 
@@ -130,8 +144,20 @@ test("a fully-qualified <providerId>/<model> key is taken at its word, with its 
   expect(providerSelectionFor("groq/llama-3.3-70b-versatile", NONE)?.providerId).toBe("groq");
 });
 
-test("a model no inventory provider serves names no provider — the child's catalog-first selection answers", () => {
+test("a model NO catalog row serves names no provider — the child's catalog-first selection answers", () => {
   expect(providerSelectionFor("definitely-not-a-real-model-id", BOTH)).toBeUndefined();
-  // Served by the catalog, but by nobody Winter holds a credential slot for.
-  expect(providerSelectionFor("llama-3.3-70b-versatile", BOTH)).toBeUndefined();
+});
+
+// WS-19 (W19-1) CHANGED THIS ANSWER DELIBERATELY. Before the derivation, `llama-3.3-70b-versatile`
+// was "served by the catalog, but by nobody Winter holds a credential slot for" → `undefined`, and
+// the session fell through to the child's own selection with no credential named. Now `groq` is an
+// inventory row like every other in-scope api-key provider, so the model resolves and — once a groq
+// key is stored — is actually routable. This is the requirement (R-10b-11), not a regression: it is
+// the same change that makes WS-18's five-hop chain reachable at all.
+test("a model served by a NEWLY-derived inventory provider now resolves to it (the WS-19 widening)", () => {
+  expect(providerSelectionFor("llama-3.3-70b-versatile", BOTH)).toEqual({ providerId: "groq" });
+  expect(providerSelectionFor("llama-3.3-70b-versatile", { byProvider: { groq: "keychain" } })).toEqual({
+    providerId: "groq",
+    authRef: { kind: "keychain", account: "groq:default", service: keychainService() },
+  });
 });
