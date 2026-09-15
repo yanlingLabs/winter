@@ -124,7 +124,8 @@ extension RpcError {
 /// refused. Separate from `RpcError` on purpose: an `RpcError` means the daemon answered "no" and
 /// said why, while this means the daemon answered something this client could not make sense of.
 public enum CredentialsClientError: Error, Equatable, Sendable {
-    /// `credential.list` returned a result with no `providers` array (WS-19 §9 A-4).
+    /// `credential.list` returned a result with no `providers` array — or a non-empty one from
+    /// which not a single row could be read (WS-19 §9 A-4).
     ///
     /// This is a THROW rather than an empty list, and the distinction is the whole point of the
     /// ruling: "no credentials are stored" and "I could not read the reply" look identical on
@@ -172,32 +173,51 @@ public final class LiveCredentialsClient: CredentialsClient, Sendable {
     /// skipped — the other rows are perfectly good, and one unknown shape from a newer daemon must
     /// not blank the whole section. `kind` is genuinely optional (W19-3) and so is never a reason
     /// to skip; `authKinds` defaults to empty since it is display-only here.
+    ///
+    /// The THIRD case sits between them and lands on A-4's side: a NON-EMPTY `providers` array in
+    /// which not one row decodes. Skipping is only ever safe as a partial measure — "some rows I
+    /// could not read, here are the ones I could" — and when there are none left it silently becomes
+    /// the empty list the ruling exists to forbid. The daemon said it had credentials; answering
+    /// `[]` would repaint that as "you have none", which is exactly the screen that talks a user
+    /// into re-entering keys they never lost. A wholesale shape change (a schema bump, a relay that
+    /// rewrites rows) is precisely what produces this, so it is a likely failure, not a theoretical
+    /// one. An EXPLICITLY empty array stays an empty list: that is a claim the daemon itself made.
     public func list() async throws -> [CredentialRow] {
         let r = try await client.request("credential.list", params: .object([:]))
         guard let rows = r["providers"]?.arrayValue else {
             throw CredentialsClientError.malformedListReply
         }
-        return rows.compactMap { row in
-            guard let providerId = row["providerId"]?.stringValue,
-                  let displayName = row["displayName"]?.stringValue,
-                  let group = row["group"]?.stringValue,
-                  let manageable = row["manageable"]?.boolValue,
-                  let present = row["present"]?.boolValue,
-                  let risk = row["risk"]?.stringValue,
-                  let door = row["door"]?.stringValue
-            else { return nil }
-            return CredentialRow(
-                providerId: providerId,
-                displayName: displayName,
-                group: group,
-                authKinds: row["authKinds"]?.arrayValue?.compactMap(\.stringValue) ?? [],
-                manageable: manageable,
-                present: present,
-                kind: row["kind"]?.stringValue,
-                risk: risk,
-                door: door
-            )
+        let decoded = rows.compactMap(Self.decodeRow)
+        guard !decoded.isEmpty || rows.isEmpty else {
+            throw CredentialsClientError.malformedListReply
         }
+        return decoded
+    }
+
+    /// One row, or `nil` when a field W19-3 makes REQUIRED is missing or the wrong type. Mirrored
+    /// line for line by `WinterChatKit.RemoteCredentialsRpc.decodeRow` — the phone cannot link this
+    /// kit, so `apple/fixtures/ws19-credential-list.json` is decoded by both test suites against one
+    /// expected table to keep the two from drifting.
+    static func decodeRow(_ row: JSONValue) -> CredentialRow? {
+        guard let providerId = row["providerId"]?.stringValue,
+              let displayName = row["displayName"]?.stringValue,
+              let group = row["group"]?.stringValue,
+              let manageable = row["manageable"]?.boolValue,
+              let present = row["present"]?.boolValue,
+              let risk = row["risk"]?.stringValue,
+              let door = row["door"]?.stringValue
+        else { return nil }
+        return CredentialRow(
+            providerId: providerId,
+            displayName: displayName,
+            group: group,
+            authKinds: row["authKinds"]?.arrayValue?.compactMap(\.stringValue) ?? [],
+            manageable: manageable,
+            present: present,
+            kind: row["kind"]?.stringValue,
+            risk: risk,
+            door: door
+        )
     }
 
     /// `credential.set` → `{ ok: true }`. The key goes into the params and nowhere else: this

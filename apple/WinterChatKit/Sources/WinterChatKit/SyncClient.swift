@@ -24,10 +24,29 @@ public struct RpcError: Error, Equatable {
     public let code: Int
     public let message: String
     public let divergedLastSeq: Int?
-    public init(code: Int, message: String, divergedLastSeq: Int? = nil) {
+    /// The refusal's whole `error.data` object, when the conn had one to hand over (WS-19 Lane I).
+    ///
+    /// `divergedLastSeq` above stays exactly as it is — a pre-parsed field, kept because the fork
+    /// logic reads it on a path that predates this and must not change shape. This is the general
+    /// carrier the newer typed refusals need: WS-19's `credential.set` answers
+    /// `error.data.code` + `error.data.door` (`CredentialRpcCode` / `credentialDoor` in
+    /// `CredentialsRpc.swift`), and the ONLY way to tell "this key is malformed" from "this
+    /// provider takes a different door" is to read them — the `message` beside them is daemon prose
+    /// that a credentials UI must never render.
+    ///
+    /// Optional, and a client must treat `nil` as "the daemon didn't say", never as a code it can
+    /// substitute: an older daemon, or a relay hop that drops `data`, lands here too.
+    public let data: [String: SessionEvent.JSONValue]?
+    public init(
+        code: Int,
+        message: String,
+        divergedLastSeq: Int? = nil,
+        data: [String: SessionEvent.JSONValue]? = nil
+    ) {
         self.code = code
         self.message = message
         self.divergedLastSeq = divergedLastSeq
+        self.data = data
     }
 }
 
@@ -678,12 +697,17 @@ public actor SyncClient {
 let ERR_DIVERGED = -32006
 let ERR_INTERNAL = -32603
 
-// `METHODS` string constants the client sends. Kept as a tiny local mirror so WinterChatKit does not
-// take a source dependency on the TS protocol's method table for five strings.
+// `METHODS` string constants this kit sends. Kept as a tiny local mirror so WinterChatKit does not
+// take a source dependency on the TS protocol's method table for a handful of strings.
 enum METHODS {
     static let syncHeads = "sync.heads"
     static let syncPull = "sync.pull"
     static let syncPush = "sync.push"
     static let syncConfig = "sync.config"
     static let syncMemory = "sync.memory"
+    // WS-19 (W19-10) — remote-allowed since Lane Q moved all four mirrored allowlists 21 → 24.
+    // Sent by `RemoteCredentialsRpc` (CredentialsRpc.swift), not by `SyncClient`.
+    static let credentialList = "credential.list"
+    static let credentialSet = "credential.set"
+    static let credentialRemove = "credential.remove"
 }
