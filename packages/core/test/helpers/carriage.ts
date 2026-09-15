@@ -7,20 +7,28 @@
 // destination can read, with the source's opaque state left behind. These are the three questions,
 // asked of the bytes that actually went out.
 //
-// THE CARRIAGE TAG'S FORM IS PER-ADAPTER, and that is MEASURED, not assumed (2026-09-15, against
-// the pinned SDK 0.0.12 / router 0.0.7 through real `dist/winter` children):
+// THE CARRIAGE'S FORM IS CHOSEN BY THE DESTINATION'S OWN READABLE STATE, not by its adapter (review
+// correction — the first pass of this comment said "per-adapter", which happens to agree on every
+// row we exercise and is the wrong rule). The SDK's `doorFor` picks the THINKING CHANNEL for a
+// destination whose `readableState` is `full-exposed`, and the TAG for every other destination;
+// `kind` is then the SOURCE's own readableState. MEASURED 2026-09-15 against the pinned SDK 0.0.12 /
+// router 0.0.7 through real `dist/winter` children:
 //
-//   - `openai-responses` (the `openai` provider) renders W18-19's literal tag:
+//   - TAG door (a destination that is not full-exposed — the `openai` rows we drive here, and a
+//     Claude destination): W18-19's literal
 //       <recovered_reasoning kind="exposed" provider="deepseek" model="deepseek/deepseek-reasoner">…</recovered_reasoning>
 //     with `kind="summary"` for a Claude source and `kind="exposed"` for DeepSeek/GLM.
-//   - `openai-chat-completions` (deepseek, zai, openrouter, xai) renders the SAME fact as a labelled
-//     plain-text prefix on the assistant message:
+//   - THINKING-CHANNEL door (a full-exposed destination — the deepseek and zai rows we drive here):
+//     the same fact as a labelled plain-text prefix on the assistant message,
 //       [prior-model reasoning, carried as data — provider: deepseek, model: deepseek/deepseek-reasoner]
-//     followed by the reasoning text.
+//     followed by the reasoning text. This door renders NO `kind` at all, which is why
+//     `carriesReasoning` cannot check one on it and the tests that need `kind` proven use a
+//     tag-door destination.
 //
 // Both carry the same three things (the text, the source provider, the source model), so
-// `carriesReasoning` accepts either and the tests say which hop is which adapter. Asserting only the
-// angle-bracket form would have made every chat-completions hop unprovable and read as a defect.
+// `carriesReasoning` accepts either and each test says which door its destination takes. Asserting
+// only the angle-bracket form would have made every thinking-channel hop unprovable and read as a
+// defect.
 
 /**
  * The CONVERSATION part of a request body — messages/input/system — with the tool schemas left out.
@@ -33,7 +41,10 @@
 export function conversationOf(body: string): string {
   try {
     const o = JSON.parse(body) as Record<string, unknown>;
-    return JSON.stringify({ messages: o.messages, input: o.input, system: o.system });
+    // `instructions` is the Responses leg's system prompt (review nit) — part of the conversation,
+    // and cheap to include. It carries no tool schemas, so it does not reintroduce the
+    // `encrypted_content` false hit the tool list would.
+    return JSON.stringify({ messages: o.messages, input: o.input, system: o.system, instructions: o.instructions });
   } catch {
     return body;
   }
@@ -82,5 +93,9 @@ export function carriesReasoning(body: string, opts: { kind: "summary" | "expose
   const responsesTag = `<recovered_reasoning kind=\\"${opts.kind}\\" provider=\\"${opts.provider}\\"`;
   const responsesTagRaw = `<recovered_reasoning kind="${opts.kind}" provider="${opts.provider}"`;
   if (body.includes(responsesTag) || body.includes(responsesTagRaw)) return true;
-  return body.includes("prior-model reasoning, carried as data") && body.includes(`provider: ${opts.provider}`);
+  // ASSOCIATED, not merely both-present (review nit): the label and the provider must be in the SAME
+  // prefix, so a body carrying two prior models cannot satisfy a claim about one of them using the
+  // other one's label.
+  return body.includes(`prior-model reasoning, carried as data — provider: ${opts.provider}`)
+    || body.includes(`prior-model reasoning, carried as data \\u2014 provider: ${opts.provider}`);
 }

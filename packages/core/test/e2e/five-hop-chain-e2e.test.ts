@@ -414,8 +414,10 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
       expect(deepseek!.models).toContain("deepseek-reasoner");
       const deepseekBody = deepseek!.bodies.at(-1)!;
       expect(outOfOrder(deepseekBody, ["hop 0, on claude", "hello from claude", "hop 1, on deepseek"])).toEqual([]);
-      // (b) the Claude turn's thinking, re-rendered as SUMMARY data — the lossy carriage the prompt
-      // above warned about, actually delivered rather than dropped.
+      // (b) the Claude turn's thinking, carried as data with its own provenance — the lossy carriage
+      // the prompt above warned about, actually delivered rather than dropped. DeepSeek is
+      // full-exposed, so this hop takes the THINKING-CHANNEL door, which renders no `kind`: the
+      // `kind` half of W18-19's table is proven on hop 3, whose destination takes the tag door.
       expect(carriesReasoning(deepseekBody, { kind: "summary", provider: "anthropic", text: CLAUDE_THINKING })).toBe(true);
       // (c) ...and the signature that made it opaque stays behind.
       expect(opaqueLeaks(deepseekBody, [CLAUDE_SIGNATURE])).toEqual([]);
@@ -428,7 +430,8 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
       const glmBody = glm!.bodies.at(-1)!;
       expect(outOfOrder(glmBody, ["hop 0, on claude", "hello from claude", "hop 1, on deepseek", "hello from deepseek", "hop 2, on glm"])).toEqual([]);
       // BOTH prior models' reasoning is still travelling — the chain accumulates, it does not
-      // replace, which is what "keeps one conversation" means five hops in.
+      // replace, which is what "keeps one conversation" means five hops in. GLM is full-exposed too,
+      // so this is the thinking-channel door again and carries no `kind`.
       expect(carriesReasoning(glmBody, { kind: "summary", provider: "anthropic", text: CLAUDE_THINKING })).toBe(true);
       expect(carriesReasoning(glmBody, { kind: "exposed", provider: "deepseek", text: "reasoning on the deepseek hop" })).toBe(true);
       expect(opaqueLeaks(glmBody, [CLAUDE_SIGNATURE])).toEqual([]);

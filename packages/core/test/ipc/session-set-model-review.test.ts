@@ -635,10 +635,11 @@ describeWithWinterBinary("A-7: the LITERAL gpt -> deepseek (prompts) / deepseek 
     await client.call(METHODS.sessionSend, { sessionId, text: "hop 2, on glm" });
     await client.waitFor(() => client.events.filter((x) => x.type === "turn_completed").length >= 3, 90_000);
     expect(zai!.models).toContain("glm-5");
-    // BODY-LEVEL (W18-19): the whole conversation in order, AND DeepSeek's EXPOSED reasoning
-    // re-rendered as data the destination can read — which is exactly why this hop is silent: there
-    // is nothing to warn about when the state carries. `zai` rides `openai-chat-completions`, so the
-    // carriage is the labelled plain-text form (see `test/helpers/carriage.ts`).
+    // BODY-LEVEL (W18-19): the whole conversation in order, AND DeepSeek's reasoning re-rendered as
+    // data the destination can read — which is exactly why this hop is silent: there is nothing to
+    // warn about when the state carries. GLM is a full-exposed destination, so this takes the
+    // THINKING-CHANNEL door, which renders the labelled plain-text form and no `kind` at all (see
+    // `test/helpers/carriage.ts`).
     const zaiBody = zai!.bodies.at(-1)!;
     expect(outOfOrder(zaiBody, ["hop 0, on gpt", "hello from gpt", "hop 1, on deepseek", "hello from deepseek", "hop 2, on glm"])).toEqual([]);
     expect(carriesReasoning(zaiBody, { kind: "exposed", provider: "deepseek", text: "thinking about the hop" })).toBe(true);
