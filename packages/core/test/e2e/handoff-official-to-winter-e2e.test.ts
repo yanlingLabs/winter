@@ -405,7 +405,14 @@ describeWithClaudeRuntime("official -> Winter handoff, DETERMINISTIC dead-child 
 
     expect(caught).toBeDefined();
     expect(caught!.rpc?.data?.code).toBe("handoff_lossy_fork");
-    expect(caught!.rpc?.message).toContain("exited before it reached init");
+    // WS-19 lane rider x1 CHANGED THIS ASSERTION DELIBERATELY. The router's lossy-fork `reason` used
+    // to be thrown verbatim as the RPC message, and it interpolates a caught `error.message` in most
+    // of its cases — which is how an absolute path was reaching the user. The user copy is now one
+    // neutral sentence for every reason, and the reason survives only in the daemon log, as a
+    // category (`lossyForkCategoryFor` — this case's is `destination-exited-before-init`). What this
+    // test is ABOUT is unchanged: the typed code, and the deterministic revert below.
+    expect(caught!.rpc?.message).toBe("Couldn't switch models without losing part of the conversation; the session stays on claude-sonnet-5.");
+    expect(caught!.rpc?.message).not.toContain("exited before it reached init");
     // Reverted: the record still names the SOURCE, deterministically, every run.
     expect(d.winter.legOf(sessionId)).toBe("official");
     expect(rt.records.get(sessionId)?.runtimeKind).toBe("claude-agent");

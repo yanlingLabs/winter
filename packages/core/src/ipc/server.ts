@@ -771,6 +771,7 @@ function lossyForkCategoryFor(reason: string): string {
   if (lower.includes("temp continuity")) return "temp-continuity-failed";
   if (lower.includes("writer lease")) return "lease-unverified";
   if (lower.includes("canonical tail is still moving")) return "tail-unsettled";
+  if (lower.includes("exited before it reached init")) return "destination-exited-before-init";
   return "unrecognized";
 }
 
