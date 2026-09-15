@@ -21,7 +21,7 @@
 // the move silent but left it on the source leg is exactly the defect being fixed, and would pass a
 // prompt-only test.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openaiResponsesFake } from "@yanlinglabs/winter-provider-conformance/fakes";
@@ -356,5 +356,181 @@ describeWithWinterBinary("MINOR 4: the daemon's own handoff wiring carries WINTE
       // home. The account name is a LOCATOR, never material (records.ts's own rule).
       expect(record?.authRef).toBe("keychain:anthropic:console");
     }, 120_000);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// Fix round 4, MAJOR 1(b) — A COMPACTED SESSION IS NEVER RE-SELECTED.
+//
+// `switchFactsFor` counts assistant entries only SINCE THE LAST COMPACTION BOUNDARY (carriage stops
+// at a boundary by design, W18-16), so EVERY compacted session reports `sourceTurns: 0` until its
+// next assistant reply — and `reviewModelSwitch` answers `skipped: "no-source-turns"` for it, the
+// same verdict a session that has genuinely never run a turn gets. Round 3 carried that verdict into
+// the execution path and would have re-selected a long conversation past the barrier's own staging.
+//
+// What separates the two is NOT the review: it is the transcript. A compacted session HAS a
+// canonical file, so WS-05 §12 step 5 validates it and the barrier performs a REAL, staged handoff;
+// only a session with no file at all produces the step-5 "nothing to validate" fork a re-selection
+// may answer (fix round 4, MAJOR 2).
+//
+// THE DISCRIMINATOR IS THE DRIVER TABLE. A real handoff runs `confirmInit`, which evicts AND
+// `ensure()`s, so the session is LIVE on the destination afterwards; a re-selection only evicts, so
+// the table holds nothing. That is observable without reaching into either implementation.
+//
+// HONEST LIMITATION, worth reporting rather than asserting around: the spec's R-10b-8 would have
+// this move PROMPT, and it does not — `reviewModelSwitch` returns its `no-source-turns` skip BEFORE
+// `classifySwitch` ever runs, so `prompt` is false. That decision belongs to the router (the
+// Interfaces block: "the ROUTER decides every skip"), and the daemon must not second-guess it. This
+// test pins the half the daemon owns: a real staged handoff, never a re-selection.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describeWithWinterBinary("a COMPACTED session reports zero source turns", (winterBin) => {
+  describeWithClaudeRuntime("but is handed off for real, never re-selected", () => {
+    let bed: Bed;
+    beforeAll(async () => { bed = await bootBed(winterBin, "dirwin-compact-", CATALOG_GPT_MODEL); });
+    afterAll(async () => { await bed?.close(); });
+
+    test("a cross-family switch after a compaction boundary runs the barrier, and the session ends up LIVE on the destination", async () => {
+      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "dirwin-compact-cwd-")));
+      const { sessionId } = await bed.client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: CATALOG_GPT_MODEL, cwd });
+      await bed.client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+      const PRIOR_TEXT = "remember P10B-COMPACT-4";
+      const sinceIdx = bed.client.events.length;
+      await bed.client.call(METHODS.sessionSend, { sessionId, text: PRIOR_TEXT });
+      await bed.client.waitForAfter(sinceIdx, (e) => e.type === "turn_completed" && e.sessionId === sessionId);
+
+      const rt = bed.daemon.runtimeState;
+      if ("unavailable" in rt) throw rt.unavailable;
+      const record = rt.records.get(sessionId);
+      if (record?.backendSessionId === undefined) throw new Error("no backendSessionId after a completed turn");
+
+      // Append a REAL compaction boundary to the canonical transcript: `type: "compact_boundary"`
+      // with a `compactMetadata` object, chained onto the file's own last entry. `preservedMessages`
+      // is deliberately omitted — WS-05 §5.1's "unset when compaction summarizes everything", the
+      // one shape `validateCompaction` accepts without naming any kept uuid, so step 5 still passes.
+      const findTranscript = (root: string, backendSessionId: string): string | undefined => {
+        for (const entry of readdirSync(root, { withFileTypes: true })) {
+          const full = join(root, entry.name);
+          if (entry.isDirectory()) {
+            const hit = findTranscript(full, backendSessionId);
+            if (hit !== undefined) return hit;
+          } else if (entry.name === `${backendSessionId}.jsonl` && statSync(full).size > 0) {
+            return full;
+          }
+        }
+        return undefined;
+      };
+      const transcript = findTranscript(bed.home, record.backendSessionId);
+      if (transcript === undefined) throw new Error(`no canonical transcript for ${record.backendSessionId} under ${bed.home}`);
+      const lines = readFileSync(transcript, "utf8").trim().split("\n").filter(Boolean);
+      const last = JSON.parse(lines[lines.length - 1]!) as { uuid?: string; cwd?: string; version?: string; sessionId?: string };
+      if (typeof last.uuid !== "string") throw new Error("the canonical transcript's last entry carries no uuid");
+      // `cwd`/`version` are copied from the real tail on purpose: the barrier's step-8 decoration
+      // door takes them from the transcript's LAST entry, and a boundary without them refuses with
+      // "a note with invented fields would claim a session that does not exist" — a property of this
+      // synthetic fixture, never of compaction (a real compaction writes them).
+      appendFileSync(transcript, `${JSON.stringify({
+        type: "compact_boundary",
+        uuid: "00000000-0000-4000-8000-00000000c0de",
+        parentUuid: last.uuid,
+        timestamp: new Date().toISOString(),
+        compactMetadata: { trigger: "manual" },
+        ...(last.cwd === undefined ? {} : { cwd: last.cwd }),
+        ...(last.version === undefined ? {} : { version: last.version }),
+        ...(last.sessionId === undefined ? {} : { sessionId: last.sessionId }),
+      })}\n`);
+
+      // Evict so the next read of this session goes through a fresh incarnation rather than a live
+      // child holding its own view of the file.
+      await bed.daemon.winter.evict(sessionId);
+      expect(bed.daemon.winter.get(sessionId)).toBeUndefined();
+
+      // `confirmLossy: true` so the assertion does not depend on whether the router prompts — the
+      // claim under test is what the APPLY does, not whether it asked.
+      await bed.client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL, confirmLossy: true });
+
+      expect(rt.records.get(sessionId)?.runtimeKind).toBe("claude-agent");
+      // THE DISCRIMINATOR: a real handoff's `confirmInit` evicted AND re-ensured, so a driver is in
+      // the table. A re-selection would only have evicted, leaving nothing.
+      expect(bed.daemon.winter.get(sessionId)).toBeDefined();
+      expect(bed.daemon.winter.legOf(sessionId)).toBe("official");
+    }, 180_000);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// Fix round 4, MAJOR 1(b) — THE DISCRIMINATOR.
+//
+// The test above proves a compacted session whose handoff SUCCEEDS is handed off for real. It does
+// not, on its own, prove the snapshot is gone: round 3 only re-selected when the barrier REFUSED.
+// This is that case. Same compacted session, same `no-source-turns` verdict from the router — but
+// the appended boundary deliberately omits the `cwd`/`version` the barrier's step-8 decoration door
+// takes from the transcript's last entry, so the barrier refuses with a real `lossy-fork-offered`
+// ("a note with invented fields would claim a session that does not exist", MEASURED).
+//
+// Round 3 answered that with a silent re-selection of a conversation carrying REAL prior content:
+// `meta.model` committed, the record flipped, nothing staged. Round 4 re-asks the router at
+// execution time and — because this is neither the step-5 "no transcript at all" fork (MAJOR 2) nor
+// a session whose fresh verdict may be trusted blindly (MAJOR 1) — refuses, keeping the barrier's
+// own typed outcome and writing nothing.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describeWithWinterBinary("a COMPACTED session whose handoff the barrier REFUSES", (winterBin) => {
+  describeWithClaudeRuntime("is never silently re-selected", () => {
+    let bed: Bed;
+    beforeAll(async () => { bed = await bootBed(winterBin, "dirwin-compact-refuse-", CATALOG_GPT_MODEL); });
+    afterAll(async () => { await bed?.close(); });
+
+    test("the switch is refused typed, the record still names the source leg, and meta.model never moved", async () => {
+      const cwd = realpathSync(mkdtempSync(join(tmpdir(), "dirwin-compact-refuse-cwd-")));
+      const { sessionId } = await bed.client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: CATALOG_GPT_MODEL, cwd });
+      await bed.client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+      const sinceIdx = bed.client.events.length;
+      await bed.client.call(METHODS.sessionSend, { sessionId, text: "remember P10B-COMPACT-REFUSE" });
+      await bed.client.waitForAfter(sinceIdx, (e) => e.type === "turn_completed" && e.sessionId === sessionId);
+
+      const rt = bed.daemon.runtimeState;
+      if ("unavailable" in rt) throw rt.unavailable;
+      const record = rt.records.get(sessionId);
+      if (record?.backendSessionId === undefined) throw new Error("no backendSessionId after a completed turn");
+      const findTranscript = (root: string, backendSessionId: string): string | undefined => {
+        for (const entry of readdirSync(root, { withFileTypes: true })) {
+          const full = join(root, entry.name);
+          if (entry.isDirectory()) {
+            const hit = findTranscript(full, backendSessionId);
+            if (hit !== undefined) return hit;
+          } else if (entry.name === `${backendSessionId}.jsonl` && statSync(full).size > 0) {
+            return full;
+          }
+        }
+        return undefined;
+      };
+      const transcript = findTranscript(bed.home, record.backendSessionId);
+      if (transcript === undefined) throw new Error(`no canonical transcript for ${record.backendSessionId} under ${bed.home}`);
+      const lines = readFileSync(transcript, "utf8").trim().split("\n").filter(Boolean);
+      const lastUuid = (JSON.parse(lines[lines.length - 1]!) as { uuid?: string }).uuid;
+      if (typeof lastUuid !== "string") throw new Error("the canonical transcript's last entry carries no uuid");
+      // NO `cwd`/`version` — that omission is what makes the barrier refuse at step 8. Everything
+      // `validateCompaction` requires is still present, so step 5 passes and this is genuinely a
+      // "the transcript is fine, the handoff is not" refusal, never the no-transcript fork.
+      appendFileSync(transcript, `${JSON.stringify({
+        type: "compact_boundary",
+        uuid: "00000000-0000-4000-8000-00000000c0de",
+        parentUuid: lastUuid,
+        timestamp: new Date().toISOString(),
+        compactMetadata: { trigger: "manual" },
+      })}\n`);
+      await bed.daemon.winter.evict(sessionId);
+
+      let caught: RpcErrorLike | undefined;
+      try {
+        await bed.client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL, confirmLossy: true });
+      } catch (err) { caught = err as RpcErrorLike; }
+      expect(caught).toBeDefined();
+      expect(caught!.rpc?.data?.code).toBe("handoff_lossy_fork");
+      // Lane P's x1 neutral copy: never the router's raw reason, which carries internals.
+      expect(caught!.rpc?.message).not.toMatch(/decoration|invented fields|step 8/i);
+      // THE POINT: nothing moved. Round 3 flipped this to "claude-agent" and wrote meta.model.
+      expect(rt.records.get(sessionId)?.runtimeKind).toBe("winter-agent");
+      expect(bed.daemon.sessions.meta(sessionId).model).toBe(CATALOG_GPT_MODEL);
+    }, 180_000);
   });
 });
