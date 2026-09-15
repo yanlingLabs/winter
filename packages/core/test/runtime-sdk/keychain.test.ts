@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -130,6 +130,22 @@ describe("KeychainSeam over SecretStore", () => {
   test("a SecretStore.get failure never propagates — credentialPresenceFrom treats the slot as absent", async () => {
     const presence = await credentialPresenceFrom(new ThrowingSecretStore());
     expect(presence.byProvider).toEqual({});
+  });
+
+  test("WS-19 (review Minor 4): a dead store logs ONE aggregated line with a COUNT, not one per slot", async () => {
+    const lines: string[] = [];
+    const spy = spyOn(console, "warn").mockImplementation((...a: unknown[]) => { lines.push(a.map(String).join(" ")); });
+    try {
+      await credentialPresenceFrom(new ThrowingSecretStore());
+    } finally { spy.mockRestore(); }
+    // The inventory is ~150 rows; the per-slot form turned one fault into 148 identical lines on
+    // every session open.
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain(`${WINTER_CREDENTIAL_INVENTORY.length} of ${WINTER_CREDENTIAL_INVENTORY.length} presence probe(s) failed`);
+    // The error CODE only — never a secret name, never the message text, never a value.
+    expect(lines[0]).toContain("EKEYCHAINLOCKED");
+    expect(lines[0]).not.toContain("openai:default");
+    expect(lines[0]).not.toContain("should never appear in a log line");
   });
 
   // WS-19 (W19-1): the inventory is DERIVED from the pinned catalog, so this is no longer a

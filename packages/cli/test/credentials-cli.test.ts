@@ -59,6 +59,24 @@ describe("winter credentials", () => {
     expect(await runCredentialsRoute(secrets, home, "remove", "deepseek", never)).toEqual({ ok: true, kind: "remove", providerId: "deepseek", removed: false });
   });
 
+  test("a store that answers NOTHING is a typed refusal, never \"none stored\" (review Minor 4)", async () => {
+    const dead = {
+      get: async (): Promise<string | null> => { throw Object.assign(new Error("keychain locked"), { code: "EKEYCHAINLOCKED" }); },
+      set: async (): Promise<void> => { throw new Error("unused"); },
+      delete: async (): Promise<boolean> => { throw new Error("unused"); },
+    };
+    const r = await runCredentialsRoute(dead, home, "list", undefined, never);
+    expect(r).toMatchObject({ ok: false, code: "credential_store_unavailable" });
+  });
+
+  test("a 4097-character value is refused TYPED, and the message never says how long it was (review Minor 7)", async () => {
+    const r = await runCredentialsRoute(secrets, home, "set", "deepseek", async () => "a".repeat(4097));
+    expect(r).toMatchObject({ ok: false, code: "credential_value_invalid" });
+    if (r.ok) throw new Error("expected a refusal");
+    expect(r.message).not.toMatch(/\d/);
+    expect(await secrets.get("deepseek:default")).toBeNull();
+  });
+
   test("the masked prompt is never reached for a malformed invocation — no staring at a prompt for a key that was going to be refused", async () => {
     // `never` throws if called; a missing provider id must be caught before it.
     expect(await runCredentialsRoute(secrets, home, "set", undefined, never)).toEqual({ ok: false, message: "usage: winter credentials set <providerId>" });

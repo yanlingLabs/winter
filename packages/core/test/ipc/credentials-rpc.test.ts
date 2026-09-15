@@ -246,10 +246,15 @@ describe("credential.list / credential.set / credential.remove (WS-19)", () => {
     // Whitespace-only trims to empty. The wire schema's own `min(1)` cannot see that.
     expect((await c.request(METHODS.credentialSet, { providerId: "deepseek", apiKey: "   " })).error.data).toEqual({ code: "credential_value_invalid" });
 
-    // Over the wire bound: the schema refuses first, as INVALID_PARAMS naming the PATH only.
+    // Over the wire bound: TYPED (review Minor 7). W19-4 names `credential_value_invalid` for this,
+    // and the schema's own `.max()` would otherwise refuse it first as a bare INVALID_PARAMS with no
+    // `data.code` to branch on. The refusal never says how long the value was.
     const tooLong = await c.request(METHODS.credentialSet, { providerId: "deepseek", apiKey: "a".repeat(5000) });
     expect(tooLong.error.code).toBe(ERR.INVALID_PARAMS);
-    expect(tooLong.error.message).toBe("invalid params: apiKey");
+    expect(tooLong.error.data).toEqual({ code: "credential_value_invalid" });
+    expect(tooLong.error.message).not.toMatch(/\d/);
+    // Exactly at the bound still passes the door (it is the value rule, not an off-by-one).
+    expect((await c.request(METHODS.credentialSet, { providerId: "deepseek", apiKey: "a".repeat(4096) })).result).toEqual({ ok: true });
     c.close();
   });
 
@@ -337,6 +342,31 @@ describe("WS-19 negative pins", () => {
     expect(after.anthropic.consoleProfile).toBe(false);
     // Names and booleans only, here too.
     expect(JSON.stringify(after)).not.toContain(SENTINEL);
+    c.close();
+  });
+
+  test("credential.list on a store that answers NOTHING is a typed refusal, never a list of absent rows (review Minor 4)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ws19-dead-"));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "auth-secrets")));
+    const tokens = await authority.ensureTokens();
+    // Reads always throw; the token authority above has its own, working store.
+    const dead = {
+      get: async (): Promise<string | null> => { throw Object.assign(new Error("keychain locked"), { code: "EKEYCHAINLOCKED" }); },
+      set: async (): Promise<void> => { throw new Error("unused"); },
+      delete: async (): Promise<boolean> => { throw new Error("unused"); },
+    };
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, secrets: dead, winterHome: home });
+    cleanup = () => { server.stop(); store.close(); rmSync(home, { recursive: true, force: true }); };
+    const c = await TestClient.connect(socketPath);
+    await c.hello(tokens.harness, "test");
+
+    const res = await c.request(METHODS.credentialList, {});
+    expect(res.result).toBeUndefined();
+    expect(res.error.data).toEqual({ code: "credential_store_unavailable" });
+    // Names no item, and certainly no value.
+    expect(res.error.message).not.toMatch(/openai|anthropic|deepseek|exa/);
     c.close();
   });
 

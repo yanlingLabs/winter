@@ -37,7 +37,7 @@ import type { TokenAuthority } from "../auth/tokens";
 import type { SecretStore } from "../auth/secret-store";
 import { readCredentialMaterial, writeOpenAiApiKey } from "../auth/credential-material";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../runtime-sdk/keychain";
-import { credentialRows, removeCredential, setCredential } from "../runtime-sdk/credentials";
+import { credentialRows, credentialValueRefusal, removeCredential, setCredential, CREDENTIAL_VALUE_MAX_CHARS, CredentialStoreUnavailable } from "../runtime-sdk/credentials";
 import { effectiveOfficialAuthFor } from "../runtime-sdk/official-options";
 import type { ConsoleProfileBroker } from "../auth/console-profile-broker";
 import type { RoutineStore } from "../routines/store";
@@ -3066,10 +3066,28 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.credentialList: {
         parseParams(CredentialListParams, params);
         if (!opts.secrets) throw new RpcFailure(ERR.INTERNAL, "credential.list is not available on this server (no secret store configured)", { code: "credential_store_unavailable" });
-        return { providers: await credentialRows(opts.secrets, opts.winterHome) };
+        try {
+          return { providers: await credentialRows(opts.secrets, opts.winterHome) };
+        } catch (err) {
+          // Review Minor 4: a store that would not answer ANY probe is a typed refusal, never a
+          // list of absent rows — "you have no credentials" is a confident, wrong answer that
+          // invites a user to re-enter keys they already have. The message names no item.
+          if (err instanceof CredentialStoreUnavailable) throw credentialRpcFailure(err);
+          throw err;
+        }
       }
 
       case METHODS.credentialSet: {
+        // Review Minor 7: W19-4 names `credential_value_invalid` for a value over the limit, but the
+        // wire schema's own `.max()` would refuse it FIRST as a plain INVALID_PARAMS with no
+        // `data.code` at all — a client branching on the typed vocabulary would see nothing to
+        // branch on. Checked here, BEFORE `parseParams`, so the §5 schema stays exactly as Lane Q
+        // and Lane I mirror it. A LENGTH TEST ONLY: the value is never read, quoted or logged, and
+        // the refusal never says how long it was.
+        const rawKey = (params as { apiKey?: unknown } | null | undefined)?.apiKey;
+        if (typeof rawKey === "string" && rawKey.trim().length > CREDENTIAL_VALUE_MAX_CHARS) {
+          throw credentialRpcFailure(credentialValueRefusal(rawKey)!);
+        }
         const p = parseParams(CredentialSetParams, params);
         if (!opts.secrets) throw new RpcFailure(ERR.INTERNAL, "credential.set is not available on this server (no secret store configured)", { code: "credential_store_unavailable" });
         const refusal = await setCredential(opts.secrets, p.providerId, p.apiKey);

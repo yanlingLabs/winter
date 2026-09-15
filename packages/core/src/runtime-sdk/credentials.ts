@@ -87,28 +87,48 @@ const ACCOUNT_REQUIRED_KIND: Readonly<Record<string, "api-key" | "bearer">> = {
   [ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME]: "bearer",
 };
 
+/**
+ * `credential.list` could not read the store AT ALL (review Minor 4).
+ *
+ * "Absent" and "unreadable" are different facts and must not render the same: a locked or denied
+ * Keychain used to come back as every row absent, which reads in the app and on the phone as "you
+ * have no credentials" — a confident, wrong answer that invites a user to re-enter keys they
+ * already have. One probe failing is still absent (a single bad item must not blind the whole list);
+ * EVERY probe failing is the store, and that is a typed refusal.
+ */
+export class CredentialStoreUnavailable extends Error {
+  readonly code = "credential_store_unavailable" as const;
+  constructor(readonly slots: number) {
+    super("the credential store could not be read");
+    this.name = "CredentialStoreUnavailable";
+  }
+}
+
+/** Three states, not two — see `CredentialStoreUnavailable` above for why "unreadable" may not
+ *  collapse into "absent". */
+type Probe = "present" | "absent" | "failed";
+
 /** Presence for one inventory slot: parseable material (`credentialPresenceFrom`'s own rule — a
  *  blank or unparseable record is ABSENT, never "present with something the child will reject"),
- *  narrowed by the account's required kind where it has one. A store failure reads as absent, the
- *  same as everywhere else; it is never allowed to fail the whole list. */
-async function slotPresent(store: SecretStore, slot: CredentialSlot): Promise<boolean> {
+ *  narrowed by the account's required kind where it has one. */
+async function slotPresent(store: SecretStore, slot: CredentialSlot): Promise<Probe> {
   try {
     const material = await readCredentialMaterial(store, slot.secretName);
-    if (material === null) return false;
+    if (material === null) return "absent";
     const required = ACCOUNT_REQUIRED_KIND[slot.secretName];
-    return required === undefined || material.kind === required;
+    return required === undefined || material.kind === required ? "present" : "absent";
   } catch {
-    return false;
+    return "failed";
   }
 }
 
 /** Presence for a raw tool key: a non-empty stored value. No JSON, no material wrapper — the tools
  *  read these verbatim and always have. */
-async function rawPresent(store: SecretStore, name: string): Promise<boolean> {
+async function rawPresent(store: SecretStore, name: string): Promise<Probe> {
   try {
-    return Boolean(await store.get(name));
+    return (await store.get(name)) ? "present" : "absent";
   } catch {
-    return false;
+    return "failed";
   }
 }
 
@@ -122,6 +142,9 @@ async function rawPresent(store: SecretStore, name: string): Promise<boolean> {
  * probes are issued together for the same reason `credentialPresenceFrom` parallelises its own: the
  * inventory is ~150 rows and they are independent reads.
  *
+ * THROWS `CredentialStoreUnavailable` when every probe fails — see that class for why "unreadable"
+ * may not render as "absent".
+ *
  * `settings` is accepted for symmetry with the rest of this seam's signatures (and so a future row
  * can be settings-aware without changing every caller); nothing reads it today — deliberately, since
  * a row's identity must not move when a setting changes underneath a client that keyed on it.
@@ -133,6 +156,11 @@ export async function credentialRows(store: SecretStore, _home?: string, _settin
     Promise.all(slots.map((slot) => slotPresent(store, slot))),
     Promise.all(TOOL_ROWS.map((row) => rawPresent(store, row.secretName))),
   ]);
+  // Review Minor 4: EVERY probe failing is the store, not an empty inventory — a typed refusal, so
+  // no surface can render "you have no credentials" for a Keychain that would not answer. One
+  // failure among many is still just that row absent.
+  const probes = [...slotPresence, ...toolPresence];
+  if (probes.length > 0 && probes.every((p) => p === "failed")) throw new CredentialStoreUnavailable(probes.length);
   const rows: CredentialRow[] = [];
   slots.forEach((slot, i) => {
     const descriptor = byId.get(slot.provider);
@@ -148,7 +176,7 @@ export async function credentialRows(store: SecretStore, _home?: string, _settin
       group: "provider",
       authKinds: [...descriptor.authKinds],
       manageable,
-      present: slotPresence[i]!,
+      present: slotPresence[i] === "present",
       kind,
       risk: descriptor.risk.class === "review-required" ? "review-required" : "approved",
       door,
@@ -161,7 +189,7 @@ export async function credentialRows(store: SecretStore, _home?: string, _settin
       group: "tool",
       authKinds: ["api-key"],
       manageable: true,
-      present: toolPresence[i]!,
+      present: toolPresence[i] === "present",
       kind: "api-key",
       risk: "approved",
       door: "credential.set",

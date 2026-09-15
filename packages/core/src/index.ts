@@ -64,6 +64,7 @@ export { writeAnthropicApiKey, ANTHROPIC_CREDENTIAL_SECRET_NAME, ANTHROPIC_CONSO
 // daemon may not be running, exactly like `winter login`).
 export {
   credentialRows, setCredential, removeCredential, credentialDisplayNameFor, credentialValueRefusal,
+  CredentialStoreUnavailable,
   CREDENTIAL_VALUE_MAX_CHARS,
   type CredentialRow, type CredentialDoor, type CredentialRefusal, type CredentialRefusalCode,
 } from "./runtime-sdk/credentials";

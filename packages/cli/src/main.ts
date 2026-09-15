@@ -1121,10 +1121,18 @@ export async function runCredentialsRoute(
   providerId: string | undefined,
   readKey: () => Promise<string>,
 ): Promise<CredentialsRouteResult> {
-  const { credentialRows, setCredential, removeCredential } = await import("@yanlinglabs/winter-core");
+  const { credentialRows, setCredential, removeCredential, CredentialStoreUnavailable } = await import("@yanlinglabs/winter-core");
   switch (verb ?? "list") {
     case "list":
-      return { ok: true, kind: "list", rows: await credentialRows(secrets, home) };
+      try {
+        return { ok: true, kind: "list", rows: await credentialRows(secrets, home) };
+      } catch (err) {
+        // Review Minor 4: a store that would not answer ANY probe is a typed refusal, never a list
+        // of absent rows — printing "none stored" for a locked Keychain invites the user to
+        // re-enter keys they already have.
+        if (err instanceof CredentialStoreUnavailable) return { ok: false, message: err.message, code: err.code };
+        throw err;
+      }
     case "set": {
       if (!providerId) return { ok: false, message: "usage: winter credentials set <providerId>" };
       const refusal = await setCredential(secrets, providerId, await readKey());

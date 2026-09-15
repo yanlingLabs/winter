@@ -390,9 +390,15 @@ export async function credentialPresenceFrom(
   const byProvider: Record<string, CredentialRef["kind"]> = {};
   const authByProvider: Record<string, { authFamily: "api-key" | "custom" }> = {};
   const authFamilies = providerAuthFamilyMap();
+  // WS-19 (review Minor 4): ONE aggregated line, not one per slot. The inventory is ~150 rows now,
+  // and a locked or denied Keychain fails every one of them — the per-slot form turned a single
+  // fault into 148 identical log lines per probe, on every session open. A COUNT and the error
+  // CODES only; never a secret name (the failing set is the whole inventory, which the log already
+  // knows), and never a value.
+  const failures: string[] = [];
   for (const row of probed) {
-    if ("failure" in row) {
-      console.warn(`[keychain] presence probe failed for "${row.slot.secretName}": ${row.failure}`);
+    if ("failure" in row && row.failure !== undefined) {
+      failures.push(row.failure);
       continue;
     }
     if (row.material) {
@@ -400,6 +406,9 @@ export async function credentialPresenceFrom(
       const authFamily = authFamilies[row.slot.provider];
       if (authFamily !== undefined) authByProvider[row.slot.provider] = { authFamily };
     }
+  }
+  if (failures.length > 0) {
+    console.warn(`[keychain] ${failures.length} of ${probed.length} presence probe(s) failed (${[...new Set(failures)].join(", ")})`);
   }
   return { byProvider, ...(Object.keys(authByProvider).length === 0 ? {} : { authByProvider }) };
 }
