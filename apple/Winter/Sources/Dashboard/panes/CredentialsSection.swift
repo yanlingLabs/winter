@@ -214,9 +214,18 @@ struct CredentialsSection: View {
                 Text(errorText).foregroundStyle(.red).font(.callout)
             }
 
-            ForEach(model.rows) { row in
-                credentialRow(row)
-                Divider()
+            // LAZY, deliberately. The inventory is derived from the agent SDK's catalog (W19-1) —
+            // on the order of a hundred rows today and growing with every SDK bump — and each row
+            // carries live controls, so a plain `VStack` would build and lay out every `SecureField`
+            // and `Button` in the whole catalog on each of this pane's redraws, most of them
+            // scrolled far out of sight. `LazyVStack` builds them as they come into view. (It works
+            // here only because the pane already provides the `ScrollView`; a `LazyVStack` outside
+            // one has no viewport to be lazy about and silently behaves like a `VStack`.)
+            LazyVStack(alignment: .leading, spacing: 8) {
+                ForEach(model.rows) { row in
+                    credentialRow(row)
+                    Divider()
+                }
             }
         }
         .task { await model.refresh() }
