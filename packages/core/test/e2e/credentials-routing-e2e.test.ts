@@ -234,6 +234,54 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
     rmSync(cwd, { recursive: true, force: true });
   }, 180_000);
 
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // MAJOR 1 (whole-branch review) — A CREDENTIAL CHANGE REACHES THE LIVE CHILD.
+  //
+  // `Options.provider.authRef` is fixed at spawn, so a key added or rotated while a session is
+  // running used to change nothing for it until the 900 s idle reap or a daemon restart — while the
+  // Mac pane says "takes effect immediately — no restart" and the CLI says "no daemon restart
+  // needed". This runs against the session B-1 just left live.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  test("MAJOR 1: credential.set on a provider a LIVE session uses replaces its child, and the next turn runs on the new incarnation", async () => {
+    const rt = daemon!.runtimeState;
+    if ("unavailable" in rt) throw rt.unavailable;
+    const sessions = await client.call<{ sessions: Array<{ sessionId: string }> }>(METHODS.sessionList, {});
+    const liveSessionId = sessions.sessions[0]!.sessionId;
+    expect(rt.records.get(liveSessionId)?.providerId).toBe("deepseek");
+    // The premise: a LIVE driver, spawned before the credential changed.
+    expect(daemon!.winter!.get(liveSessionId)).toBeDefined();
+    const generationBefore = rt.records.get(liveSessionId)!.generation;
+    const requestsBefore = fake!.requests.filter((r) => r.path.endsWith("/chat/completions")).length;
+
+    // Rotating the SAME provider's key — the journey the review describes, with the same sentinel so
+    // the sweep below still has exactly one value to look for.
+    expect(await client.call<{ ok: boolean }>(METHODS.credentialSet, { providerId: "deepseek", apiKey: SENTINEL })).toEqual({ ok: true });
+
+    // The child is GONE from the driver table — ended resumably, not killed: the session is still
+    // listed and its record is intact.
+    expect(daemon!.winter!.get(liveSessionId)).toBeUndefined();
+    const stillListed = await client.call<{ sessions: Array<{ sessionId: string }> }>(METHODS.sessionList, {});
+    expect(stillListed.sessions.some((r) => r.sessionId === liveSessionId)).toBe(true);
+
+    // ...and the next send builds a NEW INCARNATION, which is what re-reads the credential, the
+    // model and the connection. The durable generation counter is the observable: `open()` bumps it
+    // once per incarnation, and it moved.
+    await client.call(METHODS.sessionSend, { sessionId: liveSessionId, text: "after the key changed" });
+    await client.waitFor(() => client.events.filter((e) => e.type === "turn_completed" && e.sessionId === liveSessionId).length >= 2, 90_000);
+    expect(rt.records.get(liveSessionId)!.generation).toBeGreaterThan(generationBefore);
+
+    // MEASURED LIMITATION — the same one B-1 records, and the reason this test pins the REPLACEMENT
+    // rather than the replacement's turn. The spawned child resolves its `CredentialRef` by reading
+    // the macOS Keychain ITSELF, and this harness's store is a `FileSecretStore`, so the re-spawned
+    // child finds nothing and exits before init (measured: the second turn ends `agent_error
+    // process_death`, and the loopback fake receives no second request). That is the harness, not
+    // the fix: what this test owes is that the stale child was replaced, and it was. The rule's own
+    // shape — which sessions match, turn-safety, tool rows, the official leg — is pinned in
+    // `test/runtime-sdk/credentials.test.ts`.
+    expect(fake!.requests.filter((r) => r.path.endsWith("/chat/completions")).length).toBe(requestsBefore);
+    expect(authHeaders.every((h) => h === "")).toBe(true);
+  }, 120_000);
+
   test("B-8 / W19-14: the sentinel appears in NO log line, NO session file, NO history page, NO replay frame and NO credential.list", async () => {
     // The daemon logs through console.* in-process here, so this captures exactly the lines a
     // production daemon would write to its log file.

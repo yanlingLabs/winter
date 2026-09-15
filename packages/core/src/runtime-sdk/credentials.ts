@@ -320,6 +320,66 @@ function removalNamesFor(providerId: string): { names: string[] } | CredentialRe
   return { names: [slot.secretName] };
 }
 
+/**
+ * A live child whose credential just changed, in the shape this module can reason about without
+ * importing the driver table (which imports this module).
+ */
+export interface CredentialEvictionDeps {
+  /** Every live driver, both legs. */
+  list(): ReadonlyArray<{ sessionId: string; turnRunning: boolean; idle(): Promise<void> }>;
+  /** The durable record's provider for one session, or `undefined` when there is no record. */
+  providerOf(sessionId: string): string | undefined;
+  /** End the child resumably and forget the driver — `WinterSessionDrivers.evict`, which never throws. */
+  evict(sessionId: string): Promise<void>;
+  log?: (line: string) => void;
+}
+
+/**
+ * WS-19 (whole-branch review MAJOR 1) — A CREDENTIAL CHANGE REACHES THE LIVE CHILDREN.
+ *
+ * A child's `Options.provider.authRef` is FIXED AT SPAWN: `optionsFor` builds it once per
+ * incarnation, and `open()` early-returns while one is live. So adding a key changed nothing for a
+ * session already running — the Mac pane says "takes effect immediately — no restart" and the CLI
+ * says "no daemon restart needed", and both were wrong for exactly the journey a new user takes:
+ * fresh install, the app dispatches a session at launch, the user adds their key, and typing in that
+ * session keeps failing "no credential is configured" until the 900 s idle reap or a daemon restart.
+ * (REMOVING a key was already hot, through `beforeTurn` — so the two directions disagreed, which is
+ * worse than either being wrong consistently.)
+ *
+ * Evicting is the whole fix: `evict()` ends the child RESUMABLY and forgets the driver, so the next
+ * send re-assembles from the record and the transcript — and `optionsFor` re-reads the credential,
+ * the model and the connection at every incarnation. Nothing is lost and nothing is restarted.
+ *
+ * A RUNNING TURN IS NEVER CUT, the same shape the provider-change eviction uses: wait for the idle
+ * boundary, fire-and-forget, so `credential.set` never delays its reply. The turn in flight
+ * legitimately finishes on the credential it was issued with.
+ *
+ * WHICH SESSIONS: exactly those whose durable record names this provider. A tool row (`exa`,
+ * `web-search`) matches no record and evicts nothing — those keys are read per call by the tools
+ * themselves, never baked into a spawn.
+ *
+ * Returns the session ids it acted on (evicted now or scheduled), for the log and the tests.
+ */
+export async function evictSessionsForCredential(deps: CredentialEvictionDeps, providerId: string): Promise<string[]> {
+  if (TOOL_ROWS.some((r) => r.providerId === providerId)) return [];
+  const acted: string[] = [];
+  for (const session of deps.list()) {
+    if (deps.providerOf(session.sessionId) !== providerId) continue;
+    acted.push(session.sessionId);
+    if (session.turnRunning) {
+      deps.log?.(`credentials: ${session.sessionId} is mid-turn on ${providerId} — its child will be replaced at the next idle boundary`);
+      void session.idle().then(
+        () => deps.evict(session.sessionId),
+        () => { /* the session ended before settling — nothing left to replace */ },
+      );
+    } else {
+      deps.log?.(`credentials: replacing ${session.sessionId}'s child so its next turn picks up the new ${providerId} credential`);
+      await deps.evict(session.sessionId);
+    }
+  }
+  return acted;
+}
+
 /** The provider's facing name, for a message that has to say WHICH provider is missing a key.
  *  Falls back to the id — a provider with no catalog row has no better name to offer. */
 export function credentialDisplayNameFor(providerId: string): string {

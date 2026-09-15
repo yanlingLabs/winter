@@ -37,7 +37,7 @@ import type { TokenAuthority } from "../auth/tokens";
 import type { SecretStore } from "../auth/secret-store";
 import { readCredentialMaterial, writeOpenAiApiKey } from "../auth/credential-material";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../runtime-sdk/keychain";
-import { credentialRows, credentialValueRefusal, removeCredential, setCredential, CredentialStoreUnavailable } from "../runtime-sdk/credentials";
+import { credentialRows, credentialValueRefusal, evictSessionsForCredential, removeCredential, setCredential, CredentialStoreUnavailable } from "../runtime-sdk/credentials";
 import { effectiveOfficialAuthFor } from "../runtime-sdk/official-options";
 import type { ConsoleProfileBroker } from "../auth/console-profile-broker";
 import type { RoutineStore } from "../routines/store";
@@ -812,6 +812,33 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     throw new Error("startIpcServer: an engine requires a shared hub (engine and server must broadcast through the same SessionHub)");
   }
   const hub = opts.hub ?? new SessionHub(opts.store);
+
+  /**
+   * WS-19 (whole-branch review MAJOR 1): after a credential is added, replaced or removed, every
+   * LIVE child running on that provider is replaced so its next turn picks the change up.
+   *
+   * `evictSessionsForCredential` (`runtime-sdk/credentials.ts`) owns the rule and the turn-safety;
+   * this is the wiring, and it is deliberately BEST-EFFORT: the credential is already stored, so a
+   * driver table that is absent (a bare test server), a records door that is absent, or an evict
+   * that somehow throws must not turn a successful `credential.set` into a failure the caller reads
+   * as "your key was not saved". The worst case degrades to exactly the pre-fix behaviour — the
+   * change lands at the next incarnation.
+   */
+  async function evictSessionsForCredentialChange(providerId: string): Promise<void> {
+    const winter = opts.winter;
+    const records = opts.records;
+    if (winter === undefined || records === undefined) return;
+    try {
+      await evictSessionsForCredential({
+        list: () => winter.list(),
+        providerOf: (sessionId) => records.get(sessionId)?.providerId,
+        evict: (sessionId) => winter.evict(sessionId),
+        log: (line) => console.error(line),
+      }, providerId);
+    } catch (err) {
+      console.error(`credentials: replacing live children for ${providerId} failed (${err instanceof Error ? err.name : "unknown"}) — the change lands at the next incarnation`);
+    }
+  }
 
   /** P8b Task 16 / P8c-14: the session's live driver (Winter OR official), resuming one when its
    *  record says so (a daemon restart, an idle timeout). `undefined` ⇒ the engine's, exactly as
@@ -3100,6 +3127,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (!opts.secrets) throw new RpcFailure(ERR.INTERNAL, "credential.set is not available on this server (no secret store configured)", { code: "credential_store_unavailable" });
         const refusal = await setCredential(opts.secrets, p.providerId, p.apiKey);
         if (refusal !== undefined) throw credentialRpcFailure(refusal);
+        await evictSessionsForCredentialChange(p.providerId);
         return { ok: true };
       }
 
@@ -3108,6 +3136,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (!opts.secrets) throw new RpcFailure(ERR.INTERNAL, "credential.remove is not available on this server (no secret store configured)", { code: "credential_store_unavailable" });
         const outcome = await removeCredential(opts.secrets, p.providerId);
         if ("code" in outcome) throw credentialRpcFailure(outcome);
+        await evictSessionsForCredentialChange(p.providerId);
         return { ok: true, removed: outcome.removed };
       }
 
