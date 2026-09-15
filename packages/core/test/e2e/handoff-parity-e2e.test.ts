@@ -631,12 +631,20 @@ describeWithWinterBinary("A-3b: destination death, official -> Winter — the so
     expect(rt.records.get(sessionId)?.selection).toEqual(beforeSelection);
 
     const sinceIdx = client.events.length;
-    // Unlike A-3a's Winter source (Defect 3: permanently stranded, every subsequent send fails
-    // "exited before init"), the OFFICIAL source here re-resumes cleanly — and now that Defect 2
-    // is fixed (D1 fix round 2, 10b9088c) the plain wait works with no polling workaround.
+    // M2 (review-lane-d2-fix1.md): a bare `> 0` here is satisfied by the PRE-handoff turn's own
+    // request and would stay green even on a re-resumed source that completes an EMPTY turn — the
+    // exact failure shape A-3a's OWN measurement shows. Restored to a DELTA against a snapshot taken
+    // right before this send, plus a check that the NEW request's body actually carries this send's
+    // own text — never a vacuous "some request, at some point, existed" check.
+    const messagesRequestsBefore = anthropicRequests.filter((r) => r.path === "/v1/messages").length;
+    // Unlike A-3a's Winter source (Defect 3, still open — see this file's header), the OFFICIAL
+    // source here re-resumes cleanly — and now that Defect 2 is fixed (D1 fix round 2, 10b9088c) the
+    // plain wait works with no polling workaround.
     await client.call(METHODS.sessionSend, { sessionId, text: "still on claude?" });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.indexOf(e) >= sinceIdx, 45_000);
-    expect(anthropicRequests.filter((r) => r.path === "/v1/messages").length).toBeGreaterThan(0);
+    const messagesRequestsAfter = anthropicRequests.filter((r) => r.path === "/v1/messages");
+    expect(messagesRequestsAfter.length).toBeGreaterThan(messagesRequestsBefore);
+    expect(messagesRequestsAfter[messagesRequestsAfter.length - 1]!.body).toContain("still on claude?");
     expect(client.events.slice(sinceIdx).some((e) => e.type === "agent_error" && (e as { code?: string }).code === "process_death")).toBe(false);
   }, 60_000);
 });
