@@ -163,6 +163,83 @@ final class CredentialsSectionModelTests: XCTestCase {
         XCTAssertEqual(fake.listCallCount, 1, "the refresh still runs")
     }
 
+    // MARK: - typed state does not outlive the rows it belongs to
+
+    /// A key typed against a row the inventory no longer carries is dropped on the next successful
+    /// refresh. This is about secret lifetime, not tidiness: `drafts` is the one place a typed key
+    /// exists in the app, and an orphaned entry would sit in memory for the life of the process
+    /// with no field on screen to clear it and no Save that could consume it.
+    func testRefreshDropsDraftsForRowsThatAreGoneAndKeepsTheRest() async {
+        let fake = FakeCredentialsClient()
+        fake.listResults = [
+            .success([
+                FakeCredentialsClient.row(providerId: "deepseek"),
+                FakeCredentialsClient.row(providerId: "retired-provider"),
+            ]),
+            .success([FakeCredentialsClient.row(providerId: "deepseek")]),
+        ]
+        let model = CredentialsSectionModel(client: fake)
+        await model.refresh()
+        model.setDraft(sentinel, for: "deepseek")
+        model.setDraft(sentinel, for: "retired-provider")
+
+        await model.refresh()
+
+        XCTAssertEqual(model.draft(for: "deepseek"), sentinel, "a row still in the inventory keeps its draft")
+        XCTAssertEqual(model.draft(for: "retired-provider"), "", "a row that vanished must not keep a typed key in memory")
+    }
+
+    /// A FAILED refresh prunes nothing — it tells us nothing about which rows exist, and throwing
+    /// away a half-typed key on a transient RPC failure would be its own small bug.
+    func testAFailedRefreshDoesNotPruneDrafts() async {
+        let fake = FakeCredentialsClient()
+        fake.listResults = [
+            .success([FakeCredentialsClient.row(providerId: "deepseek")]),
+            .failure(CredentialsClientError.malformedListReply),
+        ]
+        let model = CredentialsSectionModel(client: fake)
+        await model.refresh()
+        model.setDraft(sentinel, for: "deepseek")
+
+        await model.refresh()
+
+        XCTAssertEqual(model.draft(for: "deepseek"), sentinel)
+    }
+
+    /// An error belonging to a row that no longer renders can never be seen or dismissed, so it
+    /// goes with the draft.
+    func testRefreshAlsoDropsErrorsForRowsThatAreGone() async {
+        let fake = FakeCredentialsClient()
+        fake.setResult = .failure(FakeCredentialsClient.refusal(code: "credential_value_invalid"))
+        fake.listResults = [.success([FakeCredentialsClient.row(providerId: "deepseek")])]
+        let model = CredentialsSectionModel(client: fake)
+        model.setDraft("bad", for: "retired-provider")
+        await model.save(providerId: "retired-provider")
+        XCTAssertNotNil(model.rowError(for: "retired-provider"))
+
+        await model.refresh()
+
+        XCTAssertNil(model.rowError(for: "retired-provider"))
+    }
+
+    /// Leaving the pane clears every typed key. The user can't see them, can't clear them, and the
+    /// next appearance re-fetches the inventory anyway.
+    func testClearTypedStateEmptiesDraftsErrorsAndAnyPendingRemoval() async {
+        let fake = FakeCredentialsClient()
+        let model = CredentialsSectionModel(client: fake)
+        model.setDraft(sentinel, for: "deepseek")
+        model.setDraft(sentinel, for: "zai")
+        fake.setResult = .failure(FakeCredentialsClient.SimpleError())
+        await model.save(providerId: "zai")
+        model.requestRemoval(FakeCredentialsClient.row(providerId: "deepseek", present: true))
+
+        model.clearTypedState()
+
+        XCTAssertTrue(model.drafts.isEmpty, "no typed key may outlive the view it was typed into")
+        XCTAssertTrue(model.rowErrors.isEmpty)
+        XCTAssertNil(model.pendingRemoval)
+    }
+
     // MARK: - Remove is confirmed before anything is deleted
 
     /// The Remove BUTTON must not delete anything — it only opens the confirmation. The whole
@@ -342,8 +419,17 @@ final class CredentialsSectionModelTests: XCTestCase {
 
     /// A later SUCCESS clears only its own row's error — a fixed key on one provider must not make
     /// another provider's outstanding refusal disappear.
+    ///
+    /// The fake must report BOTH rows, not the default empty inventory: a successful save refreshes,
+    /// and the refresh prunes state for rows that no longer exist. With an empty list "zai"'s error
+    /// is pruned correctly (a row that doesn't render can't show an error), which would make this
+    /// test pass or fail for a reason that has nothing to do with what it is about.
     func testASuccessfulSaveClearsOnlyItsOwnRowsError() async {
         let fake = FakeCredentialsClient()
+        fake.listResults = [.success([
+            FakeCredentialsClient.row(providerId: "deepseek"),
+            FakeCredentialsClient.row(providerId: "zai"),
+        ])]
         fake.setResult = .failure(FakeCredentialsClient.refusal(code: "credential_value_invalid"))
         let model = CredentialsSectionModel(client: fake)
         model.setDraft("bad", for: "deepseek")

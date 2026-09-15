@@ -168,9 +168,38 @@ final class CredentialsSectionModel: ObservableObject {
         do {
             rows = try await client.list()
             loadErrorText = nil
+            pruneToLiveRows()
         } catch {
             loadErrorText = "couldn't load credentials — try Refresh"
         }
+    }
+
+    /// Drop per-row state for providerIds the inventory no longer carries.
+    ///
+    /// This is a SECRET-LIFETIME rule, not tidiness. `drafts` is the one place a typed key exists
+    /// in the app, and without pruning a key typed against a row that then disappeared (a provider
+    /// dropped from the SDK's catalog, or simply a row that never existed because the user typed
+    /// into one and the daemon's inventory changed under them) would sit in memory for the life of
+    /// the process with no field on screen to clear it and no Save that could consume it. Pruned
+    /// only on a SUCCESSFUL list — a failed refresh tells us nothing about which rows exist, and
+    /// throwing away a half-typed key on a transient RPC failure would be its own small bug.
+    ///
+    /// `rowErrors` is pruned alongside for the plain reason that an error belonging to a row that
+    /// no longer renders can never be seen or dismissed.
+    private func pruneToLiveRows() {
+        let live = Set(rows.map(\.providerId))
+        drafts = drafts.filter { live.contains($0.key) }
+        rowErrors = rowErrors.filter { live.contains($0.key) }
+    }
+
+    /// Called when the pane goes away (`.onDisappear`). A typed-but-unsaved key has no reason to
+    /// outlive the view it was typed into: the user cannot see it, cannot clear it, and the next
+    /// appearance re-fetches the inventory anyway. Errors go too — they describe an interaction
+    /// that is over.
+    func clearTypedState() {
+        drafts.removeAll()
+        rowErrors.removeAll()
+        pendingRemoval = nil
     }
 
     /// Save this row's typed key. On success the draft is cleared BEFORE the refresh is awaited, so
@@ -291,6 +320,7 @@ struct CredentialsSection: View {
             }
         }
         .task { await model.refresh() }
+        .onDisappear { model.clearTypedState() }
         // ONE dialog for the whole section, driven by `pendingRemoval` — attaching it inside the
         // row builder would mint a presentation modifier per row (~100 of them), and SwiftUI's
         // behaviour when several claim to present at once is not something to rely on.
