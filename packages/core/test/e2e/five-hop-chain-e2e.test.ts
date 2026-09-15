@@ -108,9 +108,10 @@ describe("A-5 part 1: the five-hop chain's prompt rule, against the REAL daemon 
 // Part 2 — the chain's two REACHABLE endpoints (claude, gpt), through REAL daemon wiring: the FIRST
 // hop's own source prompt (claude -> [a foreign family]) and the LAST hop's own prompt (gpt ->
 // claude), each measured directly against a real session.setModel call — never inferred from the
-// resolver alone. The actual round trip past the prompt is covered (and found blocked) by
-// `handoff-parity-e2e.test.ts`'s A-1 (Defect 1) and A-2 (Defect 2); this file does not repeat that
-// depth, only confirms the CHAIN's own two prompting edges fire against a live session.
+// resolver alone. The actual round trip past the prompt is GREEN and covered in depth by
+// `handoff-parity-e2e.test.ts`'s own A-1/A-2 (Defects 1/2 both fixed); this file does not repeat
+// that depth, only confirms the CHAIN's own two prompting edges fire against a live session — Part 3
+// below covers the FULL chain, body-level, on every hop.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 interface RpcErrorLike { rpc?: { message?: string; data?: { code?: string; warnings?: string[] } } }
 
@@ -231,8 +232,8 @@ describeWithWinterBinary("A-5 part 2: the chain's LAST hop (gpt -> claude) promp
       expect(caught).toBeDefined();
       expect(caught!.rpc?.data?.code).toBe("handoff_confirmation_required");
       expect(caught!.rpc?.data?.warnings?.length ?? 0).toBeGreaterThan(0);
-      // The actual resumed round trip past this prompt is Defect 1 (handoff-parity-e2e.test.ts's
-      // A-1, same pairing) — not repeated here.
+      // The actual resumed round trip past this prompt is GREEN and covered in depth by
+      // `handoff-parity-e2e.test.ts`'s own A-1 (same pairing) — not repeated here.
 
       rmSync(cwd, { recursive: true, force: true });
     }, 90_000);

@@ -88,9 +88,9 @@ class TestClient {
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// A-1 — GPT -> Claude (Winter -> official). BLOCKED on Defect 1 (see header): the prompt/confirmLossy
-// half is proven; the actual resume is not reachable today. Left asserting the SPEC's required
-// outcome (never weakened to pass around the defect).
+// A-1 — GPT -> Claude (Winter -> official). GREEN end to end (Defect 1 fixed, D1 fix round 2,
+// `efbb503b`): the prompt, confirmLossy, the actual resume onto the official leg, and Major 4's real
+// tool-call round trip (assistant(tool_use) -> user(tool_result), never merged) all pass.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 describeWithWinterBinary("A-1: GPT -> Claude (Winter -> official)", (winterBin) => {
   describeWithClaudeRuntime("session.setModel prompts, then confirmLossy should resume onto the official leg", () => {
@@ -243,15 +243,12 @@ describeWithWinterBinary("A-1: GPT -> Claude (Winter -> official)", (winterBin) 
       expect(firstCaught!.rpc?.data?.warnings?.length ?? 0).toBeGreaterThan(0);
 
       // confirmLossy proceeds — this is the SPEC-required outcome (A-1: "the prompt appears, and
-      // confirmLossy proceeds"). MEASURED to fail today on Defect 1 (see this file's header); left
-      // asserting success rather than weakened.
+      // confirmLossy proceeds"). GREEN since Defect 1 was fixed (D1 fix round 2, `efbb503b`).
       let caught: RpcErrorLike | undefined;
       try {
         await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL, confirmLossy: true });
       } catch (err) { caught = err as RpcErrorLike; }
-      expect(caught).toBeUndefined(); // MEASURED (2026-09-14): fails here with handoff_lossy_fork,
-      // "the destination runtime did not report init within the handoff's confirmation window" —
-      // Defect 1. Everything below is reached only once that is fixed.
+      expect(caught).toBeUndefined();
       expect(d.winter.legOf(sessionId)).toBe("official");
 
       const anthropicRequestsBefore = anthropicRequests.length;
@@ -304,10 +301,10 @@ describeWithWinterBinary("A-1: GPT -> Claude (Winter -> official)", (winterBin) 
 });
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
-// A-2 — Claude -> GPT (official -> Winter). The handoff itself SUCCEEDS (Defect 1 does not apply to
-// this direction); Defect 2 swallows the post-handoff `turn_completed`, so this test verifies
-// carried content via the destination fake's own request log (unaffected) and separately, honestly,
-// asserts the completion event the spec requires (fails red on Defect 2, not weakened).
+// A-2 — Claude -> GPT (official -> Winter). GREEN end to end (item 0, resume-d2-fix2.md): the
+// handoff resumes, the completion event arrives (Defect 2 fixed, D1 fix round 2, `10b9088c`), and
+// the carry (Claude's `thinking` -> a `kind="summary"` tag on the GPT-bound request) is proven
+// against the REAL raw request body.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 describeWithWinterBinary("A-2: Claude -> GPT (official -> Winter)", (winterBin) => {
   describeWithClaudeRuntime("Claude's thinking lands in the canonical file, then carries to OpenAI as a summary tag", () => {
@@ -456,29 +453,15 @@ describeWithWinterBinary("A-2: Claude -> GPT (official -> Winter)", (winterBin) 
 // for one direction). The revert half (record/model back to the source, typed `handoff_lossy_fork`,
 // never a silent `applied`) is proven and PASSES in both directions below.
 //
-// DEFECT 3 — MEASURED (2026-09-14), A-3a only: after a FAILED Winter -> official handoff attempt
-// (the destination dies; the record correctly reverts to the Winter source), the Winter SOURCE is
-// left PERMANENTLY STRANDED — every subsequent `session.send` on it fails immediately with
-// `agent_error code=process_death "the runtime process exited unexpectedly: runtime exited before
-// init"`, deterministically, even after a 5-SECOND wait (ruling out ordinary OS process-exit
-// propagation lag; this is not a timing race). This is the identical class of failure
-// `handoff-official-to-winter-e2e.test.ts`'s own header already anticipated but deliberately did
-// NOT assert ("a resume attempt right after this one would plausibly hit the identical real 'exited
-// before init'... This test's own job... stops at 'reverted, typed, never silently applied'") — this
-// file's A-3a is the concrete repro that measurement was speculating about, now confirmed for a
-// PLAIN same-leg re-resume after a REVERTED cross-runtime attempt (no destination cross-runtime
-// state involved at all). STILL OPEN (2026-09-14), under investigation in the router lane — what is
-// known so far: `handoff-leases/` is EMPTY after the scenario (the lease the winter binary's own
-// resume gate checks is not simply "still held" — there is nothing there to hold it), and a bounded
-// retry does not help (this file's own earlier 5-second-sleep measurement already ruled out ordinary
-// timing; the router lane's own retry attempt independently confirms it). The likely cause
-// (`destinationRuntimeFor`'s retry loop in `runtime-sdk/handoff.ts` calling `deps.winter.evict()` on
-// the ORIGINAL, healthy Winter incarnation before attempting the doomed official destination, and
-// whatever the real winter binary's own resume gate needs before it will resume the SAME backend
-// session id again apparently being tied to a SUCCESSFUL commit) remains a working theory, not a
-// confirmed root cause. A-3a below is left asserting the SPEC's required behaviour (fails red on
-// this defect); A-3b (official source) does NOT hit this — its own source re-resume now succeeds
-// cleanly (Defect 2 is fixed).
+// DEFECT 3 — FIXED (router 0.0.7). History: after a FAILED Winter -> official handoff attempt (the
+// destination dies; the record correctly reverts to the Winter source), the Winter SOURCE was
+// measured (2026-09-14) to be left PERMANENTLY STRANDED — every subsequent `session.send` on it
+// failed immediately with `agent_error code=process_death "runtime exited before init"`. The router
+// lane traced it to the winter binary's own resume gate never releasing `handoff-leases/`'s entry on
+// a REVERTED (never-committed) handoff attempt. A-3a below now proves the fix: the source re-resumes
+// cleanly and serves the next send for real (a genuine delta on the destination fake's own request
+// log, never a bare "some request existed" check — the exact class of vacuous-green M2 flagged on
+// A-3b). A-3b (official source) never hit this defect at all.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 describeWithClaudeRuntime("A-3a: destination death, Winter -> official — the source keeps serving", () => {
   let home: string;
@@ -543,12 +526,12 @@ describeWithClaudeRuntime("A-3a: destination death, Winter -> official — the s
     expect(d.winter.legOf(sessionId)).toBe("winter");
     expect(rt.records.get(sessionId)?.selection).toEqual(beforeSelection);
 
-    await Bun.sleep(300); // negligible; MEASURED (2026-09-14) that even a 5s sleep here does not help -- see Defect 3 below
     const sinceIdx = client.events.length;
     const openaiRequestsBefore = openaiFakeRef!.requests.length;
     await client.call(METHODS.sessionSend, { sessionId, text: "still on gpt?" });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.indexOf(e) >= sinceIdx, 45_000);
     expect(openaiFakeRef!.requests.length).toBeGreaterThan(openaiRequestsBefore);
+    expect(openaiFakeRef!.requests[openaiFakeRef!.requests.length - 1]!.body).toContain("still on gpt?");
     expect(client.events.slice(sinceIdx).some((e) => e.type === "agent_error" && (e as { code?: string }).code === "process_death")).toBe(false);
 
     rmSync(cwd, { recursive: true, force: true });

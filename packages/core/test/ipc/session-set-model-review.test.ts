@@ -460,14 +460,8 @@ describeWithWinterBinary("C1: a same-leg switch must not leave the review readin
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.filter((ev) => ev.type === "turn_completed").length >= 2, 45_000);
 
     // Step 2: gpt-5.6-sol -> claude, cross-runtime — MUST prompt (W18-21's own required behaviour).
-    // MEASURED (2026-09-14): RED, exactly matching the controller's own prediction. `review.prompt`
-    // comes back FALSE — the review reads gpt-5.4's OWN stale facts (no reasoning, lossless-native)
-    // rather than gpt-5.6-sol's (hidden reasoning, warned-lossy) — so `session.setModel` proceeds
-    // PAST the (missing) prompt with no `confirmLossy` at all, all the way into a REAL handoff
-    // attempt, which then times out on Defect 1 (`handoff-parity-e2e.test.ts`'s own header) ~31s
-    // later and reports `handoff_lossy_fork` instead of ever reaching `handoff_confirmation_required`.
-    // Per the controller: "expected red until router 0.0.6 + the D1 C1 fix." Never skipped, never
-    // weakened.
+    // GREEN since the D1 C1 fix (`5c09626d`): the review now reads gpt-5.6-sol's OWN fresh facts
+    // (hidden reasoning, warned-lossy), not the stale gpt-5.4 identity from before the same-leg move.
     let caught: RpcErrorLike | undefined;
     try {
       await client.call(METHODS.sessionSetModel, { sessionId, model: "claude-sonnet-5" });
