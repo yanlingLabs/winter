@@ -253,6 +253,62 @@ final class CredentialsRpcTests: XCTestCase {
         XCTAssertNil(RpcError(code: -32602, message: "x").credentialDoor)
     }
 
+    /// End to end through `set`: a refusal thrown by the conn reaches the caller UNWRAPPED, so the
+    /// typed code and door survive the client.
+    ///
+    /// The unit tests above prove the accessors parse; this proves nothing between the conn and the
+    /// caller re-wraps the error into something richer (an app error, a fresh `RpcError` with a
+    /// friendlier message) — the mistake that would quietly reduce every refusal to "something went
+    /// wrong", and the same re-wrap that could carry the key into a rendered string.
+    func testATypedRefusalSurvivesTheSetCall() async throws {
+        let refusal = RpcError(
+            code: -32602, message: "anthropic:console is bearer-only",
+            data: ["code": .string("credential_kind_unsupported"), "door": .string("provider.login")])
+        let conn = ScriptedCredentialsConn(["credential.set": [.failure(refusal)]])
+
+        do {
+            try await RemoteCredentialsRpc(conn: conn).set(providerId: "anthropic", apiKey: "WS19-SENTINEL-phone")
+            XCTFail("a refused set must throw")
+        } catch let error as RpcError {
+            XCTAssertEqual(error.credentialCode, .kindUnsupported)
+            XCTAssertEqual(error.credentialDoor, "provider.login")
+            XCTAssertFalse(error.message.contains("WS19-SENTINEL-phone"), "no refusal may carry the key")
+        }
+    }
+
+    /// The same through `remove`, whose refusals name a door too (`cli-oauth` for Codex).
+    func testATypedRefusalSurvivesTheRemoveCall() async throws {
+        let refusal = RpcError(
+            code: -32602, message: "unknown provider",
+            data: ["code": .string("credential_provider_unknown")])
+        let conn = ScriptedCredentialsConn(["credential.remove": [.failure(refusal)]])
+
+        do {
+            _ = try await RemoteCredentialsRpc(conn: conn).remove(providerId: "nope")
+            XCTFail("a refused remove must throw")
+        } catch let error as RpcError {
+            XCTAssertEqual(error.credentialCode, .providerUnknown)
+            XCTAssertNil(error.credentialDoor, "this refusal names no door")
+        }
+    }
+
+    /// And through `list`, where a refusal must stay an `RpcError` rather than collapsing into the
+    /// client's own `malformedListReply` — "the daemon said no" and "I could not read the reply"
+    /// are different things to put on screen.
+    func testATypedRefusalSurvivesTheListCall() async throws {
+        let refusal = RpcError(
+            code: -32603, message: "keychain unavailable",
+            data: ["code": .string("credential_store_unavailable")])
+        let conn = ScriptedCredentialsConn(["credential.list": [.failure(refusal)]])
+
+        do {
+            _ = try await RemoteCredentialsRpc(conn: conn).list()
+            XCTFail("a refused list must throw")
+        } catch let error as RpcError {
+            XCTAssertEqual(error.credentialCode, .storeUnavailable)
+        }
+    }
+
     /// The pre-existing `ERR.DIVERGED` path is untouched by the new `data` member: `SyncClient`
     /// reads `divergedLastSeq` and nothing else, and a fork decision must not start depending on
     /// whether a conn happened to forward `data`.
@@ -303,13 +359,27 @@ final class ScriptedCredentialsConn: RpcConn, @unchecked Sendable {
         let paramsJSON: Data
     }
 
+    /// What the scripted daemon answers: a raw result body, or a refusal. Refusals are `RpcError`s
+    /// built here rather than JSON, because that is exactly what a real conn hands the client —
+    /// `PhoneRpcConn` parses the JSON-RPC envelope and maps it (`SessionClientError.rpcError` →
+    /// `RpcError`), so the shape under test on this seam is the mapped error, `data` included.
+    enum Reply {
+        case result(String)
+        case failure(RpcError)
+    }
+
     private let lock = NSLock()
-    private var replies: [String: [String]]
+    private var replies: [String: [Reply]]
     private var _calls: [Call] = []
     var calls: [Call] { lock.lock(); defer { lock.unlock() }; return _calls }
 
-    init(_ replies: [String: [String]]) {
+    init(_ replies: [String: [Reply]]) {
         self.replies = replies
+    }
+
+    /// Convenience for the common all-successful script.
+    convenience init(_ results: [String: [String]]) {
+        self.init(results.mapValues { $0.map(Reply.result) })
     }
 
     func call(method: String, paramsJSON: Data) async throws -> Data {
@@ -318,10 +388,11 @@ final class ScriptedCredentialsConn: RpcConn, @unchecked Sendable {
         let next = replies[method]?.first
         if next != nil { replies[method]?.removeFirst() }
         lock.unlock()
-        guard let next else {
-            throw RpcError(code: -32601, message: "no scripted reply for \(method)")
+        switch next {
+        case .result(let json): return Data(json.utf8)
+        case .failure(let error): throw error
+        case nil: throw RpcError(code: -32601, message: "no scripted reply for \(method)")
         }
-        return Data(next.utf8)
     }
 }
 
