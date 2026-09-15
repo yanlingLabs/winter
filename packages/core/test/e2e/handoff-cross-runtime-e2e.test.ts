@@ -270,10 +270,18 @@ describeWithWinterBinary("cross-runtime handoff (P8c, the phase's key proof)", (
       expect(planCalls).toEqual([{ session: { projectKey: expect.any(String), sessionId: expect.any(String) }, to: "claude-agent" }]);
       expect(caught).toBeDefined();
       expect(caught!.rpc?.data).toMatchObject({ code: "runtime_selection_refused" });
-      // The barrier-specific phrasing (`reviewSelectionFor`'s own `fresh-refused` branch) — distinct
-      // from the EARLIER `refused` branch a fresh `selectRuntimeFor` call alone could produce (e.g.
-      // `runtime-unavailable`/`claude-oauth-not-approved`), which never reaches the barrier at all.
-      expect(caught!.rpc?.message).toContain("persisted selection is no longer servable");
+      // WHICH refusal branch fired is proved by `planCalls` above, not by the copy: as of D1 fix
+      // round 4 (item 5) the router's own `detail` never reaches the user at all. The barrier-
+      // specific branch (`reviewSelectionFor`'s `fresh-refused`) is exactly the one that requires
+      // `plan()` to have been called, which the assertion above pins; the EARLIER `refused` branch a
+      // fresh `selectRuntimeFor` alone can produce (`runtime-unavailable` /
+      // `claude-oauth-not-approved`) never reaches the barrier, so `planCalls` would be empty.
+      //
+      // And the copy is now pinned the OTHER way: the router's phrasing — which names both runtime
+      // kinds and cites `WS-00 §2, D13` — must NOT be in it (R-10b-4).
+      expect(caught!.rpc?.message).toContain("Winter can't switch to");
+      expect(caught!.rpc?.message).not.toContain("persisted selection is no longer servable");
+      expect(caught!.rpc?.message).not.toMatch(/\bruntime\b|winter-agent|claude-agent|WS-00|D13/i);
 
       // Nothing migrated, and nothing was even WRITTEN: `refused` stops `session.setModel` before
       // its ordinary store write (ipc/server.ts's switch), unlike the pre-fix bug where the write
@@ -528,7 +536,13 @@ describeWithWinterBinary("cross-runtime handoff on a REAL catalog provider (fix 
           // credential both exist, so this deployment has no way to construct that fixture; recorded
           // here as the honest, measured limit — see this test's own `console.warn` below.
           measuredOutcome = "refused:runtime_selection_refused (cross-family, not cross-runtime — the barrier's own D28 sanity check)";
-          expect(caught.rpc?.message).toContain("does not serve");
+          // D1 fix round 4 (item 5): the router's own "does not serve …" phrasing no longer reaches
+          // the user — it names a runtime, which R-10b-4 forbids, and it is logged as a category
+          // instead. The branch identity is established by the CODE plus "nothing moved" below; the
+          // message is now pinned only for what it must NOT say.
+          expect(caught.rpc?.message).toContain("Winter can't switch to");
+          expect(caught.rpc?.message).not.toContain("does not serve");
+          expect(caught.rpc?.message).not.toMatch(/\bruntime\b|winter-agent|claude-agent|D28/i);
           expect(d.winter.legOf(sessionId)).toBe("winter"); // nothing moved
         } else {
           // A refusal this test did not expect (`session_predates_winter_leg`, `handoff_disabled`)
