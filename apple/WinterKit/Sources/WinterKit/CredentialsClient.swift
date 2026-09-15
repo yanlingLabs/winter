@@ -28,22 +28,21 @@ import Foundation
 /// One row of `credential.list` (WS-19 §5 `CredentialRow`).
 ///
 /// `group`, `kind`, `risk` and `door` are deliberately plain `String`s rather than closed Swift
-/// enums. Two independent reasons, either one sufficient:
+/// enums. The `door` vocabulary is exactly the three §5 values today (WS-19 §9 A-1 withdrew the
+/// fourth, `"provider.logout"`, which an earlier draft had a remove-side refusal carry), but the
+/// INVENTORY those values describe is catalog-derived (W19-1): it grows with an agent-SDK bump and
+/// no app release, so a newer daemon paired with an older app is the NORMAL state here, not an edge
+/// case. A closed enum turns "a value I don't know" into "a row I drop" — the worst possible
+/// failure for a credentials list, since a stored key would simply be invisible. `risk` is the
+/// live example of the direction this moves in: it exists so a LATER UI can badge a row, and its
+/// vocabulary is the daemon's to extend.
 ///
-///  1. **The daemon can legitimately send a value this build's enum would not have.** W19-5 refuses
-///     a `credential.remove` on the Anthropic console arm with `data.door: "provider.logout"` — a
-///     door value that is NOT among `CredentialRow.door`'s own three cases. The two vocabularies
-///     already disagree by design, and a closed enum turns "a value I don't know" into "a row I
-///     drop", which is the worst possible failure for a credentials list (a key silently invisible).
-///  2. The inventory is catalog-derived (W19-1), so a newer daemon paired with an older app is the
-///     NORMAL state, not an edge case.
-///
-/// `id` is a COMPOSITE, not `providerId`: the inventory carries both an `anthropic:default`
-/// (api-key) slot and an `anthropic:console` (bearer) slot, so two rows may well share a
-/// `providerId` while differing in `kind`/`door`. A `ForEach` keyed on `providerId` alone would
-/// then collide (SwiftUI renders one row and drops the other, silently). See this file's report
-/// note: whether the daemon in fact emits one anthropic row or two is its call — this type is
-/// correct either way.
+/// `id` is a COMPOSITE, not `providerId`. WS-19 §9 A-1 makes this load-bearing rather than
+/// defensive: rows are emitted per SLOT, so `anthropic` appears TWICE — once for `anthropic:default`
+/// (`door: "credential.set"`, manageable) and once for `anthropic:console`
+/// (`door: "provider.login"`, not manageable) — and A-1 names `providerId|door|kind` as the key
+/// clients use. A `ForEach` keyed on `providerId` alone would collide, and SwiftUI would render one
+/// row and drop the other, silently.
 public struct CredentialRow: Equatable, Sendable, Identifiable {
     /// The provider's id as the daemon knows it (`openai`, `anthropic`, `deepseek`, …). Also the
     /// value `credential.set`/`credential.remove` take — never a display name.
@@ -115,10 +114,9 @@ extension RpcError {
     }
 
     /// `error.data.door` — the door a `credential_kind_unsupported` refusal names
-    /// (`"provider.login"` for the Anthropic console arm, `"cli-oauth"` for Codex,
-    /// `"provider.logout"` for a console REMOVE, W19-5). A raw string for the same reason
-    /// `CredentialRow.door` is: the set is open and the remove-side value is already outside the
-    /// list-side enum.
+    /// (`"provider.login"` for the Anthropic console arm, `"cli-oauth"` for Codex; W19-4). A raw
+    /// string for the same reason `CredentialRow.door` is: the vocabulary is the daemon's, and it
+    /// has already moved once (WS-19 §9 A-1 withdrew `"provider.logout"` from it).
     public var credentialDoor: String? { data?["door"]?.stringValue }
 }
 

@@ -161,18 +161,20 @@ final class CredentialsSectionModelTests: XCTestCase {
         XCTAssertTrue(model.errorText?.contains("winter login") == true, "the Codex door is the CLI's `winter login`")
     }
 
-    /// The console arm's REMOVE refusal carries `door: "provider.logout"` — a value that is NOT
-    /// among `CredentialRow.door`'s three (W19-5). It must still render a real sentence; this is
-    /// exactly the case a closed Swift enum would have swallowed.
-    func testKindUnsupportedRefusalOnRemoveRendersTheLogoutDoor() async {
+    /// A door value this build has never seen still renders a real sentence. Not hypothetical: the
+    /// vocabulary already moved once (WS-19 §9 A-1 withdrew `"provider.logout"`), and the inventory
+    /// behind it is catalog-derived, so an older app meeting a newer daemon is the normal case.
+    /// This is exactly what a closed Swift enum would have swallowed.
+    func testKindUnsupportedRefusalWithAnUnknownDoorStillRendersASentence() async {
         let fake = FakeCredentialsClient()
-        fake.removeResult = .failure(FakeCredentialsClient.refusal(code: "credential_kind_unsupported", door: "provider.logout"))
+        fake.setResult = .failure(FakeCredentialsClient.refusal(code: "credential_kind_unsupported", door: "door.from.a.newer.daemon"))
         let model = CredentialsSectionModel(client: fake)
+        model.setDraft("k", for: "something")
 
-        await model.remove(providerId: "anthropic")
+        await model.save(providerId: "something")
 
-        XCTAssertEqual(model.errorText, credentialDoorText("provider.logout"))
-        XCTAssertTrue(model.errorText?.contains("Anthropic") == true)
+        XCTAssertEqual(model.errorText, credentialDoorText("door.from.a.newer.daemon"))
+        XCTAssertFalse(model.errorText?.isEmpty ?? true)
     }
 
     /// `credential_value_invalid` renders a NEUTRAL message. The assertion that matters is the
@@ -219,23 +221,68 @@ final class CredentialsSectionModelTests: XCTestCase {
 
     // MARK: - door text for non-manageable rows
 
+    /// The door vocabulary is exactly the three §5 values (WS-19 §9 A-1).
     func testDoorTextCoversEveryKnownDoorAndFallsBackNeutrallyForAnUnknownOne() {
         XCTAssertEqual(credentialDoorText("credential.set"), "Enter a key here.")
         XCTAssertTrue(credentialDoorText("provider.login").contains("Anthropic"))
         XCTAssertTrue(credentialDoorText("cli-oauth").contains("winter login"))
-        XCTAssertTrue(credentialDoorText("provider.logout").contains("Sign out"))
         // A door from a newer daemon: a neutral sentence, never an empty string (which would render
         // as a row that says nothing at all).
         XCTAssertFalse(credentialDoorText("door.from.a.newer.daemon").isEmpty)
         XCTAssertFalse(credentialDoorText(nil).isEmpty)
     }
 
+    // MARK: - A-3: Remove is offered independently of `manageable`
+
+    /// The ruling's headline case: a stored Codex OAuth login is `manageable: false` (nothing to
+    /// type) but must still be removable from the app — gating Remove on `manageable`, as this
+    /// section first did, left it with no exit but the CLI.
+    func testAPresentCodexOAuthRowOffersRemoveEvenThoughItIsNotManageable() {
+        let codex = FakeCredentialsClient.row(
+            providerId: "codex-oauth", displayName: "ChatGPT (Codex)", authKinds: ["oauth"],
+            manageable: false, present: true, kind: "oauth", door: "cli-oauth"
+        )
+
+        XCTAssertTrue(credentialRowOffersRemove(codex))
+    }
+
+    /// The one exclusion: the Anthropic CONSOLE slot. `credential.remove anthropic` acts on
+    /// `anthropic:default` ONLY (A-1), so a Remove on this row would either do nothing visible or
+    /// delete the OTHER anthropic row's key. Its sign-out is `AnthropicAuthSection`'s.
+    func testThePresentAnthropicConsoleRowNeverOffersRemove() {
+        let console = FakeCredentialsClient.row(
+            providerId: "anthropic", displayName: "Anthropic (Console)", authKinds: ["oauth"],
+            manageable: false, present: true, kind: "bearer", door: "provider.login"
+        )
+
+        XCTAssertFalse(credentialRowOffersRemove(console))
+    }
+
+    /// `present` is still the other half of the gate — nothing stored, nothing to remove. Checked
+    /// on both an api-key row and the console row so "absent" can't pass by way of the door test.
+    func testAbsentRowsNeverOfferRemove() {
+        XCTAssertFalse(credentialRowOffersRemove(
+            FakeCredentialsClient.row(providerId: "deepseek", present: false)))
+        XCTAssertFalse(credentialRowOffersRemove(
+            FakeCredentialsClient.row(providerId: "anthropic", manageable: false, present: false,
+                                      kind: "bearer", door: "provider.login")))
+    }
+
+    /// And the ordinary case stays ordinary: a present api-key row offers Remove.
+    func testAPresentApiKeyRowOffersRemove() {
+        XCTAssertTrue(credentialRowOffersRemove(
+            FakeCredentialsClient.row(providerId: "deepseek", present: true)))
+        // A tool row is an api-key row too (A-2) — same rule, no special case.
+        XCTAssertTrue(credentialRowOffersRemove(
+            FakeCredentialsClient.row(providerId: "exa", displayName: "Exa", group: "tool", present: true)))
+    }
+
     // MARK: - two rows may share a providerId
 
-    /// The inventory carries both an `anthropic:default` (api-key, manageable) slot and an
-    /// `anthropic:console` (bearer, not manageable) slot, so two rows can share a `providerId`.
-    /// `CredentialRow.id` is a composite for exactly this reason — a `ForEach` keyed on
-    /// `providerId` alone would collide and silently render one of them.
+    /// WS-19 §9 A-1: rows are emitted per SLOT, so `anthropic` appears TWICE — `anthropic:default`
+    /// (api-key, manageable) and `anthropic:console` (bearer, not manageable) — and A-1 names
+    /// `providerId|door|kind` as the key clients use. `CredentialRow.id` is that composite; a
+    /// `ForEach` keyed on `providerId` alone would collide and silently render one of them.
     func testTwoRowsSharingAProviderIdHaveDistinctIdentity() async {
         let fake = FakeCredentialsClient()
         fake.listResults = [.success([

@@ -37,10 +37,10 @@ import SwiftUI
 /// Pure display helper (same posture as `anthropicAuthStatusText` / `providerStatusText`): the
 /// sentence that tells the user WHERE a credential they cannot type here is managed.
 ///
-/// Takes an OPTIONAL raw string rather than an enum because the door vocabulary is open on both
-/// sides: `CredentialRow.door` carries three values, while a `credential_kind_unsupported`
-/// refusal's `data.door` can carry `"provider.logout"` (W19-5's console-arm REMOVE refusal), which
-/// is not one of them. An unknown door yields a neutral sentence — never an empty string, which
+/// Takes an OPTIONAL raw string rather than an enum because the vocabulary is the daemon's and has
+/// already moved once: WS-19 §9 A-1 WITHDREW `"provider.logout"` (there is no way to address the
+/// console slot through `credential.remove` at all, so no refusal ever names it), leaving exactly
+/// the three §5 values. An unknown door yields a neutral sentence — never an empty string, which
 /// would render as a row that silently says nothing.
 func credentialDoorText(_ door: String?) -> String {
     switch door {
@@ -48,13 +48,28 @@ func credentialDoorText(_ door: String?) -> String {
         return "Enter a key here."
     case "provider.login":
         return "Managed by the Anthropic (Claude) controls above — use Console login there."
-    case "provider.logout":
-        return "Sign out with the Anthropic (Claude) controls above."
     case "cli-oauth":
         return "Managed by `winter login` in a terminal."
     default:
         return "Managed outside this window."
     }
+}
+
+/// Whether this row gets a Remove button — WS-19 §9 A-3: **Remove is offered independently of
+/// `manageable`**, which governs SET only.
+///
+/// The consequence that motivated the ruling: `codex-oauth` is `manageable: false` (its key can't
+/// be TYPED — it's an OAuth token pair, and `credential.set` would refuse it typed) but it IS
+/// removable (`credential.remove codex-oauth` clears all the Codex token names, the app-side
+/// equivalent of a bare `winter logout`). Gating Remove on `manageable`, as this section first did,
+/// left a stored Codex login with no way out except the CLI.
+///
+/// `door == "provider.login"` is the one exclusion: that row is the Anthropic CONSOLE slot, and
+/// A-1 makes `credential.remove anthropic` act on `anthropic:default` ONLY — so a Remove here
+/// would either do nothing visible or delete the OTHER anthropic row's key. Its sign-out lives in
+/// `AnthropicAuthSection`, which the row's own door text already points at.
+func credentialRowOffersRemove(_ row: CredentialRow) -> Bool {
+    row.present && row.door != "provider.login"
 }
 
 @MainActor
@@ -218,26 +233,31 @@ struct CredentialsSection: View {
                     .foregroundStyle(.secondary)
             }
 
-            if row.manageable {
-                HStack(spacing: 8) {
+            // SET and REMOVE are two independent gates (WS-19 §9 A-3), not one `manageable`
+            // switch: a `codex-oauth` row can't be typed into but CAN be removed, so the two
+            // controls are decided separately and a row may well show Remove with no field.
+            HStack(spacing: 8) {
+                if row.manageable {
                     SecureField("API key", text: Binding(
                         get: { model.draft(for: row.providerId) },
                         set: { model.setDraft($0, for: row.providerId) }
                     ))
                     Button("Save") { Task { await model.save(providerId: row.providerId) } }
                         .disabled(!model.canSave(row.providerId))
-                    if row.present {
-                        Button("Remove") { Task { await model.remove(providerId: row.providerId) } }
-                            .disabled(model.busyProviderId != nil)
-                    }
                 }
-            } else {
+                if credentialRowOffersRemove(row) {
+                    Button("Remove") { Task { await model.remove(providerId: row.providerId) } }
+                        .disabled(model.busyProviderId != nil)
+                }
+            }
+
+            if !row.manageable {
                 // A row whose credential is a bespoke OAuth flow (Anthropic Console, Codex). Never
                 // a field: `credential.set` would refuse it typed (`credential_kind_unsupported`),
                 // so the door is shown INSTEAD of a control the user would only be told off for
-                // using. No Remove either — W19-3 makes `manageable` the single gate for both
-                // verbs on this surface, even though W19-5 does define a `credential.remove` for
-                // `codex-oauth` (the CLI's `winter logout` is that row's door here).
+                // using. It still sits above a Remove button when one is stored — the door says
+                // where the credential is CREATED, which is a different question from whether this
+                // window can delete it.
                 Text(credentialDoorText(row.door))
                     .font(.caption)
                     .foregroundStyle(.secondary)
