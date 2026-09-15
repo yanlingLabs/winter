@@ -178,7 +178,9 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
     // `reason` is what a client branches on to say "you have no key for DeepSeek" rather than
     // "the model could not be selected". The sentence is pinned beside it, not instead of it.
     expect(caught?.rpc?.data?.reason).toBe("no-credential");
-    expect(caught?.rpc?.message).toContain("no-credential");
+    // The prose carries no machine token any more — `data.reason` above is what a client branches
+    // on. What the sentence owes the USER is the provider and a door.
+    expect(caught?.rpc?.message).not.toContain("no-credential:");
     expect(caught?.rpc?.message).toContain("winter credentials set deepseek");
     // Never reached the provider at all: a typed refusal, not a 401.
     expect(authHeaders.length).toBe(0);
@@ -331,7 +333,7 @@ describeWithWinterBinary("WS-19 end to end: a stored credential routes a real se
     } catch (err) { caught = err as RpcErrorLike; }
     expect(caught?.rpc?.data?.code).toBe("runtime_selection_refused");
     expect(caught?.rpc?.data?.reason).toBe("no-credential");
-    expect(caught?.rpc?.message).toContain("no-credential");
+    expect(caught?.rpc?.message).not.toContain("no-credential:");
     rmSync(cwd, { recursive: true, force: true });
   }, 120_000);
 });

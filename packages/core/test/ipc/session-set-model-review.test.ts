@@ -729,12 +729,17 @@ describeWithWinterBinary("A-7a: ONE canonical model on TWO providers switches SI
     //   gpt-5.6-sol, codex-oauth only                    → "codex-oauth"   | (unqualified; unaffected)      ✅ safe
     //   openai/gpt-5.6-sol, codex-oauth only             → "codex-oauth"   | with provider → slot-unservable ❌ BREAKS
     //
-    // The third row is the caution the review raised, confirmed: a Codex-only install whose session
-    // model is the QUALIFIED `openai/gpt-5.6-sol` runs on Codex OAuth today and would stop running
-    // at all. The shipped default (`DEFAULT_CODEX_MODEL`) is unqualified, so no default install is
-    // affected — but "you typed a qualified key while signed in with ChatGPT" is a real
-    // configuration, and turning it from working into refused is a routing change with a blast
-    // radius this lane may not choose. Left as a router follow-up, per the ruling.
+    // The third row looked like a reason not to take the change. IT IS NOT, and the correction
+    // matters (review N1): that configuration is ALREADY refused, by Winter's own pre-turn gate —
+    // a qualified key names its provider, so `openai/gpt-5.6-sol` on a Codex-only home is told to
+    // add an OpenAI key at the first turn regardless of what the router would have routed. The
+    // router follow-up would make the two doors AGREE rather than change the outcome; today they
+    // disagree, which is the divergence this block exists to record.
+    //
+    // The standing ruling is that a user who explicitly picks provider X gets X's door, so both
+    // doors owe the same answer. The change is still left to the router lane — it is a routing
+    // change to the SELECTOR, whose blast radius reaches every host, not just this daemon — but not
+    // because it would break a working configuration. It would not.
     // ════════════════════════════════════════════════════════════════════════════════════════════
     await client.call(METHODS.sessionSend, { sessionId, text: "on the live child" });
     await client.waitFor(() => client.events.filter((x) => x.type === "turn_completed").length >= 2, 90_000);

@@ -321,8 +321,16 @@ describe("refusalForSelection — only credential-shaped reasons are re-describe
     }
   });
 
-  test("a Claude model refused for a NON-credential reason on a keyless home keeps its own reason and words", async () => {
-    const detail = "the official runtime is not installed on this machine";
+  // Whole-branch review MAJOR 2 FLIPPED THIS PIN. It used to assert `message === detail` — i.e. it
+  // PINNED the leak: `session.create` handed the router's own words to the user, and
+  // `session.create` is remote-allowed, so the measured shapes ("the official runtime", "persisted
+  // on claude-agent (…) (WS-00 §2, D13)", and `slot-unservable`'s enumeration of the user's own
+  // configured providers) were reaching the phone. The REASON still travels — a client branches on
+  // `data.reason`, never on prose — but the words are Winter's.
+  const ROUTER_PHRASING = /\bruntime\b|winter-agent|claude-agent|WS-\d|D\d\d\b|\(D28\)/i;
+
+  test("a Claude model refused for a NON-credential reason keeps its REASON, and never the router's words", async () => {
+    const detail = "this session is persisted on claude-agent (the official runtime) and the winter runtime cannot serve it (WS-00 §2, D13)";
     const t = table({}, { selectRuntimeFor: refusalOf("runtime-unavailable", detail) });
     try {
       const sid = t.store.createSession("t", { mode: "chat", model: "claude-sonnet-5" });
@@ -330,10 +338,33 @@ describe("refusalForSelection — only credential-shaped reasons are re-describe
       try { await t.drivers.create(sid); } catch (err) { caught = err; }
       expect((caught as { code?: string })?.code).toBe("runtime_selection_refused");
       expect((caught as { reason?: string })?.reason).toBe("runtime-unavailable");
-      expect((caught as Error)?.message).toBe(detail);
-      // Never Winter's own credential sentence, which would send the user to the wrong door.
-      expect((caught as Error)?.message).not.toContain("no-credential");
+      // The machine-readable half survives; the prose does not.
+      expect((caught as Error)?.message).toBe("Winter can't start a session on claude-sonnet-5 right now.");
+      expect((caught as Error)?.message).not.toMatch(ROUTER_PHRASING);
+      expect((caught as Error)?.message).not.toContain(detail);
+      // ...and it is not Winter's credential sentence either, which would send the user to a door
+      // that would not have helped.
       expect((caught as Error)?.message).not.toContain("winter credentials set");
+    } finally { t.close(); }
+  });
+
+  test("slot-unservable's enumeration of the user's OWN configured providers never reaches the wire", async () => {
+    // The measured shape, verbatim from the pinned router: it names every provider the user has a
+    // credential for. That is a fact about someone's setup, and `session.create` is remote-allowed.
+    const detail = 'the model "gpt-5.6-sol" (openai/gpt-5.6-sol) is served by no row this session can use: every candidate row was blocked, deprecated, known-unservable, or belongs to a provider with no configured credential ref (configured: openai, openrouter, deepseek)';
+    const t = table({}, { selectRuntimeFor: refusalOf("slot-unservable", detail) });
+    try {
+      // A BARE id six inventory providers serve: Minor 1's narrowing means no provider is named
+      // either, because Winter decided nothing.
+      const sid = t.store.createSession("t", { mode: "chat", model: "gpt-5.6-sol" });
+      let caught: unknown;
+      try { await t.drivers.create(sid); } catch (err) { caught = err; }
+      const message = (caught as Error)?.message ?? "";
+      expect(message).toBe("Winter can't start a session on gpt-5.6-sol right now.");
+      for (const leaked of ["openrouter", "deepseek", "configured:", "candidate row"]) {
+        expect(message).not.toContain(leaked);
+      }
+      expect(message).not.toMatch(ROUTER_PHRASING);
     } finally { t.close(); }
   });
 

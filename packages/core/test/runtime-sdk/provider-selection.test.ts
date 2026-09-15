@@ -75,6 +75,23 @@ test("FINDING CLOSED at winter-provider-catalog 0.0.4: all three CODEX_MODELS ar
   expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.6-sol");
 });
 
+// Whole-branch review Minor 3: the list names each PROVIDER once, not each inventory SLOT. The
+// inventory holds two `anthropic` slots (api-key + Console), and `beforeTurn`'s "exactly one
+// provider serves this model" narrowing reads this list's LENGTH — so a duplicate would make an
+// anthropic-only-served model count as two and never be gated.
+test("inventoryProvidersServing de-dupes anthropic's two slots into one provider", () => {
+  const anthropicRows = WINTER_CREDENTIAL_INVENTORY.filter((s) => s.provider === "anthropic");
+  expect(anthropicRows.length).toBe(2); // the premise: two SLOTS, one provider
+  for (const model of ["claude-sonnet-5", "anthropic/claude-sonnet-5", "gpt-5.6-sol"]) {
+    const providers = inventoryProvidersServing(model);
+    expect(providers.length).toBe(new Set(providers).size);
+  }
+  // A qualified anthropic key: `anthropic` appears once, not twice — the de-dup's own case. (A
+  // reseller row for the same canonical model is legitimately in the list beside it.)
+  const qualified = inventoryProvidersServing("anthropic/claude-sonnet-5");
+  expect(qualified.filter((p) => p === "anthropic")).toEqual(["anthropic"]);
+});
+
 // -------------------------------------------------------------------------------------------
 // (b) Credential naming — present → ref, absent → no ref, never a throw.
 // -------------------------------------------------------------------------------------------

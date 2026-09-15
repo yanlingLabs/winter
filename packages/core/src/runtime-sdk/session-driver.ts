@@ -55,6 +55,7 @@ import { clearSession } from "./diff-attach";
 import { credentialPresenceFrom, credentialRefFor } from "./keychain";
 import { apiKeyProviderIsUnauthenticated, missingCredentialDetail } from "./credentials";
 import { renderNoCredentialHint } from "./handoff";
+import { neutralSelectionRefusal, refusalDetailCategoryFor } from "./refusal-copy";
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
 import { attachOfficialSession, attachWinterSession } from "./messaging";
 import { buildWinterOptions, permissionModeFor } from "./mode-options";
@@ -923,22 +924,39 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
    * has already done its own.
    */
   const refusalForSelection = async (refusal: { reason: string; detail: string; alternatives?: readonly SelectionAlternative[] }, model: string): Promise<WinterLegRefusal> => {
+    // THE RAW DETAIL GOES TO THE LOG, AS A CATEGORY, AND NOWHERE ELSE (whole-branch review MAJOR 2).
+    // `session.setModel` has scrubbed this class since D1 fix round 4; `session.create` handed it
+    // through verbatim, and `session.create` is REMOTE-ALLOWED, so the measured shapes — "the
+    // official runtime", "persisted on claude-agent (…) (WS-00 §2, D13)", and `slot-unservable`'s
+    // enumeration of the user's own configured providers — were reaching the phone. Both doors now
+    // share one definition (`refusal-copy.ts`).
+    deps.log?.(`selectRuntimeFor refused ${model} (reason=${refusal.reason}, detail=${refusalDetailCategoryFor(refusal.detail)})`);
+    const neutral = neutralSelectionRefusal(model);
     if (refusal.reason === "no-credential" && refusal.alternatives !== undefined) {
+      // The hint is the ONE refusal text that is actionable, and it is built HERE out of the
+      // router's structured `alternatives` — never out of `detail`, whose prefix is now dropped.
       const hint = renderNoCredentialHint(refusal.alternatives, { subscriptionEnabled: officialSubscriptionAuthEnabled(deps.settings()) });
-      return new WinterLegRefusal("runtime_selection_refused", `${refusal.detail} ${hint}`, "no-credential");
+      return new WinterLegRefusal("runtime_selection_refused", `${neutral} ${hint}`, "no-credential");
     }
     if (!refusalMayBeCredentialShaped(refusal.reason)) {
-      return new WinterLegRefusal("runtime_selection_refused", refusal.detail, refusal.reason);
+      return new WinterLegRefusal("runtime_selection_refused", neutral, refusal.reason);
     }
     try {
-      const credentials = await credentialPresenceFrom(deps.secrets);
-      const selection = providerSelectionFor(model, credentials, deps.home, deps.settings());
-      if (selection !== undefined
-          && apiKeyProviderIsUnauthenticated(selection.providerId, credentials.byProvider[selection.providerId] !== undefined)) {
-        return new WinterLegRefusal("runtime_selection_refused", missingCredentialDetail(selection.providerId), "no-credential");
+      // MINOR 1: the same narrowing `beforeTurn` applies, for the same reason. Without it this arm
+      // named `inInventory[0]` — a fallback, not a decision — so a credential-less home asking for
+      // `deepseek-reasoner` was told to add a key for whichever reseller happens to sort first.
+      // Only a qualified `<provider>/<model>` key, or a bare id exactly ONE inventory provider
+      // serves, names a provider here; anything else gets the neutral sentence.
+      if (qualifiedProviderFor(model) !== undefined || inventoryProvidersServing(model).length === 1) {
+        const credentials = await credentialPresenceFrom(deps.secrets);
+        const selection = providerSelectionFor(model, credentials, deps.home, deps.settings());
+        if (selection !== undefined
+            && apiKeyProviderIsUnauthenticated(selection.providerId, credentials.byProvider[selection.providerId] !== undefined)) {
+          return new WinterLegRefusal("runtime_selection_refused", missingCredentialDetail(selection.providerId), "no-credential");
+        }
       }
     } catch { /* a store that will not answer must not turn one refusal into a different one */ }
-    return new WinterLegRefusal("runtime_selection_refused", refusal.detail, refusal.reason);
+    return new WinterLegRefusal("runtime_selection_refused", neutral, refusal.reason);
   };
 
   const createOfficial = async (sessionId: string, selection: RuntimeSelection): Promise<LegSession> => {

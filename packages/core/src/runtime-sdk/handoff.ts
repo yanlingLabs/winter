@@ -70,6 +70,7 @@ import { RuntimeSessionRecords, type RuntimeSessionRecord } from "../runtime-sta
 import { handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, type Settings } from "../settings";
 import { sessionLegOf } from "./leg";
 import { credentialRefFor } from "./keychain";
+import { refusalDetailCategoryFor } from "./refusal-copy";
 import { catalogRowsFor, testProviderNameFor } from "./provider-selection";
 import type { LegSession, WinterSessionDrivers } from "./session-driver";
 
@@ -692,12 +693,6 @@ function warningsOf(plan: HandoffPlan): string[] {
  * already pinned by a test that forbids it naming an SDK or a runtime — it is the one refusal whose
  * text is actionable, and losing it would leave the user with no way to find the door.
  */
-function refusalDetailCategoryFor(detail: string): "names-a-runtime" | "names-a-spec-id" | "opaque" {
-  if (/\b(winter|official|claude)[- ]?(runtime|agent)\b/i.test(detail)) return "names-a-runtime";
-  if (/\b(WS-\d|D\d{1,2}\b|R-\d)/.test(detail)) return "names-a-spec-id";
-  return "opaque";
-}
-
 export function renderNoCredentialHint(alternatives: readonly SelectionAlternative[], opts: { subscriptionEnabled: boolean }): string {
   const doors: string[] = [];
   for (const alt of alternatives) {

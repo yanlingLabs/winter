@@ -292,6 +292,19 @@ describeWithWinterBinary("A-5 part 2: the chain's LAST hop (gpt -> claude) promp
 // The carriage TAG's form is per-adapter and is MEASURED, not assumed — see `test/helpers/carriage.ts`
 // for both renderings and why asserting only the angle-bracket one would have made every
 // chat-completions hop read as a defect.
+//
+// ── A W18-19 ROW-4 CONTINUITY FINDING, MEASURED 2026-09-15 (review N4) ─────────────────────────
+// Hop 4's Claude-destination body carries the WHOLE conversation from hop 0 in order — every user
+// turn and every assistant reply, including the Claude turn the chain started with — and it carries
+// the reasoning of all three FOREIGN families as `<recovered_reasoning>` tags (`kind="summary"` for
+// GPT, `kind="exposed"` for DeepSeek and GLM). What it does NOT carry is hop 0's OWN thinking: the
+// Claude turn that opened the chain comes back as text alone, its reasoning gone.
+//
+// That is a real gap in the round trip — a session that starts on Claude, travels, and returns loses
+// exactly the state Claude could have replayed natively — but whether it SHOULD carry is a spec
+// question about same-family replay across an intervening foreign leg, not something this lane gets
+// to decide by writing an assertion. So it is pinned as ABSENT (so a later fix has to come here and
+// say so deliberately) and reported to the controller rather than asserted as correct.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 const CATALOG_DEEPSEEK_MODEL = "deepseek/deepseek-reasoner";
@@ -484,7 +497,12 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
       const claudeRequests = anthropicFakeServer!.requests.filter((r) => r.path === "/v1/messages");
       expect(claudeRequests.length).toBeGreaterThan(anthropicTurnsBefore);
       const claudeBody = claudeRequests.at(-1)!.body;
-      expect(outOfOrder(claudeBody, ["hop 1, on deepseek", "hello from deepseek", "hop 2, on glm", "hello from glm", "hop 3, on gpt", "hop 4, back on claude"])).toEqual([]);
+      // The WHOLE chain, from hop 0, in order — MEASURED (review N4): the official destination does
+      // receive the Claude turn it started with, so the needles start where the conversation does.
+      expect(outOfOrder(claudeBody, ["hop 0, on claude", "hello from claude", "hop 1, on deepseek", "hello from deepseek", "hop 2, on glm", "hello from glm", "hop 3, on gpt", "hop 4, back on claude"])).toEqual([]);
+      // ...but NOT hop 0's own THINKING. See the row-4 continuity finding in this block's header:
+      // deliberately not asserted either way, because neither answer is this lane's to pin.
+      expect(claudeBody.includes(CLAUDE_THINKING)).toBe(false);
       // THE TAG DOOR, all three prior families: GPT is hidden-reasoning, so its readable SUMMARY is
       // what carries (`kind="summary"`); DeepSeek and GLM are full-exposed sources, so theirs carry
       // as `kind="exposed"`.
@@ -496,7 +514,10 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
       // the blob itself may cross a family boundary.
       expect(claudeBody).not.toContain(GPT_ENCRYPTED);
       expect(claudeBody).not.toContain("itemJson");
-      expect(opaqueLeaks(claudeBody, [GPT_ENCRYPTED])).toEqual([]);
+      // N5: the SAME Anthropic exemption the everyBody sweep below installs — a Claude destination
+      // may legitimately carry a `signature` for its own same-domain native replay, and this body is
+      // a Claude destination. `encrypted_content`/`redacted_thinking` and GPT's blob stay barred.
+      expect(opaqueLeaks(claudeBody, [GPT_ENCRYPTED]).filter((leak) => leak !== "signature")).toEqual([]);
 
       // (c) once more across EVERY body every fake received: no conversation carries an opaque field
       // name, and the two scripted opaque VALUES cross nothing.

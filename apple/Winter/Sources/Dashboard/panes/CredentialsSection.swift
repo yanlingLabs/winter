@@ -49,7 +49,9 @@ func credentialDoorText(_ door: String?) -> String {
     case "provider.login":
         return "Managed by the Anthropic (Claude) controls above — use Console login there."
     case "cli-oauth":
-        return "Managed by `winter login` in a terminal."
+        // PLAIN TEXT, no markdown (whole-branch review nit): SwiftUI's `Text(_: String)` renders
+        // this verbatim, so backticks around the command showed up as backticks on screen.
+        return "Managed by the winter login command in a terminal."
     default:
         return "Managed outside this window."
     }

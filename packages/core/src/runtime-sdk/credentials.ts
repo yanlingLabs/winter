@@ -336,12 +336,17 @@ export function credentialDisplayNameFor(providerId: string): string {
  * Names the provider and all THREE doors ruling R-10b-12 opened, because a user who cannot reach the
  * Mac right now still has two of them. Never names an SDK or a runtime (R-10b-4).
  *
- * The machine-readable half rides beside it, not inside it: `WinterLegRefusal` carries a `reason`
- * (`"no-credential"`) that `ipc/server.ts` forwards as `error.data.reason`, so a client branches on
- * that rather than string-matching this sentence.
+ * THE DOORS ARE NAMED NEUTRALLY, not from the Mac's point of view: this sentence is remote-allowed
+ * and reaches the iPhone, where "from Winter on your iPhone" is advice to use the app the reader is
+ * already holding. Each surface is named as itself.
+ *
+ * NO MACHINE TOKEN IN THE PROSE (whole-branch review nit): the first round led with a literal
+ * `no-credential: ` so a client had something to key on. It does not need one — `WinterLegRefusal`
+ * carries a `reason` that `ipc/server.ts` forwards as `error.data.reason`, which is the field a
+ * client branches on. A token in the copy is only ever read by a person, and it means nothing to one.
  */
 export function missingCredentialDetail(providerId: string): string {
-  return `no-credential: ${credentialDisplayNameFor(providerId)} has no stored credential — add one with \`winter credentials set ${providerId}\`, from the app's Providers settings, or from Winter on your iPhone`;
+  return `${credentialDisplayNameFor(providerId)} has no stored credential — add one from the Mac app, the iPhone app, or run \`winter credentials set ${providerId}\``;
 }
 
 /**

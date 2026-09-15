@@ -90,6 +90,9 @@ export function outOfOrder(body: string, needles: readonly string[]): string[] {
  *  See this file's header for the two forms and why both are accepted. */
 export function carriesReasoning(body: string, opts: { kind: "summary" | "exposed"; provider: string; text: string }): boolean {
   if (!body.includes(opts.text)) return false;
+  // ASSOCIATED on the tag branch too (review N6): `kind` and `provider` must be in the SAME tag, so
+  // a body carrying two prior models of different kinds cannot satisfy a claim about one of them
+  // using the other one's `kind`.
   const responsesTag = `<recovered_reasoning kind=\\"${opts.kind}\\" provider=\\"${opts.provider}\\"`;
   const responsesTagRaw = `<recovered_reasoning kind="${opts.kind}" provider="${opts.provider}"`;
   if (body.includes(responsesTag) || body.includes(responsesTagRaw)) return true;
