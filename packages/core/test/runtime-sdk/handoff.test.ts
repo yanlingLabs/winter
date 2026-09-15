@@ -13,7 +13,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HandoffBarrier, HandoffOutcome, HandoffPlan, HandoffResumeTarget, RuntimeDirectoryEntry, RuntimeKind, RuntimeSelection, SelectionAlternative, SelectionInput, SessionKey } from "@yanlinglabs/winter-runtime-sdk";
-import { modelLabelFor, planAndApplySwitch, registerHandoffParticipants, renderNoCredentialHint, type HandoffDeps } from "../../src/runtime-sdk/handoff";
+import { modelLabelFor, planAndApplySwitch, registerHandoffParticipants, renderNoCredentialHint, type HandoffDeps, type PlanSwitchOutcome } from "../../src/runtime-sdk/handoff";
 import { openRuntimeStateDb, RuntimeSessionRecords } from "../../src/runtime-state";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import type { LegSession, WinterSessionDrivers } from "../../src/runtime-sdk/session-driver";
@@ -47,9 +47,12 @@ const SELECTION = (kind: "winter-agent" | "claude-agent"): RuntimeSelection => (
  * `expect.any(String)` rather than deleting the field: `decidedAt` being PRESENT and a string is
  * itself part of the shape a `resumed` outcome must carry, and stripping it would stop pinning that.
  */
-const RESUMED_ANY_TIME = (kind: "winter-agent" | "claude-agent"): unknown => ({
+const RESUMED_ANY_TIME = (kind: "winter-agent" | "claude-agent"): PlanSwitchOutcome => ({
   kind: "resumed",
-  selection: { ...SELECTION(kind), decidedAt: expect.any(String) },
+  // The cast is the asymmetric matcher's, not a shape claim: `expect.any(String)` is not a string,
+  // so the literal cannot satisfy `RuntimeSelection` at compile time even though it is exactly what
+  // `toEqual` wants at run time.
+  selection: { ...SELECTION(kind), decidedAt: expect.any(String) as unknown as string },
 });
 
 function seedRecord(records: RuntimeSessionRecords, sessionId: string): void {
