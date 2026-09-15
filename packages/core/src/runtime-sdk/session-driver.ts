@@ -131,6 +131,29 @@ export class WinterLegRefusal extends Error {
   }
 }
 
+/**
+ * WS-19 (W19-7, review Minor 2): which of the router's own refusal reasons a MISSING CREDENTIAL can
+ * actually produce — the only ones `refusalForSelection` may re-describe as `no-credential`.
+ *
+ * MEASURED against the pinned router (0.0.7), because the two are not interchangeable:
+ *
+ *   - `"no-credential"` is what a CLAUDE-family model gets ("...is served by rows with no configured
+ *     credential ref"), and it carries `alternatives`.
+ *   - `"slot-unservable"` is what EVERY OTHER family gets for the identical situation — the detail
+ *     reads "every candidate row was blocked, deprecated, known-unservable, or belongs to a provider
+ *     with no configured credential ref (configured: none)". A `deepseek` session with an empty slot
+ *     is refused with THIS reason, never `no-credential`, which is why gating on the literal
+ *     `"no-credential"` alone would silently switch W19-7 off for every non-Claude provider.
+ *
+ * Everything else — `"runtime-unavailable"`, `"mode-forbids-runtime"`, `"claude-oauth-not-approved"`,
+ * and any reason a later router adds (the union is widened to `string` for exactly that) — is NOT
+ * about a credential and keeps its own reason and its own words. An allowlist, not a denylist: a new
+ * reason is passed through verbatim until someone deliberately decides it belongs here.
+ */
+export function refusalMayBeCredentialShaped(reason: string): boolean {
+  return reason === "no-credential" || reason === "slot-unservable";
+}
+
 /** The narrowed `SessionMode` a stored `mode` column resolves to (absent = code, as everywhere). */
 const modeOf = (raw: string | undefined): SessionMode => (raw === "chat" || raw === "dispatch" ? raw : "code");
 
@@ -846,8 +869,12 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
    *     door hint naming that provider. This is the `deepseek`/`zai`/`openrouter` case the derived
    *     inventory made reachable: without it the user gets the router's honest but unhelpful "every
    *     candidate row … belongs to a provider with no configured credential ref".
-   *  3. Anything else — a genuinely unservable slot, a mode that forbids a runtime — passes through
-   *     verbatim, with the router's own `reason`.
+   *  3. Anything else — a runtime that is not installed, a mode that forbids one — passes through
+   *     verbatim, with the router's own `reason`. `refusalMayBeCredentialShaped` is the gate: only
+   *     the two reasons a MISSING CREDENTIAL can actually produce are eligible for case 2 (review
+   *     Minor 2 — before this, ANY refusal was relabelled `no-credential` whenever the probe
+   *     happened to find an empty slot, so a Claude session on a home with no `claude` binary would
+   *     have been told to go and add an API key).
    *
    * The credential probe happens ONLY on this path (a refusal), never on the hot create path, which
    * has already done its own.
@@ -856,6 +883,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     if (refusal.reason === "no-credential" && refusal.alternatives !== undefined) {
       const hint = renderNoCredentialHint(refusal.alternatives, { subscriptionEnabled: officialSubscriptionAuthEnabled(deps.settings()) });
       return new WinterLegRefusal("runtime_selection_refused", `${refusal.detail} ${hint}`, "no-credential");
+    }
+    if (!refusalMayBeCredentialShaped(refusal.reason)) {
+      return new WinterLegRefusal("runtime_selection_refused", refusal.detail, refusal.reason);
     }
     try {
       const credentials = await credentialPresenceFrom(deps.secrets);

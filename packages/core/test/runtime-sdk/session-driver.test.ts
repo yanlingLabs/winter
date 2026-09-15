@@ -22,7 +22,7 @@ import { QuestionBroker } from "../../src/agent/questions";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { CORE_BRAND } from "../../src/runtime-sdk/brand";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
-import { createWinterSessionDrivers, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
+import { createWinterSessionDrivers, refusalMayBeCredentialShaped, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
 import { WINTER_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
 import { backfillNativeSessions, openRuntimeStateDb, ProjectionCheckpoints, RuntimeSessionRecords } from "../../src/runtime-state";
 import { SessionHub } from "../../src/sessions/hub";
@@ -75,7 +75,7 @@ class FakeQuery {
 
 const result = (): Frame => ({ type: "result", subtype: "success", is_error: false, permission_denials: [], result: "" });
 
-function table(overrides: Partial<WinterLegDeps> = {}) {
+function table(overrides: Partial<WinterLegDeps> = {}, runtimeExtra: Record<string, unknown> = {}) {
   const home = mkdtempSync(join(tmpdir(), "winter-table-"));
   const store = new SessionStore(home);
   const hub = new SessionHub(store);
@@ -97,6 +97,10 @@ function table(overrides: Partial<WinterLegDeps> = {}) {
     spawnHookFor: () => ({ pathToClaudeCodeExecutable: join(home, "winter-fake") }),
     trackQuery: (sid: string) => { tracked.push(sid); },
     untrack: () => {},
+    // WS-19 (review Minor 2): a test may inject `selectRuntimeFor` to drive `decideRuntime`'s
+    // refusal path. Absent by default, which is `decideRuntime`'s own bail-out #1 (a partial
+    // double) and what every other test in this file relies on.
+    ...runtimeExtra,
   } as unknown as WinterRuntimeSdk;
   const settings = { runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
   const logs: string[] = [];
@@ -288,6 +292,59 @@ describe("createWinterSessionDrivers — the table", () => {
       await Bun.sleep(10);
       expect(t.q().pushed).toEqual(["B", "C"]);
       await session.end();
+    } finally { t.close(); }
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// WS-19 (W19-7, review Minor 2) — WHICH router refusals may be re-described as `no-credential`.
+//
+// `refusalForSelection` answers a credential-shaped refusal with Winter's own actionable sentence
+// (the provider and the three doors) instead of the router's "every candidate row was blocked,
+// deprecated, known-unservable, or …". Before Minor 2 it did that for ANY refusal whenever the
+// credential probe happened to find an empty slot — so a session refused because a RUNTIME is not
+// installed would have been told to add an API key that would not have helped.
+//
+// Every test here runs on a store with NO credentials at all, which is the state that made the old
+// code relabel: the probe finds nothing either way, so only the REASON can tell the two apart.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describe("refusalForSelection — only credential-shaped reasons are re-described (Minor 2)", () => {
+  const refusalOf = (reason: string, detail: string) => async () => ({ refused: true as const, reason, detail });
+
+  test("refusalMayBeCredentialShaped is an ALLOWLIST of the two reasons a missing credential produces", () => {
+    // MEASURED against the pinned router: a Claude-family model with no credential answers
+    // `no-credential`; EVERY other family answers `slot-unservable` for the identical situation.
+    expect(refusalMayBeCredentialShaped("no-credential")).toBe(true);
+    expect(refusalMayBeCredentialShaped("slot-unservable")).toBe(true);
+    for (const reason of ["runtime-unavailable", "mode-forbids-runtime", "claude-oauth-not-approved", "some-reason-a-later-router-adds"]) {
+      expect(refusalMayBeCredentialShaped(reason)).toBe(false);
+    }
+  });
+
+  test("a Claude model refused for a NON-credential reason on a keyless home keeps its own reason and words", async () => {
+    const detail = "the official runtime is not installed on this machine";
+    const t = table({}, { selectRuntimeFor: refusalOf("runtime-unavailable", detail) });
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "claude-sonnet-5" });
+      let caught: unknown;
+      try { await t.drivers.create(sid); } catch (err) { caught = err; }
+      expect((caught as { code?: string })?.code).toBe("runtime_selection_refused");
+      expect((caught as { reason?: string })?.reason).toBe("runtime-unavailable");
+      expect((caught as Error)?.message).toBe(detail);
+      // Never Winter's own credential sentence, which would send the user to the wrong door.
+      expect((caught as Error)?.message).not.toContain("no-credential");
+      expect((caught as Error)?.message).not.toContain("winter credentials set");
+    } finally { t.close(); }
+  });
+
+  test("the SAME keyless home, refused `slot-unservable`, DOES get Winter's actionable sentence — W19-7's own case", async () => {
+    const t = table({}, { selectRuntimeFor: refusalOf("slot-unservable", "every candidate row … (configured: none)") });
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "deepseek/deepseek-reasoner" });
+      let caught: unknown;
+      try { await t.drivers.create(sid); } catch (err) { caught = err; }
+      expect((caught as { reason?: string })?.reason).toBe("no-credential");
+      expect((caught as Error)?.message).toContain("winter credentials set deepseek");
     } finally { t.close(); }
   });
 });
