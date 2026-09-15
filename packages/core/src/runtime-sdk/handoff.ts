@@ -249,6 +249,34 @@ function isNotYetInRuntimeDirectory(err: unknown): boolean {
 }
 
 /**
+ * Fix round 4 (MAJOR 2): the ONE barrier refusal a re-selection may answer.
+ *
+ * Round 3 triggered `reselectWithNothingToCarry` on ANY `lossy_fork` OR `blocked` whenever the
+ * review had said "no source turns". `blocked` is the dangerous half: the router's own
+ * `revert-pending`, `lease-held` and `repair-required` reasons all mean "there is UNFINISHED STATE
+ * OWED on this session" — a revert the barrier could not complete, a writer lease another live
+ * process holds, a transcript that needs repair. MEASURED: `no-source-turns` + `blocked
+ * ("revert-pending")` produced `{kind:"same-runtime"}` and flipped `record.runtimeKind` to the
+ * destination while the router's own `revertRecord` still named the source — and the server's
+ * invariant check PASSED, because the record it re-reads had just been made to agree. Those must
+ * keep round-2 semantics: the neutral copy, no store write, the record untouched.
+ *
+ * What a re-selection legitimately answers is exactly one thing: WS-05 §12 step 5 could not
+ * validate a canonical transcript BECAUSE THERE IS NONE (`validateSessionTranscript`'s own ENOENT
+ * arm, `handoff-barrier.ts:1442`, surfaced through `lossy(5, …)`). The router exposes no typed
+ * reason code for it — `DetailedHandoffOutcome` carries a free-text `reason` plus the step number —
+ * so this matches BOTH: the step (5, the validation step) and the narrowest stable fragment of that
+ * one message. Every other step-5 reason (unterminated framing, a line that is not valid JSON, a
+ * broken parent chain, unpaired tool_use/tool_result) describes a transcript that EXISTS and is
+ * damaged, which is never "nothing to lose". Read here ONLY to branch — never logged.
+ */
+function isNoCanonicalTranscriptFork(outcome: { kind: string; reason?: string; step?: number }): boolean {
+  if (outcome.kind !== "lossy_fork") return false;
+  if (outcome.step !== undefined && outcome.step !== 5) return false;
+  return typeof outcome.reason === "string" && /no canonical transcript at .* to validate/.test(outcome.reason);
+}
+
+/**
  * Fix round 3 (INVARIANT, tested): does the DURABLE record now route this session the way the
  * requested model's own fresh selection says it should?
  *
@@ -613,7 +641,14 @@ export type PlanSwitchOutcome =
   | { kind: "confirmation_required"; warnings: string[]; portable: string[] }
   | { kind: "deferred" } // a turn is running; the switch is applied when it settles
   | { kind: "resumed"; selection: RuntimeSelection }
-  | { kind: "lossy_fork"; reason: string }
+  // Fix round 4 (MAJOR 2): `step` rides along — the router's own `HandoffStepNumber` for the step
+  // that could not be proven. It is the TYPED half of `isNoCanonicalTranscriptFork`'s match (the
+  // router exposes no reason code), so the one refusal a re-selection may answer — step 5's
+  // "there is no transcript at all to validate" — can be told apart from every other fork,
+  // including the other four step-5 reasons, which all describe a transcript that EXISTS and is
+  // damaged. Optional so a test fake that omits it still type-checks; `undefined` is treated as
+  // "unknown step", which the message match then has to carry alone.
+  | { kind: "lossy_fork"; reason: string; step?: number }
   // Fix round 2 (M1, router 0.0.6): `detail` is the router's own OWN human-readable explanation
   // (`DetailedHandoffOutcome.detail` — the pinned `HandoffOutcome` union has no room for it, but the
   // concrete object the barrier hands back always carries it). NEVER surfaced to the user raw
@@ -667,7 +702,7 @@ async function executePlan(deps: HandoffDeps, plan: HandoffPlan): Promise<PlanSw
     case "resumed":
       return { kind: "resumed", selection: outcome.selection };
     case "lossy-fork-offered":
-      return { kind: "lossy_fork", reason: outcome.reason };
+      return { kind: "lossy_fork", reason: outcome.reason, step: outcome.step };
     case "blocked": {
       // Fix round 2 (M1, router 0.0.6): the pinned `HandoffOutcome` union has no room for `detail`,
       // but the concrete object the barrier hands back always carries it (`DetailedHandoffOutcome`
@@ -795,44 +830,67 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
     return materialized;
   };
   /**
-   * Fix round 3: the ROUTER's own zero-turn verdict (`SwitchReview.skipped === "no-source-turns"`),
-   * never a count this file made up — P10b-2 and the Interfaces block both put that decision in the
-   * router, which is the only component that can actually read the transcript. Set from the review
-   * below; consulted by `reselectWithNothingToCarry` when `plan()` refuses.
-   */
-  let zeroSourceTurns = false;
-  /**
-   * Fix round 3: A ZERO-TURN SESSION IS RE-SELECTED, NOT HANDED OFF — and re-selection is a REAL
-   * write, not the round-2 no-op.
+   * A ZERO-TURN SESSION IS RE-SELECTED, NOT HANDED OFF — and re-selection is a REAL write, not
+   * round 2's no-op.
    *
-   * The real router refuses to PLAN a handoff for a session with no canonical transcript at all
-   * ("there is no canonical transcript at … to validate" — MEASURED, and honest: there is nothing
-   * to drain, stage or validate). But R-10b-8/P10b-2 say that session must still switch, silently.
-   * The switch it needs is not a handoff: it is a change of which leg the NEXT incarnation opens
-   * on, which is exactly the two fields `session-driver.ts`'s `resume()`/`ensure()` route by. So
-   * this patches the record to `decided` and EVICTS the (empty) live driver — without the evict,
-   * `ensure()` hands back the already-registered table entry for the OLD leg without ever consulting
-   * the record, and the next turn would run on the source leg regardless of what the record says.
+   * The real router VALIDATES the canonical transcript at WS-05 §12 step 5, and a session that has
+   * never run a turn has no file to validate — `validateSessionTranscript` answers
+   * `there is no canonical transcript at <path> to validate` and the barrier turns that into
+   * `lossy(5, …)` (MEASURED; the router builds the fork's own `reason` by interpolating that path,
+   * which `session.setModel` was surfacing to the user verbatim). A "fork" that would lose nothing
+   * is not a fork, and R-10b-8/P10b-2 say that switch must still land, silently. What it needs is
+   * not a handoff but a change of which leg the NEXT incarnation opens on — exactly the two fields
+   * `session-driver.ts`'s `resume()`/`resumeOfficial()` route by. So: patch the record to `decided`,
+   * EVICT the driver (without it `ensure()` hands back the already-registered table entry for the
+   * OLD leg without ever consulting the record), re-point the directory row.
    *
-   * Returns `same-runtime` with `decided`, so the caller's own 1c invariant check re-reads the
-   * record and turns a patch that did not land into a typed `blocked` rather than a false success.
+   * ⚠️ FIX ROUND 4, MAJOR 1 — RECOMPUTED HERE, NEVER SNAPSHOT. Round 3 read the router's
+   * `skipped === "no-source-turns"` once, at review time, and carried it down. That verdict goes
+   * stale in two measured ways: (a) on the DEFERRED path the review runs while the first turn is
+   * still streaming, and by the time `idle()` resolves the turn is real — re-selecting then commits
+   * `meta.model` over a transcript the barrier never staged; (b) `switchFactsFor` counts assistant
+   * entries SINCE THE LAST COMPACTION BOUNDARY, so every compacted session reports 0 until its next
+   * assistant reply, and a long conversation would have been silently re-selected past its staging.
+   * So the verdict is re-asked HERE, at execution time (the directory row exists by now, which is
+   * why this can ask at all), and anything but a FRESH `no-source-turns` refuses: a throw, a
+   * `same-family`/`same-profile` skip, or a real classification all mean "do not re-select".
+   *
+   * ⚠️ FIX ROUND 4, NIT 5 — PATCH FIRST, EVICT ONLY ON SUCCESS. A patch that throws used to be
+   * logged and the driver evicted anyway, so the caller's invariant check then told the user "the
+   * session stays on <model>" after its live incarnation had already been killed.
+   *
+   * `undefined` = "not re-selectable"; every caller then takes its own fail-safe branch. A returned
+   * outcome is `same-runtime` with `decided`, so the caller's 1c invariant check re-reads the record
+   * and turns a patch that did not land into a typed `blocked` rather than a false success.
    */
-  const reselectWithNothingToCarry = async (): Promise<PlanSwitchOutcome> => {
+  const tryReselectWithNothingToCarry = async (
+    barrier: HandoffBarrier,
+    sessionKey: SessionKey,
+  ): Promise<PlanSwitchOutcome | undefined> => {
+    let fresh: SwitchReview;
+    try {
+      fresh = await barrier.reviewSwitch(sessionKey, decided);
+    } catch (err) {
+      deps.log?.(`handoff: the execution-time re-review threw for session ${sessionId} (${err instanceof Error ? err.name : "unknown"}) — refusing to re-select`);
+      return undefined;
+    }
+    if (fresh.skipped !== "no-source-turns") return undefined;
     try {
       const current = deps.records.get(sessionId);
-      if (current !== undefined) {
-        const destinationAuthRef = credentialRefFor(decided.providerId, deps.home, deps.settings());
-        const destinationAuthRefLocator = destinationAuthRef?.kind === "keychain" ? `keychain:${destinationAuthRef.account}` : undefined;
-        deps.records.patch(sessionId, current.state, {
-          runtimeKind: decided.runtimeKind,
-          selection: decided,
-          providerId: decided.providerId,
-          modelRef: decided.modelRef,
-          authRef: destinationAuthRefLocator,
-        });
-      }
+      if (current === undefined) return undefined;
+      const destinationAuthRef = credentialRefFor(decided.providerId, deps.home, deps.settings());
+      const destinationAuthRefLocator = destinationAuthRef?.kind === "keychain" ? `keychain:${destinationAuthRef.account}` : undefined;
+      deps.records.patch(sessionId, current.state, {
+        runtimeKind: decided.runtimeKind,
+        selection: decided,
+        providerId: decided.providerId,
+        modelRef: decided.modelRef,
+        authRef: destinationAuthRefLocator,
+      });
     } catch (err) {
-      deps.log?.(`handoff: the zero-turn re-selection patch failed for ${sessionId} (${err instanceof Error ? err.name : "unknown"}) — the caller's invariant check will refuse the switch`);
+      // Nit 5: the live incarnation is left ALONE — nothing moved, so nothing is killed.
+      deps.log?.(`handoff: the zero-turn re-selection patch failed for ${sessionId} (${err instanceof Error ? err.name : "unknown"}) — the live incarnation is left running and the switch is refused`);
+      return undefined;
     }
     await deps.winter.evict(sessionId);
     // The barrier's own commit would have flipped the directory row's `runtimeKind` too; a
@@ -840,7 +898,8 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
     // case: a SECOND pre-turn switch, whose review reads `entry.runtimeKind` as its `from` — a
     // stale one would name a leg this session no longer runs on. Ordered AFTER the evict, so no
     // live child on the source leg is still attached to the row being re-pointed, and best-effort
-    // throughout: the very next incarnation's own attach re-records the row regardless.
+    // throughout (a park landing after it simply rewrites the row, and the very next incarnation's
+    // own attach rewrites it again).
     await repointDirectoryRow(deps, sessionId);
     return { kind: "same-runtime", decided };
   };
@@ -890,7 +949,13 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
         review = unreviewablePrompt();
       }
     }
-    zeroSourceTurns = review.skipped === "no-source-turns";
+    // Fix round 4 (MAJOR 1): this review's verdict is used for THIS decision only — whether to
+    // prompt — and is deliberately NOT carried down to the execution path. Round 3 kept
+    // `review.skipped === "no-source-turns"` in a `zeroSourceTurns` field and read it after the
+    // barrier ran; that snapshot goes stale on the deferred path (the turn that was streaming when
+    // this ran has completed by then) and is wrong for every compacted session (`switchFactsFor`
+    // counts assistant entries only SINCE THE LAST BOUNDARY, so a long conversation reports 0 until
+    // its next reply). `tryReselectWithNothingToCarry` re-asks the router instead.
     if (review.prompt && !confirmLossy) {
       return {
         kind: "confirmation_required",
@@ -964,29 +1029,22 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
     // materializing is impossible or the retry still throws, this is a `blocked`, which
     // `ipc/server.ts` renders with its neutral "couldn't finish switching models; the session
     // stays on <current model>" copy and NO store write. Never a silent success.
+    //
+    // Fix round 4 (MAJOR 2): NONE of these arms re-selects any more. A `plan()` that throws says
+    // nothing about whether the session has anything to lose — round 3 answered three of them with
+    // a re-selection gated on a stale review-time snapshot, which is exactly the class the review
+    // rejected. The ONE refusal a re-selection may answer is the barrier's own step-5
+    // "there is no canonical transcript at all" fork, handled where `execute` returns it, below.
     if (isNotYetInRuntimeDirectory(err)) {
       if (!(await materializeOnce())) {
-        // Fix round 3: a session the ROUTER says has no source turns has nothing to carry, so a
-        // handoff it cannot plan is not a failure — it is a plain re-selection (that function's own
-        // doc). Only a session with real turns behind it is `blocked` here.
-        if (zeroSourceTurns) return await reselectWithNothingToCarry();
         return { kind: "blocked", reason: "the session is not in the runtime directory and its row could not be rebuilt from the durable record" };
       }
       try {
         plan = await barrier.plan(sessionKey, decided.runtimeKind, { requested: decided });
       } catch (retryErr) {
-        if (zeroSourceTurns) return await reselectWithNothingToCarry();
         deps.log?.(`handoff: plan() still threw for session ${sessionId} after its runtime-directory row was materialized (${retryErr instanceof Error ? retryErr.name : "unknown"})`);
         return { kind: "blocked", reason: "the session could not be planned for a handoff even after its runtime-directory row was rebuilt" };
       }
-    } else if (zeroSourceTurns) {
-      // MEASURED against the real router (the A-7 zero-turn case): with the directory row present,
-      // `plan()`'s NEXT refusal for a session that has never run a turn is its transcript
-      // validation ("there is no canonical transcript at … to validate"). Re-selecting is the
-      // honest answer — see `reselectWithNothingToCarry`. Matched on the router's own
-      // zero-source-turns verdict, never on that message text: a session with real turns whose
-      // `plan()` throws is still an error, and still propagates.
-      return await reselectWithNothingToCarry();
     } else {
       throw err;
     }
@@ -1052,27 +1110,31 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
             // the other kind is narrowed explicitly rather than asserted.
             if (outcome.kind === "lossy_fork" || outcome.kind === "blocked") {
               deps.log?.(`deferred handoff for ${sessionId} settled ${outcome.kind}: ${outcome.reason}`);
-              // Fix round 3: the deferred half of the immediate path's own zero-turn re-selection
-              // (see below) — a fork that would lose nothing still has to land the switch, and this
-              // continuation owns the model commit for the deferred outcome (m5).
-              if (zeroSourceTurns) {
-                return void reselectWithNothingToCarry().then(() => {
+              // Fix round 4 (MAJOR 1 + MAJOR 2): the deferred half of the immediate path's own
+              // zero-turn re-selection, and THE path the review measured as a regression. Two
+              // narrowings, both load-bearing here:
+              //   MAJOR 2 — only the step-5 "there is no canonical transcript at all" fork, never a
+              //     `blocked` (revert-pending / lease-held / repair-required all mean unfinished
+              //     state is owed) and never another fork reason.
+              //   MAJOR 1 — the zero-turn verdict is RE-ASKED inside `tryReselectWithNothingToCarry`.
+              //     This continuation runs after `idle()`, i.e. after the very turn that was
+              //     streaming when the review ran: the review-time snapshot said "no source turns"
+              //     and by now there IS one, so the snapshot would have committed `meta.model` over
+              //     a transcript the barrier never staged. A fresh review refuses, and this falls
+              //     through to the log line above — round-2 semantics, no write.
+              if (isNoCanonicalTranscriptFork(outcome)) {
+                return void tryReselectWithNothingToCarry(barrier, sessionKey).then((reselected) => {
+                  if (reselected === undefined) return;
                   if (recordNamesSelection(deps.records.get(sessionId), decided)) deps.store.setModel?.(sessionId, model);
                 });
               }
             }
           },
-          // Fix round 3: a THROWING `barrier.execute` (see the immediate path's own catch below)
-          // reaches here on the deferred path. A zero-turn session still has to end up on the leg
-          // it asked for, so it re-selects and commits the model from inside this handler, exactly
-          // as the `resumed` branch above does — the invariant check rides along in
-          // `reselectWithNothingToCarry`'s own caller-side contract, re-read here.
-          async (err) => {
-            deps.log?.(`deferred handoff for ${sessionId} failed: ${err instanceof Error ? err.name : "unknown"}`);
-            if (!zeroSourceTurns) return;
-            await reselectWithNothingToCarry();
-            if (recordNamesSelection(deps.records.get(sessionId), decided)) deps.store.setModel?.(sessionId, model);
-          },
+          // Fix round 4 (MAJOR 2): a THROWING `barrier.execute` reaches here on the deferred path.
+          // Round 3 re-selected on it for a "zero-turn" session; a throw is not the step-5
+          // no-transcript fork and says nothing about what the session has to lose, so it is now
+          // log-only — round-2 semantics, no store write, the record untouched.
+          (err: unknown) => deps.log?.(`deferred handoff for ${sessionId} failed: ${err instanceof Error ? err.name : "unknown"}`),
         ).finally(() => pendingHandoffModelString.delete(pendingKey)),
       () => { pendingHandoffModelString.delete(pendingKey); /* the session ended before settling — nothing left to hand off */ },
     );
@@ -1080,15 +1142,17 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
   }
   try {
     const outcome = await executePlan(deps, plan);
-    // Fix round 3 (item 1b / P10b-2, MEASURED against the real router): a session that has never
-    // run a turn PLANS fine (all eight steps) and then loses at step 5, whose transcript validation
-    // has no file to validate — the barrier answers `lossy-fork-offered` carrying that path as its
-    // reason. A "fork" that would lose nothing is not a fork, and `session.setModel` was surfacing
-    // that reason to the user verbatim, absolute path and all. Zero source turns is the ROUTER's
-    // own verdict, so this re-selects (see `reselectWithNothingToCarry`) instead: the switch lands,
-    // silently, exactly as R-10b-8/P10b-2 require. A session WITH turns keeps every outcome it had.
-    if (zeroSourceTurns && (outcome.kind === "lossy_fork" || outcome.kind === "blocked")) {
-      return await reselectWithNothingToCarry();
+    // MEASURED against the real router: a session that has never run a turn PLANS fine (all eight
+    // steps) and then loses at step 5, whose transcript validation has no file to validate — the
+    // barrier answers `lossy-fork-offered` carrying that absolute path as its reason, which
+    // `session.setModel` was surfacing to the user verbatim as a refusal of a switch that loses
+    // nothing. THE ONE refusal a re-selection may answer (fix round 4, MAJOR 2 —
+    // `isNoCanonicalTranscriptFork`'s own doc for why `blocked` and every other fork reason are
+    // excluded), and even then only if a FRESH review still says no source turns (MAJOR 1). A
+    // refusal to re-select falls through to the barrier's own outcome, unweakened.
+    if (isNoCanonicalTranscriptFork(outcome)) {
+      const reselected = await tryReselectWithNothingToCarry(barrier, sessionKey);
+      if (reselected !== undefined) return reselected;
     }
     return outcome;
   } catch (err) {
@@ -1099,10 +1163,9 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
     // out of `session.setModel` as a raw RPC error carrying a filesystem path — both a leak and,
     // for a zero-turn session, flatly wrong: P10b-2 says that switch is silent.
     //
-    // A zero-turn session therefore RE-SELECTS (there is nothing to carry, so there is nothing a
-    // handoff would have done that the record patch does not); anything else fails SAFE as
-    // `blocked`, whose neutral copy `ipc/server.ts` already owns, with NO store write.
-    if (zeroSourceTurns) return await reselectWithNothingToCarry();
+    // Fix round 4 (MAJOR 2): a throw is NOT the step-5 no-transcript fork — it carries no step and
+    // no reason this file may interpret — so it never re-selects. It fails SAFE as `blocked`, whose
+    // neutral copy `ipc/server.ts` already owns, with NO store write.
     deps.log?.(`handoff: barrier.execute threw for session ${sessionId} (${err instanceof Error ? err.name : "unknown"}) — reporting blocked rather than surfacing it raw`);
     return { kind: "blocked", reason: "the handoff barrier could not execute the plan" };
   } finally {

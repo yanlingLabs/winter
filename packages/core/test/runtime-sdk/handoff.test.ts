@@ -943,7 +943,10 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
   // the barrier cannot plan or execute is answered by RE-SELECTING — a real record patch plus an
   // evict, so the next incarnation opens on the new leg — never by the round-2 silent no-op that
   // left `meta.model` and the record disagreeing.
-  test("P10b-2: a ZERO-TURN session whose handoff cannot be planned is RE-SELECTED — record patched, driver evicted, invariant satisfied", async () => {
+  // Fix round 4 (MAJOR 2): a `plan()` that THROWS never re-selects any more, whatever the review
+  // said. A throw carries no step and no reason this file may interpret; round 3 answered it with a
+  // re-selection gated on a stale review-time snapshot, and that is the class the review rejected.
+  test("MAJOR 2: a ZERO-TURN session whose plan() throws is BLOCKED, never re-selected — the record is untouched", async () => {
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1");
       const evicted: string[] = [];
@@ -961,24 +964,110 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
         }),
         "s1", "claude-sonnet-5", false,
       );
-      expect(out.kind).toBe("same-runtime");
-      expect((out as { decided?: RuntimeSelection }).decided?.runtimeKind).toBe("claude-agent");
-      // THE POINT: the record now routes to the destination, so `ipc/server.ts`'s invariant guard
-      // lets the store write through — and the next `ensure()` re-assembles instead of handing back
-      // the source leg's already-registered driver.
-      expect(records.get("s1")!.runtimeKind).toBe("claude-agent");
-      expect(records.get("s1")!.selection.runtimeKind).toBe("claude-agent");
-      expect(evicted).toEqual(["s1"]);
+      expect(out.kind).toBe("blocked");
+      expect(records.get("s1")!.runtimeKind).toBe("winter-agent");
+      expect(evicted).toEqual([]); // and the live incarnation is left alone
     });
   });
 
-  // The same carve-out on the OTHER refusal shape the real router actually produces: `plan()`
-  // succeeds (all eight steps) and `execute` answers `lossy-fork-offered` because step 5 has no
-  // canonical transcript to validate. MEASURED — that reason was reaching the user verbatim,
-  // absolute path and all, as a `handoff_lossy_fork` refusal of a switch that loses nothing.
-  test("P10b-2: a ZERO-TURN session whose handoff EXECUTES to lossy-fork-offered is re-selected, not refused", async () => {
+  // Fix round 4 (MAJOR 2), the dangerous half the review MEASURED: `blocked("revert-pending")` on a
+  // session the review called zero-turn produced `{kind:"same-runtime"}` and flipped the record to
+  // the destination — while the router's own `revertRecord` still named the source, and the server's
+  // invariant check then PASSED because the record it re-reads had just been made to agree.
+  for (const reason of ["revert-pending", "lease-held", "repair-required"]) {
+    test(`MAJOR 2: blocked("${reason}") on a zero-turn session is BLOCKED — never re-selected, record untouched`, async () => {
+      await withRs(async (_rs, records) => {
+        seedRecord(records, "s1");
+        const evicted: string[] = [];
+        const winter = fakeWinter({});
+        const out = await planAndApplySwitch(
+          deps({
+            records,
+            winter: { ...winter, evict: async (id: string) => { evicted.push(id); } },
+            runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+            barrier: {
+              plan: async (session, to) => ({ session, from: "winter-agent", to, steps: [], selection: { kind: "unchanged", selection: SELECTION("claude-agent") } } as unknown as HandoffPlan),
+              execute: async () => ({ kind: "blocked", reason, step: 7 } as unknown as HandoffOutcome),
+              reviewSwitch: async () => ({ prompt: false, skipped: "no-source-turns" }),
+            },
+          }),
+          "s1", "claude-sonnet-5", false,
+        );
+        expect(out.kind).toBe("blocked");
+        expect(records.get("s1")!.runtimeKind).toBe("winter-agent");
+        expect(evicted).toEqual([]);
+      });
+    });
+  }
+
+  // Fix round 4 (MAJOR 2): every OTHER step-5 reason describes a transcript that EXISTS and is
+  // damaged — never "nothing to lose".
+  for (const [name, reason] of [
+    ["unterminated framing", "the canonical transcript's final line is unterminated (framing)"],
+    ["a non-JSON line", "line 3 of the canonical transcript is not valid JSON (framing)"],
+  ] as const) {
+    test(`MAJOR 2: a step-5 fork for ${name} is NOT re-selected — the transcript exists and is damaged`, async () => {
+      await withRs(async (_rs, records) => {
+        seedRecord(records, "s1");
+        const out = await planAndApplySwitch(
+          deps({
+            records,
+            runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+            barrier: {
+              plan: async (session, to) => ({ session, from: "winter-agent", to, steps: [], selection: { kind: "unchanged", selection: SELECTION("claude-agent") } } as unknown as HandoffPlan),
+              execute: async () => ({ kind: "lossy-fork-offered", reason, step: 5 } as HandoffOutcome),
+              reviewSwitch: async () => ({ prompt: false, skipped: "no-source-turns" }),
+            },
+          }),
+          "s1", "claude-sonnet-5", false,
+        );
+        expect(out.kind).toBe("lossy_fork");
+        expect(records.get("s1")!.runtimeKind).toBe("winter-agent");
+      });
+    });
+  }
+
+  // Fix round 4 (MAJOR 1), the regression the review measured on the DEFERRED path, reproduced at
+  // the branch: the review runs while the first turn is still streaming (sourceTurns 0), and by the
+  // time the barrier has executed the turn is REAL. A snapshot re-selects and commits `meta.model`
+  // over a transcript nothing staged; a recompute refuses.
+  test("MAJOR 1: a review-time 'no source turns' that is STALE by execution time never re-selects", async () => {
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1");
+      let reviewCalls = 0;
+      const evicted: string[] = [];
+      const winter = fakeWinter({});
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          winter: { ...winter, evict: async (id: string) => { evicted.push(id); } },
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+          barrier: {
+            plan: async (session, to) => ({ session, from: "winter-agent", to, steps: [], selection: { kind: "unchanged", selection: SELECTION("claude-agent") } } as unknown as HandoffPlan),
+            execute: async () => ({ kind: "lossy-fork-offered", reason: "there is no canonical transcript at /tmp/x/y.jsonl to validate", step: 5 } as HandoffOutcome),
+            reviewSwitch: async () => {
+              reviewCalls += 1;
+              // call 1 = the pre-flight review, while the turn streams; call 2 = the execution-time
+              // re-ask, by which point the turn has landed and the source really did reason.
+              return reviewCalls === 1
+                ? { prompt: false, skipped: "no-source-turns" }
+                : { prompt: true, classification: { lossClass: "warned-lossy", warnings: ["reasoning may not carry"], portable: [] } };
+            },
+          },
+        }),
+        "s1", "claude-sonnet-5", true, // confirmLossy: past the prompt, into execution
+      );
+      expect(reviewCalls).toBe(2);           // it ASKED AGAIN rather than trusting the snapshot
+      expect(out.kind).toBe("lossy_fork");   // and honoured the barrier's own refusal
+      expect(records.get("s1")!.runtimeKind).toBe("winter-agent");
+      expect(evicted).toEqual([]);
+    });
+  });
+
+  test("MAJOR 1: an execution-time re-review that THROWS never re-selects — it fails safe to the barrier's own outcome", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      let reviewCalls = 0;
       const out = await planAndApplySwitch(
         deps({
           records,
@@ -986,13 +1075,159 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
           barrier: {
             plan: async (session, to) => ({ session, from: "winter-agent", to, steps: [], selection: { kind: "unchanged", selection: SELECTION("claude-agent") } } as unknown as HandoffPlan),
             execute: async () => ({ kind: "lossy-fork-offered", reason: "there is no canonical transcript at /tmp/x/y.jsonl to validate", step: 5 } as HandoffOutcome),
+            reviewSwitch: async () => {
+              reviewCalls += 1;
+              if (reviewCalls === 1) return { prompt: false, skipped: "no-source-turns" };
+              throw new Error("ECONNRESET: transient sidecar read failure");
+            },
+          },
+        }),
+        "s1", "claude-sonnet-5", true,
+      );
+      expect(out.kind).toBe("lossy_fork");
+      expect(records.get("s1")!.runtimeKind).toBe("winter-agent");
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // Fix round 4, MAJOR 1 — THE DEFERRED PATH, the regression the review MEASURED end to end.
+  //
+  // A switch requested while a turn is running is deferred to the next idle boundary. The pre-flight
+  // review therefore runs WHILE THE FIRST TURN IS STILL STREAMING — `switchFactsFor` counts
+  // completed assistant entries, so it answers "no source turns" — and the continuation runs AFTER
+  // `idle()`, by which point that turn is real. Round 3 carried the review-time verdict down and
+  // committed `meta.model` with no barrier staging: MEASURED as `setModelCalls=[["s1",
+  // "claude-sonnet-5"]]` and `record.runtimeKind=claude-agent`. Round 4 re-asks, and refuses.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  async function deferredStaleReviewRun(opts: { freshSkipped: "no-source-turns" | undefined }): Promise<{
+    setModelCalls: Array<[string, string | null]>; runtimeKind: string; evicted: string[]; reviewCalls: number; close: () => void;
+  }> {
+    const setModelCalls: Array<[string, string | null]> = [];
+    const evicted: string[] = [];
+    let resolveIdle: (() => void) | undefined;
+    const idlePromise = new Promise<void>((resolve) => { resolveIdle = resolve; });
+    const never = (): never => { throw new Error("not reached by this test"); };
+    const live: LegSession = {
+      sessionId: "s1", backendSessionId: "be-1", mode: "code", state: "live", generation: 1, resumed: true,
+      init: undefined, turnRunning: true, turnStartedAt: Date.now(), done: Promise.resolve(),
+      pendingSends: [], heldDeliveries: [],
+      send: never, steer: never, interrupt: never, compact: never, setModel: never, setPolicy: never,
+      end: never, deliver: never, open: never, idle: () => idlePromise,
+    };
+    let reviewCalls = 0;
+    const rs = openRuntimeStateDb(mkdtempSync(join(tmpdir(), "winter-handoff-deferred-stale-")));
+    const records = new RuntimeSessionRecords(rs);
+    seedRecord(records, "s1");
+    const winter = fakeWinter({ live });
+    const out = await planAndApplySwitch(
+      deps({
+        records,
+        winter: { ...winter, evict: async (id: string) => { evicted.push(id); } },
+        runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+        store: { meta: () => ({ mode: "code", cwd: "/x" }), setModel: (sid, m) => { setModelCalls.push([sid, m]); } },
+        barrier: {
+          plan: async (session, to) => ({ session, from: "winter-agent", to, steps: [], selection: { kind: "unchanged", selection: SELECTION("claude-agent") } } as unknown as HandoffPlan),
+          execute: async () => ({ kind: "lossy-fork-offered", reason: "there is no canonical transcript at /tmp/x/y.jsonl to validate", step: 5 } as HandoffOutcome),
+          reviewSwitch: async () => {
+            reviewCalls += 1;
+            // call 1 = the pre-flight review, mid-stream; call 2 = the execution-time re-ask.
+            if (reviewCalls === 1) return { prompt: false, skipped: "no-source-turns" };
+            return opts.freshSkipped === "no-source-turns"
+              ? { prompt: false, skipped: "no-source-turns" }
+              : { prompt: true, classification: { lossClass: "warned-lossy", warnings: ["reasoning may not carry"], portable: [] } };
+          },
+        },
+      }),
+      "s1", "claude-sonnet-5", true,
+    );
+    expect(out).toEqual({ kind: "deferred" });
+    expect(setModelCalls).toEqual([]); // never at defer time
+    resolveIdle!();
+    await idlePromise;
+    await Bun.sleep(20); // let the fire-and-forget continuation settle
+    return { setModelCalls, runtimeKind: records.get("s1")!.runtimeKind, evicted, reviewCalls, close: () => rs.close() };
+  }
+
+  test("MAJOR 1 (deferred): a review-time 'no source turns' that is STALE after idle() commits NOTHING", async () => {
+    const r = await deferredStaleReviewRun({ freshSkipped: undefined });
+    expect(r.reviewCalls).toBe(2);        // it re-asked instead of trusting the snapshot
+    expect(r.setModelCalls).toEqual([]);  // THE REGRESSION: round 3 wrote here
+    expect(r.runtimeKind).toBe("winter-agent"); // …and flipped this
+    expect(r.evicted).toEqual([]);        // the source incarnation is untouched
+    r.close();
+  });
+
+  test("MAJOR 1 (deferred): a verdict that STILL holds at execution time re-selects and commits, as before", async () => {
+    const r = await deferredStaleReviewRun({ freshSkipped: "no-source-turns" });
+    expect(r.reviewCalls).toBe(2);
+    expect(r.setModelCalls).toEqual([["s1", "claude-sonnet-5"]]);
+    expect(r.runtimeKind).toBe("claude-agent");
+    expect(r.evicted).toEqual(["s1"]);
+    r.close();
+  });
+
+  // Fix round 4 (NIT 5): a patch that throws leaves the LIVE incarnation alone. Before this, the
+  // driver was evicted anyway, so the caller's invariant check told the user "the session stays on
+  // <model>" after its child had already been killed.
+  test("NIT 5: a re-selection whose record patch fails never evicts the live incarnation", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      const evicted: string[] = [];
+      const winter = fakeWinter({});
+      const failingRecords = Object.assign(Object.create(Object.getPrototypeOf(records) as object), records, {
+        get: (id: string) => records.get(id),
+        patch: () => { throw new Error("RuntimeSessionStateMismatchError"); },
+      }) as RuntimeSessionRecords;
+      const out = await planAndApplySwitch(
+        deps({
+          records: failingRecords,
+          winter: { ...winter, evict: async (id: string) => { evicted.push(id); } },
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+          barrier: {
+            plan: async (session, to) => ({ session, from: "winter-agent", to, steps: [], selection: { kind: "unchanged", selection: SELECTION("claude-agent") } } as unknown as HandoffPlan),
+            execute: async () => ({ kind: "lossy-fork-offered", reason: "there is no canonical transcript at /tmp/x/y.jsonl to validate", step: 5 } as HandoffOutcome),
             reviewSwitch: async () => ({ prompt: false, skipped: "no-source-turns" }),
+          },
+        }),
+        "s1", "claude-sonnet-5", true,
+      );
+      expect(out.kind).toBe("lossy_fork");  // the barrier's own outcome, unweakened
+      expect(evicted).toEqual([]);          // THE POINT: the live child is still there
+      expect(records.get("s1")!.runtimeKind).toBe("winter-agent");
+    });
+  });
+
+  // The same carve-out on the OTHER refusal shape the real router actually produces: `plan()`
+  // succeeds (all eight steps) and `execute` answers `lossy-fork-offered` because step 5 has no
+  // canonical transcript to validate. MEASURED — that reason was reaching the user verbatim,
+  // absolute path and all, as a `handoff_lossy_fork` refusal of a switch that loses nothing.
+  test("P10b-2: a ZERO-TURN session whose handoff EXECUTES to the step-5 no-transcript fork is re-selected, not refused", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1");
+      let reviewCalls = 0;
+      const evicted: string[] = [];
+      const winter = fakeWinter({});
+      const out = await planAndApplySwitch(
+        deps({
+          records,
+          winter: { ...winter, evict: async (id: string) => { evicted.push(id); } },
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
+          barrier: {
+            plan: async (session, to) => ({ session, from: "winter-agent", to, steps: [], selection: { kind: "unchanged", selection: SELECTION("claude-agent") } } as unknown as HandoffPlan),
+            execute: async () => ({ kind: "lossy-fork-offered", reason: "there is no canonical transcript at /tmp/x/y.jsonl to validate", step: 5 } as HandoffOutcome),
+            reviewSwitch: async () => { reviewCalls += 1; return { prompt: false, skipped: "no-source-turns" }; },
           },
         }),
         "s1", "claude-sonnet-5", false,
       );
       expect(out.kind).toBe("same-runtime");
+      expect(reviewCalls).toBe(2); // asked again at execution time, and the verdict STILL held
+      // THE POINT: the record now routes to the destination, so `ipc/server.ts`'s invariant guard
+      // lets the store write through — and the next `ensure()` re-assembles instead of handing back
+      // the source leg's already-registered driver.
       expect(records.get("s1")!.runtimeKind).toBe("claude-agent");
+      expect(records.get("s1")!.selection.runtimeKind).toBe("claude-agent");
+      expect(evicted).toEqual(["s1"]);
     });
   });
 
