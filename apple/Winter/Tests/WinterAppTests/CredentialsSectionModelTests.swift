@@ -96,7 +96,7 @@ final class CredentialsSectionModelTests: XCTestCase {
         XCTAssertEqual(model.draft(for: "deepseek"), "", "the field must be empty once the write lands")
         XCTAssertEqual(fake.listCallCount, 2, "a successful save re-reads the inventory")
         XCTAssertEqual(model.rows.first?.present, true)
-        XCTAssertNil(model.errorText)
+        XCTAssertNil(model.rowError(for: "deepseek"))
     }
 
     /// Whitespace-only is as unsendable as empty — `credential.set` would refuse it
@@ -127,7 +127,7 @@ final class CredentialsSectionModelTests: XCTestCase {
 
         XCTAssertEqual(model.draft(for: "deepseek"), sentinel)
         XCTAssertEqual(fake.listCallCount, 1, "a failed save must not re-read the inventory")
-        XCTAssertNotNil(model.errorText)
+        XCTAssertNotNil(model.rowError(for: "deepseek"))
     }
 
     // MARK: - remove
@@ -146,7 +146,7 @@ final class CredentialsSectionModelTests: XCTestCase {
         XCTAssertEqual(fake.removeCalls, ["deepseek"])
         XCTAssertEqual(fake.listCallCount, 2)
         XCTAssertEqual(model.rows.first?.present, false)
-        XCTAssertNil(model.errorText)
+        XCTAssertNil(model.rowError(for: "deepseek"))
     }
 
     /// `removed: false` — nothing was stored — is a SUCCESS (the post-state the user asked for
@@ -159,7 +159,7 @@ final class CredentialsSectionModelTests: XCTestCase {
 
         await model.remove(providerId: "deepseek")
 
-        XCTAssertNil(model.errorText)
+        XCTAssertNil(model.rowError(for: "deepseek"))
         XCTAssertEqual(fake.listCallCount, 1, "the refresh still runs")
     }
 
@@ -176,8 +176,8 @@ final class CredentialsSectionModelTests: XCTestCase {
 
         await model.save(providerId: "codex-oauth")
 
-        XCTAssertEqual(model.errorText, credentialDoorText("cli-oauth"))
-        XCTAssertTrue(model.errorText?.contains("winter login") == true, "the Codex door is the CLI's `winter login`")
+        XCTAssertEqual(model.rowError(for: "codex-oauth"), credentialDoorText("cli-oauth"))
+        XCTAssertTrue(model.rowError(for: "codex-oauth")?.contains("winter login") == true, "the Codex door is the CLI's `winter login`")
     }
 
     /// A door value this build has never seen still renders a real sentence. Not hypothetical: the
@@ -192,8 +192,8 @@ final class CredentialsSectionModelTests: XCTestCase {
 
         await model.save(providerId: "something")
 
-        XCTAssertEqual(model.errorText, credentialDoorText("door.from.a.newer.daemon"))
-        XCTAssertFalse(model.errorText?.isEmpty ?? true)
+        XCTAssertEqual(model.rowError(for: "something"), credentialDoorText("door.from.a.newer.daemon"))
+        XCTAssertFalse(model.rowError(for: "something")?.isEmpty ?? true)
     }
 
     /// `credential_value_invalid` renders a NEUTRAL message. The assertion that matters is the
@@ -211,7 +211,7 @@ final class CredentialsSectionModelTests: XCTestCase {
 
         await model.save(providerId: "deepseek")
 
-        guard let shown = model.errorText else {
+        guard let shown = model.rowError(for: "deepseek") else {
             return XCTFail("a refused save must publish an error")
         }
         XCTAssertFalse(shown.contains(sentinel), "the typed value must never reach the error text")
@@ -229,13 +229,54 @@ final class CredentialsSectionModelTests: XCTestCase {
 
         model.setDraft("k", for: "deepseek")
         await model.save(providerId: "deepseek")
-        let saveText = model.errorText
+        let saveText = model.rowError(for: "deepseek")
 
         await model.remove(providerId: "deepseek")
-        let removeText = model.errorText
+        let removeText = model.rowError(for: "deepseek")
 
         XCTAssertEqual(saveText, "couldn't save that key — try again")
         XCTAssertEqual(removeText, "couldn't remove that credential — try again")
+    }
+
+    // MARK: - errors are per row, not per section
+
+    /// Two rows failing for different reasons keep their own sentences. Under the old single
+    /// section-level line the second refusal silently overwrote the first, so a user working down
+    /// a catalog-sized list saw one error for whichever row they touched last.
+    func testTwoRowsKeepTheirOwnErrors() async {
+        let fake = FakeCredentialsClient()
+        fake.setResult = .failure(FakeCredentialsClient.refusal(code: "credential_value_invalid"))
+        let model = CredentialsSectionModel(client: fake)
+
+        model.setDraft("bad", for: "deepseek")
+        await model.save(providerId: "deepseek")
+        fake.setResult = .failure(FakeCredentialsClient.refusal(code: "credential_kind_unsupported", door: "cli-oauth"))
+        model.setDraft("bad", for: "codex-oauth")
+        await model.save(providerId: "codex-oauth")
+
+        XCTAssertEqual(model.rowError(for: "deepseek"), "that key wasn't accepted — check it and try again")
+        XCTAssertEqual(model.rowError(for: "codex-oauth"), credentialDoorText("cli-oauth"))
+    }
+
+    /// A later SUCCESS clears only its own row's error — a fixed key on one provider must not make
+    /// another provider's outstanding refusal disappear.
+    func testASuccessfulSaveClearsOnlyItsOwnRowsError() async {
+        let fake = FakeCredentialsClient()
+        fake.setResult = .failure(FakeCredentialsClient.refusal(code: "credential_value_invalid"))
+        let model = CredentialsSectionModel(client: fake)
+        model.setDraft("bad", for: "deepseek")
+        await model.save(providerId: "deepseek")
+        model.setDraft("bad", for: "zai")
+        await model.save(providerId: "zai")
+        XCTAssertNotNil(model.rowError(for: "deepseek"))
+        XCTAssertNotNil(model.rowError(for: "zai"))
+
+        fake.setResult = .success(())
+        model.setDraft("good", for: "deepseek")
+        await model.save(providerId: "deepseek")
+
+        XCTAssertNil(model.rowError(for: "deepseek"))
+        XCTAssertNotNil(model.rowError(for: "zai"), "another row's outstanding refusal must survive")
     }
 
     // MARK: - door text for non-manageable rows

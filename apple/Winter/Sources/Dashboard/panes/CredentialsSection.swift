@@ -93,14 +93,27 @@ final class CredentialsSectionModel: ObservableObject {
     /// serializes the section (a second action is ignored while one is running).
     @Published private(set) var busyProviderId: String?
 
-    /// The last save/remove refusal, already reduced to a constant sentence. Never daemon prose.
-    @Published var errorText: String?
+    /// Save/remove refusals, keyed by `providerId` and rendered UNDER the row that caused them —
+    /// same keying as `drafts`, and for the same reason. A single section-level error line (which
+    /// this was) is unreadable on a ~100-row list: the sentence appears at the top of the section
+    /// while the row the user just acted on may be hundreds of points further down and off screen,
+    /// so the most likely outcome of a refusal was a Save that appeared to do nothing at all.
+    ///
+    /// Only LIST-LOAD failures stay section-level (`loadErrorText`), because those belong to no
+    /// row — there are no rows.
+    ///
+    /// Values are the same compile-time constants `refusalText` produces: never daemon prose,
+    /// never anything derived from a typed key.
+    @Published private(set) var rowErrors: [String: String] = [:]
 
     init(client: CredentialsClient) {
         self.client = client
     }
 
     func draft(for providerId: String) -> String { drafts[providerId] ?? "" }
+
+    /// The refusal to render under this row, if its last save/remove failed.
+    func rowError(for providerId: String) -> String? { rowErrors[providerId] }
 
     func setDraft(_ value: String, for providerId: String) { drafts[providerId] = value }
 
@@ -142,10 +155,10 @@ final class CredentialsSectionModel: ObservableObject {
         do {
             try await client.set(providerId: providerId, apiKey: key)
             drafts[providerId] = nil
-            errorText = nil
+            rowErrors[providerId] = nil
             await refresh()
         } catch {
-            errorText = refusalText(error, fallback: "couldn't save that key — try again")
+            rowErrors[providerId] = refusalText(error, fallback: "couldn't save that key — try again")
         }
     }
 
@@ -158,10 +171,10 @@ final class CredentialsSectionModel: ObservableObject {
         defer { busyProviderId = nil }
         do {
             _ = try await client.remove(providerId: providerId)
-            errorText = nil
+            rowErrors[providerId] = nil
             await refresh()
         } catch {
-            errorText = refusalText(error, fallback: "couldn't remove that credential — try again")
+            rowErrors[providerId] = refusalText(error, fallback: "couldn't remove that credential — try again")
         }
     }
 
@@ -210,10 +223,6 @@ struct CredentialsSection: View {
             if let loadErrorText = model.loadErrorText {
                 Text(loadErrorText).foregroundStyle(.red).font(.callout)
             }
-            if let errorText = model.errorText {
-                Text(errorText).foregroundStyle(.red).font(.callout)
-            }
-
             // LAZY, deliberately. The inventory is derived from the agent SDK's catalog (W19-1) —
             // on the order of a hundred rows today and growing with every SDK bump — and each row
             // carries live controls, so a plain `VStack` would build and lay out every `SecureField`
@@ -270,6 +279,16 @@ struct CredentialsSection: View {
                 Text(credentialDoorText(row.door))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // Under the row it belongs to, not at the top of the section — on a catalog-sized list
+            // the two can be a screen apart, and a refusal shown where the user is not looking is
+            // indistinguishable from a Save that did nothing.
+            if let rowErrorText = model.rowError(for: row.providerId) {
+                Text(rowErrorText)
+                    .font(.caption)
+                    .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
