@@ -124,10 +124,22 @@ export async function writeCredentialMaterial(store: SecretStore, name: string, 
   await store.set(name, JSON.stringify(clean));
 }
 
-/** `store.set(name, "")` — `SecretStore` has no delete; an empty string reads as absent everywhere
- *  in Winter (presence is truthiness), including `readCredentialMaterial` above. */
+/**
+ * WS-19 (W19-2): a REAL removal — `store.delete(name)`, which leaves no row behind at all.
+ *
+ * This used to be `store.set(name, "")`, because `SecretStore` had no delete. That blank-as-absent
+ * rule still holds on the READ side and must never be dropped (`readCredentialMaterial`'s own
+ * `if (!raw) return null` above): a home written by an older build still holds blanked items, and
+ * the migration compatibility this function's own history created is what makes them read as
+ * absent. What changed is only the WRITE: clearing now deletes rather than blanks.
+ *
+ * The boolean `store.delete` returns is deliberately dropped here — this function's contract is
+ * "afterwards there is no material", which is equally true whether an item was there or not. The
+ * caller that needs to distinguish the two (`credential.remove`'s `removed` field) calls
+ * `store.delete` itself, through `removeCredential` (`runtime-sdk/credentials.ts`).
+ */
 export async function clearCredentialMaterial(store: SecretStore, name: string): Promise<void> {
-  await store.set(name, "");
+  await store.delete(name);
 }
 
 /** The OpenAI key: the material record first (`openai:default`), else the legacy raw

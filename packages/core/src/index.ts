@@ -58,7 +58,16 @@ export {
 } from "./auth/credential-material";
 export { runLoginFlow } from "./providers/pkce";
 // P8c-10: `winter login --anthropic-key` (cli/main.ts) writes through this door.
-export { writeAnthropicApiKey, ANTHROPIC_CREDENTIAL_SECRET_NAME } from "./runtime-sdk/keychain";
+export { writeAnthropicApiKey, ANTHROPIC_CREDENTIAL_SECRET_NAME, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, credentialInventory } from "./runtime-sdk/keychain";
+// WS-19 (W19-11): `winter credentials list/set/remove` runs IN-PROCESS against the same library the
+// daemon's own `credential.*` handlers call — never a second implementation, and never an RPC (the
+// daemon may not be running, exactly like `winter login`).
+export {
+  credentialRows, setCredential, removeCredential, credentialDisplayNameFor, credentialValueRefusal,
+  CredentialStoreUnavailable,
+  CREDENTIAL_VALUE_MAX_CHARS,
+  type CredentialRow, type CredentialDoor, type CredentialRefusal, type CredentialRefusalCode,
+} from "./runtime-sdk/credentials";
 export { CODEX, CODEX_MODELS, DEFAULT_CODEX_MODEL } from "./providers/codex-config";
 // Winter Phase 10a (O7, P10a-2/6): `winter login/logout --anthropic-console` and `winter doctor`'s
 // console-profile row all run IN-PROCESS against WINTER_HOME (the CLI door inherits stdio and

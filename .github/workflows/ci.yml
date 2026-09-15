@@ -257,7 +257,7 @@ jobs:
   # variant's exhaustive switch). The WinterKit socket-test flake class is KNOWN (real Unix-socket
   # I/O against a real spawned process on a shared CI runner) — retried once rather than chased.
   swift:
-    name: swift (WinterProtocol + WinterKit)
+    name: swift (WinterProtocol + WinterKit + WinterChatKit)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -292,6 +292,17 @@ jobs:
         env:
           WINTERKIT_SKIP: 'IrohE2ETests/(testScenarioC_ReconnectReplaysExactGapInOrderOverRealAsyncTransport|testScenarioD_IdempotentResendAcrossReconnectYieldsOneDaemonEffect)$|FakePhoneConformanceTests/(testStreamingDeltasReachThePhone_OpaqueStateDoesNot_AndAnOversizedEventDoesNotKillTheLink)$|GatewayGateTests/(testG1_UpToDateReachable_HonestWatermark_NoHarnessLeak|testR2_HelloAckReplayLiveStrictOrderUnderSuspendingSend)$'
         run: swift test --skip "$WINTERKIT_SKIP" || (echo "::warning::WinterKit swift test failed once — retrying (known socket-test flake class)"; swift test --skip "$WINTERKIT_SKIP")
+
+      # WS-19 Lane I: the THIRD kit the phone links (WinterProtocol + WinterSessionKit +
+      # WinterChatKit are the root umbrella's products) had no CI step at all — its ~338 tests ran
+      # only on a developer's machine. It now carries one half of the credential decoder parity pair
+      # (`apple/fixtures/ws19-credential-list*.json`, decoded against the same expected table by
+      # WinterKitTests' CredentialsDecoderParityTests above), and a tripwire nobody runs is not a
+      # tripwire. No skip list: this package opens no socket and spawns nothing, so it has none of
+      # WinterKit's flake class.
+      - name: WinterChatKit — swift test
+        working-directory: apple/WinterChatKit
+        run: swift test
 
   # Winter Phase 8d (P8d-5): the compiled-binary proofs, on the macOS runner, after the pinned
   # `winter` artifact is available — `verify:runtimes` needs it (via stageRuntimes' `winterPath`

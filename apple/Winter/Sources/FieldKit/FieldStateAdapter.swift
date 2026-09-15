@@ -751,14 +751,17 @@ final class FieldStateAdapter: ObservableObject {
     /// model-menu content, which reads the row directly via `currentSidebarSessionSummary`).
     var onSetModel: (String?) -> Void = { _ in }
 
-    /// Winter Phase 8d (Task 4.2): one confirm-dialog request at a time — set by `onSetModel`'s
-    /// wirer (`ShellSessionHost`/`DetachedWindowController`) when `AppModel.applyModelChange`
-    /// answers `.confirmationRequired`, read by the shared `WindowContentView` (ONE dialog covers
-    /// all three of its homes: the shell's live page, a detached window, the orb's morph window).
-    /// `warnings` is `error.data.warnings` verbatim. `nil` = no dialog showing.
+    /// Winter Phase 8d (Task 4.2); Winter Phase 10b (D1-4, W18-23): one confirm-dialog request at a
+    /// time — set by `onSetModel`'s wirer (`ShellSessionHost`/`DetachedWindowController`) when
+    /// `AppModel.applyModelChange` answers `.confirmationRequired`, read by the shared
+    /// `WindowContentView` (ONE dialog covers all three of its homes: the shell's live page, a
+    /// detached window, the orb's morph window). `warnings` is `error.data.warnings` verbatim;
+    /// `portable` is `error.data.portable` verbatim (additive as of 10b — always `[]` until D1-6
+    /// fills it from the router's own review). `nil` = no dialog showing.
     struct PendingModelConfirmation: Equatable {
         let model: String?
         let warnings: [String]
+        let portable: [String]
     }
     @Published var pendingModelConfirmation: PendingModelConfirmation?
 

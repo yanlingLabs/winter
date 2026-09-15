@@ -2,7 +2,7 @@ import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
 import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, runRuntimesProbe, resolveWinterProfile } from "@yanlinglabs/winter-core";
-import type { Settings } from "@yanlinglabs/winter-core";
+import type { CredentialRow, SecretStore, Settings } from "@yanlinglabs/winter-core";
 import { METHODS, type ApprovalPolicy, type Task } from "@yanlinglabs/winter-protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
 import { WinterClient } from "./client";
@@ -253,6 +253,29 @@ function appBundlePresent(): boolean {
   // DerivedData Debug builds (Spotlight-indexed), which would auto-launch a dev build and
   // break the "dev is unaffected" invariant. DerivedData is never under /Applications.
   return existsSync("/Applications/Winter.app") || existsSync(join(homedir(), "Applications", "Winter.app"));
+}
+
+/**
+ * WS-19 (fix round 4): the daemon door the credential verbs use WHEN ONE IS ALREADY LISTENING.
+ *
+ * Deliberately NOT `connect()` above: that one AUTO-LAUNCHES Winter.app when the socket is missing,
+ * which is exactly wrong here — `winter login` has always worked with no daemon, and launching the
+ * user's menu-bar app because they typed a credential command would be a surprise, not a service.
+ * So this probes the socket file first and answers `undefined` for every failure: no socket, no
+ * harness token yet, a stale socket whose daemon is gone. The caller then writes the store itself
+ * and says so.
+ */
+async function openCredentialDaemonDoor(): Promise<CredentialRpcDoor | undefined> {
+  if (!existsSync(socketPath())) return undefined;
+  try {
+    const token = await new KeychainSecretStore().get(TOKEN_NAMES.harness);
+    if (!token) return undefined;
+    return await WinterClient.connect({ socketPath: socketPath(), token, clientName: "cli-credentials", onEvent: () => {} });
+  } catch {
+    // A stale socket file, a daemon mid-shutdown, a Keychain that will not answer — all the same
+    // answer: there is no daemon to tell, so do it in-process.
+    return undefined;
+  }
 }
 
 async function connect(name: string, onEvent: (e: any) => void = () => {}): Promise<WinterClient> {
@@ -1092,6 +1115,170 @@ export async function runBgKillRoute(c: WinterClient, sessionId: string, taskId:
   return { ok: true };
 }
 
+/**
+ * WS-19 (W19-11) — `winter credentials`'s decision, extracted from its `case` block exactly the way
+ * the eight session verbs above were: store + args in, a plain discriminated result out, nothing
+ * printed and nothing exited. That is what makes it testable on a `FileSecretStore` in a temp dir —
+ * the `case` block's real `KeychainSecretStore` can never be used from a test (`keychainService()`
+ * resolves the REAL `com.winter.core` service when no home is passed, and these tests must never
+ * touch it).
+ *
+ * `readKey` is injected for the same reason: the real one is `readSecret`'s masked raw-mode TTY
+ * prompt, and it is the ONLY way this command accepts a value — never a flag, never a stdin pipe,
+ * never an env var, because a key on a command line lands in shell history and `ps` output.
+ *
+ * It is NOT called until the verb and the provider id are known to be well-formed, so a typo in the
+ * provider id never leaves the user staring at a masked prompt for a key that was going to be
+ * refused anyway.
+ */
+/**
+ * WS-19 (fix round 4) — THE CLI's CREDENTIAL DOORS GO THROUGH THE DAEMON WHEN ONE IS LISTENING.
+ *
+ * Every credential verb here used to write the Keychain IN-PROCESS. That is still the right
+ * fallback — `winter login` has always worked with no daemon, and a credential door whose first
+ * move is to reach the daemon is useless in exactly the state a user reaches for it — but it left
+ * the daemon ignorant of the change. A live child's `Options.provider.authRef` is fixed at spawn, so
+ * a key added from the terminal did not reach a session already running until the 900 s idle reap:
+ * the same journey the whole-branch review's MAJOR 1 caught on the RPC door, surviving on this one.
+ * And the CLI printed "no daemon restart needed" while it was true only in the weakest sense.
+ *
+ * So: if the socket answers, the verb becomes the daemon's OWN `credential.set`/`credential.remove`
+ * — which stores the value AND replaces every live child on that provider — and otherwise it writes
+ * the store directly and SAYS SO, because "the key is stored, live sessions pick it up on their next
+ * turn" is a different promise from "it is in effect now" and the user is owed the difference.
+ *
+ * THE VALUE'S PATH IS UNCHANGED IN KIND: a masked TTY prompt, then either a `SecretStore` write or
+ * one frame over the local Unix socket (0600, same machine, same user). It is never logged on either
+ * path, and it is never a flag, a pipe or an env var.
+ *
+ * THE TWO TOOL ROWS (`exa`, `web-search`) DELIBERATELY STAY IN-PROCESS: their keys are read per call
+ * by the tools themselves, never baked into a spawn, so there is no live child for the daemon to
+ * replace — `evictSessionsForCredential` is a no-op for them by construction. Routing them through
+ * the socket would buy nothing and would make `winter login --exa-key` fail when the daemon is down.
+ */
+export interface CredentialRpcDoor {
+  request(method: string, params?: unknown): Promise<any>;
+  close(): void;
+}
+
+export type CredentialWriteResult =
+  | { ok: true; via: "daemon" | "in-process"; removed?: boolean }
+  | { ok: false; message: string; code?: string; door?: string };
+
+/** The typed refusal an RPC rejection carries, when it carries one (`client.ts` attaches the
+ *  envelope's `data`). A transport failure has none — that is the fall-back-to-local case. */
+function typedRefusalOf(err: unknown): { message: string; code?: string; door?: string } | undefined {
+  const rpc = (err as { rpc?: { message?: string; data?: { code?: string; door?: string } } } | null)?.rpc;
+  if (rpc?.data?.code === undefined) return undefined;
+  return { message: rpc.message ?? "the credential was refused", code: rpc.data.code, ...(rpc.data.door === undefined ? {} : { door: rpc.data.door }) };
+}
+
+export async function writeCredentialThroughDaemonOrLocally(
+  op: { kind: "set"; providerId: string; apiKey: string } | { kind: "remove"; providerId: string },
+  secrets: SecretStore,
+  openDaemon?: () => Promise<CredentialRpcDoor | undefined>,
+): Promise<CredentialWriteResult> {
+  const { METHODS } = await import("@yanlinglabs/winter-protocol");
+  const door = openDaemon === undefined ? undefined : await openDaemon();
+  if (door !== undefined) {
+    try {
+      if (op.kind === "set") {
+        await door.request(METHODS.credentialSet, { providerId: op.providerId, apiKey: op.apiKey });
+        return { ok: true, via: "daemon" };
+      }
+      const res = await door.request(METHODS.credentialRemove, { providerId: op.providerId });
+      return { ok: true, via: "daemon", removed: res?.removed === true };
+    } catch (err) {
+      // A TYPED refusal is the daemon's answer and stands — retrying it locally would store a value
+      // the daemon just refused. Anything else (a dropped socket, a timeout) is a transport problem,
+      // and the in-process path below is exactly what it degrades to.
+      const refusal = typedRefusalOf(err);
+      if (refusal !== undefined) return { ok: false, ...refusal };
+    } finally {
+      try { door.close(); } catch { /* already closed */ }
+    }
+  }
+  const { setCredential, removeCredential } = await import("@yanlinglabs/winter-core");
+  if (op.kind === "set") {
+    const refusal = await setCredential(secrets, op.providerId, op.apiKey);
+    return refusal === undefined
+      ? { ok: true, via: "in-process" }
+      : { ok: false, message: refusal.message, code: refusal.code, ...(refusal.door === undefined ? {} : { door: refusal.door }) };
+  }
+  const outcome = await removeCredential(secrets, op.providerId);
+  return "code" in outcome
+    ? { ok: false, message: outcome.message, code: outcome.code, ...(outcome.door === undefined ? {} : { door: outcome.door }) }
+    : { ok: true, via: "in-process", removed: outcome.removed };
+}
+
+/** What a credential verb prints about WHERE the change landed — the difference between "it is in
+ *  effect now" and "it is stored, and the next turn will pick it up". */
+export function credentialEffectNote(via: "daemon" | "in-process"): string {
+  return via === "daemon"
+    ? "in effect now — any session already running on it was re-armed"
+    : "the daemon isn't running, so it's stored only; sessions pick it up on their next turn";
+}
+
+export type CredentialsRouteResult =
+  | { ok: true; kind: "list"; rows: CredentialRow[] }
+  | { ok: true; kind: "set"; providerId: string; via: "daemon" | "in-process" }
+  | { ok: true; kind: "remove"; providerId: string; removed: boolean; via: "daemon" | "in-process" }
+  | { ok: false; message: string; code?: string; door?: string };
+
+export async function runCredentialsRoute(
+  secrets: SecretStore,
+  home: string,
+  verb: string | undefined,
+  providerId: string | undefined,
+  readKey: () => Promise<string>,
+  openDaemon?: () => Promise<CredentialRpcDoor | undefined>,
+): Promise<CredentialsRouteResult> {
+  const { credentialRows, CredentialStoreUnavailable } = await import("@yanlinglabs/winter-core");
+  switch (verb ?? "list") {
+    case "list":
+      // READ-ONLY, so it stays in-process on purpose: it needs no daemon, it changes nothing, and
+      // `winter credentials` must answer on a machine whose daemon is down.
+      try {
+        return { ok: true, kind: "list", rows: await credentialRows(secrets, home) };
+      } catch (err) {
+        // Review Minor 4: a store that would not answer ANY probe is a typed refusal, never a list
+        // of absent rows — printing "none stored" for a locked Keychain invites the user to
+        // re-enter keys they already have.
+        if (err instanceof CredentialStoreUnavailable) return { ok: false, message: err.message, code: err.code };
+        throw err;
+      }
+    case "set": {
+      if (!providerId) return { ok: false, message: "usage: winter credentials set <providerId>" };
+      const written = await writeCredentialThroughDaemonOrLocally({ kind: "set", providerId, apiKey: await readKey() }, secrets, openDaemon);
+      return written.ok ? { ok: true, kind: "set", providerId, via: written.via } : written;
+    }
+    case "remove": {
+      if (!providerId) return { ok: false, message: "usage: winter credentials remove <providerId>" };
+      const written = await writeCredentialThroughDaemonOrLocally({ kind: "remove", providerId }, secrets, openDaemon);
+      return written.ok ? { ok: true, kind: "remove", providerId, removed: written.removed === true, via: written.via } : written;
+    }
+    default:
+      return { ok: false, message: "usage: winter credentials [list] | credentials set <providerId> | credentials remove <providerId>" };
+  }
+}
+
+/** WS-19 (W19-11): `winter logout --openai`, extracted for the same reason. Clears BOTH the material
+ *  record and the legacy raw record — the same pair the bare Codex sign-out clears for its own
+ *  provider — so a rotated-away key is never left live under the old name. */
+export async function runLogoutOpenAiRoute(
+  secrets: SecretStore,
+  legacyName: string,
+  openDaemon?: () => Promise<CredentialRpcDoor | undefined>,
+): Promise<{ ok: true; removed: boolean; via: "daemon" | "in-process" } | { ok: false; message: string }> {
+  const written = await writeCredentialThroughDaemonOrLocally({ kind: "remove", providerId: "openai" }, secrets, openDaemon);
+  if (!written.ok) return { ok: false, message: written.message };
+  // The LEGACY raw record is this door's own business either way — the daemon's `credential.remove`
+  // knows only about the material slot, and a stale `openai-api-key` left behind would still be read
+  // by `readOpenAiApiKey`'s fallback.
+  const legacyRemoved = await secrets.delete(legacyName);
+  return { ok: true, removed: written.removed === true || legacyRemoved, via: written.via };
+}
+
 // Guarded so `main.ts` can be imported (e.g. by tests, for INIT_PROMPT/runTurnSession) without
 // executing the CLI — import.meta.main is true only when this file is the entry point.
 if (import.meta.main) {
@@ -1332,6 +1519,20 @@ if (import.meta.main) {
         console.log(`${AQUA}anthropic console profile:${RESET} ${DIM}unavailable (${err instanceof Error ? err.message : "unknown error"})${RESET}`);
       }
     };
+    // WS-19 (W19-11): ONE line — how many provider slots hold material, and which. A COUNT AND
+    // NAMES ONLY; never a value, never a fragment, never a length. In-process against WINTER_HOME
+    // like every other section here, and equally unable to crash the diagnostic tool.
+    const printCredentialsSection = async (): Promise<void> => {
+      try {
+        const { KeychainSecretStore, credentialRows } = await import("@yanlinglabs/winter-core");
+        const rows = await credentialRows(new KeychainSecretStore(), home);
+        const present = rows.filter((r) => r.present);
+        const names = present.map((r) => r.providerId).join(", ");
+        console.log(`${AQUA}credentials:${RESET} ${present.length} provider(s) with material${present.length === 0 ? "" : ` ${DIM}(${names})${RESET}`}`);
+      } catch (err) {
+        console.log(`${AQUA}credentials:${RESET} ${DIM}unavailable (${err instanceof Error ? err.message : "unknown error"})${RESET}`);
+      }
+    };
     // `--repair` with nothing after it must reach the usage branch, not silently run a diagnosis.
     const repair = args.includes("--repair") ? (flag("--repair") ?? "") : undefined;
     if (repair === undefined) {
@@ -1348,6 +1549,7 @@ if (import.meta.main) {
       await printRuntimesSection();
       await printMigrationSection();
       await printAnthropicConsoleSection();
+      await printCredentialsSection();
       break;
     }
     const session = flag("--session");
@@ -1845,7 +2047,7 @@ if (import.meta.main) {
     break;
   }
   case "login": {
-    const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, writeOpenAiApiKey, writeAnthropicApiKey, WEB_SEARCH_API_KEY_SECRET, EXA_API_KEY_SECRET, profileDisplayName } = await import("@yanlinglabs/winter-core");
+    const { KeychainSecretStore, CodexAuthStore, runLoginFlow, CODEX, writeOpenAiApiKey, WEB_SEARCH_API_KEY_SECRET, EXA_API_KEY_SECRET, OPENAI_API_KEY_SECRET: OPENAI_API_KEY_SECRET_LOGIN, profileDisplayName } = await import("@yanlinglabs/winter-core");
     console.log(`${AQUA}${profileDisplayName()} login${RESET}`);
     const secrets = new KeychainSecretStore();
     // Winter Phase 10a (O7, P10a-6): the Anthropic Console login door. Per the design amendment
@@ -1924,8 +2126,12 @@ if (import.meta.main) {
       if (!key.startsWith("sk-ant-")) { console.error("that does not look like an Anthropic API key"); process.exit(1); }
       const invisibleWarning = invisibleKeyCharWarning(key);
       if (invisibleWarning) { console.error(invisibleWarning); process.exit(1); }
-      await writeAnthropicApiKey(secrets, key);
-      console.log(`${AQUA}Anthropic API key stored in Keychain${RESET} — the official leg is ready to use on Code sessions`);
+      // WS-19 (fix round 4): the SAME slot `credential.set anthropic` writes, so it takes the same
+      // door — through the daemon when one is listening, so a Code session already running on the
+      // official leg is re-armed rather than left holding a stale (or absent) key in its spawn env.
+      const wrote = await writeCredentialThroughDaemonOrLocally({ kind: "set", providerId: "anthropic", apiKey: key }, secrets, openCredentialDaemonDoor);
+      if (!wrote.ok) { console.error(wrote.message); process.exit(1); }
+      console.log(`${AQUA}Anthropic API key stored in Keychain${RESET} — the official leg is ready to use on Code sessions; ${credentialEffectNote(wrote.via)}`);
       break;
     }
     if (process.argv.includes("--api-key")) {
@@ -1943,8 +2149,14 @@ if (import.meta.main) {
       // the provider sink itself safe against a key that reaches it some other way.
       const invisibleWarning = invisibleKeyCharWarning(key);
       if (invisibleWarning) { console.error(invisibleWarning); process.exit(1); }
-      await writeOpenAiApiKey(secrets, key);
-      console.log(`${AQUA}API key stored in Keychain${RESET} — set provider type in ~/.winter/settings.json (openai-compatible)`);
+      // WS-19 (fix round 4): `openai:default` is the slot `credential.set openai` writes, so this
+      // goes through the daemon when one is listening. The legacy raw record is blanked here either
+      // way — `writeOpenAiApiKey`'s own rotation rule, which the RPC knows nothing about.
+      const wroteOpenAi = await writeCredentialThroughDaemonOrLocally({ kind: "set", providerId: "openai", apiKey: key }, secrets, openCredentialDaemonDoor);
+      if (!wroteOpenAi.ok) { console.error(wroteOpenAi.message); process.exit(1); }
+      if (wroteOpenAi.via === "daemon") await secrets.set(OPENAI_API_KEY_SECRET_LOGIN, "");
+      else await writeOpenAiApiKey(secrets, key);   // in-process: the one call that does both halves
+      console.log(`${AQUA}API key stored in Keychain${RESET} — set provider type in ~/.winter/settings.json (openai-compatible); ${credentialEffectNote(wroteOpenAi.via)}`);
       break;
     }
     // 4g Task 6: web_search's Brave Search API key. Mirrors the --api-key branch above exactly
@@ -1986,8 +2198,59 @@ if (import.meta.main) {
     console.log(`${AQUA}◍ signed in with ChatGPT${RESET} ${DIM}(account ${tokens.accountId ?? "unknown"})${RESET}`);
     break;
   }
+  // -----------------------------------------------------------------------------------------
+  // WS-19 (W19-11) — `winter credentials [list] | set <providerId> | remove <providerId>`.
+  //
+  // IN-PROCESS, like `login`/`logout`/`doctor` and for the same reason: the daemon may not be
+  // running, and a credential door whose first move is to reach the daemon is useless in exactly
+  // the state a user reaches for it. It calls the SAME library functions the daemon's own
+  // `credential.*` RPC handlers call (`@yanlinglabs/winter-core`'s `credentialRows`/
+  // `setCredential`/`removeCredential`) — never a second implementation, so a rule added on one
+  // door is on all three.
+  //
+  // THE VALUE IS ONLY EVER READ FROM A MASKED TTY PROMPT (`readSecret`). Never a flag value, never
+  // a stdin pipe, never an env var — a key on a command line lands in the shell history and in
+  // `ps` output, and the existing `login --api-key` doors have always refused to accept one that
+  // way. `credentials set` keeps that rule exactly.
+  // -----------------------------------------------------------------------------------------
+  case "credentials": {
+    const secrets = new KeychainSecretStore();
+    const providerId = process.argv[4];
+    const r = await runCredentialsRoute(
+      secrets, resolveWinterHome(), sub, providerId,
+      // The masked raw-mode prompt — the ONLY door a value comes in through.
+      async () => (await readSecret(`Paste the API key for ${providerId}: `)).trim(),
+      openCredentialDaemonDoor,
+    );
+    if (!r.ok) {
+      console.error(r.message);
+      // The typed reason and, when the row has a different way in, the door that DOES work.
+      if (r.code) console.error(`${DIM}(${r.code}${r.door ? `, door: ${r.door}` : ""})${RESET}`);
+      process.exit(1);
+    }
+    if (r.kind === "list") {
+      // The long tail of untouched catalog rows is SUMMARISED, not printed: ~150 lines of "absent"
+      // is not a report, it is noise. What a user needs is what they have and what to type next.
+      const present = r.rows.filter((row) => row.present);
+      const width = Math.max(0, ...present.map((row) => row.providerId.length));
+      console.log(`${AQUA}credentials${RESET} ${DIM}(${present.length} of ${r.rows.length} slots hold material)${RESET}`);
+      for (const row of present) {
+        console.log(`  ${row.providerId.padEnd(width)} ${AQUA}present${RESET} ${DIM}${row.kind ?? "?"} via ${row.door}${row.risk === "review-required" ? " [review-required]" : ""}${RESET}`);
+      }
+      if (present.length === 0) console.log(`  ${DIM}none stored${RESET}`);
+      console.log(`${DIM}  ${r.rows.length - present.length} more slot(s) are empty — \`winter credentials set <providerId>\` for any catalog provider.${RESET}`);
+      break;
+    }
+    if (r.kind === "set") {
+      console.log(`${AQUA}stored in Keychain${RESET} ${DIM}(${r.providerId})${RESET} — ${credentialEffectNote(r.via)}`);
+      break;
+    }
+    if (!r.removed) { console.log(`${DIM}nothing was stored for ${r.providerId}${RESET}`); break; }
+    console.log(`${AQUA}removed${RESET} ${DIM}(${r.providerId})${RESET} — ${credentialEffectNote(r.via)}`);
+    break;
+  }
   case "logout": {
-    const { KeychainSecretStore, CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, clearCredentialMaterial, ANTHROPIC_CREDENTIAL_SECRET_NAME } = await import("@yanlinglabs/winter-core");
+    const { KeychainSecretStore, CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, clearCredentialMaterial, ANTHROPIC_CREDENTIAL_SECRET_NAME, OPENAI_API_KEY_SECRET } = await import("@yanlinglabs/winter-core");
     const secrets = new KeychainSecretStore();
     // Winter Phase 10a (O7, P10a-6; fix wave 3 M-A corrected the door): `--anthropic-console` runs
     // the SDK's own `ant auth logout --profile winter` (via the SAME broker adapter the daemon and
@@ -2018,13 +2281,29 @@ if (import.meta.main) {
     // P8c-10: `--anthropic` clears ONLY the official leg's own credential — Codex sign-out
     // (the bare command, unchanged) must not touch it, and this flag must not touch Codex's.
     if (process.argv.includes("--anthropic")) {
-      await clearCredentialMaterial(secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME);
-      console.log("anthropic API key cleared");
+      // WS-19 (fix round 4): the same slot `credential.remove anthropic` clears, so the same door —
+      // a live official child holds the key in its spawn environment and must be replaced.
+      const cleared = await writeCredentialThroughDaemonOrLocally({ kind: "remove", providerId: "anthropic" }, secrets, openCredentialDaemonDoor);
+      if (!cleared.ok) { console.error(cleared.message); process.exit(1); }
+      console.log(`anthropic API key cleared — ${credentialEffectNote(cleared.via)}`);
+      break;
+    }
+    // WS-19 (W19-11): `--openai` — the flag that was missing. `winter login --api-key` has stored
+    // an OpenAI key since Phase 1 and there was no way to clear it short of `winter credentials
+    // remove openai` (which this file also now offers) or editing the Keychain by hand. Clears the
+    // material record AND the legacy raw record, the same pair the bare Codex sign-out below clears
+    // for its own provider.
+    if (process.argv.includes("--openai")) {
+      const r = await runLogoutOpenAiRoute(secrets, OPENAI_API_KEY_SECRET, openCredentialDaemonDoor);
+      if (!r.ok) { console.error(r.message); process.exit(1); }
+      console.log(r.removed ? `openai API key cleared — ${credentialEffectNote(r.via)}` : "no openai API key was stored");
       break;
     }
     // Phase 1a simplification: SecretStore gains delete() in 1b — empty value de-authorizes everywhere today.
+    // WS-19 (W19-2) delivered that delete; these five legacy raw records are now removed outright
+    // rather than blanked, and a blank left by an older build still reads as absent everywhere.
     for (const name of Object.values(CODEX_SECRET_NAMES)) {
-      await secrets.set(name, "");
+      await secrets.delete(name);
     }
     // Hotfix (credential material, P8b): the material record is what the spawned Winter child
     // actually reads — blanking only the legacy five would leave a signed-out install still
@@ -2343,7 +2622,10 @@ if (import.meta.main) {
   routines [list] | routines create "<spec>" [--policy auto|plan] -- <prompt>
     | routines delete <id> | routines enable <id> | routines disable <id>       manage scheduled routines
   memory [list] [--project] | show <name> [--project] | rm <name> [--project]  manage saved memory facts
-  login [--api-key] [--anthropic-key] [--web-search-key] [--exa-key] | logout [--anthropic] | provider | provider-smoke [--prompt <text>]
+  login [--api-key] [--anthropic-key] [--anthropic-console] [--web-search-key] [--exa-key]
+  logout [--anthropic] [--anthropic-console] [--openai]           (bare: signs out of ChatGPT/Codex)
+  credentials [list] | credentials set <providerId> | credentials remove <providerId>   every provider's API key (masked prompt)
+  provider | provider-smoke [--prompt <text>]
   init                                            generate/update WINTER.md by surveying the project
   migrate [--from <legacyHome>] [--status|--resume|--rollback] [--yes]        Migration B: copy a legacy home into this one
   migrate-project [dir] [--yes]                   convert one project's legacy instructions file / project dir to WINTER.md/.winter

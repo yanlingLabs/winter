@@ -116,6 +116,16 @@ export type RuntimeSessionPatch = Partial<
     // P8c-12 warns about), and reverts both together if `confirmInit` ends up refusing after all.
     | "runtimeKind"
     | "selection"
+    // Winter Phase 10b (D1-2, W18-7): `confirmInit` patches these three ALONGSIDE the four above —
+    // a handoff that lands on a different provider/model/credential must not leave the record
+    // still naming the SOURCE's. `providerId`/`modelRef` are NOT NULL columns (see
+    // `NON_NULLABLE_PATCH_KEYS`), so an explicit `undefined` means "no change" for them exactly as
+    // it does for `transcriptHealth`/`capabilities`/`compatibilityLevel`/`runtimeKind`/`selection`
+    // above; `authRef` is nullable, so an explicit `undefined` there CLEARS it, same as
+    // `activeLocalWriteRoot`.
+    | "providerId"
+    | "modelRef"
+    | "authRef"
   >
 >;
 
@@ -307,6 +317,10 @@ const PATCH_COLUMNS: ReadonlyArray<readonly [keyof RuntimeSessionPatch, string]>
   ["importedFrom", "imported_from"],
   ["runtimeKind", "runtime_kind"],
   ["selection", "selection_json"],
+  // Winter Phase 10b (D1-2, W18-7):
+  ["providerId", "provider_id"],
+  ["modelRef", "model_ref"],
+  ["authRef", "auth_ref"],
 ];
 
 const DUPLICATE_BACKEND_ID = /UNIQUE constraint failed: runtime_sessions\.backend_session_id/;
@@ -315,8 +329,11 @@ const DUPLICATE_BACKEND_ID = /UNIQUE constraint failed: runtime_sessions\.backen
  *  explicit `undefined` for one of these therefore means "no change" rather than a write — for
  *  `transcriptHealth` a NULL is a refusal the schema would raise, and for `capabilities` an
  *  undefined used to serialise as `[]`, which silently emptied a list the caller never mentioned.
- *  Emptying the list is still available, and says so: `capabilities: []`. */
-const NON_NULLABLE_PATCH_KEYS: ReadonlySet<keyof RuntimeSessionPatch> = new Set<keyof RuntimeSessionPatch>(["transcriptHealth", "capabilities", "compatibilityLevel", "runtimeKind", "selection"]);
+ *  Emptying the list is still available, and says so: `capabilities: []`. `providerId`/`modelRef`
+ *  join this set for the same reason (Winter Phase 10b, D1-2, W18-7) — both are NOT NULL columns
+ *  on `runtime_sessions`; `authRef` is nullable and stays OUTSIDE this set, so an explicit
+ *  `undefined` clears it exactly as it does for `activeLocalWriteRoot`. */
+const NON_NULLABLE_PATCH_KEYS: ReadonlySet<keyof RuntimeSessionPatch> = new Set<keyof RuntimeSessionPatch>(["transcriptHealth", "capabilities", "compatibilityLevel", "runtimeKind", "selection", "providerId", "modelRef"]);
 
 function fromRow(row: SessionRow): RuntimeSessionRecord {
   return {

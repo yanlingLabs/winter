@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type {
   CanUseTool, EffortLevel, McpServerConfig, Options, PermissionMode, ProviderConnectionConfig, SandboxSettingsConfig, SpawnClaudeCodeProcess,
 } from "@yanlinglabs/winter-agent-sdk";
-import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
+import { RESUME_STAGING_PREFIX, type CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import type { SessionApprovalPolicy } from "../agent/gate";
 import type { Settings } from "../settings";
 import type { Mode as SessionMode } from "../agent/tools/registry";
@@ -297,22 +297,26 @@ export function buildChildEnv(input: WinterOptionsInput): Record<string, string>
  */
 export function controlPlaneDenyRules(home: string): string[] {
   const writeTools = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
-  // P8d-12 (WS-16 §10): the official leg's own SDK-parent staging root — `claude-resume-<uuid>`
-  // directories the Claude Agent SDK stages a cross-generation resume payload under, directly in
-  // the SYSTEM temp dir (never under `home`, which is why this rule anchors at `tmpdir()` rather
-  // than joining `home` the way every other rule here does). Nothing on either leg may read OR
-  // write another generation's — or another session's — staged resume payload: the official SDK's
-  // own process boundary does not fence that off from a child it spawns, and a resume payload can
-  // carry provider-native state as sensitive as anything under `<home>/runtimes`. The literal
-  // `claude-resume-` prefix is repeated (not imported) in `runtime-state/recovery.ts`'s step 8 scan
-  // — the two live in different subsystems this phase does not bridge with a shared constant, and
-  // each names the other in its own comment so a rename cannot drift silently.
+  // P8d-12 (WS-16 §10); Winter Phase 10b (D1-3, W18-9): the official leg's own SDK-parent staging
+  // root — `claude-resume-<uuid>` directories the Claude Agent SDK stages a cross-generation resume
+  // payload under, directly in the SYSTEM temp dir (never under `home`, which is why this rule
+  // anchors at `tmpdir()` rather than joining `home` the way every other rule here does). Nothing on
+  // either leg may read OR write another generation's — or another session's — staged resume
+  // payload: the official SDK's own process boundary does not fence that off from a child it spawns,
+  // and a resume payload can carry provider-native state as sensitive as anything under
+  // `<home>/runtimes`. As of 10b the prefix is IMPORTED from the router's own
+  // `RESUME_STAGING_PREFIX` (`@yanlinglabs/winter-runtime-sdk`, exported since 0.0.4) rather than
+  // hand-rolled here — this is the same literal `isResumeStagingRoot`/`resumeStagingRoot` build
+  // staging roots FROM, so a future rename on the router's side fails this rule at compile/test time
+  // instead of silently drifting. `runtime-state/recovery.ts`'s step 8 scan still repeats its OWN
+  // copy of the prefix (a different subsystem this phase does not bridge) and names this file in its
+  // own comment, so a rename there is still a manual sweep.
   //
   // The mid-segment `*` is a real glob wildcard on the pinned SDK's own matcher, not a literal
   // asterisk: `packages/runtime/src/permissions/paths.ts`'s `globSegmentToRegexBody` compiles a
-  // mid-segment `*` to `[^/]*`, so `claude-resume-*` matches every `claude-resume-<uuid>` name and
-  // nothing else — recorded so this form is not re-investigated.
-  const claudeResumeStaging = fsRootAnchored([join(tmpdir(), "claude-resume-*"), "**"].join("/"));
+  // mid-segment `*` to `[^/]*`, so `<prefix>*` matches every `claude-resume-<uuid>` name and nothing
+  // else — recorded so this form is not re-investigated.
+  const claudeResumeStaging = fsRootAnchored([join(tmpdir(), `${RESUME_STAGING_PREFIX}*`), "**"].join("/"));
   const targets = [
     // Any project's control-plane files, at any depth — the project-INDEPENDENT invariant
     // (`controlPlaneFileTarget`'s own doc: "the agent must NEVER write ANY

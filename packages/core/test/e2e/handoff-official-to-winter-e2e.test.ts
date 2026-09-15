@@ -60,6 +60,39 @@
 // next send answers on Winter → session.list shows the destination providerId) remains BLOCKED on
 // this machine by the resume-lock finding above; it is not something this file can fake past without
 // hiding a real, unresolved defect.
+//
+// WINTER PHASE 10b (D2-1) ADDENDUM — MEASURED 2026-09-14, against router 0.0.5 / SDK 0.0.11: the
+// resume-lock finding above IS RESOLVED. This file's FIRST describe block now reaches the
+// `caught === undefined` ("resumed") branch every run: `session.setModel`'s destination attach
+// succeeds, `d.winter.legOf(sessionId)` becomes `"winter"`, and `providerId`/`runtimeKind` patch to
+// the destination correctly — the P10a-h fix and the P10b lease-release work both hold up against
+// the real binaries.
+//
+// A NEW, DISTINCT defect blocks the LAST assertion in that same branch, though (never forced to a
+// false green): the resumed Winter destination's very first turn after the handoff streams its
+// `assistant_delta` correctly (the fake's scripted text arrives in full), but NO `assistant_message`
+// or `turn_completed` event ever reaches the client — `session.send`'s own `waitForFrom` hangs to
+// its timeout even though the record settles to `state: "idle"` (the runtime's own side believes the
+// turn finished). The daemon log carries the smoking gun, TWICE, printed the instant the handoff's
+// own destination attach opens: `[projector] source already projected — skipping; on a live stream
+// this means a resume that did not bump \`generation\`` (`src/projector/index.ts:487-501`, the
+// checkpoint dedup keyed on `{winterSessionId, generation, sourceId}`) — and `rt.records.get(sessionId)
+// ?.generation` is measured to stay `1` from BEFORE the handoff through AFTER the hung send, never
+// bumping to `2` the way `WinterSession.open()`'s own contract promises on every fresh incarnation
+// (`src/runtime-sdk/winter-session.ts:512`: "bumps the 8a generation"). The most likely account: the
+// destination's freshly-opened incarnation resets its OWN local turn/message counters to 0, so its
+// first NEW turn computes the SAME `sourceId` (e.g. `"as:0:1"`) the projector already committed for
+// the SOURCE leg's own last turn under the SAME un-bumped generation number during the handoff's own
+// bootstrap replay (the two benign-looking warnings that precede this one) — the checkpoint then
+// reads the genuinely-new turn's completion frames as "already committed" and silently drops them.
+// `OfficialSession`'s own generation counter (`runtime-sdk/official-session.ts`: `private gen = 0`,
+// `this.gen + 1` on `open()`) is ALSO purely local to the JS instance rather than reading or
+// persisting the shared `RuntimeSessionRecords` column `WinterSession.open()` writes through
+// `records.bumpGeneration()` — the two legs' generation bookkeeping are not the same clock, which is
+// consistent with (though not itself proven to be the whole story behind) this symptom. This is
+// reported to Lane D1/the controller rather than fixed here (out of scope: `packages/core/src/**`);
+// the test below is left asserting the SPEC-required behaviour (A-3/A-4 need a working post-handoff
+// turn), so it currently fails red on this defect rather than being weakened to pass around it.
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -372,7 +405,14 @@ describeWithClaudeRuntime("official -> Winter handoff, DETERMINISTIC dead-child 
 
     expect(caught).toBeDefined();
     expect(caught!.rpc?.data?.code).toBe("handoff_lossy_fork");
-    expect(caught!.rpc?.message).toContain("exited before it reached init");
+    // WS-19 lane rider x1 CHANGED THIS ASSERTION DELIBERATELY. The router's lossy-fork `reason` used
+    // to be thrown verbatim as the RPC message, and it interpolates a caught `error.message` in most
+    // of its cases — which is how an absolute path was reaching the user. The user copy is now one
+    // neutral sentence for every reason, and the reason survives only in the daemon log, as a
+    // category (`lossyForkCategoryFor` — this case's is `destination-exited-before-init`). What this
+    // test is ABOUT is unchanged: the typed code, and the deterministic revert below.
+    expect(caught!.rpc?.message).toBe("Couldn't switch models without losing part of the conversation; the session stays on claude-sonnet-5.");
+    expect(caught!.rpc?.message).not.toContain("exited before it reached init");
     // Reverted: the record still names the SOURCE, deterministically, every run.
     expect(d.winter.legOf(sessionId)).toBe("official");
     expect(rt.records.get(sessionId)?.runtimeKind).toBe("claude-agent");

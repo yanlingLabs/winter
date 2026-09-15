@@ -22,7 +22,8 @@ import { QuestionBroker } from "../../src/agent/questions";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { CORE_BRAND } from "../../src/runtime-sdk/brand";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
-import { createWinterSessionDrivers, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
+import { createWinterSessionDrivers, refusalMayBeCredentialShaped, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
+import { unconsumedUserMessages } from "../../src/runtime-sdk/winter-session";
 import { WINTER_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
 import { backfillNativeSessions, openRuntimeStateDb, ProjectionCheckpoints, RuntimeSessionRecords } from "../../src/runtime-state";
 import { SessionHub } from "../../src/sessions/hub";
@@ -75,7 +76,7 @@ class FakeQuery {
 
 const result = (): Frame => ({ type: "result", subtype: "success", is_error: false, permission_denials: [], result: "" });
 
-function table(overrides: Partial<WinterLegDeps> = {}) {
+function table(overrides: Partial<WinterLegDeps> = {}, runtimeExtra: Record<string, unknown> = {}) {
   const home = mkdtempSync(join(tmpdir(), "winter-table-"));
   const store = new SessionStore(home);
   const hub = new SessionHub(store);
@@ -97,6 +98,10 @@ function table(overrides: Partial<WinterLegDeps> = {}) {
     spawnHookFor: () => ({ pathToClaudeCodeExecutable: join(home, "winter-fake") }),
     trackQuery: (sid: string) => { tracked.push(sid); },
     untrack: () => {},
+    // WS-19 (review Minor 2): a test may inject `selectRuntimeFor` to drive `decideRuntime`'s
+    // refusal path. Absent by default, which is `decideRuntime`'s own bail-out #1 (a partial
+    // double) and what every other test in this file relies on.
+    ...runtimeExtra,
   } as unknown as WinterRuntimeSdk;
   const settings = { runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
   const logs: string[] = [];
@@ -287,6 +292,145 @@ describe("createWinterSessionDrivers — the table", () => {
       t.q().emit(result());
       await Bun.sleep(10);
       expect(t.q().pushed).toEqual(["B", "C"]);
+      await session.end();
+    } finally { t.close(); }
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// WS-19 (W19-7, review Minor 2) — WHICH router refusals may be re-described as `no-credential`.
+//
+// `refusalForSelection` answers a credential-shaped refusal with Winter's own actionable sentence
+// (the provider and the three doors) instead of the router's "every candidate row was blocked,
+// deprecated, known-unservable, or …". Before Minor 2 it did that for ANY refusal whenever the
+// credential probe happened to find an empty slot — so a session refused because a RUNTIME is not
+// installed would have been told to add an API key that would not have helped.
+//
+// Every test here runs on a store with NO credentials at all, which is the state that made the old
+// code relabel: the probe finds nothing either way, so only the REASON can tell the two apart.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describe("refusalForSelection — only credential-shaped reasons are re-described (Minor 2)", () => {
+  const refusalOf = (reason: string, detail: string) => async () => ({ refused: true as const, reason, detail });
+
+  test("refusalMayBeCredentialShaped is an ALLOWLIST of the two reasons a missing credential produces", () => {
+    // MEASURED against the pinned router: a Claude-family model with no credential answers
+    // `no-credential`; EVERY other family answers `slot-unservable` for the identical situation.
+    expect(refusalMayBeCredentialShaped("no-credential")).toBe(true);
+    expect(refusalMayBeCredentialShaped("slot-unservable")).toBe(true);
+    for (const reason of ["runtime-unavailable", "mode-forbids-runtime", "claude-oauth-not-approved", "some-reason-a-later-router-adds"]) {
+      expect(refusalMayBeCredentialShaped(reason)).toBe(false);
+    }
+  });
+
+  // Whole-branch review MAJOR 2 FLIPPED THIS PIN. It used to assert `message === detail` — i.e. it
+  // PINNED the leak: `session.create` handed the router's own words to the user, and
+  // `session.create` is remote-allowed, so the measured shapes ("the official runtime", "persisted
+  // on claude-agent (…) (WS-00 §2, D13)", and `slot-unservable`'s enumeration of the user's own
+  // configured providers) were reaching the phone. The REASON still travels — a client branches on
+  // `data.reason`, never on prose — but the words are Winter's.
+  const ROUTER_PHRASING = /\bruntime\b|winter-agent|claude-agent|WS-\d|D\d\d\b|\(D28\)/i;
+
+  test("a Claude model refused for a NON-credential reason keeps its REASON, and never the router's words", async () => {
+    const detail = "this session is persisted on claude-agent (the official runtime) and the winter runtime cannot serve it (WS-00 §2, D13)";
+    const t = table({}, { selectRuntimeFor: refusalOf("runtime-unavailable", detail) });
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "claude-sonnet-5" });
+      let caught: unknown;
+      try { await t.drivers.create(sid); } catch (err) { caught = err; }
+      expect((caught as { code?: string })?.code).toBe("runtime_selection_refused");
+      expect((caught as { reason?: string })?.reason).toBe("runtime-unavailable");
+      // The machine-readable half survives; the prose does not.
+      expect((caught as Error)?.message).toBe("Winter can't start a session on claude-sonnet-5 right now.");
+      expect((caught as Error)?.message).not.toMatch(ROUTER_PHRASING);
+      expect((caught as Error)?.message).not.toContain(detail);
+      // ...and it is not Winter's credential sentence either, which would send the user to a door
+      // that would not have helped.
+      expect((caught as Error)?.message).not.toContain("winter credentials set");
+    } finally { t.close(); }
+  });
+
+  test("slot-unservable's enumeration of the user's OWN configured providers never reaches the wire", async () => {
+    // The measured shape, verbatim from the pinned router: it names every provider the user has a
+    // credential for. That is a fact about someone's setup, and `session.create` is remote-allowed.
+    const detail = 'the model "gpt-5.6-sol" (openai/gpt-5.6-sol) is served by no row this session can use: every candidate row was blocked, deprecated, known-unservable, or belongs to a provider with no configured credential ref (configured: openai, openrouter, deepseek)';
+    const t = table({}, { selectRuntimeFor: refusalOf("slot-unservable", detail) });
+    try {
+      // A BARE id six inventory providers serve: Minor 1's narrowing means no provider is named
+      // either, because Winter decided nothing.
+      const sid = t.store.createSession("t", { mode: "chat", model: "gpt-5.6-sol" });
+      let caught: unknown;
+      try { await t.drivers.create(sid); } catch (err) { caught = err; }
+      const message = (caught as Error)?.message ?? "";
+      expect(message).toBe("Winter can't start a session on gpt-5.6-sol right now.");
+      for (const leaked of ["openrouter", "deepseek", "configured:", "candidate row"]) {
+        expect(message).not.toContain(leaked);
+      }
+      expect(message).not.toMatch(ROUTER_PHRASING);
+    } finally { t.close(); }
+  });
+
+  test("the SAME keyless home, refused `slot-unservable`, DOES get Winter's actionable sentence — W19-7's own case", async () => {
+    const t = table({}, { selectRuntimeFor: refusalOf("slot-unservable", "every candidate row … (configured: none)") });
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "deepseek/deepseek-reasoner" });
+      let caught: unknown;
+      try { await t.drivers.create(sid); } catch (err) { caught = err; }
+      expect((caught as { reason?: string })?.reason).toBe("no-credential");
+      expect((caught as Error)?.message).toContain("winter credentials set deepseek");
+    } finally { t.close(); }
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// WS-19 (review N2) — THE REPLAY PATH IS GATED TOO.
+//
+// `open()` re-pushes what the log still owes (an interrupted or held `user_message`) and any
+// delivery held while the session was resumable. Those are real turns, and `send` gates itself
+// BEFORE calling `open()` — but this path is reached with the driver table EMPTY (a daemon restart,
+// an idle reap, or the eviction `credential.set`/`credential.remove` now performs), which is exactly
+// the window in which a credential can have changed underneath. Before this, the owed text ran
+// ungated against a provider whose key had been removed and only the NEXT text was refused.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
+  test("an owed user_message is NOT replayed against a provider with no credential — a typed refusal, and no child", async () => {
+    const t = table();
+    try {
+      // A `winter-test/*` model is never gated (it is selected by env var, not by the catalog), so
+      // the session is created and driven normally.
+      const sid = t.store.createSession("t", { mode: "chat", model: "winter-test/echo" });
+      const session = await t.drivers.create(sid);
+      await session.send("A", "cli");        // pushed; its turn is begun
+      const held = await session.send("B", "cli");
+      expect(held.queued).toBe(true);        // in the log, with no turn of its own — the OWED text
+      // The session's model now names a provider with an empty slot — the same state a
+      // `credential.remove` leaves behind — and the driver is EVICTED, which is what
+      // `credential.set`/`credential.remove` now do to every live child on the affected provider
+      // (and what a daemon restart or an idle reap does anyway). `end()` alone leaves the driver in
+      // the table, and `ensure` then hands it back without re-opening: the replay path needs an
+      // EMPTY table, which is precisely the window N2 is about.
+      t.store.setModel(sid, "deepseek/deepseek-reasoner");
+      await t.drivers.evict(sid);
+      const spawnsBefore = t.queries.length;
+
+      // The next `ensure` re-opens from the record — and the replay is gated.
+      let caught: unknown;
+      try { await t.drivers.ensure(sid); } catch (err) { caught = err; }
+      expect((caught as { code?: string })?.code).toBe("runtime_selection_refused");
+      expect((caught as { reason?: string })?.reason).toBe("no-credential");
+      // NO CHILD was spawned for the replay: the gate runs before the query is created.
+      expect(t.queries.length).toBe(spawnsBefore);
+      // ...and the owed text is still owed — nothing was consumed by the refusal.
+      expect(unconsumedUserMessages(t.store.read(sid))).toEqual(["B"]);
+    } finally { t.close(); }
+  });
+
+  test("a fresh create with nothing owed never consults the gate on the open path", async () => {
+    // The cost of N2 on the hot path is zero: `create()` opens with an empty log.
+    const t = table();
+    try {
+      const sid = t.store.createSession("t", { mode: "chat", model: "deepseek/deepseek-reasoner" });
+      const session = await t.drivers.create(sid);
+      expect(t.queries.length).toBe(1);   // the child spawned; the gate had nothing to gate
       await session.end();
     } finally { t.close(); }
   });

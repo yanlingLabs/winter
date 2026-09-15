@@ -35,14 +35,18 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 // this list, has served since T2; a read-only phone could see the state but never move it).
 // working-directories T3 grew it 20→21: `session.setDirs` (the phone mutates a remote-driven code
 // session's working-directory set — the write half of the `dirs` field `session.list` now carries).
+// WS-19 (W19-10) grew it 21→24: `credential.list`/`credential.set`/`credential.remove` (ruling
+// R-10b-12 — credentials are addable and manageable from the iPhone as well as the Mac and the CLI).
+// These are the ONLY provider-family verbs on the list; `provider.configure`/`login`/`loginCode`/
+// `logout`/`status` all stay off it, and a negative pin at the bottom of this describe covers that.
 
 describe("remote allowlist parity (SP2a gate G7)", () => {
-  // The canonical twenty-one (SP1 §6 + SP3 T4b approval.list + SP3.4 session.create +
+  // The canonical twenty-four (SP1 §6 + SP3 T4b approval.list + SP3.4 session.create +
   // session-history session.history + Chat Slice D session.setModel + Chat Slice D tasks 2/3's
   // five sync verbs + provider-correctness T4's session.setEffort + session-activity-hygiene T3's
-  // session.setActivity + working-directories T3's session.setDirs) — the exact method STRINGS the
-  // Swift Gateway mirrors.
-  const TWENTY_ONE = [
+  // session.setActivity + working-directories T3's session.setDirs + WS-19's three credential verbs)
+  // — the exact method STRINGS the Swift Gateway mirrors.
+  const TWENTY_FOUR = [
     METHODS.hello,
     METHODS.sessionList,
     METHODS.sessionAttach,
@@ -64,17 +68,20 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
     METHODS.syncConfig,
     METHODS.syncMemory,
     METHODS.sessionSetDirs,
+    METHODS.credentialList,
+    METHODS.credentialSet,
+    METHODS.credentialRemove,
   ];
 
-  test("REMOTE_ALLOWED_METHODS is EXACTLY the twenty-one names", () => {
-    expect(REMOTE_ALLOWED_METHODS.size).toBe(21);
-    for (const m of TWENTY_ONE) {
+  test("REMOTE_ALLOWED_METHODS is EXACTLY the twenty-four names", () => {
+    expect(REMOTE_ALLOWED_METHODS.size).toBe(24);
+    for (const m of TWENTY_FOUR) {
       expect(REMOTE_ALLOWED_METHODS.has(m)).toBe(true);
     }
-    expect([...REMOTE_ALLOWED_METHODS].sort()).toEqual([...TWENTY_ONE].sort());
+    expect([...REMOTE_ALLOWED_METHODS].sort()).toEqual([...TWENTY_FOUR].sort());
   });
 
-  test("the twenty-one string VALUES match the Swift Gateway.remoteAllowedMethods literals", () => {
+  test("the twenty-four string VALUES match the Swift Gateway.remoteAllowedMethods literals", () => {
     expect([...REMOTE_ALLOWED_METHODS].sort()).toEqual(
       [
         "protocol.hello",
@@ -98,6 +105,9 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
         "sync.config",
         "sync.memory",
         "session.setDirs",
+        "credential.list",
+        "credential.set",
+        "credential.remove",
       ].sort(),
     );
   });
@@ -109,9 +119,18 @@ describe("remote allowlist parity (SP2a gate G7)", () => {
   // absent METHODS key is `undefined`, and `undefined` is not in the set either — so it is a PIN
   // against a future regression (someone later adding it here without updating the Swift mirror or
   // its own parity test), not a RED driver for this task's TDD cycle. The mirrored lists
-  // themselves (TWENTY_ONE above, and its Swift twin) are DELIBERATELY untouched by this line.
+  // themselves (TWENTY_FOUR above, and its Swift twin) are DELIBERATELY untouched by this line.
   test("panel.readDiff (diff-tabs Task 7) is NOT in REMOTE_ALLOWED_METHODS", () => {
     expect(REMOTE_ALLOWED_METHODS.has(METHODS.panelReadDiff)).toBe(false);
+  });
+
+  // WS-19 (W19-10) negative pin: the three credential verbs joined the list; the rest of the
+  // provider family did NOT, and must not drift on later. `provider.configure` is the sharp one —
+  // it replaces the whole `settings.provider` block, which is a Mac-local decision.
+  test("no OTHER provider-family method joined the list with WS-19's three", () => {
+    for (const m of [METHODS.providerConfigure, METHODS.providerLogin, METHODS.providerLoginCode, METHODS.providerLogout, METHODS.providerStatus]) {
+      expect(REMOTE_ALLOWED_METHODS.has(m)).toBe(false);
+    }
   });
 });
 

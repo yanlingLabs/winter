@@ -52,6 +52,30 @@ export interface OfficialInitFacts {
  *  Optional as a whole (a unit test hands in a counting fake or nothing). */
 export interface OfficialSessionRecords {
   setTranscriptHealth(winterSessionId: string, health: "repair-required"): void;
+  /**
+   * Fix round 2 (Defect 2, controller ruling): the SAME durable, monotonically-increasing
+   * generation counter `WinterSession.open()` uses (`RuntimeSessionRecords.bumpGeneration`).
+   * Without it, this leg's own private `this.gen` counter starts at 0 for EVERY fresh incarnation
+   * — including one opened as a handoff DESTINATION — regardless of what generation the OTHER leg
+   * already used for ITS OWN turns. MEASURED (fix round 2): a session that starts on Winter (whose
+   * `open()` already bumps the durable counter 0 -> 1) and hands off to official reaches an
+   * official incarnation that independently computes local generation 1 too (`0 + 1`, ignorant of
+   * the shared counter) — and symmetrically, a session that starts on official (never touching the
+   * durable counter, which stays at its schema default of 0) and hands off to Winter makes Winter's
+   * OWN `bumpGeneration()` read that untouched 0 and also compute 1. Either way the destination's
+   * generation number collides with a generation the source already wrote checkpoints under, and
+   * `projector/index.ts`'s checkpoint (keyed `{winterSessionId, generation, sourceId}`) mistakes
+   * the destination's genuinely-new events for an already-committed replay of the SAME generation —
+   * "[projector] source already projected — skipping" — and silently drops them (this leg's own
+   * `system/init`/messages, this file's `run()` loop, none of it reaching the client).
+   *
+   * Optional so a hand-built test double that only cares about `setTranscriptHealth` (every
+   * `official-session.test.ts` / `official-leg.e2e.test.ts` harness — none of them exercise a
+   * cross-leg handoff against a real durable counter) keeps compiling and behaving unchanged; the
+   * local `this.gen + 1` counter remains `open()`'s own fallback when this is absent, exactly
+   * mirroring `winter-session.ts`'s own `?? this.gen + 1` fallback for the identical reason.
+   */
+  bumpGeneration?(winterSessionId: string, input: { runtimeKind: "claude-agent"; backendSessionId?: string }): { generation: number };
 }
 
 export interface OfficialSessionDeps {
@@ -438,7 +462,13 @@ class OfficialSessionImpl implements OfficialSession {
       // it 0700 happens here, the one real spawn point.
       if (built.anthropicConfigDirToEnsure !== undefined) ensureOfficialConfigDir(built.anthropicConfigDirToEnsure);
       const stream = createOfficialInputStream();
-      const generation = this.gen + 1;
+      // Fix round 2 (Defect 2, controller ruling): draw from the SAME durable counter
+      // `WinterSession.open()` uses (`OfficialSessionRecords.bumpGeneration`'s own doc above) —
+      // never a private, per-instance counter that starts at 0 regardless of what the OTHER leg
+      // already used. Falls back to the old local counter when `records`/`bumpGeneration` is
+      // absent (every unit/e2e test double in this file's own test suites), byte-identical to
+      // pre-fix behavior there.
+      const generation = this.deps.records?.bumpGeneration?.(this.sessionId, { runtimeKind: "claude-agent", backendSessionId: this.backendSessionId }).generation ?? this.gen + 1;
       const projector = this.deps.projector(generation);
       // Fix round 1 (M1): ONE `AbortController` per incarnation, the SAME one Winter sessions
       // carry — `runtime.trackQuery` is what makes G-14's "every live Query ends BEFORE the
@@ -480,6 +510,7 @@ class OfficialSessionImpl implements OfficialSession {
       // Tracked BEFORE the iteration starts (`winter-session.ts`'s own precedent) — a shutdown
       // landing between the spawn and the first frame must still end this child.
       this.deps.runtime.trackQuery(this.sessionId, abort, () => this.end());
+      this.armControlReadySignal(inc);
       // M6b: attach BEFORE the loop starts — `open()` is the door's own call site, not gated on the
       // child's `system/init` the way Winter's messaging attach is (this leg's simpler design).
       this.attachMessaging(inc, generation);
@@ -487,6 +518,53 @@ class OfficialSessionImpl implements OfficialSession {
       this.lastDone = inc.done;
     })().finally(() => { this.opening = undefined; });
     return this.opening;
+  }
+
+  /**
+   * Fix round 2 (Defect 1, controller ruling): `system/init` is the CLI's "session metadata …
+   * emitted at the start of EACH TURN" (the pinned 0.3.250 `sdk.d.ts`'s own doc on
+   * `SDKSystemMessage`) — never at process startup — so a destination official child that has not
+   * yet been sent a first message structurally CANNOT report it. `handoff.ts`'s
+   * `confirmInit`/`awaitDestinationInit` must prove the destination alive BEFORE the router's own
+   * barrier delivers that first message (WS-05 §12 step 8: confirm, then deliver), so waiting on
+   * `session.init` there deadlocked every Winter -> official handoff (measured: `handoff_lossy_fork`
+   * after ~31s, every time).
+   *
+   * MEASURED against the pinned 0.3.250 SDK, a loopback fake, with ZERO messages ever pushed:
+   * `Query.initializationResult()` — the control-protocol `initialize` handshake, independent of
+   * any turn — resolved in ~264ms, and its `account.apiKeySource` already carried the exact same
+   * value the LATER real `system/init` frame reported for the same session (`ANTHROPIC_API_KEY` in
+   * both). This is a genuine turn-free "the process is up and the SDK completed its control-
+   * protocol handshake" signal.
+   *
+   * The router's own `OfficialQuery` seam deliberately narrows this away (`interrupt()` only —
+   * `official-sdk-shapes.d.ts`'s own doc: "reduced to what the router's own surface touches"), but
+   * that same file also documents that the object handed back IS the raw pinned SDK `Query`,
+   * "passed through verbatim" — the router never re-shapes it — so reaching past its DECLARED
+   * (narrower) type to call a method the CONCRETE object actually implements is safe in production.
+   * A test double that does not implement it (every `official-session.test.ts` fake `Query`) is
+   * skipped by the guard below rather than crashing `open()`.
+   *
+   * Deliberately narrow: `sessionId`/`model`/`tools` are left unset (the control response carries
+   * none of them), and this never runs if the REAL per-turn `system/init` handler in `run()`
+   * already fired (`inc.sawInit`) — that handler still sets `initFacts` UNCONDITIONALLY the moment
+   * a real turn lands, overwriting whatever this set. The WS-16 §6 backend-id match and the P9c-1
+   * `apiKeySource`-family assertion both still run ONLY there, on that first real turn, exactly as
+   * for a freshly-created (non-handoff) official session — never weakened, never moved earlier.
+   * This is purely a liveness signal for `awaitDestinationInit`, nothing more.
+   */
+  private armControlReadySignal(inc: Incarnation): void {
+    const raw = inc.query as unknown as { initializationResult?: () => Promise<{ account?: { apiKeySource?: string } }> };
+    if (typeof raw.initializationResult !== "function") return; // a fake test Query — fall back to the per-turn signal only
+    raw.initializationResult().then(
+      (res) => {
+        if (inc.sawInit || this.inc !== inc) return; // the real system/init already arrived, or a newer incarnation superseded this one
+        this.initFacts = { tools: [], ...(typeof res.account?.apiKeySource === "string" ? { apiKeySource: res.account.apiKeySource } : {}) };
+      },
+      (err) => {
+        this.log(`initializationResult() failed for ${this.sessionId} (${err instanceof Error ? err.name : "unknown"}) — falling back to the per-turn system/init signal`);
+      },
+    );
   }
 
   private async run(inc: Incarnation): Promise<void> {

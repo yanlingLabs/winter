@@ -37,6 +37,7 @@ import { credentialPresenceFrom, keychainSeamFromSecretStore } from "./keychain"
 import { routerInputShape } from "./official-capabilities";
 import { familyListingFromCatalog } from "./provider-selection";
 import { releaseAllHeld } from "./messaging";
+import { daemonResolveEndpoint } from "../providers/registry";
 import { WINTER_PEER_VERSIONS, REQUIRED_CLAUDE_AGENT_SDK } from "./versions";
 
 /**
@@ -427,6 +428,13 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
     // 1.3/lane 4 concern; this handle passes none yet.
     handoff: {
       winterHome: deps.home,
+      // Winter Phase 10b (D1-6, R6-R8 review, CRITICAL): without this the barrier's own
+      // `reviewSwitch`/`plan().review` fall back to `defaultEndpointResolver()` — a registry with
+      // NO adapters registered, which reports `readableState: "none"` for every model and silently
+      // over-warns a real lossless exposed-reasoning transfer (measured: DeepSeek -> GLM came back
+      // `warned-lossy` with no resolver injected). `daemonResolveEndpoint()` is the daemon's own
+      // catalog-backed registry (`providers/registry.ts`), memoised for the process's life.
+      resolveEndpoint: daemonResolveEndpoint(),
       participants: {
         source: (session, from) => handoffParticipants.current?.source?.(session, from),
         destination: (session, to) => handoffParticipants.current?.destination?.(session, to),

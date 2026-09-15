@@ -54,6 +54,23 @@ final class ServerMessageTests: XCTestCase {
         XCTAssertNil(handoffCode(#"{"jsonrpc":"2.0","id":6,"error":{"code":-32602,"message":"x","data":{"code":"runtime_selection_refused"}}}"#))
     }
 
+    /// Winter Phase 10b (D1-4, W18-23): `error.data` gains an additive `portable` array alongside
+    /// `warnings` — `RpcError.data` is generic `JSONValue?` (this file's own header), so the extra
+    /// field needs no schema change here at all, and this test PROVES it rather than assuming it:
+    /// the line decodes cleanly, `handoffCode` still resolves, `warnings` still reads exactly as
+    /// before, AND the new `portable` field is itself readable through the same subscript —
+    /// "tolerates" both directions (a newer daemon that sends it, and this kit's own code that does
+    /// not yet act on it, WS-18 W18-23: "Swift decodes only `warnings` today, so it ignores
+    /// `portable` until 10c").
+    func testHandoffConfirmationRequiredDataToleratesTheAdditivePortableField() throws {
+        let line = #"{"jsonrpc":"2.0","id":7,"error":{"code":-32602,"message":"x","data":{"code":"handoff_confirmation_required","warnings":["reasoning state may be lost"],"portable":["deepseek","GLM"]}}}"#
+        guard case .response(let id, .failure(let e)) = parseServerLine(line) else { return XCTFail("expected a failure response") }
+        XCTAssertEqual(id, 7)
+        XCTAssertEqual(e.handoffCode, .confirmationRequired)
+        XCTAssertEqual((e.data?["warnings"]?.arrayValue ?? []).compactMap { $0.stringValue }, ["reasoning state may be lost"])
+        XCTAssertEqual((e.data?["portable"]?.arrayValue ?? []).compactMap { $0.stringValue }, ["deepseek", "GLM"])
+    }
+
     func testEventNotificationDecodesSessionEvent() throws {
         let line = #"{"jsonrpc":"2.0","method":"event","params":{"type":"assistant_delta","seq":7,"sessionId":"s_1","ts":1,"threadId":"main","delta":"tok"}}"#
         guard case .event(.assistantDelta(let d)) = parseServerLine(line) else { return XCTFail() }

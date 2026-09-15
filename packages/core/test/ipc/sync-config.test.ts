@@ -41,6 +41,7 @@ class FakeSecretStore implements SecretStore {
   }
   async get(name: string): Promise<string | null> { return this.values.get(name) ?? null; }
   async set(name: string, value: string): Promise<void> { this.values.set(name, value); }
+  async delete(name: string): Promise<boolean> { return this.values.delete(name); }
 }
 
 /** A stub engine exposing only what `sync.config`'s catalogue (and `session.setModel`/`sync.push`'s
@@ -183,6 +184,7 @@ describe("sync.config (Chat Slice D task 3)", () => {
     const secrets: SecretStore = {
       get: async (name) => (name === EXA_API_KEY_SECRET ? key : null),
       set: async () => {},
+      delete: async () => false,
     };
     const { socketPath, harnessToken } = await boot({
       secrets, dangerousDomainsAdded: () => domains, liveModel: () => model,

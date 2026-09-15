@@ -36,7 +36,7 @@ import type { PermissionClassLabel } from "@yanlinglabs/winter-agent-sdk/messagi
 import type { EffortLevel, McpServerConfig, Options, PermissionResult, ProviderConnectionConfig } from "@yanlinglabs/winter-agent-sdk";
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
-import { isSelectionRefusal, type RuntimeDirectoryEntry, type RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
+import { isSelectionRefusal, type RuntimeDirectoryEntry, type RuntimeSelection, type SelectionAlternative } from "@yanlinglabs/winter-runtime-sdk";
 import type { SecretStore } from "../auth/secret-store";
 import type { ApprovalBroker } from "../agent/approvals";
 import type { PermissionGate, SessionApprovalPolicy } from "../agent/gate";
@@ -47,16 +47,19 @@ import type { RuntimeSessionRecord, RuntimeSessionRecords } from "../runtime-sta
 import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { winterOptionsFromSettings, type Settings } from "../settings";
+import { officialSubscriptionAuthEnabled, providerBaseUrlFor, winterOptionsFromSettings, type Settings } from "../settings";
 import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
 import { clearSession } from "./diff-attach";
 import { credentialPresenceFrom, credentialRefFor } from "./keychain";
+import { apiKeyProviderIsUnauthenticated, missingCredentialDetail } from "./credentials";
+import { renderNoCredentialHint } from "./handoff";
+import { neutralSelectionRefusal, refusalDetailCategoryFor } from "./refusal-copy";
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
 import { attachOfficialSession, attachWinterSession } from "./messaging";
 import { buildWinterOptions, permissionModeFor } from "./mode-options";
-import { catalogRowsFor, providerSelectionFor, testProviderNameFor } from "./provider-selection";
+import { catalogRowsFor, inventoryProvidersServing, providerSelectionFor, qualifiedProviderFor, testProviderNameFor } from "./provider-selection";
 import { winterSessions } from "./sessions";
 import { WINTER_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
@@ -116,10 +119,40 @@ export interface LegSession {
 }
 
 export class WinterLegRefusal extends Error {
-  constructor(readonly code: WinterLegRefusalCode, message: string) {
+  /**
+   * `reason` (WS-19, W19-7) is the refusal's own sub-classification, additive beside `code` and
+   * carried through to `error.data.reason` by `ipc/server.ts` — the same slot `session.setModel`'s
+   * review refusals already use. `runtime_selection_refused` is one code covering several distinct
+   * situations, and a client that wants to say "you have no key for DeepSeek" rather than "the model
+   * could not be selected" needs to tell them apart without string-matching the message.
+   */
+  constructor(readonly code: WinterLegRefusalCode, message: string, readonly reason?: string) {
     super(message);
     this.name = "WinterLegRefusal";
   }
+}
+
+/**
+ * WS-19 (W19-7, review Minor 2): which of the router's own refusal reasons a MISSING CREDENTIAL can
+ * actually produce — the only ones `refusalForSelection` may re-describe as `no-credential`.
+ *
+ * MEASURED against the pinned router (0.0.7), because the two are not interchangeable:
+ *
+ *   - `"no-credential"` is what a CLAUDE-family model gets ("...is served by rows with no configured
+ *     credential ref"), and it carries `alternatives`.
+ *   - `"slot-unservable"` is what EVERY OTHER family gets for the identical situation — the detail
+ *     reads "every candidate row was blocked, deprecated, known-unservable, or belongs to a provider
+ *     with no configured credential ref (configured: none)". A `deepseek` session with an empty slot
+ *     is refused with THIS reason, never `no-credential`, which is why gating on the literal
+ *     `"no-credential"` alone would silently switch W19-7 off for every non-Claude provider.
+ *
+ * Everything else — `"runtime-unavailable"`, `"mode-forbids-runtime"`, `"claude-oauth-not-approved"`,
+ * and any reason a later router adds (the union is widened to `string` for exactly that) — is NOT
+ * about a credential and keeps its own reason and its own words. An allowlist, not a denylist: a new
+ * reason is passed through verbatim until someone deliberately decides it belongs here.
+ */
+export function refusalMayBeCredentialShaped(reason: string): boolean {
+  return reason === "no-credential" || reason === "slot-unservable";
 }
 
 /** The narrowed `SessionMode` a stored `mode` column resolves to (absent = code, as everywhere). */
@@ -401,10 +434,27 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // never had an endpoint allowlist ("arbitrary API models are legitimate there" — the SAME
       // doc comment `runtime-provider.ts` cites). A no-op for an ordinary public HTTPS endpoint
       // (the address-class check never triggers for one).
-      const connection: ProviderConnectionConfig | undefined =
+      //
+      // WS-19 (W19-6): the SAME connection shape is now available for ANY provider, through
+      // `settings.providers.<catalogId>.baseUrl`. There is deliberately NO daemon-side endpoint
+      // table: the catalog ships each provider's own `defaultEndpoints` and the SDK's
+      // `connectionFrom` copies them for the multi-provider adapters (deepseek/zai/openrouter/xai
+      // all ride `winter.openai-chat-completions`), so an unconfigured provider needs no
+      // `connection` at all and gets the right endpoint anyway. This block is for the case the SDK
+      // cannot answer — a self-hosted or proxied endpoint, and the loopback fakes the parity e2e
+      // tests point at.
+      //
+      // THE LEGACY ARM KEEPS PRECEDENCE and stays byte-identical: a home that configured BYO OpenAI
+      // through `settings.provider` is unaffected by this block existing, even if it ALSO happens to
+      // carry a `providers.openai.baseUrl`. Read hot, per incarnation, like everything else here.
+      const legacyOpenAiConnection: ProviderConnectionConfig | undefined =
         settings?.provider?.type === "openai-compatible" && selection?.providerId === "openai"
           ? { baseUrl: settings.provider.baseUrl, endpointOrigin: "user", local: true }
           : undefined;
+      const perProviderBaseUrl = selection === undefined ? undefined : providerBaseUrlFor(settings, selection.providerId);
+      const connection: ProviderConnectionConfig | undefined =
+        legacyOpenAiConnection
+        ?? (perProviderBaseUrl === undefined ? undefined : { baseUrl: perProviderBaseUrl, endpointOrigin: "user", local: true });
       const capSession: CapabilitySession = {
         sessionId, mode, cwd,
         roots: deps.rootsOf(sessionId),
@@ -489,9 +539,70 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       try { await winterSessions(home).getSessionInfo(backendSessionId); return true; } catch { return false; }
     };
 
+    /**
+     * WS-19 (W19-7) — THE PRE-TURN CREDENTIAL REFUSAL.
+     *
+     * WHY IT IS A TURN GATE AND NOT PART OF `optionsFor` (fix round 2, and the correction of a real
+     * regression): `optionsFor` runs at EVERY `open()`, including the eager one `session.create` and
+     * `session.dispatch` perform — so refusing there made a credential-less home unable to create
+     * ANY session at all. A fresh install has no key yet, and the Mac app dispatches a session at
+     * launch, so that is the "orb Enter silently no-op'd" class of failure, not a safety win. The
+     * thing that must not happen is a TURN against a provider Winter holds no credential for, and
+     * `beforeTurn` is the one place every turn passes — still strictly BEFORE the child is spawned
+     * (it runs ahead of `send`/`steer`'s own `open()`), so it is never a vendor 401 mid-turn.
+     *
+     * Everything else about the rule is unchanged from the first round: the refusal is typed
+     * (`runtime_selection_refused`, reason `no-credential`), it names the provider and the three
+     * doors, and it fires on EVERY incarnation's first turn — a fresh create, a resume after an idle
+     * reap, a resume after a daemon restart.
+     *
+     * THE EXEMPTION is today's behaviour preserved byte-for-byte: the legacy `openai-compatible` arm
+     * (a BYO `settings.provider.baseUrl`) is never refused, because a self-hosted or LAN endpoint —
+     * Ollama, LM Studio, a local gateway — legitimately wants no key at all. The per-provider
+     * `providers.<id>.baseUrl` arm is NOT exempt. A `local-none` provider is excluded a layer down,
+     * by auth family (`apiKeyProviderIsUnauthenticated`).
+     */
+    const beforeTurn = async (): Promise<void> => {
+      const live = deps.store.meta(sessionId);
+      const settings = deps.settings();
+      const model = mode === "dispatch" ? (live.model ?? DISPATCH_MODEL) : (live.model ?? settings?.provider?.model);
+      if (model === undefined) return;
+      // ONLY A PROVIDER WINTER ACTUALLY DECIDED ON — never `providerSelectionFor`'s inventory-order
+      // FALLBACK, and this is the second half of the fix round 2 correction.
+      //
+      // When a BARE model id is served by several inventory providers and NONE of them is
+      // credentialled, `providerSelectionFor` returns `inInventory[0]` — a name, deliberately, not a
+      // decision (its own doc: "a provider that serves the model but has NO stored credential still
+      // returns a selection WITHOUT an authRef — the child then refuses with its own typed provider
+      // error, which is a better message than anything the host could invent"). Refusing on that
+      // fallback is exactly the invention it warns against: a fresh home configured for Codex OAuth,
+      // asking for `gpt-5.6-sol`, was being told to run `winter credentials set openai` — a provider
+      // the user never chose, through a door that would not have helped. It is also what broke the
+      // WinterKit gateway suite, whose harness dispatches on precisely that home.
+      //
+      // So the gate fires for the two cases where the provider IS Winter's answer:
+      //   - a fully-qualified `<provider>/<model>` key (`deepseek/deepseek-reasoner`), which names
+      //     one provider and no other;
+      //   - a bare id only ONE inventory provider serves, where there is nothing to be ambiguous
+      //     about.
+      // Anything else falls through to the child's own typed provider error, exactly as before
+      // WS-19. Codex OAuth is additionally never in scope at all — its auth family is `custom`, and
+      // `winter login`, not an API key, is its door (`apiKeyProviderIsUnauthenticated`).
+      const servingProviders = inventoryProvidersServing(model);
+      if (qualifiedProviderFor(model) === undefined && servingProviders.length !== 1) return;
+      const credentials = await credentialPresenceFrom(deps.secrets);
+      const selection = providerSelectionFor(model, credentials, deps.home, settings);
+      if (selection === undefined) return;
+      if (settings?.provider?.type === "openai-compatible" && selection.providerId === "openai") return;
+      if (apiKeyProviderIsUnauthenticated(selection.providerId, credentials.byProvider[selection.providerId] !== undefined)) {
+        throw new WinterLegRefusal("runtime_selection_refused", missingCredentialDetail(selection.providerId), "no-credential");
+      }
+    };
+
     const session = startWinterSession({
       sessionId, backendSessionId, mode, runtime,
       options: optionsFor,
+      beforeTurn,
       projector: projectorFor,
       append,
       broadcast: (event) => { deps.hub.broadcastTransient(sessionId, event); },
@@ -783,8 +894,69 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     if (model === undefined || testProviderNameFor(model) !== undefined) return undefined;
     if (catalogRowsFor(model).length === 0) return undefined;
     const decided = await deps.runtime.selectRuntimeFor({ mode, model });
-    if (isSelectionRefusal(decided)) throw new WinterLegRefusal("runtime_selection_refused", decided.detail);
+    if (isSelectionRefusal(decided)) throw await refusalForSelection(decided, model);
     return decided;
+  };
+
+  /**
+   * WS-19 (W19-7): the router's refusal, made ACTIONABLE, without taking its authority away.
+   *
+   * Three cases, in order:
+   *
+   *  1. `no-credential` WITH `alternatives` — the router's own W18-3 list of every catalog row able
+   *     to serve this model, whichever door. `renderNoCredentialHint` turns it into doors. This is
+   *     the SAME hint `session.setModel` has rendered since D1-7 (`handoff.ts`); `session.create`
+   *     simply never rendered it, so a user creating a Claude session with no Anthropic credential
+   *     got the bare one-sentence detail and no way in. Only the Claude family produces this list.
+   *  2. Outside that family the router has no alternatives to offer — but WINTER knows exactly which
+   *     provider this model resolves to and whether its slot is empty, so it answers with its own
+   *     door hint naming that provider. This is the `deepseek`/`zai`/`openrouter` case the derived
+   *     inventory made reachable: without it the user gets the router's honest but unhelpful "every
+   *     candidate row … belongs to a provider with no configured credential ref".
+   *  3. Anything else — a runtime that is not installed, a mode that forbids one — passes through
+   *     verbatim, with the router's own `reason`. `refusalMayBeCredentialShaped` is the gate: only
+   *     the two reasons a MISSING CREDENTIAL can actually produce are eligible for case 2 (review
+   *     Minor 2 — before this, ANY refusal was relabelled `no-credential` whenever the probe
+   *     happened to find an empty slot, so a Claude session on a home with no `claude` binary would
+   *     have been told to go and add an API key).
+   *
+   * The credential probe happens ONLY on this path (a refusal), never on the hot create path, which
+   * has already done its own.
+   */
+  const refusalForSelection = async (refusal: { reason: string; detail: string; alternatives?: readonly SelectionAlternative[] }, model: string): Promise<WinterLegRefusal> => {
+    // THE RAW DETAIL GOES TO THE LOG, AS A CATEGORY, AND NOWHERE ELSE (whole-branch review MAJOR 2).
+    // `session.setModel` has scrubbed this class since D1 fix round 4; `session.create` handed it
+    // through verbatim, and `session.create` is REMOTE-ALLOWED, so the measured shapes — "the
+    // official runtime", "persisted on claude-agent (…) (WS-00 §2, D13)", and `slot-unservable`'s
+    // enumeration of the user's own configured providers — were reaching the phone. Both doors now
+    // share one definition (`refusal-copy.ts`).
+    deps.log?.(`selectRuntimeFor refused ${model} (reason=${refusal.reason}, detail=${refusalDetailCategoryFor(refusal.detail)})`);
+    const neutral = neutralSelectionRefusal(model);
+    if (refusal.reason === "no-credential" && refusal.alternatives !== undefined) {
+      // The hint is the ONE refusal text that is actionable, and it is built HERE out of the
+      // router's structured `alternatives` — never out of `detail`, whose prefix is now dropped.
+      const hint = renderNoCredentialHint(refusal.alternatives, { subscriptionEnabled: officialSubscriptionAuthEnabled(deps.settings()) });
+      return new WinterLegRefusal("runtime_selection_refused", `${neutral} ${hint}`, "no-credential");
+    }
+    if (!refusalMayBeCredentialShaped(refusal.reason)) {
+      return new WinterLegRefusal("runtime_selection_refused", neutral, refusal.reason);
+    }
+    try {
+      // MINOR 1: the same narrowing `beforeTurn` applies, for the same reason. Without it this arm
+      // named `inInventory[0]` — a fallback, not a decision — so a credential-less home asking for
+      // `deepseek-reasoner` was told to add a key for whichever reseller happens to sort first.
+      // Only a qualified `<provider>/<model>` key, or a bare id exactly ONE inventory provider
+      // serves, names a provider here; anything else gets the neutral sentence.
+      if (qualifiedProviderFor(model) !== undefined || inventoryProvidersServing(model).length === 1) {
+        const credentials = await credentialPresenceFrom(deps.secrets);
+        const selection = providerSelectionFor(model, credentials, deps.home, deps.settings());
+        if (selection !== undefined
+            && apiKeyProviderIsUnauthenticated(selection.providerId, credentials.byProvider[selection.providerId] !== undefined)) {
+          return new WinterLegRefusal("runtime_selection_refused", missingCredentialDetail(selection.providerId), "no-credential");
+        }
+      }
+    } catch { /* a store that will not answer must not turn one refusal into a different one */ }
+    return new WinterLegRefusal("runtime_selection_refused", neutral, refusal.reason);
   };
 
   const createOfficial = async (sessionId: string, selection: RuntimeSelection): Promise<LegSession> => {

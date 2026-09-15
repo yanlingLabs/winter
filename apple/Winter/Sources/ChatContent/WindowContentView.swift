@@ -156,16 +156,19 @@ struct WindowContentView<Accessory: View>: View {
                 contentColumn(rightVisible: false)
             }
         }
-        // Winter Phase 8d (Task 4.2, WS-13 §8.2): the lossy-handoff confirm dialog — ONE modifier
-        // on this shared view covers all three of `WindowContentView`'s homes (the shell's live
-        // chat page, a detached window, the orb's morph window), because `adapter.onSetModel`'s
-        // wiring at each of those homes populates the SAME `adapter.pendingModelConfirmation`
-        // rather than each home drawing its own dialog. "Switch anyway" resends through
-        // `adapter.onConfirmModelSwitch` with `confirmLossy: true`; "Cancel" (and any other
-        // dismissal) simply drops the pending request — the session stays on its prior selection,
-        // exactly as if the picker had never been touched.
+        // Winter Phase 8d (Task 4.2, WS-13 §8.2); Winter Phase 10b (D1-4, W18-23): the lossy-switch
+        // confirm dialog — ONE modifier on this shared view covers all three of
+        // `WindowContentView`'s homes (the shell's live chat page, a detached window, the orb's
+        // morph window), because `adapter.onSetModel`'s wiring at each of those homes populates the
+        // SAME `adapter.pendingModelConfirmation` rather than each home drawing its own dialog.
+        // "Switch anyway" resends through `adapter.onConfirmModelSwitch` with `confirmLossy: true`;
+        // "Cancel" (and any other dismissal) simply drops the pending request — the session stays
+        // on its prior selection, exactly as if the picker had never been touched. Retitled from
+        // "Switch runtime?" for 10b: this dialog now fires for SAME-leg family-crossing switches
+        // too (gpt → deepseek on Winter, not only a cross-runtime move), and R-10b-4/W18-23 forbid
+        // naming which SDK or runtime serves a model anywhere in the UI.
         .confirmationDialog(
-            "Switch runtime?",
+            "Switch model?",
             isPresented: Binding(
                 get: { adapter.pendingModelConfirmation != nil },
                 set: { if !$0 { adapter.pendingModelConfirmation = nil } }
@@ -178,9 +181,7 @@ struct WindowContentView<Accessory: View>: View {
             }
             Button("Cancel", role: .cancel) { adapter.pendingModelConfirmation = nil }
         } message: { pending in
-            Text(pending.warnings.isEmpty
-                 ? "This model change would move the session to a different runtime and may lose in-flight provider state."
-                 : pending.warnings.joined(separator: "\n"))
+            Text(modelSwitchConfirmMessage(warnings: pending.warnings, portable: pending.portable))
         }
         // The remaining three outcomes (`.disabled`/`.lossyFork`/`.blocked`/`.failed`, collapsed by
         // `onSetModel`'s wiring into one string) — a one-line explanation, dismissed with a plain
@@ -1190,4 +1191,23 @@ func effortMenuIsVisible(isChatSession _: Bool) -> Bool {
 /// this asymmetry has a concrete symbol `ModelPickerTests` can assert against instead of nothing.
 func modelMenuIsVisible(isChatSession _: Bool) -> Bool {
     true
+}
+
+/// Winter Phase 10b (D1-4, W18-23): the lossy-switch confirm dialog's body — `warnings` joined
+/// verbatim (the matrix's own prose, `classifySwitch`'s `warned-lossy` class), plus a trailing line
+/// naming what STILL carries when the review found some (`portable`, additive — `[]` until D1-6
+/// fills it from the router's own `reviewSwitch`). A kept, top-level pure function (this file's own
+/// idiom — see `modelDisplayLabel`/`modelMenuIsVisible` above) so `ModelPickerTests` can pin its
+/// exact wording without mounting the dialog. Never names an SDK or runtime (R-10b-4): the
+/// no-warnings fallback is defensive only — `classifySwitch`'s `warned-lossy` class always carries
+/// at least one warning — and says nothing more specific than "some of the conversation's carried
+/// state".
+func modelSwitchConfirmMessage(warnings: [String], portable: [String]) -> String {
+    var lines = warnings.isEmpty
+        ? ["This model change may lose some of the conversation's carried state."]
+        : warnings
+    if !portable.isEmpty {
+        lines.append("Still carries over: \(portable.joined(separator: ", "))")
+    }
+    return lines.joined(separator: "\n")
 }

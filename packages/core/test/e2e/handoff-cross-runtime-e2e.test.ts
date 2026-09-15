@@ -42,6 +42,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runtimeSdkInternals, type RuntimeKind, type SessionKey } from "@yanlinglabs/winter-runtime-sdk";
+import type { SwitchReview } from "@yanlinglabs/winter-provider-runtime";
 import { openaiResponsesFake } from "@yanlinglabs/winter-provider-conformance/fakes";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import { FileSecretStore } from "../../src/auth/secret-store";
@@ -188,8 +189,8 @@ describeWithWinterBinary("cross-runtime handoff (P8c, the phase's key proof)", (
       // ── Spy on the REAL router's barrier — direct proof the fix reaches it, never inferred ──
       // from an error message alone. `runtimeSdkInternals` resolves the SAME object the router's
       // own factory built for THIS `daemon.runtimeSdk!.sdk` (a Symbol-keyed lookup, `sdk.ts`'s own
-      // doc) — a plain, mutable property, so wrapping `.plan` here observes the exact call
-      // `runtime-sdk/handoff.ts`'s `planAndApplySwitch` makes through `barrierFor(deps)`.
+      // doc) — a plain, mutable property, so wrapping `.plan`/`.reviewSwitch` here observes the
+      // exact calls `runtime-sdk/handoff.ts`'s `planAndApplySwitch` makes through `barrierFor(deps)`.
       const internals = runtimeSdkInternals(d.runtimeSdk!.sdk);
       expect(internals).toBeDefined();
       const realBarrier = internals!.barrier;
@@ -199,26 +200,58 @@ describeWithWinterBinary("cross-runtime handoff (P8c, the phase's key proof)", (
         planCalls.push({ session, to });
         return originalPlan(session, to);
       };
+      const originalReviewSwitch = realBarrier.reviewSwitch.bind(realBarrier);
+      const reviewCalls: SwitchReview[] = [];
+      realBarrier.reviewSwitch = async (session, requested) => {
+        const r = await originalReviewSwitch(session, requested);
+        reviewCalls.push(r);
+        return r;
+      };
 
-      // ── Step 2: session.setModel to the Claude catalog model — the handoff attempt ─────────
-      let caught: RpcErrorLike | undefined;
+      // ══════════════════════════════════════════════════════════════════════════════════════
+      // Winter Phase 10b (D2-1 flip, W18-20/W18-21): `planAndApplySwitch` now calls
+      // `barrier.reviewSwitch` for EVERY provider/model change, BEFORE `barrier.plan()` is ever
+      // reached (`runtime-sdk/handoff.ts`'s own doc). This session crosses families (an
+      // `openai-compatible` double -> `anthropic`) with one completed source turn, so the review
+      // is NOT skipped (same-profile/same-family/no-source-turns all fail to apply) and
+      // `classifySwitch` reports `warned-lossy` (a hidden-reasoning source moving to a foreign
+      // domain, W18-20's own bullet) — MEASURED directly via the spy above, not inferred from the
+      // RPC shape alone. The FIRST attempt (no `confirmLossy`) must therefore be refused
+      // `handoff_confirmation_required`, and `barrier.plan()` must NOT have been reached yet: this
+      // is the exact staleness this task flips (pre-10b, this test asserted `planCalls` was
+      // reached on the FIRST attempt, which the pre-flight review now correctly intercepts).
+      // ══════════════════════════════════════════════════════════════════════════════════════
+      let firstCaught: RpcErrorLike | undefined;
       try {
         await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL });
       } catch (err) {
-        caught = err as RpcErrorLike;
+        firstCaught = err as RpcErrorLike;
       }
+      expect(reviewCalls).toHaveLength(1);
+      expect(reviewCalls[0]?.prompt).toBe(true);
+      expect(reviewCalls[0]?.classification?.lossClass).toBe("warned-lossy");
+      expect(planCalls).toEqual([]); // the barrier is not reached until the prompt is confirmed
+      expect(firstCaught).toBeDefined();
+      expect(firstCaught!.rpc?.data).toMatchObject({ code: "handoff_confirmation_required" });
+      expect(firstCaught!.rpc?.data?.warnings).toBeDefined();
+      expect((firstCaught!.rpc?.data as { warnings?: string[] } | undefined)?.warnings?.length).toBeGreaterThan(0);
 
-      // ══════════════════════════════════════════════════════════════════════════════════════
-      // MEASURED, POST-FIX (this test's whole point): the barrier IS now consulted — proven
+      // Nothing moved on the unconfirmed attempt: same posture as the pre-10b "nothing migrated"
+      // assertions, just measured one RPC call earlier now that the review runs first.
+      expect(d.winter.legOf(sessionId)).toBe("winter");
+      expect(rt.records.get(sessionId)?.selection).toEqual(beforeSelection);
+      expect(d.sessions.meta(sessionId).model).toBe(beforeModel);
+
+      // ── Step 2: confirmLossy proceeds past the prompt — the barrier IS now consulted ────────
       // directly by the spy above, not by message-matching. `planAndApplySwitch`'s FRESH decision
       // for `CATALOG_CLAUDE_MODEL` (no `persisted`) correctly lands on `claude-agent`, differs from
       // the recorded `winter-agent` leg, and reaches `barrier.plan(session, "claude-agent")` — this
-      // call was structurally impossible before the fix (the destination decision always echoed
-      // the recorded leg back, per `SELECTION_RULES.persisted`).
+      // call was structurally impossible before the P8c fix (the destination decision always
+      // echoed the recorded leg back, per `SELECTION_RULES.persisted`).
       //
       // What the barrier's own `plan()` reports for THIS session, though, is a typed REFUSAL —
       // before `execute()` is ever reached — and it is a real, structural one, not a fluke:
-      // `selectionInputFor` (registered by this fix) reviews the persisted selection against
+      // `selectionInputFor` (registered by the P8c fix) reviews the persisted selection against
       // `WinterRuntimeSdk.buildSelectionInput`'s real, pinned `familyListingFromCatalog()`, and this
       // session's persisted model is `winter-test/echo` — a test double `provider-selection.ts`
       // documents as deliberately UNRESOLVABLE against the real catalog ("must never be resolved
@@ -227,14 +260,28 @@ describeWithWinterBinary("cross-runtime handoff (P8c, the phase's key proof)", (
       // See this file's header comment for the full account and why a genuine `resumed` round trip
       // needs a heavier fixture than this one (a catalog-listed, non-Anthropic-protocol Winter
       // provider) that this file does not build.
-      // ══════════════════════════════════════════════════════════════════════════════════════
+      let caught: RpcErrorLike | undefined;
+      try {
+        await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL, confirmLossy: true });
+      } catch (err) {
+        caught = err as RpcErrorLike;
+      }
+      expect(reviewCalls).toHaveLength(2); // the review runs again on the confirmed retry too
       expect(planCalls).toEqual([{ session: { projectKey: expect.any(String), sessionId: expect.any(String) }, to: "claude-agent" }]);
       expect(caught).toBeDefined();
       expect(caught!.rpc?.data).toMatchObject({ code: "runtime_selection_refused" });
-      // The barrier-specific phrasing (`reviewSelectionFor`'s own `fresh-refused` branch) — distinct
-      // from the EARLIER `refused` branch a fresh `selectRuntimeFor` call alone could produce (e.g.
-      // `runtime-unavailable`/`claude-oauth-not-approved`), which never reaches the barrier at all.
-      expect(caught!.rpc?.message).toContain("persisted selection is no longer servable");
+      // WHICH refusal branch fired is proved by `planCalls` above, not by the copy: as of D1 fix
+      // round 4 (item 5) the router's own `detail` never reaches the user at all. The barrier-
+      // specific branch (`reviewSelectionFor`'s `fresh-refused`) is exactly the one that requires
+      // `plan()` to have been called, which the assertion above pins; the EARLIER `refused` branch a
+      // fresh `selectRuntimeFor` alone can produce (`runtime-unavailable` /
+      // `claude-oauth-not-approved`) never reaches the barrier, so `planCalls` would be empty.
+      //
+      // And the copy is now pinned the OTHER way: the router's phrasing — which names both runtime
+      // kinds and cites `WS-00 §2, D13` — must NOT be in it (R-10b-4).
+      expect(caught!.rpc?.message).toContain("Winter can't switch to");
+      expect(caught!.rpc?.message).not.toContain("persisted selection is no longer servable");
+      expect(caught!.rpc?.message).not.toMatch(/\bruntime\b|winter-agent|claude-agent|WS-00|D13/i);
 
       // Nothing migrated, and nothing was even WRITTEN: `refused` stops `session.setModel` before
       // its ordinary store write (ipc/server.ts's switch), unlike the pre-fix bug where the write
@@ -254,9 +301,11 @@ describeWithWinterBinary("cross-runtime handoff (P8c, the phase's key proof)", (
       expect(requests.length).toBe(requestsBefore); // zero NEW requests reached the loopback fake
 
       console.warn(
-        "[handoff-cross-runtime-e2e] MEASURED (post-fix): session.setModel's fresh destination " +
-        "decision now DIFFERS from the recorded leg and reaches barrier.plan() (spied above) — the " +
-        "P8c bug is fixed. For THIS fixture, the barrier's own servability review then typed-refuses " +
+        "[handoff-cross-runtime-e2e] MEASURED (post-10b flip): the pre-flight review now runs " +
+        "BEFORE the barrier and correctly prompts `handoff_confirmation_required` on the FIRST, " +
+        "unconfirmed attempt (a cross-family move with one source turn, classified warned-lossy). " +
+        "A confirmLossy retry reaches barrier.plan() (spied above) — the P8c bug remains fixed. For " +
+        "THIS fixture, the barrier's own servability review then typed-refuses " +
         "(runtime_selection_refused: \"persisted selection is no longer servable\") because the " +
         "source session's winter-test/<double> model is deliberately unresolvable against the real " +
         "catalog (provider-selection.ts). A genuine resumed/lossy-fork/blocked round trip needs a " +
@@ -381,6 +430,20 @@ describeWithWinterBinary("cross-runtime handoff on a REAL catalog provider (fix 
         planCalls.push({ session, to });
         return originalPlan(session, to);
       };
+      // Winter Phase 10b (D2-1, W18-20/W18-21): the pre-flight review now runs on this fixture too
+      // (it crosses families: `openai` -> `claude`, with one completed source turn, so neither the
+      // same-profile, same-family nor no-source-turns skip applies) — but `CATALOG_OPENAI_MODEL`
+      // ("openai/gpt-5.4") carries no reasoning continuation in the pinned catalog, so
+      // `classifySwitch` reports `lossless-native` (nothing hidden to lose) and does NOT prompt.
+      // MEASURED via the spy below, not inferred from the RPC shape alone: the FIRST, unconfirmed
+      // `session.setModel` call below reaches `barrier.plan()` directly, exactly as it did pre-10b.
+      const originalReviewSwitch = realBarrier.reviewSwitch.bind(realBarrier);
+      const reviewCalls: SwitchReview[] = [];
+      realBarrier.reviewSwitch = async (session, requested) => {
+        const r = await originalReviewSwitch(session, requested);
+        reviewCalls.push(r);
+        return r;
+      };
 
       // ── Step 2: session.setModel to the Claude catalog model — the handoff attempt ───────────
       let caught: RpcErrorLike | undefined;
@@ -389,6 +452,9 @@ describeWithWinterBinary("cross-runtime handoff on a REAL catalog provider (fix 
       } catch (err) {
         caught = err as RpcErrorLike;
       }
+      expect(reviewCalls).toHaveLength(1);
+      expect(reviewCalls[0]?.prompt).toBe(false); // this model's catalog row carries no reasoning to lose
+      expect(reviewCalls[0]?.classification?.lossClass).toBe("lossless-native");
 
       // The fence is enabled and the model is servable both ways, so the destination decision MUST
       // differ from the recorded leg and MUST reach the barrier — this much is not in question;
@@ -470,7 +536,13 @@ describeWithWinterBinary("cross-runtime handoff on a REAL catalog provider (fix 
           // credential both exist, so this deployment has no way to construct that fixture; recorded
           // here as the honest, measured limit — see this test's own `console.warn` below.
           measuredOutcome = "refused:runtime_selection_refused (cross-family, not cross-runtime — the barrier's own D28 sanity check)";
-          expect(caught.rpc?.message).toContain("does not serve");
+          // D1 fix round 4 (item 5): the router's own "does not serve …" phrasing no longer reaches
+          // the user — it names a runtime, which R-10b-4 forbids, and it is logged as a category
+          // instead. The branch identity is established by the CODE plus "nothing moved" below; the
+          // message is now pinned only for what it must NOT say.
+          expect(caught.rpc?.message).toContain("Winter can't switch to");
+          expect(caught.rpc?.message).not.toContain("does not serve");
+          expect(caught.rpc?.message).not.toMatch(/\bruntime\b|winter-agent|claude-agent|D28/i);
           expect(d.winter.legOf(sessionId)).toBe("winter"); // nothing moved
         } else {
           // A refusal this test did not expect (`session_predates_winter_leg`, `handoff_disabled`)

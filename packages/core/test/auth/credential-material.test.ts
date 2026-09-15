@@ -61,7 +61,29 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     const req = createRequire(import.meta.url);
     const pkgPath = req.resolve("@yanlinglabs/winter-agent-sdk/package.json");
     const pkg = require(pkgPath) as { version: string };
-    expect(pkg.version).toBe("0.0.9"); // 0.0.7 → 0.0.9 (P10a integration 3; 0.0.8 skipped): `packages/runtime/src/provider/keychain-store.ts` is byte-identical across v0.0.7..v0.0.9 (`git diff v0.0.7 v0.0.9` on it is empty) — the bump moved only the console bearer's Keychain account and its request-time refusal (console-broker.ts, messages.ts), so the api-key/oauth arms this mirror exercises are unchanged; mirror re-verified.
+    // 0.0.9 → 0.0.10 → 0.0.11 → 0.0.12 (Winter Phase 10b, D1-5/D1-9 pins; re-diffed for fix rounds
+    // 1 and 3): at 0.0.12 the re-diff was a `git diff 4f76696 HEAD --
+    // packages/runtime/src/provider/keychain-store.ts` in that same sibling checkout (branch main,
+    // commit a40303e, `packages/runtime/package.json` version 0.0.12) and came back EMPTY — the
+    // child's parser is byte-identical to the 0.0.11 source the paragraph below describes, so that
+    // line-by-line account stands unchanged and nothing in the mirror needed to move.
+    //
+    // this mirror WAS re-diffed at 0.0.11, line by line, against a local sibling checkout of the
+    // `winter-agent-sdk` repo (branch main, commit 4f76696, `package.json` version 0.0.11) —
+    // `packages/runtime/src/provider/keychain-store.ts`'s own `coerceMaterial` (its
+    // `MATERIAL_KINDS` at line 124, the function at lines 134-171).
+    // Confirmed semantically identical to this file's mirror (lines 32-56) for every arm the mirror
+    // implements: the `MATERIAL_KINDS` set is byte-identical (same six kinds, same order); the
+    // `api-key` arm is identical; the `oauth` arm is identical (`accessToken` required,
+    // `refreshToken`/`expiresAt`/`accountId`/`idToken` all optional via the same conditional-spread
+    // pattern); the `bearer` arm is identical, including the optional `expiresAt` (the SDK's own
+    // P10a-4 comment there names the exact same host-brokered-Console-refresh reason this repo's
+    // `credential-material.ts` doc gives for the same field). The only divergence is the SDK's
+    // `aws`/`gcp-service-account`/`gcp-access-token` arms, which this mirror deliberately omits
+    // (falls through to `default: undefined`, matching the child's own refusal for a kind Winter
+    // never sends) — an intentional narrowing already documented above, not a drift. Re-diff again
+    // on the next bump.
+    expect(pkg.version).toBe("0.0.12");
   });
 
 
@@ -88,10 +110,22 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     expect(coerced).toEqual({ kind: "api-key", key: "sk-x" });
   });
 
-  test("a blanked record ('') is what clearCredentialMaterial writes, and readCredentialMaterial returns null for it — presence must gate the spawn because the child JSON.parses ANY non-null string", async () => {
+  // WS-19 (W19-2) CHANGED THE WRITE SIDE DELIBERATELY: `clearCredentialMaterial` now DELETES the
+  // item (`SecretStore.delete`, which did not exist before) instead of writing an empty string, so
+  // a cleared credential leaves no row behind at all. The READ side is unchanged and must stay so —
+  // a home written by an older build still holds blanked items, and they must keep reading as
+  // absent. Both halves are pinned here, in that order.
+  test("clearCredentialMaterial DELETES the record outright (W19-2) — nothing is left behind", async () => {
     const s = store();
     await writeOpenAiApiKey(s, "sk-x");
     await clearCredentialMaterial(s, CREDENTIAL_MATERIAL_NAMES.openai);
+    expect(await s.get(CREDENTIAL_MATERIAL_NAMES.openai)).toBeNull();
+    expect(await readCredentialMaterial(s, CREDENTIAL_MATERIAL_NAMES.openai)).toBeNull();
+  });
+
+  test("MIGRATION COMPATIBILITY: a blanked record ('') written by an OLDER build still reads as absent — presence must gate the spawn because the child JSON.parses ANY non-null string", async () => {
+    const s = store();
+    await s.set(CREDENTIAL_MATERIAL_NAMES.openai, ""); // exactly what pre-WS-19 `clearCredentialMaterial` wrote
     expect(await s.get(CREDENTIAL_MATERIAL_NAMES.openai)).toBe("");
     expect(await readCredentialMaterial(s, CREDENTIAL_MATERIAL_NAMES.openai)).toBeNull();
   });
@@ -184,6 +218,9 @@ describe("migrateLegacyCredentialMaterial", () => {
       }
       async set(name: string, value: string): Promise<void> {
         await this.inner.set(name, value);
+      }
+      async delete(name: string): Promise<boolean> {
+        return await this.inner.delete(name);
       }
     }
     const inner = store();

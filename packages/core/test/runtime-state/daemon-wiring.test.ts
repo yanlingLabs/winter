@@ -234,15 +234,17 @@ describe("daemon wiring — the runtime store is not readable by the model", () 
     });
   });
 
-  test("P8d-12 (WS-16 §10): the official leg's SDK-parent staging root (<tmpdir>/claude-resume-*) is denied to read AND write tools", async () => {
+  test("P8d-12 (WS-16 §10); Winter Phase 10b (D1-3, W18-9): the official leg's SDK-parent staging root (<tmpdir>/claude-resume-*) is denied to read AND write tools", async () => {
     await withTempHome(async (home) => {
       const { controlPlaneDenyRules } = await import("../../src/runtime-sdk/mode-options");
       const { tmpdir } = await import("node:os");
+      const { RESUME_STAGING_PREFIX } = await import("@yanlinglabs/winter-runtime-sdk");
       const deny = controlPlaneDenyRules(home);
       // `//`-anchored (filesystem-root), never a bare single `/` (inert for an SDK-seeded rule —
       // see `fsRootAnchored`'s own comment), and the pattern itself is rooted at the SYSTEM temp
-      // dir, never under `home` — a resume payload never lands under `~/.winter*`.
-      const wantSuffix = `/${join(tmpdir(), "claude-resume-*", "**")}`;
+      // dir, never under `home` — a resume payload never lands under `~/.winter*`. Built from the
+      // router's own `RESUME_STAGING_PREFIX`, not a hand-typed duplicate (D1-3).
+      const wantSuffix = `/${join(tmpdir(), `${RESUME_STAGING_PREFIX}*`, "**")}`;
       for (const tool of ["Read", "Glob", "Grep", "Edit", "Write", "MultiEdit", "NotebookEdit"]) {
         expect(deny).toContain(`${tool}(${wantSuffix})`);
       }

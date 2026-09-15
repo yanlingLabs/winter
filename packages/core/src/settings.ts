@@ -412,13 +412,18 @@ export const Settings = z.object({
     winterIdleTimeoutSec: z.number().int().min(10).default(DEFAULT_WINTER_IDLE_TIMEOUT_SEC),
     // Fix wave (whole-branch review C2 / ruling P8c-18): a `session.setModel` whose FRESH
     // destination decision names a DIFFERENT runtime leg than the session's recorded one is a
-    // cross-runtime HANDOFF (`runtime-sdk/handoff.ts`) — a real round-trip against the live
-    // barrier is still unmeasured in production (only a typed refusal has been proven end to end,
-    // `handoff-cross-runtime-e2e.test.ts`'s own header). Default OFF: production stays on today's
-    // "never actually reaches the barrier" behaviour until the measurement lands; `handoff.ts`
-    // reads this HOT (`handoffCrossRuntimeEnabled(deps.settings())`), never a boot snapshot, same
-    // as every other setting in this file.
-    handoff: z.object({ crossRuntime: z.boolean().default(false) }).prefault({}),
+    // cross-runtime HANDOFF (`runtime-sdk/handoff.ts`). Winter Phase 10b (D1-1, W18-10, R-10b-1):
+    // the real round-trip is now measured end to end (the whole-branch parity e2e coverage), so the
+    // fence flips to default ON for Code sessions — chat and dispatch never reach the official leg
+    // regardless (`select-runtime.ts`'s own mode gate), so they stay at the pre-10b "off" posture.
+    // `crossRuntime` is deliberately left `.optional()` here rather than `.default()`ed, so a raw
+    // parse can tell "never set" from an explicit `true`/`false` — same "absent isn't a value"
+    // shape `winterExecutable`/`advisorModel` already have on this block. The MODE-AWARE default
+    // lives in `handoffCrossRuntimeEnabled` below, the one door every reader goes through; an
+    // explicit value here always overrides it, in every mode. `handoff.ts` reads this HOT
+    // (`handoffCrossRuntimeEnabled(deps.settings(), mode)`), never a boot snapshot, same as every
+    // other setting in this file.
+    handoff: z.object({ crossRuntime: z.boolean().optional() }).prefault({}),
     // Phase 9c (P9c-1, the user's ruling on WS-00 §8 #1): the official leg authenticates ONLY with
     // Anthropic API-key material the user supplied to Winter. `subscriptionAuth: false` (the
     // default, and the ONLY shipped value until Anthropic approves subscription auth for Winter's
@@ -444,6 +449,34 @@ export const Settings = z.object({
   // OPTIONAL (not prefaulted) for the same reason `runtimes` is: a prefaulted block becomes REQUIRED on
   // the inferred `Settings` type and breaks every hand-built settings literal. Absent block = default
   // ON; readers go through `legacyProjectFilesReadEnabled()` below, never the raw block.
+  /**
+   * WS-19 (W19-6): per-provider connection overrides, keyed by the CATALOG provider id
+   * (`deepseek`, `zai`, `openrouter`, …) — the same ids `credential.list` reports and
+   * `credential.set` writes a slot for.
+   *
+   * There is NO daemon-side endpoint table and there must never be one: the catalog ships every
+   * provider's own `defaultEndpoints`, and the SDK's `connectionFrom` copies them for the
+   * multi-provider adapters (deepseek/zai/openrouter/xai all ride `winter.openai-chat-completions`).
+   * This block exists only for the case the SDK cannot answer — a self-hosted or proxied endpoint
+   * for a provider whose shipped endpoint is not where the user's account lives, and the loopback
+   * fakes the parity e2e tests point at.
+   *
+   * ABSENT IS THE NORMAL CASE. An entry without a `baseUrl` is the same as no entry: the session
+   * gets no `connection` at all and the SDK fills the catalog endpoint.
+   *
+   * `settings.provider.baseUrl` (the legacy single-provider `openai-compatible` arm) KEEPS
+   * PRECEDENCE for `openai` and is byte-identical to what it was — a home that configured BYO
+   * OpenAI that way is untouched by this block existing.
+   *
+   * Read HOT at every incarnation (`session-driver.ts`'s `optionsFor` calls `deps.settings()`), so
+   * adding or changing an endpoint takes effect on the next turn with no daemon restart — the
+   * project's standing rule.
+   *
+   * `.url()` rather than a bare string, unlike `runtimes.winterExecutable`: a malformed endpoint
+   * cannot be treated as "absent" the way a blank executable path can, because the only other
+   * reading is "send the user's credential to whatever this parses as".
+   */
+  providers: z.record(z.string(), z.object({ baseUrl: z.string().url().optional() })).optional(),
   legacy: z.object({ readLegacyProjectFiles: z.boolean().default(true) }).optional(),
 });
 export type Settings = z.infer<typeof Settings>;
@@ -452,6 +485,15 @@ export type Settings = z.infer<typeof Settings>;
  *  means ON (the shipped default); only an explicit `false` turns the legacy read-only fallback off. */
 export function legacyProjectFilesReadEnabled(settings: Settings | null | undefined): boolean {
   return settings?.legacy?.readLegacyProjectFiles ?? true;
+}
+
+/** WS-19 (W19-6): the ONE reader of `providers.<id>.baseUrl` — absent block, absent entry, absent
+ *  key and a blank string all mean "no override", so callers never have to spell that themselves.
+ *  The legacy `provider.baseUrl` arm is NOT consulted here; `session-driver.ts` checks it first and
+ *  only reaches this when it did not apply. */
+export function providerBaseUrlFor(settings: Settings | null | undefined, providerId: string): string | undefined {
+  const url = settings?.providers?.[providerId]?.baseUrl;
+  return url === undefined || url.length === 0 ? undefined : url;
 }
 
 /**
@@ -503,15 +545,25 @@ export function officialAuthModeSetting(settings: Settings | null | undefined): 
  *  providers/manager.ts's `liveModel`) and this file's own tests exercise the SAME decision. */
 export const hooksEnabledFrom = (s: Settings): boolean => s.hooks?.enabled !== false;
 
-/** Fix wave (C2 / P8c-18): the ONE door `runtime-sdk/handoff.ts` reads before letting a
- *  `session.setModel` cross a runtime leg. Absent block OR absent field both mean OFF (the
- *  schema's own `.default(false)` only materializes once `runtimes` itself is present — same
- *  "an absent block is not unknown" rule `winterOptionsFromSettings` states for its own siblings),
- *  so a home that has never touched `runtimes` gets the safe default without this function lying
- *  about what the raw block says. Deliberately total (`null`/`undefined` settings both answer
- *  `false`) for the same boot-degraded-to-`settings=null` reason every getter here is total. */
-export function handoffCrossRuntimeEnabled(s: Settings | null | undefined): boolean {
-  return s?.runtimes?.handoff?.crossRuntime === true;
+/** Fix wave (C2 / P8c-18); Winter Phase 10b (D1-1, W18-10, R-10b-1): the ONE door
+ *  `runtime-sdk/handoff.ts` reads before letting a `session.setModel` cross a runtime leg.
+ *
+ *  An EXPLICIT `true`/`false` on `runtimes.handoff.crossRuntime` always wins, in every mode — the
+ *  schema leaves the field `.optional()` (no `.default()`) precisely so this function can tell
+ *  "the user never set it" from "the user set it to false" (see the schema comment above).
+ *
+ *  Absent (never set) falls back to the MODE-AWARE default: ON for Code, OFF for chat/dispatch.
+ *  `mode` follows the file-wide `mode ?? "code"` convention (`clientEffortEligible` above is the
+ *  same shape) — an omitted mode reads as Code, never as "unknown". Chat and dispatch sessions
+ *  never reach the official leg regardless of this flag (`select-runtime.ts`'s own mode gate), so
+ *  their OFF default is belt-and-suspenders, not a behavioural fence on its own.
+ *
+ *  Deliberately total (`null`/`undefined` settings both fall through to the mode-aware default,
+ *  never a throw) for the same boot-degraded-to-`settings=null` reason every getter here is total. */
+export function handoffCrossRuntimeEnabled(s: Settings | null | undefined, mode?: string): boolean {
+  const explicit = s?.runtimes?.handoff?.crossRuntime;
+  if (explicit !== undefined) return explicit;
+  return mode === undefined || mode === "code";
 }
 
 /** What the Winter leg actually runs with, for a home whose `runtimes` block may not exist at all. */

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +9,8 @@ import { TOKEN_NAMES } from "../../src/auth/tokens";
 import { keychainService } from "../../src/profile";
 import { OPENAI_API_KEY_SECRET } from "../../src/providers/manager";
 import { CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, CodexAuthStore, writeOpenAiApiKey } from "../../src/auth/credential-material";
-import { credentialPresenceFrom, credentialRefFor, keychainSeamFromSecretStore, WINTER_CREDENTIAL_INVENTORY, ANTHROPIC_CREDENTIAL_SECRET_NAME, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
+import { credentialInventory, credentialPresenceFrom, credentialRefFor, isInScopeApiKeyProvider, keychainSeamFromSecretStore, WINTER_CREDENTIAL_INVENTORY, ANTHROPIC_CREDENTIAL_SECRET_NAME, ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
+import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { ANTHROPIC_CONSOLE_CREDENTIAL_ACCOUNT } from "@yanlinglabs/winter-provider-runtime";
 import { Settings } from "../../src/settings";
 
@@ -41,6 +42,9 @@ class ThrowingSecretStore implements SecretStore {
     throw err;
   }
   async set(): Promise<void> {
+    throw new Error("not used by these tests");
+  }
+  async delete(): Promise<boolean> {
     throw new Error("not used by these tests");
   }
 }
@@ -128,17 +132,79 @@ describe("KeychainSeam over SecretStore", () => {
     expect(presence.byProvider).toEqual({});
   });
 
-  test("the inventory's contents are pinned — adding/renaming a provider is a deliberate edit to this test too", () => {
-    expect(WINTER_CREDENTIAL_INVENTORY).toEqual([
-      { provider: "openai", secretName: "openai:default", kind: "keychain" },
-      { provider: "codex-oauth", secretName: "codex-oauth:default", kind: "keychain" },
-      { provider: "anthropic", secretName: "anthropic:default", kind: "keychain" },
-      // Fix wave 3 (M-B): a SECOND "anthropic" row for the console bearer account — see this
-      // row's own comment in keychain.ts for why `credentialRefFor` never reaches it via the
-      // generic per-provider `.find()` lookup, and why its presence here still matters (the
-      // seam's "known accounts" set, and `credentialPresenceFrom`'s console-only presence case).
-      { provider: "anthropic", secretName: "anthropic:console", kind: "keychain" },
-    ]);
+  test("WS-19 (review Minor 4): a dead store logs ONE aggregated line with a COUNT, not one per slot", async () => {
+    const lines: string[] = [];
+    const spy = spyOn(console, "warn").mockImplementation((...a: unknown[]) => { lines.push(a.map(String).join(" ")); });
+    try {
+      await credentialPresenceFrom(new ThrowingSecretStore());
+    } finally { spy.mockRestore(); }
+    // The inventory is ~150 rows; the per-slot form turned one fault into 148 identical lines on
+    // every session open.
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain(`${WINTER_CREDENTIAL_INVENTORY.length} of ${WINTER_CREDENTIAL_INVENTORY.length} presence probe(s) failed`);
+    // The error CODE only — never a secret name, never the message text, never a value.
+    expect(lines[0]).toContain("EKEYCHAINLOCKED");
+    expect(lines[0]).not.toContain("openai:default");
+    expect(lines[0]).not.toContain("should never appear in a log line");
+  });
+
+  // WS-19 (W19-1): the inventory is DERIVED from the pinned catalog, so this is no longer a
+  // contents pin (a catalog bump legitimately moves ~146 of the 148 rows). What is pinned instead
+  // is the DERIVATION: the four-row prefix that must not move, the count formula, and spot rows
+  // that must be in or out. Everything a literal pin used to protect is still protected — just at
+  // the level that can survive a catalog that grows on its own, which is the whole point of the
+  // "providers live in the SDKs" ruling.
+  describe("the derived inventory (WS-19 W19-1)", () => {
+    test("today's four rows are the PREFIX, verbatim and in order — providerSelectionFor breaks ties by inventory order", () => {
+      expect(WINTER_CREDENTIAL_INVENTORY.slice(0, 4)).toEqual([
+        { provider: "openai", secretName: "openai:default", kind: "keychain" },
+        { provider: "codex-oauth", secretName: "codex-oauth:default", kind: "keychain" },
+        { provider: "anthropic", secretName: "anthropic:default", kind: "keychain" },
+        // Fix wave 3 (M-B): a SECOND "anthropic" row for the console bearer account — see this
+        // row's own comment in keychain.ts for why `credentialRefFor` never reaches it via the
+        // generic per-provider `.find()` lookup, and why its presence here still matters (the
+        // seam's "known accounts" set, and `credentialPresenceFrom`'s console-only presence case).
+        { provider: "anthropic", secretName: "anthropic:console", kind: "keychain" },
+      ]);
+    });
+
+    test("the count is the formula, not a number — in-scope api-key providers + the two OAuth rows", () => {
+      const inScope = loadCatalog().providers.filter(isInScopeApiKeyProvider);
+      // `openai` and `anthropic` are themselves in-scope api-key rows and appear once each; the two
+      // EXTRA rows are `codex-oauth:default` and `anthropic:console`, neither of which is derived.
+      expect(WINTER_CREDENTIAL_INVENTORY.length).toBe(inScope.length + 2);
+      expect(credentialInventory()).toBe(WINTER_CREDENTIAL_INVENTORY); // memoised, one array
+    });
+
+    test("every row's secretName is <providerId>:default, and every provider appears exactly once (bar anthropic's two accounts)", () => {
+      for (const slot of WINTER_CREDENTIAL_INVENTORY) {
+        if (slot.secretName === "anthropic:console") continue;
+        expect(slot.secretName).toBe(`${slot.provider}:default`);
+        expect(slot.kind).toBe("keychain");
+      }
+      const counts = new Map<string, number>();
+      for (const slot of WINTER_CREDENTIAL_INVENTORY) counts.set(slot.provider, (counts.get(slot.provider) ?? 0) + 1);
+      expect([...counts].filter(([, n]) => n > 1)).toEqual([["anthropic", 2]]);
+    });
+
+    test("the providers WS-18's five-hop chain needs are IN — this is the whole reason the inventory was derived", () => {
+      const ids = new Set(WINTER_CREDENTIAL_INVENTORY.map((s) => s.provider));
+      for (const id of ["deepseek", "zai", "openrouter", "google", "xai"]) expect(ids.has(id)).toBe(true);
+    });
+
+    test("endpoint-required, local-none and blocked rows are OUT — by construction, never by a denylist", () => {
+      const ids = new Set(WINTER_CREDENTIAL_INVENTORY.map((s) => s.provider));
+      // `requiresUserEndpoint` rows ship with a placeholder host, so a credential slot for one
+      // would route a session at a literal `<resource>` domain.
+      for (const id of ["azure-ai", "oci"]) expect(ids.has(id)).toBe(false);
+      for (const p of loadCatalog().providers) {
+        if (p.risk.class === "blocked") expect(ids.has(p.id)).toBe(false);
+        // A `local-none` row (a local endpoint with no key) is only excluded when it declares NO
+        // api-key kind at all — which is what `local-none` means. Asserted over the real catalog so
+        // a row that later gains an api-key kind is a deliberate, visible change here.
+        if (p.authKinds.length === 1 && p.authKinds[0] === "local-none") expect(ids.has(p.id)).toBe(false);
+      }
+    });
   });
 
   test("every non-provider secret is excluded from the inventory AND refused by read() even when present", async () => {

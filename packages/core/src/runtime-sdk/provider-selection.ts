@@ -27,8 +27,10 @@ export function catalogRowsFor(model: string): Array<{ key: string; providerId: 
   );
 }
 
-/** Is this a fully-qualified `<providerId>/<model>` catalog key? */
-function qualifiedProviderFor(model: string): string | undefined {
+/** Is this a fully-qualified `<providerId>/<model>` catalog key? Exported since WS-19 (W19-7): the
+ *  pre-turn credential gate refuses only for a provider Winter actually DECIDED on, and a qualified
+ *  key is one of the two ways it does. */
+export function qualifiedProviderFor(model: string): string | undefined {
   const row = loadCatalog().models.find((m) => m.key === model);
   return row?.providerId;
 }
@@ -97,12 +99,22 @@ export function providerSelectionFor(
   return ref ? { providerId: chosen.provider, authRef: ref } : { providerId: chosen.provider };
 }
 
-/** Which of Winter's inventory providers the pinned catalog says serve `model`. Exported for the
- *  parity test, which pins the EXACT answer for every model Winter's own default catalogue offers —
- *  so a catalog bump that adds or drops a row fails loudly in either direction. */
+/**
+ * Which of Winter's inventory providers the pinned catalog says serve `model` — each named ONCE.
+ *
+ * Exported for the parity test, which pins the EXACT answer for every model Winter's own default
+ * catalogue offers, so a catalog bump that adds or drops a row fails loudly in either direction.
+ *
+ * DE-DUPED (whole-branch review Minor 3): the inventory holds TWO slots for `anthropic` (the api-key
+ * account and the Console account), so the raw filter listed it twice. That is harmless for the
+ * parity pin but not for `beforeTurn`, whose "exactly one provider serves this model" narrowing
+ * reads this list's LENGTH — an anthropic-only-served model would have counted as two and never been
+ * gated. Inert today (no such model is reachable on the Winter leg) and wrong on its own terms, so
+ * it is a provider list, not a slot list.
+ */
 export function inventoryProvidersServing(model: string): string[] {
   const serving = new Set(catalogRowsFor(model).map((r) => r.providerId));
-  return WINTER_CREDENTIAL_INVENTORY.filter((s) => serving.has(s.provider)).map((s) => s.provider);
+  return [...new Set(WINTER_CREDENTIAL_INVENTORY.filter((s) => serving.has(s.provider)).map((s) => s.provider))];
 }
 
 /**

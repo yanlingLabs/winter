@@ -25,6 +25,7 @@ import {
   MemoryListParams, MemoryReadParams, MemoryWriteParams, MemoryDeleteParams, MemoryAuditParams,
   ProviderConfigureParams,
   ProviderLoginParams, ProviderLoginCodeParams, ProviderLogoutParams, ProviderStatusParams,
+  CredentialListParams, CredentialSetParams, CredentialRemoveParams,
   WorkflowListParams, WorkflowRunParams, WorkflowStopParams, WorkflowGetParams,
   SyncHeadsParams, SyncPullParams, SyncPushParams, SyncConfigParams, SyncMemoryParams,
   PanelListParams, PanelOpenTabParams, PanelCloseTabParams, PanelActivateTabParams, PanelReportNavigationParams,
@@ -36,6 +37,7 @@ import type { TokenAuthority } from "../auth/tokens";
 import type { SecretStore } from "../auth/secret-store";
 import { readCredentialMaterial, writeOpenAiApiKey } from "../auth/credential-material";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../runtime-sdk/keychain";
+import { credentialRows, credentialValueRefusal, evictSessionsForCredential, removeCredential, setCredential, CredentialStoreUnavailable } from "../runtime-sdk/credentials";
 import { effectiveOfficialAuthFor } from "../runtime-sdk/official-options";
 import type { ConsoleProfileBroker } from "../auth/console-profile-broker";
 import type { RoutineStore } from "../routines/store";
@@ -67,6 +69,7 @@ import { WinterLegRefusal, type LegSession, type WinterSessionDrivers } from "..
 import { readWinterTasks } from "../runtime-sdk/tasks-reader";
 import { ImportLegacySessionError } from "../runtime-sdk/import-legacy";
 import type { PlanSwitchOutcome } from "../runtime-sdk/handoff";
+import { recordNamesSelection } from "../runtime-sdk/handoff";
 import type { RuntimeSessionRecords } from "../runtime-state/records";
 import { loadCatalog, CLAUDE_FAMILY_ID } from "@yanlinglabs/winter-provider-catalog";
 import { catalogRowsFor } from "../runtime-sdk/provider-selection";
@@ -451,13 +454,38 @@ function rpcFromWinterRefusal(err: unknown): never {
     const invalid = err.code === "session_predates_winter_leg" || err.code === "not_supported_on_winter_leg"
       || err.code === "claude_executable_unavailable" || err.code === "runtime_selection_refused"
       || err.code === "official_console_router_unsupported" || err.code === "console_profile_missing";
-    throw new RpcFailure(invalid ? ERR.INVALID_PARAMS : ERR.INTERNAL, err.message, { code: err.code });
+    // WS-19 (W19-7): `reason` is additive beside `code` — one `runtime_selection_refused` covers
+    // several distinct situations, and `"no-credential"` is the one a client should render as "you
+    // have no key for <provider>" rather than "the model could not be selected". Same `data.reason`
+    // slot `session.setModel`'s own review refusals already use; omitted entirely when absent, so
+    // every existing error is byte-identical on the wire.
+    throw new RpcFailure(invalid ? ERR.INVALID_PARAMS : ERR.INTERNAL, err.message, {
+      code: err.code,
+      ...(err.reason === undefined ? {} : { reason: err.reason }),
+    });
   }
   const code = (err as { code?: unknown } | null)?.code;
   if (code === "winter_session_ended" || code === "not_supported_on_winter_leg") {
     throw new RpcFailure(ERR.INVALID_PARAMS, (err as Error).message, { code });
   }
   throw err;
+}
+
+/**
+ * WS-19: a typed credential refusal as the RPC error a client branches on. The CODE rides
+ * `error.data.code` (+ `data.door` where one applies), exactly as the Winter leg's own refusals do,
+ * so the Mac app, the phone and the CLI all read one vocabulary.
+ *
+ * INVALID_PARAMS for everything the caller can fix (an unknown provider, a wrong door, an unusable
+ * value); INTERNAL only for a store that would not answer. The message names the provider and the
+ * door and never the value — `credentials.ts` builds it and is the one place that rule lives.
+ */
+function credentialRpcFailure(refusal: { code: string; message: string; door?: string }): RpcFailure {
+  const numeric = refusal.code === "credential_store_unavailable" ? ERR.INTERNAL : ERR.INVALID_PARAMS;
+  return new RpcFailure(numeric, refusal.message, {
+    code: refusal.code,
+    ...(refusal.door === undefined ? {} : { door: refusal.door }),
+  });
 }
 
 /** Maps a `MemoryStore` failure's structural `kind` to a JSON-RPC code, for the memory.*
@@ -572,6 +600,19 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   // allowlist's other member, is Mac-local-only and never reaches this guard at all); the setter's
   // own participation check is a SECOND, narrower gate on top of that.
   METHODS.sessionSetDirs,
+  // WS-19 (W19-10, ruling R-10b-12): the phone manages the MAC's provider credentials — list, add,
+  // replace, remove. These are the ONLY provider-family verbs on this list: `provider.configure`,
+  // `provider.login`/`loginCode`/`logout` and `provider.status` all stay off it (the Console login
+  // is an interactive, Mac-local flow, and `provider.configure` rewrites the whole
+  // `settings.provider` block).
+  //
+  // `credential.set` carries a raw key phone -> Gateway -> daemon over the existing encrypted,
+  // authenticated channel. Accepted deliberately (spec §7): it is the user's own paired device, and
+  // `sync.config.exaKey` already crosses the same channel the other way. Nothing is persisted
+  // phone-side, and no result or error on any of the three ever carries a value back.
+  METHODS.credentialList,
+  METHODS.credentialSet,
+  METHODS.credentialRemove,
 ]);
 
 /** The session `mode`s a remote (iPhone) client may target at all — every other mode is Mac-local
@@ -705,6 +746,42 @@ function isClaudeCatalogModel(model: string): boolean {
  *  availability one: it does not check credentials or leg eligibility (the runtime decision still
  *  owns that, and still refuses typed when the catalog row exists but nothing can actually serve
  *  it) — it only stops widening to a string neither source recognizes as a real model. */
+/**
+ * M1 (whole-branch review, fix round 2): a CATEGORY for the daemon log, never `detail`'s raw text
+ * (this file's "names only" logging discipline). Router 0.0.6's `revert-pending` `detail` says
+ * whether the pending-revert note was written ("will self-converge") or ALSO failed ("needs manual
+ * reconciliation") — the two words this classifies on are the router's own documented vocabulary
+ * for that outcome, never guessed at; anything else is `"unrecognized"` rather than logged verbatim.
+ */
+/**
+ * The `lossy_fork` twin of `detailCategoryFor` below (D1 round-3 carry / WS-19 lane rider x1).
+ *
+ * The router's lossy-fork reasons are free text built around a step in its own eight-step barrier,
+ * and seven of the nine interpolate a caught `error.message` — which is how an absolute path was
+ * reaching the user. These substrings are the STABLE, path-free part of each: a reason that stops
+ * matching simply reads `unrecognized`, which is the honest answer and still leaks nothing. Order
+ * matters only in that the more specific phrases come first.
+ */
+function lossyForkCategoryFor(reason: string): string {
+  const lower = reason.toLowerCase();
+  if (lower.includes("session store could not be resolved")) return "store-unresolved";
+  if (lower.includes("re-plan against the current owner")) return "owner-changed";
+  if (lower.includes("no destination runtime confirmed")) return "unconfirmed-destination";
+  if (lower.includes("could not be staged")) return "staging-failed";
+  if (lower.includes("temp continuity")) return "temp-continuity-failed";
+  if (lower.includes("writer lease")) return "lease-unverified";
+  if (lower.includes("canonical tail is still moving")) return "tail-unsettled";
+  if (lower.includes("exited before it reached init")) return "destination-exited-before-init";
+  return "unrecognized";
+}
+
+function detailCategoryFor(detail: string): "self-converge" | "needs-manual-reconciliation" | "unrecognized" {
+  const lower = detail.toLowerCase();
+  if (lower.includes("manual reconciliation")) return "needs-manual-reconciliation";
+  if (lower.includes("self-converge")) return "self-converge";
+  return "unrecognized";
+}
+
 function resolveModelSelection(model: string, knownModels: { id: string }[]): string {
   if (knownModels.length === 0) return model;
   const resolved = resolveModelAlias(model, knownModels.map((m) => m.id));
@@ -735,6 +812,33 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
     throw new Error("startIpcServer: an engine requires a shared hub (engine and server must broadcast through the same SessionHub)");
   }
   const hub = opts.hub ?? new SessionHub(opts.store);
+
+  /**
+   * WS-19 (whole-branch review MAJOR 1): after a credential is added, replaced or removed, every
+   * LIVE child running on that provider is replaced so its next turn picks the change up.
+   *
+   * `evictSessionsForCredential` (`runtime-sdk/credentials.ts`) owns the rule and the turn-safety;
+   * this is the wiring, and it is deliberately BEST-EFFORT: the credential is already stored, so a
+   * driver table that is absent (a bare test server), a records door that is absent, or an evict
+   * that somehow throws must not turn a successful `credential.set` into a failure the caller reads
+   * as "your key was not saved". The worst case degrades to exactly the pre-fix behaviour — the
+   * change lands at the next incarnation.
+   */
+  async function evictSessionsForCredentialChange(providerId: string): Promise<void> {
+    const winter = opts.winter;
+    const records = opts.records;
+    if (winter === undefined || records === undefined) return;
+    try {
+      await evictSessionsForCredential({
+        list: () => winter.list(),
+        providerOf: (sessionId) => records.get(sessionId)?.providerId,
+        evict: (sessionId) => winter.evict(sessionId),
+        log: (line) => console.error(line),
+      }, providerId);
+    } catch (err) {
+      console.error(`credentials: replacing live children for ${providerId} failed (${err instanceof Error ? err.name : "unknown"}) — the change lands at the next incarnation`);
+    }
+  }
 
   /** P8b Task 16 / P8c-14: the session's live driver (Winter OR official), resuming one when its
    *  record says so (a daemon restart, an idle timeout). `undefined` ⇒ the engine's, exactly as
@@ -2078,15 +2182,52 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             case "refused":
               throw new RpcFailure(ERR.INVALID_PARAMS, outcome.detail, { code: outcome.code });
             case "confirmation_required":
+              // Winter Phase 10b (D1-4/D1-6, W18-23): `portable` is additive in the error data —
+              // now filled from `PlanSwitchOutcome.confirmation_required.portable`, itself sourced
+              // from the router's own `reviewSwitch` classification (D1-6). Never "runtime" in the
+              // message text (R-10b-4): as of 10b this same outcome also fires for a same-leg
+              // family change (gpt -> deepseek on Winter), which never moves a runtime at all.
               throw new RpcFailure(
                 ERR.INVALID_PARAMS,
-                "this model change would move the session to a different runtime and may lose in-flight provider state; resend with confirmLossy to proceed",
-                { code: "handoff_confirmation_required", warnings: outcome.warnings },
+                "this model change may lose some of the conversation's carried state; resend with confirmLossy to proceed",
+                { code: "handoff_confirmation_required", warnings: outcome.warnings, portable: outcome.portable },
               );
-            case "lossy_fork":
-              throw new RpcFailure(ERR.INVALID_PARAMS, outcome.reason, { code: "handoff_lossy_fork" });
-            case "blocked":
-              throw new RpcFailure(ERR.INTERNAL, outcome.reason, { code: "handoff_blocked" });
+            case "lossy_fork": {
+              // D1 round-3 carry, same class as `blocked` below and fixed the same way: the router
+              // builds a lossy-fork `reason` by interpolating `error.message` (see the barrier's own
+              // `lossy(...)` helper — "the shared session store could not be resolved …: ${error}",
+              // "the handoff could not be staged: ${error}", and five more), so an ABSOLUTE PATH was
+              // reaching the user verbatim in an RPC error. The raw reason now goes to the daemon
+              // log as a CATEGORY only, and the user gets one neutral sentence that is the same for
+              // every reason — never conditioned on its content, which would risk leaking what it
+              // says.
+              let currentModel: string | undefined;
+              try { currentModel = opts.store.meta(p.sessionId).model; } catch { /* unknown id: the fallback copy still reads fine */ }
+              console.error(`session.setModel: handoff offered a lossy fork for ${p.sessionId} (reason=${lossyForkCategoryFor(outcome.reason)})`);
+              throw new RpcFailure(
+                ERR.INVALID_PARAMS,
+                `Couldn't switch models without losing part of the conversation; the session stays on ${currentModel ?? "the default model"}.`,
+                { code: "handoff_lossy_fork" },
+              );
+            }
+            case "blocked": {
+              // M1 (whole-branch review, fix round 2): NEVER surface the raw `reason`/`detail` to
+              // the user — either can name router/daemon internals (R-10b-4's discipline applies
+              // here too). `detail` (present as of router 0.0.6 on the `revert-pending` reason —
+              // `DetailedHandoffOutcome`'s own doc: "widened with the detail the pinned union has
+              // no room for") goes to the daemon log ONLY, and as a CATEGORY derived from it, never
+              // its raw text (this file's own "names only" logging discipline). The user copy is
+              // the SAME neutral sentence for every `blocked` reason — never conditioned on
+              // `detail`'s content, which would risk leaking what it says.
+              let currentModel: string | undefined;
+              try { currentModel = opts.store.meta(p.sessionId).model; } catch { /* unknown id: the fallback copy still reads fine */ }
+              console.error(`session.setModel: handoff blocked for ${p.sessionId} (reason=${outcome.reason}${outcome.detail === undefined ? "" : `, detail=${detailCategoryFor(outcome.detail)}`})`);
+              throw new RpcFailure(
+                ERR.INTERNAL,
+                `Couldn't finish switching models; the session stays on ${currentModel ?? "the default model"}. Try again in a moment.`,
+                { code: "handoff_blocked" },
+              );
+            }
             // Fix round 1 (item 5, Lane 2's handoff m5 change): a turn is running and the switch's
             // OWN continuation now commits the model preference itself, exactly once, when it
             // settles to "resumed" — this RPC must NOT also write it now. Writing here too would
@@ -2097,8 +2238,43 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
             case "deferred":
               return {};
             case "same-runtime":
-            case "resumed":
+            case "resumed": {
+              // Winter Phase 10b (D1 fix round 3, INVARIANT 1c): `meta.model` and the 8a record may
+              // NEVER disagree about which leg/selection this session runs on.
+              //
+              // `session-driver.ts`'s `resume()` picks the leg from `record.runtimeKind` and
+              // `resumeOfficial` hands `record.selection` on BY IDENTITY; `meta.model` is read only
+              // by the Winter leg's own `optionsFor`. So a `session.setModel` that writes
+              // `meta.model` while the record still names the SOURCE has not switched anything — it
+              // has made `session.list` show the new model while every future turn runs the old one,
+              // silently and permanently. That is exactly what round 2's "not in the runtime
+              // directory ⇒ same-runtime" mapping produced, and it is why this guard is here rather
+              // than only inside `planAndApplySwitch`: the store write itself lives on this side.
+              //
+              // Guarded ONLY when the outcome actually carries a decided selection. A bare
+              // `same-runtime` with no `decided` is one of `planAndApplySwitch`'s early bail-outs
+              // (`model === null`, no record at all, an engine-era row, a `winter-test/*` double, an
+              // off-catalog model) — no leg decision ever ran, so there is nothing for a record to
+              // agree or disagree with, and those keep their ordinary store-write behaviour. Also
+              // inert when no `records` door is wired (a daemon whose 8a spine is offline, and every
+              // test that boots the server without one): the pre-10b behaviour, unchanged.
+              const decidedSelection = outcome.kind === "resumed" ? outcome.selection : outcome.decided;
+              if (decidedSelection !== undefined && opts.records !== undefined
+                  && !recordNamesSelection(opts.records.get(p.sessionId), decidedSelection)) {
+                let currentModel: string | undefined;
+                try { currentModel = opts.store.meta(p.sessionId).model; } catch { /* unknown id: the fallback copy still reads fine */ }
+                // Category only — never the selection itself, which names a provider and a model
+                // ref and rides alongside credential-adjacent facts (this file's own "names only"
+                // logging discipline, and the runtime-state header's rule about record contents).
+                console.error(`session.setModel: refusing to report ${outcome.kind} for ${p.sessionId} — the durable runtime record does not name the requested model's leg/selection (category=record-disagrees)`);
+                throw new RpcFailure(
+                  ERR.INTERNAL,
+                  `Couldn't finish switching models; the session stays on ${currentModel ?? "the default model"}. Try again in a moment.`,
+                  { code: "handoff_blocked" },
+                );
+              }
               break; // the ordinary store write below still applies
+            }
           }
         }
         try {
@@ -2897,6 +3073,71 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const apiKey = material?.kind === "api-key";
         const consoleProfile = opts.consoleBroker?.profileExists() ?? false;
         return { anthropic: { apiKey, consoleProfile, auth, effective: effectiveOfficialAuthFor(auth, apiKey, consoleProfile) } };
+      }
+
+      // -----------------------------------------------------------------------------------------
+      // WS-19 — provider credentials: `credential.list` / `credential.set` / `credential.remove`.
+      //
+      // The only provider-family verbs a REMOTE (phone) client may call. Everything they answer with
+      // is names and booleans; the one value that ever crosses is `credential.set`'s `apiKey`, in
+      // one direction, and it is never logged here, never echoed in a result, never put in an error
+      // message and never written into an event. There is no generic RPC request logger in this
+      // file to suppress it in (verified — the pump at the top of this file logs nothing per
+      // request, and `parseParams` prints zod issue PATHS only, never values); the W19-14 sweep
+      // pins that end-to-end against a sentinel rather than trusting this paragraph.
+      //
+      // All three read the store LIVE on every call, so `credential.set` followed immediately by
+      // `session.create` on that provider works with no daemon restart (W19-8) — the standing
+      // "no setting or credential change may require a restart" rule.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.credentialList: {
+        parseParams(CredentialListParams, params);
+        if (!opts.secrets) throw new RpcFailure(ERR.INTERNAL, "credential.list is not available on this server (no secret store configured)", { code: "credential_store_unavailable" });
+        try {
+          return { providers: await credentialRows(opts.secrets, opts.winterHome) };
+        } catch (err) {
+          // Review Minor 4: a store that would not answer ANY probe is a typed refusal, never a
+          // list of absent rows — "you have no credentials" is a confident, wrong answer that
+          // invites a user to re-enter keys they already have. The message names no item.
+          if (err instanceof CredentialStoreUnavailable) throw credentialRpcFailure(err);
+          throw err;
+        }
+      }
+
+      case METHODS.credentialSet: {
+        // Review Minor 7 (+ its BAND, fix round 2): W19-4 names `credential_value_invalid` for an
+        // unusable value, but the wire schema's own `min`/`max` would refuse one FIRST as a plain
+        // INVALID_PARAMS with no `data.code` at all — a client branching on the typed vocabulary
+        // would see nothing to branch on. So the value rule runs HERE, before `parseParams`, and the
+        // §5 schema stays exactly as Lane Q and Lane I mirror it.
+        //
+        // THE BAND the first pass left open: a value whose RAW length is over the limit but whose
+        // TRIMMED length is not (a pasted key with a lot of trailing whitespace). The CLI trims and
+        // accepts it; the RPC's `.max()` saw the raw string and refused it untyped. Both doors now
+        // apply the SAME trim-based rule and hand the TRIMMED value on, so the two agree on every
+        // input. The refusal is names-and-shape only: the value is never read, quoted or logged, and
+        // it never says how long it was.
+        const rawKey = (params as { apiKey?: unknown } | null | undefined)?.apiKey;
+        if (typeof rawKey === "string") {
+          const invalid = credentialValueRefusal(rawKey);
+          if (invalid !== undefined) throw credentialRpcFailure(invalid);
+          params = { ...(params as Record<string, unknown>), apiKey: rawKey.trim() };
+        }
+        const p = parseParams(CredentialSetParams, params);
+        if (!opts.secrets) throw new RpcFailure(ERR.INTERNAL, "credential.set is not available on this server (no secret store configured)", { code: "credential_store_unavailable" });
+        const refusal = await setCredential(opts.secrets, p.providerId, p.apiKey);
+        if (refusal !== undefined) throw credentialRpcFailure(refusal);
+        await evictSessionsForCredentialChange(p.providerId);
+        return { ok: true };
+      }
+
+      case METHODS.credentialRemove: {
+        const p = parseParams(CredentialRemoveParams, params);
+        if (!opts.secrets) throw new RpcFailure(ERR.INTERNAL, "credential.remove is not available on this server (no secret store configured)", { code: "credential_store_unavailable" });
+        const outcome = await removeCredential(opts.secrets, p.providerId);
+        if ("code" in outcome) throw credentialRpcFailure(outcome);
+        await evictSessionsForCredentialChange(p.providerId);
+        return { ok: true, removed: outcome.removed };
       }
 
       // -----------------------------------------------------------------------------------------
