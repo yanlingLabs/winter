@@ -435,18 +435,14 @@ describeWithWinterBinary("A-2: Claude -> GPT (official -> Winter)", (winterBin) 
       await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.indexOf(e) >= sinceIdx, 45_000);
       expect(openaiFakeRef!.requests.length).toBeGreaterThan(openaiRequestsBefore);
       const lastReq = openaiFakeRef!.requests[openaiFakeRef!.requests.length - 1]!;
-      const reqBody = JSON.stringify(lastReq.body ?? {});
+      // item 0 (resume-d2-fix2.md, report-lane-d1-fix3.md): `lastReq.body` is ALREADY the raw
+      // request body STRING — `JSON.stringify`-ing it again double-encodes it (every `"` becomes
+      // `\"`), so a literal `toContain('kind="summary"')` check could never match. Asserted directly
+      // against the string; the product carry is GREEN.
+      const reqBody = lastReq.body;
       expect(reqBody).toContain(PRIOR_TEXT);
-      // STILL RED (2026-09-14): the SDK's own message reader drops `message.model`, root-caused and
-      // fixed upstream but not yet pinned in this build (SDK 0.0.12 — see this file's header). The
-      // visible conversation DOES carry (the prior USER text above, and separately confirmed the
-      // assistant's visible reply "the answer is 4" also reaches this request) but NEITHER a
-      // `<recovered_reasoning` tag NOR the `<prior_model_handoff>` fallback appears anywhere in the
-      // request body — the Claude turn's `thinking` content (confirmed landed in the canonical file
-      // above) does not visibly carry in any form. Left asserting the SPEC's required tag (W18-15/
-      // 17) rather than weakened.
       expect(reqBody).toContain("recovered_reasoning");
-      expect(reqBody).toContain("kind=\"summary\"");
+      expect(reqBody).toContain('kind=\\"summary\\"'); // the body is itself a JSON string, so an embedded `"` is escaped
       expect(reqBody).not.toContain("SIG-DUMMY-A2-1");
       expect(reqBody).not.toContain("redacted_thinking");
     }, 90_000);
