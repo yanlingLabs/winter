@@ -9,7 +9,7 @@
 // (never a refusal) but must NOT write `meta.model` now, or the continuation's later write would
 // either double it or race a preference this RPC never actually applied.
 import { describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, type WritableSocket } from "@yanlinglabs/winter-protocol";
@@ -111,6 +111,54 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
       }
     });
   }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // D1 round-3 carry (WS-19 lane rider x1) — the `lossy_fork` arm's user copy.
+  //
+  // The router builds a lossy-fork `reason` by interpolating a caught `error.message` in seven of
+  // its nine cases, so an ABSOLUTE PATH was reaching the user verbatim in the RPC error. Same class
+  // as the `blocked` arm's own M1 fix, and fixed the same way: one neutral sentence for every
+  // reason, and the raw reason only in the daemon log, only as a category.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  test("lossy_fork: the user copy is neutral and NEVER carries the router's raw reason (an absolute path)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-setmodel-lossy-copy-"));
+    const store = new SessionStore(home);
+    const sessionId = store.createSession("global");
+    store.setModel(sessionId, "openai/gpt-5.4");
+    const leaky = `the shared session store could not be resolved, so nothing about this session can be read or written: ENOENT: no such file or directory, open '${home}/runtime-state.db'`;
+    const { server, c: client } = await boot(store, home, { kind: "lossy_fork", reason: leaky });
+    try {
+      const res = await client.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet", confirmLossy: true });
+      expect(res.error?.data?.code).toBe("handoff_lossy_fork");
+      expect(res.error!.message).toBe("Couldn't switch models without losing part of the conversation; the session stays on openai/gpt-5.4.");
+      // The whole envelope, not just the message: no fragment of the raw reason may ride anywhere.
+      expect(JSON.stringify(res)).not.toContain(home);
+      expect(JSON.stringify(res)).not.toContain("ENOENT");
+      // ...and nothing was written.
+      expect(store.meta(sessionId).model).toBe("openai/gpt-5.4");
+    } finally {
+      client.close();
+      server.stop();
+      store.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("lossy_fork on a session with no model of its own still reads as a sentence", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-setmodel-lossy-default-"));
+    const store = new SessionStore(home);
+    const sessionId = store.createSession("global");
+    const { server, c: client } = await boot(store, home, { kind: "lossy_fork", reason: "anything at all" });
+    try {
+      const res = await client.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet", confirmLossy: true });
+      expect(res.error!.message).toBe("Couldn't switch models without losing part of the conversation; the session stays on the default model.");
+    } finally {
+      client.close();
+      server.stop();
+      store.close();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 
   // ══════════════════════════════════════════════════════════════════════════════════════════════
   // Winter Phase 10b (D1 fix round 3) — THE 1c INVARIANT.

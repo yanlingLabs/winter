@@ -34,6 +34,24 @@ const SELECTION = (kind: "winter-agent" | "claude-agent"): RuntimeSelection => (
   sdkVersion: "0.0.4", reason: "test", decidedAt: new Date().toISOString(),
 });
 
+/**
+ * WS-19 lane rider x3 (a LATENT FLAKE, not a failure anyone has seen yet): `SELECTION()` stamps
+ * `decidedAt: new Date().toISOString()` at CALL TIME, so `expect(out).toEqual({kind:"resumed",
+ * selection: SELECTION(...)})` builds a SECOND, independently-timestamped object and compares it to
+ * the one the barrier already produced. A millisecond boundary between the two calls fails the
+ * assertion for a reason that has nothing to do with what the test is about. Several sites in this
+ * file already work around it by hoisting one `SELECTION()` and reusing it (see the comments at the
+ * deferred-outcome tests below); this is the same fix for the four comparisons that cannot hoist,
+ * because the barrier builds its own.
+ *
+ * `expect.any(String)` rather than deleting the field: `decidedAt` being PRESENT and a string is
+ * itself part of the shape a `resumed` outcome must carry, and stripping it would stop pinning that.
+ */
+const RESUMED_ANY_TIME = (kind: "winter-agent" | "claude-agent"): unknown => ({
+  kind: "resumed",
+  selection: { ...SELECTION(kind), decidedAt: expect.any(String) },
+});
+
 function seedRecord(records: RuntimeSessionRecords, sessionId: string): void {
   records.create({
     winterSessionId: sessionId, runtimeKind: "winter-agent", backendSessionId: "be-1",
@@ -210,7 +228,7 @@ describe("planAndApplySwitch", () => {
         deps({ records, barrier, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }) }),
         "s1", "claude-sonnet-5", true,
       );
-      expect(out).toEqual({ kind: "resumed", selection: SELECTION("claude-agent") });
+      expect(out).toEqual(RESUMED_ANY_TIME("claude-agent"));
       expect(planCalled).toBe(true);
       expect(executedPlan).toBe(plan);
     });
@@ -521,7 +539,7 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
         "s1", "claude-sonnet-5", true,
       );
       expect(planCalled).toBe(true);
-      expect(out).toEqual({ kind: "resumed", selection: SELECTION("claude-agent") });
+      expect(out).toEqual(RESUMED_ANY_TIME("claude-agent"));
     });
   });
 
@@ -561,7 +579,7 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
         deps({ records, barrier, runtime, store: { meta: () => ({ mode: "code", cwd: "/x" }) }, settings: () => live }),
         "s1", "claude-sonnet-5", true,
       );
-      expect(out1).toEqual({ kind: "resumed", selection: SELECTION("claude-agent") });
+      expect(out1).toEqual(RESUMED_ANY_TIME("claude-agent"));
       // Flip the SAME getter to an explicit false — no daemon restart, no new `deps` object.
       live = { runtimes: { handoff: { crossRuntime: false } } } as unknown as Settings;
       const out2 = await planAndApplySwitch(
@@ -592,7 +610,7 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
         "s1", "claude-sonnet-5", true,
       );
       expect(planCalled).toBe(true);
-      expect(out).toEqual({ kind: "resumed", selection: SELECTION("claude-agent") });
+      expect(out).toEqual(RESUMED_ANY_TIME("claude-agent"));
     });
   });
 

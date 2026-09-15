@@ -745,6 +745,27 @@ function isClaudeCatalogModel(model: string): boolean {
  * reconciliation") — the two words this classifies on are the router's own documented vocabulary
  * for that outcome, never guessed at; anything else is `"unrecognized"` rather than logged verbatim.
  */
+/**
+ * The `lossy_fork` twin of `detailCategoryFor` below (D1 round-3 carry / WS-19 lane rider x1).
+ *
+ * The router's lossy-fork reasons are free text built around a step in its own eight-step barrier,
+ * and seven of the nine interpolate a caught `error.message` — which is how an absolute path was
+ * reaching the user. These substrings are the STABLE, path-free part of each: a reason that stops
+ * matching simply reads `unrecognized`, which is the honest answer and still leaks nothing. Order
+ * matters only in that the more specific phrases come first.
+ */
+function lossyForkCategoryFor(reason: string): string {
+  const lower = reason.toLowerCase();
+  if (lower.includes("session store could not be resolved")) return "store-unresolved";
+  if (lower.includes("re-plan against the current owner")) return "owner-changed";
+  if (lower.includes("no destination runtime confirmed")) return "unconfirmed-destination";
+  if (lower.includes("could not be staged")) return "staging-failed";
+  if (lower.includes("temp continuity")) return "temp-continuity-failed";
+  if (lower.includes("writer lease")) return "lease-unverified";
+  if (lower.includes("canonical tail is still moving")) return "tail-unsettled";
+  return "unrecognized";
+}
+
 function detailCategoryFor(detail: string): "self-converge" | "needs-manual-reconciliation" | "unrecognized" {
   const lower = detail.toLowerCase();
   if (lower.includes("manual reconciliation")) return "needs-manual-reconciliation";
@@ -2135,8 +2156,24 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
                 "this model change may lose some of the conversation's carried state; resend with confirmLossy to proceed",
                 { code: "handoff_confirmation_required", warnings: outcome.warnings, portable: outcome.portable },
               );
-            case "lossy_fork":
-              throw new RpcFailure(ERR.INVALID_PARAMS, outcome.reason, { code: "handoff_lossy_fork" });
+            case "lossy_fork": {
+              // D1 round-3 carry, same class as `blocked` below and fixed the same way: the router
+              // builds a lossy-fork `reason` by interpolating `error.message` (see the barrier's own
+              // `lossy(...)` helper — "the shared session store could not be resolved …: ${error}",
+              // "the handoff could not be staged: ${error}", and five more), so an ABSOLUTE PATH was
+              // reaching the user verbatim in an RPC error. The raw reason now goes to the daemon
+              // log as a CATEGORY only, and the user gets one neutral sentence that is the same for
+              // every reason — never conditioned on its content, which would risk leaking what it
+              // says.
+              let currentModel: string | undefined;
+              try { currentModel = opts.store.meta(p.sessionId).model; } catch { /* unknown id: the fallback copy still reads fine */ }
+              console.error(`session.setModel: handoff offered a lossy fork for ${p.sessionId} (reason=${lossyForkCategoryFor(outcome.reason)})`);
+              throw new RpcFailure(
+                ERR.INVALID_PARAMS,
+                `Couldn't switch models without losing part of the conversation; the session stays on ${currentModel ?? "the default model"}.`,
+                { code: "handoff_lossy_fork" },
+              );
+            }
             case "blocked": {
               // M1 (whole-branch review, fix round 2): NEVER surface the raw `reason`/`detail` to
               // the user — either can name router/daemon internals (R-10b-4's discipline applies
