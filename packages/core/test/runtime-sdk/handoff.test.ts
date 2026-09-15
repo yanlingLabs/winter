@@ -1752,6 +1752,35 @@ describe("item 6: a same-leg PROVIDER change replaces the live child", () => {
     });
   });
 
+  // Fix round 4 review (N2): the evict fired even when the C1 record patch THREW. The record then
+  // still names the OLD provider, `ipc/server.ts`'s 1c invariant check reads it, sees the
+  // disagreement and refuses the whole switch — so the child was thrown away for a switch that never
+  // happened, and the next send paid a cold start and a resume to reach the SAME provider.
+  test("N2: a C1 patch that throws leaves the live child alone — nothing moved, so nothing is replaced", async () => {
+    await withRs(async (_rs, records) => {
+      seedRecord(records, "s1"); // seeded providerId "p"
+      const evicted: string[] = [];
+      const winter = fakeWinter({ live: idleLive(false, async () => {}) });
+      const failingRecords = Object.assign(Object.create(Object.getPrototypeOf(records) as object), records, {
+        get: (id: string) => records.get(id),
+        patch: () => { throw new Error("RuntimeSessionStateMismatchError"); },
+      }) as RuntimeSessionRecords;
+      const out = await planAndApplySwitch(
+        deps({
+          records: failingRecords,
+          winter: { ...winter, evict: async (id: string) => { evicted.push(id); } },
+          runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-reasoner")) }),
+          barrier: { plan: async () => { throw new Error("not reached — same leg"); }, execute: async () => { throw new Error("not reached"); }, reviewSwitch: async () => ({ prompt: false }) },
+        }),
+        "s1", "deepseek-chat", false,
+      );
+      expect(out.kind).toBe("same-runtime");
+      expect(evicted).toEqual([]);
+      // The record never moved, which is what the caller's own 1c guard will refuse on.
+      expect(records.get("s1")!.providerId).toBe("p");
+    });
+  });
+
   test("no live child at all is a no-op — the next resume reads the record", async () => {
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1");

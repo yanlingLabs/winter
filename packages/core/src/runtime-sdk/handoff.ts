@@ -1033,6 +1033,9 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
     // Winter Phase 10b (D1 fix round 4, item 6 — Lane P's product finding). Captured BEFORE the C1
     // patch below overwrites it: the provider the LIVE child was actually spawned against.
     const providerBeforeSwitch = deps.records.get(sessionId)?.providerId;
+    // D1 round-4 review N2: the evict below is gated on the record having ACTUALLY moved. See its
+    // own note for why.
+    let recordMoved = false;
     try {
       const current = deps.records.get(sessionId);
       if (current !== undefined) {
@@ -1044,6 +1047,7 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
           modelRef: decided.modelRef,
           authRef: destinationAuthRefLocator,
         });
+        recordMoved = true;
       }
     } catch (err) {
       deps.log?.(`handoff: C1 same-leg record patch failed for ${sessionId} (${err instanceof Error ? err.name : "unknown"}) — the caller's own invariant check will refuse the switch rather than let meta.model and the record disagree`);
@@ -1072,7 +1076,14 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
     // `evict()` ends the child RESUMABLY (it is `end()`, not a kill) and is documented never to
     // throw, so the next `send`/`ensure` re-assembles from the record and the transcript — the same
     // mechanism `tryReselectWithNothingToCarry` relies on, and the same one an idle reap uses.
-    if (providerBeforeSwitch !== undefined && providerBeforeSwitch !== decided.providerId) {
+    //
+    // D1 round-4 review N2: GATED ON THE RECORD HAVING MOVED. When the C1 patch above threw, the
+    // record still names the OLD provider — and `ipc/server.ts`'s own 1c invariant check then reads
+    // that record, sees it disagree with the requested selection, and refuses the whole switch
+    // (`handoff_blocked`, nothing written). Evicting anyway would have thrown away a perfectly good
+    // child for a switch that never happened: the next send would re-spawn it against the SAME
+    // provider, paying a cold start and a resume for nothing, on a path that is already failing.
+    if (recordMoved && providerBeforeSwitch !== undefined && providerBeforeSwitch !== decided.providerId) {
       const liveChild = deps.winter.get(sessionId);
       if (liveChild !== undefined) {
         if (liveChild.turnRunning === true) {
