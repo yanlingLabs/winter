@@ -41,6 +41,14 @@
 //      SAME two directions `handoff-parity-e2e.test.ts`'s A-1/A-2 already prove in depth, so this
 //      file does not re-implement them; it only confirms the chain's own FIRST and LAST prompts
 //      fire against a REAL session (not just the resolver).
+//
+// RESOLVED (WS-19, Lane P): the finding above is a HISTORICAL RECORD, accurate for when it was
+// written — it is no longer this daemon's current state. W19-1 derives `WINTER_CREDENTIAL_INVENTORY`
+// from the catalog (deepseek/zai/openrouter are now real, routable rows) and W19-6 gives
+// `session-driver.ts`'s `optionsFor` a connection seam for any provider with a
+// `settings.providers.<id>.baseUrl`, not just `openai`. Part 3 below now proves the FULL chain,
+// BODY-LEVEL, on every hop — see its own header (and `test/helpers/carriage.ts`) for what "body-
+// level" means and the two per-adapter carriage-tag forms it measures.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

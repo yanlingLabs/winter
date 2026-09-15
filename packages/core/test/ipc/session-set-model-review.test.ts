@@ -22,6 +22,17 @@
 // `openai/gpt-5.6-sol`, hidden reasoning) plus the SAME real-resolver/real-`classifySwitch` technique
 // `five-hop-chain-e2e.test.ts` already established for the literal DeepSeek/GLM pairing — never a
 // fixture that fakes `readableState`/`continuation`.
+//
+// RESOLVED (WS-19, Lane P): the finding above is a HISTORICAL RECORD, accurate for when it was
+// written — it is no longer this daemon's current state (W19-1 derives the credential inventory from
+// the catalog; W19-6 gives `session-driver.ts` a connection seam for any provider with a
+// `settings.providers.<id>.baseUrl`). The substitutes above still stand as real coverage of the same
+// classification, and the file's OWN "A-7 / A-7a — THE LITERAL PAIRINGS, now reachable" section
+// (below) adds the literal pairings beside them, body-level, through real sessions — including the
+// A-7a deviation it records: the spec's literal "Claude on Anthropic -> Claude on OpenRouter" case is
+// unbuildable against the pinned catalog (0.0.12 carries no OpenRouter Claude row at all), so it is
+// substituted with the same SHAPE the case is actually about (one canonical model, two providers,
+// switching silently) using a pairing the catalog does carry.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
