@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ERR, LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, CredentialListResult, type WritableSocket } from "@yanlinglabs/winter-protocol";
@@ -21,7 +21,7 @@ import { ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, ANTHROPIC_CREDENTIAL_SECRET_N
 // The security obligation these tests carry is NEGATIVE and load-bearing: a `credential.list` reply
 // and every `credential.set`/`remove` result and ERROR is asserted not to contain the sentinel. The
 // end-to-end version of that sweep (daemon log, session JSONL, history, remote stream) is
-// `test/ipc/credentials-secret-sweep.test.ts` (W19-14); this file pins the RPC boundary itself.
+// `test/e2e/credentials-routing-e2e.test.ts` (W19-14); this file pins the RPC boundary itself.
 
 const SENTINEL = "WS19-SENTINEL-rpc-9f2c41";
 
@@ -275,6 +275,92 @@ describe("credential.list / credential.set / credential.remove (WS-19)", () => {
     const configure = await c.request(METHODS.providerConfigure, { apiKey: "sk-x", baseUrl: "https://example.com/v1" });
     expect(configure.result).toBeUndefined();
     expect(configure.error.code).toBe(ERR.UNAUTHORIZED);
+    c.close();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// W19-14's NEGATIVE pins — what WS-19 must NOT have changed, and the logging discipline.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+describe("WS-19 negative pins", () => {
+  let cleanup: (() => void) | undefined;
+  afterEach(() => { cleanup?.(); cleanup = undefined; });
+
+  async function boot(): Promise<{ home: string; socketPath: string; harnessToken: string; secrets: FileSecretStore }> {
+    const home = mkdtempSync(join(tmpdir(), "ws19-neg-"));
+    // `provider.status` reads settings live, so the home needs a real one.
+    writeFileSync(join(home, "settings.json"), JSON.stringify({
+      schemaVersion: 2, provider: { type: "openai-compatible", model: "m", baseUrl: "https://example.com/v1" },
+    }));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "auth-secrets")));
+    const tokens = await authority.ensureTokens();
+    const secrets = new FileSecretStore(join(home, "secrets"));
+    const server = startIpcServer({
+      socketPath, serverVersion: "test", tokens: authority, store, secrets, winterHome: home,
+      dangerousDomainsAdded: () => [], liveModel: () => "m",
+    });
+    cleanup = () => { server.stop(); store.close(); rmSync(home, { recursive: true, force: true }); };
+    return { home, socketPath, harnessToken: tokens.harness, secrets };
+  }
+
+  test("sync.config's shape is unchanged — `exaKey` still carries the RAW value, and `credential.set exa` is the same slot", async () => {
+    const { socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "test");
+
+    // Pre-existing and deliberately OUT of WS-19's scope (spec §8): `sync.config` is the phone's own
+    // standalone-chat bootstrap and hands it the Exa key itself. What WS-19 must not do is move the
+    // slot out from under it — `credential.set exa` writes `exa-api-key`, the same name it reads.
+    await c.request(METHODS.credentialSet, { providerId: "exa", apiKey: SENTINEL });
+    const cfg = (await c.request(METHODS.syncConfig, {})).result;
+    expect(cfg).toMatchObject({ exaKey: SENTINEL });
+    expect(Object.keys(cfg as object).sort()).toEqual(
+      ["clientEfforts", "defaultEffort", "defaultModel", "dangerousDomains", "exaKey", "models", "provider"].sort(),
+    );
+    c.close();
+  });
+
+  test("provider.status's shape is unchanged, and `credential.set anthropic` is the api-key arm it reports", async () => {
+    const { socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "test");
+
+    const before = (await c.request(METHODS.providerStatus, {})).result as { anthropic: Record<string, unknown> };
+    expect(Object.keys(before.anthropic).sort()).toEqual(["apiKey", "auth", "consoleProfile", "effective"].sort());
+    expect(before.anthropic.apiKey).toBe(false);
+
+    await c.request(METHODS.credentialSet, { providerId: "anthropic", apiKey: SENTINEL });
+    const after = (await c.request(METHODS.providerStatus, {})).result as { anthropic: Record<string, unknown> };
+    expect(after.anthropic.apiKey).toBe(true);
+    expect(after.anthropic.consoleProfile).toBe(false);
+    // Names and booleans only, here too.
+    expect(JSON.stringify(after)).not.toContain(SENTINEL);
+    c.close();
+  });
+
+  test("the RPC read pump prints NOTHING per request — `credential.set`'s params can never reach a log", async () => {
+    // VERIFIED BY CONSTRUCTION and pinned here: `ipc/server.ts` has no generic request logger at
+    // all (the read pump decodes, dispatches and replies), and `parseParams` renders zod issue
+    // PATHS only, never values. This asserts the observable half of that: a successful set, a
+    // schema rejection and a typed refusal together produce no console output carrying the value.
+    const { socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "test");
+    const lines: string[] = [];
+    const errSpy = spyOn(console, "error").mockImplementation((...a: unknown[]) => { lines.push(a.map(String).join(" ")); });
+    const logSpy = spyOn(console, "log").mockImplementation((...a: unknown[]) => { lines.push(a.map(String).join(" ")); });
+    const warnSpy = spyOn(console, "warn").mockImplementation((...a: unknown[]) => { lines.push(a.map(String).join(" ")); });
+    try {
+      await c.request(METHODS.credentialSet, { providerId: "deepseek", apiKey: SENTINEL });
+      await c.request(METHODS.credentialSet, { providerId: "deepseek", apiKey: "a".repeat(5000) }); // schema rejection
+      await c.request(METHODS.credentialSet, { providerId: "codex-oauth", apiKey: SENTINEL });      // typed refusal
+      await c.request(METHODS.credentialRemove, { providerId: "deepseek" });
+    } finally {
+      errSpy.mockRestore(); logSpy.mockRestore(); warnSpy.mockRestore();
+    }
+    for (const line of lines) expect(line).not.toContain(SENTINEL);
     c.close();
   });
 });
