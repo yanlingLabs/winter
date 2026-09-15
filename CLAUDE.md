@@ -48,7 +48,7 @@ bun src/main.ts                      # interactive TUI (Ink)
 
 ### Profiles — which daemon you are talking to
 
-`WINTER_PROFILE=dev` selects the dev profile: default home `~/.winter-dev`, Keychain service `com.winter.core.dev`, app "Winter Dev" (`com.winter.app.dev`). The default `dist` profile is `~/.winter` + `com.winter.core` + `Winter.app` (`com.winter.app`) — the user's daily driver. `WINTER_HOME` overrides the home for either (`winter-dir.ts`); `profile.ts`'s `keychainService()` honours `WINTER_KEYCHAIN_SERVICE` only when the caller passes a home that is *not* the profile's default, which is how tests stay off the real Keychain.
+The home and the profile are set INDEPENDENTLY, and the home is profile-blind: `resolveWinterHome()` reads only `WINTER_HOME` and defaults to `~/.winter` — the user's live daily driver (`winter-dir.ts`). `WINTER_PROFILE=dev` changes only the Keychain service (`com.winter.core.dev`) and the app identity ("Winter Dev", `com.winter.app.dev`); it does NOT move the home. So `WINTER_PROFILE=dev` alone would run dev-profile tooling against `~/.winter` — always set BOTH (`WINTER_HOME=~/.winter-dev WINTER_PROFILE=dev …`). The `~/.winter-dev` convention is supplied by the `winter-dev` wrapper script (it exports `WINTER_HOME` for you), not by core code. The `dist` profile is `~/.winter` + `com.winter.core` + `Winter.app` (`com.winter.app`). `profile.ts`'s `keychainService()` honours `WINTER_KEYCHAIN_SERVICE` only when the caller passes a home that is *not* the profile's default, which is how tests stay off the real Keychain.
 
 ```sh
 WINTER_HOME=~/.winter-dev WINTER_PROFILE=dev bun src/main.ts daemon run   # or: winter-dev daemon run
