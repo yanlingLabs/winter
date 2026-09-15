@@ -2,7 +2,7 @@ import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
 import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, runRuntimesProbe, resolveWinterProfile } from "@yanlinglabs/winter-core";
-import type { Settings } from "@yanlinglabs/winter-core";
+import type { CredentialRow, SecretStore, Settings } from "@yanlinglabs/winter-core";
 import { METHODS, type ApprovalPolicy, type Task } from "@yanlinglabs/winter-protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
 import { WinterClient } from "./client";
@@ -1092,6 +1092,69 @@ export async function runBgKillRoute(c: WinterClient, sessionId: string, taskId:
   return { ok: true };
 }
 
+/**
+ * WS-19 (W19-11) — `winter credentials`'s decision, extracted from its `case` block exactly the way
+ * the eight session verbs above were: store + args in, a plain discriminated result out, nothing
+ * printed and nothing exited. That is what makes it testable on a `FileSecretStore` in a temp dir —
+ * the `case` block's real `KeychainSecretStore` can never be used from a test (`keychainService()`
+ * resolves the REAL `com.winter.core` service when no home is passed, and these tests must never
+ * touch it).
+ *
+ * `readKey` is injected for the same reason: the real one is `readSecret`'s masked raw-mode TTY
+ * prompt, and it is the ONLY way this command accepts a value — never a flag, never a stdin pipe,
+ * never an env var, because a key on a command line lands in shell history and `ps` output.
+ *
+ * It is NOT called until the verb and the provider id are known to be well-formed, so a typo in the
+ * provider id never leaves the user staring at a masked prompt for a key that was going to be
+ * refused anyway.
+ */
+export type CredentialsRouteResult =
+  | { ok: true; kind: "list"; rows: CredentialRow[] }
+  | { ok: true; kind: "set"; providerId: string }
+  | { ok: true; kind: "remove"; providerId: string; removed: boolean }
+  | { ok: false; message: string; code?: string; door?: string };
+
+export async function runCredentialsRoute(
+  secrets: SecretStore,
+  home: string,
+  verb: string | undefined,
+  providerId: string | undefined,
+  readKey: () => Promise<string>,
+): Promise<CredentialsRouteResult> {
+  const { credentialRows, setCredential, removeCredential } = await import("@yanlinglabs/winter-core");
+  switch (verb ?? "list") {
+    case "list":
+      return { ok: true, kind: "list", rows: await credentialRows(secrets, home) };
+    case "set": {
+      if (!providerId) return { ok: false, message: "usage: winter credentials set <providerId>" };
+      const refusal = await setCredential(secrets, providerId, await readKey());
+      return refusal === undefined
+        ? { ok: true, kind: "set", providerId }
+        : { ok: false, message: refusal.message, code: refusal.code, ...(refusal.door === undefined ? {} : { door: refusal.door }) };
+    }
+    case "remove": {
+      if (!providerId) return { ok: false, message: "usage: winter credentials remove <providerId>" };
+      const outcome = await removeCredential(secrets, providerId);
+      return "code" in outcome
+        ? { ok: false, message: outcome.message, code: outcome.code, ...(outcome.door === undefined ? {} : { door: outcome.door }) }
+        : { ok: true, kind: "remove", providerId, removed: outcome.removed };
+    }
+    default:
+      return { ok: false, message: "usage: winter credentials [list] | credentials set <providerId> | credentials remove <providerId>" };
+  }
+}
+
+/** WS-19 (W19-11): `winter logout --openai`, extracted for the same reason. Clears BOTH the material
+ *  record and the legacy raw record — the same pair the bare Codex sign-out clears for its own
+ *  provider — so a rotated-away key is never left live under the old name. */
+export async function runLogoutOpenAiRoute(secrets: SecretStore, legacyName: string): Promise<{ ok: true; removed: boolean } | { ok: false; message: string }> {
+  const { removeCredential } = await import("@yanlinglabs/winter-core");
+  const outcome = await removeCredential(secrets, "openai");
+  if ("code" in outcome) return { ok: false, message: outcome.message };
+  const legacyRemoved = await secrets.delete(legacyName);
+  return { ok: true, removed: outcome.removed || legacyRemoved };
+}
+
 // Guarded so `main.ts` can be imported (e.g. by tests, for INIT_PROMPT/runTurnSession) without
 // executing the CLI — import.meta.main is true only when this file is the entry point.
 if (import.meta.main) {
@@ -1332,6 +1395,20 @@ if (import.meta.main) {
         console.log(`${AQUA}anthropic console profile:${RESET} ${DIM}unavailable (${err instanceof Error ? err.message : "unknown error"})${RESET}`);
       }
     };
+    // WS-19 (W19-11): ONE line — how many provider slots hold material, and which. A COUNT AND
+    // NAMES ONLY; never a value, never a fragment, never a length. In-process against WINTER_HOME
+    // like every other section here, and equally unable to crash the diagnostic tool.
+    const printCredentialsSection = async (): Promise<void> => {
+      try {
+        const { KeychainSecretStore, credentialRows } = await import("@yanlinglabs/winter-core");
+        const rows = await credentialRows(new KeychainSecretStore(), home);
+        const present = rows.filter((r) => r.present);
+        const names = present.map((r) => r.providerId).join(", ");
+        console.log(`${AQUA}credentials:${RESET} ${present.length} provider(s) with material${present.length === 0 ? "" : ` ${DIM}(${names})${RESET}`}`);
+      } catch (err) {
+        console.log(`${AQUA}credentials:${RESET} ${DIM}unavailable (${err instanceof Error ? err.message : "unknown error"})${RESET}`);
+      }
+    };
     // `--repair` with nothing after it must reach the usage branch, not silently run a diagnosis.
     const repair = args.includes("--repair") ? (flag("--repair") ?? "") : undefined;
     if (repair === undefined) {
@@ -1348,6 +1425,7 @@ if (import.meta.main) {
       await printRuntimesSection();
       await printMigrationSection();
       await printAnthropicConsoleSection();
+      await printCredentialsSection();
       break;
     }
     const session = flag("--session");
@@ -1986,8 +2064,57 @@ if (import.meta.main) {
     console.log(`${AQUA}◍ signed in with ChatGPT${RESET} ${DIM}(account ${tokens.accountId ?? "unknown"})${RESET}`);
     break;
   }
+  // -----------------------------------------------------------------------------------------
+  // WS-19 (W19-11) — `winter credentials [list] | set <providerId> | remove <providerId>`.
+  //
+  // IN-PROCESS, like `login`/`logout`/`doctor` and for the same reason: the daemon may not be
+  // running, and a credential door whose first move is to reach the daemon is useless in exactly
+  // the state a user reaches for it. It calls the SAME library functions the daemon's own
+  // `credential.*` RPC handlers call (`@yanlinglabs/winter-core`'s `credentialRows`/
+  // `setCredential`/`removeCredential`) — never a second implementation, so a rule added on one
+  // door is on all three.
+  //
+  // THE VALUE IS ONLY EVER READ FROM A MASKED TTY PROMPT (`readSecret`). Never a flag value, never
+  // a stdin pipe, never an env var — a key on a command line lands in the shell history and in
+  // `ps` output, and the existing `login --api-key` doors have always refused to accept one that
+  // way. `credentials set` keeps that rule exactly.
+  // -----------------------------------------------------------------------------------------
+  case "credentials": {
+    const secrets = new KeychainSecretStore();
+    const providerId = process.argv[4];
+    const r = await runCredentialsRoute(
+      secrets, resolveWinterHome(), sub, providerId,
+      // The masked raw-mode prompt — the ONLY door a value comes in through.
+      async () => (await readSecret(`Paste the API key for ${providerId}: `)).trim(),
+    );
+    if (!r.ok) {
+      console.error(r.message);
+      // The typed reason and, when the row has a different way in, the door that DOES work.
+      if (r.code) console.error(`${DIM}(${r.code}${r.door ? `, door: ${r.door}` : ""})${RESET}`);
+      process.exit(1);
+    }
+    if (r.kind === "list") {
+      // The long tail of untouched catalog rows is SUMMARISED, not printed: ~150 lines of "absent"
+      // is not a report, it is noise. What a user needs is what they have and what to type next.
+      const present = r.rows.filter((row) => row.present);
+      const width = Math.max(0, ...present.map((row) => row.providerId.length));
+      console.log(`${AQUA}credentials${RESET} ${DIM}(${present.length} of ${r.rows.length} slots hold material)${RESET}`);
+      for (const row of present) {
+        console.log(`  ${row.providerId.padEnd(width)} ${AQUA}present${RESET} ${DIM}${row.kind ?? "?"} via ${row.door}${row.risk === "review-required" ? " [review-required]" : ""}${RESET}`);
+      }
+      if (present.length === 0) console.log(`  ${DIM}none stored${RESET}`);
+      console.log(`${DIM}  ${r.rows.length - present.length} more slot(s) are empty — \`winter credentials set <providerId>\` for any catalog provider.${RESET}`);
+      break;
+    }
+    if (r.kind === "set") {
+      console.log(`${AQUA}stored in Keychain${RESET} ${DIM}(${r.providerId})${RESET} — no daemon restart needed`);
+      break;
+    }
+    console.log(r.removed ? `${AQUA}removed${RESET} ${DIM}(${r.providerId})${RESET}` : `${DIM}nothing was stored for ${r.providerId}${RESET}`);
+    break;
+  }
   case "logout": {
-    const { KeychainSecretStore, CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, clearCredentialMaterial, ANTHROPIC_CREDENTIAL_SECRET_NAME } = await import("@yanlinglabs/winter-core");
+    const { KeychainSecretStore, CODEX_SECRET_NAMES, CREDENTIAL_MATERIAL_NAMES, clearCredentialMaterial, ANTHROPIC_CREDENTIAL_SECRET_NAME, OPENAI_API_KEY_SECRET } = await import("@yanlinglabs/winter-core");
     const secrets = new KeychainSecretStore();
     // Winter Phase 10a (O7, P10a-6; fix wave 3 M-A corrected the door): `--anthropic-console` runs
     // the SDK's own `ant auth logout --profile winter` (via the SAME broker adapter the daemon and
@@ -2022,9 +2149,22 @@ if (import.meta.main) {
       console.log("anthropic API key cleared");
       break;
     }
+    // WS-19 (W19-11): `--openai` — the flag that was missing. `winter login --api-key` has stored
+    // an OpenAI key since Phase 1 and there was no way to clear it short of `winter credentials
+    // remove openai` (which this file also now offers) or editing the Keychain by hand. Clears the
+    // material record AND the legacy raw record, the same pair the bare Codex sign-out below clears
+    // for its own provider.
+    if (process.argv.includes("--openai")) {
+      const r = await runLogoutOpenAiRoute(secrets, OPENAI_API_KEY_SECRET);
+      if (!r.ok) { console.error(r.message); process.exit(1); }
+      console.log(r.removed ? "openai API key cleared" : "no openai API key was stored");
+      break;
+    }
     // Phase 1a simplification: SecretStore gains delete() in 1b — empty value de-authorizes everywhere today.
+    // WS-19 (W19-2) delivered that delete; these five legacy raw records are now removed outright
+    // rather than blanked, and a blank left by an older build still reads as absent everywhere.
     for (const name of Object.values(CODEX_SECRET_NAMES)) {
-      await secrets.set(name, "");
+      await secrets.delete(name);
     }
     // Hotfix (credential material, P8b): the material record is what the spawned Winter child
     // actually reads — blanking only the legacy five would leave a signed-out install still
@@ -2343,7 +2483,10 @@ if (import.meta.main) {
   routines [list] | routines create "<spec>" [--policy auto|plan] -- <prompt>
     | routines delete <id> | routines enable <id> | routines disable <id>       manage scheduled routines
   memory [list] [--project] | show <name> [--project] | rm <name> [--project]  manage saved memory facts
-  login [--api-key] [--anthropic-key] [--web-search-key] [--exa-key] | logout [--anthropic] | provider | provider-smoke [--prompt <text>]
+  login [--api-key] [--anthropic-key] [--anthropic-console] [--web-search-key] [--exa-key]
+  logout [--anthropic] [--anthropic-console] [--openai]           (bare: signs out of ChatGPT/Codex)
+  credentials [list] | credentials set <providerId> | credentials remove <providerId>   every provider's API key (masked prompt)
+  provider | provider-smoke [--prompt <text>]
   init                                            generate/update WINTER.md by surveying the project
   migrate [--from <legacyHome>] [--status|--resume|--rollback] [--yes]        Migration B: copy a legacy home into this one
   migrate-project [dir] [--yes]                   convert one project's legacy instructions file / project dir to WINTER.md/.winter
