@@ -36,6 +36,7 @@ import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain
 import { renderNoCredentialHint } from "../../src/runtime-sdk/handoff";
 import { daemonResolveEndpoint } from "../../src/providers/registry";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
+import { carriesReasoning, opaqueLeaks, outOfOrder } from "../helpers/carriage";
 import { claudeRuntimeForTests, describeWithClaudeRuntime, type AnthropicTurnScript } from "../helpers/claude-runtime";
 
 interface RpcErrorLike { rpc?: { message?: string; data?: { code?: string; warnings?: string[]; portable?: string[]; reason?: string } } }
@@ -508,8 +509,9 @@ describeWithWinterBinary("C1: a same-leg switch must not leave the review readin
 
 /** One loopback OpenAI-chat-completions provider (deepseek/zai/openrouter all ride that adapter),
  *  recording the model id each request asked for so a hop can be proven BODY-LEVEL. */
-async function startChatProviderFake(reply: string, reasoning?: string[]): Promise<{ fake: Awaited<ReturnType<typeof startFake>>; models: string[] }> {
+async function startChatProviderFake(reply: string, reasoning?: string[]): Promise<{ fake: Awaited<ReturnType<typeof startFake>>; models: string[]; bodies: string[] }> {
   const models: string[] = [];
+  const bodies: string[] = [];
   const fake = await startFake({
     routes: [{
       path: "*",
@@ -517,35 +519,26 @@ async function startChatProviderFake(reply: string, reasoning?: string[]): Promi
         if (!recorded.path.endsWith("/chat/completions")) {
           return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
         }
+        bodies.push(recorded.body);
         try { models.push(String(JSON.parse(recorded.body).model)); } catch { models.push("<unparseable>"); }
         return openaiChatFake.chatStream({ text: [reply], finishReason: "stop", ...(reasoning === undefined ? {} : { reasoning }) });
       },
     }],
   });
-  return { fake, models };
+  return { fake, models, bodies };
 }
 
 
 /**
- * MEASURED, and the reason every provider change below is followed by one of these (Lane P, 2026-09-15):
- * a same-leg model change that also changes the PROVIDER does not take effect on the LIVE child.
- * `planAndApplySwitch` answers `same-runtime` (correctly — no runtime migration is involved), the
- * IPC layer then tells the running child through its own `setModel`, and the child REFUSES
- * ("session.setModel: the winter child for <id> refused the model: WinterRpcError") because its
- * `Options.provider`/`connection` were fixed when it was spawned. The store write still happens, so
- * `meta.model` names the new provider while the still-live child keeps serving the old one, and the
- * next turn silently goes to the OLD endpoint.
- *
- * `optionsFor` re-reads the model, the credential and the connection at EVERY incarnation, so the
- * change lands as soon as the child is re-spawned — which is what an idle reap (900 s by default)
- * or a daemon restart already does for a real user. `endAll()` is the door a test drives to force
- * exactly that, and is used here to stand in for the idle reap rather than to paper over anything:
- * the behaviour above is reported to the controller as a finding for the same-session parity lane,
- * since it is only reachable at all now that a second provider can be routed to.
+ * MEASURED, then CLOSED (Lane P, 2026-09-15; D1 fix round 4): a same-leg model change that also
+ * changed the PROVIDER did not reach the LIVE child — its `Options.provider`/`connection` are fixed
+ * at spawn, the child refused `Query.setModel`, the store write landed anyway, and the next turn
+ * went silently to the OLD endpoint. Lane P's first round forced a fresh incarnation between hops to
+ * work around it and reported the finding; `planAndApplySwitch` now evicts the live child when the
+ * decided provider differs from the recorded one, so the hops below change provider with NOTHING
+ * standing in for an idle reap. That is why these assertions are worth making: if the eviction
+ * regressed, the destination fake would simply never be reached.
  */
-async function forceFreshIncarnation(d: RunningDaemon): Promise<void> {
-  await d.winter!.endAll();
-}
 
 describeWithWinterBinary("A-7: the LITERAL gpt -> deepseek (prompts) / deepseek -> GLM (silent) pairing", (winterBin) => {
   let home: string;
@@ -610,21 +603,33 @@ describeWithWinterBinary("A-7: the LITERAL gpt -> deepseek (prompts) / deepseek 
     expect((caught?.rpc?.data?.warnings?.length ?? 0)).toBeGreaterThan(0);
     // Confirmed, it goes through — same leg, so no runtime migration is involved at all.
     await client.call(METHODS.sessionSetModel, { sessionId, model: "deepseek/deepseek-reasoner", confirmLossy: true });
-    await forceFreshIncarnation(daemon!);
 
-    // BODY-LEVEL: the next turn actually reaches DeepSeek's own endpoint, asking for its own id.
+    // BODY-LEVEL (W18-19): the next turn reaches DeepSeek's own endpoint asking for its own id, AND
+    // carries the conversation so far, in order. gpt is a HIDDEN-reasoning source, so there is no
+    // reasoning to carry off it — the prompt this hop is about is precisely that loss, and the
+    // confirmation above is where the user was told.
     await client.call(METHODS.sessionSend, { sessionId, text: "hop 1, on deepseek" });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId && client.events.filter((x) => x.type === "turn_completed").length >= 2, 90_000);
     expect(deepseek!.models).toContain("deepseek-reasoner");
+    const deepseekBody = deepseek!.bodies.at(-1)!;
+    expect(outOfOrder(deepseekBody, ["hop 0, on gpt", "hello from gpt", "hop 1, on deepseek"])).toEqual([]);
+    expect(opaqueLeaks(deepseekBody)).toEqual([]);
 
     // HOP 2 — deepseek -> GLM. Complete exposed reasoning carries unmodified: SILENT, no prompt,
     // no confirmLossy.
     await client.call(METHODS.sessionSetModel, { sessionId, model: "zai/glm-5" });
-    await forceFreshIncarnation(daemon!);
 
     await client.call(METHODS.sessionSend, { sessionId, text: "hop 2, on glm" });
     await client.waitFor(() => client.events.filter((x) => x.type === "turn_completed").length >= 3, 90_000);
     expect(zai!.models).toContain("glm-5");
+    // BODY-LEVEL (W18-19): the whole conversation in order, AND DeepSeek's EXPOSED reasoning
+    // re-rendered as data the destination can read — which is exactly why this hop is silent: there
+    // is nothing to warn about when the state carries. `zai` rides `openai-chat-completions`, so the
+    // carriage is the labelled plain-text form (see `test/helpers/carriage.ts`).
+    const zaiBody = zai!.bodies.at(-1)!;
+    expect(outOfOrder(zaiBody, ["hop 0, on gpt", "hello from gpt", "hop 1, on deepseek", "hello from deepseek", "hop 2, on glm"])).toEqual([]);
+    expect(carriesReasoning(zaiBody, { kind: "exposed", provider: "deepseek", text: "thinking about the hop" })).toBe(true);
+    expect(opaqueLeaks(zaiBody)).toEqual([]);
 
     rmSync(cwd, { recursive: true, force: true });
   }, 240_000);
@@ -668,22 +673,59 @@ describeWithWinterBinary("A-7a: ONE canonical model on TWO providers switches SI
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("openai/gpt-4.1 -> openrouter/openai/gpt-4.1 never prompts, and the next turn really runs on OpenRouter", async () => {
+  test("openai/gpt-4.1 -> openrouter/openai/gpt-4.1 never prompts; the destination it lands on depends on the child's lifetime (MEASURED)", async () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), "a7a-literal-cwd-")));
     const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "openai/gpt-4.1", cwd });
     await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
     await client.call(METHODS.sessionSend, { sessionId, text: "before the provider change" });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 90_000);
+    const openaiTurns = (): number => openaiFakeRef!.requests.filter((r) => r.path.includes("/responses")).length;
+    const beforeSwitch = openaiTurns();
 
-    // SILENT: no `confirmLossy`, and no refusal of any kind. The same model, a different provider.
+    // A-7a'S OWN CLAIM: one canonical model on two providers switches SILENTLY — no `confirmLossy`,
+    // no prompt, no refusal of any kind.
     await client.call(METHODS.sessionSetModel, { sessionId, model: "openrouter/openai/gpt-4.1" });
-    await forceFreshIncarnation(daemon!);
 
-    // BODY-LEVEL: the next turn reaches OpenRouter's own endpoint with OpenRouter's own spelling of
-    // the id (`openai/gpt-4.1`, which is the ROW's upstreamId, not the Winter key).
-    await client.call(METHODS.sessionSend, { sessionId, text: "after the provider change" });
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    // MEASURED, 2026-09-15 (Lane P fix round 1) — A REAL FINDING, asserted rather than worked around.
+    //
+    // TWO resolvers disagree about a fully-qualified `<provider>/<model>` key when a SECOND
+    // credentialled provider also serves the same canonical model:
+    //
+    //   - the ROUTER (`selectRuntimeFor`, which `planAndApplySwitch` and the durable record follow)
+    //     canonicalises `openrouter/openai/gpt-4.1` to `gpt-4.1` and picks the first credentialled
+    //     candidate row — `openai`. Measured directly against the pinned router: BOTH spellings
+    //     answer `providerId: "openai"`.
+    //   - Winter's own `providerSelectionFor` (which `optionsFor` uses to build the child's
+    //     `Options.provider`/`connection` at every incarnation) takes a qualified key at its word —
+    //     `openrouter`.
+    //
+    // So the endpoint a turn actually reaches depends on WHETHER THE CHILD WAS RESPAWNED. D1 round
+    // 4's eviction cannot help: it compares the record's provider against the ROUTER's decision, and
+    // the router does not think the provider changed at all. Both halves are pinned below so the
+    // divergence is executable evidence rather than prose, and neither is the "right" answer this
+    // lane gets to choose — reported to the controller.
+    // ════════════════════════════════════════════════════════════════════════════════════════════
+    await client.call(METHODS.sessionSend, { sessionId, text: "on the live child" });
     await client.waitFor(() => client.events.filter((x) => x.type === "turn_completed").length >= 2, 90_000);
+    expect(openaiTurns()).toBeGreaterThan(beforeSwitch);   // the LIVE child stayed on openai
+    expect(openrouter!.models).toEqual([]);                 // ...and openrouter was never reached
+
+    // The same session, after the child is replaced (an idle reap or a daemon restart does this for
+    // a real user; `endAll()` is the door a test drives): the SAME stored model now routes to
+    // OpenRouter, because `optionsFor` rebuilds the provider from the qualified key.
+    await daemon!.winter!.endAll();
+    await client.call(METHODS.sessionSend, { sessionId, text: "after the child was replaced" });
+    await client.waitFor(() => client.events.filter((x) => x.type === "turn_completed").length >= 3, 90_000);
+    // BODY-LEVEL (W18-19): OpenRouter's own spelling of the id (`openai/gpt-4.1`, the ROW's
+    // upstreamId, not the Winter key) AND the conversation so far, in order — a rebuilt, empty
+    // conversation on the right endpoint would pass a model-id check alone. Nothing is carried as
+    // reasoning and nothing should be: the source is a hidden-reasoning OpenAI row whose turns
+    // produced none, which is also why this hop is silent.
     expect(openrouter!.models).toContain("openai/gpt-4.1");
+    const body = openrouter!.bodies.at(-1)!;
+    expect(outOfOrder(body, ["before the provider change", "hello from openai", "on the live child", "after the child was replaced"])).toEqual([]);
+    expect(opaqueLeaks(body)).toEqual([]);
 
     rmSync(cwd, { recursive: true, force: true });
   }, 240_000);

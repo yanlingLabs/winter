@@ -54,6 +54,7 @@ import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
 import { daemonResolveEndpoint } from "../../src/providers/registry";
 import { describeWithWinterBinary } from "../helpers/winter-binary";
+import { carriesReasoning, opaqueLeaks, outOfOrder } from "../helpers/carriage";
 import { claudeRuntimeForTests, describeWithClaudeRuntime, type AnthropicTurnScript } from "../helpers/claude-runtime";
 
 const CATALOG_GPT_MODEL = "openai/gpt-5.6-sol";
@@ -251,17 +252,34 @@ describeWithWinterBinary("A-5 part 2: the chain's LAST hop (gpt -> claude) promp
 // `settings.providers.<id>.baseUrl`. Parts 1 and 2 stand as written; this part adds the chain they
 // could not run.
 //
-// "Body-level" here means each hop's own loopback fake received a request whose BODY names that
-// provider's own upstream model id — never inferred from the resolver, never from `session.list`.
+// "BODY-LEVEL" MEANS W18-19'S CARRIAGE, not merely the routing (corrected after review — the first
+// pass of this block asserted only that each body named the provider's own upstream model id, which
+// an empty, rebuilt conversation on the right endpoint would also satisfy). Every hop below asserts
+// three things about the bytes that actually went out:
+//
+//   (a) the PRIOR TURNS are there, IN ORDER — the same conversation continued, not a fresh one;
+//   (b) the prior model's REASONING is carried as data with its own provenance, where W18-19 says it
+//       should be: `kind="summary"` off the Claude source, `kind="exposed"` off DeepSeek and GLM;
+//   (c) NO OPAQUE STATE crosses — no `signature`, `encrypted_content` or `redacted_thinking` in the
+//       conversation, and the Claude turn's own scripted signature value appears in no body at all.
+//
+// The carriage TAG's form is per-adapter and is MEASURED, not assumed — see `test/helpers/carriage.ts`
+// for both renderings and why asserting only the angle-bracket one would have made every
+// chat-completions hop read as a defect.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 
 const CATALOG_DEEPSEEK_MODEL = "deepseek/deepseek-reasoner";
+/** The Claude turn's scripted thinking and its opaque signature — the text MUST carry as summary
+ *  data, the signature MUST NOT appear in any request body anywhere. */
+const CLAUDE_THINKING = "claude was thinking here";
+const CLAUDE_SIGNATURE = "sig-claude-hop0";
 const CATALOG_GLM_MODEL = "zai/glm-5";
 
 /** One loopback OpenAI-chat-completions provider (deepseek and zai both ride that adapter),
  *  recording the model id each request asked for. */
-async function startChainChatFake(reply: string, reasoning?: string[]): Promise<{ fake: FakeServer; models: string[] }> {
+async function startChainChatFake(reply: string, reasoning?: string[]): Promise<{ fake: FakeServer; models: string[]; bodies: string[] }> {
   const models: string[] = [];
+  const bodies: string[] = [];
   const fake = await startFake({
     routes: [{
       path: "*",
@@ -269,12 +287,13 @@ async function startChainChatFake(reply: string, reasoning?: string[]): Promise<
         if (!recorded.path.endsWith("/chat/completions")) {
           return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
         }
+        bodies.push(recorded.body);
         try { models.push(String(JSON.parse(recorded.body).model)); } catch { models.push("<unparseable>"); }
         return openaiChatFake.chatStream({ text: [reply], finishReason: "stop", ...(reasoning === undefined ? {} : { reasoning }) });
       },
     }],
   });
-  return { fake, models };
+  return { fake, models, bodies };
 }
 
 describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude, every hop on its own provider", (winterBin) => {
@@ -297,7 +316,7 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
         routes: [{
           path: "*",
           handler: async (_req, recorded) => (recorded.path === "/v1/messages" && recorded.method === "POST"
-            ? anthropicFake.anthropicTurnResponse({ blocks: [{ type: "text", chunks: ["hello from claude"] }], stopReason: "end_turn" } as AnthropicTurnScript)
+            ? anthropicFake.anthropicTurnResponse({ blocks: [{ type: "thinking", chunks: [CLAUDE_THINKING], signature: CLAUDE_SIGNATURE }, { type: "text", chunks: ["hello from claude"] }], stopReason: "end_turn" } as AnthropicTurnScript)
             : new Response("{}", { status: 200, headers: { "content-type": "application/json" } })),
         }],
       });
@@ -344,11 +363,10 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
     test("every hop runs on its own provider, and the prompts fall exactly where W18-19's table says", async () => {
       const cwd = realpathSync(mkdtempSync(join(tmpdir(), "five-hop-chain-cwd-")));
       const turns = (): number => client.events.filter((e) => e.type === "turn_completed").length;
-      // A same-leg provider change does not reach the LIVE child (its `Options.provider`/`connection`
-      // were fixed at spawn — measured, and recorded in `session-set-model-review.test.ts`'s own
-      // A-7 block); `optionsFor` re-reads all three at every incarnation, so forcing a fresh one is
-      // what an idle reap already does for a real user.
-      const freshIncarnation = async (): Promise<void> => { await daemon!.winter!.endAll(); };
+      // NOTHING stands in for an idle reap here any more. Lane P's first round had to force a fresh
+      // incarnation between hops because a same-leg provider change did not reach the live child;
+      // D1 round 4 evicts it, so every hop below changes provider on its own. If that eviction
+      // regressed, the destination fake would simply never be reached and these assertions fail.
 
       // HOP 0 — claude, on the OFFICIAL leg.
       const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: CATALOG_CLAUDE_MODEL, cwd });
@@ -367,25 +385,46 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
       expect(caught?.rpc?.data?.code).toBe("handoff_confirmation_required");
       await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_DEEPSEEK_MODEL, confirmLossy: true });
       expect(daemon!.winter!.legOf(sessionId)).toBe("winter");
-      await freshIncarnation();
       await client.call(METHODS.sessionSend, { sessionId, text: "hop 1, on deepseek" });
       await client.waitFor(() => turns() >= 2, 120_000);
       expect(deepseek!.models).toContain("deepseek-reasoner");
+      const deepseekBody = deepseek!.bodies.at(-1)!;
+      expect(outOfOrder(deepseekBody, ["hop 0, on claude", "hello from claude", "hop 1, on deepseek"])).toEqual([]);
+      // (b) the Claude turn's thinking, re-rendered as SUMMARY data — the lossy carriage the prompt
+      // above warned about, actually delivered rather than dropped.
+      expect(carriesReasoning(deepseekBody, { kind: "summary", provider: "anthropic", text: CLAUDE_THINKING })).toBe(true);
+      // (c) ...and the signature that made it opaque stays behind.
+      expect(opaqueLeaks(deepseekBody, [CLAUDE_SIGNATURE])).toEqual([]);
 
       // HOP 2 — deepseek -> GLM. Complete exposed reasoning carries unmodified: SILENT.
       await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_GLM_MODEL });
-      await freshIncarnation();
       await client.call(METHODS.sessionSend, { sessionId, text: "hop 2, on glm" });
       await client.waitFor(() => turns() >= 3, 120_000);
       expect(glm!.models).toContain("glm-5");
+      const glmBody = glm!.bodies.at(-1)!;
+      expect(outOfOrder(glmBody, ["hop 0, on claude", "hello from claude", "hop 1, on deepseek", "hello from deepseek", "hop 2, on glm"])).toEqual([]);
+      // BOTH prior models' reasoning is still travelling — the chain accumulates, it does not
+      // replace, which is what "keeps one conversation" means five hops in.
+      expect(carriesReasoning(glmBody, { kind: "summary", provider: "anthropic", text: CLAUDE_THINKING })).toBe(true);
+      expect(carriesReasoning(glmBody, { kind: "exposed", provider: "deepseek", text: "reasoning on the deepseek hop" })).toBe(true);
+      expect(opaqueLeaks(glmBody, [CLAUDE_SIGNATURE])).toEqual([]);
 
       // HOP 3 — GLM -> gpt. Still SILENT: the exposed state carries as a tag on a hidden-reasoning
       // destination.
       await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_GPT_MODEL });
-      await freshIncarnation();
       await client.call(METHODS.sessionSend, { sessionId, text: "hop 3, on gpt" });
       await client.waitFor(() => turns() >= 4, 120_000);
-      expect(openaiFakeRef!.requests.some((r) => r.path.includes("/responses"))).toBe(true);
+      const gptRequests = openaiFakeRef!.requests.filter((r) => r.path.includes("/responses"));
+      expect(gptRequests.length).toBeGreaterThan(0);
+      const gptBody = gptRequests.at(-1)!.body;
+      expect(outOfOrder(gptBody, ["hop 0, on claude", "hello from claude", "hop 1, on deepseek", "hello from deepseek", "hop 2, on glm", "hello from glm", "hop 3, on gpt"])).toEqual([]);
+      // THE LITERAL W18-19 TAG: `openai` rides the `openai-responses` adapter, which renders the
+      // angle-bracket form — all THREE prior models, each with its own kind and provenance.
+      expect(gptBody).toContain(`<recovered_reasoning kind=\\"summary\\" provider=\\"anthropic\\"`);
+      expect(gptBody).toContain(`<recovered_reasoning kind=\\"exposed\\" provider=\\"deepseek\\"`);
+      expect(gptBody).toContain(`<recovered_reasoning kind=\\"exposed\\" provider=\\"zai\\"`);
+      expect(carriesReasoning(gptBody, { kind: "exposed", provider: "zai", text: "reasoning on the glm hop" })).toBe(true);
+      expect(opaqueLeaks(gptBody, [CLAUDE_SIGNATURE])).toEqual([]);
 
       // HOP 4 — gpt -> claude. PROMPTS, and moves back to the official leg.
       let caught2: RpcErrorLike | undefined;
@@ -393,6 +432,16 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
         await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL });
       } catch (err) { caught2 = err as RpcErrorLike; }
       expect(caught2?.rpc?.data?.code).toBe("handoff_confirmation_required");
+
+      // (c) once more across EVERY body every fake received, including the Anthropic source's own:
+      // the Claude turn's signature is in none of them, and no conversation anywhere carries an
+      // opaque field name.
+      const everyBody = [
+        ...deepseek!.bodies, ...glm!.bodies,
+        ...openaiFakeRef!.requests.map((r) => r.body),
+        ...anthropicFakeServer!.requests.map((r) => r.body),
+      ];
+      for (const body of everyBody) expect(opaqueLeaks(body, [CLAUDE_SIGNATURE])).toEqual([]);
 
       // ONE conversation throughout: every hop's user message is still in the session's own log.
       const history = await client.call<{ events: Array<{ type: string; text?: string }> }>(METHODS.sessionHistory, { sessionId, limit: 500 });
