@@ -53,7 +53,7 @@
         "@yanlinglabs/winter-protocol": "workspace:*",
         "@yanlinglabs/winter-provider-catalog": "0.0.11",
         "@yanlinglabs/winter-provider-runtime": "^0.0.11",
-        "@yanlinglabs/winter-runtime-sdk": "^0.0.6",
+        "@yanlinglabs/winter-runtime-sdk": "^0.0.7",
         "unpdf": "^1.6.2",
         "zod": "^4.0.0",
       },
@@ -171,7 +171,7 @@
 
     "@yanlinglabs/winter-provider-runtime": ["@yanlinglabs/winter-provider-runtime@0.0.11", "", { "dependencies": { "@yanlinglabs/winter-agent-sdk": "0.0.11", "@yanlinglabs/winter-provider-catalog": "0.0.11" } }, "sha512-9EpXX+C2Vxhtn/bj0RyLxTg3Q7ZJpj3wRXJhscb67qqbmuJtwkaMTFUVajfF1fVmzGFhZGpjzR1GqsV1PxsWUQ=="],
 
-    "@yanlinglabs/winter-runtime-sdk": ["@yanlinglabs/winter-runtime-sdk@0.0.6", "", { "peerDependencies": { "@anthropic-ai/claude-agent-sdk": "0.3.250", "@yanlinglabs/winter-agent-sdk": ">=0.0.10 <0.1.0", "@yanlinglabs/winter-conformance": ">=0.0.3 <0.1.0", "@yanlinglabs/winter-provider-catalog": ">=0.0.10 <0.1.0", "@yanlinglabs/winter-provider-conformance": ">=0.0.3 <0.1.0", "@yanlinglabs/winter-provider-runtime": ">=0.0.10 <0.1.0" }, "optionalPeers": ["@anthropic-ai/claude-agent-sdk", "@yanlinglabs/winter-conformance", "@yanlinglabs/winter-provider-conformance"] }, "sha512-zFOCjpgNTJWHhPHF+cdr0AvRvo57o57WU9OLepWq2GJclhASARFqZRb8sqPqoX9xUGJyUf+hNCR4JzVO/5ZM2w=="],
+    "@yanlinglabs/winter-runtime-sdk": ["@yanlinglabs/winter-runtime-sdk@0.0.7", "", { "peerDependencies": { "@anthropic-ai/claude-agent-sdk": "0.3.250", "@yanlinglabs/winter-agent-sdk": ">=0.0.10 <0.1.0", "@yanlinglabs/winter-conformance": ">=0.0.3 <0.1.0", "@yanlinglabs/winter-provider-catalog": ">=0.0.10 <0.1.0", "@yanlinglabs/winter-provider-conformance": ">=0.0.3 <0.1.0", "@yanlinglabs/winter-provider-runtime": ">=0.0.10 <0.1.0" }, "optionalPeers": ["@anthropic-ai/claude-agent-sdk", "@yanlinglabs/winter-conformance", "@yanlinglabs/winter-provider-conformance"] }, "sha512-TfXltUERBzPPajuTpVDZ4Y6QUX7a46Q3u+Uq89MpKeO+5HD+m+PjCBdBnt+zpMBDq3YNomS22X2pnRop4B37xw=="],
 
     "accepts": ["accepts@2.0.0", "", { "dependencies": { "mime-types": "^3.0.0", "negotiator": "^1.0.0" } }, "sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng=="],
 
