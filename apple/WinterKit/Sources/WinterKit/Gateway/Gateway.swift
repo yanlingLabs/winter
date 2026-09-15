@@ -65,6 +65,16 @@ public actor Gateway {
     /// code session's working-directory set, the write half of the `dirs` field `session.list` now
     /// carries. Also a pure passthrough: the daemon owns the participation rule (chat/dispatch have
     /// no writable root) and the locked/denylist/remove-primary refusals.
+    /// WS-19 (Phase 10b amendment c) grew it 21→24: `credential.list`/`credential.set`/
+    /// `credential.remove` — the phone manages the MAC's provider credentials (R-10b-12: addable
+    /// and manageable on the iPhone app, the macOS app and the CLI). Pure passthroughs like every
+    /// other verb here; the daemon owns the whole inventory, the typed refusals and the storage.
+    /// One property of this trio is unlike anything already on the list and is deliberate, not an
+    /// oversight: a `credential.set` carries a RAW API KEY phone → gateway → daemon. WS-19 §7
+    /// accepts it (the user's own paired device, on the existing encrypted+authenticated channel,
+    /// and `sync.config.exaKey` already crosses the other way) on the condition that nothing here
+    /// keeps or prints it — this gateway relays the `rpcRequest` payload UNCHANGED and logs no
+    /// params, so the value exists only in transit. Results never carry values (W19-3).
     static let remoteAllowedMethods: Set<String> = [
         "protocol.hello", "session.list", "session.attach", "session.send",
         "session.dispatch", "approval.respond", "ask_user.respond",
@@ -86,6 +96,8 @@ public actor Gateway {
         "sync.config", "sync.memory",
         // working-directories T3: and its working-directory set (setPrimary/add/remove).
         "session.setDirs",
+        // WS-19: the phone lists/adds/removes the Mac's provider credentials.
+        "credential.list", "credential.set", "credential.remove",
     ]
 
     /// Session-map cap (SP2b Task 4) — see `evictIfNeeded()`.

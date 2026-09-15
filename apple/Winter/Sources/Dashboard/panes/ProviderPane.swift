@@ -64,6 +64,20 @@ final class ProviderPaneModel: ObservableObject {
     /// `AppDelegate.makeDashboardWiring` needs no changes.
     let anthropicAuth: AnthropicAuthSectionModel
 
+    /// WS-19 W19-12 (Phase 10b amendment c): the per-provider credential list
+    /// (`CredentialsSection.swift`). Same construction posture as `anthropicAuth` directly above —
+    /// built around a PROTOCOL (`CredentialsClient`) for testability, wired to the same live
+    /// connection via `LiveCredentialsClient(client:)`, and owned here so `ProviderPane`'s existing
+    /// construction site in `AppDelegate.makeDashboardWiring` needs no changes.
+    ///
+    /// Note the overlap with this class's own BYO-key form above: that form is OpenAI-specific and
+    /// writes through `provider.configure` (base URL + key + model, and it restarts the daemon).
+    /// This section writes through `credential.set`, which stores a key for ANY catalog provider
+    /// and needs no restart (W19-8). They are not duplicates — and consolidating them is a
+    /// deliberate later decision, not a cleanup to do silently, because the old form is the only
+    /// place a custom base URL can be typed.
+    let credentials: CredentialsSectionModel
+
     @Published private(set) var providerId: String?
     @Published private(set) var providerModel: String?
     @Published private(set) var statusLoading = false
@@ -87,6 +101,7 @@ final class ProviderPaneModel: ObservableObject {
         self.client = client
         self.onConfigured = onConfigured
         self.anthropicAuth = AnthropicAuthSectionModel(client: LiveAnthropicAuthClient(client: client))
+        self.credentials = CredentialsSectionModel(client: LiveCredentialsClient(client: client))
     }
 
     /// Save is blocked on an empty (or whitespace-only) base URL or API key — `provider.configure`'s
@@ -170,6 +185,12 @@ struct ProviderPane: View {
                 chatGptSignIn
                 Divider()
                 AnthropicAuthSection(model: model.anthropicAuth)
+                Divider()
+                // WS-19 W19-12. Placed AFTER the Anthropic block on purpose: two of its
+                // non-manageable rows point at that block as their door
+                // (`credentialDoorText("provider.login")` — "the controls above"), so the thing
+                // they name is already on screen above them.
+                CredentialsSection(model: model.credentials)
                 Divider()
                 disclosure
             }
