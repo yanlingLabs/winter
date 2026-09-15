@@ -1219,6 +1219,61 @@ export const ProviderStatusResult = z.object({
 });
 
 // ---------------------------------------------------------------------------------------------
+// WS-19 — provider credentials (Winter Phase 10b): list / set / remove, one row per credential SLOT
+// the daemon can store. Reachable from the Mac app, the CLI and (uniquely among the provider verbs)
+// the PHONE — `credential.list`/`set`/`remove` are the three additions to REMOTE_ALLOWED_METHODS,
+// which is why their shapes are stated here exactly rather than left to the handler.
+//
+// NAMES AND BOOLEANS ONLY. No result and no error in this block may ever carry a credential value,
+// a fragment of one, or its length. `credential.list` answers presence as a boolean; `credential.set`
+// answers `{ok:true}`; `credential.remove` answers whether something went away. The value travels in
+// exactly one direction, once, inside `CredentialSetParams.apiKey`.
+//
+// ROWS ARE PER SLOT (§9 A-1), not per provider: `anthropic` appears twice — its api-key slot
+// (`door: "credential.set"`, manageable) and its Console slot (`door: "provider.login"`, not
+// manageable, whose `present` reports the broker's bearer). Clients key a row by
+// `providerId|door|kind`, so those three fields are the row's identity and must stay stable for a
+// slot whether or not anything is stored in it.
+// ---------------------------------------------------------------------------------------------
+export const CredentialRow = z.object({
+  providerId: z.string().min(1),
+  displayName: z.string().min(1),
+  /** `provider` = a model provider's credential slot; `tool` = one of the daemon's own two tool
+   *  keys (Exa, web search), which are raw values under their own long-standing secret names. */
+  group: z.enum(["provider", "tool"]),
+  /** The catalog's own `authKinds` for this provider, verbatim (`api-key`, `oauth-approved`, …) —
+   *  informational; `door` is what actually says how this row is reached. */
+  authKinds: z.array(z.string()),
+  /** Whether `credential.set` accepts this row. Governs SET ONLY (§9 A-3): a client offers Remove
+   *  whenever `present && door !== "provider.login"`, so Codex OAuth is removable but not settable. */
+  manageable: z.boolean(),
+  present: z.boolean(),
+  /** The kind this SLOT holds — never the kind of whatever is stored right now, so a row's identity
+   *  does not move when it is filled or emptied. */
+  kind: z.enum(["api-key", "oauth", "bearer"]).optional(),
+  risk: z.enum(["approved", "review-required"]),
+  door: z.enum(["credential.set", "provider.login", "cli-oauth"]),
+});
+
+export const CredentialListParams = z.object({});
+/** A reply ALWAYS carries `providers` (§9 A-4). A client that receives one without it surfaces an
+ *  error ("Couldn't load credentials"), never an empty list — an empty inventory and a broken reply
+ *  must not look the same. */
+export const CredentialListResult = z.object({ providers: z.array(CredentialRow) });
+
+/** The ONE place a credential value appears in this protocol. Never logged by the daemon's RPC
+ *  layer, never persisted outside the Keychain, never echoed in a result or an error. The `max` is
+ *  a wire sanity bound; the daemon applies the same limit (plus the printable-ASCII rule) itself and
+ *  answers `credential_value_invalid` for a value that reaches it another way (the CLI's own
+ *  in-process path). */
+export const CredentialSetParams = z.object({ providerId: z.string().min(1), apiKey: z.string().min(1).max(4096) });
+export const CredentialSetResult = z.object({ ok: z.literal(true) });
+
+export const CredentialRemoveParams = z.object({ providerId: z.string().min(1) });
+/** `removed: false` means there was nothing stored — a successful no-op, not a failure. */
+export const CredentialRemoveResult = z.object({ ok: z.literal(true), removed: z.boolean() });
+
+// ---------------------------------------------------------------------------------------------
 // Workflows (CC-parity phase 3, Track C Task C2): the RPC surface over `WorkflowRuntime` (live
 // runs, core/src/workflows/runtime.ts, A3+/B2) + `WorkflowStore` (saved, trust-gated
 // `.winter/workflows/*.js` scripts, C1) — mirrors the routines.*/memory.* blocks above (harness AND
@@ -1901,6 +1956,10 @@ export const METHODS = {
   providerLoginCode: "provider.loginCode",
   providerLogout: "provider.logout",
   providerStatus: "provider.status",
+  // WS-19 (W19-3/4/5). The only provider-family verbs on the remote allowlist.
+  credentialList: "credential.list",
+  credentialSet: "credential.set",
+  credentialRemove: "credential.remove",
   workflowList: "workflow.list",
   workflowRun: "workflow.run",
   workflowStop: "workflow.stop",

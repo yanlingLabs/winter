@@ -25,6 +25,7 @@ import {
   MemoryListParams, MemoryReadParams, MemoryWriteParams, MemoryDeleteParams, MemoryAuditParams,
   ProviderConfigureParams,
   ProviderLoginParams, ProviderLoginCodeParams, ProviderLogoutParams, ProviderStatusParams,
+  CredentialListParams, CredentialSetParams, CredentialRemoveParams,
   WorkflowListParams, WorkflowRunParams, WorkflowStopParams, WorkflowGetParams,
   SyncHeadsParams, SyncPullParams, SyncPushParams, SyncConfigParams, SyncMemoryParams,
   PanelListParams, PanelOpenTabParams, PanelCloseTabParams, PanelActivateTabParams, PanelReportNavigationParams,
@@ -36,6 +37,7 @@ import type { TokenAuthority } from "../auth/tokens";
 import type { SecretStore } from "../auth/secret-store";
 import { readCredentialMaterial, writeOpenAiApiKey } from "../auth/credential-material";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../runtime-sdk/keychain";
+import { credentialRows, removeCredential, setCredential } from "../runtime-sdk/credentials";
 import { effectiveOfficialAuthFor } from "../runtime-sdk/official-options";
 import type { ConsoleProfileBroker } from "../auth/console-profile-broker";
 import type { RoutineStore } from "../routines/store";
@@ -461,6 +463,23 @@ function rpcFromWinterRefusal(err: unknown): never {
   throw err;
 }
 
+/**
+ * WS-19: a typed credential refusal as the RPC error a client branches on. The CODE rides
+ * `error.data.code` (+ `data.door` where one applies), exactly as the Winter leg's own refusals do,
+ * so the Mac app, the phone and the CLI all read one vocabulary.
+ *
+ * INVALID_PARAMS for everything the caller can fix (an unknown provider, a wrong door, an unusable
+ * value); INTERNAL only for a store that would not answer. The message names the provider and the
+ * door and never the value — `credentials.ts` builds it and is the one place that rule lives.
+ */
+function credentialRpcFailure(refusal: { code: string; message: string; door?: string }): RpcFailure {
+  const numeric = refusal.code === "credential_store_unavailable" ? ERR.INTERNAL : ERR.INVALID_PARAMS;
+  return new RpcFailure(numeric, refusal.message, {
+    code: refusal.code,
+    ...(refusal.door === undefined ? {} : { door: refusal.door }),
+  });
+}
+
 /** Maps a `MemoryStore` failure's structural `kind` to a JSON-RPC code, for the memory.*
  *  handlers below. Only two buckets, same precedent as routines.create/update's INVALID_PARAMS/
  *  NOT_FOUND split above: `"not_found"` (unknown/corrupt fact on read, unknown fact on delete)
@@ -573,6 +592,19 @@ export const REMOTE_ALLOWED_METHODS = new Set<string>([
   // allowlist's other member, is Mac-local-only and never reaches this guard at all); the setter's
   // own participation check is a SECOND, narrower gate on top of that.
   METHODS.sessionSetDirs,
+  // WS-19 (W19-10, ruling R-10b-12): the phone manages the MAC's provider credentials — list, add,
+  // replace, remove. These are the ONLY provider-family verbs on this list: `provider.configure`,
+  // `provider.login`/`loginCode`/`logout` and `provider.status` all stay off it (the Console login
+  // is an interactive, Mac-local flow, and `provider.configure` rewrites the whole
+  // `settings.provider` block).
+  //
+  // `credential.set` carries a raw key phone -> Gateway -> daemon over the existing encrypted,
+  // authenticated channel. Accepted deliberately (spec §7): it is the user's own paired device, and
+  // `sync.config.exaKey` already crosses the same channel the other way. Nothing is persisted
+  // phone-side, and no result or error on any of the three ever carries a value back.
+  METHODS.credentialList,
+  METHODS.credentialSet,
+  METHODS.credentialRemove,
 ]);
 
 /** The session `mode`s a remote (iPhone) client may target at all — every other mode is Mac-local
@@ -2968,6 +3000,43 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const apiKey = material?.kind === "api-key";
         const consoleProfile = opts.consoleBroker?.profileExists() ?? false;
         return { anthropic: { apiKey, consoleProfile, auth, effective: effectiveOfficialAuthFor(auth, apiKey, consoleProfile) } };
+      }
+
+      // -----------------------------------------------------------------------------------------
+      // WS-19 — provider credentials: `credential.list` / `credential.set` / `credential.remove`.
+      //
+      // The only provider-family verbs a REMOTE (phone) client may call. Everything they answer with
+      // is names and booleans; the one value that ever crosses is `credential.set`'s `apiKey`, in
+      // one direction, and it is never logged here, never echoed in a result, never put in an error
+      // message and never written into an event. There is no generic RPC request logger in this
+      // file to suppress it in (verified — the pump at the top of this file logs nothing per
+      // request, and `parseParams` prints zod issue PATHS only, never values); the W19-14 sweep
+      // pins that end-to-end against a sentinel rather than trusting this paragraph.
+      //
+      // All three read the store LIVE on every call, so `credential.set` followed immediately by
+      // `session.create` on that provider works with no daemon restart (W19-8) — the standing
+      // "no setting or credential change may require a restart" rule.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.credentialList: {
+        parseParams(CredentialListParams, params);
+        if (!opts.secrets) throw new RpcFailure(ERR.INTERNAL, "credential.list is not available on this server (no secret store configured)", { code: "credential_store_unavailable" });
+        return { providers: await credentialRows(opts.secrets, opts.winterHome) };
+      }
+
+      case METHODS.credentialSet: {
+        const p = parseParams(CredentialSetParams, params);
+        if (!opts.secrets) throw new RpcFailure(ERR.INTERNAL, "credential.set is not available on this server (no secret store configured)", { code: "credential_store_unavailable" });
+        const refusal = await setCredential(opts.secrets, p.providerId, p.apiKey);
+        if (refusal !== undefined) throw credentialRpcFailure(refusal);
+        return { ok: true };
+      }
+
+      case METHODS.credentialRemove: {
+        const p = parseParams(CredentialRemoveParams, params);
+        if (!opts.secrets) throw new RpcFailure(ERR.INTERNAL, "credential.remove is not available on this server (no secret store configured)", { code: "credential_store_unavailable" });
+        const outcome = await removeCredential(opts.secrets, p.providerId);
+        if ("code" in outcome) throw credentialRpcFailure(outcome);
+        return { ok: true, removed: outcome.removed };
       }
 
       // -----------------------------------------------------------------------------------------
