@@ -95,6 +95,36 @@ final class CredentialsRpcTests: XCTestCase {
         XCTAssertEqual(rows.first?.group, "tool")
     }
 
+    /// The case between the two: rows were offered and NONE could be read. Skipping is only safe as
+    /// a partial measure; with nothing left it becomes the empty list A-4 forbids, and the daemon
+    /// had just said it holds credentials. On this leg it is also the likeliest shape of the
+    /// failure — an App Store app meets daemons it is many releases behind, so a row-shape change
+    /// arrives as every row failing at once rather than as one odd row.
+    func testANonEmptyProvidersArrayWhereNoRowDecodesThrows() async throws {
+        let broken = #"{"providerId":"broken","group":"provider","manageable":true,"present":true,"risk":"approved","door":"credential.set"}"#
+        let conn = ScriptedCredentialsConn(["credential.list": ["{\"providers\":[\(broken),\(broken)]}"]])
+
+        do {
+            _ = try await RemoteCredentialsRpc(conn: conn).list()
+            XCTFail("a non-empty providers array that decodes to nothing must throw, never answer []")
+        } catch let error as CredentialsClientError {
+            XCTAssertEqual(error, .malformedListReply)
+        }
+    }
+
+    /// The same rule driven from the shared fixture, so the Mac side asserts it on identical bytes.
+    func testTheAllMalformedSharedFixtureThrows() async throws {
+        let fixture = try String(decoding: CredentialFixture.allMalformedListResult(), as: UTF8.self)
+        let conn = ScriptedCredentialsConn(["credential.list": [fixture]])
+
+        do {
+            _ = try await RemoteCredentialsRpc(conn: conn).list()
+            XCTFail("the all-malformed fixture must throw")
+        } catch let error as CredentialsClientError {
+            XCTAssertEqual(error, .malformedListReply)
+        }
+    }
+
     /// Per-slot rows (§9 A-1): `anthropic` twice, distinguished by `door`/`kind`. The composite `id`
     /// is what keeps a SwiftUI `ForEach` from collapsing them into one.
     func testTheTwoAnthropicSlotsDecodeAsTwoDistinctRows() async throws {
@@ -303,11 +333,17 @@ final class ScriptedCredentialsConn: RpcConn, @unchecked Sendable {
 /// SwiftPM resource bundling could not carry it anyway — the file lives outside both test targets
 /// on purpose, so neither kit owns it.
 enum CredentialFixture {
-    static func listResult() throws -> Data {
+    static func listResult() throws -> Data { try load("ws19-credential-list.json") }
+
+    /// The companion fixture for the all-rows-unreadable case: three rows, each missing a different
+    /// REQUIRED field (no `providerId`, no `displayName`, a `manageable` of the wrong type).
+    static func allMalformedListResult() throws -> Data { try load("ws19-credential-list-all-malformed.json") }
+
+    private static func load(_ name: String) throws -> Data {
         // #filePath == <repo>/apple/WinterChatKit/Tests/WinterChatKitTests/CredentialsRpcTests.swift
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0 ..< 4 { url.deleteLastPathComponent() } // file, WinterChatKitTests, Tests, WinterChatKit → <repo>/apple
-        return try Data(contentsOf: url.appending(path: "fixtures/ws19-credential-list.json"))
+        return try Data(contentsOf: url.appending(path: "fixtures/\(name)"))
     }
 
     /// The agreed decode of that fixture — the table BOTH decoders must produce. Its interesting

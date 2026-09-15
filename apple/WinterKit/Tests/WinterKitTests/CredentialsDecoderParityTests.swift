@@ -58,17 +58,42 @@ final class CredentialsDecoderParityTests: XCTestCase {
                        [true, true, false, true, false, false, true, true])
     }
 
+    /// A non-empty `providers` array in which NOT ONE row decodes throws, on the same bytes
+    /// `CredentialsRpcTests.testTheAllMalformedSharedFixtureThrows` drives (three rows, each
+    /// missing a different required field). Skipping unreadable rows is only safe as a partial
+    /// measure — with none left it silently becomes the empty list §9 A-4 forbids, and the daemon
+    /// had just said it holds credentials. This is the one A-4 case where the two clients could
+    /// plausibly have been written to disagree, so it is pinned on both.
+    func testTheAllMalformedSharedFixtureThrows() async throws {
+        let fixture = try String(decoding: sharedFixture("ws19-credential-list-all-malformed.json"), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            _ = try await list(fixture)
+            XCTFail("a non-empty providers array that decodes to nothing must throw, never answer []")
+        } catch let error as CredentialsClientError {
+            XCTAssertEqual(error, .malformedListReply)
+        }
+    }
+
+    /// An EXPLICITLY empty array is the other side of that line and must stay an empty list: `[]` is
+    /// a claim the daemon itself made, which is what makes it safe to show.
+    func testAnExplicitlyEmptyProvidersArrayIsStillNotAnError() async throws {
+        let rows = try await list(#"{"providers":[]}"#)
+
+        XCTAssertTrue(rows.isEmpty)
+    }
+
     // MARK: - plumbing
 
-    /// `<repo>/apple/fixtures/ws19-credential-list.json`, read straight from the repo (the same
+    /// A fixture under `<repo>/apple/fixtures/`, read straight from the repo (the same
     /// source-relative habit `WinterProtocol`'s fixture tests and `ParityFixtures` use). Neither
-    /// package owns the file: a copy inside one of them would be a second source of truth that goes
-    /// stale the moment the other side edits it — the exact drift this test exists to catch.
-    private func sharedFixture() throws -> Data {
+    /// package owns these files: a copy inside one of them would be a second source of truth that
+    /// goes stale the moment the other side edits it — the exact drift this test exists to catch.
+    private func sharedFixture(_ name: String = "ws19-credential-list.json") throws -> Data {
         // #filePath == <repo>/apple/WinterKit/Tests/WinterKitTests/CredentialsDecoderParityTests.swift
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0 ..< 4 { url.deleteLastPathComponent() } // file, WinterKitTests, Tests, WinterKit → <repo>/apple
-        return try Data(contentsOf: url.appending(path: "fixtures/ws19-credential-list.json"))
+        return try Data(contentsOf: url.appending(path: "fixtures/\(name)"))
     }
 
     /// Drives a real `LiveCredentialsClient` over `ScriptedTransport` (WinterClientTests) and feeds

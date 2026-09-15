@@ -142,7 +142,8 @@ extension RpcError {
 /// refused. Separate from `RpcError` on purpose: an `RpcError` means the daemon answered "no" and
 /// said why, while this means the daemon answered something this client could not make sense of.
 public enum CredentialsClientError: Error, Equatable, Sendable {
-    /// `credential.list` returned a result with no `providers` array (WS-19 §9 A-4).
+    /// `credential.list` returned a result with no `providers` array — or a non-empty one from
+    /// which not a single row could be read (WS-19 §9 A-4).
     ///
     /// A THROW rather than an empty list, and the distinction is the whole point of the ruling:
     /// "no credentials are stored" and "I could not read the reply" look identical on screen if the
@@ -186,13 +187,28 @@ public struct RemoteCredentialsRpc: CredentialsRpc, Sendable {
     /// "no credentials stored" would tell a user their keys are gone. A SINGLE unreadable row is
     /// skipped — the other rows are perfectly good, and one unknown shape from a newer daemon must
     /// not blank the whole section.
+    ///
+    /// The THIRD case sits between them and lands on A-4's side: a NON-EMPTY `providers` array in
+    /// which not one row decodes. Skipping is only ever safe as a partial measure — "some rows I
+    /// could not read, here are the ones I could" — and when there are none left it silently becomes
+    /// the empty list the ruling exists to forbid. The daemon said it had credentials; answering
+    /// `[]` would repaint that as "you have none", the screen that talks a user into re-entering
+    /// keys they never lost. It is also the most likely way this breaks on THIS leg specifically: an
+    /// App Store app meets daemons it is many releases behind, so a wholesale row-shape change lands
+    /// here as every row failing at once, not as one odd row. An EXPLICITLY empty array stays an
+    /// empty list — that is a claim the daemon itself made. Mirrored in
+    /// `WinterKit.LiveCredentialsClient.list`.
     public func list() async throws -> [CredentialRow] {
         let raw = try await conn.call(method: METHODS.credentialList, paramsJSON: encode(CredentialListParams()))
         let result = try JSONDecoder().decode(SessionEvent.JSONValue.self, from: raw)
         guard let rows = result["providers"]?.credentialArray else {
             throw CredentialsClientError.malformedListReply
         }
-        return rows.compactMap(Self.decodeRow)
+        let decoded = rows.compactMap(Self.decodeRow)
+        guard !decoded.isEmpty || rows.isEmpty else {
+            throw CredentialsClientError.malformedListReply
+        }
+        return decoded
     }
 
     /// One row, or `nil` when a field W19-3 makes REQUIRED is missing or the wrong type.
