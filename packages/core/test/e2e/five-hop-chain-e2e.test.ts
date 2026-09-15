@@ -283,7 +283,9 @@ describeWithWinterBinary("A-5 part 2: the chain's LAST hop (gpt -> claude) promp
 //
 //   (a) the PRIOR TURNS are there, IN ORDER — the same conversation continued, not a fresh one;
 //   (b) the prior model's REASONING is carried as data with its own provenance, where W18-19 says it
-//       should be: `kind="summary"` off the Claude source, `kind="exposed"` off DeepSeek and GLM;
+//       should be: `kind="summary"` off a hidden-reasoning source (Claude, GPT), `kind="exposed"`
+//       off DeepSeek and GLM — including on ROW 4, the official-leg destination, which no test
+//       covered anywhere before fix round 2;
 //   (c) NO OPAQUE STATE crosses — no `signature`, `encrypted_content` or `redacted_thinking` in the
 //       conversation, and the Claude turn's own scripted signature value appears in no body at all.
 //
@@ -297,6 +299,10 @@ const CATALOG_DEEPSEEK_MODEL = "deepseek/deepseek-reasoner";
  *  data, the signature MUST NOT appear in any request body anywhere. */
 const CLAUDE_THINKING = "claude was thinking here";
 const CLAUDE_SIGNATURE = "sig-claude-hop0";
+/** GPT's own turn is HIDDEN-reasoning: a readable summary that MAY carry to a foreign family, and
+ *  an opaque `encrypted_content` blob that may not. Hop 4 is where both are tested. */
+const GPT_SUMMARY = "gpt summarised its reasoning here";
+const GPT_ENCRYPTED = "ENC-DUMMY-FIVEHOP-GPT";
 const CATALOG_GLM_MODEL = "zai/glm-5";
 
 /** One loopback OpenAI-chat-completions provider (deepseek and zai both ride that adapter),
@@ -333,7 +339,15 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
     beforeAll(async () => {
       home = realpathSync(mkdtempSync(join(tmpdir(), "five-hop-chain-")));
       openaiFakeRef = await openaiResponsesFake.startOpenAiResponsesFake({
-        scenarios: {}, unknownModel: async () => openaiResponsesFake.responsesStream({ text: ["hello from gpt"] }),
+        scenarios: {},
+        // GPT's turn carries a HIDDEN reasoning item: an opaque `encrypted_content` blob plus a
+        // readable summary. Both halves are load-bearing for hop 4 — the summary is the only thing
+        // that can carry to a foreign family, and the blob is the thing that must NOT.
+        unknownModel: async () => openaiResponsesFake.responsesStream({
+          text: ["hello from gpt"],
+          summary: [GPT_SUMMARY],
+          reasoningItems: [{ index: 0, encrypted: GPT_ENCRYPTED, summaryText: GPT_SUMMARY }],
+        }),
       });
       const { startFake: startAnthropic, anthropicFake } = await import("@yanlinglabs/winter-provider-conformance");
       anthropicFakeServer = await startAnthropic({
@@ -459,21 +473,61 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
         await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL });
       } catch (err) { caught2 = err as RpcErrorLike; }
       expect(caught2?.rpc?.data?.code).toBe("handoff_confirmation_required");
+      // CONFIRMED, and the turn actually runs — W18-19's ROW 4, the one destination class no test
+      // covered anywhere: back onto the OFFICIAL leg, whose `readableState` is not full-exposed, so
+      // it takes the TAG door.
+      const anthropicTurnsBefore = anthropicFakeServer!.requests.filter((r) => r.path === "/v1/messages").length;
+      await client.call(METHODS.sessionSetModel, { sessionId, model: CATALOG_CLAUDE_MODEL, confirmLossy: true });
+      expect(daemon!.winter!.legOf(sessionId)).toBe("official");
+      await client.call(METHODS.sessionSend, { sessionId, text: "hop 4, back on claude" });
+      await client.waitFor(() => turns() >= 5, 120_000);
+      const claudeRequests = anthropicFakeServer!.requests.filter((r) => r.path === "/v1/messages");
+      expect(claudeRequests.length).toBeGreaterThan(anthropicTurnsBefore);
+      const claudeBody = claudeRequests.at(-1)!.body;
+      expect(outOfOrder(claudeBody, ["hop 1, on deepseek", "hello from deepseek", "hop 2, on glm", "hello from glm", "hop 3, on gpt", "hop 4, back on claude"])).toEqual([]);
+      // THE TAG DOOR, all three prior families: GPT is hidden-reasoning, so its readable SUMMARY is
+      // what carries (`kind="summary"`); DeepSeek and GLM are full-exposed sources, so theirs carry
+      // as `kind="exposed"`.
+      expect(carriesReasoning(claudeBody, { kind: "summary", provider: "openai", text: GPT_SUMMARY })).toBe(true);
+      expect(carriesReasoning(claudeBody, { kind: "exposed", provider: "deepseek", text: "reasoning on the deepseek hop" })).toBe(true);
+      expect(carriesReasoning(claudeBody, { kind: "exposed", provider: "zai", text: "reasoning on the glm hop" })).toBe(true);
+      // ...and GPT's OPAQUE half stays behind. `encrypted_content` is what the Responses leg calls
+      // it and `itemJson` is what Winter's own `reasoning_item` calls it; neither the field names nor
+      // the blob itself may cross a family boundary.
+      expect(claudeBody).not.toContain(GPT_ENCRYPTED);
+      expect(claudeBody).not.toContain("itemJson");
+      expect(opaqueLeaks(claudeBody, [GPT_ENCRYPTED])).toEqual([]);
 
-      // (c) once more across EVERY body every fake received, including the Anthropic source's own:
-      // the Claude turn's signature is in none of them, and no conversation anywhere carries an
-      // opaque field name.
-      const everyBody = [
+      // (c) once more across EVERY body every fake received: no conversation carries an opaque field
+      // name, and the two scripted opaque VALUES cross nothing.
+      //
+      // THE ANTHROPIC BODIES ARE EXEMPT FROM THE `signature` NAME CHECK, deliberately and in
+      // ADVANCE: a Claude destination replaying Claude's OWN thinking is SAME-DOMAIN native replay —
+      // exactly what W18-19 wants to happen, and it carries a `signature` field legitimately. A
+      // names-only bar there would fail the very behaviour it is meant to protect.
+      //
+      // MEASURED in THIS construction the exemption is not yet load-bearing: hop 4's request carries
+      // no `signature` at all, because the Claude source turn is four hops back and its thinking
+      // arrives as a `<recovered_reasoning>` TAG rather than as native replay. It is written this way
+      // so that a future chain with adjacent Claude hops — where native replay IS the right answer —
+      // does not fail on a rule that was only ever about crossing a family boundary.
+      //
+      // What must never happen is that signature reaching a FOREIGN family, so its VALUE is asserted
+      // absent from every non-Anthropic body, and `encrypted_content`/`redacted_thinking` stay barred
+      // everywhere, including here.
+      const foreignBodies = [
         ...deepseek!.bodies, ...glm!.bodies,
         ...openaiFakeRef!.requests.map((r) => r.body),
-        ...anthropicFakeServer!.requests.map((r) => r.body),
       ];
-      for (const body of everyBody) expect(opaqueLeaks(body, [CLAUDE_SIGNATURE])).toEqual([]);
+      for (const body of foreignBodies) expect(opaqueLeaks(body, [CLAUDE_SIGNATURE, GPT_ENCRYPTED])).toEqual([]);
+      for (const body of anthropicFakeServer!.requests.map((r) => r.body)) {
+        expect(opaqueLeaks(body, [GPT_ENCRYPTED]).filter((leak) => leak !== "signature")).toEqual([]);
+      }
 
       // ONE conversation throughout: every hop's user message is still in the session's own log.
       const history = await client.call<{ events: Array<{ type: string; text?: string }> }>(METHODS.sessionHistory, { sessionId, limit: 500 });
       const userTexts = history.events.filter((e) => e.type === "user_message").map((e) => e.text ?? "");
-      for (const hop of ["hop 0, on claude", "hop 1, on deepseek", "hop 2, on glm", "hop 3, on gpt"]) {
+      for (const hop of ["hop 0, on claude", "hop 1, on deepseek", "hop 2, on glm", "hop 3, on gpt", "hop 4, back on claude"]) {
         expect(userTexts.some((t) => t.includes(hop))).toBe(true);
       }
 
