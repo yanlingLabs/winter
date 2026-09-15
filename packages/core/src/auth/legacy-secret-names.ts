@@ -33,7 +33,8 @@ export const CODEX_SECRET_NAMES = {
  * Phase 9c Migration B (P9c-14): every Keychain secret name the migrator copies from the LEGACY
  * service to the CURRENT one, by known name — `SecretStore` has no enumeration, so this is the
  * complete inventory `migration/migrate-b.ts` walks. Verbatim COPIES of the literals declared
- * canonically elsewhere (`CREDENTIAL_MATERIAL_NAMES`/`ANTHROPIC_CREDENTIAL_SECRET_NAME` — the
+ * canonically elsewhere (`CREDENTIAL_MATERIAL_NAMES` / `ANTHROPIC_CREDENTIAL_SECRET_NAME` /
+ * `ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME` — the
  * material records; `TOKEN_NAMES` — the remote/harness/admin tokens; `OPENAI_API_KEY_SECRET` +
  * `CODEX_SECRET_NAMES` above — the pre-material raw records; `WEB_SEARCH_API_KEY_SECRET` +
  * `EXA_API_KEY_SECRET` — the two tool keys), repeated as string literals rather than imported so
@@ -48,6 +49,11 @@ export const MIGRATION_B_SECRET_NAMES: readonly string[] = [
   "openai:default",
   "codex-oauth:default",
   "anthropic:default",
+  // WS-19 (W19-9): the Console broker's OWN bearer account (`anthropic:console`,
+  // `runtime-sdk/keychain.ts`'s `ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME`). It shipped in Phase
+  // 10a, AFTER this list was written, and was simply never added — so a migrated home silently lost
+  // its Console sign-in and had to re-run `winter login --anthropic-console`.
+  "anthropic:console",
   "harness-token",
   "admin-token",
   "remote-token",

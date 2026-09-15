@@ -21,7 +21,7 @@ import { completeMarkerPath, manifestPath, rolledBackManifestPath } from "../../
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { CODEX_SECRET_NAMES, OPENAI_API_KEY_SECRET } from "../../src/auth/legacy-secret-names";
 import { CREDENTIAL_MATERIAL_NAMES } from "../../src/auth/credential-material";
-import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
+import { ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain";
 import { TOKEN_NAMES } from "../../src/auth/tokens";
 import { WEB_SEARCH_API_KEY_SECRET } from "../../src/agent/tools/web";
 import { EXA_API_KEY_SECRET } from "../../src/agent/tools/search";
@@ -151,6 +151,7 @@ describe("MIGRATION_B_SECRET_NAMES — literal parity with the canonical secret-
       CREDENTIAL_MATERIAL_NAMES.openai,
       CREDENTIAL_MATERIAL_NAMES.codexOauth,
       ANTHROPIC_CREDENTIAL_SECRET_NAME,
+      ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME,
       TOKEN_NAMES.harness,
       TOKEN_NAMES.admin,
       TOKEN_NAMES.remote,
@@ -164,17 +165,19 @@ describe("MIGRATION_B_SECRET_NAMES — literal parity with the canonical secret-
       EXA_API_KEY_SECRET,
     ];
     expect([...MIGRATION_B_SECRET_NAMES].sort()).toEqual([...canonical].sort());
-    // Sanity: the canonical list itself is exactly 14 distinct names — proves this test isn't
+    // Sanity: the canonical list itself is exactly 15 distinct names — proves this test isn't
     // vacuously passing on two empty (or duplicate-collapsed) arrays.
-    expect(new Set(canonical).size).toBe(14);
+    expect(new Set(canonical).size).toBe(15);
   });
 
-  test("contains exactly the pinned 14 literal names (global-constraints.md, verbatim)", () => {
+  test("contains exactly the pinned 15 literal names (global-constraints.md, verbatim + WS-19's anthropic:console)", () => {
     expect([...MIGRATION_B_SECRET_NAMES].sort()).toEqual(
       [
         "openai:default",
         "codex-oauth:default",
         "anthropic:default",
+        // WS-19 (W19-9): the Console broker's bearer account, missing since Phase 10a.
+        "anthropic:console",
         "harness-token",
         "admin-token",
         "remote-token",
