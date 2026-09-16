@@ -1,13 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { mergeSettings } from "../src/project-settings";
 import { Settings } from "../src/settings";
+import type { ModelTag } from "../src/runtime-sdk/model-tag";
 
 /** Minimal valid Settings — schemaVersion literal 2 + a valid ProviderSettings variant
  *  (codex-oauth requires only a non-empty model; reasoningEffort/baseUrl etc are optional). */
 function minimalBase(overrides: Record<string, unknown> = {}): Settings {
   return Settings.parse({
-    schemaVersion: 2,
-    provider: { type: "codex-oauth", model: "x" },
+    schemaVersion: 3,
+    provider: { model: "codex-oauth/x" },
     ...overrides,
   });
 }
@@ -144,10 +145,10 @@ describe("mergeSettings", () => {
   describe("clone semantics", () => {
     test("overlay sub-objects are cloned, not aliased — mutating the overlay after merging does not corrupt the merged result", () => {
       const base = minimalBase();
-      const overlay: { reviewer: { model: string } } = { reviewer: { model: "shared-model" } };
+      const overlay: { reviewer: { model: string } } = { reviewer: { model: "codex-oauth/shared-model" } };
       const merged = mergeSettings(base, [overlay]);
-      overlay.reviewer.model = "MUTATED-AFTER-MERGE";
-      expect(merged.reviewer?.model).toBe("shared-model");
+      overlay.reviewer.model = "codex-oauth/mutated-after-merge";
+      expect(merged.reviewer?.model).toBe("codex-oauth/shared-model" as ModelTag);
     });
   });
 });

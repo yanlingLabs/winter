@@ -45,6 +45,7 @@ import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import type { RuntimeStateWiring } from "../../src/runtime-state";
 import { sessionLegOf } from "../../src/runtime-sdk/leg";
 import { CHAT_ALLOWED_WINTER_TOOLS, buildWinterOptions, disallowedToolsFor } from "../../src/runtime-sdk/mode-options";
+import type { ModelTag } from "../../src/runtime-sdk/model-tag";
 import { WINTER_ADVERTISED_MCP_TOOLS_0_0_4, WINTER_ADVERTISED_TOOLS_0_0_4_BASE } from "../../src/runtime-sdk/tool-names";
 import { createHostPromptQueue } from "../../src/runtime-sdk/prompt-queue";
 import { WINTER_CAPABILITY_TOOLS } from "../../src/capabilities";
@@ -538,7 +539,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     if (hook instanceof Error) throw hook;
     const abort = new AbortController();
     const options: Options = buildWinterOptions({
-      mode: "code", policy: "auto", sessionId: crypto.randomUUID(), home, cwd, model: "winter-test/echo",
+      mode: "code", policy: "auto", sessionId: crypto.randomUUID(), home, cwd, model: "winter-test/echo" as ModelTag,
       credentials: { byProvider: {} }, spawn: hook, canUseTool: async () => ({ behavior: "deny", message: "tripwire" }), abort,
       capabilityTools: WINTER_CAPABILITY_TOOLS, capabilities: caps,
     });
