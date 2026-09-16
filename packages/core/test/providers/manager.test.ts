@@ -3,8 +3,9 @@ import { mkdtempSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
-import { createProvider, OPENAI_API_KEY_SECRET } from "../../src/providers/manager";
+import { createProvider, internalModelFor, OPENAI_API_KEY_SECRET } from "../../src/providers/manager";
 import type { Settings } from "../../src/settings";
+import type { ModelTag } from "../../src/runtime-sdk/model-tag";
 
 function tmpSettingsFile(settings: Settings): string {
   const p = join(mkdtempSync(join(tmpdir(), "winter-manager-")), "settings.json");
@@ -143,5 +144,27 @@ describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
 
     expect(() => p.liveModel()).not.toThrow();
     expect(p.liveModel()).toEqual({ model: "gpt-5.6-terra", providerId: "codex-oauth" }); // last good, unchanged
+  });
+});
+
+describe("internalModelFor (WS-20 review round 1, GUARD)", () => {
+  test("a pin naming the SAME provider as the daemon's internal Provider returns the bare modelId", () => {
+    expect(internalModelFor("codex-oauth/gpt-5.6-terra" as ModelTag, { providerId: "codex-oauth" }, "pins.dream")).toBe("gpt-5.6-terra");
+  });
+
+  test("a pin naming a DIFFERENT provider returns undefined and logs one line naming the field, never the tag or a secret", () => {
+    const lines: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+    try {
+      const result = internalModelFor("openai/gpt-5.6-terra" as ModelTag, { providerId: "codex-oauth" }, "pins.dream");
+      expect(result).toBeUndefined();
+    } finally {
+      console.error = realError;
+    }
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("pins.dream");
+    expect(lines[0]).toContain("openai");
+    expect(lines[0]).toContain("codex-oauth");
   });
 });

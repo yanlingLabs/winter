@@ -109,8 +109,8 @@ export function writeAndLoadSettings(home: string, pluginId: string, opts?: { ha
   const consent: { exec: number; hardware?: number } = { exec: Date.now() };
   if (opts?.hardwareConsent) consent.hardware = Date.now();
   writeFileSync(join(home, "settings.json"), JSON.stringify({
-    schemaVersion: 2,
-    provider: { type: "codex-oauth", model: "gpt-5.4" }, // unused (nothing here constructs a real provider) but required by the settings schema
+    schemaVersion: 3,
+    provider: { model: "codex-oauth/gpt-5.4" }, // unused (nothing here constructs a real provider) but required by the settings schema
     plugins: { enabled: [pluginId], consents: { [pluginId]: consent } },
   }));
   return loadSettings(join(home, "settings.json"));

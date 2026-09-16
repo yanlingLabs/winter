@@ -52,7 +52,7 @@ import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain
 import { describeWithWinterBinary } from "../helpers/winter-binary";
 import { claudeRuntimeForTests, describeWithClaudeRuntime, type AnthropicTurnScript } from "../helpers/claude-runtime";
 
-const CATALOG_CLAUDE_MODEL = "claude-sonnet-5"; // the same pinned-catalog id official-leg.e2e.test.ts uses
+const CATALOG_CLAUDE_MODEL = "anthropic/claude-sonnet-5"; // the same pinned-catalog id official-leg.e2e.test.ts uses
 const WINTER_DOUBLE_MODEL = "winter-test/echo";
 // Fix wave item 2: a REAL catalog-listed, credentialed Winter provider — `provider-selection.ts`'s
 // `catalogRowsFor` lists it under providerId "openai", and its family ("gpt") is non-Claude, so
@@ -127,8 +127,9 @@ describeWithWinterBinary("cross-runtime handoff (P8c, the phase's key proof)", (
     beforeAll(async () => {
       home = realpathSync(mkdtempSync(join(tmpdir(), "winter-handoff-x-")));
       writeFileSync(join(home, "settings.json"), JSON.stringify({
-        schemaVersion: 2,
-        provider: { type: "openai-compatible", model: WINTER_DOUBLE_MODEL, baseUrl: "http://127.0.0.1:9/v1" },
+        schemaVersion: 3,
+        provider: { model: WINTER_DOUBLE_MODEL },
+        providers: { openai: { baseUrl: "http://127.0.0.1:9/v1" } },
         // Fix wave (C2 / ruling P8c-18): the fence defaults OFF in production; THIS file's whole
         // job is measuring the real barrier, so it opts in explicitly.
         runtimes: { winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable, winterIdleTimeoutSec: 10, handoff: { crossRuntime: true } },
@@ -367,10 +368,11 @@ describeWithWinterBinary("cross-runtime handoff on a REAL catalog provider (fix 
       anthropicFakeClose = () => anthropicFakeServer.close();
 
       writeFileSync(join(home, "settings.json"), JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         // `session.create`'s own model wins over this default — carried only because `Settings`
         // requires `provider` to be present at all (same as every other e2e fixture in this repo).
-        provider: { type: "openai-compatible", model: CATALOG_OPENAI_MODEL, baseUrl: openaiFakeUrl },
+        provider: { model: CATALOG_OPENAI_MODEL },
+        providers: { openai: { baseUrl: openaiFakeUrl } },
         runtimes: {
           winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable, winterIdleTimeoutSec: 10,
           handoff: { crossRuntime: true },
