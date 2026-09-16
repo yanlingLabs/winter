@@ -617,11 +617,16 @@ describe("setProviderModel / setReasoningEffort (winter model CLI's pure transfo
     expect(() => Settings.parse(setReasoningEffort(setProviderModel(s, tag("codex-oauth/gpt-5.6-terra")), "max"))).not.toThrow();
   });
 
-  // WS-20 (review round 2, M6): `provider.model` binds the daemon's own internal Provider, which
-  // can only ever serve codex-oauth/openai — `setProviderModel` refuses any other provider outright.
-  test("M6: setProviderModel refuses a provider the daemon's internal Provider cannot serve", () => {
+  // WS-20 (review round 4): `setProviderModel` is UNCONSTRAINED again — a round-2 gate to
+  // `INTERNAL_PROVIDER_IDS` lived here briefly and broke a real "my default chat model is Claude"
+  // scenario (a SESSION's own default falls back to THIS field too, not just the daemon's internal
+  // Provider — session-driver.ts's create()). The constraint now lives only where the internal
+  // Provider is actually built (`createProvider`, which answers `null` rather than a refusal).
+  test("R4: setProviderModel accepts any catalog provider, including one the internal Provider cannot serve", () => {
     const s: Settings = { schemaVersion: 3, provider: { model: tag("codex-oauth/gpt-5.6-sol") } };
-    expect(() => setProviderModel(s, tag("anthropic/claude-sonnet-5"))).toThrow(/codex-oauth or openai/);
+    const next = setProviderModel(s, tag("anthropic/claude-sonnet-5"));
+    expect(next.provider.model).toBe(tag("anthropic/claude-sonnet-5"));
+    expect(() => Settings.parse(next)).not.toThrow();
   });
 });
 
@@ -915,12 +920,17 @@ describe("WS-20: provider.model is a tag", () => {
     expect(() => Settings.parse({ schemaVersion: 3, provider: { type: "codex-oauth", model: "codex-oauth/gpt-5.6-terra" } })).toThrow(); // `type` is gone (strict object)
   });
 
-  // WS-20 (review round 2, M6): the `ProviderModelTagSchema` refinement itself, exercised directly
-  // through `Settings.parse` — the other M6 tests each go through a DIFFERENT door
-  // (`setProviderModel`'s own throw, `provider.configure`'s explicit check, `pinsFor` via a
-  // schema-bypassing fixture); this is the one that proves the schema itself refuses/accepts.
-  test("M6: Settings.parse refuses provider.model naming a non-internal provider, and keeps accepting winter-test/*", () => {
-    expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "anthropic/claude-sonnet-5" } })).toThrow(/codex-oauth or openai/);
+  // WS-20 (review round 4): `provider.model` accepts ANY catalog provider's tag, or `winter-test/*`
+  // — the SAME `ModelTagSchemaCore` every other model-bearing field uses. A round-2 gate
+  // (`ProviderModelTagSchema`, narrowed to `INTERNAL_PROVIDER_IDS`) lived here briefly and broke a
+  // real "my default chat model is Claude" scenario (a session with no explicit override falls
+  // back to THIS field too — session-driver.ts's `create()`, not just the daemon's internal
+  // Provider). The codex-oauth/openai constraint now lives only where the internal Provider is
+  // actually built (`createProvider`, providers/manager.ts), which answers `null` rather than
+  // refusing the write.
+  test("R4: Settings.parse accepts provider.model naming ANY catalog provider, including one the internal Provider cannot serve", () => {
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "anthropic/claude-sonnet-5" } });
+    expect(s.provider.model).toBe(tag("anthropic/claude-sonnet-5"));
     expect(Settings.parse({ schemaVersion: 3, provider: { model: "winter-test/echo" } }).provider.model).toBe(tag("winter-test/echo"));
   });
 });

@@ -77,14 +77,13 @@ describe("WS-20 (spec §5): settings v2 -> v3 migration", () => {
     expect(s.providers?.openai?.baseUrl).toBe("http://127.0.0.1:9999/v1");
   });
 
-  // WS-20 (review round 2, M6 follow-up / self-fix): `migrateBareModelId`'s Claude arm answers
-  // purely off `legacyOfficialAuth`/the console profile, never off `INTERNAL_PROVIDER_IDS` — a v2
-  // `openai-compatible` BYO endpoint that happened to serve a model with a `claude-`-prefixed bare
-  // id would otherwise migrate `provider.model` to `anthropic/claude-*`, which the
-  // `ProviderSettings` schema (M6) now refuses outright. Falls back to the SAME rule-2 default
-  // instead, logged, so migration never produces a `provider.model` the very next `Settings.parse`
-  // would reject. `reviewer.model` is NOT gated the same way — it keeps its Claude tag.
-  test("M6: a v2 BYO endpoint serving a claude-prefixed id falls back to the provider's own default for provider.model, but reviewer.model keeps its Claude tag", () => {
+  // WS-20 (review round 4): `provider.model` is UNCONSTRAINED again (any catalog provider) — a
+  // round-2/round-3 fallback briefly steered a v2 `openai-compatible` BYO endpoint serving a
+  // `claude-`-prefixed bare id AWAY from `anthropic/claude-*` for `provider.model` specifically,
+  // because that used to fail the (now-removed) `ProviderSettings` schema gate. `migrateBareModelId`'s
+  // Claude arm answer is now trusted verbatim for `provider.model`, same as `reviewer.model` always
+  // was — the correct migration for a genuinely Claude-primary v2 home.
+  test("R4: a v2 BYO endpoint serving a claude-prefixed id migrates provider.model AND reviewer.model to the SAME Claude tag", () => {
     const home = mkdtempSync(join(tmpdir(), "ws20-"));
     const path = join(home, "settings.json");
     writeFileSync(path, JSON.stringify({
@@ -93,11 +92,11 @@ describe("WS-20 (spec §5): settings v2 -> v3 migration", () => {
       reviewer: { model: "claude-opus-5" },
     }));
     const s = loadSettings(path, { persistMigration: true });
-    expect(s.provider.model).toBe(tag("openai/gpt-5.6-sol")); // gated — falls back, never a Claude tag here
-    expect(s.reviewer?.model).toBe(tag("anthropic/claude-opus-5")); // ungated — keeps the Claude arm's answer
-    // The migration actually persisted a VALID v3 file (the whole point: no write-then-fail).
+    expect(s.provider.model).toBe(tag("anthropic/claude-opus-5"));
+    expect(s.reviewer?.model).toBe(tag("anthropic/claude-opus-5"));
+    // The migration persisted a VALID v3 file.
     const onDisk = JSON.parse(readFileSync(path, "utf8"));
     expect(onDisk.schemaVersion).toBe(3);
-    expect(onDisk.provider.model).toBe("openai/gpt-5.6-sol");
+    expect(onDisk.provider.model).toBe("anthropic/claude-opus-5");
   });
 });
