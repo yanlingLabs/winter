@@ -292,7 +292,11 @@ export async function startDaemon(opts: {
    *  behavior). object: use this provider directly (tests inject FakeProvider). `live`, when
    *  present, is threaded into EngineConfig.provider.live (no-restart model resolution) — tests
    *  that inject a provider directly and don't care about live resolution just omit it. */
-  agentProvider?: { provider: Provider; model: string; live?: () => { model: string; reasoningEffort?: string } } | null;
+  // WS-20: `live`'s return gained an optional `providerId` (the CATALOG providerId, `LiveModelSelection`
+  // in providers/manager.ts) so `liveModel` below can recompose a REAL tag — kept optional here
+  // (rather than importing `LiveModelSelection` verbatim) so a test that injects a provider
+  // directly and doesn't care about live resolution can still omit it entirely.
+  agentProvider?: { provider: Provider; model: string; live?: () => { model: string; reasoningEffort?: string; providerId?: string } } | null;
   /** TEST ONLY (fix round 1, M2) — threaded straight into `WinterLegDeps.officialConnectionOverride`;
    *  a production caller never sets this. See that field's own doc for why it exists at all. */
   officialConnectionOverride?: WinterLegDeps["officialConnectionOverride"];
@@ -1514,7 +1518,7 @@ export async function startDaemon(opts: {
     // all, so a dangerous-domain url is HARD-BLOCKED (isError, no card) rather than carded like
     // web_fetch (code mode, unchanged). See page-core.ts's `checkDangerousDomain` for the full
     // rationale and read-page.ts/research.ts for where the check actually fires.
-    const research = createResearchRunner({ provider: agentProvider.provider, cache: pageCache, audit: (line) => audit.append(line), dangerousDomainsAdded });
+    const research = createResearchRunner({ provider: agentProvider.provider, cache: pageCache, audit: (line) => audit.append(line), dangerousDomainsAdded, settings: () => settings });
     researchRunner = research; // the holder the `research` capability server reads (P8b Task 7)
     // B2 Task 4: the agent's browser. Four narrow deps, each the SAME thing the equivalent RPC uses —
     // `tabs` is the fold `panel.list` serves, `openTab` is the function `panel.openTab`'s handler
@@ -1880,6 +1884,9 @@ export async function startDaemon(opts: {
       enabled: memoryEnabledHot,
       // P8b Task 17: a Winter-leg turn in flight is activity too (the drivers' host-side count).
       activeTurnCount: () => signals.activeTurnCount(),
+      // WS-20: hot settings read — `pinsFor(deps.settings()).dream` is what actually decides the
+      // model now, never a boot snapshot (see Dreamer's own DreamerDeps.settings doc comment).
+      settings: () => settings,
       // session-activity-hygiene T7 (spec §3): the cleaner rides THIS scheduler slot. Constructed
       // here (not at the top of the file) for the same reason the Dreamer is: it needs a provider,
       // and the signals it derives activity from (`engine`, `hub`) are only final by this point.
@@ -1901,6 +1908,10 @@ export async function startDaemon(opts: {
         bgWork: (sid) => signals.hasBackgroundWork(sid),
         home: winterHome,
         enabled: cleanerEnabledHot,
+        // WS-20: hot settings read — `pinsFor(deps.settings()).cleaner` is what actually decides
+        // the model now, never a boot snapshot (see SessionCleaner's own CleanerDeps.settings doc
+        // comment, which defaults to the SAME value as Dreamer's own `pinsFor(...).dream`).
+        settings: () => settings,
         // P8a Task 12: the second sanctioned deletion path takes runtime state with it too, exactly
         // as the reaper's does (WS-16 §16) — and, since Task 16, the session's Winter child.
         onDelete: onSessionDeleted,
@@ -2040,19 +2051,28 @@ export async function startDaemon(opts: {
   const liveSelection = agentProvider
     ? () => agentProvider!.live?.() ?? { model: agentProvider!.model }
     : undefined;
-  // Whole-branch review C1 — WHICH provider `liveModel` below belongs to. Read off
-  // `agentProvider.provider` and NOT off `liveSelection`: the provider IDENTITY is boot-bound
-  // (`buildLiveModelResolver` closes over the boot providerId and deliberately ignores a
-  // live-read one, because changing which provider is active needs a restart), so routing it
-  // through the hot resolver would advertise a hotness that does not exist. `undefined` on a
-  // no-provider daemon — ipc/sync.ts degrades that to `"none"`, never to `""`.
+  // Whole-branch review C1 — WHICH provider `sync.config`'s own `provider` field reports. Read off
+  // `agentProvider.provider.id` (the INTERNAL adapter literal — `"codex-oauth"` or
+  // `"openai-compatible"`) and NOT off `liveSelection`: this identity is boot-bound (changing
+  // which provider is active needs a restart), so routing it through the hot resolver would
+  // advertise a hotness that does not exist. `undefined` on a no-provider daemon — ipc/sync.ts
+  // degrades that to `"none"`, never to `""`. NOTE: this is a DIFFERENT vocabulary than the
+  // catalog `providerId` `liveModel` below composes a tag from — `Provider.id` only happens to
+  // equal the catalog id for the codex-oauth arm; the BYO/openai-compatible arm's `Provider.id` is
+  // its own internal literal, never a real catalog provider (see `providers/manager.ts`'s
+  // `LiveModelSelection.providerId` doc comment for why the two must not be conflated).
   const liveProvider = agentProvider ? () => agentProvider!.provider.id : undefined;
-  // WS-20: `liveModel()` is a TAG — composed from the boot-bound `liveProvider` (never re-derived
-  // live) plus the hot `liveSelection().model` (the bare modelId half, re-read every call). This
-  // is the ONE place the daemon recomposes a tag from the internal-Provider abstraction's own
-  // bare-id world, mirroring the runtime-sdk spawn boundary's own split in the other direction.
+  // WS-20: `liveModel()` is a TAG — composed from the hot `liveSelection().providerId` (the CATALOG
+  // providerId, boot-bound like everything else about provider identity, but read off
+  // `LiveModelSelection` itself rather than `Provider.id` above, which is NOT always a real catalog
+  // id — see the comment on `liveProvider` just above) plus the hot `liveSelection().model` (the
+  // bare modelId half, re-read every call). This is the ONE place the daemon recomposes a tag from
+  // the internal-Provider abstraction's own bare-id world, mirroring the runtime-sdk spawn
+  // boundary's own split in the other direction. Falls back to `liveProvider()` only when the
+  // injected `live()` resolver predates `providerId` (a test double that hasn't been updated) —
+  // every real boot path (`createProvider`'s own `liveModel`) always supplies it.
   const liveModel = liveSelection && liveProvider
-    ? () => `${liveProvider!()}/${liveSelection!().model}` as ModelTag
+    ? () => `${liveSelection!().providerId ?? liveProvider!()}/${liveSelection!().model}` as ModelTag
     : undefined;
   const liveEffort = liveSelection ? () => liveSelection().reasoningEffort ?? "" : undefined;
 

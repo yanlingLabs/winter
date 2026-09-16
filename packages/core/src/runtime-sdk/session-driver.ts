@@ -47,7 +47,7 @@ import type { RuntimeSessionRecord, RuntimeSessionRecords } from "../runtime-sta
 import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { officialSubscriptionAuthEnabled, pinsFor, providerBaseUrlFor, winterOptionsFromSettings, type Settings } from "../settings";
+import { DEFAULT_PROVIDER, officialSubscriptionAuthEnabled, pinsFor, providerBaseUrlFor, winterOptionsFromSettings, type Settings } from "../settings";
 import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
@@ -60,7 +60,7 @@ import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
 import { attachOfficialSession, attachWinterSession } from "./messaging";
 import { buildWinterOptions, permissionModeFor } from "./mode-options";
 import { providerFor, rowForTag, testProviderNameFor } from "./provider-selection";
-import { splitTag, UNSTATED_TAG } from "./model-tag";
+import { splitTag, UNSTATED_TAG, isModelTag, type ModelTag } from "./model-tag";
 import { winterSessions } from "./sessions";
 import { WINTER_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
@@ -417,8 +417,21 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // `DISPATCH_EFFORT`; `session.setModel`/`setEffort` refuse a dispatch target, so a stored
       // override can only come from a harness that wrote the store directly — a test's door to
       // the `winter-test/*` doubles); every other mode is the per-session override, else the
-      // daemon's configured provider model.
-      const model = mode === "dispatch" ? (live.model ?? pinsFor(settings).dispatch) : (live.model ?? settings?.provider?.model);
+      // daemon's configured provider model, else (no settings loaded at all — no agent provider
+      // configured) `DEFAULT_PROVIDER.model`, the same ultimate fallback `pinsFor` itself falls
+      // back through for a null `settings`. `buildWinterOptions` below requires a real `ModelTag`,
+      // never `undefined` — there is always a real spawn boundary to cross even on a freshly
+      // installed, unconfigured daemon.
+      //
+      // `live.model` (`SessionStore`'s raw `model` column) is deliberately UNBRANDED at the store
+      // layer — `session.list` reports it verbatim, legacy/pre-pin rows may still hold one, and the
+      // column itself is never re-validated on read (see `session.setModel`'s own doc comment on
+      // why a stored override must stay clearable even after the shape rule tightened). The `as
+      // ModelTag` below trusts the WRITE-time invariant instead: every door that can set this
+      // column (`session.setModel`, `session.create`, `sync.push`) validates through
+      // `ModelTagSchema`/`resolveModelSelection` before the write, so a value that reaches here
+      // already satisfies the shape this cast asserts.
+      const model = mode === "dispatch" ? (live.model as ModelTag | undefined ?? pinsFor(settings).dispatch) : (live.model as ModelTag | undefined ?? settings?.provider?.model ?? DEFAULT_PROVIDER.model);
       const effort = mode === "dispatch" ? sdkEffortOf(live.effort ?? DISPATCH_EFFORT) : sdkEffortOf(live.effort);
       // WS-20: `model` is ALWAYS a provider-qualified tag now (or the winter-test escape hatch) —
       // `providerFor` names exactly its provider, no inventory-order tie-break, no "router's decided
@@ -477,7 +490,16 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       }
       // P8d-8 (D30), computed ONCE (review Minor fix): `runtimes.advisorModel` when the user set
       // one, else Winter's own D30 default for this session's model family.
-      const advisorModel = winterOptionsFromSettings(settings).advisorModel ?? d30DefaultModel(model);
+      //
+      // WS-20: `runtimes.advisorModel` stays a PLAIN, deliberately unvalidated string at the schema
+      // level (settings.ts's own doc comment — "blank-is-absent must never invalidate the file");
+      // the ONLY door that validates it as a real tag is `settings.setAdvisorModel`
+      // (ipc/server.ts). A hand-edited settings.json could still park a non-tag string there, so
+      // this is the one OTHER place that must not trust it blindly — `isModelTag` degrades an
+      // invalid stored value to "unset", falling through to the same D30 default an absent value
+      // already gets, rather than handing a malformed string to the spawn boundary.
+      const rawAdvisorModel = winterOptionsFromSettings(settings).advisorModel;
+      const advisorModel = rawAdvisorModel !== undefined && isModelTag(rawAdvisorModel) ? rawAdvisorModel : d30DefaultModel(model);
       return buildWinterOptions({
         mode,
         policy: live.approvalPolicy,

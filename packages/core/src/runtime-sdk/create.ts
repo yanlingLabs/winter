@@ -503,9 +503,22 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
     // refuses a bare id typed (`bare-model-id`) — so `requested.provider` is sent alongside it,
     // split from the SAME tag, never independently guessed. Skipped for the winter-test double
     // (not a catalog tag at all) and when no model is named yet.
+    //
+    // `splitTag` THROWS on anything not shaped like "<providerId>/<modelId>" — a bare id reaching
+    // this function directly (every real RPC door validates via `ModelTagSchema` first, so this is
+    // a defense-in-depth path, not the common one) must still resolve to the router's own typed
+    // `bare-model-id` refusal, never an uncaught `TypeError`. Caught here and passed through as a
+    // bare `model` with no `provider` — the SAME shape `selectRuntime` itself treats as
+    // provider-less — so the router is the one that refuses it, not this function pre-empting it.
     const requestedModel = input.model === undefined || input.model.startsWith(WINTER_TEST_PREFIX)
       ? {}
-      : { model: input.model, provider: splitTag(input.model).providerId };
+      : (() => {
+          try {
+            return { model: input.model!, provider: splitTag(input.model!).providerId };
+          } catch {
+            return { model: input.model! };
+          }
+        })();
     return {
       mode: input.mode,
       requested: requestedModel,

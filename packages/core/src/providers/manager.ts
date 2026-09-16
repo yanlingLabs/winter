@@ -23,6 +23,13 @@ export { OPENAI_API_KEY_SECRET };
 export interface LiveModelSelection {
   model: string;
   reasoningEffort?: string;
+  /** The CATALOG providerId (`splitTag(settings.provider.model).providerId` at BOOT time, never
+   *  re-derived live — see this interface's own doc comment above for why the provider identity
+   *  is fixed for the life of this `ActiveProvider`). This is deliberately NOT `Provider.id` (the
+   *  internal adapter literal, `"codex-oauth"` or `"openai-compatible"`) — a caller that wants to
+   *  recompose a real `ModelTag` (`daemon.ts`'s own `liveModel`, ipc/sync.ts's `syncConfig`) needs
+   *  the CATALOG id, and `Provider.id` only happens to agree with it for the codex-oauth arm. */
+  providerId: string;
 }
 
 export interface ActiveProvider {
@@ -57,19 +64,22 @@ function statMtimeOrZero(path: string): number {
 /** Resolves the (model, reasoningEffort) pair for one already-loaded Settings — `model` is the
  *  BARE modelId half of `settings.provider.model`'s tag, verbatim (see `liveModel`'s doc comment
  *  above for why no rewrite/fallback happens here any more). */
-function resolveSelection(settings: Settings): LiveModelSelection {
+function resolveSelection(settings: Settings, providerId: string): LiveModelSelection {
   const { model, reasoningEffort } = settings.provider;
-  return { model: splitTag(model).modelId, ...(reasoningEffort ? { reasoningEffort } : {}) };
+  return { model: splitTag(model).modelId, providerId, ...(reasoningEffort ? { reasoningEffort } : {}) };
 }
 
 /** Builds the `liveModel` resolver for `createProvider`. `settingsPath` is optional — omitted
  *  (e.g. tests, `winter provider-smoke`) means the resolver just keeps returning the boot-time
- *  selection forever (no re-read possible without a path). */
+ *  selection forever (no re-read possible without a path). `providerId` is the BOOT-time catalog
+ *  id (`createProvider`'s own `providerId` local) — passed in rather than re-derived from each
+ *  live read, because the provider IDENTITY is fixed at boot (this function's own doc comment). */
 function buildLiveModelResolver(
   bootSettings: Settings,
   settingsPath: string | undefined,
+  providerId: string,
 ): () => LiveModelSelection {
-  let lastGood = resolveSelection(bootSettings);
+  let lastGood = resolveSelection(bootSettings, providerId);
   let cache: { key: number; value: LiveModelSelection } | null = null;
 
   return () => {
@@ -82,7 +92,7 @@ function buildLiveModelResolver(
     } catch {
       return lastGood; // read/parse failure — never throw into a turn, keep the last good value
     }
-    const value = resolveSelection(settings);
+    const value = resolveSelection(settings, providerId);
     cache = { key, value };
     lastGood = value;
     return value;
@@ -121,8 +131,11 @@ export async function createProvider(settings: Settings, secrets: SecretStore, s
     // key is stored (manager.test.ts pins this exact message).
     const apiKey = await readOpenAiApiKey(secrets);
     if (!apiKey) throw new Error("no API key stored — run: winter login --api-key");
-    inner = createOpenAiCompatibleRuntimeProvider(secrets, providerBaseUrlFor(settings, providerId));
+    // providerBaseUrlFor's own doc comment: "ABSENT IS THE NORMAL CASE" — an empty string is the
+    // same "no override" signal `createOpenAiCompatibleRuntimeProvider`'s `connection.baseUrl` has
+    // always accepted (the adapter falls back to its own generated default).
+    inner = createOpenAiCompatibleRuntimeProvider(secrets, providerBaseUrlFor(settings, providerId) ?? "");
   }
-  const liveModel = buildLiveModelResolver(settings, settingsPath);
+  const liveModel = buildLiveModelResolver(settings, settingsPath, providerId);
   return { provider: withQuota(inner, quota), model: splitTag(settings.provider.model).modelId, quota, liveModel };
 }
