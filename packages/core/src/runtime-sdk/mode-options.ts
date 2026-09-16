@@ -156,6 +156,8 @@ export interface WinterOptionsInput {
   cwd: string;
   model?: string;
   credentials: CredentialPresence;
+  /** Hotfix 2026-09-16: the router's decided provider for this session (see `providerSelectionFor`). */
+  preferredProviderId?: string;
   effort?: EffortLevel;
   systemPrompt?: string;
   outputStyle?: string;
@@ -454,7 +456,7 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
   if (input.outputStyle !== undefined) options.outputStyle = input.outputStyle;
   if (input.policy === "bypass") options.allowDangerouslySkipPermissions = true;
   if (input.hooks !== undefined) options.hooks = input.hooks;
-  const provider = providerSelectionFor(input.model, input.credentials, input.home, input.settings);
+  const provider = providerSelectionFor(input.model, input.credentials, input.home, input.settings, input.preferredProviderId);
   if (input.advisorModel !== undefined) {
     // Fix wave (M7): when the advisor's own target model resolves to the SAME provider as the
     // session's own model, thread the SESSION's already-resolved `authRef` onto `Options.advisor`
