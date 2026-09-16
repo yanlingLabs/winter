@@ -24,7 +24,7 @@ export { rowForTag } from "./runtime-sdk/provider-selection";
 // WS-20: the ONE model-tag module — a model is ALWAYS a provider-qualified tag
 // ("<providerId>/<modelId>") in code; nothing else may pick a provider for a bare id.
 export {
-  splitTag, parseModelTag, isModelTag, modelTagIsKnown, tagsForSlot, facingNameToTag, facingNameOf,
+  splitTag, parseModelTag, isModelTag, modelTagIsKnown, canonicalizeModelTag, tagsForSlot, facingNameToTag, facingNameOf,
   UNSTATED_TAG, WINTER_TEST_PREFIX,
   type ModelTag,
 } from "./runtime-sdk/model-tag";

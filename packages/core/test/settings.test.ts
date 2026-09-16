@@ -949,6 +949,32 @@ describe("WS-20: pinsFor", () => {
     expect(p.research).toBe(UNSTATED_TAG);
     expect(p.researchFallback).toBe(UNSTATED_TAG);
   });
+
+  // WS-20 (review round 2, M6 fix — R2): a `winter-test/*` primary (provider-less; the string
+  // "winter-test" is never a pinned catalog provider) used to fall to UNSTATED_TAG the same way a
+  // real non-serving provider does — but there is no OTHER model for the double to default to, so
+  // every winter-test-primary daemon's dispatch/dream/cleaner/research refused outright. The
+  // primary tag IS the pin instead: every slot defaults to the SAME double the session runs on.
+  test("R2: a winter-test/* primary makes every pin default to the primary tag itself, never UNSTATED", () => {
+    const s = { schemaVersion: 3, provider: { model: "winter-test/echo" } } as unknown as Settings;
+    const p = pinsFor(s);
+    expect(p.dispatch).toBe(tag("winter-test/echo"));
+    expect(p.dream).toBe(tag("winter-test/echo"));
+    expect(p.cleaner).toBe(tag("winter-test/echo"));
+    expect(p.research).toBe(tag("winter-test/echo"));
+    expect(p.researchFallback).toBe(tag("winter-test/echo"));
+  });
+
+  test("R2: an explicit settings.pins.* override still wins over the winter-test/* primary default", () => {
+    const s = {
+      schemaVersion: 3,
+      provider: { model: "winter-test/echo" },
+      pins: { dispatch: "winter-test/other-double" },
+    } as unknown as Settings;
+    const p = pinsFor(s);
+    expect(p.dispatch).toBe(tag("winter-test/other-double")); // explicit wins
+    expect(p.dream).toBe(tag("winter-test/echo")); // unoverridden slots still default to the primary
+  });
 });
 
 // P8b Task 15 / review r1 F4: ONE door answers for an absent block and a blank string, so three
