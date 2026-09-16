@@ -2,8 +2,8 @@ import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { Provider, TurnInputItem } from "../providers/types";
 import { hasOpenPanelTabs } from "../panel/store";
 import type { Settings } from "../settings";
-import { pinsFor } from "../settings";
-import { splitTag } from "../runtime-sdk/model-tag";
+import { pinsFor, ownProviderFor } from "../settings";
+import { internalModelFor } from "../providers/manager";
 import { activityFor, type ActivityRow } from "./activity";
 import { appendCleanerLog } from "./cleaner-log";
 import { SYNCED_SESSION_ID_RE } from "./store";
@@ -328,6 +328,14 @@ export class SessionCleaner {
    *  verdict, an empty reason, a provider error, a timeout — because they all mean the same thing:
    *  this session was not judged, so it must be kept AND left unstamped for the next pass. */
   private async judge(events: SessionEvent[]): Promise<Verdict | null> {
+    // WS-20 (review round 1, GUARD): same "must not send a mismatched-provider pin to the daemon's
+    // single internal Provider" guard the Dreamer applies to `pins.dream` — a mismatch here folds
+    // naturally into this method's own "returns null for every failure mode" contract (this doc
+    // comment's own header), so the session is kept and left unstamped for the next pass, same as
+    // a provider error or a timeout.
+    const settings = this.deps.settings();
+    const cleanerModel = internalModelFor(pinsFor(settings).cleaner, { providerId: ownProviderFor(settings) }, "pins.cleaner");
+    if (cleanerModel === undefined) return null;
     const input: TurnInputItem[] = [{ type: "message", role: "user", content: renderTranscript(events) }];
     // The Dreamer's own abort-tied-to-the-race idiom, verbatim: without the signal a timeout only
     // makes THIS call stop waiting while the detached generator keeps draining a hung connection.
@@ -335,7 +343,7 @@ export class SessionCleaner {
     let text = "";
     const run = (async () => {
       for await (const ev of this.deps.provider.provider.streamTurn({
-        model: splitTag(pinsFor(this.deps.settings()).cleaner).modelId, reasoningEffort: CLEANER_EFFORT, instructions: CLEANER_INSTRUCTION,
+        model: cleanerModel, reasoningEffort: CLEANER_EFFORT, instructions: CLEANER_INSTRUCTION,
         input, tools: [], signal: ac.signal,
       })) {
         if (ev.type === "text_delta") text += ev.delta;
