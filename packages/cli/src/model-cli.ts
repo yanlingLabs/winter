@@ -127,21 +127,19 @@ export function validateModelTag(tag: string, settings?: Settings): string | und
   return undefined;
 }
 
-/** WS-20 (review fix, item 4): the ADDITIONAL gate `winter model <tag>` (the CLI verb, `main.ts`'s
- *  `case "model"`) applies on top of `validateModelTag` — it writes `settings.provider.model`,
- *  which binds the daemon's own INTERNAL `Provider` instance (`providers/manager.ts`, one per
- *  daemon), and that instance can only ever be `codex-oauth` or `openai` (`INTERNAL_PROVIDER_IDS`,
- *  core's own settings.ts — the SAME constant/message the daemon's own `provider.model` setter
- *  refuses with). A PER-SESSION `/model` (the TUI's own command, `tui/commands.ts`) does NOT use
- *  this — a session's model can name any pinned provider, the router decides the leg. */
-export function validateInternalProviderModelTag(tag: string, settings?: Settings): string | undefined {
-  const err = validateModelTag(tag, settings);
-  if (err) return err;
+/** WS-20 (design correction after item 4): `settings.provider.model` may name ANY catalog
+ *  provider — `winter model <tag>` no longer REFUSES a non-internal one (a user whose default
+ *  model is Claude must be able to boot). When the chosen provider is outside
+ *  `INTERNAL_PROVIDER_IDS` (core's own `codex-oauth`/`openai`), the daemon simply does not build
+ *  its internal `Provider` instance and the features that lean on it — titles, review, dreaming,
+ *  research — go inert (one daemon log line, not a refusal). This is the CLI's own heads-up for
+ *  that, printed to stderr alongside (never blocking) the write: `undefined` when the provider
+ *  IS internal (nothing to say). Precondition: `tag` is already a validated tag (`validateModelTag`
+ *  returned `undefined` for it) — `splitTag` is called unguarded. */
+export function internalProviderNote(tag: string): string | undefined {
   const { providerId } = splitTag(tag);
-  if (!(INTERNAL_PROVIDER_IDS as readonly string[]).includes(providerId)) {
-    return `provider.model must name ${INTERNAL_PROVIDER_IDS.join(" or ")} — the daemon's internal provider supports codex-oauth and openai; any provider is fine per session`;
-  }
-  return undefined;
+  if ((INTERNAL_PROVIDER_IDS as readonly string[]).includes(providerId)) return undefined;
+  return `note: ${providerId} is not one of the daemon's internal providers (codex-oauth, openai); titles, review, dreaming and research are inert until provider.model names one of those`;
 }
 
 /** Validates a reasoning-effort slug against REASONING_EFFORTS (settings.ts — the wire-valid
