@@ -43,7 +43,7 @@ import {
   setPluginEnabled,
   stripPluginConsents,
 } from "./plugin-cli";
-import { parseModelArgs, validateEffort, validateInternalProviderModelTag, validateAdvisorSlug, renderModelListing, modelDisplayWithHint, type ModelListingRow } from "./model-cli";
+import { parseModelArgs, validateEffort, validateModelTag, internalProviderNote, validateAdvisorSlug, renderModelListing, modelDisplayWithHint, type ModelListingRow } from "./model-cli";
 import { formatElapsed, formatTokens } from "./task-display";
 import { formatRoutineDetail } from "./routines-cli";
 import { runAgentsCommand } from "./agents-cli";
@@ -2444,15 +2444,19 @@ if (import.meta.main) {
 
     let next = settings;
     if (action.kind === "setModel" || action.kind === "setModelAndEffort") {
-      // Review fix (item 4): `winter model <tag>` writes the GLOBAL settings.provider.model, which
-      // binds the daemon's own internal Provider — codex-oauth/openai only
-      // (`validateInternalProviderModelTag`, the extra gate on top of the shape/catalog checks
-      // `validateModelTag` alone does).
-      const err = validateInternalProviderModelTag(action.slug, settings);
+      // Design correction (after item 4): `winter model <tag>` writes the GLOBAL
+      // settings.provider.model, but that no longer REFUSES a non-internal-provider tag — any
+      // catalog provider may be the default model (a user whose default is Claude must be able to
+      // boot). Only the shape/catalog checks (`validateModelTag`) still gate the write; a
+      // non-internal provider gets an informational stderr note instead, since the daemon's
+      // internal Provider (titles/review/dreaming/research) simply goes inert for one, rather than
+      // the write refusing.
+      const err = validateModelTag(action.slug, settings);
       if (err) { console.error(err); process.exit(1); }
-      // `validateInternalProviderModelTag` just proved this is a real, internal-provider tag (and,
-      // unlike `parseModelTag` alone, also refused the sentinel/test-double escapes) —
-      // `parseModelTag` here only brands it.
+      const note = internalProviderNote(action.slug);
+      if (note) console.error(note);
+      // `validateModelTag` just proved this is a real tag (and, unlike `parseModelTag` alone, also
+      // refused the sentinel/test-double escapes) — `parseModelTag` here only brands it.
       next = setProviderModel(next, parseModelTag(action.slug));
     }
     if (action.kind === "setEffort" || action.kind === "setModelAndEffort") {
@@ -2645,6 +2649,16 @@ if (import.meta.main) {
     const { loadSettings, resolveWinterHome, createProvider, KeychainSecretStore } = await import("@yanlinglabs/winter-core");
     const s = loadSettings(join(resolveWinterHome(), "settings.json"));
     const active = await createProvider(s, new KeychainSecretStore());
+    // Design correction (Lane 3, round 4): `createProvider` now answers `null` rather than
+    // refusing, whenever `provider.model` names a provider outside the daemon's internal set
+    // (codex-oauth/openai) — the same "inert, not a refusal" shape `internalProviderNote`
+    // (model-cli.ts) warns about for `winter model <tag>` itself.
+    if (!active) {
+      let note: string | undefined;
+      try { note = internalProviderNote(s.provider.model); } catch { /* not tag-shaped — fall through to the generic message */ }
+      console.error(`no internal provider is built for the current provider.model — ${note ?? "the configured provider is not one of the daemon's internal providers (codex-oauth, openai)"}`);
+      process.exit(1);
+    }
     const promptIdx = process.argv.indexOf("--prompt");
     const prompt = promptIdx > 0 ? process.argv[promptIdx + 1]! : "Reply with exactly: winter provider smoke OK";
     console.log(`${DIM}provider=${active.provider.id} model=${active.model}${RESET}`);
