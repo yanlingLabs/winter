@@ -1,7 +1,7 @@
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
-import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, runRuntimesProbe, resolveWinterProfile } from "@yanlinglabs/winter-core";
+import { resolveWinterHome, KeychainSecretStore, startDaemon, TOKEN_NAMES, loadSettings, CORE_VERSION, runWorkflowSubprocess, runRuntimeStateProbe, runRuntimesProbe, resolveWinterProfile, splitTag } from "@yanlinglabs/winter-core";
 import type { CredentialRow, SecretStore, Settings } from "@yanlinglabs/winter-core";
 import { METHODS, type ApprovalPolicy, type Task } from "@yanlinglabs/winter-protocol";
 import { POLICY_ORDER } from "./tui/policy-order";
@@ -43,7 +43,7 @@ import {
   setPluginEnabled,
   stripPluginConsents,
 } from "./plugin-cli";
-import { parseModelArgs, validateEffort, validateModelSlug, validateAdvisorSlug } from "./model-cli";
+import { parseModelArgs, validateEffort, validateModelTag, validateAdvisorSlug, renderModelListing, type ModelListingRow } from "./model-cli";
 import { formatElapsed, formatTokens } from "./task-display";
 import { formatRoutineDetail } from "./routines-cli";
 import { runAgentsCommand } from "./agents-cli";
@@ -54,6 +54,26 @@ import { parsePlanResponse } from "./plan-response";
 import { makeEventBridge, type EventBridge } from "./tui/event-bridge";
 
 const AQUA = "\x1b[38;2;53;214;232m";
+
+/** WS-20: best-effort `splitTag` for DISPLAY only — the daemon-side producer of a `model`/`.id`
+ *  string may not have migrated to the tag shape yet on an older/partially-migrated settings.json
+ *  (L3.1 was schemas only), so this never throws: a non-tag-shaped value prints as-is rather than
+ *  crashing a status/listing command. Never used on a WRITE path — `winter model <tag>` validates
+ *  the tag shape itself (`validateModelTag`) and refuses outright rather than tolerating a bare id. */
+function modelIdOf(m: string): string {
+  try {
+    return splitTag(m).modelId;
+  } catch {
+    return m;
+  }
+}
+function providerIdOf(m: string): string | undefined {
+  try {
+    return splitTag(m).providerId;
+  } catch {
+    return undefined;
+  }
+}
 
 /** A raw-mode control-key listener (2e-iii-b Task 6) that owns stdin ONLY while a turn is running
  *  on a TTY (esc-interrupt, shift+tab policy cycle, ↑/↓/Enter footer selection — see §0/§4/§7).
@@ -1423,7 +1443,10 @@ if (import.meta.main) {
   case "status": {
     const c = await connect("cli-status");
     const s = await c.daemonStatus();
-    const provider = s.provider ? `${s.provider.id} (${s.provider.model})` : "(none configured)";
+    // WS-20: `s.provider.id` is already a bare providerId once the daemon side lands the tag
+    // change (`providerIdOf` is a no-op fallback for the pre-migration shape); `s.provider.model`
+    // may already be split by the daemon or may still be a full tag — `modelIdOf` handles both.
+    const provider = s.provider ? `${providerIdOf(s.provider.id) ?? s.provider.id} (${modelIdOf(s.provider.model)})` : "(none configured)";
     const profileTag = resolveWinterProfile() === "dev" ? " (dev)" : "";
     console.log(`${AQUA}winter-core v${s.version}${profileTag}${RESET} ${DIM}up ${formatElapsed(s.uptimeMs)} · ${s.socketPath}${RESET}`);
     console.log(`${DIM}provider: ${provider} · sessions: ${s.sessionsCount} · plugins: ${s.pluginsCount}${RESET}`);
@@ -2315,7 +2338,11 @@ if (import.meta.main) {
   case "provider": {
     const { loadSettings, resolveWinterHome } = await import("@yanlinglabs/winter-core");
     const s = loadSettings(join(resolveWinterHome(), "settings.json"));
-    console.log(`${AQUA}${s.provider.type}${RESET} ${DIM}model ${s.provider.model}${RESET}`);
+    // WS-20: no `.type` read — the provider is the tag's own providerId; a not-yet-migrated
+    // settings.json (a bare model, pre-L3.3) prints the raw value rather than reaching for the
+    // field this command is retiring.
+    const providerId = providerIdOf(s.provider.model) ?? "(unqualified)";
+    console.log(`${AQUA}${providerId}${RESET} ${DIM}model ${modelIdOf(s.provider.model)}${RESET}`);
     break;
   }
   case "model": {
@@ -2324,7 +2351,7 @@ if (import.meta.main) {
     // "changing models must NOT require a daemon restart") is that a running daemon picks the
     // new value up on its NEXT turn via providers/manager.ts's live model resolver — no restart,
     // no RPC round-trip needed here at all.
-    const { loadSettings, saveSettings, resolveWinterHome, setProviderModel, setReasoningEffort, setAdvisorModel, CODEX_MODELS } = await import("@yanlinglabs/winter-core");
+    const { loadSettings, saveSettings, resolveWinterHome, setProviderModel, setReasoningEffort, setAdvisorModel } = await import("@yanlinglabs/winter-core");
     const settingsPath = join(resolveWinterHome(), "settings.json");
     const settings = loadSettings(settingsPath);
     const action = parseModelArgs(process.argv.slice(3));
@@ -2337,13 +2364,26 @@ if (import.meta.main) {
     if (action.kind === "show") {
       const effortSuffix = settings.provider.reasoningEffort ? `  ${DIM}effort: ${settings.provider.reasoningEffort}${RESET}` : "";
       console.log(`${AQUA}${settings.provider.model}${RESET}${effortSuffix}`);
-      if (settings.provider.type === "codex-oauth") {
-        console.log(`${DIM}available (codex-oauth):${RESET}`);
-        for (const m of CODEX_MODELS) {
-          const active = m.id === settings.provider.model;
-          console.log(`  ${active ? `${AQUA}*${RESET}` : " "} ${m.id}`);
+      // WS-20: the full grouped-by-provider catalogue needs the daemon's `sync.config` (the live
+      // model list — this command has no static per-provider allowlist to fall back on anymore,
+      // see model-cli.ts's `validateModelTag`). Try the socket; on any failure (no daemon, no
+      // token, a stale socket) fall back to the stored tag alone — the historical no-daemon
+      // posture this command has always had.
+      try {
+        const { METHODS, SyncConfigModel } = await import("@yanlinglabs/winter-protocol");
+        const door = await openCredentialDaemonDoor();
+        if (door) {
+          const raw = await door.request(METHODS.syncConfig, {});
+          // Narrowed to just `models[]` (not the whole `SyncConfigResult`) — an older daemon
+          // missing the WS-20 fields on that array parse-fails into the catch below rather than
+          // this command exploding on a shape it doesn't otherwise depend on.
+          const parsed = SyncConfigModel.array().safeParse((raw as { models?: unknown } | undefined)?.models);
+          if (parsed.success && parsed.data.length > 0) {
+            console.log(renderModelListing(parsed.data as ModelListingRow[], settings.provider.model));
+          }
+          door.close();
         }
-      }
+      } catch { /* no live daemon (or an older one) — the bare current tag printed above is the whole answer */ }
       // Winter Phase 8d (P8d-8, Task 4.3): the D30 advisor line — "auto" is the honest label for
       // an unset override (the router applies its own per-family default, never a slug this CLI
       // invents), mirroring `winter model --advisor auto`'s own clearing spelling.
@@ -2367,7 +2407,7 @@ if (import.meta.main) {
 
     let next = settings;
     if (action.kind === "setModel" || action.kind === "setModelAndEffort") {
-      const err = validateModelSlug(settings.provider.type, action.slug);
+      const err = validateModelTag(action.slug);
       if (err) { console.error(err); process.exit(1); }
       next = setProviderModel(next, action.slug);
     }

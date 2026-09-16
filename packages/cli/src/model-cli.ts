@@ -2,7 +2,7 @@
 // unit-tested without going through the top-level `if (import.meta.main)` dispatch. Mirrors
 // plugin-cli.ts's split: main.ts owns the I/O (loadSettings/saveSettings/connect), this file
 // owns the parse/validate decisions.
-import { CODEX_MODELS, REASONING_EFFORTS, catalogRowsFor } from "@yanlinglabs/winter-core";
+import { REASONING_EFFORTS, catalogRowsFor, isModelTag, splitTag } from "@yanlinglabs/winter-core";
 
 export type ModelCliAction =
   | { kind: "show" }
@@ -59,40 +59,88 @@ export function parseModelArgs(args: string[]): ModelCliAction {
   return { kind: "usageError", message: USAGE };
 }
 
-/**
- * Validates a model slug against the active provider type. codex-oauth is allowlisted to
- * CODEX_MODELS (the gpt-5.6 family only — 5.5/5.4/5.4-mini are deprecated, see
- * providers/codex-config.ts) with a clear error listing the valid slugs. openai-compatible has
- * no allowlist — arbitrary API models are legitimate there, so any non-empty slug passes.
- * Returns an error message, or null when the slug is valid.
- */
-export function validateModelSlug(providerType: "codex-oauth" | "openai-compatible", slug: string): string | null {
-  if (providerType === "openai-compatible") {
-    return slug.trim().length > 0 ? null : "model slug must not be empty";
+/** WS-20: validates a model against the tag shape ("<providerId>/<modelId>") AND catalog
+ *  provider membership — replaces `validateModelSlug`'s per-provider-type allowlist now that a
+ *  model is ALWAYS a provider-qualified tag (`packages/core/src/runtime-sdk/model-tag.ts`, the
+ *  one place the shape/lookup rules live). Two distinct failure shapes, so the message always
+ *  names the actual defect:
+ *    - not tag-shaped at all (`splitTag` throws)      -> "…must be a provider-qualified tag …"
+ *    - tag-shaped but the provider isn't pinned         -> "…unknown provider "<id>""
+ *  Returns an error message, or undefined when the tag is valid. The sentinel (`unstated/unstated`)
+ *  is never a user-settable model — rejected the same as any other non-catalog provider. */
+export function validateModelTag(tag: string): string | undefined {
+  let providerId: string;
+  try {
+    providerId = splitTag(tag).providerId;
+  } catch {
+    return `invalid model "${tag}" — must be a provider-qualified tag "<providerId>/<modelId>"`;
   }
-  if (CODEX_MODELS.some((m) => m.id === slug)) return null;
-  return `invalid model "${slug}" for codex-oauth — valid slugs: ${CODEX_MODELS.map((m) => m.id).join(", ")}`;
+  if (!isModelTag(tag)) {
+    return `invalid model "${tag}" — unknown provider "${providerId}"`;
+  }
+  return undefined;
 }
 
 /** Validates a reasoning-effort slug against REASONING_EFFORTS (settings.ts — the wire-valid
  *  universe, measured live against the endpoint, not read off the /models catalogue; see that
  *  constant's own comment). Per-model rejection (e.g. "minimal", which the backend rejects on a
  *  per-model basis) is NOT validated here — the backend rejects unsupported combos itself.
- *  Returns an error message, or null when valid. */
-export function validateEffort(effort: string): string | null {
-  if ((REASONING_EFFORTS as readonly string[]).includes(effort)) return null;
+ *  Returns an error message, or undefined when valid. */
+export function validateEffort(effort: string): string | undefined {
+  if ((REASONING_EFFORTS as readonly string[]).includes(effort)) return undefined;
   return `invalid effort "${effort}" — must be one of: ${REASONING_EFFORTS.join(", ")}`;
 }
 
-/** Winter Phase 8d (P8d-8, Task 4.3): validates an advisor slug against the pinned catalog
- *  (`catalogRowsFor`) — the SAME catalog `session.setModel`'s handler consults on the daemon side
- *  (`ipc/server.ts`'s `isClaudeCatalogModel`/`resolveModelSelection`'s own catalog-membership
- *  check), not `CODEX_MODELS`/the live provider's own model list: the CLI runs this command with
- *  no daemon RPC at all (direct settings.json read/write, same posture as `validateModelSlug`
- *  above), so the compiled-in static catalog is the only universe it can check against. `"auto"`
- *  is parsed as `clearAdvisor` before this ever runs (`parseModelArgs`) — this only ever sees a
- *  real candidate slug. Returns an error message, or null when valid. */
-export function validateAdvisorSlug(slug: string): string | null {
-  if (catalogRowsFor(slug).length > 0) return null;
-  return `invalid advisor model "${slug}" — not in the pinned catalog (use "auto" to clear the override)`;
+/** Winter Phase 8d (P8d-8, Task 4.3) + WS-20: validates an advisor TAG — shape/provider first
+ *  (`validateModelTag`, the same check every other model write now goes through), then catalog
+ *  row membership (`catalogRowsFor`, the SAME catalog `session.setModel`'s handler consults on the
+ *  daemon side) so a tag-shaped but nonexistent row (e.g. a typo'd modelId under a real provider)
+ *  is still caught. The CLI runs this command with no daemon RPC at all (direct settings.json
+ *  read/write, same posture as `validateModelTag` above), so the compiled-in static catalog is the
+ *  only universe it can check against. `"auto"` is parsed as `clearAdvisor` before this ever runs
+ *  (`parseModelArgs`) — this only ever sees a real candidate tag. Returns an error message, or
+ *  undefined when valid. */
+export function validateAdvisorSlug(tag: string): string | undefined {
+  const shapeErr = validateModelTag(tag);
+  if (shapeErr) return shapeErr;
+  if (catalogRowsFor(tag).length > 0) return undefined;
+  return `invalid advisor model "${tag}" — not in the pinned catalog (use "auto" to clear the override)`;
+}
+
+/** WS-20: one row of `sync.config`'s `models[]` — the shape `renderModelListing` groups/labels
+ *  from. Mirrors `SyncConfigModel` (`packages/protocol/src/methods.ts`) structurally rather than
+ *  importing it, so this stays a pure zero-import function callable from a plain object literal in
+ *  tests; the two are kept in sync by the protocol's own schema being the wire source of truth. */
+export interface ModelListingRow {
+  id: string;
+  providerId: string;
+  displayName: string;
+  facingName?: string;
+  efforts: string[];
+}
+
+/** WS-20: `winter model` (show) / `/model` (headless fallback)'s catalogue listing — grouped by
+ *  provider (first-appearance order, matching the daemon's own catalog order), each row marked
+ *  `"  * "` when it is the CURRENT tag else `"    "`, labelled by facing name (falling back to the
+ *  bare modelId when the row fills no family slot) with the modelId always shown alongside in
+ *  parens so the underlying slug is never hidden behind a display name. Pure string-building — no
+ *  I/O, no color codes (the caller wraps ANSI around the whole block if it wants any). */
+export function renderModelListing(models: ModelListingRow[], current: string): string {
+  const byProvider = new Map<string, ModelListingRow[]>();
+  for (const m of models) {
+    const rows = byProvider.get(m.providerId);
+    if (rows) rows.push(m);
+    else byProvider.set(m.providerId, [m]);
+  }
+  let out = "";
+  for (const [providerId, rows] of byProvider) {
+    out += `${providerId}\n`;
+    for (const m of rows) {
+      const modelId = m.id.slice(m.id.indexOf("/") + 1);
+      const label = m.facingName ?? modelId;
+      const marker = m.id === current ? "  * " : "    ";
+      out += `${marker}${label}  (${modelId})\n`;
+    }
+  }
+  return out;
 }
