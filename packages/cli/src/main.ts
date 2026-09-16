@@ -43,7 +43,7 @@ import {
   setPluginEnabled,
   stripPluginConsents,
 } from "./plugin-cli";
-import { parseModelArgs, validateEffort, validateModelTag, validateAdvisorSlug, renderModelListing, modelDisplayWithHint, type ModelListingRow } from "./model-cli";
+import { parseModelArgs, validateEffort, validateInternalProviderModelTag, validateAdvisorSlug, renderModelListing, modelDisplayWithHint, type ModelListingRow } from "./model-cli";
 import { formatElapsed, formatTokens } from "./task-display";
 import { formatRoutineDetail } from "./routines-cli";
 import { runAgentsCommand } from "./agents-cli";
@@ -2444,10 +2444,15 @@ if (import.meta.main) {
 
     let next = settings;
     if (action.kind === "setModel" || action.kind === "setModelAndEffort") {
-      const err = validateModelTag(action.slug);
+      // Review fix (item 4): `winter model <tag>` writes the GLOBAL settings.provider.model, which
+      // binds the daemon's own internal Provider — codex-oauth/openai only
+      // (`validateInternalProviderModelTag`, the extra gate on top of the shape/catalog checks
+      // `validateModelTag` alone does).
+      const err = validateInternalProviderModelTag(action.slug, settings);
       if (err) { console.error(err); process.exit(1); }
-      // `validateModelTag` just proved this is a real tag (and, unlike `parseModelTag` alone,
-      // also refused the sentinel/test-double escapes) — `parseModelTag` here only brands it.
+      // `validateInternalProviderModelTag` just proved this is a real, internal-provider tag (and,
+      // unlike `parseModelTag` alone, also refused the sentinel/test-double escapes) —
+      // `parseModelTag` here only brands it.
       next = setProviderModel(next, parseModelTag(action.slug));
     }
     if (action.kind === "setEffort" || action.kind === "setModelAndEffort") {

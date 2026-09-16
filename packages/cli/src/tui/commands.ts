@@ -169,7 +169,10 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
 
   let next = settings;
   if (action.kind === "setModel" || action.kind === "setModelAndEffort") {
-    const err = validateModelTag(action.slug);
+    // Review fix (item 4): PER-SESSION /model accepts any pinned provider — catalog-membership
+    // only (`validateModelTag`), never the internal-provider gate `winter model <tag>` (the CLI
+    // verb, main.ts) applies to its own GLOBAL settings.provider.model write.
+    const err = validateModelTag(action.slug, settings);
     if (err) { ctx.appendNote(err); return; }
     // `validateModelTag` just proved this is a real tag (and refused the sentinel/test-double
     // escapes `parseModelTag` alone would accept) — `parseModelTag` here only brands it.
@@ -213,7 +216,9 @@ async function syncConfigModels(ctx: CommandCtx): Promise<SyncConfigModel[]> {
 function applyModelPick(ctx: CommandCtx, slug: string): void {
   const settingsPath = join(resolveWinterHome(), "settings.json");
   const settings = loadSettings(settingsPath);
-  const err = validateModelTag(slug);
+  // Review fix (item 4): same per-session posture as runModel's own setModel branch above —
+  // catalog-membership only, any pinned provider.
+  const err = validateModelTag(slug, settings);
   if (err) { ctx.appendNote(err); return; }
   const next = setProviderModel(settings, parseModelTag(slug));
   saveSettings(settingsPath, next);
