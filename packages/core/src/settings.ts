@@ -568,6 +568,24 @@ export function ownProviderFor(settings: Settings | null | undefined): string {
 export function pinsFor(settings: Settings | null | undefined): {
   dispatch: ModelTag; dream: ModelTag; cleaner: ModelTag; research: ModelTag; researchFallback: ModelTag;
 } {
+  // WS-20 (review round 2, M6 fix — R2): a `winter-test/*` primary is a provider-LESS test double —
+  // it has no catalog family, so it serves no terra/luna slot at all, and `ownProviderFor` would
+  // answer the literal string "winter-test" (never a pinned catalog provider). The OLD `UNSTATED_TAG`
+  // default (correct for a REAL provider that genuinely serves no gpt-family slot) made every
+  // winter-test-primary daemon's dispatch/dream/cleaner/research refuse outright, because the
+  // harness's own double has no OTHER model to default to. Rule: the primary tag IS the pin — every
+  // slot defaults to the SAME double the session itself runs on, unless an explicit
+  // `settings.pins.<slot>` override says otherwise (still wins, unchanged).
+  const primary = settings?.provider?.model ?? DEFAULT_PROVIDER.model;
+  if (primary.startsWith(WINTER_TEST_PREFIX)) {
+    return {
+      dispatch: settings?.pins?.dispatch ?? (primary as ModelTag),
+      dream: settings?.pins?.dream ?? (primary as ModelTag),
+      cleaner: settings?.pins?.cleaner ?? (primary as ModelTag),
+      research: settings?.pins?.research ?? (primary as ModelTag),
+      researchFallback: settings?.pins?.researchFallback ?? (primary as ModelTag),
+    };
+  }
   const ownProvider = ownProviderFor(settings);
   // WS-20 (review round 2, M6): the OLD `?? facingNameToTag("openai", slotName)` rung silently
   // pinned dispatch/dream/cleaner/research to a DIFFERENT provider than the daemon's own configured

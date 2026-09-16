@@ -37,31 +37,70 @@ export function parseModelTag(s: string): ModelTag {
   return s as ModelTag;
 }
 
+/** Case-insensitive: the catalog row for `providerId` whose family slot NAME matches `facingName`
+ *  (e.g. `providerId="anthropic"`, `facingName="sonnet"` or `"Sonnet"` → the `anthropic/claude-
+ *  sonnet-*` row), or `undefined` when this provider serves no such slot. Distinct from
+ *  `facingNameToTag` (case-SENSITIVE, and matches by tag-string prefix rather than the row's own
+ *  `providerId` field) — kept as its own local helper rather than changed in place, since
+ *  `facingNameToTag` is a stable, already-exported API other callers rely on case-sensitively. */
+function rowForFacingName(providerId: string, facingName: string): ModelTag | undefined {
+  const wanted = facingName.toLowerCase();
+  const catalog = loadCatalog();
+  for (const family of catalog.families ?? []) {
+    for (const slot of family.slots) {
+      if (slot.name.toLowerCase() !== wanted) continue;
+      const row = catalog.models.find((m) => m.providerId === providerId && m.canonicalModelId === slot.canonicalModelId);
+      if (row) return row.key as ModelTag;
+    }
+  }
+  return undefined;
+}
+
 /**
- * WS-20 (review round 2, M4): `isModelTag` only checks TAG SHAPE plus "the provider itself is a
- * pinned catalog provider" — a typo model id on a real provider (`codex-oauth/gpt-5.4`) passes it.
- * `modelTagIsKnown` is the STRICTER membership gate the RPC doors need (`session.create`/`setModel`/
- * `sync.push` meta/`provider.configure`): the tag must name a REAL catalog row, UNLESS either (a)
- * the provider has a BYO `providers.<id>.baseUrl` configured — an intentionally unlisted endpoint
- * model, e.g. a fine-tune, keeps its pass-through — or (b) the provider has NO catalog rows at all
- * (nothing for the tag to be a member of, so refusing would be refusing every possible model that
- * provider could ever serve). The sentinel and `winter-test/*` are accepted here exactly as
- * `isModelTag` accepts them — rejecting the sentinel at the RPC boundary is a SEPARATE, door-level
- * concern (nit e), not this membership question.
+ * WS-20 (review round 2, M4 fix — R1): the STRICTER membership + CANONICALIZATION gate the RPC
+ * doors need (`session.create`/`setModel`/`sync.push` meta/`provider.configure`). Returns the
+ * CANONICAL catalog row key a tag resolves to, or `undefined` when it cannot be resolved at all —
+ * callers store/forward THIS value, never the tag as typed, so a facing-name request never persists
+ * its shorthand form.
+ *
+ * Resolution order:
+ *  1. The sentinel and `winter-test/*` pass through unchanged (never validated against the
+ *     catalog at all).
+ *  2. A tag that is ALREADY a real catalog row key (`rowForTag`'s own check) — the common case.
+ *  3. A `<providerId>/<facingName>` request (spec §1: "a facing name resolves to a tag only within
+ *     a chosen provider") — `anthropic/sonnet` names the SLOT `sonnet` within provider `anthropic`,
+ *     resolved case-insensitively to that provider's own row for the slot (`anthropic/claude-
+ *     sonnet-5`), same for `codex-oauth/terra` → `codex-oauth/gpt-5.6-terra`. `isModelTag` already
+ *     proved `providerId` is a pinned catalog provider, so this is never a guess at WHICH provider,
+ *     only which of ITS OWN rows the facing name means.
+ *  4. Neither a real row nor a facing name: the ORIGINAL typo-refusal rule 3 items on — refuse,
+ *     UNLESS the provider has a BYO `providers.<id>.baseUrl` configured (an intentionally unlisted
+ *     endpoint model, e.g. a fine-tune, keeps its pass-through verbatim) or the provider has NO
+ *     catalog rows at all (nothing for the tag to be a member of, so refusing would be refusing
+ *     every possible model that provider could ever serve) — either way, the caller's own literal
+ *     tag is returned unchanged (there is no canonical form to resolve it TO).
  *
  * `settings` is optional and duck-typed (not the full `Settings` type) to avoid this module
  * depending on `../settings`, which already depends on THIS module.
  */
-export function modelTagIsKnown(tag: string, settings?: { providers?: Record<string, { baseUrl?: string }> }): boolean {
-  if (!isModelTag(tag)) return false;
-  if (tag === UNSTATED_TAG || tag.startsWith(WINTER_TEST_PREFIX)) return true;
+export function canonicalizeModelTag(tag: string, settings?: { providers?: Record<string, { baseUrl?: string }> }): ModelTag | undefined {
+  if (!isModelTag(tag)) return undefined;
+  if (tag === UNSTATED_TAG || tag.startsWith(WINTER_TEST_PREFIX)) return tag as ModelTag;
   const catalog = loadCatalog();
-  if (catalog.models.some((m) => m.key === tag)) return true;
-  const { providerId } = splitTag(tag);
+  if (catalog.models.some((m) => m.key === tag)) return tag as ModelTag;
+  const { providerId, modelId } = splitTag(tag);
+  const facing = rowForFacingName(providerId, modelId);
+  if (facing !== undefined) return facing;
   const providerHasRows = catalog.models.some((m) => m.providerId === providerId);
   const baseUrl = settings?.providers?.[providerId]?.baseUrl;
   const hasByoEndpoint = typeof baseUrl === "string" && baseUrl.length > 0;
-  return !providerHasRows || hasByoEndpoint;
+  return !providerHasRows || hasByoEndpoint ? (tag as ModelTag) : undefined;
+}
+
+/** Thin boolean wrapper over `canonicalizeModelTag` — kept for callers that only need "is this tag
+ *  resolvable at all", never the resolved value itself. */
+export function modelTagIsKnown(tag: string, settings?: { providers?: Record<string, { baseUrl?: string }> }): boolean {
+  return canonicalizeModelTag(tag, settings) !== undefined;
 }
 
 /** Every catalog row key whose family slot name === slotName (across every family that defines

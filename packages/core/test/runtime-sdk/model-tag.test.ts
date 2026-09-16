@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { facingNameOf, facingNameToTag, isModelTag, modelTagIsKnown, parseModelTag, splitTag, tagsForSlot, UNSTATED_TAG, WINTER_TEST_PREFIX, type ModelTag } from "../../src/runtime-sdk/model-tag";
+import { canonicalizeModelTag, facingNameOf, facingNameToTag, isModelTag, modelTagIsKnown, parseModelTag, splitTag, tagsForSlot, UNSTATED_TAG, WINTER_TEST_PREFIX, type ModelTag } from "../../src/runtime-sdk/model-tag";
 
 /** A plain test literal known to be tag-shaped, asserted as `ModelTag` for `toBe`/`toEqual` against
  *  a branded return value — a type assertion only, never a runtime validation. */
@@ -56,6 +56,43 @@ describe("modelTagIsKnown", () => {
   test("shape-invalid and unrecognized-provider tags are refused, same as isModelTag", () => {
     expect(modelTagIsKnown("not-a-tag-at-all")).toBe(false);
     expect(modelTagIsKnown("nosuchprovider/gpt-5.6")).toBe(false);
+  });
+});
+
+// WS-20 (review round 2, M4 fix — R1): `<providerId>/<facingName>` is a legitimate request (spec
+// §1: "a facing name resolves to a tag only within a chosen provider") — `anthropic/sonnet` names
+// the SLOT `sonnet` within provider `anthropic`, not a typo. `canonicalizeModelTag` resolves it to
+// the REAL catalog row key; `modelTagIsKnown` is a thin boolean wrapper over it.
+describe("canonicalizeModelTag", () => {
+  test("a facing-name request resolves to its provider's real catalog row key", () => {
+    expect(canonicalizeModelTag("anthropic/sonnet")).toBe(tag("anthropic/claude-sonnet-5"));
+    expect(canonicalizeModelTag("codex-oauth/terra")).toBe(tag("codex-oauth/gpt-5.6-terra"));
+  });
+  test("case-insensitive slot-name matching", () => {
+    expect(canonicalizeModelTag("anthropic/Sonnet")).toBe(tag("anthropic/claude-sonnet-5"));
+    expect(canonicalizeModelTag("anthropic/SONNET")).toBe(tag("anthropic/claude-sonnet-5"));
+  });
+  test("an already-canonical row key resolves to itself, unchanged", () => {
+    expect(canonicalizeModelTag("codex-oauth/gpt-5.6-terra")).toBe(tag("codex-oauth/gpt-5.6-terra"));
+  });
+  test("neither a real row nor a facing name, on a provider with catalog rows and no BYO baseUrl, is still refused", () => {
+    expect(canonicalizeModelTag("anthropic/nosuch")).toBeUndefined();
+    expect(modelTagIsKnown("anthropic/nosuch")).toBe(false);
+  });
+  test("a facing name for a slot this provider does NOT serve falls through to the typo-refusal rule", () => {
+    // "terra" is a gpt-family slot; anthropic serves no such slot.
+    expect(canonicalizeModelTag("anthropic/terra")).toBeUndefined();
+  });
+  test("the BYO-baseUrl escape hatch still applies when neither a row nor a facing name matches", () => {
+    expect(canonicalizeModelTag("openai/my-finetune", { providers: { openai: { baseUrl: "https://api.example.com/v1" } } })).toBe(tag("openai/my-finetune"));
+  });
+  test("sentinel and winter-test/* pass through unchanged, never treated as a facing name", () => {
+    expect(canonicalizeModelTag(UNSTATED_TAG)).toBe(UNSTATED_TAG);
+    expect(canonicalizeModelTag(`${WINTER_TEST_PREFIX}echo`)).toBe(tag(`${WINTER_TEST_PREFIX}echo`));
+  });
+  test("modelTagIsKnown agrees with canonicalizeModelTag's defined/undefined split", () => {
+    expect(modelTagIsKnown("anthropic/sonnet")).toBe(true);
+    expect(modelTagIsKnown("codex-oauth/gpt-5.4")).toBe(false); // the M4 typo-refusal regression control
   });
 });
 describe("slots", () => {
