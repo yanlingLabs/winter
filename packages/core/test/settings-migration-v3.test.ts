@@ -76,4 +76,28 @@ describe("WS-20 (spec §5): settings v2 -> v3 migration", () => {
     expect(s.provider.model).toBe(tag("openai/gpt-5.6-sol")); // rule 2: S empty → the legacy provider (openai-compatible ⇒ openai) at its default model, one log line
     expect(s.providers?.openai?.baseUrl).toBe("http://127.0.0.1:9999/v1");
   });
+
+  // WS-20 (review round 2, M6 follow-up / self-fix): `migrateBareModelId`'s Claude arm answers
+  // purely off `legacyOfficialAuth`/the console profile, never off `INTERNAL_PROVIDER_IDS` — a v2
+  // `openai-compatible` BYO endpoint that happened to serve a model with a `claude-`-prefixed bare
+  // id would otherwise migrate `provider.model` to `anthropic/claude-*`, which the
+  // `ProviderSettings` schema (M6) now refuses outright. Falls back to the SAME rule-2 default
+  // instead, logged, so migration never produces a `provider.model` the very next `Settings.parse`
+  // would reject. `reviewer.model` is NOT gated the same way — it keeps its Claude tag.
+  test("M6: a v2 BYO endpoint serving a claude-prefixed id falls back to the provider's own default for provider.model, but reviewer.model keeps its Claude tag", () => {
+    const home = mkdtempSync(join(tmpdir(), "ws20-"));
+    const path = join(home, "settings.json");
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 2,
+      provider: { type: "openai-compatible", model: "claude-opus-5", baseUrl: "http://127.0.0.1:9999/v1" },
+      reviewer: { model: "claude-opus-5" },
+    }));
+    const s = loadSettings(path, { persistMigration: true });
+    expect(s.provider.model).toBe(tag("openai/gpt-5.6-sol")); // gated — falls back, never a Claude tag here
+    expect(s.reviewer?.model).toBe(tag("anthropic/claude-opus-5")); // ungated — keeps the Claude arm's answer
+    // The migration actually persisted a VALID v3 file (the whole point: no write-then-fail).
+    const onDisk = JSON.parse(readFileSync(path, "utf8"));
+    expect(onDisk.schemaVersion).toBe(3);
+    expect(onDisk.provider.model).toBe("openai/gpt-5.6-sol");
+  });
 });
