@@ -510,6 +510,18 @@ export const Settings = z.object({
 });
 export type Settings = z.infer<typeof Settings>;
 
+/** WS-20 (review round 1, GUARD): the catalog providerId the daemon's SINGLE internal-calls
+ *  `Provider` instance is actually bound to — `splitTag(settings.provider.model).providerId`, with
+ *  the same `DEFAULT_PROVIDER` fallback `pinsFor` itself uses for a settings file with no
+ *  `provider.model` at all. Extracted so `pinsFor`'s own `ownProvider` derivation and
+ *  `providers/manager.ts`'s `internalModelFor` guard (dreamer/cleaner/research's own internal-
+ *  Provider calls) read the identical "which provider is this daemon actually bound to" answer —
+ *  they must never independently rederive it and risk disagreeing. */
+export function ownProviderFor(settings: Settings | null | undefined): string {
+  const providerModel = settings?.provider?.model ?? DEFAULT_PROVIDER.model;
+  try { return splitTag(providerModel).providerId; } catch { return splitTag(DEFAULT_PROVIDER.model).providerId; }
+}
+
 /** WS-20: the ONE reader of `settings.pins.<slot>` — every default falls back to a `gpt-5.6-terra`
  *  (dispatch/dream/cleaner/researchFallback) or `gpt-5.6-luna` (research) row SERVED BY THE SAME
  *  PROVIDER as `settings.provider.model`, so a fresh install's internal callers run on whichever
@@ -522,10 +534,7 @@ export type Settings = z.infer<typeof Settings>;
 export function pinsFor(settings: Settings | null | undefined): {
   dispatch: ModelTag; dream: ModelTag; cleaner: ModelTag; research: ModelTag; researchFallback: ModelTag;
 } {
-  const providerModel = settings?.provider?.model ?? DEFAULT_PROVIDER.model;
-  const ownProvider = (() => {
-    try { return splitTag(providerModel).providerId; } catch { return splitTag(DEFAULT_PROVIDER.model).providerId; }
-  })();
+  const ownProvider = ownProviderFor(settings);
   const defaultFor = (slotName: "terra" | "luna"): ModelTag => {
     return facingNameToTag(ownProvider, slotName) ?? facingNameToTag("openai", slotName) ?? UNSTATED_TAG;
   };

@@ -1009,11 +1009,20 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
 
     const backendSessionId = randomUUID();
     const transcriptKey = transcriptProjectKey(cwd);
+    // WS-20 (review round 2, M1): `session.create` with NO explicit `model` (the normal Mac case)
+    // must still record a REAL provider, because the child runs on `settings.provider.model`'s
+    // provider regardless — the OLD code recorded `providerId: "unstated"` here, which made
+    // `credential.set`'s hot-swap (`credentials.ts`'s `evictSessionsForCredential`, which reads
+    // THIS record's `providerId`) evict nothing for a default-model session. Computed ONCE, the
+    // SAME precedence `optionsFor`'s own `model` derivation uses just above: dispatch runs its own
+    // pin, everything else falls back to the daemon's configured provider.
+    const settings = deps.settings();
+    const effectiveTag = meta.model ?? (mode === "dispatch" ? pinsFor(settings).dispatch : settings?.provider?.model ?? DEFAULT_PROVIDER.model);
     // WS-20: a tag names exactly its provider — no more "steer this selection to agree with the
     // router's decision" hotfix; `providerFor` and `splitTag` can never disagree because they are
     // the same tag's own prefix.
-    const selection = meta.model === undefined ? undefined : providerFor(meta.model, deps.home);
-    const providerId = decided?.providerId ?? (meta.model !== undefined ? splitTag(meta.model).providerId : "unstated");
+    const selection = providerFor(effectiveTag, deps.home);
+    const providerId = decided?.providerId ?? splitTag(effectiveTag).providerId;
     const providerAuthKinds = loadCatalog().providers.find((p) => p.id === providerId)?.authKinds ?? [];
     const authFamily: RuntimeSelection["authFamily"] = providerAuthKinds.includes("api-key") ? "api-key" : "custom";
     try {
@@ -1022,7 +1031,11 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         runtimeKind: "winter-agent",
         backendSessionId,
         providerId,
-        modelRef: meta.model ?? UNSTATED_TAG,
+        // WS-20 (review round 2, M1): the EFFECTIVE tag, never the `UNSTATED_TAG` sentinel — a
+        // default-model session has a real, known model (the daemon's configured provider.model,
+        // or the dispatch pin) the moment it is created; recording "unstated" for it was itself
+        // part of the same lie `providerId` told.
+        modelRef: effectiveTag,
         // The LOCATOR only (`keychain:<account>`) — never material (records.ts's own rule).
         ...(selection?.authRef?.kind === "keychain" ? { authRef: `keychain:${selection.authRef.account}` } : {}),
         backendRoot: join(deps.home, "projects", transcriptKey),

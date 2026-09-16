@@ -112,7 +112,7 @@ describe("4d-ii gate: over-the-wire plugin lifecycle (install -> enable/consent 
       // the plugin as already enabled+consented, exactly the end state this gate's own RPC calls
       // are supposed to produce, not the starting point).
       writeFileSync(settingsPath, JSON.stringify({
-        schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" },
+        schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
       }));
       const socketPath = join(home, "core.sock");
 

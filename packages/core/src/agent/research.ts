@@ -3,8 +3,8 @@ import type { Provider, ProviderEvent, TurnInputItem, ToolSpec } from "../provid
 import { fetchCleanPage, renderLines, PageCoreError, checkDangerousDomain, dangerousDomainRefusal, type PageCache, type CleanPage } from "./tools/page-core";
 import { READPAGE_PER_PAGE_CHAR_CAP, READPAGE_TOTAL_OUTPUT_CHAR_CAP } from "./tools/read-page";
 import type { Settings } from "../settings";
-import { pinsFor } from "../settings";
-import { splitTag } from "../runtime-sdk/model-tag";
+import { pinsFor, ownProviderFor } from "../settings";
+import { internalModelFor } from "../providers/manager";
 
 /**
  * B2-T3: the ephemeral research sub-agent. A plain, radically reduced loop over
@@ -431,11 +431,22 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
 
   const input: TurnInputItem[] = [{ type: "message", role: "user", content: buildSeedMessage(q, seed) }];
 
-  // The internal `Provider` abstraction speaks bare model ids in ITS OWN dialect — split the
-  // pin's tag at this boundary, same discipline as the runtime-sdk spawn boundary (§0.1).
-  const pins = pinsFor(deps.settings());
-  const researchModel = splitTag(pins.research).modelId;
-  const researchFallbackModel = splitTag(pins.researchFallback).modelId;
+  // The internal `Provider` abstraction speaks bare model ids in ITS OWN dialect — `internalModelFor`
+  // splits the pin's tag at this boundary, same discipline as the runtime-sdk spawn boundary
+  // (§0.1), AND verifies the pin names the SAME provider the daemon's single internal Provider
+  // instance is actually bound to (WS-20, review round 1, GUARD) — a `settings.pins.research`
+  // override (or a slot whose own default fell back to a sibling provider) could otherwise send
+  // the bare id to the wrong backend silently.
+  const settings = deps.settings();
+  const pins = pinsFor(settings);
+  const ownProvider = ownProviderFor(settings);
+  const researchModel = internalModelFor(pins.research, { providerId: ownProvider }, "pins.research");
+  if (researchModel === undefined) {
+    return notReadReport("", state, "Research is unavailable (pins.research names a different provider than this daemon's own)");
+  }
+  // The fallback pin is validated the same way, but its absence only disables the fallback step —
+  // the primary model above is already confirmed safe, so research still runs on it.
+  const researchFallbackModel = internalModelFor(pins.researchFallback, { providerId: ownProvider }, "pins.researchFallback");
   let model: string = researchModel;
   let usedFallback = false;
   let lastText = "";
@@ -496,7 +507,11 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
     if (textBuf) lastText = textBuf;
 
     if (roundError) {
-      if (!usedFallback && looksLikeBadModelError(roundError, model)) {
+      // WS-20 (review round 1, GUARD): `researchFallbackModel` is `undefined` when
+      // `pins.researchFallback` names a different provider than this daemon is bound to
+      // (`internalModelFor`, above) — falls through to the ordinary provider-error throw below,
+      // same as any other unavailable fallback, rather than sending a mismatched-provider id.
+      if (!usedFallback && researchFallbackModel !== undefined && looksLikeBadModelError(roundError, model)) {
         usedFallback = true;
         model = researchFallbackModel;
         continue; // retry the SAME round (input unchanged) with the fallback model

@@ -486,15 +486,25 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     // is the same credential (and therefore the same already-configured provider connection) the
     // session's own turn already resolved — never an independent, uninstructed lookup.
     //
-    // A CROSS-provider advisor is UNCHANGED: it keeps falling through to the SDK's documented
-    // "target provider's own keychain record" default, exactly as today (never guessed at here).
+    // WS-20 (review round 2, nit a): a CROSS-provider advisor is DROPPED, not guessed at. The pinned
+    // SDK's `AdvisorConfig` shape (`protocol/config.d.ts`) has NO `providerId` field — only
+    // `model`/`authRef` — so this door has no way to PIN the advisor to its own provider identity;
+    // the only safe lever is "same provider as the session's own model, or nothing at all". Threading
+    // `advisorProvider`'s own authRef for a genuinely cross-provider advisor (the OLD behavior) risked
+    // a credential/provider mismatch this shape cannot express or verify. Logged once, naming the
+    // setting, so a misconfigured `runtimes.advisorModel` is visible rather than silently inert.
     const advisorProvider = providerFor(input.advisorModel, input.home);
     const sameProvider = provider !== undefined && advisorProvider !== undefined && provider.providerId === advisorProvider.providerId;
-    const advisorAuthRef = sameProvider ? provider!.authRef : advisorProvider?.authRef;
-    options.advisor = {
-      model: input.advisorModel.startsWith(WINTER_TEST_PREFIX) ? input.advisorModel : splitTag(input.advisorModel).modelId,
-      ...(advisorAuthRef === undefined ? {} : { authRef: advisorAuthRef }),
-    };
+    if (sameProvider) {
+      options.advisor = {
+        model: input.advisorModel.startsWith(WINTER_TEST_PREFIX) ? input.advisorModel : splitTag(input.advisorModel).modelId,
+        ...(provider!.authRef === undefined ? {} : { authRef: provider!.authRef }),
+      };
+    } else {
+      console.error(
+        `runtimes.advisorModel: names a different provider than the session's own model (or one side is unroutable) — dropping the advisor rather than guessing which credential it should use`,
+      );
+    }
   }
   if (provider) options.provider = input.connection === undefined ? provider : { ...provider, connection: input.connection };
   // P8b-36: the session's own servers, spread under their own names (see `capabilities` above).

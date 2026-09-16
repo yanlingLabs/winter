@@ -529,8 +529,8 @@ describeWithWinterBinary("W19-7: a credential-less, Codex-configured home create
     // What `bootstrapWinterDir` + `loadSettings` leave a FRESH home looking like: the Codex OAuth
     // default provider and its default model, and nothing stored anywhere.
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "codex-oauth", model: "gpt-5.6-sol" },
+      schemaVersion: 3,
+      provider: { model: "codex-oauth/gpt-5.6-sol" },
       runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60 },
     }, null, 2));
     daemon = await startDaemon({ home, secrets: new FileSecretStore(join(home, "test-secrets")), agentProvider: null });
