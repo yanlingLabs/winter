@@ -672,7 +672,6 @@ struct WindowContentView<Accessory: View>: View {
     /// and the daemon's own row otherwise (`effectiveSelection`).
     var modelMenuContent: ModelMenuContent {
         ModelMenuContent(
-            options: modelPickerOptions(adapter.modelCatalogue),
             current: effectiveSelection(row: currentSidebarSessionSummary?.model, optimistic: adapter.pendingModel),
             isDisabled: adapter.modelChangeInFlight,
             catalogue: adapter.modelCatalogue,
@@ -924,19 +923,32 @@ struct ModelPickerRow: View {
     let catalogue: SyncConfigSnapshot
     let onSelect: (String?) -> Void
 
-    /// WS-20: the provider tooltip — spec §7's "provider shown as the menu row's secondary text /
-    /// tooltip only". `nil` for the "Default" row and for a tag not (or not yet) in the catalogue.
-    private var providerId: String? {
+    /// The catalogue row this tag names, when there is one. `nil` for the "Default" row and for a
+    /// tag not (or not yet) in the catalogue.
+    private var row: SyncConfigModelInfo? {
         guard let model else { return nil }
-        return catalogue.models.first { $0.id == model }?.providerId
+        return catalogue.models.first { $0.id == model }
     }
+    /// WS-20: the provider tooltip — spec §7's "provider shown as the menu row's secondary text /
+    /// tooltip only".
+    private var providerId: String? { row?.providerId }
 
     var body: some View {
         Button {
             onSelect(model)
         } label: {
             HStack {
-                Text(modelDisplayLabel(model, catalogue: catalogue))
+                // WS-20 review fix (Nit 2): the catalog row's own human displayName as the row's
+                // SECONDARY text (spec §7) — distinct from the primary label, which stays the
+                // facing-name-or-modelId `modelDisplayLabel` (never the raw tag either way).
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(modelDisplayLabel(model, catalogue: catalogue))
+                    if let displayName = row?.displayName {
+                        Text(displayName)
+                            .font(Typography.caption())
+                            .foregroundStyle(Theme.textMuted)
+                    }
+                }
                 Spacer()
                 if selectionIsCurrent(model, current: current) {
                     Image(systemName: "checkmark")
@@ -951,8 +963,10 @@ struct ModelPickerRow: View {
     }
 }
 
-/// The model menu: "Default" (clears the override) first, then every slug the SYNCED CATALOGUE
-/// reports (`modelPickerOptions`).
+/// The model menu: "Default" (clears the override) first, then the SYNCED CATALOGUE grouped by
+/// provider (WS-20 review fix, Nit 2 — spec §7's sectioned picker, wired into production: a
+/// section per provider, headed by `modelPickerSections`' `title`, each row's secondary text the
+/// catalog row's `displayName`).
 ///
 /// An UNLISTED current model still gets a row of its own — a stale slug from a provider change is
 /// still the thing this session is pinned to, and a selection the user cannot see is a selection
@@ -961,27 +975,34 @@ struct ModelPickerRow: View {
 /// It draws no padding or width of its own: each popover frames it (the header's two do it exactly
 /// as they always did; the composer's stacks this and `EffortMenuContent` and frames the pair).
 struct ModelMenuContent: View {
-    let options: [String]
     let current: String?
     let isDisabled: Bool
-    /// WS-20: the synced catalogue — threaded through to every row for its facing-name label and
-    /// provider tooltip. Defaulted to `.empty` so every pre-WS-20 construction site (and any test
-    /// double that has no catalogue to offer) keeps compiling; an empty catalogue degrades every
-    /// row's label to the bare modelId, never a crash.
+    /// WS-20: the synced catalogue — the source `modelPickerSections` groups, and every row reads
+    /// for its facing-name label and provider tooltip. Defaulted to `.empty` so a test double with
+    /// no catalogue to offer keeps compiling; an empty catalogue renders no sections at all (just
+    /// the "Default" row), never a crash.
     var catalogue: SyncConfigSnapshot = .empty
     let onSelect: (String?) -> Void
 
     var body: some View {
+        let sections = modelPickerSections(catalogue)
         VStack(alignment: .leading, spacing: 2) {
             Text("Model")
                 .font(Typography.caption(.semibold))
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 4)
             ModelPickerRow(model: nil, current: current, isDisabled: isDisabled, catalogue: catalogue, onSelect: onSelect)
-            ForEach(options, id: \.self) { model in
-                ModelPickerRow(model: model, current: current, isDisabled: isDisabled, catalogue: catalogue, onSelect: onSelect)
+            ForEach(sections, id: \.providerId) { section in
+                Text(section.title)
+                    .font(Typography.caption(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 6)
+                    .padding(.bottom, 2)
+                ForEach(section.entries, id: \.tag) { entry in
+                    ModelPickerRow(model: entry.tag, current: current, isDisabled: isDisabled, catalogue: catalogue, onSelect: onSelect)
+                }
             }
-            if let current, !options.contains(current) {
+            if let current, !sections.contains(where: { section in section.entries.contains { $0.tag == current } }) {
                 ModelPickerRow(model: current, current: current, isDisabled: isDisabled, catalogue: catalogue, onSelect: onSelect)
             }
         }

@@ -462,6 +462,11 @@ final class ComposerChromeTests: XCTestCase {
             let card = WinterComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
                                          policy: nil, model: wiredModel(model: "srv-b"), stop: nil)
             XCTAssertEqual(card.modelRow.options, ["srv-a", "srv-b"], "\(mode) must still offer the models")
+            // WS-20 review fix (Nit 2): the popover renders `modelPickerSections(card.modelRow.
+            // catalogue)`, not `.options` directly — pin that the SAME catalogue the chip carries
+            // groups into the same rows, in the same order.
+            XCTAssertEqual(modelPickerSections(card.modelRow.catalogue).flatMap { $0.entries.map(\.tag) }, ["srv-a", "srv-b"],
+                           "\(mode)'s sectioned menu must offer the same models")
             XCTAssertEqual(card.modelRow.wire, ["high", "max"],
                            "\(mode) must still offer the WIRE efforts — they are model-scoped, never mode-scoped")
         }
