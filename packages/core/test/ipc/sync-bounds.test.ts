@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -131,11 +131,16 @@ describe("I1 — a pushed meta.model is validated exactly like session.setModel'
 
   async function boot(): Promise<{ store: SessionStore; socketPath: string; token: string }> {
     const home = mkdtempSync(join(tmpdir(), "winter-sync-model-"));
+    // WS-20 (review round 2, M4): `validateSyncMeta`'s `modelTagIsKnown` now enforces real catalog
+    // MEMBERSHIP, not just provider existence — a BYO `providers.codex-oauth.baseUrl` keeps this
+    // block's off-catalog-model control below meaning what it says (same escape hatch
+    // `session-set-model.test.ts`'s `boot2()` configures for the identical `session.create` case).
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" }, providers: { "codex-oauth": { baseUrl: "http://127.0.0.1:9/v1" } } }));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
     const tokens = await authority.ensureTokens();
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home });
     stop = () => { server.stop(); store.close(); };
     return { store, socketPath, token: tokens.harness };
   }
@@ -215,9 +220,10 @@ describe("I1 — a pushed meta.model is validated exactly like session.setModel'
   });
 
   // Same "never bricked" precedent `session.setModel` follows: a real provider with an off-catalog
-  // model id (no row to enumerate against — a BYO/self-hosted endpoint) is stored freely. Only the
-  // PROVIDER half of the tag is ever validated, never per-model membership.
-  test("a real provider with an off-catalog model id is stored freely (never bricked)", async () => {
+  // model id (no row to enumerate against — a BYO/self-hosted endpoint) is stored freely, GIVEN
+  // this block's `boot()` configures a BYO `providers.codex-oauth.baseUrl` for it (WS-20 review
+  // round 2, M4) — without that, the SAME id is now dropped, same as a genuine typo.
+  test("a real provider with an off-catalog model id is stored freely, GIVEN a BYO baseUrl for it", async () => {
     const { store, socketPath, token } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(token, "sync");
@@ -229,6 +235,36 @@ describe("I1 — a pushed meta.model is validated exactly like session.setModel'
     });
     expect(store.meta(id).model).toBe("codex-oauth/some-byo-endpoint-model");
     c.close();
+  });
+
+  // WS-20 (review round 2, M4): the regression this item closes — a typo on a real, catalog-backed
+  // provider, pushed with NO BYO baseUrl configured, is DROPPED (not bricked, not stored) — the
+  // handler's own non-fatal policy still holds (the log itself still lands), only which models
+  // qualify for the drop got stricter.
+  test("M4: a typo model on a real provider, with NO BYO baseUrl, is dropped (log still lands)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-sync-model-notypo-"));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+    const tokens = await authority.ensureTokens();
+    // No `winterHome` — no BYO baseUrl to consult.
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store });
+    try {
+      const c = await TestClient.connect(socketPath);
+      await c.hello(tokens.harness, "sync");
+      const id = uuid();
+      const res = await c.request(METHODS.syncPush, {
+        sessionId: id, baseSeq: 0, data: b64(jsonl([created(id)])), complete: true,
+        meta: { model: "codex-oauth/gpt-5.4" },
+      });
+      expect(res.error).toBeUndefined(); // never fails the whole push
+      expect(store.lastSeq(id)).toBe(1); // the log still landed
+      expect(store.meta(id).model).toBeUndefined(); // the model override did not
+      c.close();
+    } finally {
+      server.stop();
+      store.close();
+    }
   });
 });
 

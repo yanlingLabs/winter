@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, SESSION_MODEL_MAX_CHARS, type WritableSocket } from "@yanlinglabs/winter-protocol";
@@ -66,11 +66,16 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
 
   async function boot(): Promise<{ store: SessionStore; socketPath: string; harnessToken: string; remoteToken: string }> {
     const home = mkdtempSync(join(tmpdir(), "winter-set-model-rpc-"));
+    // WS-20 (review round 2, M4): `resolveModelSelection` now enforces real catalog MEMBERSHIP,
+    // not just provider existence — a BYO `providers.codex-oauth.baseUrl` keeps this file's several
+    // off-catalog/placeholder model ids (`codex-oauth/m1`, the length-boundary filler) passing
+    // exactly as before, same escape hatch `session-model-gate-catalog.test.ts` exercises directly.
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" }, providers: { "codex-oauth": { baseUrl: "http://127.0.0.1:9/v1" } } }));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
     const tokens = await authority.ensureTokens();
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home });
     stop = () => { server.stop(); store.close(); };
     return { store, socketPath, harnessToken: tokens.harness, remoteToken: tokens.remote };
   }
@@ -326,15 +331,19 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
 
 // ================================================================================================
 // WS-20: `session.create`'s OWN `model` is validated by the SAME `resolveModelSelection` helper
-// `session.setModel` applies above — a plain `parseModelTag` check, extracted once (beside
-// `assertEffortSelectable`) so the two surfaces cannot drift. There is no more alias-resolution
-// step and no more catalogue-enumerability escape hatch (both were pre-WS-20 concepts, built
-// around `AgentEngine.knownModels()` / `providers/codex-config.ts`'s `CODEX_MODELS`, neither of
-// which exists any more): every model is now EITHER shape-valid AND names a real catalog
-// provider, OR it is refused — full stop, with no alias table and no "catalogue can't enumerate,
-// so anything goes" branch. A model id the named provider doesn't itself recognize is still
-// accepted verbatim (there is no per-provider model list to check membership against any more,
-// on or off catalog) — only the PROVIDER half of the tag is ever validated.
+// `session.setModel` applies above — extracted once (beside `assertEffortSelectable`) so the two
+// surfaces cannot drift. There is no more alias-resolution step and no more
+// `AgentEngine.knownModels()`-driven enumerability escape hatch (a pre-WS-20 concept that no
+// longer exists).
+//
+// WS-20 (review round 2, M4): `resolveModelSelection` is a real catalog MEMBERSHIP gate, not just
+// "the provider exists" — a tag whose provider has catalog rows must name ONE OF THEM, refused
+// INVALID_PARAMS otherwise (`codex-oauth/gpt-5.4`, a typo, is refused exactly like an unrecognized
+// provider always was). The ONE escape hatch is a BYO `providers.<id>.baseUrl` (`boot2()` above
+// configures one for `codex-oauth`, mirroring the openai-BYOK flow `provider.configure` writes) —
+// an intentionally unlisted endpoint model (a fine-tune, say) still passes verbatim on a provider
+// the caller has explicitly pointed at their own endpoint. A provider with NO catalog rows at all
+// also passes anything (nothing to be a member of).
 // ================================================================================================
 describe("session.create validates model exactly like session.setModel (WS-20: tags, not aliases)", () => {
   let stop2: (() => void) | undefined;
@@ -342,11 +351,14 @@ describe("session.create validates model exactly like session.setModel (WS-20: t
 
   async function boot2(): Promise<{ store: SessionStore; socketPath: string; harnessToken: string }> {
     const home = mkdtempSync(join(tmpdir(), "winter-create-model-rpc-"));
+    // WS-20 (review round 2, M4): see `boot()`'s identical comment above — the BYO baseUrl keeps
+    // this describe block's off-catalog-model controls meaning what they say.
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" }, providers: { "codex-oauth": { baseUrl: "http://127.0.0.1:9/v1" } } }));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
     const tokens = await authority.ensureTokens();
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, hub: new SessionHub(store) });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, hub: new SessionHub(store), winterHome: home });
     stop2 = () => { server.stop(); store.close(); };
     return { store, socketPath, harnessToken: tokens.harness };
   }
@@ -394,7 +406,11 @@ describe("session.create validates model exactly like session.setModel (WS-20: t
     c.close();
   });
 
-  test("a real provider with an off-catalog model id is stored verbatim — never bricked, only the provider half is validated (control)", async () => {
+  // WS-20 (review round 2, M4): `boot2()` configures a BYO `providers.codex-oauth.baseUrl` — the
+  // escape hatch that keeps an off-catalog id passing on a provider the caller has explicitly
+  // pointed at their own endpoint (a fine-tune, say). Without it (the next test), the SAME id is
+  // now refused: this is no longer "only the provider half is validated" unconditionally.
+  test("a real provider with an off-catalog model id is stored verbatim, GIVEN a BYO baseUrl for it", async () => {
     const { store, socketPath, harnessToken } = await boot2();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "creator");
@@ -403,6 +419,33 @@ describe("session.create validates model exactly like session.setModel (WS-20: t
     expect(res.error).toBeUndefined();
     expect(store.meta(res.result.sessionId).model).toBe("codex-oauth/some-byo-endpoint-model");
     c.close();
+  });
+
+  // WS-20 (review round 2, M4): the regression this whole item exists to close — the SAME
+  // off-catalog id as the control just above, but with NO `providers.codex-oauth.baseUrl`
+  // configured (a fresh server, no winterHome/settings at all) is now refused rather than passed
+  // through: a typo on a real, catalog-backed provider is a real membership failure.
+  test("M4: a typo model on a real provider, with NO BYO baseUrl, is refused INVALID_PARAMS", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-create-model-rpc-notypo-"));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+    const tokens = await authority.ensureTokens();
+    // No `winterHome` — `liveSettingsFor` answers `undefined`, so there is no BYO baseUrl to consult.
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, hub: new SessionHub(store) });
+    try {
+      const c = await TestClient.connect(socketPath);
+      await c.hello(tokens.harness, "creator");
+      const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "codex-oauth/gpt-5.4" });
+      expect(res.error).toBeTruthy();
+      expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+      expect(res.error.message).toContain("unknown model");
+      expect(store.list().length).toBe(0);
+      c.close();
+    } finally {
+      server.stop();
+      store.close();
+    }
   });
 
   test("omitting model is unaffected — no resolution/validation runs at all (control)", async () => {
@@ -445,9 +488,10 @@ describe("session.create validates model exactly like session.setModel (WS-20: t
     c.close();
   });
 
-  // An off-catalog model id has no row to check effort against — `effortsForModel` returns `[]`,
-  // and `assertEffortSelectable`'s own guard (`allowed.length > 0`) means no restriction applies,
-  // same as a pre-WS-20 "catalogue can't enumerate" BYO endpoint.
+  // An off-catalog model id (passing the M4 membership gate here only because `boot2()`'s BYO
+  // baseUrl keeps it a valid selection at all) has no row to check effort against —
+  // `effortsForModel` returns `[]`, and `assertEffortSelectable`'s own guard (`allowed.length > 0`)
+  // means no restriction applies.
   test("effort is unrestricted against an off-catalog model id (no row to validate against)", async () => {
     const { store, socketPath, harnessToken } = await boot2();
     const c = await TestClient.connect(socketPath);
