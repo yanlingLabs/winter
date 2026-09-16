@@ -675,6 +675,7 @@ struct WindowContentView<Accessory: View>: View {
             options: modelPickerOptions(adapter.modelCatalogue),
             current: effectiveSelection(row: currentSidebarSessionSummary?.model, optimistic: adapter.pendingModel),
             isDisabled: adapter.modelChangeInFlight,
+            catalogue: adapter.modelCatalogue,
             onSelect: { model in
                 adapter.applyModelSelection(model)
                 showingModelMenu = false
@@ -918,14 +919,24 @@ struct ModelPickerRow: View {
     let current: String?
     /// True while a `session.setModel` is in flight — one change at a time.
     let isDisabled: Bool
+    /// WS-20: the synced catalogue, for the label (`modelDisplayLabel`) and the provider tooltip —
+    /// a picker row never shows the raw `<providerId>/<modelId>` tag to the user.
+    let catalogue: SyncConfigSnapshot
     let onSelect: (String?) -> Void
+
+    /// WS-20: the provider tooltip — spec §7's "provider shown as the menu row's secondary text /
+    /// tooltip only". `nil` for the "Default" row and for a tag not (or not yet) in the catalogue.
+    private var providerId: String? {
+        guard let model else { return nil }
+        return catalogue.models.first { $0.id == model }?.providerId
+    }
 
     var body: some View {
         Button {
             onSelect(model)
         } label: {
             HStack {
-                Text(modelDisplayLabel(model))
+                Text(modelDisplayLabel(model, catalogue: catalogue))
                 Spacer()
                 if selectionIsCurrent(model, current: current) {
                     Image(systemName: "checkmark")
@@ -936,6 +947,7 @@ struct ModelPickerRow: View {
         .buttonStyle(.plain)
         .disabled(isDisabled)
         .padding(.vertical, 4)
+        .help(providerId ?? "")
     }
 }
 
@@ -952,6 +964,11 @@ struct ModelMenuContent: View {
     let options: [String]
     let current: String?
     let isDisabled: Bool
+    /// WS-20: the synced catalogue — threaded through to every row for its facing-name label and
+    /// provider tooltip. Defaulted to `.empty` so every pre-WS-20 construction site (and any test
+    /// double that has no catalogue to offer) keeps compiling; an empty catalogue degrades every
+    /// row's label to the bare modelId, never a crash.
+    var catalogue: SyncConfigSnapshot = .empty
     let onSelect: (String?) -> Void
 
     var body: some View {
@@ -960,12 +977,12 @@ struct ModelMenuContent: View {
                 .font(Typography.caption(.semibold))
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 4)
-            ModelPickerRow(model: nil, current: current, isDisabled: isDisabled, onSelect: onSelect)
+            ModelPickerRow(model: nil, current: current, isDisabled: isDisabled, catalogue: catalogue, onSelect: onSelect)
             ForEach(options, id: \.self) { model in
-                ModelPickerRow(model: model, current: current, isDisabled: isDisabled, onSelect: onSelect)
+                ModelPickerRow(model: model, current: current, isDisabled: isDisabled, catalogue: catalogue, onSelect: onSelect)
             }
             if let current, !options.contains(current) {
-                ModelPickerRow(model: current, current: current, isDisabled: isDisabled, onSelect: onSelect)
+                ModelPickerRow(model: current, current: current, isDisabled: isDisabled, catalogue: catalogue, onSelect: onSelect)
             }
         }
     }
@@ -1070,6 +1087,62 @@ func modelPickerOptions(_ catalogue: SyncConfigSnapshot) -> [String] {
     catalogue.models.map(\.id)
 }
 
+/// WS-20: `id`'s own `<providerId>/` prefix, stripped for DISPLAY only — splitting at the FIRST
+/// `/` (an id may itself contain more, e.g. an openrouter-style nested slug), and a no-op when the
+/// value is not tag-shaped at all (a pre-migration bare model, or a stray non-catalog string) —
+/// never throws, this is a label helper, not a validator. Shared by every picker/status surface in
+/// this file so the "strip the provider for display" rule lives in exactly one place.
+func modelIdPortion(of tag: String) -> String {
+    guard let slash = tag.firstIndex(of: "/") else { return tag }
+    return String(tag[tag.index(after: slash)...])
+}
+
+/// WS-20: one row in a `modelPickerSections` group — `tag` is the wire value (`session.setModel`
+/// sends it verbatim), `label` is what the row shows.
+struct ModelPickerEntry: Equatable {
+    let tag: String
+    let label: String
+}
+
+/// WS-20: one provider's rows in the picker — `providerId` for identity/grouping, `title` for the
+/// section header.
+struct ModelPickerSection: Equatable {
+    let providerId: String
+    let title: String
+    let entries: [ModelPickerEntry]
+}
+
+/// WS-20 (Interim presentation, spec §7): the picker's catalogue GROUPED BY PROVIDER — the picker
+/// no longer shows a flat list of provider-qualified tags verbatim (a Mac-native menu is not a
+/// terminal listing; a section per provider is the direct visual translation of the CLI's
+/// `renderModelListing` grouping). First-appearance provider order, matching `catalogue.models`'
+/// own (daemon) order — never re-sorted, same "the daemon decides the order" rule
+/// `modelPickerOptions` already keeps.
+///
+/// `title` is the provider's human-facing name when the caller has one cached (e.g. from
+/// `credential.list`'s own `displayName` rows) — `providerNames` defaults to `[:]` so every
+/// existing call site keeps compiling and simply shows the bare providerId until a caller is
+/// wired to supply better names (a follow-up, not a blocker: the id is still an honest, never-
+/// wrong label).
+///
+/// `label` is the family-slot facing name (capitalized, e.g. "Terra") when the row fills one, else
+/// the bare modelId (`modelIdPortion`) — mirrors the CLI's `renderModelListing` exactly.
+func modelPickerSections(_ catalogue: SyncConfigSnapshot, providerNames: [String: String] = [:]) -> [ModelPickerSection] {
+    var order: [String] = []
+    var byProvider: [String: [ModelPickerEntry]] = [:]
+    for m in catalogue.models {
+        if byProvider[m.providerId] == nil {
+            order.append(m.providerId)
+            byProvider[m.providerId] = []
+        }
+        let label = m.facingName.map { $0.capitalized } ?? modelIdPortion(of: m.id)
+        byProvider[m.providerId]?.append(ModelPickerEntry(tag: m.id, label: label))
+    }
+    return order.map { providerId in
+        ModelPickerSection(providerId: providerId, title: providerNames[providerId] ?? providerId, entries: byProvider[providerId] ?? [])
+    }
+}
+
 /// provider-correctness T6: the effort menu's two sections — WIRE levels for the session's model,
 /// and WINTER-LEVEL tiers.
 ///
@@ -1156,10 +1229,17 @@ func selectionOrigin(_ current: String?, wire: [String], tiers: [String]) -> Sel
     return .unknown
 }
 
-/// The model menu's current-selection LABEL — the row's `model` if set, else "Default" (brief's
-/// own wording: labeled so the user can tell inherited-from-default apart from explicitly-pinned).
-func modelDisplayLabel(_ model: String?) -> String {
-    model ?? "Default"
+/// The model menu's current-selection LABEL — "Default" when unset (brief's own wording: labeled
+/// so the user can tell inherited-from-default apart from explicitly-pinned), else the CATALOGUE
+/// entry's own label (facing name, capitalized) when the tag is present in it, else the bare
+/// modelId (`modelIdPortion`) — WS-20's "model-portion badge": a picker/chip/tooltip never shows
+/// the raw `<providerId>/<modelId>` tag to the user, catalogue-known or not.
+func modelDisplayLabel(_ model: String?, catalogue: SyncConfigSnapshot) -> String {
+    guard let model else { return "Default" }
+    if let row = catalogue.models.first(where: { $0.id == model }) {
+        return row.facingName.map { $0.capitalized } ?? modelIdPortion(of: model)
+    }
+    return modelIdPortion(of: model)
 }
 
 /// The effort menu's current-selection LABEL — same "Default" wording and same reason as

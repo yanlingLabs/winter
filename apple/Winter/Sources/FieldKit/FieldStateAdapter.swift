@@ -1029,7 +1029,7 @@ final class FieldStateAdapter: ObservableObject {
             return .none
         }
         defer { selectionProbation = nil }
-        return selectionRevert(probation, turnErrorMessage: turnError)
+        return selectionRevert(probation: probation, turnErrorMessage: turnError)
     }
 }
 
@@ -1118,7 +1118,7 @@ enum SelectionRevert: Equatable {
 /// already declares acceptable — the user sees the failing turn and clears the effort themselves.
 /// The residual is narrow twice over: a tier is code-sessions-only, and since the whole-branch I1
 /// fix the picker offers no tier at all unless the daemon reported real wire levels beside it.
-func selectionRevert(_ probation: SelectionProbation?, turnErrorMessage: String?) -> SelectionRevert {
+func selectionRevert(probation: SelectionProbation?, turnErrorMessage: String?) -> SelectionRevert {
     guard let probation, let raw = turnErrorMessage else { return .none }
     let message = raw.lowercased()
     // Effort first: an effort rejection names the model too (`unsupported_value` errors quote the
@@ -1127,7 +1127,11 @@ func selectionRevert(_ probation: SelectionProbation?, turnErrorMessage: String?
        message.contains("effort") || message.contains("reasoning") {
         return .effort
     }
-    if let model = probation.model, mentionsQuoted(model, in: message), message.contains("model") {
+    // WS-20: `probation.model` is now a provider-qualified TAG, but a provider rejection quotes
+    // only the bare model id it was sent (`the model 'gpt-5.6-sol' does not exist`) — it has no
+    // way to know or quote Winter's own tag. `modelIdPortion` strips the "<providerId>/" prefix
+    // (a no-op on anything not tag-shaped, so a pre-migration bare value still matches).
+    if let model = probation.model, mentionsQuoted(modelIdPortion(of: model), in: message), message.contains("model") {
         return .model
     }
     return .none
