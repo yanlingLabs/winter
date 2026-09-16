@@ -67,7 +67,11 @@ test("the internal seventh policy maps to default, NOT dontAsk", () => {
 // buildWinterOptions
 // -------------------------------------------------------------------------------------------
 
-function optionsInput(over: Partial<WinterOptionsInput> = {}): WinterOptionsInput {
+// WS-20: `model`/`advisorModel` are branded `ModelTag` on `WinterOptionsInput`, but every fixture
+// in this file hand-writes them as plain tag-shaped string literals — `over` accepts plain strings
+// for both and casts once, here, rather than every call site wrapping its own `tag(...)`.
+function optionsInput(over: Partial<Omit<WinterOptionsInput, "model" | "advisorModel">> & { model?: string; advisorModel?: string } = {}): WinterOptionsInput {
+  const { model, advisorModel, ...rest } = over;
   return {
     mode: "code",
     policy: "ask",
@@ -79,7 +83,9 @@ function optionsInput(over: Partial<WinterOptionsInput> = {}): WinterOptionsInpu
     canUseTool: (async () => ({ behavior: "allow" as const })) as CanUseTool,
     abort: new AbortController(),
     baseEnv: { PATH: "/usr/bin", HOME: "/Users/x", TMPDIR: "/tmp", LANG: "en_US.UTF-8", SECRET_TOKEN: "leak-me" },
-    ...over,
+    ...rest,
+    ...(model === undefined ? {} : { model: model as WinterOptionsInput["model"] }),
+    ...(advisorModel === undefined ? {} : { advisorModel: advisorModel as WinterOptionsInput["advisorModel"] }),
   };
 }
 
