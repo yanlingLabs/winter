@@ -47,7 +47,7 @@ import type { RuntimeSessionRecord, RuntimeSessionRecords } from "../runtime-sta
 import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { officialSubscriptionAuthEnabled, providerBaseUrlFor, winterOptionsFromSettings, type Settings } from "../settings";
+import { officialSubscriptionAuthEnabled, pinsFor, providerBaseUrlFor, winterOptionsFromSettings, type Settings } from "../settings";
 import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
@@ -59,15 +59,12 @@ import { neutralSelectionRefusal, refusalDetailCategoryFor } from "./refusal-cop
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
 import { attachOfficialSession, attachWinterSession } from "./messaging";
 import { buildWinterOptions, permissionModeFor } from "./mode-options";
-import { catalogRowsFor, inventoryProvidersServing, providerSelectionFor, qualifiedProviderFor, testProviderNameFor } from "./provider-selection";
+import { providerFor, rowForTag, testProviderNameFor } from "./provider-selection";
+import { splitTag, UNSTATED_TAG } from "./model-tag";
 import { winterSessions } from "./sessions";
 import { WINTER_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
 import { DISPATCH_EFFORT } from "../agent/dispatch-config";
-// WS-20 L3.4: `DISPATCH_MODEL` is deleted — `pinsFor(settings).dispatch` (settings.ts) replaces it
-// at both call sites below; left as an inline literal here so this module still LOADS until L3.4's
-// full redesign of this file lands (session-driver.ts is L3.4's own file cluster).
-const DISPATCH_MODEL_STUB = "codex-oauth/gpt-5.6-terra";
 import type { AgentRegistry } from "../agent/bg-agent-registry";
 import type { ContextAssembler } from "../agent/context";
 import { startWinterSession, unconsumedUserMessages, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
@@ -421,50 +418,33 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // override can only come from a harness that wrote the store directly — a test's door to
       // the `winter-test/*` doubles); every other mode is the per-session override, else the
       // daemon's configured provider model.
-      const model = mode === "dispatch" ? (live.model ?? DISPATCH_MODEL_STUB) : (live.model ?? settings?.provider?.model);
+      const model = mode === "dispatch" ? (live.model ?? pinsFor(settings).dispatch) : (live.model ?? settings?.provider?.model);
       const effort = mode === "dispatch" ? sdkEffortOf(live.effort ?? DISPATCH_EFFORT) : sdkEffortOf(live.effort);
-      // Hotfix 2026-09-16: the ROUTER's decided provider (persisted at create, `selection_json`) is
-      // the tie-breaker for a bare id several credentialled providers serve. Without it this call
-      // re-decided by inventory order and named `openai` for a session the router had placed on
-      // `codex-oauth` (measured on the release daemon). Read per incarnation, like everything here.
-      const decidedSelection = recordOf(sessionId)?.selection;
-      const preferredProviderId = decidedSelection?.runtimeKind === "winter-agent" ? decidedSelection.providerId : undefined;
-      const selection = providerSelectionFor(model, credentials, deps.home, settings, preferredProviderId);
-      // P8b-30: a BYO `openai-compatible` endpoint travels as the provider's connection, or the
-      // catalog's `openai` row would route it to api.openai.com.
+      // WS-20: `model` is ALWAYS a provider-qualified tag now (or the winter-test escape hatch) —
+      // `providerFor` names exactly its provider, no inventory-order tie-break, no "router's decided
+      // provider" hotfix needed (that hotfix existed only because a BARE id could be ambiguous).
+      const selection = model === undefined ? undefined : providerFor(model, deps.home);
+      // WS-19 (W19-6): a BYO endpoint travels as the provider's connection, or the catalog's own row
+      // would route it to that provider's default endpoint. There is deliberately NO daemon-side
+      // endpoint table: the catalog ships each provider's own `defaultEndpoints` and the SDK's
+      // `connectionFrom` copies them for the multi-provider adapters, so an unconfigured provider
+      // needs no `connection` at all and gets the right endpoint anyway. This is for the case the SDK
+      // cannot answer — a self-hosted or proxied endpoint, and the loopback fakes the parity e2e
+      // tests point at.
       //
       // Fix wave item 2 (measured against a real child): `local: true` is a DELIBERATE
       // compatibility decision, not an oversight — the SAME one `providers/runtime-provider.ts`'s
       // own `createOpenAiCompatibleRuntimeProvider` already makes for the identical setting.
       // Without it the Winter runtime's own endpoint policy refuses a loopback/private-address
-      // base URL outright ("points at a loopback address but the connection is not declared
-      // local"), which — measured — is not merely a test-fixture inconvenience: it silently
-      // broke every real self-hosted/LAN `openai-compatible` endpoint (Ollama, LM Studio, a local
-      // gateway) on the Winter leg, even though Winter's own `openai-compatible` provider type has
-      // never had an endpoint allowlist ("arbitrary API models are legitimate there" — the SAME
-      // doc comment `runtime-provider.ts` cites). A no-op for an ordinary public HTTPS endpoint
-      // (the address-class check never triggers for one).
+      // base URL outright, which silently breaks every real self-hosted/LAN endpoint (Ollama, LM
+      // Studio, a local gateway) even though a BYO provider has never had an endpoint allowlist.
       //
-      // WS-19 (W19-6): the SAME connection shape is now available for ANY provider, through
-      // `settings.providers.<catalogId>.baseUrl`. There is deliberately NO daemon-side endpoint
-      // table: the catalog ships each provider's own `defaultEndpoints` and the SDK's
-      // `connectionFrom` copies them for the multi-provider adapters (deepseek/zai/openrouter/xai
-      // all ride `winter.openai-chat-completions`), so an unconfigured provider needs no
-      // `connection` at all and gets the right endpoint anyway. This block is for the case the SDK
-      // cannot answer — a self-hosted or proxied endpoint, and the loopback fakes the parity e2e
-      // tests point at.
-      //
-      // THE LEGACY ARM KEEPS PRECEDENCE and stays byte-identical: a home that configured BYO OpenAI
-      // through `settings.provider` is unaffected by this block existing, even if it ALSO happens to
-      // carry a `providers.openai.baseUrl`. Read hot, per incarnation, like everything else here.
-      const legacyOpenAiConnection: ProviderConnectionConfig | undefined =
-        settings?.provider?.type === "openai-compatible" && selection?.providerId === "openai"
-          ? { baseUrl: settings.provider.baseUrl, endpointOrigin: "user", local: true }
-          : undefined;
+      // WS-20: the LEGACY `settings.provider.baseUrl` arm is GONE — `ProviderSettings` has no
+      // `baseUrl` field any more (the v2→v3 migration copies a stored value into
+      // `providers.openai.baseUrl` once), so `providerBaseUrlFor` is the ONLY door.
       const perProviderBaseUrl = selection === undefined ? undefined : providerBaseUrlFor(settings, selection.providerId);
       const connection: ProviderConnectionConfig | undefined =
-        legacyOpenAiConnection
-        ?? (perProviderBaseUrl === undefined ? undefined : { baseUrl: perProviderBaseUrl, endpointOrigin: "user", local: true });
+        perProviderBaseUrl === undefined ? undefined : { baseUrl: perProviderBaseUrl, endpointOrigin: "user", local: true };
       const capSession: CapabilitySession = {
         sessionId, mode, cwd,
         roots: deps.rootsOf(sessionId),
@@ -508,7 +488,6 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         cwd,
         model,
         credentials,
-        ...(preferredProviderId === undefined ? {} : { preferredProviderId }),
         settings,
         effort,
         ...(systemPrompt === undefined ? {} : { systemPrompt }),
@@ -567,44 +546,21 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
      * doors, and it fires on EVERY incarnation's first turn — a fresh create, a resume after an idle
      * reap, a resume after a daemon restart.
      *
-     * THE EXEMPTION is today's behaviour preserved byte-for-byte: the legacy `openai-compatible` arm
-     * (a BYO `settings.provider.baseUrl`) is never refused, because a self-hosted or LAN endpoint —
-     * Ollama, LM Studio, a local gateway — legitimately wants no key at all. The per-provider
-     * `providers.<id>.baseUrl` arm is NOT exempt. A `local-none` provider is excluded a layer down,
-     * by auth family (`apiKeyProviderIsUnauthenticated`).
+     * WS-20: a model is ALWAYS a provider-qualified tag now (or the winter-test escape hatch), so
+     * `providerFor` names exactly one provider — there is no more "ambiguous bare id served by
+     * several inventory providers" case to narrow around, and this gate ALWAYS runs for a real
+     * tag. `local-none` providers (Ollama, LM Studio, a local gateway — anything whose catalog
+     * `authKinds` is not `api-key`) are excluded a layer down, by auth family
+     * (`apiKeyProviderIsUnauthenticated`) — never a settings-field special case.
      */
     const beforeTurn = async (): Promise<void> => {
       const live = deps.store.meta(sessionId);
       const settings = deps.settings();
-      const model = mode === "dispatch" ? (live.model ?? DISPATCH_MODEL_STUB) : (live.model ?? settings?.provider?.model);
+      const model = mode === "dispatch" ? (live.model ?? pinsFor(settings).dispatch) : (live.model ?? settings?.provider?.model);
       if (model === undefined) return;
-      // ONLY A PROVIDER WINTER ACTUALLY DECIDED ON — never `providerSelectionFor`'s inventory-order
-      // FALLBACK, and this is the second half of the fix round 2 correction.
-      //
-      // When a BARE model id is served by several inventory providers and NONE of them is
-      // credentialled, `providerSelectionFor` returns `inInventory[0]` — a name, deliberately, not a
-      // decision (its own doc: "a provider that serves the model but has NO stored credential still
-      // returns a selection WITHOUT an authRef — the child then refuses with its own typed provider
-      // error, which is a better message than anything the host could invent"). Refusing on that
-      // fallback is exactly the invention it warns against: a fresh home configured for Codex OAuth,
-      // asking for `gpt-5.6-sol`, was being told to run `winter credentials set openai` — a provider
-      // the user never chose, through a door that would not have helped. It is also what broke the
-      // WinterKit gateway suite, whose harness dispatches on precisely that home.
-      //
-      // So the gate fires for the two cases where the provider IS Winter's answer:
-      //   - a fully-qualified `<provider>/<model>` key (`deepseek/deepseek-reasoner`), which names
-      //     one provider and no other;
-      //   - a bare id only ONE inventory provider serves, where there is nothing to be ambiguous
-      //     about.
-      // Anything else falls through to the child's own typed provider error, exactly as before
-      // WS-19. Codex OAuth is additionally never in scope at all — its auth family is `custom`, and
-      // `winter login`, not an API key, is its door (`apiKeyProviderIsUnauthenticated`).
-      const servingProviders = inventoryProvidersServing(model);
-      if (qualifiedProviderFor(model) === undefined && servingProviders.length !== 1) return;
-      const credentials = await credentialPresenceFrom(deps.secrets);
-      const selection = providerSelectionFor(model, credentials, deps.home, settings);
+      const selection = providerFor(model, deps.home);
       if (selection === undefined) return;
-      if (settings?.provider?.type === "openai-compatible" && selection.providerId === "openai") return;
+      const credentials = await credentialPresenceFrom(deps.secrets);
       if (apiKeyProviderIsUnauthenticated(selection.providerId, credentials.byProvider[selection.providerId] !== undefined)) {
         throw new WinterLegRefusal("runtime_selection_refused", missingCredentialDetail(selection.providerId), "no-credential");
       }
@@ -762,7 +718,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // branch needed.) The native Winter leg's own `optionsFor` (this file, above) is UNCHANGED —
       // it re-derives its OWN per-incarnation live choice every `open()`, which is correct for that
       // leg because it has no separately-fixed `selection.authFamily` to disagree with.
-      const provider = providerSelectionFor(live.model, credentials, deps.home);
+      const provider = live.model === undefined ? undefined : providerFor(live.model, deps.home);
       // TEST-ONLY (`WinterLegDeps.officialConnectionOverride`, fix round 1 M2 — never an ambient
       // env var, never set by production `daemon.ts` wiring): a loopback fake needs
       // `ANTHROPIC_BASE_URL` beside the key, which the `api-key` family's own variable set does
@@ -860,7 +816,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
   const selectionFor = (mode: SessionMode, model: string | undefined, providerId: string, authFamily: RuntimeSelection["authFamily"]): RuntimeSelection => ({
     runtimeKind: "winter-agent",
     providerId,
-    modelRef: model ?? "unknown",
+    modelRef: model ?? UNSTATED_TAG,
     family: "winter",
     authFamily,
     sdkVersion,
@@ -886,10 +842,8 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
    *      — which would turn "no model configured yet" into a hard `session.create` failure for
    *      every mode. Once a model-picker UI sets `meta.model` explicitly (8d), this bail-out stops
    *      firing for that session.
-   *   4. (Fix round 1, M5) The model has NO ROW IN THE PINNED CATALOG AT ALL —
-   *      `catalogRowsFor(model).length === 0` — e.g. a custom `provider.baseUrl` endpoint's own
-   *      model id, which `providerSelectionFor`'s own doc calls "served by no inventory provider …
-   *      letting the child's own catalog-first selection answer, never a host-side throw". The
+   *   4. (Fix round 1, M5; WS-20) The model has NO ROW IN THE PINNED CATALOG AT ALL —
+   *      `rowForTag(model) === undefined` — a tag whose exact key no catalog row carries. The
    *      selector has NOTHING to route on for a name it does not recognise at all — this is exactly
    *      that same "the child decides" case, not the D13 "we know the family, we lack the
    *      credential" refusal, so it keeps today's literal too. A model the catalog DOES recognise
@@ -903,7 +857,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
   const decideRuntime = async (mode: SessionMode, model: string | undefined): Promise<RuntimeSelection | undefined> => {
     if (typeof deps.runtime?.selectRuntimeFor !== "function") return undefined;
     if (model === undefined || testProviderNameFor(model) !== undefined) return undefined;
-    if (catalogRowsFor(model).length === 0) return undefined;
+    if (rowForTag(model) === undefined) return undefined;
     const decided = await deps.runtime.selectRuntimeFor({ mode, model });
     if (isSelectionRefusal(decided)) throw await refusalForSelection(decided, model);
     return decided;
@@ -953,18 +907,14 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       return new WinterLegRefusal("runtime_selection_refused", neutral, refusal.reason);
     }
     try {
-      // MINOR 1: the same narrowing `beforeTurn` applies, for the same reason. Without it this arm
-      // named `inInventory[0]` — a fallback, not a decision — so a credential-less home asking for
-      // `deepseek-reasoner` was told to add a key for whichever reseller happens to sort first.
-      // Only a qualified `<provider>/<model>` key, or a bare id exactly ONE inventory provider
-      // serves, names a provider here; anything else gets the neutral sentence.
-      if (qualifiedProviderFor(model) !== undefined || inventoryProvidersServing(model).length === 1) {
-        const credentials = await credentialPresenceFrom(deps.secrets);
-        const selection = providerSelectionFor(model, credentials, deps.home, deps.settings());
-        if (selection !== undefined
-            && apiKeyProviderIsUnauthenticated(selection.providerId, credentials.byProvider[selection.providerId] !== undefined)) {
-          return new WinterLegRefusal("runtime_selection_refused", missingCredentialDetail(selection.providerId), "no-credential");
-        }
+      // WS-20: `providerFor` always names exactly one provider (a tag is never ambiguous) — the
+      // MINOR 1 narrowing this used to need (a bare id served by several inventory providers) no
+      // longer applies.
+      const credentials = await credentialPresenceFrom(deps.secrets);
+      const selection = providerFor(model, deps.home);
+      if (selection !== undefined
+          && apiKeyProviderIsUnauthenticated(selection.providerId, credentials.byProvider[selection.providerId] !== undefined)) {
+        return new WinterLegRefusal("runtime_selection_refused", missingCredentialDetail(selection.providerId), "no-credential");
       }
     } catch { /* a store that will not answer must not turn one refusal into a different one */ }
     return new WinterLegRefusal("runtime_selection_refused", neutral, refusal.reason);
@@ -1038,7 +988,6 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     // refuses typed if it went away in between.
     assertSpine();
     const records = deps.records!;
-    const settings = deps.settings();
     const cwd = winterCwdOf(sessionId, meta.cwd);
 
     const decided = await decideRuntime(mode, meta.model);
@@ -1048,20 +997,20 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
 
     const backendSessionId = randomUUID();
     const transcriptKey = transcriptProjectKey(cwd);
-    const credentials = await credentialPresenceFrom(deps.secrets);
-    // Hotfix 2026-09-16: the router's decision steers this selection too, so the record's `authRef`
-    // names the SAME provider as its `providerId` (measured: `provider_id: codex-oauth` beside
-    // `auth_ref: keychain:openai:default` on the release daemon).
-    const selection = providerSelectionFor(meta.model, credentials, deps.home, settings, decided?.providerId);
-    const providerId = decided?.providerId ?? selection?.providerId ?? settings?.provider?.type ?? "unstated";
-    const authFamily: RuntimeSelection["authFamily"] = settings?.provider?.type === "openai-compatible" ? "api-key" : "custom";
+    // WS-20: a tag names exactly its provider — no more "steer this selection to agree with the
+    // router's decision" hotfix; `providerFor` and `splitTag` can never disagree because they are
+    // the same tag's own prefix.
+    const selection = meta.model === undefined ? undefined : providerFor(meta.model, deps.home);
+    const providerId = decided?.providerId ?? (meta.model !== undefined ? splitTag(meta.model).providerId : "unstated");
+    const providerAuthKinds = loadCatalog().providers.find((p) => p.id === providerId)?.authKinds ?? [];
+    const authFamily: RuntimeSelection["authFamily"] = providerAuthKinds.includes("api-key") ? "api-key" : "custom";
     try {
       records.create({
         winterSessionId: sessionId,
         runtimeKind: "winter-agent",
         backendSessionId,
         providerId,
-        modelRef: meta.model ?? "unknown",
+        modelRef: meta.model ?? UNSTATED_TAG,
         // The LOCATOR only (`keychain:<account>`) — never material (records.ts's own rule).
         ...(selection?.authRef?.kind === "keychain" ? { authRef: `keychain:${selection.authRef.account}` } : {}),
         backendRoot: join(deps.home, "projects", transcriptKey),

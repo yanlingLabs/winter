@@ -36,6 +36,7 @@ import { resolveClaudeExecutable, ClaudeExecutableUnavailable } from "./official
 import { credentialPresenceFrom, keychainSeamFromSecretStore } from "./keychain";
 import { routerInputShape } from "./official-capabilities";
 import { familyListingFromCatalog } from "./provider-selection";
+import { splitTag, WINTER_TEST_PREFIX } from "./model-tag";
 import { releaseAllHeld } from "./messaging";
 import { daemonResolveEndpoint } from "../providers/registry";
 import { WINTER_PEER_VERSIONS, REQUIRED_CLAUDE_AGENT_SDK } from "./versions";
@@ -498,9 +499,16 @@ export async function createWinterRuntimeSdk(deps: WinterRuntimeSdkDeps, overrid
   // the same session.
   const buildSelectionInput = async (input: { mode: SessionMode; model?: string; persisted?: RuntimeSelection }): Promise<SelectionInput> => {
     const credentials = await credentialPresenceFrom(deps.secrets);
+    // WS-20: `requested.model` is ALWAYS a provider-qualified tag now — the router (0.0.8+)
+    // refuses a bare id typed (`bare-model-id`) — so `requested.provider` is sent alongside it,
+    // split from the SAME tag, never independently guessed. Skipped for the winter-test double
+    // (not a catalog tag at all) and when no model is named yet.
+    const requestedModel = input.model === undefined || input.model.startsWith(WINTER_TEST_PREFIX)
+      ? {}
+      : { model: input.model, provider: splitTag(input.model).providerId };
     return {
       mode: input.mode,
-      requested: { ...(input.model === undefined ? {} : { model: input.model }) },
+      requested: requestedModel,
       families: familyListingFromCatalog(),
       credentials,
       hasClaudePeer: officialModule !== undefined,

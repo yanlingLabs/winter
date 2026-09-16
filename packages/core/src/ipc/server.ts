@@ -72,7 +72,7 @@ import type { PlanSwitchOutcome } from "../runtime-sdk/handoff";
 import { recordNamesSelection } from "../runtime-sdk/handoff";
 import type { RuntimeSessionRecords } from "../runtime-state/records";
 import { loadCatalog, CLAUDE_FAMILY_ID } from "@yanlinglabs/winter-provider-catalog";
-import { catalogRowsFor } from "../runtime-sdk/provider-selection";
+import { rowForTag } from "../runtime-sdk/provider-selection";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import { resolveModelAlias } from "../agent/model-aliases";
 import type { ApprovalBroker } from "../agent/approvals";
@@ -787,7 +787,10 @@ function detailCategoryFor(detail: string): "self-converge" | "needs-manual-reco
 function resolveModelSelection(model: string, knownModels: { id: string }[]): string {
   if (knownModels.length === 0) return model;
   const resolved = resolveModelAlias(model, knownModels.map((m) => m.id));
-  if (!knownModels.some((m) => m.id === resolved) && catalogRowsFor(resolved).length === 0) {
+  // WS-20 L3.6: this whole function is superseded by `parseModelTag` at the RPC door; left as a
+  // minimal stub (exact-key lookup instead of `catalogRowsFor`'s broad alias match) so the module
+  // still LOADS until L3.6 lands.
+  if (!knownModels.some((m) => m.id === resolved) && rowForTag(resolved) === undefined) {
     throw new RpcFailure(
       ERR.INVALID_PARAMS,
       `unknown model '${resolved}' — available models: ${knownModels.map((m) => m.id).join(", ")} (a pinned-catalog model id/alias is also accepted, even when it isn't in that list)`,

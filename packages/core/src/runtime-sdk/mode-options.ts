@@ -8,7 +8,8 @@ import type { SessionApprovalPolicy } from "../agent/gate";
 import type { Settings } from "../settings";
 import type { Mode as SessionMode } from "../agent/tools/registry";
 import { CONTROL_PLANE_FILENAMES } from "./control-plane";
-import { providerSelectionFor, testProviderNameFor } from "./provider-selection";
+import { providerFor, testProviderNameFor } from "./provider-selection";
+import { splitTag, WINTER_TEST_PREFIX, type ModelTag } from "./model-tag";
 import { WINTER_ADVERTISED_TOOLS_0_0_4, RUNTIME_HOST_TOOL_PAIRS, WINTER_OWN_TOOL_NAMES } from "./tool-names";
 
 /**
@@ -154,10 +155,13 @@ export interface WinterOptionsInput {
   home: string;
   profile?: string;
   cwd: string;
-  model?: string;
+  /** WS-20: always a provider-qualified tag (or a `winter-test/<name>` double). */
+  model?: ModelTag;
+  /** WS-20: NOT consumed by this file any more — `providerFor` names a provider's credential
+   *  LOCATOR unconditionally (a tag always resolves to exactly its provider), never gated on
+   *  presence. Presence-based refusal is `session-driver.ts`'s `beforeTurn`'s own job. Kept on the
+   *  interface for callers that still pass it. */
   credentials: CredentialPresence;
-  /** Hotfix 2026-09-16: the router's decided provider for this session (see `providerSelectionFor`). */
-  preferredProviderId?: string;
   effort?: EffortLevel;
   systemPrompt?: string;
   outputStyle?: string;
@@ -212,12 +216,12 @@ export interface WinterOptionsInput {
    * session has no model at all yet (`d30DefaultModel` falls through to the caller's `model`, itself
    * possibly `undefined`) — in which case no `advisor` key is set and the child's own default applies.
    */
-  advisorModel?: string;
-  /** Winter Phase 10a fix wave 3 (M-B, "Native sessions"): threaded to `providerSelectionFor` (for
-   *  both `Options.provider` and, when set, `Options.advisor`) so the WINTER leg's own "anthropic"
-   *  credential ref picks `anthropic:console` vs `anthropic:default` the SAME way the official
-   *  leg's own console-vs-api-key arm decides (`officialAuthFamilyFor`) — "both legs agree".
-   *  `undefined` (a caller with no settings handy) keeps the old, unconditional `anthropic:default`. */
+  /** WS-20: always a provider-qualified tag. */
+  advisorModel?: ModelTag;
+  /** WS-20: no longer consumed by THIS file — the "anthropic" vs "console" arm is now the tag's
+   *  own prefix (`providerFor`, provider-selection.ts), not a settings-driven decision
+   *  `credentialRefFor` used to make. Kept on the interface because other callers may still pass
+   *  it for unrelated reasons; nothing here reads it. */
   settings?: Settings | null;
 }
 
@@ -450,13 +454,18 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     sandbox: sandboxConfigFor(input.home),
   };
   if (input.spawn.spawnClaudeCodeProcess) options.spawnClaudeCodeProcess = input.spawn.spawnClaudeCodeProcess;
-  if (input.model !== undefined) options.model = input.model;
+  // WS-20 (§0.1 Spawn boundary): the Winter leg's `Options.model` is the BARE modelId, split from
+  // the tag once, right here — the winter-test double is the one exception, passed through WHOLE
+  // (it is not a tag at all, and splitting it would strip its own "winter-test/" identity).
+  if (input.model !== undefined) {
+    options.model = input.model.startsWith(WINTER_TEST_PREFIX) ? input.model : splitTag(input.model).modelId;
+  }
   if (input.effort !== undefined) options.effort = input.effort;
   if (input.systemPrompt !== undefined) options.systemPrompt = input.systemPrompt;
   if (input.outputStyle !== undefined) options.outputStyle = input.outputStyle;
   if (input.policy === "bypass") options.allowDangerouslySkipPermissions = true;
   if (input.hooks !== undefined) options.hooks = input.hooks;
-  const provider = providerSelectionFor(input.model, input.credentials, input.home, input.settings, input.preferredProviderId);
+  const provider = input.model !== undefined ? providerFor(input.model, input.home) : undefined;
   if (input.advisorModel !== undefined) {
     // Fix wave (M7): when the advisor's own target model resolves to the SAME provider as the
     // session's own model, thread the SESSION's already-resolved `authRef` onto `Options.advisor`
@@ -479,12 +488,13 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     //
     // A CROSS-provider advisor is UNCHANGED: it keeps falling through to the SDK's documented
     // "target provider's own keychain record" default, exactly as today (never guessed at here).
-    const advisorProvider = providerSelectionFor(input.advisorModel, input.credentials, input.home, input.settings);
-    const sameProviderAuthRef =
-      provider !== undefined && advisorProvider !== undefined && provider.providerId === advisorProvider.providerId
-        ? provider.authRef
-        : undefined;
-    options.advisor = { model: input.advisorModel, ...(sameProviderAuthRef === undefined ? {} : { authRef: sameProviderAuthRef }) };
+    const advisorProvider = providerFor(input.advisorModel, input.home);
+    const sameProvider = provider !== undefined && advisorProvider !== undefined && provider.providerId === advisorProvider.providerId;
+    const advisorAuthRef = sameProvider ? provider!.authRef : advisorProvider?.authRef;
+    options.advisor = {
+      model: input.advisorModel.startsWith(WINTER_TEST_PREFIX) ? input.advisorModel : splitTag(input.advisorModel).modelId,
+      ...(advisorAuthRef === undefined ? {} : { authRef: advisorAuthRef }),
+    };
   }
   if (provider) options.provider = input.connection === undefined ? provider : { ...provider, connection: input.connection };
   // P8b-36: the session's own servers, spread under their own names (see `capabilities` above).

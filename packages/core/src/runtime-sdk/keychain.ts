@@ -5,8 +5,6 @@ import type { WinterProviderDescriptor } from "@yanlinglabs/winter-provider-cata
 import type { SecretStore } from "../auth/secret-store";
 import { keychainService } from "../profile";
 import { CREDENTIAL_MATERIAL_NAMES, readCredentialMaterial, writeCredentialMaterial } from "../auth/credential-material";
-import { officialAuthFamilyFor } from "./official-options";
-import type { Settings } from "../settings";
 
 /**
  * One row of the credential inventory: a provider id, the `SecretStore` name that backs it, and
@@ -299,23 +297,16 @@ export function keychainSeamFromSecretStore(store: SecretStore, home?: string): 
  * ``keychain:${ref.account}`` from this function's result, rather than hand-building either form
  * separately — this function is the one place that knows both.
  *
- * Winter Phase 10a fix wave 3 (M-B, "Native sessions"): for `provider === "anthropic"` the account
- * is no longer the inventory row's fixed `secretName` — it is decided FRESH, by reusing
- * `officialAuthFamilyFor(home, settings, …)` (the SAME decision the official leg's own console-vs-
- * api-key arm makes), so both legs agree on which credential a session actually gets. `settings`
- * absent (every pre-existing caller — `advisor-reviewer.ts`'s own internal Anthropic-Messages
- * reviewer deliberately never passes it, since it always wants the plain api-key material) keeps
- * the OLD, unconditional `anthropic:default` behavior — `officialAuthFamilyFor` needs a real
- * `home` to check profile presence, so this new behavior also requires `home`, not just `settings`.
- * Every OTHER provider is unaffected: still the inventory's one fixed row, `.find()`ed as before.
+ * WS-20: the arm is no longer decided HERE — a model is always a provider-qualified tag, so the
+ * caller already names `"anthropic"` or `"console"` as two SEPARATE providers (the tag's own
+ * prefix), and this function just looks up each one's fixed inventory row like every other
+ * provider. `console` has NO Keychain slot at all (its `authKinds` is `console-profile`, not
+ * `api-key` — `isInScopeApiKeyProvider` excludes it from the derived inventory by construction);
+ * its presence is the on-disk profile file, checked at spawn time
+ * (`official-options.ts`'s `console_profile_missing` gate), never a `CredentialRef`.
  */
-export function credentialRefFor(provider: string, home?: string, settings?: Settings | null): CredentialRef | undefined {
-  if (provider === "anthropic") {
-    const account = home !== undefined && settings !== undefined && officialAuthFamilyFor(home, settings, false) === "console"
-      ? ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME
-      : ANTHROPIC_CREDENTIAL_SECRET_NAME;
-    return { kind: "keychain", account, service: keychainService(undefined, home) };
-  }
+export function credentialRefFor(provider: string, home?: string): CredentialRef | undefined {
+  if (provider === "console") return undefined;
   const slot = WINTER_CREDENTIAL_INVENTORY.find((s) => s.provider === provider);
   if (!slot) return undefined;
   return { kind: "keychain", account: slot.secretName, service: keychainService(undefined, home) };
