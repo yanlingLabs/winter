@@ -98,7 +98,10 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
         const res = await client.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet", confirmLossy: true });
         if (c.expectWrite) {
           expect(res.error).toBeUndefined();
-          expect(store.meta(sessionId).model).toBe("anthropic/sonnet");
+          // WS-20 (review round 2, M4 fix — R1): `resolveModelSelection` now CANONICALIZES a
+          // `<providerId>/<facingName>` request to its real catalog row key — the stored value is
+          // never the facing form as sent.
+          expect(store.meta(sessionId).model).toBe("anthropic/claude-sonnet-5");
         } else {
           expect(res.error).toBeDefined();
           expect(res.error.data?.code).toBe(c.expectedCode);
@@ -214,7 +217,10 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
       try {
         const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet", confirmLossy: true });
         expect(res.error).toBeUndefined();
-        expect(store.meta(sessionId).model).toBe("anthropic/sonnet");
+        // WS-20 (review round 2, M4 fix — R1): `resolveModelSelection` now CANONICALIZES a
+          // `<providerId>/<facingName>` request to its real catalog row key — the stored value is
+          // never the facing form as sent.
+          expect(store.meta(sessionId).model).toBe("anthropic/claude-sonnet-5");
       } finally {
         c.close();
         server.stop();
@@ -236,7 +242,10 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
     try {
       const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet", confirmLossy: true });
       expect(res.error).toBeUndefined();
-      expect(store.meta(sessionId).model).toBe("anthropic/sonnet");
+      // WS-20 (review round 2, M4 fix — R1): `resolveModelSelection` now CANONICALIZES a
+          // `<providerId>/<facingName>` request to its real catalog row key — the stored value is
+          // never the facing form as sent.
+          expect(store.meta(sessionId).model).toBe("anthropic/claude-sonnet-5");
     } finally {
       c.close();
       server.stop();

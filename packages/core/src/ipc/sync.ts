@@ -7,7 +7,7 @@ import { assistantMemoryDirFor } from "../agent/memory-dir";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
 import { CLIENT_EFFORTS, isClientEffort } from "../settings";
 import { rowForTag } from "../runtime-sdk/provider-selection";
-import { modelTagIsKnown, UNSTATED_TAG } from "../runtime-sdk/model-tag";
+import { canonicalizeModelTag, UNSTATED_TAG } from "../runtime-sdk/model-tag";
 import { pickerModels } from "./picker-models";
 import type { SessionForkRef, SessionStore, SyncedEntry } from "../sessions/store";
 
@@ -210,10 +210,10 @@ export interface SyncMetaEffortContext {
   /** Called with the REFUSED value and a short reason, once per drop. The caller logs; this
    *  function never does its own I/O (`validateSyncMeta` is pure), same split as `onDroppedModel`. */
   onDroppedEffort?(effort: string, reason: string): void;
-  /** WS-20 (review round 2, M4): threaded into `modelTagIsKnown` so a pushed `meta.model` is held
-   *  to the SAME membership gate as `session.create`/`session.setModel` — a typo model on a real
-   *  provider is dropped exactly like an unrecognised provider always was. Absent simply means the
-   *  BYO-`baseUrl` escape hatch never applies (no settings to consult) — the catalog-membership
+  /** WS-20 (review round 2, M4): threaded into `canonicalizeModelTag` so a pushed `meta.model` is
+   *  held to the SAME membership gate as `session.create`/`session.setModel` — a typo model on a
+   *  real provider is dropped exactly like an unrecognised provider always was. Absent simply means
+   *  the BYO-`baseUrl` escape hatch never applies (no settings to consult) — the catalog-membership
    *  check itself still runs either way, never a crash. */
   settings?: { providers?: Record<string, { baseUrl?: string }> };
 }
@@ -280,15 +280,20 @@ export function validateSyncMeta(
   //
   // WS-20 (review round 2, M4): `isModelTag` alone only checks shape AND that the PROVIDER exists
   // in the pinned catalog — a typo model on a real provider (`codex-oauth/gpt-5.4`) would pass it.
-  // `modelTagIsKnown` is the stricter MEMBERSHIP gate (real catalog row, unless the provider has a
-  // BYO `baseUrl` or no catalog rows of its own); anything else is dropped-and-logged, same as an
-  // unknown id always was — `sync.push`'s own "drop, never fail the whole push" policy (documented
-  // above) is unchanged, only which models qualify for the drop got stricter.
+  // `canonicalizeModelTag` is the stricter MEMBERSHIP gate (real catalog row, unless the provider
+  // has a BYO `baseUrl` or no catalog rows of its own); anything else is dropped-and-logged, same as
+  // an unknown id always was — `sync.push`'s own "drop, never fail the whole push" policy
+  // (documented above) is unchanged, only which models qualify for the drop got stricter.
+  //
+  // WS-20 (review round 2, M4 fix — R1): `canonicalizeModelTag` ALSO resolves a
+  // `<providerId>/<facingName>` push (`anthropic/sonnet`) to its real catalog row key — the
+  // CANONICAL tag is what lands in `out.model`, never the facing form as pushed.
   if (meta.model !== undefined) {
     // WS-20 (review round 2, nit e): `unstated/unstated` is the internal "nothing recorded"
     // sentinel — a CLIENT pushing it explicitly is never a real request (mirrors `resolveModelSelection`'s
     // identical door-level rejection in ipc/server.ts; `winter-test/*` stays accepted, unaffected).
-    if (meta.model !== UNSTATED_TAG && modelTagIsKnown(meta.model, effortCtx.settings)) out.model = meta.model;
+    const canonical = meta.model === UNSTATED_TAG ? undefined : canonicalizeModelTag(meta.model, effortCtx.settings);
+    if (canonical !== undefined) out.model = canonical;
     else onDroppedModel?.(meta.model);
   }
   if (meta.effort !== undefined) {
