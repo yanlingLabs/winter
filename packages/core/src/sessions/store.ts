@@ -192,7 +192,12 @@ export class SessionStore {
    *  true without a second `dirs`-column write path. */
   private readonly warnedMalformedDirs = new Set<string>();
 
-  constructor(private readonly homeDir: string) {
+  /** WS-20 (review round 2, M5): `presentProviders` (`credentialPresenceFrom(secrets)`'s keys) is
+   *  threaded into `migrateBareModelColumnToTags`'s own rule-5 tie-break — only the daemon boot
+   *  hook has `secrets` in hand at construction time, so every other caller (tests, `winter doctor`,
+   *  any direct `new SessionStore(home)`) omits it and gets the same fixed-preference tie-break as
+   *  before this field existed. */
+  constructor(private readonly homeDir: string, private readonly storeOpts?: { presentProviders?: ReadonlySet<string> }) {
     mkdirSync(join(homeDir, "sessions"), { recursive: true });
     this.db = new Database(join(homeDir, "sessions", "index.db"));
     this.db.run(`CREATE TABLE IF NOT EXISTS sessions (
@@ -289,7 +294,10 @@ export class SessionStore {
     const rows = this.db.query<{ session_id: string; model: string | null }, []>("SELECT session_id, model FROM sessions WHERE model IS NOT NULL").all();
     for (const row of rows) {
       if (row.model === null || isModelTag(row.model)) continue;
-      const tag = migrateBareModelId(row.model, { fieldName: "sessions.model", home: this.homeDir, emptySFallback: UNSTATED_TAG }) ?? UNSTATED_TAG;
+      const tag = migrateBareModelId(row.model, {
+        fieldName: "sessions.model", home: this.homeDir, emptySFallback: UNSTATED_TAG,
+        presentProviders: this.storeOpts?.presentProviders,
+      }) ?? UNSTATED_TAG;
       this.db.run("UPDATE sessions SET model = ? WHERE session_id = ?", [tag, row.session_id]);
     }
   }

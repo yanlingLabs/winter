@@ -761,6 +761,13 @@ export interface MigrateBareModelIdOptions {
    *  provider default (`provider.model` itself) or is cleared (`"delete"`); a runtime-state/session
    *  row always gets the sentinel (`UNSTATED_TAG`). */
   emptySFallback: ModelTag | "delete";
+  /** WS-20 (review round 2, M5): the set of providers this HOME actually holds a credential for
+   *  (`credentialPresenceFrom(secrets)`'s keys) — rule 5's tie-break (several serving providers,
+   *  none named by the legacy `provider.type`) prefers a member of S that HOLDS a credential over
+   *  the fixed codex-oauth>openai>anthropic order. Absent (every caller but the daemon boot hook,
+   *  which is the only one with `secrets` in hand at migration time) falls straight to the fixed
+   *  order, exactly as before this field existed. */
+  presentProviders?: ReadonlySet<string>;
 }
 
 /** WS-20 (spec §5, numbered exactly as the plan states it): resolves ONE bare legacy model id `m`
@@ -790,11 +797,24 @@ export function migrateBareModelId(m: string, opts: MigrateBareModelIdOptions): 
   // 3. the legacy provider.type, when THAT provider is in S (provider.model only).
   if (opts.legacyProviderType === "codex-oauth" && S.includes("codex-oauth")) return "codex-oauth/" + m as ModelTag;
   if (opts.legacyProviderType === "openai-compatible" && S.includes("openai")) return "openai/" + m as ModelTag;
-  // 4. exactly one serving provider.
+  // 4. exactly one serving provider (no ambiguity to resolve — presence plays no role).
   if (S.length === 1) return `${S[0]}/${m}` as ModelTag;
-  // 5. several, none named — prefer an api-key vendor in this fixed order, else catalog order.
-  const preferred = (["codex-oauth", "openai", "anthropic"] as const).find((p) => S.includes(p));
-  const chosen = preferred ?? S[0]!;
+  // 5. several, none named. WS-20 (review round 2, M5): prefer a member of S that HOLDS A
+  //    CREDENTIAL, when the caller knows presence at all — falling back to the fixed
+  //    api-key-vendor order (unchanged) when presence is unknown, OR known but none of S holds one
+  //    (logged either way, so a silent wrong-provider guess is never truly silent).
+  const fixedOrder = (["codex-oauth", "openai", "anthropic"] as const).find((p) => S.includes(p));
+  if (opts.presentProviders !== undefined) {
+    const credentialed = S.find((p) => opts.presentProviders!.has(p));
+    if (credentialed !== undefined) {
+      console.error(`[settings migration] "${opts.fieldName}" is ambiguous across providers (${S.join(", ")}) — chose ${credentialed}, which holds a credential`);
+      return `${credentialed}/${m}` as ModelTag;
+    }
+    const chosen = fixedOrder ?? S[0]!;
+    console.error(`[settings migration] "${opts.fieldName}" is ambiguous across providers (${S.join(", ")}) — none holds a credential, chose ${chosen} by fixed preference`);
+    return `${chosen}/${m}` as ModelTag;
+  }
+  const chosen = fixedOrder ?? S[0]!;
   console.error(`[settings migration] "${opts.fieldName}" is ambiguous across providers (${S.join(", ")}) — chose ${chosen}`);
   return `${chosen}/${m}` as ModelTag;
 }
@@ -804,7 +824,7 @@ export function migrateBareModelId(m: string, opts: MigrateBareModelIdOptions): 
  *  (for the Claude-id console-profile probe) and returns a raw object shaped for `Settings.parse`.
  *  Preserves every unrelated key verbatim (same "nothing silently lost" discipline the v1→v2 branch
  *  already had). Exported so `loadSettings` and this file's own tests share one implementation. */
-export function migrateSettingsV2ToV3(raw: Record<string, unknown>, home: string): Record<string, unknown> {
+export function migrateSettingsV2ToV3(raw: Record<string, unknown>, home: string, presentProviders?: ReadonlySet<string>): Record<string, unknown> {
   const legacyProvider = (raw.provider ?? {}) as Record<string, unknown>;
   const legacyProviderType = legacyProvider.type as "codex-oauth" | "openai-compatible" | undefined;
   const legacyRuntimes = (raw.runtimes ?? {}) as Record<string, unknown>;
@@ -816,7 +836,7 @@ export function migrateSettingsV2ToV3(raw: Record<string, unknown>, home: string
   // provider: model (required), reasoningEffort (carried as-is), type/baseUrl dropped.
   if (typeof legacyProvider.model === "string") {
     const tag = migrateBareModelId(legacyProvider.model, {
-      fieldName: "provider.model", home, legacyOfficialAuth, legacyProviderType,
+      fieldName: "provider.model", home, legacyOfficialAuth, legacyProviderType, presentProviders,
       emptySFallback: legacyProviderType === "openai-compatible" ? ("openai/gpt-5.6-sol" as ModelTag) : ("codex-oauth/gpt-5.6-sol" as ModelTag),
     });
     const nextProvider: Record<string, unknown> = { model: tag };
@@ -838,7 +858,7 @@ export function migrateSettingsV2ToV3(raw: Record<string, unknown>, home: string
   for (const [block, key] of [["reviewer", "reviewer"], ["titles", "titles"]] as const) {
     const legacyBlock = (raw[block] ?? {}) as Record<string, unknown>;
     if (typeof legacyBlock.model !== "string") continue;
-    const tag = migrateBareModelId(legacyBlock.model, { fieldName: `${key}.model`, home, legacyOfficialAuth, emptySFallback: "delete" });
+    const tag = migrateBareModelId(legacyBlock.model, { fieldName: `${key}.model`, home, legacyOfficialAuth, presentProviders, emptySFallback: "delete" });
     const nextBlock = { ...(out[block] as Record<string, unknown> | undefined) };
     if (tag) nextBlock.model = tag; else delete nextBlock.model;
     out[block] = nextBlock;
@@ -848,7 +868,7 @@ export function migrateSettingsV2ToV3(raw: Record<string, unknown>, home: string
   if (raw.runtimes !== undefined) {
     const nextRuntimes: Record<string, unknown> = { ...legacyRuntimes };
     if (typeof legacyRuntimes.advisorModel === "string" && legacyRuntimes.advisorModel.length > 0) {
-      const tag = migrateBareModelId(legacyRuntimes.advisorModel, { fieldName: "runtimes.advisorModel", home, legacyOfficialAuth, emptySFallback: "delete" });
+      const tag = migrateBareModelId(legacyRuntimes.advisorModel, { fieldName: "runtimes.advisorModel", home, legacyOfficialAuth, presentProviders, emptySFallback: "delete" });
       if (tag) nextRuntimes.advisorModel = tag; else delete nextRuntimes.advisorModel;
     }
     if (legacyRuntimes.official !== undefined) {
@@ -875,7 +895,22 @@ function backupPreWs20Once(path: string, raw: unknown): void {
   }
 }
 
-export function loadSettings(path: string): Settings {
+/**
+ * WS-20 (review round 2, M5): `opts.presentProviders` threads credential presence into migration
+ * rule 5's tie-break (`migrateBareModelId`) — only the DAEMON boot hook has `secrets` in hand at
+ * migration time (`credentialPresenceFrom(secrets)`, computed before this call), so every other
+ * caller (the CLI, every test without a daemon) omits it and gets the OLD fixed-preference tie-break
+ * unchanged.
+ *
+ * `opts.persistMigration` (default `false`) gates every DISK WRITE this function can make — the
+ * migrated-shape return value is IDENTICAL either way (a caller always gets a valid, migrated
+ * `Settings` object back), but with it left `false` the on-disk file is left EXACTLY as it was
+ * found (still v2, still un-backed-up). This makes the daemon boot hook (which passes `true`, AFTER
+ * it has computed presence) the ONLY writer of a migrated v3 file — a CLI or test process that
+ * happens to read a v2 home first can no longer race the daemon to a migration written WITHOUT
+ * presence in hand.
+ */
+export function loadSettings(path: string, opts?: { presentProviders?: ReadonlySet<string>; persistMigration?: boolean }): Settings {
   let raw: any;
   try {
     raw = JSON.parse(readFileSync(path, "utf8"));
@@ -893,10 +928,15 @@ export function loadSettings(path: string): Settings {
     return parsed.data;
   }
   const home = dirname(path);
-  backupPreWs20Once(path, raw);
+  const persistMigration = opts?.persistMigration ?? false;
   if (raw.schemaVersion === 2) {
-    const migrated = migrateSettingsV2ToV3(raw, home);
-    writeFileSync(path, JSON.stringify(migrated, null, 2) + "\n");
+    // WS-20 (review round 2, nit h): the backup is a REAL pre-WS20 file worth preserving — moved
+    // inside this branch (it used to run unconditionally, including for the v1-or-legacy fallback
+    // below, which never held real settings worth backing up) and gated on `persistMigration` like
+    // every other write this function makes.
+    if (persistMigration) backupPreWs20Once(path, raw);
+    const migrated = migrateSettingsV2ToV3(raw, home, opts?.presentProviders);
+    if (persistMigration) writeFileSync(path, JSON.stringify(migrated, null, 2) + "\n");
     const parsed = Settings.safeParse(migrated);
     if (!parsed.success) {
       throw new Error(`settings.json is invalid: ${parsed.error.issues.map((i) => i.path.join(".")).join(", ")} — fix or delete ${path}`);
@@ -906,10 +946,10 @@ export function loadSettings(path: string): Settings {
   // v1-or-legacy file (Phase 0 wrote {schemaVersion:1}; the retired v1 app wrote files with no
   // schemaVersion at all — same directory on case-insensitive APFS). No real provider info exists
   // to migrate, so this lands straight on v3's DEFAULT_PROVIDER — preserving unknown fields so
-  // nothing is silently lost.
+  // nothing is silently lost. Never backed up (nit h) — there is nothing real to lose.
   const { schemaVersion: _legacy, ...preserved } = raw;
   const migrated = { ...preserved, schemaVersion: 3 as const, provider: DEFAULT_PROVIDER };
-  writeFileSync(path, JSON.stringify(migrated, null, 2) + "\n");
+  if (persistMigration) writeFileSync(path, JSON.stringify(migrated, null, 2) + "\n");
   // zod v4 z.object() strips unknown keys by default (does NOT throw) — safe to parse migrated
   return Settings.parse(migrated);
 }

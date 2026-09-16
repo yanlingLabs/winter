@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { openRuntimeStateDb, RuntimeSessionRecords } from "../../src/runtime-state";
 import { migrateModelRefsToTags } from "../../src/runtime-state/migrations/tags";
+import { credentialRefFor } from "../../src/runtime-sdk/keychain";
 import { withTempHome, ISO } from "./support";
 
 function seedSession(records: RuntimeSessionRecords, home: string, id: string, providerId: string, modelRef: string) {
@@ -81,6 +82,44 @@ describe("WS-20 (spec §5): migrateModelRefsToTags", () => {
         const report = migrateModelRefsToTags({ rs, home });
         expect(report.sessionsRewritten).toBe(0);
         expect(records.get("s_e")!.modelRef).toBe("codex-oauth/gpt-5.6-luna");
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  // WS-20 (review round 2, nit d): `auth_ref` is rewritten alongside `model_ref`, from the
+  // RESULTING tag's own provider — so a migrated row's stored ref agrees with the model it now
+  // names (spec §10's claim).
+  test("nit(d): auth_ref is rewritten from the resulting tag's own provider", async () => {
+    await withTempHome(async (home) => {
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        seedSession(records, home, "s_f", "codex-oauth", "gpt-5.6-terra");
+        migrateModelRefsToTags({ rs, home });
+        const expected = credentialRefFor("codex-oauth", home);
+        expect(records.get("s_f")!.authRef).toBe(expected?.kind === "keychain" ? `keychain:${expected.account}` : undefined);
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
+  // WS-20 (review round 2, M5): a row whose `provider_id` is NOT a catalog provider this daemon
+  // recognises falls back to `migrateBareModelId`'s rule 5 — now presence-aware, same as the
+  // settings migration.
+  test("M5: a row with an unrecognized provider_id and an ambiguous model_ref prefers a credentialed provider", async () => {
+    await withTempHome(async (home) => {
+      const rs = openRuntimeStateDb(home);
+      try {
+        const records = new RuntimeSessionRecords(rs);
+        // "legacy-provider" is not a pinned catalog provider — falls to the S-based fallback rule.
+        // "gpt-5.6-terra" is served by codex-oauth/openai/kie (genuinely ambiguous).
+        seedSession(records, home, "s_g", "legacy-provider", "gpt-5.6-terra");
+        const report = migrateModelRefsToTags({ rs, home, presentProviders: new Set(["openai"]) });
+        expect(report.sessionsRewritten).toBe(1);
+        expect(records.get("s_g")!.modelRef).toBe("openai/gpt-5.6-terra");
       } finally {
         rs.close();
       }
