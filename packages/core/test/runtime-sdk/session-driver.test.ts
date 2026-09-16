@@ -23,6 +23,7 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { CORE_BRAND } from "../../src/runtime-sdk/brand";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import { createWinterSessionDrivers, refusalMayBeCredentialShaped, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
+import { evictSessionsForCredential } from "../../src/runtime-sdk/credentials";
 import { unconsumedUserMessages } from "../../src/runtime-sdk/winter-session";
 import { WINTER_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
 import { backfillNativeSessions, openRuntimeStateDb, ProjectionCheckpoints, RuntimeSessionRecords } from "../../src/runtime-state";
@@ -433,6 +434,39 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
       const sid = t.store.createSession("t", { mode: "chat", model: "deepseek/deepseek-reasoner" });
       const session = await t.drivers.create(sid);
       expect(t.queries.length).toBe(1);   // the child spawned; the gate had nothing to gate
+      await session.end();
+    } finally { t.close(); }
+  });
+
+  // WS-20 (review round 2, M1): a `session.create` with NO explicit `model` (the normal Mac case)
+  // used to record `providerId: "unstated"` — the record's provider never agreed with the SETTINGS
+  // provider the child actually runs on, so `credential.set`'s hot-swap
+  // (`evictSessionsForCredential`, which reads `records.get(sessionId)?.providerId`) evicted
+  // nothing for a default-model session: a rotated key never reached its live child until the next
+  // restart/idle-reap. Fixed by computing the EFFECTIVE tag (the daemon's configured
+  // `settings.provider.model` when no explicit model was given) once, and deriving providerId AND
+  // modelRef from it.
+  test("create with no model records the settings tag's REAL provider — a later credential change evicts it (M1)", async () => {
+    const settings = { provider: { model: "openai/gpt-5.6-sol" }, runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
+    const t = table({ settings: () => settings });
+    try {
+      const sid = t.store.createSession("t", { mode: "chat" }); // no `model` at all
+      const session = await t.drivers.create(sid);
+
+      // The record names the REAL provider the child actually runs on — never "unstated".
+      const record = t.records.get(sid);
+      expect(record?.providerId).toBe("openai");
+      expect(record?.modelRef).toBe("openai/gpt-5.6-sol");
+
+      // The hot-swap path (production wiring: ipc/server.ts's evictSessionsForCredentialChange)
+      // now finds this session when its provider's credential changes.
+      const acted = await evictSessionsForCredential({
+        list: () => t.drivers.list(),
+        providerOf: (sessionId) => t.records.get(sessionId)?.providerId,
+        evict: (sessionId) => t.drivers.evict(sessionId),
+      }, "openai");
+      expect(acted).toEqual([sid]);
+
       await session.end();
     } finally { t.close(); }
   });
