@@ -69,6 +69,15 @@ describe("validateModelTag", () => {
     expect(validateModelTag("gpt-5.6-terra")).toMatch(/provider-qualified tag/);
     expect(validateModelTag("nosuch/gpt-5.6-terra")).toMatch(/unknown provider/);
   });
+
+  // Review fix: `isModelTag` accepts both as ESCAPES (for validating a stored value that may
+  // legitimately carry either), but neither is a real, user-settable model -- a user typing
+  // `winter model unstated/unstated` or `winter model winter-test/foo` must be refused, not
+  // silently "succeed" into a sentinel/test-double record.
+  test("WS-20: validateModelTag rejects the unstated sentinel and a winter-test double", () => {
+    expect(validateModelTag("unstated/unstated")).toMatch(/provider-qualified tag/);
+    expect(validateModelTag("winter-test/foo")).toMatch(/provider-qualified tag/);
+  });
 });
 
 describe("validateEffort", () => {

@@ -2,7 +2,7 @@
 // unit-tested without going through the top-level `if (import.meta.main)` dispatch. Mirrors
 // plugin-cli.ts's split: main.ts owns the I/O (loadSettings/saveSettings/connect), this file
 // owns the parse/validate decisions.
-import { REASONING_EFFORTS, catalogRowsFor, isModelTag, splitTag } from "@yanlinglabs/winter-core";
+import { REASONING_EFFORTS, catalogRowsFor, isModelTag, splitTag, UNSTATED_TAG, WINTER_TEST_PREFIX } from "@yanlinglabs/winter-core";
 
 export type ModelCliAction =
   | { kind: "show" }
@@ -65,10 +65,17 @@ export function parseModelArgs(args: string[]): ModelCliAction {
  *  one place the shape/lookup rules live). Two distinct failure shapes, so the message always
  *  names the actual defect:
  *    - not tag-shaped at all (`splitTag` throws)      -> "…must be a provider-qualified tag …"
+ *    - the `unstated/unstated` sentinel, or a `winter-test/…` double -> same message: NEITHER is a
+ *      real, user-settable model — `isModelTag` accepts both as escapes (it exists to validate a
+ *      *stored* value, e.g. a session record that may legitimately carry the sentinel), but a
+ *      value the USER is trying to SET must never be either. Without this check both slipped
+ *      through as "valid" (`isModelTag` says so) — caught in review.
  *    - tag-shaped but the provider isn't pinned         -> "…unknown provider "<id>""
- *  Returns an error message, or undefined when the tag is valid. The sentinel (`unstated/unstated`)
- *  is never a user-settable model — rejected the same as any other non-catalog provider. */
+ *  Returns an error message, or undefined when the tag is valid. */
 export function validateModelTag(tag: string): string | undefined {
+  if (tag === UNSTATED_TAG || tag.startsWith(WINTER_TEST_PREFIX)) {
+    return `invalid model "${tag}" — must be a provider-qualified tag "<providerId>/<modelId>"`;
+  }
   let providerId: string;
   try {
     providerId = splitTag(tag).providerId;
