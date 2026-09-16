@@ -88,7 +88,11 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     // packages/runtime/src/provider/keychain-store.ts` in the sibling checkout came back EMPTY
     // (0 lines) — the 0.0.13 release touched only provider-catalog + version stamps; the mirror
     // stands unchanged.
-    expect(pkg.version).toBe("0.0.13");
+    //
+    // 0.0.13 → 0.0.14 (the Codex usage-limit hotfix): `git diff v0.0.13 v0.0.14 --
+    // packages/runtime/src/provider/keychain-store.ts` came back EMPTY (0 lines) — only
+    // provider-runtime/src/errors.ts and version stamps moved; the mirror stands unchanged.
+    expect(pkg.version).toBe("0.0.14");
   });
 
 

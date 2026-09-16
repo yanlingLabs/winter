@@ -173,6 +173,14 @@ export class WinterClient {
   async addDir(sessionId: string, path: string, persist = false): Promise<string[]> {
     return this.validated(SessionAddDirResult, await this.request(METHODS.sessionAddDir, { sessionId, path, persist }), METHODS.sessionAddDir).roots;
   }
+  /** `session.setModel` for ONE session — `model: null` clears the per-session override; `confirmLossy`
+   *  is the one-shot confirmation for a lossy cross-family handoff (never stored). Resolves `{}` when
+   *  applied now, `{ deferred: true }` when a turn is running (applied at its end); a refusal throws
+   *  with `.rpc.data.code` (`handoff_confirmation_required` carries `data.warnings`). */
+  async setModel(sessionId: string, model: string | null, confirmLossy = false): Promise<{ deferred?: boolean }> {
+    const r = await this.request(METHODS.sessionSetModel, { sessionId, model, ...(confirmLossy ? { confirmLossy: true } : {}) });
+    return r && typeof r === "object" ? (r as { deferred?: boolean }) : {};
+  }
   async setCwd(sessionId: string, cwd: string): Promise<string> {
     return this.validated(SessionSetCwdResult, await this.request(METHODS.sessionSetCwd, { sessionId, cwd }), METHODS.sessionSetCwd).cwd;
   }
