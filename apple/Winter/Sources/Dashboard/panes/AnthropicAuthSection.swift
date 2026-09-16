@@ -3,9 +3,14 @@ import SwiftUI
 
 // -----------------------------------------------------------------------------------------------
 // AnthropicAuthSection — Winter Phase 10a Task A1/A2: the Provider pane's Anthropic (Claude) block.
-// Three custom-drawn radio options (docs/brand.md: never native list/radio treatment) — "API key",
-// "Console login", "Claude subscription" (disabled, P9c-1) — plus the Console option's sign-in/out
-// affordances and the login-progress sheet (`AnthropicLoginSheet.swift`).
+//
+// WS-20 review fix (M3): the three-radio "pick a sign-in ARM" UI is RETIRED along with
+// `runtimes.official.auth`/`provider.configure`'s anthropic arm — there is no standing setting
+// left to pick. THE ARM IS THE MODEL now: a session tagged `anthropic/…` uses the API key
+// material, one tagged `console/…` uses the Console profile; both can be configured and present at
+// once (`effective: "both"`). This section is now read-only PRESENCE plus the Console
+// sign-in/sign-out affordance (creating/removing the profile is still a real action, independent
+// of any "which one is active" choice) and the login-progress sheet (`AnthropicLoginSheet.swift`).
 //
 // Modeled on `ProviderPaneModel` immediately above in this directory (same "own view-model, built
 // around the raw client, no closures for the RPCs themselves" posture) with ONE deliberate
@@ -17,22 +22,12 @@ import SwiftUI
 // existing `.task`/wiring needs no changes beyond rendering the new section.
 // -----------------------------------------------------------------------------------------------
 
-/// The three radio rows, in display order. `.subscription` is permanently disabled (P9c-1: "Claude
-/// subscription" login stays off until Anthropic approves it) — it is never the argument to a
-/// `provider.configure` call.
-enum AnthropicAuthOption: CaseIterable, Equatable {
-    case apiKey
-    case console
-    case subscription
-}
-
 /// Pure display helper (mirrors `providerStatusText`'s "own tiny pure function" posture at the top
-/// of `ProviderPane.swift`) — the section's status line, driven by `effective` alone. `apiKey`/
-/// `consoleProfile` carry no independent text of their own: `provider.status.anthropic` keeps
-/// `effective` consistent with them by construction (P10a Interfaces), so this never has a
-/// contradiction to reconcile.
+/// of `ProviderPane.swift`) — the section's status line, driven by `effective` alone (presence,
+/// WS-20 review fix M3).
 func anthropicAuthStatusText(_ status: AnthropicAuthStatus) -> String {
     switch status.effective {
+    case "both": return "API key + Console"
     case "console": return "signed in (Console)"
     case "api-key": return "API key"
     default: return "not configured"
@@ -60,20 +55,6 @@ final class AnthropicAuthSectionModel: ObservableObject {
         self.client = client
     }
 
-    /// The radio that reads as selected right now. `"auto"` (the untouched default, P10a-3) has no
-    /// radio of its own — shown as whichever mode is CURRENTLY effective, per the brief ("'auto' is
-    /// the untouched default shown as whichever is effective"). No status loaded yet defaults to
-    /// `.apiKey` rather than leaving every radio unselected (`refreshStatus()` corrects it as soon
-    /// as it lands, same "assume the common case" posture as `ProviderPaneModel.baseUrl`'s default).
-    var selectedOption: AnthropicAuthOption {
-        guard let status else { return .apiKey }
-        switch status.auth {
-        case "api-key": return .apiKey
-        case "console": return .console
-        default: return status.effective == "console" ? .console : .apiKey
-        }
-    }
-
     var statusText: String {
         guard let status else { return "not configured" }
         return anthropicAuthStatusText(status)
@@ -92,23 +73,6 @@ final class AnthropicAuthSectionModel: ObservableObject {
         }
     }
 
-    /// Tapping a radio row. `.subscription` is disabled in the view (`.disabled(true)`, never
-    /// reachable by a click) — guarded again here defensively, so a future view change that
-    /// disabled it incorrectly would show as "nothing happened" rather than a silent RPC.
-    func select(_ option: AnthropicAuthOption) async {
-        guard option != .subscription else { return }
-        let mode: AnthropicAuthMode = option == .console ? .console : .apiKey
-        selecting = true
-        defer { selecting = false }
-        do {
-            try await client.configureAuth(mode)
-            selectErrorText = nil
-            await refreshStatus()
-        } catch {
-            selectErrorText = "couldn't switch sign-in method — try again"
-        }
-    }
-
     /// "Sign in to Anthropic Console" — opens the progress sheet and starts the login attempt.
     /// Construction + `loginSheet =` happen synchronously (the sheet opens immediately, showing
     /// "Waiting for your browser…") — `start()` itself is fired off as its own task since it awaits
@@ -120,6 +84,8 @@ final class AnthropicAuthSectionModel: ObservableObject {
     }
 
     func signOut() async {
+        selecting = true
+        defer { selecting = false }
         do {
             try await client.logout()
             selectErrorText = nil
@@ -137,20 +103,21 @@ struct AnthropicAuthSection: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Anthropic (Claude)").font(Typography.control(.semibold))
 
-            VStack(alignment: .leading, spacing: 6) {
-                optionRow(.apiKey, title: "API key", caption: nil)
-                optionRow(.console, title: "Console login", caption: nil)
-                optionRow(.subscription, title: "Claude subscription", caption: "Awaiting Anthropic approval")
-            }
+            // WS-20 review fix (M3): no more arm picker — the arm is the model (an `anthropic/…`
+            // tag uses the API key, a `console/…` tag uses the Console profile); either or both can
+            // be configured at once. This section is read-only presence plus the Console sign-in/
+            // sign-out affordance below.
+            Text("The arm is the model: anthropic/… uses the API key, console/… uses the Console profile.")
+                .font(Typography.caption())
+                .foregroundStyle(Theme.textMuted)
 
-            if model.selectedOption == .console {
-                HStack(spacing: 8) {
+            HStack(spacing: 8) {
+                if model.hasConsoleProfile {
+                    Button("Sign out") { Task { await model.signOut() } }
+                        .disabled(model.selecting)
+                } else {
                     Button("Sign in to Anthropic Console") { model.startLogin() }
                         .disabled(model.selecting)
-                    if model.hasConsoleProfile {
-                        Button("Sign out") { Task { await model.signOut() } }
-                            .disabled(model.selecting)
-                    }
                 }
             }
 
@@ -174,36 +141,5 @@ struct AnthropicAuthSection: View {
                 Task { await model.refreshStatus() }
             })
         }
-    }
-
-    private func optionRow(_ option: AnthropicAuthOption, title: String, caption: String?) -> some View {
-        let isSelected = model.selectedOption == option
-        let isDisabled = option == .subscription
-        return Button {
-            Task { await model.select(option) }
-        } label: {
-            HStack(alignment: .top, spacing: 8) {
-                // Custom-drawn radio glyph — docs/brand.md forbids native list/radio treatment.
-                ZStack {
-                    Circle()
-                        .strokeBorder(isSelected && !isDisabled ? Theme.accent : Color.secondary, lineWidth: 1.5)
-                        .frame(width: 14, height: 14)
-                    if isSelected && !isDisabled {
-                        Circle().fill(Theme.accent).frame(width: 7, height: 7)
-                    }
-                }
-                .padding(.top, 2)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(Typography.label())
-                        .foregroundStyle(isDisabled ? Theme.textMuted : .primary)
-                    if let caption {
-                        Text(caption).font(Typography.caption()).foregroundStyle(Theme.textMuted)
-                    }
-                }
-            }
-        }
-        .buttonStyle(.plain)
-        .disabled(isDisabled || model.selecting)
     }
 }

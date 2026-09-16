@@ -32,10 +32,10 @@ final class LiveAnthropicAuthClientTests: XCTestCase {
         XCTAssertEqual(req["method"] as? String, "provider.status")
         XCTAssertEqual((req["params"] as? [String: Any])?.isEmpty, true, "provider.status must send {} — no provider key")
 
-        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"anthropic":{"apiKey":true,"consoleProfile":false,"auth":"api-key","effective":"api-key"}}}"#)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"anthropic":{"apiKey":true,"consoleProfile":false,"effective":"api-key"}}}"#)
         let status = try await statusTask
 
-        XCTAssertEqual(status, AnthropicAuthStatus(apiKey: true, consoleProfile: false, auth: "api-key", effective: "api-key"))
+        XCTAssertEqual(status, AnthropicAuthStatus(apiKey: true, consoleProfile: false, effective: "api-key"))
     }
 
     /// `provider.login`'s `urlHint`, when present, is sanitized (query stripped) and returned.

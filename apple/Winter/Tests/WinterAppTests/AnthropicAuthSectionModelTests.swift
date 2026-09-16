@@ -2,135 +2,103 @@ import XCTest
 import WinterKit
 @testable import Winter
 
-/// Winter Phase 10a Task A1: `AnthropicAuthSectionModel`'s option→setting mapping, the disabled
-/// "Claude subscription" row, and the status-line text across `effective`/`apiKey`/`consoleProfile`
-/// combinations. Drives the model against `FakeAnthropicAuthClient` directly — no
-/// `WinterClient`/transport involved, since this model depends on the `AnthropicAuthClient`
-/// protocol precisely so it can be tested this way (see that file's header comment).
+/// Winter Phase 10a Task A1; WS-20 review fix (M3): `AnthropicAuthSectionModel`'s status-line text
+/// across `effective`/`apiKey`/`consoleProfile` combinations, and the Console sign-in/sign-out
+/// affordance. The arm-picker (`select`/`configureAuth`/`selectedOption`/`AnthropicAuthOption`) is
+/// RETIRED along with `runtimes.official.auth` — there is no standing setting left to pick; a
+/// session's own tag (`anthropic/…` vs `console/…`) decides which credential it uses. Drives the
+/// model against `FakeAnthropicAuthClient` directly — no `WinterClient`/transport involved, since
+/// this model depends on the `AnthropicAuthClient` protocol precisely so it can be tested this way
+/// (see that file's header comment).
 @MainActor
 final class AnthropicAuthSectionModelTests: XCTestCase {
-    private func status(apiKey: Bool = false, consoleProfile: Bool = false, auth: String = "auto", effective: String = "none") -> AnthropicAuthStatus {
-        AnthropicAuthStatus(apiKey: apiKey, consoleProfile: consoleProfile, auth: auth, effective: effective)
+    private func status(apiKey: Bool = false, consoleProfile: Bool = false, effective: String = "none") -> AnthropicAuthStatus {
+        AnthropicAuthStatus(apiKey: apiKey, consoleProfile: consoleProfile, effective: effective)
     }
 
-    // MARK: - option ↔ setting mapping
+    // MARK: - refreshStatus / hasConsoleProfile
 
-    /// Selecting "API key" calls `configureAuth(.apiKey)` — the wire value `provider.configure`
-    /// eventually turns into `runtimes.official.auth = "api-key"` (P10a-3).
-    func testSelectApiKeyCallsConfigureAuthWithApiKeyMode() async {
+    func testRefreshStatusLoadsFromTheClient() async {
         let fake = FakeAnthropicAuthClient()
+        fake.statusResult = .success(status(apiKey: true, effective: "api-key"))
         let model = AnthropicAuthSectionModel(client: fake)
 
-        await model.select(.apiKey)
-
-        XCTAssertEqual(fake.configureAuthCalls, [.apiKey])
-    }
-
-    /// Selecting "Console login" calls `configureAuth(.console)`.
-    func testSelectConsoleCallsConfigureAuthWithConsoleMode() async {
-        let fake = FakeAnthropicAuthClient()
-        let model = AnthropicAuthSectionModel(client: fake)
-
-        await model.select(.console)
-
-        XCTAssertEqual(fake.configureAuthCalls, [.console])
-    }
-
-    /// A successful `select` clears any prior error and refreshes status (one extra `status()`
-    /// call beyond `init`'s zero — this model never auto-fetches on construction, only when asked).
-    func testSelectRefreshesStatusOnSuccess() async {
-        let fake = FakeAnthropicAuthClient()
-        fake.statusResult = .success(status(apiKey: true, auth: "api-key", effective: "api-key"))
-        let model = AnthropicAuthSectionModel(client: fake)
-
-        await model.select(.apiKey)
+        await model.refreshStatus()
 
         XCTAssertEqual(fake.statusCallCount, 1)
-        XCTAssertNil(model.selectErrorText)
+        XCTAssertNil(model.statusErrorText)
         XCTAssertEqual(model.statusText, "API key")
+        XCTAssertFalse(model.hasConsoleProfile)
     }
 
-    /// A thrown `configureAuth` surfaces as `selectErrorText` and never triggers a status refresh.
-    func testSelectErrorSurfacesWithoutRefreshingStatus() async {
+    func testHasConsoleProfileReflectsStatus() async {
         let fake = FakeAnthropicAuthClient()
-        fake.configureAuthResult = .failure(FakeAnthropicAuthClient.SimpleError())
+        fake.statusResult = .success(status(consoleProfile: true, effective: "console"))
         let model = AnthropicAuthSectionModel(client: fake)
 
-        await model.select(.console)
+        await model.refreshStatus()
+
+        XCTAssertTrue(model.hasConsoleProfile)
+    }
+
+    func testARefreshFailureSurfacesAsStatusErrorText() async {
+        let fake = FakeAnthropicAuthClient()
+        fake.statusResult = .failure(FakeAnthropicAuthClient.SimpleError())
+        let model = AnthropicAuthSectionModel(client: fake)
+
+        await model.refreshStatus()
+
+        XCTAssertNotNil(model.statusErrorText)
+    }
+
+    // MARK: - sign out
+
+    /// A successful sign-out clears any prior error and refreshes status.
+    func testSignOutRefreshesStatusOnSuccess() async {
+        let fake = FakeAnthropicAuthClient()
+        fake.statusResult = .success(status(apiKey: true, effective: "api-key"))
+        let model = AnthropicAuthSectionModel(client: fake)
+
+        await model.signOut()
+
+        XCTAssertEqual(fake.logoutCallCount, 1)
+        XCTAssertEqual(fake.statusCallCount, 1)
+        XCTAssertNil(model.selectErrorText)
+    }
+
+    /// A thrown `logout` surfaces as `selectErrorText` and never triggers a status refresh.
+    func testSignOutErrorSurfacesWithoutRefreshingStatus() async {
+        let fake = FakeAnthropicAuthClient()
+        fake.logoutResult = .failure(FakeAnthropicAuthClient.SimpleError())
+        let model = AnthropicAuthSectionModel(client: fake)
+
+        await model.signOut()
 
         XCTAssertNotNil(model.selectErrorText)
-        XCTAssertEqual(fake.statusCallCount, 0, "a failed configure must not trigger a status refresh")
+        XCTAssertEqual(fake.statusCallCount, 0, "a failed sign-out must not trigger a status refresh")
     }
 
-    // MARK: - disabled subscription
-
-    /// "Claude subscription" is disabled (P9c-1) — selecting it must never call `configureAuth`,
-    /// even if the view's own `.disabled(true)` were somehow bypassed.
-    func testSelectSubscriptionNeverCallsConfigureAuth() async {
-        let fake = FakeAnthropicAuthClient()
-        let model = AnthropicAuthSectionModel(client: fake)
-
-        await model.select(.subscription)
-
-        XCTAssertTrue(fake.configureAuthCalls.isEmpty)
-        XCTAssertEqual(fake.statusCallCount, 0)
-    }
-
-    // MARK: - selectedOption reflects the daemon's reported auth/effective
-
-    func testSelectedOptionReflectsExplicitApiKeyAuth() async {
-        let fake = FakeAnthropicAuthClient()
-        fake.statusResult = .success(status(apiKey: true, auth: "api-key", effective: "api-key"))
-        let model = AnthropicAuthSectionModel(client: fake)
-
-        await model.refreshStatus()
-
-        XCTAssertEqual(model.selectedOption, .apiKey)
-    }
-
-    func testSelectedOptionReflectsExplicitConsoleAuth() async {
-        let fake = FakeAnthropicAuthClient()
-        fake.statusResult = .success(status(consoleProfile: true, auth: "console", effective: "console"))
-        let model = AnthropicAuthSectionModel(client: fake)
-
-        await model.refreshStatus()
-
-        XCTAssertEqual(model.selectedOption, .console)
-    }
-
-    /// `"auto"` (the untouched default) has no radio of its own — the brief: "'auto' is the
-    /// untouched default shown as whichever is effective".
-    func testSelectedOptionUnderAutoFollowsEffective() async {
-        let fake = FakeAnthropicAuthClient()
-        fake.statusResult = .success(status(consoleProfile: true, auth: "auto", effective: "console"))
-        let model = AnthropicAuthSectionModel(client: fake)
-
-        await model.refreshStatus()
-
-        XCTAssertEqual(model.selectedOption, .console)
-    }
-
-    // MARK: - status text for the four `effective` × `apiKey`/`consoleProfile` combinations
+    // MARK: - status text for every `effective` value (review fix M3: presence alone, incl. "both")
 
     func testStatusTextWhenEffectiveIsApiKey() {
-        let s = status(apiKey: true, consoleProfile: false, auth: "api-key", effective: "api-key")
+        let s = status(apiKey: true, consoleProfile: false, effective: "api-key")
         XCTAssertEqual(anthropicAuthStatusText(s), "API key")
     }
 
     func testStatusTextWhenEffectiveIsConsole() {
-        let s = status(apiKey: false, consoleProfile: true, auth: "console", effective: "console")
+        let s = status(apiKey: false, consoleProfile: true, effective: "console")
         XCTAssertEqual(anthropicAuthStatusText(s), "signed in (Console)")
     }
 
     func testStatusTextWhenEffectiveIsNone() {
-        let s = status(apiKey: false, consoleProfile: false, auth: "auto", effective: "none")
+        let s = status(apiKey: false, consoleProfile: false, effective: "none")
         XCTAssertEqual(anthropicAuthStatusText(s), "not configured")
     }
 
-    /// Both credentials present at once (a user who's done both flows) — `effective` still decides
-    /// the text alone, never a "both" phrasing.
-    func testStatusTextWhenBothCredentialsExistFollowsEffectiveOnly() {
-        let s = status(apiKey: true, consoleProfile: true, auth: "console", effective: "console")
-        XCTAssertEqual(anthropicAuthStatusText(s), "signed in (Console)")
+    /// Review fix (M3): both credentials present at once — `effective: "both"` is now a real,
+    /// distinct wire value (not a derived/synthesized state), and reads as "API key + Console".
+    func testStatusTextWhenEffectiveIsBoth() {
+        let s = status(apiKey: true, consoleProfile: true, effective: "both")
+        XCTAssertEqual(anthropicAuthStatusText(s), "API key + Console")
     }
 }
