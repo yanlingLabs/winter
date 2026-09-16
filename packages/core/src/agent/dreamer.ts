@@ -3,8 +3,8 @@ import { join } from "node:path";
 import type { Provider, TurnInputItem } from "../providers/types";
 import type { SessionStore } from "../sessions/store";
 import type { Settings } from "../settings";
-import { pinsFor } from "../settings";
-import { splitTag } from "../runtime-sdk/model-tag";
+import { pinsFor, ownProviderFor } from "../settings";
+import { internalModelFor } from "../providers/manager";
 import { applyOps, validateOps, RESERVED_FILES, MAX_FILES } from "./dream-ops";
 
 // WS-20: the model half is no longer a hardcoded constant — see `pinsFor(settings).dream` in
@@ -120,6 +120,15 @@ export class Dreamer {
 
   /** One dream: window → prompt → one terra/medium call → validate → apply → advance. */
   private async runCycle(dispatchId: string, state: DreamState): Promise<void> {
+    // WS-20 (review round 1, GUARD): `pinsFor(settings).dream` can name a DIFFERENT provider than
+    // the one the daemon's single internal Provider instance is actually bound to (a
+    // `settings.pins.dream` override, or a slot whose own default fell back to a sibling provider)
+    // — sending that bare modelId to the wrong backend would be silent. Skip the whole cycle rather
+    // than guess; `internalModelFor` logs the field name (never the tag) so the mismatch is
+    // diagnosable without a raw provider-config dump in the log.
+    const settings = this.deps.settings();
+    const dreamModel = internalModelFor(pinsFor(settings).dream, { providerId: ownProviderFor(settings) }, "pins.dream");
+    if (dreamModel === undefined) return;
     const upTo = this.deps.store.lastSeq(dispatchId);
     const events = this.deps.store.read(dispatchId, state.watermarkSeq);
     const lines: string[] = [];
@@ -148,10 +157,11 @@ export class Dreamer {
     let text = "";
     const run = (async () => {
       // The internal `Provider` abstraction speaks bare model ids in ITS OWN dialect (the same
-      // single backend `agentProvider` was constructed for) — split the pin's tag at this
-      // boundary, same discipline as the runtime-sdk spawn boundary (§0.1).
+      // single backend `agentProvider` was constructed for) — `dreamModel`, computed once above
+      // via `internalModelFor`, is already that bare id, verified to name the SAME provider this
+      // Provider instance is bound to.
       for await (const ev of this.deps.provider.provider.streamTurn({
-        model: splitTag(pinsFor(this.deps.settings()).dream).modelId, reasoningEffort: DREAM_EFFORT, instructions: DREAM_INSTRUCTION, input, tools: [], signal: ac.signal,
+        model: dreamModel, reasoningEffort: DREAM_EFFORT, instructions: DREAM_INSTRUCTION, input, tools: [], signal: ac.signal,
       })) {
         if (ev.type === "text_delta") text += ev.delta;
         else if (ev.type === "error") throw new Error(`provider error: ${ev.message}`);

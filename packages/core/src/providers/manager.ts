@@ -6,7 +6,7 @@ import { loadSettings, providerBaseUrlFor, type Settings } from "../settings";
 import type { Provider } from "./types";
 import { createCodexOauthRuntimeProvider, createOpenAiCompatibleRuntimeProvider } from "./runtime-provider";
 import { QuotaManager, withQuota } from "./quota";
-import { splitTag } from "../runtime-sdk/model-tag";
+import { splitTag, type ModelTag } from "../runtime-sdk/model-tag";
 
 /** LEGACY raw record — migration source only (`auth/credential-material.ts`'s
  *  `readOpenAiApiKey`/`migrateLegacyCredentialMaterial`). Writers use `writeOpenAiApiKey`, which
@@ -138,4 +138,41 @@ export async function createProvider(settings: Settings, secrets: SecretStore, s
   }
   const liveModel = buildLiveModelResolver(settings, settingsPath, providerId);
   return { provider: withQuota(inner, quota), model: splitTag(settings.provider.model).modelId, quota, liveModel };
+}
+
+/**
+ * WS-20 (review round 1, GUARD): the daemon has exactly ONE internal-calls `Provider` instance
+ * (`ActiveProvider`, above) — the dispatch pin, the dreamer, the session cleaner and the ephemeral
+ * research sub-agent all wire THEIR turns through it, never a second one. Each of those callers
+ * resolves its OWN model as a tag (`pinsFor(settings).<slot>`) and then splits it once at the
+ * internal-Provider spawn boundary (`splitTag(pin).modelId`) to get the bare id that instance's
+ * `streamTurn()` expects.
+ *
+ * That split alone is not enough: `pinsFor`'s per-slot default can name a DIFFERENT provider than
+ * the one `settings.provider.model` actually bound the internal instance to (a user override in
+ * `settings.pins.<slot>`, or a slot whose own default fallback rule picked a sibling provider —
+ * `pinsFor`'s own doc comment). Splitting off the bare modelId and sending it to the WRONG
+ * backend is silent: the internal Provider has no way to know the id it was handed came from a
+ * different provider's vocabulary, and depending on the two providers' id conventions it may
+ * simply 400, or — worse — resolve to an unrelated real model on the wrong service.
+ *
+ * `internalModelFor` is the one gate every caller of the internal Provider must pass through: it
+ * returns the bare modelId ONLY when the pin's own provider matches the internal instance's, and
+ * `undefined` (logging one line naming the pin's FIELD, e.g. `"pins.dream"` — never the tag itself,
+ * which is not a secret either, but the field name is enough to diagnose without repeating the
+ * daemon's provider config into the log on every mismatch) otherwise. Every caller skips its run
+ * on `undefined` rather than guessing — the same "typed refusal over a silent wrong answer"
+ * discipline as every RPC-facing door in this arc, applied to the daemon's own internal caller.
+ *
+ * Deliberately NOT a redesign of the internal-Provider abstraction (still exactly one instance,
+ * still bare-id-only at its own boundary) — that is a follow-up if the mismatch turns out to
+ * matter in practice; this is the guard that makes a mismatch loud instead of silent today.
+ */
+export function internalModelFor(pin: ModelTag, provider: { providerId: string }, fieldName: string): string | undefined {
+  const { providerId, modelId } = splitTag(pin);
+  if (providerId !== provider.providerId) {
+    console.error(`${fieldName}: names provider "${providerId}", but the daemon's internal provider is "${provider.providerId}" — skipping this run rather than sending the model to the wrong backend`);
+    return undefined;
+  }
+  return modelId;
 }
