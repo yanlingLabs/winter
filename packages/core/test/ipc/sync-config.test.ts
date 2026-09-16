@@ -776,10 +776,20 @@ describe("sync.config `provider` through a real startDaemon (whole-branch review
     const home = mkdtempSync(join(tmpdir(), "winter-sync-provider-ids-"));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     await secrets.set("openai-api-key", "sk-test-not-a-real-key");
-    for (const model of ["codex-oauth/gpt-5.6-sol", "openai/gpt-5.6-sol", "deepseek/deepseek-reasoner"]) {
+    // WS-20 (review round 2, M6): `settings.provider.model` is now schema-gated to codex-oauth/
+    // openai only (the daemon's internal Provider can only ever serve one of those) — the real
+    // door, `Settings.parse`, can no longer construct a `deepseek/*` `provider.model` at all. This
+    // test is about `createProvider`'s OWN internal branch, a defensive check independent of that
+    // gate, so the deepseek case is built directly (`as unknown as Settings`, bypassing the schema)
+    // rather than dropped — a future per-provider internal Provider (M6's own follow-up) would
+    // widen `INTERNAL_PROVIDER_IDS` without this branch itself changing shape.
+    for (const model of ["codex-oauth/gpt-5.6-sol", "openai/gpt-5.6-sol"]) {
       const active = await createProvider(Settings.parse({ schemaVersion: 3, provider: { model } }), secrets);
       expect(active.provider.id).toBe(model.startsWith("codex-oauth/") ? "codex-oauth" : "openai-compatible");
     }
+    const deepseekSettings = { schemaVersion: 3, provider: { model: "deepseek/deepseek-reasoner" } } as unknown as Settings;
+    const deepseekActive = await createProvider(deepseekSettings, secrets);
+    expect(deepseekActive.provider.id).toBe("openai-compatible");
   });
 });
 

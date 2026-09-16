@@ -74,7 +74,7 @@ import { recordNamesSelection } from "../runtime-sdk/handoff";
 import type { RuntimeSessionRecords } from "../runtime-state/records";
 import { loadCatalog, CLAUDE_FAMILY_ID } from "@yanlinglabs/winter-provider-catalog";
 import { rowForTag } from "../runtime-sdk/provider-selection";
-import { parseModelTag, modelTagIsKnown, splitTag, UNSTATED_TAG, type ModelTag } from "../runtime-sdk/model-tag";
+import { parseModelTag, canonicalizeModelTag, splitTag, UNSTATED_TAG, type ModelTag } from "../runtime-sdk/model-tag";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import type { ApprovalBroker } from "../agent/approvals";
 import type { PermissionRules } from "../agent/permission-rules";
@@ -722,11 +722,17 @@ function isClaudeCatalogModel(model: string): boolean {
  *  WS-20 (review round 2, M4): `parseModelTag`/`isModelTag` alone only check TAG SHAPE plus "the
  *  PROVIDER is pinned in the catalog" — `codex-oauth/gpt-5.4` (any typo) passed that gate, which
  *  had regressed this door from a real MEMBERSHIP check to a provider-existence one. Now also runs
- *  `modelTagIsKnown` (model-tag.ts): a tag whose provider has real catalog rows must name ONE OF
- *  them, unless that provider has a BYO `providers.<id>.baseUrl` configured (an intentionally
+ *  `canonicalizeModelTag` (model-tag.ts): a tag whose provider has real catalog rows must name ONE
+ *  OF them, unless that provider has a BYO `providers.<id>.baseUrl` configured (an intentionally
  *  unlisted endpoint model keeps its pass-through). Still a MEMBERSHIP gate, not an availability
  *  one: it does not check credentials or leg eligibility (the runtime decision still owns that,
- *  and still refuses typed when the tag is real but nothing can actually serve it). */
+ *  and still refuses typed when the tag is real but nothing can actually serve it).
+ *
+ *  WS-20 (review round 2, M4 fix — R1): `canonicalizeModelTag` ALSO resolves a
+ *  `<providerId>/<facingName>` request (`anthropic/sonnet`) to its real catalog row key
+ *  (`anthropic/claude-sonnet-5`) — a legitimate request (spec §1), never a typo, since `providerId`
+ *  is already the chosen provider. The RESOLVED (canonical) tag is what this function returns and
+ *  every caller stores/forwards; the facing form itself is never persisted. */
 /**
  * M1 (whole-branch review, fix round 2): a CATEGORY for the daemon log, never `detail`'s raw text
  * (this file's "names only" logging discipline). Router 0.0.6's `revert-pending` `detail` says
@@ -777,11 +783,17 @@ function resolveModelSelection(model: string, settings?: Settings): string {
   if (tag === UNSTATED_TAG) {
     throw new RpcFailure(ERR.INVALID_PARAMS, `model must be a provider-qualified tag '<providerId>/<modelId>' (got '${model}')`);
   }
-  if (!modelTagIsKnown(tag, settings)) {
+  // WS-20 (review round 2, M4 fix — R1): `<providerId>/<facingName>` is a legitimate request (spec
+  // §1: "a facing name resolves to a tag only within a chosen provider") — `anthropic/sonnet` names
+  // the SLOT `sonnet` within the ALREADY-CHOSEN provider `anthropic`, not a typo. `canonicalizeModelTag`
+  // resolves it to the real catalog row key (`anthropic/claude-sonnet-5`); THAT is what gets stored/
+  // forwarded — never the facing form, so a later reader never has to re-resolve it.
+  const canonical = canonicalizeModelTag(tag, settings);
+  if (canonical === undefined) {
     // `splitTag` cannot throw here — `parseModelTag` above already proved the shape.
     throw new RpcFailure(ERR.INVALID_PARAMS, `unknown model '${tag}' for provider ${splitTag(tag).providerId}`);
   }
-  return tag;
+  return canonical;
 }
 
 /** WS-20: `dispatchPinMessage` needs the LIVE settings (it names the live pinned tag), but most
