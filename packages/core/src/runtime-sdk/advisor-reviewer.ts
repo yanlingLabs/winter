@@ -58,17 +58,14 @@ export function familyOfModel(model: string): AdvisorFamily {
   return "other";
 }
 
-/** D30's own per-family default: family slot 1's canonical model id ("astra" for gpt, "fable" for
- *  claude — WS-13c §9's own ranked slot 1). `undefined` only if the pinned catalog ever drops the
- *  family entirely (never true for the two families 8d cares about; a defensive `undefined` rather
- *  than a throw so a catalog hiccup degrades to "no reviewer", never a daemon crash). */
-function firstSlotCanonicalIdFor(familyId: "gpt" | "claude"): string | undefined {
-  return loadCatalog().families.find((f) => f.id === familyId)?.slots[0]?.canonicalModelId;
-}
-
-/** WS-20: the SAME slot-1 lookup as `firstSlotCanonicalIdFor`, but the slot NAME ("astra"/"fable")
- *  rather than its canonical model id — `facingNameToTag` (model-tag.ts) needs the name to find
- *  which TAG a given provider serves for that slot. */
+/** D30's own per-family default: family slot 1's NAME ("astra" for gpt, "fable" for claude —
+ *  WS-13c §9's own ranked slot 1). `undefined` only if the pinned catalog ever drops the family
+ *  entirely (never true for the two families 8d cares about; a defensive `undefined` rather than a
+ *  throw so a catalog hiccup degrades to "no reviewer", never a daemon crash). WS-20: the NAME,
+ *  not a canonical model id — `facingNameToTag` (model-tag.ts) needs the name to find which TAG a
+ *  given provider serves for that slot; a hand-composed `<provider>/<canonicalId>` string is not
+ *  guaranteed to match a real row (the catalog's normaliser can rewrite an id between a row's
+ *  `key` and its `canonicalModelId`). */
 function firstSlotNameOfFamily(familyId: "gpt" | "claude"): string | undefined {
   return loadCatalog().families.find((f) => f.id === familyId)?.slots[0]?.name;
 }
@@ -95,8 +92,11 @@ function firstSlotNameOfFamily(familyId: "gpt" | "claude"): string | undefined {
 // (it mirrors every anthropic Claude row, L1's own Task), and falls through to no override
 // otherwise — never a wrong-provider tag reaching a reviewer call.
 export function officialLegDefaultSessionModel(): ModelTag | undefined {
-  const canonicalId = firstSlotCanonicalIdFor("claude");
-  return canonicalId === undefined ? undefined : (`anthropic/${canonicalId}` as ModelTag);
+  // `facingNameToTag`, not a hand-composed `anthropic/${canonicalId}` string: the catalog's
+  // normaliser can rewrite an id between its row `key` and its `canonicalModelId` (e.g. the fable
+  // row's key is `anthropic/claude-fable-5-1` but its canonicalModelId is `claude-fable-5.1`), so
+  // only a real catalog lookup is guaranteed to produce a tag that matches an actual row.
+  return facingNameToTag("anthropic", firstSlotNameOfFamily("claude") ?? "");
 }
 
 /**
