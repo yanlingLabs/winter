@@ -49,7 +49,9 @@ import { resolve as resolveForGrant, sep as pathSep } from "node:path";
 import { OutputStyleStore } from "./agent/output-styles";
 import { Dreamer } from "./agent/dreamer";
 import { SessionCleaner } from "./sessions/cleaner";
-import { deriveModelAliases } from "./agent/model-aliases";
+import { pickerModels } from "./ipc/picker-models";
+import { credentialPresenceFrom } from "./runtime-sdk/keychain";
+import { splitTag, type ModelTag } from "./runtime-sdk/model-tag";
 import { SessionDirectories } from "./agent/dirs";
 import { TrustStore } from "./agent/trust";
 import { ContextAssembler } from "./agent/context";
@@ -965,12 +967,20 @@ export async function startDaemon(opts: {
   // invoked at tool-call time long after boot (the `engine?.turnStartedAt` precedent this file
   // already relies on).
   //
+  // WS-20: boot-time credential presence for the spawn tool's STATIC model enum (`spawnModelIds`
+  // below) — a snapshot, like the enum itself; `sync.config`'s OWN `models` field re-probes hot,
+  // per call, through the exact same `credentialPresenceFrom`/`pickerModels` pair.
+  const spawnModelsCredentials = await credentialPresenceFrom(secrets);
   // Steering only, exactly as on the registry door (`registerSessionSpawnTool` below gets the same
-  // list). A daemon with no agent provider has no model catalogue and the field is a free string.
-  const spawnModelIds = agentProvider ? agentProvider.provider.models().map((m) => m.id) : [];
+  // list). WS-20: `pickerModels()` (ipc/picker-models.ts) — every credentialed provider's own tags,
+  // catalog order — replaces `agentProvider.provider.models()` (the boot-bound internal provider's
+  // own small bare-id list) and `deriveModelAliases` (a bare-id short-name hack this catalog-driven
+  // list has no more use for: `facingName` on each picker row already carries the curated slot
+  // name). A daemon with no credentials at all gets an empty list, the honest answer.
+  const spawnModelIds = pickerModels({ credentials: spawnModelsCredentials, home: winterHome }).map((m) => m.id);
   const capabilityDeps: CapabilityDeps = {
     sessions: {
-      models: [...spawnModelIds, ...deriveModelAliases(spawnModelIds)],
+      models: spawnModelIds,
       // THE SAME instances the registry door gets (`registerListSessionsTools` below): a
       // management surface with its own hub/store would read every attached session as idle.
       sessions: {
@@ -1238,7 +1248,12 @@ export async function startDaemon(opts: {
           stallTimeoutMs: () => settings?.subagents?.stallTimeoutMs,
           store: runtime.children,
           profiles: runtime.profiles,
-          providerId: () => settings?.provider?.type ?? "unstated",
+          // WS-20: the provider is the tag's own prefix now — `settings.provider.type` is gone.
+          providerId: () => {
+            const model = settings?.provider?.model;
+            if (model === undefined) return "unstated";
+            try { return splitTag(model).providerId; } catch { return "unstated"; }
+          },
           // The owning session's live facet — Task 16 attaches Winter sessions, and until then a
           // stop with no local `AbortController` is recorded and nothing is asked of the child.
           facetFor: (sessionId) => {
@@ -1997,7 +2012,10 @@ export async function startDaemon(opts: {
   // its own.
   const hardware = new HardwareBroker({ audit, pushToProvider: (event) => providerLink.push(event) });
 
-  const providerInfo = agentProvider ? { id: agentProvider.provider.id, model: agentProvider.model } : null;
+  // WS-20: `model` is the TAG (`settings.provider.model`, already provider-qualified) — never
+  // `agentProvider.model`, which is the BARE modelId half split at the internal-Provider boundary
+  // (providers/manager.ts).
+  const providerInfo = agentProvider && settings ? { id: agentProvider.provider.id, model: settings.provider.model } : null;
 
   // Chat Slice D task 3 (`sync.config`): the phone's "default model" bootstrap value, re-resolved
   // HOT at every call — mirrors engine.ts's own boot idiom EXACTLY
@@ -2022,18 +2040,21 @@ export async function startDaemon(opts: {
   const liveSelection = agentProvider
     ? () => agentProvider!.live?.() ?? { model: agentProvider!.model }
     : undefined;
-  const liveModel = liveSelection ? () => liveSelection().model : undefined;
-  const liveEffort = liveSelection ? () => liveSelection().reasoningEffort ?? "" : undefined;
-  // Whole-branch review C1 — WHICH provider the two lines above (and the catalogue the server reads
-  // off `engine`) belong to. Read off `agentProvider.provider` and NOT off `liveSelection`: the
-  // provider TYPE is boot-bound (`buildLiveModelResolver` closes over the boot `providerType` and
-  // deliberately ignores a live-read one, because changing `provider.type` needs a restart), so
-  // routing it through the hot resolver would advertise a hotness that does not exist. This is the
-  // SAME instance `providerInfo` above and `engine.knownModels()` (via `cfg.provider.provider`)
-  // read, so the identity and the catalogue cannot drift apart; `Provider.id` is `codex-oauth` /
-  // `openai-compatible`, `ProviderSettings.type`'s own vocabulary. `undefined` on a no-provider
-  // daemon — ipc/sync.ts degrades that to `"none"`, never to `""`.
+  // Whole-branch review C1 — WHICH provider `liveModel` below belongs to. Read off
+  // `agentProvider.provider` and NOT off `liveSelection`: the provider IDENTITY is boot-bound
+  // (`buildLiveModelResolver` closes over the boot providerId and deliberately ignores a
+  // live-read one, because changing which provider is active needs a restart), so routing it
+  // through the hot resolver would advertise a hotness that does not exist. `undefined` on a
+  // no-provider daemon — ipc/sync.ts degrades that to `"none"`, never to `""`.
   const liveProvider = agentProvider ? () => agentProvider!.provider.id : undefined;
+  // WS-20: `liveModel()` is a TAG — composed from the boot-bound `liveProvider` (never re-derived
+  // live) plus the hot `liveSelection().model` (the bare modelId half, re-read every call). This
+  // is the ONE place the daemon recomposes a tag from the internal-Provider abstraction's own
+  // bare-id world, mirroring the runtime-sdk spawn boundary's own split in the other direction.
+  const liveModel = liveSelection && liveProvider
+    ? () => `${liveProvider!()}/${liveSelection!().model}` as ModelTag
+    : undefined;
+  const liveEffort = liveSelection ? () => liveSelection().reasoningEffort ?? "" : undefined;
 
   const server: IpcServer = startIpcServer({
     socketPath: dirs.socketPath,

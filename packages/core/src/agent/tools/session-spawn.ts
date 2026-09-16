@@ -11,8 +11,10 @@ import type { ToolDefinition, ToolRegistry } from "./registry";
  *  {output, isError:false} — same shape spawn_agent's own placeholder uses).
  *
  *  The schema enum on `model` is steering only (defense-in-depth, same two-layer shape as
- *  spawn.ts's own `model` field, see its doc comment) — the bridge's own models() check (with
- *  resolveModelAlias) is the authoritative runtime gate. */
+ *  spawn.ts's own `model` field, see its doc comment) — the bridge's own models() check is the
+ *  authoritative runtime gate. WS-20: the enum is now the picker's own tag list
+ *  (`pickerModels()`, ipc/picker-models.ts) — a provider-qualified tag like
+ *  `codex-oauth/gpt-5.6-terra`, never a bare id or a short alias. */
 export function registerSessionSpawnTool(r: ToolRegistry, opts: { models?: string[] } = {}): void {
   for (const def of sessionSpawnToolDefs(opts)) r.register(def);
 }
@@ -25,8 +27,8 @@ export function sessionSpawnToolDefs(opts: { models?: string[] } = {}): ToolDefi
   const hasModels = !!opts.models && opts.models.length > 0;
   const modelField = hasModels ? z.enum(opts.models as [string, ...string[]]).optional() : z.string().optional();
   const modelClause = hasModels
-    ? `model: optional override, one of: ${opts.models!.join(", ")} (omit to inherit the default model)`
-    : "model: optional model override";
+    ? `model: optional override, a provider-qualified model tag, e.g. codex-oauth/gpt-5.6-terra — one of: ${opts.models!.join(", ")} (omit to inherit the default model)`
+    : "model: optional override, a provider-qualified model tag, e.g. codex-oauth/gpt-5.6-terra";
   return [{
     name: "session_spawn",
     // R-T2: dispatch's own orchestration verb — was DISPATCH_ALLOW_TOOLS's literal membership,

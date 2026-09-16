@@ -27,10 +27,11 @@ import { sessionSpawnToolDefs } from "../agent/tools/session-spawn";
 import { capabilityServer, type CapabilitySession } from "./server";
 
 export interface SessionsCapabilityDeps {
-  /** The `session_spawn` schema's `model` enum — the SAME list `registerSessionSpawnTool` gets in
-   *  `daemon.ts` (known model ids + their unambiguous short aliases). Steering only, exactly as it
-   *  is on the registry door: the bridge's own `models()` check is the authoritative gate. A
-   *  daemon with no agent provider has no model list, and the field falls back to a free string. */
+  /** The `session_spawn` schema's `model` enum — WS-20: every credentialed provider's own tag
+   *  (`pickerModels()`, ipc/picker-models.ts — the SAME list `daemon.ts` builds for
+   *  `registerSessionSpawnTool`), catalog order. Steering only, exactly as it is on the registry
+   *  door: the bridge's own `models()` check is the authoritative gate. A daemon with no
+   *  credentials at all has no model list, and the field falls back to a free string. */
   models?: string[];
   /** `list_sessions`/`manage_session`'s deps — the SAME `store`/`derive`/`interrupt`/`emit`
    *  closures `daemon.ts` hands `registerListSessionsTools`. Handing this server its own store or
