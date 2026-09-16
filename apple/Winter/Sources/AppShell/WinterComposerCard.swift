@@ -150,8 +150,10 @@ struct ComposerModelControl {
     /// .readAdvisorModelFromSettings()` — a local file read, not an RPC). `nil` = unset
     /// ("Automatic"). Defaulted so every pre-8d construction site keeps compiling unchanged.
     var advisorModel: String? = nil
-    /// Writes the setting directly (`AppModel.writeAdvisorModelToSettings`) — `nil` clears it.
-    /// Defaulted to a no-op for the same reason `advisorModel` above is defaulted.
+    /// WS-20: writes through the daemon's `settings.setAdvisorModel` RPC
+    /// (`FieldStateAdapter.applyAdvisorModelSelection` → its own `onSetAdvisorModel`,
+    /// `AppModel.setAdvisorModel`) — `nil` clears it. Defaulted to a no-op for the same reason
+    /// `advisorModel` above is defaulted.
     var onSetAdvisorModel: (String?) -> Void = { _ in }
 }
 
@@ -166,6 +168,11 @@ struct ComposerModelRow: Equatable {
     let effort: String?
     /// The model slugs on offer — the catalogue's, verbatim.
     let options: [String]
+    /// WS-20: the synced catalogue itself — needed alongside `options` so `chipTitle`/`help` can
+    /// look up a tag's facing-name label (`modelDisplayLabel`) instead of showing the raw
+    /// `<providerId>/<modelId>` tag, and so the popover's `ModelMenuContent` can do the same for
+    /// its rows without re-deriving the catalogue from `options` alone.
+    let catalogue: SyncConfigSnapshot
     /// The WIRE effort levels this model accepts. Model-scoped, never mode-scoped.
     let wire: [String]
     /// The WINTER-LEVEL tiers this mode may select — `["ultra"]` on code, EMPTY everywhere else.
@@ -188,9 +195,9 @@ struct ComposerModelRow: Equatable {
     /// when it is set keeps the common case short while making a chosen effort visible somewhere on
     /// the page (before this task it was visible nowhere on the new-chat page at all).
     var chipTitle: String {
-        let model = model ?? newChatModelPlaceholder
-        guard let effort else { return model }
-        return "\(model) · \(effort)"
+        let label = model.map { modelDisplayLabel($0, catalogue: catalogue) } ?? newChatModelPlaceholder
+        guard let effort else { return label }
+        return "\(label) · \(effort)"
     }
 
     /// The runtime badge text (`runtimeBadgeLabel`, `ShellSidebar.swift`'s pure mapping) — `nil`
@@ -202,7 +209,7 @@ struct ComposerModelRow: Equatable {
     /// "Default" readings — the tooltip is where "inherited from the daemon's default" can be said
     /// in full without crowding the row.
     var help: String {
-        "Model: \(modelDisplayLabel(model)) · Reasoning effort: \(effortDisplayLabel(effort))"
+        "Model: \(modelDisplayLabel(model, catalogue: catalogue)) · Reasoning effort: \(effortDisplayLabel(effort))"
     }
 }
 
@@ -261,6 +268,7 @@ struct ComposerModelChip: View {
             VStack(alignment: .leading, spacing: 2) {
                 ModelMenuContent(options: row.options, current: row.model,
                                  isDisabled: row.modelChangeInFlight,
+                                 catalogue: row.catalogue,
                                  onSelect: { onSetModel($0); showingMenu = false })
                 Divider().opacity(0.5).padding(.vertical, 6)
                 EffortMenuContent(wire: row.wire, tiers: row.tiers, current: row.effort,
@@ -273,6 +281,7 @@ struct ComposerModelChip: View {
                 // live-session controls above it.
                 Divider().opacity(0.5).padding(.vertical, 6)
                 AdvisorModelMenuContent(options: row.options, current: row.advisorModel,
+                                        catalogue: row.catalogue,
                                         onSelect: { onSetAdvisorModel($0) })
             }
             .padding(12)
@@ -292,6 +301,10 @@ struct ComposerModelChip: View {
 struct AdvisorModelMenuContent: View {
     let options: [String]
     let current: String?
+    /// WS-20 (review fix): threaded through exactly like `ModelMenuContent.catalogue` — the row
+    /// label must never be the raw tag. Defaulted to `.empty` for the same reason that one is: an
+    /// empty catalogue degrades every row's label to the bare modelId, never a crash.
+    var catalogue: SyncConfigSnapshot = .empty
     let onSelect: (String?) -> Void
 
     var body: some View {
@@ -300,12 +313,12 @@ struct AdvisorModelMenuContent: View {
                 .font(Typography.caption(.semibold))
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 4)
-            AdvisorModelPickerRow(model: nil, current: current, onSelect: onSelect)
+            AdvisorModelPickerRow(model: nil, current: current, catalogue: catalogue, onSelect: onSelect)
             ForEach(options, id: \.self) { model in
-                AdvisorModelPickerRow(model: model, current: current, onSelect: onSelect)
+                AdvisorModelPickerRow(model: model, current: current, catalogue: catalogue, onSelect: onSelect)
             }
             if let current, !options.contains(current) {
-                AdvisorModelPickerRow(model: current, current: current, onSelect: onSelect)
+                AdvisorModelPickerRow(model: current, current: current, catalogue: catalogue, onSelect: onSelect)
             }
         }
     }
@@ -316,6 +329,8 @@ struct AdvisorModelMenuContent: View {
 struct AdvisorModelPickerRow: View {
     let model: String?
     let current: String?
+    /// WS-20 (review fix): see `AdvisorModelMenuContent.catalogue`'s own doc.
+    var catalogue: SyncConfigSnapshot = .empty
     let onSelect: (String?) -> Void
 
     var body: some View {
@@ -323,7 +338,12 @@ struct AdvisorModelPickerRow: View {
             onSelect(model)
         } label: {
             HStack {
-                Text(model ?? "Automatic")
+                // WS-20 (review fix): was `Text(model ?? "Automatic")` — the raw tag as the
+                // primary label. `nil` still reads "Automatic" (never `modelDisplayLabel`'s own
+                // "Default" — this picks the D30 reviewer model, a different unset-meaning, see
+                // this type's own doc above); a set model now goes through the SAME
+                // catalogue-aware label `ModelMenuContent`'s own rows use.
+                Text(model.map { modelDisplayLabel($0, catalogue: catalogue) } ?? "Automatic")
                 Spacer()
                 if selectionIsCurrent(model, current: current) {
                     Image(systemName: "checkmark")
@@ -473,6 +493,7 @@ struct WinterComposerCard: View {
         return ComposerModelRow(model: model.model,
                                 effort: model.effort,
                                 options: modelPickerOptions(model.catalogue),
+                                catalogue: model.catalogue,
                                 wire: efforts.wire,
                                 tiers: efforts.tiers,
                                 modelChangeInFlight: model.modelChangeInFlight,

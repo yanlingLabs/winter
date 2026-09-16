@@ -29,7 +29,11 @@ const wait = (ms = 25) => new Promise((r) => setTimeout(r, ms));
 
 afterEach(cleanup);
 
-function fakeClient() {
+// WS-20: `opts.request` lets a test answer a specific RPC (e.g. `sync.config`, the live catalogue
+// `/model`'s show form now reads over `ctx.client.request` — see commands.test.ts's fake client,
+// which follows the same shape) while every other method keeps the generic "record + return {}"
+// behavior. Default (no override) is byte-identical to the old always-`{}` `rec("request")`.
+function fakeClient(opts: { request?: (method: string, params?: unknown) => unknown } = {}) {
   const calls: { method: string; args: unknown[] }[] = [];
   const rec = (method: string) => (...args: unknown[]) => {
     calls.push({ method, args });
@@ -43,7 +47,12 @@ function fakeClient() {
     setPolicy: rec("setPolicy"),
     askUserRespond: rec("askUserRespond"),
     planRespond: rec("planRespond"),
-    request: rec("request"),
+    request: opts.request
+      ? (...args: unknown[]) => {
+          calls.push({ method: "request", args });
+          return Promise.resolve(opts.request!(args[0] as string, args[1]));
+        }
+      : rec("request"),
     // child-transcript-view T3: typed results (AppClient reads `delivered`/`status` off these);
     // per-test overrides spread over this base for the resumed/rejected variants.
     sendToThread: (...args: unknown[]) => {
@@ -140,6 +149,20 @@ describe("App (fullscreen shell)", () => {
     expect(frame).toContain("Winter");
     expect(frame).toContain("v0.0.1");
     expect(frame).toContain("gpt-5-codex · /work/proj");
+  });
+
+  // Review fix (WS-20): the (d) pin above uses a bare "gpt-5-codex" — no "/", so `modelIdPortion`
+  // is a no-op and it stayed green untouched. This exercises the real shape the banner now
+  // receives: a provider-qualified tag, which must show only its modelId half.
+  test("(d2) WS-20: a provider-qualified tag in the welcome banner shows its modelId half only", async () => {
+    const bridge = makeEventBridge();
+    const { lastFrame } = render(
+      <App client={fakeClient()} bridge={bridge} sessionId="s" cwd="/work/proj" initialPolicy="ask" version="0.0.1" model="codex-oauth/gpt-5.6-terra" />,
+    );
+    await wait();
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("gpt-5.6-terra · /work/proj");
+    expect(frame).not.toContain("codex-oauth");
   });
 
   test("(e) empty session: frame is exactly rows-1 lines, welcome at the top, composer + footer pinned at the bottom", async () => {
@@ -1628,11 +1651,22 @@ describe("bottomBarLayout — B2: pickerRows are counted (essential, like chrome
   });
 });
 
+// WS-20: the picker's catalogue now comes from `sync.config` (`ctx.client.request`), replacing
+// the retired static CODEX_MODELS enumeration — `fakeClient({ request: … })` answers it.
+const codexOauthCatalogue = () => ({
+  models: [
+    { id: "codex-oauth/gpt-5.6-sol", providerId: "codex-oauth", displayName: "GPT-5.6 Sol", facingName: "sol", efforts: ["low"] },
+    { id: "codex-oauth/gpt-5.6-terra", providerId: "codex-oauth", displayName: "GPT-5.6 Terra", facingName: "terra", efforts: ["low"] },
+    { id: "codex-oauth/gpt-5.6-luna", providerId: "codex-oauth", displayName: "GPT-5.6 Luna", facingName: "luna", efforts: ["low"] },
+  ],
+});
+const catalogueClient = () => fakeClient({ request: (method) => (method === METHODS.syncConfig ? codexOauthCatalogue() : {}) });
+
 describe("App — B2 the /model bottom picker end-to-end", () => {
   // Same temp-WINTER_HOME discipline as commands.test.ts's /model suite — never ~/.winter.
   const withTempHome = async (fn: (home: string) => Promise<void>) => {
     const home = mkdtempSync(join(tmpdir(), "winter-tui-b2-picker-"));
-    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } }));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "codex-oauth/gpt-5.6-sol" } }));
     const prevHome = process.env.WINTER_HOME;
     process.env.WINTER_HOME = home;
     try {
@@ -1647,7 +1681,7 @@ describe("App — B2 the /model bottom picker end-to-end", () => {
   test("(p1) `/model` opens the picker in the BOTTOM BAR — the transcript never gets the model dump", async () => {
     await withTempHome(async () => {
       const bridge = makeEventBridge();
-      const client = fakeClient();
+      const client = catalogueClient();
       const { stdin, lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
       await wait();
       stdin.write("/model");
@@ -1656,17 +1690,19 @@ describe("App — B2 the /model bottom picker end-to-end", () => {
       await wait();
       const frame = lastFrame() ?? "";
       expect(frame).toContain("esc cancel"); // the picker's title row (its key grammar)
-      expect(frame).toContain("gpt-5.6-terra"); // catalogue rows are visible to pick
-      expect(frame).toContain("* gpt-5.6-sol"); // current marked
+      expect(frame).toContain("terra"); // catalogue rows are visible to pick (facing-name label)
+      expect(frame).toContain("* sol"); // current marked
       expect(frame).not.toContain("available (codex-oauth):"); // THE BUG: the old transcript dump
-      expect(client.calls).toEqual([]); // /model never touches the client
+      // WS-20: the show form DOES now touch the client — it reads the live catalogue over
+      // sync.config; the pick itself (below) stays a local settings write with no further call.
+      expect(client.calls).toEqual([{ method: "request", args: [METHODS.syncConfig, {}] }]);
     });
   });
 
   test("(p2) ↓ + Enter applies the selection: settings written, footer flips, ONE confirmation note, picker closed", async () => {
     await withTempHome(async (home) => {
       const bridge = makeEventBridge();
-      const client = fakeClient();
+      const client = catalogueClient();
       const { stdin, lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
       await wait();
       stdin.write("/model");
@@ -1679,17 +1715,17 @@ describe("App — B2 the /model bottom picker end-to-end", () => {
       await wait();
       const frame = lastFrame() ?? "";
       expect(frame).not.toContain("esc cancel"); // picker closed
-      expect(frame).toContain("updated (model gpt-5.6-terra)"); // the confirmation note (transcript, AFTER selection)
-      expect(frame).toContain("gpt-5.6-terra"); // the footer chip flipped (same frame)
+      expect(frame).toContain("updated (model codex-oauth/gpt-5.6-terra)"); // the confirmation note (transcript, AFTER selection)
+      expect(frame).toContain("terra"); // the footer chip flipped (same frame)
       const settings = JSON.parse(readFileSync(join(home, "settings.json"), "utf8")) as { provider: { model: string } };
-      expect(settings.provider.model).toBe("gpt-5.6-terra"); // the write really landed on disk
+      expect(settings.provider.model).toBe("codex-oauth/gpt-5.6-terra"); // the write really landed on disk
     });
   });
 
   test("(p3) Esc dismisses: no write, no note, footer keeps the mount model", async () => {
     await withTempHome(async (home) => {
       const bridge = makeEventBridge();
-      const client = fakeClient();
+      const client = catalogueClient();
       const { stdin, lastFrame } = render(<App client={client} bridge={bridge} {...baseProps} />);
       await wait();
       stdin.write("/model");
@@ -1704,7 +1740,7 @@ describe("App — B2 the /model bottom picker end-to-end", () => {
       expect(frame).not.toContain("updated (");
       expect(frame).toContain("gpt-5-codex"); // footer unchanged (the mount model)
       const settings = JSON.parse(readFileSync(join(home, "settings.json"), "utf8")) as { provider: { model: string } };
-      expect(settings.provider.model).toBe("gpt-5.6-sol"); // untouched on disk
+      expect(settings.provider.model).toBe("codex-oauth/gpt-5.6-sol"); // untouched on disk
     });
   });
 });
@@ -1745,7 +1781,7 @@ describe("App — T5 status chrome end-to-end (live sources, zero daemon changes
   test("(sc3) the footer shows the mount model; /model switches it IMMEDIATELY (live through the CommandCtx callback)", async () => {
     // Same temp-WINTER_HOME discipline as commands.test.ts's /model suite — never ~/.winter.
     const home = mkdtempSync(join(tmpdir(), "winter-tui-t5-model-"));
-    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } }));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "codex-oauth/gpt-5.6-sol" } }));
     const prevHome = process.env.WINTER_HOME;
     process.env.WINTER_HOME = home;
     try {
@@ -1756,15 +1792,17 @@ describe("App — T5 status chrome end-to-end (live sources, zero daemon changes
       // The mount-time model rides the footer's status line from the first frame (baseProps.model).
       expect(lastFrame() ?? "").toContain("gpt-5-codex");
 
-      stdin.write("/model gpt-5.6-luna --effort high");
+      // WS-20: the DIRECT form (a tag argument) never reads sync.config — write-path-only, so the
+      // plain `fakeClient()` (no request override) is correct here.
+      stdin.write("/model codex-oauth/gpt-5.6-luna --effort high");
       await wait();
       stdin.write("\r");
       await wait();
 
       const frame = lastFrame() ?? "";
-      expect(frame).toContain("model gpt-5.6-luna, effort high"); // the committed note (unchanged wording)
+      expect(frame).toContain("model codex-oauth/gpt-5.6-luna, effort high"); // the committed note (unchanged wording)
       expect(frame).toContain("gpt-5.6-luna (high)"); // THE PIN: the footer segment flipped, same frame
-      expect(client.calls).toEqual([]); // /model never touches the client (settings.json route)
+      expect(client.calls).toEqual([]); // /model's direct write form never touches the client
     } finally {
       if (prevHome === undefined) delete process.env.WINTER_HOME;
       else process.env.WINTER_HOME = prevHome;

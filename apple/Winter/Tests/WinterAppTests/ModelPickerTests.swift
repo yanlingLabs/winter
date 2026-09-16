@@ -13,14 +13,70 @@ import WinterKit
 /// `AppModel.setSessionModel`'s real wire shape (mirrors `testAppModelSetSessionPolicyWireShape`),
 /// and the T1-deferred `listSessions()` → `SessionSummary.model` threading this task closes.
 final class ModelPickerTests: XCTestCase {
+    // WS-20: `SyncConfigModelInfo` gained providerId/displayName/facingName; this test file's
+    // pre-existing `srv-a`/`srv-b` fixture ids are not tag-shaped and are kept as-is (the pure
+    // functions under test don't require tag shape) — this helper just supplies the two new
+    // required fields with an inert provider/displayName so every existing call site keeps
+    // compiling without restating them everywhere.
+    private func srv(_ id: String, efforts: [String]) -> SyncConfigModelInfo {
+        SyncConfigModelInfo(id: id, providerId: "srv", displayName: id, facingName: nil, efforts: efforts)
+    }
+
     // MARK: - Pure decisions
 
-    /// "model set → shown; model nil → 'default' shown" (brief's own wording for the picker's
-    /// current-selection label).
+    /// WS-20: `modelDisplayLabel` no longer shows a tag verbatim — "model set → the catalogue's own
+    /// label (facing name, or the bare modelId); model nil → 'Default'".
     func testModelDisplayLabelShowsModelOrDefault() {
-        XCTAssertEqual(modelDisplayLabel("gpt-5.6-sol"), "gpt-5.6-sol", "a set model is shown verbatim")
-        XCTAssertEqual(modelDisplayLabel("gpt-5.6-luna"), "gpt-5.6-luna")
-        XCTAssertEqual(modelDisplayLabel(nil), "Default", "no override shows the labeled default, not a blank/misleading value")
+        let cat = SyncConfigSnapshot(provider: "codex-oauth", defaultModel: "codex-oauth/gpt-5.6-sol", models: [
+            SyncConfigModelInfo(id: "codex-oauth/gpt-5.6-sol", providerId: "codex-oauth", displayName: "GPT-5.6 Sol", facingName: "sol", efforts: ["low"]),
+            SyncConfigModelInfo(id: "codex-oauth/gpt-5.6-luna", providerId: "codex-oauth", displayName: "GPT-5.6 Luna", facingName: nil, efforts: ["low"]),
+        ], defaultEffort: "", clientEfforts: [])
+        XCTAssertEqual(modelDisplayLabel("codex-oauth/gpt-5.6-sol", catalogue: cat), "Sol", "a family-slot row shows its capitalized facing name")
+        XCTAssertEqual(modelDisplayLabel("codex-oauth/gpt-5.6-luna", catalogue: cat), "gpt-5.6-luna", "no facing name -> the bare modelId, never the tag")
+        XCTAssertEqual(modelDisplayLabel(nil, catalogue: cat), "Default", "no override shows the labeled default, not a blank/misleading value")
+    }
+
+    /// WS-20 (Interim presentation, spec §7): `modelPickerSections` groups the catalogue by
+    /// provider (first-appearance order) and labels each row by facing name (capitalized) falling
+    /// back to the bare modelId — the CLI's `renderModelListing` grouping, translated to the Mac
+    /// picker's section shape. A daemon-served catalogue never carries a "cc" row (that id names no
+    /// real provider — see the catalog's own pinned-provider rule), so the picker never renders one
+    /// either; asserted directly rather than left implicit.
+    func testSectionsGroupByProviderAndLabelByFacingName() {
+        let cat = SyncConfigSnapshot(provider: "codex-oauth", defaultModel: "codex-oauth/gpt-5.6-terra", models: [
+            SyncConfigModelInfo(id: "codex-oauth/gpt-5.6-terra", providerId: "codex-oauth", displayName: "GPT-5.6 Terra", facingName: "terra", efforts: ["low"]),
+            SyncConfigModelInfo(id: "openai/gpt-5.6", providerId: "openai", displayName: "GPT-5.6", facingName: nil, efforts: ["low"]),
+        ], defaultEffort: "", clientEfforts: [])
+        let sections = modelPickerSections(cat)
+        XCTAssertEqual(sections.map(\.providerId), ["codex-oauth", "openai"])
+        XCTAssertEqual(sections[0].entries.map(\.label), ["Terra"])
+        XCTAssertEqual(sections[1].entries.map(\.label), ["gpt-5.6"])
+        XCTAssertEqual(modelDisplayLabel("codex-oauth/gpt-5.6-terra", catalogue: cat), "Terra")
+        XCTAssertEqual(modelDisplayLabel("openai/gpt-5.6", catalogue: cat), "gpt-5.6")
+        XCTAssertEqual(modelDisplayLabel(nil, catalogue: cat), "Default")
+        XCTAssertFalse(sections.contains { $0.providerId == "cc" })
+    }
+
+    /// Review fix: `AdvisorModelPickerRow`'s label (`WinterComposerCard.swift`) used to render
+    /// `Text(model ?? "Automatic")` — the raw tag as its primary label, missed when the header/
+    /// composer model menus were switched to catalogue-aware labels. Its body now composes
+    /// `model.map { modelDisplayLabel($0, catalogue: catalogue) } ?? "Automatic"`; SwiftUI bodies
+    /// aren't exercised in this target (this file's own note), so this pins that exact expression
+    /// at value level — the same claim a render test would make, without rendering.
+    func testAdvisorRowLabelUsesTheCatalogueFacingNameNotTheRawTag() {
+        let cat = SyncConfigSnapshot(provider: "codex-oauth", defaultModel: "codex-oauth/gpt-5.6-terra", models: [
+            SyncConfigModelInfo(id: "codex-oauth/gpt-5.6-terra", providerId: "codex-oauth", displayName: "GPT-5.6 Terra", facingName: "terra", efforts: ["low"]),
+        ], defaultEffort: "", clientEfforts: [])
+        XCTAssertEqual(modelDisplayLabel("codex-oauth/gpt-5.6-terra", catalogue: cat), "Terra")
+    }
+
+    /// WS-20: `probation.model` is now a provider-qualified TAG, but a provider rejection quotes
+    /// only the bare model id it was sent — `selectionRevert` must match against THAT, not the tag
+    /// (which never appears in the message at all, so the pre-WS-20 tag-vs-message check would be a
+    /// permanent false negative here).
+    func testSelectionRevertMatchesTheModelIdNotTheTag() {
+        let p = SelectionProbation(sessionId: "s", model: "codex-oauth/gpt-5.6-sol", effort: nil, skipsInFlightTurn: false)
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: "the model 'gpt-5.6-sol' does not exist"), .model)
     }
 
     /// Winter Phase 10b (D1-4, W18-23): the "Switch model?" confirm dialog's body — warnings
@@ -49,8 +105,8 @@ final class ModelPickerTests: XCTestCase {
         let catalogue = SyncConfigSnapshot(
             provider: "codex-oauth",
             defaultModel: "srv-a",
-            models: [SyncConfigModelInfo(id: "srv-a", efforts: ["low", "high"]),
-                     SyncConfigModelInfo(id: "srv-b", efforts: ["high"])],
+            models: [srv("srv-a", efforts: ["low", "high"]),
+                     srv("srv-b", efforts: ["high"])],
             defaultEffort: "high", clientEfforts: ["ultra"])
         XCTAssertEqual(modelPickerOptions(catalogue), ["srv-a", "srv-b"],
                        "the picker repeats what the daemon said — nothing more, in daemon order")
@@ -323,8 +379,8 @@ final class ModelPickerTests: XCTestCase {
         let catalogue = SyncConfigSnapshot(
             provider: "codex-oauth",
             defaultModel: "srv-a",
-            models: [SyncConfigModelInfo(id: "srv-a", efforts: ["none", "low", "high"]),
-                     SyncConfigModelInfo(id: "srv-b", efforts: ["high", "max"])],
+            models: [srv("srv-a", efforts: ["none", "low", "high"]),
+                     srv("srv-b", efforts: ["high", "max"])],
             defaultEffort: "high", clientEfforts: ["ultra"])
 
         let code = effortPickerOptions(catalogue: catalogue, model: "srv-b", mode: "code")
@@ -374,7 +430,7 @@ final class ModelPickerTests: XCTestCase {
         // 2. An UNLISTED model against a real catalogue — a stale pin, or a provider that moved on.
         //    Same reasoning: we were not told this model's levels, so we know nothing to offer.
         let real = SyncConfigSnapshot(provider: "codex-oauth", defaultModel: "srv-a",
-                                      models: [SyncConfigModelInfo(id: "srv-a", efforts: ["low", "high"])],
+                                      models: [srv("srv-a", efforts: ["low", "high"])],
                                       defaultEffort: "high", clientEfforts: ["ultra"])
         let unlisted = effortPickerOptions(catalogue: real, model: "unheard-of", mode: "code")
         XCTAssertEqual(unlisted.wire, [])
@@ -570,15 +626,15 @@ final class ModelPickerTests: XCTestCase {
     /// contain the word "high" must not cost the user their effort setting.
     func testSelectionRevertRequiresTheErrorToNameBothValueAndAxis() {
         let p = SelectionProbation(sessionId: "s1", model: "srv-b", effort: "high")
-        XCTAssertEqual(selectionRevert(p, turnErrorMessage: "unsupported_value: 'reasoning.effort' does not support 'high' with this model"), .effort)
-        XCTAssertEqual(selectionRevert(p, turnErrorMessage: "the model 'srv-b' does not exist"), .model)
-        XCTAssertEqual(selectionRevert(p, turnErrorMessage: "bash: exit 1 — the high-water mark file is missing"), .none,
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: "unsupported_value: 'reasoning.effort' does not support 'high' with this model"), .effort)
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: "the model 'srv-b' does not exist"), .model)
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: "bash: exit 1 — the high-water mark file is missing"), .none,
                        "an incidental substring is not a rejection")
-        XCTAssertEqual(selectionRevert(p, turnErrorMessage: "connection reset"), .none)
-        XCTAssertEqual(selectionRevert(nil, turnErrorMessage: "model 'srv-b' rejected"), .none)
-        XCTAssertEqual(selectionRevert(p, turnErrorMessage: nil), .none)
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: "connection reset"), .none)
+        XCTAssertEqual(selectionRevert(probation: nil, turnErrorMessage: "model 'srv-b' rejected"), .none)
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: nil), .none)
         // An effort rejection quotes the model too; checking model FIRST would clear the wrong axis.
-        XCTAssertEqual(selectionRevert(p, turnErrorMessage: "model 'srv-b' does not support reasoning effort 'high'"), .effort)
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: "model 'srv-b' does not support reasoning effort 'high'"), .effort)
     }
 
     /// I4 (review): SUBSTRING matching silently clears a deliberate choice. `"low"` sits inside
@@ -586,22 +642,22 @@ final class ModelPickerTests: XCTestCase {
     /// English word. Matching must respect word boundaries.
     func testSelectionRevertDoesNotMatchAnEffortInsideAnotherWord() {
         // The review's own example: an unrelated refusal that happens to contain "allowed".
-        XCTAssertEqual(selectionRevert(SelectionProbation(sessionId: "s1", model: nil, effort: "low"),
+        XCTAssertEqual(selectionRevert(probation: SelectionProbation(sessionId: "s1", model: nil, effort: "low"),
                                        turnErrorMessage: "this model is not allowed to use reasoning"), .none,
                        #""low" inside "allowed" must not cost the user their selection"#)
-        XCTAssertEqual(selectionRevert(SelectionProbation(sessionId: "s1", model: nil, effort: "max"),
+        XCTAssertEqual(selectionRevert(probation: SelectionProbation(sessionId: "s1", model: nil, effort: "max"),
                                        turnErrorMessage: "reasoning effort exceeds the maximum for this account"), .none)
-        XCTAssertEqual(selectionRevert(SelectionProbation(sessionId: "s1", model: nil, effort: "none"),
+        XCTAssertEqual(selectionRevert(probation: SelectionProbation(sessionId: "s1", model: nil, effort: "none"),
                                        turnErrorMessage: "no reasoning effort was accepted; none of the retries succeeded"), .none,
                        #""none" is an ordinary English word — an incidental use is not a rejection"#)
         // The composing case: a mid-turn change from xhigh to high, where the IN-FLIGHT turn (still
         // on xhigh) errors. `"high"` must not match inside `"xhigh"` or the NEW selection is reverted.
-        XCTAssertEqual(selectionRevert(SelectionProbation(sessionId: "s1", model: nil, effort: "high"),
+        XCTAssertEqual(selectionRevert(probation: SelectionProbation(sessionId: "s1", model: nil, effort: "high"),
                                        turnErrorMessage: "reasoning effort 'xhigh' is not supported"), .none)
         // …and the same boundary rule must not break the real, quoted rejections.
-        XCTAssertEqual(selectionRevert(SelectionProbation(sessionId: "s1", model: nil, effort: "high"),
+        XCTAssertEqual(selectionRevert(probation: SelectionProbation(sessionId: "s1", model: nil, effort: "high"),
                                        turnErrorMessage: "reasoning effort 'high' is not supported"), .effort)
-        XCTAssertEqual(selectionRevert(SelectionProbation(sessionId: "s1", model: nil, effort: "xhigh"),
+        XCTAssertEqual(selectionRevert(probation: SelectionProbation(sessionId: "s1", model: nil, effort: "xhigh"),
                                        turnErrorMessage: "reasoning effort 'xhigh' is not supported"), .effort)
     }
 
@@ -610,8 +666,8 @@ final class ModelPickerTests: XCTestCase {
     /// string.
     func testSelectionRevertMatchesAModelSlugExactlyAndNotAsAPrefix() {
         let p = SelectionProbation(sessionId: "s1", model: "gpt-5.6-sol", effort: nil)
-        XCTAssertEqual(selectionRevert(p, turnErrorMessage: "the model 'gpt-5.6-sol' does not exist"), .model)
-        XCTAssertEqual(selectionRevert(p, turnErrorMessage: "unknown model gpt-5.6-sol"), .none,
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: "the model 'gpt-5.6-sol' does not exist"), .model)
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: "unknown model gpt-5.6-sol"), .none,
                        """
                        UNQUOTED does not count. The review offered quoting OR a word-boundary regex; \
                        quoting is the stricter and the only one that survives "none", an ordinary \
@@ -619,7 +675,7 @@ final class ModelPickerTests: XCTestCase {
                        negative means no auto-revert (passive), a false positive destroys a setting \
                        the user chose on purpose.
                        """)
-        XCTAssertEqual(selectionRevert(p, turnErrorMessage: "the model 'gpt-5.6-solaris' does not exist"), .none,
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: "the model 'gpt-5.6-solaris' does not exist"), .none,
                        "a longer slug that merely STARTS with ours is a different model")
     }
 
@@ -782,9 +838,9 @@ final class ModelPickerTests: XCTestCase {
         await waitUntilSent(t, 3)
         let req = lineJSON(t.sent[2])
         XCTAssertEqual(req["method"] as? String, "sync.config")
-        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"provider":"codex-oauth","exaKey":null,"dangerousDomains":[],"defaultModel":"srv-a","models":[{"id":"srv-a","efforts":["low","high"]}],"defaultEffort":"high","clientEfforts":["ultra"]}}"#)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"provider":"codex-oauth","exaKey":null,"dangerousDomains":[],"defaultModel":"srv-a","models":[{"id":"srv-a","providerId":"srv","displayName":"srv-a","efforts":["low","high"]}],"defaultEffort":"high","clientEfforts":["ultra"]}}"#)
         let snapshot = await fetched
-        XCTAssertEqual(snapshot?.models, [SyncConfigModelInfo(id: "srv-a", efforts: ["low", "high"])])
+        XCTAssertEqual(snapshot?.models, [srv("srv-a", efforts: ["low", "high"])])
         XCTAssertEqual(snapshot?.clientEfforts, ["ultra"])
         XCTAssertEqual(snapshot?.provider, "codex-oauth",
                        "whole-branch review C1: the identity threads through the wrapper like every other field")
@@ -829,8 +885,8 @@ final class ModelPickerTests: XCTestCase {
         let adapter = FieldStateAdapter(session: SessionModel())
         adapter.modelCatalogue = SyncConfigSnapshot(
             provider: "codex-oauth", defaultModel: "srv-a",
-            models: [SyncConfigModelInfo(id: "srv-a", efforts: ["low", "high"]),
-                     SyncConfigModelInfo(id: "srv-b", efforts: ["high", "max"])],
+            models: [srv("srv-a", efforts: ["low", "high"]),
+                     srv("srv-b", efforts: ["high", "max"])],
             defaultEffort: "high", clientEfforts: ["ultra"])
         adapter.modelChangeInFlight = true
         let view = await headerView(adapter, rows: [
@@ -849,8 +905,8 @@ final class ModelPickerTests: XCTestCase {
         let adapter = FieldStateAdapter(session: SessionModel())
         adapter.modelCatalogue = SyncConfigSnapshot(
             provider: "codex-oauth", defaultModel: "srv-a",
-            models: [SyncConfigModelInfo(id: "srv-a", efforts: ["low", "high"]),
-                     SyncConfigModelInfo(id: "srv-b", efforts: ["high", "max"])],
+            models: [srv("srv-a", efforts: ["low", "high"]),
+                     srv("srv-b", efforts: ["high", "max"])],
             defaultEffort: "high", clientEfforts: ["ultra"])
         let code = await headerView(adapter, rows: [
             SessionSummary(sessionId: "s_1", title: nil, createdAt: 1, scope: "global",
@@ -881,7 +937,7 @@ final class ModelPickerTests: XCTestCase {
     func testTheEffortOptionsBoolDoorAgreesWithTheModeDoorForEveryMode() {
         let catalogue = SyncConfigSnapshot(
             provider: "codex-oauth", defaultModel: "srv-a",
-            models: [SyncConfigModelInfo(id: "srv-a", efforts: ["low", "high"])],
+            models: [srv("srv-a", efforts: ["low", "high"])],
             defaultEffort: "high", clientEfforts: ["ultra"])
         for mode in SessionMode.allCases.map({ $0.rawValue }) + [nil] {
             let byMode = effortPickerOptions(catalogue: catalogue, model: "srv-a", mode: mode)
@@ -930,21 +986,54 @@ final class ModelPickerTests: XCTestCase {
         return WindowContentView(adapter: adapter, tint: .blue, topInset: 8, sidebars: wiring) { EmptyView() }
     }
 
+
+    /// WS-20 (cross-lane fix): the direct settings.json WRITE this suite used to pin is RETIRED —
+    /// `AppModel.writeAdvisorModelToSettings` is gone; the write now goes through the daemon's
+    /// `settings.setAdvisorModel` RPC (`AppModel.setAdvisorModel`, WinterKit's own
+    /// `WinterClient.setAdvisorModel`). This pins THAT wire shape instead, the same
+    /// `AppScriptedTransport` idiom `testAppModelFetchesTheModelCatalogue` (ModelPickerTests, this
+    /// file) already uses for a real RPC round trip.
+    @MainActor
+    func testSetAdvisorModelSendsTheTagAndDecodesTheDaemonsEchoedValue() async throws {
+        let t = AppScriptedTransport()
+        let model = AppModel(makeTransport: { t }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+        await answerHandshake(t, sessions: "[]")
+
+        async let outcome = AppModel.setAdvisorModel(client: model.client, "anthropic/claude-opus-5")
+        await waitUntilSent(t, 3)
+        let req = lineJSON(t.sent[2])
+        XCTAssertEqual(req["method"] as? String, "settings.setAdvisorModel")
+        XCTAssertEqual((req["params"] as? [String: Any])?["model"] as? String, "anthropic/claude-opus-5")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"ok":true,"model":"anthropic/claude-opus-5"}}"#)
+
+        switch await outcome {
+        case .success(let stored): XCTAssertEqual(stored, "anthropic/claude-opus-5")
+        case .failure(let reason): XCTFail("expected success, got failure: \(reason)")
+        }
+    }
 }
 
-// MARK: - Winter Phase 8d (P8d-8, fix round 1): AppModel.readAdvisorModelFromSettings /
-// writeAdvisorModelToSettings — the D30 advisor setting's direct-file-I/O door (`AppModel`'s own
-// doc: the SAME pattern `UpdaterCoordinator.readChannelFromSettings()` already uses,
+// MARK: - Winter Phase 8d (P8d-8, fix round 1) + WS-20 (cross-lane fix): AppModel.
+// readAdvisorModelFromSettings — the D30 advisor setting's direct-file-I/O READ door (`AppModel`'s
+// own doc: the SAME pattern `UpdaterCoordinator.readChannelFromSettings()` already uses,
 // `UpdaterCoordinatorTests.testReadChannelFromSettingsFile`'s own `setenv("WINTER_HOME", …)` +
-// temp-dir technique reused verbatim here). Both functions resolve the settings path through
+// temp-dir technique reused verbatim here). Resolves the settings path through
 // `AppProfile.winterHome`, which reads the SAME raw `WINTER_HOME` env var `WinterPaths.
 // homeDirectory()` reads (via `getenv`, not `ProcessInfo.environment` — `AppProfile.swift`'s own
-// doc explains why both must agree), so overriding the env var redirects both functions at once.
+// doc explains why both must agree), so overriding the env var redirects it.
+//
+// The WRITE half (`writeAdvisorModelToSettings`) is RETIRED as of WS-20 — the write now goes
+// through the daemon's `settings.setAdvisorModel` RPC (`AppModel.setAdvisorModel`), tested with
+// `testSetAdvisorModelSendsTheTagAndDecodesTheDaemonsEchoedValue` in `ModelPickerTests` above (it
+// needs a live `AppModel`/scripted transport, unlike these pure file-read tests, so it stays in
+// that class rather than moving down here).
 //
 /// A SEPARATE `XCTestCase` (not nested in `ModelPickerTests` above) — these tests need no
-/// main-actor isolation at all, since they touch no adapter/`AppModel` instance, only the two
-/// static file-I/O functions. Same file for proximity to the outcome tests above, which exercise
-/// the OTHER half of the same D30 surface.
+/// main-actor isolation at all, since they touch no adapter/`AppModel` instance, only the static
+/// file-READ function. Same file for proximity to the outcome tests above, which exercise the
+/// OTHER half of the same D30 surface.
 final class AdvisorSettingsTests: XCTestCase {
     private func tempHome() throws -> URL {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -1012,156 +1101,4 @@ final class AdvisorSettingsTests: XCTestCase {
         XCTAssertNil(AppModel.readAdvisorModelFromSettings())
     }
 
-    /// THE MAJOR finding's core case: writing preserves every sibling `runtimes.*` key AND every
-    /// unrelated top-level key, on a fixture shaped exactly like a real daemon's `settings.json`
-    /// (`Settings.parse`'s own shape) — never a whole-block replace.
-    func testWritePreservesSiblingRuntimesKeysAndUnrelatedTopLevelKeys() throws {
-        let dir = try tempHome()
-        setenv("WINTER_HOME", dir.path, 1)
-        defer { unsetenv("WINTER_HOME") }
-        try write(Self.realisticFixture, to: dir)
-
-        XCTAssertTrue(AppModel.writeAdvisorModelToSettings("gpt-5.6-astra"))
-
-        let obj = try read(dir)
-        XCTAssertEqual(obj["schemaVersion"] as? Int, 2, "unrelated top-level key preserved")
-        let provider = obj["provider"] as? [String: Any]
-        XCTAssertEqual(provider?["type"] as? String, "codex-oauth", "unrelated top-level block preserved")
-        XCTAssertEqual(provider?["model"] as? String, "gpt-5.6-sol")
-        let memory = obj["memory"] as? [String: Any]
-        XCTAssertEqual(memory?["enabled"] as? Bool, true, "unrelated top-level block preserved")
-
-        let runtimes = obj["runtimes"] as? [String: Any]
-        XCTAssertEqual(runtimes?["advisorModel"] as? String, "gpt-5.6-astra", "the write landed")
-        XCTAssertEqual(runtimes?["winterExecutable"] as? String, "/opt/homebrew/bin/winter", "sibling runtimes.* key preserved")
-        let retention = runtimes?["retention"] as? [String: Any]
-        XCTAssertEqual(retention?["deliveriesDays"] as? Int, 30, "sibling runtimes.* BLOCK preserved")
-        XCTAssertEqual(retention?["nameLeasesDays"] as? Int, 7)
-        let winterLeg = runtimes?["winterLeg"] as? [String: Any]
-        XCTAssertEqual(winterLeg?["chat"] as? Bool, true, "sibling runtimes.* block preserved")
-        XCTAssertEqual(winterLeg?["dispatch"] as? Bool, true)
-        XCTAssertEqual(winterLeg?["code"] as? Bool, true)
-        let handoff = runtimes?["handoff"] as? [String: Any]
-        XCTAssertEqual(handoff?["crossRuntime"] as? Bool, false, "sibling runtimes.* block preserved")
-
-        // Round-trips through a fresh read too, proving the write is self-consistent.
-        XCTAssertEqual(AppModel.readAdvisorModelFromSettings(), "gpt-5.6-astra")
-    }
-
-    /// `nil` clears the key entirely (never writes an empty string) — the picker's "Automatic" row.
-    func testWriteNilClearsTheKeyEntirely() throws {
-        let dir = try tempHome()
-        setenv("WINTER_HOME", dir.path, 1)
-        defer { unsetenv("WINTER_HOME") }
-        try write(#"{"schemaVersion":2,"runtimes":{"advisorModel":"claude-fable-5","winterExecutable":"/x"}}"#, to: dir)
-
-        XCTAssertTrue(AppModel.writeAdvisorModelToSettings(nil))
-
-        let obj = try read(dir)
-        let runtimes = obj["runtimes"] as? [String: Any]
-        XCTAssertNil(runtimes?["advisorModel"], "the key must be REMOVED, not set to an empty string")
-        XCTAssertEqual(runtimes?["winterExecutable"] as? String, "/x", "sibling key untouched by the clear")
-        XCTAssertNil(AppModel.readAdvisorModelFromSettings())
-    }
-
-    /// A blank/whitespace-only string clears the key exactly like `nil` — "auto"'s own spelling in
-    /// `winter model --advisor auto` maps to `nil` before this function ever sees it, but the
-    /// function itself must not special-case that: a blank string arriving by any other path
-    /// (a future caller) gets the identical blank-is-absent treatment `settings.ts` documents.
-    func testWriteBlankStringClearsTheKeyLikeNil() throws {
-        let dir = try tempHome()
-        setenv("WINTER_HOME", dir.path, 1)
-        defer { unsetenv("WINTER_HOME") }
-        try write(#"{"schemaVersion":2,"runtimes":{"advisorModel":"claude-fable-5"}}"#, to: dir)
-
-        XCTAssertTrue(AppModel.writeAdvisorModelToSettings("   "))
-
-        let obj = try read(dir)
-        let runtimes = obj["runtimes"] as? [String: Any]
-        XCTAssertNil(runtimes?["advisorModel"])
-    }
-
-    /// A HOME WITH NO `runtimes` BLOCK AT ALL, and no `settings.json` at all — the first write on a
-    /// fresh home must still produce a schema-valid file (every `Settings` field is optional) with
-    /// no OTHER top-level key invented.
-    func testWriteOnAFreshHomeWithNoSettingsFileCreatesOne() throws {
-        let dir = try tempHome()
-        setenv("WINTER_HOME", dir.path, 1)
-        defer { unsetenv("WINTER_HOME") }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("settings.json").path))
-
-        XCTAssertTrue(AppModel.writeAdvisorModelToSettings("claude-opus-5"))
-
-        let obj = try read(dir)
-        XCTAssertEqual(Set(obj.keys), ["runtimes"], "a fresh home gets ONLY the runtimes block — nothing invented")
-        let runtimes = obj["runtimes"] as? [String: Any]
-        XCTAssertEqual(runtimes?["advisorModel"] as? String, "claude-opus-5")
-        XCTAssertEqual(Set((runtimes ?? [:]).keys), ["advisorModel"], "no sibling runtimes.* field invented either")
-    }
-
-    /// Whole-branch review Major 2 — THE regression this fix wave closes: a settings.json that
-    /// EXISTS and is readable but does NOT parse as a JSON object (hand-edited, truncated, or a
-    /// bare JSON array/string/number at the root) must be left byte-for-byte UNTOUCHED and the
-    /// write must report `false` — never the pre-fix behaviour of silently replacing it with
-    /// `{"runtimes":{"advisorModel":…}}` (which the daemon's settings-watcher would then hot-load,
-    /// resetting every other setting in the file).
-    func testWriteOnAnUnparseableSettingsFileLeavesItByteIdenticalAndReportsFalse() throws {
-        let dir = try tempHome()
-        setenv("WINTER_HOME", dir.path, 1)
-        defer { unsetenv("WINTER_HOME") }
-        let malformed = #"{"schemaVersion": 2, "provider": { unterminated"#
-        try write(malformed, to: dir)
-        let before = try Data(contentsOf: dir.appendingPathComponent("settings.json"))
-
-        XCTAssertFalse(AppModel.writeAdvisorModelToSettings("claude-opus-5"), "an unparseable file must refuse the write, not clobber it")
-
-        let after = try Data(contentsOf: dir.appendingPathComponent("settings.json"))
-        XCTAssertEqual(before, after, "the file must be byte-for-byte unchanged after a refused write")
-        XCTAssertNil(AppModel.readAdvisorModelFromSettings(), "nothing was written, so there is still nothing to read")
-    }
-
-    /// The SAME refusal for a file that parses as valid JSON but whose ROOT is not an object
-    /// (e.g. a bare JSON array) — `Settings` is always an object, so this is exactly as malformed
-    /// as truncated JSON from this function's point of view, and must refuse identically.
-    func testWriteOnASettingsFileWhoseRootIsNotAnObjectLeavesItUntouchedAndReportsFalse() throws {
-        let dir = try tempHome()
-        setenv("WINTER_HOME", dir.path, 1)
-        defer { unsetenv("WINTER_HOME") }
-        try write(#"["not", "an", "object"]"#, to: dir)
-        let before = try Data(contentsOf: dir.appendingPathComponent("settings.json"))
-
-        XCTAssertFalse(AppModel.writeAdvisorModelToSettings("claude-opus-5"))
-
-        let after = try Data(contentsOf: dir.appendingPathComponent("settings.json"))
-        XCTAssertEqual(before, after)
-    }
-
-    /// A write must never corrupt the file into something `Settings.parse` (the daemon's own
-    /// validator) would reject — proved here by checking every field this fixture came in with is
-    /// still the SAME TYPE it started as (an object stays an object, a bool stays a bool) after the
-    /// merge, which is what a `JSONSerialization`-level shallow merge guarantees and a naive
-    /// string-replace would not.
-    func testWrittenFileStaysShapeCompatibleWithTheDaemonsSettingsSchema() throws {
-        let dir = try tempHome()
-        setenv("WINTER_HOME", dir.path, 1)
-        defer { unsetenv("WINTER_HOME") }
-        try write(Self.realisticFixture, to: dir)
-
-        XCTAssertTrue(AppModel.writeAdvisorModelToSettings("gpt-5.6-luna"))
-
-        let obj = try read(dir)
-        XCTAssertTrue(obj["schemaVersion"] is Int)
-        XCTAssertTrue(obj["provider"] is [String: Any])
-        XCTAssertTrue(obj["runtimes"] is [String: Any])
-        XCTAssertTrue(obj["memory"] is [String: Any])
-        let runtimes = obj["runtimes"] as! [String: Any]
-        XCTAssertTrue(runtimes["advisorModel"] is String)
-        XCTAssertTrue(runtimes["winterExecutable"] is String)
-        XCTAssertTrue(runtimes["retention"] is [String: Any])
-        XCTAssertTrue(runtimes["winterLeg"] is [String: Any])
-        XCTAssertTrue(runtimes["handoff"] is [String: Any])
-        // JSONSerialization itself is the round-trip proof: a shape it cannot re-encode as valid
-        // JSON would already have thrown inside writeAdvisorModelToSettings (returning false) —
-        // the `true` return above IS the "this is valid JSON" assertion.
-    }
 }

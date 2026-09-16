@@ -179,11 +179,19 @@ public struct SyncConfig: Codable, Equatable, Sendable {
     public let provider: String
     public let exaKey: String?
     public let dangerousDomains: [String]
+    /// WS-20: a provider-qualified TAG ("<providerId>/<modelId>") when non-empty, not a bare
+    /// modelId — this kit stores/threads it opaquely (`LocalSessionMeta.model`) and splits it
+    /// (`modelIdPortion(of:)`, `ChatEngine.swift`) at the one place that needs the bare id: right
+    /// before building a `ProviderTurnRequest`. The provider-mismatch rule documented on `provider`
+    /// above is UNCHANGED by this — the daemon already derives `provider` from this same tag's own
+    /// `providerId` half, so the two stay in lockstep by construction; nothing here needs to parse
+    /// the tag to re-derive what `provider` already states.
     public let defaultModel: String
-    /// The Mac's whole model catalogue. EMPTY means the Mac reported no catalogue — its provider
-    /// cannot enumerate its models, none is configured, or (see above) it predates this field.
-    /// A consumer must wait for a real one rather than deriving a lineup from `defaultModel`, which
-    /// is precisely what this field exists to stop.
+    /// The Mac's whole model catalogue — each row's `id` carries the same tag shape as
+    /// `defaultModel` above. EMPTY means the Mac reported no catalogue — its provider cannot
+    /// enumerate its models, none is configured, or (see above) it predates this field. A consumer
+    /// must wait for a real one rather than deriving a lineup from `defaultModel`, which is
+    /// precisely what this field exists to stop.
     public let models: [SyncConfigModel]
     /// The Mac's live reasoning effort. `""` means UNSET, which is NOT `"none"`: unset makes a turn
     /// omit the `reasoning` block entirely, while `"none"` is an explicit level the backend honours.
