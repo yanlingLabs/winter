@@ -2351,7 +2351,7 @@ if (import.meta.main) {
     // "changing models must NOT require a daemon restart") is that a running daemon picks the
     // new value up on its NEXT turn via providers/manager.ts's live model resolver — no restart,
     // no RPC round-trip needed here at all.
-    const { loadSettings, saveSettings, resolveWinterHome, setProviderModel, setReasoningEffort, setAdvisorModel } = await import("@yanlinglabs/winter-core");
+    const { loadSettings, saveSettings, resolveWinterHome, setProviderModel, setReasoningEffort, setAdvisorModel, parseModelTag } = await import("@yanlinglabs/winter-core");
     const settingsPath = join(resolveWinterHome(), "settings.json");
     const settings = loadSettings(settingsPath);
     const action = parseModelArgs(process.argv.slice(3));
@@ -2415,7 +2415,9 @@ if (import.meta.main) {
     if (action.kind === "setModel" || action.kind === "setModelAndEffort") {
       const err = validateModelTag(action.slug);
       if (err) { console.error(err); process.exit(1); }
-      next = setProviderModel(next, action.slug);
+      // `validateModelTag` just proved this is a real tag (and, unlike `parseModelTag` alone,
+      // also refused the sentinel/test-double escapes) — `parseModelTag` here only brands it.
+      next = setProviderModel(next, parseModelTag(action.slug));
     }
     if (action.kind === "setEffort" || action.kind === "setModelAndEffort") {
       const err = validateEffort(action.effort);

@@ -146,6 +146,29 @@ final class MethodWrapperTests: XCTestCase {
         )
     }
 
+    /// WS-20 (cross-lane, Lane 4 / Mac app): `setAdvisorModel` — same string-or-literal-null wire
+    /// shape as `setModel` above, and returns the RPC's own ECHOED `model` (what was actually
+    /// stored), not merely what was requested.
+    func testSetAdvisorModelEncodesStringOrLiteralNullAndDecodesTheEcho() async throws {
+        let (client, t) = try await connected()
+
+        let (setReq, echoed) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"model":"anthropic/claude-opus-5"}"#) {
+            try await client.setAdvisorModel("anthropic/claude-opus-5")
+        }
+        XCTAssertEqual(setReq["method"] as? String, "settings.setAdvisorModel")
+        XCTAssertEqual((setReq["params"] as? [String: Any])?["model"] as? String, "anthropic/claude-opus-5")
+        XCTAssertEqual(echoed, "anthropic/claude-opus-5")
+
+        let (clearReq, clearedEcho) = try await roundTrip(t, sentIndex: 2, result: #"{"ok":true,"model":null}"#) {
+            try await client.setAdvisorModel(nil)
+        }
+        XCTAssertTrue(
+            (clearReq["params"] as? [String: Any])?["model"] is NSNull,
+            "model:nil must send a literal JSON null, not an omitted key"
+        )
+        XCTAssertNil(clearedEcho)
+    }
+
     /// Winter Phase 8d (Task 4.2, Interfaces block): `setModel`'s new `confirmLossy` parameter —
     /// defaulted `false` (an unconfirmed call — the daemon refuses a lossy switch typed rather than
     /// performing it), and the confirm sheet's "Switch anyway" resend passes `true`. ALWAYS sent as

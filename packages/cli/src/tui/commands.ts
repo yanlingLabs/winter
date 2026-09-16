@@ -9,7 +9,7 @@
 import { join } from "node:path";
 import {
   OutputStyleStore, TrustStore, loadSettings, resolveWinterHome, saveSettings,
-  setOutputStyle, setProviderModel, setReasoningEffort, setAdvisorModel,
+  setOutputStyle, setProviderModel, setReasoningEffort, setAdvisorModel, parseModelTag,
 } from "@yanlinglabs/winter-core";
 import type { Settings } from "@yanlinglabs/winter-core";
 import { METHODS, SyncConfigModel } from "@yanlinglabs/winter-protocol";
@@ -152,7 +152,9 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
   if (action.kind === "setModel" || action.kind === "setModelAndEffort") {
     const err = validateModelTag(action.slug);
     if (err) { ctx.appendNote(err); return; }
-    next = setProviderModel(next, action.slug);
+    // `validateModelTag` just proved this is a real tag (and refused the sentinel/test-double
+    // escapes `parseModelTag` alone would accept) — `parseModelTag` here only brands it.
+    next = setProviderModel(next, parseModelTag(action.slug));
   }
   if (action.kind === "setEffort" || action.kind === "setModelAndEffort") {
     const err = validateEffort(action.effort);
@@ -194,7 +196,7 @@ function applyModelPick(ctx: CommandCtx, slug: string): void {
   const settings = loadSettings(settingsPath);
   const err = validateModelTag(slug);
   if (err) { ctx.appendNote(err); return; }
-  const next = setProviderModel(settings, slug);
+  const next = setProviderModel(settings, parseModelTag(slug));
   saveSettings(settingsPath, next);
   ctx.onModelChanged?.(next.provider.model, next.provider.reasoningEffort);
   ctx.appendNote(`updated (model ${next.provider.model}) — takes effect next turn, no daemon restart needed`);

@@ -2,7 +2,7 @@
 // unit-tested without going through the top-level `if (import.meta.main)` dispatch. Mirrors
 // plugin-cli.ts's split: main.ts owns the I/O (loadSettings/saveSettings/connect), this file
 // owns the parse/validate decisions.
-import { REASONING_EFFORTS, catalogRowsFor, isModelTag, splitTag, UNSTATED_TAG, WINTER_TEST_PREFIX } from "@yanlinglabs/winter-core";
+import { REASONING_EFFORTS, rowForTag, isModelTag, splitTag, UNSTATED_TAG, WINTER_TEST_PREFIX } from "@yanlinglabs/winter-core";
 
 export type ModelCliAction =
   | { kind: "show" }
@@ -59,19 +59,6 @@ export function parseModelArgs(args: string[]): ModelCliAction {
   return { kind: "usageError", message: USAGE };
 }
 
-/** WS-20: validates a model against the tag shape ("<providerId>/<modelId>") AND catalog
- *  provider membership — replaces `validateModelSlug`'s per-provider-type allowlist now that a
- *  model is ALWAYS a provider-qualified tag (`packages/core/src/runtime-sdk/model-tag.ts`, the
- *  one place the shape/lookup rules live). Two distinct failure shapes, so the message always
- *  names the actual defect:
- *    - not tag-shaped at all (`splitTag` throws)      -> "…must be a provider-qualified tag …"
- *    - the `unstated/unstated` sentinel, or a `winter-test/…` double -> same message: NEITHER is a
- *      real, user-settable model — `isModelTag` accepts both as escapes (it exists to validate a
- *      *stored* value, e.g. a session record that may legitimately carry the sentinel), but a
- *      value the USER is trying to SET must never be either. Without this check both slipped
- *      through as "valid" (`isModelTag` says so) — caught in review.
- *    - tag-shaped but the provider isn't pinned         -> "…unknown provider "<id>""
- *  Returns an error message, or undefined when the tag is valid. */
 /** WS-20 (review fix): the ONE shared "strip the '<providerId>/' prefix for DISPLAY" helper —
  *  every surface that shows a model to the user (not just this file's own `renderModelListing`)
  *  imports this rather than re-deriving it: the TUI welcome banner and the T5 status-chrome footer
@@ -87,6 +74,18 @@ export function modelIdPortion(tag: string): string {
   }
 }
 
+/** WS-20: validates a model against the tag shape ("<providerId>/<modelId>") AND catalog
+ *  provider membership — replaces `validateModelSlug`'s per-provider-type allowlist now that a
+ *  model is ALWAYS a provider-qualified tag (`packages/core/src/runtime-sdk/model-tag.ts`, the
+ *  one place the shape/lookup rules live). Distinct failure shapes, so the message always names
+ *  the actual defect:
+ *    - not tag-shaped at all (`splitTag` throws)      -> "…must be a provider-qualified tag …"
+ *    - the `unstated/unstated` sentinel, or a `winter-test/…` double -> same message: NEITHER is a
+ *      real, user-settable model — `isModelTag` accepts both as escapes (it exists to validate a
+ *      *stored* value, e.g. a session record that may legitimately carry the sentinel), but a
+ *      value the USER is trying to SET must never be either.
+ *    - tag-shaped but the provider isn't pinned         -> "…unknown provider "<id>""
+ *  Returns an error message, or undefined when the tag is valid. */
 export function validateModelTag(tag: string): string | undefined {
   if (tag === UNSTATED_TAG || tag.startsWith(WINTER_TEST_PREFIX)) {
     return `invalid model "${tag}" — must be a provider-qualified tag "<providerId>/<modelId>"`;
@@ -115,17 +114,17 @@ export function validateEffort(effort: string): string | undefined {
 
 /** Winter Phase 8d (P8d-8, Task 4.3) + WS-20: validates an advisor TAG — shape/provider first
  *  (`validateModelTag`, the same check every other model write now goes through), then catalog
- *  row membership (`catalogRowsFor`, the SAME catalog `session.setModel`'s handler consults on the
- *  daemon side) so a tag-shaped but nonexistent row (e.g. a typo'd modelId under a real provider)
- *  is still caught. The CLI runs this command with no daemon RPC at all (direct settings.json
- *  read/write, same posture as `validateModelTag` above), so the compiled-in static catalog is the
- *  only universe it can check against. `"auto"` is parsed as `clearAdvisor` before this ever runs
- *  (`parseModelArgs`) — this only ever sees a real candidate tag. Returns an error message, or
- *  undefined when valid. */
+ *  row membership (`rowForTag`, the SAME exact-key lookup `session.setModel`'s handler consults on
+ *  the daemon side) so a tag-shaped but nonexistent row (e.g. a typo'd modelId under a real
+ *  provider) is still caught. The CLI runs this command with no daemon RPC at all (direct
+ *  settings.json read/write, same posture as `validateModelTag` above), so the compiled-in static
+ *  catalog is the only universe it can check against. `"auto"` is parsed as `clearAdvisor` before
+ *  this ever runs (`parseModelArgs`) — this only ever sees a real candidate tag. Returns an error
+ *  message, or undefined when valid. */
 export function validateAdvisorSlug(tag: string): string | undefined {
   const shapeErr = validateModelTag(tag);
   if (shapeErr) return shapeErr;
-  if (catalogRowsFor(tag).length > 0) return undefined;
+  if (rowForTag(tag) !== undefined) return undefined;
   return `invalid advisor model "${tag}" — not in the pinned catalog (use "auto" to clear the override)`;
 }
 

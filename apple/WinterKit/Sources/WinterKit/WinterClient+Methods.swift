@@ -563,6 +563,22 @@ extension WinterClient {
         ]))
     }
 
+    /// WS-20 (cross-lane, Lane 4 / Mac app): `settings.setAdvisorModel {model}` — the D30 advisor
+    /// override, moved off a direct `settings.json` write (`AppModel.writeAdvisorModelToSettings`,
+    /// now retired) so the tag is validated against the pinned catalog BEFORE it lands on disk, the
+    /// same transform `winter model --advisor <slug|auto>` already goes through daemon-side.
+    /// LOCAL-ROLE ONLY (never reachable from a phone — it has no Winter-leg advisor to configure).
+    /// `model: nil` clears the override (falls back to the D30 per-family default) and is sent as a
+    /// literal JSON `null`, same "always send the key" convention as `setModel`'s `confirmLossy`.
+    /// Returns the RPC's own echoed `model` — what was ACTUALLY stored, never merely what was
+    /// requested — `nil` when cleared. A refusal (an invalid/non-catalog tag) throws `RpcError`.
+    public func setAdvisorModel(_ model: String?) async throws -> String? {
+        let r = try await request("settings.setAdvisorModel", params: obj([
+            "model": model.map { JSONValue.string($0) } ?? JSONValue.null,
+        ]))
+        return r["model"]?.stringValue
+    }
+
     /// `session.setEffort {sessionId, effort}` (provider-correctness T4) — the per-session
     /// reasoning-effort override, the other half of `setModel` above and a SEPARATE method by
     /// design ("effort and model are two different things, just like the CLI"). Identical wire
