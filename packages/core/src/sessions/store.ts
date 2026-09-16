@@ -8,6 +8,8 @@ import { hasOpenPanelTabs } from "../panel/store";
 import type { SessionDirs } from "./dirs";
 import { outdirPath } from "./outdir";
 import { removeSessionDiffs } from "../diffs/store";
+import { isModelTag, UNSTATED_TAG } from "../runtime-sdk/model-tag";
+import { migrateBareModelId } from "../settings";
 
 // Keep in sync with SessionCreateParams scope regex (packages/protocol/src/methods.ts).
 const SCOPE_RE = /^[a-z0-9]([a-z0-9-]{0,39}[a-z0-9])?$/;
@@ -190,7 +192,12 @@ export class SessionStore {
    *  true without a second `dirs`-column write path. */
   private readonly warnedMalformedDirs = new Set<string>();
 
-  constructor(private readonly homeDir: string) {
+  /** WS-20 (review round 2, M5): `presentProviders` (`credentialPresenceFrom(secrets)`'s keys) is
+   *  threaded into `migrateBareModelColumnToTags`'s own rule-5 tie-break — only the daemon boot
+   *  hook has `secrets` in hand at construction time, so every other caller (tests, `winter doctor`,
+   *  any direct `new SessionStore(home)`) omits it and gets the same fixed-preference tie-break as
+   *  before this field existed. */
+  constructor(private readonly homeDir: string, private readonly storeOpts?: { presentProviders?: ReadonlySet<string> }) {
     mkdirSync(join(homeDir, "sessions"), { recursive: true });
     this.db = new Database(join(homeDir, "sessions", "index.db"));
     this.db.run(`CREATE TABLE IF NOT EXISTS sessions (
@@ -272,7 +279,27 @@ export class SessionStore {
       token_hash TEXT NOT NULL,
       minted_at INTEGER NOT NULL
     )`);
+    this.migrateBareModelColumnToTags();
     this.recoverAll();
+  }
+
+  /** WS-20 (spec §5): `sessions.model` is index-only metadata with no `provider_id` column of its
+   *  own (unlike `runtime_sessions`/`runtime_children`, see `runtime-state/migrations/tags.ts`), so
+   *  a stored bare legacy id is resolved through the generic multi-provider rule
+   *  (`migrateBareModelId`, settings.ts) rather than trusted from a sibling column. Records always
+   *  get the sentinel on an unresolvable id (never a provider default — that fallback is
+   *  `provider.model`-only). Idempotent: a row already holding a tag is skipped, so this runs on
+   *  every store construction with no marker needed, same posture as the ALTER TABLE loop above. */
+  private migrateBareModelColumnToTags(): void {
+    const rows = this.db.query<{ session_id: string; model: string | null }, []>("SELECT session_id, model FROM sessions WHERE model IS NOT NULL").all();
+    for (const row of rows) {
+      if (row.model === null || isModelTag(row.model)) continue;
+      const tag = migrateBareModelId(row.model, {
+        fieldName: "sessions.model", home: this.homeDir, emptySFallback: UNSTATED_TAG,
+        presentProviders: this.storeOpts?.presentProviders,
+      }) ?? UNSTATED_TAG;
+      this.db.run("UPDATE sessions SET model = ? WHERE session_id = ?", [tag, row.session_id]);
+    }
   }
 
   /** Derives the index's title/first_message columns from a session's parsed event log:

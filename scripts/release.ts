@@ -97,7 +97,6 @@ import {
   appcastInsertPlan,
   appcastItem,
   caskFrom,
-  catalogueStaleness,
   dmgStagePlan,
   embeddedRuntimesDescriptionLine,
   preflight,
@@ -111,7 +110,6 @@ import {
   verifyVersionsJsonAgainstPins,
 } from "./release-lib";
 import { fetchAnt, parseAntPin } from "./fetch-ant";
-import { CODEX_MODELS_VERIFIED } from "../packages/core/src/providers/codex-config";
 import { winterSourceOf } from "../packages/core/src/runtime-sdk/bundle-layout";
 import { REQUIRED_WINTER_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
 import { buildWinter } from "./build-winter";
@@ -1300,21 +1298,10 @@ for (const re of NAME_SCAN_EXCLUSIONS) {
 sh([`"${nameGuard}" artifacts`, ...scan.targets.map((t) => `"${t}"`), `"${caskOutPath}"`].join(" "));
 
 // ---------------------------------------------------------------------------
-// 11c. Provider-catalogue staleness nudge — WARN ONLY, never a gate (T2 review M2).
-//      CODEX_MODELS' context windows are hand-held constants re-derived from a live
-//      /models call; a stale window does not throw, it silently moves the
-//      auto-compaction threshold (a 372_000 transcription for a 272,000 window once
-//      put it ABOVE the provider's hard ceiling and killed auto-compaction outright).
-//      This is the moment that number SHIPS and a human is watching output, which is
-//      why the nudge lives here rather than as a console.warn inside a 3,000-test run.
-//      Deliberately not fail-closed like 11b: a date-triggered failure would redden a
-//      green pipeline on a day nobody touched code, and the reflexive repair is to bump
-//      the date without checking anything.
-// ---------------------------------------------------------------------------
-const catalogue = catalogueStaleness({ verified: CODEX_MODELS_VERIFIED, now: new Date() });
-if (catalogue.line) console.warn(`\n${catalogue.line}\n`);
-else console.log(`Catalogue: CODEX_MODELS verified ${CODEX_MODELS_VERIFIED} (${catalogue.ageDays}d ago) — within budget`);
-
+// 11c. WS-20: `catalogueStaleness`/`CODEX_MODELS_VERIFIED` deleted along with `CODEX_MODELS` —
+//      the pinned SDK catalog is the one source for which models a provider serves, and it has
+//      its own provenance/freshness story (PROVENANCE.md), not a hand-held constant this
+//      pipeline needs to nudge about.
 // ---------------------------------------------------------------------------
 // 12. Publish tail. Guards run FIRST (tag + gh release existence, re-checked HERE against the
 //     actual post-bump `version` — not preflight's pre-bump snapshot — so a version bump

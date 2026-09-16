@@ -2,6 +2,9 @@ import { z } from "zod";
 import type { Provider, ProviderEvent, TurnInputItem, ToolSpec } from "../providers/types";
 import { fetchCleanPage, renderLines, PageCoreError, checkDangerousDomain, dangerousDomainRefusal, type PageCache, type CleanPage } from "./tools/page-core";
 import { READPAGE_PER_PAGE_CHAR_CAP, READPAGE_TOTAL_OUTPUT_CHAR_CAP } from "./tools/read-page";
+import type { Settings } from "../settings";
+import { pinsFor, ownProviderFor } from "../settings";
+import { internalModelFor } from "../providers/manager";
 
 /**
  * B2-T3: the ephemeral research sub-agent. A plain, radically reduced loop over
@@ -39,8 +42,8 @@ import { READPAGE_PER_PAGE_CHAR_CAP, READPAGE_TOTAL_OUTPUT_CHAR_CAP } from "./to
 // gpt-5.4-mini on BOTH quality and cost, and 5.4-mini is a deprecated slug the daemon no longer
 // advertises. Effort "none" is a real, measured wire level (server echoes it and reports 0
 // reasoning tokens — provider-correctness T1); summarization needs recall, not reasoning.
-export const RESEARCH_MODEL = "gpt-5.6-luna";
-export const RESEARCH_FALLBACK_MODEL = "gpt-5.6-terra";
+// WS-20: the model/fallback pair is no longer hardcoded — see `pinsFor(settings).research` /
+// `.researchFallback` in settings.ts, read hot via `ResearchDeps.settings` below.
 export const RESEARCH_EFFORT = "none";
 export const RESEARCH_MAX_PAGES_DEFAULT = 5;
 export const RESEARCH_MAX_PAGES_CEILING = 15;
@@ -119,6 +122,9 @@ export interface ResearchRunner {
 
 export interface ResearchDeps {
   provider: Provider;
+  // WS-20: hot settings read, same "re-read every call" discipline as every other settings-backed
+  // getter — `pinsFor(deps.settings())` is called at each run, never a boot snapshot.
+  settings: () => Settings | null;
   cache: PageCache;
   fetchFn?: typeof fetch;
   audit?: (line: Record<string, unknown>) => void;
@@ -425,7 +431,23 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
 
   const input: TurnInputItem[] = [{ type: "message", role: "user", content: buildSeedMessage(q, seed) }];
 
-  let model: string = RESEARCH_MODEL;
+  // The internal `Provider` abstraction speaks bare model ids in ITS OWN dialect — `internalModelFor`
+  // splits the pin's tag at this boundary, same discipline as the runtime-sdk spawn boundary
+  // (§0.1), AND verifies the pin names the SAME provider the daemon's single internal Provider
+  // instance is actually bound to (WS-20, review round 1, GUARD) — a `settings.pins.research`
+  // override (or a slot whose own default fell back to a sibling provider) could otherwise send
+  // the bare id to the wrong backend silently.
+  const settings = deps.settings();
+  const pins = pinsFor(settings);
+  const ownProvider = ownProviderFor(settings);
+  const researchModel = internalModelFor(pins.research, { providerId: ownProvider }, "pins.research");
+  if (researchModel === undefined) {
+    return notReadReport("", state, "Research is unavailable (pins.research names a different provider than this daemon's own)");
+  }
+  // The fallback pin is validated the same way, but its absence only disables the fallback step —
+  // the primary model above is already confirmed safe, so research still runs on it.
+  const researchFallbackModel = internalModelFor(pins.researchFallback, { providerId: ownProvider }, "pins.researchFallback");
+  let model: string = researchModel;
   let usedFallback = false;
   let lastText = "";
 
@@ -485,9 +507,13 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
     if (textBuf) lastText = textBuf;
 
     if (roundError) {
-      if (!usedFallback && looksLikeBadModelError(roundError, model)) {
+      // WS-20 (review round 1, GUARD): `researchFallbackModel` is `undefined` when
+      // `pins.researchFallback` names a different provider than this daemon is bound to
+      // (`internalModelFor`, above) — falls through to the ordinary provider-error throw below,
+      // same as any other unavailable fallback, rather than sending a mismatched-provider id.
+      if (!usedFallback && researchFallbackModel !== undefined && looksLikeBadModelError(roundError, model)) {
         usedFallback = true;
-        model = RESEARCH_FALLBACK_MODEL;
+        model = researchFallbackModel;
         continue; // retry the SAME round (input unchanged) with the fallback model
       }
       // fix-round-1 Minor 4: THROWS (rejects) rather than resolving with a failure-shaped string —

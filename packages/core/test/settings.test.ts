@@ -1,10 +1,21 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialAuthModeSetting, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert } from "../src/settings";
-import { DEFAULT_CODEX_MODEL } from "../src/providers/codex-config";
+import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert, DEFAULT_PROVIDER, pinsFor } from "../src/settings";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
+import { UNSTATED_TAG, type ModelTag } from "../src/runtime-sdk/model-tag";
+
+// WS-20: the pre-migration default bare id — used ONLY inside a raw v2 (or v1) fixture that
+// exercises `loadSettings`'s OWN migration; every v3 fixture below uses `DEFAULT_PROVIDER.model`
+// (a tag) instead. `DEFAULT_CODEX_MODEL` itself is deleted along with `CODEX_MODELS`.
+const LEGACY_DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
+
+/** A plain test literal known to be tag-shaped, asserted as `ModelTag` for `toEqual`/`toBe` against
+ *  a branded field — these fixtures are hand-written to already be valid tags, so this is a type
+ *  assertion, never a runtime validation (mirrors every other test file's identical `tag()` helper
+ *  under this arc). */
+const tag = (s: string): ModelTag => s as ModelTag;
 
 function tmpSettings(content: unknown): string {
   const p = join(mkdtempSync(join(tmpdir(), "winter-set-")), "settings.json");
@@ -13,17 +24,54 @@ function tmpSettings(content: unknown): string {
 }
 
 describe("loadSettings", () => {
-  test("migrates schemaVersion 1 → 2 with codex-oauth default and persists", () => {
+  // WS-20 (review round 2, M5): `loadSettings`'s migration is now IN-MEMORY ONLY by default
+  // (`persistMigration` defaults to `false`) — the daemon boot hook is the only caller that opts in
+  // (with presence in hand); every other caller (the CLI, every test below that doesn't pass
+  // `persistMigration: true`) gets the SAME migrated `Settings` object back, but the file on disk is
+  // left exactly as found.
+  test("migrates schemaVersion 1 → 3 with codex-oauth default IN MEMORY, without persistMigration", () => {
     const p = tmpSettings({ schemaVersion: 1 });
     const s = loadSettings(p);
-    expect(s.schemaVersion).toBe(2);
-    expect(s.provider).toEqual({ type: "codex-oauth", model: DEFAULT_CODEX_MODEL }); // gpt-5.4 fully deprecated — default points at the current model
-    expect(JSON.parse(readFileSync(p, "utf8")).schemaVersion).toBe(2); // migration persisted
+    expect(s.schemaVersion).toBe(3);
+    expect(s.provider).toEqual(DEFAULT_PROVIDER); // gpt-5.4 fully deprecated — default points at the current tag
+    expect(JSON.parse(readFileSync(p, "utf8")).schemaVersion).toBe(1); // NOT persisted — this is the "CLI path"
   });
 
-  test("valid v2 settings load as-is", () => {
-    const p = tmpSettings({ schemaVersion: 2, provider: { type: "openai-compatible", model: "gpt-5.2", baseUrl: "https://api.openai.com/v1" } });
-    expect(loadSettings(p).provider.type).toBe("openai-compatible");
+  test("migrates schemaVersion 1 → 3 AND persists, given persistMigration: true (the daemon-boot path)", () => {
+    const p = tmpSettings({ schemaVersion: 1 });
+    const s = loadSettings(p, { persistMigration: true });
+    expect(s.schemaVersion).toBe(3);
+    expect(s.provider).toEqual(DEFAULT_PROVIDER);
+    expect(JSON.parse(readFileSync(p, "utf8")).schemaVersion).toBe(3); // migration persisted
+  });
+
+  // WS-20 (spec §5 rule 3): a v2 `openai-compatible` provider migrates to an `openai/` tag, and
+  // its `baseUrl` moves into the sibling `providers.openai.baseUrl` block.
+  test("v2 openai-compatible settings migrate to v3: openai/ tag + providers.openai.baseUrl", () => {
+    const p = tmpSettings({ schemaVersion: 2, provider: { type: "openai-compatible", model: "gpt-5.6-sol", baseUrl: "https://api.openai.com/v1" } });
+    const s = loadSettings(p);
+    expect(s.schemaVersion).toBe(3);
+    expect(s.provider).toEqual({ model: tag("openai/gpt-5.6-sol") });
+    expect(s.providers?.openai?.baseUrl).toBe("https://api.openai.com/v1");
+    // In-memory only by default — no backup and no persisted v3 file (the "CLI path").
+    expect(existsSync(`${p}.bak-pre-ws20`)).toBe(false);
+    expect(JSON.parse(readFileSync(p, "utf8")).schemaVersion).toBe(2);
+  });
+
+  test("v2 openai-compatible settings, given persistMigration: true, back up the pre-migration file once (spec §5)", () => {
+    const p = tmpSettings({ schemaVersion: 2, provider: { type: "openai-compatible", model: "gpt-5.6-sol", baseUrl: "https://api.openai.com/v1" } });
+    const s = loadSettings(p, { persistMigration: true });
+    expect(s.schemaVersion).toBe(3);
+    expect(existsSync(`${p}.bak-pre-ws20`)).toBe(true);
+    expect(JSON.parse(readFileSync(p, "utf8")).schemaVersion).toBe(3);
+  });
+
+  // WS-20 (review round 2, nit h): a FRESH schemaVersion-1 home never had real provider info to
+  // lose — the backup must never fire for it, with or without persistMigration.
+  test("nit(h): a fresh schemaVersion-1 home is never backed up, even with persistMigration: true", () => {
+    const p = tmpSettings({ schemaVersion: 1 });
+    loadSettings(p, { persistMigration: true });
+    expect(existsSync(`${p}.bak-pre-ws20`)).toBe(false);
   });
 
   // SP-approvals T10 (spec §7): permissions.dangerousDomains.added — the user-added half of
@@ -32,7 +80,7 @@ describe("loadSettings", () => {
   test("permissions.dangerousDomains.added round-trips through the schema", () => {
     const p = tmpSettings({
       schemaVersion: 2,
-      provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL },
+      provider: { type: "codex-oauth", model: LEGACY_DEFAULT_CODEX_MODEL },
       permissions: { dangerousDomains: { added: ["evil-example.net", "exfil.example.org"] } },
     });
     const s = loadSettings(p);
@@ -40,14 +88,14 @@ describe("loadSettings", () => {
   });
 
   test("permissions.dangerousDomains absent is valid (no user additions)", () => {
-    const p = tmpSettings({ schemaVersion: 2, provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } });
+    const p = tmpSettings({ schemaVersion: 2, provider: { type: "codex-oauth", model: LEGACY_DEFAULT_CODEX_MODEL } });
     expect(loadSettings(p).permissions?.dangerousDomains).toBeUndefined();
   });
 
   test("permissions.dangerousDomains.added rejects a non-array value", () => {
     const p = tmpSettings({
       schemaVersion: 2,
-      provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL },
+      provider: { type: "codex-oauth", model: LEGACY_DEFAULT_CODEX_MODEL },
       permissions: { dangerousDomains: { added: "not-an-array" } },
     });
     expect(() => loadSettings(p)).toThrow(/settings/);
@@ -62,26 +110,35 @@ describe("loadSettings", () => {
     expect(() => loadSettings(join(mkdtempSync(join(tmpdir(), "winter-set-")), "settings.json"))).toThrow(/winter daemon run/);
   });
 
-  test("legacy v1-app settings (no schemaVersion) migrate, preserving v1 keys", () => {
+  test("legacy v1-app settings (no schemaVersion) migrate, preserving v1 keys — in the PARSED result and, given persistMigration: true, on disk", () => {
     const p = tmpSettings({ legacyCustom: { provider: "disabled" } });
-    const s = loadSettings(p);
-    expect(s.schemaVersion).toBe(2);
-    expect(s.provider.type).toBe("codex-oauth");
+    const s = loadSettings(p, { persistMigration: true });
+    expect(s.schemaVersion).toBe(3);
+    expect(s.provider.model).toBe(DEFAULT_PROVIDER.model);
     const onDisk = JSON.parse(readFileSync(p, "utf8"));
     expect(onDisk.legacyCustom).toEqual({ provider: "disabled" }); // v1 data preserved on disk
-    expect(onDisk.schemaVersion).toBe(2);
+    expect(onDisk.schemaVersion).toBe(3);
   });
 
-  test("v1→v2 migration preserves unknown fields on disk", () => {
+  test("without persistMigration, a legacy v1-app file migrates in the PARSED result only — nothing written", () => {
+    const p = tmpSettings({ legacyCustom: { provider: "disabled" } });
+    const s = loadSettings(p);
+    expect(s.schemaVersion).toBe(3);
+    expect(s.provider.model).toBe(DEFAULT_PROVIDER.model);
+    const onDisk = JSON.parse(readFileSync(p, "utf8"));
+    expect(onDisk.schemaVersion).toBeUndefined(); // untouched — the original v1 fixture has none
+  });
+
+  test("v1→v2 migration preserves unknown fields on disk, given persistMigration: true", () => {
     const p = tmpSettings({ schemaVersion: 1, custom: true });
-    loadSettings(p);
+    loadSettings(p, { persistMigration: true });
     expect(JSON.parse(readFileSync(p, "utf8")).custom).toBe(true);
   });
 
-  test("v1→v2 migration preserves a permissions block in the parsed result", () => {
+  test("v1→v2 migration preserves a permissions block in the parsed result, and on disk given persistMigration: true", () => {
     const p = tmpSettings({ schemaVersion: 1, permissions: { additionalDirectories: ["~/kept", "/opt/kept"] } });
-    const s = loadSettings(p);
-    expect(s.schemaVersion).toBe(2);
+    const s = loadSettings(p, { persistMigration: true });
+    expect(s.schemaVersion).toBe(3);
     expect(s.permissions?.additionalDirectories).toEqual(["~/kept", "/opt/kept"]);
     // and on disk:
     const onDisk = JSON.parse(require("node:fs").readFileSync(p, "utf8"));
@@ -91,33 +148,33 @@ describe("loadSettings", () => {
   test("legacy no-schemaVersion file with permissions migrates and keeps them", () => {
     const p = tmpSettings({ legacyCustom: { provider: "disabled" }, permissions: { additionalDirectories: ["/opt/x"] } });
     const s = loadSettings(p);
-    expect(s.schemaVersion).toBe(2);
+    expect(s.schemaVersion).toBe(3);
     expect(s.permissions?.additionalDirectories).toEqual(["/opt/x"]);
   });
 
   test("mcpServers parses; absent → undefined; legacy migration keeps working", () => {
-    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, mcpServers: { everything: { command: "npx", args: ["-y", "@modelcontextprotocol/server-everything"], env: { X: "1" } } } });
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, mcpServers: { everything: { command: "npx", args: ["-y", "@modelcontextprotocol/server-everything"], env: { X: "1" } } } });
     if (!s.mcpServers) throw new Error("mcpServers must be defined");
     expect(s.mcpServers["everything"]?.command).toBe("npx");
-    const none = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" } });
+    const none = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } });
     expect(none.mcpServers).toBeUndefined();
   });
 
   test("reviewer config parses; absent → undefined", () => {
-    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, reviewer: { enabled: true, model: "gpt-5.4-mini", allow: ["git status"] } });
-    expect(s.reviewer).toEqual({ enabled: true, model: "gpt-5.4-mini", allow: ["git status"] });
-    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" } }).reviewer).toBeUndefined();
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, reviewer: { enabled: true, model: "codex-oauth/gpt-5.4-mini", allow: ["git status"] } });
+    expect(s.reviewer).toEqual({ enabled: true, model: tag("codex-oauth/gpt-5.4-mini"), allow: ["git status"] });
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } }).reviewer).toBeUndefined();
   });
 
   test("legacy migration keeps working with reviewer field absent", () => {
     const p = tmpSettings({ legacyCustom: { provider: "disabled" } });
     const s = loadSettings(p);
-    expect(s.schemaVersion).toBe(2);
+    expect(s.schemaVersion).toBe(3);
     expect(s.reviewer).toBeUndefined();
   });
 
   // Phase 5e T4: reviewer.classes — additive per-class on/off, subordinate to reviewer.enabled.
-  const base54 = { schemaVersion: 2 as const, provider: { type: "codex-oauth" as const, model: "gpt-5.4" } };
+  const base54 = { schemaVersion: 3 as const, provider: { model: "codex-oauth/gpt-5.4" } };
 
   test("reviewer.classes parses all three booleans; absent block/field → undefined", () => {
     const s = Settings.parse({ ...base54, reviewer: { classes: { bash: false, fs: true, external: false } } });
@@ -152,84 +209,84 @@ describe("loadSettings", () => {
   test("legacy migration keeps working with reviewer.classes absent", () => {
     const p = tmpSettings({ legacyCustom: { provider: "disabled" } });
     const s = loadSettings(p);
-    expect(s.schemaVersion).toBe(2);
+    expect(s.schemaVersion).toBe(3);
     expect(s.reviewer?.classes).toBeUndefined();
   });
 
   test("plugins config parses; absent → undefined", () => {
-    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, plugins: { enabled: ["a"], disabled: ["b"] } });
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, plugins: { enabled: ["a"], disabled: ["b"] } });
     expect(s.plugins).toEqual({ enabled: ["a"], disabled: ["b"] });
-    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" } }).plugins).toBeUndefined();
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } }).plugins).toBeUndefined();
   });
 
   test("legacy migration keeps working with plugins field absent", () => {
     const p = tmpSettings({ legacyCustom: { provider: "disabled" } });
     const s = loadSettings(p);
-    expect(s.schemaVersion).toBe(2);
+    expect(s.schemaVersion).toBe(3);
     expect(s.plugins).toBeUndefined();
   });
 
   test("toolSearch config parses; absent → undefined", () => {
-    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, toolSearch: { enabled: true, deferThreshold: 20 } });
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, toolSearch: { enabled: true, deferThreshold: 20 } });
     expect(s.toolSearch).toEqual({ enabled: true, deferThreshold: 20 });
-    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" } }).toolSearch).toBeUndefined();
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } }).toolSearch).toBeUndefined();
   });
 
   test("toolSearch.deferExternals parses 'count'/'always'; absent → undefined; bad value rejected", () => {
-    const count = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, toolSearch: { deferExternals: "count" } });
+    const count = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, toolSearch: { deferExternals: "count" } });
     expect(count.toolSearch).toEqual({ deferExternals: "count" });
-    const always = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, toolSearch: { enabled: true, deferThreshold: 20, deferExternals: "always" } });
+    const always = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, toolSearch: { enabled: true, deferThreshold: 20, deferExternals: "always" } });
     expect(always.toolSearch).toEqual({ enabled: true, deferThreshold: 20, deferExternals: "always" });
-    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, toolSearch: {} }).toolSearch?.deferExternals).toBeUndefined();
-    expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, toolSearch: { deferExternals: "sometimes" } })).toThrow();
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, toolSearch: {} }).toolSearch?.deferExternals).toBeUndefined();
+    expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, toolSearch: { deferExternals: "sometimes" } })).toThrow();
   });
 
   test("legacy migration keeps working with toolSearch field absent", () => {
     const p = tmpSettings({ legacyCustom: { provider: "disabled" } });
     const s = loadSettings(p);
-    expect(s.schemaVersion).toBe(2);
+    expect(s.schemaVersion).toBe(3);
     expect(s.toolSearch).toBeUndefined();
   });
 
   test("worktree config parses; absent → undefined; bad baseRef rejected", () => {
-    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, worktree: { baseRef: "fresh" } });
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, worktree: { baseRef: "fresh" } });
     expect(s.worktree).toEqual({ baseRef: "fresh" });
-    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" } }).worktree).toBeUndefined();
-    expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, worktree: { baseRef: "bogus" } })).toThrow();
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } }).worktree).toBeUndefined();
+    expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, worktree: { baseRef: "bogus" } })).toThrow();
   });
 
   test("legacy migration keeps working with worktree field absent", () => {
     const p = tmpSettings({ legacyCustom: { provider: "disabled" } });
     const s = loadSettings(p);
-    expect(s.schemaVersion).toBe(2);
+    expect(s.schemaVersion).toBe(3);
     expect(s.worktree).toBeUndefined();
   });
 
   test("subagents config parses; absent → undefined; non-positive maxConcurrent rejected", () => {
-    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, subagents: { maxConcurrent: 2 } });
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, subagents: { maxConcurrent: 2 } });
     expect(s.subagents).toEqual({ maxConcurrent: 2 });
-    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" } }).subagents).toBeUndefined();
-    expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, subagents: { maxConcurrent: 0 } })).toThrow();
-    expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, subagents: { maxConcurrent: -1 } })).toThrow();
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } }).subagents).toBeUndefined();
+    expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, subagents: { maxConcurrent: 0 } })).toThrow();
+    expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, subagents: { maxConcurrent: -1 } })).toThrow();
   });
 
   // 4h-i Task 3: subagents.maxDepth — CC parity (CC allows nesting depth up to 5; Winter's engine
   // defaults to 2 when this is unset — see engine.ts's `subagentMaxDepth ?? 2`).
   test("subagents.maxDepth parses (1-5 inclusive); absent → undefined; out-of-range/non-integer rejected", () => {
-    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, subagents: { maxDepth: 3 } });
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, subagents: { maxDepth: 3 } });
     expect(s.subagents).toEqual({ maxDepth: 3 });
-    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" } }).subagents).toBeUndefined();
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } }).subagents).toBeUndefined();
 
     // boundaries: 1 and 5 both accepted
-    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, subagents: { maxDepth: 1 } }).subagents).toEqual({ maxDepth: 1 });
-    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, subagents: { maxDepth: 5 } }).subagents).toEqual({ maxDepth: 5 });
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, subagents: { maxDepth: 1 } }).subagents).toEqual({ maxDepth: 1 });
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, subagents: { maxDepth: 5 } }).subagents).toEqual({ maxDepth: 5 });
 
-    expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, subagents: { maxDepth: 0 } })).toThrow();
-    expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, subagents: { maxDepth: 6 } })).toThrow();
-    expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, subagents: { maxDepth: 2.5 } })).toThrow();
+    expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, subagents: { maxDepth: 0 } })).toThrow();
+    expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, subagents: { maxDepth: 6 } })).toThrow();
+    expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, subagents: { maxDepth: 2.5 } })).toThrow();
 
     // maxConcurrent and maxDepth coexist independently within the same subagents block
-    const both = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, subagents: { maxConcurrent: 2, maxDepth: 4 } });
+    const both = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, subagents: { maxConcurrent: 2, maxDepth: 4 } });
     expect(both.subagents).toEqual({ maxConcurrent: 2, maxDepth: 4 });
   });
 
@@ -238,7 +295,7 @@ describe("loadSettings", () => {
   // the progress-stall watchdog window (ABSENT = the manager's 600000 default). Both hot via
   // daemon.ts's live getters.
   test("subagents.timeoutMs + stallTimeoutMs parse (positive ints); absent → undefined (no wall clock / stall default); zero/negative/non-integer rejected", () => {
-    const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" } };
+    const base = { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } };
 
     const s = Settings.parse({ ...base, subagents: { timeoutMs: 300000, stallTimeoutMs: 900000 } });
     expect(s.subagents).toEqual({ timeoutMs: 300000, stallTimeoutMs: 900000 });
@@ -265,42 +322,42 @@ describe("loadSettings", () => {
   test("legacy migration keeps working with subagents field absent", () => {
     const p = tmpSettings({ legacyCustom: { provider: "disabled" } });
     const s = loadSettings(p);
-    expect(s.schemaVersion).toBe(2);
+    expect(s.schemaVersion).toBe(3);
     expect(s.subagents).toBeUndefined();
   });
 
   // 4g Task 6: webSearch.provider defaults (unset) to Brave; "brave" is the only accepted literal
   // today (forward-room for other backends later).
   test("webSearch config parses; absent → undefined; non-brave provider rejected", () => {
-    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, webSearch: { provider: "brave" } });
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, webSearch: { provider: "brave" } });
     expect(s.webSearch).toEqual({ provider: "brave" });
-    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" } }).webSearch).toBeUndefined();
-    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, webSearch: {} }).webSearch).toEqual({});
-    expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, webSearch: { provider: "disabled" } })).toThrow();
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } }).webSearch).toBeUndefined();
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, webSearch: {} }).webSearch).toEqual({});
+    expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, webSearch: { provider: "disabled" } })).toThrow();
   });
 
   test("legacy migration keeps working with webSearch field absent", () => {
     const p = tmpSettings({ legacyCustom: { provider: "disabled" } });
     const s = loadSettings(p);
-    expect(s.schemaVersion).toBe(2);
+    expect(s.schemaVersion).toBe(3);
     expect(s.webSearch).toBeUndefined();
   });
 
   test("provider.reasoningEffort parses on both provider variants; absent → undefined", () => {
-    const codex = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: "high" } });
+    const codex = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol", reasoningEffort: "high" } });
     expect(codex.provider.reasoningEffort).toBe("high");
-    const openai = Settings.parse({ schemaVersion: 2, provider: { type: "openai-compatible", model: "gpt-5.2", baseUrl: "https://x", reasoningEffort: "xhigh" } });
+    const openai = Settings.parse({ schemaVersion: 3, provider: { model: "openai/gpt-5.2", reasoningEffort: "xhigh" }, providers: { openai: { baseUrl: "https://x" } } });
     expect(openai.provider.reasoningEffort).toBe("xhigh");
-    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } }).provider.reasoningEffort).toBeUndefined();
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } }).provider.reasoningEffort).toBeUndefined();
   });
 
   test("every documented reasoning-effort slug parses; an invalid slug is rejected", () => {
     expect(REASONING_EFFORTS).toEqual(["none", "low", "medium", "high", "xhigh", "max"]);
     for (const effort of REASONING_EFFORTS) {
-      const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: effort } });
+      const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol", reasoningEffort: effort } });
       expect(s.provider.reasoningEffort).toBe(effort);
     }
-    expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: "bogus" } })).toThrow();
+    expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol", reasoningEffort: "bogus" } })).toThrow();
   });
 
   // Task 1 (provider-correctness, 2026-07-31): pins the live bug this task exists to fix.
@@ -317,15 +374,15 @@ describe("loadSettings", () => {
   test("ultra must never be wire-valid again; none must always be (the live 400 this task fixes)", () => {
     expect(REASONING_EFFORTS as readonly string[]).not.toContain("ultra");
     expect(REASONING_EFFORTS as readonly string[]).toContain("none");
-    expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: "ultra" } })).toThrow();
-    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: "none" } });
+    expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol", reasoningEffort: "ultra" } })).toThrow();
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol", reasoningEffort: "none" } });
     expect(s.provider.reasoningEffort).toBe("none");
 
     // The actual `winter model --effort ultra` path: setReasoningEffort + saveSettings (which
     // validates before writing). Before this task's fix, this round-trip SUCCEEDED and wrote
     // "ultra" to settings.json on disk — exactly the write that then 400s every session's next
     // turn against the live endpoint.
-    const p = tmpSettings({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } });
+    const p = tmpSettings({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } });
     expect(() => saveSettings(p, setReasoningEffort(loadSettings(p), "ultra" as any))).toThrow();
   });
 
@@ -352,7 +409,7 @@ describe("loadSettings", () => {
     // for the sessions that inherit it), so the settings schema keeps refusing it — the Task 1 fix
     // is untouched by this task.
     for (const tier of CLIENT_EFFORTS) {
-      expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: tier } })).toThrow();
+      expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol", reasoningEffort: tier } })).toThrow();
     }
   });
 
@@ -386,60 +443,60 @@ describe("loadSettings", () => {
   });
 
   test("hooks config parses; absent → undefined", () => {
-    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, hooks: { enabled: false } });
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, hooks: { enabled: false } });
     expect(s.hooks).toEqual({ enabled: false });
-    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" } }).hooks).toBeUndefined();
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } }).hooks).toBeUndefined();
   });
 
   test("legacy migration keeps working with hooks field absent", () => {
     const p = tmpSettings({ legacyCustom: { provider: "disabled" } });
     const s = loadSettings(p);
-    expect(s.schemaVersion).toBe(2);
+    expect(s.schemaVersion).toBe(3);
     expect(s.hooks).toBeUndefined();
   });
 
   // Phase 5f Task 4: lsp.enabled/idleShutdownMs — mirrors hooks/toolSearch/subagents' own
   // optional-nested-block shape (unknown keys stripped, wrong-typed known keys throw).
   test("lsp config parses (both fields); absent block → undefined", () => {
-    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, lsp: { enabled: false, idleShutdownMs: 60_000 } });
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, lsp: { enabled: false, idleShutdownMs: 60_000 } });
     expect(s.lsp).toEqual({ enabled: false, idleShutdownMs: 60_000 });
-    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" } }).lsp).toBeUndefined();
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } }).lsp).toBeUndefined();
   });
 
   test("lsp: a partial object (one field set) round-trips exactly — the other field stays absent, not defaulted-in at the settings layer", () => {
-    const enabledOnly = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, lsp: { enabled: true } });
+    const enabledOnly = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, lsp: { enabled: true } });
     expect(enabledOnly.lsp).toEqual({ enabled: true });
     expect(enabledOnly.lsp).not.toHaveProperty("idleShutdownMs");
-    const idleOnly = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, lsp: { idleShutdownMs: 1000 } });
+    const idleOnly = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, lsp: { idleShutdownMs: 1000 } });
     expect(idleOnly.lsp).toEqual({ idleShutdownMs: 1000 });
     expect(idleOnly.lsp).not.toHaveProperty("enabled");
-    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, lsp: {} }).lsp).toEqual({});
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, lsp: {} }).lsp).toEqual({});
   });
 
   test("lsp: an unrecognized key inside the block is tolerated — stripped like every other zod object here, never rejects the whole settings file", () => {
-    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, lsp: { enabled: true, maxWorkers: 4 } });
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, lsp: { enabled: true, maxWorkers: 4 } });
     expect(s.lsp).toEqual({ enabled: true });
     expect(s.lsp).not.toHaveProperty("maxWorkers");
   });
 
   test("lsp: a wrong-typed known key throws (same idiom as subagents.maxConcurrent / worktree.baseRef)", () => {
-    expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, lsp: { enabled: "yes" } })).toThrow();
-    expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, lsp: { idleShutdownMs: -1 } })).toThrow();
-    expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, lsp: { idleShutdownMs: 0 } })).toThrow();
-    expect(() => Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, lsp: { idleShutdownMs: "60000" } })).toThrow();
+    expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, lsp: { enabled: "yes" } })).toThrow();
+    expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, lsp: { idleShutdownMs: -1 } })).toThrow();
+    expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, lsp: { idleShutdownMs: 0 } })).toThrow();
+    expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, lsp: { idleShutdownMs: "60000" } })).toThrow();
   });
 
   test("legacy migration keeps working with lsp field absent", () => {
     const p = tmpSettings({ legacyCustom: { provider: "disabled" } });
     const s = loadSettings(p);
-    expect(s.schemaVersion).toBe(2);
+    expect(s.schemaVersion).toBe(3);
     expect(s.lsp).toBeUndefined();
   });
 
   // Sparkle T5: updates.channel — beta/stable auto-update channel, read live by the app at
   // each check (no daemon restart needed — see UpdaterCoordinator.readChannelFromSettings()).
   test("updates.channel accepts stable/beta/absent and rejects junk", () => {
-    const base = { schemaVersion: 2 as const, provider: { type: "codex-oauth" as const, model: "gpt-5.4" } };
+    const base = { schemaVersion: 3 as const, provider: { model: "codex-oauth/gpt-5.4" } };
     expect(Settings.safeParse({ ...base, updates: { channel: "beta" } }).success).toBe(true);
     expect(Settings.safeParse({ ...base, updates: { channel: "stable" } }).success).toBe(true);
     expect(Settings.safeParse({ ...base, updates: {} }).success).toBe(true);
@@ -451,28 +508,28 @@ describe("loadSettings", () => {
   // known keys throw); default-ON semantics for each flag are covered separately below
   // (workflowsEnabledFrom/keywordTriggerEnabledFrom).
   test("workflows config parses; absent → undefined", () => {
-    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, workflows: { enabled: false, keywordTrigger: true } });
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, workflows: { enabled: false, keywordTrigger: true } });
     expect(s.workflows).toEqual({ enabled: false, keywordTrigger: true });
-    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" } }).workflows).toBeUndefined();
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } }).workflows).toBeUndefined();
   });
 });
 
 describe("workflowsEnabledFrom / keywordTriggerEnabledFrom (Task B1: workflows.{enabled,keywordTrigger} default-ON semantics)", () => {
   test("workflows key parses; both flags default ON when absent", () => {
-    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } });
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } });
     expect(workflowsEnabledFrom(s)).toBe(true);
     expect(keywordTriggerEnabledFrom(s)).toBe(true);
   });
 
   test("explicit false disables each independently", () => {
-    const s = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" }, workflows: { enabled: false, keywordTrigger: true } });
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" }, workflows: { enabled: false, keywordTrigger: true } });
     expect(workflowsEnabledFrom(s)).toBe(false);
     expect(keywordTriggerEnabledFrom(s)).toBe(true);
   });
 });
 
 describe("hooksEnabledFrom (4f: hooks.enabled default-ON semantics)", () => {
-  const base = { schemaVersion: 2 as const, provider: { type: "codex-oauth" as const, model: "gpt-5.4" } };
+  const base = { schemaVersion: 3 as const, provider: { model: "codex-oauth/gpt-5.4" } };
 
   test("hooks block absent → enabled", () => {
     expect(hooksEnabledFrom(Settings.parse(base))).toBe(true);
@@ -492,7 +549,7 @@ describe("hooksEnabledFrom (4f: hooks.enabled default-ON semantics)", () => {
 });
 
 describe("cleanerEnabledFrom (session-activity-hygiene T7: cleaner.enabled default-ON semantics)", () => {
-  const base = { schemaVersion: 2 as const, provider: { type: "codex-oauth" as const, model: "gpt-5.4" } };
+  const base = { schemaVersion: 3 as const, provider: { model: "codex-oauth/gpt-5.4" } };
 
   test("cleaner block absent → enabled", () => {
     expect(cleanerEnabledFrom(Settings.parse(base))).toBe(true);
@@ -512,7 +569,7 @@ describe("cleanerEnabledFrom (session-activity-hygiene T7: cleaner.enabled defau
 
   test("the flag round-trips through a real settings.json (the watcher's own read path)", () => {
     const p = join(mkdtempSync(join(tmpdir(), "winter-cleaner-settings-")), "settings.json");
-    saveSettings(p, { ...base, cleaner: { enabled: false } });
+    saveSettings(p, Settings.parse({ ...base, cleaner: { enabled: false } }));
     expect(cleanerEnabledFrom(loadSettings(p))).toBe(false);
   });
 });
@@ -520,49 +577,62 @@ describe("cleanerEnabledFrom (session-activity-hygiene T7: cleaner.enabled defau
 describe("saveSettings", () => {
   test("writes a file that loadSettings round-trips", () => {
     const p = join(mkdtempSync(join(tmpdir(), "winter-save-")), "settings.json");
-    const s: Settings = { schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, plugins: { enabled: ["a"] } };
+    const s: Settings = { schemaVersion: 3, provider: { model: tag("codex-oauth/gpt-5.4") }, plugins: { enabled: ["a"] } };
     saveSettings(p, s);
     expect(loadSettings(p)).toEqual(s);
   });
 
   test("throws on an invalid object (bad schemaVersion) and does not write", () => {
     const p = join(mkdtempSync(join(tmpdir(), "winter-save-")), "settings.json");
-    expect(() => saveSettings(p, { schemaVersion: 1, provider: { type: "codex-oauth", model: "gpt-5.4" } } as unknown as Settings)).toThrow();
+    expect(() => saveSettings(p, { schemaVersion: 1, provider: { model: "codex-oauth/gpt-5.4" } } as unknown as Settings)).toThrow();
   });
 });
 
 describe("setProviderModel / setReasoningEffort (winter model CLI's pure transforms)", () => {
   test("setProviderModel changes only provider.model, preserving every other field", () => {
-    const s: Settings = { schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: "high" }, plugins: { enabled: ["a"] } };
-    const next = setProviderModel(s, "gpt-5.6-luna");
-    expect(next.provider).toEqual({ type: "codex-oauth", model: "gpt-5.6-luna", reasoningEffort: "high" });
+    const s: Settings = { schemaVersion: 3, provider: { model: tag("codex-oauth/gpt-5.6-sol"), reasoningEffort: "high" }, plugins: { enabled: ["a"] } };
+    const next = setProviderModel(s, tag("codex-oauth/gpt-5.6-luna"));
+    expect(next.provider).toEqual({ model: tag("codex-oauth/gpt-5.6-luna"), reasoningEffort: "high" });
     expect(next.plugins).toEqual({ enabled: ["a"] });
   });
 
-  test("setProviderModel preserves openai-compatible's baseUrl", () => {
-    const s: Settings = { schemaVersion: 2, provider: { type: "openai-compatible", model: "gpt-5.2", baseUrl: "https://x" } };
-    const next = setProviderModel(s, "gpt-5.9");
-    expect(next.provider).toEqual({ type: "openai-compatible", model: "gpt-5.9", baseUrl: "https://x" });
+  test("setProviderModel changes provider even across providers (openai)", () => {
+    const s: Settings = { schemaVersion: 3, provider: { model: tag("openai/gpt-5.2") }, providers: { openai: { baseUrl: "https://x" } } };
+    const next = setProviderModel(s, tag("openai/gpt-5.9"));
+    expect(next.provider).toEqual({ model: tag("openai/gpt-5.9") });
+    expect(next.providers).toEqual({ openai: { baseUrl: "https://x" } }); // untouched — a sibling block
   });
 
   test("setReasoningEffort sets/clears provider.reasoningEffort, preserving model", () => {
-    const s: Settings = { schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } };
+    const s: Settings = { schemaVersion: 3, provider: { model: tag("codex-oauth/gpt-5.6-sol") } };
     const withEffort = setReasoningEffort(s, "xhigh");
-    expect(withEffort.provider).toEqual({ type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: "xhigh" });
+    expect(withEffort.provider).toEqual({ model: tag("codex-oauth/gpt-5.6-sol"), reasoningEffort: "xhigh" });
     const cleared = setReasoningEffort(withEffort, undefined);
-    expect(cleared.provider.model).toBe("gpt-5.6-sol");
+    expect(cleared.provider.model).toBe(tag("codex-oauth/gpt-5.6-sol"));
     expect(cleared.provider.reasoningEffort).toBeUndefined();
   });
 
   test("both transforms produce Settings.parse-valid output", () => {
-    const s: Settings = { schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } };
-    expect(() => Settings.parse(setReasoningEffort(setProviderModel(s, "gpt-5.6-terra"), "max"))).not.toThrow();
+    const s: Settings = { schemaVersion: 3, provider: { model: tag("codex-oauth/gpt-5.6-sol") } };
+    expect(() => Settings.parse(setReasoningEffort(setProviderModel(s, tag("codex-oauth/gpt-5.6-terra")), "max"))).not.toThrow();
+  });
+
+  // WS-20 (review round 4): `setProviderModel` is UNCONSTRAINED again — a round-2 gate to
+  // `INTERNAL_PROVIDER_IDS` lived here briefly and broke a real "my default chat model is Claude"
+  // scenario (a SESSION's own default falls back to THIS field too, not just the daemon's internal
+  // Provider — session-driver.ts's create()). The constraint now lives only where the internal
+  // Provider is actually built (`createProvider`, which answers `null` rather than a refusal).
+  test("R4: setProviderModel accepts any catalog provider, including one the internal Provider cannot serve", () => {
+    const s: Settings = { schemaVersion: 3, provider: { model: tag("codex-oauth/gpt-5.6-sol") } };
+    const next = setProviderModel(s, tag("anthropic/claude-sonnet-5"));
+    expect(next.provider.model).toBe(tag("anthropic/claude-sonnet-5"));
+    expect(() => Settings.parse(next)).not.toThrow();
   });
 });
 
 describe("setOutputStyle (CC-parity output styles: the active style name)", () => {
   test("setOutputStyle sets and clears the key, preserving other fields", () => {
-    const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: "x" } } as any;
+    const base = { schemaVersion: 3, provider: { model: "codex-oauth/x" } } as any;
     const set = setOutputStyle(base, "proactive");
     expect(set.outputStyle).toBe("proactive");
     expect(set.provider).toEqual(base.provider); // untouched
@@ -572,20 +642,20 @@ describe("setOutputStyle (CC-parity output styles: the active style name)", () =
 
   test("Settings accepts an outputStyle string", () => {
     const { Settings } = require("../src/settings");
-    expect(Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" }, outputStyle: "learning" }).outputStyle).toBe("learning");
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/x" }, outputStyle: "learning" }).outputStyle).toBe("learning");
   });
 });
 
 describe("permission directories", () => {
   test("Settings accepts an optional permissions.additionalDirectories block", () => {
-    const p = tmpSettings({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, permissions: { additionalDirectories: ["~/x"] } });
+    const p = tmpSettings({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, permissions: { additionalDirectories: ["~/x"] } });
     expect(loadSettings(p).permissions?.additionalDirectories).toEqual(["~/x"]);
   });
 
   test("loadPermissionDirs merges user + project + local, expands ~, dedups (trusted project)", () => {
     const home = mkdtempSync(join(tmpdir(), "winter-perm-home-"));
     const project = mkdtempSync(join(tmpdir(), "winter-perm-proj-"));
-    wf(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, permissions: { additionalDirectories: ["~/shared"] } }));
+    wf(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, permissions: { additionalDirectories: ["~/shared"] } }));
     mkdirSync(join(project, ".winter"), { recursive: true });
     wf(join(project, ".winter", "settings.json"), JSON.stringify({ permissions: { additionalDirectories: ["/opt/data", "~/shared"] } }));
     wf(join(project, ".winter", "settings.local.json"), JSON.stringify({ permissions: { additionalDirectories: ["/tmp/local-grant"] } }));
@@ -619,7 +689,7 @@ describe("loadPermissionDirs trust gating", () => {
     const home = mkdtempSync(join(tmpdir(), "winter-tg-home-"));
     const project = mkdtempSync(join(tmpdir(), "winter-tg-proj-"));
     mkdirSync(join(project, ".winter"), { recursive: true });
-    wf(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, permissions: { additionalDirectories: ["/opt/user-dir"] } }));
+    wf(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, permissions: { additionalDirectories: ["/opt/user-dir"] } }));
     wf(join(project, ".winter", "settings.json"), JSON.stringify({ permissions: { additionalDirectories: ["/opt/committed-dir"] } }));       // committed → trust-gated
     wf(join(project, ".winter", "settings.local.json"), JSON.stringify({ permissions: { additionalDirectories: ["/opt/local-dir"] } }));    // fix-wave A2: local is ALSO trust-gated now (a repo can force-commit one)
     return { home, project };
@@ -664,7 +734,7 @@ describe("loadPermissionDirs trust gating", () => {
 // settings key — a sweep reads it through a getter each pass, so changing a window never needs a
 // daemon restart.
 describe("settings.runtimes", () => {
-  const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } };
+  const base = { schemaVersion: 3 as const, provider: { model: DEFAULT_PROVIDER.model } };
 
   // The block is OPTIONAL, like every other top-level key here — a defaulted one would make
   // `runtimes` required on the inferred Settings type and would make `saveSettings` stamp today's
@@ -782,7 +852,7 @@ describe("settings.runtimes", () => {
 // (`select-runtime.ts`'s own mode gate). An explicit setting always overrides the mode-aware
 // default, in every mode.
 describe("handoffCrossRuntimeEnabled", () => {
-  const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } };
+  const base = { schemaVersion: 3 as const, provider: { model: DEFAULT_PROVIDER.model } };
 
   test("null/undefined settings (a boot-degraded daemon) fall back to the mode-aware default, never a throw", () => {
     expect(handoffCrossRuntimeEnabled(null)).toBe(true); // omitted mode reads as Code
@@ -820,23 +890,20 @@ describe("handoffCrossRuntimeEnabled", () => {
   });
 });
 
-// Winter Phase 10a (P10a-3): the official leg's auth-family selector setting. Same "absent means
-// the default, read live, never a boot snapshot" shape as `handoffCrossRuntimeEnabled` above.
-describe("runtimes.official.auth schema", () => {
-  const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } };
+// WS-20: `runtimes.official.auth` (and its reader `officialAuthModeSetting`) is REMOVED, not
+// deprecated — the official leg's auth arm is now the tag's own prefix
+// (`officialAuthArmFor(selection)`, official-options.ts). `subscriptionAuth` stays, orthogonal to
+// which arm.
+describe("runtimes.official schema (WS-20: auth is gone)", () => {
+  const base = { schemaVersion: 3 as const, provider: { model: DEFAULT_PROVIDER.model } };
 
-  test("absent runtimes.official block defaults auth to \"auto\" once official is present", () => {
-    expect(Settings.parse({ ...base, runtimes: { official: {} } }).runtimes?.official?.auth).toBe("auto");
+  test("runtimes.official.auth is gone", () => {
+    expect(() => Settings.parse({ ...base, runtimes: { official: { auth: "console" } } })).toThrow();
   });
 
-  test("accepts the three literal values", () => {
-    for (const v of ["auto", "api-key", "console"] as const) {
-      expect(Settings.parse({ ...base, runtimes: { official: { auth: v } } }).runtimes?.official?.auth).toBe(v);
-    }
-  });
-
-  test("an unknown value is rejected — never silently coerced to a default", () => {
-    expect(() => Settings.parse({ ...base, runtimes: { official: { auth: "subscription" } } })).toThrow();
+  test("subscriptionAuth still parses, default false", () => {
+    expect(Settings.parse({ ...base, runtimes: { official: {} } }).runtimes?.official?.subscriptionAuth).toBe(false);
+    expect(Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: true } } }).runtimes?.official?.subscriptionAuth).toBe(true);
   });
 
   test("antExecutable parses as an optional string beside winterExecutable/claudeExecutable", () => {
@@ -845,31 +912,78 @@ describe("runtimes.official.auth schema", () => {
   });
 });
 
-describe("officialAuthModeSetting", () => {
-  const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } };
-
-  test("null/undefined settings (a boot-degraded daemon) answer \"auto\", never a throw", () => {
-    expect(officialAuthModeSetting(null)).toBe("auto");
-    expect(officialAuthModeSetting(undefined)).toBe("auto");
+// WS-20 (plan Task L3.2, Step 1's exact test list).
+describe("WS-20: provider.model is a tag", () => {
+  test("provider.model is a tag; a bare id is rejected; `type` is gone (strict object)", () => {
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-terra" } }).provider.model).toBe(tag("codex-oauth/gpt-5.6-terra"));
+    expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "gpt-5.6-terra" } })).toThrow();
+    expect(() => Settings.parse({ schemaVersion: 3, provider: { type: "codex-oauth", model: "codex-oauth/gpt-5.6-terra" } })).toThrow(); // `type` is gone (strict object)
   });
 
-  test("an absent runtimes block, or an absent official block, both answer \"auto\"", () => {
-    expect(officialAuthModeSetting(Settings.parse(base))).toBe("auto");
-    expect(officialAuthModeSetting(Settings.parse({ ...base, runtimes: {} }))).toBe("auto");
+  // WS-20 (review round 4): `provider.model` accepts ANY catalog provider's tag, or `winter-test/*`
+  // — the SAME `ModelTagSchemaCore` every other model-bearing field uses. A round-2 gate
+  // (`ProviderModelTagSchema`, narrowed to `INTERNAL_PROVIDER_IDS`) lived here briefly and broke a
+  // real "my default chat model is Claude" scenario (a session with no explicit override falls
+  // back to THIS field too — session-driver.ts's `create()`, not just the daemon's internal
+  // Provider). The codex-oauth/openai constraint now lives only where the internal Provider is
+  // actually built (`createProvider`, providers/manager.ts), which answers `null` rather than
+  // refusing the write.
+  test("R4: Settings.parse accepts provider.model naming ANY catalog provider, including one the internal Provider cannot serve", () => {
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "anthropic/claude-sonnet-5" } });
+    expect(s.provider.model).toBe(tag("anthropic/claude-sonnet-5"));
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "winter-test/echo" } }).provider.model).toBe(tag("winter-test/echo"));
+  });
+});
+
+describe("WS-20: pinsFor", () => {
+  test("pins default from the provider tag's provider, per slot", () => {
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } });
+    expect(pinsFor(s)).toEqual({ dispatch: tag("codex-oauth/gpt-5.6-terra"), dream: tag("codex-oauth/gpt-5.6-terra"), cleaner: tag("codex-oauth/gpt-5.6-terra"), research: tag("codex-oauth/gpt-5.6-luna"), researchFallback: tag("codex-oauth/gpt-5.6-terra") });
+    const o = Settings.parse({ schemaVersion: 3, provider: { model: "openai/gpt-5.6-sol" }, pins: { research: "openai/gpt-5.6-luna" } });
+    expect(pinsFor(o).dispatch).toBe(tag("openai/gpt-5.6-terra"));
+    expect(pinsFor(o).research).toBe(tag("openai/gpt-5.6-luna")); // explicit override wins
   });
 
-  test("an absent auth field (official block present, subscriptionAuth-only) answers \"auto\"", () => {
-    expect(officialAuthModeSetting(Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: false } } }))).toBe("auto");
+  // WS-20 (review round 2, M6): the OLD `?? facingNameToTag("openai", slot)` fallback rung is gone
+  // — a provider that serves no gpt-family row of its own now yields UNSTATED_TAG, never a silent
+  // cross-provider guess. `provider.model` itself can no longer legitimately hold a non-internal
+  // provider tag (the ProviderSettings schema refinement enforces codex-oauth/openai only), so this
+  // fixture is hand-built (`as unknown as Settings`) rather than parsed — `pinsFor` is a pure
+  // function over the object shape, not the schema.
+  test("M6: a provider serving no gpt-family row yields UNSTATED pins, never a cross-provider guess", () => {
+    const s = { schemaVersion: 3, provider: { model: "anthropic/claude-sonnet-5" } } as unknown as Settings;
+    const p = pinsFor(s);
+    expect(p.dispatch).toBe(UNSTATED_TAG);
+    expect(p.dream).toBe(UNSTATED_TAG);
+    expect(p.cleaner).toBe(UNSTATED_TAG);
+    expect(p.research).toBe(UNSTATED_TAG);
+    expect(p.researchFallback).toBe(UNSTATED_TAG);
   });
 
-  test("reads an explicit value straight off the live settings object — no caching, no boot snapshot", () => {
-    const withApiKey = Settings.parse({ ...base, runtimes: { official: { auth: "api-key" } } });
-    const withConsole = Settings.parse({ ...base, runtimes: { official: { auth: "console" } } });
-    expect(officialAuthModeSetting(withApiKey)).toBe("api-key");
-    expect(officialAuthModeSetting(withConsole)).toBe("console");
-    // Same function, a DIFFERENT settings object each call — proves this is a pure read, never a
-    // memoized/boot-bound value (the hot-reload contract every getter in this file follows).
-    expect(officialAuthModeSetting(withApiKey)).not.toBe(officialAuthModeSetting(withConsole));
+  // WS-20 (review round 2, M6 fix — R2): a `winter-test/*` primary (provider-less; the string
+  // "winter-test" is never a pinned catalog provider) used to fall to UNSTATED_TAG the same way a
+  // real non-serving provider does — but there is no OTHER model for the double to default to, so
+  // every winter-test-primary daemon's dispatch/dream/cleaner/research refused outright. The
+  // primary tag IS the pin instead: every slot defaults to the SAME double the session runs on.
+  test("R2: a winter-test/* primary makes every pin default to the primary tag itself, never UNSTATED", () => {
+    const s = { schemaVersion: 3, provider: { model: "winter-test/echo" } } as unknown as Settings;
+    const p = pinsFor(s);
+    expect(p.dispatch).toBe(tag("winter-test/echo"));
+    expect(p.dream).toBe(tag("winter-test/echo"));
+    expect(p.cleaner).toBe(tag("winter-test/echo"));
+    expect(p.research).toBe(tag("winter-test/echo"));
+    expect(p.researchFallback).toBe(tag("winter-test/echo"));
+  });
+
+  test("R2: an explicit settings.pins.* override still wins over the winter-test/* primary default", () => {
+    const s = {
+      schemaVersion: 3,
+      provider: { model: "winter-test/echo" },
+      pins: { dispatch: "winter-test/other-double" },
+    } as unknown as Settings;
+    const p = pinsFor(s);
+    expect(p.dispatch).toBe(tag("winter-test/other-double")); // explicit wins
+    expect(p.dream).toBe(tag("winter-test/echo")); // unoverridden slots still default to the primary
   });
 });
 
@@ -877,7 +991,7 @@ describe("officialAuthModeSetting", () => {
 // lanes (Task 2's executable resolver, Task 5's create.ts, Task 9's leg + Task 16's idle timer)
 // cannot each re-derive the conventions and cannot silently forget one.
 describe("winterOptionsFromSettings", () => {
-  const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } };
+  const base = { schemaVersion: 3 as const, provider: { model: DEFAULT_PROVIDER.model } };
 
   test("an absent runtimes block answers with today's behaviour, not with undefined", () => {
     expect(winterOptionsFromSettings(Settings.parse(base))).toEqual({
@@ -921,7 +1035,7 @@ describe("winterOptionsFromSettings", () => {
 // use the function's own injectable `approved` override rather than the real constant, exactly the
 // seam the constant's own doc says tests must use.
 describe("officialSubscriptionAuthEnabled (P9c-1 amendment)", () => {
-  const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } };
+  const base = { schemaVersion: 3 as const, provider: { model: DEFAULT_PROVIDER.model } };
 
   test("null/undefined settings answer false, never a throw", () => {
     expect(officialSubscriptionAuthEnabled(null)).toBe(false);
@@ -955,7 +1069,7 @@ describe("officialSubscriptionAuthEnabled (P9c-1 amendment)", () => {
 });
 
 describe("officialSubscriptionAuthFlagInert (P9c-1 amendment)", () => {
-  const base = { schemaVersion: 2, provider: { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } };
+  const base = { schemaVersion: 3 as const, provider: { model: DEFAULT_PROVIDER.model } };
 
   test("absent/false flag is never \"inert\" — it is simply off", () => {
     expect(officialSubscriptionAuthFlagInert(null)).toBe(false);

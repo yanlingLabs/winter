@@ -39,6 +39,20 @@ describe("Compactor", () => {
     expect(res.summaryChars).toBe("SUMMARY_TOKEN".length);
   });
 
+  // WS-20 (review round 2, M2): confirms `streamTurn`'s `model` is always the internal Provider's
+  // OWN bare model id (`deps.provider.model`) — Compactor takes no override field at all, unlike
+  // SessionTitler/BashReviewer, so there is no tag-vs-provider mismatch to guard here.
+  test("streamTurn's model is the provider's own bare model id, never a qualified tag", async () => {
+    const { store, hub, sid } = seedSession(10);
+    const rec: any = summarizer("SUMMARY");
+    const orig = rec.streamTurn.bind(rec);
+    const models: string[] = [];
+    rec.streamTurn = (req: any) => { models.push(req.model); return orig(req); };
+    const c = new Compactor({ provider: { provider: rec, model: "gpt-5.6-terra" }, store, hub, keepTail: 6 });
+    await c.compact(sid);
+    expect(models).toEqual(["gpt-5.6-terra"]);
+  });
+
   test("too few messages -> not compacted", async () => {
     const { store, hub, sid } = seedSession(2); // 4 messages, <= keepTail
     const c = new Compactor({ provider: { provider: summarizer("X"), model: "fake" }, store, hub, keepTail: 6 });

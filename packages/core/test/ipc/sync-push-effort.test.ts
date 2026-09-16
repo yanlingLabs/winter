@@ -101,8 +101,8 @@ function fakeEngine(models: ModelInfo[]): any {
 }
 
 const CATALOGUE: ModelInfo[] = [
-  { id: "gpt-5.6-sol", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
-  { id: "gpt-5.6-luna", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
+  { id: "codex-oauth/gpt-5.6-sol", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
+  { id: "codex-oauth/gpt-5.6-luna", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
 ];
 
 describe("sync.push meta.effort — the second ingress (provider-correctness T6)", () => {
@@ -138,13 +138,13 @@ describe("sync.push meta.effort — the second ingress (provider-correctness T6)
 
     const res = await c.request(METHODS.syncPush, {
       sessionId: id, baseSeq: 0, data: b64(jsonl([created(id), userMsg(id, 2, "hi")])), complete: true,
-      meta: { model: "gpt-5.6-luna", effort: "xhigh" },
+      meta: { model: "codex-oauth/gpt-5.6-luna", effort: "xhigh" },
     });
     expect(res.error).toBeUndefined();
     // Would fail before T6: `effort` was not in `SyncPushParams.meta`, was not in `SyncMeta`, and
     // `applySyncMeta` wrote no effort column — so this read came back undefined while `model` was set.
     expect(store.meta(id).effort).toBe("xhigh");
-    expect(store.meta(id).model).toBe("gpt-5.6-luna");
+    expect(store.meta(id).model).toBe("codex-oauth/gpt-5.6-luna");
     c.close();
   });
 
@@ -209,17 +209,23 @@ describe("sync.push meta.effort — the second ingress (provider-correctness T6)
     expect(REASONING_EFFORTS).not.toContain("minimal");
     const res = await c.request(METHODS.syncPush, {
       sessionId: id, baseSeq: 0, data: b64(jsonl([created(id), userMsg(id, 2, "hi")])), complete: true,
-      meta: { model: "gpt-5.6-sol", effort: "minimal" },
+      meta: { model: "codex-oauth/gpt-5.6-sol", effort: "minimal" },
     });
     expect(res.error).toBeUndefined();          // NEVER fails the push — the events are irreplaceable
     expect(store.lastSeq(id)).toBe(2);          // ...and they all landed
     expect(store.meta(id).effort).toBeUndefined();
-    expect(store.meta(id).model).toBe("gpt-5.6-sol"); // the model half is unaffected by the effort drop
+    expect(store.meta(id).model).toBe("codex-oauth/gpt-5.6-sol"); // the model half is unaffected by the effort drop
     c.close();
   });
 
   test("a dropped effort never OVERWRITES a good one already on the row", async () => {
-    const { store, socketPath, harnessToken } = await boot({ models: CATALOGUE });
+    // WS-20: `effortsForModel` is now catalog-row-driven (`rowForTag`) — an UNRESOLVABLE model
+    // (no override on the row AND no live model wired) answers `[]`, which is UNRESTRICTED, not a
+    // refusal (see the "no provider configured" precedent, session-set-effort.test.ts). A real
+    // `liveModel` is wired here so this push is checked against an ACTUAL catalog row, exactly as
+    // a real daemon with an agent provider configured always has one — restoring the invariant
+    // this test exists to prove, rather than exercising a boot shape no real daemon has.
+    const { store, socketPath, harnessToken } = await boot({ models: CATALOGUE, liveModel: () => "codex-oauth/gpt-5.6-sol" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "phone");
     const id = uuid();
@@ -305,8 +311,8 @@ describe("sync.push meta.effort — the second ingress (provider-correctness T6)
     const dropped: string[] = [];
     // A NON-EMPTY wire list on purpose: with an empty one the permissive carve-out would admit the
     // null by accident and this test would prove nothing.
-    const out = validateSyncMeta({ effort: null }, known, undefined, {
-      model: "gpt-5.6-sol", efforts: () => ["low", "high"], onDroppedEffort: (e) => dropped.push(e),
+    const out = validateSyncMeta({ effort: null }, undefined, {
+      model: "codex-oauth/gpt-5.6-sol", efforts: () => ["low", "high"], onDroppedEffort: (e) => dropped.push(e),
     });
     expect(out.effort).toBeNull();
     expect(dropped).toEqual([]);
@@ -341,17 +347,17 @@ describe("sync.push meta.effort — the second ingress (provider-correctness T6)
     const onDroppedEffort = (effort: string, reason: string) => { dropped.push({ effort, reason }); };
 
     // Accepted: a level the model's own list carries.
-    expect(validateSyncMeta({ effort: "xhigh" }, known, undefined, { model: "gpt-5.6-sol", onDroppedEffort }).effort).toBe("xhigh");
+    expect(validateSyncMeta({ effort: "xhigh" }, undefined, { model: "codex-oauth/gpt-5.6-sol", onDroppedEffort }).effort).toBe("xhigh");
     expect(dropped).toEqual([]);
 
     // Refused: outside the model's list.
-    expect(validateSyncMeta({ effort: "minimal" }, known, undefined, { model: "gpt-5.6-sol", onDroppedEffort }).effort).toBeUndefined();
+    expect(validateSyncMeta({ effort: "minimal" }, undefined, { model: "codex-oauth/gpt-5.6-sol", onDroppedEffort }).effort).toBeUndefined();
     expect(dropped.length).toBe(1);
     expect(dropped[0]!.effort).toBe("minimal");
 
     // Refused: a tier, regardless of model — and for a DIFFERENT stated reason than "unsupported".
     dropped.length = 0;
-    expect(validateSyncMeta({ effort: "ultra" }, known, undefined, { model: "gpt-5.6-sol", onDroppedEffort }).effort).toBeUndefined();
+    expect(validateSyncMeta({ effort: "ultra" }, undefined, { model: "codex-oauth/gpt-5.6-sol", onDroppedEffort }).effort).toBeUndefined();
     expect(dropped.length).toBe(1);
     expect(dropped[0]!.reason).not.toBe(dropped[0]!.effort);
     expect(dropped[0]!.reason.toLowerCase()).toContain("tier");
@@ -362,8 +368,8 @@ describe("sync.push meta.effort — the second ingress (provider-correctness T6)
     // `effortsForModel` is uniform today; this pins the SEAM (the caller passes the session's
     // effective model, not a hardcoded ""), so a future per-model divergence is a data change here
     // rather than a re-plumb.
-    for (const level of effortsForModel("gpt-5.6-luna")) {
-      expect(validateSyncMeta({ effort: level }, known, undefined, { model: "gpt-5.6-luna" }).effort).toBe(level);
+    for (const level of effortsForModel("codex-oauth/gpt-5.6-luna")) {
+      expect(validateSyncMeta({ effort: level }, undefined, { model: "codex-oauth/gpt-5.6-luna" }).effort).toBe(level);
     }
   });
 
@@ -374,7 +380,7 @@ describe("sync.push meta.effort — the second ingress (provider-correctness T6)
     const { store, socketPath, harnessToken } = await boot({
       models: CATALOGUE,
       // A model the catalogue knows, deliberately NOT the one any push names.
-      liveModel: () => "gpt-5.6-luna",
+      liveModel: () => "codex-oauth/gpt-5.6-luna",
     });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "phone");
@@ -403,22 +409,30 @@ describe("sync.push meta.effort — the second ingress (provider-correctness T6)
       console.warn = realWarn;
     }
     expect(store.meta(id).effort).toBe("high"); // the bad push never overwrote the good value
-    expect(warnings.join("\n")).toContain("by model 'gpt-5.6-luna'");
+    expect(warnings.join("\n")).toContain("by model 'codex-oauth/gpt-5.6-luna'");
     c.close();
   });
 
   // M3 (review): the drop reason must MIRROR `assertEffortSelectable`'s wording, including its
   // no-model fallback — `by model ''` is not a sentence, and the two surfaces explaining the same
   // refusal differently is the drift this whole plan is about.
-  test("the drop reason mirrors assertEffortSelectable's wording, including the no-model case", () => {
-    const known = CATALOGUE.map((m) => m.id);
+  test("the drop reason mirrors assertEffortSelectable's wording, for a REAL model", () => {
     let reason = "";
-    validateSyncMeta({ effort: "minimal" }, known, undefined, { model: "gpt-5.6-sol", onDroppedEffort: (_e, r) => { reason = r; } });
-    expect(reason).toContain("by model 'gpt-5.6-sol'");
+    validateSyncMeta({ effort: "minimal" }, undefined, { model: "codex-oauth/gpt-5.6-sol", onDroppedEffort: (_e, r) => { reason = r; } });
+    expect(reason).toContain("by model 'codex-oauth/gpt-5.6-sol'");
+  });
 
-    validateSyncMeta({ effort: "minimal" }, known, undefined, { model: "", onDroppedEffort: (_e, r) => { reason = r; } });
-    expect(reason).toContain("by the configured provider");
-    expect(reason).not.toContain("by model ''");
+  // WS-20: the pre-WS-20 "no-model fallback" half of this test is retired — `effortsForModel` is
+  // now catalog-row-driven (`rowForTag`), so a BLANK model finds no row and answers `[]`, which is
+  // UNRESTRICTED (the "no provider configured" precedent this whole arc applies consistently,
+  // session-set-effort.test.ts's own version of the same rule) rather than a refusal with a
+  // generic "by the configured provider" wording. There is no more refusal to mirror the wording
+  // of in this branch at all.
+  test("a blank model is unrestricted — there is no catalog row to check the effort against", () => {
+    let dropped = false;
+    const out = validateSyncMeta({ effort: "minimal" }, undefined, { model: "", onDroppedEffort: () => { dropped = true; } });
+    expect(dropped).toBe(false);
+    expect(out.effort).toBe("minimal");
   });
 
   test("validateSyncMeta: a provider that cannot enumerate efforts accepts freely (the permissive direction)", () => {
@@ -426,8 +440,8 @@ describe("sync.push meta.effort — the second ingress (provider-correctness T6)
     // allowed-list means "can't check", never "refuse everything". `effortsForModel` is uniform and
     // non-empty today, so the only way to reach that branch is the injection seam.
     const known = CATALOGUE.map((m) => m.id);
-    expect(validateSyncMeta({ effort: "high" }, known, undefined, { model: "gpt-5.6-sol", efforts: () => [] }).effort).toBe("high");
+    expect(validateSyncMeta({ effort: "high" }, undefined, { model: "codex-oauth/gpt-5.6-sol", efforts: () => [] }).effort).toBe("high");
     // ...but a TIER is still refused, because that refusal does not come from the wire list at all.
-    expect(validateSyncMeta({ effort: "ultra" }, known, undefined, { model: "gpt-5.6-sol", efforts: () => [] }).effort).toBeUndefined();
+    expect(validateSyncMeta({ effort: "ultra" }, undefined, { model: "codex-oauth/gpt-5.6-sol", efforts: () => [] }).effort).toBeUndefined();
   });
 });

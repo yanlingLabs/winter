@@ -150,8 +150,10 @@ struct ComposerModelControl {
     /// .readAdvisorModelFromSettings()` — a local file read, not an RPC). `nil` = unset
     /// ("Automatic"). Defaulted so every pre-8d construction site keeps compiling unchanged.
     var advisorModel: String? = nil
-    /// Writes the setting directly (`AppModel.writeAdvisorModelToSettings`) — `nil` clears it.
-    /// Defaulted to a no-op for the same reason `advisorModel` above is defaulted.
+    /// WS-20: writes through the daemon's `settings.setAdvisorModel` RPC
+    /// (`FieldStateAdapter.applyAdvisorModelSelection` → its own `onSetAdvisorModel`,
+    /// `AppModel.setAdvisorModel`) — `nil` clears it. Defaulted to a no-op for the same reason
+    /// `advisorModel` above is defaulted.
     var onSetAdvisorModel: (String?) -> Void = { _ in }
 }
 
@@ -166,6 +168,11 @@ struct ComposerModelRow: Equatable {
     let effort: String?
     /// The model slugs on offer — the catalogue's, verbatim.
     let options: [String]
+    /// WS-20: the synced catalogue itself — needed alongside `options` so `chipTitle`/`help` can
+    /// look up a tag's facing-name label (`modelDisplayLabel`) instead of showing the raw
+    /// `<providerId>/<modelId>` tag, and so the popover's `ModelMenuContent` can do the same for
+    /// its rows without re-deriving the catalogue from `options` alone.
+    let catalogue: SyncConfigSnapshot
     /// The WIRE effort levels this model accepts. Model-scoped, never mode-scoped.
     let wire: [String]
     /// The WINTER-LEVEL tiers this mode may select — `["ultra"]` on code, EMPTY everywhere else.
@@ -188,9 +195,9 @@ struct ComposerModelRow: Equatable {
     /// when it is set keeps the common case short while making a chosen effort visible somewhere on
     /// the page (before this task it was visible nowhere on the new-chat page at all).
     var chipTitle: String {
-        let model = model ?? newChatModelPlaceholder
-        guard let effort else { return model }
-        return "\(model) · \(effort)"
+        let label = model.map { modelDisplayLabel($0, catalogue: catalogue) } ?? newChatModelPlaceholder
+        guard let effort else { return label }
+        return "\(label) · \(effort)"
     }
 
     /// The runtime badge text (`runtimeBadgeLabel`, `ShellSidebar.swift`'s pure mapping) — `nil`
@@ -202,7 +209,7 @@ struct ComposerModelRow: Equatable {
     /// "Default" readings — the tooltip is where "inherited from the daemon's default" can be said
     /// in full without crowding the row.
     var help: String {
-        "Model: \(modelDisplayLabel(model)) · Reasoning effort: \(effortDisplayLabel(effort))"
+        "Model: \(modelDisplayLabel(model, catalogue: catalogue)) · Reasoning effort: \(effortDisplayLabel(effort))"
     }
 }
 
@@ -259,20 +266,23 @@ struct ComposerModelChip: View {
         .accessibilityLabel(row.help)
         .popover(isPresented: $showingMenu, arrowEdge: .top) {
             VStack(alignment: .leading, spacing: 2) {
-                ModelMenuContent(options: row.options, current: row.model,
+                ModelMenuContent(current: row.model,
                                  isDisabled: row.modelChangeInFlight,
+                                 catalogue: row.catalogue,
                                  onSelect: { onSetModel($0); showingMenu = false })
                 Divider().opacity(0.5).padding(.vertical, 6)
                 EffortMenuContent(wire: row.wire, tiers: row.tiers, current: row.effort,
                                   isDisabled: row.effortChangeInFlight,
                                   onSelect: { onSetEffort($0); showingMenu = false })
-                // Winter Phase 8d (P8d-8, Task 4.2): the D30 advisor picker — "Automatic" plus the
-                // SAME catalogue rows the model menu above just offered (`row.options`, verbatim —
-                // P8d-8's own ruling). A menu, not a THIRD stacked section: this is a one-shot
-                // local-settings edit with no in-flight/optimistic state to show, unlike the two
-                // live-session controls above it.
+                // Winter Phase 8d (P8d-8, Task 4.2); WS-20 review fix (Nit 2): the D30 advisor
+                // picker — "Automatic" plus the SAME catalogue the model menu above just offered
+                // (`row.catalogue`, verbatim — P8d-8's own ruling), now sectioned by provider the
+                // same way. A menu, not a THIRD stacked section: this is a one-shot local-settings
+                // edit with no in-flight/optimistic state to show, unlike the two live-session
+                // controls above it.
                 Divider().opacity(0.5).padding(.vertical, 6)
-                AdvisorModelMenuContent(options: row.options, current: row.advisorModel,
+                AdvisorModelMenuContent(current: row.advisorModel,
+                                        catalogue: row.catalogue,
                                         onSelect: { onSetAdvisorModel($0) })
             }
             .padding(12)
@@ -290,22 +300,34 @@ struct ComposerModelChip: View {
 /// means "let the router decide" (D30's own per-family defaults), not "inherit some other value
 /// this menu could name".
 struct AdvisorModelMenuContent: View {
-    let options: [String]
     let current: String?
+    /// WS-20 (review fix): threaded through exactly like `ModelMenuContent.catalogue` — the row
+    /// label must never be the raw tag, and (Nit 2) the source `modelPickerSections` groups by
+    /// provider. Defaulted to `.empty` for the same reason that one is: an empty catalogue renders
+    /// no sections at all (just the "Automatic" row), never a crash.
+    var catalogue: SyncConfigSnapshot = .empty
     let onSelect: (String?) -> Void
 
     var body: some View {
+        let sections = modelPickerSections(catalogue)
         VStack(alignment: .leading, spacing: 2) {
             Text("Advisor model")
                 .font(Typography.caption(.semibold))
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 4)
-            AdvisorModelPickerRow(model: nil, current: current, onSelect: onSelect)
-            ForEach(options, id: \.self) { model in
-                AdvisorModelPickerRow(model: model, current: current, onSelect: onSelect)
+            AdvisorModelPickerRow(model: nil, current: current, catalogue: catalogue, onSelect: onSelect)
+            ForEach(sections, id: \.providerId) { section in
+                Text(section.title)
+                    .font(Typography.caption(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 6)
+                    .padding(.bottom, 2)
+                ForEach(section.entries, id: \.tag) { entry in
+                    AdvisorModelPickerRow(model: entry.tag, current: current, catalogue: catalogue, onSelect: onSelect)
+                }
             }
-            if let current, !options.contains(current) {
-                AdvisorModelPickerRow(model: current, current: current, onSelect: onSelect)
+            if let current, !sections.contains(where: { section in section.entries.contains { $0.tag == current } }) {
+                AdvisorModelPickerRow(model: current, current: current, catalogue: catalogue, onSelect: onSelect)
             }
         }
     }
@@ -316,14 +338,35 @@ struct AdvisorModelMenuContent: View {
 struct AdvisorModelPickerRow: View {
     let model: String?
     let current: String?
+    /// WS-20 (review fix): see `AdvisorModelMenuContent.catalogue`'s own doc.
+    var catalogue: SyncConfigSnapshot = .empty
     let onSelect: (String?) -> Void
+
+    /// The catalogue row this tag names, when there is one. `nil` for the "Automatic" row.
+    private var row: SyncConfigModelInfo? {
+        guard let model else { return nil }
+        return catalogue.models.first { $0.id == model }
+    }
 
     var body: some View {
         Button {
             onSelect(model)
         } label: {
             HStack {
-                Text(model ?? "Automatic")
+                // WS-20 (review fix): was `Text(model ?? "Automatic")` — the raw tag as the
+                // primary label. `nil` still reads "Automatic" (never `modelDisplayLabel`'s own
+                // "Default" — this picks the D30 reviewer model, a different unset-meaning, see
+                // this type's own doc above); a set model now goes through the SAME
+                // catalogue-aware label `ModelMenuContent`'s own rows use, plus (Nit 2) the same
+                // displayName secondary text.
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(model.map { modelDisplayLabel($0, catalogue: catalogue) } ?? "Automatic")
+                    if let displayName = row?.displayName {
+                        Text(displayName)
+                            .font(Typography.caption())
+                            .foregroundStyle(Theme.textMuted)
+                    }
+                }
                 Spacer()
                 if selectionIsCurrent(model, current: current) {
                     Image(systemName: "checkmark")
@@ -473,6 +516,7 @@ struct WinterComposerCard: View {
         return ComposerModelRow(model: model.model,
                                 effort: model.effort,
                                 options: modelPickerOptions(model.catalogue),
+                                catalogue: model.catalogue,
                                 wire: efforts.wire,
                                 tiers: efforts.tiers,
                                 modelChangeInFlight: model.modelChangeInFlight,

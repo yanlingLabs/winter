@@ -98,7 +98,10 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
         const res = await client.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet", confirmLossy: true });
         if (c.expectWrite) {
           expect(res.error).toBeUndefined();
-          expect(store.meta(sessionId).model).toBe("anthropic/sonnet");
+          // WS-20 (review round 2, M4 fix — R1): `resolveModelSelection` now CANONICALIZES a
+          // `<providerId>/<facingName>` request to its real catalog row key — the stored value is
+          // never the facing form as sent.
+          expect(store.meta(sessionId).model).toBe("anthropic/claude-sonnet-5");
         } else {
           expect(res.error).toBeDefined();
           expect(res.error.data?.code).toBe(c.expectedCode);
@@ -214,7 +217,10 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
       try {
         const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet", confirmLossy: true });
         expect(res.error).toBeUndefined();
-        expect(store.meta(sessionId).model).toBe("anthropic/sonnet");
+        // WS-20 (review round 2, M4 fix — R1): `resolveModelSelection` now CANONICALIZES a
+          // `<providerId>/<facingName>` request to its real catalog row key — the stored value is
+          // never the facing form as sent.
+          expect(store.meta(sessionId).model).toBe("anthropic/claude-sonnet-5");
       } finally {
         c.close();
         server.stop();
@@ -236,7 +242,10 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
     try {
       const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/sonnet", confirmLossy: true });
       expect(res.error).toBeUndefined();
-      expect(store.meta(sessionId).model).toBe("anthropic/sonnet");
+      // WS-20 (review round 2, M4 fix — R1): `resolveModelSelection` now CANONICALIZES a
+          // `<providerId>/<facingName>` request to its real catalog row key — the stored value is
+          // never the facing form as sent.
+          expect(store.meta(sessionId).model).toBe("anthropic/claude-sonnet-5");
     } finally {
       c.close();
       server.stop();
@@ -324,7 +333,7 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
       store.setModel(sessionId, "openai/gpt-5.6-sol"); // the session's CURRENT model, before this failed attempt
       const { server, c } = await boot(store, home, { kind: "blocked", reason: "revert-pending", detail: "the pending-revert note was written; this will self-converge" });
       try {
-        const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "claude-sonnet-5", confirmLossy: true });
+        const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-sonnet-5", confirmLossy: true });
         expect(res.error).toBeDefined();
         expect(res.error.data?.code).toBe("handoff_blocked");
         expect(res.error.message).toBe("Couldn't finish switching models; the session stays on openai/gpt-5.6-sol. Try again in a moment.");
@@ -348,7 +357,7 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
       store.setModel(sessionId, "openai/gpt-5.6-sol");
       const { server, c } = await boot(store, home, { kind: "blocked", reason: "revert-pending", detail: "the pending-revert note ALSO failed; this needs manual reconciliation" });
       try {
-        const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "claude-sonnet-5", confirmLossy: true });
+        const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-sonnet-5", confirmLossy: true });
         expect(res.error.message).toBe("Couldn't finish switching models; the session stays on openai/gpt-5.6-sol. Try again in a moment.");
         expect(res.error.message).not.toContain("manual reconciliation");
       } finally {
@@ -364,7 +373,7 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
       const sessionId = store.createSession("global"); // no model ever set
       const { server, c } = await boot(store, home, { kind: "blocked", reason: "lease-held" });
       try {
-        const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "claude-sonnet-5", confirmLossy: true });
+        const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-sonnet-5", confirmLossy: true });
         expect(res.error.message).toBe("Couldn't finish switching models; the session stays on the default model. Try again in a moment.");
       } finally {
         c.close();
@@ -381,7 +390,7 @@ describe("session.setModel — the P8c-14 handoff outcome gate", () => {
       const errSpy = spyOn(console, "error").mockImplementation(() => {});
       const { server, c } = await boot(store, home, { kind: "blocked", reason: "revert-pending", detail: "the pending-revert note was written; this will self-converge" });
       try {
-        await c.request(METHODS.sessionSetModel, { sessionId, model: "claude-sonnet-5", confirmLossy: true });
+        await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-sonnet-5", confirmLossy: true });
         const logged = errSpy.mock.calls.map((call) => String(call[0])).join("\n");
         expect(logged).toContain("revert-pending"); // the reason enum — a safe, closed vocabulary
         expect(logged).toContain("self-converge"); // the DERIVED category, not raw prose

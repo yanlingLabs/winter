@@ -32,33 +32,28 @@ import WinterProtocol
 // one-time secret: no conforming implementation may log it or any raw line that might carry it.
 // -----------------------------------------------------------------------------------------------
 
-/// Mirrors the eventual `provider.status`'s `anthropic` sub-object (P10a Interfaces).
+/// Mirrors `provider.status`'s `anthropic` sub-object (P10a Interfaces; WS-20 review fix M3).
+///
+/// WS-20: `auth` is REMOVED along with `runtimes.official.auth` — there is no standing arm SETTING
+/// left to report, only presence. The arm IS the model now: a session's own tag
+/// (`anthropic/…` vs `console/…`) decides which credential it uses, so this status is read-only
+/// PRESENCE, never a mode the user picks here.
 public struct AnthropicAuthStatus: Equatable, Sendable {
     /// An Anthropic API key material exists (Keychain `anthropic:default`, `winter login
     /// --anthropic-key` or the in-app key field).
     public let apiKey: Bool
     /// A Console profile exists (`<home>/runtimes/anthropic-config/credentials/winter.json`).
     public let consoleProfile: Bool
-    /// The user's chosen mode: `"auto" | "api-key" | "console"` (`runtimes.official.auth`).
-    public let auth: String
-    /// What's actually in effect right now: `"api-key" | "console" | "none"`.
+    /// What's actually available right now, from presence alone: `"both"` when the API key
+    /// material AND the console profile both exist, `"api-key"`/`"console"` when exactly one does,
+    /// `"none"` when neither does.
     public let effective: String
 
-    public init(apiKey: Bool, consoleProfile: Bool, auth: String, effective: String) {
+    public init(apiKey: Bool, consoleProfile: Bool, effective: String) {
         self.apiKey = apiKey
         self.consoleProfile = consoleProfile
-        self.auth = auth
         self.effective = effective
     }
-}
-
-/// The wire value `runtimes.official.auth` takes when the user picks one of the two ENABLED radio
-/// options. "Claude subscription" is disabled (P9c-1, awaiting Anthropic's approval) and never
-/// produces one of these; `"auto"` is the untouched default and is never SENT by the section — it
-/// is only ever a value `status().auth` can already hold, shown as whichever mode is `effective`.
-public enum AnthropicAuthMode: String, Equatable, Sendable {
-    case apiKey = "api-key"
-    case console = "console"
 }
 
 /// One update on the CURRENT login attempt — a `provider_login_progress` line (the embedded
@@ -76,10 +71,6 @@ public enum AnthropicLoginEvent: Equatable, Sendable {
 /// are unit-testable against a hand-written fake with no socket/transport involved.
 public protocol AnthropicAuthClient: Sendable {
     func status() async throws -> AnthropicAuthStatus
-    /// Selecting "API key" or "Console login" — `provider.configure`'s anthropic arm
-    /// (`packages/protocol/src/methods.ts`'s `ProviderConfigureParams` union, P10a-3). Never called
-    /// for the disabled "Claude subscription" row.
-    func configureAuth(_ mode: AnthropicAuthMode) async throws
     /// Starts a console login attempt. Returns once the daemon confirms it told the login binary
     /// to open the browser — NOT once the user has finished signing in (M2 amendment). Returns the
     /// login binary's own hint URL when it has one (`provider.login`'s `urlHint`, ALREADY sanitized
@@ -119,16 +110,8 @@ public final class LiveAnthropicAuthClient: AnthropicAuthClient, Sendable {
         return AnthropicAuthStatus(
             apiKey: a?["apiKey"]?.boolValue ?? false,
             consoleProfile: a?["consoleProfile"]?.boolValue ?? false,
-            auth: a?["auth"]?.stringValue ?? "auto",
             effective: a?["effective"]?.stringValue ?? "none"
         )
-    }
-
-    public func configureAuth(_ mode: AnthropicAuthMode) async throws {
-        _ = try await client.request("provider.configure", params: .object([
-            "provider": .string("anthropic"),
-            "settings": .object(["runtimes.official.auth": .string(mode.rawValue)]),
-        ]))
     }
 
     /// `provider.login` returns `{ started: true, urlHint?: string }` — `started` carries no

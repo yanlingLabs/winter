@@ -3,6 +3,7 @@ import type { GlobalAgentMessage } from "@yanlinglabs/winter-agent-sdk/messaging
 import type { SessionMessagingFacet } from "@yanlinglabs/winter-agent-sdk";
 import type { ChildProfiles, ChildStatus, PersistedWinterChild, RuntimeChildren } from "../runtime-state/children";
 import type { SessionApprovalPolicy } from "./gate";
+import { UNSTATED_TAG } from "../runtime-sdk/model-tag";
 
 /**
  * BackgroundAgentRegistry — pure state tracker for detached (async) subagent
@@ -578,7 +579,7 @@ export function createPersistedChildren(deps: PersistedChildrenDeps): AgentRegis
           ...(e.name === undefined ? {} : { name: e.name }),
           agentType: e.resume?.agentType ?? "general-purpose",
           providerId: deps.providerId(),
-          modelRef: deps.modelRef?.(e) ?? e.resume?.model ?? "unstated",
+          modelRef: deps.modelRef?.(e) ?? e.resume?.model ?? UNSTATED_TAG,
           providerCatalogVersion: versions.catalog,
           providerAdapterVersion: versions.adapter,
           status: "running",

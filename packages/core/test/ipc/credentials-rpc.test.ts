@@ -352,7 +352,8 @@ describe("WS-19 negative pins", () => {
     await c.hello(harnessToken, "test");
 
     const before = (await c.request(METHODS.providerStatus, {})).result as { anthropic: Record<string, unknown> };
-    expect(Object.keys(before.anthropic).sort()).toEqual(["apiKey", "auth", "consoleProfile", "effective"].sort());
+    // WS-20: `auth` is gone from provider.status — presence alone.
+    expect(Object.keys(before.anthropic).sort()).toEqual(["apiKey", "consoleProfile", "effective"].sort());
     expect(before.anthropic.apiKey).toBe(false);
 
     await c.request(METHODS.credentialSet, { providerId: "anthropic", apiKey: SENTINEL });

@@ -15,13 +15,9 @@ final class FakeAnthropicAuthClient: AnthropicAuthClient, @unchecked Sendable {
 
     // status()
     var statusResult: Result<AnthropicAuthStatus, Error> = .success(
-        AnthropicAuthStatus(apiKey: false, consoleProfile: false, auth: "auto", effective: "none")
+        AnthropicAuthStatus(apiKey: false, consoleProfile: false, effective: "none")
     )
     private(set) var statusCallCount = 0
-
-    // configureAuth(_:)
-    var configureAuthResult: Result<Void, Error> = .success(())
-    private(set) var configureAuthCalls: [AnthropicAuthMode] = []
 
     // login() — fix round 1: returns the sanitized `urlHint` (may be nil), not Void.
     var loginResult: Result<URL?, Error> = .success(nil)
@@ -41,11 +37,6 @@ final class FakeAnthropicAuthClient: AnthropicAuthClient, @unchecked Sendable {
     func status() async throws -> AnthropicAuthStatus {
         statusCallCount += 1
         return try statusResult.get()
-    }
-
-    func configureAuth(_ mode: AnthropicAuthMode) async throws {
-        configureAuthCalls.append(mode)
-        try configureAuthResult.get()
     }
 
     func login() async throws -> URL? {

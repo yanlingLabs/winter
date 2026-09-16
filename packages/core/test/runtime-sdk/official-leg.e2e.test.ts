@@ -51,7 +51,7 @@ import {
   type AnthropicTurnScript, type HermeticOfficialHome,
 } from "../helpers/claude-runtime";
 
-const CATALOG_CLAUDE_MODEL = "claude-sonnet-5"; // a real pinned-catalog Claude model id (selectRuntime must recognize it)
+const CATALOG_CLAUDE_MODEL = "anthropic/claude-sonnet-5"; // WS-20: a real pinned-catalog Claude TAG (selectRuntime must recognize it)
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -275,7 +275,11 @@ function selectionFor(overrides: Partial<RuntimeSelection> = {}): RuntimeSelecti
   return {
     runtimeKind: "claude-agent",
     providerId: "loopback",
-    modelRef: LOOPBACK_MODEL_ID,
+    // WS-20: modelRef is a TAG now — "loopback" is this test bed's own fake providerId (never a
+    // real catalog provider), qualifying the SAME bare wire id LOOPBACK_MODEL_ID names; the split
+    // happens once at official-session.ts's own spawn boundary (splitTag(...).modelId), which is
+    // what puts the bare id back on the wire the loopback fake actually scripts against.
+    modelRef: `loopback/${LOOPBACK_MODEL_ID}`,
     family: "claude",
     authFamily: "custom",
     sdkVersion: "0.0.2",
@@ -816,7 +820,7 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
         settings: () => undefined,
         secrets: secretsForAdvisor,
         familyOf: familyOfModel,
-        sessionModel: () => "claude-sonnet-5",
+        sessionModel: () => "anthropic/claude-sonnet-5", // WS-20: familyOfModel needs a real catalog-recognized tag
         connectionOverride: () => ({ anthropicBaseUrl: fake.url }),
       });
       // Warm F3's background credential-presence cache (cold-start honesty: the FIRST call answers
@@ -853,7 +857,8 @@ describeWithClaudeRuntime("official leg — one real session against the loopbac
       // scripted text ("done") comes back verbatim in the tool result. Pinned shape:
       // `{"advice": <reviewer text>, "model": <resolved reviewer model>}`, `isError: false`.
       expect(result?.isError).toBe(false);
-      expect(result?.output).toBe(JSON.stringify({ advice: "done", model: "claude-fable-5.1" }));
+      // WS-20: ResolvedReviewer.model is a TAG now, never a bare canonical id.
+      expect(result?.output).toBe(JSON.stringify({ advice: "done", model: "anthropic/claude-fable-5-1" }));
       expect(reviewerGenerateCalled).toBe(true);
       // Three requests reach the loopback: the main turn's scripted tool_use, the reviewer's own
       // `generate()` call (through `connectionOverride`), and the model's continuation after seeing

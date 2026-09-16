@@ -21,11 +21,13 @@
 // that does not exist would send a resume hunting for a file forever.
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
+import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { join } from "node:path";
 import { repoRootFor, sanitizeProjectKey } from "../../agent/memory-dir";
 import { SYNCED_SESSION_ID_RE, type SessionStore } from "../../sessions/store";
 import type { RuntimeStateDb } from "../db";
 import { RuntimeSessionRecords, type RuntimeSessionState } from "../records";
+import { isModelTag, UNSTATED_TAG, type ModelTag } from "../../runtime-sdk/model-tag";
 
 export interface BackfillReport {
   /** Sessions that gained a record on this run. */
@@ -41,7 +43,11 @@ export interface BackfillDeps {
   rs: RuntimeStateDb;
   store: SessionStore;
   home: string;
-  /** `settings.provider.type` — `codex-oauth` | `openai-compatible`. */
+  /** WS-20: `splitTag(settings.provider.model).providerId` — a REAL catalog provider id
+   *  (`codex-oauth`, `openai`, …), not the legacy `settings.provider.type` string. A caller still
+   *  passing the legacy `"openai-compatible"` spelling is mapped to `"openai"` below (spec §5's
+   *  "per-session/runtime-state rows" sub-rule: "the record's provider_id when it is a catalog
+   *  provider id, openai-compatible → openai"). */
   providerId: string;
   now?: () => string;
 }
@@ -67,8 +73,18 @@ const TERMINAL_LAST_EVENTS: ReadonlySet<string> = new Set(["turn_completed", "ha
  * `console-oauth` are never inferred here for the same reason the router never infers them — an
  * OAuth family is reachable only by declaration (WS-14 §12's ship gate).
  */
-function authFamilyFor(providerId: string): RuntimeSelection["authFamily"] {
-  return providerId === "openai-compatible" ? "api-key" : "custom";
+// WS-20 (review round 2, nit c): the OLD check (`providerId === "openai-compatible"`) tested for a
+// legacy spelling the caller (`wiring.ts`'s `providerId = splitTag(settings.provider.model).providerId`)
+// never actually passes post-WS-20 — `providerId` here is already a REAL catalog provider id, so
+// the string comparison was permanently dead, and every backfilled record's `authFamily` silently
+// defaulted to `"custom"`. Reads the catalog's own `authKinds` instead (the SAME rule
+// `session-driver.ts`'s `create()` uses for a live selection), and takes the MAPPED catalog id
+// (`catalogProviderId`, `backfillOne`'s own local) rather than the raw `providerId` — the two agree
+// today (the legacy spelling is already resolved before this function ever runs), but passing the
+// mapped one is the honest input regardless of what a future caller does upstream.
+function authFamilyFor(catalogProviderId: string): RuntimeSelection["authFamily"] {
+  const authKinds = loadCatalog().providers.find((p) => p.id === catalogProviderId)?.authKinds ?? [];
+  return authKinds.includes("api-key") ? "api-key" : "custom";
 }
 
 /**
@@ -118,20 +134,24 @@ function backfillOne(deps: BackfillDeps, records: RuntimeSessionRecords, now: ()
   const settle = settlePathFor(store, meta, winterSessionId);
   const at = now();
 
+  // WS-20 (spec §5, "per-session/runtime-state rows"): `providerId` is now a REAL catalog provider
+  // id (`splitTag(settings.provider.model).providerId`, mapped from the legacy `openai-compatible`
+  // spelling to `openai` when a caller still passes it) — trusted directly rather than
+  // disambiguated through the full S-set rule, because the RECORD already states which provider
+  // this session ran on. `modelRef` composes the tag from it when a bare override is stored;
+  // `UNSTATED_TAG` (never the string `"unknown"`) when none is. The record still says this is not
+  // to be trusted as current: `versionProvenance: "legacy-unknown"`, `family: "legacy"`,
+  // `reason: "backfill"`.
+  const catalogProviderId = providerId === "openai-compatible" ? "openai" : providerId;
+  const modelRef: ModelTag = meta.model
+    ? (isModelTag(meta.model) ? (meta.model as ModelTag) : (`${catalogProviderId}/${meta.model}` as ModelTag))
+    : UNSTATED_TAG;
   const selection: RuntimeSelection = {
     runtimeKind: "winter-agent",
-    providerId,
-    // A BARE MODEL ID, DELIBERATELY, and 8b should read legacy rows as unqualified (review r1,
-    // minor 6). The SDK types `modelRef` as the provider-qualified catalog ROW KEY
-    // (`anthropic/claude-opus-5`), and the obvious derivation — `${providerId}/${model}` — would be
-    // a fabrication here: `providerId` on this record is `settings.provider.type`
-    // (`codex-oauth` | `openai-compatible`), which is Winter's PROVIDER TYPE, not a catalog provider
-    // id, so the composed string would name a row no catalog has ever contained. The bare id is what
-    // the session actually ran with, and the record already says it is not to be trusted as current:
-    // `versionProvenance: "legacy-unknown"`, `family: "legacy"`, `reason: "backfill"`.
-    modelRef: meta.model ?? "unknown",
+    providerId: catalogProviderId,
+    modelRef,
     family: "legacy",
-    authFamily: authFamilyFor(providerId),
+    authFamily: authFamilyFor(catalogProviderId),
     sdkVersion: "unknown",
     reason: "backfill",
     decidedAt: at,
@@ -147,7 +167,7 @@ function backfillOne(deps: BackfillDeps, records: RuntimeSessionRecords, now: ()
       records.create({
         winterSessionId,
         runtimeKind: "winter-agent",
-        providerId,
+        providerId: catalogProviderId,
         modelRef: selection.modelRef,
         // Where this session's compatibility tree WOULD live. Nothing is written there by this
         // migration; it is the root a later import would read from.

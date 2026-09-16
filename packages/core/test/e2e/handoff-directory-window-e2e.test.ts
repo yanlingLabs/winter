@@ -39,7 +39,7 @@ import { claudeRuntimeForTests, describeWithClaudeRuntime, type AnthropicTurnScr
 // carries `reasoning.continuation: "opaque-provider-state"` (it reasons, hidden), which is what
 // makes a cross-family move away from it warned-lossy in case (iii) rather than silent.
 const CATALOG_GPT_MODEL = "openai/gpt-5.6-sol";
-const CATALOG_CLAUDE_MODEL = "claude-sonnet-5";
+const CATALOG_CLAUDE_MODEL = "anthropic/claude-sonnet-5";
 
 interface RpcErrorLike { rpc?: { message?: string; data?: { code?: string; warnings?: string[]; portable?: string[] } } }
 
@@ -109,7 +109,7 @@ interface Bed {
  * `winter`/`claude` binaries. Mirrors `handoff-parity-e2e.test.ts`'s own bed; each case gets its own
  * so a directory row deleted by one can never affect another.
  */
-async function bootBed(winterBin: string, prefix: string, defaultModel: string, officialAuth?: "console"): Promise<Bed> {
+async function bootBed(winterBin: string, prefix: string, defaultModel: string): Promise<Bed> {
   const home = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
   const openaiFake = await openaiResponsesFake.startOpenAiResponsesFake({
     scenarios: {},
@@ -133,16 +133,12 @@ async function bootBed(winterBin: string, prefix: string, defaultModel: string, 
     }],
   });
   writeFileSync(join(home, "settings.json"), JSON.stringify({
-    schemaVersion: 2,
-    provider: { type: "openai-compatible", model: defaultModel, baseUrl: openaiFake.url },
+    schemaVersion: 3,
+    provider: { model: defaultModel },
+    providers: { openai: { baseUrl: openaiFake.url } },
     runtimes: {
       winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable, winterIdleTimeoutSec: 60,
       handoff: { crossRuntime: true },
-      // Fix round 4 (MINOR 4): `official.auth` is the ONE setting that makes `credentialRefFor`
-      // answer differently with and without a `home`, which is what the authRef pin below reads.
-      // Only the MINOR-4 bed sets it — a `console` arm would refuse to spawn a real `claude` child
-      // (`console_profile_missing`), so that bed never sends a turn on the official leg.
-      ...(officialAuth === undefined ? {} : { official: { auth: officialAuth } }),
     },
   }, null, 2));
   const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -326,23 +322,35 @@ describeWithWinterBinary("the runtime-directory window: a session WITH turns", (
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // MINOR 4 — the DAEMON's own wiring passes `home` into `planAndApplySwitch`.
 //
-// `credentialRefFor` keeps the old unconditional `anthropic:default` account when it has no `home`,
-// and consults `officialAuthFamilyFor` when it does. `confirmInit` has always had the home (through
-// `registerHandoffParticipants`); `planAndApplySwitch` did not, so the two writers of the record's
-// `authRef` column could persist different account names for the very same provider. This pins the
-// fix at `daemon.ts`'s own construction site, not at a hand-built deps object.
+// PRE-WS-20 PREMISE (kept for the record; no longer testable as written): `credentialRefFor` kept
+// the old unconditional `anthropic:default` account when it had no `home`, and consulted
+// `officialAuthFamilyFor` (a SETTINGS-driven auth-mode toggle, `runtimes.official.auth`) when it
+// did — so the SAME catalog provider ("anthropic") could persist two different Keychain ACCOUNT
+// SUFFIXES depending on which writer built the record, and this test proved both writers agreed.
 //
-// A zero-turn re-selection is the vehicle because it reaches the patch WITHOUT spawning anything on
-// the destination — which matters here, since a `console` auth arm has no profile in a temp home
-// and a real `claude` child would refuse (`console_profile_missing`). No turn is ever sent.
+// WS-20 retires this whole axis: `runtimes.official.auth` is deleted, and "console" is no longer
+// an auth-mode toggle on the "anthropic" provider — it is its own catalog provider id
+// (`console/claude-sonnet-5`, a DIFFERENT tag than `anthropic/claude-sonnet-5`), and
+// `credentialRefFor("console", home)` returns `undefined` unconditionally (the console arm reads
+// an ON-DISK profile file, never a Keychain account) — see keychain.ts's own `credentialRefFor`.
+// There is no more "same provider, two possible accounts" ambiguity for the two writers to
+// disagree about, so this test's specific claim (`authRef === "keychain:anthropic:console"`) can
+// no longer be true under any settings/model combination. The daemon.ts `home`-wiring fix itself
+// is still real and still covered structurally (every OTHER writer in this describe block's
+// sibling cases exercises the same construction site); only THIS scenario's premise is obsolete.
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 describeWithWinterBinary("MINOR 4: the daemon's own handoff wiring carries WINTER_HOME", (winterBin) => {
   describeWithClaudeRuntime("so the account persisted in the record is the one the official leg's auth mode names", () => {
     let bed: Bed;
-    beforeAll(async () => { bed = await bootBed(winterBin, "dirwin-authref-", CATALOG_GPT_MODEL, "console"); });
+    beforeAll(async () => { bed = await bootBed(winterBin, "dirwin-authref-", CATALOG_GPT_MODEL); });
     afterAll(async () => { await bed?.close(); });
 
-    test("a zero-turn re-selection onto an Anthropic model records the CONSOLE account, not the default one", async () => {
+    // WS-20: skipped, not fixed — see the header comment above. The "console" auth arm is no
+    // longer a settings toggle on the "anthropic" provider; it is its own catalog provider
+    // ("console/claude-sonnet-5") whose credentialRefFor is unconditionally `undefined` (an
+    // on-disk profile, never a Keychain account), so there is no more "which account" ambiguity
+    // for this test to distinguish.
+    test.skip("a zero-turn re-selection onto an Anthropic model records the CONSOLE account, not the default one", async () => {
       const cwd = realpathSync(mkdtempSync(join(tmpdir(), "dirwin-authref-cwd-")));
       const { sessionId } = await bed.client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: CATALOG_GPT_MODEL, cwd });
       await bed.client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });

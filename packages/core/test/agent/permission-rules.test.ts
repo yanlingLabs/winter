@@ -595,7 +595,7 @@ describe("PermissionRules.append", () => {
 
   test("global append round-trips through the real Settings zod schema", () => {
     const winterHome = tmpDir("winter-permrules-home-");
-    writeFileSync(join(winterHome, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } }));
+    writeFileSync(join(winterHome, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } }));
     const pr = new PermissionRules({ globalAllow: () => undefined, winterHome });
     pr.append("Bash(git push:*)", "global", null);
     const onDisk = JSON.parse(readFileSync(join(winterHome, "settings.json"), "utf8"));

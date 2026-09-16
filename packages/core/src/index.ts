@@ -15,11 +15,19 @@ export {
   type Settings,
 } from "./settings";
 // Winter Phase 8d (Task 4.3): `winter model --advisor <slug>` validates against the SAME pinned
-// catalog `session.setModel`'s handler consults (`catalogRowsFor`, `runtime-sdk/provider-
-// selection.ts`) — the CLI runs with no live daemon/RPC for this command (direct settings.json
-// read/write, `case "model"`'s own doc comment), so the STATIC compiled-in catalog, not a
-// `sync.config` round trip, is the only thing it can validate against without one.
-export { catalogRowsFor } from "./runtime-sdk/provider-selection";
+// catalog `session.setModel`'s handler consults — the CLI runs with no live daemon/RPC for this
+// command (direct settings.json read/write, `case "model"`'s own doc comment), so the STATIC
+// compiled-in catalog, not a `sync.config` round trip, is the only thing it can validate against
+// without one. WS-20 L4: `catalogRowsFor`'s broad alias/upstreamId matching is deleted —
+// `packages/cli/src/model-cli.ts` needs the cross-lane update to `rowForTag`/`isModelTag`.
+export { rowForTag } from "./runtime-sdk/provider-selection";
+// WS-20: the ONE model-tag module — a model is ALWAYS a provider-qualified tag
+// ("<providerId>/<modelId>") in code; nothing else may pick a provider for a bare id.
+export {
+  splitTag, parseModelTag, isModelTag, modelTagIsKnown, canonicalizeModelTag, tagsForSlot, facingNameToTag, facingNameOf,
+  UNSTATED_TAG, WINTER_TEST_PREFIX,
+  type ModelTag,
+} from "./runtime-sdk/model-tag";
 export { runWorkflowSubprocess } from "./workflows/subprocess-entry";
 // P8b-18: reached only by the CLI's static `__runtime-state-probe` argv route, which imports it
 // from THIS barrel — the same shape `runWorkflowSubprocess` above uses, and the only shape that
@@ -68,7 +76,10 @@ export {
   CREDENTIAL_VALUE_MAX_CHARS,
   type CredentialRow, type CredentialDoor, type CredentialRefusal, type CredentialRefusalCode,
 } from "./runtime-sdk/credentials";
-export { CODEX, CODEX_MODELS, DEFAULT_CODEX_MODEL } from "./providers/codex-config";
+export { CODEX } from "./providers/codex-config";
+// WS-20 L4: `CODEX_MODELS`/`DEFAULT_CODEX_MODEL` are deleted — `packages/cli/src/model-cli.ts`
+// imports them today and needs the L4 cross-lane update to `catalogRowsFor`/`isModelTag`/tags.
+export { DEFAULT_PROVIDER, INTERNAL_PROVIDER_IDS, pinsFor } from "./settings";
 // Winter Phase 10a (O7, P10a-2/6): `winter login/logout --anthropic-console` and `winter doctor`'s
 // console-profile row all run IN-PROCESS against WINTER_HOME (the CLI door inherits stdio and
 // drives the SDK's login directly — see console-profile-broker.ts's own header — never an RPC), so

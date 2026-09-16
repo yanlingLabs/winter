@@ -2,9 +2,13 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFile
 import { join } from "node:path";
 import type { Provider, TurnInputItem } from "../providers/types";
 import type { SessionStore } from "../sessions/store";
+import type { Settings } from "../settings";
+import { pinsFor, ownProviderFor } from "../settings";
+import { internalModelFor } from "../providers/manager";
 import { applyOps, validateOps, RESERVED_FILES, MAX_FILES } from "./dream-ops";
 
-export const DREAM_MODEL = "gpt-5.6-terra";
+// WS-20: the model half is no longer a hardcoded constant — see `pinsFor(settings).dream` in
+// settings.ts, read hot via `DreamerDeps.settings` below.
 export const DREAM_EFFORT = "medium";
 export const DREAM_MIN_EVENTS = 40;
 export const DREAM_MIN_SPACING_MS = 7_200_000; // 2h
@@ -26,10 +30,13 @@ export const DREAM_INSTRUCTION = [
 const SUBSTANTIVE = new Set(["user_message", "assistant_message", "child_update"]);
 
 export interface DreamerDeps {
-  provider: { provider: Provider; model: string }; // wrapper for parity with compactor/titler; model IGNORED — dreams pin DREAM_MODEL
+  provider: { provider: Provider; model: string }; // wrapper for parity with compactor/titler; model IGNORED — dreams pin pinsFor(settings).dream
   store: SessionStore;
   dir: () => string;                // assistantMemoryDirFor thunk
   enabled: () => boolean;           // memoryEnabledHot
+  // WS-20: hot settings read, same "re-read every call" discipline as every other settings-backed
+  // getter — `pinsFor(deps.settings())` is called at each dream cycle, never a boot snapshot.
+  settings: () => Settings | null;
   activeTurnCount: () => number;    // engine idle signal
   now?: () => number;               // injectable clock (tests)
   timeoutMs?: number;               // default WINTER_DREAM_TIMEOUT_MS ?? 120_000
@@ -113,6 +120,15 @@ export class Dreamer {
 
   /** One dream: window → prompt → one terra/medium call → validate → apply → advance. */
   private async runCycle(dispatchId: string, state: DreamState): Promise<void> {
+    // WS-20 (review round 1, GUARD): `pinsFor(settings).dream` can name a DIFFERENT provider than
+    // the one the daemon's single internal Provider instance is actually bound to (a
+    // `settings.pins.dream` override, or a slot whose own default fell back to a sibling provider)
+    // — sending that bare modelId to the wrong backend would be silent. Skip the whole cycle rather
+    // than guess; `internalModelFor` logs the field name (never the tag) so the mismatch is
+    // diagnosable without a raw provider-config dump in the log.
+    const settings = this.deps.settings();
+    const dreamModel = internalModelFor(pinsFor(settings).dream, { providerId: ownProviderFor(settings) }, "pins.dream");
+    if (dreamModel === undefined) return;
     const upTo = this.deps.store.lastSeq(dispatchId);
     const events = this.deps.store.read(dispatchId, state.watermarkSeq);
     const lines: string[] = [];
@@ -140,8 +156,12 @@ export class Dreamer {
     const ac = new AbortController();
     let text = "";
     const run = (async () => {
+      // The internal `Provider` abstraction speaks bare model ids in ITS OWN dialect (the same
+      // single backend `agentProvider` was constructed for) — `dreamModel`, computed once above
+      // via `internalModelFor`, is already that bare id, verified to name the SAME provider this
+      // Provider instance is bound to.
       for await (const ev of this.deps.provider.provider.streamTurn({
-        model: DREAM_MODEL, reasoningEffort: DREAM_EFFORT, instructions: DREAM_INSTRUCTION, input, tools: [], signal: ac.signal,
+        model: dreamModel, reasoningEffort: DREAM_EFFORT, instructions: DREAM_INSTRUCTION, input, tools: [], signal: ac.signal,
       })) {
         if (ev.type === "text_delta") text += ev.delta;
         else if (ev.type === "error") throw new Error(`provider error: ${ev.message}`);

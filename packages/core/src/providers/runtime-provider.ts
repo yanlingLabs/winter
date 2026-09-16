@@ -14,7 +14,9 @@ import type {
 import type { SecretStore } from "../auth/secret-store";
 import { CREDENTIAL_MATERIAL_NAMES } from "../auth/credential-material";
 import { credentialStoreOverSecretStore } from "./credential-store";
-import { CODEX_MODELS } from "./codex-config";
+// WS-20 L3.6: `CODEX_MODELS` is deleted — the pinned catalog is the one source for which models a
+// provider serves, and `daemon.ts`'s `spawnModelIds`/`knownModels` are superseded by
+// `pickerModels()` (ipc/picker-models.ts), which does not call this adapter's `.models()` at all.
 import type { ModelInfo, Provider, ProviderEvent, ToolSpec, TurnInputItem, TurnRequest } from "./types";
 
 /**
@@ -313,7 +315,7 @@ export function createCodexOauthRuntimeProvider(
     descriptors: () => undefined,
     ...(testBackendUrl ? { tokenUrl: `${testBackendUrl}/oauth/token` } : {}),
   });
-  return new RuntimeBackedProvider({ id: "codex-oauth", adapter, context, models: () => CODEX_MODELS, onSubscriptionQuota });
+  return new RuntimeBackedProvider({ id: "codex-oauth", adapter, context, models: () => [], onSubscriptionQuota });
 }
 
 /** Test-only: `translateEvents` is the one place the P8d-13 subscription-quota carry is decided,

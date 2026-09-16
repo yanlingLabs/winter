@@ -31,11 +31,11 @@ import type { ProviderContext } from "@yanlinglabs/winter-provider-runtime";
 import type { SecretStore } from "../auth/secret-store";
 import { readCredentialMaterial, CREDENTIAL_MATERIAL_NAMES } from "../auth/credential-material";
 import { createCodexOauthRuntimeProvider, createOpenAiCompatibleRuntimeProvider } from "../providers/runtime-provider";
-import { DEFAULT_CODEX_MODEL } from "../providers/codex-config";
 import type { Provider, TurnInputItem } from "../providers/types";
 import { credentialStoreOverSecretStore } from "../providers/credential-store";
-import { winterOptionsFromSettings, type Settings } from "../settings";
+import { winterOptionsFromSettings, providerBaseUrlFor, type Settings } from "../settings";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME, credentialRefFor } from "./keychain";
+import { facingNameToTag, splitTag, type ModelTag } from "./model-tag";
 
 /** Which of Winter's three D30-relevant families a catalog-recognised model belongs to. `"other"` is
  *  every family the pinned catalog has that is neither the OpenAI ("gpt") nor the Claude ("claude")
@@ -58,12 +58,16 @@ export function familyOfModel(model: string): AdvisorFamily {
   return "other";
 }
 
-/** D30's own per-family default: family slot 1's canonical model id ("astra" for gpt, "fable" for
- *  claude — WS-13c §9's own ranked slot 1). `undefined` only if the pinned catalog ever drops the
- *  family entirely (never true for the two families 8d cares about; a defensive `undefined` rather
- *  than a throw so a catalog hiccup degrades to "no reviewer", never a daemon crash). */
-function firstSlotCanonicalIdFor(familyId: "gpt" | "claude"): string | undefined {
-  return loadCatalog().families.find((f) => f.id === familyId)?.slots[0]?.canonicalModelId;
+/** D30's own per-family default: family slot 1's NAME ("astra" for gpt, "fable" for claude —
+ *  WS-13c §9's own ranked slot 1). `undefined` only if the pinned catalog ever drops the family
+ *  entirely (never true for the two families 8d cares about; a defensive `undefined` rather than a
+ *  throw so a catalog hiccup degrades to "no reviewer", never a daemon crash). WS-20: the NAME,
+ *  not a canonical model id — `facingNameToTag` (model-tag.ts) needs the name to find which TAG a
+ *  given provider serves for that slot; a hand-composed `<provider>/<canonicalId>` string is not
+ *  guaranteed to match a real row (the catalog's normaliser can rewrite an id between a row's
+ *  `key` and its `canonicalModelId`). */
+function firstSlotNameOfFamily(familyId: "gpt" | "claude"): string | undefined {
+  return loadCatalog().families.find((f) => f.id === familyId)?.slots[0]?.name;
 }
 
 /**
@@ -81,22 +85,43 @@ function firstSlotCanonicalIdFor(familyId: "gpt" | "claude"): string | undefined
  * — this export just states the one thing this deployment can promise TODAY: every session on this
  * leg is Claude-family, so its placeholder session-model IS a Claude-family model, unconditionally.)
  */
-export function officialLegDefaultSessionModel(): string | undefined {
-  return firstSlotCanonicalIdFor("claude");
+// WS-20: `d30DefaultModel` now needs a TAG (it splits the provider off the front, never a bare
+// canonical id) — this placeholder asserts the Claude family through the "anthropic" arm, the
+// default/common one; `d30DefaultModel`'s own "no cross-provider fallback" rule means a session
+// actually running on "console" instead still resolves correctly IF console serves the same slot
+// (it mirrors every anthropic Claude row, L1's own Task), and falls through to no override
+// otherwise — never a wrong-provider tag reaching a reviewer call.
+export function officialLegDefaultSessionModel(): ModelTag | undefined {
+  // `facingNameToTag`, not a hand-composed `anthropic/${canonicalId}` string: the catalog's
+  // normaliser can rewrite an id between its row `key` and its `canonicalModelId` (e.g. the fable
+  // row's key is `anthropic/claude-fable-5-1` but its canonicalModelId is `claude-fable-5.1`), so
+  // only a real catalog lookup is guaranteed to produce a tag that matches an actual row.
+  return facingNameToTag("anthropic", firstSlotNameOfFamily("claude") ?? "");
 }
 
 /**
  * D30's table, shared by both legs so they can never state two different defaults for the same
- * family: unset -> a gpt session's reviewer is "astra" (`gpt-6-astra`), a claude session's is "fable"
- * (`claude-fable-5-1`), any OTHER family falls through to the session's own model (which then most
- * likely resolves to `familyOfModel` = "other" too, and `advisorReviewerFor`'s own resolver answers
- * `undefined` — no provider mapping exists for a non-openai/claude family in 8d).
+ * family: unset -> a gpt session's reviewer is family slot 1 ("astra"), a claude session's is
+ * family slot 1 ("fable") — WS-13c §9's own ranked slot 1.
+ *
+ * WS-20: the answer is now the SAME PROVIDER's own tag for that slot (`facingNameToTag`), never a
+ * bare canonical id and never a cross-provider fallback (spec §4.3) — a provider that does not
+ * serve its family's slot 1 (or a session whose tag matches no catalog family at all) answers
+ * `undefined`, letting the caller fall through to no explicit advisor override (the child's own
+ * default, which is the session's own model either way).
  */
-export function d30DefaultModel(sessionModel: string | undefined): string | undefined {
-  const family = sessionModel !== undefined ? familyOfModel(sessionModel) : "other";
-  if (family === "openai") return firstSlotCanonicalIdFor("gpt") ?? sessionModel;
-  if (family === "claude") return firstSlotCanonicalIdFor("claude") ?? sessionModel;
-  return sessionModel;
+export function d30DefaultModel(sessionTag: string | undefined): ModelTag | undefined {
+  if (sessionTag === undefined) return undefined;
+  let providerId: string;
+  try {
+    providerId = splitTag(sessionTag).providerId;
+  } catch {
+    return undefined;
+  }
+  const family = familyOfModel(sessionTag);
+  if (family === "openai") return facingNameToTag(providerId, firstSlotNameOfFamily("gpt") ?? "");
+  if (family === "claude") return facingNameToTag(providerId, firstSlotNameOfFamily("claude") ?? "");
+  return undefined;
 }
 
 /** `AdvisorReviewerRequest.messages` -> one non-streaming text turn, for the OpenAI-family Winter
@@ -127,15 +152,31 @@ async function generateOverWinterProvider(provider: Provider, model: string, inp
  * a future D30 slot-to-adapter-id table (the SDK's own `resolveSlotToProvider`, WS-13c §4) is the
  * real fix and is out of this lane's scope.
  */
-function openAiFamilyReviewer(secrets: SecretStore, settings: () => Settings | undefined, targetModel: string): AdvisorReviewer {
+// WS-20 (review round 2, nit b): the OLD version tried codex-oauth material FIRST, unconditionally,
+// for EVERY openai-family target — so an `openai/*` tag with a real OpenAI key present, on a home
+// that ALSO happened to have codex-oauth material stored, silently reviewed through the WRONG
+// provider with a HARDCODED model id ("gpt-5.6-sol"), ignoring `targetModel` entirely. `providerId`
+// (the target tag's OWN provider, `splitTag(targetModel).providerId` at the call site) now gates
+// this explicitly: codex-oauth material is read ONLY for a `codex-oauth/*` target; every other
+// openai-family provider (plain `openai/*`, or any other GPT-dialect catalog provider) goes straight
+// to the openai-compatible branch with the tag's own `targetModel`, never a hardcoded substitute.
+function openAiFamilyReviewer(secrets: SecretStore, settings: () => Settings | undefined, targetModel: string, providerId: string): AdvisorReviewer {
   return {
     async generate(input: AdvisorReviewerRequest): Promise<AdvisorReviewerTurn> {
-      const material = await readCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth);
-      if (material !== null) {
-        return generateOverWinterProvider(createCodexOauthRuntimeProvider(secrets), DEFAULT_CODEX_MODEL, input);
+      if (providerId === "codex-oauth") {
+        const material = await readCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth);
+        if (material !== null) {
+          // WS-20 (whole-branch review nit): the tag's OWN model id goes on the wire — the arm used to
+          // inline the deleted `DEFAULT_CODEX_MODEL` ("gpt-5.6-sol"), so a `codex-oauth/gpt-5.6-terra`
+          // advisor tag silently ran Sol.
+          return generateOverWinterProvider(createCodexOauthRuntimeProvider(secrets), targetModel, input);
+        }
+        throw new Error("advisor reviewer: codex-oauth credential material is missing for a codex-oauth/* target");
       }
-      const provider = settings()?.provider;
-      const baseUrl = provider?.type === "openai-compatible" ? provider.baseUrl : OPENAI_API_BASE_URL;
+      // WS-20 L3.4: `provider.type`/`provider.baseUrl` no longer exist on `ProviderSettings` — the
+      // BYO endpoint lives at `providers.openai.baseUrl` (`providerBaseUrlFor`) regardless of which
+      // provider is active.
+      const baseUrl = providerBaseUrlFor(settings(), "openai") ?? OPENAI_API_BASE_URL;
       return generateOverWinterProvider(createOpenAiCompatibleRuntimeProvider(secrets, baseUrl), targetModel, input);
     },
   };
@@ -247,15 +288,33 @@ export function advisorReviewerFor(deps: {
     const targetModel = explicit ?? d30DefaultModel(deps.sessionModel());
     if (targetModel === undefined) return undefined;
     const family = deps.familyOf(targetModel);
+    // WS-20: `targetModel` is a TAG (reported verbatim as `ResolvedReviewer.model`) — the internal
+    // `Provider`/adapter wire calls inside `openAiFamilyReviewer`/`claudeFamilyReviewer` speak bare
+    // model ids, split from the tag once, right at this boundary.
+    const wireModel = (() => { try { return splitTag(targetModel).modelId; } catch { return targetModel; } })();
+    // WS-20 (review round 2, nit b): the tag's OWN provider — `openAiFamilyReviewer` needs this to
+    // gate codex-oauth material to a `codex-oauth/*` target only (never tried for a plain `openai/*`
+    // one, regardless of what other credential material this home happens to have stored).
+    const targetProviderId = (() => { try { return splitTag(targetModel).providerId; } catch { return "openai"; } })();
     // Review fix F3: "no credential for the target family" is `undefined`, checked HERE (sync, from
     // the cache above) — never inside `generate()`, and never a live Keychain read in this function.
+    //
+    // WS-20 (review round 2, nit b follow-up): checked against the TARGET's own provider now, not
+    // "either credential in the family" — the OLD `codexOauth || openai` check would resolve a
+    // reviewer for a `codex-oauth/*` target on an openai-only-credentialed home, which then throws
+    // inside `generate()` the moment it actually runs (`openAiFamilyReviewer`'s own provider gate).
+    // Answering `undefined` HERE for that case is the correct F3 behavior: no credential for what
+    // this target actually needs.
     if (family === "openai") {
-      if (!hasCredential(CREDENTIAL_MATERIAL_NAMES.codexOauth) && !hasCredential(CREDENTIAL_MATERIAL_NAMES.openai)) return undefined;
-      return { provider: openAiFamilyReviewer(deps.secrets, deps.settings, targetModel), model: targetModel };
+      const hasNeededCredential = targetProviderId === "codex-oauth"
+        ? hasCredential(CREDENTIAL_MATERIAL_NAMES.codexOauth)
+        : hasCredential(CREDENTIAL_MATERIAL_NAMES.openai);
+      if (!hasNeededCredential) return undefined;
+      return { provider: openAiFamilyReviewer(deps.secrets, deps.settings, wireModel, targetProviderId), model: targetModel };
     }
     if (family === "claude") {
       if (!hasCredential(ANTHROPIC_CREDENTIAL_SECRET_NAME)) return undefined;
-      return { provider: claudeFamilyReviewer(deps.secrets, targetModel, deps.connectionOverride), model: targetModel };
+      return { provider: claudeFamilyReviewer(deps.secrets, wireModel, deps.connectionOverride), model: targetModel };
     }
     // "other": 8d states no provider-runtime mapping for a third family (see this module's header).
     return undefined;

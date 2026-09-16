@@ -71,7 +71,7 @@ import { handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, type Setti
 import { sessionLegOf } from "./leg";
 import { credentialRefFor } from "./keychain";
 import { refusalDetailCategoryFor } from "./refusal-copy";
-import { catalogRowsFor, testProviderNameFor } from "./provider-selection";
+import { rowForTag, testProviderNameFor } from "./provider-selection";
 import type { LegSession, WinterSessionDrivers } from "./session-driver";
 
 export interface HandoffDeps {
@@ -480,7 +480,7 @@ function destinationRuntimeFor(deps: HandoffDeps, session: SessionKey, to: Runti
       // a brand-new session. `undefined` when the destination provider has no keychain-backed slot
       // at all (a `custom`/env-backed provider), which explicitly CLEARS the column below rather
       // than leaving the SOURCE's stale locator in place.
-      const destinationAuthRef = credentialRefFor(destinationSelection.providerId, deps.home, deps.settings());
+      const destinationAuthRef = credentialRefFor(destinationSelection.providerId, deps.home); // WS-20: credentialRefFor no longer takes settings — the arm is the tag prefix
       const destinationAuthRefLocator = destinationAuthRef?.kind === "keychain" ? `keychain:${destinationAuthRef.account}` : undefined;
       try {
         // P8d-24: `patch`, never `transition` — this never changes the lifecycle `state`, only the
@@ -768,12 +768,12 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
   // `session.create` already does for the same models). Without this bail-out the fresh decision
   // below would hard-refuse a plain, same-leg model change that never asked to move anything.
   if (testProviderNameFor(model) !== undefined) return { kind: "same-runtime" };
-  // M1 (whole-branch review): mirrors `session-driver.ts`'s `decideRuntime` bail-out #4 — a model
-  // with NO row in the pinned catalog AT ALL (a BYO/custom `provider.baseUrl` endpoint's own model
-  // id) has nothing for the selector to route on; without this bail-out a plain, off-catalog model
-  // change on an EXISTING session would hard-refuse through the selector instead of keeping its
-  // ordinary in-runtime behaviour, which is what `session.create` already does for the same models.
-  if (catalogRowsFor(model).length === 0) return { kind: "same-runtime" };
+  // M1 (whole-branch review); WS-20: mirrors `session-driver.ts`'s `decideRuntime` bail-out #4 — a
+  // tag with NO row in the pinned catalog AT ALL has nothing for the selector to route on; without
+  // this bail-out a plain, off-catalog model change on an EXISTING session would hard-refuse
+  // through the selector instead of keeping its ordinary in-runtime behaviour, which is what
+  // `session.create` already does for the same models.
+  if (rowForTag(model) === undefined) return { kind: "same-runtime" };
   const mode = modeOf(deps.store.meta(sessionId).mode);
   // FRESH — no `persisted`. `SELECTION_RULES.persisted` returns a persisted selection BY IDENTITY,
   // so passing `record.selection` here (the pre-fix shape) made `decided.runtimeKind` always equal
@@ -904,7 +904,7 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
     try {
       const current = deps.records.get(sessionId);
       if (current === undefined) return undefined;
-      const destinationAuthRef = credentialRefFor(decided.providerId, deps.home, deps.settings());
+      const destinationAuthRef = credentialRefFor(decided.providerId, deps.home); // WS-20: credentialRefFor no longer takes settings — the arm is the tag prefix
       const destinationAuthRefLocator = destinationAuthRef?.kind === "keychain" ? `keychain:${destinationAuthRef.account}` : undefined;
       deps.records.patch(sessionId, current.state, {
         runtimeKind: decided.runtimeKind,
@@ -1034,7 +1034,7 @@ export async function planAndApplySwitch(deps: HandoffDeps, sessionId: string, m
     try {
       const current = deps.records.get(sessionId);
       if (current !== undefined) {
-        const destinationAuthRef = credentialRefFor(decided.providerId, deps.home, deps.settings());
+        const destinationAuthRef = credentialRefFor(decided.providerId, deps.home); // WS-20: credentialRefFor no longer takes settings — the arm is the tag prefix
         const destinationAuthRefLocator = destinationAuthRef?.kind === "keychain" ? `keychain:${destinationAuthRef.account}` : undefined;
         deps.records.patch(sessionId, current.state, {
           selection: decided,

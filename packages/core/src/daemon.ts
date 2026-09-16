@@ -17,11 +17,11 @@ import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings } from "./settings";
+import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, INTERNAL_PROVIDER_IDS, type Settings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
-import { createProvider } from "./providers/manager";
+import { createProvider, internalModelFor } from "./providers/manager";
 import type { Provider } from "./providers/types";
 import { QuotaManager } from "./providers/quota";
 import { ToolRegistry } from "./agent/tools/registry";
@@ -49,7 +49,9 @@ import { resolve as resolveForGrant, sep as pathSep } from "node:path";
 import { OutputStyleStore } from "./agent/output-styles";
 import { Dreamer } from "./agent/dreamer";
 import { SessionCleaner } from "./sessions/cleaner";
-import { deriveModelAliases } from "./agent/model-aliases";
+import { pickerModels } from "./ipc/picker-models";
+import { credentialPresenceFrom } from "./runtime-sdk/keychain";
+import { splitTag, type ModelTag } from "./runtime-sdk/model-tag";
 import { SessionDirectories } from "./agent/dirs";
 import { TrustStore } from "./agent/trust";
 import { ContextAssembler } from "./agent/context";
@@ -290,7 +292,11 @@ export async function startDaemon(opts: {
    *  behavior). object: use this provider directly (tests inject FakeProvider). `live`, when
    *  present, is threaded into EngineConfig.provider.live (no-restart model resolution) — tests
    *  that inject a provider directly and don't care about live resolution just omit it. */
-  agentProvider?: { provider: Provider; model: string; live?: () => { model: string; reasoningEffort?: string } } | null;
+  // WS-20: `live`'s return gained an optional `providerId` (the CATALOG providerId, `LiveModelSelection`
+  // in providers/manager.ts) so `liveModel` below can recompose a REAL tag — kept optional here
+  // (rather than importing `LiveModelSelection` verbatim) so a test that injects a provider
+  // directly and doesn't care about live resolution can still omit it entirely.
+  agentProvider?: { provider: Provider; model: string; live?: () => { model: string; reasoningEffort?: string; providerId?: string } } | null;
   /** TEST ONLY (fix round 1, M2) — threaded straight into `WinterLegDeps.officialConnectionOverride`;
    *  a production caller never sets this. See that field's own doc for why it exists at all. */
   officialConnectionOverride?: WinterLegDeps["officialConnectionOverride"];
@@ -346,6 +352,18 @@ export async function startDaemon(opts: {
   }
 
   const secrets = opts.secrets ?? new KeychainSecretStore();
+
+  // WS-20 (review round 2, M5): computed HERE — before the settings migration, before
+  // `SessionStore` construction, before the runtime-state spine's own model_ref rewrite — so all
+  // three can prefer a provider this HOME actually holds a credential for, rather than the old
+  // fixed-preference guess, when a legacy model id is ambiguous across several catalog providers.
+  // This boot hook is the ONLY caller with `secrets` in hand at migration time; every other
+  // `loadSettings`/`new SessionStore`/`migrateModelRefsToTags` caller (the CLI, tests without a
+  // daemon) omits it and gets the OLD behavior unchanged.
+  const bootPresence = await credentialPresenceFrom(secrets);
+  const presentProviders: ReadonlySet<string> = new Set(
+    Object.entries(bootPresence.byProvider).filter(([, v]) => v !== undefined).map(([k]) => k),
+  );
 
   let legacyHome: string | undefined;
   let legacySecrets: SecretStore | undefined;
@@ -419,7 +437,7 @@ export async function startDaemon(opts: {
   const authority = new TokenAuthority(secrets);
   const tokens = await authority.ensureTokens();
 
-  const store = new SessionStore(dirs.home);
+  const store = new SessionStore(dirs.home, { presentProviders });
   const hub = new SessionHub(store);
 
   // session-activity-hygiene T8: THE activity derivation, filled in by `startIpcServer` below
@@ -443,7 +461,9 @@ export async function startDaemon(opts: {
   // reordering of two independent statements, not a change of behaviour.
   let settings: ReturnType<typeof loadSettings> | null;
   try {
-    settings = loadSettings(dirs.settingsPath);
+    // WS-20 (review round 2, M5): `persistMigration: true` — this boot hook, WITH presence in
+    // hand, is the ONLY writer of a migrated v3 settings file (see `loadSettings`'s own doc).
+    settings = loadSettings(dirs.settingsPath, { presentProviders, persistMigration: true });
     // Task 17: the engine leg no longer exists — a `winterLeg.<mode>: false` is accepted for one
     // release, reported here (and by settings-apply on a hot edit), never obeyed.
     for (const key of winterLegDisabledKeys(settings)) console.error(`settings: runtimes.winterLeg.${key} = false — the engine leg no longer exists; ignored`);
@@ -468,6 +488,9 @@ export async function startDaemon(opts: {
     store,
     settings: () => settings, // LIVE holder, re-read per sweep — never a boot snapshot
     log: (line) => console.error(`runtime-state: ${line}`),
+    // WS-20 (review round 2, M5): threaded through to `migrateModelRefsToTags`'s own rule-5
+    // tie-break — same presence this boot hook already computed for the settings migration above.
+    presentProviders,
   });
   const runtime = runtimeStateOnline(runtimeState);
 
@@ -772,16 +795,29 @@ export async function startDaemon(opts: {
     if (settings) {
       try {
         const active = await createProvider(settings, secrets, dirs.settingsPath);
-        // `model` here is the RESOLVED (not raw) boot selection — active.model is the raw
-        // settings.json value, which for codex-oauth may be a since-deprecated slug (e.g.
-        // "gpt-5.4"). Everything that consumes this snapshot directly rather than calling `live`
-        // per-turn (Compactor's own summarization turn, BashReviewer, SessionTitler, the
-        // daemon-status `providerInfo` below) needs a model the backend will actually accept, so
-        // resolve once here via the SAME deprecation-fallback path `live` uses on every turn.
-        // `live` itself is still wired separately below (EngineConfig.provider.live) so turns
-        // keep re-resolving on every call, not just at this boot snapshot.
-        agentProvider = { provider: active.provider, model: active.liveModel().model, live: active.liveModel };
-        quota = active.quota;
+        if (active === null) {
+          // WS-20 (review round 4): `settings.provider.model` names a provider OUTSIDE
+          // `INTERNAL_PROVIDER_IDS` (codex-oauth/openai) — a real, unconstrained choice for a
+          // SESSION's own default model (routed per-session through the runtime SDK, unaffected),
+          // but the daemon's single process-wide internal Provider genuinely cannot be built for
+          // it. Logged ONCE, naming exactly what goes inert — never a boot refusal; every other
+          // daemon function (sessions, the RPC surface, settings) works normally.
+          console.error(
+            `provider: settings.provider.model names "${splitTag(settings.provider.model).providerId}" — the daemon's internal provider only builds for ${INTERNAL_PROVIDER_IDS.join("/")}, so titles, the bash reviewer, the dreamer, the session cleaner, research, and turn compaction are inert until it's set to one of those (a session's own model is unaffected)`,
+          );
+          agentProvider = null;
+        } else {
+          // `model` here is the RESOLVED (not raw) boot selection — active.model is the raw
+          // settings.json value, which for codex-oauth may be a since-deprecated slug (e.g.
+          // "gpt-5.4"). Everything that consumes this snapshot directly rather than calling `live`
+          // per-turn (Compactor's own summarization turn, BashReviewer, SessionTitler, the
+          // daemon-status `providerInfo` below) needs a model the backend will actually accept, so
+          // resolve once here via the SAME deprecation-fallback path `live` uses on every turn.
+          // `live` itself is still wired separately below (EngineConfig.provider.live) so turns
+          // keep re-resolving on every call, not just at this boot snapshot.
+          agentProvider = { provider: active.provider, model: active.liveModel().model, live: active.liveModel };
+          quota = active.quota;
+        }
       } catch (err) {
         console.error(`agent disabled: ${(err as Error).message}`);
         agentProvider = null;
@@ -965,12 +1001,20 @@ export async function startDaemon(opts: {
   // invoked at tool-call time long after boot (the `engine?.turnStartedAt` precedent this file
   // already relies on).
   //
+  // WS-20: boot-time credential presence for the spawn tool's STATIC model enum (`spawnModelIds`
+  // below) — a snapshot, like the enum itself; `sync.config`'s OWN `models` field re-probes hot,
+  // per call, through the exact same `credentialPresenceFrom`/`pickerModels` pair.
+  const spawnModelsCredentials = await credentialPresenceFrom(secrets);
   // Steering only, exactly as on the registry door (`registerSessionSpawnTool` below gets the same
-  // list). A daemon with no agent provider has no model catalogue and the field is a free string.
-  const spawnModelIds = agentProvider ? agentProvider.provider.models().map((m) => m.id) : [];
+  // list). WS-20: `pickerModels()` (ipc/picker-models.ts) — every credentialed provider's own tags,
+  // catalog order — replaces `agentProvider.provider.models()` (the boot-bound internal provider's
+  // own small bare-id list) and `deriveModelAliases` (a bare-id short-name hack this catalog-driven
+  // list has no more use for: `facingName` on each picker row already carries the curated slot
+  // name). A daemon with no credentials at all gets an empty list, the honest answer.
+  const spawnModelIds = pickerModels({ credentials: spawnModelsCredentials, home: winterHome }).map((m) => m.id);
   const capabilityDeps: CapabilityDeps = {
     sessions: {
-      models: [...spawnModelIds, ...deriveModelAliases(spawnModelIds)],
+      models: spawnModelIds,
       // THE SAME instances the registry door gets (`registerListSessionsTools` below): a
       // management surface with its own hub/store would read every attached session as idle.
       sessions: {
@@ -1238,7 +1282,12 @@ export async function startDaemon(opts: {
           stallTimeoutMs: () => settings?.subagents?.stallTimeoutMs,
           store: runtime.children,
           profiles: runtime.profiles,
-          providerId: () => settings?.provider?.type ?? "unstated",
+          // WS-20: the provider is the tag's own prefix now — `settings.provider.type` is gone.
+          providerId: () => {
+            const model = settings?.provider?.model;
+            if (model === undefined) return "unstated";
+            try { return splitTag(model).providerId; } catch { return "unstated"; }
+          },
           // The owning session's live facet — Task 16 attaches Winter sessions, and until then a
           // stop with no local `AbortController` is recorded and nothing is asked of the child.
           facetFor: (sessionId) => {
@@ -1256,7 +1305,17 @@ export async function startDaemon(opts: {
   // daemon simply titles nothing, as before. `titles.enabled` is read LIVE at every fire (the
   // engine-era wiring was a boot snapshot; no setting may need a restart), `titles.model` stays the
   // boot snapshot it always was (it names WHICH model titles, not whether titling is on).
-  const sessionTitler = agentProvider === null ? undefined : new SessionTitler({ provider: agentProvider, store, hub, model: settings?.titles?.model });
+  // WS-20 (review round 2, M2): `titles.model` is a qualified TAG (any provider), but the titler
+  // runs on the daemon's own INTERNAL Provider (`agentProvider`, one provider per daemon) — sending
+  // a tag naming a different provider straight to `streamTurn` would hand that backend a model id it
+  // never issued. `internalModelFor` returns the bare modelId when the tag agrees with the internal
+  // provider, else logs one line naming the field and returns `undefined`, which falls through to
+  // `SessionTitler`'s own `deps.model ?? deps.provider.model` default (the provider's own model) —
+  // identical behavior to having no override configured at all.
+  const titlesModel = settings?.titles?.model === undefined
+    ? undefined
+    : internalModelFor(settings.titles.model, { providerId: ownProviderFor(settings) }, "titles.model");
+  const sessionTitler = agentProvider === null ? undefined : new SessionTitler({ provider: agentProvider, store, hub, model: titlesModel });
   const titler = sessionTitler === undefined ? undefined : {
     maybeTitle: (sid: string): Promise<void> => (settings?.titles?.enabled === false ? Promise.resolve() : sessionTitler.maybeTitle(sid)),
   };
@@ -1303,9 +1362,15 @@ export async function startDaemon(opts: {
   // The retired engine's own BashReviewer gate (engine.ts:4547-4548): `provider`/`model` are the
   // SAME shape `SessionTitler` above takes — inert without an `agentProvider` (mirrors `titler`'s
   // own `agentProvider === null` guard).
+  // WS-20 (review round 2, M2): same guard as `titlesModel` above — `reviewer.model` is a qualified
+  // TAG, the reviewer runs on the same per-daemon internal Provider, and a mismatched tag falls
+  // through to `BashReviewer`'s own provider-model fallback rather than reaching `streamTurn` raw.
+  const reviewerModel = settings?.reviewer?.model === undefined
+    ? undefined
+    : internalModelFor(settings.reviewer.model, { providerId: ownProviderFor(settings) }, "reviewer.model");
   const bashReviewer = agentProvider === null || agentProvider === undefined
     ? undefined
-    : new BashReviewer({ provider: agentProvider, model: settings?.reviewer?.model });
+    : new BashReviewer({ provider: agentProvider, model: reviewerModel });
   const hooksFor = (session: CapabilitySession) =>
     sessionHooksFor({
       sessionId: session.sessionId,
@@ -1499,7 +1564,7 @@ export async function startDaemon(opts: {
     // all, so a dangerous-domain url is HARD-BLOCKED (isError, no card) rather than carded like
     // web_fetch (code mode, unchanged). See page-core.ts's `checkDangerousDomain` for the full
     // rationale and read-page.ts/research.ts for where the check actually fires.
-    const research = createResearchRunner({ provider: agentProvider.provider, cache: pageCache, audit: (line) => audit.append(line), dangerousDomainsAdded });
+    const research = createResearchRunner({ provider: agentProvider.provider, cache: pageCache, audit: (line) => audit.append(line), dangerousDomainsAdded, settings: () => settings });
     researchRunner = research; // the holder the `research` capability server reads (P8b Task 7)
     // B2 Task 4: the agent's browser. Four narrow deps, each the SAME thing the equivalent RPC uses —
     // `tabs` is the fold `panel.list` serves, `openTab` is the function `panel.openTab`'s handler
@@ -1865,6 +1930,9 @@ export async function startDaemon(opts: {
       enabled: memoryEnabledHot,
       // P8b Task 17: a Winter-leg turn in flight is activity too (the drivers' host-side count).
       activeTurnCount: () => signals.activeTurnCount(),
+      // WS-20: hot settings read — `pinsFor(deps.settings()).dream` is what actually decides the
+      // model now, never a boot snapshot (see Dreamer's own DreamerDeps.settings doc comment).
+      settings: () => settings,
       // session-activity-hygiene T7 (spec §3): the cleaner rides THIS scheduler slot. Constructed
       // here (not at the top of the file) for the same reason the Dreamer is: it needs a provider,
       // and the signals it derives activity from (`engine`, `hub`) are only final by this point.
@@ -1886,6 +1954,10 @@ export async function startDaemon(opts: {
         bgWork: (sid) => signals.hasBackgroundWork(sid),
         home: winterHome,
         enabled: cleanerEnabledHot,
+        // WS-20: hot settings read — `pinsFor(deps.settings()).cleaner` is what actually decides
+        // the model now, never a boot snapshot (see SessionCleaner's own CleanerDeps.settings doc
+        // comment, which defaults to the SAME value as Dreamer's own `pinsFor(...).dream`).
+        settings: () => settings,
         // P8a Task 12: the second sanctioned deletion path takes runtime state with it too, exactly
         // as the reaper's does (WS-16 §16) — and, since Task 16, the session's Winter child.
         onDelete: onSessionDeleted,
@@ -1997,7 +2069,24 @@ export async function startDaemon(opts: {
   // its own.
   const hardware = new HardwareBroker({ audit, pushToProvider: (event) => providerLink.push(event) });
 
-  const providerInfo = agentProvider ? { id: agentProvider.provider.id, model: agentProvider.model } : null;
+  // WS-20 (review round 1, MAJOR): both `daemon.status.provider.id` and `sync.config.provider`
+  // (the `liveProvider` closure below) must report the CATALOG providerId
+  // (`splitTag(settings.provider.model).providerId`) — never `Provider.id`, the internal adapter
+  // literal (`"codex-oauth"` / `"openai-compatible"`), which is a different vocabulary entirely
+  // (it happens to equal the catalog id for codex-oauth and never does for the BYO/openai-compatible
+  // arm). One shared derivation for both sites so they can never answer two different identities
+  // for the same settings.
+  const providerIdFromSettingsTag = (s: Settings | null | undefined): string | undefined => {
+    const model = s?.provider?.model;
+    if (model === undefined) return undefined;
+    try { return splitTag(model).providerId; } catch { return undefined; }
+  };
+  // WS-20: `model` is the TAG (`settings.provider.model`, already provider-qualified) — never
+  // `agentProvider.model`, which is the BARE modelId half split at the internal-Provider boundary
+  // (providers/manager.ts).
+  const providerInfo = agentProvider && settings
+    ? { id: providerIdFromSettingsTag(settings) ?? "none", model: settings.provider.model }
+    : null;
 
   // Chat Slice D task 3 (`sync.config`): the phone's "default model" bootstrap value, re-resolved
   // HOT at every call — mirrors engine.ts's own boot idiom EXACTLY
@@ -2022,18 +2111,30 @@ export async function startDaemon(opts: {
   const liveSelection = agentProvider
     ? () => agentProvider!.live?.() ?? { model: agentProvider!.model }
     : undefined;
-  const liveModel = liveSelection ? () => liveSelection().model : undefined;
+  // Whole-branch review C1, corrected under WS-20 review round 1 (MAJOR): WHICH provider
+  // `sync.config`'s own `provider` field reports. Read off `providerIdFromSettingsTag(settings)`
+  // (the CATALOG providerId, `splitTag(settings.provider.model).providerId`) — HOT, same live
+  // `settings` holder `liveModel`/`liveSelection` read — never `agentProvider.provider.id` (the
+  // INTERNAL adapter literal, `"codex-oauth"` or `"openai-compatible"`): that is a DIFFERENT
+  // vocabulary that only happens to equal the catalog id for the codex-oauth arm, and reporting it
+  // here made a BYO/openai-compatible Mac's `sync.config.provider` say `"openai-compatible"`,
+  // which no client can compare against a catalog provider id or a tag's own prefix. `undefined`
+  // on a no-provider daemon (or an unset `settings.provider.model`) — ipc/sync.ts degrades that to
+  // `"none"`, never to `""`.
+  const liveProvider = agentProvider ? () => providerIdFromSettingsTag(settings) ?? "none" : undefined;
+  // WS-20: `liveModel()` is a TAG — composed from the hot `liveSelection().providerId` (the CATALOG
+  // providerId, boot-bound like everything else about provider identity, but read off
+  // `LiveModelSelection` itself rather than `Provider.id` above, which is NOT always a real catalog
+  // id — see the comment on `liveProvider` just above) plus the hot `liveSelection().model` (the
+  // bare modelId half, re-read every call). This is the ONE place the daemon recomposes a tag from
+  // the internal-Provider abstraction's own bare-id world, mirroring the runtime-sdk spawn
+  // boundary's own split in the other direction. Falls back to `liveProvider()` only when the
+  // injected `live()` resolver predates `providerId` (a test double that hasn't been updated) —
+  // every real boot path (`createProvider`'s own `liveModel`) always supplies it.
+  const liveModel = liveSelection && liveProvider
+    ? () => `${liveSelection!().providerId ?? liveProvider!()}/${liveSelection!().model}` as ModelTag
+    : undefined;
   const liveEffort = liveSelection ? () => liveSelection().reasoningEffort ?? "" : undefined;
-  // Whole-branch review C1 — WHICH provider the two lines above (and the catalogue the server reads
-  // off `engine`) belong to. Read off `agentProvider.provider` and NOT off `liveSelection`: the
-  // provider TYPE is boot-bound (`buildLiveModelResolver` closes over the boot `providerType` and
-  // deliberately ignores a live-read one, because changing `provider.type` needs a restart), so
-  // routing it through the hot resolver would advertise a hotness that does not exist. This is the
-  // SAME instance `providerInfo` above and `engine.knownModels()` (via `cfg.provider.provider`)
-  // read, so the identity and the catalogue cannot drift apart; `Provider.id` is `codex-oauth` /
-  // `openai-compatible`, `ProviderSettings.type`'s own vocabulary. `undefined` on a no-provider
-  // daemon — ipc/sync.ts degrades that to `"none"`, never to `""`.
-  const liveProvider = agentProvider ? () => agentProvider!.provider.id : undefined;
 
   const server: IpcServer = startIpcServer({
     socketPath: dirs.socketPath,

@@ -1,14 +1,14 @@
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
+import type { WinterModelDescriptor } from "@yanlinglabs/winter-provider-catalog";
 import type { ModelFamilyListing, ProviderSelection } from "@yanlinglabs/winter-agent-sdk";
-import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
-import { WINTER_CREDENTIAL_INVENTORY, credentialRefFor } from "./keychain";
-import type { Settings } from "../settings";
+import { credentialRefFor } from "./keychain";
+import { splitTag, WINTER_TEST_PREFIX, UNSTATED_TAG, type ModelTag } from "./model-tag";
 
 /** The `winter-test/<name>` namespace (Winter map §11.6): selection is BY NAME through
  *  `model: "winter-test/<name>"` plus the env var `WINTER_TEST_PROVIDER`, precisely because a
  *  spawned or compiled child shares no module state with the test process. It is not a catalog
  *  provider and must never be resolved against one. */
-export const WINTER_TEST_MODEL_PREFIX = "winter-test/";
+export const WINTER_TEST_MODEL_PREFIX = WINTER_TEST_PREFIX;
 
 /** The test-provider NAME a `winter-test/<name>` model selects, or `undefined`. `buildWinterOptions`
  *  puts it in the child's `WINTER_TEST_PROVIDER`; nothing else in the daemon reads it. */
@@ -18,117 +18,31 @@ export function testProviderNameFor(model: string | undefined): string | undefin
   return name || undefined;
 }
 
-/** Every catalog row whose id, upstream id, canonical id or alias is `model`. Memoised through
- *  `loadCatalog`, which is itself memoised for the life of the process. */
-export function catalogRowsFor(model: string): Array<{ key: string; providerId: string }> {
-  const catalog = loadCatalog();
-  return catalog.models.filter((m) =>
-    m.key === model || m.upstreamId === model || m.canonicalModelId === model || m.aliases.includes(model),
-  );
-}
-
-/** Is this a fully-qualified `<providerId>/<model>` catalog key? Exported since WS-19 (W19-7): the
- *  pre-turn credential gate refuses only for a provider Winter actually DECIDED on, and a qualified
- *  key is one of the two ways it does. */
-export function qualifiedProviderFor(model: string): string | undefined {
-  const row = loadCatalog().models.find((m) => m.key === model);
-  return row?.providerId;
+/** WS-20: the ONE catalog row lookup by its EXACT key — the tag itself, since the catalog row
+ *  `key` already IS the provider-qualified tag. Replaces `catalogRowsFor`'s broad alias/upstreamId
+ *  matching (a bare-id concept that no longer exists — a tag names exactly one row or none). */
+export function rowForTag(tag: string): WinterModelDescriptor | undefined {
+  return loadCatalog().models.find((m) => m.key === tag);
 }
 
 /**
- * **Which provider a session's model resolves against, and which credential names it** — the value
- * of `Options.provider` (surface map §7.1).
+ * WS-20: **a tag names exactly its provider and that provider's credential ref.** No selection, no
+ * inventory-order tie-break, no bare-id ambiguity — the old bare-id selector this function replaces
+ * is gone entirely, because there is nothing left to decide: `splitTag(tag).providerId` IS the
+ * answer.
  *
- * The host NAMES the credential and never reads it: the returned `authRef` is a
- * `{ kind: "keychain", account, service }` locator, and the CHILD resolves the material through the
- * `KeychainSeam` Task 4 built. Nothing here touches a `SecretStore`.
+ * `winter-test/*` and the `unstated/unstated` sentinel return `undefined` — the test double is
+ * selected by env var, not by the catalog, and the sentinel names no provider to begin with.
  *
- * The resolution, in order:
- *
- * 1. **No model** → `undefined`. (`Options.model` is separately set by `buildWinterOptions`; "no
- *    model AND no provider" is the child's own typed resolution error, never a silent default.)
- * 2. **`winter-test/<name>`** → `undefined`. The test double is selected by env var, not by the
- *    catalog, and naming a provider for it would be a lie.
- * 3. **A fully-qualified `<providerId>/<model>` key** → that provider, with its ref if Winter has
- *    one. §7.1: "a qualified key needs no `provider` at all" — we still return one so the
- *    credential is named, which is the half the child cannot do for itself.
- * 4. **A bare id** → resolve against the pinned catalog, RESTRICTED to the providers Winter actually
- *    has credentials for. This restriction is load-bearing: a bare id like `gpt-5.6-sol` matches
- *    SIX catalog rows (`agentrouter`, `codex-oauth`, `freeaiapikey`, `kie`, `kilocode`, `openai`),
- *    so "resolve the model id against the catalog" alone is ambiguous and would pick an arbitrary
- *    third-party reseller. Within Winter's own inventory the choice is made in inventory order,
- *    preferring a provider whose credential is actually PRESENT — so a Codex-only install routes
- *    `gpt-5.6-sol` to `codex-oauth` and an API-key install routes it to `openai`, which is exactly
- *    what the engine leg does today.
- * 5. **Served by no inventory provider** → `undefined`, letting the child's own catalog-first
- *    selection answer. Never a host-side throw (a model Winter cannot name is the child's typed
- *    refusal to give, not ours).
- *
- * A provider that serves the model but has NO stored credential still returns a selection WITHOUT
- * an `authRef` — the child then refuses with its own typed provider error, which is a better
- * message than anything the host could invent.
+ * A provider with no stored credential still returns a selection WITHOUT an `authRef` — the child
+ * then refuses with its own typed provider error, which is a better message than anything the host
+ * could invent.
  */
-export function providerSelectionFor(
-  model: string | undefined,
-  credentials: CredentialPresence,
-  home?: string,
-  // Winter Phase 10a fix wave 3 (M-B, "Native sessions"): threaded through to `credentialRefFor`
-  // so the "anthropic" provider's ref picks `anthropic:console` vs `anthropic:default` the SAME
-  // way the official leg decides its own arm (`officialAuthFamilyFor`) — "both legs agree".
-  // `undefined` (a caller with no settings handy) keeps the old, unconditional `anthropic:default`.
-  settings?: Settings | null,
-  /**
-   * Hotfix 2026-09-16: the ROUTER's decided provider for this session (`RuntimeSelection.providerId`,
-   * persisted in runtime-state at create and re-read at every incarnation). For a BARE id served by
-   * several inventory providers this is the tie-breaker, ahead of inventory order — measured on the
-   * release daemon, the router decided `codex-oauth/gpt-5.6-terra` and this function, re-run in
-   * `optionsFor` without that decision, named `openai` instead. Honoured only when the preferred
-   * provider serves the model AND holds a credential; otherwise the unchanged rule applies, so a
-   * stale decision (credential since removed) can never name a provider Winter has no key for.
-   */
-  preferredProviderId?: string,
-): ProviderSelection | undefined {
-  if (!model) return undefined;
-  if (model.startsWith(WINTER_TEST_MODEL_PREFIX)) return undefined;
-
-  const qualified = qualifiedProviderFor(model);
-  if (qualified) {
-    const ref = credentials.byProvider[qualified] ? credentialRefFor(qualified, home, settings) : undefined;
-    return ref ? { providerId: qualified, authRef: ref } : { providerId: qualified };
-  }
-
-  const serving = new Set(catalogRowsFor(model).map((r) => r.providerId));
-  if (serving.size === 0) return undefined;
-
-  const inInventory = WINTER_CREDENTIAL_INVENTORY.filter((s) => serving.has(s.provider));
-  if (inInventory.length === 0) return undefined;
-
-  const preferred =
-    preferredProviderId === undefined
-      ? undefined
-      : inInventory.find((s) => s.provider === preferredProviderId && credentials.byProvider[s.provider] !== undefined);
-  const withCredential = preferred ?? inInventory.find((s) => credentials.byProvider[s.provider] !== undefined);
-  const chosen = withCredential ?? inInventory[0]!;
-  const ref = withCredential ? credentialRefFor(chosen.provider, home, settings) : undefined;
-  return ref ? { providerId: chosen.provider, authRef: ref } : { providerId: chosen.provider };
-}
-
-/**
- * Which of Winter's inventory providers the pinned catalog says serve `model` — each named ONCE.
- *
- * Exported for the parity test, which pins the EXACT answer for every model Winter's own default
- * catalogue offers, so a catalog bump that adds or drops a row fails loudly in either direction.
- *
- * DE-DUPED (whole-branch review Minor 3): the inventory holds TWO slots for `anthropic` (the api-key
- * account and the Console account), so the raw filter listed it twice. That is harmless for the
- * parity pin but not for `beforeTurn`, whose "exactly one provider serves this model" narrowing
- * reads this list's LENGTH — an anthropic-only-served model would have counted as two and never been
- * gated. Inert today (no such model is reachable on the Winter leg) and wrong on its own terms, so
- * it is a provider list, not a slot list.
- */
-export function inventoryProvidersServing(model: string): string[] {
-  const serving = new Set(catalogRowsFor(model).map((r) => r.providerId));
-  return [...new Set(WINTER_CREDENTIAL_INVENTORY.filter((s) => serving.has(s.provider)).map((s) => s.provider))];
+export function providerFor(tag: ModelTag | string, home?: string): ProviderSelection | undefined {
+  if (tag.startsWith(WINTER_TEST_PREFIX) || tag === UNSTATED_TAG) return undefined;
+  const { providerId } = splitTag(tag);
+  const ref = credentialRefFor(providerId, home);
+  return ref ? { providerId, authRef: ref } : { providerId };
 }
 
 /**
@@ -153,28 +67,11 @@ export function inventoryProvidersServing(model: string): string[] {
  * inference nobody made" this codebase's own culture warns against — recorded as a carry for
  * whichever surface eventually renders it.
  *
- * M2 (whole-branch review): the router's OWN `resolveModel` (`select-runtime.ts`, the SDK's
- * compiled code, not ours) matches a requested model against exactly two things — an entry's
- * `canonicalModelId`, or a row's `key` — because the SDK's `ModelFamilyListing` row shape HAS no
- * `aliases`/`upstreamId` field to consult at all. `catalogRowsFor` (this file, just above) matches
- * a broader set — a row's `key`, `upstreamId`, `canonicalModelId` OR any of its `aliases` — which is
- * exactly right for "does Winter's catalog know this model" (`decideRuntime`'s bail-out #4,
- * `session-driver.ts`) but WRONG the moment that broader answer is fed to the router as a literal
- * `requested.model` string: an alias/upstreamId match passes the bail-out (a real catalog row
- * exists) and then reaches `resolveModel`, which cannot find it anywhere in THIS listing and
- * refuses ("no model or catalog row … matches") even though the model is unambiguously catalogued.
- * Fix: for every alias/upstreamId a row answers to, this listing carries one EXTRA row with that
- * identifier as `key` (same provider/status — a synonym for the SAME row, never a different
- * provider or a different canonical model), appended AFTER the row's own real entry — so
- * `resolveModel`'s `row.key === model` check succeeds identically to a direct key/canonicalModelId
- * request. `candidatesFor`'s own array-order pick (`resolveCandidateRows`'s `[first, ...rest]`)
- * therefore still stamps the REAL provider-qualified key as `modelRef` whenever both survive its
- * filters (same provider/status/servable/auth either way) — an alias row never displaces its own
- * real row, it only adds a second door to the same one. These rows exist ONLY inside the
- * `SelectionInput` fed to the router's pure functions (`selectRuntime`/`resolveCandidateRows`) —
- * nothing UI-facing reads `familyListingFromCatalog()`'s output (grep confirms: `create.ts`'s
- * `buildSelectionInput`/`selectRuntimeFor` are its only callers), so a synthetic `key` here never
- * reaches a client's model picker.
+ * WS-20: no more alias/upstreamId synonym rows. Every model request the router ever sees is now a
+ * provider-qualified TAG (`requested.model`, §0.1), and the router matches `row.key === model`
+ * directly — the synonym-row synthesis this function used to do existed only to paper over a BARE
+ * id reaching `resolveModel` (which has no alias table of its own); a tag never needs it, so this
+ * listing carries exactly one row per catalog row, nothing synthesized.
  */
 export function familyListingFromCatalog(): ModelFamilyListing {
   const catalog = loadCatalog();
@@ -183,13 +80,9 @@ export function familyListingFromCatalog(): ModelFamilyListing {
     const canonicalIds = [...new Set(inFamily.map((m) => m.canonicalModelId))];
     const models = canonicalIds.map((canonicalModelId) => {
       const rows = inFamily.filter((m) => m.canonicalModelId === canonicalModelId);
-      const listedRows = rows.flatMap((r) => {
-        const base = { providerId: r.providerId, status: r.status, pricingBasis: "unknown", servable: "unknown" as const };
-        const synonyms = new Set([r.upstreamId, ...r.aliases]);
-        synonyms.delete(r.key);
-        synonyms.delete(canonicalModelId); // already matched at the entry level; no need to duplicate
-        return [{ key: r.key, ...base }, ...[...synonyms].map((key) => ({ key, ...base }))];
-      });
+      const listedRows = rows.map((r) => ({
+        key: r.key, providerId: r.providerId, status: r.status, pricingBasis: "unknown", servable: "unknown" as const,
+      }));
       return {
         canonicalModelId,
         displayName: rows[0]?.displayName ?? canonicalModelId,

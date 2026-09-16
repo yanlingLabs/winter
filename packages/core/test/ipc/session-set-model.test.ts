@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, ERR, SESSION_MODEL_MAX_CHARS, type WritableSocket } from "@yanlinglabs/winter-protocol";
@@ -8,7 +8,6 @@ import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
-import type { ModelInfo } from "../../src/providers/types";
 
 // Chat Slice D task 1: per-session model override — session.setModel {sessionId, model: string|null}
 // → {} (null clears), mode-agnostic (works for code/dispatch/chat, unlike session.setPolicy which
@@ -67,11 +66,16 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
 
   async function boot(): Promise<{ store: SessionStore; socketPath: string; harnessToken: string; remoteToken: string }> {
     const home = mkdtempSync(join(tmpdir(), "winter-set-model-rpc-"));
+    // WS-20 (review round 2, M4): `resolveModelSelection` now enforces real catalog MEMBERSHIP,
+    // not just provider existence — a BYO `providers.codex-oauth.baseUrl` keeps this file's several
+    // off-catalog/placeholder model ids (`codex-oauth/m1`, the length-boundary filler) passing
+    // exactly as before, same escape hatch `session-model-gate-catalog.test.ts` exercises directly.
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" }, providers: { "codex-oauth": { baseUrl: "http://127.0.0.1:9/v1" } } }));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
     const tokens = await authority.ensureTokens();
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home });
     stop = () => { server.stop(); store.close(); };
     return { store, socketPath, harnessToken: tokens.harness, remoteToken: tokens.remote };
   }
@@ -82,14 +86,14 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
     await c.hello(harnessToken, "model-setter");
     const sessionId = store.createSession("global");
 
-    const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "claude-opus-5" });
+    const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-opus-5" });
     expect(res.error).toBeUndefined();
     expect(res.result).toEqual({});
 
-    expect(store.meta(sessionId).model).toBe("claude-opus-5");
+    expect(store.meta(sessionId).model).toBe("anthropic/claude-opus-5");
     const listed = await c.request(METHODS.sessionList, {});
     const row = listed.result.sessions.find((s: any) => s.sessionId === sessionId);
-    expect(row.model).toBe("claude-opus-5");
+    expect(row.model).toBe("anthropic/claude-opus-5");
     c.close();
   });
 
@@ -110,8 +114,8 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
     const { store, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "model-setter");
-    const sessionId = store.createSession("global", { model: "claude-opus-5" });
-    expect(store.meta(sessionId).model).toBe("claude-opus-5");
+    const sessionId = store.createSession("global", { model: "anthropic/claude-opus-5" });
+    expect(store.meta(sessionId).model).toBe("anthropic/claude-opus-5");
 
     const res = await c.request(METHODS.sessionSetModel, { sessionId, model: null });
     expect(res.error).toBeUndefined();
@@ -124,9 +128,9 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "model-setter");
 
-    const created = await c.request(METHODS.sessionCreate, { scope: "global", model: "gpt-6" });
+    const created = await c.request(METHODS.sessionCreate, { scope: "global", model: "codex-oauth/gpt-6" });
     expect(created.error).toBeUndefined();
-    expect(store.meta(created.result.sessionId).model).toBe("gpt-6");
+    expect(store.meta(created.result.sessionId).model).toBe("codex-oauth/gpt-6");
     c.close();
   });
 
@@ -136,11 +140,11 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
     await c.hello(harnessToken, "model-setter");
     const sessionId = store.createSession("global");
 
-    const first = await c.request(METHODS.sessionSetModel, { sessionId, model: "m1" });
-    const second = await c.request(METHODS.sessionSetModel, { sessionId, model: "m1" });
+    const first = await c.request(METHODS.sessionSetModel, { sessionId, model: "codex-oauth/m1" });
+    const second = await c.request(METHODS.sessionSetModel, { sessionId, model: "codex-oauth/m1" });
     expect(first.error).toBeUndefined();
     expect(second.error).toBeUndefined();
-    expect(store.meta(sessionId).model).toBe("m1");
+    expect(store.meta(sessionId).model).toBe("codex-oauth/m1");
     c.close();
   });
 
@@ -149,7 +153,7 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "model-setter");
 
-    const res = await c.request(METHODS.sessionSetModel, { sessionId: "s_does_not_exist", model: "m1" });
+    const res = await c.request(METHODS.sessionSetModel, { sessionId: "s_does_not_exist", model: "codex-oauth/m1" });
     expect(res.error).toBeTruthy();
     expect(res.error.code).toBe(ERR.NOT_FOUND);
     c.close();
@@ -163,9 +167,9 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
     await c.hello(harnessToken, "model-setter");
     const sessionId = store.createSession("global", { mode: "chat", approvalPolicy: "chat" as any });
 
-    const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "claude-opus-5" });
+    const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-opus-5" });
     expect(res.error).toBeUndefined();
-    expect(store.meta(sessionId).model).toBe("claude-opus-5");
+    expect(store.meta(sessionId).model).toBe("anthropic/claude-opus-5");
     c.close();
   });
 
@@ -180,7 +184,7 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
     await c.hello(harnessToken, "model-setter");
     const sessionId = store.createSession("global", { mode: "dispatch", origin: "dispatch" });
 
-    const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "claude-opus-5" });
+    const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-opus-5" });
     expect(res.error).toBeTruthy();
     expect(res.error.code).toBe(ERR.INVALID_PARAMS);
     expect(res.error.message).toContain("dispatch runs a fixed model");
@@ -243,7 +247,7 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "model-setter");
 
-    const res = await c.request(METHODS.sessionSetModel, { sessionId: "s_does_not_exist", model: "claude-opus-5" });
+    const res = await c.request(METHODS.sessionSetModel, { sessionId: "s_does_not_exist", model: "anthropic/claude-opus-5" });
     expect(res.error).toBeTruthy();
     expect(res.error.code).toBe(ERR.NOT_FOUND);
     c.close();
@@ -257,9 +261,9 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
     await c.hello(remoteToken, "iphone-gateway", "remote");
     const sessionId = store.createSession("global", { mode: "code" });
 
-    const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "claude-opus-5" });
+    const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-opus-5" });
     expect(res.error).toBeUndefined();
-    expect(store.meta(sessionId).model).toBe("claude-opus-5");
+    expect(store.meta(sessionId).model).toBe("anthropic/claude-opus-5");
     c.close();
   });
 
@@ -274,7 +278,7 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
 
     const c = await TestClient.connect(socketPath);
     await c.hello(remoteToken, "iphone-gateway", "remote");
-    const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "claude-opus-5" });
+    const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-opus-5" });
     expect(res.error).toBeTruthy();
     expect(res.error.message).toMatch(/not available/i);
     c.close();
@@ -303,119 +307,149 @@ describe("session.setModel round-trip RPC (Chat Slice D task 1)", () => {
     await c.hello(remoteToken, "iphone-gateway", "remote");
     const sessionId = store.createSession("global", { mode: "code" });
 
-    const res = await c.request(METHODS.sessionSetModel, { sessionId, model: "m".repeat(SESSION_MODEL_MAX_CHARS + 1) });
+    // WS-20: `ModelTagSchema` now requires the "<providerId>/<modelId>" shape as well as the
+    // length cap, so the filler has to stay tag-shaped (a real catalog providerId prefix) for the
+    // AT-CAP control below to mean anything — an unprefixed run of "m"s would be refused for its
+    // shape alone, not its length, which is not what this test is proving.
+    const prefix = "codex-oauth/";
+    const overCap = prefix + "m".repeat(SESSION_MODEL_MAX_CHARS + 1 - prefix.length);
+    const res = await c.request(METHODS.sessionSetModel, { sessionId, model: overCap });
     expect(res.error).toBeTruthy();
     expect(res.error.code).toBe(ERR.INVALID_PARAMS);
     expect(store.meta(sessionId).model).toBeUndefined();
 
-    // Control: a realistic slug (and one right AT the bound) still passes — the cap is far above
-    // every real model id, so no existing caller changes behavior.
-    const atCap = "m".repeat(SESSION_MODEL_MAX_CHARS);
+    // Control: a tag-shaped value right AT the bound still passes — the cap is far above every
+    // real model id, so no existing caller changes behavior.
+    const atCap = prefix + "m".repeat(SESSION_MODEL_MAX_CHARS - prefix.length);
+    expect(atCap.length).toBe(SESSION_MODEL_MAX_CHARS);
     expect((await c.request(METHODS.sessionSetModel, { sessionId, model: atCap })).error).toBeUndefined();
     expect(store.meta(sessionId).model).toBe(atCap);
     c.close();
   });
 });
 
-/** The `session.setModel`/`sync.push`/`sync.config` catalogue shape — same fake used by
- *  sync-push-effort.test.ts/sync-config.test.ts, and the SAME production ids
- *  (providers/codex-config.ts's CODEX_MODELS) so an alias like "sol" resolves the way it really
- *  would in production. */
-function fakeEngine(models: ModelInfo[]): any {
-  // session-activity-hygiene T2: `hasBackgroundWork` joins `isRunning` here because `session.list`
-  // now builds activity signals from BOTH — and this double is an `any` cast, so a missing method
-  // is a runtime TypeError inside the handler (the RPC answers INTERNAL, not "no activity"), not a
-  // compile error. Every AgentEngine double that a session.list-calling test can reach owes both.
-  return { knownModels: () => models, isRunning: () => false, hasBackgroundWork: () => false, interrupt: () => ({ wasRunning: false }) };
-}
-
-const CATALOGUE: ModelInfo[] = [
-  { id: "gpt-5.6-sol", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
-  { id: "gpt-5.6-terra", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
-  { id: "gpt-5.6-luna", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
-];
 
 // ================================================================================================
-// followups batch T2: `session.create`'s OWN `model` was never validated — unlike `session.setModel`
-// above (already alias-resolving + membership-checking since Chat Slice D task 1), a bogus model
-// handed to `session.create` was stored VERBATIM and bricked every subsequent turn on that session
-// (each one 400s against the provider, with nothing pointing back at create), and an alias like
-// "sol" never matched the catalogue's canonical "gpt-5.6-sol" — which ALSO makes that session's
-// effort menu render wire-empty on the Mac (the picker matches `row.model` against catalogue ids).
-// Fixed with the SAME idiom `session.setModel` already applies (now a shared helper so the two
-// surfaces cannot drift): resolve aliases, refuse membership only when the catalogue can enumerate
-// (`known.length > 0` — a BYO endpoint that cannot enumerate is never bricked).
+// WS-20: `session.create`'s OWN `model` is validated by the SAME `resolveModelSelection` helper
+// `session.setModel` applies above — extracted once (beside `assertEffortSelectable`) so the two
+// surfaces cannot drift. There is no more alias-resolution step and no more
+// `AgentEngine.knownModels()`-driven enumerability escape hatch (a pre-WS-20 concept that no
+// longer exists).
+//
+// WS-20 (review round 2, M4): `resolveModelSelection` is a real catalog MEMBERSHIP gate, not just
+// "the provider exists" — a tag whose provider has catalog rows must name ONE OF THEM, refused
+// INVALID_PARAMS otherwise (`codex-oauth/gpt-5.4`, a typo, is refused exactly like an unrecognized
+// provider always was). The ONE escape hatch is a BYO `providers.<id>.baseUrl` (`boot2()` above
+// configures one for `codex-oauth`, mirroring the openai-BYOK flow `provider.configure` writes) —
+// an intentionally unlisted endpoint model (a fine-tune, say) still passes verbatim on a provider
+// the caller has explicitly pointed at their own endpoint. A provider with NO catalog rows at all
+// also passes anything (nothing to be a member of).
 // ================================================================================================
-describe("session.create validates model exactly like session.setModel (followups T2)", () => {
+describe("session.create validates model exactly like session.setModel (WS-20: tags, not aliases)", () => {
   let stop2: (() => void) | undefined;
   afterEach(() => { stop2?.(); stop2 = undefined; });
 
-  async function boot2(models: ModelInfo[]): Promise<{ store: SessionStore; socketPath: string; harnessToken: string }> {
+  async function boot2(): Promise<{ store: SessionStore; socketPath: string; harnessToken: string }> {
     const home = mkdtempSync(join(tmpdir(), "winter-create-model-rpc-"));
+    // WS-20 (review round 2, M4): see `boot()`'s identical comment above — the BYO baseUrl keeps
+    // this describe block's off-catalog-model controls meaning what they say.
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" }, providers: { "codex-oauth": { baseUrl: "http://127.0.0.1:9/v1" } } }));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
     const tokens = await authority.ensureTokens();
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, engine: fakeEngine(models), hub: new SessionHub(store) });
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, hub: new SessionHub(store), winterHome: home });
     stop2 = () => { server.stop(); store.close(); };
     return { store, socketPath, harnessToken: tokens.harness };
   }
 
-  test("a garbage model is REFUSED at create when the catalogue can enumerate — the brick, closed", async () => {
-    const { store, socketPath, harnessToken } = await boot2(CATALOGUE);
+  test("a bare (non-tag-shaped) model is refused at the wire schema, before the handler ever runs", async () => {
+    const { store, socketPath, harnessToken } = await boot2();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "creator");
 
     const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "garbage" });
     expect(res.error).toBeTruthy();
     expect(res.error.code).toBe(ERR.INVALID_PARAMS);
-    expect(res.error.message).toContain("garbage");
-    // Refused BEFORE the row exists, same precedent as the effort refusal (T6) just above in the
-    // sibling suite — a bricked session (every future turn 400s, silently) is worse than an upfront
-    // refusal the caller can act on immediately.
+    // Refused BEFORE the row exists, same precedent as the effort refusal further down — a bricked
+    // session (every future turn 400s, silently) is worse than an upfront refusal the caller can
+    // act on immediately.
     expect(store.list().length).toBe(0);
     c.close();
   });
 
-  test("an alias is RESOLVED to its canonical id at create, not stored verbatim", async () => {
-    const { store, socketPath, harnessToken } = await boot2(CATALOGUE);
+  test("a tag-shaped model naming an unrecognized provider is refused by resolveModelSelection", async () => {
+    const { store, socketPath, harnessToken } = await boot2();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "creator");
 
-    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "sol" });
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "nosuchprovider/foo" });
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(res.error.message).toContain("nosuchprovider/foo");
+    expect(store.list().length).toBe(0);
+    c.close();
+  });
+
+  test("a real tag passes through unchanged — no alias table, no resolution step (control)", async () => {
+    const { store, socketPath, harnessToken } = await boot2();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "creator");
+
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "codex-oauth/gpt-5.6-terra" });
     expect(res.error).toBeUndefined();
-    expect(store.meta(res.result.sessionId).model).toBe("gpt-5.6-sol");
+    expect(store.meta(res.result.sessionId).model).toBe("codex-oauth/gpt-5.6-terra");
 
     const listed = await c.request(METHODS.sessionList, {});
     const row = listed.result.sessions.find((s: any) => s.sessionId === res.result.sessionId);
-    expect(row.model).toBe("gpt-5.6-sol");
+    expect(row.model).toBe("codex-oauth/gpt-5.6-terra");
     c.close();
   });
 
-  test("a full canonical id passes through unchanged (control)", async () => {
-    const { store, socketPath, harnessToken } = await boot2(CATALOGUE);
+  // WS-20 (review round 2, M4): `boot2()` configures a BYO `providers.codex-oauth.baseUrl` — the
+  // escape hatch that keeps an off-catalog id passing on a provider the caller has explicitly
+  // pointed at their own endpoint (a fine-tune, say). Without it (the next test), the SAME id is
+  // now refused: this is no longer "only the provider half is validated" unconditionally.
+  test("a real provider with an off-catalog model id is stored verbatim, GIVEN a BYO baseUrl for it", async () => {
+    const { store, socketPath, harnessToken } = await boot2();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "creator");
 
-    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "gpt-5.6-terra" });
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "codex-oauth/some-byo-endpoint-model" });
     expect(res.error).toBeUndefined();
-    expect(store.meta(res.result.sessionId).model).toBe("gpt-5.6-terra");
+    expect(store.meta(res.result.sessionId).model).toBe("codex-oauth/some-byo-endpoint-model");
     c.close();
   });
 
-  test("without an enumerable catalogue, an arbitrary model is stored freely — a BYO endpoint is never bricked (control)", async () => {
-    const { store, socketPath, harnessToken } = await boot2([]);
-    const c = await TestClient.connect(socketPath);
-    await c.hello(harnessToken, "creator");
-
-    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "garbage" });
-    expect(res.error).toBeUndefined();
-    expect(store.meta(res.result.sessionId).model).toBe("garbage");
-    c.close();
+  // WS-20 (review round 2, M4): the regression this whole item exists to close — the SAME
+  // off-catalog id as the control just above, but with NO `providers.codex-oauth.baseUrl`
+  // configured (a fresh server, no winterHome/settings at all) is now refused rather than passed
+  // through: a typo on a real, catalog-backed provider is a real membership failure.
+  test("M4: a typo model on a real provider, with NO BYO baseUrl, is refused INVALID_PARAMS", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-create-model-rpc-notypo-"));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+    const tokens = await authority.ensureTokens();
+    // No `winterHome` — `liveSettingsFor` answers `undefined`, so there is no BYO baseUrl to consult.
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, hub: new SessionHub(store) });
+    try {
+      const c = await TestClient.connect(socketPath);
+      await c.hello(tokens.harness, "creator");
+      const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "codex-oauth/gpt-5.4" });
+      expect(res.error).toBeTruthy();
+      expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+      expect(res.error.message).toContain("unknown model");
+      expect(store.list().length).toBe(0);
+      c.close();
+    } finally {
+      server.stop();
+      store.close();
+    }
   });
 
   test("omitting model is unaffected — no resolution/validation runs at all (control)", async () => {
-    const { store, socketPath, harnessToken } = await boot2(CATALOGUE);
+    const { store, socketPath, harnessToken } = await boot2();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "creator");
 
@@ -425,37 +459,48 @@ describe("session.create validates model exactly like session.setModel (followup
     c.close();
   });
 
-  // The interaction the brief's own checklist calls out by name: create's effort validation (T6,
-  // `assertEffortSelectable`) must run against the RESOLVED model, not whatever alias the caller
-  // typed. `effortsForModel` is uniform (ignores its modelId argument today — untouched by this
-  // task), so a divergent ALLOWED-list can't be the probe; the refusal MESSAGE naming the model can
-  // be: it is built from whatever string `assertEffortSelectable` was handed. If create ran the
-  // effort check before resolving the alias, the message would name 'sol'; run in the correct
-  // order, it names the canonical id the row is about to be stamped with.
-  test("effort validates against the RESOLVED model, not the alias the caller sent", async () => {
-    const { store, socketPath, harnessToken } = await boot2(CATALOGUE);
+  // The interaction the original T6 checklist called out by name still matters under WS-20: effort
+  // validation runs against the TAG this call is about to stamp (there is no alias step left to
+  // run it against the wrong thing) — `effortsForModel` reads the real catalog row for a known tag.
+  test("effort validates against the model tag actually being stamped", async () => {
+    const { store, socketPath, harnessToken } = await boot2();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "creator");
 
-    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "sol", effort: "minimal" });
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "codex-oauth/gpt-5.6-sol", effort: "minimal" });
     expect(res.error).toBeTruthy();
     expect(res.error.code).toBe(ERR.INVALID_PARAMS);
-    expect(res.error.message).toContain("gpt-5.6-sol");
-    expect(res.error.message).not.toContain("'sol'");
-    // Refused before the row exists, exactly like the T6 "wire-invalid effort" refusal.
+    expect(res.error.message).toContain("codex-oauth/gpt-5.6-sol");
+    // Refused before the row exists, exactly like the wire-invalid effort refusal above.
     expect(store.list().length).toBe(0);
     c.close();
   });
 
-  test("a resolved alias's canonical id is what actually gets stamped when effort ALSO validates fine", async () => {
-    const { store, socketPath, harnessToken } = await boot2(CATALOGUE);
+  test("a real tag is what actually gets stamped when effort ALSO validates fine", async () => {
+    const { store, socketPath, harnessToken } = await boot2();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "creator");
 
-    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "luna", effort: "high" });
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "codex-oauth/gpt-5.6-luna", effort: "high" });
     expect(res.error).toBeUndefined();
-    expect(store.meta(res.result.sessionId).model).toBe("gpt-5.6-luna");
+    expect(store.meta(res.result.sessionId).model).toBe("codex-oauth/gpt-5.6-luna");
     expect(store.meta(res.result.sessionId).effort).toBe("high");
+    c.close();
+  });
+
+  // An off-catalog model id (passing the M4 membership gate here only because `boot2()`'s BYO
+  // baseUrl keeps it a valid selection at all) has no row to check effort against —
+  // `effortsForModel` returns `[]`, and `assertEffortSelectable`'s own guard (`allowed.length > 0`)
+  // means no restriction applies.
+  test("effort is unrestricted against an off-catalog model id (no row to validate against)", async () => {
+    const { store, socketPath, harnessToken } = await boot2();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "creator");
+
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "codex-oauth/some-byo-endpoint-model", effort: "minimal" });
+    expect(res.error).toBeUndefined();
+    expect(store.meta(res.result.sessionId).model).toBe("codex-oauth/some-byo-endpoint-model");
+    expect(store.meta(res.result.sessionId).effort).toBe("minimal");
     c.close();
   });
 });

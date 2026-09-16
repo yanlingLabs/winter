@@ -887,6 +887,16 @@ describe("statusChromeModel — the status line (policy, model/effort, chip, hin
     expect(lineText(unknown.lines[0]!)).not.toContain("gpt");
   });
 
+  // Review fix (WS-20): the pre-existing pins above use a bare "gpt-5.6-luna"/"gpt-5.6-sol" — no
+  // "/", so `modelIdPortion` is a no-op and they stayed green untouched. This one exercises the
+  // REAL shape the footer now receives: a provider-qualified tag, which must show only its
+  // modelId half.
+  test("WS-20: a provider-qualified tag renders as its modelId half only, never the raw tag", () => {
+    const { lines } = statusChromeModel(chromeBase({ model: "codex-oauth/gpt-5.6-luna", effort: "high" }));
+    expect(lineText(lines[0]!)).toContain("gpt-5.6-luna (high)");
+    expect(lineText(lines[0]!)).not.toContain("codex-oauth");
+  });
+
   test("a model switch mid-session reflects immediately (pure: new input, new line)", () => {
     const before = statusChromeModel(chromeBase());
     const after = statusChromeModel(chromeBase({ model: "gpt-5.6-sol", effort: "medium" }));

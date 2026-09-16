@@ -19,7 +19,7 @@ import {
 } from "../../src/plugins/lifecycle";
 
 function baseSettings(overrides: Partial<Settings> = {}): Settings {
-  return { schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" }, ...overrides } as Settings;
+  return { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, ...overrides } as Settings;
 }
 
 describe("deriveInstallName", () => {

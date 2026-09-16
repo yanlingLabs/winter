@@ -72,6 +72,10 @@ export const SESSION_TITLE_MAX_CHARS = 200;
  *  40 characters), far below anything that could bloat a row. */
 export const SESSION_MODEL_MAX_CHARS = 200;
 
+/** WS-20: a model is ALWAYS a provider-qualified tag on the wire. Shape only — provider existence
+ *  is the daemon's check (core's `isModelTag`/`ModelTagSchemaCore`), not this package's. */
+export const ModelTagSchema = z.string().min(3).max(SESSION_MODEL_MAX_CHARS).regex(/^[a-z0-9][a-z0-9.-]*\/\S+$/, "model must be a provider-qualified tag '<providerId>/<modelId>'");
+
 /** provider-correctness T4: the same unbounded-field hazard `SESSION_MODEL_MAX_CHARS` documents,
  *  one column over — a per-session `effort` rides every `session.list` row, unpaged and
  *  remote-reachable, exactly like `model`.
@@ -130,7 +134,7 @@ export const SessionCreateParams = z.object({
   // unaffected. Index-only metadata (like `cwd`/`approvalPolicy`, NOT `mode` — see
   // `SessionRow.model`'s own doc comment in store.ts), so it does NOT ride the `session_created`
   // event and resets to absent on a full index rebuild. Bounded — see SESSION_MODEL_MAX_CHARS.
-  model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).optional(),
+  model: ModelTagSchema.optional(),
   // provider-correctness T6: the effort half of `model` just above, stamped at creation time and
   // validated by the SAME rules `session.setEffort` applies (model-aware membership against
   // `effortsForModel`, plus the code-sessions-only gate for a Winter-level tier). Added rather than
@@ -183,7 +187,7 @@ export const SessionListResult = z.object({
     parentSessionId: z.string().optional(), // set on dispatch children
     // Chat Slice D Task 1: round-trips SessionRow.model (store.ts) — absent for every session
     // created before this field existed, or created/left without an explicit override.
-    model: z.string().optional(),
+    model: ModelTagSchema.optional(),
     // provider-correctness T4: round-trips SessionRow.effort (store.ts), the per-session reasoning
     // effort `session.setEffort` writes. Declared alongside `model` for the same reason `title` and
     // `forkedFrom` are — the value really does flow out of `store.list()`, so a schema-validating
@@ -531,7 +535,7 @@ export const SessionSetPolicyResult = z.object({ ok: z.literal(true) });
 // precedent as session.setPolicy).
 export const SessionSetModelParams = z.object({
   sessionId: z.string().min(1),
-  model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).nullable(),
+  model: ModelTagSchema.nullable(),
   // Winter Phase 8c (P8c-5/P8c-14, WS-13 §8.2): a model switch that crosses runtime legs (Winter <->
   // the official leg) may be LOSSY — the handoff barrier's own warning list (a source with reasoning
   // state moving to a foreign target, chiefly). Absent/false means "the caller has not confirmed
@@ -738,7 +742,9 @@ export const DaemonStatusResult = z.object({
   version: z.string(),
   uptimeMs: z.number().int().nonnegative(),
   socketPath: z.string(),
-  provider: z.object({ id: z.string(), model: z.string() }).nullable(),
+  // WS-20 L3.6: `model` is a provider-qualified tag now (`splitTag(defaultTag).providerId` names
+  // `id`, and `defaultTag` itself is `model`).
+  provider: z.object({ id: z.string(), model: ModelTagSchema }).nullable(),
   sessionsCount: z.number().int().nonnegative(),
   pluginsCount: z.number().int().nonnegative(),
 });
@@ -1146,30 +1152,38 @@ export const MemoryAuditResult = z.object({ lines: z.array(MemoryAuditLineSchema
  *  required (non-optional) `model` field for openai-compatible. Provider-TYPE changes need a
  *  daemon restart to take effect (providers/manager.ts fixes `providerType` at boot) — this RPC
  *  only persists the new config; triggering the restart is the caller's job (T2's Dashboard pane). */
-// Winter Phase 10a (P10a-3): a SECOND arm — the Anthropic auth-mode radio in the app's Provider
-// pane. Deliberately a `z.union` rather than a `z.discriminatedUnion` (the two arms don't share a
-// discriminant KEY — the original arm has no `provider` field at all, only `type`, and adding one
-// would be an unrelated wire-shape break for the shipped BYOK caller) — each arm keeps its own
-// shape exactly as it shipped. This arm writes exactly ONE hot-reloaded settings key
-// (`runtimes.official.auth`) and never touches `settings.provider` at all, unlike the
-// openai-compatible arm below, which REPLACES that whole block.
+// WS-20: the SECOND arm (the Anthropic auth-mode radio, `settings["runtimes.official.auth"]`) is
+// DELETED, not deprecated — the official leg's arm is now the tag's own prefix
+// (`officialAuthArmFor`, official-options.ts), decided by which model a session runs, never a
+// standing settings toggle. The remaining (and only) arm is the openai-compatible BYOK path, kept
+// as a `z.union` of one for wire-shape stability (nothing about this arm's own shape changed).
 export const ProviderConfigureParams = z.union([
   z.object({
     type: z.literal("openai-compatible"),
     baseUrl: z.string().url(),
     apiKey: z.string().min(1),
-    model: z.string().min(1).optional(),
-  }),
-  z.object({
-    provider: z.literal("anthropic"),
-    // Fix wave (N3): widened to include "auto" — settings.ts's own `officialAuthModeSetting`
-    // (and `ProviderStatusResult.anthropic.auth` just below) already accept it as the DEFAULT
-    // value, so the app's Provider pane had no way to configure a session back to "auto" once an
-    // explicit "api-key"/"console" had been set, short of hand-editing settings.json.
-    settings: z.object({ "runtimes.official.auth": z.enum(["auto", "api-key", "console"]) }),
+    model: ModelTagSchema.optional(),
   }),
 ]);
 export const ProviderConfigureResult = z.object({ ok: z.literal(true) });
+
+// WS-20 (cross-lane request, Lane 4 / Mac app): the Mac app used to write
+// `runtimes.advisorModel` straight into settings.json (`AppModel.writeAdvisorModelToSettings`).
+// Under WS-20 that write must go through the daemon so the tag is validated against the pinned
+// catalog before it ever lands on disk — `setAdvisorModel` (settings.ts) is the SAME transform
+// `winter model --advisor <slug|auto>` already uses; this is the RPC door onto it. LOCAL-ROLE
+// ONLY: never added to `REMOTE_ALLOWED_METHODS` — a phone has no Winter-leg advisor to configure.
+export const SettingsSetAdvisorModelParams = z.object({
+  /** `null` clears the override (falls back to the D30 per-family default); a non-null value must
+   *  already be a provider-qualified tag — the shape check happens HERE, at the door; provider
+   *  EXISTENCE is the handler's own `setAdvisorModel` check. */
+  model: ModelTagSchema.nullable(),
+});
+export const SettingsSetAdvisorModelResult = z.object({
+  ok: z.literal(true),
+  /** Echoes back what was actually STORED (never what was requested) — `null` when cleared. */
+  model: z.string().nullable(),
+});
 
 // ---------------------------------------------------------------------------------------------
 // Winter Phase 10a (O5, P10a-6): the Anthropic Console login RPC surface. `provider.login` is a
@@ -1202,19 +1216,17 @@ export const ProviderLoginCodeResult = z.object({ ok: z.boolean() });
 export const ProviderLogoutParams = z.object({ provider: z.literal("anthropic"), kind: z.literal("console") });
 export const ProviderLogoutResult = z.object({ ok: z.boolean() });
 
-/** Winter Phase 10a (O5): read-only status for the Provider pane's Anthropic section.
- *  `effective` is the same "auto resolved against on-disk presence" decision
- *  `official-options.ts`'s `officialAuthFamilyFor` makes for the official leg's own spawn, WIDENED
- *  with an explicit `"none"` for the case neither credential actually exists yet — a case that
- *  function itself never answers (it always picks an arm to attempt), because only the caller here
- *  has both presence booleans in hand to tell "decided" apart from "actually usable". */
+/** Winter Phase 10a (O5); WS-20: read-only status for the Provider pane's Anthropic section.
+ *  `auth` is REMOVED along with `runtimes.official.auth` — there is no standing arm SETTING left
+ *  to report, only presence. `effective` is presence alone now: `"both"` when the api-key material
+ *  AND the console profile both exist (a session's own tag decides which one it actually uses),
+ *  `"api-key"`/`"console"` when exactly one does, `"none"` when neither does. */
 export const ProviderStatusParams = z.object({});
 export const ProviderStatusResult = z.object({
   anthropic: z.object({
     apiKey: z.boolean(),
     consoleProfile: z.boolean(),
-    auth: z.enum(["auto", "api-key", "console"]),
-    effective: z.enum(["api-key", "console", "none"]),
+    effective: z.enum(["both", "api-key", "console", "none"]),
   }),
 });
 
@@ -1451,7 +1463,7 @@ export const SyncPushParams = z.object({
     // Bounded at the wire, not just clamped internally — see SESSION_TITLE_MAX_CHARS for why an
     // unbounded title on an UNPAGED heads/list response is a persistent connection killer.
     title: z.string().max(SESSION_TITLE_MAX_CHARS).optional(),
-    model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).optional(),
+    model: ModelTagSchema.optional(),
     // provider-correctness T6. Bounded by the SAME constant `session.setEffort`'s param uses, and
     // NOT enumerated here for the same reason that one isn't: which levels a model accepts is
     // provider knowledge the protocol package cannot see change, so a zod enum here would be a
@@ -1519,7 +1531,15 @@ export const SyncConfigParams = z.object({});
  *  on its next connect. (See `REASONING_EFFORTS` in packages/core/src/settings.ts for the full
  *  two-layer story and why "ultra" must never come back.) */
 export const SyncConfigModel = z.object({
-  id: z.string().min(1),
+  id: ModelTagSchema,
+  // WS-20: for GROUPING the picker by provider without parsing the tag — `splitTag(id).providerId`,
+  // served pre-split so no client ever splits a tag to derive UI structure.
+  providerId: z.string().min(1),
+  // WS-20: the catalog row's human-facing name (e.g. "GPT-5.6 Sol") for the picker label.
+  displayName: z.string().min(1),
+  // WS-20: the family SLOT name (e.g. "sol", "terra") when this row fills one, else absent — the
+  // per-family facing vocabulary (Terra/Luna/Sol/Astra, Fable/Opus/Sonnet/Haiku, …).
+  facingName: z.string().min(1).optional(),
   efforts: z.array(z.string().min(1)),
 });
 export type SyncConfigModel = z.infer<typeof SyncConfigModel>;
@@ -1567,7 +1587,7 @@ export const SyncConfigResult = z.object({
   /** The provider's LIVE model (re-resolved every call, mirroring `AgentEngine`'s own
    *  `provider.live?.() ?? {model: provider.model}` idiom) — the phone's starting point for a brand
    *  new local chat session, not a value it re-validates against anything. */
-  defaultModel: z.string(),
+  defaultModel: z.union([ModelTagSchema, z.literal("")]),
   /** The ACTIVE provider's whole model catalogue — `AgentEngine.knownModels()`, the SAME list
    *  `session.setModel` and `sync.push` validate a slug against, re-read every call.
    *
@@ -1952,6 +1972,7 @@ export const METHODS = {
   memoryDelete: "memory.delete",
   memoryAudit: "memory.audit",
   providerConfigure: "provider.configure",
+  settingsSetAdvisorModel: "settings.setAdvisorModel",
   providerLogin: "provider.login",
   providerLoginCode: "provider.loginCode",
   providerLogout: "provider.logout",

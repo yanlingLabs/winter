@@ -278,29 +278,17 @@ describe("KeychainSeam over SecretStore", () => {
     });
   });
 
-  describe("credentialRefFor — the console-vs-default anthropic account (M-B, \"Native sessions\")", () => {
-    test("with no settings (every pre-existing caller, e.g. advisor-reviewer.ts) — unconditionally anthropic:default, unchanged", () => {
+  describe("credentialRefFor — WS-20: the arm is the tag's own prefix, not a settings decision", () => {
+    test("\"anthropic\" always resolves to anthropic:default — the arm decision moved to the tag prefix (officialAuthArmFor), not a settings-driven choice here", () => {
       expect(credentialRefFor("anthropic", dir)).toEqual({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, dir) });
     });
 
-    test("settings.runtimes.official.auth = \"console\" -> anthropic:console", () => {
-      const settings = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" }, runtimes: { official: { auth: "console" } } });
-      expect(credentialRefFor("anthropic", dir, settings)).toEqual({ kind: "keychain", account: ANTHROPIC_CONSOLE_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, dir) });
+    test("\"console\" has NO Keychain slot at all — its presence is the on-disk profile file, never a CredentialRef", () => {
+      expect(credentialRefFor("console", dir)).toBeUndefined();
     });
 
-    test("settings.runtimes.official.auth = \"api-key\" -> anthropic:default", () => {
-      const settings = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" }, runtimes: { official: { auth: "api-key" } } });
-      expect(credentialRefFor("anthropic", dir, settings)).toEqual({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, dir) });
-    });
-
-    test("\"auto\" (the default) with no console profile on disk -> anthropic:default — both legs agree with officialAuthFamilyFor", () => {
-      const settings = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" } });
-      expect(credentialRefFor("anthropic", dir, settings)).toEqual({ kind: "keychain", account: ANTHROPIC_CREDENTIAL_SECRET_NAME, service: keychainService(undefined, dir) });
-    });
-
-    test("every OTHER provider is unaffected by the settings parameter", () => {
-      const settings = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" }, runtimes: { official: { auth: "console" } } });
-      expect(credentialRefFor("openai", dir, settings)).toEqual({ kind: "keychain", account: "openai:default", service: keychainService(undefined, dir) });
+    test("every OTHER provider is an ordinary fixed inventory row", () => {
+      expect(credentialRefFor("openai", dir)).toEqual({ kind: "keychain", account: "openai:default", service: keychainService(undefined, dir) });
     });
   });
 
