@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { createProvider, OPENAI_API_KEY_SECRET } from "../../src/providers/manager";
-import { DEFAULT_CODEX_MODEL } from "../../src/providers/codex-config";
 import type { Settings } from "../../src/settings";
 
 function tmpSettingsFile(settings: Settings): string {
@@ -22,27 +21,30 @@ function bumpMtime(path: string, deltaMs: number): void {
 }
 
 describe("createProvider", () => {
-  test("codex-oauth settings yield the codex provider (quota-wrapped)", async () => {
+  test("codex-oauth settings (a codex-oauth/ tag) yield the codex provider (quota-wrapped)", async () => {
     const p = await createProvider(
-      { schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.2-codex" } },
+      { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.2-codex" } } as Settings,
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
     );
     expect(p.provider.id).toBe("codex-oauth");
-    expect(p.model).toBe("gpt-5.2-codex");
+    expect(p.model).toBe("gpt-5.2-codex"); // WS-20: the BARE modelId half, split from the tag
     expect(p.quota.state().kind).toBe("ok");
   });
 
-  test("openai-compatible requires an api key in the secret store", async () => {
+  test("a non-codex-oauth tag (openai/) requires an api key in the secret store", async () => {
     const store = new FileSecretStore(mkdtempSync(join(tmpdir(), "s-")));
     await expect(createProvider(
-      { schemaVersion: 2, provider: { type: "openai-compatible", model: "gpt-5.2", baseUrl: "https://x" } },
+      { schemaVersion: 3, provider: { model: "openai/gpt-5.2" }, providers: { openai: { baseUrl: "https://x" } } } as Settings,
       store,
     )).rejects.toThrow(/api key/i);
     await store.set(OPENAI_API_KEY_SECRET, "sk-test");
     const p = await createProvider(
-      { schemaVersion: 2, provider: { type: "openai-compatible", model: "gpt-5.2", baseUrl: "https://x" } },
+      { schemaVersion: 3, provider: { model: "openai/gpt-5.2" }, providers: { openai: { baseUrl: "https://x" } } } as Settings,
       store,
     );
+    // WS-20: the internal Provider abstraction has no more "openai-compatible" id of its own —
+    // every non-codex-oauth tag goes through the SAME openai-compatible adapter, still reported
+    // under its own runtime id.
     expect(p.provider.id).toBe("openai-compatible");
   });
 });
@@ -50,7 +52,7 @@ describe("createProvider", () => {
 describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
   test("no settingsPath -> liveModel() just keeps returning the boot selection", async () => {
     const p = await createProvider(
-      { schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-terra", reasoningEffort: "high" } },
+      { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-terra", reasoningEffort: "high" } } as Settings,
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
       // settingsPath omitted
     );
@@ -59,24 +61,24 @@ describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
   });
 
   test("a settings.json edit is picked up on the NEXT liveModel() call — no re-construction", async () => {
-    const settingsPath = tmpSettingsFile({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } });
+    const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings);
     const p = await createProvider(
-      { schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } },
+      { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings,
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
       settingsPath,
     );
     expect(p.liveModel()).toEqual({ model: "gpt-5.6-sol" });
 
-    writeFileSync(settingsPath, JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-luna", reasoningEffort: "max" } }));
+    writeFileSync(settingsPath, JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-luna", reasoningEffort: "max" } }));
     bumpMtime(settingsPath, 5_000);
 
     expect(p.liveModel()).toEqual({ model: "gpt-5.6-luna", reasoningEffort: "max" });
   });
 
   test("mtime-cached: an unchanged settingsPath does not re-parse (cache hit returns the same object)", async () => {
-    const settingsPath = tmpSettingsFile({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } });
+    const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings);
     const p = await createProvider(
-      { schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } },
+      { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings,
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
       settingsPath,
     );
@@ -85,47 +87,25 @@ describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
     expect(second).toBe(first); // same cached object reference — no fresh parse happened
   });
 
-  test("deprecated/unknown codex-oauth slug resolves to DEFAULT_CODEX_MODEL", async () => {
-    const settingsPath = tmpSettingsFile({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" } });
+  // WS-20: the CODEX_MODELS deprecated-slug fallback (and its DEFAULT_CODEX_MODEL target) is
+  // DELETED — `settings.provider.model` is read verbatim (bare modelId split from the tag), no
+  // rewrite. A "deprecated" slug like gpt-5.4 now passes through exactly like any other.
+  test("an unlisted codex-oauth slug passes through verbatim — no deprecated-slug rewrite any more", async () => {
+    const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } } as Settings);
     const p = await createProvider(
-      { schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" } },
+      { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } } as Settings,
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
       settingsPath,
     );
-    expect(p.liveModel()).toEqual({ model: DEFAULT_CODEX_MODEL });
+    expect(p.liveModel()).toEqual({ model: "gpt-5.4" });
   });
 
-  test("deprecated slug warns exactly ONCE across construction + many liveModel() calls, not once per turn", async () => {
-    const settingsPath = tmpSettingsFile({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.5" } });
-    const errors: unknown[][] = [];
-    const orig = console.error;
-    console.error = (...args: unknown[]) => { errors.push(args); };
-    try {
-      // The FIRST warning fires during createProvider itself (buildLiveModelResolver resolves the
-      // boot selection eagerly) — mock installed before construction so this call is captured too.
-      const p = await createProvider(
-        { schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.5" } },
-        new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
-        settingsPath,
-      );
-      p.liveModel();
-      for (let i = 0; i < 5; i++) {
-        bumpMtime(settingsPath, (i + 1) * 1_000); // force a cache miss each time — still the SAME deprecated slug
-        p.liveModel();
-      }
-    } finally {
-      console.error = orig;
-    }
-    const deprecationWarnings = errors.filter((a) => String(a[0]).includes("gpt-5.5"));
-    expect(deprecationWarnings.length).toBe(1);
-  });
-
-  test("openai-compatible passes the configured model through untouched (no allowlist)", async () => {
+  test("a non-codex-oauth tag's model passes the configured id through untouched (no allowlist)", async () => {
     const store = new FileSecretStore(mkdtempSync(join(tmpdir(), "s-")));
     await store.set(OPENAI_API_KEY_SECRET, "sk-test");
-    const settingsPath = tmpSettingsFile({ schemaVersion: 2, provider: { type: "openai-compatible", model: "some-arbitrary-model", baseUrl: "https://x" } });
+    const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "openai/some-arbitrary-model" }, providers: { openai: { baseUrl: "https://x" } } } as Settings);
     const p = await createProvider(
-      { schemaVersion: 2, provider: { type: "openai-compatible", model: "some-arbitrary-model", baseUrl: "https://x" } },
+      { schemaVersion: 3, provider: { model: "openai/some-arbitrary-model" }, providers: { openai: { baseUrl: "https://x" } } } as Settings,
       store,
       settingsPath,
     );
@@ -133,9 +113,9 @@ describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
   });
 
   test("parse failure (corrupt JSON) on re-read falls back to the LAST GOOD value, never throws", async () => {
-    const settingsPath = tmpSettingsFile({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } });
+    const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings);
     const p = await createProvider(
-      { schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } },
+      { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings,
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
       settingsPath,
     );
@@ -151,9 +131,9 @@ describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
   test("parse failure (missing file) on re-read falls back to the LAST GOOD value, never throws", async () => {
     const dir = mkdtempSync(join(tmpdir(), "winter-manager-missing-"));
     const settingsPath = join(dir, "settings.json");
-    writeFileSync(settingsPath, JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-terra" } }));
+    writeFileSync(settingsPath, JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-terra" } }));
     const p = await createProvider(
-      { schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-terra" } },
+      { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-terra" } } as Settings,
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
       settingsPath,
     );
