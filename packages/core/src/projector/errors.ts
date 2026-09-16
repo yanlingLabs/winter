@@ -123,10 +123,16 @@ export function sanitizeDetail(raw: unknown): string | undefined {
   return text.length <= 200 ? text : `${text.slice(0, 200)}…`;
 }
 
-const compose = (code: AgentErrorCode, detail?: string): ClassifiedError => ({
-  code,
-  message: detail === undefined ? CLASS_MESSAGE[code] : `${CLASS_MESSAGE[code]}: ${detail}`,
-});
+/** SDK 0.0.14's wording for a ChatGPT Codex `usage_limit_reached` 429 (`provider-runtime/src/errors.ts`
+ *  `normalizeHttpError`): a SPENT usage window that resets on a clock, not "you are going too fast". The
+ *  class stays `rate_limit` (`routines/runner.ts` switches on it); only the human prefix changes. */
+const USAGE_LIMIT_DETAIL = /usage limit reached/i;
+const USAGE_LIMIT_MESSAGE = "your plan's usage limit is reached";
+
+const compose = (code: AgentErrorCode, detail?: string): ClassifiedError => {
+  const prefix = code === "rate_limit" && detail !== undefined && USAGE_LIMIT_DETAIL.test(detail) ? USAGE_LIMIT_MESSAGE : CLASS_MESSAGE[code];
+  return { code, message: detail === undefined ? prefix : `${prefix}: ${detail}` };
+};
 
 /**
  * Hotfix (credential material, P8b): a `CredentialResolutionError("malformed")` thrown by the

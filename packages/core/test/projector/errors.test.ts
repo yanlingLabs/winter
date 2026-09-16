@@ -224,3 +224,20 @@ describe("projector/errors: a credential-resolution api_error classifies as auth
     expect(classified.code).toBe("server"); // codeForHttpStatus(500), not the marker match
   });
 });
+
+describe("Codex usage limit (2026-09-16 field report)", () => {
+  // SDK 0.0.14 makes the ChatGPT Codex `usage_limit_reached` 429 terminal and words it
+  // "usage limit reached (plan: plus) — resets in 48 min". The daemon's class stays `rate_limit`
+  // (routines/runner.ts switches on it), but the human prefix must not say "rate limiting" —
+  // a spent usage window is not "you are going too fast".
+  test("a 429 whose detail names a usage limit keeps code rate_limit with a usage-limit message", () => {
+    const c = classifyResult(res({ api_error_status: 429, result: "provider request failed (rate_limit): HTTP 429 — usage limit reached (plan: plus) — resets in 48 min" }));
+    expect(c.code).toBe("rate_limit");
+    expect(c.message.startsWith("your plan's usage limit is reached")).toBe(true);
+    expect(c.message).toContain("resets in 48 min");
+  });
+  test("an ordinary 429 keeps the rate-limiting wording", () => {
+    const c = classifyResult(res({ api_error_status: 429, result: "HTTP 429 — slow down" }));
+    expect(c.message.startsWith("the provider is rate limiting this account")).toBe(true);
+  });
+});
