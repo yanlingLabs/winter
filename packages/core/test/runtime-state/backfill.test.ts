@@ -43,7 +43,7 @@ describe("backfillNativeSessions", () => {
         // rather than point at a file nobody wrote (WS-16 §17 step 4).
         expect(ra.backendSessionId).toBeUndefined();
         expect(ra.providerId).toBe("codex-oauth");
-        expect(ra.modelRef).toBe("gpt-5.4");
+        expect(ra.modelRef).toBe("codex-oauth/gpt-5.4"); // WS-20: composed from the record's own provider_id
         expect(ra.versionProvenance).toBe("legacy-unknown");
         expect(ra.transcriptHealth).toBe("unsupported");
         expect(ra.transcriptDialect).toBe("claude-code-jsonl");
@@ -59,7 +59,9 @@ describe("backfillNativeSessions", () => {
         expect(ra.transcriptProjectKey).not.toBe(ra.memoryProjectKey);
 
         // A session with no recorded model is honest about it rather than inheriting a plausible one.
-        expect(records.get(b)!.modelRef).toBe("unknown");
+        // WS-20: the sentinel is now the typed UNSTATED_TAG ("unstated/unstated"), never the bare
+        // string "unknown".
+        expect(records.get(b)!.modelRef).toBe("unstated/unstated");
       } finally {
         rs.close();
       }
@@ -77,7 +79,7 @@ describe("backfillNativeSessions", () => {
         const selection = new RuntimeSessionRecords(rs).get(oauth)!.selection;
         expect(selection.runtimeKind).toBe("winter-agent");
         expect(selection.providerId).toBe("codex-oauth");
-        expect(selection.modelRef).toBe("gpt-5.4");
+        expect(selection.modelRef).toBe("codex-oauth/gpt-5.4"); // WS-20: composed from providerId
         expect(selection.family).toBe("legacy");
         // An OAuth-backed provider is NOT an api-key provider — 8b's reviewPersistedSelection
         // refuses a record that says otherwise.

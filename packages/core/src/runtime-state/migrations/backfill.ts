@@ -26,6 +26,7 @@ import { repoRootFor, sanitizeProjectKey } from "../../agent/memory-dir";
 import { SYNCED_SESSION_ID_RE, type SessionStore } from "../../sessions/store";
 import type { RuntimeStateDb } from "../db";
 import { RuntimeSessionRecords, type RuntimeSessionState } from "../records";
+import { isModelTag, UNSTATED_TAG, type ModelTag } from "../../runtime-sdk/model-tag";
 
 export interface BackfillReport {
   /** Sessions that gained a record on this run. */
@@ -41,7 +42,11 @@ export interface BackfillDeps {
   rs: RuntimeStateDb;
   store: SessionStore;
   home: string;
-  /** `settings.provider.type` — `codex-oauth` | `openai-compatible`. */
+  /** WS-20: `splitTag(settings.provider.model).providerId` — a REAL catalog provider id
+   *  (`codex-oauth`, `openai`, …), not the legacy `settings.provider.type` string. A caller still
+   *  passing the legacy `"openai-compatible"` spelling is mapped to `"openai"` below (spec §5's
+   *  "per-session/runtime-state rows" sub-rule: "the record's provider_id when it is a catalog
+   *  provider id, openai-compatible → openai"). */
   providerId: string;
   now?: () => string;
 }
@@ -118,18 +123,22 @@ function backfillOne(deps: BackfillDeps, records: RuntimeSessionRecords, now: ()
   const settle = settlePathFor(store, meta, winterSessionId);
   const at = now();
 
+  // WS-20 (spec §5, "per-session/runtime-state rows"): `providerId` is now a REAL catalog provider
+  // id (`splitTag(settings.provider.model).providerId`, mapped from the legacy `openai-compatible`
+  // spelling to `openai` when a caller still passes it) — trusted directly rather than
+  // disambiguated through the full S-set rule, because the RECORD already states which provider
+  // this session ran on. `modelRef` composes the tag from it when a bare override is stored;
+  // `UNSTATED_TAG` (never the string `"unknown"`) when none is. The record still says this is not
+  // to be trusted as current: `versionProvenance: "legacy-unknown"`, `family: "legacy"`,
+  // `reason: "backfill"`.
+  const catalogProviderId = providerId === "openai-compatible" ? "openai" : providerId;
+  const modelRef: ModelTag = meta.model
+    ? (isModelTag(meta.model) ? (meta.model as ModelTag) : (`${catalogProviderId}/${meta.model}` as ModelTag))
+    : UNSTATED_TAG;
   const selection: RuntimeSelection = {
     runtimeKind: "winter-agent",
-    providerId,
-    // A BARE MODEL ID, DELIBERATELY, and 8b should read legacy rows as unqualified (review r1,
-    // minor 6). The SDK types `modelRef` as the provider-qualified catalog ROW KEY
-    // (`anthropic/claude-opus-5`), and the obvious derivation — `${providerId}/${model}` — would be
-    // a fabrication here: `providerId` on this record is `settings.provider.type`
-    // (`codex-oauth` | `openai-compatible`), which is Winter's PROVIDER TYPE, not a catalog provider
-    // id, so the composed string would name a row no catalog has ever contained. The bare id is what
-    // the session actually ran with, and the record already says it is not to be trusted as current:
-    // `versionProvenance: "legacy-unknown"`, `family: "legacy"`, `reason: "backfill"`.
-    modelRef: meta.model ?? "unknown",
+    providerId: catalogProviderId,
+    modelRef,
     family: "legacy",
     authFamily: authFamilyFor(providerId),
     sdkVersion: "unknown",
@@ -147,7 +156,7 @@ function backfillOne(deps: BackfillDeps, records: RuntimeSessionRecords, now: ()
       records.create({
         winterSessionId,
         runtimeKind: "winter-agent",
-        providerId,
+        providerId: catalogProviderId,
         modelRef: selection.modelRef,
         // Where this session's compatibility tree WOULD live. Nothing is written there by this
         // migration; it is the root a later import would read from.

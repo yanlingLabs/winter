@@ -51,7 +51,7 @@ function online(d: RunningDaemon): RuntimeStateWiring {
   return rt;
 }
 
-const SETTINGS_BASE = { schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" } };
+const SETTINGS_BASE = { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } };
 
 /** Write a COMPLETE v2 settings.json — a partial one would be rewritten by `loadSettings`'s v1
  *  migration and the assertion would be about the migration, not about the key under test. */
@@ -208,7 +208,7 @@ describe("daemon wiring — the store opens and recovery runs before the socket 
 
   test("pre-existing native sessions gain a backfilled record carrying settings.provider.type", async () => {
     await withTempHome(async (home) => {
-      writeSettings(home, { provider: { type: "openai-compatible", model: "gpt-x", baseUrl: "https://example.invalid/v1" } });
+      writeSettings(home, { provider: { model: "openai/gpt-x" }, providers: { openai: { baseUrl: "https://example.invalid/v1" } } });
       const store = new SessionStore(home);
       const sessionId = store.createSession("work", { cwd: home });
       store.append(sessionId, { type: "user_message", sessionId, threadId: "main", text: "hello", clientName: "test" });
@@ -217,7 +217,7 @@ describe("daemon wiring — the store opens and recovery runs before the socket 
       const rt = online(await boot(home));
       const record = rt.records.get(sessionId);
       expect(record).toBeDefined();
-      expect(record!.providerId).toBe("openai-compatible");
+      expect(record!.providerId).toBe("openai");
       expect(record!.versionProvenance).toBe("legacy-unknown");
       expect(rt.lastBackfill?.created).toContain(sessionId);
     });
