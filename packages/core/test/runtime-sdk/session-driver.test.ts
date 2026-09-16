@@ -334,13 +334,13 @@ describe("refusalForSelection — only credential-shaped reasons are re-describe
     const detail = "this session is persisted on claude-agent (the official runtime) and the winter runtime cannot serve it (WS-00 §2, D13)";
     const t = table({}, { selectRuntimeFor: refusalOf("runtime-unavailable", detail) });
     try {
-      const sid = t.store.createSession("t", { mode: "chat", model: "claude-sonnet-5" });
+      const sid = t.store.createSession("t", { mode: "chat", model: "anthropic/claude-sonnet-5" });
       let caught: unknown;
       try { await t.drivers.create(sid); } catch (err) { caught = err; }
       expect((caught as { code?: string })?.code).toBe("runtime_selection_refused");
       expect((caught as { reason?: string })?.reason).toBe("runtime-unavailable");
       // The machine-readable half survives; the prose does not.
-      expect((caught as Error)?.message).toBe("Winter can't start a session on claude-sonnet-5 right now.");
+      expect((caught as Error)?.message).toBe("Winter can't start a session on anthropic/claude-sonnet-5 right now.");
       expect((caught as Error)?.message).not.toMatch(ROUTER_PHRASING);
       expect((caught as Error)?.message).not.toContain(detail);
       // ...and it is not Winter's credential sentence either, which would send the user to a door
@@ -355,13 +355,15 @@ describe("refusalForSelection — only credential-shaped reasons are re-describe
     const detail = 'the model "gpt-5.6-sol" (openai/gpt-5.6-sol) is served by no row this session can use: every candidate row was blocked, deprecated, known-unservable, or belongs to a provider with no configured credential ref (configured: openai, openrouter, deepseek)';
     const t = table({}, { selectRuntimeFor: refusalOf("slot-unservable", detail) });
     try {
-      // A BARE id six inventory providers serve: Minor 1's narrowing means no provider is named
-      // either, because Winter decided nothing.
-      const sid = t.store.createSession("t", { mode: "chat", model: "gpt-5.6-sol" });
+      // WS-20: a tag names its provider outright — `providerFor` always resolves "openai"
+      // unambiguously now (no more bare-id narrowing to skip), so this refusal correctly
+      // attributes to openai's own missing credential rather than falling through to the generic
+      // neutral sentence. The router's raw enumeration must still never reach the wire.
+      const sid = t.store.createSession("t", { mode: "chat", model: "openai/gpt-5.6-sol" });
       let caught: unknown;
       try { await t.drivers.create(sid); } catch (err) { caught = err; }
       const message = (caught as Error)?.message ?? "";
-      expect(message).toBe("Winter can't start a session on gpt-5.6-sol right now.");
+      expect(message).toContain("run `winter credentials set openai`");
       for (const leaked of ["openrouter", "deepseek", "configured:", "candidate row"]) {
         expect(message).not.toContain(leaked);
       }
