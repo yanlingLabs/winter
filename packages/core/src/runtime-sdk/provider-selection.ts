@@ -1,4 +1,5 @@
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
+import type { WinterModelDescriptor } from "@yanlinglabs/winter-provider-catalog";
 import type { ModelFamilyListing, ProviderSelection } from "@yanlinglabs/winter-agent-sdk";
 import { credentialRefFor } from "./keychain";
 import { splitTag, WINTER_TEST_PREFIX, UNSTATED_TAG, type ModelTag } from "./model-tag";
@@ -20,7 +21,7 @@ export function testProviderNameFor(model: string | undefined): string | undefin
 /** WS-20: the ONE catalog row lookup by its EXACT key — the tag itself, since the catalog row
  *  `key` already IS the provider-qualified tag. Replaces `catalogRowsFor`'s broad alias/upstreamId
  *  matching (a bare-id concept that no longer exists — a tag names exactly one row or none). */
-export function rowForTag(tag: string): { key: string; providerId: string } | undefined {
+export function rowForTag(tag: string): WinterModelDescriptor | undefined {
   return loadCatalog().models.find((m) => m.key === tag);
 }
 

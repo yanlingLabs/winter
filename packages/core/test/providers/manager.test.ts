@@ -34,12 +34,12 @@ describe("createProvider", () => {
   test("a non-codex-oauth tag (openai/) requires an api key in the secret store", async () => {
     const store = new FileSecretStore(mkdtempSync(join(tmpdir(), "s-")));
     await expect(createProvider(
-      { schemaVersion: 3, provider: { model: "openai/gpt-5.2" }, providers: { openai: { baseUrl: "https://x" } } } as Settings,
+      { schemaVersion: 3, provider: { model: "openai/gpt-5.2" }, providers: { openai: { baseUrl: "https://x" } } } as unknown as Settings,
       store,
     )).rejects.toThrow(/api key/i);
     await store.set(OPENAI_API_KEY_SECRET, "sk-test");
     const p = await createProvider(
-      { schemaVersion: 3, provider: { model: "openai/gpt-5.2" }, providers: { openai: { baseUrl: "https://x" } } } as Settings,
+      { schemaVersion: 3, provider: { model: "openai/gpt-5.2" }, providers: { openai: { baseUrl: "https://x" } } } as unknown as Settings,
       store,
     );
     // WS-20: the internal Provider abstraction has no more "openai-compatible" id of its own —
@@ -56,8 +56,8 @@ describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
       // settingsPath omitted
     );
-    expect(p.liveModel()).toEqual({ model: "gpt-5.6-terra", reasoningEffort: "high" });
-    expect(p.liveModel()).toEqual({ model: "gpt-5.6-terra", reasoningEffort: "high" }); // stable across calls
+    expect(p.liveModel()).toEqual({ model: "gpt-5.6-terra", reasoningEffort: "high", providerId: "codex-oauth" });
+    expect(p.liveModel()).toEqual({ model: "gpt-5.6-terra", reasoningEffort: "high", providerId: "codex-oauth" }); // stable across calls
   });
 
   test("a settings.json edit is picked up on the NEXT liveModel() call — no re-construction", async () => {
@@ -67,12 +67,12 @@ describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
       settingsPath,
     );
-    expect(p.liveModel()).toEqual({ model: "gpt-5.6-sol" });
+    expect(p.liveModel()).toEqual({ model: "gpt-5.6-sol", providerId: "codex-oauth" });
 
     writeFileSync(settingsPath, JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-luna", reasoningEffort: "max" } }));
     bumpMtime(settingsPath, 5_000);
 
-    expect(p.liveModel()).toEqual({ model: "gpt-5.6-luna", reasoningEffort: "max" });
+    expect(p.liveModel()).toEqual({ model: "gpt-5.6-luna", reasoningEffort: "max", providerId: "codex-oauth" });
   });
 
   test("mtime-cached: an unchanged settingsPath does not re-parse (cache hit returns the same object)", async () => {
@@ -97,19 +97,19 @@ describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
       settingsPath,
     );
-    expect(p.liveModel()).toEqual({ model: "gpt-5.4" });
+    expect(p.liveModel()).toEqual({ model: "gpt-5.4", providerId: "codex-oauth" });
   });
 
   test("a non-codex-oauth tag's model passes the configured id through untouched (no allowlist)", async () => {
     const store = new FileSecretStore(mkdtempSync(join(tmpdir(), "s-")));
     await store.set(OPENAI_API_KEY_SECRET, "sk-test");
-    const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "openai/some-arbitrary-model" }, providers: { openai: { baseUrl: "https://x" } } } as Settings);
+    const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "openai/some-arbitrary-model" }, providers: { openai: { baseUrl: "https://x" } } } as unknown as Settings);
     const p = await createProvider(
-      { schemaVersion: 3, provider: { model: "openai/some-arbitrary-model" }, providers: { openai: { baseUrl: "https://x" } } } as Settings,
+      { schemaVersion: 3, provider: { model: "openai/some-arbitrary-model" }, providers: { openai: { baseUrl: "https://x" } } } as unknown as Settings,
       store,
       settingsPath,
     );
-    expect(p.liveModel()).toEqual({ model: "some-arbitrary-model" });
+    expect(p.liveModel()).toEqual({ model: "some-arbitrary-model", providerId: "openai" });
   });
 
   test("parse failure (corrupt JSON) on re-read falls back to the LAST GOOD value, never throws", async () => {
@@ -119,13 +119,13 @@ describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
       settingsPath,
     );
-    expect(p.liveModel()).toEqual({ model: "gpt-5.6-sol" });
+    expect(p.liveModel()).toEqual({ model: "gpt-5.6-sol", providerId: "codex-oauth" });
 
     writeFileSync(settingsPath, "{ not valid json");
     bumpMtime(settingsPath, 5_000);
 
     expect(() => p.liveModel()).not.toThrow();
-    expect(p.liveModel()).toEqual({ model: "gpt-5.6-sol" }); // last good, unchanged
+    expect(p.liveModel()).toEqual({ model: "gpt-5.6-sol", providerId: "codex-oauth" }); // last good, unchanged
   });
 
   test("parse failure (missing file) on re-read falls back to the LAST GOOD value, never throws", async () => {
@@ -137,11 +137,11 @@ describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
       settingsPath,
     );
-    expect(p.liveModel()).toEqual({ model: "gpt-5.6-terra" });
+    expect(p.liveModel()).toEqual({ model: "gpt-5.6-terra", providerId: "codex-oauth" });
 
     require("node:fs").rmSync(settingsPath);
 
     expect(() => p.liveModel()).not.toThrow();
-    expect(p.liveModel()).toEqual({ model: "gpt-5.6-terra" }); // last good, unchanged
+    expect(p.liveModel()).toEqual({ model: "gpt-5.6-terra", providerId: "codex-oauth" }); // last good, unchanged
   });
 });

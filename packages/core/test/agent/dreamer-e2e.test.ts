@@ -88,6 +88,7 @@ describe("Dreaming end-to-end (Task 5): teach / forget / tombstone-survival / te
     ]);
 
     const dreamer = new Dreamer({
+      settings: () => null,
       provider: { provider, model: "ignored" },
       store,
       dir: () => dir,

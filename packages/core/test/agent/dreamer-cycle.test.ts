@@ -4,7 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "../../src/sessions/store";
 import { FakeProvider } from "../../src/agent/fake-provider";
-import { Dreamer, DREAM_INSTRUCTION, DREAM_MIN_EVENTS, DREAM_MODEL, DREAM_EFFORT, DREAM_WINDOW_MAX_CHARS } from "../../src/agent/dreamer";
+import { Dreamer, DREAM_INSTRUCTION, DREAM_MIN_EVENTS, DREAM_EFFORT, DREAM_WINDOW_MAX_CHARS } from "../../src/agent/dreamer";
+import { pinsFor } from "../../src/settings";
+import { splitTag } from "../../src/runtime-sdk/model-tag";
+
+// WS-20: `DREAM_MODEL` is deleted — the model is now `pinsFor(settings).dream`, live per tick
+// (dreamer.ts). Every `new Dreamer(...)` fixture in this file passes `settings: () => null`, so
+// this is the SAME value production falls back to on a daemon with no settings loaded at all
+// (`pinsFor`'s own `DEFAULT_PROVIDER`-rooted default) — computed here rather than hand-copied so a
+// future default-rule change can't silently desync this expectation from the real one.
+const DREAM_MODEL_UNDER_TEST = splitTag(pinsFor(null).dream).modelId;
 
 /** A real temp store with a dispatch session (the sole session `dispatchSessionId()` finds) —
  *  same fixture shape across all 8 cases; individual tests append whatever events/memory files
@@ -53,6 +62,7 @@ describe("Dreamer.tick", () => {
 
     const provider = okProvider();
     const dreamer = new Dreamer({
+      settings: () => null,
       provider: { provider, model: "ignored" }, store, dir: () => dir,
       enabled: () => true, activeTurnCount: () => 0,
     });
@@ -74,6 +84,7 @@ describe("Dreamer.tick", () => {
 
     const provider = okProvider();
     const dreamer = new Dreamer({
+      settings: () => null,
       provider: { provider, model: "some-other-model" }, store, dir: () => dir,
       enabled: () => true, activeTurnCount: () => 0,
     });
@@ -81,7 +92,7 @@ describe("Dreamer.tick", () => {
 
     expect(provider.requests).toHaveLength(1);
     const req = provider.requests[0]!;
-    expect(req.model).toBe(DREAM_MODEL);
+    expect(req.model).toBe(DREAM_MODEL_UNDER_TEST);
     expect(req.reasoningEffort).toBe(DREAM_EFFORT);
     expect(req.tools).toEqual([]);
     expect(req.instructions).toBe(DREAM_INSTRUCTION);
@@ -98,6 +109,7 @@ describe("Dreamer.tick", () => {
     const fixedNow = new Date("2026-07-18T12:00:00Z").getTime();
     const provider = okProvider();
     const dreamer = new Dreamer({
+      settings: () => null,
       provider: { provider, model: "x" }, store, dir: () => dir,
       enabled: () => true, activeTurnCount: () => 0, now: () => fixedNow,
     });
@@ -119,6 +131,7 @@ describe("Dreamer.tick", () => {
     const fixedNow = 1_753_000_000_000;
     const provider = okProvider(opsJson);
     const dreamer = new Dreamer({
+      settings: () => null,
       provider: { provider, model: "x" }, store, dir: () => dir,
       enabled: () => true, activeTurnCount: () => 0, now: () => fixedNow,
     });
@@ -137,6 +150,7 @@ describe("Dreamer.tick", () => {
 
     const provider = okProvider('{"ops":[]}');
     const dreamer = new Dreamer({
+      settings: () => null,
       provider: { provider, model: "x" }, store, dir: () => dir,
       enabled: () => true, activeTurnCount: () => 0,
     });
@@ -154,6 +168,7 @@ describe("Dreamer.tick", () => {
 
     const provider = okProvider("I have nothing worth keeping today.");
     const dreamer = new Dreamer({
+      settings: () => null,
       provider: { provider, model: "x" }, store, dir: () => dir,
       enabled: () => true, activeTurnCount: () => 0,
     });
@@ -169,6 +184,7 @@ describe("Dreamer.tick", () => {
     const tooMany = { ops: Array.from({ length: 13 }, (_, i) => ({ op: "tombstone", text: `t${i}` })) };
     const provider = okProvider(JSON.stringify(tooMany));
     const dreamer = new Dreamer({
+      settings: () => null,
       provider: { provider, model: "x" }, store, dir: () => dir,
       enabled: () => true, activeTurnCount: () => 0,
     });
@@ -186,6 +202,7 @@ describe("Dreamer.tick", () => {
 
     const provider = okProvider();
     const dreamer = new Dreamer({
+      settings: () => null,
       provider: { provider, model: "x" }, store, dir: () => dir,
       enabled: () => true, activeTurnCount: () => 0,
     });
