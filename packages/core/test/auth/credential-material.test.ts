@@ -83,7 +83,12 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     // (falls through to `default: undefined`, matching the child's own refusal for a kind Winter
     // never sends) — an intentional narrowing already documented above, not a drift. Re-diff again
     // on the next bump.
-    expect(pkg.version).toBe("0.0.12");
+    //
+    // 0.0.12 → 0.0.13 (Winter Phase 11, WS-20 catalog release): `git diff v0.0.12 v0.0.13 --
+    // packages/runtime/src/provider/keychain-store.ts` in the sibling checkout came back EMPTY
+    // (0 lines) — the 0.0.13 release touched only provider-catalog + version stamps; the mirror
+    // stands unchanged.
+    expect(pkg.version).toBe("0.0.13");
   });
 
 
