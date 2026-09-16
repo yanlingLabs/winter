@@ -72,6 +72,21 @@ export function parseModelArgs(args: string[]): ModelCliAction {
  *      through as "valid" (`isModelTag` says so) — caught in review.
  *    - tag-shaped but the provider isn't pinned         -> "…unknown provider "<id>""
  *  Returns an error message, or undefined when the tag is valid. */
+/** WS-20 (review fix): the ONE shared "strip the '<providerId>/' prefix for DISPLAY" helper —
+ *  every surface that shows a model to the user (not just this file's own `renderModelListing`)
+ *  imports this rather than re-deriving it: the TUI welcome banner and the T5 status-chrome footer
+ *  (`packages/cli/src/tui/app.tsx`, `state.ts`) both do. Splits at the FIRST `/` via core's own
+ *  `splitTag`, falling back to the raw value on anything not tag-shaped (a pre-migration bare
+ *  model, or any other non-catalog string) — never throws, since this is a label helper, not a
+ *  validator (see `validateModelTag` for that). */
+export function modelIdPortion(tag: string): string {
+  try {
+    return splitTag(tag).modelId;
+  } catch {
+    return tag;
+  }
+}
+
 export function validateModelTag(tag: string): string | undefined {
   if (tag === UNSTATED_TAG || tag.startsWith(WINTER_TEST_PREFIX)) {
     return `invalid model "${tag}" — must be a provider-qualified tag "<providerId>/<modelId>"`;
