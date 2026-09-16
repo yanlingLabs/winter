@@ -1187,10 +1187,22 @@ extension WinterClient {
 /// per model, that divergence becomes a daemon-side data change instead of a new app release.
 public struct SyncConfigModelInfo: Equatable, Sendable {
     public let id: String
+    /// WS-20: `id`'s own `providerId` half, served pre-split (`splitTag(id).providerId` on the
+    /// daemon) so no client ever splits a tag to derive UI structure — the picker groups by THIS,
+    /// never by parsing `id`.
+    public let providerId: String
+    /// WS-20: the catalog row's human-facing name (e.g. "GPT-5.6 Sol") for the picker label.
+    public let displayName: String
+    /// WS-20: the family SLOT name (e.g. "sol", "terra") when this row fills one, else `nil` — the
+    /// per-family facing vocabulary (Terra/Luna/Sol/Astra, Fable/Opus/Sonnet/Haiku, …).
+    public let facingName: String?
     public let efforts: [String]
 
-    public init(id: String, efforts: [String]) {
+    public init(id: String, providerId: String, displayName: String, facingName: String?, efforts: [String]) {
         self.id = id
+        self.providerId = providerId
+        self.displayName = displayName
+        self.facingName = facingName
         self.efforts = efforts
     }
 }
@@ -1288,12 +1300,17 @@ extension WinterClient {
     public func syncConfig() async throws -> SyncConfigSnapshot {
         let r = try await request("sync.config", params: .object([:]))
         let models: [SyncConfigModelInfo] = (r["models"]?.arrayValue ?? []).compactMap { m in
-            // Mirrors `z.string().min(1)` on BOTH fields — Swift's synthesized decoding enforces
-            // neither, and an empty slug or an empty level is exactly the value that survives all
-            // the way to a request body.
-            guard let id = m["id"]?.stringValue, !id.isEmpty else { return nil }
+            // Mirrors `z.string().min(1)` on `id`/`providerId`/`displayName`/each `efforts` entry —
+            // Swift's synthesized decoding enforces none of them, and an empty slug or an empty
+            // level is exactly the value that survives all the way to a request body. `facingName`
+            // is `.optional()` on the wire, so absence there is a real value, not a drop condition.
+            guard let id = m["id"]?.stringValue, !id.isEmpty,
+                  let providerId = m["providerId"]?.stringValue, !providerId.isEmpty,
+                  let displayName = m["displayName"]?.stringValue, !displayName.isEmpty
+            else { return nil }
+            let facingName = m["facingName"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
             let efforts = (m["efforts"]?.arrayValue ?? []).compactMap { $0.stringValue }.filter { !$0.isEmpty }
-            return SyncConfigModelInfo(id: id, efforts: efforts)
+            return SyncConfigModelInfo(id: id, providerId: providerId, displayName: displayName, facingName: facingName, efforts: efforts)
         }
         return SyncConfigSnapshot(
             // Absent → `""`: an older daemon, decoded as "nobody has said" rather than as a claim.
