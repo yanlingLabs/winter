@@ -2373,15 +2373,21 @@ if (import.meta.main) {
         const { METHODS, SyncConfigModel } = await import("@yanlinglabs/winter-protocol");
         const door = await openCredentialDaemonDoor();
         if (door) {
-          const raw = await door.request(METHODS.syncConfig, {});
-          // Narrowed to just `models[]` (not the whole `SyncConfigResult`) — an older daemon
-          // missing the WS-20 fields on that array parse-fails into the catch below rather than
-          // this command exploding on a shape it doesn't otherwise depend on.
-          const parsed = SyncConfigModel.array().safeParse((raw as { models?: unknown } | undefined)?.models);
-          if (parsed.success && parsed.data.length > 0) {
-            console.log(renderModelListing(parsed.data as ModelListingRow[], settings.provider.model));
+          // Review nit: try/finally — a `request` throw (a dead-mid-call daemon, a malformed
+          // reply) must not skip `door.close()` and leak the connection; the outer catch below
+          // still absorbs the throw itself.
+          try {
+            const raw = await door.request(METHODS.syncConfig, {});
+            // Narrowed to just `models[]` (not the whole `SyncConfigResult`) — an older daemon
+            // missing the WS-20 fields on that array parse-fails into the catch below rather than
+            // this command exploding on a shape it doesn't otherwise depend on.
+            const parsed = SyncConfigModel.array().safeParse((raw as { models?: unknown } | undefined)?.models);
+            if (parsed.success && parsed.data.length > 0) {
+              console.log(renderModelListing(parsed.data as ModelListingRow[], settings.provider.model));
+            }
+          } finally {
+            door.close();
           }
-          door.close();
         }
       } catch { /* no live daemon (or an older one) — the bare current tag printed above is the whole answer */ }
       // Winter Phase 8d (P8d-8, Task 4.3): the D30 advisor line — "auto" is the honest label for
