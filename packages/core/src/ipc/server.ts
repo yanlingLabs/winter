@@ -103,6 +103,7 @@ import type { HardwareBroker } from "../peripheral/hardware";
 import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
 import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings } from "../settings";
+import { dispatchPinMessage } from "../agent/dispatch-config";
 // WS-20 L3.5/L3.6: `officialAuthModeSetting`/`DISPATCH_PIN_MESSAGE` are deleted along with
 // `runtimes.official.auth`/`DISPATCH_MODEL` — left as inline stubs below (marked WS-20 L3.5/L3.6)
 // so this module still LOADS until those tasks land (ipc/server.ts is L3.5/L3.6's own file).
@@ -765,6 +766,20 @@ function resolveModelSelection(model: string): string {
     return parseModelTag(model);
   } catch {
     throw new RpcFailure(ERR.INVALID_PARAMS, `model must be a provider-qualified tag '<providerId>/<modelId>' (got '${model}')`);
+  }
+}
+
+/** WS-20: `dispatchPinMessage` needs the LIVE settings (it names the live pinned tag), but most
+ *  test harnesses boot this server with no `winterHome` wired at all — same "typed no-op, never a
+ *  crash" precedent as every other `opts.winterHome`-gated reader in this file (`livePlugins`,
+ *  `provider.configure`, …). Falls back to `undefined`, which `pinsFor`/`dispatchPinMessage` both
+ *  already treat as "use `DEFAULT_PROVIDER`" — never a throw. */
+function liveSettingsFor(opts: { winterHome?: string }): Settings | undefined {
+  if (!opts.winterHome) return undefined;
+  try {
+    return loadSettings(join(opts.winterHome, "settings.json"));
+  } catch {
+    return undefined;
   }
 }
 
@@ -2129,7 +2144,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         let targetMode: string | undefined;
         try { targetMode = opts.store.meta(p.sessionId).mode; } catch { /* unknown id — NOT_FOUND below wins */ }
         if (targetMode === "dispatch" && p.model !== null) {
-          throw new RpcFailure(ERR.INVALID_PARAMS, "dispatch runs a fixed model" /* WS-20 L3.6: dispatchPinMessage(settings) */);
+          throw new RpcFailure(ERR.INVALID_PARAMS, dispatchPinMessage(liveSettingsFor(opts)));
         }
         let model = p.model;
         // I1 review fix: this method is remote-reachable and hand-callable, so a future picker's
@@ -2285,7 +2300,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         let sessionMeta: { model?: string; mode?: string } | undefined;
         try { sessionMeta = opts.store.meta(p.sessionId); } catch { /* unknown id → the store call below owns the error */ }
         if (sessionMeta?.mode === "dispatch" && p.effort !== null) {
-          throw new RpcFailure(ERR.INVALID_PARAMS, "dispatch runs a fixed model" /* WS-20 L3.6: dispatchPinMessage(settings) */);
+          throw new RpcFailure(ERR.INVALID_PARAMS, dispatchPinMessage(liveSettingsFor(opts)));
         }
         // SET-TIME validation, for the reason session.setModel's exists (I1 review fix: an
         // unvalidated selection bricks every future turn SILENTLY — the provider 400s on each one
