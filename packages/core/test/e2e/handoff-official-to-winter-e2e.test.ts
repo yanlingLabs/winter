@@ -109,7 +109,7 @@ import { claudeRuntimeForTests, describeWithClaudeRuntime, type AnthropicTurnScr
 // A real pinned-catalog Claude model — `session.create` with an `anthropic:default` material and no
 // explicit provider override routes this straight to the OFFICIAL leg (D13-2), exactly the field
 // report's own "a session created on claude-haiku-4-5-20251001 ran on the OFFICIAL leg".
-const CATALOG_CLAUDE_MODEL = "claude-sonnet-5";
+const CATALOG_CLAUDE_MODEL = "anthropic/claude-sonnet-5";
 // A real, catalog-listed, credentialed WINTER provider (`provider-selection.ts`'s `catalogRowsFor`
 // lists it under providerId "openai") — never a `winter-test/<double>`, which the router's own
 // `reviewSelectionFor` cannot resolve against the real catalog at all (`handoff-cross-runtime-e2e
@@ -215,10 +215,11 @@ describeWithWinterBinary("official -> Winter handoff (P10a-h, the measured live 
       anthropicFakeClose = () => anthropicFakeServer.close();
 
       writeFileSync(join(home, "settings.json"), JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         // `session.create`'s own `model` wins over this default (`Settings` requires `provider` to
         // be present at all) — it also names the WINTER-leg destination provider for the handoff.
-        provider: { type: "openai-compatible", model: CATALOG_OPENAI_MODEL, baseUrl: openaiFakeUrl },
+        provider: { model: CATALOG_OPENAI_MODEL },
+        providers: { openai: { baseUrl: openaiFakeUrl } },
         runtimes: {
           winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable, winterIdleTimeoutSec: 10,
           handoff: { crossRuntime: true },
@@ -346,8 +347,9 @@ describeWithClaudeRuntime("official -> Winter handoff, DETERMINISTIC dead-child 
     anthropicFakeClose = () => anthropicFakeServer.close();
 
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "openai-compatible", model: CATALOG_OPENAI_MODEL, baseUrl: "http://127.0.0.1:9/v1" },
+      schemaVersion: 3,
+      provider: { model: CATALOG_OPENAI_MODEL },
+      providers: { openai: { baseUrl: "http://127.0.0.1:9/v1" } },
       runtimes: {
         // A real, on-disk executable that exits before ever reaching the wire protocol's own init
         // handshake — the deterministic "dead child" this describe block's whole point is proving
@@ -411,7 +413,7 @@ describeWithClaudeRuntime("official -> Winter handoff, DETERMINISTIC dead-child 
     // neutral sentence for every reason, and the reason survives only in the daemon log, as a
     // category (`lossyForkCategoryFor` — this case's is `destination-exited-before-init`). What this
     // test is ABOUT is unchanged: the typed code, and the deterministic revert below.
-    expect(caught!.rpc?.message).toBe("Couldn't switch models without losing part of the conversation; the session stays on claude-sonnet-5.");
+    expect(caught!.rpc?.message).toBe("Couldn't switch models without losing part of the conversation; the session stays on anthropic/claude-sonnet-5.");
     expect(caught!.rpc?.message).not.toContain("exited before it reached init");
     // Reverted: the record still names the SOURCE, deterministically, every run.
     expect(d.winter.legOf(sessionId)).toBe("official");

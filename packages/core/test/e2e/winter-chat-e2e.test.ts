@@ -173,8 +173,9 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
   };
   const writeSettings = (chatFlag: boolean): void => {
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "openai-compatible", model: "gpt-x", baseUrl: "http://127.0.0.1:9/v1" },
+      schemaVersion: 3,
+      provider: { model: "openai/gpt-x" },
+      providers: { openai: { baseUrl: "http://127.0.0.1:9/v1" } },
       runtimes: { winterExecutable: bin, winterLeg: { chat: chatFlag }, winterIdleTimeoutSec: 10 },
     }, null, 2));
   };
@@ -513,8 +514,8 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     const sent = await client.call<{ seq: number }>(METHODS.sessionSend, { sessionId: engineSid, text: "hello?" });
     expect(sent.seq).toBeGreaterThan(0);
     // The record is no longer engine-era: the import gave it a real backend transcript on the
-    // Winter leg (the settings-wide `provider.model: "gpt-x"` this suite otherwise never resolves
-    // to a real double is irrelevant here — the RPC's own success is the import door's contract;
+    // Winter leg (the settings-wide `provider.model: "openai/gpt-x"` this suite otherwise never
+    // resolves to a real double is irrelevant here — the RPC's own success is the import door's contract;
     // whatever the resumed child does with an unrecognized model surfaces later, as an async
     // turn_completed/agent_error event, never as this RPC failing).
     expect(sessionLegOf(record(engineSid))).not.toBe("engine");

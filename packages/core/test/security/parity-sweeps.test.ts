@@ -233,8 +233,9 @@ describeWithWinterBinary("A-8 part B: real captures (official Claude -> Winter G
       });
       anthropicFakeClose = () => anthropicFakeServer.close();
       writeFileSync(join(home, "settings.json"), JSON.stringify({
-        schemaVersion: 2,
-        provider: { type: "openai-compatible", model: "openai/gpt-5.6-sol", baseUrl: openaiFake.url },
+        schemaVersion: 3,
+        provider: { model: "openai/gpt-5.6-sol" },
+        providers: { openai: { baseUrl: openaiFake.url } },
         runtimes: { winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
       }, null, 2));
       const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -264,7 +265,7 @@ describeWithWinterBinary("A-8 part B: real captures (official Claude -> Winter G
       if ("unavailable" in d.runtimeState) throw d.runtimeState.unavailable;
       const rt = d.runtimeState;
       const PRIOR_TEXT = "remember P10B-SWEEP-1";
-      const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "claude-sonnet-5" });
+      const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "anthropic/claude-sonnet-5" });
       await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
       expect(d.winter.legOf(sessionId)).toBe("official");
       await client.call(METHODS.sessionSend, { sessionId, text: PRIOR_TEXT });
