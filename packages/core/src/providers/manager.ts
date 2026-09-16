@@ -2,7 +2,7 @@ import { statSync } from "node:fs";
 import type { SecretStore } from "../auth/secret-store";
 import { readOpenAiApiKey } from "../auth/credential-material";
 import { OPENAI_API_KEY_SECRET } from "../auth/legacy-secret-names";
-import { loadSettings, providerBaseUrlFor, type Settings } from "../settings";
+import { loadSettings, providerBaseUrlFor, INTERNAL_PROVIDER_IDS, type Settings } from "../settings";
 import type { Provider } from "./types";
 import { createCodexOauthRuntimeProvider, createOpenAiCompatibleRuntimeProvider } from "./runtime-provider";
 import { QuotaManager, withQuota } from "./quota";
@@ -105,15 +105,29 @@ function buildLiveModelResolver(
  * `provider-smoke` and most tests do) and `liveModel()` just keeps returning the boot selection.
  *
  * WS-20: which backend this daemon runs is decided by `splitTag(settings.provider.model).providerId`
- * — "codex-oauth" onto the Codex OAuth adapter, every other provider id (chiefly "openai", the
- * BYO-endpoint arm) onto the OpenAI-compatible adapter with `providerBaseUrlFor(settings, providerId)`
- * (`providers.<id>.baseUrl` — `settings.provider.baseUrl` itself no longer exists on `ProviderSettings`;
- * the v2→v3 migration copies it into `providers.openai.baseUrl` once, see settings.ts).
+ * — "codex-oauth" onto the Codex OAuth adapter, every other INTERNAL provider id (chiefly "openai",
+ * the BYO-endpoint arm) onto the OpenAI-compatible adapter with
+ * `providerBaseUrlFor(settings, providerId)` (`providers.<id>.baseUrl` — `settings.provider.baseUrl`
+ * itself no longer exists on `ProviderSettings`; the v2→v3 migration copies it into
+ * `providers.openai.baseUrl` once, see settings.ts).
+ *
+ * WS-20 (review round 4): `settings.provider.model` is UNCONSTRAINED at the schema level (any
+ * catalog provider, or `winter-test/*` — a SESSION's own model always has been, and the schema
+ * gate a prior round put on this field broke the ordinary "my default chat model is Claude" case,
+ * since a session with no explicit override falls back to THIS field, not just the internal
+ * Provider's own binding). The daemon's internal Provider, by contrast, really can only ever be
+ * ONE of `INTERNAL_PROVIDER_IDS` (codex-oauth/openai) — a single process-wide instance, built here.
+ * A `providerId` outside that set answers `null` rather than mis-building an OpenAI-compatible
+ * client pointed at a provider it was never meant to speak to; the caller (daemon.ts) treats that
+ * as "no internal Provider" — titles/reviewer/dreamer/cleaner/research/compaction go inert, logged
+ * ONCE, never a boot refusal. A per-provider internal Provider (one instance per provider, built on
+ * the SDK) is the real follow-up that would let this set grow; not attempted here.
  */
-export async function createProvider(settings: Settings, secrets: SecretStore, settingsPath?: string): Promise<ActiveProvider> {
+export async function createProvider(settings: Settings, secrets: SecretStore, settingsPath?: string): Promise<ActiveProvider | null> {
+  const providerId = splitTag(settings.provider.model).providerId;
+  if (!(INTERNAL_PROVIDER_IDS as readonly string[]).includes(providerId)) return null;
   const quota = new QuotaManager();
   let inner: Provider;
-  const providerId = splitTag(settings.provider.model).providerId;
   if (providerId === "codex-oauth") {
     // P8c lane 5: onto the `@yanlinglabs/winter-provider-runtime` codex-oauth adapter — credential
     // resolution (and, on a 401, refresh write-back) goes through `credential-store.ts`'s

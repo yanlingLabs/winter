@@ -13,6 +13,18 @@ function tmpSettingsFile(settings: Settings): string {
   return p;
 }
 
+// WS-20 (review round 4): `createProvider` now answers `null` for a provider outside
+// `INTERNAL_PROVIDER_IDS` (codex-oauth/openai) — every fixture below configures one of those two,
+// so a `null` here would itself be the bug the test should catch, never a case to silently paper
+// over with `!`.
+async function createInternalProvider(
+  ...args: Parameters<typeof createProvider>
+): Promise<Exclude<Awaited<ReturnType<typeof createProvider>>, null>> {
+  const p = await createProvider(...args);
+  if (p === null) throw new Error("test fixture expected the internal Provider to build (codex-oauth/openai), got null");
+  return p;
+}
+
 /** Deterministically bumps a file's mtime forward, so the liveModel resolver's mtime-cache key
  *  reliably changes even when two writes land in the same wall-clock millisecond (the same
  *  aliasing risk ipc/server.ts's livePlugins doc comment calls out for statSync's granularity). */
@@ -23,7 +35,7 @@ function bumpMtime(path: string, deltaMs: number): void {
 
 describe("createProvider", () => {
   test("codex-oauth settings (a codex-oauth/ tag) yield the codex provider (quota-wrapped)", async () => {
-    const p = await createProvider(
+    const p = await createInternalProvider(
       { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.2-codex" } } as Settings,
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
     );
@@ -39,7 +51,7 @@ describe("createProvider", () => {
       store,
     )).rejects.toThrow(/api key/i);
     await store.set(OPENAI_API_KEY_SECRET, "sk-test");
-    const p = await createProvider(
+    const p = await createInternalProvider(
       { schemaVersion: 3, provider: { model: "openai/gpt-5.2" }, providers: { openai: { baseUrl: "https://x" } } } as unknown as Settings,
       store,
     );
@@ -48,11 +60,31 @@ describe("createProvider", () => {
     // under its own runtime id.
     expect(p.provider.id).toBe("openai-compatible");
   });
+
+  // WS-20 (review round 4): a provider outside `INTERNAL_PROVIDER_IDS` (codex-oauth/openai) answers
+  // `null` — never mis-built as an OpenAI-compatible client pointed at a provider it was never
+  // meant to speak to, and never a throw (`settings.provider.model` itself is unconstrained now;
+  // this is the ONE place the codex-oauth/openai constraint is actually enforced).
+  test("a provider outside INTERNAL_PROVIDER_IDS (e.g. anthropic) answers null, never a mis-built client", async () => {
+    const p = await createProvider(
+      { schemaVersion: 3, provider: { model: "anthropic/claude-sonnet-5" } } as Settings,
+      new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
+    );
+    expect(p).toBeNull();
+  });
+
+  test("a winter-test/* primary also answers null (a provider-less double, not an internal provider)", async () => {
+    const p = await createProvider(
+      { schemaVersion: 3, provider: { model: "winter-test/echo" } } as unknown as Settings,
+      new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
+    );
+    expect(p).toBeNull();
+  });
 });
 
 describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
   test("no settingsPath -> liveModel() just keeps returning the boot selection", async () => {
-    const p = await createProvider(
+    const p = await createInternalProvider(
       { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-terra", reasoningEffort: "high" } } as Settings,
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
       // settingsPath omitted
@@ -63,7 +95,7 @@ describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
 
   test("a settings.json edit is picked up on the NEXT liveModel() call — no re-construction", async () => {
     const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings);
-    const p = await createProvider(
+    const p = await createInternalProvider(
       { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings,
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
       settingsPath,
@@ -78,7 +110,7 @@ describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
 
   test("mtime-cached: an unchanged settingsPath does not re-parse (cache hit returns the same object)", async () => {
     const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings);
-    const p = await createProvider(
+    const p = await createInternalProvider(
       { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings,
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
       settingsPath,
@@ -93,7 +125,7 @@ describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
   // rewrite. A "deprecated" slug like gpt-5.4 now passes through exactly like any other.
   test("an unlisted codex-oauth slug passes through verbatim — no deprecated-slug rewrite any more", async () => {
     const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } } as Settings);
-    const p = await createProvider(
+    const p = await createInternalProvider(
       { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } } as Settings,
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
       settingsPath,
@@ -105,7 +137,7 @@ describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
     const store = new FileSecretStore(mkdtempSync(join(tmpdir(), "s-")));
     await store.set(OPENAI_API_KEY_SECRET, "sk-test");
     const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "openai/some-arbitrary-model" }, providers: { openai: { baseUrl: "https://x" } } } as unknown as Settings);
-    const p = await createProvider(
+    const p = await createInternalProvider(
       { schemaVersion: 3, provider: { model: "openai/some-arbitrary-model" }, providers: { openai: { baseUrl: "https://x" } } } as unknown as Settings,
       store,
       settingsPath,
@@ -115,7 +147,7 @@ describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
 
   test("parse failure (corrupt JSON) on re-read falls back to the LAST GOOD value, never throws", async () => {
     const settingsPath = tmpSettingsFile({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings);
-    const p = await createProvider(
+    const p = await createInternalProvider(
       { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } } as Settings,
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
       settingsPath,
@@ -133,7 +165,7 @@ describe("ActiveProvider.liveModel (no-restart model resolution)", () => {
     const dir = mkdtempSync(join(tmpdir(), "winter-manager-missing-"));
     const settingsPath = join(dir, "settings.json");
     writeFileSync(settingsPath, JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-terra" } }));
-    const p = await createProvider(
+    const p = await createInternalProvider(
       { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-terra" } } as Settings,
       new FileSecretStore(mkdtempSync(join(tmpdir(), "s-"))),
       settingsPath,
