@@ -2,7 +2,8 @@
 // unit-tested without going through the top-level `if (import.meta.main)` dispatch. Mirrors
 // plugin-cli.ts's split: main.ts owns the I/O (loadSettings/saveSettings/connect), this file
 // owns the parse/validate decisions.
-import { REASONING_EFFORTS, rowForTag, isModelTag, splitTag, UNSTATED_TAG, WINTER_TEST_PREFIX } from "@yanlinglabs/winter-core";
+import { REASONING_EFFORTS, rowForTag, isModelTag, modelTagIsKnown, splitTag, UNSTATED_TAG, WINTER_TEST_PREFIX, INTERNAL_PROVIDER_IDS } from "@yanlinglabs/winter-core";
+import type { Settings } from "@yanlinglabs/winter-core";
 
 export type ModelCliAction =
   | { kind: "show" }
@@ -87,30 +88,58 @@ export function modelDisplayWithHint(tag: string): string {
   }
 }
 
-/** WS-20: validates a model against the tag shape ("<providerId>/<modelId>") AND catalog
- *  provider membership — replaces `validateModelSlug`'s per-provider-type allowlist now that a
- *  model is ALWAYS a provider-qualified tag (`packages/core/src/runtime-sdk/model-tag.ts`, the
- *  one place the shape/lookup rules live). Distinct failure shapes, so the message always names
- *  the actual defect:
+/** WS-20 (review fix, item 4): validates a model against the tag shape ("<providerId>/<modelId>"),
+ *  catalog PROVIDER membership, and now catalog MODEL membership too — replaces
+ *  `validateModelSlug`'s per-provider-type allowlist now that a model is ALWAYS a
+ *  provider-qualified tag (`packages/core/src/runtime-sdk/model-tag.ts`, the one place the
+ *  shape/lookup rules live). Distinct failure shapes, so the message always names the actual
+ *  defect:
  *    - not tag-shaped at all (`splitTag` throws)      -> "…must be a provider-qualified tag …"
  *    - the `unstated/unstated` sentinel, or a `winter-test/…` double -> same message: NEITHER is a
  *      real, user-settable model — `isModelTag` accepts both as escapes (it exists to validate a
  *      *stored* value, e.g. a session record that may legitimately carry the sentinel), but a
  *      value the USER is trying to SET must never be either.
  *    - tag-shaped but the provider isn't pinned         -> "…unknown provider "<id>""
- *  Returns an error message, or undefined when the tag is valid. */
-export function validateModelTag(tag: string): string | undefined {
+ *    - a real, pinned provider, but this specific model isn't one of its rows (and no BYO
+ *      endpoint override exists for it, `settings.providers.<id>.baseUrl`) -> "unknown model
+ *      '<id>' for provider <p>" (`modelTagIsKnown`, core's own membership check — the SAME one the
+ *      daemon consults, so this refuses locally exactly what the daemon would refuse remotely).
+ *  `settings` is optional (defaulted through to `modelTagIsKnown`) so a caller with no settings in
+ *  hand yet still gets the shape/provider-pinned checks; only the model-membership check needs it
+ *  (for the BYO-endpoint leniency). Returns an error message, or undefined when the tag is valid. */
+export function validateModelTag(tag: string, settings?: Settings): string | undefined {
   if (tag === UNSTATED_TAG || tag.startsWith(WINTER_TEST_PREFIX)) {
     return `invalid model "${tag}" — must be a provider-qualified tag "<providerId>/<modelId>"`;
   }
   let providerId: string;
+  let modelId: string;
   try {
-    providerId = splitTag(tag).providerId;
+    ({ providerId, modelId } = splitTag(tag));
   } catch {
     return `invalid model "${tag}" — must be a provider-qualified tag "<providerId>/<modelId>"`;
   }
   if (!isModelTag(tag)) {
     return `invalid model "${tag}" — unknown provider "${providerId}"`;
+  }
+  if (!modelTagIsKnown(tag, settings)) {
+    return `unknown model '${modelId}' for provider ${providerId}`;
+  }
+  return undefined;
+}
+
+/** WS-20 (review fix, item 4): the ADDITIONAL gate `winter model <tag>` (the CLI verb, `main.ts`'s
+ *  `case "model"`) applies on top of `validateModelTag` — it writes `settings.provider.model`,
+ *  which binds the daemon's own INTERNAL `Provider` instance (`providers/manager.ts`, one per
+ *  daemon), and that instance can only ever be `codex-oauth` or `openai` (`INTERNAL_PROVIDER_IDS`,
+ *  core's own settings.ts — the SAME constant/message the daemon's own `provider.model` setter
+ *  refuses with). A PER-SESSION `/model` (the TUI's own command, `tui/commands.ts`) does NOT use
+ *  this — a session's model can name any pinned provider, the router decides the leg. */
+export function validateInternalProviderModelTag(tag: string, settings?: Settings): string | undefined {
+  const err = validateModelTag(tag, settings);
+  if (err) return err;
+  const { providerId } = splitTag(tag);
+  if (!(INTERNAL_PROVIDER_IDS as readonly string[]).includes(providerId)) {
+    return `provider.model must name ${INTERNAL_PROVIDER_IDS.join(" or ")} — the daemon's internal provider supports codex-oauth and openai; any provider is fine per session`;
   }
   return undefined;
 }
