@@ -17,7 +17,7 @@ import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, type Settings } from "./settings";
+import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, INTERNAL_PROVIDER_IDS, type Settings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
@@ -795,16 +795,29 @@ export async function startDaemon(opts: {
     if (settings) {
       try {
         const active = await createProvider(settings, secrets, dirs.settingsPath);
-        // `model` here is the RESOLVED (not raw) boot selection — active.model is the raw
-        // settings.json value, which for codex-oauth may be a since-deprecated slug (e.g.
-        // "gpt-5.4"). Everything that consumes this snapshot directly rather than calling `live`
-        // per-turn (Compactor's own summarization turn, BashReviewer, SessionTitler, the
-        // daemon-status `providerInfo` below) needs a model the backend will actually accept, so
-        // resolve once here via the SAME deprecation-fallback path `live` uses on every turn.
-        // `live` itself is still wired separately below (EngineConfig.provider.live) so turns
-        // keep re-resolving on every call, not just at this boot snapshot.
-        agentProvider = { provider: active.provider, model: active.liveModel().model, live: active.liveModel };
-        quota = active.quota;
+        if (active === null) {
+          // WS-20 (review round 4): `settings.provider.model` names a provider OUTSIDE
+          // `INTERNAL_PROVIDER_IDS` (codex-oauth/openai) — a real, unconstrained choice for a
+          // SESSION's own default model (routed per-session through the runtime SDK, unaffected),
+          // but the daemon's single process-wide internal Provider genuinely cannot be built for
+          // it. Logged ONCE, naming exactly what goes inert — never a boot refusal; every other
+          // daemon function (sessions, the RPC surface, settings) works normally.
+          console.error(
+            `provider: settings.provider.model names "${splitTag(settings.provider.model).providerId}" — the daemon's internal provider only builds for ${INTERNAL_PROVIDER_IDS.join("/")}, so titles, the bash reviewer, the dreamer, the session cleaner, research, and turn compaction are inert until it's set to one of those (a session's own model is unaffected)`,
+          );
+          agentProvider = null;
+        } else {
+          // `model` here is the RESOLVED (not raw) boot selection — active.model is the raw
+          // settings.json value, which for codex-oauth may be a since-deprecated slug (e.g.
+          // "gpt-5.4"). Everything that consumes this snapshot directly rather than calling `live`
+          // per-turn (Compactor's own summarization turn, BashReviewer, SessionTitler, the
+          // daemon-status `providerInfo` below) needs a model the backend will actually accept, so
+          // resolve once here via the SAME deprecation-fallback path `live` uses on every turn.
+          // `live` itself is still wired separately below (EngineConfig.provider.live) so turns
+          // keep re-resolving on every call, not just at this boot snapshot.
+          agentProvider = { provider: active.provider, model: active.liveModel().model, live: active.liveModel };
+          quota = active.quota;
+        }
       } catch (err) {
         console.error(`agent disabled: ${(err as Error).message}`);
         agentProvider = null;
