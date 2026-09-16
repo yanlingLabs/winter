@@ -950,14 +950,18 @@ describe("WS-20: pinsFor", () => {
   // provider tag (the ProviderSettings schema refinement enforces codex-oauth/openai only), so this
   // fixture is hand-built (`as unknown as Settings`) rather than parsed — `pinsFor` is a pure
   // function over the object shape, not the schema.
-  test("M6: a provider serving no gpt-family row yields UNSTATED pins, never a cross-provider guess", () => {
-    const s = { schemaVersion: 3, provider: { model: "anthropic/claude-sonnet-5" } } as unknown as Settings;
+  test("M6 (amended 2026-09-17): a provider serving no gpt-family row pins fall back to the user's OWN tag, never a cross-provider guess and never the sentinel", () => {
+    const s = Settings.parse({ schemaVersion: 3, provider: { model: "anthropic/claude-sonnet-5" } });
     const p = pinsFor(s);
-    expect(p.dispatch).toBe(UNSTATED_TAG);
-    expect(p.dream).toBe(UNSTATED_TAG);
-    expect(p.cleaner).toBe(UNSTATED_TAG);
-    expect(p.research).toBe(UNSTATED_TAG);
-    expect(p.researchFallback).toBe(UNSTATED_TAG);
+    expect(p.dispatch).toBe(tag("anthropic/claude-sonnet-5"));
+    expect(p.dream).toBe(tag("anthropic/claude-sonnet-5"));
+    expect(p.cleaner).toBe(tag("anthropic/claude-sonnet-5"));
+    expect(p.research).toBe(tag("anthropic/claude-sonnet-5"));
+    expect(p.researchFallback).toBe(tag("anthropic/claude-sonnet-5"));
+    const d = Settings.parse({ schemaVersion: 3, provider: { model: "deepseek/deepseek-v4-flash" }, pins: { research: "deepseek/deepseek-reasoner" } });
+    expect(pinsFor(d).dispatch).toBe(tag("deepseek/deepseek-v4-flash"));
+    expect(pinsFor(d).research).toBe(tag("deepseek/deepseek-reasoner")); // explicit override still wins
+    expect(Object.values(pinsFor(d))).not.toContain(UNSTATED_TAG);
   });
 
   // WS-20 (review round 2, M6 fix — R2): a `winter-test/*` primary (provider-less; the string

@@ -241,3 +241,12 @@ describe("Codex usage limit (2026-09-16 field report)", () => {
     expect(c.message.startsWith("the provider is rate limiting this account")).toBe(true);
   });
 });
+
+describe("Winter-side capability refusal (2026-09-17 field report)", () => {
+  test("the child's own pre-flight refusal is bad_request with a Winter prefix, never 'unavailable or overloaded'", () => {
+    const c = classifyResult(res({ terminal_reason: "api_error", api_error_status: null, result: 'provider request failed (capability): a bare model id needs a provider: set `provider.providerId`, or use a qualified "<providerId>/<model>" key' }));
+    expect(c.code).toBe("bad_request");
+    expect(c.message.startsWith("Winter refused the request before sending it")).toBe(true);
+    expect(c.message).not.toContain("unavailable or overloaded");
+  });
+});
