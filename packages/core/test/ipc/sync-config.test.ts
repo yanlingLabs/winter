@@ -755,16 +755,11 @@ describe("sync.config `provider` through a real startDaemon (whole-branch review
     expect(res.result.models.length).toBeGreaterThan(0);
     expect(res.result.models.every((m: any) => m.providerId === "openai")).toBe(true);
     expect(res.result.models.map((m: any) => m.id)).not.toContain("openai/llama-3.3-70b-local");
-    // WS-20 wrinkle worth stating explicitly: `liveModel()` (daemon.ts) composes its tag from
-    // `liveProvider()` = the INTERNAL `Provider.id` literal ("openai-compatible" — unchanged since
-    // before WS-20, and deliberately decoupled from the catalog's own "openai" id), not from the
-    // catalog providerId the picker rows above use. So `defaultModel` here is shape-valid
-    // (`ModelTagSchema` is shape-only, never a catalog-membership check) but not a tag any core-side
-    // `splitTag`/`isModelTag` call would recognize. This is exactly why `provider` mismatch is the
-    // rule that governs this field (its own doc comment): a client never tries to parse/route
-    // `defaultModel` at all unless `provider` first matches its own identity, so this never reaches
-    // a `splitTag` call in practice.
-    expect(res.result.defaultModel).toBe("openai-compatible/llama-3.3-70b-local");
+    // `defaultModel` composes from `LiveModelSelection.providerId` (the CATALOG id, daemon.ts's
+    // `liveModel`), not from `Provider.id` (the internal adapter literal `sync.config.provider`
+    // above uses) — so it is a real, `splitTag`/`isModelTag`-recognizable tag even for the
+    // openai-compatible arm, whose internal id ("openai-compatible") is not itself a catalog id.
+    expect(res.result.defaultModel).toBe("openai/llama-3.3-70b-local");
     expect(res.result.provider).not.toBe("codex-oauth"); // …and this is what saves it
     expect(["codex-oauth", "openai-compatible"]).toContain(res.result.provider);
     c.close();
