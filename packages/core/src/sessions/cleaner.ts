@@ -1,7 +1,9 @@
 import type { SessionEvent } from "@yanlinglabs/winter-protocol";
 import type { Provider, TurnInputItem } from "../providers/types";
-import { DREAM_MODEL } from "../agent/dreamer";
 import { hasOpenPanelTabs } from "../panel/store";
+import type { Settings } from "../settings";
+import { pinsFor, ownProviderFor } from "../settings";
+import { internalModelFor } from "../providers/manager";
 import { activityFor, type ActivityRow } from "./activity";
 import { appendCleanerLog } from "./cleaner-log";
 import { SYNCED_SESSION_ID_RE } from "./store";
@@ -25,9 +27,9 @@ export const CLEANER_MAX_JUDGMENTS_PER_PASS = 10;
 export const CLEANER_TRANSCRIPT_MAX_CHARS = 4000;
 
 /** Spec §3: the cleaner "rides the existing Dreaming cycle (its scheduler, its model configuration,
- *  low effort)". The model is the Dreaming constant itself, not a copy — a re-pin of the dream model
- *  must move both or neither. */
-export const CLEANER_MODEL = DREAM_MODEL;
+ *  low effort)". WS-20: the model is `pinsFor(settings).cleaner` — DEFAULTS to the SAME value as
+ *  `pinsFor(settings).dream` (both fall back to the `<provider>/gpt-5.6-terra` rule), but is
+ *  independently overridable via `settings.pins.cleaner` — see `CleanerDeps.settings` below. */
 export const CLEANER_EFFORT = "low";
 
 /** The judge's one-line reason is model-authored text that lands verbatim in `~/.winter/cleaner.jsonl`.
@@ -84,8 +86,12 @@ export interface CleanerStore {
 
 export interface CleanerDeps {
   /** Wrapper for parity with the Dreamer/compactor/titler; the `model` field is IGNORED — the
-   *  cleaner pins `CLEANER_MODEL`, exactly as `DreamerDeps.provider` documents for dreams. */
+   *  cleaner pins `pinsFor(settings).cleaner`, exactly as `DreamerDeps.provider` documents for
+   *  dreams. */
   provider: { provider: Provider; model: string };
+  // WS-20: hot settings read, same "re-read every call" discipline as every other settings-backed
+  // getter — `pinsFor(deps.settings())` is called at each pass, never a boot snapshot.
+  settings: () => Settings | null;
   store: CleanerStore;
   /** `SessionHub.attachedCount` — the same signal `session.list`'s own derivation reads. */
   attachedCount: (sessionId: string) => number;
@@ -322,6 +328,14 @@ export class SessionCleaner {
    *  verdict, an empty reason, a provider error, a timeout — because they all mean the same thing:
    *  this session was not judged, so it must be kept AND left unstamped for the next pass. */
   private async judge(events: SessionEvent[]): Promise<Verdict | null> {
+    // WS-20 (review round 1, GUARD): same "must not send a mismatched-provider pin to the daemon's
+    // single internal Provider" guard the Dreamer applies to `pins.dream` — a mismatch here folds
+    // naturally into this method's own "returns null for every failure mode" contract (this doc
+    // comment's own header), so the session is kept and left unstamped for the next pass, same as
+    // a provider error or a timeout.
+    const settings = this.deps.settings();
+    const cleanerModel = internalModelFor(pinsFor(settings).cleaner, { providerId: ownProviderFor(settings) }, "pins.cleaner");
+    if (cleanerModel === undefined) return null;
     const input: TurnInputItem[] = [{ type: "message", role: "user", content: renderTranscript(events) }];
     // The Dreamer's own abort-tied-to-the-race idiom, verbatim: without the signal a timeout only
     // makes THIS call stop waiting while the detached generator keeps draining a hung connection.
@@ -329,7 +343,7 @@ export class SessionCleaner {
     let text = "";
     const run = (async () => {
       for await (const ev of this.deps.provider.provider.streamTurn({
-        model: CLEANER_MODEL, reasoningEffort: CLEANER_EFFORT, instructions: CLEANER_INSTRUCTION,
+        model: cleanerModel, reasoningEffort: CLEANER_EFFORT, instructions: CLEANER_INSTRUCTION,
         input, tools: [], signal: ac.signal,
       })) {
         if (ev.type === "text_delta") text += ev.delta;

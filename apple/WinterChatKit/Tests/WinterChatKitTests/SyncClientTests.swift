@@ -1131,6 +1131,31 @@ final class SyncClientTests: XCTestCase {
         XCTAssertEqual(config.models, [SyncConfigModel(id: "m", efforts: [])])
     }
 
+    // MARK: - WS-20 review fix (Nit 3): providerId/displayName/facingName decode, optional-tolerant
+
+    /// A current daemon's row decodes all three new fields; `facingName` absent on a non-slot row
+    /// decodes to `nil` the same way `providerId`/`displayName` do when the whole row predates them
+    /// (the next test) — absence is never a licence to guess any of the three.
+    func testModelRowDecodesProviderIdDisplayNameAndFacingName() throws {
+        let body = #"{"exaKey":null,"dangerousDomains":[],"defaultModel":"codex-oauth/gpt-5.6-terra","defaultEffort":"","models":[{"id":"codex-oauth/gpt-5.6-terra","providerId":"codex-oauth","displayName":"GPT-5.6 Terra","facingName":"terra","efforts":["low"]},{"id":"openai/gpt-5.6","providerId":"openai","displayName":"GPT-5.6","efforts":["low"]}]}"#
+        let config = try JSONDecoder().decode(SyncConfig.self, from: Data(body.utf8))
+        XCTAssertEqual(config.models[0].providerId, "codex-oauth")
+        XCTAssertEqual(config.models[0].displayName, "GPT-5.6 Terra")
+        XCTAssertEqual(config.models[0].facingName, "terra")
+        XCTAssertEqual(config.models[1].facingName, nil, "no family-slot row -> nil, never guessed")
+    }
+
+    /// A PRE-WS-20 daemon's row (this kit ships inside the iOS app, on its OWN update schedule —
+    /// this file's own header doc) has none of the three fields at all — the row must still decode,
+    /// with `providerId`/`displayName`/`facingName` all `nil`, never a failed catalogue fetch.
+    func testModelRowMissingTheNewFieldsEntirelyDecodesWithThemNil() throws {
+        let body = #"{"exaKey":null,"dangerousDomains":[],"defaultModel":"m","defaultEffort":"","models":[{"id":"m","efforts":["low"]}]}"#
+        let config = try JSONDecoder().decode(SyncConfig.self, from: Data(body.utf8))
+        XCTAssertNil(config.models[0].providerId)
+        XCTAssertNil(config.models[0].displayName)
+        XCTAssertNil(config.models[0].facingName)
+    }
+
     // MARK: - whole-branch review C1: `provider` — the field that makes the bundle self-describing
 
     /// The identity rides the wire and reaches the caller. Every other field says WHAT the Mac runs;

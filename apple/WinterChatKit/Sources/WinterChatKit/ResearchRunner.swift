@@ -16,8 +16,11 @@ import Foundation
 /// TEARS DOWN a stuck fetch (the underlying URLSession task is cancelled) rather than merely
 /// abandoning a promise. The provider stream is likewise cancelled by cancelling its consuming task.
 public struct ResearchRunner: Sendable {
-    public static let model = "gpt-5.4-mini"
-    public static let fallbackModel = "gpt-5.6-luna"
+    // WS-20: provider-qualified tags now — split to the bare modelId (`modelIdPortion`,
+    // ChatEngine.swift) right before either ever reaches a `ProviderTurnRequest`, same as every
+    // other model value in this kit.
+    public static let model = "openai/gpt-5.4-mini"
+    public static let fallbackModel = "openai/gpt-5.6-luna"
     public static let effort = "low"
     public static let defaultMaxPages = 5
     public static let maxPagesCeiling = 15
@@ -140,7 +143,9 @@ public struct ResearchRunner: Sendable {
                 return result(notReadReport(lastText, state, "Research timed out before finishing"), isError: false)
             }
 
-            let request = ProviderTurnRequest(model: model, instructions: Self.systemPrompt, input: input,
+            // WS-20: `model` holds a tag (`Self.model`/`Self.fallbackModel`); the wire request wants
+            // the bare modelId.
+            let request = ProviderTurnRequest(model: modelIdPortion(of: model), instructions: Self.systemPrompt, input: input,
                                               tools: [Self.fetchPageTool], reasoningEffort: Self.effort)
             let stream = provider.streamTurn(request)
             let remaining = Duration.seconds(max(0, deadlineDate.timeIntervalSinceNow))
@@ -157,7 +162,10 @@ public struct ResearchRunner: Sendable {
             if !round.textBuf.isEmpty { lastText = round.textBuf }
 
             if let error = round.error {
-                if !usedFallback, Self.looksLikeBadModelError(error, model: model) {
+                // WS-20: the error text names only the bare modelId that was actually sent
+                // (`modelIdPortion(of: model)`, just above) — it has no way to know or quote our
+                // own tag, so matching against `model` verbatim would be a permanent false negative.
+                if !usedFallback, Self.looksLikeBadModelError(error, model: modelIdPortion(of: model)) {
                     usedFallback = true
                     model = Self.fallbackModel
                     continue // retry the SAME round (input unchanged) on the fallback model

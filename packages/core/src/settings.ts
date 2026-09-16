@@ -1,10 +1,12 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { z } from "zod";
-import { DEFAULT_CODEX_MODEL } from "./providers/codex-config";
+import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { ensureGlobalGitignore, WINTER_PERSONAL_IGNORES } from "./global-gitignore";
 import { OFFICIAL_SUBSCRIPTION_AUTH_APPROVED } from "./runtime-sdk/versions";
+import { consoleProfileCredentialFile } from "./runtime-sdk/anthropic-paths";
+import { facingNameToTag, isModelTag, splitTag, UNSTATED_TAG, WINTER_TEST_PREFIX, type ModelTag } from "./runtime-sdk/model-tag";
 
 /** Reasoning-effort slugs valid on the wire — measured LIVE against the Codex OAuth endpoint
  *  (2026-07-30), one model at a time, NOT read off the /models catalogue text. That distinction
@@ -91,10 +93,47 @@ export function clientEffortEligible(mode: string | undefined): boolean {
   return mode === undefined || mode === "code";
 }
 
-export const ProviderSettings = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("codex-oauth"), model: z.string().min(1), reasoningEffort: z.enum(REASONING_EFFORTS).optional() }),
-  z.object({ type: z.literal("openai-compatible"), model: z.string().min(1), baseUrl: z.string().url(), reasoningEffort: z.enum(REASONING_EFFORTS).optional() }),
-]);
+/**
+ * WS-20 (review round 4): the ONLY two providers the daemon's own internal `Provider`
+ * (`providers/manager.ts`, ONE instance per daemon process — titles/the bash reviewer/dreamer/the
+ * session cleaner/research/turn compaction all call through it) can actually be BUILT for.
+ * `createProvider` uses this as its own predicate, answering `null` for anything else (never
+ * mis-building an OpenAI-compatible client pointed at a provider it was never meant to speak to);
+ * `daemon.ts` treats a `null` as "no internal Provider" and logs ONE line naming what goes inert —
+ * never a boot refusal.
+ *
+ * WS-20 (review round 2, M6 — SUPERSEDED by round 4): a prior round gated `settings.provider.model`
+ * itself to this set at the schema door (`ProviderModelTagSchema`, since removed). That broke the
+ * ordinary "my default chat model is Claude" case: a SESSION with no explicit override falls back
+ * to `settings.provider.model` too (`session-driver.ts`'s `create()`), and that fallback is meant
+ * to be UNCONSTRAINED — any catalog provider, routed per-session through the runtime SDK, same as
+ * an explicit `model` on `session.create` always has been. The constraint belongs where the
+ * internal Provider is actually BUILT, not on the field a session's own default also reads.
+ *
+ * Exported so the CLI can reuse it as the `createProvider`-equivalent predicate (e.g. deciding
+ * whether `winter provider configure`'s own restart-needed banner applies) — never again as a
+ * `settings.provider.model` write-time refusal.
+ */
+export const INTERNAL_PROVIDER_IDS = ["codex-oauth", "openai"] as const;
+
+/** WS-20: the core-side tag schema — checks SHAPE (protocol's `ModelTagSchema`) AND provider
+ *  EXISTENCE against the pinned catalog (`isModelTag`), unlike the protocol package's own
+ *  shape-only `ModelTagSchema`. */
+export const ModelTagSchemaCore = z.string().refine(isModelTag, "model must be a provider-qualified tag '<providerId>/<modelId>'");
+
+/** WS-20: no `type`, no `baseUrl` — the provider IS the tag's prefix (`splitTag(model).providerId`),
+ *  and a BYO endpoint lives in the sibling `providers.<id>.baseUrl` block below, never here.
+ *  `.strict()` so a stray legacy `type` field on a hand-edited/un-migrated settings.json throws
+ *  rather than being silently stripped — the migration (`migrateSettingsV2ToV3`) is the ONLY place
+ *  that reads and discards it.
+ *
+ *  WS-20 (review round 4): `model` is the SAME `ModelTagSchemaCore` every other model-bearing field
+ *  uses — any catalog provider, or `winter-test/*` — never narrowed to `INTERNAL_PROVIDER_IDS` (see
+ *  that constant's own doc for why the round-2 narrowing broke a real Mac-default scenario). */
+export const ProviderSettings = z.object({
+  model: ModelTagSchemaCore,
+  reasoningEffort: z.enum(REASONING_EFFORTS).optional(),
+}).strict();
 
 export const PermissionsSettings = z.object({
   additionalDirectories: z.array(z.string()).optional(),
@@ -122,7 +161,7 @@ export const PermissionsSettings = z.object({
 export const DEFAULT_WINTER_IDLE_TIMEOUT_SEC = 900;
 
 export const Settings = z.object({
-  schemaVersion: z.literal(2),
+  schemaVersion: z.literal(3),
   provider: ProviderSettings,
   permissions: PermissionsSettings.optional(),
   mcpServers: z.record(z.string(), z.object({
@@ -132,7 +171,7 @@ export const Settings = z.object({
   })).optional(),
   reviewer: z.object({
     enabled: z.boolean().optional(),
-    model: z.string().optional(),
+    model: ModelTagSchemaCore.optional(),
     allow: z.array(z.string()).optional(),
     // Phase 5e T4: per-class on/off, subordinate to `enabled` — an `enabled:false` reviewer
     // never runs regardless of what's set here (engine.ts ANDs reviewerEnabled with
@@ -146,7 +185,7 @@ export const Settings = z.object({
   }).optional(),
   titles: z.object({
     enabled: z.boolean().optional(),
-    model: z.string().optional(),
+    model: ModelTagSchemaCore.optional(),
   }).optional(),
   /** CC-parity output style: the active style NAME (built-in or a `.winter/output-styles/<name>.md`).
    *  Absent or "default" → Winter's base prompt (today's behavior). Hot-reloaded; per-project via the
@@ -408,6 +447,10 @@ export const Settings = z.object({
       dispatch: z.boolean().default(true),
       code: z.boolean().default(true),
     }).prefault({}),
+    // WS-20: stays a PLAIN `z.string()` (not the tag-refined schema) — same "blank must not
+    // invalidate the whole file" reasoning as `winterExecutable` above. `setAdvisorModel`
+    // validates a non-blank value with `isModelTag` at the WRITE door instead (see below); a
+    // stored value is a `ModelTag` by construction of that door, never re-validated here.
     advisorModel: z.string().optional(),
     winterIdleTimeoutSec: z.number().int().min(10).default(DEFAULT_WINTER_IDLE_TIMEOUT_SEC),
     // Fix wave (whole-branch review C2 / ruling P8c-18): a `session.setModel` whose FRESH
@@ -431,16 +474,16 @@ export const Settings = z.object({
     // `CLAUDE_CONFIG_DIR`, an env scrubbed of every auth-injecting variable except the one the
     // credential plan names, and a per-session assertion on the SDK's reported `apiKeySource`.
     // Read HOT (`official-options.ts`), never a boot snapshot.
+    // WS-20: `official.auth` is REMOVED, not deprecated — the official leg's auth arm is now the
+    // tag's own prefix (`anthropic/*` = API key, `console/*` = the Console profile;
+    // `officialAuthArmFor`, official-options.ts). `subscriptionAuth` stays: it is orthogonal to
+    // WHICH arm, gating whether a claude.ai subscription login is even permitted at all.
+    // `.strict()` (unlike every sibling block in this schema, which strips unknown keys) so a
+    // stray legacy `auth` field THROWS rather than being silently discarded — `auth` is REMOVED,
+    // not deprecated, and the migration is the only place that reads and discards it.
     official: z.object({
       subscriptionAuth: z.boolean().default(false),
-      // Winter Phase 10a (P10a-3): which credential the official leg's spawned `claude` child
-      // authenticates with. "auto" (the default) picks the console profile when one exists
-      // (`<home>/runtimes/anthropic-config/credentials/winter.json`) and falls back to the
-      // Anthropic API-key material otherwise; "api-key"/"console" pin one arm explicitly. Read
-      // HOT via `officialAuthModeSetting` below, never a boot snapshot — same posture as
-      // `subscriptionAuth` beside it.
-      auth: z.enum(["auto", "api-key", "console"]).default("auto"),
-    }).optional(),
+    }).strict().optional(),
   }).optional(),
   // Phase 9c (P9c-4, the user's ruling on WS-00 §8 #7): Winter reads a project's unconverted legacy
   // instructions file / project dir (`legacy-names.ts`'s `LEGACY_INSTRUCTIONS_FILE` / `LEGACY_PROJECT_DIR`) READ-ONLY when the Winter-named file/dir is absent and this is true —
@@ -464,9 +507,11 @@ export const Settings = z.object({
    * ABSENT IS THE NORMAL CASE. An entry without a `baseUrl` is the same as no entry: the session
    * gets no `connection` at all and the SDK fills the catalog endpoint.
    *
-   * `settings.provider.baseUrl` (the legacy single-provider `openai-compatible` arm) KEEPS
-   * PRECEDENCE for `openai` and is byte-identical to what it was — a home that configured BYO
-   * OpenAI that way is untouched by this block existing.
+   * WS-20: `settings.provider.baseUrl` (the legacy single-provider `openai-compatible` arm) is
+   * REMOVED from `ProviderSettings` — the v2→v3 migration copies it into `providers.openai.baseUrl`
+   * ONCE, so a home that configured BYO OpenAI that way keeps working byte-identically without
+   * this block's own precedence rule (a settings.ts function reading a now-nonexistent field would
+   * be dead code, not a fallback).
    *
    * Read HOT at every incarnation (`session-driver.ts`'s `optionsFor` calls `deps.settings()`), so
    * adding or changing an endpoint takes effect on the next turn with no daemon restart — the
@@ -478,8 +523,83 @@ export const Settings = z.object({
    */
   providers: z.record(z.string(), z.object({ baseUrl: z.string().url().optional() })).optional(),
   legacy: z.object({ readLegacyProjectFiles: z.boolean().default(true) }).optional(),
+  /** WS-20: user-overridable per-slot model pins for the daemon's own INTERNAL callers (dispatch,
+   *  dreaming, the session cleaner, the ephemeral research sub-agent) — every key is optional; an
+   *  absent key (or an absent block) falls back to `pinsFor`'s own default, the ONE reader every
+   *  consumer goes through (never this raw block). See `pinsFor` below for the exact default rule. */
+  pins: z.object({
+    dispatch: ModelTagSchemaCore,
+    dream: ModelTagSchemaCore,
+    cleaner: ModelTagSchemaCore,
+    research: ModelTagSchemaCore,
+    researchFallback: ModelTagSchemaCore,
+  }).partial().optional(),
 });
 export type Settings = z.infer<typeof Settings>;
+
+/** WS-20 (review round 1, GUARD): the catalog providerId the daemon's SINGLE internal-calls
+ *  `Provider` instance is actually bound to — `splitTag(settings.provider.model).providerId`, with
+ *  the same `DEFAULT_PROVIDER` fallback `pinsFor` itself uses for a settings file with no
+ *  `provider.model` at all. Extracted so `pinsFor`'s own `ownProvider` derivation and
+ *  `providers/manager.ts`'s `internalModelFor` guard (dreamer/cleaner/research's own internal-
+ *  Provider calls) read the identical "which provider is this daemon actually bound to" answer —
+ *  they must never independently rederive it and risk disagreeing. */
+export function ownProviderFor(settings: Settings | null | undefined): string {
+  const providerModel = settings?.provider?.model ?? DEFAULT_PROVIDER.model;
+  try { return splitTag(providerModel).providerId; } catch { return splitTag(DEFAULT_PROVIDER.model).providerId; }
+}
+
+/** WS-20: the ONE reader of `settings.pins.<slot>` — every default falls back to a `gpt-5.6-terra`
+ *  (dispatch/dream/cleaner/researchFallback) or `gpt-5.6-luna` (research) row SERVED BY THE SAME
+ *  PROVIDER as `settings.provider.model`, so a fresh install's internal callers run on whichever
+ *  provider the user actually configured rather than an unrelated one. When that provider does
+ *  NOT serve the pinned slot (e.g. `deepseek`, which has no `terra`/`luna` row), the default falls
+ *  back to `openai` — the api-key vendor every gpt-5.6 slot is guaranteed to serve — never a
+ *  fabricated tag, and never a throw: a settings file with no `provider.model` at all still gets a
+ *  real answer via `DEFAULT_PROVIDER`. An explicit `settings.pins.<slot>` entry always wins over
+ *  every default, per slot independently. */
+export function pinsFor(settings: Settings | null | undefined): {
+  dispatch: ModelTag; dream: ModelTag; cleaner: ModelTag; research: ModelTag; researchFallback: ModelTag;
+} {
+  // WS-20 (review round 2, M6 fix — R2): a `winter-test/*` primary is a provider-LESS test double —
+  // it has no catalog family, so it serves no terra/luna slot at all, and `ownProviderFor` would
+  // answer the literal string "winter-test" (never a pinned catalog provider). The OLD `UNSTATED_TAG`
+  // default (correct for a REAL provider that genuinely serves no gpt-family slot) made every
+  // winter-test-primary daemon's dispatch/dream/cleaner/research refuse outright, because the
+  // harness's own double has no OTHER model to default to. Rule: the primary tag IS the pin — every
+  // slot defaults to the SAME double the session itself runs on, unless an explicit
+  // `settings.pins.<slot>` override says otherwise (still wins, unchanged).
+  const primary = settings?.provider?.model ?? DEFAULT_PROVIDER.model;
+  if (primary.startsWith(WINTER_TEST_PREFIX)) {
+    return {
+      dispatch: settings?.pins?.dispatch ?? (primary as ModelTag),
+      dream: settings?.pins?.dream ?? (primary as ModelTag),
+      cleaner: settings?.pins?.cleaner ?? (primary as ModelTag),
+      research: settings?.pins?.research ?? (primary as ModelTag),
+      researchFallback: settings?.pins?.researchFallback ?? (primary as ModelTag),
+    };
+  }
+  const ownProvider = ownProviderFor(settings);
+  // WS-20 (review round 2, M6): the OLD `?? facingNameToTag("openai", slotName)` rung silently
+  // pinned dispatch/dream/cleaner/research to a DIFFERENT provider than the daemon's own configured
+  // one whenever `ownProvider` did not itself serve the slot (e.g. an `anthropic/*` primary) — a
+  // cross-provider guess this function has no business making. Dropped: a provider that does not
+  // serve its own family's terra/luna slot yields `UNSTATED_TAG`, and every one of these doors
+  // already refuses/skips typed on that sentinel (`internalModelFor`'s own guard, session-driver.ts's
+  // dispatch door) rather than silently running on a provider nobody configured.
+  const defaultFor = (slotName: "terra" | "luna"): ModelTag => {
+    return facingNameToTag(ownProvider, slotName) ?? UNSTATED_TAG;
+  };
+  const terra = defaultFor("terra");
+  const luna = defaultFor("luna");
+  return {
+    dispatch: settings?.pins?.dispatch ?? terra,
+    dream: settings?.pins?.dream ?? terra,
+    cleaner: settings?.pins?.cleaner ?? terra,
+    research: settings?.pins?.research ?? luna,
+    researchFallback: settings?.pins?.researchFallback ?? terra,
+  };
+}
 
 /** Phase 9c (P9c-4): the ONE reader of `legacy.readLegacyProjectFiles` — absent block or absent key
  *  means ON (the shipped default); only an explicit `false` turns the legacy read-only fallback off. */
@@ -489,8 +609,9 @@ export function legacyProjectFilesReadEnabled(settings: Settings | null | undefi
 
 /** WS-19 (W19-6): the ONE reader of `providers.<id>.baseUrl` — absent block, absent entry, absent
  *  key and a blank string all mean "no override", so callers never have to spell that themselves.
- *  The legacy `provider.baseUrl` arm is NOT consulted here; `session-driver.ts` checks it first and
- *  only reaches this when it did not apply. */
+ *  WS-20: this is now the ONLY door — the legacy `provider.baseUrl` arm no longer exists on
+ *  `ProviderSettings` at all (the v2→v3 migration copies a stored value in here once, on the
+ *  provider it named, and drops the field). */
 export function providerBaseUrlFor(settings: Settings | null | undefined, providerId: string): string | undefined {
   const url = settings?.providers?.[providerId]?.baseUrl;
   return url === undefined || url.length === 0 ? undefined : url;
@@ -528,15 +649,8 @@ export function officialSubscriptionAuthFlagInert(
   return !approved && (settings?.runtimes?.official?.subscriptionAuth ?? false);
 }
 
-/** Winter Phase 10a (P10a-3): the ONE reader of `runtimes.official.auth` — absent block or absent
- *  field both mean `"auto"` (the schema's own default only materializes once `runtimes.official`
- *  itself is present, same "an absent block is not unknown" rule every sibling getter in this file
- *  follows). Deliberately total (`null`/`undefined` settings both answer `"auto"`) for the same
- *  boot-degraded-to-`settings=null` reason `handoffCrossRuntimeEnabled` is total. Read HOT by
- *  `official-options.ts`'s `officialAuthFamilyFor`, never a boot snapshot. */
-export function officialAuthModeSetting(settings: Settings | null | undefined): "auto" | "api-key" | "console" {
-  return settings?.runtimes?.official?.auth ?? "auto";
-}
+// WS-20: `officialAuthModeSetting` is DELETED along with `runtimes.official.auth` — the official
+// leg's auth arm is now the tag's own prefix (`official-options.ts`'s `officialAuthArmFor`).
 
 /** The one place `hooks.enabled`'s default-ON semantics live (4f Task 2): absent block, absent
  *  field, or `enabled: true` all mean hooks run; only an explicit `false` turns them off. Kept as
@@ -658,12 +772,204 @@ export const lspAutoDiagnosticsEnabledFrom = (s: Settings): boolean => s.lsp?.au
  *  so the two can never drift. */
 export const cleanerEnabledFrom = (s: Settings): boolean => s.cleaner?.enabled !== false;
 
-// gpt-5.4 was the pre-deprecation default; fully deprecated per the 2026-07-10 user decision
-// (packages/core/src/providers/codex-config.ts) — a fresh v1→v2 migration must not persist a
-// dead slug to disk, so this points at the current default instead.
-const DEFAULT_PROVIDER = { type: "codex-oauth", model: DEFAULT_CODEX_MODEL } as const;
+// WS-20: the pre-deprecation `gpt-5.4` default is gone (there is no more CODEX_MODELS allowlist to
+// deprecate against) — points at `gpt-5.6-sol`, prefixed as a codex-oauth tag: the ONE default a
+// fresh install (no settings.json at all) or a v1-or-legacy file (no real provider info) lands on.
+export const DEFAULT_PROVIDER = { model: "codex-oauth/gpt-5.6-sol" as ModelTag } as const;
 
-export function loadSettings(path: string): Settings {
+/** WS-20 (spec §5): every catalog provider id with a row whose BARE modelId (the tag's own tail)
+ *  equals `m`, or whose `canonicalModelId` equals `m` (an alias/family match) — the "S" set the
+ *  v2→v3 migration rule and the runtime-state/session-row rewrite (`runtime-state/migrations/
+ *  tags.ts`, `sessions/store.ts`) both resolve a bare legacy id against. Catalog order. */
+export function providersServingBareId(m: string): string[] {
+  const catalog = loadCatalog();
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const row of catalog.models) {
+    const bare = row.key.slice(row.key.indexOf("/") + 1);
+    if (bare !== m && row.canonicalModelId !== m) continue;
+    if (seen.has(row.providerId)) continue;
+    seen.add(row.providerId);
+    out.push(row.providerId);
+  }
+  return out;
+}
+
+/** WS-20 (spec §5): options for `migrateBareModelId` — one call per bare-id field being migrated,
+ *  whether it lives in settings.json or a runtime-state/session row. */
+export interface MigrateBareModelIdOptions {
+  /** Named ONLY for the one log line this function may emit — NEVER the value itself (which is
+   *  not a secret, but this keeps the discipline uniform with every other settings log). */
+  fieldName: string;
+  /** The Winter home — for the Claude-id arm's console-profile existence probe. */
+  home: string;
+  /** The legacy `runtimes.official.auth` value, when migrating from settings (undefined for a
+   *  runtime-state/session row migration, which has no such field to read). */
+  legacyOfficialAuth?: "auto" | "api-key" | "console";
+  /** The legacy `provider.type`, ONLY meaningful when this field IS `provider.model` itself
+   *  (rule 3) — absent for every other field/row. */
+  legacyProviderType?: "codex-oauth" | "openai-compatible";
+  /** Rule 2's answer when NO catalog provider serves `m`: a settings field either gets a real
+   *  provider default (`provider.model` itself) or is cleared (`"delete"`); a runtime-state/session
+   *  row always gets the sentinel (`UNSTATED_TAG`). */
+  emptySFallback: ModelTag | "delete";
+  /** WS-20 (review round 2, M5): the set of providers this HOME actually holds a credential for
+   *  (`credentialPresenceFrom(secrets)`'s keys) — rule 5's tie-break (several serving providers,
+   *  none named by the legacy `provider.type`) prefers a member of S that HOLDS a credential over
+   *  the fixed codex-oauth>openai>anthropic order. Absent (every caller but the daemon boot hook,
+   *  which is the only one with `secrets` in hand at migration time) falls straight to the fixed
+   *  order, exactly as before this field existed. */
+  presentProviders?: ReadonlySet<string>;
+}
+
+/** WS-20 (spec §5, numbered exactly as the plan states it): resolves ONE bare legacy model id `m`
+ *  to a `ModelTag`, or `undefined` when the caller's `emptySFallback` is `"delete"` (the field
+ *  should be removed rather than defaulted). Shared by the settings v2→v3 migration AND the
+ *  runtime-state/session-row rewrite so the rule is never duplicated. */
+export function migrateBareModelId(m: string, opts: MigrateBareModelIdOptions): ModelTag | undefined {
+  // 1. already a tag with a catalog provider (or the winter-test escape hatch) → keep.
+  if (isModelTag(m)) return m as ModelTag;
+  // Claude ids: the arm is decided by the legacy official-auth setting / on-disk console profile,
+  // NOT by the generic S-based rules below (S would contain both `anthropic` and `console` for
+  // every Claude row, which the generic tie-break has no way to resolve correctly).
+  if (m.startsWith("claude-")) {
+    const arm =
+      opts.legacyOfficialAuth === "console" ||
+      ((opts.legacyOfficialAuth === undefined || opts.legacyOfficialAuth === "auto") && existsSync(consoleProfileCredentialFile(opts.home)))
+        ? "console"
+        : "anthropic";
+    return `${arm}/${m}` as ModelTag;
+  }
+  const S = providersServingBareId(m);
+  // 2. no catalog provider serves it.
+  if (S.length === 0) {
+    console.error(`[settings migration] "${opts.fieldName}" named a model no catalog provider serves${opts.emptySFallback === "delete" ? " — cleared" : ""}`);
+    return opts.emptySFallback === "delete" ? undefined : opts.emptySFallback;
+  }
+  // 3. the legacy provider.type, when THAT provider is in S (provider.model only).
+  if (opts.legacyProviderType === "codex-oauth" && S.includes("codex-oauth")) return "codex-oauth/" + m as ModelTag;
+  if (opts.legacyProviderType === "openai-compatible" && S.includes("openai")) return "openai/" + m as ModelTag;
+  // 4. exactly one serving provider (no ambiguity to resolve — presence plays no role).
+  if (S.length === 1) return `${S[0]}/${m}` as ModelTag;
+  // 5. several, none named. WS-20 (review round 2, M5): prefer a member of S that HOLDS A
+  //    CREDENTIAL, when the caller knows presence at all — falling back to the fixed
+  //    api-key-vendor order (unchanged) when presence is unknown, OR known but none of S holds one
+  //    (logged either way, so a silent wrong-provider guess is never truly silent).
+  const fixedOrder = (["codex-oauth", "openai", "anthropic"] as const).find((p) => S.includes(p));
+  if (opts.presentProviders !== undefined) {
+    const credentialed = S.find((p) => opts.presentProviders!.has(p));
+    if (credentialed !== undefined) {
+      console.error(`[settings migration] "${opts.fieldName}" is ambiguous across providers (${S.join(", ")}) — chose ${credentialed}, which holds a credential`);
+      return `${credentialed}/${m}` as ModelTag;
+    }
+    const chosen = fixedOrder ?? S[0]!;
+    console.error(`[settings migration] "${opts.fieldName}" is ambiguous across providers (${S.join(", ")}) — none holds a credential, chose ${chosen} by fixed preference`);
+    return `${chosen}/${m}` as ModelTag;
+  }
+  const chosen = fixedOrder ?? S[0]!;
+  console.error(`[settings migration] "${opts.fieldName}" is ambiguous across providers (${S.join(", ")}) — chose ${chosen}`);
+  return `${chosen}/${m}` as ModelTag;
+}
+
+/** WS-20 (spec §5): the v2 → v3 settings migration. Takes the RAW parsed v2 object (never a
+ *  validated `Settings` — the whole point is to accept a v2 shape the v3 schema rejects) and `home`
+ *  (for the Claude-id console-profile probe) and returns a raw object shaped for `Settings.parse`.
+ *  Preserves every unrelated key verbatim (same "nothing silently lost" discipline the v1→v2 branch
+ *  already had). Exported so `loadSettings` and this file's own tests share one implementation. */
+export function migrateSettingsV2ToV3(raw: Record<string, unknown>, home: string, presentProviders?: ReadonlySet<string>): Record<string, unknown> {
+  const legacyProvider = (raw.provider ?? {}) as Record<string, unknown>;
+  const legacyProviderType = legacyProvider.type as "codex-oauth" | "openai-compatible" | undefined;
+  const legacyRuntimes = (raw.runtimes ?? {}) as Record<string, unknown>;
+  const legacyOfficial = (legacyRuntimes.official ?? {}) as Record<string, unknown>;
+  const legacyOfficialAuth = legacyOfficial.auth as "auto" | "api-key" | "console" | undefined;
+
+  const out: Record<string, unknown> = { ...raw, schemaVersion: 3 };
+
+  // provider: model (required), reasoningEffort (carried as-is), type/baseUrl dropped.
+  if (typeof legacyProvider.model === "string") {
+    // WS-20 (review round 4): `provider.model` is UNCONSTRAINED again (any catalog provider, or
+    // `winter-test/*`) — a round-2/round-3 fallback lived here briefly to keep
+    // `migrateBareModelId`'s Claude-id arm (which answers purely off `legacyOfficialAuth`/the
+    // console profile) from producing a `provider.model` the schema would then refuse; that
+    // refusal no longer exists, so the fallback would now silently steer a genuinely Claude-primary
+    // v2 home to an openai/codex-oauth default instead of the CORRECT `anthropic/claude-*` answer.
+    // Removed — `migrateBareModelId`'s own answer is trusted verbatim, same as every other field.
+    const tag = migrateBareModelId(legacyProvider.model, {
+      fieldName: "provider.model", home, legacyOfficialAuth, legacyProviderType, presentProviders,
+      emptySFallback: legacyProviderType === "openai-compatible" ? ("openai/gpt-5.6-sol" as ModelTag) : ("codex-oauth/gpt-5.6-sol" as ModelTag),
+    });
+    const nextProvider: Record<string, unknown> = { model: tag };
+    if (legacyProvider.reasoningEffort !== undefined) nextProvider.reasoningEffort = legacyProvider.reasoningEffort;
+    out.provider = nextProvider;
+  } else if (raw.provider !== undefined) {
+    // A malformed provider block (no model at all) — drop `type`/whatever else it had and let the
+    // final Settings.parse report the missing `model` as the readable "settings.json is invalid"
+    // error; fabricating a default here would hide a genuinely corrupt file.
+    out.provider = {};
+  }
+  if (typeof legacyProvider.baseUrl === "string" && legacyProvider.baseUrl.length > 0) {
+    const existingProviders = (raw.providers ?? {}) as Record<string, { baseUrl?: string }>;
+    out.providers = { ...existingProviders, openai: { ...existingProviders.openai, baseUrl: legacyProvider.baseUrl } };
+  }
+
+  // reviewer.model / titles.model: settings fields OTHER than provider.model → cleared, not
+  // defaulted, when no catalog provider serves the legacy id (rule 2).
+  for (const [block, key] of [["reviewer", "reviewer"], ["titles", "titles"]] as const) {
+    const legacyBlock = (raw[block] ?? {}) as Record<string, unknown>;
+    if (typeof legacyBlock.model !== "string") continue;
+    const tag = migrateBareModelId(legacyBlock.model, { fieldName: `${key}.model`, home, legacyOfficialAuth, presentProviders, emptySFallback: "delete" });
+    const nextBlock = { ...(out[block] as Record<string, unknown> | undefined) };
+    if (tag) nextBlock.model = tag; else delete nextBlock.model;
+    out[block] = nextBlock;
+  }
+
+  // runtimes.advisorModel + runtimes.official.auth removal.
+  if (raw.runtimes !== undefined) {
+    const nextRuntimes: Record<string, unknown> = { ...legacyRuntimes };
+    if (typeof legacyRuntimes.advisorModel === "string" && legacyRuntimes.advisorModel.length > 0) {
+      const tag = migrateBareModelId(legacyRuntimes.advisorModel, { fieldName: "runtimes.advisorModel", home, legacyOfficialAuth, presentProviders, emptySFallback: "delete" });
+      if (tag) nextRuntimes.advisorModel = tag; else delete nextRuntimes.advisorModel;
+    }
+    if (legacyRuntimes.official !== undefined) {
+      const { auth: _auth, ...restOfficial } = legacyOfficial;
+      nextRuntimes.official = restOfficial;
+    }
+    out.runtimes = nextRuntimes;
+  }
+
+  return out;
+}
+
+/** Copies the settings file to `<path>.bak-pre-ws20` before its first v2→v3 (or earlier) migration
+ *  — skipped once that backup already exists, so a daemon that boots repeatedly against an
+ *  un-upgraded home never overwrites the ORIGINAL pre-migration file with a later, already-migrated
+ *  one. Best-effort: a failure to write the backup must never block the migration itself. */
+function backupPreWs20Once(path: string, raw: unknown): void {
+  const backupPath = `${path}.bak-pre-ws20`;
+  if (existsSync(backupPath)) return;
+  try {
+    writeFileSync(backupPath, JSON.stringify(raw, null, 2) + "\n");
+  } catch {
+    /* best-effort only */
+  }
+}
+
+/**
+ * WS-20 (review round 2, M5): `opts.presentProviders` threads credential presence into migration
+ * rule 5's tie-break (`migrateBareModelId`) — only the DAEMON boot hook has `secrets` in hand at
+ * migration time (`credentialPresenceFrom(secrets)`, computed before this call), so every other
+ * caller (the CLI, every test without a daemon) omits it and gets the OLD fixed-preference tie-break
+ * unchanged.
+ *
+ * `opts.persistMigration` (default `false`) gates every DISK WRITE this function can make — the
+ * migrated-shape return value is IDENTICAL either way (a caller always gets a valid, migrated
+ * `Settings` object back), but with it left `false` the on-disk file is left EXACTLY as it was
+ * found (still v2, still un-backed-up). This makes the daemon boot hook (which passes `true`, AFTER
+ * it has computed presence) the ONLY writer of a migrated v3 file — a CLI or test process that
+ * happens to read a v2 home first can no longer race the daemon to a migration written WITHOUT
+ * presence in hand.
+ */
+export function loadSettings(path: string, opts?: { presentProviders?: ReadonlySet<string>; persistMigration?: boolean }): Settings {
   let raw: any;
   try {
     raw = JSON.parse(readFileSync(path, "utf8"));
@@ -673,21 +979,52 @@ export function loadSettings(path: string): Settings {
     }
     throw err;
   }
-  if (raw.schemaVersion !== 2) {
-    // v1-or-legacy file (Phase 0 wrote {schemaVersion:1}; the retired v1 app wrote files with
-    // no schemaVersion at all — same directory on case-insensitive APFS). Migrate to v2,
-    // preserving unknown fields so nothing is silently lost.
-    const { schemaVersion: _legacy, ...preserved } = raw;
-    const migrated = { ...preserved, schemaVersion: 2 as const, provider: DEFAULT_PROVIDER };
-    writeFileSync(path, JSON.stringify(migrated, null, 2) + "\n");
-    // zod v4 z.object() strips unknown keys by default (does NOT throw) — safe to parse migrated
-    return Settings.parse(migrated);
+  if (raw.schemaVersion === 3) {
+    const parsed = Settings.safeParse(raw);
+    if (!parsed.success) {
+      throw new Error(`settings.json is invalid: ${parsed.error.issues.map((i) => i.path.join(".")).join(", ")} — fix or delete ${path}`);
+    }
+    return parsed.data;
   }
-  const parsed = Settings.safeParse(raw);
-  if (!parsed.success) {
-    throw new Error(`settings.json is invalid: ${parsed.error.issues.map((i) => i.path.join(".")).join(", ")} — fix or delete ${path}`);
+  const home = dirname(path);
+  const persistMigration = opts?.persistMigration ?? false;
+  if (raw.schemaVersion === 2) {
+    const migrated = migrateSettingsV2ToV3(raw, home, opts?.presentProviders);
+    const parsed = Settings.safeParse(migrated);
+    if (!parsed.success) {
+      throw new Error(`settings.json is invalid: ${parsed.error.issues.map((i) => i.path.join(".")).join(", ")} — fix or delete ${path}`);
+    }
+    // WS-20 (review round 2, self-fix): VALIDATE BEFORE WRITING — `saveSettings`'s own discipline
+    // ("never persist an invalid settings file"). The old write-then-validate order could leave an
+    // INVALID v3 file on disk (this function throws either way, but a caller that only reads the
+    // thrown message never learns the file itself is now broken): M6's `ProviderModelTagSchema`
+    // refinement made this newly reachable — `migrateBareModelId`'s Claude arm can produce
+    // `anthropic/claude-*`/`console/claude-*` for `provider.model` from a v2 `openai-compatible` BYO
+    // endpoint that happened to serve a model with a `claude-` prefixed bare id, which now fails
+    // that refinement.
+    //
+    // WS-20 (review round 2, nit h): the backup is a REAL pre-WS20 file worth preserving — only
+    // reached once migration is KNOWN to produce a valid result, and gated on `persistMigration`
+    // like every other write this function makes.
+    if (persistMigration) {
+      backupPreWs20Once(path, raw);
+      writeFileSync(path, JSON.stringify(migrated, null, 2) + "\n");
+    }
+    return parsed.data;
   }
-  return parsed.data;
+  // v1-or-legacy file (Phase 0 wrote {schemaVersion:1}; the retired v1 app wrote files with no
+  // schemaVersion at all — same directory on case-insensitive APFS). No real provider info exists
+  // to migrate, so this lands straight on v3's DEFAULT_PROVIDER — preserving unknown fields so
+  // nothing is silently lost. Never backed up (nit h) — there is nothing real to lose.
+  const { schemaVersion: _legacy, ...preserved } = raw;
+  const migrated = { ...preserved, schemaVersion: 3 as const, provider: DEFAULT_PROVIDER };
+  // zod v4 z.object() strips unknown keys by default (does NOT throw) — safe to parse migrated.
+  // Validated BEFORE writing, same discipline as the v2 branch above (this arm's own `provider` is
+  // always the fixed `DEFAULT_PROVIDER`, so it can never itself fail the M6 refinement — kept in the
+  // same order regardless, for the same reason `saveSettings` always validates before writing).
+  const result = Settings.parse(migrated);
+  if (persistMigration) writeFileSync(path, JSON.stringify(migrated, null, 2) + "\n");
+  return result;
 }
 
 export function saveSettings(path: string, s: Settings): void {
@@ -707,11 +1044,16 @@ export function readRawSettings(path: string): Record<string, unknown> | null {
 
 /** Pure `Settings -> Settings` provider-model transform (mirrors plugins/lifecycle.ts's
  *  `setPluginEnabled` pattern) — used by `winter model <slug>`. Preserves every other field,
- *  including `provider.reasoningEffort` if set. Validation (codex-oauth slug membership,
- *  non-empty for openai-compatible) is the CALLER's job — this never throws on the slug itself,
- *  only on whatever Settings.parse would already reject (e.g. an empty string, caught by the
- *  schema's `z.string().min(1)`). */
-export function setProviderModel(settings: Settings, model: string): Settings {
+ *  including `provider.reasoningEffort` if set. WS-20: `model` is a `ModelTag` — tag-shape/provider
+ *  validation is the CALLER's job (same "never throws on the slug itself" contract as before,
+ *  except the slug is now the whole tag): this never throws except on whatever `Settings.parse`
+ *  would already reject. */
+export function setProviderModel(settings: Settings, model: ModelTag): Settings {
+  // WS-20 (review round 4): `provider.model` is UNCONSTRAINED here — any catalog provider, or
+  // `winter-test/*` — same as a session's own model always has been. A round-2 gate to
+  // `INTERNAL_PROVIDER_IDS` lived here briefly; it's now enforced only where the daemon's internal
+  // Provider is actually BUILT (`createProvider`, providers/manager.ts), which answers `null`
+  // rather than refusing the write — see `INTERNAL_PROVIDER_IDS`'s own doc comment.
   return { ...settings, provider: { ...settings.provider, model } };
 }
 
@@ -744,6 +1086,14 @@ export function setReasoningEffort(settings: Settings, effort: (typeof REASONING
  * (`ipc/server.ts`) rather than replacing the whole block. `settings.runtimes` may be absent
  * entirely (it is `.optional()`); spreading `undefined` is a no-op object literal, so the first
  * write on a home with no `runtimes` block yet still produces a schema-valid one.
+ *
+ * WS-20: validates a non-blank `model` with `isModelTag` — the schema itself stays a plain
+ * `z.string()` (blank must not invalidate the whole settings file, see the schema's own comment),
+ * so THIS is the one door that enforces "a stored advisorModel is a real tag or nothing at all".
+ * Throws `TypeError` (same shape `parseModelTag` throws) on a non-tag, non-blank value — the
+ * CALLER's job to catch and report (mirrors `setProviderModel`'s "never throws on the slug itself,
+ * only on what the schema already would" EXCEPT this one extra check, because `advisorModel`'s own
+ * schema cannot make it for the blank-is-absent reason above).
  */
 export function setAdvisorModel(settings: Settings, model: string | undefined): Settings {
   // `Record<string, unknown>` rather than `Settings["runtimes"]`: that type's OTHER fields
@@ -756,8 +1106,15 @@ export function setAdvisorModel(settings: Settings, model: string | undefined): 
   // this shape before it is ever persisted.
   const runtimes: Record<string, unknown> = { ...settings.runtimes };
   const trimmed = model?.trim();
-  if (trimmed) runtimes.advisorModel = trimmed;
-  else delete runtimes.advisorModel;
+  if (trimmed) {
+    // WS-20 (review round 2, nit e): `isModelTag` accepts the `unstated/unstated` sentinel (a
+    // STORED record may legitimately carry it), but a CALLER explicitly selecting it here is never
+    // a real request — same door-level rejection `resolveModelSelection`/`validateSyncMeta` apply.
+    if (!isModelTag(trimmed) || trimmed === UNSTATED_TAG) throw new TypeError(`not a model tag: ${JSON.stringify(trimmed)}`);
+    runtimes.advisorModel = trimmed;
+  } else {
+    delete runtimes.advisorModel;
+  }
   return { ...settings, runtimes: runtimes as Settings["runtimes"] };
 }
 

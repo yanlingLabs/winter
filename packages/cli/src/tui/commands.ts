@@ -8,11 +8,12 @@
 // 3d-task-1-brief.md reading list (packages/cli/src/main.ts).
 import { join } from "node:path";
 import {
-  CODEX_MODELS, OutputStyleStore, TrustStore, loadSettings, resolveWinterHome, saveSettings,
-  setOutputStyle, setProviderModel, setReasoningEffort, setAdvisorModel,
+  OutputStyleStore, TrustStore, loadSettings, resolveWinterHome, saveSettings,
+  setOutputStyle, setProviderModel, setReasoningEffort, setAdvisorModel, parseModelTag,
 } from "@yanlinglabs/winter-core";
 import type { Settings } from "@yanlinglabs/winter-core";
-import { parseModelArgs, validateEffort, validateModelSlug, validateAdvisorSlug } from "../model-cli";
+import { METHODS, SyncConfigModel } from "@yanlinglabs/winter-protocol";
+import { parseModelArgs, validateEffort, validateModelTag, validateAdvisorSlug, renderModelListing, modelDisplayWithHint } from "../model-cli";
 import { parseOutputStyleArgs } from "../output-style-cli";
 import { formatElapsed, formatTokens } from "../task-display";
 import { formatRoutineLine } from "../routines-cli";
@@ -78,11 +79,16 @@ async function runCompact(ctx: CommandCtx): Promise<void> {
 /** Mirrors main.ts `case "model"` (~:1318-1365): NO client/daemon RPC at all — that route reads
  *  and writes `settings.json` directly (spec: model switches must not require a daemon restart;
  *  the daemon's live model resolver in providers/manager.ts picks the new value up on its next
- *  turn). Reuses model-cli.ts's parseModelArgs/validateModelSlug/validateEffort — the exact same
+ *  turn). Reuses model-cli.ts's parseModelArgs/validateModelTag/validateEffort — the exact same
  *  pure parse/validate functions main.ts's route calls — and @yanlinglabs/winter-core's
- *  loadSettings/saveSettings/setProviderModel/setReasoningEffort/CODEX_MODELS, the same helpers.
- *  No arg -> "show" (lists CODEX_MODELS marking the active one, mirroring the route's `*` marker);
- *  an arg -> switches (mirrors the route's write path + "takes effect next turn" note). */
+ *  loadSettings/saveSettings/setProviderModel/setReasoningEffort.
+ *  No arg -> "show": WS-20 replaces the static CODEX_MODELS enumeration with a LIVE
+ *  `sync.config` read over `ctx.client` (the session's own connection — always live in a real TUI
+ *  session, so this now DOES touch the client, deliberately reversing the pre-WS-20 "never touches
+ *  the client" design once CODEX_MODELS stopped being a thing any provider has). A request
+ *  failure/empty catalogue (a fake test client with no `request` handler, an old daemon, a
+ *  provider that cannot enumerate) falls back to the bare-tag note, unchanged from before.
+ *  An arg -> switches (mirrors the route's write path + "takes effect next turn" note). */
 async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
   const args = argText.trim().length > 0 ? argText.trim().split(/\s+/) : [];
   const action = parseModelArgs(args);
@@ -95,29 +101,36 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
   const settings = loadSettings(settingsPath);
 
   if (action.kind === "show") {
-    // B2: with a picker surface wired AND a real catalogue to choose from (codex-oauth), the
-    // no-arg form IS the picker — the model list must never land in the transcript (the
-    // user-reported bug this fixes). The EFFORT knob stays direct-form-only (`/model --effort
-    // <level>`) — a second picker stage would double the interaction for the rare axis; the title
-    // discloses both the current value and the direct form. Esc = no write, no note.
-    if (ctx.openChoice && settings.provider.type === "codex-oauth") {
+    const models = await syncConfigModels(ctx);
+
+    // B2: with a picker surface wired AND a non-empty live catalogue, the no-arg form IS the
+    // picker — the model list must never land in the transcript (the user-reported bug this
+    // fixes). The EFFORT knob stays direct-form-only (`/model --effort <level>`) — a second
+    // picker stage would double the interaction for the rare axis; the title discloses both the
+    // current value and the direct form. Esc = no write, no note. Provider-ordered flat options
+    // (the picker has no section headers); the provider rides `hint` since the label is the
+    // facing name / modelId.
+    if (ctx.openChoice && models.length > 0) {
       ctx.openChoice({
         title: `model — effort: ${settings.provider.reasoningEffort ?? "default"} (/model --effort)`,
-        options: CODEX_MODELS.map((m) => ({ value: m.id, label: m.id, current: m.id === settings.provider.model })),
+        options: models.map((m) => ({
+          value: m.id,
+          label: m.facingName ?? m.id.slice(m.id.indexOf("/") + 1),
+          hint: m.providerId,
+          current: m.id === settings.provider.model,
+        })),
         onPick: (slug) => applyModelPick(ctx, slug),
       });
       return;
     }
-    // Headless fallback (no picker surface), and any provider without a fixed catalogue: the
-    // historical transcript note, byte-identical.
+    // Headless fallback (no picker surface), and no live catalogue: the historical bare-tag note,
+    // extended with the grouped listing when a catalogue WAS available (openChoice absent).
     const effortSuffix = settings.provider.reasoningEffort ? `  effort: ${settings.provider.reasoningEffort}` : "";
-    const lines = [`${settings.provider.model}${effortSuffix}`];
-    if (settings.provider.type === "codex-oauth") {
-      lines.push("available (codex-oauth):");
-      for (const m of CODEX_MODELS) lines.push(`  ${m.id === settings.provider.model ? "*" : " "} ${m.id}`);
-    }
+    // Review fix (Nit 1): the modelId, the provider trailing as a hint — never the raw tag.
+    const lines = [`${modelDisplayWithHint(settings.provider.model)}${effortSuffix}`];
+    if (models.length > 0) lines.push(renderModelListing(models, settings.provider.model).trimEnd());
     // Winter Phase 8d (P8d-8, Task 4.3): mirrors main.ts's `case "model"` show branch verbatim.
-    lines.push(`advisor: ${settings.runtimes?.advisorModel ?? "auto"}`);
+    lines.push(`advisor: ${settings.runtimes?.advisorModel ? modelDisplayWithHint(settings.runtimes.advisorModel) : "auto"}`);
     ctx.appendNote(lines.join("\n"));
     return;
   }
@@ -130,17 +143,40 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
       const err = validateAdvisorSlug(action.slug);
       if (err) { ctx.appendNote(err); return; }
     }
-    const next = setAdvisorModel(settings, action.kind === "setAdvisor" ? action.slug : undefined);
-    saveSettings(settingsPath, next);
-    ctx.appendNote(`updated (advisor ${next.runtimes?.advisorModel ?? "auto"}) — takes effect next turn, no daemon restart needed`);
+    const modelArg = action.kind === "setAdvisor" ? action.slug : null;
+    // Review fix (Nit 4): the write goes through `settings.setAdvisorModel` over the session's own
+    // (always-live) client, so the tag is validated against the pinned catalog before it lands on
+    // disk. Falls back to the direct file write ONLY when there is no RPC surface to ask at all (a
+    // headless/test double with nothing wired — the historical no-daemon posture this command has
+    // always had) — never on a genuine RPC refusal, which must surface as a real error instead of
+    // silently writing the rejected value locally.
+    if (typeof ctx.client.request !== "function") {
+      ctx.appendNote("no daemon connection — wrote settings.json directly");
+      const next = setAdvisorModel(settings, modelArg ?? undefined);
+      saveSettings(settingsPath, next);
+      ctx.appendNote(`updated (advisor ${next.runtimes?.advisorModel ? modelDisplayWithHint(next.runtimes.advisorModel) : "auto"}) — takes effect next turn, no daemon restart needed`);
+      return;
+    }
+    try {
+      const stored = (await ctx.client.request(METHODS.settingsSetAdvisorModel, { model: modelArg })) as { model?: string | null } | undefined;
+      const model = stored?.model ?? null;
+      ctx.appendNote(`updated (advisor ${model ? modelDisplayWithHint(model) : "auto"}) — takes effect next turn, no daemon restart needed`);
+    } catch (err) {
+      ctx.appendNote(`the daemon refused the advisor setting: ${(err as Error).message}`);
+    }
     return;
   }
 
   let next = settings;
   if (action.kind === "setModel" || action.kind === "setModelAndEffort") {
-    const err = validateModelSlug(settings.provider.type, action.slug);
+    // Review fix (item 4): PER-SESSION /model accepts any pinned provider — catalog-membership
+    // only (`validateModelTag`), never the internal-provider gate `winter model <tag>` (the CLI
+    // verb, main.ts) applies to its own GLOBAL settings.provider.model write.
+    const err = validateModelTag(action.slug, settings);
     if (err) { ctx.appendNote(err); return; }
-    next = setProviderModel(next, action.slug);
+    // `validateModelTag` just proved this is a real tag (and refused the sentinel/test-double
+    // escapes `parseModelTag` alone would accept) — `parseModelTag` here only brands it.
+    next = setProviderModel(next, parseModelTag(action.slug));
   }
   if (action.kind === "setEffort" || action.kind === "setModelAndEffort") {
     const err = validateEffort(action.effort);
@@ -152,10 +188,25 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
   // independently; see `CommandCtx.onModelChanged`).
   ctx.onModelChanged?.(next.provider.model, next.provider.reasoningEffort);
   const changed = [
-    action.kind === "setModel" || action.kind === "setModelAndEffort" ? `model ${next.provider.model}` : null,
+    action.kind === "setModel" || action.kind === "setModelAndEffort" ? `model ${modelDisplayWithHint(next.provider.model)}` : null,
     action.kind === "setEffort" || action.kind === "setModelAndEffort" ? `effort ${next.provider.reasoningEffort}` : null,
   ].filter(Boolean).join(", ");
   ctx.appendNote(`updated (${changed}) — takes effect next turn, no daemon restart needed`);
+}
+
+/** WS-20: `/model`'s live catalogue read — `ctx.client.request("sync.config", {})`, narrowed to
+ *  just `models[]` (not the whole `SyncConfigResult`) so a fake test client with no `request`
+ *  handler, an older daemon reply missing the WS-20 fields, or a transport error all collapse to
+ *  the SAME empty-array "no catalogue" answer the caller already falls back on — never a thrown
+ *  error surfacing as a broken `/model`. */
+async function syncConfigModels(ctx: CommandCtx): Promise<SyncConfigModel[]> {
+  try {
+    const raw = await ctx.client.request(METHODS.syncConfig, {});
+    const parsed = SyncConfigModel.array().safeParse((raw as { models?: unknown } | undefined)?.models);
+    return parsed.success ? parsed.data : [];
+  } catch {
+    return [];
+  }
 }
 
 /** B2: the model picker's Enter path — the SAME write path as `/model <slug>` (validate via the
@@ -165,12 +216,14 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
 function applyModelPick(ctx: CommandCtx, slug: string): void {
   const settingsPath = join(resolveWinterHome(), "settings.json");
   const settings = loadSettings(settingsPath);
-  const err = validateModelSlug(settings.provider.type, slug);
+  // Review fix (item 4): same per-session posture as runModel's own setModel branch above —
+  // catalog-membership only, any pinned provider.
+  const err = validateModelTag(slug, settings);
   if (err) { ctx.appendNote(err); return; }
-  const next = setProviderModel(settings, slug);
+  const next = setProviderModel(settings, parseModelTag(slug));
   saveSettings(settingsPath, next);
   ctx.onModelChanged?.(next.provider.model, next.provider.reasoningEffort);
-  ctx.appendNote(`updated (model ${next.provider.model}) — takes effect next turn, no daemon restart needed`);
+  ctx.appendNote(`updated (model ${modelDisplayWithHint(next.provider.model)}) — takes effect next turn, no daemon restart needed`);
 }
 
 /** Mirrors main.ts `case "output-style"` (~:1546): NO client/daemon RPC at all — same

@@ -1,10 +1,13 @@
 /** Phase 3d Task 1 — the pure in-chat slash-command registry + runners. Each runner mirrors ONE
  *  main.ts subcommand route's client calls + output wording (cited in commands.ts per-runner);
  *  this file drives them through a fake `WinterClient` that only records calls + returns canned
- *  results, following app.test.tsx's `fakeClient()` precedent (recorded calls array, no real I/O)
- *  — except `/model`, which (like its main.ts route) never touches the client at all: it reads/
- *  writes `settings.json` directly under `WINTER_HOME` (an env var this suite points at a tmpdir
- *  per test so it never touches the real `~/.winter`). */
+ *  results, following app.test.tsx's `fakeClient()` precedent (recorded calls array, no real I/O).
+ *  `/model` reads/writes `settings.json` directly under `WINTER_HOME` (an env var this suite
+ *  points at a tmpdir per test so it never touches the real `~/.winter`) for its WRITE path, same
+ *  as its main.ts route — but WS-20 has its no-arg SHOW form read the live catalogue over
+ *  `ctx.client.request("sync.config", {})` (CODEX_MODELS, the static enumeration the pre-WS-20
+ *  design relied on to stay client-free, no longer exists), so a fake client WITHOUT a `request`
+ *  handler is how these tests pin the "no live catalogue" fallback. */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -803,13 +806,13 @@ describe("runCommand — saved-workflow /name dispatch (CC-parity phase 3 Track 
   });
 });
 
-describe("/model — mirrors `case \"model\"` (direct settings.json I/O under WINTER_HOME, no client)", () => {
+describe("/model — mirrors `case \"model\"` (settings.json write under WINTER_HOME; show reads sync.config)", () => {
   let home: string;
   let prevHome: string | undefined;
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "winter-cli-cmd-model-"));
-    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } }));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "codex-oauth/gpt-5.6-sol" } }));
     prevHome = process.env.WINTER_HOME;
     process.env.WINTER_HOME = home;
   });
@@ -820,37 +823,63 @@ describe("/model — mirrors `case \"model\"` (direct settings.json I/O under WI
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("no args -> show, marks the active model, never touches the client", async () => {
+  test("no args, no request handler -> show falls back to the bare tag, no crash", async () => {
     const { client, calls } = makeClient({});
     const { ctx, notes } = makeCtx(client);
     await runCommand(ctx, "/model");
     expect(calls).toEqual([]);
-    expect(notes[0]).toContain("gpt-5.6-sol");
-    expect(notes[0]).toContain("* gpt-5.6-sol");
-    expect(notes[0]).toContain("gpt-5.6-terra");
+    expect(notes[0]).toContain("gpt-5.6-sol (codex-oauth)");
   });
 
-  test("a valid slug -> switches the model, mirrors the write-path note", async () => {
+  test("no args, sync.config answers -> show renders the grouped listing", async () => {
+    const { client, calls } = makeClient({
+      request: () => ({
+        models: [
+          { id: "codex-oauth/gpt-5.6-sol", providerId: "codex-oauth", displayName: "GPT-5.6 Sol", facingName: "sol", efforts: ["low"] },
+          { id: "codex-oauth/gpt-5.6-terra", providerId: "codex-oauth", displayName: "GPT-5.6 Terra", facingName: "terra", efforts: ["low"] },
+        ],
+      }),
+    });
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/model");
+    expect(calls).toEqual([{ method: "request", args: ["sync.config", {}] }]);
+    expect(notes[0]).toContain("* sol");
+    expect(notes[0]).toContain("terra");
+  });
+
+  test("a valid tag -> switches the model, mirrors the write-path note", async () => {
     const { client } = makeClient({});
     const { ctx, notes } = makeCtx(client);
-    await runCommand(ctx, "/model gpt-5.6-luna");
-    expect(notes[0]).toContain("model gpt-5.6-luna");
+    await runCommand(ctx, "/model codex-oauth/gpt-5.6-luna");
+    expect(notes[0]).toContain("model gpt-5.6-luna (codex-oauth)");
     expect(notes[0]).toContain("no daemon restart needed");
 
     const { ctx: ctx2, notes: notes2 } = makeCtx(client);
     await runCommand(ctx2, "/model");
-    expect(notes2[0]).toContain("* gpt-5.6-luna");
+    expect(notes2[0]).toContain("gpt-5.6-luna (codex-oauth)");
   });
 
-  test("an invalid slug -> validation note, no write", async () => {
+  // Design correction (after item 4): `settings.provider.model` may name ANY catalog provider —
+  // a non-internal one (e.g. anthropic) no longer refuses at the write. `/model` never printed
+  // `internalProviderNote` itself (that heads-up is `winter model <tag>`'s own, main.ts) — a
+  // per-session pick has no daemon-internal-Provider concern to warn about in the first place.
+  test("(item 4 design correction) a non-internal-provider tag writes successfully", async () => {
     const { client } = makeClient({});
     const { ctx, notes } = makeCtx(client);
-    await runCommand(ctx, "/model not-a-real-model");
-    expect(notes[0]).toContain("invalid model");
+    await runCommand(ctx, "/model anthropic/claude-opus-5");
+    expect(notes[0]).toContain("model claude-opus-5 (anthropic)");
+    expect(notes[0]).toContain("no daemon restart needed");
+  });
+
+  test("a bare (non-tag) slug -> validation note, no write", async () => {
+    const { client } = makeClient({});
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/model gpt-5.6-luna");
+    expect(notes[0]).toMatch(/provider-qualified tag/);
 
     const { ctx: ctx2, notes: notes2 } = makeCtx(client);
     await runCommand(ctx2, "/model");
-    expect(notes2[0]).toContain("gpt-5.6-sol"); // unchanged
+    expect(notes2[0]).toContain("gpt-5.6-sol (codex-oauth)"); // unchanged
   });
 
   test("--effort switches reasoning effort", async () => {
@@ -867,6 +896,44 @@ describe("/model — mirrors `case \"model\"` (direct settings.json I/O under WI
     expect(notes[0]).toContain("usage:");
   });
 
+  // Review fix (Nit 4): `/model --advisor` now writes through `settings.setAdvisorModel` over the
+  // session's own (always-live) client, not a direct settings.json write — the daemon validates
+  // the tag against the pinned catalog before it lands on disk.
+  describe("--advisor (WS-20 review fix Nit 4: the write goes through settings.setAdvisorModel)", () => {
+    test("setAdvisor sends the tag and reports the daemon's own echoed value", async () => {
+      const { client, calls } = makeClient({ request: () => ({ ok: true, model: "anthropic/claude-opus-5" }) });
+      const { ctx, notes } = makeCtx(client);
+      await runCommand(ctx, "/model --advisor anthropic/claude-opus-5");
+      expect(calls).toEqual([{ method: "request", args: ["settings.setAdvisorModel", { model: "anthropic/claude-opus-5" }] }]);
+      expect(notes).toEqual(["updated (advisor claude-opus-5 (anthropic)) — takes effect next turn, no daemon restart needed"]);
+    });
+
+    test("--advisor auto sends a literal null and reports 'auto' when the daemon clears it", async () => {
+      const { client, calls } = makeClient({ request: () => ({ ok: true, model: null }) });
+      const { ctx, notes } = makeCtx(client);
+      await runCommand(ctx, "/model --advisor auto");
+      expect(calls).toEqual([{ method: "request", args: ["settings.setAdvisorModel", { model: null }] }]);
+      expect(notes).toEqual(["updated (advisor auto) — takes effect next turn, no daemon restart needed"]);
+    });
+
+    test("a daemon refusal surfaces as a note, never a silent fallback to the file write", async () => {
+      const { client } = makeClient({
+        request: () => { throw new Error("unknown model 'claude-opus-5' for provider anthropic"); },
+      });
+      const { ctx, notes } = makeCtx(client);
+      await runCommand(ctx, "/model --advisor anthropic/claude-opus-5");
+      expect(notes).toEqual(["the daemon refused the advisor setting: unknown model 'claude-opus-5' for provider anthropic"]);
+    });
+
+    test("no RPC surface at all (headless/test double) falls back to the direct file write, and says so", async () => {
+      const { client } = makeClient({});
+      const { ctx, notes } = makeCtx(client);
+      await runCommand(ctx, "/model --advisor anthropic/claude-opus-5");
+      expect(notes[0]).toBe("no daemon connection — wrote settings.json directly");
+      expect(notes[1]).toContain("updated (advisor claude-opus-5 (anthropic))");
+    });
+  });
+
   // TUI renderer T5 — the status chrome's live model source: a SUCCESSFUL write reports the new
   // resolved global model+effort through `onModelChanged` (the same optional-callback shape as
   // `onCwdChanged`), so the App's footer flips the moment /model lands instead of showing the
@@ -875,8 +942,8 @@ describe("/model — mirrors `case \"model\"` (direct settings.json I/O under WI
     const { client } = makeClient({});
     const changes: Array<[string, string | undefined]> = [];
     const { ctx } = makeCtx(client, { onModelChanged: (m, e) => changes.push([m, e]) });
-    await runCommand(ctx, "/model gpt-5.6-luna --effort high");
-    expect(changes).toEqual([["gpt-5.6-luna", "high"]]);
+    await runCommand(ctx, "/model codex-oauth/gpt-5.6-luna --effort high");
+    expect(changes).toEqual([["codex-oauth/gpt-5.6-luna", "high"]]);
   });
 
   test("(T5) an effort-only switch still reports both axes (model unchanged, new effort)", async () => {
@@ -884,7 +951,7 @@ describe("/model — mirrors `case \"model\"` (direct settings.json I/O under WI
     const changes: Array<[string, string | undefined]> = [];
     const { ctx } = makeCtx(client, { onModelChanged: (m, e) => changes.push([m, e]) });
     await runCommand(ctx, "/model --effort medium");
-    expect(changes).toEqual([["gpt-5.6-sol", "medium"]]);
+    expect(changes).toEqual([["codex-oauth/gpt-5.6-sol", "medium"]]);
   });
 
   test("(T5) show / invalid slug / usage error never fire onModelChanged (nothing changed)", async () => {
@@ -892,7 +959,7 @@ describe("/model — mirrors `case \"model\"` (direct settings.json I/O under WI
     const changes: unknown[] = [];
     const { ctx } = makeCtx(client, { onModelChanged: (...a: unknown[]) => changes.push(a) });
     await runCommand(ctx, "/model");
-    await runCommand(ctx, "/model not-a-real-model");
+    await runCommand(ctx, "/model gpt-5.6-luna");
     await runCommand(ctx, "/model --effort");
     expect(changes).toEqual([]);
   });
@@ -903,16 +970,24 @@ describe("/model — mirrors `case \"model\"` (direct settings.json I/O under WI
 // instead of dumping the list into the transcript (the user-reported `/model` bug). The optional-
 // callback discipline mirrors `onCwdChanged`/`onModelChanged`: a ctx WITHOUT `openChoice` (headless,
 // every pre-B2 test above) keeps the historical transcript note byte-identical — those suites stay
-// green untouched, which is itself the fallback pin.
+// green untouched, which is itself the fallback pin. WS-20: the picker's options now come from
+// `sync.config` (`ctx.client.request`) instead of the retired static CODEX_MODELS.
 // ---------------------------------------------------------------------------------------------
 
 describe("B2 — /model (no args) opens the model picker when openChoice is wired", () => {
   let home: string;
   let prevHome: string | undefined;
+  const codexModels = () => ({
+    models: [
+      { id: "codex-oauth/gpt-5.6-sol", providerId: "codex-oauth", displayName: "GPT-5.6 Sol", facingName: "sol", efforts: ["low"] },
+      { id: "codex-oauth/gpt-5.6-terra", providerId: "codex-oauth", displayName: "GPT-5.6 Terra", facingName: "terra", efforts: ["low"] },
+      { id: "codex-oauth/gpt-5.6-luna", providerId: "codex-oauth", displayName: "GPT-5.6 Luna", facingName: "luna", efforts: ["low"] },
+    ],
+  });
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "winter-cli-cmd-choice-"));
-    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol" } }));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "codex-oauth/gpt-5.6-sol" } }));
     prevHome = process.env.WINTER_HOME;
     process.env.WINTER_HOME = home;
   });
@@ -923,22 +998,23 @@ describe("B2 — /model (no args) opens the model picker when openChoice is wire
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("opens ONE picker over the codex catalogue (current marked), appends NO note, never touches the client", async () => {
-    const { client, calls } = makeClient({});
+  test("opens ONE picker over the live sync.config catalogue (current marked), appends NO note", async () => {
+    const { client, calls } = makeClient({ request: () => codexModels() });
     const requests: ChoiceRequest[] = [];
     const { ctx, notes } = makeCtx(client, { openChoice: (r) => requests.push(r) });
     await runCommand(ctx, "/model");
-    expect(calls).toEqual([]);
+    expect(calls).toEqual([{ method: "request", args: ["sync.config", {}] }]);
     expect(notes).toEqual([]); // the bug: this used to be the transcript dump
     expect(requests).toHaveLength(1);
     expect(requests[0]!.title).toContain("model");
-    expect(requests[0]!.options.map((o) => o.value)).toEqual(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
-    expect(requests[0]!.options.filter((o) => o.current).map((o) => o.value)).toEqual(["gpt-5.6-sol"]);
+    expect(requests[0]!.options.map((o) => o.value)).toEqual(["codex-oauth/gpt-5.6-sol", "codex-oauth/gpt-5.6-terra", "codex-oauth/gpt-5.6-luna"]);
+    expect(requests[0]!.options.map((o) => o.label)).toEqual(["sol", "terra", "luna"]);
+    expect(requests[0]!.options.filter((o) => o.current).map((o) => o.value)).toEqual(["codex-oauth/gpt-5.6-sol"]);
   });
 
   test("the effort knob stays direct-form-only — the picker title discloses it", async () => {
-    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.6-sol", reasoningEffort: "high" } }));
-    const { client } = makeClient({});
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "codex-oauth/gpt-5.6-sol", reasoningEffort: "high" } }));
+    const { client } = makeClient({ request: () => codexModels() });
     const requests: ChoiceRequest[] = [];
     const { ctx } = makeCtx(client, { openChoice: (r) => requests.push(r) });
     await runCommand(ctx, "/model");
@@ -946,8 +1022,8 @@ describe("B2 — /model (no args) opens the model picker when openChoice is wire
     expect(requests[0]!.title).toContain("--effort");
   });
 
-  test("onPick takes the SAME write path as `/model <slug>`: settings write + onModelChanged + the identical note", async () => {
-    const { client } = makeClient({});
+  test("onPick takes the SAME write path as `/model <tag>`: settings write + onModelChanged + the identical note", async () => {
+    const { client } = makeClient({ request: () => codexModels() });
     const requests: ChoiceRequest[] = [];
     const changes: Array<[string, string | undefined]> = [];
     const { ctx, notes } = makeCtx(client, {
@@ -955,35 +1031,45 @@ describe("B2 — /model (no args) opens the model picker when openChoice is wire
       onModelChanged: (m, e) => changes.push([m, e]),
     });
     await runCommand(ctx, "/model");
-    await requests[0]!.onPick("gpt-5.6-luna");
-    expect(changes).toEqual([["gpt-5.6-luna", undefined]]);
-    expect(notes).toEqual(["updated (model gpt-5.6-luna) — takes effect next turn, no daemon restart needed"]);
+    await requests[0]!.onPick("codex-oauth/gpt-5.6-luna");
+    expect(changes).toEqual([["codex-oauth/gpt-5.6-luna", undefined]]);
+    expect(notes).toEqual(["updated (model gpt-5.6-luna (codex-oauth)) — takes effect next turn, no daemon restart needed"]);
     // The write really landed: a re-show marks luna as current.
     const requests2: ChoiceRequest[] = [];
     const { ctx: ctx2 } = makeCtx(client, { openChoice: (r) => requests2.push(r) });
     await runCommand(ctx2, "/model");
-    expect(requests2[0]!.options.filter((o) => o.current).map((o) => o.value)).toEqual(["gpt-5.6-luna"]);
+    expect(requests2[0]!.options.filter((o) => o.current).map((o) => o.value)).toEqual(["codex-oauth/gpt-5.6-luna"]);
   });
 
-  test("`/model <slug>` and `/model --effort <level>` (direct forms) NEVER open the picker", async () => {
-    const { client } = makeClient({});
+  test("`/model <tag>` and `/model --effort <level>` (direct forms) NEVER open the picker", async () => {
+    const { client } = makeClient({ request: () => codexModels() });
     const requests: ChoiceRequest[] = [];
     const { ctx, notes } = makeCtx(client, { openChoice: (r) => requests.push(r) });
-    await runCommand(ctx, "/model gpt-5.6-terra");
+    await runCommand(ctx, "/model codex-oauth/gpt-5.6-terra");
     await runCommand(ctx, "/model --effort medium");
     expect(requests).toEqual([]);
-    expect(notes[0]).toContain("model gpt-5.6-terra");
+    expect(notes[0]).toContain("model gpt-5.6-terra (codex-oauth)");
     expect(notes[1]).toContain("effort medium");
   });
 
-  test("a non-codex provider has no catalogue to pick from — falls back to the note even with openChoice wired", async () => {
-    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "openai-compatible", model: "local-model", baseUrl: "http://localhost:1234/v1" } }));
-    const { client } = makeClient({});
+  test("sync.config answers an EMPTY catalogue — falls back to the note even with openChoice wired", async () => {
+    const { client } = makeClient({ request: () => ({ models: [] }) });
     const requests: ChoiceRequest[] = [];
     const { ctx, notes } = makeCtx(client, { openChoice: (r) => requests.push(r) });
     await runCommand(ctx, "/model");
     expect(requests).toEqual([]);
-    expect(notes).toEqual(["local-model"]);
+    expect(notes).toEqual(["gpt-5.6-sol (codex-oauth)\nadvisor: auto"]);
+  });
+
+  test("sync.config request rejects — falls back to the note even with openChoice wired", async () => {
+    const { client } = makeClient({
+      request: () => { throw new Error("no daemon"); },
+    });
+    const requests: ChoiceRequest[] = [];
+    const { ctx, notes } = makeCtx(client, { openChoice: (r) => requests.push(r) });
+    await runCommand(ctx, "/model");
+    expect(requests).toEqual([]);
+    expect(notes).toEqual(["gpt-5.6-sol (codex-oauth)\nadvisor: auto"]);
   });
 });
 

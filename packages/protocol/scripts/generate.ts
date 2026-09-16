@@ -20,7 +20,7 @@ const fixtures: Record<string, unknown> = {
   // `session_created_with_mode` just below already covers the old/additive-field shape).
   "session_created": {
     ...base, type: "session_created", scope: "global",
-    runtimeKind: "winter-agent", providerId: "openai", modelRef: "gpt-5.6-sol",
+    runtimeKind: "winter-agent", providerId: "openai", modelRef: "openai/gpt-5.6-sol",
   },
   // Dispatch durability follow-up: mode is additive/optional on the EXISTING session_created
   // shape — a dedicated fixture (distinct from session_created.json above) so Swift round-trips

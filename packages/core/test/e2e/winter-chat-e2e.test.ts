@@ -45,6 +45,7 @@ import { startDaemon, type RunningDaemon } from "../../src/daemon";
 import type { RuntimeStateWiring } from "../../src/runtime-state";
 import { sessionLegOf } from "../../src/runtime-sdk/leg";
 import { CHAT_ALLOWED_WINTER_TOOLS, buildWinterOptions, disallowedToolsFor } from "../../src/runtime-sdk/mode-options";
+import type { ModelTag } from "../../src/runtime-sdk/model-tag";
 import { WINTER_ADVERTISED_MCP_TOOLS_0_0_4, WINTER_ADVERTISED_TOOLS_0_0_4_BASE } from "../../src/runtime-sdk/tool-names";
 import { createHostPromptQueue } from "../../src/runtime-sdk/prompt-queue";
 import { WINTER_CAPABILITY_TOOLS } from "../../src/capabilities";
@@ -172,8 +173,12 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
   };
   const writeSettings = (chatFlag: boolean): void => {
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "openai-compatible", model: "gpt-x", baseUrl: "http://127.0.0.1:9/v1" },
+      schemaVersion: 3,
+      // WS-20: the settings-wide default is the echo DOUBLE, not an unservable `openai/gpt-x` — a tag whose
+      // provider holds no credential now refuses typed at the first turn (before any spawn), so the
+      // engine-era import case (g) needs a default that can actually run.
+      provider: { model: "winter-test/echo" },
+      providers: { openai: { baseUrl: "http://127.0.0.1:9/v1" } },
       runtimes: { winterExecutable: bin, winterLeg: { chat: chatFlag }, winterIdleTimeoutSec: 10 },
     }, null, 2));
   };
@@ -512,10 +517,9 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     const sent = await client.call<{ seq: number }>(METHODS.sessionSend, { sessionId: engineSid, text: "hello?" });
     expect(sent.seq).toBeGreaterThan(0);
     // The record is no longer engine-era: the import gave it a real backend transcript on the
-    // Winter leg (the settings-wide `provider.model: "gpt-x"` this suite otherwise never resolves
-    // to a real double is irrelevant here — the RPC's own success is the import door's contract;
-    // whatever the resumed child does with an unrecognized model surfaces later, as an async
-    // turn_completed/agent_error event, never as this RPC failing).
+    // Winter leg. WS-20: the resumed child runs the settings-wide default (`winter-test/echo`, see
+    // `writeSettings`) — a provider-less double, so the first-turn credential gate has nothing to
+    // refuse and the RPC's own success is the import door's contract.
     expect(sessionLegOf(record(engineSid))).not.toBe("engine");
     expect(record(engineSid)?.backendSessionId).toBeDefined();
     // The user_message the import's own send appended is now really there — the OPPOSITE of the
@@ -538,7 +542,7 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     if (hook instanceof Error) throw hook;
     const abort = new AbortController();
     const options: Options = buildWinterOptions({
-      mode: "code", policy: "auto", sessionId: crypto.randomUUID(), home, cwd, model: "winter-test/echo",
+      mode: "code", policy: "auto", sessionId: crypto.randomUUID(), home, cwd, model: "winter-test/echo" as ModelTag,
       credentials: { byProvider: {} }, spawn: hook, canUseTool: async () => ({ behavior: "deny", message: "tripwire" }), abort,
       capabilityTools: WINTER_CAPABILITY_TOOLS, capabilities: caps,
     });

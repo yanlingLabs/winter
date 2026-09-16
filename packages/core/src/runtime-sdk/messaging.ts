@@ -63,6 +63,7 @@ import type {
 } from "@yanlinglabs/winter-runtime-sdk";
 import type { WinterRuntimeSdk } from "./create";
 import { WINTER_PEER_VERSIONS } from "./versions";
+import { UNSTATED_TAG } from "./model-tag";
 
 /** The router's own `LiveSessionStatus`, which its barrel does not re-export (`messaging/sessions.d.ts`
  *  declares it, `index.d.ts` omits it). Same declaration, not a widening. */
@@ -75,7 +76,7 @@ type LiveSessionStatus = ListedRuntimeObject["status"];
 const UNSTATED_SELECTION = {
   runtimeKind: "winter-agent",
   providerId: "unstated",
-  modelRef: "unstated/unstated",
+  modelRef: UNSTATED_TAG,
   family: "unstated",
   authFamily: "custom",
   sdkVersion: WINTER_PEER_VERSIONS.winterAgentSdk,
@@ -361,7 +362,7 @@ export function attachWinterSession(runtime: WinterRuntimeSdk, session: WinterSe
 const UNSTATED_OFFICIAL_SELECTION = {
   runtimeKind: "claude-agent",
   providerId: "unstated",
-  modelRef: "unstated/unstated",
+  modelRef: UNSTATED_TAG,
   family: "unstated",
   authFamily: "custom",
   sdkVersion: WINTER_PEER_VERSIONS.claudeAgentSdk ?? "unstated",

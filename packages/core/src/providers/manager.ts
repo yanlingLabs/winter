@@ -2,11 +2,11 @@ import { statSync } from "node:fs";
 import type { SecretStore } from "../auth/secret-store";
 import { readOpenAiApiKey } from "../auth/credential-material";
 import { OPENAI_API_KEY_SECRET } from "../auth/legacy-secret-names";
-import { loadSettings, type Settings } from "../settings";
+import { loadSettings, providerBaseUrlFor, INTERNAL_PROVIDER_IDS, type Settings } from "../settings";
 import type { Provider } from "./types";
 import { createCodexOauthRuntimeProvider, createOpenAiCompatibleRuntimeProvider } from "./runtime-provider";
 import { QuotaManager, withQuota } from "./quota";
-import { CODEX_MODELS, DEFAULT_CODEX_MODEL } from "./codex-config";
+import { splitTag, type ModelTag } from "../runtime-sdk/model-tag";
 
 /** LEGACY raw record — migration source only (`auth/credential-material.ts`'s
  *  `readOpenAiApiKey`/`migrateLegacyCredentialMaterial`). Writers use `writeOpenAiApiKey`, which
@@ -16,10 +16,20 @@ import { CODEX_MODELS, DEFAULT_CODEX_MODEL } from "./codex-config";
  *  `OPENAI_API_KEY_SECRET` from this module keeps working unchanged. */
 export { OPENAI_API_KEY_SECRET };
 
-/** What a turn actually resolves to: the model slug plus an optional reasoning-effort hint. */
+/** What a turn actually resolves to: the model slug plus an optional reasoning-effort hint. WS-20:
+ *  `model` is the BARE modelId (this module's `Provider` abstraction is bound to ONE backend at
+ *  construction time and speaks that backend's own dialect) — the tag is split once, at THIS
+ *  boundary, mirroring the runtime-sdk spawn boundary (§0.1). */
 export interface LiveModelSelection {
   model: string;
   reasoningEffort?: string;
+  /** The CATALOG providerId (`splitTag(settings.provider.model).providerId` at BOOT time, never
+   *  re-derived live — see this interface's own doc comment above for why the provider identity
+   *  is fixed for the life of this `ActiveProvider`). This is deliberately NOT `Provider.id` (the
+   *  internal adapter literal, `"codex-oauth"` or `"openai-compatible"`) — a caller that wants to
+   *  recompose a real `ModelTag` (`daemon.ts`'s own `liveModel`, ipc/sync.ts's `syncConfig`) needs
+   *  the CATALOG id, and `Provider.id` only happens to agree with it for the codex-oauth arm. */
+  providerId: string;
 }
 
 export interface ActiveProvider {
@@ -34,15 +44,15 @@ export interface ActiveProvider {
    * boot-time settings passed to createProvider — on ANY read/parse failure (missing file,
    * mid-write partial JSON, failed zod validation): this must NEVER throw into a turn.
    *
-   * Deprecation fallback (codex-oauth only): a configured model not in CODEX_MODELS (e.g. a
-   * since-deprecated slug like "gpt-5.4") silently resolves to DEFAULT_CODEX_MODEL, logging ONE
-   * console.error per distinct deprecated slug (not per turn). openai-compatible has no
-   * allowlist — arbitrary API models are legitimate there, so its configured model always passes
-   * through untouched. The provider TYPE itself is fixed at the boot-time value (`providerType`,
-   * closed over below) — a settings.json edited to a DIFFERENT provider.type still needs a
-   * daemon restart to take effect (out of scope here), so this resolver deliberately ignores any
-   * live-read `type` field and only ever branches on the type this Provider instance was actually
-   * constructed for.
+   * WS-20: `settings.provider.model` is read VERBATIM, then split once at this boundary — no
+   * deprecated-slug rewrite (the CODEX_MODELS allowlist and its DEFAULT_CODEX_MODEL fallback are
+   * gone; the pinned catalog is the one source for which models exist, and an unlisted slug is
+   * the provider's own 400 to report, not this daemon's to silently paper over). The provider
+   * IDENTITY itself is fixed at the boot-time value (`providerId`, closed over below) — a
+   * settings.json edited to name a DIFFERENT provider still needs a daemon restart to take effect
+   * (out of scope here), so this resolver deliberately ignores any live-read provider prefix and
+   * only ever emits the bare id for the provider this Provider instance was actually constructed
+   * for.
    */
   liveModel: () => LiveModelSelection;
 }
@@ -51,39 +61,25 @@ function statMtimeOrZero(path: string): number {
   try { return statSync(path).mtimeMs; } catch { return 0; } // missing file -> key 0
 }
 
-/** Resolves the (model, reasoningEffort) pair for one already-loaded Settings, applying the
- *  codex-oauth deprecated-slug fallback (warn once per distinct slug via `warnedSlugs`).
- *  `providerType` is always the BOOT-time type (see liveModel's doc comment) — never re-derived
- *  from the freshly re-read `settings`. */
-function resolveSelection(
-  providerType: Settings["provider"]["type"],
-  settings: Settings,
-  warnedSlugs: Set<string>,
-): LiveModelSelection {
+/** Resolves the (model, reasoningEffort) pair for one already-loaded Settings — `model` is the
+ *  BARE modelId half of `settings.provider.model`'s tag, verbatim (see `liveModel`'s doc comment
+ *  above for why no rewrite/fallback happens here any more). */
+function resolveSelection(settings: Settings, providerId: string): LiveModelSelection {
   const { model, reasoningEffort } = settings.provider;
-  if (providerType !== "codex-oauth") {
-    return { model, ...(reasoningEffort ? { reasoningEffort } : {}) };
-  }
-  if (CODEX_MODELS.some((m) => m.id === model)) {
-    return { model, ...(reasoningEffort ? { reasoningEffort } : {}) };
-  }
-  if (!warnedSlugs.has(model)) {
-    warnedSlugs.add(model);
-    console.error(`model "${model}" is deprecated/unavailable for codex-oauth — falling back to ${DEFAULT_CODEX_MODEL}`);
-  }
-  return { model: DEFAULT_CODEX_MODEL, ...(reasoningEffort ? { reasoningEffort } : {}) };
+  return { model: splitTag(model).modelId, providerId, ...(reasoningEffort ? { reasoningEffort } : {}) };
 }
 
 /** Builds the `liveModel` resolver for `createProvider`. `settingsPath` is optional — omitted
  *  (e.g. tests, `winter provider-smoke`) means the resolver just keeps returning the boot-time
- *  selection forever (no re-read possible without a path). */
+ *  selection forever (no re-read possible without a path). `providerId` is the BOOT-time catalog
+ *  id (`createProvider`'s own `providerId` local) — passed in rather than re-derived from each
+ *  live read, because the provider IDENTITY is fixed at boot (this function's own doc comment). */
 function buildLiveModelResolver(
-  providerType: Settings["provider"]["type"],
   bootSettings: Settings,
   settingsPath: string | undefined,
+  providerId: string,
 ): () => LiveModelSelection {
-  const warnedSlugs = new Set<string>();
-  let lastGood = resolveSelection(providerType, bootSettings, warnedSlugs);
+  let lastGood = resolveSelection(bootSettings, providerId);
   let cache: { key: number; value: LiveModelSelection } | null = null;
 
   return () => {
@@ -96,7 +92,7 @@ function buildLiveModelResolver(
     } catch {
       return lastGood; // read/parse failure — never throw into a turn, keep the last good value
     }
-    const value = resolveSelection(providerType, settings, warnedSlugs);
+    const value = resolveSelection(settings, providerId);
     cache = { key, value };
     lastGood = value;
     return value;
@@ -107,12 +103,32 @@ function buildLiveModelResolver(
  * `settingsPath` (optional) enables the returned `liveModel()` resolver to re-read settings.json
  * on each call instead of only ever reflecting this boot-time snapshot — omit it (as
  * `provider-smoke` and most tests do) and `liveModel()` just keeps returning the boot selection.
+ *
+ * WS-20: which backend this daemon runs is decided by `splitTag(settings.provider.model).providerId`
+ * — "codex-oauth" onto the Codex OAuth adapter, every other INTERNAL provider id (chiefly "openai",
+ * the BYO-endpoint arm) onto the OpenAI-compatible adapter with
+ * `providerBaseUrlFor(settings, providerId)` (`providers.<id>.baseUrl` — `settings.provider.baseUrl`
+ * itself no longer exists on `ProviderSettings`; the v2→v3 migration copies it into
+ * `providers.openai.baseUrl` once, see settings.ts).
+ *
+ * WS-20 (review round 4): `settings.provider.model` is UNCONSTRAINED at the schema level (any
+ * catalog provider, or `winter-test/*` — a SESSION's own model always has been, and the schema
+ * gate a prior round put on this field broke the ordinary "my default chat model is Claude" case,
+ * since a session with no explicit override falls back to THIS field, not just the internal
+ * Provider's own binding). The daemon's internal Provider, by contrast, really can only ever be
+ * ONE of `INTERNAL_PROVIDER_IDS` (codex-oauth/openai) — a single process-wide instance, built here.
+ * A `providerId` outside that set answers `null` rather than mis-building an OpenAI-compatible
+ * client pointed at a provider it was never meant to speak to; the caller (daemon.ts) treats that
+ * as "no internal Provider" — titles/reviewer/dreamer/cleaner/research/compaction go inert, logged
+ * ONCE, never a boot refusal. A per-provider internal Provider (one instance per provider, built on
+ * the SDK) is the real follow-up that would let this set grow; not attempted here.
  */
-export async function createProvider(settings: Settings, secrets: SecretStore, settingsPath?: string): Promise<ActiveProvider> {
+export async function createProvider(settings: Settings, secrets: SecretStore, settingsPath?: string): Promise<ActiveProvider | null> {
+  const providerId = splitTag(settings.provider.model).providerId;
+  if (!(INTERNAL_PROVIDER_IDS as readonly string[]).includes(providerId)) return null;
   const quota = new QuotaManager();
   let inner: Provider;
-  const providerType = settings.provider.type;
-  if (providerType === "codex-oauth") {
+  if (providerId === "codex-oauth") {
     // P8c lane 5: onto the `@yanlinglabs/winter-provider-runtime` codex-oauth adapter — credential
     // resolution (and, on a 401, refresh write-back) goes through `credential-store.ts`'s
     // `CredentialStore`, which reads/writes the SAME `codex-oauth:default` material record the
@@ -129,8 +145,48 @@ export async function createProvider(settings: Settings, secrets: SecretStore, s
     // key is stored (manager.test.ts pins this exact message).
     const apiKey = await readOpenAiApiKey(secrets);
     if (!apiKey) throw new Error("no API key stored — run: winter login --api-key");
-    inner = createOpenAiCompatibleRuntimeProvider(secrets, settings.provider.baseUrl);
+    // providerBaseUrlFor's own doc comment: "ABSENT IS THE NORMAL CASE" — an empty string is the
+    // same "no override" signal `createOpenAiCompatibleRuntimeProvider`'s `connection.baseUrl` has
+    // always accepted (the adapter falls back to its own generated default).
+    inner = createOpenAiCompatibleRuntimeProvider(secrets, providerBaseUrlFor(settings, providerId) ?? "");
   }
-  const liveModel = buildLiveModelResolver(providerType, settings, settingsPath);
-  return { provider: withQuota(inner, quota), model: settings.provider.model, quota, liveModel };
+  const liveModel = buildLiveModelResolver(settings, settingsPath, providerId);
+  return { provider: withQuota(inner, quota), model: splitTag(settings.provider.model).modelId, quota, liveModel };
+}
+
+/**
+ * WS-20 (review round 1, GUARD): the daemon has exactly ONE internal-calls `Provider` instance
+ * (`ActiveProvider`, above) — the dispatch pin, the dreamer, the session cleaner and the ephemeral
+ * research sub-agent all wire THEIR turns through it, never a second one. Each of those callers
+ * resolves its OWN model as a tag (`pinsFor(settings).<slot>`) and then splits it once at the
+ * internal-Provider spawn boundary (`splitTag(pin).modelId`) to get the bare id that instance's
+ * `streamTurn()` expects.
+ *
+ * That split alone is not enough: `pinsFor`'s per-slot default can name a DIFFERENT provider than
+ * the one `settings.provider.model` actually bound the internal instance to (a user override in
+ * `settings.pins.<slot>`, or a slot whose own default fallback rule picked a sibling provider —
+ * `pinsFor`'s own doc comment). Splitting off the bare modelId and sending it to the WRONG
+ * backend is silent: the internal Provider has no way to know the id it was handed came from a
+ * different provider's vocabulary, and depending on the two providers' id conventions it may
+ * simply 400, or — worse — resolve to an unrelated real model on the wrong service.
+ *
+ * `internalModelFor` is the one gate every caller of the internal Provider must pass through: it
+ * returns the bare modelId ONLY when the pin's own provider matches the internal instance's, and
+ * `undefined` (logging one line naming the pin's FIELD, e.g. `"pins.dream"` — never the tag itself,
+ * which is not a secret either, but the field name is enough to diagnose without repeating the
+ * daemon's provider config into the log on every mismatch) otherwise. Every caller skips its run
+ * on `undefined` rather than guessing — the same "typed refusal over a silent wrong answer"
+ * discipline as every RPC-facing door in this arc, applied to the daemon's own internal caller.
+ *
+ * Deliberately NOT a redesign of the internal-Provider abstraction (still exactly one instance,
+ * still bare-id-only at its own boundary) — that is a follow-up if the mismatch turns out to
+ * matter in practice; this is the guard that makes a mismatch loud instead of silent today.
+ */
+export function internalModelFor(pin: ModelTag, provider: { providerId: string }, fieldName: string): string | undefined {
+  const { providerId, modelId } = splitTag(pin);
+  if (providerId !== provider.providerId) {
+    console.error(`${fieldName}: names provider "${providerId}", but the daemon's internal provider is "${provider.providerId}" — skipping this run rather than sending the model to the wrong backend`);
+    return undefined;
+  }
+  return modelId;
 }

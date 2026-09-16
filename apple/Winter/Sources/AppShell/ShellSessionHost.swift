@@ -2418,20 +2418,32 @@ final class ShellSessionHost: ObservableObject {
     /// here). `nil` = unset ("Automatic") or not yet read.
     @Published private(set) var newChatAdvisorModel: String? = nil
 
-    /// Whole-branch review Major 2: `AppModel.writeAdvisorModelToSettings` now refuses (returns
-    /// `false`) rather than clobbering an unparseable settings.json — this page's OWN visible
-    /// surface for that refusal, rendered the SAME way `newChatCreate`'s `.failed` banner is
-    /// (`NewChatPage.swift`) but kept as a SEPARATE property: this is a picker-write failure, not
-    /// a session-create failure, and `newChatCreate`'s other states drive real create-flow gates
-    /// (`sendFirstChatMessage`'s own guard) that an unrelated failure must never perturb.
+    /// WS-20 (cross-lane fix): `AppModel.setAdvisorModel` surfaces a refusal (an invalid/non-
+    /// catalog tag, a transport failure, no `managementClient` yet) here rather than clobbering
+    /// anything — this page's OWN visible surface for that refusal, rendered the SAME way
+    /// `newChatCreate`'s `.failed` banner is (`NewChatPage.swift`) but kept as a SEPARATE property:
+    /// this is a picker-write failure, not a session-create failure, and `newChatCreate`'s other
+    /// states drive real create-flow gates (`sendFirstChatMessage`'s own guard) that an unrelated
+    /// failure must never perturb.
     @Published private(set) var newChatAdvisorError: String? = nil
 
+    /// WS-20 (cross-lane fix): same `settings.setAdvisorModel` RPC as the live-page adapter's own
+    /// `onSetAdvisorModel` wiring above, over `managementClient` — the new-chat page has no session
+    /// (and so no per-session client) yet, the same reason `sync.config`'s own new-chat fetch rides
+    /// `managementClient` (`testTheNewChatChipFetchesItsCatalogueOnTheManagementConnection`).
     func setNewChatAdvisorModel(_ model: String?) {
-        if AppModel.writeAdvisorModelToSettings(model) {
-            newChatAdvisorModel = model
-            newChatAdvisorError = nil
-        } else {
-            newChatAdvisorError = "the advisor setting could not be saved — settings.json could not be read"
+        guard let client = managementClient else {
+            newChatAdvisorError = "the advisor setting could not be saved — no daemon connection"
+            return
+        }
+        Task { @MainActor [weak self] in
+            switch await AppModel.setAdvisorModel(client: client, model) {
+            case .success(let stored):
+                self?.newChatAdvisorModel = stored
+                self?.newChatAdvisorError = nil
+            case .failure(let reason):
+                self?.newChatAdvisorError = reason
+            }
         }
     }
 
@@ -3443,6 +3455,16 @@ final class ShellSessionHost: ObservableObject {
                     adapter?.modelChangeError = reason
                 }
                 adapter?.modelChangeInFlight = false
+            }
+        }
+        // WS-20 (cross-lane fix): the D30 advisor override, GLOBAL (no session id to resolve,
+        // unlike `onSetModel` just above) — fires straight through `AppModel.setAdvisorModel`.
+        adapter.onSetAdvisorModel = { [weak adapter] model in
+            Task { @MainActor [weak adapter] in
+                switch await AppModel.setAdvisorModel(client: client, model) {
+                case .success(let stored): adapter?.adoptAdvisorModel(stored)
+                case .failure(let reason): adapter?.modelChangeError = reason
+                }
             }
         }
         // The confirm dialog's "Switch anyway" — identical body, forced `confirmLossy: true`, and

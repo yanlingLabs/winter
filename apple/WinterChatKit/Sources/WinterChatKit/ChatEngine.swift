@@ -1,6 +1,20 @@
 import Foundation
 import WinterProtocol
 
+/// WS-20: a model is now ALWAYS a provider-qualified tag ("<providerId>/<modelId>") outside the
+/// provider wire itself — `runTurn`'s own `model` parameter, `LocalSessionMeta.model`, and
+/// `SyncConfig.defaultModel`/`.models[].id` all carry the tag verbatim (this kit stores/threads it
+/// as an opaque `String`, no shape change needed there). The ONE place that must NOT see a tag is
+/// `ProviderTurnRequest.model` — the wire request a provider's own `/responses`-shaped endpoint
+/// receives — so every construction site splits at the FIRST `/` right before building one. A
+/// no-op on a value with no `/` at all, so a pre-migration bare model (or a `winter-test/…` double)
+/// still threads through unchanged; never throws, since this is a display/wire-shaping helper, not
+/// a validator (the daemon/router already own tag validation).
+func modelIdPortion(of tag: String) -> String {
+    guard let slash = tag.firstIndex(of: "/") else { return tag }
+    return String(tag[tag.index(after: slash)...])
+}
+
 /// The phone's standalone chat turn-loop — the Swift counterpart of the daemon's chat turn
 /// (`packages/core/src/agent/engine.ts`), radically reduced to exactly what a phone-local chat
 /// session needs: stream from the provider, emit typed WinterProtocol `SessionEvent`s, dispatch chat's
@@ -134,6 +148,9 @@ public final class ChatEngine: @unchecked Sendable {
 
     // MARK: - runTurn
 
+    /// WS-20: `model` is a provider-qualified tag ("<providerId>/<modelId>", the SAME shape
+    /// `LocalSessionMeta.model`/`SyncConfig.defaultModel` carry) — `runBody` splits it to the bare
+    /// modelId right before it ever reaches the provider wire (`modelIdPortion`, this file).
     public func runTurn(session: any LocalSession,
                         userText: String,
                         model: String,
@@ -189,7 +206,9 @@ public final class ChatEngine: @unchecked Sendable {
             round += 1
             if signal.isAborted { stopReason = "aborted"; break }
 
-            let request = ProviderTurnRequest(model: model, instructions: tools.systemPrompt,
+            // WS-20: `model` (the param this func/`runTurn` was handed) is a tag; the provider wire
+            // wants the bare modelId only.
+            let request = ProviderTurnRequest(model: modelIdPortion(of: model), instructions: tools.systemPrompt,
                                               input: input, tools: Self.toolSpecs,
                                               reasoningEffort: tools.reasoningEffort)
             let stream = provider.streamTurn(request)

@@ -52,8 +52,8 @@ final class ComposerChromeTests: XCTestCase {
     /// does" is asserted against one vocabulary rather than two fixtures that could drift.
     private func catalogue() -> SyncConfigSnapshot {
         SyncConfigSnapshot(provider: "codex-oauth", defaultModel: "srv-a",
-                           models: [SyncConfigModelInfo(id: "srv-a", efforts: ["none", "low", "high"]),
-                                    SyncConfigModelInfo(id: "srv-b", efforts: ["high", "max"])],
+                           models: [SyncConfigModelInfo(id: "srv-a", providerId: "srv", displayName: "srv-a", facingName: nil, efforts: ["none", "low", "high"]),
+                                    SyncConfigModelInfo(id: "srv-b", providerId: "srv", displayName: "srv-b", facingName: nil, efforts: ["high", "max"])],
                            defaultEffort: "high", clientEfforts: ["ultra"])
     }
 
@@ -462,6 +462,11 @@ final class ComposerChromeTests: XCTestCase {
             let card = WinterComposerCard(text: .constant(""), onSubmit: {}, mode: .constant(mode),
                                          policy: nil, model: wiredModel(model: "srv-b"), stop: nil)
             XCTAssertEqual(card.modelRow.options, ["srv-a", "srv-b"], "\(mode) must still offer the models")
+            // WS-20 review fix (Nit 2): the popover renders `modelPickerSections(card.modelRow.
+            // catalogue)`, not `.options` directly — pin that the SAME catalogue the chip carries
+            // groups into the same rows, in the same order.
+            XCTAssertEqual(modelPickerSections(card.modelRow.catalogue).flatMap { $0.entries.map(\.tag) }, ["srv-a", "srv-b"],
+                           "\(mode)'s sectioned menu must offer the same models")
             XCTAssertEqual(card.modelRow.wire, ["high", "max"],
                            "\(mode) must still offer the WIRE efforts — they are model-scoped, never mode-scoped")
         }

@@ -20,7 +20,7 @@ function realDir(): string {
   return realpathSync(mkdtempSync(join(tmpdir(), "winter-ctx-legacy-all-")));
 }
 function minimalSettings(readLegacyProjectFiles: boolean): Settings {
-  return Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" }, legacy: { readLegacyProjectFiles } });
+  return Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/x" }, legacy: { readLegacyProjectFiles } });
 }
 
 function build(cwd: string, home: string, settings: Settings) {

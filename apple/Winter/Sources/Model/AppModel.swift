@@ -523,6 +523,17 @@ enum ModelChangeOutcome: Equatable {
     case failed(String)
 }
 
+/// WS-20 (cross-lane fix): `AppModel.setAdvisorModel`'s own outcome — a two-case enum rather than
+/// `Result<String?, String>` because a bare `String` does not conform to `Error` (`Result`'s
+/// `Failure` generic requires it), and wrapping the message in a throwaway `Error` type just to
+/// satisfy that would be more machinery than this narrow, purely-local-to-this-file shape needs.
+enum AdvisorModelWriteOutcome {
+    /// The RPC's own ECHOED `model` — what was ACTUALLY stored, `nil` when cleared.
+    case success(String?)
+    /// A user-facing failure reason (an invalid/non-catalog tag, a transport failure).
+    case failure(String)
+}
+
 extension AppModel {
     /// **THE ONE door every `session.setModel` call in the app goes through** (Task 4.2's own
     /// requirement) — static, not an instance method, because two of its four callers
@@ -590,48 +601,28 @@ extension AppModel {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    /// A shallow merge at both levels — preserves every other top-level key AND every other key
-    /// already under `runtimes` — the SAME shape `saveSettings(settingsPath, {...settings,
-    /// runtimes: {...settings.runtimes, advisorModel}})` takes on the daemon/CLI side
-    /// (`packages/cli/src/main.ts`'s `case "model"`). A MISSING settings.json is read as `{}`
-    /// (every field in `Settings` is optional, so an empty object is a valid file — the same
-    /// "first write creates it" the CLI's own `saveSettings` already does for a fresh home).
-    /// Returns `false` (writing nothing) on any parse/encode/I-O failure — never a partial file.
+    /// WS-20 (cross-lane fix, Lane 4 / Mac app): the direct settings.json write this docstring used
+    /// to describe is RETIRED — it raced the daemon's own settings-watcher (a write from here and a
+    /// concurrent daemon write could interleave) and, more importantly, never validated the tag
+    /// against the pinned catalog before it landed on disk. The write now goes through the daemon's
+    /// `settings.setAdvisorModel` RPC (`WinterClient.setAdvisorModel`, WinterKit), the SAME
+    /// transform `winter model --advisor <slug|auto>` already uses daemon-side — validated at the
+    /// door, and evicted/hot-picked-up by the daemon's own settings-watcher exactly like any other
+    /// live setting (`CLAUDE.md`'s "no daemon restart for settings" rule, now actually honoured
+    /// here instead of raced against).
     ///
-    /// Whole-branch review Major 2: a settings.json that EXISTS and was readable but does not
-    /// parse as a JSON object (hand-edited, truncated, or from a future/incompatible schema) is
-    /// NOT "no settings.json yet" — conflating the two used to fall through to `obj = [:]` and
-    /// atomically REPLACE that file with `{"runtimes":{"advisorModel":…}}`, which the daemon's
-    /// settings-watcher then hot-loads, silently resetting every OTHER setting in it. The fresh
-    /// object is only ever the honest "there is genuinely nothing there yet" case
-    /// (`Data(contentsOf:)` itself failing, e.g. ENOENT) — a file that exists but fails to parse
-    /// refuses the write entirely instead. Callers surface `false` to the user (`ComposerModelChip`'s
-    /// wirers: `FieldStateAdapter.applyAdvisorModelSelection` sets `modelChangeError`, the
-    /// existing "Couldn't switch model" alert; `ShellSessionHost.setNewChatAdvisorModel` sets its
-    /// own `newChatAdvisorError`, rendered the same way `newChatCreate`'s failure banner is).
-    @discardableResult
-    nonisolated static func writeAdvisorModelToSettings(_ model: String?) -> Bool {
-        let url = URL(fileURLWithPath: WinterPaths.settingsPath(home: AppProfile.winterHome))
-        var obj: [String: Any]
-        if let data = try? Data(contentsOf: url) {
-            guard let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                return false // exists, unparseable/not-an-object — refuse rather than clobber it
-            }
-            obj = parsed
-        } else {
-            obj = [:] // genuinely no file yet — the honest "first write creates it" case
+    /// Returns the RPC's own ECHOED `model` on success (what was ACTUALLY stored — `nil` when
+    /// cleared, never merely what was requested) or a user-facing failure reason on refusal (an
+    /// invalid/non-catalog tag, or a transport failure). Callers surface the failure the same way
+    /// the old `Bool` return did: `FieldStateAdapter.applyAdvisorModelSelection`'s wirer sets
+    /// `modelChangeError`, `ShellSessionHost.setNewChatAdvisorModel` sets its own
+    /// `newChatAdvisorError`.
+    static func setAdvisorModel(client: WinterClient, _ model: String?) async -> AdvisorModelWriteOutcome {
+        do {
+            let stored = try await client.setAdvisorModel(model)
+            return .success(stored)
+        } catch {
+            return .failure("the advisor setting could not be saved — \(error.localizedDescription)")
         }
-        var runtimes = obj["runtimes"] as? [String: Any] ?? [:]
-        let trimmed = model?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let trimmed, !trimmed.isEmpty {
-            runtimes["advisorModel"] = trimmed
-        } else {
-            runtimes.removeValue(forKey: "advisorModel")
-        }
-        obj["runtimes"] = runtimes
-        guard JSONSerialization.isValidJSONObject(obj),
-              let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys])
-        else { return false }
-        return (try? data.write(to: url, options: .atomic)) != nil
     }
 }

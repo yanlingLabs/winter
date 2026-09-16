@@ -67,7 +67,11 @@ test("the internal seventh policy maps to default, NOT dontAsk", () => {
 // buildWinterOptions
 // -------------------------------------------------------------------------------------------
 
-function optionsInput(over: Partial<WinterOptionsInput> = {}): WinterOptionsInput {
+// WS-20: `model`/`advisorModel` are branded `ModelTag` on `WinterOptionsInput`, but every fixture
+// in this file hand-writes them as plain tag-shaped string literals — `over` accepts plain strings
+// for both and casts once, here, rather than every call site wrapping its own `tag(...)`.
+function optionsInput(over: Partial<Omit<WinterOptionsInput, "model" | "advisorModel">> & { model?: string; advisorModel?: string } = {}): WinterOptionsInput {
+  const { model, advisorModel, ...rest } = over;
   return {
     mode: "code",
     policy: "ask",
@@ -79,7 +83,9 @@ function optionsInput(over: Partial<WinterOptionsInput> = {}): WinterOptionsInpu
     canUseTool: (async () => ({ behavior: "allow" as const })) as CanUseTool,
     abort: new AbortController(),
     baseEnv: { PATH: "/usr/bin", HOME: "/Users/x", TMPDIR: "/tmp", LANG: "en_US.UTF-8", SECRET_TOKEN: "leak-me" },
-    ...over,
+    ...rest,
+    ...(model === undefined ? {} : { model: model as WinterOptionsInput["model"] }),
+    ...(advisorModel === undefined ? {} : { advisorModel: advisorModel as WinterOptionsInput["advisorModel"] }),
   };
 }
 
@@ -134,7 +140,7 @@ test("process.env.WINTER_HOME is NEVER consulted — the child is pinned to the 
 
 test("WINTER_TEST_PROVIDER is set ONLY for a winter-test/* model", () => {
   expect(buildWinterOptions(optionsInput({ model: "winter-test/echo" })).env!.WINTER_TEST_PROVIDER).toBe("echo");
-  expect(buildWinterOptions(optionsInput({ model: "gpt-5.6-sol" })).env).not.toHaveProperty("WINTER_TEST_PROVIDER");
+  expect(buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol" })).env).not.toHaveProperty("WINTER_TEST_PROVIDER");
   expect(buildWinterOptions(optionsInput()).env).not.toHaveProperty("WINTER_TEST_PROVIDER");
 });
 
@@ -161,11 +167,11 @@ test("optional passthroughs appear only when given", () => {
     expect(bare[k]).toBeUndefined();
   }
   const full = buildWinterOptions(optionsInput({
-    model: "gpt-5.6-sol", effort: "high", systemPrompt: "be terse", outputStyle: "explanatory",
+    model: "openai/gpt-5.6-sol", effort: "high", systemPrompt: "be terse", outputStyle: "explanatory",
     credentials: { byProvider: { openai: "keychain" } },
     spawn: { pathToClaudeCodeExecutable: "/opt/winter", spawnClaudeCodeProcess: (() => { throw new Error("unused"); }) as never },
   }));
-  expect(full.model).toBe("gpt-5.6-sol");
+  expect(full.model).toBe("gpt-5.6-sol"); // WS-20: Options.model is the BARE modelId, split from the tag
   expect(full.effort).toBe("high");
   expect(full.systemPrompt).toBe("be terse");
   expect(full.outputStyle).toBe("explanatory");
@@ -793,7 +799,7 @@ test("Task 16 / P8b-36: `capabilities` is spread into mcpServers under its OWN k
 
 test("Task 16 / P8b-30: a BYO `connection` rides provider.connection; without a selected provider it is dropped", () => {
   const connection = { baseUrl: "http://127.0.0.1:9/v1", endpointOrigin: "user" as const };
-  const withProvider = buildWinterOptions(optionsInput({ model: "gpt-5.6-sol", credentials: { byProvider: { openai: "keychain" } }, connection }));
+  const withProvider = buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol", credentials: { byProvider: { openai: "keychain" } }, connection }));
   expect(withProvider.provider).toEqual({ providerId: "openai", authRef: expect.objectContaining({ kind: "keychain" }), connection });
   // a `winter-test/*` model names no provider, so there is nothing to attach a connection to
   expect(buildWinterOptions(optionsInput({ model: "winter-test/echo", connection })).provider).toBeUndefined();
@@ -809,37 +815,47 @@ test("Task 16 / P8b-30: a BYO `connection` rides provider.connection; without a 
 // `dist/winter`).
 test("M7: same-provider advisor gets authRef — the SAME ref providerSelectionFor already resolved for the session", () => {
   const credentials: CredentialPresence = { byProvider: { openai: "keychain" } };
-  const o = buildWinterOptions(optionsInput({ model: "gpt-5.6-sol", advisorModel: "openai/gpt-6-astra", credentials }));
-  expect(o.advisor).toEqual({ model: "openai/gpt-6-astra", authRef: o.provider!.authRef });
+  const o = buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol", advisorModel: "openai/gpt-6-astra", credentials }));
+  expect(o.advisor).toEqual({ model: "gpt-6-astra", authRef: o.provider!.authRef }); // WS-20: advisor.model is also the BARE modelId now
   expect(o.advisor!.authRef).toEqual(expect.objectContaining({ kind: "keychain" }));
 });
 
-test("M7: cross-provider (or unroutable) advisor NEVER gets an authRef — falls through to the SDK's own default, unchanged", () => {
+// WS-20 (review round 2, nit a): the pinned SDK's `AdvisorConfig` has no `providerId` field, so a
+// cross-provider (or unroutable) advisor can never be PINNED to its own provider through this door
+// — the only safe rule left is same-provider-only. `Options.advisor` is DROPPED entirely rather
+// than guessed at, superseding the old "falls through to the advisor's own resolved authRef" M7
+// behavior this test used to pin.
+test("nit(a): cross-provider (or unroutable) advisor is DROPPED entirely — never guessed at", () => {
   const credentials: CredentialPresence = { byProvider: { openai: "keychain" } };
   // The advisor's own model names no catalog identity at all (Winter's inventory cannot serve it) —
-  // `providerSelectionFor` answers `undefined`, so there is no ref to compare, let alone thread.
-  const o = buildWinterOptions(optionsInput({ model: "gpt-5.6-sol", advisorModel: "winter-test/echo", credentials }));
-  expect(o.advisor).toEqual({ model: "winter-test/echo" });
-  expect(o.advisor).not.toHaveProperty("authRef");
+  // `providerSelectionFor` answers `undefined`, so there is no provider to agree with the session's.
+  const o = buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol", advisorModel: "winter-test/echo", credentials }));
+  expect(o.advisor).toBeUndefined();
 });
 
-test("M7: no credential present for the shared provider -> no authRef to thread, even though both models resolve to it", () => {
-  const o = buildWinterOptions(optionsInput({ model: "gpt-5.6-sol", advisorModel: "openai/gpt-6-astra", credentials: NO_CREDS }));
-  expect(o.provider!.authRef).toBeUndefined();
-  expect(o.advisor).toEqual({ model: "openai/gpt-6-astra" });
-  expect(o.advisor).not.toHaveProperty("authRef");
+// WS-20: `providerFor` names a provider's credential LOCATOR unconditionally — a tag always
+// resolves to exactly its provider, never gated on `credentials` presence (that field is now
+// unread by this file; presence-based refusal is `beforeTurn`'s own separate job) — so the
+// same-provider advisor STILL gets the session's own authRef even with `NO_CREDS` passed in.
+test("M7: the shared provider's authRef threads through regardless of the (now-unread) credentials presence input", () => {
+  const o = buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol", advisorModel: "openai/gpt-6-astra", credentials: NO_CREDS }));
+  expect(o.provider!.authRef).toEqual(expect.objectContaining({ kind: "keychain", account: "openai:default" }));
+  expect(o.advisor).toEqual({ model: "gpt-6-astra", authRef: o.provider!.authRef });
 });
 
-test("M7: the session having NO resolvable provider at all (winter-test/*) never attaches an advisor authRef either", () => {
+// WS-20 (review round 2, nit a): supersedes the OLD "threads the advisor's own resolved authRef
+// regardless of the session's own provider" M7 behavior — a session with no resolvable provider at
+// all has nothing to agree with, so `sameProvider` is false and the advisor is DROPPED, same as any
+// other non-matching pair.
+test("nit(a): the session having NO resolvable provider at all (winter-test/*) drops the advisor too", () => {
   const credentials: CredentialPresence = { byProvider: { openai: "keychain" } };
   const o = buildWinterOptions(optionsInput({ model: "winter-test/echo", advisorModel: "openai/gpt-6-astra", credentials }));
   expect(o.provider).toBeUndefined();
-  expect(o.advisor).toEqual({ model: "openai/gpt-6-astra" });
-  expect(o.advisor).not.toHaveProperty("authRef");
+  expect(o.advisor).toBeUndefined();
 });
 
 test("M7: no advisorModel at all -> no Options.advisor key, unchanged from before this fix", () => {
-  const o = buildWinterOptions(optionsInput({ model: "gpt-5.6-sol", credentials: { byProvider: { openai: "keychain" } } }));
+  const o = buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol", credentials: { byProvider: { openai: "keychain" } } }));
   expect(o.advisor).toBeUndefined();
 });
 
@@ -856,11 +872,13 @@ test("Task 16 / P8b-24: `resume` names the transcript through Options.resume and
 // Hotfix 2026-09-16: `optionsFor` must not override the router's provider decision.
 // -------------------------------------------------------------------------------------------
 
-test("hotfix: preferredProviderId steers Options.provider when both providers hold a credential", () => {
+// WS-20: `preferredProviderId` is deleted along with `providerSelectionFor`'s bare-id ambiguity —
+// a tag names its provider outright, so there is nothing left to "steer".
+test("WS-20: a tag names its provider outright regardless of which OTHER providers hold a credential", () => {
   const credentials = { byProvider: { openai: "keychain" as const, "codex-oauth": "keychain" as const } };
-  const without = buildWinterOptions(optionsInput({ model: "gpt-5.6-terra", credentials }));
-  expect(without.provider?.providerId).toBe("openai");
-  const withPreference = buildWinterOptions(optionsInput({ model: "gpt-5.6-terra", credentials, preferredProviderId: "codex-oauth" }));
-  expect(withPreference.provider?.providerId).toBe("codex-oauth");
-  expect(withPreference.provider?.authRef).toMatchObject({ kind: "keychain", account: "codex-oauth:default" });
+  const openai = buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-terra", credentials }));
+  expect(openai.provider?.providerId).toBe("openai");
+  const codex = buildWinterOptions(optionsInput({ model: "codex-oauth/gpt-5.6-terra", credentials }));
+  expect(codex.provider?.providerId).toBe("codex-oauth");
+  expect(codex.provider?.authRef).toMatchObject({ kind: "keychain", account: "codex-oauth:default" });
 });

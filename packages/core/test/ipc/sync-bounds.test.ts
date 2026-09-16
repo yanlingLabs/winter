@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -10,7 +10,6 @@ import {
 import { startIpcServer } from "../../src/ipc/server";
 import { SyncPushBuffers, SYNC_PAGE_BYTES } from "../../src/ipc/sync";
 import { SessionStore } from "../../src/sessions/store";
-import { SessionHub } from "../../src/sessions/hub";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 
@@ -121,69 +120,59 @@ async function pushChunked(
   return last;
 }
 
-/** A stub engine exposing only what `session.setModel`/`sync.push` consult. */
-function fakeEngine(ids: string[]): any {
-  // session-activity-hygiene T2/T5: `hasBackgroundWork` beside `isRunning`, and `interrupt` beside
-  // both — session.list's activity signals read the first two and T5's last-detach enforcement calls
-  // the third. An `any`-cast double missing one fails at RUNTIME, not at compile time.
-  return { knownModels: () => ids.map((id) => ({ id })), isRunning: () => false, hasBackgroundWork: () => false, interrupt: () => ({ wasRunning: false }) };
-}
-
+// WS-20 rewrite: `sync.push`'s `meta.model` validation never consults `engine.knownModels()` —
+// there is no more alias resolution (`catalogRowsFor`/aliases are deleted) and no more "enumerable
+// models" concept; `engine`/`hub` are dropped from this describe block's `boot()` entirely.
+//
+// WS-20 (review round 2, M4): the check itself is `modelTagIsKnown(meta.model, settings)`
+// (model-tag.ts) now — real catalog MEMBERSHIP, not just shape plus provider existence
+// (`isModelTag` alone). See this block's own `boot()` for the BYO-baseUrl escape hatch it
+// configures so the off-catalog-model control below still means what it says.
 describe("I1 — a pushed meta.model is validated exactly like session.setModel's", () => {
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
 
-  async function boot(models: string[] | null): Promise<{ store: SessionStore; socketPath: string; token: string }> {
+  async function boot(): Promise<{ store: SessionStore; socketPath: string; token: string }> {
     const home = mkdtempSync(join(tmpdir(), "winter-sync-model-"));
+    // WS-20 (review round 2, M4): `validateSyncMeta`'s `modelTagIsKnown` now enforces real catalog
+    // MEMBERSHIP, not just provider existence — a BYO `providers.codex-oauth.baseUrl` keeps this
+    // block's off-catalog-model control below meaning what it says (same escape hatch
+    // `session-set-model.test.ts`'s `boot2()` configures for the identical `session.create` case).
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" }, providers: { "codex-oauth": { baseUrl: "http://127.0.0.1:9/v1" } } }));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
     const tokens = await authority.ensureTokens();
-    const server = startIpcServer({
-      socketPath, serverVersion: "test", tokens: authority, store,
-      // An engine requires a shared hub (startIpcServer enforces it); the stub only ever answers
-      // knownModels(), which is all sync.push's validation consults.
-      ...(models ? { engine: fakeEngine(models), hub: new SessionHub(store) } : {}),
-    } as any);
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home });
     stop = () => { server.stop(); store.close(); };
     return { store, socketPath, token: tokens.harness };
   }
 
-  test("a KNOWN model is stored", async () => {
-    const { store, socketPath, token } = await boot(["claude-opus-5", "gpt-6"]);
+  test("a real tag is stored", async () => {
+    const { store, socketPath, token } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(token, "sync");
     const id = uuid();
 
     const res = await c.request(METHODS.syncPush, {
       sessionId: id, baseSeq: 0, data: b64(jsonl([created(id)])), complete: true,
-      meta: { model: "claude-opus-5" },
+      meta: { model: "anthropic/claude-opus-5" },
     });
     expect(res.error).toBeUndefined();
-    expect(store.meta(id).model).toBe("claude-opus-5");
+    expect(store.meta(id).model).toBe("anthropic/claude-opus-5");
     c.close();
   });
 
-  test("an UNAMBIGUOUS ALIAS is resolved to the canonical id (session.setModel's idiom)", async () => {
-    const { store, socketPath, token } = await boot(["claude-opus-5", "gpt-6"]);
-    const c = await TestClient.connect(socketPath);
-    await c.hello(token, "sync");
-    const id = uuid();
-
-    await c.request(METHODS.syncPush, {
-      sessionId: id, baseSeq: 0, data: b64(jsonl([created(id)])), complete: true,
-      meta: { model: "5" }, // "claude-opus-5" is the only id ending in "-5"
-    });
-    expect(store.meta(id).model).toBe("claude-opus-5");
-    c.close();
-  });
-
-  // The rejection POLICY, decided here and pinned: an unknown slug is DROPPED, not fatal. A model
-  // mismatch between a phone and a Mac must never block log replication — the events are the
-  // durable, irreplaceable half and the model is a hint. Dropping also cannot half-apply: the log
-  // lands in full, and the column is simply left at whatever it already was.
-  test("an UNKNOWN model is DROPPED — the events still land and the column stays clear", async () => {
-    const { store, socketPath, token } = await boot(["claude-opus-5"]);
+  // WS-20: the rejection POLICY splits into TWO layers now, and they behave differently on
+  // purpose. `SyncPushParams.meta.model` is `ModelTagSchema.optional()` at the WIRE — a bare
+  // (non-tag-shaped) slug fails the whole request typed, BEFORE the handler (and therefore the
+  // log-replication path) ever runs; there is nothing to drop-and-log because the shape check
+  // never lets it in. A tag-shaped model naming an UNRECOGNIZED PROVIDER, by contrast, passes the
+  // wire shape check and reaches the handler's own drop-and-log policy (next test) — replication
+  // is never blocked BY THE HANDLER, but a caller sending a genuinely malformed (non-tag) slug does
+  // get a typed refusal at the door, same as every other model-bearing RPC now refuses a bare id.
+  test("a bare (non-tag) model fails the WHOLE push at the wire schema — never reaches drop-and-log", async () => {
+    const { store, socketPath, token } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(token, "sync");
     const id = uuid();
@@ -192,48 +181,96 @@ describe("I1 — a pushed meta.model is validated exactly like session.setModel'
       sessionId: id, baseSeq: 0, data: b64(jsonl([created(id), asstMsg(id, 2, "hi")])), complete: true,
       meta: { title: "kept", model: "phone-only-slug-the-mac-never-heard-of" },
     });
-    expect(res.error).toBeUndefined();
-    expect(res.result.applied).toBe(true);
-    expect(res.result.lastSeq).toBe(2);
-    expect(store.lastSeq(id)).toBe(2);           // replication was NOT blocked
-    expect(store.meta(id).model).toBeUndefined(); // ...and the bricking slug never landed
-    expect(store.list().find((r) => r.sessionId === id)!.title).toBe("kept"); // the rest of meta applied
+    expect(res.error).toBeTruthy();
+    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    // Nothing landed at all — this is a WIRE refusal, not a partial apply. The session was never
+    // even created (the whole request, including its session_created event, was refused).
+    expect(store.list().some((r) => r.sessionId === id)).toBe(false);
     c.close();
   });
 
-  test("an UNKNOWN model never OVERWRITES a good one already on the row", async () => {
-    const { store, socketPath, token } = await boot(["claude-opus-5"]);
+  test("a tag naming an unrecognized provider passes the wire shape but is DROPPED-and-logged by the handler — the events still land", async () => {
+    const { store, socketPath, token } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(token, "sync");
+    const id = uuid();
+
+    const res = await c.request(METHODS.syncPush, {
+      sessionId: id, baseSeq: 0, data: b64(jsonl([created(id), asstMsg(id, 2, "hi")])), complete: true,
+      meta: { title: "kept", model: "nosuchprovider/phone-only-slug" },
+    });
+    expect(res.error).toBeUndefined();
+    expect(store.lastSeq(id)).toBe(2);
+    expect(store.meta(id).model).toBeUndefined();
+    c.close();
+  });
+
+  test("a dropped model never OVERWRITES a good one already on the row", async () => {
+    const { store, socketPath, token } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(token, "sync");
     const id = uuid();
     await c.request(METHODS.syncPush, {
-      sessionId: id, baseSeq: 0, data: b64(jsonl([created(id)])), complete: true, meta: { model: "claude-opus-5" },
+      sessionId: id, baseSeq: 0, data: b64(jsonl([created(id)])), complete: true, meta: { model: "anthropic/claude-opus-5" },
     });
 
     await c.request(METHODS.syncPush, {
       sessionId: id, baseSeq: 1, data: b64(jsonl([asstMsg(id, 2, "x")])), complete: true,
       meta: { model: "nonsense" },
     });
-    expect(store.meta(id).model).toBe("claude-opus-5");
+    expect(store.meta(id).model).toBe("anthropic/claude-opus-5");
     c.close();
   });
 
-  // Same fallback session.setModel takes: a provider that cannot enumerate its models cannot
-  // validate anything, so the value is stored freely rather than rejected wholesale.
-  test("with NO enumerable models the pushed value is stored freely (setModel's own fallback)", async () => {
-    const { store, socketPath, token } = await boot(null); // no engine at all
+  // Same "never bricked" precedent `session.setModel` follows: a real provider with an off-catalog
+  // model id (no row to enumerate against — a BYO/self-hosted endpoint) is stored freely, GIVEN
+  // this block's `boot()` configures a BYO `providers.codex-oauth.baseUrl` for it (WS-20 review
+  // round 2, M4) — without that, the SAME id is now dropped, same as a genuine typo.
+  test("a real provider with an off-catalog model id is stored freely, GIVEN a BYO baseUrl for it", async () => {
+    const { store, socketPath, token } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(token, "sync");
     const id = uuid();
 
     await c.request(METHODS.syncPush, {
       sessionId: id, baseSeq: 0, data: b64(jsonl([created(id)])), complete: true,
-      meta: { model: "some-byo-endpoint-model" },
+      meta: { model: "codex-oauth/some-byo-endpoint-model" },
     });
-    expect(store.meta(id).model).toBe("some-byo-endpoint-model");
+    expect(store.meta(id).model).toBe("codex-oauth/some-byo-endpoint-model");
     c.close();
   });
+
+  // WS-20 (review round 2, M4): the regression this item closes — a typo on a real, catalog-backed
+  // provider, pushed with NO BYO baseUrl configured, is DROPPED (not bricked, not stored) — the
+  // handler's own non-fatal policy still holds (the log itself still lands), only which models
+  // qualify for the drop got stricter.
+  test("M4: a typo model on a real provider, with NO BYO baseUrl, is dropped (log still lands)", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-sync-model-notypo-"));
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+    const tokens = await authority.ensureTokens();
+    // No `winterHome` — no BYO baseUrl to consult.
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store });
+    try {
+      const c = await TestClient.connect(socketPath);
+      await c.hello(tokens.harness, "sync");
+      const id = uuid();
+      const res = await c.request(METHODS.syncPush, {
+        sessionId: id, baseSeq: 0, data: b64(jsonl([created(id)])), complete: true,
+        meta: { model: "codex-oauth/gpt-5.4" },
+      });
+      expect(res.error).toBeUndefined(); // never fails the whole push
+      expect(store.lastSeq(id)).toBe(1); // the log still landed
+      expect(store.meta(id).model).toBeUndefined(); // the model override did not
+      c.close();
+    } finally {
+      server.stop();
+      store.close();
+    }
+  });
 });
+
 
 describe("I2 — title is bounded at every ingress, so heads/list can never outgrow a frame", () => {
   let stop: (() => void) | undefined;

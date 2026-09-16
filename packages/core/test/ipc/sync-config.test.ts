@@ -3,37 +3,48 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ERR, LineDecoder, encodeLine, METHODS, PROTOCOL_VERSION, ConnWriter, SyncConfigResult, type WritableSocket } from "@yanlinglabs/winter-protocol";
+import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { startIpcServer } from "../../src/ipc/server";
 import { syncConfig, syncMemory, effortsForModel, clientEfforts, SYNC_PAGE_BYTES, SYNC_MEMORY_TRUNCATION_MARKER } from "../../src/ipc/sync";
+import { pickerModels } from "../../src/ipc/picker-models";
 import { EXA_API_KEY_SECRET } from "../../src/agent/tools/search";
-import { CLIENT_EFFORTS, REASONING_EFFORTS, loadSettings } from "../../src/settings";
-import { CODEX_MODELS, DEFAULT_CODEX_MODEL } from "../../src/providers/codex-config";
+import { CLIENT_EFFORTS, REASONING_EFFORTS, Settings, loadSettings } from "../../src/settings";
 import { createProvider } from "../../src/providers/manager";
 import { startDaemon, type RunningDaemon } from "../../src/daemon";
-import type { ModelInfo } from "../../src/providers/types";
+import { writeOpenAiApiKey, CodexAuthStore } from "../../src/auth/credential-material";
 import type { SecretStore } from "../../src/auth/secret-store";
 import { SessionStore } from "../../src/sessions/store";
-import { SessionHub } from "../../src/sessions/hub";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 
 // Chat Slice D task 3 — the two remaining sync surfaces, for the phone's OWN standalone chat
 // rather than log replication:
 //
-//  - sync.config {}          → { exaKey, dangerousDomains, defaultModel, models, defaultEffort }
-//                              (all read HOT, at call time; the last two added by
-//                               provider-correctness T3 — see that describe block below)
+//  - sync.config {}          → { provider, exaKey, dangerousDomains, defaultModel, models, defaultEffort, clientEfforts }
+//                              (all read HOT, at call time)
 //  - sync.memory { cursor? } → { files: [{name, content}], nextCursor?, complete }
 //
 // Neither carries a `sessionId` — both stay REMOTE_ALLOWED_METHODS-listed anyway (the phone is the
-// only client that has ever needed them). Secrets never touch disk in this file: the fake
+// only client that has ever needed them). Secrets never touch disk in most of this file: the fake
 // SecretStore below is a plain in-memory object, same "injected fake, not a real Keychain/file
 // write" precedent test/agent/chat-search.test.ts's `secret: async () => "exa_test_key"` already
-// follows for the Search tool's identical dependency.
+// follows for the Search tool's identical dependency. The "through a real startDaemon" blocks
+// further down are the deliberate exception (see their own header comments).
+//
+// WS-20: `sync.config`'s `models` field is now `pickerModels()` (ipc/picker-models.ts) — every
+// CREDENTIALED provider's own catalog rows, read at call time off a `SecretStore` + `home`, NOT the
+// small boot-bound `AgentEngine.knownModels()` list this file used to fake with `fakeEngine`/
+// `ModelInfo`/`CODEX_MODELS`. There is no more "the daemon's active provider's catalogue" — a
+// daemon can (and often will) serve rows for a DIFFERENT provider than the one it is currently
+// configured to run turns on, because the field now answers "what could a picker offer", not "what
+// is this instance about to call". Every test below that needs a non-empty `models` list seeds a
+// real credential-shaped record into a `SecretStore` (`writeOpenAiApiKey`/`CodexAuthStore`, the
+// SAME helpers `test/runtime-sdk/keychain.test.ts` uses) rather than injecting a fake catalogue.
 
 /** In-memory-only fake — NEVER writes to disk (unlike `FileSecretStore`, which is disk-backed and
- *  reserved for the allowlist-parity test elsewhere in this suite that needs a real `TokenAuthority`
- *  boot). Constructor seeds it directly; `set()` is unused here but kept for interface conformance. */
+ *  reserved for the "through a real startDaemon" blocks that need a real `TokenAuthority`/
+ *  `credentialPresenceFrom` boot). `writeOpenAiApiKey`/`CodexAuthStore.save()` both work against it
+ *  unchanged (they only need `get`/`set`). */
 class FakeSecretStore implements SecretStore {
   private readonly values = new Map<string, string>();
   constructor(seed: Record<string, string> = {}) {
@@ -42,17 +53,6 @@ class FakeSecretStore implements SecretStore {
   async get(name: string): Promise<string | null> { return this.values.get(name) ?? null; }
   async set(name: string, value: string): Promise<void> { this.values.set(name, value); }
   async delete(name: string): Promise<boolean> { return this.values.delete(name); }
-}
-
-/** A stub engine exposing only what `sync.config`'s catalogue (and `session.setModel`/`sync.push`'s
- *  validation) consult — the SAME shape sync-bounds.test.ts's own `fakeEngine` uses. The catalogue
- *  is deliberately read off `opts.engine`, never a parallel `IpcServerOptions` getter: a second
- *  source could serve the phone a lineup the daemon's own `session.setModel` would then reject. */
-function fakeEngine(models: () => ModelInfo[]): any {
-  // session-activity-hygiene T2/T5: `hasBackgroundWork` beside `isRunning`, and `interrupt` beside
-  // both — session.list's activity signals read the first two and T5's last-detach enforcement calls
-  // the third. An `any`-cast double missing one fails at RUNTIME, not at compile time.
-  return { knownModels: () => models(), isRunning: () => false, hasBackgroundWork: () => false, interrupt: () => ({ wasRunning: false }) };
 }
 
 class TestClient {
@@ -106,7 +106,7 @@ describe("sync.config (Chat Slice D task 3)", () => {
     liveModel?: () => string;
     liveEffort?: () => string;
     liveProvider?: () => string;
-    models?: () => ModelInfo[];
+    winterHome?: string;
   } = {}): Promise<{ home: string; socketPath: string; harnessToken: string; remoteToken: string }> {
     const home = mkdtempSync(join(tmpdir(), "winter-sync-config-"));
     const store = new SessionStore(home);
@@ -117,7 +117,7 @@ describe("sync.config (Chat Slice D task 3)", () => {
       socketPath, serverVersion: "test", tokens: authority, store,
       secrets: over.secrets, dangerousDomainsAdded: over.dangerousDomainsAdded, liveModel: over.liveModel,
       liveEffort: over.liveEffort, liveProvider: over.liveProvider,
-      ...(over.models ? { engine: fakeEngine(over.models), hub: new SessionHub(store) } : {}),
+      winterHome: over.winterHome ?? home,
     });
     stop = () => { server.stop(); store.close(); };
     return { home, socketPath, harnessToken: tokens.harness, remoteToken: tokens.remote };
@@ -128,7 +128,7 @@ describe("sync.config (Chat Slice D task 3)", () => {
     const { socketPath, harnessToken } = await boot({
       secrets,
       dangerousDomainsAdded: () => ["evil.example.com", "totally-fine.example"],
-      liveModel: () => "claude-opus-5",
+      liveModel: () => "anthropic/claude-opus-5",
     });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "phone");
@@ -141,9 +141,9 @@ describe("sync.config (Chat Slice D task 3)", () => {
       provider: "none",
       exaKey: "exa_live_key",
       dangerousDomains: ["evil.example.com", "totally-fine.example"],
-      defaultModel: "claude-opus-5",
-      // No knownModels/liveEffort wired on this server -> the honest empties (see the catalogue
-      // describe-block below for what a real provider serves).
+      defaultModel: "anthropic/claude-opus-5",
+      // No credential wired on this FakeSecretStore -> pickerModels() serves nothing, the honest
+      // empty (see the catalogue describe-block below for what a credentialed daemon serves).
       models: [],
       defaultEffort: "",
       clientEfforts: ["ultra"],
@@ -176,19 +176,17 @@ describe("sync.config (Chat Slice D task 3)", () => {
   test("every field is read HOT, at call time — no daemon restart needed to see a change", async () => {
     let key: string | null = "first-key";
     let domains: string[] = ["first.example"];
-    let model = "gpt-5-first";
+    let model = "codex-oauth/gpt-5.6-terra";
     let effort = "low";
-    let catalogue: ModelInfo[] = [
-      { id: "gpt-5-first", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
-    ];
+    const secretsStore = new FakeSecretStore();
     const secrets: SecretStore = {
-      get: async (name) => (name === EXA_API_KEY_SECRET ? key : null),
-      set: async () => {},
-      delete: async () => false,
+      get: async (name) => (name === EXA_API_KEY_SECRET ? key : await secretsStore.get(name)),
+      set: async (name, value) => secretsStore.set(name, value),
+      delete: async (name) => secretsStore.delete(name),
     };
     const { socketPath, harnessToken } = await boot({
       secrets, dangerousDomainsAdded: () => domains, liveModel: () => model,
-      liveEffort: () => effort, models: () => catalogue, liveProvider: () => "codex-oauth",
+      liveEffort: () => effort, liveProvider: () => "codex-oauth",
     });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "phone");
@@ -196,37 +194,34 @@ describe("sync.config (Chat Slice D task 3)", () => {
     const before = await c.request(METHODS.syncConfig, {});
     expect(before.result).toEqual({
       provider: "codex-oauth",
-      exaKey: "first-key", dangerousDomains: ["first.example"], defaultModel: "gpt-5-first",
-      models: [{ id: "gpt-5-first", efforts: [...REASONING_EFFORTS] }], defaultEffort: "low",
+      exaKey: "first-key", dangerousDomains: ["first.example"], defaultModel: "codex-oauth/gpt-5.6-terra",
+      // No credential written yet — the picker has nothing to offer, even though the daemon is
+      // actively running on codex-oauth (the two are deliberately decoupled under WS-20; see this
+      // file's header comment).
+      models: [], defaultEffort: "low",
       clientEfforts: ["ultra"],
     });
 
     // Simulate a live settings/keychain change WITHOUT restarting anything — same closures, new
-    // values. The MODEL CATALOGUE moves too (a provider swap / a family bump on the Mac): the phone
-    // must see the new lineup on its very next connect, with no daemon restart AND no app update —
-    // that "no app update" half is the whole reason the catalogue is served rather than derived.
+    // values. A Keychain write for codex-oauth ALSO lands here: the phone must see the new picker
+    // lineup on its very next connect, with no daemon restart AND no app update — that "no app
+    // update" half is the whole reason the catalogue is served rather than derived.
     key = "second-key";
     domains = ["first.example", "second.example"];
-    model = "gpt-5-second";
+    model = "codex-oauth/gpt-5.6-luna";
     effort = "xhigh";
-    catalogue = [
-      { id: "gpt-5-second", family: "gpt-5", contextWindow: 272_000, supportsVision: true },
-      { id: "gpt-5-second-mini", family: "gpt-5", contextWindow: 272_000, supportsVision: false },
-    ];
+    await new CodexAuthStore(secretsStore).save({ accessToken: "at_live", refreshToken: null, idToken: null, accountId: null, expiresAt: 0 });
 
     const after = await c.request(METHODS.syncConfig, {});
-    expect(after.result).toEqual({
-      // NOT hot, unlike everything beside it: the provider TYPE is boot-bound (changing it needs a
-      // daemon restart), so this closure keeps answering the running instance's id.
-      provider: "codex-oauth",
-      exaKey: "second-key", dangerousDomains: ["first.example", "second.example"], defaultModel: "gpt-5-second",
-      models: [
-        { id: "gpt-5-second", efforts: [...REASONING_EFFORTS] },
-        { id: "gpt-5-second-mini", efforts: [...REASONING_EFFORTS] },
-      ],
-      defaultEffort: "xhigh",
-      clientEfforts: ["ultra"],
-    });
+    expect(after.result.provider).toBe("codex-oauth"); // boot-bound, unchanged by the live edit
+    expect(after.result.exaKey).toBe("second-key");
+    expect(after.result.dangerousDomains).toEqual(["first.example", "second.example"]);
+    expect(after.result.defaultModel).toBe("codex-oauth/gpt-5.6-luna");
+    expect(after.result.defaultEffort).toBe("xhigh");
+    // The picker lineup moved too, hot, from the SAME Keychain write — no restart, no RPC beyond
+    // the one sync.config call above.
+    expect(after.result.models.length).toBeGreaterThan(0);
+    expect(after.result.models.every((m: { id: string }) => m.id.startsWith("codex-oauth/"))).toBe(true);
     c.close();
   });
 
@@ -234,14 +229,14 @@ describe("sync.config (Chat Slice D task 3)", () => {
     const { socketPath, remoteToken } = await boot({
       secrets: new FakeSecretStore({ [EXA_API_KEY_SECRET]: "k" }),
       dangerousDomainsAdded: () => [],
-      liveModel: () => "m",
+      liveModel: () => "codex-oauth/m",
     });
     const c = await TestClient.connect(socketPath);
     await c.hello(remoteToken, "iphone-gateway", "remote");
 
     const res = await c.request(METHODS.syncConfig, {});
     expect(res.error).toBeUndefined();
-    expect(res.result.defaultModel).toBe("m");
+    expect(res.result.defaultModel).toBe("codex-oauth/m");
     c.close();
   });
 
@@ -260,7 +255,7 @@ describe("sync.config (Chat Slice D task 3)", () => {
     const result = await syncConfig({
       secret: async (name) => { seen.push(name); return "abc"; },
       dangerousDomainsAdded: () => undefined,
-      liveModel: () => "m",
+      liveModel: () => "codex-oauth/m",
     });
     expect(seen).toEqual([EXA_API_KEY_SECRET]);
     expect(result.exaKey).toBe("abc");
@@ -269,30 +264,37 @@ describe("sync.config (Chat Slice D task 3)", () => {
 });
 
 // ================================================================================================
-// The MODEL CATALOGUE on sync.config (provider-correctness T3).
+// The MODEL CATALOGUE on sync.config (provider-correctness T3, reworked under WS-20).
 //
-// Before this, the wire carried ONE model string and the phone GUESSED the rest: it split
+// Before WS-20, the wire carried ONE model string and the phone GUESSED the rest: it split
 // `gpt-5.6-terra` into ("gpt-5.6", terra) and synthesized the other two tiers by string
 // concatenation (norma-ios `ModelLineup.options`), and its effort control was a pure UI mock whose
-// list still carried `ultra` — a slug the backend's GLOBAL enum layer rejects outright, and which
-// this daemon deleted from REASONING_EFFORTS on 2026-07-31. A derived lineup cannot be wrong-proof:
-// the phone can never prove the tiers it invented exist. The daemon can, because it is the side
-// that already validates them (`AgentEngine.knownModels()`, `session.setModel`).
+// list still carried `ultra` — a slug the backend's GLOBAL enum layer rejects outright. A derived
+// lineup cannot be wrong-proof: the phone can never prove the tiers it invented exist.
 //
-// So the catalogue is SERVED, not derived — and per-model, even though all three gpt-5.6 slugs
-// accept the identical six efforts today (see `effortsForModel`'s own doc comment).
+// So the catalogue is SERVED, not derived. Under WS-20 it is served from `pickerModels()`
+// (ipc/picker-models.ts) — every provider the daemon holds a REAL credential for (or, for
+// `console`, an on-disk profile), read fresh off the pinned catalog at call time. `codex-oauth` is
+// used throughout as the credentialed provider below: its four rows all carry the identical
+// five-tier `reasoning.efforts` list in the pinned catalog, which keeps these fixtures simple
+// without hand-copying a model id list that could drift from the real catalog.
 // ================================================================================================
 
-describe("sync.config model catalogue (provider-correctness T3)", () => {
+describe("sync.config model catalogue (provider-correctness T3, WS-20)", () => {
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
 
+  function codexOauthTags(): string[] {
+    return loadCatalog().models.filter((m) => m.providerId === "codex-oauth").map((m) => m.key);
+  }
+
   async function boot(over: {
+    secrets?: SecretStore;
     liveModel?: () => string;
     liveEffort?: () => string;
     liveProvider?: () => string;
-    models?: () => ModelInfo[];
-  } = {}): Promise<{ socketPath: string; harnessToken: string; remoteToken: string }> {
+    winterHome?: string;
+  } = {}): Promise<{ home: string; socketPath: string; harnessToken: string; remoteToken: string }> {
     const home = mkdtempSync(join(tmpdir(), "winter-sync-catalogue-"));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
@@ -300,33 +302,44 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
     const tokens = await authority.ensureTokens();
     const server = startIpcServer({
       socketPath, serverVersion: "test", tokens: authority, store,
-      liveModel: over.liveModel, liveEffort: over.liveEffort, liveProvider: over.liveProvider,
-      ...(over.models ? { engine: fakeEngine(over.models), hub: new SessionHub(store) } : {}),
+      secrets: over.secrets, liveModel: over.liveModel, liveEffort: over.liveEffort, liveProvider: over.liveProvider,
+      winterHome: over.winterHome ?? home,
     });
     stop = () => { server.stop(); store.close(); };
-    return { socketPath, harnessToken: tokens.harness, remoteToken: tokens.remote };
+    return { home, socketPath, harnessToken: tokens.harness, remoteToken: tokens.remote };
   }
 
-  test("serves the ACTIVE provider's real catalogue — the daemon's own knownModels(), not a mirror", async () => {
+  /** A `FakeSecretStore` holding real codex-oauth material — `credentialPresenceFrom` (probed
+   *  through `opts.secrets`) reads real inventory secret names, so this is the ONE way to make
+   *  `pickerModels()` serve rows in this describe block, same as the "every field is read HOT" test
+   *  in the block above. */
+  async function codexCredentialedSecrets(): Promise<FakeSecretStore> {
+    const secrets = new FakeSecretStore();
+    await new CodexAuthStore(secrets).save({ accessToken: "at_test", refreshToken: null, idToken: null, accountId: null, expiresAt: 0 });
+    return secrets;
+  }
+
+  test("serves every CREDENTIALED provider's real catalogue rows — the daemon's own pickerModels(), not a mirror", async () => {
+    const secrets = await codexCredentialedSecrets();
     const { socketPath, harnessToken } = await boot({
-      models: () => CODEX_MODELS,
-      liveModel: () => DEFAULT_CODEX_MODEL,
-      liveEffort: () => "high",
+      secrets, liveModel: () => "codex-oauth/gpt-5.6-sol", liveEffort: () => "high",
     });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "phone");
 
     const res = await c.request(METHODS.syncConfig, {});
     expect(res.error).toBeUndefined();
-    // Exactly the daemon's own catalogue, in its own order — never a hand-kept second list.
-    expect(res.result.models.map((m: { id: string }) => m.id)).toEqual(CODEX_MODELS.map((m) => m.id));
-    expect(res.result.defaultModel).toBe(DEFAULT_CODEX_MODEL);
+    // Exactly the catalog's codex-oauth rows, in catalog order — never a hand-kept second list.
+    expect(res.result.models.map((m: { id: string }) => m.id)).toEqual(codexOauthTags());
+    expect(res.result.models.every((m: { providerId: string }) => m.providerId === "codex-oauth")).toBe(true);
+    expect(res.result.defaultModel).toBe("codex-oauth/gpt-5.6-sol");
     expect(res.result.defaultEffort).toBe("high");
     c.close();
   });
 
-  test("efforts ride PER MODEL — uniform today, but a divergence must never need an app update", async () => {
-    const { socketPath, harnessToken } = await boot({ models: () => CODEX_MODELS });
+  test("efforts ride PER MODEL — uniform for codex-oauth today, but a divergence must never need an app update", async () => {
+    const secrets = await codexCredentialedSecrets();
+    const { socketPath, harnessToken } = await boot({ secrets });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "phone");
 
@@ -345,21 +358,17 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
     c.close();
   });
 
-  test("a provider that cannot enumerate its models serves [] — it never invents a catalogue", async () => {
-    // An arbitrary openai-compatible endpoint: `knownModels()` is empty, exactly the case
-    // `session.setModel`'s `known.length > 0` guard already skips membership-checking. `[]` is the
-    // honest answer, and the never-synced discipline (a phone must WAIT, never guess) is what makes
-    // it safe — an invented lineup is what produced the 400-on-first-turn bug once already.
-    const { socketPath, harnessToken } = await boot({
-      models: () => [],
-      liveModel: () => "my-local-llm",
-    });
+  test("a provider with NO stored credential serves no rows for itself — it never invents a catalogue", async () => {
+    // No credential written at all: `pickerModels()` excludes every provider outright (the
+    // WS-20 analogue of the old "a provider that cannot enumerate its models serves []" case —
+    // there is no more per-provider enumerability check, only presence).
+    const { socketPath, harnessToken } = await boot({ liveModel: () => "codex-oauth/gpt-5.6-sol" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "phone");
 
     const res = await c.request(METHODS.syncConfig, {});
     expect(res.result.models).toEqual([]);
-    expect(res.result.defaultModel).toBe("my-local-llm"); // still served — the phone can run on it
+    expect(res.result.defaultModel).toBe("codex-oauth/gpt-5.6-sol"); // still served — the phone can run on it
     c.close();
   });
 
@@ -384,7 +393,8 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
     // `reasoning` block from the request body ENTIRELY; `"none"` sends `reasoning: {effort:"none"}`
     // and the server echoes it back. Collapsing the two here would make the phone start sending an
     // explicit level to a Mac that deliberately sends none.
-    const { socketPath, harnessToken } = await boot({ liveEffort: () => "", models: () => CODEX_MODELS });
+    const secrets = await codexCredentialedSecrets();
+    const { socketPath, harnessToken } = await boot({ secrets, liveEffort: () => "" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "phone");
 
@@ -397,13 +407,14 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
   test("a REMOTE (phone) caller gets the catalogue too — sync.config's allowlisting is unchanged", async () => {
     // Widening a result does NOT touch the four-list remote allowlist: `sync.config` has been
     // REMOTE_ALLOWED_METHODS-listed since Chat Slice D task 3. Only a NEW METHOD would.
-    const { socketPath, remoteToken } = await boot({ models: () => CODEX_MODELS, liveEffort: () => "medium" });
+    const secrets = await codexCredentialedSecrets();
+    const { socketPath, remoteToken } = await boot({ secrets, liveEffort: () => "medium" });
     const c = await TestClient.connect(socketPath);
     await c.hello(remoteToken, "iphone-gateway", "remote");
 
     const res = await c.request(METHODS.syncConfig, {});
     expect(res.error).toBeUndefined();
-    expect(res.result.models.map((m: { id: string }) => m.id)).toEqual(CODEX_MODELS.map((m) => m.id));
+    expect(res.result.models.map((m: { id: string }) => m.id)).toEqual(codexOauthTags());
     expect(res.result.defaultEffort).toBe("medium");
     c.close();
   });
@@ -414,7 +425,8 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
   // for the remote role, not a restriction to it. Named explicitly here so a future tightening
   // (adding a role check to this handler, say) breaks with a test that says why it may not.
   test("a HARNESS (Mac app) caller gets the identical catalogue — the method is role-AGNOSTIC", async () => {
-    const { socketPath, harnessToken, remoteToken } = await boot({ models: () => CODEX_MODELS, liveEffort: () => "medium", liveModel: () => DEFAULT_CODEX_MODEL });
+    const secrets = await codexCredentialedSecrets();
+    const { socketPath, harnessToken, remoteToken } = await boot({ secrets, liveEffort: () => "medium", liveModel: () => "codex-oauth/gpt-5.6-sol" });
 
     const harness = await TestClient.connect(socketPath);
     await harness.hello(harnessToken, "winter-app");
@@ -434,8 +446,9 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
   });
 
   test("the served result validates against SyncConfigResult — the schema is the contract, not prose", async () => {
+    const secrets = await codexCredentialedSecrets();
     const { socketPath, harnessToken } = await boot({
-      models: () => CODEX_MODELS, liveModel: () => DEFAULT_CODEX_MODEL, liveEffort: () => "max",
+      secrets, liveModel: () => "codex-oauth/gpt-5.6-sol", liveEffort: () => "max",
     });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "phone");
@@ -454,52 +467,31 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
   // Direct unit tests — no server/socket.
   // ----------------------------------------------------------------------------------------------
 
-  test("effortsForModel() returns REASONING_EFFORTS for every model, as a fresh array each call", () => {
-    const a = effortsForModel("gpt-5.6-sol");
-    const b = effortsForModel("anything-at-all");
-    expect(a).toEqual([...REASONING_EFFORTS]);
-    expect(b).toEqual([...REASONING_EFFORTS]);
-    // A copy, never the shared constant: a caller that mutates its row must not corrupt the source.
+  // WS-20: `effortsForModel` is now driven by a REAL catalog row (`rowForTag`), not a uniform
+  // function of its argument — the pre-WS-20 "uniformity tripwire" test this replaces pinned the
+  // OPPOSITE claim (every id, known or not, gets the same global list) and is no longer true by
+  // design: an unresolvable tag now honestly answers `[]` rather than a fabricated global default.
+  test("effortsForModel() reads the REAL catalog row — a known tag gets its row's list, an unrecognized one gets []", () => {
+    const known = effortsForModel("codex-oauth/gpt-5.6-sol");
+    expect(known).toEqual([...REASONING_EFFORTS]);
+    for (const unknown of ["anything-at-all", "", "unknown-vendor/byo-model-x", "codex-oauth/no-such-model"]) {
+      expect(effortsForModel(unknown)).toEqual([]);
+    }
+    // A copy, never a shared mutable array: a caller that mutates its row must not corrupt the source.
+    const a = effortsForModel("codex-oauth/gpt-5.6-sol");
+    const b = effortsForModel("codex-oauth/gpt-5.6-sol");
     expect(a).not.toBe(b);
     a.push("bogus");
-    expect(effortsForModel("gpt-5.6-sol")).toEqual([...REASONING_EFFORTS]);
-  });
-
-  // I1 review fix (task-4-review.md lines 394-416): `effortsForModel` is a FUNCTION, not a constant,
-  // precisely because a per-model divergence is expected to land one day — and nothing today
-  // detects the day it does. `session.setModel` (ipc/server.ts) validates only the NEW model id; it
-  // never re-checks a session's already-stored effort against that model's list. That is silently
-  // fine while every model's list is identical, and silently WRONG the day it isn't: a session could
-  // carry an effort its (new) model no longer accepts, and every subsequent turn would be 400'd by
-  // the provider with nothing pointing back at the setting that caused it — the exact silent-brick
-  // failure mode this task's OWN set-time validation exists to prevent, reintroduced through the
-  // other door.
-  //
-  // This is the tripwire: it pins uniformity across a representative spread of model ids — real
-  // ones this daemon knows about, an arbitrary/BYO one, an empty string, and one that looks
-  // plausible but isn't — so that a genuine per-model divergence turns this test red the moment it
-  // lands, rather than staying invisible until a user hits it in production.
-  //
-  // WHEN THIS FAILS: `session.setModel` must re-check-or-clear a stored effort before this
-  // divergence can ship. Do not "fix" this test by special-casing the diverging id — that defeats
-  // its purpose.
-  test("uniformity tripwire — effortsForModel returns the IDENTICAL set for every id, known or not", () => {
-    const ids = ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5-first", "anything-at-all", "", "unknown-vendor/byo-model-x"];
-    const rows = ids.map((id) => effortsForModel(id));
-    for (const row of rows) expect(row).toEqual([...REASONING_EFFORTS]);
-    // Cross-compare pairwise too, not merely each-against-the-constant — the failure this guards
-    // against is divergence BETWEEN models, which "equals REASONING_EFFORTS" alone still catches,
-    // but stating the cross-comparison explicitly is what makes this test self-documenting as a
-    // UNIFORMITY check rather than a per-id snapshot.
-    for (let i = 1; i < rows.length; i++) expect(rows[i]).toEqual(rows[0]);
+    expect(effortsForModel("codex-oauth/gpt-5.6-sol")).toEqual([...REASONING_EFFORTS]);
   });
 
   // provider-correctness T5 — the OTHER tripwire on this seam, and the one that guards the identity
-  // Task 4 hardened. `effortsForModel` is what `session.setEffort` validates a WIRE effort against
-  // AND what `sync.config` advertises per model; a Winter-level tier is accepted by the same handler
-  // but must never appear in that list, because the daemon would then be advertising a level its own
-  // request would be 400'd on — the exact bug (`ultra` offered by a phone-side mock) that the
-  // catalogue field was added to fix, arriving through the fix.
+  // Task 4 hardened, unaffected by WS-20 (it holds regardless of whether a row is found at all).
+  // `effortsForModel` is what `session.setEffort` validates a WIRE effort against AND what
+  // `sync.config` advertises per model; a Winter-level tier is accepted by the same handler but must
+  // never appear in that list, because the daemon would then be advertising a level its own request
+  // would be 400'd on — the exact bug (`ultra` offered by a phone-side mock) that the catalogue
+  // field was added to fix, arriving through the fix.
   //
   // WHEN THIS FAILS: someone has merged the tier list into the wire list. The fix is never to widen
   // `effortsForModel`; it is to put the tier back in `clientEfforts`, where a client renders it as a
@@ -508,7 +500,7 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
     const tiers = clientEfforts();
     expect(tiers).toEqual([...CLIENT_EFFORTS]);
     expect(tiers).toContain("ultra");
-    const ids = ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "anything-at-all", "", "unknown-vendor/byo-model-x"];
+    const ids = ["codex-oauth/gpt-5.6-sol", "codex-oauth/gpt-5.6-luna", "codex-oauth/gpt-5.6-terra", "anything-at-all", "", "unknown-vendor/byo-model-x"];
     for (const id of ids) {
       for (const tier of tiers) expect(effortsForModel(id)).not.toContain(tier);
     }
@@ -521,14 +513,23 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
     expect(clientEfforts()).toEqual([...CLIENT_EFFORTS]);
   });
 
-  test("syncConfig() maps knownModels() to {id, efforts} and drops everything else about a model", async () => {
-    // `ModelInfo` also carries `family`/`contextWindow`/`supportsVision`. None of it is the phone's
-    // business (it does not size its own context window off the Mac's catalogue), and every field on
-    // this wire is one more thing to keep true — so the projection is deliberate and pinned here.
-    const result = await syncConfig({
-      knownModels: () => [{ id: "gpt-5.6-sol", family: "gpt-5", contextWindow: 272_000, supportsVision: true }],
-    });
-    expect(result.models).toEqual([{ id: "gpt-5.6-sol", efforts: [...REASONING_EFFORTS] }]);
+  test("pickerModels() projects a catalog row to {id, providerId, displayName, efforts[, facingName]} — never the whole row", async () => {
+    // `sync.config`'s `models` field is exactly `pickerModels()`'s own shape — pinned directly here
+    // (replacing the pre-WS-20 `syncConfig({knownModels: ...})` projection test, whose `ModelInfo`
+    // source no longer exists) so a field added to the catalog row does not leak onto the wire
+    // without a deliberate edit to `picker-models.ts`.
+    const secrets = await codexCredentialedSecrets();
+    const { credentialPresenceFrom } = await import("../../src/runtime-sdk/keychain");
+    const credentials = await credentialPresenceFrom(secrets);
+    const home = mkdtempSync(join(tmpdir(), "winter-picker-models-unit-"));
+    const models = pickerModels({ credentials, home });
+    expect(models.length).toBeGreaterThan(0);
+    for (const m of models) {
+      expect(Object.keys(m).sort()).toEqual(
+        m.facingName === undefined ? ["displayName", "efforts", "id", "providerId"] : ["displayName", "efforts", "facingName", "id", "providerId"],
+      );
+      expect(m.id.startsWith(`${m.providerId}/`)).toBe(true);
+    }
   });
 });
 
@@ -537,8 +538,8 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
 //
 // Every other test in this file constructs `startIpcServer` directly and hands it its own
 // `liveModel`/`liveEffort` closures. That proves the handler and skips the thing most likely to
-// break: daemon.ts's `liveSelection`/`liveEffort` construction and the one line that passes
-// `liveEffort` into the options object.
+// break: daemon.ts's `liveSelection`/`liveEffort`/`liveModel` construction and the one line that
+// passes them into the options object.
 //
 // WHY THAT GAP IS WORSE THAN IT LOOKS. Dropping `liveEffort` from that object does not throw, does
 // not warn, and does not fail a type-check — `SyncConfigContext.liveEffort` is optional and
@@ -550,10 +551,13 @@ describe("sync.config model catalogue (provider-correctness T3)", () => {
 //
 // It uses `createProvider` to build the SAME live resolver production uses (mtime-cached, re-reads
 // settings.json per call) rather than a hand-written closure — the point is to exercise the real
-// path end to end. codex-oauth is chosen deliberately: its provider constructs without a
-// credential (the token is only read at stream time, and no turn is ever driven here), and its
-// `models()` returns the real `CODEX_MODELS`, so one test covers the catalogue AND the effort
-// through the genuine wiring. Nothing here touches `~/.winter` — temp home, temp secret store.
+// path end to end. codex-oauth is chosen deliberately: its provider constructs without a credential
+// at construction time (the token is only read at stream time, and no turn is ever driven here).
+// WS-20: `models` is now credential-presence-driven rather than boot-provider-driven (see this
+// file's header comment), so a real codex-oauth credential is seeded into the SAME `SecretStore`
+// `startDaemon` is booted with — exactly the shape a real `winter login` would leave behind — so
+// this test still covers the catalogue AND the effort through the genuine wiring. Nothing here
+// touches `~/.winter` — temp home, temp secret store.
 // ================================================================================================
 
 describe("sync.config through a real startDaemon (T3 review I1)", () => {
@@ -562,8 +566,8 @@ describe("sync.config through a real startDaemon (T3 review I1)", () => {
 
   function writeProviderSettings(home: string, model: string, effort?: string): void {
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "codex-oauth", model, ...(effort ? { reasoningEffort: effort } : {}) },
+      schemaVersion: 3,
+      provider: { model, ...(effort ? { reasoningEffort: effort } : {}) },
       titles: { enabled: false },
       toolSearch: { enabled: false },
     }, null, 2) + "\n");
@@ -571,11 +575,19 @@ describe("sync.config through a real startDaemon (T3 review I1)", () => {
 
   /** Boots a daemon over a real settings.json, wiring `agentProvider` EXACTLY as daemon.ts's own
    *  boot does (`{provider, model: active.liveModel().model, live: active.liveModel}`) — so the
-   *  `live()` resolver under test is the production one, not a test closure. */
+   *  `live()` resolver under test is the production one, not a test closure. Also seeds real
+   *  codex-oauth credential material into the SAME `SecretStore` (WS-20: `pickerModels()` reads
+   *  credential PRESENCE, decoupled from which provider is boot-configured — see this file's
+   *  header comment), so `models` is exercised through the genuine wiring too. */
   async function bootReal(home: string): Promise<RunningDaemon> {
     const settingsPath = join(home, "settings.json");
     const secrets = new FileSecretStore(join(home, "test-secrets"));
+    await new CodexAuthStore(secrets).save({ accessToken: "at_test", refreshToken: null, idToken: null, accountId: null, expiresAt: 0 });
+    // WS-20 (review round 4): `createProvider` answers `null` for a provider outside
+    // `INTERNAL_PROVIDER_IDS` — this helper's every caller configures codex-oauth/openai, so a
+    // `null` here would itself be the bug the test should catch.
     const active = await createProvider(loadSettings(settingsPath), secrets, settingsPath);
+    if (active === null) throw new Error("bootReal: expected the internal Provider to build (codex-oauth/openai)");
     return startDaemon({
       home, secrets,
       agentProvider: { provider: active.provider, model: active.liveModel().model, live: active.liveModel },
@@ -584,35 +596,39 @@ describe("sync.config through a real startDaemon (T3 review I1)", () => {
 
   test("a real daemon serves the effort AND the catalogue from settings.json, and re-reads both live", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-sync-config-real-"));
-    writeProviderSettings(home, "gpt-5.6-terra", "xhigh");
+    writeProviderSettings(home, "codex-oauth/gpt-5.6-terra", "xhigh");
 
     daemon = await bootReal(home);
     const daemonRef = daemon; // captured ONCE — the no-restart proof is that this is never re-created
     const c = await TestClient.connect(daemon.socketPath);
     await c.hello(daemon.tokens.harness, "phone");
 
+    const codexOauthTags = loadCatalog().models.filter((m) => m.providerId === "codex-oauth").map((m) => m.key);
+
     const before = await c.request(METHODS.syncConfig, {});
     expect(before.error).toBeUndefined();
-    expect(before.result.defaultModel).toBe("gpt-5.6-terra");
+    expect(before.result.defaultModel).toBe("codex-oauth/gpt-5.6-terra");
     // THE ASSERTION I1 IS ABOUT: without `liveEffort` wired in daemon.ts this is `""` — a value
     // that is legal, meaningful, and wrong, which is exactly why it needs pinning here.
     expect(before.result.defaultEffort).toBe("xhigh");
-    // The catalogue rides the same real boot: CODEX_MODELS, in order, with the real effort lists.
-    expect(before.result.models).toEqual(CODEX_MODELS.map((m) => ({ id: m.id, efforts: [...REASONING_EFFORTS] })));
+    // The catalogue rides the same real boot: the catalog's codex-oauth rows, in order, with the
+    // real effort lists — sourced from the real codex-oauth credential seeded in `bootReal`.
+    expect(before.result.models.map((m: { id: string }) => m.id)).toEqual(codexOauthTags);
+    for (const row of before.result.models as Array<{ efforts: string[] }>) expect(row.efforts).toEqual([...REASONING_EFFORTS]);
 
-    // A live `winter model gpt-5.6-luna --effort low` — a plain settings.json rewrite, no restart,
-    // no RPC. The provider's resolver is mtime-cached, so poll rather than assuming the first read
-    // past the write already sees it.
-    writeProviderSettings(home, "gpt-5.6-luna", "low");
+    // A live `winter model codex-oauth/gpt-5.6-luna --effort low` — a plain settings.json rewrite,
+    // no restart, no RPC. The provider's resolver is mtime-cached, so poll rather than assuming the
+    // first read past the write already sees it.
+    writeProviderSettings(home, "codex-oauth/gpt-5.6-luna", "low");
     let after: any;
     const deadline = Date.now() + 5000;
     for (;;) {
       after = await c.request(METHODS.syncConfig, {});
-      if (after.result.defaultModel === "gpt-5.6-luna" && after.result.defaultEffort === "low") break;
+      if (after.result.defaultModel === "codex-oauth/gpt-5.6-luna" && after.result.defaultEffort === "low") break;
       if (Date.now() > deadline) break;
       await new Promise((r) => setTimeout(r, 50));
     }
-    expect(after.result.defaultModel).toBe("gpt-5.6-luna");
+    expect(after.result.defaultModel).toBe("codex-oauth/gpt-5.6-luna");
     expect(after.result.defaultEffort).toBe("low");
 
     // Same daemon object, same socket — nothing was restarted to make the above true.
@@ -627,7 +643,7 @@ describe("sync.config through a real startDaemon (T3 review I1)", () => {
     // backend honours. A phone told "none" for an unset Mac would start sending a level the Mac
     // never sends.
     const home = mkdtempSync(join(tmpdir(), "winter-sync-config-real-unset-"));
-    writeProviderSettings(home, "gpt-5.6-sol"); // no reasoningEffort key at all
+    writeProviderSettings(home, "codex-oauth/gpt-5.6-sol"); // no reasoningEffort key at all
 
     daemon = await bootReal(home);
     const c = await TestClient.connect(daemon.socketPath);
@@ -636,8 +652,9 @@ describe("sync.config through a real startDaemon (T3 review I1)", () => {
     const res = await c.request(METHODS.syncConfig, {});
     expect(res.error).toBeUndefined();
     expect(res.result.defaultEffort).toBe("");
-    expect(res.result.defaultModel).toBe("gpt-5.6-sol");
-    expect(res.result.models.length).toBe(CODEX_MODELS.length); // the catalogue is unaffected
+    expect(res.result.defaultModel).toBe("codex-oauth/gpt-5.6-sol");
+    const codexOauthCount = loadCatalog().models.filter((m) => m.providerId === "codex-oauth").length;
+    expect(res.result.models.length).toBe(codexOauthCount); // the catalogue is unaffected
     c.close();
   }, 20_000);
 });
@@ -647,36 +664,54 @@ describe("sync.config through a real startDaemon (T3 review I1)", () => {
 //
 // Every other field says WHAT the Mac runs. Nothing said WHOSE, and that gap has one concrete live
 // failure behind it. The phone runs its OWN chat engine on its OWN codex-oauth credentials
-// (`phone-always-local`). On an `openai-compatible` Mac the provider is constructed with no
-// enumerable catalogue (`ProviderSettings` has no `models` field, settings.ts), so `sync.config`
-// honestly serves `models: []` — but `defaultModel` is still a NON-EMPTY foreign slug, and a phone
-// that stores any non-empty `defaultModel` then puts a llama/BYOK name on Codex `/responses` and is
-// 400'd on its first turn. The "empty catalogue is ignored on apply" rule governs `models` only;
-// only the provider identity closes this.
+// (`phone-always-local`). On a BYO-endpoint Mac (a non-codex-oauth `provider.model` tag with a
+// `providers.openai.baseUrl` override) the provider is constructed by the `openai-compatible`
+// internal adapter with no separately-credentialed picker rows, so `sync.config` honestly serves
+// `models: []` — but `defaultModel` is still a NON-EMPTY foreign slug, and a phone that stores any
+// non-empty `defaultModel` then puts a llama/BYOK name on Codex `/responses` and is 400'd on its
+// first turn. The "empty catalogue is ignored on apply" rule governs `models` only; only the
+// provider identity closes this.
 //
 // These run against a REAL `startDaemon` over a real settings.json for the same reason the T3
 // review's I1 block above does: the wiring (daemon.ts's `liveProvider`, and the one line that
 // passes it into the options object) is the part that silently degrades. Dropping it does not throw
 // and does not fail a type-check — `SyncConfigContext.liveProvider` is optional — it just makes
 // every daemon report `"none"`, which reads as "no provider configured" and would have every phone
-// discard a perfectly good codex bundle. Both provider types are booted, because the whole point of
-// the field is telling them apart.
+// discard a perfectly good codex bundle. Both internal provider ids are booted, because the whole
+// point of the field is telling them apart.
+//
+// WS-20: `Provider.id` (the internal literal `liveProvider` reports) is now a FIXED function of the
+// tag's providerId — `"codex-oauth"` when `splitTag(provider.model).providerId === "codex-oauth"`,
+// `"openai-compatible"` for every other provider (see `providers/manager.ts`'s `createProvider`).
+// It is no longer read off a `ProviderSettings.type` literal — that field is gone entirely.
 // ================================================================================================
 
 describe("sync.config `provider` through a real startDaemon (whole-branch review C1)", () => {
   let daemon: RunningDaemon | undefined;
   afterEach(async () => { await daemon?.stop(); daemon = undefined; });
 
-  async function bootWithSettings(home: string, provider: Record<string, unknown>): Promise<{ daemon: RunningDaemon; secrets: FileSecretStore }> {
+  async function bootWithSettings(home: string, opts: { model: string; reasoningEffort?: string; openaiBaseUrl?: string }): Promise<{ daemon: RunningDaemon; secrets: FileSecretStore }> {
     const settingsPath = join(home, "settings.json");
     writeFileSync(settingsPath, JSON.stringify({
-      schemaVersion: 2, provider, titles: { enabled: false }, toolSearch: { enabled: false },
+      schemaVersion: 3,
+      provider: { model: opts.model, ...(opts.reasoningEffort ? { reasoningEffort: opts.reasoningEffort } : {}) },
+      ...(opts.openaiBaseUrl ? { providers: { openai: { baseUrl: opts.openaiBaseUrl } } } : {}),
+      titles: { enabled: false },
+      toolSearch: { enabled: false },
     }, null, 2) + "\n");
     const secrets = new FileSecretStore(join(home, "test-secrets"));
-    // openai-compatible refuses to construct without a stored key; codex-oauth ignores it (its
-    // token is only read at stream time, and no turn is ever driven here).
-    await secrets.set("openai-api-key", "sk-test-not-a-real-key");
+    // The openai-compatible internal adapter refuses to construct without a stored key (legacy raw
+    // name — createProvider's own readOpenAiApiKey fallback); codex-oauth ignores it (its token is
+    // only read at stream time, and no turn is ever driven here). WS-20: this write is auto-migrated
+    // to real `openai:default` credential material at daemon boot (`migrateLegacyCredentialMaterial`,
+    // daemon.ts), which makes `openai` PRESENT to `pickerModels()` too — so it is scoped to only the
+    // openai-compatible test below, keeping the codex-oauth test's picker lineup isolated to what it
+    // explicitly seeds.
+    if (!opts.model.startsWith("codex-oauth/")) await secrets.set("openai-api-key", "sk-test-not-a-real-key");
+    // WS-20 (review round 4): see bootReal's identical note above — every caller of this helper
+    // configures codex-oauth/openai.
     const active = await createProvider(loadSettings(settingsPath), secrets, settingsPath);
+    if (active === null) throw new Error("bootWithSettings: expected the internal Provider to build (codex-oauth/openai)");
     const d = await startDaemon({
       home, secrets,
       agentProvider: { provider: active.provider, model: active.liveModel().model, live: active.liveModel },
@@ -686,7 +721,11 @@ describe("sync.config `provider` through a real startDaemon (whole-branch review
 
   test("a codex-oauth Mac states `codex-oauth` beside its real catalogue", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-sync-provider-codex-"));
-    ({ daemon } = await bootWithSettings(home, { type: "codex-oauth", model: "gpt-5.6-terra", reasoningEffort: "high" }));
+    const booted = await bootWithSettings(home, { model: "codex-oauth/gpt-5.6-terra", reasoningEffort: "high" });
+    daemon = booted.daemon;
+    // WS-20: `models` is credential-presence-driven — seed the real codex-oauth material into the
+    // SAME secrets store the daemon is running on, exactly what a real `winter login` leaves behind.
+    await new CodexAuthStore(booted.secrets).save({ accessToken: "at_test", refreshToken: null, idToken: null, accountId: null, expiresAt: 0 });
     const c = await TestClient.connect(daemon.socketPath);
     await c.hello(daemon.tokens.harness, "phone");
 
@@ -695,49 +734,67 @@ describe("sync.config `provider` through a real startDaemon (whole-branch review
     // THE ASSERTION C1 IS ABOUT: without `liveProvider` wired in daemon.ts this is "none", a value
     // that is legal, meaningful, and wrong — exactly the shape of the `liveEffort` gap above.
     expect(res.result.provider).toBe("codex-oauth");
-    // It agrees with the catalogue beside it, which is the property that makes it usable: the
-    // identity and the lineup come off the SAME provider instance.
-    expect(res.result.models.map((m: any) => m.id)).toEqual(CODEX_MODELS.map((m) => m.id));
-    expect(res.result.defaultModel).toBe("gpt-5.6-terra");
+    const codexOauthTags = loadCatalog().models.filter((m) => m.providerId === "codex-oauth").map((m) => m.key);
+    expect(res.result.models.map((m: any) => m.id)).toEqual(codexOauthTags);
+    expect(res.result.defaultModel).toBe("codex-oauth/gpt-5.6-terra");
     c.close();
   }, 20_000);
 
-  test("a BYOK (openai-compatible) Mac states `openai-compatible` — the empty catalogue alone never could", async () => {
+  test("a BYOK (openai-compatible) Mac states `openai` — provider identity, not an empty catalogue, is what protects a phone", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-sync-provider-byok-"));
     ({ daemon } = await bootWithSettings(home, {
-      type: "openai-compatible", model: "llama-3.3-70b-local", baseUrl: "http://127.0.0.1:11434/v1",
+      model: "openai/llama-3.3-70b-local", openaiBaseUrl: "http://127.0.0.1:11434/v1",
     }));
     const c = await TestClient.connect(daemon.socketPath);
     await c.hello(daemon.tokens.harness, "phone");
 
     const res = await c.request(METHODS.syncConfig, {});
     expect(res.error).toBeUndefined();
-    expect(res.result.provider).toBe("openai-compatible");
-    // The exact live shape C1 exists for, asserted TOGETHER so the danger is visible in one place:
-    // an empty catalogue AND a non-empty foreign slug. A phone reading only these two would store
-    // "llama-3.3-70b-local" and send it to Codex.
-    expect(res.result.models).toEqual([]);
-    expect(res.result.defaultModel).toBe("llama-3.3-70b-local");
+    // WS-20 (review round 1, MAJOR): `sync.config.provider` now reports the CATALOG providerId
+    // (`splitTag(settings.provider.model).providerId`), never `Provider.id` (the internal adapter
+    // literal `"openai-compatible"`) — so a BYO/openai-compatible Mac states `"openai"`, agreeing
+    // with `defaultModel`'s own tag prefix, not a vocabulary a phone cannot compare against anything.
+    expect(res.result.provider).toBe("openai");
+    // WS-20: `models` is credential-PRESENCE-driven (pickerModels), decoupled from which model this
+    // daemon actually runs turns on. `bootWithSettings`'s legacy `openai-api-key` write (needed so
+    // the openai-compatible adapter can even construct) is auto-migrated to real credential material
+    // at daemon boot — the SAME migration a real BYOK install goes through — so the picker DOES
+    // serve openai's real catalog rows here. This is exactly why `models` alone can never be the
+    // safety net: it can be simultaneously non-empty AND for a catalog the daemon is not actually
+    // calling (its own model, `llama-3.3-70b-local`, is off-catalog and appears nowhere in it). Only
+    // `provider` disambiguating the WHOLE bundle closes the gap — the assertion this test exists for.
+    expect(res.result.models.length).toBeGreaterThan(0);
+    expect(res.result.models.every((m: any) => m.providerId === "openai")).toBe(true);
+    expect(res.result.models.map((m: any) => m.id)).not.toContain("openai/llama-3.3-70b-local");
+    // `defaultModel` composes from `LiveModelSelection.providerId` (the CATALOG id, daemon.ts's
+    // `liveModel`) — the SAME source `provider` above now reads too, so the two agree by
+    // construction for every arm, not just codex-oauth.
+    expect(res.result.defaultModel).toBe("openai/llama-3.3-70b-local");
     expect(res.result.provider).not.toBe("codex-oauth"); // …and this is what saves it
-    // Not a wire-format accident: the served value is a member of `ProviderSettings.type`'s own
-    // vocabulary, which is what lets a client compare it against its own provider at all.
-    expect(["codex-oauth", "openai-compatible"]).toContain(res.result.provider);
+    expect(["codex-oauth", "openai"]).toContain(res.result.provider);
     c.close();
   }, 20_000);
 
-  test("`Provider.id` IS the `ProviderSettings.type` literal — the identity this field reports", async () => {
-    // The one coupling `liveProvider` depends on, pinned so a new provider whose `id` drifts from
-    // its settings literal fails here rather than by serving a phone a token it cannot compare.
+  test("`Provider.id` is a FIXED internal literal driven by the tag's providerId — codex-oauth branches to \"codex-oauth\", openai to \"openai-compatible\", anything else answers null", async () => {
+    // WS-20: there is no more `ProviderSettings.type` literal to mirror — `Provider.id` is decided
+    // purely by `splitTag(settings.provider.model).providerId === "codex-oauth"`. Pinned so a new
+    // provider whose adapter drifts from this two-way split fails here rather than by serving a
+    // phone a `provider` value it cannot compare against anything.
     const home = mkdtempSync(join(tmpdir(), "winter-sync-provider-ids-"));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     await secrets.set("openai-api-key", "sk-test-not-a-real-key");
-    for (const provider of [
-      { type: "codex-oauth" as const, model: "gpt-5.6-sol" },
-      { type: "openai-compatible" as const, model: "m", baseUrl: "http://127.0.0.1:11434/v1" },
-    ]) {
-      const active = await createProvider({ schemaVersion: 2, provider } as any, secrets);
-      expect(active.provider.id).toBe(provider.type);
+    for (const model of ["codex-oauth/gpt-5.6-sol", "openai/gpt-5.6-sol"]) {
+      const active = await createProvider(Settings.parse({ schemaVersion: 3, provider: { model } }), secrets);
+      expect(active?.provider.id).toBe(model.startsWith("codex-oauth/") ? "codex-oauth" : "openai-compatible");
     }
+    // WS-20 (review round 4): `settings.provider.model` is UNCONSTRAINED at the schema level again
+    // (any catalog provider, or `winter-test/*` — the round-2 M6 gate broke a real "my default
+    // chat model is Claude" scenario and was removed) — but `createProvider` itself, the ONE place
+    // the codex-oauth/openai constraint on the daemon's INTERNAL Provider is now enforced, answers
+    // `null` for anything outside `INTERNAL_PROVIDER_IDS` rather than mis-building an
+    // openai-compatible client pointed at a provider it was never meant to speak to.
+    const deepseekSettings = Settings.parse({ schemaVersion: 3, provider: { model: "deepseek/deepseek-reasoner" } });
+    expect(await createProvider(deepseekSettings, secrets)).toBeNull();
   });
 });
 

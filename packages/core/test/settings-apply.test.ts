@@ -386,7 +386,7 @@ describe("makeApply: the runtime options diff (P8b Task 15)", () => {
   const withRuntimes = (runtimes: unknown) => ({ provider: { model: "a" }, runtimes }) as any;
   /** A COMPLETE settings object, so the block-presence tests exercise the real parsed shape (zod's
    *  per-key defaults included) rather than a hand-built partial that could not exist on disk. */
-  const BASE_SETTINGS = { schemaVersion: 2 as const, provider: { type: "codex-oauth" as const, model: "gpt-5.4" } };
+  const BASE_SETTINGS = { schemaVersion: 3 as const, provider: { model: "codex-oauth/gpt-5.6-sol" } };
 
   test("a shortened name-lease window nudges the directory — a held message must not wait for the next event", async () => {
     const releaseHeld = mock(() => {});

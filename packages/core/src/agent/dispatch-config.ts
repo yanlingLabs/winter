@@ -1,3 +1,6 @@
+import type { Settings } from "../settings";
+import { pinsFor } from "../settings";
+
 /** session-activity-hygiene task 1: dispatch's model and reasoning effort are a FIXED PIN, not a
  *  per-session choice — a user ruling, the same shape as `RESEARCH_MODEL`/`RESEARCH_EFFORT`
  *  (research.ts): dispatch is the user's ambient coordinator on this Mac, not a conversation
@@ -14,12 +17,17 @@
  *      `assertEffortSelectable`) even run — the door, so the daemon never even stores an override
  *      nobody will ever honor.
  *
- *  `DISPATCH_EFFORT` is an ordinary member of `REASONING_EFFORTS` (settings.ts) — this is a fixed
- *  SELECTION of a real wire effort, not a client-side tier like `ultra`; it needs no translation. */
-export const DISPATCH_MODEL = "gpt-5.6-terra";
+ *  WS-20: the MODEL half is no longer a hardcoded constant — it is `pinsFor(settings).dispatch`,
+ *  a tag that DEFAULTS from `settings.provider.model`'s own provider (see `pinsFor` in
+ *  settings.ts) and is user-overridable per `settings.pins.dispatch`. `DISPATCH_EFFORT` stays a
+ *  literal: effort is not a provider choice, and `REASONING_EFFORTS` (settings.ts) is an ordinary
+ *  member — this is a fixed SELECTION of a real wire effort, not a client-side tier like `ultra`;
+ *  it needs no translation. */
 export const DISPATCH_EFFORT = "medium";
 
 /** The one refusal message both doors throw — extracted so the two surfaces cannot drift (same
  *  reasoning as `resolveModelSelection`/`assertEffortSelectable` being shared helpers rather than
- *  two copies). Built FROM the constants above so it can never name a stale value. */
-export const DISPATCH_PIN_MESSAGE = `dispatch runs a fixed model: ${DISPATCH_MODEL} at ${DISPATCH_EFFORT}`;
+ *  two copies). Built from the LIVE pin so it can never name a stale value. */
+export function dispatchPinMessage(settings: Settings | null | undefined): string {
+  return `dispatch runs a fixed model: ${pinsFor(settings).dispatch} at ${DISPATCH_EFFORT}`;
+}

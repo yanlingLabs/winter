@@ -23,6 +23,7 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { CORE_BRAND } from "../../src/runtime-sdk/brand";
 import type { WinterRuntimeSdk } from "../../src/runtime-sdk/create";
 import { createWinterSessionDrivers, refusalMayBeCredentialShaped, type WinterLegDeps } from "../../src/runtime-sdk/session-driver";
+import { evictSessionsForCredential } from "../../src/runtime-sdk/credentials";
 import { unconsumedUserMessages } from "../../src/runtime-sdk/winter-session";
 import { WINTER_PEER_VERSIONS } from "../../src/runtime-sdk/versions";
 import { backfillNativeSessions, openRuntimeStateDb, ProjectionCheckpoints, RuntimeSessionRecords } from "../../src/runtime-state";
@@ -334,13 +335,13 @@ describe("refusalForSelection — only credential-shaped reasons are re-describe
     const detail = "this session is persisted on claude-agent (the official runtime) and the winter runtime cannot serve it (WS-00 §2, D13)";
     const t = table({}, { selectRuntimeFor: refusalOf("runtime-unavailable", detail) });
     try {
-      const sid = t.store.createSession("t", { mode: "chat", model: "claude-sonnet-5" });
+      const sid = t.store.createSession("t", { mode: "chat", model: "anthropic/claude-sonnet-5" });
       let caught: unknown;
       try { await t.drivers.create(sid); } catch (err) { caught = err; }
       expect((caught as { code?: string })?.code).toBe("runtime_selection_refused");
       expect((caught as { reason?: string })?.reason).toBe("runtime-unavailable");
       // The machine-readable half survives; the prose does not.
-      expect((caught as Error)?.message).toBe("Winter can't start a session on claude-sonnet-5 right now.");
+      expect((caught as Error)?.message).toBe("Winter can't start a session on anthropic/claude-sonnet-5 right now.");
       expect((caught as Error)?.message).not.toMatch(ROUTER_PHRASING);
       expect((caught as Error)?.message).not.toContain(detail);
       // ...and it is not Winter's credential sentence either, which would send the user to a door
@@ -355,13 +356,15 @@ describe("refusalForSelection — only credential-shaped reasons are re-describe
     const detail = 'the model "gpt-5.6-sol" (openai/gpt-5.6-sol) is served by no row this session can use: every candidate row was blocked, deprecated, known-unservable, or belongs to a provider with no configured credential ref (configured: openai, openrouter, deepseek)';
     const t = table({}, { selectRuntimeFor: refusalOf("slot-unservable", detail) });
     try {
-      // A BARE id six inventory providers serve: Minor 1's narrowing means no provider is named
-      // either, because Winter decided nothing.
-      const sid = t.store.createSession("t", { mode: "chat", model: "gpt-5.6-sol" });
+      // WS-20: a tag names its provider outright — `providerFor` always resolves "openai"
+      // unambiguously now (no more bare-id narrowing to skip), so this refusal correctly
+      // attributes to openai's own missing credential rather than falling through to the generic
+      // neutral sentence. The router's raw enumeration must still never reach the wire.
+      const sid = t.store.createSession("t", { mode: "chat", model: "openai/gpt-5.6-sol" });
       let caught: unknown;
       try { await t.drivers.create(sid); } catch (err) { caught = err; }
       const message = (caught as Error)?.message ?? "";
-      expect(message).toBe("Winter can't start a session on gpt-5.6-sol right now.");
+      expect(message).toContain("run `winter credentials set openai`");
       for (const leaked of ["openrouter", "deepseek", "configured:", "candidate row"]) {
         expect(message).not.toContain(leaked);
       }
@@ -432,6 +435,60 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
       const session = await t.drivers.create(sid);
       expect(t.queries.length).toBe(1);   // the child spawned; the gate had nothing to gate
       await session.end();
+    } finally { t.close(); }
+  });
+
+  // WS-20 (review round 2, M1): a `session.create` with NO explicit `model` (the normal Mac case)
+  // used to record `providerId: "unstated"` — the record's provider never agreed with the SETTINGS
+  // provider the child actually runs on, so `credential.set`'s hot-swap
+  // (`evictSessionsForCredential`, which reads `records.get(sessionId)?.providerId`) evicted
+  // nothing for a default-model session: a rotated key never reached its live child until the next
+  // restart/idle-reap. Fixed by computing the EFFECTIVE tag (the daemon's configured
+  // `settings.provider.model` when no explicit model was given) once, and deriving providerId AND
+  // modelRef from it.
+  test("create with no model records the settings tag's REAL provider — a later credential change evicts it (M1)", async () => {
+    const settings = { provider: { model: "openai/gpt-5.6-sol" }, runtimes: { winterLeg: { chat: true, dispatch: false, code: false }, winterIdleTimeoutSec: 10 } } as unknown as Settings;
+    const t = table({ settings: () => settings });
+    try {
+      const sid = t.store.createSession("t", { mode: "chat" }); // no `model` at all
+      const session = await t.drivers.create(sid);
+
+      // The record names the REAL provider the child actually runs on — never "unstated".
+      const record = t.records.get(sid);
+      expect(record?.providerId).toBe("openai");
+      expect(record?.modelRef).toBe("openai/gpt-5.6-sol");
+
+      // The hot-swap path (production wiring: ipc/server.ts's evictSessionsForCredentialChange)
+      // now finds this session when its provider's credential changes.
+      const acted = await evictSessionsForCredential({
+        list: () => t.drivers.list(),
+        providerOf: (sessionId) => t.records.get(sessionId)?.providerId,
+        evict: (sessionId) => t.drivers.evict(sessionId),
+      }, "openai");
+      expect(acted).toEqual([sid]);
+
+      await session.end();
+    } finally { t.close(); }
+  });
+
+  // WS-20 (review round 2, M6): `pinsFor` dropped its old cross-provider "openai" fallback rung —
+  // a provider that serves no gpt-family row of its own (an `anthropic/*` primary, here) now yields
+  // UNSTATED_TAG for `pins.dispatch`, and dispatch must refuse typed rather than mint a record
+  // naming the "unstated" pseudo-provider or hand a real child the literal model string "unstated".
+  test("M6: dispatch refuses typed when its pin resolves to UNSTATED_TAG, naming pins.dispatch — no record is minted", async () => {
+    const settings = {
+      provider: { model: "anthropic/claude-sonnet-5" },
+      runtimes: { winterLeg: { chat: true, dispatch: true, code: false }, winterIdleTimeoutSec: 10 },
+    } as unknown as Settings;
+    const t = table({ settings: () => settings });
+    try {
+      const sid = t.store.createSession("t", { mode: "dispatch" }); // no explicit model — runs the dispatch pin
+      let caught: unknown;
+      try { await t.drivers.create(sid); } catch (err) { caught = err; }
+      expect((caught as { code?: string })?.code).toBe("runtime_selection_refused");
+      expect((caught as Error)?.message).toContain("pins.dispatch");
+      // Refused BEFORE any runtime-state record was minted — never a record naming "unstated".
+      expect(t.records.get(sid)).toBeUndefined();
     } finally { t.close(); }
   });
 });

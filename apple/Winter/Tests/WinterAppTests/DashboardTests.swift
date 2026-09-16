@@ -40,6 +40,13 @@ final class DashboardTests: XCTestCase {
         XCTAssertEqual(d.pluginsCount, "0")
     }
 
+    /// Review fix (Nit 1): `providerModel` is a provider-qualified TAG now — the display never
+    /// shows it verbatim, only the modelId half.
+    func testFormatDaemonStatusStripsTheProviderPrefixFromAQualifiedTag() {
+        let d = formatDaemonStatus(version: "0.1.0", uptimeMs: 0, socketPath: "/tmp/winter.sock", providerId: "codex-oauth", providerModel: "codex-oauth/gpt-5.6-terra", sessionsCount: 0, pluginsCount: 0)
+        XCTAssertEqual(d.provider, "codex-oauth (gpt-5.6-terra)")
+    }
+
     func testFormatDaemonStatusWithNoProvider() {
         let d = formatDaemonStatus(version: "0.1.0", uptimeMs: 3_840_000, socketPath: "/tmp/winter.sock", providerId: nil, providerModel: nil, sessionsCount: 0, pluginsCount: 0)
         XCTAssertEqual(d.provider, "none")

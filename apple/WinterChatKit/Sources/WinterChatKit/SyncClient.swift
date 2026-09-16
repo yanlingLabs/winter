@@ -107,10 +107,25 @@ struct SyncPushResult: Decodable { let applied: Bool; let lastSeq: Int; let buff
 public struct SyncConfigModel: Codable, Equatable, Sendable {
     public let id: String
     public let efforts: [String]
+    /// WS-20 (review fix, Nit 3): OPTIONAL-TOLERANT, unlike `id`/`efforts` above — this kit ships
+    /// inside the iOS app on its OWN update schedule (this file's own header doc), so it WILL, at
+    /// some point, decode a `sync.config` from a daemon built before these three fields existed.
+    /// Requiring them would make a pre-WS-20 daemon fail this row's decode entirely (the same
+    /// "requiring a field takes an older pairing down" reasoning `provider-correctness T3/T5`'s own
+    /// fields already follow on `SyncConfig` itself, just below). Absent OR blank both decode to
+    /// `nil` — "not told", never a licence to guess a value. `providerId`/`displayName` served
+    /// pre-split so this kit never parses `id` to derive UI structure; `facingName` is genuinely
+    /// optional even on a current daemon (only a family-slot row has one).
+    public let providerId: String?
+    public let displayName: String?
+    public let facingName: String?
 
-    public init(id: String, efforts: [String]) {
+    public init(id: String, efforts: [String], providerId: String? = nil, displayName: String? = nil, facingName: String? = nil) {
         self.id = id
         self.efforts = efforts
+        self.providerId = providerId
+        self.displayName = displayName
+        self.facingName = facingName
     }
 
     public init(from decoder: Decoder) throws {
@@ -130,6 +145,11 @@ public struct SyncConfigModel: Codable, Equatable, Sendable {
         }
         self.id = id
         self.efforts = efforts
+        // Blank-is-absent (same rule `SyncConfig`'s own optional fields use, just below) — never
+        // let an empty string through as though it were a real value.
+        self.providerId = try c.decodeIfPresent(String.self, forKey: .providerId).flatMap { $0.isEmpty ? nil : $0 }
+        self.displayName = try c.decodeIfPresent(String.self, forKey: .displayName).flatMap { $0.isEmpty ? nil : $0 }
+        self.facingName = try c.decodeIfPresent(String.self, forKey: .facingName).flatMap { $0.isEmpty ? nil : $0 }
     }
 }
 
@@ -154,10 +174,11 @@ public struct SyncConfigModel: Codable, Equatable, Sendable {
 /// never-synced rule (WAIT, never guess) is what makes that safe. `[]` and `""` are the ABSENCE of
 /// a catalogue, never a fallback one; nothing here may invent slugs or levels from them.
 public struct SyncConfig: Codable, Equatable, Sendable {
-    /// WHICH PROVIDER this whole bundle describes — `"codex-oauth"` / `"openai-compatible"`, the
-    /// Mac's `ProviderSettings.type` vocabulary; `"none"` when that Mac has no provider configured
-    /// at all. On the wire it is `z.string().min(1)`: the one field here with NO empty sentinel,
-    /// because a daemon always knows which provider it is running (including "not one").
+    /// WHICH PROVIDER this whole bundle describes — WS-20 review fix (Nit 3): the DEFAULT TAG's
+    /// own provider id (`splitTag(defaultTag).providerId`, daemon-side), or `"none"` when that Mac
+    /// has no provider configured at all. On the wire it is `z.string().min(1)`: the one field here
+    /// with NO empty sentinel, because a daemon always knows which provider it is running
+    /// (including "not one").
     ///
     /// **THE RULE (whole-branch review C1, and the one T6b must implement): a provider MISMATCH
     /// means NEVER-SYNCED for the model half.** This device runs its OWN chat engine on its OWN
@@ -179,11 +200,19 @@ public struct SyncConfig: Codable, Equatable, Sendable {
     public let provider: String
     public let exaKey: String?
     public let dangerousDomains: [String]
+    /// WS-20: a provider-qualified TAG ("<providerId>/<modelId>") when non-empty, not a bare
+    /// modelId — this kit stores/threads it opaquely (`LocalSessionMeta.model`) and splits it
+    /// (`modelIdPortion(of:)`, `ChatEngine.swift`) at the one place that needs the bare id: right
+    /// before building a `ProviderTurnRequest`. The provider-mismatch rule documented on `provider`
+    /// above is UNCHANGED by this — the daemon already derives `provider` from this same tag's own
+    /// `providerId` half, so the two stay in lockstep by construction; nothing here needs to parse
+    /// the tag to re-derive what `provider` already states.
     public let defaultModel: String
-    /// The Mac's whole model catalogue. EMPTY means the Mac reported no catalogue — its provider
-    /// cannot enumerate its models, none is configured, or (see above) it predates this field.
-    /// A consumer must wait for a real one rather than deriving a lineup from `defaultModel`, which
-    /// is precisely what this field exists to stop.
+    /// The Mac's whole model catalogue — each row's `id` carries the same tag shape as
+    /// `defaultModel` above. EMPTY means the Mac reported no catalogue — its provider cannot
+    /// enumerate its models, none is configured, or (see above) it predates this field. A consumer
+    /// must wait for a real one rather than deriving a lineup from `defaultModel`, which is
+    /// precisely what this field exists to stop.
     public let models: [SyncConfigModel]
     /// The Mac's live reasoning effort. `""` means UNSET, which is NOT `"none"`: unset makes a turn
     /// omit the `reasoning` block entirely, while `"none"` is an explicit level the backend honours.

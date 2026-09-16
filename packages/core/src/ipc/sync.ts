@@ -2,11 +2,13 @@ import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { ERR, SessionEvent, SESSION_TITLE_MAX_CHARS, type SyncConfigResult, type SyncHeadsResult, type SyncMemoryResult, type SyncPullParams, type SyncPullResult, type SyncPushParams, type SyncPushResult } from "@yanlinglabs/winter-protocol";
-import { resolveModelAlias } from "../agent/model-aliases";
+import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { assistantMemoryDirFor } from "../agent/memory-dir";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
-import { CLIENT_EFFORTS, REASONING_EFFORTS, isClientEffort } from "../settings";
-import type { ModelInfo } from "../providers/types";
+import { CLIENT_EFFORTS, isClientEffort } from "../settings";
+import { rowForTag } from "../runtime-sdk/provider-selection";
+import { canonicalizeModelTag, UNSTATED_TAG } from "../runtime-sdk/model-tag";
+import { pickerModels } from "./picker-models";
 import type { SessionForkRef, SessionStore, SyncedEntry } from "../sessions/store";
 
 // ================================================================================================
@@ -208,6 +210,12 @@ export interface SyncMetaEffortContext {
   /** Called with the REFUSED value and a short reason, once per drop. The caller logs; this
    *  function never does its own I/O (`validateSyncMeta` is pure), same split as `onDroppedModel`. */
   onDroppedEffort?(effort: string, reason: string): void;
+  /** WS-20 (review round 2, M4): threaded into `canonicalizeModelTag` so a pushed `meta.model` is
+   *  held to the SAME membership gate as `session.create`/`session.setModel` — a typo model on a
+   *  real provider is dropped exactly like an unrecognised provider always was. Absent simply means
+   *  the BYO-`baseUrl` escape hatch never applies (no settings to consult) — the catalog-membership
+   *  check itself still runs either way, never a crash. */
+  settings?: { providers?: Record<string, { baseUrl?: string }> };
 }
 
 /** Validates `sync.push`'s `meta` before ANY of it reaches the index.
@@ -256,7 +264,6 @@ export interface SyncMetaEffortContext {
  *  `session.setEffort`'s handler. */
 export function validateSyncMeta(
   meta: { title?: string; model?: string; effort?: string | null; forkedFrom?: SessionForkRef },
-  knownModelIds: string[],
   onDroppedModel?: (slug: string) => void,
   effortCtx: SyncMetaEffortContext = {},
 ): SyncMeta {
@@ -267,14 +274,27 @@ export function validateSyncMeta(
     out.title = meta.title.length <= SESSION_TITLE_MAX_CHARS ? meta.title : `${meta.title.slice(0, SESSION_TITLE_MAX_CHARS - 1)}…`;
   }
   if (meta.forkedFrom !== undefined) out.forkedFrom = meta.forkedFrom;
+  // WS-20: a model is ALWAYS a provider-qualified tag now — no more alias resolution against a
+  // provider's own enumerable model list (there is nothing left to resolve; a tag names its
+  // provider outright).
+  //
+  // WS-20 (review round 2, M4): `isModelTag` alone only checks shape AND that the PROVIDER exists
+  // in the pinned catalog — a typo model on a real provider (`codex-oauth/gpt-5.4`) would pass it.
+  // `canonicalizeModelTag` is the stricter MEMBERSHIP gate (real catalog row, unless the provider
+  // has a BYO `baseUrl` or no catalog rows of its own); anything else is dropped-and-logged, same as
+  // an unknown id always was — `sync.push`'s own "drop, never fail the whole push" policy
+  // (documented above) is unchanged, only which models qualify for the drop got stricter.
+  //
+  // WS-20 (review round 2, M4 fix — R1): `canonicalizeModelTag` ALSO resolves a
+  // `<providerId>/<facingName>` push (`anthropic/sonnet`) to its real catalog row key — the
+  // CANONICAL tag is what lands in `out.model`, never the facing form as pushed.
   if (meta.model !== undefined) {
-    if (knownModelIds.length === 0) {
-      out.model = meta.model; // provider can't enumerate — nothing to check against
-    } else {
-      const resolved = resolveModelAlias(meta.model, knownModelIds);
-      if (knownModelIds.includes(resolved)) out.model = resolved;
-      else onDroppedModel?.(meta.model);
-    }
+    // WS-20 (review round 2, nit e): `unstated/unstated` is the internal "nothing recorded"
+    // sentinel — a CLIENT pushing it explicitly is never a real request (mirrors `resolveModelSelection`'s
+    // identical door-level rejection in ipc/server.ts; `winter-test/*` stays accepted, unaffected).
+    const canonical = meta.model === UNSTATED_TAG ? undefined : canonicalizeModelTag(meta.model, effortCtx.settings);
+    if (canonical !== undefined) out.model = canonical;
+    else onDroppedModel?.(meta.model);
   }
   if (meta.effort !== undefined) {
     if (meta.effort === null) {
@@ -379,17 +399,16 @@ export interface SyncPushContext {
    *  ledgered `session.dispatch` gap — a new session nobody was told about — is exactly what this
    *  parameter exists to avoid reproducing. */
   broadcastCreated(event: SessionEvent): void;
-  /** The daemon's model catalogue, for validating a pushed `meta.model` — the SAME source
-   *  `session.setModel` consults (`AgentEngine.knownModels()`). Absent, or empty, means the
-   *  provider can't enumerate its models, in which case a pushed value is stored freely; see
-   *  `validateSyncMeta`. */
-  knownModelIds?(): string[];
-  /** provider-correctness T6: the daemon's live default model — the LAST rung of the effective-model
-   *  precedence a pushed `meta.effort` is validated against (pushed model → the row's stored model →
-   *  this → `""`), identical to what `session.setEffort` resolves (`sessionMeta?.model ??
-   *  opts.liveModel?.() ?? ""`, ipc/server.ts). Absent degrades to `""`, which `effortsForModel`
-   *  answers for as it does for any slug. */
+  /** provider-correctness T6: the daemon's live default model TAG — the LAST rung of the
+   *  effective-model precedence a pushed `meta.effort` is validated against (pushed model → the
+   *  row's stored model → this → `""`), identical to what `session.setEffort` resolves
+   *  (`sessionMeta?.model ?? opts.liveModel?.() ?? ""`, ipc/server.ts). WS-20: a TAG, composed from
+   *  the boot-bound provider's own id + its live model. Absent degrades to `""`, which
+   *  `effortsForModel` answers for (an empty tag matches no catalog row). */
   liveModel?(): string;
+  /** WS-20 (review round 2, M4): threaded straight through to `validateSyncMeta`'s
+   *  `SyncMetaEffortContext.settings` — see that field's own doc. */
+  settings?: { providers?: Record<string, { baseUrl?: string }> };
 }
 
 /** Parses a reassembled JSONL batch into raw-line/event pairs. Every line must be JSON AND a valid
@@ -423,7 +442,7 @@ function parseBatch(buf: Buffer): SyncedEntry[] {
 /** Buffers a chunk and, on the final one, validates and applies the whole batch atomically.
  *  Returns the current head plus buffering progress; `applied` is true only once bytes are on disk. */
 export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResult {
-  const { store, buffers, connId } = ctx;
+  const { store, buffers, connId, settings } = ctx;
   const existing = resolveChatSession(store, p.sessionId, true);
   const creating = existing === null;
 
@@ -497,7 +516,7 @@ export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResul
 
   const first = entries[0]!.event;
   const meta = p.meta
-    ? validateSyncMeta(p.meta, ctx.knownModelIds?.() ?? [], (slug) =>
+    ? validateSyncMeta(p.meta, (slug) =>
         console.warn(`[sync] dropped unknown model ${JSON.stringify(slug)} pushed for session ${p.sessionId} — the log was replicated, the model override was not`), {
         // provider-correctness T6. The row may not exist yet (a creating push), so the lookup is
         // defensive — an unknown id simply contributes nothing and the live default takes over.
@@ -506,6 +525,7 @@ export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResul
         })() ?? ctx.liveModel?.(),
         onDroppedEffort: (effort, reason) =>
           console.warn(`[sync] dropped effort ${JSON.stringify(effort)} pushed for session ${p.sessionId} (${reason}) — the log was replicated, the effort override was not`),
+        settings,
       })
     : undefined;
   let lastSeq: number;
@@ -611,10 +631,12 @@ export interface SyncConfigContext {
    *  session/project context, so this resolves against the daemon's base (non-project) settings —
    *  the same "no cwd" behavior every other cwd-less caller in this codebase already gets. */
   dangerousDomainsAdded?(): string[] | undefined;
-  /** The provider's live model, re-resolved at call time (mirrors `AgentEngine`'s own
-   *  `provider.live?.() ?? {model: provider.model}` idiom). Absent (no agent provider configured)
-   *  degrades to `""` — there is no sensible model to report, and `defaultModel` is a plain
-   *  string, never nullable (see `SyncConfigResult`'s own doc comment). */
+  /** The provider's live model TAG, re-resolved at call time (mirrors `AgentEngine`'s own
+   *  `provider.live?.() ?? {model: provider.model}` idiom). WS-20: composed from the boot-bound
+   *  provider's own id + its live model (never a bare id — see `daemon.ts`'s own `liveModel`
+   *  wiring). Absent (no agent provider configured) degrades to `""` — there is no sensible model
+   *  to report, and `defaultModel` is `ModelTagSchema | ""`, never nullable (see
+   *  `SyncConfigResult`'s own doc comment). */
   liveModel?(): string;
   /** The provider's live reasoning effort, off the SAME `live()` resolver `liveModel` reads (a
    *  `LiveModelSelection` carries both) — so a `winter model --effort` edit is visible on the very
@@ -625,26 +647,18 @@ export interface SyncConfigContext {
    *  unset makes every request omit the `reasoning` block entirely; collapsing that to `"none"` here
    *  would have the phone start sending an explicit level the Mac never sends. */
   liveEffort?(): string;
-  /** The ACTIVE provider's model catalogue — wired (ipc/server.ts) from `opts.engine.knownModels()`,
-   *  the SAME accessor `session.setModel` validates against and `sync.push` consults for
-   *  `knownModelIds`. Deliberately NOT a parallel `IpcServerOptions` getter: a second source could
-   *  serve a phone a lineup this daemon's own `session.setModel` would then reject.
-   *
-   *  Absent, or an empty array, both mean "no catalogue to report" (no engine wired, or a provider
-   *  that cannot enumerate) — see `SyncConfigResult.models` for why the client must WAIT on that
-   *  rather than derive one. */
-  knownModels?(): ModelInfo[];
-  /** WHICH PROVIDER this whole bundle describes (whole-branch review C1) — wired (ipc/server.ts →
-   *  daemon.ts) from the id of the very `Provider` instance whose `models()` becomes `knownModels`
-   *  above, so the identity and the catalogue can never disagree. `Provider.id` is the same
-   *  vocabulary as `ProviderSettings.type` (`"codex-oauth"` / `"openai-compatible"`, settings.ts)
-   *  by construction: `createProvider` branches on that literal and each provider's `id` is it.
-   *
-   *  Deliberately NOT a fresh `settings.provider.type` read, and deliberately NOT off `liveModel`'s
-   *  resolver: the provider TYPE is boot-bound (a settings.json edit that changes it needs a daemon
-   *  restart — providers/manager.ts), so a live read would report a provider whose catalogue this
-   *  bundle is not serving. Reporting the running instance is the only answer that agrees with
-   *  `models`/`defaultModel` beside it.
+  /** WS-20: the picker's own two dependencies (`pickerModels`, ipc/picker-models.ts) — every
+   *  credentialed provider's rows, not just the boot-bound instance's. `credentials` absent
+   *  degrades to no stored credentials at all (`{byProvider:{}}`); `home` absent degrades to `""`
+   *  (the console arm's on-disk profile probe then simply never finds one). */
+  credentials?(): Promise<CredentialPresence> | CredentialPresence;
+  home?: string;
+  /** WHICH PROVIDER `defaultModel` names (whole-branch review C1) — wired (ipc/server.ts →
+   *  daemon.ts) from the id of the very `Provider` instance `liveModel` above reads, so the
+   *  identity and the default can never disagree. Deliberately NOT a fresh `settings.provider.model`
+   *  read: the provider IDENTITY is boot-bound (a settings.json edit that changes it needs a
+   *  daemon restart — providers/manager.ts), so a live read would report a provider whose default
+   *  this bundle is not serving.
    *
    *  Absent (a daemon with no agent provider at all) degrades to `"none"`, not to `""`: this is the
    *  one field on this wire with no empty sentinel — see `SyncConfigResult.provider`. */
@@ -658,22 +672,20 @@ export interface SyncConfigContext {
  *  token from any `ProviderSettings.type` literal so it can never read as a real provider. */
 export const NO_PROVIDER = "none";
 
-/** The reasoning-effort levels one model accepts.
+/** The reasoning-effort levels one TAG accepts — WS-20: read from the pinned catalog row's own
+ *  `reasoning.efforts` (measured per-provider, per-model — `provider-catalog`'s own live-probe
+ *  provenance, never a hand-held constant this daemon re-derives), with `"none"` PREPENDED when
+ *  the row has any tier at all: the catalog's `efforts` array deliberately excludes `"none"` (its
+ *  own sourceRef: "none is Winter's unset and is not a catalog tier"), but `"none"` is itself a
+ *  real, wire-honoured level once a model supports reasoning — see `REASONING_EFFORTS`
+ *  (settings.ts) for the measured story. A tag with no catalog row (the `UNSTATED_TAG` sentinel,
+ *  or anything `rowForTag` cannot find) answers `[]` — nothing to accept, nothing to advertise.
  *
- *  Uniform today — every model gets `REASONING_EFFORTS`, the wire-valid universe measured against
- *  the endpoint (settings.ts) — but this is THE SEAM where a per-model divergence lands, and it is a
- *  function rather than a constant for exactly that reason. It deliberately does NOT live as an
- *  `efforts` field on `ModelInfo`/`CODEX_MODELS`: the models catalogue's own drift guard
- *  (test/providers/codex-models-drift.test.ts) documents at length that the provider's
- *  `supported_reasoning_levels` is the source that CAUSED the `ultra` bug rather than one that would
- *  have caught it, and a per-model effort array sitting inside `CODEX_MODELS` would read as a claim
- *  sourced from that catalogue. Effort validity is a property of the REQUEST VALIDATOR; it belongs
- *  here, next to the thing that serves it, not next to the context windows.
- *
- *  Returns a fresh array every call — the caller owns its row and must not be able to mutate the
- *  shared constant through it. */
-export function effortsForModel(_modelId: string): string[] {
-  return [...REASONING_EFFORTS];
+ *  Returns a fresh array every call — the caller owns its row and must not be able to mutate a
+ *  shared array through it. */
+export function effortsForModel(tag: string): string[] {
+  const efforts = rowForTag(tag)?.reasoning?.efforts ?? [];
+  return efforts.length > 0 ? ["none", ...efforts] : [];
 }
 
 /** The WINTER-LEVEL effort tiers this daemon offers (provider-correctness T5) — `sync.config`'s
@@ -730,7 +742,10 @@ export async function syncConfig(ctx: SyncConfigContext): Promise<SyncConfigResu
   const dangerousDomains = ctx.dangerousDomainsAdded?.() ?? [];
   const defaultModel = ctx.liveModel?.() ?? "";
   const defaultEffort = ctx.liveEffort?.() ?? "";
-  const models = (ctx.knownModels?.() ?? []).map((m) => ({ id: m.id, efforts: effortsForModel(m.id) }));
+  // WS-20: `pickerModels` — every credentialed provider's rows, not just the boot-bound instance's
+  // small catalogue (ipc/picker-models.ts).
+  const credentials = (await ctx.credentials?.()) ?? { byProvider: {} };
+  const models = pickerModels({ credentials, home: ctx.home ?? "" });
   // provider-correctness T5 — a SEPARATE field, never merged into `models[].efforts`. Not a
   // per-model projection either: a tier is a Winter product decision with no API meaning, so it
   // rides once for the whole daemon. Constant today; served rather than baked into the client for

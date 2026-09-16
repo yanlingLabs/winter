@@ -89,6 +89,7 @@ import { Chalk } from "chalk";
 import wrapAnsi from "wrap-ansi";
 import { METHODS, type ApprovalPolicy, type SessionActivity, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import { POLICY_ORDER } from "./policy-order";
+import { modelIdPortion } from "../model-cli";
 import { initialState, reduce, statusChromeModel, type AgentRow, type Block, type LocalEvent, type PendingCard, type TuiState } from "./state";
 import { makeFlattenCache, makeStreamRenderer } from "./flatten-blocks";
 import { applyWheel, followBottom, onContentGrown, scrollToTop, type ScrollState } from "./scroll-model";
@@ -143,7 +144,9 @@ export interface AppProps {
   cwd: string;
   initialPolicy: ApprovalPolicy;
   /** Welcome-banner data (main.ts threads these through mountTui). `model` doubles as the status
-   *  chrome's GLOBAL model seed (TUI renderer T5) — the settings.json value read at mount. */
+   *  chrome's GLOBAL model seed (TUI renderer T5) — the settings.json value read at mount. WS-20:
+   *  a provider-qualified tag; every render site splits it for display (`modelIdPortion`,
+   *  `../model-cli`) — never rendered verbatim. */
   version: string;
   model: string;
   /** T5 status chrome: the global reasoning effort at mount (settings.provider.reasoningEffort),
@@ -200,7 +203,11 @@ function welcomeLines(version: string, model: string, cwd: string): string[] {
   const ansi = new Chalk({ level: 3 });
   return [
     `${ansi.hex(theme.accent)("✻")} ${ansi.hex(theme.accent).bold("Winter")}${ansi.dim(` v${version}`)}`,
-    `  ${ansi.dim(`${model} · ${cwd}`)}`,
+    // WS-20 (review fix): `model` is a provider-qualified tag — the banner shows the modelId
+    // portion only (`modelIdPortion`), matching every other model surface's "never the raw tag"
+    // rule. No hint slot exists on a plain scrollback line (unlike the picker's own `hint`
+    // column), so the provider half is simply not shown here — there is nowhere to put it.
+    `  ${ansi.dim(`${modelIdPortion(model)} · ${cwd}`)}`,
     "",
   ];
 }

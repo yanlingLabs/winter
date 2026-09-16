@@ -108,7 +108,7 @@ final class MethodWrapperTests: XCTestCase {
             ("ask_user.respond", #"{"ok":true,"alreadyResolved":false}"#, { _ = try await client.askUserRespond(sessionId: "s", callId: "c1", answers: ["Q": "A"]) }),
             ("plan.respond", #"{"ok":true,"alreadyResolved":false}"#, { _ = try await client.planRespond(sessionId: "s", callId: "c1", approved: true, autoAccept: true) }),
             ("session.setPolicy", #"{"ok":true}"#, { try await client.setPolicy(sessionId: "s", policy: "auto") }),
-            ("session.setModel", #"{}"#, { try await client.setModel(sessionId: "s", model: "claude-opus-5") }),
+            ("session.setModel", #"{}"#, { try await client.setModel(sessionId: "s", model: "anthropic/claude-opus-5") }),
             ("session.setEffort", #"{}"#, { try await client.setEffort(sessionId: "s", effort: "xhigh") }),
             ("session.steer", #"{"ok":true,"injected":true}"#, { _ = try await client.steer(sessionId: "s", text: "also do X") }),
             ("session.interrupt", #"{"ok":true,"wasRunning":true}"#, { _ = try await client.interrupt(sessionId: "s") }),
@@ -130,11 +130,11 @@ final class MethodWrapperTests: XCTestCase {
         let (client, t) = try await connected()
 
         let (setReq, _) = try await roundTrip(t, sentIndex: 1, result: #"{}"#) {
-            try await client.setModel(sessionId: "s_1", model: "claude-opus-5")
+            try await client.setModel(sessionId: "s_1", model: "anthropic/claude-opus-5")
         }
         XCTAssertEqual(setReq["method"] as? String, "session.setModel")
         XCTAssertEqual((setReq["params"] as? [String: Any])?["sessionId"] as? String, "s_1")
-        XCTAssertEqual((setReq["params"] as? [String: Any])?["model"] as? String, "claude-opus-5")
+        XCTAssertEqual((setReq["params"] as? [String: Any])?["model"] as? String, "anthropic/claude-opus-5")
 
         let (clearReq, _) = try await roundTrip(t, sentIndex: 2, result: #"{}"#) {
             try await client.setModel(sessionId: "s_1", model: nil)
@@ -146,6 +146,29 @@ final class MethodWrapperTests: XCTestCase {
         )
     }
 
+    /// WS-20 (cross-lane, Lane 4 / Mac app): `setAdvisorModel` — same string-or-literal-null wire
+    /// shape as `setModel` above, and returns the RPC's own ECHOED `model` (what was actually
+    /// stored), not merely what was requested.
+    func testSetAdvisorModelEncodesStringOrLiteralNullAndDecodesTheEcho() async throws {
+        let (client, t) = try await connected()
+
+        let (setReq, echoed) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true,"model":"anthropic/claude-opus-5"}"#) {
+            try await client.setAdvisorModel("anthropic/claude-opus-5")
+        }
+        XCTAssertEqual(setReq["method"] as? String, "settings.setAdvisorModel")
+        XCTAssertEqual((setReq["params"] as? [String: Any])?["model"] as? String, "anthropic/claude-opus-5")
+        XCTAssertEqual(echoed, "anthropic/claude-opus-5")
+
+        let (clearReq, clearedEcho) = try await roundTrip(t, sentIndex: 2, result: #"{"ok":true,"model":null}"#) {
+            try await client.setAdvisorModel(nil)
+        }
+        XCTAssertTrue(
+            (clearReq["params"] as? [String: Any])?["model"] is NSNull,
+            "model:nil must send a literal JSON null, not an omitted key"
+        )
+        XCTAssertNil(clearedEcho)
+    }
+
     /// Winter Phase 8d (Task 4.2, Interfaces block): `setModel`'s new `confirmLossy` parameter —
     /// defaulted `false` (an unconfirmed call — the daemon refuses a lossy switch typed rather than
     /// performing it), and the confirm sheet's "Switch anyway" resend passes `true`. ALWAYS sent as
@@ -154,13 +177,13 @@ final class MethodWrapperTests: XCTestCase {
         let (client, t) = try await connected()
 
         let (defaultReq, _) = try await roundTrip(t, sentIndex: 1, result: #"{}"#) {
-            try await client.setModel(sessionId: "s_1", model: "claude-opus-5")
+            try await client.setModel(sessionId: "s_1", model: "anthropic/claude-opus-5")
         }
         XCTAssertEqual((defaultReq["params"] as? [String: Any])?["confirmLossy"] as? Bool, false,
                        "omitting the argument must still send confirmLossy:false explicitly")
 
         let (confirmedReq, _) = try await roundTrip(t, sentIndex: 2, result: #"{}"#) {
-            try await client.setModel(sessionId: "s_1", model: "claude-opus-5", confirmLossy: true)
+            try await client.setModel(sessionId: "s_1", model: "anthropic/claude-opus-5", confirmLossy: true)
         }
         XCTAssertEqual((confirmedReq["params"] as? [String: Any])?["confirmLossy"] as? Bool, true,
                        "the confirm sheet's resend must set confirmLossy:true")
@@ -214,11 +237,11 @@ final class MethodWrapperTests: XCTestCase {
         let (client, t) = try await connected()
         let (_, sessions) = try await roundTrip(
             t, sentIndex: 1,
-            result: #"{"sessions":[{"sessionId":"s_1","scope":"global","createdAt":5,"lastSeq":9,"model":"gpt-5.6-luna"},{"sessionId":"s_2","scope":"global","createdAt":6,"lastSeq":1}]}"#
+            result: #"{"sessions":[{"sessionId":"s_1","scope":"global","createdAt":5,"lastSeq":9,"model":"codex-oauth/gpt-5.6-luna"},{"sessionId":"s_2","scope":"global","createdAt":6,"lastSeq":1}]}"#
         ) {
             try await client.listSessions()
         }
-        XCTAssertEqual(sessions[0].model, "gpt-5.6-luna")
+        XCTAssertEqual(sessions[0].model, "codex-oauth/gpt-5.6-luna")
         XCTAssertNil(sessions[1].model, "absent on the wire decodes to nil")
     }
 
@@ -376,14 +399,14 @@ final class MethodWrapperTests: XCTestCase {
         let (client, t) = try await connected()
 
         let (req1, _) = try await roundTrip(t, sentIndex: 1, result: #"{"ok":true}"#) {
-            try await client.configureProvider(baseUrl: "https://api.openai.com/v1", apiKey: "sk-test-123", model: "gpt-4o-mini")
+            try await client.configureProvider(baseUrl: "https://api.openai.com/v1", apiKey: "sk-test-123", model: "openai/gpt-4o-mini")
         }
         XCTAssertEqual(req1["method"] as? String, "provider.configure")
         let params1 = req1["params"] as? [String: Any]
         XCTAssertEqual(params1?["type"] as? String, "openai-compatible")
         XCTAssertEqual(params1?["baseUrl"] as? String, "https://api.openai.com/v1")
         XCTAssertEqual(params1?["apiKey"] as? String, "sk-test-123")
-        XCTAssertEqual(params1?["model"] as? String, "gpt-4o-mini")
+        XCTAssertEqual(params1?["model"] as? String, "openai/gpt-4o-mini")
 
         let (req2, _) = try await roundTrip(t, sentIndex: 2, result: #"{"ok":true}"#) {
             try await client.configureProvider(baseUrl: "https://api.openai.com/v1", apiKey: "sk-test-456")
@@ -1047,7 +1070,10 @@ extension MethodWrapperTests {
     func testSyncConfigDecodesTheCatalogueAndBothEffortLists() async throws {
         let (client, t) = try await connected()
 
-        let catalogueBody = #"{"provider":"codex-oauth","exaKey":"exa_secret","dangerousDomains":["evil.test"],"defaultModel":"gpt-5.6-sol","models":[{"id":"gpt-5.6-sol","efforts":["none","low","medium","high","xhigh","max"]},{"id":"gpt-5.6-luna","efforts":["low","high"]}],"defaultEffort":"medium","clientEfforts":["ultra"]}"#
+        // WS-20: `id` is now a provider-qualified tag, and each row also carries `providerId`
+        // (pre-split, for grouping) + `displayName` + an optional `facingName` (present only when
+        // the row fills a family slot — "sol" does, "luna" here does not, to prove `nil` decodes).
+        let catalogueBody = #"{"provider":"codex-oauth","exaKey":"exa_secret","dangerousDomains":["evil.test"],"defaultModel":"codex-oauth/gpt-5.6-sol","models":[{"id":"codex-oauth/gpt-5.6-sol","providerId":"codex-oauth","displayName":"GPT-5.6 Sol","facingName":"sol","efforts":["none","low","medium","high","xhigh","max"]},{"id":"codex-oauth/gpt-5.6-luna","providerId":"codex-oauth","displayName":"GPT-5.6 Luna","efforts":["low","high"]}],"defaultEffort":"medium","clientEfforts":["ultra"]}"#
         let (req, snapshot) = try await roundTrip(t, sentIndex: 1, result: catalogueBody) {
             try await client.syncConfig()
         }
@@ -1056,11 +1082,11 @@ extension MethodWrapperTests {
                        "sync.config takes NO params — an empty object, matching SyncConfigParams")
         XCTAssertEqual(snapshot.provider, "codex-oauth",
                        "whole-branch review C1: the bundle says WHOSE catalogue this is, not only what it holds")
-        XCTAssertEqual(snapshot.defaultModel, "gpt-5.6-sol")
+        XCTAssertEqual(snapshot.defaultModel, "codex-oauth/gpt-5.6-sol")
         XCTAssertEqual(snapshot.defaultEffort, "medium")
         XCTAssertEqual(snapshot.models, [
-            SyncConfigModelInfo(id: "gpt-5.6-sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"]),
-            SyncConfigModelInfo(id: "gpt-5.6-luna", efforts: ["low", "high"]),
+            SyncConfigModelInfo(id: "codex-oauth/gpt-5.6-sol", providerId: "codex-oauth", displayName: "GPT-5.6 Sol", facingName: "sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"]),
+            SyncConfigModelInfo(id: "codex-oauth/gpt-5.6-luna", providerId: "codex-oauth", displayName: "GPT-5.6 Luna", facingName: nil, efforts: ["low", "high"]),
         ], "per-model efforts survive verbatim — the whole point of the field")
         XCTAssertEqual(snapshot.clientEfforts, ["ultra"],
                        "tiers arrive on their OWN list, never merged into models[].efforts")
@@ -1091,13 +1117,15 @@ extension MethodWrapperTests {
         XCTAssertEqual(SyncConfigSnapshot.empty.models, [], "the never-told state has no catalogue at all")
     }
 
-    /// A malformed row is DROPPED, not admitted. The wire is `z.string().min(1)` on both fields;
-    /// Swift enforces neither for free, and an empty slug reaches a `/responses` body verbatim and
-    /// comes back an opaque 400 — the same failure class the never-synced rule exists to prevent,
-    /// arriving by a different door.
+    /// A malformed row is DROPPED, not admitted. The wire is `z.string().min(1)` on `id`/
+    /// `providerId`/`displayName`/each `efforts` entry; Swift enforces none of it for free, and an
+    /// empty slug reaches a `/responses` body verbatim and comes back an opaque 400 — the same
+    /// failure class the never-synced rule exists to prevent, arriving by a different door. A row
+    /// missing `providerId` or `displayName` entirely is dropped the same way (WS-20: those two are
+    /// required, unlike `facingName`, which is genuinely optional).
     func testSyncConfigRefusesEmptySlugsAndEmptyLevels() async throws {
-        let (_, snapshot) = try await roundTripSyncConfig(#"{"exaKey":null,"dangerousDomains":[],"defaultModel":"m","models":[{"id":"","efforts":["high"]},{"id":"ok","efforts":["high",""]}],"defaultEffort":"","clientEfforts":["ultra",""]}"#)
-        XCTAssertEqual(snapshot.models, [SyncConfigModelInfo(id: "ok", efforts: ["high"])])
+        let (_, snapshot) = try await roundTripSyncConfig(#"{"exaKey":null,"dangerousDomains":[],"defaultModel":"m","models":[{"id":"","providerId":"p","displayName":"D","efforts":["high"]},{"id":"p/ok","providerId":"","displayName":"D","efforts":["high"]},{"id":"p/ok2","providerId":"p","displayName":"","efforts":["high"]},{"id":"p/ok3","providerId":"p","displayName":"D","efforts":["high",""]}],"defaultEffort":"","clientEfforts":["ultra",""]}"#)
+        XCTAssertEqual(snapshot.models, [SyncConfigModelInfo(id: "p/ok3", providerId: "p", displayName: "D", facingName: nil, efforts: ["high"])])
         XCTAssertEqual(snapshot.clientEfforts, ["ultra"])
     }
 

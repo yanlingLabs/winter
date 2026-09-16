@@ -126,6 +126,11 @@ public struct ProviderToolSpec: Sendable, Equatable {
 /// (cancellation is delivered out-of-band: the research runner tears fetches down through a
 /// `ChatAbortSignal` and cancels the provider stream by cancelling its consuming task).
 public struct ProviderTurnRequest: Sendable {
+    /// WS-20: ALWAYS the bare wire modelId, never a provider-qualified tag — every caller
+    /// (`ChatEngine.runBody`, `ResearchRunner.runResearch`) splits its own tag-typed model value
+    /// (`modelIdPortion(of:)`, `ChatEngine.swift`) right before constructing this request, because
+    /// this struct maps straight onto the provider's own `/responses`-shaped wire request, which
+    /// has never heard of Winter's tag vocabulary.
     public let model: String
     public let instructions: String?
     public let input: [ProviderInputItem]

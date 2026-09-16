@@ -26,6 +26,8 @@ import { openRuntimeStateDb, type RuntimeStateDb } from "./db";
 import { createSqliteRuntimeDirectoryStore } from "./directory-store";
 import { RuntimeLeases, processStartedAt, type LeaseProbe } from "./leases";
 import { backfillNativeSessions, type BackfillReport } from "./migrations/backfill";
+import { migrateModelRefsToTags } from "./migrations/tags";
+import { splitTag } from "../runtime-sdk/model-tag";
 import { applyMemoryKeyMigration, memoryKeyRelocations, planMemoryKeyMigration, reconcileMemoryKeyManifest, type MemoryKeyFs } from "./migrations/memory-keys";
 import { RuntimeSessionRecords } from "./records";
 import { recoverRuntimeState, type RecoveryHooks, type RecoveryReport } from "./recovery";
@@ -75,6 +77,10 @@ export interface DaemonRuntimeStateDeps {
    *  wiring has to survive — a repair that throws, and an apply that throws after a committed move —
    *  are both mid-`rename` failures, and a test cannot produce either by arranging files. */
   memoryKeyFs?: MemoryKeyFs;
+  /** WS-20 (review round 2, M5): threaded into `migrateModelRefsToTags`'s rule-5 tie-break — only
+   *  the daemon boot hook has `secrets` in hand to compute this; every other caller omits it and
+   *  gets the old fixed-preference tie-break unchanged. */
+  presentProviders?: ReadonlySet<string>;
 }
 
 /** The runtime spine, open and recovered. 8b's `createRuntimeSdk({ directoryStore })` consumes
@@ -222,7 +228,11 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
     // runs at EVERY boot rather than behind a marker — that is what makes it catch up after a
     // release, and after any boot where it could not run.
     let lastBackfill: BackfillReport | null = null;
-    const providerId = deps.settings()?.provider?.type;
+    // WS-20: the "provider" is now the TAG's own prefix (a real catalog provider id), not the
+    // legacy `settings.provider.type` string — `backfillNativeSessions` composes it straight into
+    // a tag for any session that carries a bare stored model override.
+    const providerModel = deps.settings()?.provider?.model;
+    const providerId = providerModel ? splitTag(providerModel).providerId : undefined;
     if (!providerId) {
       log("runtime backfill skipped: settings.json names no provider (it re-runs at the next boot)");
     } else {
@@ -234,6 +244,18 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
       } catch (e) {
         log(`runtime backfill failed (it retries at the next boot): ${errName(e)}`);
       }
+    }
+
+    // WS-20 (spec §5): every `runtime_sessions`/`runtime_children.model_ref` still holding a bare
+    // legacy model id becomes a provider-qualified tag — idempotent, same "runs at every boot"
+    // shape as the backfill just above (a row already holding a tag is a no-op).
+    try {
+      const tagsMigration = migrateModelRefsToTags({ rs, home, presentProviders: deps.presentProviders });
+      if (tagsMigration.sessionsRewritten > 0 || tagsMigration.childrenRewritten > 0) {
+        log(`model_ref tag migration: ${tagsMigration.sessionsRewritten} session(s), ${tagsMigration.childrenRewritten} child(ren) rewritten`);
+      }
+    } catch (e) {
+      log(`model_ref tag migration failed (it retries at the next boot): ${errName(e)}`);
     }
 
     // ── §17 phase 5: the opt-in memory-key relocation — LIVE IN THIS BUILD (P8b-17) ──────────────

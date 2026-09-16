@@ -5,7 +5,7 @@
 //
 // Fix wave (M1): `planAndApplySwitch` reads the REAL pinned catalog (`catalogRowsFor`, never
 // faked) for its own bail-out #4 — so every case below that means to REACH the fake selector uses
-// "claude-sonnet-5" (a real catalog row/alias), not a fictional string like the file's earlier
+// "anthropic/claude-sonnet-5" (a real catalog row/alias), not a fictional string like the file's earlier
 // "anthropic/sonnet" (zero catalog rows, which the new bail-out now short-circuits to
 // `same-runtime` before the fake selector is ever called).
 import { describe, expect, test } from "bun:test";
@@ -157,7 +157,7 @@ describe("planAndApplySwitch", () => {
 
   test("no runtime record: same-runtime (nothing to switch FROM)", async () => {
     await withRs(async (_rs, records) => {
-      const out = await planAndApplySwitch(deps({ records }), "s-nope", "claude-sonnet-5", false);
+      const out = await planAndApplySwitch(deps({ records }), "s-nope", "anthropic/claude-sonnet-5", false);
       expect(out).toEqual({ kind: "same-runtime" });
     });
   });
@@ -185,12 +185,12 @@ describe("planAndApplySwitch", () => {
       seedRecord(records, "s1");
       const out = await planAndApplySwitch(
         deps({ records, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => ({ refused: true, reason: "runtime-unavailable", detail: "no claude executable" })) }) }),
-        "s1", "claude-sonnet-5", false,
+        "s1", "anthropic/claude-sonnet-5", false,
       );
       // Fix round 4 (item 5): the ROUTER's own detail never reaches the user — measured shapes name
       // a runtime ("… never routes to the Winter runtime (D28)") or cite a spec id, both of which
       // R-10b-4 forbids. It goes to the log as a category; this copy is the daemon's own.
-      expect(out).toEqual({ kind: "refused", code: "runtime_selection_refused", detail: "Winter can't switch to claude-sonnet-5 right now." });
+      expect(out).toEqual({ kind: "refused", code: "runtime_selection_refused", detail: "Winter can't switch to anthropic/claude-sonnet-5 right now." });
     });
   });
 
@@ -208,7 +208,7 @@ describe("planAndApplySwitch", () => {
       const barrier: HandoffBarrier = { plan: async (_session, to) => { planCalled = to; return plan; }, reviewSwitch: async () => ({ prompt: false }), execute: async () => { executeCalled = true; return { kind: "resumed", selection: SELECTION("claude-agent") }; } };
       const out = await planAndApplySwitch(
         deps({ records, barrier, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }) }),
-        "s1", "claude-sonnet-5", false,
+        "s1", "anthropic/claude-sonnet-5", false,
       );
       expect(out).toEqual({ kind: "confirmation_required", warnings: ["reasoning state does not survive a move to the official leg"], portable: [] });
       // A fresh selection landing on a DIFFERENT leg from the recorded one must reach the barrier's
@@ -232,7 +232,7 @@ describe("planAndApplySwitch", () => {
       const barrier: HandoffBarrier = { plan: async () => { planCalled = true; return plan; }, reviewSwitch: async () => ({ prompt: false }), execute: async (p) => { executedPlan = p; return { kind: "resumed", selection: SELECTION("claude-agent") }; } };
       const out = await planAndApplySwitch(
         deps({ records, barrier, runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }) }),
-        "s1", "claude-sonnet-5", true,
+        "s1", "anthropic/claude-sonnet-5", true,
       );
       expect(out).toEqual(RESUMED_ANY_TIME("claude-agent"));
       expect(planCalled).toBe(true);
@@ -263,7 +263,7 @@ describe("planAndApplySwitch", () => {
       const barrier: HandoffBarrier = { plan: async () => plan, reviewSwitch: async () => ({ prompt: false }), execute: async () => { executeCalled = true; return { kind: "resumed", selection: SELECTION("claude-agent") }; } };
       const out = await planAndApplySwitch(
         deps({ records, barrier, winter: fakeWinter({ live }), runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }) }),
-        "s1", "claude-sonnet-5", true,
+        "s1", "anthropic/claude-sonnet-5", true,
       );
       expect(out).toEqual({ kind: "deferred" });
       expect(executeCalled).toBe(false);
@@ -340,7 +340,7 @@ describe("planAndApplySwitch", () => {
               store: { meta: () => ({ mode: "code", cwd: "/x" }), setModel: (sid, model) => { setModelCalls.push([sid, model]); } },
               log: (line) => { logLines.push(line); },
             }),
-            "s1", "claude-sonnet-5", true,
+            "s1", "anthropic/claude-sonnet-5", true,
           );
           return { out, setModelCalls, logLines, resolveIdle: resolveIdle!, idlePromise, close: () => rs.close() };
         },
@@ -355,7 +355,7 @@ describe("planAndApplySwitch", () => {
       resolveIdle();
       await idlePromise;
       await Bun.sleep(10); // let the fire-and-forget continuation run
-      expect(setModelCalls).toEqual([["s1", "claude-sonnet-5"]]);
+      expect(setModelCalls).toEqual([["s1", "anthropic/claude-sonnet-5"]]);
       expect(logLines).toEqual([]); // Minor 3's log line is for the NON-resumed outcomes only
       close();
     });
@@ -434,7 +434,7 @@ describe("planAndApplySwitch", () => {
       const runtime = fakeRuntime({
         selectRuntimeFor: freshOnlySelector(() => { selectorCalled = true; return sameLegSelection; }),
       });
-      const out = await planAndApplySwitch(deps({ records, runtime }), "s1", "claude-sonnet-5", false);
+      const out = await planAndApplySwitch(deps({ records, runtime }), "s1", "anthropic/claude-sonnet-5", false);
       // same leg as recorded — but the selector DID run; C1 (fix round 2) carries its decision along.
       expect(out).toEqual({ kind: "same-runtime", decided: sameLegSelection });
       expect(selectorCalled).toBe(true);
@@ -461,7 +461,7 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
           store: { meta: () => ({ mode: "code", cwd: "/x" }) }, // Code would default ON — the explicit false still wins
           settings: () => ({ runtimes: { handoff: { crossRuntime: false } } }) as unknown as Settings,
         }),
-        "s1", "claude-sonnet-5", false,
+        "s1", "anthropic/claude-sonnet-5", false,
       );
       // Carried Minor m1 (D1 review, W18-23): reworded to name the SETTING, never a runtime. The
       // setting's own key path ("crossRuntime") is allowed to contain the substring "runtime" — it
@@ -494,7 +494,7 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
           runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }), // a genuine cross-leg move
           settings: () => ({ runtimes: { handoff: { crossRuntime: false } } }) as unknown as Settings,
         }),
-        "s1", "claude-sonnet-5", false,
+        "s1", "anthropic/claude-sonnet-5", false,
       );
       expect(out).toEqual({ kind: "refused", code: "handoff_disabled", detail: expect.stringContaining("turned off") });
       expect(reviewCalled).toBe(false);
@@ -517,7 +517,7 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
           runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => sameLegSelection) }), // deepseek stays on Winter — same leg
           settings: () => ({ runtimes: { handoff: { crossRuntime: false } } }) as unknown as Settings,
         }),
-        "s1", "deepseek-chat", false,
+        "s1", "deepseek/deepseek-reasoner", false,
       );
       expect(out).toEqual({ kind: "same-runtime", decided: sameLegSelection });
       expect(reviewCalled).toBe(true);
@@ -542,7 +542,7 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
           store: { meta: () => ({ mode: "code", cwd: "/x" }) },
           settings: () => null,
         }),
-        "s1", "claude-sonnet-5", true,
+        "s1", "anthropic/claude-sonnet-5", true,
       );
       expect(planCalled).toBe(true);
       expect(out).toEqual(RESUMED_ANY_TIME("claude-agent"));
@@ -562,7 +562,7 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
             store: { meta: () => ({ mode, cwd: "/x" }) },
             settings: () => null,
           }),
-          "s1", "claude-sonnet-5", false,
+          "s1", "anthropic/claude-sonnet-5", false,
         );
         expect(out).toEqual({ kind: "refused", code: "handoff_disabled", detail: expect.any(String) });
         expect(planCalled).toBe(false);
@@ -583,14 +583,14 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
       const runtime = fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) });
       const out1 = await planAndApplySwitch(
         deps({ records, barrier, runtime, store: { meta: () => ({ mode: "code", cwd: "/x" }) }, settings: () => live }),
-        "s1", "claude-sonnet-5", true,
+        "s1", "anthropic/claude-sonnet-5", true,
       );
       expect(out1).toEqual(RESUMED_ANY_TIME("claude-agent"));
       // Flip the SAME getter to an explicit false — no daemon restart, no new `deps` object.
       live = { runtimes: { handoff: { crossRuntime: false } } } as unknown as Settings;
       const out2 = await planAndApplySwitch(
         deps({ records, barrier, runtime, store: { meta: () => ({ mode: "code", cwd: "/x" }) }, settings: () => live }),
-        "s1", "claude-sonnet-5", false,
+        "s1", "anthropic/claude-sonnet-5", false,
       );
       expect(out2).toEqual({ kind: "refused", code: "handoff_disabled", detail: expect.any(String) });
     });
@@ -613,7 +613,7 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
           runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => SELECTION("claude-agent")) }),
           settings: () => ({ runtimes: { handoff: { crossRuntime: true } } }) as unknown as Settings,
         }),
-        "s1", "claude-sonnet-5", true,
+        "s1", "anthropic/claude-sonnet-5", true,
       );
       expect(planCalled).toBe(true);
       expect(out).toEqual(RESUMED_ANY_TIME("claude-agent"));
@@ -631,7 +631,7 @@ describe("planAndApplySwitch: the C2 cross-runtime fence (settings.runtimes.hand
             runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => sameLegSelection) }),
             settings: () => ({ runtimes: { handoff: { crossRuntime } } }) as unknown as Settings,
           }),
-          "s1", "claude-sonnet-5", false,
+          "s1", "anthropic/claude-sonnet-5", false,
         );
         expect(out).toEqual({ kind: "same-runtime", decided: sameLegSelection });
       }
@@ -667,7 +667,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
       const runtime = fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => sameLegSelection) }); // deepseek stays on Winter
       const refused = await planAndApplySwitch(
         deps({ records, runtime, barrier: fakeBarrierWithReview(review) }),
-        "s1", "deepseek-chat", false,
+        "s1", "deepseek/deepseek-reasoner", false,
       );
       expect(refused).toEqual({ kind: "confirmation_required", warnings: ["reasoning state may be lost"], portable: ["the visible conversation"] });
 
@@ -675,7 +675,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
       // model change (barrier.plan()/execute() are never reached for a same-leg switch at all).
       const confirmed = await planAndApplySwitch(
         deps({ records, runtime, barrier: fakeBarrierWithReview(review) }),
-        "s1", "deepseek-chat", true,
+        "s1", "deepseek/deepseek-reasoner", true,
       );
       expect(confirmed).toEqual({ kind: "same-runtime", decided: sameLegSelection });
     });
@@ -690,19 +690,19 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
   test("C1: GPT -> DeepSeek (same leg, confirmed) leaves the record on DeepSeek; DeepSeek -> GPT then leaves it on GPT", async () => {
     await withRs(async (_rs, records) => {
       seedRecord(records, "s1"); // persisted: winter-agent, providerId "p", modelRef "m"
-      const DEEPSEEK = { ...SELECTION("winter-agent"), providerId: "deepseek", modelRef: "deepseek/deepseek-chat", family: "deepseek" };
+      const DEEPSEEK = { ...SELECTION("winter-agent"), providerId: "deepseek", modelRef: "deepseek/deepseek-reasoner", family: "deepseek" };
       const GPT = { ...SELECTION("winter-agent"), providerId: "openai", modelRef: "openai/gpt-5.6-sol", family: "openai" };
       const runtime = fakeRuntime({
-        selectRuntimeFor: freshOnlySelector((model) => (model === "deepseek-chat" ? DEEPSEEK : GPT)),
+        selectRuntimeFor: freshOnlySelector((model) => (model === "deepseek/deepseek-reasoner" ? DEEPSEEK : GPT)),
       });
       const barrier = fakeBarrierWithReview({ prompt: false });
       const d = deps({ records, runtime, barrier });
 
-      const toDeepseek = await planAndApplySwitch(d, "s1", "deepseek-chat", false);
+      const toDeepseek = await planAndApplySwitch(d, "s1", "deepseek/deepseek-reasoner", false);
       expect(toDeepseek).toEqual({ kind: "same-runtime", decided: DEEPSEEK });
       const afterDeepseek = records.get("s1")!;
       expect(afterDeepseek.providerId).toBe("deepseek");
-      expect(afterDeepseek.modelRef).toBe("deepseek/deepseek-chat");
+      expect(afterDeepseek.modelRef).toBe("deepseek/deepseek-reasoner");
       expect(afterDeepseek.selection).toEqual(DEEPSEEK);
 
       const toGpt = await planAndApplySwitch(d, "s1", "openai/gpt-5.6-sol", false);
@@ -752,7 +752,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
           runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => officialSelection) }),
           barrier: fakeBarrierWithReview(review, { onReviewSwitch: (_s, requested) => { reviewedWith = requested; } }),
         }),
-        "s1", "claude-opus-5", false,
+        "s1", "anthropic/claude-opus-5", false,
       );
       expect(out).toEqual({ kind: "same-runtime", decided: officialSelection });
       // The review DID run (proving the daemon calls it on every change, same-leg or not) and the
@@ -792,7 +792,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
             reviewSwitch: async () => { reviewCalled = true; throw new Error("not reached — no sessionKey means reviewSwitch is never called"); },
           },
         }),
-        "s1", "deepseek-chat", false,
+        "s1", "deepseek/deepseek-reasoner", false,
       );
       expect(out).toEqual({ kind: "same-runtime" });
       expect(reviewCalled).toBe(false);
@@ -851,7 +851,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
             },
           },
         }),
-        "s1", "claude-sonnet-5", false,
+        "s1", "anthropic/claude-sonnet-5", false,
       );
       // A REAL handoff, not a silent same-runtime: the row was rebuilt, the router answered, and
       // the plan actually executed.
@@ -890,7 +890,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
             execute: async () => { throw new Error("not reached"); },
           },
         }),
-        "s1", "claude-sonnet-5", false,
+        "s1", "anthropic/claude-sonnet-5", false,
       );
       expect(out.kind).toBe("confirmation_required");
       expect(reviewCalls).toBe(2);
@@ -911,7 +911,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
             reviewSwitch: async () => { throw new Error(NOT_IN_DIRECTORY); },
           },
         }),
-        "s1", "claude-sonnet-5", false,
+        "s1", "anthropic/claude-sonnet-5", false,
       );
       expect(out.kind).toBe("confirmation_required");
     });
@@ -932,7 +932,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
             reviewSwitch: async () => ({ prompt: false }),
           },
         }),
-        "s1", "claude-sonnet-5", true, // confirmLossy: the user already said yes
+        "s1", "anthropic/claude-sonnet-5", true, // confirmLossy: the user already said yes
       );
       expect(out.kind).toBe("blocked");
       // The record is untouched — it still names the source leg, which is exactly why the caller
@@ -965,7 +965,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
             reviewSwitch: async () => ({ prompt: false, skipped: "no-source-turns" }),
           },
         }),
-        "s1", "claude-sonnet-5", false,
+        "s1", "anthropic/claude-sonnet-5", false,
       );
       expect(out.kind).toBe("blocked");
       expect(records.get("s1")!.runtimeKind).toBe("winter-agent");
@@ -994,7 +994,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
               reviewSwitch: async () => ({ prompt: false, skipped: "no-source-turns" }),
             },
           }),
-          "s1", "claude-sonnet-5", false,
+          "s1", "anthropic/claude-sonnet-5", false,
         );
         expect(out.kind).toBe("blocked");
         expect(records.get("s1")!.runtimeKind).toBe("winter-agent");
@@ -1022,7 +1022,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
               reviewSwitch: async () => ({ prompt: false, skipped: "no-source-turns" }),
             },
           }),
-          "s1", "claude-sonnet-5", false,
+          "s1", "anthropic/claude-sonnet-5", false,
         );
         expect(out.kind).toBe("lossy_fork");
         expect(records.get("s1")!.runtimeKind).toBe("winter-agent");
@@ -1058,7 +1058,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
             },
           },
         }),
-        "s1", "claude-sonnet-5", true, // confirmLossy: past the prompt, into execution
+        "s1", "anthropic/claude-sonnet-5", true, // confirmLossy: past the prompt, into execution
       );
       expect(reviewCalls).toBe(2);           // it ASKED AGAIN rather than trusting the snapshot
       expect(out.kind).toBe("lossy_fork");   // and honoured the barrier's own refusal
@@ -1085,7 +1085,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
             },
           },
         }),
-        "s1", "claude-sonnet-5", true,
+        "s1", "anthropic/claude-sonnet-5", true,
       );
       expect(out.kind).toBe("lossy_fork");
       expect(records.get("s1")!.runtimeKind).toBe("winter-agent");
@@ -1100,7 +1100,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
   // completed assistant entries, so it answers "no source turns" — and the continuation runs AFTER
   // `idle()`, by which point that turn is real. Round 3 carried the review-time verdict down and
   // committed `meta.model` with no barrier staging: MEASURED as `setModelCalls=[["s1",
-  // "claude-sonnet-5"]]` and `record.runtimeKind=claude-agent`. Round 4 re-asks, and refuses.
+  // "anthropic/claude-sonnet-5"]]` and `record.runtimeKind=claude-agent`. Round 4 re-asks, and refuses.
   // ══════════════════════════════════════════════════════════════════════════════════════════════
   async function deferredStaleReviewRun(opts: { freshSkipped: "no-source-turns" | undefined }): Promise<{
     setModelCalls: Array<[string, string | null]>; runtimeKind: string; evicted: string[]; reviewCalls: number; close: () => void;
@@ -1141,7 +1141,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
           },
         },
       }),
-      "s1", "claude-sonnet-5", true,
+      "s1", "anthropic/claude-sonnet-5", true,
     );
     expect(out).toEqual({ kind: "deferred" });
     expect(setModelCalls).toEqual([]); // never at defer time
@@ -1163,7 +1163,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
   test("MAJOR 1 (deferred): a verdict that STILL holds at execution time re-selects and commits, as before", async () => {
     const r = await deferredStaleReviewRun({ freshSkipped: "no-source-turns" });
     expect(r.reviewCalls).toBe(2);
-    expect(r.setModelCalls).toEqual([["s1", "claude-sonnet-5"]]);
+    expect(r.setModelCalls).toEqual([["s1", "anthropic/claude-sonnet-5"]]);
     expect(r.runtimeKind).toBe("claude-agent");
     expect(r.evicted).toEqual(["s1"]);
     r.close();
@@ -1187,10 +1187,11 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
         deps({
           records,
           ...(home === undefined ? {} : { home }),
-          // `runtimes.official.auth: "console"` is what makes the two answers DIFFER: with a home,
-          // `credentialRefFor` consults `officialAuthFamilyFor` and names the console account;
-          // without one it keeps the old unconditional `anthropic:default`.
-          settings: () => ({ runtimes: { handoff: { crossRuntime: true }, official: { auth: "console" } } }) as unknown as Settings,
+          // WS-20: `runtimes.official.auth` is GONE — the console-vs-api-key arm is now the tag's
+          // own prefix (`console/*` vs `anthropic/*`), never a settings-driven `credentialRefFor`
+          // decision. `home` presence/absence therefore no longer changes which account this
+          // "anthropic" selection persists — both converge on the one fixed inventory row.
+          settings: () => ({ runtimes: { handoff: { crossRuntime: true } } }) as unknown as Settings,
           runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => ANTHROPIC_SELECTION) }),
           barrier: {
             plan: async (session, to) => ({ session, from: "winter-agent", to, steps: [], selection: { kind: "unchanged", selection: ANTHROPIC_SELECTION } } as unknown as HandoffPlan),
@@ -1198,17 +1199,21 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
             reviewSwitch: async () => ({ prompt: false, skipped: "no-source-turns" }),
           },
         }),
-        "s1", "claude-sonnet-5", false,
+        "s1", "anthropic/claude-sonnet-5", false,
       );
       return records.get("s1")!.authRef;
     });
   }
 
-  test("MINOR 4: with a home, the re-selection persists the account the official leg's own auth mode names", async () => {
-    expect(await reselectAnthropicAuthRef(mkdtempSync(join(tmpdir(), "winter-handoff-home-")))).toBe("keychain:anthropic:console");
+  // WS-20: both cases now converge on the SAME unconditional account — `credentialRefFor` no
+  // longer branches on `home`/settings at all for "anthropic" (that arm decision is the tag's own
+  // prefix, decided upstream of this function entirely). Kept as two tests, still proving `home`
+  // presence/absence cannot change what this leg persists for an `anthropic/*` selection.
+  test("MINOR 4: with a home, the re-selection persists the one fixed anthropic account", async () => {
+    expect(await reselectAnthropicAuthRef(mkdtempSync(join(tmpdir(), "winter-handoff-home-")))).toBe("keychain:anthropic:default");
   });
 
-  test("MINOR 4: without a home it falls back to the unconditional default account — the gap daemon.ts:2173 closes", async () => {
+  test("MINOR 4: without a home it persists the SAME unconditional default account — the gap daemon.ts:2173 closes", async () => {
     expect(await reselectAnthropicAuthRef(undefined)).toBe("keychain:anthropic:default");
   });
 
@@ -1235,7 +1240,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
             reviewSwitch: async () => ({ prompt: false, skipped: "no-source-turns" }),
           },
         }),
-        "s1", "claude-sonnet-5", true,
+        "s1", "anthropic/claude-sonnet-5", true,
       );
       expect(out.kind).toBe("lossy_fork");  // the barrier's own outcome, unweakened
       expect(evicted).toEqual([]);          // THE POINT: the live child is still there
@@ -1281,7 +1286,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
             reviewSwitch: async () => ({ prompt: false, skipped: "no-source-turns" }),
           },
         }),
-        "s1", "claude-sonnet-5", true,
+        "s1", "anthropic/claude-sonnet-5", true,
       );
       expect(out.kind).toBe("same-runtime");
       expect(evicted).toEqual([]);      // THE POINT: the turn in flight was not cut
@@ -1313,7 +1318,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
             reviewSwitch: async () => { reviewCalls += 1; return { prompt: false, skipped: "no-source-turns" }; },
           },
         }),
-        "s1", "claude-sonnet-5", false,
+        "s1", "anthropic/claude-sonnet-5", false,
       );
       expect(out.kind).toBe("same-runtime");
       expect(reviewCalls).toBe(2); // asked again at execution time, and the verdict STILL held
@@ -1340,7 +1345,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
             reviewSwitch: async () => ({ prompt: false }),
           },
         }),
-        "s1", "claude-sonnet-5", false,
+        "s1", "anthropic/claude-sonnet-5", false,
       );
       expect(out.kind).toBe("lossy_fork");
       expect(records.get("s1")!.runtimeKind).toBe("winter-agent");
@@ -1362,7 +1367,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
             reviewSwitch: async () => ({ prompt: false }),
           },
         }),
-        "s1", "claude-sonnet-5", false,
+        "s1", "anthropic/claude-sonnet-5", false,
       );
       expect(out.kind).toBe("blocked");
       expect(records.get("s1")!.runtimeKind).toBe("winter-agent");
@@ -1384,7 +1389,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
             reviewSwitch: async () => ({ prompt: false }), // a session WITH turns — nothing to re-select away
           },
         }),
-        "s1", "claude-sonnet-5", false,
+        "s1", "anthropic/claude-sonnet-5", false,
       );
       expect(out.kind).toBe("blocked");
       expect(planCalls).toBe(2); // tried once, materialized, tried again — then gave up SAFELY
@@ -1405,7 +1410,7 @@ describe("planAndApplySwitch: the pre-flight review (barrier.reviewSwitch) runs 
             reviewSwitch: async () => { throw new Error("ECONNRESET: transient sidecar read failure"); },
           },
         }),
-        "s1", "claude-sonnet-5", false,
+        "s1", "anthropic/claude-sonnet-5", false,
       );
       expect(out.kind).toBe("confirmation_required");
     });
@@ -1440,7 +1445,7 @@ describe("planAndApplySwitch: a throwing reviewSwitch fails safe as a prompt, ne
             barrier: fakeBarrierWhoseReviewThrows(err),
             log: (line) => logs.push(line),
           }),
-          "s1", "deepseek-chat", false,
+          "s1", "deepseek/deepseek-reasoner", false,
         );
       } catch (e) {
         caught = e;
@@ -1448,7 +1453,7 @@ describe("planAndApplySwitch: a throwing reviewSwitch fails safe as a prompt, ne
       expect(caught).toBeUndefined(); // never a rejection
       expect(out).toEqual({
         kind: "confirmation_required",
-        warnings: ["Winter couldn't check what carries over to deepseek-chat. The conversation carries over; reasoning private to the current model may not."],
+        warnings: ["Winter couldn't check what carries over to deepseek/deepseek-reasoner. The conversation carries over; reasoning private to the current model may not."],
         portable: [],
       });
       // Logged ONCE, naming the error CLASS only — never `.message` (which could carry payload
@@ -1474,7 +1479,7 @@ describe("planAndApplySwitch: a throwing reviewSwitch fails safe as a prompt, ne
           runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => sameLegSelection) }),
           barrier: fakeBarrierWhoseReviewThrows(new Error("transient store error")),
         }),
-        "s1", "deepseek-chat", true,
+        "s1", "deepseek/deepseek-reasoner", true,
       );
       // A same-leg change proceeds as an ordinary same-runtime model change once "confirmed" —
       // barrier.plan()/execute() are never reached for a same-leg switch at all.
@@ -1493,7 +1498,7 @@ describe("planAndApplySwitch: a throwing reviewSwitch fails safe as a prompt, ne
           barrier: fakeBarrierWhoseReviewThrows("a bare string throw"),
           log: (line) => logs.push(line),
         }),
-        "s1", "deepseek-chat", false,
+        "s1", "deepseek/deepseek-reasoner", false,
       );
       expect(out.kind).toBe("confirmation_required");
       expect(logs[0]).toContain("unknown");
@@ -1510,7 +1515,7 @@ describe("planAndApplySwitch: a throwing reviewSwitch fails safe as a prompt, ne
 // override" intent, must still render something readable).
 describe("modelLabelFor", () => {
   test("an ordinary model string passes through unchanged", () => {
-    expect(modelLabelFor("claude-sonnet-5")).toBe("claude-sonnet-5");
+    expect(modelLabelFor("anthropic/claude-sonnet-5")).toBe("anthropic/claude-sonnet-5");
   });
 
   test("an empty string renders as \"the default model\", never a blank or a literal null", () => {
@@ -1593,7 +1598,7 @@ describe("planAndApplySwitch: the no-credential refusal carries the hint", () =>
             selectRuntimeFor: async () => ({ refused: true, reason: "no-credential", detail: "no door can serve claude-opus-5", alternatives }),
           }),
         }),
-        "s1", "claude-opus-5", false,
+        "s1", "anthropic/claude-opus-5", false,
       );
       expect(out.kind).toBe("refused");
       const detail = (out as { detail: string }).detail;
@@ -1622,9 +1627,9 @@ describe("planAndApplySwitch: the no-credential refusal carries the hint", () =>
             selectRuntimeFor: async () => ({ refused: true, reason: "mode-forbids-runtime", detail: "chat/dispatch never route to the official runtime (D28)" }),
           }),
         }),
-        "s1", "claude-opus-5", false,
+        "s1", "anthropic/claude-opus-5", false,
       );
-      expect(out).toEqual({ kind: "refused", code: "runtime_selection_refused", detail: "Winter can't switch to claude-opus-5 right now." });
+      expect(out).toEqual({ kind: "refused", code: "runtime_selection_refused", detail: "Winter can't switch to anthropic/claude-opus-5 right now." });
       // Logged as a CATEGORY, never as text — the router's own words leave no trace anywhere a user
       // or a log reader could reconstruct them from.
       expect(logLines).toHaveLength(1);
@@ -1653,9 +1658,9 @@ describe("planAndApplySwitch: the no-credential refusal carries the hint", () =>
             reviewSwitch: async () => ({ prompt: false }),
           },
         }),
-        "s1", "claude-sonnet-5", false,
+        "s1", "anthropic/claude-sonnet-5", false,
       );
-      expect(out).toEqual({ kind: "refused", code: "runtime_selection_refused", detail: "Winter can't switch to claude-sonnet-5 right now." });
+      expect(out).toEqual({ kind: "refused", code: "runtime_selection_refused", detail: "Winter can't switch to anthropic/claude-sonnet-5 right now." });
       expect(logLines).toHaveLength(1);
       expect(logLines[0]).toContain("detail=names-a-runtime");
       expect(logLines[0]).not.toContain("WS-00");
@@ -1698,7 +1703,7 @@ describe("item 6: a same-leg PROVIDER change replaces the live child", () => {
           runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-reasoner")) }),
           barrier: { plan: async () => { throw new Error("not reached — same leg"); }, execute: async () => { throw new Error("not reached"); }, reviewSwitch: async () => ({ prompt: false }) },
         }),
-        "s1", "deepseek-chat", false,
+        "s1", "deepseek/deepseek-reasoner", false,
       );
       expect(out.kind).toBe("same-runtime");
       expect(evicted).toEqual(["s1"]);
@@ -1720,7 +1725,7 @@ describe("item 6: a same-leg PROVIDER change replaces the live child", () => {
           runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("p", "p/other-model")) }),
           barrier: { plan: async () => { throw new Error("not reached — same leg"); }, execute: async () => { throw new Error("not reached"); }, reviewSwitch: async () => ({ prompt: false }) },
         }),
-        "s1", "deepseek-chat", false,
+        "s1", "deepseek/deepseek-reasoner", false,
       );
       expect(out.kind).toBe("same-runtime");
       expect(evicted).toEqual([]);
@@ -1741,7 +1746,7 @@ describe("item 6: a same-leg PROVIDER change replaces the live child", () => {
           runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-reasoner")) }),
           barrier: { plan: async () => { throw new Error("not reached — same leg"); }, execute: async () => { throw new Error("not reached"); }, reviewSwitch: async () => ({ prompt: false }) },
         }),
-        "s1", "deepseek-chat", false,
+        "s1", "deepseek/deepseek-reasoner", false,
       );
       expect(out.kind).toBe("same-runtime");
       expect(evicted).toEqual([]);   // the reply never waited, and the turn was never cut short
@@ -1772,7 +1777,7 @@ describe("item 6: a same-leg PROVIDER change replaces the live child", () => {
           runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-reasoner")) }),
           barrier: { plan: async () => { throw new Error("not reached — same leg"); }, execute: async () => { throw new Error("not reached"); }, reviewSwitch: async () => ({ prompt: false }) },
         }),
-        "s1", "deepseek-chat", false,
+        "s1", "deepseek/deepseek-reasoner", false,
       );
       expect(out.kind).toBe("same-runtime");
       expect(evicted).toEqual([]);
@@ -1793,7 +1798,7 @@ describe("item 6: a same-leg PROVIDER change replaces the live child", () => {
           runtime: fakeRuntime({ selectRuntimeFor: freshOnlySelector(() => winterSelection("deepseek", "deepseek/deepseek-reasoner")) }),
           barrier: { plan: async () => { throw new Error("not reached — same leg"); }, execute: async () => { throw new Error("not reached"); }, reviewSwitch: async () => ({ prompt: false }) },
         }),
-        "s1", "deepseek-chat", false,
+        "s1", "deepseek/deepseek-reasoner", false,
       );
       expect(out.kind).toBe("same-runtime");
       expect(evicted).toEqual([]);
@@ -1969,12 +1974,12 @@ describe("registerHandoffParticipants: destination.confirmInit (m4 — the plan-
       seedRecord(records, "s1"); // providerId: "p", modelRef: "m", no authRef
       const destination = registerDestination(records, fakeWinterThatOpens());
       const built = destination({ projectKey: "pk", sessionId: "be-1" }, "winter-agent");
-      const destinationSelection = { ...SELECTION("winter-agent"), providerId: "openai", modelRef: "gpt-5.6-sol" };
+      const destinationSelection = { ...SELECTION("winter-agent"), providerId: "openai", modelRef: "openai/gpt-5.6-sol" };
       const result = await built!.confirmInit({ backendSessionId: "be-1-new", selection: destinationSelection } as unknown as HandoffResumeTarget);
       expect(result).toMatchObject({ ok: true });
       const record = records.get("s1")!;
       expect(record.providerId).toBe("openai");
-      expect(record.modelRef).toBe("gpt-5.6-sol");
+      expect(record.modelRef).toBe("openai/gpt-5.6-sol");
       expect(record.authRef).toBe("keychain:openai:default");
     });
   });
@@ -2011,12 +2016,12 @@ describe("registerHandoffParticipants: destination.confirmInit (m4 — the plan-
       const built = destination({ projectKey: "pk", sessionId: "be-1" }, "claude-agent");
       // THIS plan's own fresh destination — deliberately named nothing like the persisted "p"/"m",
       // so a silent fallback to the persisted selection would be caught immediately.
-      const thisPlansDestination = { ...SELECTION("claude-agent"), providerId: "anthropic", modelRef: "claude-opus-5" };
+      const thisPlansDestination = { ...SELECTION("claude-agent"), providerId: "anthropic", modelRef: "anthropic/claude-opus-5" };
       const result = await built!.confirmInit({ backendSessionId: "be-1-new", selection: thisPlansDestination } as unknown as HandoffResumeTarget);
       expect(result).toMatchObject({ ok: true });
       const record = records.get("s1")!;
       expect(record.providerId).toBe("anthropic");
-      expect(record.modelRef).toBe("claude-opus-5");
+      expect(record.modelRef).toBe("anthropic/claude-opus-5");
       // NOT the persisted/source values a fallback-to-`target.selection`-being-stale bug would leave.
       expect(record.providerId).not.toBe("p");
       expect(record.modelRef).not.toBe("m");
@@ -2038,7 +2043,7 @@ describe("registerHandoffParticipants: destination.confirmInit (m4 — the plan-
       const SELECTION_SONNET = { ...SELECTION("claude-agent"), providerId: "anthropic", modelRef: "anthropic/claude-sonnet-5" };
       const SELECTION_OPUS = { ...SELECTION("claude-agent"), providerId: "anthropic", modelRef: "anthropic/claude-opus-5" };
       const runtime = fakeRuntime({
-        selectRuntimeFor: freshOnlySelector((model) => (model === "claude-sonnet-5" ? SELECTION_SONNET : SELECTION_OPUS)),
+        selectRuntimeFor: freshOnlySelector((model) => (model === "anthropic/claude-sonnet-5" ? SELECTION_SONNET : SELECTION_OPUS)),
       });
       const never = (): never => { throw new Error("not reached by this test"); };
       // Never resolves — both calls stay deferred for this test's whole life, exactly the window
@@ -2067,8 +2072,8 @@ describe("registerHandoffParticipants: destination.confirmInit (m4 — the plan-
       // Call A defers, leaving ITS OWN pending entry set. Call B is a SECOND, overlapping deferred
       // call for the SAME session, issued before A's own confirmInit ever runs (idle() never
       // resolves here) — exactly the pre-fix collision window.
-      expect(await planAndApplySwitch(d, "s1", "claude-sonnet-5", true)).toEqual({ kind: "deferred" });
-      expect(await planAndApplySwitch(d, "s1", "claude-opus-5", true)).toEqual({ kind: "deferred" });
+      expect(await planAndApplySwitch(d, "s1", "anthropic/claude-sonnet-5", true)).toEqual({ kind: "deferred" });
+      expect(await planAndApplySwitch(d, "s1", "anthropic/claude-opus-5", true)).toEqual({ kind: "deferred" });
 
       // Read each plan's own pending entry through the REAL registered destination participant.
       // Both confirmInit attempts die before init (never patching the record's backendSessionId),
@@ -2093,9 +2098,9 @@ describe("registerHandoffParticipants: destination.confirmInit (m4 — the plan-
       await builtB!.confirmInit({ backendSessionId: "be-1-new-b", selection: SELECTION_OPUS } as unknown as HandoffResumeTarget);
 
       // Each commits the raw string ITS OWN plan set — never the other's (the pre-m2 bug: a bare
-      // sessionId key meant the SECOND .set() clobbered the first, so BOTH would show "claude-opus-5").
-      expect(committed).toContainEqual({ sessionId: "s1", model: "claude-sonnet-5" });
-      expect(committed).toContainEqual({ sessionId: "s1", model: "claude-opus-5" });
+      // sessionId key meant the SECOND .set() clobbered the first, so BOTH would show "anthropic/claude-opus-5").
+      expect(committed).toContainEqual({ sessionId: "s1", model: "anthropic/claude-sonnet-5" });
+      expect(committed).toContainEqual({ sessionId: "s1", model: "anthropic/claude-opus-5" });
     });
   });
 

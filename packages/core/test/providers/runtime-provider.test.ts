@@ -5,8 +5,11 @@ import { join } from "node:path";
 import { codexFake, openaiResponsesFake } from "@yanlinglabs/winter-provider-conformance/fakes";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { CREDENTIAL_MATERIAL_NAMES, writeCredentialMaterial } from "../../src/auth/credential-material";
-import { DEFAULT_CODEX_MODEL } from "../../src/providers/codex-config";
 import { createCodexOauthRuntimeProvider, createOpenAiCompatibleRuntimeProvider, _translateEventsForTests } from "../../src/providers/runtime-provider";
+
+// WS-20: `DEFAULT_CODEX_MODEL` is deleted — this file only ever used it as a local bare-modelId
+// fixture value against a fake HTTP server, unrelated to the real catalog/tag machinery.
+const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
 import { QuotaManager } from "../../src/providers/quota";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";

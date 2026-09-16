@@ -50,7 +50,7 @@ function counts(rs: RuntimeStateDb): Record<string, number> {
   return out;
 }
 
-const baseSettings = { schemaVersion: 2 as const, provider: { type: "codex-oauth" as const, model: "gpt-5.4" } };
+const baseSettings = { schemaVersion: 3 as const, provider: { model: "codex-oauth/gpt-5.4" } };
 
 /** A full runtime-state footprint for one session, on every table §16 names. */
 async function seedSession(rs: RuntimeStateDb, store: RuntimeDirectoryStore, id: string): Promise<void> {

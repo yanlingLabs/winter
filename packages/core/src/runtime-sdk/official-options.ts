@@ -22,7 +22,7 @@ import type { SessionApprovalPolicy } from "../agent/gate";
 import type { Mode as SessionMode } from "../agent/tools/registry";
 import { assistantMemoryDirFor, memoryDirFor, type MemoryDirOptions } from "../agent/memory-dir";
 import type { CapabilityServerRecord } from "../capabilities";
-import { officialAuthModeSetting, officialSubscriptionAuthEnabled, type Settings } from "../settings";
+import { officialSubscriptionAuthEnabled, type Settings } from "../settings";
 import { canUseToolFor, type CanUseToolDeps } from "./approval-bridge";
 import { CORE_BRAND } from "./brand";
 import { controlPlaneDenyRules, disallowedToolsFor, sandboxConfigFor } from "./mode-options";
@@ -31,6 +31,7 @@ import { winterSystemPromptFor } from "./system-prompt";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import type { OfficialPeer } from "./create";
 import { CONSOLE_AUTH_ROUTER_MIN, REQUIRED_WINTER_RUNTIME_SDK, versionAtLeast } from "./versions";
+import { splitTag } from "./model-tag";
 
 /**
  * Phase 9c (P9c-1, WS-00 §8 #1): env names the official leg's spawned child must NEVER inherit
@@ -120,24 +121,11 @@ export function ensureOfficialConfigDir(dir: string): void {
  * (`console-profile-broker.ts`), the SAME `ensureOfficialConfigDir` helper above — that function
  * is already dir-path-agnostic, so neither door needs its own copy.
  */
-export function anthropicConfigDirFor(home: string): string {
-  return join(home, "runtimes", "anthropic-config");
-}
-
-/** P10a-2: the ONE profile name every login/refresh/logout call names — `ant auth login --profile
- *  ${ANTHROPIC_PROFILE_NAME}` writes `<anthropicConfigDirFor(home)>/credentials/${ANTHROPIC_PROFILE_NAME}.json`,
- *  and `ant auth print-credentials --profile ${ANTHROPIC_PROFILE_NAME}` reads the identical file
- *  (fix wave 3 M-A: `claude auth login --console` was measured to write neither this file nor
- *  anything else under `ANTHROPIC_CONFIG_DIR` at all). Winter never supports more than one
- *  Anthropic Console profile — a literal, not a setting. */
-export const ANTHROPIC_PROFILE_NAME = "winter";
-
-/** The console profile's own credential file — `officialAuthFamilyFor`'s "auto" arm probes this
- *  path's existence, and nothing else (presence, never validity — same "presence is not validity"
- *  discipline `keychain.ts`'s `credentialPresenceFrom` documents for the Keychain-backed rows). */
-function consoleProfileCredentialFile(home: string): string {
-  return join(anthropicConfigDirFor(home), "credentials", `${ANTHROPIC_PROFILE_NAME}.json`);
-}
+// WS-20: `anthropicConfigDirFor`/`ANTHROPIC_PROFILE_NAME`/`consoleProfileCredentialFile` moved to
+// `./anthropic-paths` (a pure module settings.ts's migration can import without a cycle) — re-exported
+// here so every existing importer of this module keeps working unchanged.
+export { anthropicConfigDirFor, ANTHROPIC_PROFILE_NAME, consoleProfileCredentialFile } from "./anthropic-paths";
+import { anthropicConfigDirFor, ANTHROPIC_PROFILE_NAME, consoleProfileCredentialFile } from "./anthropic-paths";
 
 /** The official leg's two shippable, mutually-exclusive auth arms (P10a-3) — a NARROWER type than
  *  the router's own `RuntimeSelection["authFamily"]` (which also has `console-oauth`/`bedrock`/
@@ -147,28 +135,16 @@ function consoleProfileCredentialFile(home: string): string {
 export type OfficialAuthFamily = "api-key" | "console";
 
 /**
- * Winter Phase 10a (P10a-3): `settings.runtimes.official.auth` resolved against the console
- * profile's own on-disk presence. `"api-key"`/`"console"` are explicit pins — honoured even when
- * the pinned arm's own credential is not actually there yet (a user who picked "console" before
- * finishing `winter login --anthropic-console` gets a real, typed refusal further down the launch
- * path, never a silent substitution of the other arm). `"auto"` (the default) is the ruling's own
- * literal rule: the console profile wins when its credential file exists, otherwise API key —
- * unconditionally, regardless of `hasApiKey`.
- *
- * `hasApiKey` is accepted (not merely tolerated) as part of this door's PINNED signature because
- * the caller building `provider.status`'s `effective` field needs it to tell "this arm was
- * DECIDED" apart from "this arm's own credential actually EXISTS" — e.g. `auto` with no console
- * profile and no API key material still decides `"api-key"` here, and the caller is the one who
- * turns that into `effective: "none"` by combining this result with the presence booleans it
- * already has (`ipc/server.ts`'s `provider.status` handler). Kept as a real parameter (not
- * dropped) so that combination stays a one-function read rather than a second, independently
- * drifting copy of this same decision.
+ * WS-20: the official leg's auth arm is the tag's OWN PREFIX — `console/*` selections run the
+ * Console profile arm, every other provider (`anthropic/*`, and any future non-Claude provider
+ * that somehow lands here) runs the api-key arm. No settings read, no live on-disk probe, no
+ * "auto" fallback: `runtimes.official.auth` and `officialAuthFamilyFor` (the settings-driven
+ * decision this replaces) are REMOVED, not deprecated — the arm was already decided the moment
+ * the router picked `selection.providerId`/`modelRef`, so re-deciding it here from live state
+ * could only ever disagree with the session's own recorded selection, never improve on it.
  */
-export function officialAuthFamilyFor(home: string, settings: Settings | null | undefined, hasApiKey: boolean): OfficialAuthFamily {
-  void hasApiKey; // see this function's own doc comment — accepted for the caller's use, not consulted here
-  const mode = officialAuthModeSetting(settings);
-  if (mode === "api-key" || mode === "console") return mode;
-  return existsSync(consoleProfileCredentialFile(home)) ? "console" : "api-key";
+export function officialAuthArmFor(selection: { modelRef: string }): OfficialAuthFamily {
+  return splitTag(selection.modelRef).providerId === "console" ? "console" : "api-key";
 }
 
 /**
@@ -194,22 +170,17 @@ export function officialAuthChildEnvFor(family: OfficialAuthFamily, home: string
 }
 
 /**
- * Winter Phase 10a (O6): `provider.status`'s own "which credential will actually be used right
- * now" decision — WIDER than `officialAuthFamilyFor` above (which always picks an arm to attempt
- * and never answers `"none"`), because only a caller holding both presence booleans can tell
- * "this arm was decided" apart from "this arm's own credential doesn't actually exist yet". An
- * explicit `auth` pin (`"api-key"`/`"console"`) is only "effective" when ITS OWN credential is
- * present — it never silently falls back to the other arm, matching `officialAuthFamilyFor`'s own
- * "honoured even when not there yet" stance for the SPAWN decision. Only `"auto"` falls back
- * (console first, per P10a-3's literal rule), and answers `"none"` when neither exists.
+ * WS-20: `provider.status`'s own "which credentials actually exist" report — presence ALONE, no
+ * `auth` pin to consult any more (there is no standing arm SETTING left; the arm is decided per
+ * session by the tag's own prefix, `officialAuthArmFor`). `"both"` when the api-key material AND
+ * the console profile both exist — a session's own tag decides which one it actually uses, and
+ * this function does not guess on the caller's behalf.
  */
 export function effectiveOfficialAuthFor(
-  auth: "auto" | "api-key" | "console",
   apiKey: boolean,
   consoleProfile: boolean,
-): "api-key" | "console" | "none" {
-  if (auth === "console") return consoleProfile ? "console" : "none";
-  if (auth === "api-key") return apiKey ? "api-key" : "none";
+): "both" | "api-key" | "console" | "none" {
+  if (apiKey && consoleProfile) return "both";
   if (consoleProfile) return "console";
   if (apiKey) return "api-key";
   return "none";

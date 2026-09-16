@@ -36,8 +36,8 @@ import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../../src/runtime-sdk/keychain
 import { describeWithWinterBinary } from "../helpers/winter-binary";
 import { claudeRuntimeForTests, describeWithClaudeRuntime, type AnthropicTurnScript } from "../helpers/claude-runtime";
 
-const CLAUDE_CATALOG_MODEL = "claude-sonnet-5"; // a real, pinned-catalog Claude canonical model id
-const DESTINATION_CLAUDE_MODEL = "claude-sonnet-5"; // the destination is the SAME canonical id, on the real Anthropic protocol
+const CLAUDE_CATALOG_MODEL = "anthropic/claude-sonnet-5"; // a real, pinned-catalog Claude canonical model id
+const DESTINATION_CLAUDE_MODEL = "anthropic/claude-sonnet-5"; // the destination is the SAME canonical id, on the real Anthropic protocol
 
 class TestClient {
   private decoder = new LineDecoder();
@@ -113,8 +113,9 @@ describeWithWinterBinary("P8d-9 -- the bounded cross-runtime resumed attempt", (
       // Construction, per the brief: `settings.provider` is `openai-compatible` (a custom,
       // non-Anthropic-protocol row) naming the CLAUDE CATALOG model id.
       writeFileSync(join(home, "settings.json"), JSON.stringify({
-        schemaVersion: 2,
-        provider: { type: "openai-compatible", model: CLAUDE_CATALOG_MODEL, baseUrl: openaiFakeUrl },
+        schemaVersion: 3,
+        provider: { model: CLAUDE_CATALOG_MODEL },
+        providers: { openai: { baseUrl: openaiFakeUrl } },
         runtimes: {
           winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable, winterIdleTimeoutSec: 10,
           handoff: { crossRuntime: true },
