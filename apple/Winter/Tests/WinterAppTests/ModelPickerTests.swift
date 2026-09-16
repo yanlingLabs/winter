@@ -57,6 +57,19 @@ final class ModelPickerTests: XCTestCase {
         XCTAssertFalse(sections.contains { $0.providerId == "cc" })
     }
 
+    /// Review fix: `AdvisorModelPickerRow`'s label (`WinterComposerCard.swift`) used to render
+    /// `Text(model ?? "Automatic")` — the raw tag as its primary label, missed when the header/
+    /// composer model menus were switched to catalogue-aware labels. Its body now composes
+    /// `model.map { modelDisplayLabel($0, catalogue: catalogue) } ?? "Automatic"`; SwiftUI bodies
+    /// aren't exercised in this target (this file's own note), so this pins that exact expression
+    /// at value level — the same claim a render test would make, without rendering.
+    func testAdvisorRowLabelUsesTheCatalogueFacingNameNotTheRawTag() {
+        let cat = SyncConfigSnapshot(provider: "codex-oauth", defaultModel: "codex-oauth/gpt-5.6-terra", models: [
+            SyncConfigModelInfo(id: "codex-oauth/gpt-5.6-terra", providerId: "codex-oauth", displayName: "GPT-5.6 Terra", facingName: "terra", efforts: ["low"]),
+        ], defaultEffort: "", clientEfforts: [])
+        XCTAssertEqual(modelDisplayLabel("codex-oauth/gpt-5.6-terra", catalogue: cat), "Terra")
+    }
+
     /// WS-20: `probation.model` is now a provider-qualified TAG, but a provider rejection quotes
     /// only the bare model id it was sent — `selectionRevert` must match against THAT, not the tag
     /// (which never appears in the message at all, so the pre-WS-20 tag-vs-message check would be a

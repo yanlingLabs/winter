@@ -279,6 +279,7 @@ struct ComposerModelChip: View {
                 // live-session controls above it.
                 Divider().opacity(0.5).padding(.vertical, 6)
                 AdvisorModelMenuContent(options: row.options, current: row.advisorModel,
+                                        catalogue: row.catalogue,
                                         onSelect: { onSetAdvisorModel($0) })
             }
             .padding(12)
@@ -298,6 +299,10 @@ struct ComposerModelChip: View {
 struct AdvisorModelMenuContent: View {
     let options: [String]
     let current: String?
+    /// WS-20 (review fix): threaded through exactly like `ModelMenuContent.catalogue` — the row
+    /// label must never be the raw tag. Defaulted to `.empty` for the same reason that one is: an
+    /// empty catalogue degrades every row's label to the bare modelId, never a crash.
+    var catalogue: SyncConfigSnapshot = .empty
     let onSelect: (String?) -> Void
 
     var body: some View {
@@ -306,12 +311,12 @@ struct AdvisorModelMenuContent: View {
                 .font(Typography.caption(.semibold))
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 4)
-            AdvisorModelPickerRow(model: nil, current: current, onSelect: onSelect)
+            AdvisorModelPickerRow(model: nil, current: current, catalogue: catalogue, onSelect: onSelect)
             ForEach(options, id: \.self) { model in
-                AdvisorModelPickerRow(model: model, current: current, onSelect: onSelect)
+                AdvisorModelPickerRow(model: model, current: current, catalogue: catalogue, onSelect: onSelect)
             }
             if let current, !options.contains(current) {
-                AdvisorModelPickerRow(model: current, current: current, onSelect: onSelect)
+                AdvisorModelPickerRow(model: current, current: current, catalogue: catalogue, onSelect: onSelect)
             }
         }
     }
@@ -322,6 +327,8 @@ struct AdvisorModelMenuContent: View {
 struct AdvisorModelPickerRow: View {
     let model: String?
     let current: String?
+    /// WS-20 (review fix): see `AdvisorModelMenuContent.catalogue`'s own doc.
+    var catalogue: SyncConfigSnapshot = .empty
     let onSelect: (String?) -> Void
 
     var body: some View {
@@ -329,7 +336,12 @@ struct AdvisorModelPickerRow: View {
             onSelect(model)
         } label: {
             HStack {
-                Text(model ?? "Automatic")
+                // WS-20 (review fix): was `Text(model ?? "Automatic")` — the raw tag as the
+                // primary label. `nil` still reads "Automatic" (never `modelDisplayLabel`'s own
+                // "Default" — this picks the D30 reviewer model, a different unset-meaning, see
+                // this type's own doc above); a set model now goes through the SAME
+                // catalogue-aware label `ModelMenuContent`'s own rows use.
+                Text(model.map { modelDisplayLabel($0, catalogue: catalogue) } ?? "Automatic")
                 Spacer()
                 if selectionIsCurrent(model, current: current) {
                     Image(systemName: "checkmark")
