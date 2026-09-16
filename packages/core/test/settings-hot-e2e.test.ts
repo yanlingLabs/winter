@@ -96,8 +96,8 @@ function writeSettingsFile(home: string, overrides: Record<string, unknown> = {}
   writeFileSync(
     join(home, "settings.json"),
     JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "codex-oauth", model: "gpt-5.4" },
+      schemaVersion: 3,
+      provider: { model: "codex-oauth/gpt-5.4" },
       titles: { enabled: false },
       toolSearch: { enabled: false },
       // These are ENGINE hot-reload proofs (registry re-registration): pin the engine leg for the
