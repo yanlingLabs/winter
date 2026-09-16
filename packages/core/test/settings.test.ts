@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert, DEFAULT_PROVIDER, pinsFor } from "../src/settings";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
-import type { ModelTag } from "../src/runtime-sdk/model-tag";
+import { UNSTATED_TAG, type ModelTag } from "../src/runtime-sdk/model-tag";
 
 // WS-20: the pre-migration default bare id — used ONLY inside a raw v2 (or v1) fixture that
 // exercises `loadSettings`'s OWN migration; every v3 fixture below uses `DEFAULT_PROVIDER.model`
@@ -616,6 +616,13 @@ describe("setProviderModel / setReasoningEffort (winter model CLI's pure transfo
     const s: Settings = { schemaVersion: 3, provider: { model: tag("codex-oauth/gpt-5.6-sol") } };
     expect(() => Settings.parse(setReasoningEffort(setProviderModel(s, tag("codex-oauth/gpt-5.6-terra")), "max"))).not.toThrow();
   });
+
+  // WS-20 (review round 2, M6): `provider.model` binds the daemon's own internal Provider, which
+  // can only ever serve codex-oauth/openai — `setProviderModel` refuses any other provider outright.
+  test("M6: setProviderModel refuses a provider the daemon's internal Provider cannot serve", () => {
+    const s: Settings = { schemaVersion: 3, provider: { model: tag("codex-oauth/gpt-5.6-sol") } };
+    expect(() => setProviderModel(s, tag("anthropic/claude-sonnet-5"))).toThrow(/codex-oauth or openai/);
+  });
 });
 
 describe("setOutputStyle (CC-parity output styles: the active style name)", () => {
@@ -916,8 +923,22 @@ describe("WS-20: pinsFor", () => {
     const o = Settings.parse({ schemaVersion: 3, provider: { model: "openai/gpt-5.6-sol" }, pins: { research: "openai/gpt-5.6-luna" } });
     expect(pinsFor(o).dispatch).toBe(tag("openai/gpt-5.6-terra"));
     expect(pinsFor(o).research).toBe(tag("openai/gpt-5.6-luna")); // explicit override wins
-    const d = Settings.parse({ schemaVersion: 3, provider: { model: "deepseek/deepseek-reasoner" } });
-    expect(pinsFor(d).dispatch).toBe(tag("openai/gpt-5.6-terra")); // deepseek serves no gpt row → the api-key vendor
+  });
+
+  // WS-20 (review round 2, M6): the OLD `?? facingNameToTag("openai", slot)` fallback rung is gone
+  // — a provider that serves no gpt-family row of its own now yields UNSTATED_TAG, never a silent
+  // cross-provider guess. `provider.model` itself can no longer legitimately hold a non-internal
+  // provider tag (the ProviderSettings schema refinement enforces codex-oauth/openai only), so this
+  // fixture is hand-built (`as unknown as Settings`) rather than parsed — `pinsFor` is a pure
+  // function over the object shape, not the schema.
+  test("M6: a provider serving no gpt-family row yields UNSTATED pins, never a cross-provider guess", () => {
+    const s = { schemaVersion: 3, provider: { model: "anthropic/claude-sonnet-5" } } as unknown as Settings;
+    const p = pinsFor(s);
+    expect(p.dispatch).toBe(UNSTATED_TAG);
+    expect(p.dream).toBe(UNSTATED_TAG);
+    expect(p.cleaner).toBe(UNSTATED_TAG);
+    expect(p.research).toBe(UNSTATED_TAG);
+    expect(p.researchFallback).toBe(UNSTATED_TAG);
   });
 });
 

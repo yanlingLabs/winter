@@ -47,7 +47,7 @@ import type { RuntimeSessionRecord, RuntimeSessionRecords } from "../runtime-sta
 import type { ProjectionCheckpoints } from "../runtime-state/checkpoints";
 import type { SessionHub } from "../sessions/hub";
 import type { SessionStore } from "../sessions/store";
-import { DEFAULT_PROVIDER, officialSubscriptionAuthEnabled, pinsFor, providerBaseUrlFor, winterOptionsFromSettings, type Settings } from "../settings";
+import { DEFAULT_PROVIDER, officialSubscriptionAuthEnabled, ownProviderFor, pinsFor, providerBaseUrlFor, winterOptionsFromSettings, type Settings } from "../settings";
 import { d30DefaultModel } from "./advisor-reviewer";
 import { canUseToolFor, type BridgedApprovalRequest } from "./approval-bridge";
 import type { WinterRuntimeSdk, SessionMode } from "./create";
@@ -1018,6 +1018,20 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     // pin, everything else falls back to the daemon's configured provider.
     const settings = deps.settings();
     const effectiveTag = meta.model ?? (mode === "dispatch" ? pinsFor(settings).dispatch : settings?.provider?.model ?? DEFAULT_PROVIDER.model);
+    // WS-20 (review round 2, M6): `pinsFor` dropped its old cross-provider "openai" fallback rung —
+    // a provider that does not itself serve the terra/luna slot now yields `UNSTATED_TAG`, never a
+    // silent guess at a different provider. `meta.model` can never BE the sentinel here (rejected at
+    // the RPC door, `resolveModelSelection`'s nit-e check), so this can only fire for the
+    // `pinsFor(settings).dispatch` branch in practice — refused typed, BEFORE `records.create` mints
+    // a record naming the "unstated" pseudo-provider and BEFORE the child would ever be handed the
+    // literal string "unstated" as its model.
+    if (effectiveTag === UNSTATED_TAG) {
+      throw new WinterLegRefusal(
+        "runtime_selection_refused",
+        `dispatch has no runnable model: pins.dispatch resolves to no known slot for this daemon's own provider (${ownProviderFor(settings)}) — set settings.pins.dispatch explicitly to a tag naming a provider this daemon can serve, or configure settings.provider.model to a provider whose catalog serves the terra slot`,
+        "pin-unstated",
+      );
+    }
     // WS-20: a tag names exactly its provider — no more "steer this selection to agree with the
     // router's decision" hotfix; `providerFor` and `splitTag` can never disagree because they are
     // the same tag's own prefix.

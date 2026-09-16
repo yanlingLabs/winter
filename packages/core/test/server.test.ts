@@ -3018,6 +3018,27 @@ describe("provider.configure RPC (BYOK T1)", () => {
     c.close(); srv.stop();
   });
 
+  // WS-20 (review round 2, M6): `settings.provider.model` binds the daemon's own internal
+  // Provider, which can only ever serve codex-oauth/openai — a tag naming any other provider is
+  // refused INVALID_PARAMS here, not silently written (and not left to `saveSettings`'s own schema
+  // refinement to throw a raw parse failure instead).
+  test("M6: a model naming a provider the daemon's internal Provider cannot serve is refused INVALID_PARAMS, nothing written", async () => {
+    const srv = await bootProviderConfigServer();
+    const before = readFileSync(srv.settingsPath, "utf8");
+    const c = await TestClient.connect(srv.socketPath);
+    await c.hello(srv.harnessToken, "cli-provider-configure-wrong-provider");
+
+    const res = await c.request(METHODS.providerConfigure, {
+      type: "openai-compatible", baseUrl: "https://api.openai.com/v1", apiKey: "sk-test-321", model: "anthropic/claude-sonnet-5",
+    });
+    expect(res.error?.code).toBe(ERR.INVALID_PARAMS);
+    expect(res.error?.message).toContain("codex-oauth or openai");
+    expect(readFileSync(srv.settingsPath, "utf8")).toBe(before);
+    expect(await srv.secrets.get(OPENAI_API_KEY_SECRET)).toBeNull();
+
+    c.close(); srv.stop();
+  });
+
   test("a malformed baseUrl is rejected as INVALID_PARAMS — settings and the secret store are left UNCHANGED", async () => {
     const srv = await bootProviderConfigServer();
     const before = readFileSync(srv.settingsPath, "utf8");

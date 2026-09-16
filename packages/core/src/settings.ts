@@ -6,7 +6,7 @@ import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { ensureGlobalGitignore, WINTER_PERSONAL_IGNORES } from "./global-gitignore";
 import { OFFICIAL_SUBSCRIPTION_AUTH_APPROVED } from "./runtime-sdk/versions";
 import { consoleProfileCredentialFile } from "./runtime-sdk/anthropic-paths";
-import { facingNameToTag, isModelTag, splitTag, UNSTATED_TAG, type ModelTag } from "./runtime-sdk/model-tag";
+import { facingNameToTag, isModelTag, splitTag, UNSTATED_TAG, WINTER_TEST_PREFIX, type ModelTag } from "./runtime-sdk/model-tag";
 
 /** Reasoning-effort slugs valid on the wire — measured LIVE against the Codex OAuth endpoint
  *  (2026-07-30), one model at a time, NOT read off the /models catalogue text. That distinction
@@ -93,10 +93,44 @@ export function clientEffortEligible(mode: string | undefined): boolean {
   return mode === undefined || mode === "code";
 }
 
+/**
+ * WS-20 (review round 2, M6): the ONLY two providers the daemon's own internal `Provider`
+ * (`providers/manager.ts`, one instance per daemon process) can actually serve —
+ * `settings.provider.model` (the DAEMON's OWN binding: titles/reviewer/dreamer/cleaner/research all
+ * call through it) is therefore gated to a tag naming one of these two, everywhere it can be set
+ * (`setProviderModel`, `provider.configure`, and `ProviderModelTagSchema` below). This is a
+ * DIFFERENT, NARROWER constraint than a SESSION's own model, which is unconstrained (any catalog
+ * provider, routed per-session through the runtime SDK) — a per-provider internal Provider (built
+ * on the SDK, one instance per provider rather than one per daemon) is the follow-up that would let
+ * this list grow; not attempted here. Exported so the CLI can reuse it (`winter model` /
+ * `winter provider configure`'s own validation) rather than hand-copying the list. Declared here,
+ * ahead of `ModelTagSchemaCore`, because `ProviderModelTagSchema` below references it in an
+ * eagerly-evaluated error-message string, not just inside a lazy `.refine()` predicate.
+ */
+export const INTERNAL_PROVIDER_IDS = ["codex-oauth", "openai"] as const;
+
 /** WS-20: the core-side tag schema — checks SHAPE (protocol's `ModelTagSchema`) AND provider
  *  EXISTENCE against the pinned catalog (`isModelTag`), unlike the protocol package's own
  *  shape-only `ModelTagSchema`. */
 export const ModelTagSchemaCore = z.string().refine(isModelTag, "model must be a provider-qualified tag '<providerId>/<modelId>'");
+
+/**
+ * WS-20 (review round 2, M6): `settings.provider.model` binds the DAEMON's OWN internal `Provider`
+ * (`providers/manager.ts`, one instance per daemon process) — narrower than `ModelTagSchemaCore`,
+ * which every OTHER model-bearing field (the pins, `reviewer.model`, `titles.model`,
+ * `runtimes.advisorModel`) still uses UNCHANGED: those retain their own SOFT runtime guard
+ * (`internalModelFor` — log-and-fall-through-to-the-provider's-own-model on a mismatch) rather than
+ * a hard schema refusal, because a pin/override naming a different provider is a recoverable
+ * misconfiguration for them, not a structural impossibility. `provider.model` has no such fallback
+ * to fall through TO — it IS the internal Provider's own binding — so a tag naming any OTHER
+ * provider can never be served at all, and belongs at the schema door, not a runtime log line.
+ * `winter-test/*` is exempted (the e2e chat suite's settings DEFAULT is the echo double, commit
+ * fc050bec).
+ */
+const ProviderModelTagSchema = ModelTagSchemaCore.refine(
+  (m) => m.startsWith(WINTER_TEST_PREFIX) || (INTERNAL_PROVIDER_IDS as readonly string[]).includes(splitTag(m).providerId),
+  `provider.model must name ${INTERNAL_PROVIDER_IDS.join(" or ")} — the daemon's internal provider supports codex-oauth and openai; any provider is fine per session`,
+);
 
 /** WS-20: no `type`, no `baseUrl` — the provider IS the tag's prefix (`splitTag(model).providerId`),
  *  and a BYO endpoint lives in the sibling `providers.<id>.baseUrl` block below, never here.
@@ -104,7 +138,7 @@ export const ModelTagSchemaCore = z.string().refine(isModelTag, "model must be a
  *  rather than being silently stripped — the migration (`migrateSettingsV2ToV3`) is the ONLY place
  *  that reads and discards it. */
 export const ProviderSettings = z.object({
-  model: ModelTagSchemaCore,
+  model: ProviderModelTagSchema,
   reasoningEffort: z.enum(REASONING_EFFORTS).optional(),
 }).strict();
 
@@ -535,8 +569,15 @@ export function pinsFor(settings: Settings | null | undefined): {
   dispatch: ModelTag; dream: ModelTag; cleaner: ModelTag; research: ModelTag; researchFallback: ModelTag;
 } {
   const ownProvider = ownProviderFor(settings);
+  // WS-20 (review round 2, M6): the OLD `?? facingNameToTag("openai", slotName)` rung silently
+  // pinned dispatch/dream/cleaner/research to a DIFFERENT provider than the daemon's own configured
+  // one whenever `ownProvider` did not itself serve the slot (e.g. an `anthropic/*` primary) — a
+  // cross-provider guess this function has no business making. Dropped: a provider that does not
+  // serve its own family's terra/luna slot yields `UNSTATED_TAG`, and every one of these doors
+  // already refuses/skips typed on that sentinel (`internalModelFor`'s own guard, session-driver.ts's
+  // dispatch door) rather than silently running on a provider nobody configured.
   const defaultFor = (slotName: "terra" | "luna"): ModelTag => {
-    return facingNameToTag(ownProvider, slotName) ?? facingNameToTag("openai", slotName) ?? UNSTATED_TAG;
+    return facingNameToTag(ownProvider, slotName) ?? UNSTATED_TAG;
   };
   const terra = defaultFor("terra");
   const luna = defaultFor("luna");
@@ -976,6 +1017,15 @@ export function readRawSettings(path: string): Record<string, unknown> | null {
  *  except the slug is now the whole tag): this never throws except on whatever `Settings.parse`
  *  would already reject. */
 export function setProviderModel(settings: Settings, model: ModelTag): Settings {
+  // WS-20 (review round 2, M6): `settings.provider.model` binds the daemon's own internal
+  // Provider, which can only ever be ONE of `INTERNAL_PROVIDER_IDS` — never a per-session model
+  // (any catalog provider is fine there, unconstrained, routed per session through the runtime SDK).
+  const providerId = splitTag(model).providerId;
+  if (!(INTERNAL_PROVIDER_IDS as readonly string[]).includes(providerId)) {
+    throw new TypeError(
+      `provider.model must name ${INTERNAL_PROVIDER_IDS.join(" or ")} — the daemon's internal provider supports codex-oauth and openai; any provider is fine per session`,
+    );
+  }
   return { ...settings, provider: { ...settings.provider, model } };
 }
 

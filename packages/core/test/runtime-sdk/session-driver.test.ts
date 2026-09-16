@@ -470,4 +470,25 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
       await session.end();
     } finally { t.close(); }
   });
+
+  // WS-20 (review round 2, M6): `pinsFor` dropped its old cross-provider "openai" fallback rung —
+  // a provider that serves no gpt-family row of its own (an `anthropic/*` primary, here) now yields
+  // UNSTATED_TAG for `pins.dispatch`, and dispatch must refuse typed rather than mint a record
+  // naming the "unstated" pseudo-provider or hand a real child the literal model string "unstated".
+  test("M6: dispatch refuses typed when its pin resolves to UNSTATED_TAG, naming pins.dispatch — no record is minted", async () => {
+    const settings = {
+      provider: { model: "anthropic/claude-sonnet-5" },
+      runtimes: { winterLeg: { chat: true, dispatch: true, code: false }, winterIdleTimeoutSec: 10 },
+    } as unknown as Settings;
+    const t = table({ settings: () => settings });
+    try {
+      const sid = t.store.createSession("t", { mode: "dispatch" }); // no explicit model — runs the dispatch pin
+      let caught: unknown;
+      try { await t.drivers.create(sid); } catch (err) { caught = err; }
+      expect((caught as { code?: string })?.code).toBe("runtime_selection_refused");
+      expect((caught as Error)?.message).toContain("pins.dispatch");
+      // Refused BEFORE any runtime-state record was minted — never a record naming "unstated".
+      expect(t.records.get(sid)).toBeUndefined();
+    } finally { t.close(); }
+  });
 });
