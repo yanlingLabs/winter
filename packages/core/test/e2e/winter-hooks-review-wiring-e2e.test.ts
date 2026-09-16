@@ -75,8 +75,9 @@ describeWithWinterBinary("daemon.ts's hooksFor wiring — the BashReviewer reach
     const home = join(realpathSync(mkdtempSync(join(tmpdir(), "winter-hooks-wiring-"))), ".winter");
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "openai-compatible", model: "winter-test/p5checkpoint", baseUrl: "http://127.0.0.1:9/v1" },
+      schemaVersion: 3,
+      provider: { model: "winter-test/p5checkpoint" },
+      providers: { openai: { baseUrl: "http://127.0.0.1:9/v1" } },
       runtimes: { winterExecutable: bin, winterLeg: { code: true }, winterIdleTimeoutSec: 10 },
     }, null, 2));
     // Empty model list ⇒ `resolveModelSelection`'s "a BYO endpoint that cannot enumerate" skip —

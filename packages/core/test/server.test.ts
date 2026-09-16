@@ -103,8 +103,8 @@ describe("daemon IPC", () => {
     daemonHome = home;
     if (settingsOverride) {
       writeFileSync(join(home, "settings.json"), JSON.stringify({
-        schemaVersion: 2,
-        provider: { type: "codex-oauth", model: "gpt-5.4" },
+        schemaVersion: 3,
+        provider: { model: "codex-oauth/gpt-5.4" },
         ...settingsOverride,
       }));
     }
@@ -738,8 +738,8 @@ describe("daemon IPC", () => {
     const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
     const home = mkdtempSync(join(tmpdir(), "winter-daemon-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "codex-oauth", model: "gpt-5.4" },
+      schemaVersion: 3,
+      provider: { model: "codex-oauth/gpt-5.4" },
       mcpServers: { fake: { command: "bun", args: ["run", fixture] } },
     }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -760,8 +760,8 @@ describe("daemon IPC", () => {
     const fixture = join(import.meta.dir, "agent", "mcp", "fake-mcp-server.ts");
     const home = mkdtempSync(join(tmpdir(), "winter-daemon-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "codex-oauth", model: "gpt-5.4" },
+      schemaVersion: 3,
+      provider: { model: "codex-oauth/gpt-5.4" },
       mcpServers: { fake: { command: "bun", args: ["run", fixture] } },
     }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -975,8 +975,8 @@ describe("daemon IPC", () => {
     const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
     seedDemoPlugin(home, fixture);
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "codex-oauth", model: "gpt-5.4" },
+      schemaVersion: 3,
+      provider: { model: "codex-oauth/gpt-5.4" },
     }));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
@@ -1001,8 +1001,8 @@ describe("daemon IPC", () => {
     const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
     seedDemoPlugin(home, fixture);
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "codex-oauth", model: "gpt-5.4" },
+      schemaVersion: 3,
+      provider: { model: "codex-oauth/gpt-5.4" },
       plugins: { enabled: ["demo"] },
     }));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -1029,8 +1029,8 @@ describe("daemon IPC", () => {
     const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
     seedDemoPlugin(home, fixture);
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "codex-oauth", model: "gpt-5.4" },
+      schemaVersion: 3,
+      provider: { model: "codex-oauth/gpt-5.4" },
       plugins: { enabled: ["demo"], disabled: ["demo"] },
     }));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -1073,8 +1073,8 @@ describe("daemon IPC", () => {
     const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
     seedManifestPlugin(home, fixture);
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "codex-oauth", model: "gpt-5.4" },
+      schemaVersion: 3,
+      provider: { model: "codex-oauth/gpt-5.4" },
       plugins: { enabled: ["demo"] }, // enabled, but no consents record at all
     }));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -1117,8 +1117,8 @@ describe("daemon IPC", () => {
     const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
     seedManifestPlugin(home, fixture);
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "codex-oauth", model: "gpt-5.4" },
+      schemaVersion: 3,
+      provider: { model: "codex-oauth/gpt-5.4" },
       plugins: { enabled: ["demo"], consents: { demo: { exec: Date.now() } } },
     }));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -1165,8 +1165,8 @@ describe("daemon IPC", () => {
     const home = mkdtempSync(join(tmpdir(), "winter-plugin-consent-"));
     seedManifestOnlyPlugin(home, fixture);
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "codex-oauth", model: "gpt-5.4" },
+      schemaVersion: 3,
+      provider: { model: "codex-oauth/gpt-5.4" },
       plugins: { enabled: ["demo"], consents: { demo: { exec: Date.now() } } },
     }));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -1199,8 +1199,8 @@ describe("daemon IPC", () => {
       contributes: { mcpServers: [{ name: "fake", command: "bun", args: ["run", fixture] }] },
     }));
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "codex-oauth", model: "gpt-5.4" },
+      schemaVersion: 3,
+      provider: { model: "codex-oauth/gpt-5.4" },
       plugins: { enabled: ["demo"], consents: { demo: { exec: Date.now() } } },
     }));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -1261,8 +1261,8 @@ describe("daemon IPC", () => {
   test("Phase 4d-cleanup Task 2 fix: a daemon booted with NO agent provider does NOT hot-spawn on plugin.enable — settings recorded, status stays \"stopped\", no process spawned", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-daemon-no-provider-enable-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "codex-oauth", model: "gpt-5.4" }, // unused — agentProvider: null below forces no-provider
+      schemaVersion: 3,
+      provider: { model: "codex-oauth/gpt-5.4" }, // unused — agentProvider: null below forces no-provider
     }));
     // A Tier-2 (platform) plugin with an `entry` — spawn-eligible once enabled+consented, exactly
     // the shape `plugin.enable{consent:true}` would hot-spawn on a provider-configured daemon.
@@ -1779,7 +1779,7 @@ describe("daemon IPC", () => {
       const srv = await bootHardwareServer(); // no consents at all
       seedBatteryPlugin(srv.home, "battery-limiter");
       writeFileSync(join(srv.home, "settings.json"), JSON.stringify({
-        schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" },
+        schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
       }));
       const plugin = await connectPlugin(srv.store, srv.socketPath, "battery-limiter");
 
@@ -2099,7 +2099,7 @@ describe("daemon IPC", () => {
     }> {
       const home = mkdtempSync(join(tmpdir(), "winter-plugin-lifecycle-"));
       writeFileSync(join(home, "settings.json"), JSON.stringify({
-        schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" },
+        schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" },
       }));
       // A Tier-2 (platform) plugin with an `entry` — requiredConsentClasses derives "exec" for
       // any manifest with an entry point (plugin-manifest.ts), so this plugin always starts out
@@ -2953,8 +2953,8 @@ describe("provider.configure RPC (BYOK T1)", () => {
   }> {
     const home = mkdtempSync(join(tmpdir(), "winter-provider-configure-"));
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "codex-oauth", model: "gpt-5.4" },
+      schemaVersion: 3,
+      provider: { model: "codex-oauth/gpt-5.4" },
       ...settingsSeed,
     }));
     const store = new SessionStore(home);
@@ -2970,13 +2970,15 @@ describe("provider.configure RPC (BYOK T1)", () => {
     };
   }
 
-  test("writes the API key via the SecretStore and the openai-compatible provider block, preserving other settings fields", async () => {
+  test("writes the API key via the SecretStore and providers.openai.baseUrl, preserving other settings fields", async () => {
     const srv = await bootProviderConfigServer({ reviewer: { enabled: false } });
     const c = await TestClient.connect(srv.socketPath);
     await c.hello(srv.harnessToken, "cli-provider-configure");
 
+    // WS-20: `model` is `ModelTagSchema.optional()` at the params door now — a bare id is refused
+    // typed, so this fixture sends a real tag.
     const res = await c.request(METHODS.providerConfigure, {
-      type: "openai-compatible", baseUrl: "https://api.openai.com/v1", apiKey: "sk-test-123", model: "gpt-4o-mini",
+      type: "openai-compatible", baseUrl: "https://api.openai.com/v1", apiKey: "sk-test-123", model: "openai/gpt-4o-mini",
     });
     expect(res.result).toEqual({ ok: true });
 
@@ -2987,15 +2989,19 @@ describe("provider.configure RPC (BYOK T1)", () => {
     // rotated key is never left live under the old name; blank reads as absent everywhere (presence, migration).
     expect(await srv.secrets.get(OPENAI_API_KEY_SECRET)).toBe("");
 
+    // WS-20: the BYO endpoint is `providers.openai.baseUrl` now (never `provider.baseUrl`, which no
+    // longer exists on `ProviderSettings`), and `provider.model` is the tag verbatim — no more
+    // `type` field at all.
     const settings = JSON.parse(readFileSync(srv.settingsPath, "utf8"));
-    expect(settings.provider).toEqual({ type: "openai-compatible", baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini" });
+    expect(settings.provider).toEqual({ model: "openai/gpt-4o-mini" });
+    expect(settings.providers).toEqual({ openai: { baseUrl: "https://api.openai.com/v1" } });
     expect(settings.reviewer).toEqual({ enabled: false }); // other top-level settings fields preserved
-    expect(settings.schemaVersion).toBe(2);
+    expect(settings.schemaVersion).toBe(3);
 
     c.close(); srv.stop();
   });
 
-  test("model omitted -> defaults to gpt-4o", async () => {
+  test("model omitted -> defaults to openai/gpt-5.6-sol", async () => {
     const srv = await bootProviderConfigServer();
     const c = await TestClient.connect(srv.socketPath);
     await c.hello(srv.harnessToken, "cli-provider-configure-default-model");
@@ -3006,7 +3012,8 @@ describe("provider.configure RPC (BYOK T1)", () => {
     expect(res.result).toEqual({ ok: true });
 
     const settings = JSON.parse(readFileSync(srv.settingsPath, "utf8"));
-    expect(settings.provider).toEqual({ type: "openai-compatible", baseUrl: "https://api.openai.com/v1", model: "gpt-4o" });
+    expect(settings.provider).toEqual({ model: "openai/gpt-5.6-sol" });
+    expect(settings.providers).toEqual({ openai: { baseUrl: "https://api.openai.com/v1" } });
 
     c.close(); srv.stop();
   });
@@ -3058,7 +3065,7 @@ describe("provider.configure RPC (BYOK T1)", () => {
 
   test("a server with no secret store configured -> typed INTERNAL failure, never a crash", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-provider-configure-nostore-"));
-    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 2, provider: { type: "codex-oauth", model: "gpt-5.4" } }));
+    writeFileSync(join(home, "settings.json"), JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } }));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const authority = new TokenAuthority(new FileSecretStore(join(home, "auth-secrets")));

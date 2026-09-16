@@ -66,7 +66,7 @@ import { carriesReasoning, opaqueLeaks, outOfOrder } from "../helpers/carriage";
 import { claudeRuntimeForTests, describeWithClaudeRuntime, type AnthropicTurnScript } from "../helpers/claude-runtime";
 
 const CATALOG_GPT_MODEL = "openai/gpt-5.6-sol";
-const CATALOG_CLAUDE_MODEL = "claude-sonnet-5";
+const CATALOG_CLAUDE_MODEL = "anthropic/claude-sonnet-5";
 
 // ════════════════════════════════════════════════════════════════════════════════════════════════
 // Part 1 — W18-19's prompt-timing table, over all four of the chain's real transitions, computed
@@ -213,8 +213,9 @@ describeWithWinterBinary("A-5 part 2: the chain's LAST hop (gpt -> claude) promp
       });
       anthropicFakeClose = () => anthropicFakeServer.close();
       writeFileSync(join(home, "settings.json"), JSON.stringify({
-        schemaVersion: 2,
-        provider: { type: "openai-compatible", model: CATALOG_GPT_MODEL, baseUrl: openaiFake.url },
+        schemaVersion: 3,
+        provider: { model: CATALOG_GPT_MODEL },
+        providers: { openai: { baseUrl: openaiFake.url } },
         runtimes: { winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
       }, null, 2));
       const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -376,9 +377,12 @@ describeWithWinterBinary("A-5 part 3: claude -> deepseek -> GLM -> gpt -> claude
       deepseek = await startChainChatFake("hello from deepseek", ["reasoning on the deepseek hop"]);
       glm = await startChainChatFake("hello from glm", ["reasoning on the glm hop"]);
       writeFileSync(join(home, "settings.json"), JSON.stringify({
-        schemaVersion: 2,
-        provider: { type: "openai-compatible", model: CATALOG_GPT_MODEL, baseUrl: openaiFakeRef.url },
-        providers: { deepseek: { baseUrl: `${deepseek.fake.url}/v1` }, zai: { baseUrl: `${glm.fake.url}/v1` } },
+        schemaVersion: 3,
+        provider: { model: CATALOG_GPT_MODEL },
+        providers: {
+          openai: { baseUrl: openaiFakeRef.url },
+          deepseek: { baseUrl: `${deepseek.fake.url}/v1` }, zai: { baseUrl: `${glm.fake.url}/v1` },
+        },
         runtimes: {
           winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable,
           winterIdleTimeoutSec: 60, handoff: { crossRuntime: true },

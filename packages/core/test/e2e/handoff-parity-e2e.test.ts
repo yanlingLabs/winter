@@ -42,7 +42,7 @@ import { claudeRuntimeForTests, describeWithClaudeRuntime, type AnthropicTurnScr
 // `openai/gpt-5.4` (no reasoning continuation at all, `handoff-cross-runtime-e2e.test.ts`'s own
 // `lossless-native` fixture) which would never prompt for A-1's own required "the prompt appears".
 const CATALOG_GPT_MODEL = "openai/gpt-5.6-sol";
-const CATALOG_CLAUDE_MODEL = "claude-sonnet-5";
+const CATALOG_CLAUDE_MODEL = "anthropic/claude-sonnet-5";
 
 interface RpcErrorLike { rpc?: { message?: string; data?: { code?: string; warnings?: string[]; portable?: string[] } } }
 
@@ -159,8 +159,9 @@ describeWithWinterBinary("A-1: GPT -> Claude (Winter -> official)", (winterBin) 
       anthropicFakeClose = () => anthropicFakeServer.close();
 
       writeFileSync(join(home, "settings.json"), JSON.stringify({
-        schemaVersion: 2,
-        provider: { type: "openai-compatible", model: CATALOG_GPT_MODEL, baseUrl: openaiFake.url },
+        schemaVersion: 3,
+        provider: { model: CATALOG_GPT_MODEL },
+        providers: { openai: { baseUrl: openaiFake.url } },
         runtimes: { winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
       }, null, 2));
       const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -354,8 +355,9 @@ describeWithWinterBinary("A-2: Claude -> GPT (official -> Winter)", (winterBin) 
       anthropicFakeClose = () => anthropicFakeServer.close();
 
       writeFileSync(join(home, "settings.json"), JSON.stringify({
-        schemaVersion: 2,
-        provider: { type: "openai-compatible", model: CATALOG_GPT_MODEL, baseUrl: openaiFake.url },
+        schemaVersion: 3,
+        provider: { model: CATALOG_GPT_MODEL },
+        providers: { openai: { baseUrl: openaiFake.url } },
         runtimes: { winterExecutable: winterBin, claudeExecutable: claudeRuntimeForTests()!.executable, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
       }, null, 2));
       const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -486,8 +488,9 @@ describeWithClaudeRuntime("A-3a: destination death, Winter -> official — the s
     });
     openaiFakeRef = openaiFake;
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "openai-compatible", model: CATALOG_GPT_MODEL, baseUrl: openaiFake.url },
+      schemaVersion: 3,
+      provider: { model: CATALOG_GPT_MODEL },
+      providers: { openai: { baseUrl: openaiFake.url } },
       runtimes: {
         // A deliberately DEAD official destination — a real, on-disk executable that exits(0)
         // immediately without ever speaking the wire protocol (the coordinator's own technique).
@@ -572,8 +575,9 @@ describeWithWinterBinary("A-3b: destination death, official -> Winter — the so
     anthropicFakeUrl = anthropicFakeServer.url;
     anthropicFakeClose = () => anthropicFakeServer.close();
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "openai-compatible", model: CATALOG_GPT_MODEL, baseUrl: "http://127.0.0.1:9/v1" },
+      schemaVersion: 3,
+      provider: { model: CATALOG_GPT_MODEL },
+      providers: { openai: { baseUrl: "http://127.0.0.1:9/v1" } },
       runtimes: {
         // A deliberately DEAD Winter destination.
         winterExecutable: "/usr/bin/true",
@@ -713,8 +717,9 @@ describeWithClaudeRuntime("m4: a REAL resumed official child's environment", () 
     chmodSync(shimPath, 0o755);
 
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "openai-compatible", model: "winter-test/unused", baseUrl: "http://127.0.0.1:9/v1" },
+      schemaVersion: 3,
+      provider: { model: "winter-test/unused" },
+      providers: { openai: { baseUrl: "http://127.0.0.1:9/v1" } },
       runtimes: { claudeExecutable: shimPath },
     }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
