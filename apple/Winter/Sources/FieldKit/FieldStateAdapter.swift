@@ -902,22 +902,27 @@ final class FieldStateAdapter: ObservableObject {
         advisorModel = AppModel.readAdvisorModelFromSettings()
     }
 
-    /// Writes the setting and updates the cached value on success, so the picker's own selection
-    /// reads back immediately rather than waiting for the menu to reopen. `nil` clears it
-    /// ("Automatic"). A failed write (see `AppModel.writeAdvisorModelToSettings`'s own doc) leaves
-    /// the cache untouched — the picker keeps showing the value that is actually on disk.
+    /// WS-20 (cross-lane fix): the advisor write now goes through the daemon's own
+    /// `settings.setAdvisorModel` RPC (`AppModel.setAdvisorModel`), not a direct settings.json
+    /// write — and this adapter, like every other RPC-backed control here, holds no
+    /// `WinterClient` of its own. Same "adapter holds a wired closure, the surface that DOES hold
+    /// a client fires the RPC" convention as `onSetModel`/`onSetEffort` above: fire-and-forget from
+    /// here, the wirer reports success (`adoptAdvisorModel`, below) or failure (`modelChangeError`,
+    /// the same alert `ModelChangeOutcome`'s other failure cases already show) back onto this
+    /// adapter. Defaulted to a no-op so a headless/test adapter with nothing wired stays inert.
+    var onSetAdvisorModel: (String?) -> Void = { _ in }
+
+    /// The picker's Enter path — fires the wired RPC. Reads back immediately once the wirer calls
+    /// `adoptAdvisorModel` with the daemon's own echoed value, rather than waiting for the menu to
+    /// reopen.
     func applyAdvisorModelSelection(_ model: String?) {
-        if AppModel.writeAdvisorModelToSettings(model) {
-            advisorModel = model
-        } else {
-            // Whole-branch review Major 2: a `false` return means settings.json exists but is
-            // unparseable — the write refused rather than clobbering it. Reuses the SAME
-            // "Couldn't …" alert `ModelChangeOutcome`'s other failure cases already show
-            // (`WindowContentView`'s `.alert("Couldn't switch model", …)`), rather than a second
-            // alert for what is, to the user, the identical class of event ("this pick did not
-            // take effect").
-            modelChangeError = "the advisor setting could not be saved — settings.json could not be read"
-        }
+        onSetAdvisorModel(model)
+    }
+
+    /// Called by `onSetAdvisorModel`'s wirer once `AppModel.setAdvisorModel` succeeds — `model` is
+    /// the RPC's own ECHOED value (what was actually stored), never merely what was requested.
+    func adoptAdvisorModel(_ model: String?) {
+        advisorModel = model
     }
 
     /// True while a `session.setEffort` RPC is in flight. A SEPARATE flag from `modelChangeInFlight`
@@ -1029,7 +1034,7 @@ final class FieldStateAdapter: ObservableObject {
             return .none
         }
         defer { selectionProbation = nil }
-        return selectionRevert(probation, turnErrorMessage: turnError)
+        return selectionRevert(probation: probation, turnErrorMessage: turnError)
     }
 }
 
@@ -1118,7 +1123,7 @@ enum SelectionRevert: Equatable {
 /// already declares acceptable — the user sees the failing turn and clears the effort themselves.
 /// The residual is narrow twice over: a tier is code-sessions-only, and since the whole-branch I1
 /// fix the picker offers no tier at all unless the daemon reported real wire levels beside it.
-func selectionRevert(_ probation: SelectionProbation?, turnErrorMessage: String?) -> SelectionRevert {
+func selectionRevert(probation: SelectionProbation?, turnErrorMessage: String?) -> SelectionRevert {
     guard let probation, let raw = turnErrorMessage else { return .none }
     let message = raw.lowercased()
     // Effort first: an effort rejection names the model too (`unsupported_value` errors quote the
@@ -1127,7 +1132,11 @@ func selectionRevert(_ probation: SelectionProbation?, turnErrorMessage: String?
        message.contains("effort") || message.contains("reasoning") {
         return .effort
     }
-    if let model = probation.model, mentionsQuoted(model, in: message), message.contains("model") {
+    // WS-20: `probation.model` is now a provider-qualified TAG, but a provider rejection quotes
+    // only the bare model id it was sent (`the model 'gpt-5.6-sol' does not exist`) — it has no
+    // way to know or quote Winter's own tag. `modelIdPortion` strips the "<providerId>/" prefix
+    // (a no-op on anything not tag-shaped, so a pre-migration bare value still matches).
+    if let model = probation.model, mentionsQuoted(modelIdPortion(of: model), in: message), message.contains("model") {
         return .model
     }
     return .none

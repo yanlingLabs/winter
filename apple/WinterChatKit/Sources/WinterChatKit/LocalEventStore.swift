@@ -54,6 +54,11 @@ public struct LocalSessionMeta: Equatable, Sendable {
     public let sessionId: String
     public let scope: String
     public let title: String?
+    /// WS-20: a provider-qualified TAG when set (`"<providerId>/<modelId>"`), never a bare modelId —
+    /// carried opaquely end to end (index-only, sidecar-persisted, `sync.push`'s `meta.model`,
+    /// `sync.heads`' own reply). The ONE place a model value is split to its bare modelId is
+    /// `ChatEngine`'s own `modelIdPortion(of:)`, right before it reaches a `ProviderTurnRequest` —
+    /// this sidecar never does that itself.
     public let model: String?
     /// provider-correctness T6: the per-session reasoning effort, carried on exactly `model`'s
     /// terms — index-only, sidecar-persisted, pushed in `sync.push`'s `meta`, and reported back by

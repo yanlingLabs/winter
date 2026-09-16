@@ -2650,7 +2650,7 @@ final class ShellSessionHostTests: XCTestCase {
         guard let cfg = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "sync.config" }) else {
             return XCTFail("the chip's open must fetch the catalogue: \(mgmt.methods)")
         }
-        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(cfg["id"] as! Int),"result":{"provider":"codex-oauth","exaKey":null,"dangerousDomains":[],"defaultModel":"srv-a","models":[{"id":"srv-a","efforts":["low","high"]}],"defaultEffort":"high","clientEfforts":["ultra"]}}"#)
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(cfg["id"] as! Int),"result":{"provider":"codex-oauth","exaKey":null,"dangerousDomains":[],"defaultModel":"srv-a","models":[{"id":"srv-a","providerId":"srv","displayName":"srv-a","efforts":["low","high"]}],"defaultEffort":"high","clientEfforts":["ultra"]}}"#)
         await feedWaitUntil { host.newChatCatalogue.models.count == 1 }
         XCTAssertEqual(host.newChatCatalogue.models.map(\.id), ["srv-a"])
     }
@@ -2752,7 +2752,7 @@ final class ShellSessionHostTests: XCTestCase {
         host.setShellVisible(true)
         host.apply(destination: .newChat)
         await feedNewChatCatalogue(host, mgmt,
-                                   models: #"[{"id":"srv-a","efforts":["none","low","high"]},{"id":"srv-b","efforts":["high","max"]}]"#)
+                                   models: #"[{"id":"srv-a","providerId":"srv","displayName":"srv-a","efforts":["none","low","high"]},{"id":"srv-b","providerId":"srv","displayName":"srv-b","efforts":["high","max"]}]"#)
 
         // Picked with NO model pinned: the offered list came from the catalogue's default (srv-a).
         host.setNewChatEffort("low")
@@ -2783,7 +2783,7 @@ final class ShellSessionHostTests: XCTestCase {
         XCTAssertEqual(host.newChatEffort, "low", "an unfetched catalogue knows nothing and must clear nothing")
 
         // 2. A real catalogue, an unlisted model.
-        await feedNewChatCatalogue(host, mgmt, models: #"[{"id":"srv-a","efforts":["none","low","high"]}]"#)
+        await feedNewChatCatalogue(host, mgmt, models: #"[{"id":"srv-a","providerId":"srv","displayName":"srv-a","efforts":["none","low","high"]}]"#)
         host.setNewChatModel("unheard-of")
         XCTAssertEqual(host.newChatEffort, "low", "…and neither does a model it does not list")
     }
@@ -2798,7 +2798,7 @@ final class ShellSessionHostTests: XCTestCase {
         host.setNewChatModel("srv-b")
         host.setNewChatEffort("low") // legal-looking: nothing has said otherwise yet
         await feedNewChatCatalogue(host, mgmt,
-                                   models: #"[{"id":"srv-a","efforts":["none","low","high"]},{"id":"srv-b","efforts":["high","max"]}]"#)
+                                   models: #"[{"id":"srv-a","providerId":"srv","displayName":"srv-a","efforts":["none","low","high"]},{"id":"srv-b","providerId":"srv","displayName":"srv-b","efforts":["high","max"]}]"#)
         XCTAssertNil(host.newChatEffort, "once the daemon has said, an effort srv-b refuses cannot stay held")
     }
 
