@@ -74,7 +74,7 @@ import { recordNamesSelection } from "../runtime-sdk/handoff";
 import type { RuntimeSessionRecords } from "../runtime-state/records";
 import { loadCatalog, CLAUDE_FAMILY_ID } from "@yanlinglabs/winter-provider-catalog";
 import { rowForTag } from "../runtime-sdk/provider-selection";
-import { parseModelTag, type ModelTag } from "../runtime-sdk/model-tag";
+import { parseModelTag, modelTagIsKnown, splitTag, UNSTATED_TAG, type ModelTag } from "../runtime-sdk/model-tag";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
 import type { ApprovalBroker } from "../agent/approvals";
 import type { PermissionRules } from "../agent/permission-rules";
@@ -104,9 +104,6 @@ import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
 import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings } from "../settings";
 import { dispatchPinMessage } from "../agent/dispatch-config";
-// WS-20 L3.5/L3.6: `officialAuthModeSetting`/`DISPATCH_PIN_MESSAGE` are deleted along with
-// `runtimes.official.auth`/`DISPATCH_MODEL` — left as inline stubs below (marked WS-20 L3.5/L3.6)
-// so this module still LOADS until those tasks land (ipc/server.ts is L3.5/L3.6's own file).
 import {
   deriveInstallName, installPluginFromDir, missingConsents, buildConsentBlock, applyFreshPluginConsent,
   setPluginEnabled, grantPluginConsents, removePluginFromSettings, removePluginDir, stripPluginConsents,
@@ -720,9 +717,14 @@ function isClaudeCatalogModel(model: string): boolean {
  *  `session.create` — collapses to a straight `parseModelTag` now: a model is ALWAYS a
  *  provider-qualified tag on the wire (`ModelTagSchema` at the params schema already refuses a
  *  bare id before this ever runs), so there is nothing left to RESOLVE, only to check exists in
- *  the pinned catalog. No more alias step, no more `knownModels`-vs-catalog fallback dance — a tag
- *  either names a real catalog provider or it does not, and `isModelTag`/`parseModelTag`
- *  (model-tag.ts) is the one place that answer lives. Stays a MEMBERSHIP gate, not an availability
+ *  the pinned catalog. No more alias step, no more `knownModels`-vs-catalog fallback dance.
+ *
+ *  WS-20 (review round 2, M4): `parseModelTag`/`isModelTag` alone only check TAG SHAPE plus "the
+ *  PROVIDER is pinned in the catalog" — `codex-oauth/gpt-5.4` (any typo) passed that gate, which
+ *  had regressed this door from a real MEMBERSHIP check to a provider-existence one. Now also runs
+ *  `modelTagIsKnown` (model-tag.ts): a tag whose provider has real catalog rows must name ONE OF
+ *  them, unless that provider has a BYO `providers.<id>.baseUrl` configured (an intentionally
+ *  unlisted endpoint model keeps its pass-through). Still a MEMBERSHIP gate, not an availability
  *  one: it does not check credentials or leg eligibility (the runtime decision still owns that,
  *  and still refuses typed when the tag is real but nothing can actually serve it). */
 /**
@@ -761,12 +763,25 @@ function detailCategoryFor(detail: string): "self-converge" | "needs-manual-reco
   return "unrecognized";
 }
 
-function resolveModelSelection(model: string): string {
+function resolveModelSelection(model: string, settings?: Settings): string {
+  let tag: string;
   try {
-    return parseModelTag(model);
+    tag = parseModelTag(model);
   } catch {
     throw new RpcFailure(ERR.INVALID_PARAMS, `model must be a provider-qualified tag '<providerId>/<modelId>' (got '${model}')`);
   }
+  // WS-20 (review round 2, nit e): `unstated/unstated` is the internal "nothing recorded" sentinel
+  // (model-tag.ts's `UNSTATED_TAG`) — `isModelTag`/`parseModelTag` accept it because a stored
+  // session record legitimately carries it, but a CLIENT explicitly selecting it at an RPC door is
+  // never a real request (`winter-test/*` stays accepted — the e2e suite depends on that double).
+  if (tag === UNSTATED_TAG) {
+    throw new RpcFailure(ERR.INVALID_PARAMS, `model must be a provider-qualified tag '<providerId>/<modelId>' (got '${model}')`);
+  }
+  if (!modelTagIsKnown(tag, settings)) {
+    // `splitTag` cannot throw here — `parseModelTag` above already proved the shape.
+    throw new RpcFailure(ERR.INVALID_PARAMS, `unknown model '${tag}' for provider ${splitTag(tag).providerId}`);
+  }
+  return tag;
 }
 
 /** WS-20: `dispatchPinMessage` needs the LIVE settings (it names the live pinned tag), but most
@@ -1501,7 +1516,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // validate against the wrong list entirely.
         let model = p.model;
         if (model !== undefined) {
-          model = resolveModelSelection(model);
+          model = resolveModelSelection(model, liveSettingsFor(opts));
         }
         // provider-correctness T6: the effort half of `model`, validated by the SAME rule
         // `session.setEffort` applies (`assertEffortSelectable`) so a create can never accept what a
@@ -2157,7 +2172,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // `knownModels()`, e.g. an arbitrary openai-compatible endpoint) can't validate anything
         // either, so the value is stored freely, same as spawn_agent's own fallback for that case.
         if (model !== null) {
-          model = resolveModelSelection(model);
+          model = resolveModelSelection(model, liveSettingsFor(opts));
         }
         // Winter Phase 8c (Task 4.1): a model that resolves to a DIFFERENT runtime leg than the
         // session's record is a HANDOFF, not a plain write — `planAndApplySwitch` is the one place
@@ -2414,6 +2429,10 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           store: opts.store,
           buffers: syncBuffers,
           connId: socket.data.connId,
+          // WS-20 (review round 2, M4): threaded into `validateSyncMeta`'s `modelTagIsKnown` check
+          // so a pushed `meta.model` is held to the SAME membership gate (and the SAME BYO-baseUrl
+          // escape hatch) as `session.create`/`session.setModel` below.
+          settings: liveSettingsFor(opts),
           // provider-correctness T6: the SAME live-model getter `session.setEffort` resolves against
           // (just above), so a pushed `meta.effort` on a session with no model override of its own
           // is checked against the model the next turn would actually use — not against `""`.
@@ -2897,11 +2916,15 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // WS-20: the BYO endpoint is `providers.openai.baseUrl` now (never `provider.baseUrl`,
         // which no longer exists on `ProviderSettings`) and the model is a tag — `"openai/…"`,
         // never a bare id. `p.model` is already `ModelTagSchema`-validated at the params door.
-        saveSettings(settingsPath, {
-          ...settings,
-          provider: { model: (p.model ?? "openai/gpt-5.6-sol") as ModelTag },
-          providers: { ...settings.providers, openai: { ...settings.providers?.openai, baseUrl: p.baseUrl } },
-        });
+        const model = (p.model ?? "openai/gpt-5.6-sol") as ModelTag;
+        const nextProviders = { ...settings.providers, openai: { ...settings.providers?.openai, baseUrl: p.baseUrl } };
+        // WS-20 (review round 2, M4): the SAME membership gate `session.create`/`session.setModel`
+        // apply — checked against settings that already carry the `baseUrl` this call is about to
+        // write (the BYO escape hatch this RPC exists FOR), so an `openai/<fine-tune>` naming ITS
+        // OWN just-configured endpoint always passes; a tag naming a DIFFERENT, unrelated provider
+        // (a typo, or the wrong RPC entirely) is still held to the real catalog.
+        resolveModelSelection(model, { ...settings, providers: nextProviders });
+        saveSettings(settingsPath, { ...settings, provider: { model }, providers: nextProviders });
         return { ok: true };
       }
 

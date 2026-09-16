@@ -37,6 +37,33 @@ export function parseModelTag(s: string): ModelTag {
   return s as ModelTag;
 }
 
+/**
+ * WS-20 (review round 2, M4): `isModelTag` only checks TAG SHAPE plus "the provider itself is a
+ * pinned catalog provider" — a typo model id on a real provider (`codex-oauth/gpt-5.4`) passes it.
+ * `modelTagIsKnown` is the STRICTER membership gate the RPC doors need (`session.create`/`setModel`/
+ * `sync.push` meta/`provider.configure`): the tag must name a REAL catalog row, UNLESS either (a)
+ * the provider has a BYO `providers.<id>.baseUrl` configured — an intentionally unlisted endpoint
+ * model, e.g. a fine-tune, keeps its pass-through — or (b) the provider has NO catalog rows at all
+ * (nothing for the tag to be a member of, so refusing would be refusing every possible model that
+ * provider could ever serve). The sentinel and `winter-test/*` are accepted here exactly as
+ * `isModelTag` accepts them — rejecting the sentinel at the RPC boundary is a SEPARATE, door-level
+ * concern (nit e), not this membership question.
+ *
+ * `settings` is optional and duck-typed (not the full `Settings` type) to avoid this module
+ * depending on `../settings`, which already depends on THIS module.
+ */
+export function modelTagIsKnown(tag: string, settings?: { providers?: Record<string, { baseUrl?: string }> }): boolean {
+  if (!isModelTag(tag)) return false;
+  if (tag === UNSTATED_TAG || tag.startsWith(WINTER_TEST_PREFIX)) return true;
+  const catalog = loadCatalog();
+  if (catalog.models.some((m) => m.key === tag)) return true;
+  const { providerId } = splitTag(tag);
+  const providerHasRows = catalog.models.some((m) => m.providerId === providerId);
+  const baseUrl = settings?.providers?.[providerId]?.baseUrl;
+  const hasByoEndpoint = typeof baseUrl === "string" && baseUrl.length > 0;
+  return !providerHasRows || hasByoEndpoint;
+}
+
 /** Every catalog row key whose family slot name === slotName (across every family that defines
  *  that slot), in catalog order. */
 export function tagsForSlot(slotName: string): ModelTag[] {

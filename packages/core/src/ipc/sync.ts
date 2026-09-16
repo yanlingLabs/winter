@@ -7,7 +7,7 @@ import { assistantMemoryDirFor } from "../agent/memory-dir";
 import { EXA_API_KEY_SECRET } from "../agent/tools/search";
 import { CLIENT_EFFORTS, isClientEffort } from "../settings";
 import { rowForTag } from "../runtime-sdk/provider-selection";
-import { isModelTag } from "../runtime-sdk/model-tag";
+import { modelTagIsKnown, UNSTATED_TAG } from "../runtime-sdk/model-tag";
 import { pickerModels } from "./picker-models";
 import type { SessionForkRef, SessionStore, SyncedEntry } from "../sessions/store";
 
@@ -210,6 +210,12 @@ export interface SyncMetaEffortContext {
   /** Called with the REFUSED value and a short reason, once per drop. The caller logs; this
    *  function never does its own I/O (`validateSyncMeta` is pure), same split as `onDroppedModel`. */
   onDroppedEffort?(effort: string, reason: string): void;
+  /** WS-20 (review round 2, M4): threaded into `modelTagIsKnown` so a pushed `meta.model` is held
+   *  to the SAME membership gate as `session.create`/`session.setModel` — a typo model on a real
+   *  provider is dropped exactly like an unrecognised provider always was. Absent simply means the
+   *  BYO-`baseUrl` escape hatch never applies (no settings to consult) — the catalog-membership
+   *  check itself still runs either way, never a crash. */
+  settings?: { providers?: Record<string, { baseUrl?: string }> };
 }
 
 /** Validates `sync.push`'s `meta` before ANY of it reaches the index.
@@ -270,10 +276,19 @@ export function validateSyncMeta(
   if (meta.forkedFrom !== undefined) out.forkedFrom = meta.forkedFrom;
   // WS-20: a model is ALWAYS a provider-qualified tag now — no more alias resolution against a
   // provider's own enumerable model list (there is nothing left to resolve; a tag names its
-  // provider outright). `isModelTag` checks shape AND provider existence against the pinned
-  // catalog; anything else is dropped-and-logged, same as an unknown id always was.
+  // provider outright).
+  //
+  // WS-20 (review round 2, M4): `isModelTag` alone only checks shape AND that the PROVIDER exists
+  // in the pinned catalog — a typo model on a real provider (`codex-oauth/gpt-5.4`) would pass it.
+  // `modelTagIsKnown` is the stricter MEMBERSHIP gate (real catalog row, unless the provider has a
+  // BYO `baseUrl` or no catalog rows of its own); anything else is dropped-and-logged, same as an
+  // unknown id always was — `sync.push`'s own "drop, never fail the whole push" policy (documented
+  // above) is unchanged, only which models qualify for the drop got stricter.
   if (meta.model !== undefined) {
-    if (isModelTag(meta.model)) out.model = meta.model;
+    // WS-20 (review round 2, nit e): `unstated/unstated` is the internal "nothing recorded"
+    // sentinel — a CLIENT pushing it explicitly is never a real request (mirrors `resolveModelSelection`'s
+    // identical door-level rejection in ipc/server.ts; `winter-test/*` stays accepted, unaffected).
+    if (meta.model !== UNSTATED_TAG && modelTagIsKnown(meta.model, effortCtx.settings)) out.model = meta.model;
     else onDroppedModel?.(meta.model);
   }
   if (meta.effort !== undefined) {
@@ -386,6 +401,9 @@ export interface SyncPushContext {
    *  the boot-bound provider's own id + its live model. Absent degrades to `""`, which
    *  `effortsForModel` answers for (an empty tag matches no catalog row). */
   liveModel?(): string;
+  /** WS-20 (review round 2, M4): threaded straight through to `validateSyncMeta`'s
+   *  `SyncMetaEffortContext.settings` — see that field's own doc. */
+  settings?: { providers?: Record<string, { baseUrl?: string }> };
 }
 
 /** Parses a reassembled JSONL batch into raw-line/event pairs. Every line must be JSON AND a valid
@@ -419,7 +437,7 @@ function parseBatch(buf: Buffer): SyncedEntry[] {
 /** Buffers a chunk and, on the final one, validates and applies the whole batch atomically.
  *  Returns the current head plus buffering progress; `applied` is true only once bytes are on disk. */
 export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResult {
-  const { store, buffers, connId } = ctx;
+  const { store, buffers, connId, settings } = ctx;
   const existing = resolveChatSession(store, p.sessionId, true);
   const creating = existing === null;
 
@@ -502,6 +520,7 @@ export function syncPush(ctx: SyncPushContext, p: SyncPushParams): SyncPushResul
         })() ?? ctx.liveModel?.(),
         onDroppedEffort: (effort, reason) =>
           console.warn(`[sync] dropped effort ${JSON.stringify(effort)} pushed for session ${p.sessionId} (${reason}) — the log was replicated, the effort override was not`),
+        settings,
       })
     : undefined;
   let lastSeq: number;

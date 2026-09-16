@@ -11,6 +11,9 @@ import {
   SyncPushParams,
   SettingsSetAdvisorModelParams,
   SyncConfigModel,
+  SessionListResult,
+  SyncConfigResult,
+  DaemonStatusResult,
 } from "@yanlinglabs/winter-protocol";
 
 const BARE = "gpt-5.6-sol";
@@ -58,5 +61,32 @@ describe("model-tag-parity: every RPC schema with a model field refuses a bare i
     const rowFor = (id: string) => ({ id, providerId: "codex-oauth", displayName: "GPT-5.6 Sol", efforts: [] });
     expect(SyncConfigModel.safeParse(rowFor(BARE)).success).toBe(false);
     expect(SyncConfigModel.safeParse(rowFor(TAG)).success).toBe(true);
+  });
+
+  // WS-20 (review round 2, nit f): the three SERVED (result, not param) schemas that also carry a
+  // model field — same parity obligation as every param above, just on the daemon's OWN outgoing
+  // shape rather than an incoming one.
+  test("SessionListResult.sessions[].model", () => {
+    const row = { sessionId: "s1", scope: "test", createdAt: 0, lastSeq: 0 };
+    expect(SessionListResult.safeParse({ sessions: [{ ...row, model: BARE }] }).success).toBe(false);
+    expect(SessionListResult.safeParse({ sessions: [{ ...row, model: TAG }] }).success).toBe(true);
+    // model is optional — a row with no override, or predating the field, is still valid.
+    expect(SessionListResult.safeParse({ sessions: [row] }).success).toBe(true);
+  });
+
+  test("SyncConfigResult.defaultModel", () => {
+    const base = { provider: "codex-oauth", exaKey: null, dangerousDomains: [], models: [], defaultEffort: "", clientEfforts: [] };
+    expect(SyncConfigResult.safeParse({ ...base, defaultModel: BARE }).success).toBe(false);
+    expect(SyncConfigResult.safeParse({ ...base, defaultModel: TAG }).success).toBe(true);
+    // "" is the ONE non-tag value this field accepts — "the Mac did not say" / no provider configured.
+    expect(SyncConfigResult.safeParse({ ...base, defaultModel: "" }).success).toBe(true);
+  });
+
+  test("DaemonStatusResult.provider.model", () => {
+    const base = { version: "0.0.0", uptimeMs: 0, socketPath: "/tmp/x.sock", sessionsCount: 0, pluginsCount: 0 };
+    expect(DaemonStatusResult.safeParse({ ...base, provider: { id: "codex-oauth", model: BARE } }).success).toBe(false);
+    expect(DaemonStatusResult.safeParse({ ...base, provider: { id: "codex-oauth", model: TAG } }).success).toBe(true);
+    // provider is nullable — no provider configured at all is still a valid status.
+    expect(DaemonStatusResult.safeParse({ ...base, provider: null }).success).toBe(true);
   });
 });
