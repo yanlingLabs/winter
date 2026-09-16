@@ -23,6 +23,9 @@ pnpm test                            # every workspace, serially
 cd packages/core && bun test         # one package
 bun test path/to/file.test.ts        # one file (path substring match)
 bun test -t "test name"              # one test by name
+# The "built binary through a real daemon" e2e files (test/e2e/winter-{chat,code,dispatch}-e2e, official-leg.e2e)
+# need WINTER_RUNTIME_EXECUTABLE="$PWD/dist/winter" (built by `bun run build:winter`); without it the daemon
+# resolves the npm platform binary and the pid scan for dist/winter FAILS rather than skips.
 pnpm typecheck:core                  # tsc --noEmit (also typecheck:protocol)
 
 # Protocol codegen — REQUIRED after changing packages/protocol/src/events.ts
@@ -95,7 +98,7 @@ The spawned `winter` child reads the daemon's Keychain items itself, so macOS as
 
 ### Providers and credentials
 
-The credential inventory is **derived from the pinned catalog**, never a hand-kept list (`runtime-sdk/keychain.ts`, `credentialInventory()`): every catalog provider whose `authKinds` includes `api-key`, whose `risk.class` is not `blocked`, and which does not require the user's own endpoint gets a Keychain slot at `<providerId>:default`. Four rows are pinned at the front in order (`openai`, `codex-oauth`, `anthropic`, `anthropic:console`). A model is always a provider-qualified tag (`codex-oauth/gpt-5.6-terra`); `providerFor(tag)` names the credential and nothing in the daemon selects a provider for a bare id (WS-20).
+The credential inventory is **derived from the pinned catalog**, never a hand-kept list (`runtime-sdk/keychain.ts`, `credentialInventory()`): every catalog provider whose `authKinds` includes `api-key`, whose `risk.class` is not `blocked`, and which does not require the user's own endpoint gets a Keychain slot at `<providerId>:default`. Four rows are pinned at the front (`openai`, `codex-oauth`, `anthropic`, `anthropic:console`); since WS-20 their order carries no meaning — a session names its provider in the tag. A model is always a provider-qualified tag (`codex-oauth/gpt-5.6-terra`); `providerFor(tag)` names the credential and nothing in the daemon selects a provider for a bare id (WS-20).
 
 The daemon **names** a credential and never reads it: `Options.provider.authRef` is a `{kind:"keychain", account, service}` locator the child resolves itself. Three RPCs manage slots — `credential.list`, `credential.set`, `credential.remove` — and on the terminal `winter credentials [list] | set <id> | remove <id>` (masked prompt only, never a flag, a pipe or an env var). `winter login --anthropic-key` / `--api-key` and `winter logout --anthropic` / `--openai` write the same slots. All of these go through the daemon whenever the socket is live, and a write that reaches the daemon **replaces every live child whose record names that provider** (`evictSessionsForCredential` — mid-turn children at their next idle boundary), so the key is in effect on the next turn with no restart. With no daemon running the CLI stores it and says so; live sessions pick it up at their next incarnation.
 
@@ -151,7 +154,7 @@ Durable per-session facts (the backend transcript id, provider, runtime kind, se
 
 ### Settings
 
-`<WINTER_HOME>/settings.json` is watched (`settings-watcher.ts`: debounced, single-flight, keep-last-good on a torn file) and swapped atomically by `settings-apply.ts`; feature code reads live getters, never a boot snapshot. **No setting and no credential change may ever require a daemon restart.** Concretely: the daemon's own reads go live on the next call; a live runtime child keeps the `Options` it was spawned with and picks up new settings at its next incarnation (`optionsFor` re-reads `deps.settings()` every time) — the one exception is a credential write through the daemon, which evicts the affected children resumably so the next turn is already on the new material. New settings follow the same shape: an `.optional()` block with its default spelled in exactly one reader function (`handoffCrossRuntimeEnabled`, `legacyProjectFilesReadEnabled`, `providerBaseUrlFor`, `officialAuthModeSetting`, `winterOptionsFromSettings`, …), because an absent block never materializes zod's per-key defaults.
+`<WINTER_HOME>/settings.json` is watched (`settings-watcher.ts`: debounced, single-flight, keep-last-good on a torn file) and swapped atomically by `settings-apply.ts`; feature code reads live getters, never a boot snapshot. **No setting and no credential change may ever require a daemon restart.** Concretely: the daemon's own reads go live on the next call; a live runtime child keeps the `Options` it was spawned with and picks up new settings at its next incarnation (`optionsFor` re-reads `deps.settings()` every time) — the one exception is a credential write through the daemon, which evicts the affected children resumably so the next turn is already on the new material. New settings follow the same shape: an `.optional()` block with its default spelled in exactly one reader function (`handoffCrossRuntimeEnabled`, `legacyProjectFilesReadEnabled`, `providerBaseUrlFor`, `pinsFor`, `winterOptionsFromSettings`, …), because an absent block never materializes zod's per-key defaults.
 
 ### Migration from the legacy home
 
