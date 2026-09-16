@@ -63,7 +63,11 @@ import { catalogRowsFor, inventoryProvidersServing, providerSelectionFor, qualif
 import { winterSessions } from "./sessions";
 import { WINTER_PEER_VERSIONS } from "./versions";
 import { winterSystemPromptFor } from "./system-prompt";
-import { DISPATCH_EFFORT, DISPATCH_MODEL } from "../agent/dispatch-config";
+import { DISPATCH_EFFORT } from "../agent/dispatch-config";
+// WS-20 L3.4: `DISPATCH_MODEL` is deleted — `pinsFor(settings).dispatch` (settings.ts) replaces it
+// at both call sites below; left as an inline literal here so this module still LOADS until L3.4's
+// full redesign of this file lands (session-driver.ts is L3.4's own file cluster).
+const DISPATCH_MODEL_STUB = "codex-oauth/gpt-5.6-terra";
 import type { AgentRegistry } from "../agent/bg-agent-registry";
 import type { ContextAssembler } from "../agent/context";
 import { startWinterSession, unconsumedUserMessages, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
@@ -417,7 +421,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // override can only come from a harness that wrote the store directly — a test's door to
       // the `winter-test/*` doubles); every other mode is the per-session override, else the
       // daemon's configured provider model.
-      const model = mode === "dispatch" ? (live.model ?? DISPATCH_MODEL) : (live.model ?? settings?.provider?.model);
+      const model = mode === "dispatch" ? (live.model ?? DISPATCH_MODEL_STUB) : (live.model ?? settings?.provider?.model);
       const effort = mode === "dispatch" ? sdkEffortOf(live.effort ?? DISPATCH_EFFORT) : sdkEffortOf(live.effort);
       // Hotfix 2026-09-16: the ROUTER's decided provider (persisted at create, `selection_json`) is
       // the tie-breaker for a bare id several credentialled providers serve. Without it this call
@@ -572,7 +576,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     const beforeTurn = async (): Promise<void> => {
       const live = deps.store.meta(sessionId);
       const settings = deps.settings();
-      const model = mode === "dispatch" ? (live.model ?? DISPATCH_MODEL) : (live.model ?? settings?.provider?.model);
+      const model = mode === "dispatch" ? (live.model ?? DISPATCH_MODEL_STUB) : (live.model ?? settings?.provider?.model);
       if (model === undefined) return;
       // ONLY A PROVIDER WINTER ACTUALLY DECIDED ON — never `providerSelectionFor`'s inventory-order
       // FALLBACK, and this is the second half of the fix round 2 correction.

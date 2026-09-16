@@ -22,7 +22,7 @@ import type { SessionApprovalPolicy } from "../agent/gate";
 import type { Mode as SessionMode } from "../agent/tools/registry";
 import { assistantMemoryDirFor, memoryDirFor, type MemoryDirOptions } from "../agent/memory-dir";
 import type { CapabilityServerRecord } from "../capabilities";
-import { officialAuthModeSetting, officialSubscriptionAuthEnabled, type Settings } from "../settings";
+import { officialSubscriptionAuthEnabled, type Settings } from "../settings";
 import { canUseToolFor, type CanUseToolDeps } from "./approval-bridge";
 import { CORE_BRAND } from "./brand";
 import { controlPlaneDenyRules, disallowedToolsFor, sandboxConfigFor } from "./mode-options";
@@ -120,24 +120,11 @@ export function ensureOfficialConfigDir(dir: string): void {
  * (`console-profile-broker.ts`), the SAME `ensureOfficialConfigDir` helper above — that function
  * is already dir-path-agnostic, so neither door needs its own copy.
  */
-export function anthropicConfigDirFor(home: string): string {
-  return join(home, "runtimes", "anthropic-config");
-}
-
-/** P10a-2: the ONE profile name every login/refresh/logout call names — `ant auth login --profile
- *  ${ANTHROPIC_PROFILE_NAME}` writes `<anthropicConfigDirFor(home)>/credentials/${ANTHROPIC_PROFILE_NAME}.json`,
- *  and `ant auth print-credentials --profile ${ANTHROPIC_PROFILE_NAME}` reads the identical file
- *  (fix wave 3 M-A: `claude auth login --console` was measured to write neither this file nor
- *  anything else under `ANTHROPIC_CONFIG_DIR` at all). Winter never supports more than one
- *  Anthropic Console profile — a literal, not a setting. */
-export const ANTHROPIC_PROFILE_NAME = "winter";
-
-/** The console profile's own credential file — `officialAuthFamilyFor`'s "auto" arm probes this
- *  path's existence, and nothing else (presence, never validity — same "presence is not validity"
- *  discipline `keychain.ts`'s `credentialPresenceFrom` documents for the Keychain-backed rows). */
-function consoleProfileCredentialFile(home: string): string {
-  return join(anthropicConfigDirFor(home), "credentials", `${ANTHROPIC_PROFILE_NAME}.json`);
-}
+// WS-20: `anthropicConfigDirFor`/`ANTHROPIC_PROFILE_NAME`/`consoleProfileCredentialFile` moved to
+// `./anthropic-paths` (a pure module settings.ts's migration can import without a cycle) — re-exported
+// here so every existing importer of this module keeps working unchanged.
+export { anthropicConfigDirFor, ANTHROPIC_PROFILE_NAME, consoleProfileCredentialFile } from "./anthropic-paths";
+import { consoleProfileCredentialFile } from "./anthropic-paths";
 
 /** The official leg's two shippable, mutually-exclusive auth arms (P10a-3) — a NARROWER type than
  *  the router's own `RuntimeSelection["authFamily"]` (which also has `console-oauth`/`bedrock`/
@@ -166,8 +153,11 @@ export type OfficialAuthFamily = "api-key" | "console";
  */
 export function officialAuthFamilyFor(home: string, settings: Settings | null | undefined, hasApiKey: boolean): OfficialAuthFamily {
   void hasApiKey; // see this function's own doc comment — accepted for the caller's use, not consulted here
-  const mode = officialAuthModeSetting(settings);
-  if (mode === "api-key" || mode === "console") return mode;
+  void settings;
+  // WS-20 L3.5: `officialAuthModeSetting`/`runtimes.official.auth` is removed — this whole
+  // function is superseded by `officialAuthArmFor(selection)` (the tag's own prefix decides the
+  // arm). Left inert (behaves as the old "auto" default always did) until L3.5 deletes it and its
+  // call sites.
   return existsSync(consoleProfileCredentialFile(home)) ? "console" : "api-key";
 }
 

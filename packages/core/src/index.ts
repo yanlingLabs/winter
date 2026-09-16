@@ -75,7 +75,10 @@ export {
   CREDENTIAL_VALUE_MAX_CHARS,
   type CredentialRow, type CredentialDoor, type CredentialRefusal, type CredentialRefusalCode,
 } from "./runtime-sdk/credentials";
-export { CODEX, CODEX_MODELS, DEFAULT_CODEX_MODEL } from "./providers/codex-config";
+export { CODEX } from "./providers/codex-config";
+// WS-20 L4: `CODEX_MODELS`/`DEFAULT_CODEX_MODEL` are deleted — `packages/cli/src/model-cli.ts`
+// imports them today and needs the L4 cross-lane update to `catalogRowsFor`/`isModelTag`/tags.
+export { DEFAULT_PROVIDER, pinsFor } from "./settings";
 // Winter Phase 10a (O7, P10a-2/6): `winter login/logout --anthropic-console` and `winter doctor`'s
 // console-profile row all run IN-PROCESS against WINTER_HOME (the CLI door inherits stdio and
 // drives the SDK's login directly — see console-profile-broker.ts's own header — never an RPC), so
