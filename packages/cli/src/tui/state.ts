@@ -48,6 +48,7 @@ import { subagentTokens } from "../subagent-display";
 import { upsertTask } from "../task-block";
 import { formatElapsed, type TaskRow } from "../task-display";
 import { spinnerFrame } from "./spinner-verbs";
+import { modelIdPortion } from "../model-cli";
 
 export type Block =
   | { kind: "user"; text: string }
@@ -642,7 +643,9 @@ export interface StatusChromeInput {
   /** The roster as the App renders it (visibleAgents — dismissed rows excluded). */
   agents: AgentRow[];
   bgTasks: BgTaskRow[];
-  /** The session's LIVE model slug (`""` = unknown → segment omitted, the pre-T5 footer shape). */
+  /** The session's LIVE model (`""` = unknown → segment omitted, the pre-T5 footer shape). WS-20:
+   *  a provider-qualified tag — `statusChromeModel` renders `modelIdPortion(model)`, never this
+   *  verbatim; there is no hint slot on this plain-text status line to carry the provider half. */
   model: string;
   effort?: string;
   activity?: SessionActivity;
@@ -726,8 +729,11 @@ export function statusChromeModel(input: StatusChromeInput): { lines: StatusLine
   else if (activity === "archived") segments.push({ text: "● archived", tone: "warning" });
 
   // The session's live model + effort — last, the CC status-line position adapted (model reads as
-  // the line's right edge). Unknown model (`""`) omits the segment: never show a guess.
-  if (model) segments.push({ text: effort ? `${model} (${effort})` : model, tone: "dim" });
+  // the line's right edge). Unknown model (`""`) omits the segment: never show a guess. WS-20:
+  // `model` is a provider-qualified tag — `modelIdPortion` strips the "<providerId>/" prefix so
+  // the footer never shows the raw tag (also covers `sessionModelOverride`, app.tsx's resume-route
+  // prop, which reaches this same field — see that file's own note on the prop).
+  if (model) segments.push({ text: effort ? `${modelIdPortion(model)} (${effort})` : modelIdPortion(model), tone: "dim" });
 
   lines.push({ key: "status", sep: " · ", segments });
   return { lines };

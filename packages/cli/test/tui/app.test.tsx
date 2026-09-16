@@ -151,6 +151,20 @@ describe("App (fullscreen shell)", () => {
     expect(frame).toContain("gpt-5-codex · /work/proj");
   });
 
+  // Review fix (WS-20): the (d) pin above uses a bare "gpt-5-codex" — no "/", so `modelIdPortion`
+  // is a no-op and it stayed green untouched. This exercises the real shape the banner now
+  // receives: a provider-qualified tag, which must show only its modelId half.
+  test("(d2) WS-20: a provider-qualified tag in the welcome banner shows its modelId half only", async () => {
+    const bridge = makeEventBridge();
+    const { lastFrame } = render(
+      <App client={fakeClient()} bridge={bridge} sessionId="s" cwd="/work/proj" initialPolicy="ask" version="0.0.1" model="codex-oauth/gpt-5.6-terra" />,
+    );
+    await wait();
+    const frame = lastFrame() ?? "";
+    expect(frame).toContain("gpt-5.6-terra · /work/proj");
+    expect(frame).not.toContain("codex-oauth");
+  });
+
   test("(e) empty session: frame is exactly rows-1 lines, welcome at the top, composer + footer pinned at the bottom", async () => {
     const bridge = makeEventBridge();
     const { lastFrame } = render(<App client={fakeClient()} bridge={bridge} {...baseProps} />);
