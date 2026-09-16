@@ -742,7 +742,9 @@ export const DaemonStatusResult = z.object({
   version: z.string(),
   uptimeMs: z.number().int().nonnegative(),
   socketPath: z.string(),
-  provider: z.object({ id: z.string(), model: z.string() }).nullable(),
+  // WS-20 L3.6: `model` is a provider-qualified tag now (`splitTag(defaultTag).providerId` names
+  // `id`, and `defaultTag` itself is `model`).
+  provider: z.object({ id: z.string(), model: ModelTagSchema }).nullable(),
   sessionsCount: z.number().int().nonnegative(),
   pluginsCount: z.number().int().nonnegative(),
 });
@@ -1164,6 +1166,24 @@ export const ProviderConfigureParams = z.union([
   }),
 ]);
 export const ProviderConfigureResult = z.object({ ok: z.literal(true) });
+
+// WS-20 (cross-lane request, Lane 4 / Mac app): the Mac app used to write
+// `runtimes.advisorModel` straight into settings.json (`AppModel.writeAdvisorModelToSettings`).
+// Under WS-20 that write must go through the daemon so the tag is validated against the pinned
+// catalog before it ever lands on disk — `setAdvisorModel` (settings.ts) is the SAME transform
+// `winter model --advisor <slug|auto>` already uses; this is the RPC door onto it. LOCAL-ROLE
+// ONLY: never added to `REMOTE_ALLOWED_METHODS` — a phone has no Winter-leg advisor to configure.
+export const SettingsSetAdvisorModelParams = z.object({
+  /** `null` clears the override (falls back to the D30 per-family default); a non-null value must
+   *  already be a provider-qualified tag — the shape check happens HERE, at the door; provider
+   *  EXISTENCE is the handler's own `setAdvisorModel` check. */
+  model: ModelTagSchema.nullable(),
+});
+export const SettingsSetAdvisorModelResult = z.object({
+  ok: z.literal(true),
+  /** Echoes back what was actually STORED (never what was requested) — `null` when cleared. */
+  model: z.string().nullable(),
+});
 
 // ---------------------------------------------------------------------------------------------
 // Winter Phase 10a (O5, P10a-6): the Anthropic Console login RPC surface. `provider.login` is a
@@ -1952,6 +1972,7 @@ export const METHODS = {
   memoryDelete: "memory.delete",
   memoryAudit: "memory.audit",
   providerConfigure: "provider.configure",
+  settingsSetAdvisorModel: "settings.setAdvisorModel",
   providerLogin: "provider.login",
   providerLoginCode: "provider.loginCode",
   providerLogout: "provider.logout",

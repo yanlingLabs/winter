@@ -24,6 +24,7 @@ import {
   RoutinesCreateParams, RoutinesListParams, RoutinesUpdateParams, RoutinesDeleteParams,
   MemoryListParams, MemoryReadParams, MemoryWriteParams, MemoryDeleteParams, MemoryAuditParams,
   ProviderConfigureParams,
+  SettingsSetAdvisorModelParams,
   ProviderLoginParams, ProviderLoginCodeParams, ProviderLogoutParams, ProviderStatusParams,
   CredentialListParams, CredentialSetParams, CredentialRemoveParams,
   WorkflowListParams, WorkflowRunParams, WorkflowStopParams, WorkflowGetParams,
@@ -36,7 +37,7 @@ import {
 import type { TokenAuthority } from "../auth/tokens";
 import type { SecretStore } from "../auth/secret-store";
 import { readCredentialMaterial, writeOpenAiApiKey } from "../auth/credential-material";
-import { ANTHROPIC_CREDENTIAL_SECRET_NAME } from "../runtime-sdk/keychain";
+import { ANTHROPIC_CREDENTIAL_SECRET_NAME, credentialPresenceFrom } from "../runtime-sdk/keychain";
 import { credentialRows, credentialValueRefusal, evictSessionsForCredential, removeCredential, setCredential, CredentialStoreUnavailable } from "../runtime-sdk/credentials";
 import { effectiveOfficialAuthFor } from "../runtime-sdk/official-options";
 import type { ConsoleProfileBroker } from "../auth/console-profile-broker";
@@ -73,8 +74,8 @@ import { recordNamesSelection } from "../runtime-sdk/handoff";
 import type { RuntimeSessionRecords } from "../runtime-state/records";
 import { loadCatalog, CLAUDE_FAMILY_ID } from "@yanlinglabs/winter-provider-catalog";
 import { rowForTag } from "../runtime-sdk/provider-selection";
+import { parseModelTag, type ModelTag } from "../runtime-sdk/model-tag";
 import type { CapabilityServerRecord, CapabilitySession } from "../capabilities";
-import { resolveModelAlias } from "../agent/model-aliases";
 import type { ApprovalBroker } from "../agent/approvals";
 import type { PermissionRules } from "../agent/permission-rules";
 import { repoRootFor } from "../agent/memory-dir";
@@ -101,7 +102,7 @@ import type { ProviderLink } from "../peripheral/provider-link";
 import type { HardwareBroker } from "../peripheral/hardware";
 import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
-import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, Settings } from "../settings";
+import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings } from "../settings";
 // WS-20 L3.5/L3.6: `officialAuthModeSetting`/`DISPATCH_PIN_MESSAGE` are deleted along with
 // `runtimes.official.auth`/`DISPATCH_MODEL` — left as inline stubs below (marked WS-20 L3.5/L3.6)
 // so this module still LOADS until those tasks land (ipc/server.ts is L3.5/L3.6's own file).
@@ -708,46 +709,21 @@ function assertEffortSelectable(effort: string, model: string, mode: string | un
  * here — never the family answer itself, which is read straight off the row — is the cost of that
  * boundary, not a second source of truth for "what the catalog says a model's family is".
  */
+// WS-20: `model` is ALWAYS a tag now — the exact catalog row `key` is the only match this needs;
+// the broad alias/upstreamId/canonicalModelId matching a bare id used to require is gone.
 function isClaudeCatalogModel(model: string): boolean {
-  return loadCatalog().models.some((m) =>
-    (m.key === model || m.upstreamId === model || m.canonicalModelId === model || m.aliases.includes(model))
-    && m.modelFamily === CLAUDE_FAMILY_ID,
-  );
+  return loadCatalog().models.some((m) => m.key === model && m.modelFamily === CLAUDE_FAMILY_ID);
 }
 
-/** followups batch T2: the ONE model-resolution+selection rule, shared verbatim by
- *  `session.setModel` and `session.create` (which — unlike `effort` above, T6's own extraction —
- *  never validated `model` AT ALL until this task: a bogus id bricked every subsequent turn on the
- *  session, each one 400ing against the provider with nothing pointing back at create, and an alias
- *  like "sol" was stored verbatim, never matching the catalogue's canonical "gpt-5.6-sol" — which
- *  also renders that session's effort menu wire-empty on the Mac, since the picker matches
- *  `row.model` against catalogue ids).
- *
- *  Mirrors `assertEffortSelectable` just above in shape (extracted so the two model-writing
- *  surfaces cannot drift) but returns the RESOLVED id rather than only asserting, because model
- *  selection has an alias step effort selection does not: `resolveModelAlias` turns a short name
- *  ("sol") into the full id ("gpt-5.6-sol") it should be STORED as, not merely validated against.
- *
- *  `knownModels.length === 0` (a BYO openai-compatible endpoint that cannot enumerate) skips both
- *  resolution and membership and returns `model` unchanged — the exact `known.length > 0` gate
- *  `assertEffortSelectable` uses for effort, so neither surface can be bricked by a provider it
- *  cannot ask. Otherwise a resolved id that still isn't a member throws
- *  `RpcFailure(INVALID_PARAMS)` — UNLESS the pinned catalog itself has a row for it
- *  (`catalogRowsFor`, `runtime-sdk/provider-selection.ts`).
- *
- *  That catalog fallback is the fix for a shipped defect (measured live 2026-09-13): `knownModels`
- *  is `engine.knownModels()` — the daemon's INTERNAL-calls provider's own fixed list (e.g.
- *  `CODEX_MODELS` for a `codex-oauth` deployment) — which has never listed a Claude model and never
- *  will; it describes what the daemon's OWN background calls can use, not what a SESSION can run.
- *  A session's actual model can instead be served by the runtime SDK's official Claude leg
- *  (`runtime-sdk/session-driver.ts`'s `decideRuntime`, `runtime-sdk/handoff.ts`'s
- *  `planAndApplySwitch`), which resolves against the pinned catalog, not `knownModels`. Gating a
- *  catalog-servable model out HERE meant it could never reach that decision at all — a bare
- *  INVALID_PARAMS with no `data.code`, never the leg's own typed `runtime_selection_refused` /
- *  `confirmation_required` / `handoff_disabled`. This function stays a MEMBERSHIP gate, not an
- *  availability one: it does not check credentials or leg eligibility (the runtime decision still
- *  owns that, and still refuses typed when the catalog row exists but nothing can actually serve
- *  it) — it only stops widening to a string neither source recognizes as a real model. */
+/** WS-20: the ONE model-validation door, shared verbatim by `session.setModel` and
+ *  `session.create` — collapses to a straight `parseModelTag` now: a model is ALWAYS a
+ *  provider-qualified tag on the wire (`ModelTagSchema` at the params schema already refuses a
+ *  bare id before this ever runs), so there is nothing left to RESOLVE, only to check exists in
+ *  the pinned catalog. No more alias step, no more `knownModels`-vs-catalog fallback dance — a tag
+ *  either names a real catalog provider or it does not, and `isModelTag`/`parseModelTag`
+ *  (model-tag.ts) is the one place that answer lives. Stays a MEMBERSHIP gate, not an availability
+ *  one: it does not check credentials or leg eligibility (the runtime decision still owns that,
+ *  and still refuses typed when the tag is real but nothing can actually serve it). */
 /**
  * M1 (whole-branch review, fix round 2): a CATEGORY for the daemon log, never `detail`'s raw text
  * (this file's "names only" logging discipline). Router 0.0.6's `revert-pending` `detail` says
@@ -784,19 +760,12 @@ function detailCategoryFor(detail: string): "self-converge" | "needs-manual-reco
   return "unrecognized";
 }
 
-function resolveModelSelection(model: string, knownModels: { id: string }[]): string {
-  if (knownModels.length === 0) return model;
-  const resolved = resolveModelAlias(model, knownModels.map((m) => m.id));
-  // WS-20 L3.6: this whole function is superseded by `parseModelTag` at the RPC door; left as a
-  // minimal stub (exact-key lookup instead of `catalogRowsFor`'s broad alias match) so the module
-  // still LOADS until L3.6 lands.
-  if (!knownModels.some((m) => m.id === resolved) && rowForTag(resolved) === undefined) {
-    throw new RpcFailure(
-      ERR.INVALID_PARAMS,
-      `unknown model '${resolved}' — available models: ${knownModels.map((m) => m.id).join(", ")} (a pinned-catalog model id/alias is also accepted, even when it isn't in that list)`,
-    );
+function resolveModelSelection(model: string): string {
+  try {
+    return parseModelTag(model);
+  } catch {
+    throw new RpcFailure(ERR.INVALID_PARAMS, `model must be a provider-qualified tag '<providerId>/<modelId>' (got '${model}')`);
   }
-  return resolved;
 }
 
 /** Maps a failed `PluginSupervisor.invoke()` result to the message a `throw new Error(...)` in
@@ -1517,7 +1486,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // validate against the wrong list entirely.
         let model = p.model;
         if (model !== undefined) {
-          model = resolveModelSelection(model, opts.engine?.knownModels() ?? []);
+          model = resolveModelSelection(model);
         }
         // provider-correctness T6: the effort half of `model`, validated by the SAME rule
         // `session.setEffort` applies (`assertEffortSelectable`) so a create can never accept what a
@@ -2173,7 +2142,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // `knownModels()`, e.g. an arbitrary openai-compatible endpoint) can't validate anything
         // either, so the value is stored freely, same as spawn_agent's own fallback for that case.
         if (model !== null) {
-          model = resolveModelSelection(model, opts.engine?.knownModels() ?? []);
+          model = resolveModelSelection(model);
         }
         // Winter Phase 8c (Task 4.1): a model that resolves to a DIFFERENT runtime leg than the
         // session's record is a HANDOFF, not a plain write — `planAndApplySwitch` is the one place
@@ -2430,11 +2399,6 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           store: opts.store,
           buffers: syncBuffers,
           connId: socket.data.connId,
-          // The SAME catalogue session.setModel validates against, just above — sync.push writes
-          // the same `model` column over the same remote allowlist, so it must not be the one path
-          // that skips Task 1's validation. An unknown slug is dropped rather than fatal (a model
-          // mismatch must never block log replication); see validateSyncMeta.
-          knownModelIds: () => (opts.engine?.knownModels() ?? []).map((m) => m.id),
           // provider-correctness T6: the SAME live-model getter `session.setEffort` resolves against
           // (just above), so a pushed `meta.effort` on a session with no model override of its own
           // is checked against the model the next turn would actually use — not against `""`.
@@ -2464,24 +2428,15 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           dangerousDomainsAdded: opts.dangerousDomainsAdded ? () => opts.dangerousDomainsAdded!() : undefined,
           liveModel: opts.liveModel,
           liveEffort: opts.liveEffort,
-          // Whole-branch review C1: the identity of the provider the `knownModels` below belongs to
-          // — served together so a client can tell a foreign catalogue from its own.
+          // Whole-branch review C1: the identity of the provider `liveModel` above belongs to —
+          // served together so a client can tell a foreign catalogue from its own.
           liveProvider: opts.liveProvider,
-          // provider-correctness T3: the EXACT catalogue session.setModel validates against, a few
-          // hundred lines above (`opts.engine?.knownModels() ?? []`), and the one sync.push consults
-          // for `knownModelIds`.
-          //
-          // Read at CALL TIME, and T3 review m2 is precise about what that does and does not buy.
-          // It buys: a phone always sees whatever the running engine's provider currently
-          // enumerates, with no phone app update — which is the whole reason the catalogue is
-          // served rather than derived. It does NOT buy a hot provider SWAP: `knownModels()` goes
-          // to `this.cfg.provider.provider`, the instance bound at boot, and providers/manager.ts
-          // states outright that changing `provider.type` in settings.json still needs a daemon
-          // restart. Only the model/effort SELECTION is hot (that resolver re-reads settings.json);
-          // the catalogue moves when the provider instance does. Do not describe this line as
-          // "a provider swap needs no restart" — it isn't, and the phone would be told the old
-          // provider's lineup until the daemon comes back.
-          knownModels: () => opts.engine?.knownModels() ?? [],
+          // WS-20: `models` is now `pickerModels()` (ipc/picker-models.ts) — every CREDENTIALED
+          // provider's own rows, not just the boot-bound engine instance's small catalogue. Read at
+          // CALL TIME: a Keychain write or a console sign-in is visible on the very next
+          // `sync.config`, no daemon restart.
+          credentials: opts.secrets ? () => credentialPresenceFrom(opts.secrets!) : undefined,
+          home: opts.winterHome,
         });
       }
       case METHODS.syncMemory: {
@@ -2924,11 +2879,39 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         await writeOpenAiApiKey(opts.secrets, p.apiKey);
         const settingsPath = join(opts.winterHome, "settings.json");
         const settings = loadSettings(settingsPath);
+        // WS-20: the BYO endpoint is `providers.openai.baseUrl` now (never `provider.baseUrl`,
+        // which no longer exists on `ProviderSettings`) and the model is a tag — `"openai/…"`,
+        // never a bare id. `p.model` is already `ModelTagSchema`-validated at the params door.
         saveSettings(settingsPath, {
           ...settings,
-          provider: { type: "openai-compatible", baseUrl: p.baseUrl, model: p.model ?? "gpt-4o" },
+          provider: { model: (p.model ?? "openai/gpt-5.6-sol") as ModelTag },
+          providers: { ...settings.providers, openai: { ...settings.providers?.openai, baseUrl: p.baseUrl } },
         });
         return { ok: true };
+      }
+
+      // -----------------------------------------------------------------------------------------
+      // WS-20 (cross-lane, Lane 4 / Mac app): the ONE door onto `settings.runtimes.advisorModel` —
+      // the Mac app used to write it straight into settings.json; that write must be validated
+      // against the pinned catalog now, same as `winter model --advisor <slug|auto>` (the CLI's
+      // own in-process door onto the SAME `setAdvisorModel` transform). LOCAL-ROLE ONLY.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.settingsSetAdvisorModel: {
+        const p = parseParams(SettingsSetAdvisorModelParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "settings.setAdvisorModel is not available on this server (no winterHome configured)");
+        const settingsPath = join(opts.winterHome, "settings.json");
+        const settings = loadSettings(settingsPath);
+        let next: Settings;
+        try {
+          next = setAdvisorModel(settings, p.model ?? undefined);
+        } catch (err) {
+          // `setAdvisorModel` throws a `TypeError` on a non-tag value — `ModelTagSchema` at the
+          // params door already refused a BARE id, so the only way here is a shape-valid tag whose
+          // provider the pinned catalog does not recognise.
+          throw new RpcFailure(ERR.INVALID_PARAMS, err instanceof Error ? err.message : String(err));
+        }
+        saveSettings(settingsPath, next);
+        return { ok: true, model: next.runtimes?.advisorModel ?? null };
       }
 
       // -----------------------------------------------------------------------------------------
