@@ -74,6 +74,19 @@ export function modelIdPortion(tag: string): string {
   }
 }
 
+/** WS-20 (review fix, Nit 1): a free-text CLI line's "model, with the provider as a hint" shape —
+ *  `modelIdPortion` alone (never the raw tag), the providerId trailing in parens as a secondary
+ *  hint rather than concatenated into one opaque string. A no-op fallback to the raw value on
+ *  anything not tag-shaped, same posture as `modelIdPortion` itself. */
+export function modelDisplayWithHint(tag: string): string {
+  try {
+    const { providerId, modelId } = splitTag(tag);
+    return `${modelId} (${providerId})`;
+  } catch {
+    return tag;
+  }
+}
+
 /** WS-20: validates a model against the tag shape ("<providerId>/<modelId>") AND catalog
  *  provider membership — replaces `validateModelSlug`'s per-provider-type allowlist now that a
  *  model is ALWAYS a provider-qualified tag (`packages/core/src/runtime-sdk/model-tag.ts`, the

@@ -1715,7 +1715,7 @@ describe("App — B2 the /model bottom picker end-to-end", () => {
       await wait();
       const frame = lastFrame() ?? "";
       expect(frame).not.toContain("esc cancel"); // picker closed
-      expect(frame).toContain("updated (model codex-oauth/gpt-5.6-terra)"); // the confirmation note (transcript, AFTER selection)
+      expect(frame).toContain("updated (model gpt-5.6-terra (codex-oauth))"); // the confirmation note (transcript, AFTER selection)
       expect(frame).toContain("terra"); // the footer chip flipped (same frame)
       const settings = JSON.parse(readFileSync(join(home, "settings.json"), "utf8")) as { provider: { model: string } };
       expect(settings.provider.model).toBe("codex-oauth/gpt-5.6-terra"); // the write really landed on disk
@@ -1800,7 +1800,7 @@ describe("App — T5 status chrome end-to-end (live sources, zero daemon changes
       await wait();
 
       const frame = lastFrame() ?? "";
-      expect(frame).toContain("model codex-oauth/gpt-5.6-luna, effort high"); // the committed note (unchanged wording)
+      expect(frame).toContain("model gpt-5.6-luna (codex-oauth), effort high"); // the committed note (unchanged wording)
       expect(frame).toContain("gpt-5.6-luna (high)"); // THE PIN: the footer segment flipped, same frame
       expect(client.calls).toEqual([]); // /model's direct write form never touches the client
     } finally {

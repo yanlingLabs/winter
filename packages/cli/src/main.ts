@@ -43,7 +43,7 @@ import {
   setPluginEnabled,
   stripPluginConsents,
 } from "./plugin-cli";
-import { parseModelArgs, validateEffort, validateModelTag, validateAdvisorSlug, renderModelListing, type ModelListingRow } from "./model-cli";
+import { parseModelArgs, validateEffort, validateModelTag, validateAdvisorSlug, renderModelListing, modelDisplayWithHint, type ModelListingRow } from "./model-cli";
 import { formatElapsed, formatTokens } from "./task-display";
 import { formatRoutineDetail } from "./routines-cli";
 import { runAgentsCommand } from "./agents-cli";
@@ -2363,7 +2363,8 @@ if (import.meta.main) {
 
     if (action.kind === "show") {
       const effortSuffix = settings.provider.reasoningEffort ? `  ${DIM}effort: ${settings.provider.reasoningEffort}${RESET}` : "";
-      console.log(`${AQUA}${settings.provider.model}${RESET}${effortSuffix}`);
+      // Review fix (Nit 1): the modelId, the provider trailing as a hint — never the raw tag.
+      console.log(`${AQUA}${modelDisplayWithHint(settings.provider.model)}${RESET}${effortSuffix}`);
       // WS-20: the full grouped-by-provider catalogue needs the daemon's `sync.config` (the live
       // model list — this command has no static per-provider allowlist to fall back on anymore,
       // see model-cli.ts's `validateModelTag`). Try the socket; on any failure (no daemon, no
@@ -2393,7 +2394,7 @@ if (import.meta.main) {
       // Winter Phase 8d (P8d-8, Task 4.3): the D30 advisor line — "auto" is the honest label for
       // an unset override (the router applies its own per-family default, never a slug this CLI
       // invents), mirroring `winter model --advisor auto`'s own clearing spelling.
-      console.log(`${DIM}advisor: ${settings.runtimes?.advisorModel ?? "auto"}${RESET}`);
+      console.log(`${DIM}advisor: ${settings.runtimes?.advisorModel ? modelDisplayWithHint(settings.runtimes.advisorModel) : "auto"}${RESET}`);
       process.exit(0);
     }
 
@@ -2405,9 +2406,39 @@ if (import.meta.main) {
         const err = validateAdvisorSlug(action.slug);
         if (err) { console.error(err); process.exit(1); }
       }
-      const next = setAdvisorModel(settings, action.kind === "setAdvisor" ? action.slug : undefined);
+      const modelArg = action.kind === "setAdvisor" ? action.slug : null;
+      // Review fix (Nit 4): when the daemon is live, the write goes through `settings.
+      // setAdvisorModel` (the SAME door.request pattern `winter model` (show) uses for
+      // sync.config) so the tag is validated against the pinned catalog before it lands on disk —
+      // never a bare `saveSettings` racing the daemon's own settings-watcher. Falls back to the
+      // direct file write ONLY when there is no live daemon to ask, same no-daemon posture this
+      // command has always had — and says so on stderr, since the daemon usually owns this write.
+      const door = await openCredentialDaemonDoor();
+      if (door) {
+        // `process.exit()` terminates immediately — it never lets a pending `finally` run — so
+        // `door.close()` must happen BEFORE either exit call, not rely on one after it.
+        let stored: string | null = null;
+        let daemonError: string | undefined;
+        try {
+          const { METHODS } = await import("@yanlinglabs/winter-protocol");
+          const raw = await door.request(METHODS.settingsSetAdvisorModel, { model: modelArg });
+          stored = (raw as { model?: string | null } | undefined)?.model ?? null;
+        } catch (err) {
+          daemonError = (err as Error).message;
+        } finally {
+          door.close();
+        }
+        if (daemonError !== undefined) {
+          console.error(`the daemon refused the advisor setting: ${daemonError}`);
+          process.exit(1);
+        }
+        console.log(`${AQUA}updated${RESET} ${DIM}(advisor ${stored ? modelDisplayWithHint(stored) : "auto"}) — takes effect next turn, no daemon restart needed${RESET}`);
+        process.exit(0);
+      }
+      console.error("no daemon connection — writing settings.json directly");
+      const next = setAdvisorModel(settings, modelArg ?? undefined);
       saveSettings(settingsPath, next);
-      console.log(`${AQUA}updated${RESET} ${DIM}(advisor ${next.runtimes?.advisorModel ?? "auto"}) — takes effect next turn, no daemon restart needed${RESET}`);
+      console.log(`${AQUA}updated${RESET} ${DIM}(advisor ${next.runtimes?.advisorModel ? modelDisplayWithHint(next.runtimes.advisorModel) : "auto"}) — takes effect next turn, no daemon restart needed${RESET}`);
       process.exit(0);
     }
 
@@ -2426,7 +2457,7 @@ if (import.meta.main) {
     }
     saveSettings(settingsPath, next);
     const changed = [
-      action.kind === "setModel" || action.kind === "setModelAndEffort" ? `model ${next.provider.model}` : null,
+      action.kind === "setModel" || action.kind === "setModelAndEffort" ? `model ${modelDisplayWithHint(next.provider.model)}` : null,
       action.kind === "setEffort" || action.kind === "setModelAndEffort" ? `effort ${next.provider.reasoningEffort}` : null,
     ].filter(Boolean).join(", ");
     console.log(`${AQUA}updated${RESET} ${DIM}(${changed}) — takes effect next turn, no daemon restart needed${RESET}`);
