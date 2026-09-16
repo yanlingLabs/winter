@@ -15,11 +15,12 @@ export {
   type Settings,
 } from "./settings";
 // Winter Phase 8d (Task 4.3): `winter model --advisor <slug>` validates against the SAME pinned
-// catalog `session.setModel`'s handler consults (`catalogRowsFor`, `runtime-sdk/provider-
-// selection.ts`) — the CLI runs with no live daemon/RPC for this command (direct settings.json
-// read/write, `case "model"`'s own doc comment), so the STATIC compiled-in catalog, not a
-// `sync.config` round trip, is the only thing it can validate against without one.
-export { catalogRowsFor } from "./runtime-sdk/provider-selection";
+// catalog `session.setModel`'s handler consults — the CLI runs with no live daemon/RPC for this
+// command (direct settings.json read/write, `case "model"`'s own doc comment), so the STATIC
+// compiled-in catalog, not a `sync.config` round trip, is the only thing it can validate against
+// without one. WS-20 L4: `catalogRowsFor`'s broad alias/upstreamId matching is deleted —
+// `packages/cli/src/model-cli.ts` needs the cross-lane update to `rowForTag`/`isModelTag`.
+export { rowForTag } from "./runtime-sdk/provider-selection";
 // WS-20: the ONE model-tag module — a model is ALWAYS a provider-qualified tag
 // ("<providerId>/<modelId>") in code; nothing else may pick a provider for a bare id.
 export {

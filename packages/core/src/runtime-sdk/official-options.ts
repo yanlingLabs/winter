@@ -124,7 +124,7 @@ export function ensureOfficialConfigDir(dir: string): void {
 // `./anthropic-paths` (a pure module settings.ts's migration can import without a cycle) — re-exported
 // here so every existing importer of this module keeps working unchanged.
 export { anthropicConfigDirFor, ANTHROPIC_PROFILE_NAME, consoleProfileCredentialFile } from "./anthropic-paths";
-import { consoleProfileCredentialFile } from "./anthropic-paths";
+import { anthropicConfigDirFor, ANTHROPIC_PROFILE_NAME, consoleProfileCredentialFile } from "./anthropic-paths";
 
 /** The official leg's two shippable, mutually-exclusive auth arms (P10a-3) — a NARROWER type than
  *  the router's own `RuntimeSelection["authFamily"]` (which also has `console-oauth`/`bedrock`/

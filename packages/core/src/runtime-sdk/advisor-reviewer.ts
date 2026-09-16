@@ -35,6 +35,7 @@ import type { Provider, TurnInputItem } from "../providers/types";
 import { credentialStoreOverSecretStore } from "../providers/credential-store";
 import { winterOptionsFromSettings, providerBaseUrlFor, type Settings } from "../settings";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME, credentialRefFor } from "./keychain";
+import { facingNameToTag, splitTag, type ModelTag } from "./model-tag";
 
 /** Which of Winter's three D30-relevant families a catalog-recognised model belongs to. `"other"` is
  *  every family the pinned catalog has that is neither the OpenAI ("gpt") nor the Claude ("claude")
@@ -65,6 +66,13 @@ function firstSlotCanonicalIdFor(familyId: "gpt" | "claude"): string | undefined
   return loadCatalog().families.find((f) => f.id === familyId)?.slots[0]?.canonicalModelId;
 }
 
+/** WS-20: the SAME slot-1 lookup as `firstSlotCanonicalIdFor`, but the slot NAME ("astra"/"fable")
+ *  rather than its canonical model id — `facingNameToTag` (model-tag.ts) needs the name to find
+ *  which TAG a given provider serves for that slot. */
+function firstSlotNameOfFamily(familyId: "gpt" | "claude"): string | undefined {
+  return loadCatalog().families.find((f) => f.id === familyId)?.slots[0]?.name;
+}
+
 /**
  * Review fix F1: `advisorReviewerFor`'s `sessionModel` deriving the D30 default is only correct when
  * it reports THIS resolver's own family — and the ONE caller of this resolver (`daemon.ts`, feeding
@@ -80,22 +88,40 @@ function firstSlotCanonicalIdFor(familyId: "gpt" | "claude"): string | undefined
  * — this export just states the one thing this deployment can promise TODAY: every session on this
  * leg is Claude-family, so its placeholder session-model IS a Claude-family model, unconditionally.)
  */
-export function officialLegDefaultSessionModel(): string | undefined {
-  return firstSlotCanonicalIdFor("claude");
+// WS-20: `d30DefaultModel` now needs a TAG (it splits the provider off the front, never a bare
+// canonical id) — this placeholder asserts the Claude family through the "anthropic" arm, the
+// default/common one; `d30DefaultModel`'s own "no cross-provider fallback" rule means a session
+// actually running on "console" instead still resolves correctly IF console serves the same slot
+// (it mirrors every anthropic Claude row, L1's own Task), and falls through to no override
+// otherwise — never a wrong-provider tag reaching a reviewer call.
+export function officialLegDefaultSessionModel(): ModelTag | undefined {
+  const canonicalId = firstSlotCanonicalIdFor("claude");
+  return canonicalId === undefined ? undefined : (`anthropic/${canonicalId}` as ModelTag);
 }
 
 /**
  * D30's table, shared by both legs so they can never state two different defaults for the same
- * family: unset -> a gpt session's reviewer is "astra" (`gpt-6-astra`), a claude session's is "fable"
- * (`claude-fable-5-1`), any OTHER family falls through to the session's own model (which then most
- * likely resolves to `familyOfModel` = "other" too, and `advisorReviewerFor`'s own resolver answers
- * `undefined` — no provider mapping exists for a non-openai/claude family in 8d).
+ * family: unset -> a gpt session's reviewer is family slot 1 ("astra"), a claude session's is
+ * family slot 1 ("fable") — WS-13c §9's own ranked slot 1.
+ *
+ * WS-20: the answer is now the SAME PROVIDER's own tag for that slot (`facingNameToTag`), never a
+ * bare canonical id and never a cross-provider fallback (spec §4.3) — a provider that does not
+ * serve its family's slot 1 (or a session whose tag matches no catalog family at all) answers
+ * `undefined`, letting the caller fall through to no explicit advisor override (the child's own
+ * default, which is the session's own model either way).
  */
-export function d30DefaultModel(sessionModel: string | undefined): string | undefined {
-  const family = sessionModel !== undefined ? familyOfModel(sessionModel) : "other";
-  if (family === "openai") return firstSlotCanonicalIdFor("gpt") ?? sessionModel;
-  if (family === "claude") return firstSlotCanonicalIdFor("claude") ?? sessionModel;
-  return sessionModel;
+export function d30DefaultModel(sessionTag: string | undefined): ModelTag | undefined {
+  if (sessionTag === undefined) return undefined;
+  let providerId: string;
+  try {
+    providerId = splitTag(sessionTag).providerId;
+  } catch {
+    return undefined;
+  }
+  const family = familyOfModel(sessionTag);
+  if (family === "openai") return facingNameToTag(providerId, firstSlotNameOfFamily("gpt") ?? "");
+  if (family === "claude") return facingNameToTag(providerId, firstSlotNameOfFamily("claude") ?? "");
+  return undefined;
 }
 
 /** `AdvisorReviewerRequest.messages` -> one non-streaming text turn, for the OpenAI-family Winter
@@ -250,15 +276,19 @@ export function advisorReviewerFor(deps: {
     const targetModel = explicit ?? d30DefaultModel(deps.sessionModel());
     if (targetModel === undefined) return undefined;
     const family = deps.familyOf(targetModel);
+    // WS-20: `targetModel` is a TAG (reported verbatim as `ResolvedReviewer.model`) — the internal
+    // `Provider`/adapter wire calls inside `openAiFamilyReviewer`/`claudeFamilyReviewer` speak bare
+    // model ids, split from the tag once, right at this boundary.
+    const wireModel = (() => { try { return splitTag(targetModel).modelId; } catch { return targetModel; } })();
     // Review fix F3: "no credential for the target family" is `undefined`, checked HERE (sync, from
     // the cache above) — never inside `generate()`, and never a live Keychain read in this function.
     if (family === "openai") {
       if (!hasCredential(CREDENTIAL_MATERIAL_NAMES.codexOauth) && !hasCredential(CREDENTIAL_MATERIAL_NAMES.openai)) return undefined;
-      return { provider: openAiFamilyReviewer(deps.secrets, deps.settings, targetModel), model: targetModel };
+      return { provider: openAiFamilyReviewer(deps.secrets, deps.settings, wireModel), model: targetModel };
     }
     if (family === "claude") {
       if (!hasCredential(ANTHROPIC_CREDENTIAL_SECRET_NAME)) return undefined;
-      return { provider: claudeFamilyReviewer(deps.secrets, targetModel, deps.connectionOverride), model: targetModel };
+      return { provider: claudeFamilyReviewer(deps.secrets, wireModel, deps.connectionOverride), model: targetModel };
     }
     // "other": 8d states no provider-runtime mapping for a third family (see this module's header).
     return undefined;
