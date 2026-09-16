@@ -166,9 +166,10 @@ function openAiFamilyReviewer(secrets: SecretStore, settings: () => Settings | u
       if (providerId === "codex-oauth") {
         const material = await readCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth);
         if (material !== null) {
-          // WS-20 L3.4: inlined — `DEFAULT_CODEX_MODEL` is deleted; `d30DefaultModel`'s own tag-based
-          // redesign (facingNameToTag/pinsFor) supersedes this whole function.
-          return generateOverWinterProvider(createCodexOauthRuntimeProvider(secrets), "gpt-5.6-sol", input);
+          // WS-20 (whole-branch review nit): the tag's OWN model id goes on the wire — the arm used to
+          // inline the deleted `DEFAULT_CODEX_MODEL` ("gpt-5.6-sol"), so a `codex-oauth/gpt-5.6-terra`
+          // advisor tag silently ran Sol.
+          return generateOverWinterProvider(createCodexOauthRuntimeProvider(secrets), targetModel, input);
         }
         throw new Error("advisor reviewer: codex-oauth credential material is missing for a codex-oauth/* target");
       }
