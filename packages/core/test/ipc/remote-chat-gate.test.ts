@@ -150,7 +150,7 @@ describe("remote chat gate: chat lifted (Slice C), the mechanism survives for co
     [METHODS.approvalRespond, { callId: "c_x", approved: true }],
     [METHODS.approvalList, {}],
     [METHODS.askUserRespond, { callId: "c_x", answers: {} }],
-    [METHODS.sessionSetModel, { model: "claude-opus-5" }],
+    [METHODS.sessionSetModel, { model: "anthropic/claude-opus-5" }],
     [METHODS.sessionSetEffort, { effort: "high" }],
     [METHODS.syncPull, { fromSeq: 0 }],
   ])("%s on a chat session now succeeds for remote (Slice C lifted the gate)", async (method, extra) => {
@@ -198,7 +198,7 @@ describe("remote chat gate: chat lifted (Slice C), the mechanism survives for co
     [METHODS.approvalRespond, { callId: "c_x", approved: true }],
     [METHODS.approvalList, {}],
     [METHODS.askUserRespond, { callId: "c_x", answers: {} }],
-    [METHODS.sessionSetModel, { model: "claude-opus-5" }],
+    [METHODS.sessionSetModel, { model: "anthropic/claude-opus-5" }],
     [METHODS.sessionSetEffort, { effort: "high" }],
     [METHODS.syncPull, { fromSeq: 0 }],
     [METHODS.syncPush, { baseSeq: 1, data: "", complete: false }],

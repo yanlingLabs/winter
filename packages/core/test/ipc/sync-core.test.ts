@@ -313,17 +313,17 @@ describe("sync.heads / sync.pull / sync.push (Chat Slice D task 2)", () => {
 
     const res = await c.request(METHODS.syncPush, {
       sessionId: id, baseSeq: 0, data: b64(jsonl([created(id), userMsg(id, 2, "forked")])), complete: true,
-      meta: { title: "A forked chat", model: "claude-opus-5", forkedFrom: { sessionId: parent, atSeq: 7 } },
+      meta: { title: "A forked chat", model: "anthropic/claude-opus-5", forkedFrom: { sessionId: parent, atSeq: 7 } },
     });
     expect(res.error).toBeUndefined();
-    expect(store.meta(id).model).toBe("claude-opus-5");
+    expect(store.meta(id).model).toBe("anthropic/claude-opus-5");
 
     const heads = await c.request(METHODS.syncHeads, {});
     const row = heads.result.sessions.find((s: any) => s.sessionId === id);
     expect(row).toBeTruthy();
     expect(row.lastSeq).toBe(2);
     expect(row.title).toBe("A forked chat");
-    expect(row.model).toBe("claude-opus-5");
+    expect(row.model).toBe("anthropic/claude-opus-5");
     expect(row.forkedFrom).toEqual({ sessionId: parent, atSeq: 7 });
     c.close();
   });
