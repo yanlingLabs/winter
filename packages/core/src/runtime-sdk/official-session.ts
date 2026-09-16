@@ -28,6 +28,7 @@ import { attachOfficialSession, type OfficialSessionAttachHandle, type OfficialS
 // P10a-h: the SAME grace window `WinterSession.end()` races against — reused, not reinvented, so
 // the two legs' "does the process actually die on end()" behaviour is one tuned constant, not two.
 import { WINTER_SESSION_END_GRACE_MS } from "./winter-session";
+import { splitTag } from "./model-tag";
 
 /** Mirrors `winter-session.ts`'s own private `sleep` exactly (including the `unref` so a pending
  *  grace timer never keeps the process alive on its own) — kept local rather than exported from
@@ -480,7 +481,9 @@ class OfficialSessionImpl implements OfficialSession {
         prompt: stream,
         options: {
           cwd: this.deps.sessionInput().cwd,
-          model: this.deps.selection.modelRef,
+          // WS-20: `selection.modelRef` is a TAG — the official leg's own wire model is the BARE
+          // modelId half, split at this boundary (explicit; see L3.5's measurement note).
+          model: splitTag(this.deps.selection.modelRef).modelId,
           pathToClaudeCodeExecutable: built.pathToClaudeCodeExecutable,
           // WS-16 §6: force the vendor to use OUR pre-allocated backend uuid on a fresh start —
           // `Options.sessionId` (must be a valid UUID; carried, never checked, for a RESUME, which

@@ -2917,26 +2917,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.providerConfigure: {
         const p = parseParams(ProviderConfigureParams, params);
         if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "provider.configure is not available on this server (no winterHome configured)");
-        // Winter Phase 10a (P10a-3): the SECOND arm — the app's Anthropic auth-mode radio. Writes
-        // EXACTLY the one hot-reloaded settings key (`runtimes.official.auth`); never touches
-        // `settings.provider` (unlike the openai-compatible arm below, which replaces that whole
-        // block) and never writes a secret — there is no key to store on this arm.
-        if ("provider" in p) {
-          const settingsPath = join(opts.winterHome, "settings.json");
-          const settings = loadSettings(settingsPath);
-          // `Settings.parse` (not a hand-built literal) fills every OTHER `runtimes.*` default
-          // (retention/migrations/winterLeg/handoff/winterIdleTimeoutSec) when the block was
-          // previously absent — the same "an absent block is not unknown" rule this file's own
-          // settings.ts documents, without this handler re-deriving those defaults by hand.
-          saveSettings(settingsPath, Settings.parse({
-            ...settings,
-            runtimes: {
-              ...(settings.runtimes ?? {}),
-              official: { ...(settings.runtimes?.official ?? {}), auth: p.settings["runtimes.official.auth"] },
-            },
-          }));
-          return { ok: true };
-        }
+        // WS-20: the SECOND arm (the app's Anthropic auth-mode radio, `runtimes.official.auth`) is
+        // DELETED along with the setting itself — `ProviderConfigureParams` now has exactly the one
+        // openai-compatible BYOK arm below.
         if (!opts.secrets) throw new RpcFailure(ERR.INTERNAL, "provider.configure is not available on this server (no secret store configured)");
         await writeOpenAiApiKey(opts.secrets, p.apiKey);
         const settingsPath = join(opts.winterHome, "settings.json");
@@ -3073,11 +3056,11 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // other settings-derived RPC in this file.
       case METHODS.providerStatus: {
         parseParams(ProviderStatusParams, params);
-        const auth = "auto" as const; // WS-20 L3.5: runtimes.official.auth removed — arm is the tag prefix
         const material = opts.secrets ? await readCredentialMaterial(opts.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME) : null;
         const apiKey = material?.kind === "api-key";
         const consoleProfile = opts.consoleBroker?.profileExists() ?? false;
-        return { anthropic: { apiKey, consoleProfile, auth, effective: effectiveOfficialAuthFor(auth, apiKey, consoleProfile) } };
+        // WS-20: `auth` is gone — presence alone; a session's own tag decides which arm it uses.
+        return { anthropic: { apiKey, consoleProfile, effective: effectiveOfficialAuthFor(apiKey, consoleProfile) } };
       }
 
       // -----------------------------------------------------------------------------------------

@@ -1150,27 +1150,17 @@ export const MemoryAuditResult = z.object({ lines: z.array(MemoryAuditLineSchema
  *  required (non-optional) `model` field for openai-compatible. Provider-TYPE changes need a
  *  daemon restart to take effect (providers/manager.ts fixes `providerType` at boot) — this RPC
  *  only persists the new config; triggering the restart is the caller's job (T2's Dashboard pane). */
-// Winter Phase 10a (P10a-3): a SECOND arm — the Anthropic auth-mode radio in the app's Provider
-// pane. Deliberately a `z.union` rather than a `z.discriminatedUnion` (the two arms don't share a
-// discriminant KEY — the original arm has no `provider` field at all, only `type`, and adding one
-// would be an unrelated wire-shape break for the shipped BYOK caller) — each arm keeps its own
-// shape exactly as it shipped. This arm writes exactly ONE hot-reloaded settings key
-// (`runtimes.official.auth`) and never touches `settings.provider` at all, unlike the
-// openai-compatible arm below, which REPLACES that whole block.
+// WS-20: the SECOND arm (the Anthropic auth-mode radio, `settings["runtimes.official.auth"]`) is
+// DELETED, not deprecated — the official leg's arm is now the tag's own prefix
+// (`officialAuthArmFor`, official-options.ts), decided by which model a session runs, never a
+// standing settings toggle. The remaining (and only) arm is the openai-compatible BYOK path, kept
+// as a `z.union` of one for wire-shape stability (nothing about this arm's own shape changed).
 export const ProviderConfigureParams = z.union([
   z.object({
     type: z.literal("openai-compatible"),
     baseUrl: z.string().url(),
     apiKey: z.string().min(1),
     model: ModelTagSchema.optional(),
-  }),
-  z.object({
-    provider: z.literal("anthropic"),
-    // Fix wave (N3): widened to include "auto" — settings.ts's own `officialAuthModeSetting`
-    // (and `ProviderStatusResult.anthropic.auth` just below) already accept it as the DEFAULT
-    // value, so the app's Provider pane had no way to configure a session back to "auto" once an
-    // explicit "api-key"/"console" had been set, short of hand-editing settings.json.
-    settings: z.object({ "runtimes.official.auth": z.enum(["auto", "api-key", "console"]) }),
   }),
 ]);
 export const ProviderConfigureResult = z.object({ ok: z.literal(true) });
@@ -1206,19 +1196,17 @@ export const ProviderLoginCodeResult = z.object({ ok: z.boolean() });
 export const ProviderLogoutParams = z.object({ provider: z.literal("anthropic"), kind: z.literal("console") });
 export const ProviderLogoutResult = z.object({ ok: z.boolean() });
 
-/** Winter Phase 10a (O5): read-only status for the Provider pane's Anthropic section.
- *  `effective` is the same "auto resolved against on-disk presence" decision
- *  `official-options.ts`'s `officialAuthFamilyFor` makes for the official leg's own spawn, WIDENED
- *  with an explicit `"none"` for the case neither credential actually exists yet — a case that
- *  function itself never answers (it always picks an arm to attempt), because only the caller here
- *  has both presence booleans in hand to tell "decided" apart from "actually usable". */
+/** Winter Phase 10a (O5); WS-20: read-only status for the Provider pane's Anthropic section.
+ *  `auth` is REMOVED along with `runtimes.official.auth` — there is no standing arm SETTING left
+ *  to report, only presence. `effective` is presence alone now: `"both"` when the api-key material
+ *  AND the console profile both exist (a session's own tag decides which one it actually uses),
+ *  `"api-key"`/`"console"` when exactly one does, `"none"` when neither does. */
 export const ProviderStatusParams = z.object({});
 export const ProviderStatusResult = z.object({
   anthropic: z.object({
     apiKey: z.boolean(),
     consoleProfile: z.boolean(),
-    auth: z.enum(["auto", "api-key", "console"]),
-    effective: z.enum(["api-key", "console", "none"]),
+    effective: z.enum(["both", "api-key", "console", "none"]),
   }),
 });
 
