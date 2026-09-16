@@ -529,7 +529,7 @@ describe("plan.respond / session.setPolicy schemas", () => {
 // → {} (null clears). Works for ALL modes (unlike session.setPolicy, which chat rejects outright).
 describe("session.setModel schema (Chat Slice D Task 1)", () => {
   test("params: sessionId required non-empty, model is a nullable string (both string and null accepted)", () => {
-    expect(SessionSetModelParams.parse({ sessionId: "s1", model: "claude-opus-5" }).model).toBe("claude-opus-5");
+    expect(SessionSetModelParams.parse({ sessionId: "s1", model: "anthropic/claude-opus-5" }).model).toBe("anthropic/claude-opus-5");
     expect(SessionSetModelParams.parse({ sessionId: "s1", model: null }).model).toBeNull();
     expect(() => SessionSetModelParams.parse({ sessionId: "s1", model: "" })).toThrow(); // empty string is not a valid model id
     expect(() => SessionSetModelParams.parse({ sessionId: "", model: "m" })).toThrow();
@@ -544,7 +544,7 @@ describe("session.setModel schema (Chat Slice D Task 1)", () => {
 
 describe("session.create / session.list carry an optional per-session model (Chat Slice D Task 1)", () => {
   test("SessionCreateParams accepts an optional model, absent by default", () => {
-    expect(SessionCreateParams.parse({ scope: "global", model: "claude-opus-5" }).model).toBe("claude-opus-5");
+    expect(SessionCreateParams.parse({ scope: "global", model: "anthropic/claude-opus-5" }).model).toBe("anthropic/claude-opus-5");
     expect(SessionCreateParams.parse({ scope: "global" }).model).toBeUndefined();
     expect(() => SessionCreateParams.parse({ scope: "global", model: "" })).toThrow();
   });
@@ -552,11 +552,11 @@ describe("session.create / session.list carry an optional per-session model (Cha
   test("SessionListResult rows carry an optional model; older shapes without it still parse", () => {
     const listed = SessionListResult.parse({
       sessions: [
-        { sessionId: "s_1", scope: "global", createdAt: 1, lastSeq: 0, model: "claude-opus-5" },
+        { sessionId: "s_1", scope: "global", createdAt: 1, lastSeq: 0, model: "anthropic/claude-opus-5" },
         { sessionId: "s_2", scope: "global", createdAt: 1, lastSeq: 0 }, // no model — pre-existing shape
       ],
     });
-    expect(listed.sessions[0]!.model).toBe("claude-opus-5");
+    expect(listed.sessions[0]!.model).toBe("anthropic/claude-opus-5");
     expect(listed.sessions[1]!.model).toBeUndefined();
   });
 });
@@ -1209,8 +1209,8 @@ describe("sync.config schema (provider-correctness T3)", () => {
     provider: "codex-oauth",
     exaKey: null,
     dangerousDomains: [],
-    defaultModel: "gpt-5.6-sol",
-    models: [{ id: "gpt-5.6-sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"] }],
+    defaultModel: "codex-oauth/gpt-5.6-sol",
+    models: [{ id: "codex-oauth/gpt-5.6-sol", providerId: "codex-oauth", displayName: "GPT-5.6 Sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"] }],
     defaultEffort: "high",
     clientEfforts: ["ultra"],
   };
@@ -1240,16 +1240,19 @@ describe("sync.config schema (provider-correctness T3)", () => {
     });
   });
 
-  test("a catalogue row needs a non-empty id AND an efforts array — no half rows", () => {
-    expect(SyncConfigModel.parse({ id: "m", efforts: ["low"] })).toEqual({ id: "m", efforts: ["low"] });
-    expect(SyncConfigModel.parse({ id: "m", efforts: [] })).toEqual({ id: "m", efforts: [] });
-    expect(() => SyncConfigModel.parse({ id: "", efforts: ["low"] })).toThrow();
-    expect(() => SyncConfigModel.parse({ id: "m" })).toThrow();
-    expect(() => SyncConfigModel.parse({ efforts: ["low"] })).toThrow();
+  test("a catalogue row needs a tag-shaped id, a providerId, a displayName AND an efforts array — no half rows", () => {
+    const row = { id: "codex-oauth/m", providerId: "codex-oauth", displayName: "M", efforts: ["low"] };
+    expect(SyncConfigModel.parse(row)).toEqual(row);
+    expect(SyncConfigModel.parse({ ...row, efforts: [] })).toEqual({ ...row, efforts: [] });
+    expect(() => SyncConfigModel.parse({ ...row, id: "" })).toThrow();
+    expect(() => SyncConfigModel.parse({ ...row, id: "m" })).toThrow(); // not a tag — no '/'
+    expect(() => SyncConfigModel.parse({ id: "codex-oauth/m", displayName: "M", efforts: ["low"] })).toThrow(); // no providerId
+    expect(() => SyncConfigModel.parse({ id: "codex-oauth/m", providerId: "codex-oauth", efforts: ["low"] })).toThrow(); // no displayName
+    expect(() => SyncConfigModel.parse({ providerId: "codex-oauth", displayName: "M", efforts: ["low"] })).toThrow();
     // An empty-string effort would reach a request body verbatim and 400 the turn.
-    expect(() => SyncConfigModel.parse({ id: "m", efforts: [""] })).toThrow();
+    expect(() => SyncConfigModel.parse({ ...row, efforts: [""] })).toThrow();
     // One bad row poisons the whole result rather than being silently dropped.
-    expect(() => SyncConfigResult.parse({ ...full, models: [{ id: "", efforts: [] }] })).toThrow();
+    expect(() => SyncConfigResult.parse({ ...full, models: [{ ...row, id: "" }] })).toThrow();
   });
 
   // provider-correctness T5 — `clientEfforts`: WINTER-LEVEL tiers, a SEPARATE field from
@@ -1299,7 +1302,7 @@ describe("sync.config schema (provider-correctness T3)", () => {
     // Exactly what an `openai-compatible` daemon serves. `models: []` alone does NOT protect a
     // phone (T6b's "empty catalogue is ignored on apply" governs `models` only); `defaultModel` is
     // still non-empty and still foreign, and only `provider` distinguishes it from a codex Mac's.
-    const byok = { ...full, provider: "openai-compatible", defaultModel: "llama-3.3-70b-local", models: [] };
+    const byok = { ...full, provider: "openai-compatible", defaultModel: "openai/llama-3.3-70b-local", models: [] };
     expect(SyncConfigResult.parse(byok)).toEqual(byok);
     expect(byok.provider).not.toBe("codex-oauth");
   });
@@ -1311,8 +1314,8 @@ describe("sync.config schema (provider-correctness T3)", () => {
     const divergent = {
       ...full,
       models: [
-        { id: "gpt-5.6-sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"] },
-        { id: "gpt-5.7-nano", efforts: ["low", "medium"] },
+        { id: "codex-oauth/gpt-5.6-sol", providerId: "codex-oauth", displayName: "GPT-5.6 Sol", efforts: ["none", "low", "medium", "high", "xhigh", "max"] },
+        { id: "codex-oauth/gpt-5.7-nano", providerId: "codex-oauth", displayName: "GPT-5.7 Nano", efforts: ["low", "medium"] },
       ],
     };
     expect(SyncConfigResult.parse(divergent)).toEqual(divergent);
