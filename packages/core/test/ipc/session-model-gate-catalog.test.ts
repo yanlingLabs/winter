@@ -7,14 +7,18 @@
 // `planAndApplySwitch`) — the caller got a bare INVALID_PARAMS with no `data.code`, never the leg's
 // own typed `runtime_selection_refused` / `confirmation_required` / `handoff_disabled`.
 //
-// WS-20 rewrite: `resolveModelSelection` is now a pure `parseModelTag` check — no `knownModels`,
-// no catalog-row fallback, no alias resolution at all (`catalogRowsFor` is deleted; a tag names
-// exactly its provider). The fix this file originally proved is now the DEFAULT and only behavior:
-// `engine.knownModels()` (the internal-calls provider's own small list) plays NO ROLE whatsoever in
-// gating `session.create`/`session.setModel` any more — the gate is purely "is this a
-// provider-qualified tag naming a real catalog provider". A bare id is refused at the wire SCHEMA
-// (before the handler even runs, `ModelTagSchema`); a tag naming an unrecognized provider is
-// refused by the handler's own `resolveModelSelection`/`parseModelTag` call.
+// WS-20 rewrite: `resolveModelSelection` no longer consults `knownModels`, alias resolution, or
+// `catalogRowsFor` (deleted; a tag names exactly its provider) at all. The fix this file originally
+// proved is now the DEFAULT and only behavior: `engine.knownModels()` (the internal-calls
+// provider's own small list) plays NO ROLE whatsoever in gating `session.create`/`session.setModel`
+// any more. A bare id is refused at the wire SCHEMA (before the handler even runs,
+// `ModelTagSchema`); a tag naming an unrecognized provider is refused by `parseModelTag`.
+//
+// WS-20 (review round 2, M4): the gate is a real catalog MEMBERSHIP check now, not just "is this a
+// provider-qualified tag naming a real catalog provider" — `modelTagIsKnown` (model-tag.ts) also
+// requires the tag be a REAL catalog row for its provider, unless a BYO `baseUrl` is configured for
+// it. See `session-set-model.test.ts`/`sync-bounds.test.ts` for that half; every model used in
+// THIS file is a real catalog row, so none of these tests exercise the narrower path.
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -173,8 +177,9 @@ describe("resolveModelSelection: tag shape + provider existence, engine.knownMod
     c.close();
   });
 
-  // An internal-provider (Codex) tag still passes (control — the gate is provider-existence, not a
-  // replacement for a real per-model check the internal-calls engine never did anyway).
+  // An internal-provider (Codex) tag still passes (control — `engine.knownModels()`, the
+  // internal-calls engine's own small list, plays no role in the catalog-membership gate either
+  // way; this row is real in the pinned catalog regardless of what the fake engine enumerates).
   test("session.create: an internal-provider (Codex) tag still passes, unaffected by knownModels", async () => {
     const { store, socketPath, harnessToken } = await boot(CODEX_ONLY_CATALOGUE);
     const c = await TestClient.connect(socketPath);
