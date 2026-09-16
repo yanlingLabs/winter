@@ -583,7 +583,11 @@ describe("sync.config through a real startDaemon (T3 review I1)", () => {
     const settingsPath = join(home, "settings.json");
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     await new CodexAuthStore(secrets).save({ accessToken: "at_test", refreshToken: null, idToken: null, accountId: null, expiresAt: 0 });
+    // WS-20 (review round 4): `createProvider` answers `null` for a provider outside
+    // `INTERNAL_PROVIDER_IDS` — this helper's every caller configures codex-oauth/openai, so a
+    // `null` here would itself be the bug the test should catch.
     const active = await createProvider(loadSettings(settingsPath), secrets, settingsPath);
+    if (active === null) throw new Error("bootReal: expected the internal Provider to build (codex-oauth/openai)");
     return startDaemon({
       home, secrets,
       agentProvider: { provider: active.provider, model: active.liveModel().model, live: active.liveModel },
@@ -704,7 +708,10 @@ describe("sync.config `provider` through a real startDaemon (whole-branch review
     // openai-compatible test below, keeping the codex-oauth test's picker lineup isolated to what it
     // explicitly seeds.
     if (!opts.model.startsWith("codex-oauth/")) await secrets.set("openai-api-key", "sk-test-not-a-real-key");
+    // WS-20 (review round 4): see bootReal's identical note above — every caller of this helper
+    // configures codex-oauth/openai.
     const active = await createProvider(loadSettings(settingsPath), secrets, settingsPath);
+    if (active === null) throw new Error("bootWithSettings: expected the internal Provider to build (codex-oauth/openai)");
     const d = await startDaemon({
       home, secrets,
       agentProvider: { provider: active.provider, model: active.liveModel().model, live: active.liveModel },
@@ -768,7 +775,7 @@ describe("sync.config `provider` through a real startDaemon (whole-branch review
     c.close();
   }, 20_000);
 
-  test("`Provider.id` is a FIXED internal literal driven by the tag's providerId — codex-oauth branches to \"codex-oauth\", every other provider tag to \"openai-compatible\"", async () => {
+  test("`Provider.id` is a FIXED internal literal driven by the tag's providerId — codex-oauth branches to \"codex-oauth\", openai to \"openai-compatible\", anything else answers null", async () => {
     // WS-20: there is no more `ProviderSettings.type` literal to mirror — `Provider.id` is decided
     // purely by `splitTag(settings.provider.model).providerId === "codex-oauth"`. Pinned so a new
     // provider whose adapter drifts from this two-way split fails here rather than by serving a
@@ -776,20 +783,18 @@ describe("sync.config `provider` through a real startDaemon (whole-branch review
     const home = mkdtempSync(join(tmpdir(), "winter-sync-provider-ids-"));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
     await secrets.set("openai-api-key", "sk-test-not-a-real-key");
-    // WS-20 (review round 2, M6): `settings.provider.model` is now schema-gated to codex-oauth/
-    // openai only (the daemon's internal Provider can only ever serve one of those) — the real
-    // door, `Settings.parse`, can no longer construct a `deepseek/*` `provider.model` at all. This
-    // test is about `createProvider`'s OWN internal branch, a defensive check independent of that
-    // gate, so the deepseek case is built directly (`as unknown as Settings`, bypassing the schema)
-    // rather than dropped — a future per-provider internal Provider (M6's own follow-up) would
-    // widen `INTERNAL_PROVIDER_IDS` without this branch itself changing shape.
     for (const model of ["codex-oauth/gpt-5.6-sol", "openai/gpt-5.6-sol"]) {
       const active = await createProvider(Settings.parse({ schemaVersion: 3, provider: { model } }), secrets);
-      expect(active.provider.id).toBe(model.startsWith("codex-oauth/") ? "codex-oauth" : "openai-compatible");
+      expect(active?.provider.id).toBe(model.startsWith("codex-oauth/") ? "codex-oauth" : "openai-compatible");
     }
-    const deepseekSettings = { schemaVersion: 3, provider: { model: "deepseek/deepseek-reasoner" } } as unknown as Settings;
-    const deepseekActive = await createProvider(deepseekSettings, secrets);
-    expect(deepseekActive.provider.id).toBe("openai-compatible");
+    // WS-20 (review round 4): `settings.provider.model` is UNCONSTRAINED at the schema level again
+    // (any catalog provider, or `winter-test/*` — the round-2 M6 gate broke a real "my default
+    // chat model is Claude" scenario and was removed) — but `createProvider` itself, the ONE place
+    // the codex-oauth/openai constraint on the daemon's INTERNAL Provider is now enforced, answers
+    // `null` for anything outside `INTERNAL_PROVIDER_IDS` rather than mis-building an
+    // openai-compatible client pointed at a provider it was never meant to speak to.
+    const deepseekSettings = Settings.parse({ schemaVersion: 3, provider: { model: "deepseek/deepseek-reasoner" } });
+    expect(await createProvider(deepseekSettings, secrets)).toBeNull();
   });
 });
 

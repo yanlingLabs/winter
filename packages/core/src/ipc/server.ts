@@ -102,7 +102,7 @@ import type { ProviderLink } from "../peripheral/provider-link";
 import type { HardwareBroker } from "../peripheral/hardware";
 import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
-import { addLocalDir, clientEffortEligible, isClientEffort, INTERNAL_PROVIDER_IDS, loadSettings, saveSettings, setAdvisorModel, Settings } from "../settings";
+import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings } from "../settings";
 import { dispatchPinMessage } from "../agent/dispatch-config";
 import {
   deriveInstallName, installPluginFromDir, missingConsents, buildConsentBlock, applyFreshPluginConsent,
@@ -2928,20 +2928,12 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // which no longer exists on `ProviderSettings`) and the model is a tag — `"openai/…"`,
         // never a bare id. `p.model` is already `ModelTagSchema`-validated at the params door.
         const model = (p.model ?? "openai/gpt-5.6-sol") as ModelTag;
-        // WS-20 (review round 2, M6): `settings.provider.model` binds the daemon's OWN internal
-        // Provider, which can only ever serve codex-oauth/openai — checked HERE, explicitly, for a
-        // clean INVALID_PARAMS (the `ProviderSettings.model` schema refinement would also catch this
-        // inside `saveSettings` below, but as a raw parse failure rather than a typed RPC refusal).
-        // Both validation checks run BEFORE `writeOpenAiApiKey` below, so a refusal leaves the
-        // secret store untouched too — the same "nothing written on refusal" invariant this RPC's
-        // other refusal branches (a malformed baseUrl, an empty apiKey) already hold.
-        const providerId = splitTag(model).providerId;
-        if (!(INTERNAL_PROVIDER_IDS as readonly string[]).includes(providerId)) {
-          throw new RpcFailure(
-            ERR.INVALID_PARAMS,
-            `provider.model must name ${INTERNAL_PROVIDER_IDS.join(" or ")} — the daemon's internal provider supports codex-oauth and openai; any provider is fine per session`,
-          );
-        }
+        // WS-20 (review round 4): `settings.provider.model` is UNCONSTRAINED here, same as every
+        // other write door — a round-2 gate to `INTERNAL_PROVIDER_IDS` lived here briefly (this is
+        // the openai-compatible BYOK arm, so it was practically unreachable regardless); the
+        // constraint now lives only where the daemon's internal Provider is actually built
+        // (`createProvider`, which answers `null`, never a refusal — see `INTERNAL_PROVIDER_IDS`'s
+        // own doc comment in settings.ts).
         const nextProviders = { ...settings.providers, openai: { ...settings.providers?.openai, baseUrl: p.baseUrl } };
         // WS-20 (review round 2, M4): the SAME membership gate `session.create`/`session.setModel`
         // apply — checked against settings that already carry the `baseUrl` this call is about to
