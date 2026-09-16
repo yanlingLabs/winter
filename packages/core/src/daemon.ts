@@ -17,11 +17,11 @@ import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, type Settings } from "./settings";
+import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, ownProviderFor, type Settings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
-import { createProvider } from "./providers/manager";
+import { createProvider, internalModelFor } from "./providers/manager";
 import type { Provider } from "./providers/types";
 import { QuotaManager } from "./providers/quota";
 import { ToolRegistry } from "./agent/tools/registry";
@@ -1275,7 +1275,17 @@ export async function startDaemon(opts: {
   // daemon simply titles nothing, as before. `titles.enabled` is read LIVE at every fire (the
   // engine-era wiring was a boot snapshot; no setting may need a restart), `titles.model` stays the
   // boot snapshot it always was (it names WHICH model titles, not whether titling is on).
-  const sessionTitler = agentProvider === null ? undefined : new SessionTitler({ provider: agentProvider, store, hub, model: settings?.titles?.model });
+  // WS-20 (review round 2, M2): `titles.model` is a qualified TAG (any provider), but the titler
+  // runs on the daemon's own INTERNAL Provider (`agentProvider`, one provider per daemon) — sending
+  // a tag naming a different provider straight to `streamTurn` would hand that backend a model id it
+  // never issued. `internalModelFor` returns the bare modelId when the tag agrees with the internal
+  // provider, else logs one line naming the field and returns `undefined`, which falls through to
+  // `SessionTitler`'s own `deps.model ?? deps.provider.model` default (the provider's own model) —
+  // identical behavior to having no override configured at all.
+  const titlesModel = settings?.titles?.model === undefined
+    ? undefined
+    : internalModelFor(settings.titles.model, { providerId: ownProviderFor(settings) }, "titles.model");
+  const sessionTitler = agentProvider === null ? undefined : new SessionTitler({ provider: agentProvider, store, hub, model: titlesModel });
   const titler = sessionTitler === undefined ? undefined : {
     maybeTitle: (sid: string): Promise<void> => (settings?.titles?.enabled === false ? Promise.resolve() : sessionTitler.maybeTitle(sid)),
   };
@@ -1322,9 +1332,15 @@ export async function startDaemon(opts: {
   // The retired engine's own BashReviewer gate (engine.ts:4547-4548): `provider`/`model` are the
   // SAME shape `SessionTitler` above takes — inert without an `agentProvider` (mirrors `titler`'s
   // own `agentProvider === null` guard).
+  // WS-20 (review round 2, M2): same guard as `titlesModel` above — `reviewer.model` is a qualified
+  // TAG, the reviewer runs on the same per-daemon internal Provider, and a mismatched tag falls
+  // through to `BashReviewer`'s own provider-model fallback rather than reaching `streamTurn` raw.
+  const reviewerModel = settings?.reviewer?.model === undefined
+    ? undefined
+    : internalModelFor(settings.reviewer.model, { providerId: ownProviderFor(settings) }, "reviewer.model");
   const bashReviewer = agentProvider === null || agentProvider === undefined
     ? undefined
-    : new BashReviewer({ provider: agentProvider, model: settings?.reviewer?.model });
+    : new BashReviewer({ provider: agentProvider, model: reviewerModel });
   const hooksFor = (session: CapabilitySession) =>
     sessionHooksFor({
       sessionId: session.sessionId,
