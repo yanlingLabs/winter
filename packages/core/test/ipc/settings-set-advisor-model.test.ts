@@ -103,6 +103,20 @@ describe("settings.setAdvisorModel (WS-20 cross-lane)", () => {
     c.close();
   });
 
+  // WS-20 (review round 2, nit e): `unstated/unstated` is the internal "nothing recorded" sentinel
+  // — it passes the wire shape check (`ModelTagSchema` is a plain regex), but `setAdvisorModel`
+  // itself now refuses it explicitly, same as `resolveModelSelection`/`validateSyncMeta` do at
+  // their own doors.
+  test("the unstated/unstated sentinel is refused INVALID_PARAMS", async () => {
+    const { socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.settingsSetAdvisorModel, { model: "unstated/unstated" });
+    expect(result.error).toBeDefined();
+    expect(result.error.code).toBe(-32602);
+    c.close();
+  });
+
   test("null clears the override", async () => {
     const { settingsPath, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);

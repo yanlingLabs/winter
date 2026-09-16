@@ -989,7 +989,10 @@ export function setAdvisorModel(settings: Settings, model: string | undefined): 
   const runtimes: Record<string, unknown> = { ...settings.runtimes };
   const trimmed = model?.trim();
   if (trimmed) {
-    if (!isModelTag(trimmed)) throw new TypeError(`not a model tag: ${JSON.stringify(trimmed)}`);
+    // WS-20 (review round 2, nit e): `isModelTag` accepts the `unstated/unstated` sentinel (a
+    // STORED record may legitimately carry it), but a CALLER explicitly selecting it here is never
+    // a real request — same door-level rejection `resolveModelSelection`/`validateSyncMeta` apply.
+    if (!isModelTag(trimmed) || trimmed === UNSTATED_TAG) throw new TypeError(`not a model tag: ${JSON.stringify(trimmed)}`);
     runtimes.advisorModel = trimmed;
   } else {
     delete runtimes.advisorModel;

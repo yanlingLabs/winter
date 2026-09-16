@@ -297,8 +297,18 @@ export function advisorReviewerFor(deps: {
     const targetProviderId = (() => { try { return splitTag(targetModel).providerId; } catch { return "openai"; } })();
     // Review fix F3: "no credential for the target family" is `undefined`, checked HERE (sync, from
     // the cache above) — never inside `generate()`, and never a live Keychain read in this function.
+    //
+    // WS-20 (review round 2, nit b follow-up): checked against the TARGET's own provider now, not
+    // "either credential in the family" — the OLD `codexOauth || openai` check would resolve a
+    // reviewer for a `codex-oauth/*` target on an openai-only-credentialed home, which then throws
+    // inside `generate()` the moment it actually runs (`openAiFamilyReviewer`'s own provider gate).
+    // Answering `undefined` HERE for that case is the correct F3 behavior: no credential for what
+    // this target actually needs.
     if (family === "openai") {
-      if (!hasCredential(CREDENTIAL_MATERIAL_NAMES.codexOauth) && !hasCredential(CREDENTIAL_MATERIAL_NAMES.openai)) return undefined;
+      const hasNeededCredential = targetProviderId === "codex-oauth"
+        ? hasCredential(CREDENTIAL_MATERIAL_NAMES.codexOauth)
+        : hasCredential(CREDENTIAL_MATERIAL_NAMES.openai);
+      if (!hasNeededCredential) return undefined;
       return { provider: openAiFamilyReviewer(deps.secrets, deps.settings, wireModel, targetProviderId), model: targetModel };
     }
     if (family === "claude") {

@@ -120,11 +120,14 @@ async function pushChunked(
   return last;
 }
 
-// WS-20 rewrite: `sync.push`'s `meta.model` validation is now `isModelTag(meta.model)` — shape
-// (`<providerId>/<modelId>`) plus a real pinned-catalog provider — never `engine.knownModels()`.
-// There is no more alias resolution (`catalogRowsFor`/aliases are deleted) and no more
-// "enumerable models" concept for this check; `engine`/`hub` are dropped from this describe block's
-// `boot()` entirely since sync.push's model half no longer consults them at all.
+// WS-20 rewrite: `sync.push`'s `meta.model` validation never consults `engine.knownModels()` —
+// there is no more alias resolution (`catalogRowsFor`/aliases are deleted) and no more "enumerable
+// models" concept; `engine`/`hub` are dropped from this describe block's `boot()` entirely.
+//
+// WS-20 (review round 2, M4): the check itself is `modelTagIsKnown(meta.model, settings)`
+// (model-tag.ts) now — real catalog MEMBERSHIP, not just shape plus provider existence
+// (`isModelTag` alone). See this block's own `boot()` for the BYO-baseUrl escape hatch it
+// configures so the off-catalog-model control below still means what it says.
 describe("I1 — a pushed meta.model is validated exactly like session.setModel's", () => {
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
