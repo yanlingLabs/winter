@@ -859,6 +859,22 @@ describe("/model — mirrors `case \"model\"` (settings.json write under WINTER_
     expect(notes2[0]).toContain("gpt-5.6-luna (codex-oauth)");
   });
 
+  // Review fix (item 4): `/model`'s OWN validation layer (`validateModelTag`) never adds the
+  // internal-provider gate — a non-internal-provider tag clears the shape/catalog checks here,
+  // exactly like `winter model <tag>`'s own `validateInternalProviderModelTag` would too, minus
+  // that one extra check. It still cannot WRITE to `settings.provider.model` for one, though:
+  // that field binds the daemon's own internal Provider (core's `setProviderModel`, unconditional
+  // for every caller — there is no separate per-session storage in settings.json for this command
+  // to reach instead), so the write itself refuses and `runCommand`'s existing generic
+  // catch-and-report surfaces it gracefully (never a crash) rather than this validation layer
+  // pre-emptively blocking it a second time.
+  test("(item 4) a non-internal-provider tag clears /model's own validation, but the write still refuses (no separate per-session storage exists)", async () => {
+    const { client } = makeClient({});
+    const { ctx, notes } = makeCtx(client);
+    await runCommand(ctx, "/model anthropic/claude-opus-5");
+    expect(notes).toEqual(["/model failed: provider.model must name codex-oauth or openai — the daemon's internal provider supports codex-oauth and openai; any provider is fine per session"]);
+  });
+
   test("a bare (non-tag) slug -> validation note, no write", async () => {
     const { client } = makeClient({});
     const { ctx, notes } = makeCtx(client);

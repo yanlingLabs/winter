@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { REASONING_EFFORTS } from "@yanlinglabs/winter-core";
-import { parseModelArgs, validateEffort, validateModelTag, validateAdvisorSlug, renderModelListing, modelDisplayWithHint } from "../src/model-cli";
+import type { Settings } from "@yanlinglabs/winter-core";
+import { parseModelArgs, validateEffort, validateModelTag, validateInternalProviderModelTag, validateAdvisorSlug, renderModelListing, modelDisplayWithHint } from "../src/model-cli";
 
 describe("parseModelArgs", () => {
   test("no args -> show", () => {
@@ -78,6 +79,42 @@ describe("validateModelTag", () => {
     expect(validateModelTag("unstated/unstated")).toMatch(/provider-qualified tag/);
     expect(validateModelTag("winter-test/foo")).toMatch(/provider-qualified tag/);
   });
+
+  // Review fix (item 4): a real, pinned provider, but a model that isn't one of its rows — refused
+  // via `modelTagIsKnown` (core's own membership check, the SAME one the daemon consults), naming
+  // both the model and the provider so the message matches the daemon's own vocabulary.
+  test("WS-20 (item 4): rejects an unknown model under a real, enumerable provider", () => {
+    expect(validateModelTag("codex-oauth/totally-made-up-model-xyz")).toBe("unknown model 'totally-made-up-model-xyz' for provider codex-oauth");
+  });
+
+  // The BYO-endpoint leniency: a provider WITH catalog rows still accepts an unlisted model when
+  // the caller has configured its own endpoint for that provider (`settings.providers.<id>.baseUrl`)
+  // — the same leniency `session.setModel`'s own membership check gives an arbitrary
+  // openai-compatible model.
+  test("WS-20 (item 4): a BYO endpoint override accepts an otherwise-unlisted model for that provider", () => {
+    const settings = { providers: { openai: { baseUrl: "https://my-llm.example.com/v1" } } } as unknown as Settings;
+    expect(validateModelTag("openai/my-custom-llm", settings)).toBeUndefined();
+  });
+});
+
+// Review fix (item 4): `winter model <tag>` (the CLI verb, main.ts's `case "model"`) writes the
+// GLOBAL settings.provider.model, which binds the daemon's own internal Provider — codex-oauth or
+// openai only. A PER-SESSION `/model` (tui/commands.ts) does NOT use this gate — see
+// tui/commands.test.ts for that side.
+describe("validateInternalProviderModelTag", () => {
+  test("accepts an internal-provider tag (codex-oauth/openai)", () => {
+    expect(validateInternalProviderModelTag("codex-oauth/gpt-5.6-terra")).toBeUndefined();
+  });
+
+  test("refuses a real, non-internal catalog provider with the daemon's own message", () => {
+    const err = validateInternalProviderModelTag("anthropic/claude-opus-5");
+    expect(err).toBe("provider.model must name codex-oauth or openai — the daemon's internal provider supports codex-oauth and openai; any provider is fine per session");
+  });
+
+  test("still surfaces the shape/catalog errors validateModelTag itself would", () => {
+    expect(validateInternalProviderModelTag("not-a-tag")).toMatch(/provider-qualified tag/);
+    expect(validateInternalProviderModelTag("codex-oauth/totally-made-up-model-xyz")).toContain("unknown model");
+  });
 });
 
 describe("validateEffort", () => {
@@ -106,10 +143,14 @@ describe("validateAdvisorSlug", () => {
     expect(validateAdvisorSlug("claude-opus-5")).toMatch(/provider-qualified tag/);
   });
 
-  test("a tag-shaped model with zero catalog rows is rejected, naming the clearing spelling", () => {
+  // Review fix (item 4): `validateModelTag` (which `validateAdvisorSlug` calls first) now itself
+  // catches a tag-shaped-but-nonexistent model under a real, enumerable provider via
+  // `modelTagIsKnown` — "unknown model '<id>' for provider <p>" fires before `validateAdvisorSlug`'s
+  // own `rowForTag` fallback ("not in the pinned catalog…") is ever reached for this case.
+  test("a tag-shaped model with zero catalog rows is rejected, naming the model and provider", () => {
     const err = validateAdvisorSlug("anthropic/totally-made-up-model-xyz");
     expect(err).not.toBeUndefined();
-    expect(err).toContain("auto");
+    expect(err).toContain("unknown model 'totally-made-up-model-xyz' for provider anthropic");
   });
 });
 
