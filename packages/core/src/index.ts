@@ -20,6 +20,13 @@ export {
 // read/write, `case "model"`'s own doc comment), so the STATIC compiled-in catalog, not a
 // `sync.config` round trip, is the only thing it can validate against without one.
 export { catalogRowsFor } from "./runtime-sdk/provider-selection";
+// WS-20: the ONE model-tag module — a model is ALWAYS a provider-qualified tag
+// ("<providerId>/<modelId>") in code; nothing else may pick a provider for a bare id.
+export {
+  splitTag, parseModelTag, isModelTag, tagsForSlot, facingNameToTag, facingNameOf,
+  UNSTATED_TAG, WINTER_TEST_PREFIX,
+  type ModelTag,
+} from "./runtime-sdk/model-tag";
 export { runWorkflowSubprocess } from "./workflows/subprocess-entry";
 // P8b-18: reached only by the CLI's static `__runtime-state-probe` argv route, which imports it
 // from THIS barrel — the same shape `runWorkflowSubprocess` above uses, and the only shape that

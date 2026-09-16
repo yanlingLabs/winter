@@ -72,6 +72,10 @@ export const SESSION_TITLE_MAX_CHARS = 200;
  *  40 characters), far below anything that could bloat a row. */
 export const SESSION_MODEL_MAX_CHARS = 200;
 
+/** WS-20: a model is ALWAYS a provider-qualified tag on the wire. Shape only — provider existence
+ *  is the daemon's check (core's `isModelTag`/`ModelTagSchemaCore`), not this package's. */
+export const ModelTagSchema = z.string().min(3).max(SESSION_MODEL_MAX_CHARS).regex(/^[a-z0-9][a-z0-9.-]*\/\S+$/, "model must be a provider-qualified tag '<providerId>/<modelId>'");
+
 /** provider-correctness T4: the same unbounded-field hazard `SESSION_MODEL_MAX_CHARS` documents,
  *  one column over — a per-session `effort` rides every `session.list` row, unpaged and
  *  remote-reachable, exactly like `model`.
@@ -130,7 +134,7 @@ export const SessionCreateParams = z.object({
   // unaffected. Index-only metadata (like `cwd`/`approvalPolicy`, NOT `mode` — see
   // `SessionRow.model`'s own doc comment in store.ts), so it does NOT ride the `session_created`
   // event and resets to absent on a full index rebuild. Bounded — see SESSION_MODEL_MAX_CHARS.
-  model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).optional(),
+  model: ModelTagSchema.optional(),
   // provider-correctness T6: the effort half of `model` just above, stamped at creation time and
   // validated by the SAME rules `session.setEffort` applies (model-aware membership against
   // `effortsForModel`, plus the code-sessions-only gate for a Winter-level tier). Added rather than
@@ -183,7 +187,7 @@ export const SessionListResult = z.object({
     parentSessionId: z.string().optional(), // set on dispatch children
     // Chat Slice D Task 1: round-trips SessionRow.model (store.ts) — absent for every session
     // created before this field existed, or created/left without an explicit override.
-    model: z.string().optional(),
+    model: ModelTagSchema.optional(),
     // provider-correctness T4: round-trips SessionRow.effort (store.ts), the per-session reasoning
     // effort `session.setEffort` writes. Declared alongside `model` for the same reason `title` and
     // `forkedFrom` are — the value really does flow out of `store.list()`, so a schema-validating
@@ -531,7 +535,7 @@ export const SessionSetPolicyResult = z.object({ ok: z.literal(true) });
 // precedent as session.setPolicy).
 export const SessionSetModelParams = z.object({
   sessionId: z.string().min(1),
-  model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).nullable(),
+  model: ModelTagSchema.nullable(),
   // Winter Phase 8c (P8c-5/P8c-14, WS-13 §8.2): a model switch that crosses runtime legs (Winter <->
   // the official leg) may be LOSSY — the handoff barrier's own warning list (a source with reasoning
   // state moving to a foreign target, chiefly). Absent/false means "the caller has not confirmed
@@ -1158,7 +1162,7 @@ export const ProviderConfigureParams = z.union([
     type: z.literal("openai-compatible"),
     baseUrl: z.string().url(),
     apiKey: z.string().min(1),
-    model: z.string().min(1).optional(),
+    model: ModelTagSchema.optional(),
   }),
   z.object({
     provider: z.literal("anthropic"),
@@ -1451,7 +1455,7 @@ export const SyncPushParams = z.object({
     // Bounded at the wire, not just clamped internally — see SESSION_TITLE_MAX_CHARS for why an
     // unbounded title on an UNPAGED heads/list response is a persistent connection killer.
     title: z.string().max(SESSION_TITLE_MAX_CHARS).optional(),
-    model: z.string().min(1).max(SESSION_MODEL_MAX_CHARS).optional(),
+    model: ModelTagSchema.optional(),
     // provider-correctness T6. Bounded by the SAME constant `session.setEffort`'s param uses, and
     // NOT enumerated here for the same reason that one isn't: which levels a model accepts is
     // provider knowledge the protocol package cannot see change, so a zod enum here would be a
@@ -1519,7 +1523,15 @@ export const SyncConfigParams = z.object({});
  *  on its next connect. (See `REASONING_EFFORTS` in packages/core/src/settings.ts for the full
  *  two-layer story and why "ultra" must never come back.) */
 export const SyncConfigModel = z.object({
-  id: z.string().min(1),
+  id: ModelTagSchema,
+  // WS-20: for GROUPING the picker by provider without parsing the tag — `splitTag(id).providerId`,
+  // served pre-split so no client ever splits a tag to derive UI structure.
+  providerId: z.string().min(1),
+  // WS-20: the catalog row's human-facing name (e.g. "GPT-5.6 Sol") for the picker label.
+  displayName: z.string().min(1),
+  // WS-20: the family SLOT name (e.g. "sol", "terra") when this row fills one, else absent — the
+  // per-family facing vocabulary (Terra/Luna/Sol/Astra, Fable/Opus/Sonnet/Haiku, …).
+  facingName: z.string().min(1).optional(),
   efforts: z.array(z.string().min(1)),
 });
 export type SyncConfigModel = z.infer<typeof SyncConfigModel>;
@@ -1567,7 +1579,7 @@ export const SyncConfigResult = z.object({
   /** The provider's LIVE model (re-resolved every call, mirroring `AgentEngine`'s own
    *  `provider.live?.() ?? {model: provider.model}` idiom) — the phone's starting point for a brand
    *  new local chat session, not a value it re-validates against anything. */
-  defaultModel: z.string(),
+  defaultModel: z.union([ModelTagSchema, z.literal("")]),
   /** The ACTIVE provider's whole model catalogue — `AgentEngine.knownModels()`, the SAME list
    *  `session.setModel` and `sync.push` validate a slug against, re-read every call.
    *
