@@ -174,7 +174,10 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
   const writeSettings = (chatFlag: boolean): void => {
     writeFileSync(join(home, "settings.json"), JSON.stringify({
       schemaVersion: 3,
-      provider: { model: "openai/gpt-x" },
+      // WS-20: the settings-wide default is the echo DOUBLE, not an unservable `openai/gpt-x` — a tag whose
+      // provider holds no credential now refuses typed at the first turn (before any spawn), so the
+      // engine-era import case (g) needs a default that can actually run.
+      provider: { model: "winter-test/echo" },
       providers: { openai: { baseUrl: "http://127.0.0.1:9/v1" } },
       runtimes: { winterExecutable: bin, winterLeg: { chat: chatFlag }, winterIdleTimeoutSec: 10 },
     }, null, 2));
@@ -514,10 +517,9 @@ describeWithWinterBinary("chat on the Winter leg — the built binary through a 
     const sent = await client.call<{ seq: number }>(METHODS.sessionSend, { sessionId: engineSid, text: "hello?" });
     expect(sent.seq).toBeGreaterThan(0);
     // The record is no longer engine-era: the import gave it a real backend transcript on the
-    // Winter leg (the settings-wide `provider.model: "openai/gpt-x"` this suite otherwise never
-    // resolves to a real double is irrelevant here — the RPC's own success is the import door's contract;
-    // whatever the resumed child does with an unrecognized model surfaces later, as an async
-    // turn_completed/agent_error event, never as this RPC failing).
+    // Winter leg. WS-20: the resumed child runs the settings-wide default (`winter-test/echo`, see
+    // `writeSettings`) — a provider-less double, so the first-turn credential gate has nothing to
+    // refuse and the RPC's own success is the import door's contract.
     expect(sessionLegOf(record(engineSid))).not.toBe("engine");
     expect(record(engineSid)?.backendSessionId).toBeDefined();
     // The user_message the import's own send appended is now really there — the OPPOSITE of the
