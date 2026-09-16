@@ -1045,7 +1045,10 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     const backendSessionId = randomUUID();
     const transcriptKey = transcriptProjectKey(cwd);
     const credentials = await credentialPresenceFrom(deps.secrets);
-    const selection = providerSelectionFor(meta.model, credentials, deps.home, settings);
+    // Hotfix 2026-09-16: the router's decision steers this selection too, so the record's `authRef`
+    // names the SAME provider as its `providerId` (measured: `provider_id: codex-oauth` beside
+    // `auth_ref: keychain:openai:default` on the release daemon).
+    const selection = providerSelectionFor(meta.model, credentials, deps.home, settings, decided?.providerId);
     const providerId = decided?.providerId ?? selection?.providerId ?? settings?.provider?.type ?? "unstated";
     const authFamily: RuntimeSelection["authFamily"] = settings?.provider?.type === "openai-compatible" ? "api-key" : "custom";
     try {
