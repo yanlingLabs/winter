@@ -143,9 +143,27 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
       const err = validateAdvisorSlug(action.slug);
       if (err) { ctx.appendNote(err); return; }
     }
-    const next = setAdvisorModel(settings, action.kind === "setAdvisor" ? action.slug : undefined);
-    saveSettings(settingsPath, next);
-    ctx.appendNote(`updated (advisor ${next.runtimes?.advisorModel ? modelDisplayWithHint(next.runtimes.advisorModel) : "auto"}) — takes effect next turn, no daemon restart needed`);
+    const modelArg = action.kind === "setAdvisor" ? action.slug : null;
+    // Review fix (Nit 4): the write goes through `settings.setAdvisorModel` over the session's own
+    // (always-live) client, so the tag is validated against the pinned catalog before it lands on
+    // disk. Falls back to the direct file write ONLY when there is no RPC surface to ask at all (a
+    // headless/test double with nothing wired — the historical no-daemon posture this command has
+    // always had) — never on a genuine RPC refusal, which must surface as a real error instead of
+    // silently writing the rejected value locally.
+    if (typeof ctx.client.request !== "function") {
+      ctx.appendNote("no daemon connection — wrote settings.json directly");
+      const next = setAdvisorModel(settings, modelArg ?? undefined);
+      saveSettings(settingsPath, next);
+      ctx.appendNote(`updated (advisor ${next.runtimes?.advisorModel ? modelDisplayWithHint(next.runtimes.advisorModel) : "auto"}) — takes effect next turn, no daemon restart needed`);
+      return;
+    }
+    try {
+      const stored = (await ctx.client.request(METHODS.settingsSetAdvisorModel, { model: modelArg })) as { model?: string | null } | undefined;
+      const model = stored?.model ?? null;
+      ctx.appendNote(`updated (advisor ${model ? modelDisplayWithHint(model) : "auto"}) — takes effect next turn, no daemon restart needed`);
+    } catch (err) {
+      ctx.appendNote(`the daemon refused the advisor setting: ${(err as Error).message}`);
+    }
     return;
   }
 
