@@ -7,7 +7,7 @@ import { FakeProvider } from "../../src/agent/fake-provider";
 import { SessionEvent } from "@yanlinglabs/winter-protocol";
 import { SessionStore } from "../../src/sessions/store";
 import {
-  SessionCleaner, renderTranscript, hasUserSetTitle, CLEANER_MODEL, CLEANER_EFFORT, CLEANER_INSTRUCTION,
+  SessionCleaner, renderTranscript, hasUserSetTitle, CLEANER_EFFORT, CLEANER_INSTRUCTION,
   CLEANER_MAX_JUDGMENTS_PER_PASS, CLEANER_MIN_IDLE_MS, CLEANER_TRANSCRIPT_MAX_CHARS,
   type CleanerDeps, type CleanerStore,
 } from "../../src/sessions/cleaner";
@@ -183,6 +183,7 @@ function makeCleaner(
     bgWork: () => false,
     home,
     enabled: () => true,
+    settings: () => null, // WS-20: pinsFor(null) -> the DEFAULT_PROVIDER-derived pin (codex-oauth/gpt-5.6-terra)
     now: () => Date.now(),
     ...over,
   });
@@ -255,7 +256,7 @@ describe("SessionCleaner — the happy path (session-activity-hygiene T7)", () =
 
     expect(provider.requests).toHaveLength(1);
     const req = provider.requests[0]!;
-    expect(req.model).toBe(CLEANER_MODEL);
+    expect(req.model).toBe("gpt-5.6-terra"); // WS-20: pinsFor(null).cleaner split to its bare modelId
     expect(req.reasoningEffort).toBe(CLEANER_EFFORT);
     expect(req.instructions).toBe(CLEANER_INSTRUCTION);
     const content = (req.input[0] as { content: string }).content;
