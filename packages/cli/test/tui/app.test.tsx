@@ -44,6 +44,7 @@ function fakeClient(opts: { request?: (method: string, params?: unknown) => unkn
     send: rec("send"),
     steer: rec("steer"),
     interrupt: rec("interrupt"),
+    setModel: rec("setModel"),
     setPolicy: rec("setPolicy"),
     askUserRespond: rec("askUserRespond"),
     planRespond: rec("planRespond"),
@@ -1715,7 +1716,7 @@ describe("App — B2 the /model bottom picker end-to-end", () => {
       await wait();
       const frame = lastFrame() ?? "";
       expect(frame).not.toContain("esc cancel"); // picker closed
-      expect(frame).toContain("updated (model gpt-5.6-terra (codex-oauth))"); // the confirmation note (transcript, AFTER selection)
+      expect(frame).toContain("this session now runs gpt-5.6-terra (codex-oauth)"); // the confirmation note (transcript, AFTER selection)
       expect(frame).toContain("terra"); // the footer chip flipped (same frame)
       const settings = JSON.parse(readFileSync(join(home, "settings.json"), "utf8")) as { provider: { model: string } };
       expect(settings.provider.model).toBe("codex-oauth/gpt-5.6-terra"); // the write really landed on disk
