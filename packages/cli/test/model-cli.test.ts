@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { REASONING_EFFORTS } from "@yanlinglabs/winter-core";
 import type { Settings } from "@yanlinglabs/winter-core";
-import { parseModelArgs, validateEffort, validateModelTag, validateInternalProviderModelTag, validateAdvisorSlug, renderModelListing, modelDisplayWithHint } from "../src/model-cli";
+import { parseModelArgs, validateEffort, validateModelTag, internalProviderNote, validateAdvisorSlug, renderModelListing, modelDisplayWithHint } from "../src/model-cli";
 
 describe("parseModelArgs", () => {
   test("no args -> show", () => {
@@ -97,23 +97,19 @@ describe("validateModelTag", () => {
   });
 });
 
-// Review fix (item 4): `winter model <tag>` (the CLI verb, main.ts's `case "model"`) writes the
-// GLOBAL settings.provider.model, which binds the daemon's own internal Provider — codex-oauth or
-// openai only. A PER-SESSION `/model` (tui/commands.ts) does NOT use this gate — see
-// tui/commands.test.ts for that side.
-describe("validateInternalProviderModelTag", () => {
-  test("accepts an internal-provider tag (codex-oauth/openai)", () => {
-    expect(validateInternalProviderModelTag("codex-oauth/gpt-5.6-terra")).toBeUndefined();
+// Design correction (after item 4): `winter model <tag>` no longer REFUSES a non-internal-provider
+// tag for settings.provider.model — any catalog provider may be the default model. The old
+// `validateInternalProviderModelTag` gate is GONE; `internalProviderNote` is its informational
+// replacement, printed to stderr alongside the write rather than blocking it.
+describe("internalProviderNote", () => {
+  test("undefined for an internal provider (codex-oauth/openai) — nothing to say", () => {
+    expect(internalProviderNote("codex-oauth/gpt-5.6-terra")).toBeUndefined();
+    expect(internalProviderNote("openai/gpt-5.6")).toBeUndefined();
   });
 
-  test("refuses a real, non-internal catalog provider with the daemon's own message", () => {
-    const err = validateInternalProviderModelTag("anthropic/claude-opus-5");
-    expect(err).toBe("provider.model must name codex-oauth or openai — the daemon's internal provider supports codex-oauth and openai; any provider is fine per session");
-  });
-
-  test("still surfaces the shape/catalog errors validateModelTag itself would", () => {
-    expect(validateInternalProviderModelTag("not-a-tag")).toMatch(/provider-qualified tag/);
-    expect(validateInternalProviderModelTag("codex-oauth/totally-made-up-model-xyz")).toContain("unknown model");
+  test("a heads-up for a real, non-internal catalog provider — never a refusal", () => {
+    const note = internalProviderNote("anthropic/claude-opus-5");
+    expect(note).toBe("note: anthropic is not one of the daemon's internal providers (codex-oauth, openai); titles, review, dreaming and research are inert until provider.model names one of those");
   });
 });
 
