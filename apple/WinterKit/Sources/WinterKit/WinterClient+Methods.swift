@@ -1242,9 +1242,9 @@ public struct SyncConfigModelInfo: Equatable, Sendable {
 /// UNSET, which is NOT `"none"`: unset makes a turn omit the `reasoning` block entirely, while
 /// `"none"` is an explicit level the backend honours.
 public struct SyncConfigSnapshot: Equatable, Sendable {
-    /// WHICH PROVIDER everything below describes — `"codex-oauth"` / `"openai-compatible"` (the
-    /// daemon's `ProviderSettings.type` vocabulary), `"none"` when it runs none, `""` only when the
-    /// daemon predates the field.
+    /// WHICH PROVIDER everything below describes — WS-20 review fix (Nit 3): the default tag's own
+    /// provider id (`splitTag(defaultTag).providerId`, daemon-side), or `"none"` when it runs none,
+    /// `""` only when the daemon predates the field.
     ///
     /// **On the wire this is the one field with NO empty sentinel** (`z.string().min(1)`) — a daemon
     /// always knows which provider it is running. Its purpose is a rule THIS client does not need
