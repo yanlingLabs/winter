@@ -12,7 +12,10 @@ import SwiftUI
 func providerStatusText(providerId: String?, providerModel: String?) -> String {
     switch (providerId, providerModel) {
     case let (.some(id), .some(model)):
-        return "\(id) (\(model))"
+        // WS-20: `model` may already be a bare modelId (an unmigrated daemon) or a full
+        // provider-qualified tag — `modelIdPortion` strips the "<providerId>/" prefix when
+        // present and is a no-op otherwise, so this reads correctly either way.
+        return "\(id) (\(modelIdPortion(of: model)))"
     case let (.some(id), nil):
         return id
     default:
@@ -244,7 +247,9 @@ struct ProviderPane: View {
             }
             VStack(alignment: .leading, spacing: 4) {
                 Text("Model (optional)").font(Typography.caption()).foregroundStyle(.secondary)
-                TextField("gpt-4o", text: $model.model)
+                // WS-20: the daemon now expects a provider-qualified tag ("<providerId>/<modelId>")
+                // everywhere a model is set, including here — the placeholder shows the shape.
+                TextField("openai/gpt-5.6-sol", text: $model.model)
                     .textFieldStyle(.roundedBorder)
                     .font(Typography.labelMono())
             }

@@ -52,8 +52,8 @@ final class ComposerChromeTests: XCTestCase {
     /// does" is asserted against one vocabulary rather than two fixtures that could drift.
     private func catalogue() -> SyncConfigSnapshot {
         SyncConfigSnapshot(provider: "codex-oauth", defaultModel: "srv-a",
-                           models: [SyncConfigModelInfo(id: "srv-a", efforts: ["none", "low", "high"]),
-                                    SyncConfigModelInfo(id: "srv-b", efforts: ["high", "max"])],
+                           models: [SyncConfigModelInfo(id: "srv-a", providerId: "srv", displayName: "srv-a", facingName: nil, efforts: ["none", "low", "high"]),
+                                    SyncConfigModelInfo(id: "srv-b", providerId: "srv", displayName: "srv-b", facingName: nil, efforts: ["high", "max"])],
                            defaultEffort: "high", clientEfforts: ["ultra"])
     }
 

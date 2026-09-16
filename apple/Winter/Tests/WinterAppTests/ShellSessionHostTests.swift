@@ -2650,7 +2650,7 @@ final class ShellSessionHostTests: XCTestCase {
         guard let cfg = mgmt.sent.map({ feedLineJSON($0) }).last(where: { $0["method"] as? String == "sync.config" }) else {
             return XCTFail("the chip's open must fetch the catalogue: \(mgmt.methods)")
         }
-        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(cfg["id"] as! Int),"result":{"provider":"codex-oauth","exaKey":null,"dangerousDomains":[],"defaultModel":"srv-a","models":[{"id":"srv-a","efforts":["low","high"]}],"defaultEffort":"high","clientEfforts":["ultra"]}}"#)
+        mgmt.feed(#"{"jsonrpc":"2.0","id":\#(cfg["id"] as! Int),"result":{"provider":"codex-oauth","exaKey":null,"dangerousDomains":[],"defaultModel":"srv-a","models":[{"id":"srv-a","providerId":"srv","displayName":"srv-a","efforts":["low","high"]}],"defaultEffort":"high","clientEfforts":["ultra"]}}"#)
         await feedWaitUntil { host.newChatCatalogue.models.count == 1 }
         XCTAssertEqual(host.newChatCatalogue.models.map(\.id), ["srv-a"])
     }

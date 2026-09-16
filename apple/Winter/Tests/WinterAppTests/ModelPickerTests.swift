@@ -13,14 +13,57 @@ import WinterKit
 /// `AppModel.setSessionModel`'s real wire shape (mirrors `testAppModelSetSessionPolicyWireShape`),
 /// and the T1-deferred `listSessions()` → `SessionSummary.model` threading this task closes.
 final class ModelPickerTests: XCTestCase {
+    // WS-20: `SyncConfigModelInfo` gained providerId/displayName/facingName; this test file's
+    // pre-existing `srv-a`/`srv-b` fixture ids are not tag-shaped and are kept as-is (the pure
+    // functions under test don't require tag shape) — this helper just supplies the two new
+    // required fields with an inert provider/displayName so every existing call site keeps
+    // compiling without restating them everywhere.
+    private func srv(_ id: String, efforts: [String]) -> SyncConfigModelInfo {
+        SyncConfigModelInfo(id: id, providerId: "srv", displayName: id, facingName: nil, efforts: efforts)
+    }
+
     // MARK: - Pure decisions
 
-    /// "model set → shown; model nil → 'default' shown" (brief's own wording for the picker's
-    /// current-selection label).
+    /// WS-20: `modelDisplayLabel` no longer shows a tag verbatim — "model set → the catalogue's own
+    /// label (facing name, or the bare modelId); model nil → 'Default'".
     func testModelDisplayLabelShowsModelOrDefault() {
-        XCTAssertEqual(modelDisplayLabel("gpt-5.6-sol"), "gpt-5.6-sol", "a set model is shown verbatim")
-        XCTAssertEqual(modelDisplayLabel("gpt-5.6-luna"), "gpt-5.6-luna")
-        XCTAssertEqual(modelDisplayLabel(nil), "Default", "no override shows the labeled default, not a blank/misleading value")
+        let cat = SyncConfigSnapshot(provider: "codex-oauth", defaultModel: "codex-oauth/gpt-5.6-sol", models: [
+            SyncConfigModelInfo(id: "codex-oauth/gpt-5.6-sol", providerId: "codex-oauth", displayName: "GPT-5.6 Sol", facingName: "sol", efforts: ["low"]),
+            SyncConfigModelInfo(id: "codex-oauth/gpt-5.6-luna", providerId: "codex-oauth", displayName: "GPT-5.6 Luna", facingName: nil, efforts: ["low"]),
+        ], defaultEffort: "", clientEfforts: [])
+        XCTAssertEqual(modelDisplayLabel("codex-oauth/gpt-5.6-sol", catalogue: cat), "Sol", "a family-slot row shows its capitalized facing name")
+        XCTAssertEqual(modelDisplayLabel("codex-oauth/gpt-5.6-luna", catalogue: cat), "gpt-5.6-luna", "no facing name -> the bare modelId, never the tag")
+        XCTAssertEqual(modelDisplayLabel(nil, catalogue: cat), "Default", "no override shows the labeled default, not a blank/misleading value")
+    }
+
+    /// WS-20 (Interim presentation, spec §7): `modelPickerSections` groups the catalogue by
+    /// provider (first-appearance order) and labels each row by facing name (capitalized) falling
+    /// back to the bare modelId — the CLI's `renderModelListing` grouping, translated to the Mac
+    /// picker's section shape. A daemon-served catalogue never carries a "cc" row (that id names no
+    /// real provider — see the catalog's own pinned-provider rule), so the picker never renders one
+    /// either; asserted directly rather than left implicit.
+    func testSectionsGroupByProviderAndLabelByFacingName() {
+        let cat = SyncConfigSnapshot(provider: "codex-oauth", defaultModel: "codex-oauth/gpt-5.6-terra", models: [
+            SyncConfigModelInfo(id: "codex-oauth/gpt-5.6-terra", providerId: "codex-oauth", displayName: "GPT-5.6 Terra", facingName: "terra", efforts: ["low"]),
+            SyncConfigModelInfo(id: "openai/gpt-5.6", providerId: "openai", displayName: "GPT-5.6", facingName: nil, efforts: ["low"]),
+        ], defaultEffort: "", clientEfforts: [])
+        let sections = modelPickerSections(cat)
+        XCTAssertEqual(sections.map(\.providerId), ["codex-oauth", "openai"])
+        XCTAssertEqual(sections[0].entries.map(\.label), ["Terra"])
+        XCTAssertEqual(sections[1].entries.map(\.label), ["gpt-5.6"])
+        XCTAssertEqual(modelDisplayLabel("codex-oauth/gpt-5.6-terra", catalogue: cat), "Terra")
+        XCTAssertEqual(modelDisplayLabel("openai/gpt-5.6", catalogue: cat), "gpt-5.6")
+        XCTAssertEqual(modelDisplayLabel(nil, catalogue: cat), "Default")
+        XCTAssertFalse(sections.contains { $0.providerId == "cc" })
+    }
+
+    /// WS-20: `probation.model` is now a provider-qualified TAG, but a provider rejection quotes
+    /// only the bare model id it was sent — `selectionRevert` must match against THAT, not the tag
+    /// (which never appears in the message at all, so the pre-WS-20 tag-vs-message check would be a
+    /// permanent false negative here).
+    func testSelectionRevertMatchesTheModelIdNotTheTag() {
+        let p = SelectionProbation(sessionId: "s", model: "codex-oauth/gpt-5.6-sol", effort: nil, skipsInFlightTurn: false)
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: "the model 'gpt-5.6-sol' does not exist"), .model)
     }
 
     /// Winter Phase 10b (D1-4, W18-23): the "Switch model?" confirm dialog's body — warnings
@@ -49,8 +92,8 @@ final class ModelPickerTests: XCTestCase {
         let catalogue = SyncConfigSnapshot(
             provider: "codex-oauth",
             defaultModel: "srv-a",
-            models: [SyncConfigModelInfo(id: "srv-a", efforts: ["low", "high"]),
-                     SyncConfigModelInfo(id: "srv-b", efforts: ["high"])],
+            models: [srv("srv-a", efforts: ["low", "high"]),
+                     srv("srv-b", efforts: ["high"])],
             defaultEffort: "high", clientEfforts: ["ultra"])
         XCTAssertEqual(modelPickerOptions(catalogue), ["srv-a", "srv-b"],
                        "the picker repeats what the daemon said — nothing more, in daemon order")
@@ -323,8 +366,8 @@ final class ModelPickerTests: XCTestCase {
         let catalogue = SyncConfigSnapshot(
             provider: "codex-oauth",
             defaultModel: "srv-a",
-            models: [SyncConfigModelInfo(id: "srv-a", efforts: ["none", "low", "high"]),
-                     SyncConfigModelInfo(id: "srv-b", efforts: ["high", "max"])],
+            models: [srv("srv-a", efforts: ["none", "low", "high"]),
+                     srv("srv-b", efforts: ["high", "max"])],
             defaultEffort: "high", clientEfforts: ["ultra"])
 
         let code = effortPickerOptions(catalogue: catalogue, model: "srv-b", mode: "code")
@@ -374,7 +417,7 @@ final class ModelPickerTests: XCTestCase {
         // 2. An UNLISTED model against a real catalogue — a stale pin, or a provider that moved on.
         //    Same reasoning: we were not told this model's levels, so we know nothing to offer.
         let real = SyncConfigSnapshot(provider: "codex-oauth", defaultModel: "srv-a",
-                                      models: [SyncConfigModelInfo(id: "srv-a", efforts: ["low", "high"])],
+                                      models: [srv("srv-a", efforts: ["low", "high"])],
                                       defaultEffort: "high", clientEfforts: ["ultra"])
         let unlisted = effortPickerOptions(catalogue: real, model: "unheard-of", mode: "code")
         XCTAssertEqual(unlisted.wire, [])
@@ -570,15 +613,15 @@ final class ModelPickerTests: XCTestCase {
     /// contain the word "high" must not cost the user their effort setting.
     func testSelectionRevertRequiresTheErrorToNameBothValueAndAxis() {
         let p = SelectionProbation(sessionId: "s1", model: "srv-b", effort: "high")
-        XCTAssertEqual(selectionRevert(p, turnErrorMessage: "unsupported_value: 'reasoning.effort' does not support 'high' with this model"), .effort)
-        XCTAssertEqual(selectionRevert(p, turnErrorMessage: "the model 'srv-b' does not exist"), .model)
-        XCTAssertEqual(selectionRevert(p, turnErrorMessage: "bash: exit 1 — the high-water mark file is missing"), .none,
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: "unsupported_value: 'reasoning.effort' does not support 'high' with this model"), .effort)
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: "the model 'srv-b' does not exist"), .model)
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: "bash: exit 1 — the high-water mark file is missing"), .none,
                        "an incidental substring is not a rejection")
-        XCTAssertEqual(selectionRevert(p, turnErrorMessage: "connection reset"), .none)
-        XCTAssertEqual(selectionRevert(nil, turnErrorMessage: "model 'srv-b' rejected"), .none)
-        XCTAssertEqual(selectionRevert(p, turnErrorMessage: nil), .none)
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: "connection reset"), .none)
+        XCTAssertEqual(selectionRevert(probation: nil, turnErrorMessage: "model 'srv-b' rejected"), .none)
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: nil), .none)
         // An effort rejection quotes the model too; checking model FIRST would clear the wrong axis.
-        XCTAssertEqual(selectionRevert(p, turnErrorMessage: "model 'srv-b' does not support reasoning effort 'high'"), .effort)
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: "model 'srv-b' does not support reasoning effort 'high'"), .effort)
     }
 
     /// I4 (review): SUBSTRING matching silently clears a deliberate choice. `"low"` sits inside
@@ -586,22 +629,22 @@ final class ModelPickerTests: XCTestCase {
     /// English word. Matching must respect word boundaries.
     func testSelectionRevertDoesNotMatchAnEffortInsideAnotherWord() {
         // The review's own example: an unrelated refusal that happens to contain "allowed".
-        XCTAssertEqual(selectionRevert(SelectionProbation(sessionId: "s1", model: nil, effort: "low"),
+        XCTAssertEqual(selectionRevert(probation: SelectionProbation(sessionId: "s1", model: nil, effort: "low"),
                                        turnErrorMessage: "this model is not allowed to use reasoning"), .none,
                        #""low" inside "allowed" must not cost the user their selection"#)
-        XCTAssertEqual(selectionRevert(SelectionProbation(sessionId: "s1", model: nil, effort: "max"),
+        XCTAssertEqual(selectionRevert(probation: SelectionProbation(sessionId: "s1", model: nil, effort: "max"),
                                        turnErrorMessage: "reasoning effort exceeds the maximum for this account"), .none)
-        XCTAssertEqual(selectionRevert(SelectionProbation(sessionId: "s1", model: nil, effort: "none"),
+        XCTAssertEqual(selectionRevert(probation: SelectionProbation(sessionId: "s1", model: nil, effort: "none"),
                                        turnErrorMessage: "no reasoning effort was accepted; none of the retries succeeded"), .none,
                        #""none" is an ordinary English word — an incidental use is not a rejection"#)
         // The composing case: a mid-turn change from xhigh to high, where the IN-FLIGHT turn (still
         // on xhigh) errors. `"high"` must not match inside `"xhigh"` or the NEW selection is reverted.
-        XCTAssertEqual(selectionRevert(SelectionProbation(sessionId: "s1", model: nil, effort: "high"),
+        XCTAssertEqual(selectionRevert(probation: SelectionProbation(sessionId: "s1", model: nil, effort: "high"),
                                        turnErrorMessage: "reasoning effort 'xhigh' is not supported"), .none)
         // …and the same boundary rule must not break the real, quoted rejections.
-        XCTAssertEqual(selectionRevert(SelectionProbation(sessionId: "s1", model: nil, effort: "high"),
+        XCTAssertEqual(selectionRevert(probation: SelectionProbation(sessionId: "s1", model: nil, effort: "high"),
                                        turnErrorMessage: "reasoning effort 'high' is not supported"), .effort)
-        XCTAssertEqual(selectionRevert(SelectionProbation(sessionId: "s1", model: nil, effort: "xhigh"),
+        XCTAssertEqual(selectionRevert(probation: SelectionProbation(sessionId: "s1", model: nil, effort: "xhigh"),
                                        turnErrorMessage: "reasoning effort 'xhigh' is not supported"), .effort)
     }
 
@@ -610,8 +653,8 @@ final class ModelPickerTests: XCTestCase {
     /// string.
     func testSelectionRevertMatchesAModelSlugExactlyAndNotAsAPrefix() {
         let p = SelectionProbation(sessionId: "s1", model: "gpt-5.6-sol", effort: nil)
-        XCTAssertEqual(selectionRevert(p, turnErrorMessage: "the model 'gpt-5.6-sol' does not exist"), .model)
-        XCTAssertEqual(selectionRevert(p, turnErrorMessage: "unknown model gpt-5.6-sol"), .none,
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: "the model 'gpt-5.6-sol' does not exist"), .model)
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: "unknown model gpt-5.6-sol"), .none,
                        """
                        UNQUOTED does not count. The review offered quoting OR a word-boundary regex; \
                        quoting is the stricter and the only one that survives "none", an ordinary \
@@ -619,7 +662,7 @@ final class ModelPickerTests: XCTestCase {
                        negative means no auto-revert (passive), a false positive destroys a setting \
                        the user chose on purpose.
                        """)
-        XCTAssertEqual(selectionRevert(p, turnErrorMessage: "the model 'gpt-5.6-solaris' does not exist"), .none,
+        XCTAssertEqual(selectionRevert(probation: p, turnErrorMessage: "the model 'gpt-5.6-solaris' does not exist"), .none,
                        "a longer slug that merely STARTS with ours is a different model")
     }
 
@@ -782,9 +825,9 @@ final class ModelPickerTests: XCTestCase {
         await waitUntilSent(t, 3)
         let req = lineJSON(t.sent[2])
         XCTAssertEqual(req["method"] as? String, "sync.config")
-        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"provider":"codex-oauth","exaKey":null,"dangerousDomains":[],"defaultModel":"srv-a","models":[{"id":"srv-a","efforts":["low","high"]}],"defaultEffort":"high","clientEfforts":["ultra"]}}"#)
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"provider":"codex-oauth","exaKey":null,"dangerousDomains":[],"defaultModel":"srv-a","models":[{"id":"srv-a","providerId":"srv","displayName":"srv-a","efforts":["low","high"]}],"defaultEffort":"high","clientEfforts":["ultra"]}}"#)
         let snapshot = await fetched
-        XCTAssertEqual(snapshot?.models, [SyncConfigModelInfo(id: "srv-a", efforts: ["low", "high"])])
+        XCTAssertEqual(snapshot?.models, [srv("srv-a", efforts: ["low", "high"])])
         XCTAssertEqual(snapshot?.clientEfforts, ["ultra"])
         XCTAssertEqual(snapshot?.provider, "codex-oauth",
                        "whole-branch review C1: the identity threads through the wrapper like every other field")
@@ -829,8 +872,8 @@ final class ModelPickerTests: XCTestCase {
         let adapter = FieldStateAdapter(session: SessionModel())
         adapter.modelCatalogue = SyncConfigSnapshot(
             provider: "codex-oauth", defaultModel: "srv-a",
-            models: [SyncConfigModelInfo(id: "srv-a", efforts: ["low", "high"]),
-                     SyncConfigModelInfo(id: "srv-b", efforts: ["high", "max"])],
+            models: [srv("srv-a", efforts: ["low", "high"]),
+                     srv("srv-b", efforts: ["high", "max"])],
             defaultEffort: "high", clientEfforts: ["ultra"])
         adapter.modelChangeInFlight = true
         let view = await headerView(adapter, rows: [
@@ -849,8 +892,8 @@ final class ModelPickerTests: XCTestCase {
         let adapter = FieldStateAdapter(session: SessionModel())
         adapter.modelCatalogue = SyncConfigSnapshot(
             provider: "codex-oauth", defaultModel: "srv-a",
-            models: [SyncConfigModelInfo(id: "srv-a", efforts: ["low", "high"]),
-                     SyncConfigModelInfo(id: "srv-b", efforts: ["high", "max"])],
+            models: [srv("srv-a", efforts: ["low", "high"]),
+                     srv("srv-b", efforts: ["high", "max"])],
             defaultEffort: "high", clientEfforts: ["ultra"])
         let code = await headerView(adapter, rows: [
             SessionSummary(sessionId: "s_1", title: nil, createdAt: 1, scope: "global",
@@ -881,7 +924,7 @@ final class ModelPickerTests: XCTestCase {
     func testTheEffortOptionsBoolDoorAgreesWithTheModeDoorForEveryMode() {
         let catalogue = SyncConfigSnapshot(
             provider: "codex-oauth", defaultModel: "srv-a",
-            models: [SyncConfigModelInfo(id: "srv-a", efforts: ["low", "high"])],
+            models: [srv("srv-a", efforts: ["low", "high"])],
             defaultEffort: "high", clientEfforts: ["ultra"])
         for mode in SessionMode.allCases.map({ $0.rawValue }) + [nil] {
             let byMode = effortPickerOptions(catalogue: catalogue, model: "srv-a", mode: mode)

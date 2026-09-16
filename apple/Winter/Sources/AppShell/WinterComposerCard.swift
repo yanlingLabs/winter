@@ -166,6 +166,11 @@ struct ComposerModelRow: Equatable {
     let effort: String?
     /// The model slugs on offer — the catalogue's, verbatim.
     let options: [String]
+    /// WS-20: the synced catalogue itself — needed alongside `options` so `chipTitle`/`help` can
+    /// look up a tag's facing-name label (`modelDisplayLabel`) instead of showing the raw
+    /// `<providerId>/<modelId>` tag, and so the popover's `ModelMenuContent` can do the same for
+    /// its rows without re-deriving the catalogue from `options` alone.
+    let catalogue: SyncConfigSnapshot
     /// The WIRE effort levels this model accepts. Model-scoped, never mode-scoped.
     let wire: [String]
     /// The WINTER-LEVEL tiers this mode may select — `["ultra"]` on code, EMPTY everywhere else.
@@ -188,9 +193,9 @@ struct ComposerModelRow: Equatable {
     /// when it is set keeps the common case short while making a chosen effort visible somewhere on
     /// the page (before this task it was visible nowhere on the new-chat page at all).
     var chipTitle: String {
-        let model = model ?? newChatModelPlaceholder
-        guard let effort else { return model }
-        return "\(model) · \(effort)"
+        let label = model.map { modelDisplayLabel($0, catalogue: catalogue) } ?? newChatModelPlaceholder
+        guard let effort else { return label }
+        return "\(label) · \(effort)"
     }
 
     /// The runtime badge text (`runtimeBadgeLabel`, `ShellSidebar.swift`'s pure mapping) — `nil`
@@ -202,7 +207,7 @@ struct ComposerModelRow: Equatable {
     /// "Default" readings — the tooltip is where "inherited from the daemon's default" can be said
     /// in full without crowding the row.
     var help: String {
-        "Model: \(modelDisplayLabel(model)) · Reasoning effort: \(effortDisplayLabel(effort))"
+        "Model: \(modelDisplayLabel(model, catalogue: catalogue)) · Reasoning effort: \(effortDisplayLabel(effort))"
     }
 }
 
@@ -261,6 +266,7 @@ struct ComposerModelChip: View {
             VStack(alignment: .leading, spacing: 2) {
                 ModelMenuContent(options: row.options, current: row.model,
                                  isDisabled: row.modelChangeInFlight,
+                                 catalogue: row.catalogue,
                                  onSelect: { onSetModel($0); showingMenu = false })
                 Divider().opacity(0.5).padding(.vertical, 6)
                 EffortMenuContent(wire: row.wire, tiers: row.tiers, current: row.effort,
@@ -473,6 +479,7 @@ struct WinterComposerCard: View {
         return ComposerModelRow(model: model.model,
                                 effort: model.effort,
                                 options: modelPickerOptions(model.catalogue),
+                                catalogue: model.catalogue,
                                 wire: efforts.wire,
                                 tiers: efforts.tiers,
                                 modelChangeInFlight: model.modelChangeInFlight,
