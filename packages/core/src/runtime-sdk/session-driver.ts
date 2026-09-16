@@ -70,7 +70,7 @@ import type { ContextAssembler } from "../agent/context";
 import { startWinterSession, unconsumedUserMessages, type WinterChildrenSink, type WinterIncarnation, type WinterIncarnationShape, type WinterSession } from "./winter-session";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import { startOfficialSession, type OfficialSession } from "./official-session";
-import { officialAuthFamilyFor, OfficialConsoleProfileMissing, OfficialConsoleRouterUnsupported, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
+import { officialAuthArmFor, OfficialConsoleProfileMissing, OfficialConsoleRouterUnsupported, type OfficialInputDeps, type OfficialSessionInput } from "./official-options";
 
 export type WinterLegRefusalCode =
   | "winter_executable_unavailable"   // P8b-2: no `winter` binary resolves (setting → env → bundle → home)
@@ -613,30 +613,20 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
     // env-allowlist's family-shape check does not itself refuse `ANTHROPIC_BASE_URL`) — never the
     // PERSISTED record, which keeps the router's real decision.
     const connectionOverride = deps.officialConnectionOverride?.();
-    // Winter Phase 10a (router 0.0.4, C1): Winter's OWN console-vs-api-key decision now widens THIS
-    // session's `RuntimeSelection.authFamily` to `"console-profile"` directly, rather than riding a
-    // parallel `officialAuthArm` field the way the C1-interim fix wave did — the router's own
-    // `openOfficialLeg` re-derives `credentials`/`connectionEnv` from `Options.runtime.selection`
-    // AT SPAWN (measured: `officialCredentialPlan`/`officialConnectionEnv` are called a SECOND time
-    // inside the router, keyed on `request.selection`, not merely on whatever `officialInputFor`
-    // pre-computed) — so a selection left at `"api-key"` would have the router re-inject
-    // `ANTHROPIC_API_KEY` from the provider's own authRef regardless of what this host built, and a
-    // widened `connectionEnv` paired with an unwidened `"api-key"` selection would fail the router's
-    // own `validateAuthEnvironment` ("a variable outside the family's set") before the child ever
-    // spawned. Evaluated HERE (session assembly, same posture as the `connectionOverride` widening
-    // above and as every other family this leg persists) rather than per-incarnation inside
-    // `inputDeps()`: `officialAuthFamilyFor`'s `hasApiKey` argument is accepted only for
-    // `provider.status`'s own "effective auth" combination (its own doc: "accepted for the caller's
-    // use, not consulted here") — the family decision itself needs no async credential read, so
-    // nothing here is losing liveness by moving out of the per-`open()` closure; `officialAuthFamilyFor`
-    // still re-reads `deps.settings()` (hot) and the console profile file's live on-disk presence
-    // each time THIS function runs (once per session assembly — fresh session create, or resume from
-    // a record after a driver restart), the same "no daemon restart required" contract every other
-    // settings-hot-reload call site in this file already has.
+    // WS-20: the console-vs-api-key decision is the TAG's own prefix now
+    // (`officialAuthArmFor(persistedSelection)`, official-options.ts) — no live settings read, no
+    // on-disk profile probe here at all. The tag cannot go stale the way `runtimes.official.auth`
+    // could (a session that wants the OTHER arm needs a real `session.setModel` onto a
+    // `console/*`/`anthropic/*` tag, which mints a FRESH `RuntimeSelection` with the correct
+    // `authFamily` already — there is no "live state disagrees with the recorded selection" case
+    // left to reconcile at assembly time). Winter's own console-vs-api-key decision still widens
+    // THIS session's `RuntimeSelection.authFamily` to `"console-profile"` directly (never a
+    // parallel `officialAuthArm` field) because the router's own `openOfficialLeg` re-derives
+    // `credentials`/`connectionEnv` from `Options.runtime.selection` AT SPAWN, keyed on
+    // `request.selection` — a selection left at `"api-key"` would have the router re-inject
+    // `ANTHROPIC_API_KEY` from the provider's own authRef regardless of what this host built.
     const officialAuthArm: "api-key" | "console" | undefined =
-      connectionOverride?.authFamily === undefined && persistedSelection.authFamily === "api-key"
-        ? officialAuthFamilyFor(deps.home, deps.settings(), false)
-        : undefined;
+      connectionOverride?.authFamily === undefined ? officialAuthArmFor(persistedSelection) : undefined;
     const selection: RuntimeSelection = connectionOverride?.authFamily !== undefined
       ? { ...persistedSelection, authFamily: connectionOverride.authFamily }
       : officialAuthArm === "console"

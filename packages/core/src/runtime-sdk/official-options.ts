@@ -31,6 +31,7 @@ import { winterSystemPromptFor } from "./system-prompt";
 import { ClaudeExecutableUnavailable } from "./official-executable";
 import type { OfficialPeer } from "./create";
 import { CONSOLE_AUTH_ROUTER_MIN, REQUIRED_WINTER_RUNTIME_SDK, versionAtLeast } from "./versions";
+import { splitTag } from "./model-tag";
 
 /**
  * Phase 9c (P9c-1, WS-00 §8 #1): env names the official leg's spawned child must NEVER inherit
@@ -134,31 +135,16 @@ import { anthropicConfigDirFor, ANTHROPIC_PROFILE_NAME, consoleProfileCredential
 export type OfficialAuthFamily = "api-key" | "console";
 
 /**
- * Winter Phase 10a (P10a-3): `settings.runtimes.official.auth` resolved against the console
- * profile's own on-disk presence. `"api-key"`/`"console"` are explicit pins — honoured even when
- * the pinned arm's own credential is not actually there yet (a user who picked "console" before
- * finishing `winter login --anthropic-console` gets a real, typed refusal further down the launch
- * path, never a silent substitution of the other arm). `"auto"` (the default) is the ruling's own
- * literal rule: the console profile wins when its credential file exists, otherwise API key —
- * unconditionally, regardless of `hasApiKey`.
- *
- * `hasApiKey` is accepted (not merely tolerated) as part of this door's PINNED signature because
- * the caller building `provider.status`'s `effective` field needs it to tell "this arm was
- * DECIDED" apart from "this arm's own credential actually EXISTS" — e.g. `auto` with no console
- * profile and no API key material still decides `"api-key"` here, and the caller is the one who
- * turns that into `effective: "none"` by combining this result with the presence booleans it
- * already has (`ipc/server.ts`'s `provider.status` handler). Kept as a real parameter (not
- * dropped) so that combination stays a one-function read rather than a second, independently
- * drifting copy of this same decision.
+ * WS-20: the official leg's auth arm is the tag's OWN PREFIX — `console/*` selections run the
+ * Console profile arm, every other provider (`anthropic/*`, and any future non-Claude provider
+ * that somehow lands here) runs the api-key arm. No settings read, no live on-disk probe, no
+ * "auto" fallback: `runtimes.official.auth` and `officialAuthFamilyFor` (the settings-driven
+ * decision this replaces) are REMOVED, not deprecated — the arm was already decided the moment
+ * the router picked `selection.providerId`/`modelRef`, so re-deciding it here from live state
+ * could only ever disagree with the session's own recorded selection, never improve on it.
  */
-export function officialAuthFamilyFor(home: string, settings: Settings | null | undefined, hasApiKey: boolean): OfficialAuthFamily {
-  void hasApiKey; // see this function's own doc comment — accepted for the caller's use, not consulted here
-  void settings;
-  // WS-20 L3.5: `officialAuthModeSetting`/`runtimes.official.auth` is removed — this whole
-  // function is superseded by `officialAuthArmFor(selection)` (the tag's own prefix decides the
-  // arm). Left inert (behaves as the old "auto" default always did) until L3.5 deletes it and its
-  // call sites.
-  return existsSync(consoleProfileCredentialFile(home)) ? "console" : "api-key";
+export function officialAuthArmFor(selection: { modelRef: string }): OfficialAuthFamily {
+  return splitTag(selection.modelRef).providerId === "console" ? "console" : "api-key";
 }
 
 /**
@@ -184,22 +170,17 @@ export function officialAuthChildEnvFor(family: OfficialAuthFamily, home: string
 }
 
 /**
- * Winter Phase 10a (O6): `provider.status`'s own "which credential will actually be used right
- * now" decision — WIDER than `officialAuthFamilyFor` above (which always picks an arm to attempt
- * and never answers `"none"`), because only a caller holding both presence booleans can tell
- * "this arm was decided" apart from "this arm's own credential doesn't actually exist yet". An
- * explicit `auth` pin (`"api-key"`/`"console"`) is only "effective" when ITS OWN credential is
- * present — it never silently falls back to the other arm, matching `officialAuthFamilyFor`'s own
- * "honoured even when not there yet" stance for the SPAWN decision. Only `"auto"` falls back
- * (console first, per P10a-3's literal rule), and answers `"none"` when neither exists.
+ * WS-20: `provider.status`'s own "which credentials actually exist" report — presence ALONE, no
+ * `auth` pin to consult any more (there is no standing arm SETTING left; the arm is decided per
+ * session by the tag's own prefix, `officialAuthArmFor`). `"both"` when the api-key material AND
+ * the console profile both exist — a session's own tag decides which one it actually uses, and
+ * this function does not guess on the caller's behalf.
  */
 export function effectiveOfficialAuthFor(
-  auth: "auto" | "api-key" | "console",
   apiKey: boolean,
   consoleProfile: boolean,
-): "api-key" | "console" | "none" {
-  if (auth === "console") return consoleProfile ? "console" : "none";
-  if (auth === "api-key") return apiKey ? "api-key" : "none";
+): "both" | "api-key" | "console" | "none" {
+  if (apiKey && consoleProfile) return "both";
   if (consoleProfile) return "console";
   if (apiKey) return "api-key";
   return "none";

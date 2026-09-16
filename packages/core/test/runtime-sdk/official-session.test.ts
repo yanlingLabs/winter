@@ -817,7 +817,7 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
     const checkpoints = existing?.checkpoints ?? new ProjectionCheckpoints(rs!);
     const secrets = existing?.secrets ?? new FileSecretStore(join(home, "secrets"));
     // "auto" mode — no `runtimes.official.auth` pin — exactly the review's own scenario.
-    const settings = Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" } });
+    const settings = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } });
     const officialSelection: RuntimeSelection = {
       runtimeKind: "claude-agent", providerId: "anthropic", modelRef: MODEL,
       family: "claude", authFamily: "api-key", sdkVersion: "0.0.3", reason: "unit test", decidedAt: new Date(0).toISOString(),
@@ -919,19 +919,14 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
     }
   });
 
-  // Coordinator addendum (cross-runtime handoff must keep working in BOTH directions): the M-C fix
-  // pins ONLY the credential ref for the LIFETIME of one already-assembled official incarnation
-  // set (the `inputDeps()` path, re-run on every `open()`/resume of the SAME `OfficialSession`
-  // instance) to that instance's fixed `selection.authFamily`. It must NEVER touch
-  // `assembleOfficial`'s own per-ASSEMBLY decision (session-driver.ts ~559-565,
-  // `officialAuthFamilyFor` against LIVE settings/profile presence) — a FRESH assembly of the SAME
-  // session (a daemon restart, or `resumeOfficial`, which is exactly the path a `session.setModel`
-  // handoff INTO the official leg resumes through) must still re-decide the arm from whatever is
-  // true RIGHT NOW. This test proves the contrast directly: the SAME session, the SAME Console
-  // sign-in, but assembled FRESH instead of re-opened on the old instance, ends up on the console
-  // arm — never pinned to the stale api-key arm the way the M-C test above (correctly) pins the
-  // SAME incarnation set.
-  test("a FRESH assembly of the same session (resumeOfficial / handoff-into-official) re-decides the arm from LIVE state and picks console — assembleOfficial's own per-assembly decision is untouched by the M-C fix", async () => {
+  // WS-20 supersedes this test's ORIGINAL premise (a FRESH assembly re-probing live console-profile
+  // presence and picking console): the auth arm is now the recorded selection's TAG prefix
+  // (`officialAuthArmFor`, official-options.ts), decided once by the router at `session.create`/
+  // `session.setModel` time — never re-derived from live on-disk state at assembly. So a FRESH
+  // assembly of the SAME `anthropic/*`-tagged session stays on the api-key arm even after a real
+  // Console sign-in appears on disk; only an actual `session.setModel` onto a `console/*` tag mints
+  // a NEW selection that would assemble on the console arm.
+  test("WS-20: a FRESH assembly of the same anthropic/* session STAYS on the api-key arm even after a live Console sign-in — the arm is the tag's own prefix, not live-probed state", async () => {
     const w = driverWorld();
     try {
       await writeCredentialMaterial(w.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME, { kind: "api-key", key: API_KEY_MATERIAL });
@@ -965,17 +960,18 @@ describe("session-driver.ts (real) — the official leg's own anthropic ref must
       const resumed = await w2.drivers.ensure(sid);
       expect(resumed).toBeDefined();
 
-      // THE CONTRAST with the M-C regression test: this FRESH assembly is NOT pinned to the OLD
-      // incarnation-set's api-key arm — it re-reads the now-present profile and widens
-      // `selection.authFamily` to `"console-profile"`, so this incarnation carries NO
-      // `ANTHROPIC_API_KEY` credential at all, only `ANTHROPIC_PROFILE`/`ANTHROPIC_CONFIG_DIR`.
+      // WS-20: this FRESH assembly is STILL on the api-key arm — `officialAuthArmFor` reads only
+      // the persisted selection's `modelRef` prefix ("anthropic/…"), never the live on-disk
+      // profile, so a Console sign-in that happened in between changes nothing about THIS session
+      // until a real `session.setModel` onto a `console/*` tag mints a new selection.
       expect(w2.capturedOptions).toHaveLength(1);
       const gen = w2.capturedOptions[0]!;
-      expect(gen.runtime?.official?.credentials ?? []).toEqual([]);
-      expect(gen.runtime?.official?.connectionEnv?.ANTHROPIC_PROFILE).toBe(ANTHROPIC_PROFILE_NAME);
-      expect(gen.runtime?.official?.connectionEnv?.ANTHROPIC_CONFIG_DIR).toBe(anthropicConfigDirFor(w.home));
+      expect(gen.runtime?.official?.credentials).toEqual([
+        { variable: "ANTHROPIC_API_KEY", ref: expect.objectContaining({ account: ANTHROPIC_CREDENTIAL_SECRET_NAME }) },
+      ]);
+      expect(gen.runtime?.official?.connectionEnv?.ANTHROPIC_PROFILE).toBeUndefined();
 
-      w2.q().emit(init(resumed!.backendSessionId, { apiKeySource: CONSOLE_API_KEY_SOURCE }));
+      w2.q().emit(init(resumed!.backendSessionId, { apiKeySource: "ANTHROPIC_API_KEY" }));
       w2.q().emit(result());
       await Bun.sleep(10);
       await resumed!.end();

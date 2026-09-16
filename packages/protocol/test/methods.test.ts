@@ -1392,13 +1392,14 @@ describe("PanelOpenTabParams diffId/kind pairing (fix-wave 2026-08-14, Item 1)",
   });
 });
 
-// Winter Phase 10a (O5): provider.configure's SECOND arm (the Anthropic auth-mode radio) — a
-// z.union, so both the original openai-compatible shape and this new one must parse independently
-// and neither must accept the other's fields.
-describe("ProviderConfigureParams (P10a-3 — the anthropic auth-mode arm)", () => {
-  test("the anthropic arm parses exactly {provider, settings: {'runtimes.official.auth'}}", () => {
-    const parsed = ProviderConfigureParams.parse({ provider: "anthropic", settings: { "runtimes.official.auth": "console" } });
-    expect(parsed).toEqual({ provider: "anthropic", settings: { "runtimes.official.auth": "console" } });
+// WS-20: provider.configure's SECOND arm (the Anthropic auth-mode radio,
+// `settings["runtimes.official.auth"]`) is DELETED, not deprecated — the official leg's arm is now
+// the tag's own prefix (`officialAuthArmFor`), decided per session, never a standing settings
+// toggle. `ProviderConfigureParams` is now exactly the one openai-compatible BYOK arm.
+describe("ProviderConfigureParams (WS-20: the anthropic auth-mode arm is gone)", () => {
+  test("the anthropic arm no longer parses at all", () => {
+    expect(ProviderConfigureParams.safeParse({ provider: "anthropic", settings: { "runtimes.official.auth": "console" } }).success).toBe(false);
+    expect(ProviderConfigureParams.safeParse({ provider: "anthropic", settings: { "runtimes.official.auth": "auto" } }).success).toBe(false);
   });
 
   test("the original openai-compatible arm still parses, unchanged", () => {
@@ -1406,20 +1407,7 @@ describe("ProviderConfigureParams (P10a-3 — the anthropic auth-mode arm)", () 
     expect(parsed).toEqual({ type: "openai-compatible", baseUrl: "https://example.com", apiKey: "sk-1" });
   });
 
-  test("an unknown auth value on the anthropic arm is refused", () => {
-    expect(ProviderConfigureParams.safeParse({ provider: "anthropic", settings: { "runtimes.official.auth": "subscription" } }).success).toBe(false);
-  });
-
-  // Fix wave (N3): settings.ts's own officialAuthModeSetting/schema (and ProviderStatusResult.
-  // anthropic.auth just below in this same file) already accept "auto" as the DEFAULT value — this
-  // arm had no way to configure a session back to it once an explicit "api-key"/"console" had been
-  // set, short of hand-editing settings.json.
-  test("\"auto\" is accepted on the anthropic arm (N3)", () => {
-    const parsed = ProviderConfigureParams.parse({ provider: "anthropic", settings: { "runtimes.official.auth": "auto" } });
-    expect(parsed).toEqual({ provider: "anthropic", settings: { "runtimes.official.auth": "auto" } });
-  });
-
-  test("a params object naming neither arm's discriminant is refused", () => {
+  test("a params object naming no arm's discriminant is refused", () => {
     expect(ProviderConfigureParams.safeParse({ foo: "bar" }).success).toBe(false);
   });
 });
@@ -1449,17 +1437,25 @@ describe("provider.login / provider.loginCode / provider.logout (O5, P10a-6)", (
   });
 });
 
-describe("provider.status (O5, P10a-3)", () => {
-  test("the anthropic block's four fields parse with the pinned enums", () => {
+describe("provider.status (O5, P10a-3); WS-20: auth is gone, effective gains \"both\"", () => {
+  test("the anthropic block's three fields parse with the pinned enum", () => {
+    const parsed = ProviderStatusResult.parse({
+      anthropic: { apiKey: true, consoleProfile: false, effective: "api-key" },
+    });
+    expect(parsed.anthropic).toEqual({ apiKey: true, consoleProfile: false, effective: "api-key" });
+  });
+
+  test("a stray auth field is silently stripped — the key no longer exists on this schema", () => {
     const parsed = ProviderStatusResult.parse({
       anthropic: { apiKey: true, consoleProfile: false, auth: "auto", effective: "api-key" },
     });
-    expect(parsed.anthropic).toEqual({ apiKey: true, consoleProfile: false, auth: "auto", effective: "api-key" });
+    expect(parsed.anthropic).not.toHaveProperty("auth");
   });
 
-  test("effective accepts \"none\" — auth accepts only auto/api-key/console", () => {
-    expect(ProviderStatusResult.safeParse({ anthropic: { apiKey: false, consoleProfile: false, auth: "auto", effective: "none" } }).success).toBe(true);
-    expect(ProviderStatusResult.safeParse({ anthropic: { apiKey: false, consoleProfile: false, auth: "subscription", effective: "none" } }).success).toBe(false);
-    expect(ProviderStatusResult.safeParse({ anthropic: { apiKey: false, consoleProfile: false, auth: "auto", effective: "bearer" } }).success).toBe(false);
+  test("effective accepts both/api-key/console/none; rejects junk", () => {
+    for (const v of ["both", "api-key", "console", "none"] as const) {
+      expect(ProviderStatusResult.safeParse({ anthropic: { apiKey: false, consoleProfile: false, effective: v } }).success).toBe(true);
+    }
+    expect(ProviderStatusResult.safeParse({ anthropic: { apiKey: false, consoleProfile: false, effective: "bearer" } }).success).toBe(false);
   });
 });

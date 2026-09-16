@@ -51,7 +51,7 @@ import {
   type AnthropicTurnScript, type HermeticOfficialHome,
 } from "../helpers/claude-runtime";
 
-const CATALOG_CLAUDE_MODEL = "claude-sonnet-5"; // a real pinned-catalog Claude model id (selectRuntime must recognize it)
+const CATALOG_CLAUDE_MODEL = "anthropic/claude-sonnet-5"; // WS-20: a real pinned-catalog Claude TAG (selectRuntime must recognize it)
 
 class TestClient {
   private decoder = new LineDecoder();

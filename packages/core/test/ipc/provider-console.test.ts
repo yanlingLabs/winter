@@ -102,63 +102,11 @@ function fakeBroker(overrides: Partial<ConsoleProfileBroker> = {}): { broker: Co
   return { broker, calls };
 }
 
-describe("provider.configure — the anthropic auth-mode arm (P10a-3)", () => {
-  let stop: (() => void) | undefined;
-  afterEach(() => { stop?.(); stop = undefined; });
-
-  async function boot() {
-    const home = mkdtempSync(join(tmpdir(), "winter-provider-console-"));
-    const settingsPath = join(home, "settings.json");
-    saveSettings(settingsPath, Settings.parse({ schemaVersion: 2, provider: { type: "codex-oauth", model: "x" } }));
-    const store = new SessionStore(home);
-    const socketPath = join(home, "core.sock");
-    const secrets = new FileSecretStore(join(home, "secrets"));
-    const authority = new TokenAuthority(secrets);
-    const tokens = await authority.ensureTokens();
-    const { broker, calls } = fakeBroker();
-    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store, winterHome: home, secrets, consoleBroker: broker });
-    stop = () => { server.stop(); store.close(); };
-    return { home, settingsPath, socketPath, harnessToken: tokens.harness, secrets, calls };
-  }
-
-  test("writes exactly runtimes.official.auth, preserving the rest of settings.json", async () => {
-    const { settingsPath, socketPath, harnessToken } = await boot();
-    const c = await TestClient.connect(socketPath);
-    await c.hello(harnessToken, "cli");
-    const result = await c.request(METHODS.providerConfigure, { provider: "anthropic", settings: { "runtimes.official.auth": "console" } });
-    expect(result.result).toEqual({ ok: true });
-    const written = JSON.parse(readFileSync(settingsPath, "utf8"));
-    expect(written.runtimes.official.auth).toBe("console");
-    expect(written.provider).toEqual({ type: "codex-oauth", model: "x" }); // untouched
-    c.close();
-  });
-
-  test("a second write with a different value hot-reloads (no restart, no daemon involved at all)", async () => {
-    const { settingsPath, socketPath, harnessToken } = await boot();
-    const c = await TestClient.connect(socketPath);
-    await c.hello(harnessToken, "cli");
-    await c.request(METHODS.providerConfigure, { provider: "anthropic", settings: { "runtimes.official.auth": "console" } });
-    await c.request(METHODS.providerConfigure, { provider: "anthropic", settings: { "runtimes.official.auth": "api-key" } });
-    const written = JSON.parse(readFileSync(settingsPath, "utf8"));
-    expect(written.runtimes.official.auth).toBe("api-key");
-    c.close();
-  });
-
-  // Fix wave (N3): "auto" is settings.ts's own default value — this was previously refused by
-  // the protocol schema, so the only way back to it (after an explicit api-key/console pin) was
-  // hand-editing settings.json. Pinned here at the IPC layer too, not just the schema unit test.
-  test("\"auto\" is accepted and writes exactly that value (N3)", async () => {
-    const { settingsPath, socketPath, harnessToken } = await boot();
-    const c = await TestClient.connect(socketPath);
-    await c.hello(harnessToken, "cli");
-    await c.request(METHODS.providerConfigure, { provider: "anthropic", settings: { "runtimes.official.auth": "console" } });
-    const result = await c.request(METHODS.providerConfigure, { provider: "anthropic", settings: { "runtimes.official.auth": "auto" } });
-    expect(result.result).toEqual({ ok: true });
-    const written = JSON.parse(readFileSync(settingsPath, "utf8"));
-    expect(written.runtimes.official.auth).toBe("auto");
-    c.close();
-  });
-});
+// WS-20: `provider.configure`'s anthropic auth-mode arm (`settings["runtimes.official.auth"]`) is
+// DELETED, not deprecated — the official leg's arm is now the tag's own prefix
+// (`officialAuthArmFor`), decided per session, never a standing settings toggle written through
+// this RPC. `ProviderConfigureParams` no longer has a second arm to write through at all — see
+// `packages/protocol/test/methods.test.ts`'s own coverage for the schema-level refusal.
 
 describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", () => {
   let stop: (() => void) | undefined;
@@ -456,17 +404,18 @@ describe("provider.login / provider.loginCode / provider.logout (O6, P10a-6)", (
   });
 });
 
-describe("provider.status (O6, P10a-3)", () => {
+// WS-20: `auth` is gone from `provider.status` — `effective` is presence alone now, and gains
+// `"both"` for the case where the api-key material AND the console profile both exist (a
+// session's own tag decides which one it actually uses; this RPC no longer guesses on anyone's
+// behalf).
+describe("provider.status (O6, P10a-3); WS-20: presence alone, effective gains \"both\"", () => {
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
 
-  async function boot(opts: { auth?: "auto" | "api-key" | "console"; hasApiKey?: boolean; hasProfile?: boolean } = {}) {
+  async function boot(opts: { hasApiKey?: boolean; hasProfile?: boolean } = {}) {
     const home = mkdtempSync(join(tmpdir(), "winter-provider-status-"));
     const settingsPath = join(home, "settings.json");
-    saveSettings(settingsPath, Settings.parse({
-      schemaVersion: 2, provider: { type: "codex-oauth", model: "x" },
-      ...(opts.auth === undefined ? {} : { runtimes: { official: { auth: opts.auth } } }),
-    }));
+    saveSettings(settingsPath, Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } }));
     const store = new SessionStore(home);
     const socketPath = join(home, "core.sock");
     const secrets = new FileSecretStore(join(home, "secrets"));
@@ -479,39 +428,39 @@ describe("provider.status (O6, P10a-3)", () => {
     return { socketPath, harnessToken: tokens.harness };
   }
 
-  test("no credentials at all — auto/none", async () => {
+  test("no credentials at all -> none", async () => {
     const { socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const result = await c.request(METHODS.providerStatus, {});
-    expect(result.result).toEqual({ anthropic: { apiKey: false, consoleProfile: false, auth: "auto", effective: "none" } });
+    expect(result.result).toEqual({ anthropic: { apiKey: false, consoleProfile: false, effective: "none" } });
     c.close();
   });
 
-  test("api-key material present, auto -> effective api-key", async () => {
+  test("api-key material present only -> effective api-key", async () => {
     const { socketPath, harnessToken } = await boot({ hasApiKey: true });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const result = await c.request(METHODS.providerStatus, {});
-    expect(result.result).toEqual({ anthropic: { apiKey: true, consoleProfile: false, auth: "auto", effective: "api-key" } });
+    expect(result.result).toEqual({ anthropic: { apiKey: true, consoleProfile: false, effective: "api-key" } });
     c.close();
   });
 
-  test("console profile present AND api key present, auto -> console wins", async () => {
+  test("console profile present only -> effective console", async () => {
+    const { socketPath, harnessToken } = await boot({ hasProfile: true });
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+    const result = await c.request(METHODS.providerStatus, {});
+    expect(result.result).toEqual({ anthropic: { apiKey: false, consoleProfile: true, effective: "console" } });
+    c.close();
+  });
+
+  test("console profile AND api key both present -> effective \"both\" — never guesses which one wins", async () => {
     const { socketPath, harnessToken } = await boot({ hasApiKey: true, hasProfile: true });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
     const result = await c.request(METHODS.providerStatus, {});
-    expect(result.result.anthropic).toEqual({ apiKey: true, consoleProfile: true, auth: "auto", effective: "console" });
-    c.close();
-  });
-
-  test("explicit auth:\"console\" with no profile yet -> effective none (never silently falls back to api-key)", async () => {
-    const { socketPath, harnessToken } = await boot({ auth: "console", hasApiKey: true, hasProfile: false });
-    const c = await TestClient.connect(socketPath);
-    await c.hello(harnessToken, "cli");
-    const result = await c.request(METHODS.providerStatus, {});
-    expect(result.result.anthropic).toEqual({ apiKey: true, consoleProfile: false, auth: "console", effective: "none" });
+    expect(result.result.anthropic).toEqual({ apiKey: true, consoleProfile: true, effective: "both" });
     c.close();
   });
 });
