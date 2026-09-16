@@ -314,19 +314,19 @@ describe("session.setEffort round-trip RPC (provider-correctness T4)", () => {
   // -------------------------------------------------------------------------------------------
 
   test("every effort the daemon ADVERTISES for a model is accepted for a session on that model", async () => {
-    const { store, socketPath, harnessToken } = await boot({ liveModel: () => "gpt-5.6-sol" });
+    const { store, socketPath, harnessToken } = await boot({ liveModel: () => "codex-oauth/gpt-5.6-sol" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "effort-setter");
     const sessionId = store.createSession("global");
 
-    for (const effort of effortsForModel("gpt-5.6-sol")) {
+    for (const effort of effortsForModel("codex-oauth/gpt-5.6-sol")) {
       const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort });
       expect(res.error).toBeUndefined();
       expect(store.meta(sessionId).effort).toBe(effort);
     }
     // The advertised set is the wire-valid one (settings.ts's REASONING_EFFORTS) — pinned here so
     // "accepts everything it advertises" can't degrade into "advertises nothing, accepts nothing".
-    expect(effortsForModel("gpt-5.6-sol")).toEqual([...REASONING_EFFORTS]);
+    expect(effortsForModel("codex-oauth/gpt-5.6-sol")).toEqual([...REASONING_EFFORTS]);
     c.close();
   });
 
@@ -339,7 +339,7 @@ describe("session.setEffort round-trip RPC (provider-correctness T4)", () => {
   // adding it to `effortsForModel`. Its new truth — accepted for code, refused for chat/dispatch —
   // is pinned in its own describe block below; the other three must stay here.
   test("an effort OUTSIDE the model's list is refused with INVALID_PARAMS and never reaches the column", async () => {
-    const { store, socketPath, harnessToken } = await boot({ liveModel: () => "gpt-5.6-sol" });
+    const { store, socketPath, harnessToken } = await boot({ liveModel: () => "codex-oauth/gpt-5.6-sol" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "effort-setter");
     const sessionId = store.createSession("global");
@@ -360,39 +360,43 @@ describe("session.setEffort round-trip RPC (provider-correctness T4)", () => {
   // OBSERVE a divergence; it pins the wiring so the day a model's list diverges, the per-session
   // override — not the global default — is what the check reads.
   test("a session with its OWN model override is validated against THAT model's list", async () => {
-    const { store, socketPath, harnessToken } = await boot({ liveModel: () => "gpt-5.6-sol" });
+    const { store, socketPath, harnessToken } = await boot({ liveModel: () => "codex-oauth/gpt-5.6-sol" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "effort-setter");
     const sessionId = store.createSession("global");
-    store.setModel(sessionId, "gpt-5.6-luna");
+    store.setModel(sessionId, "codex-oauth/gpt-5.6-luna");
 
-    for (const effort of effortsForModel("gpt-5.6-luna")) {
+    for (const effort of effortsForModel("codex-oauth/gpt-5.6-luna")) {
       expect((await c.request(METHODS.sessionSetEffort, { sessionId, effort })).error).toBeUndefined();
     }
     const refused = await c.request(METHODS.sessionSetEffort, { sessionId, effort: "minimal" });
     expect(refused.error.code).toBe(ERR.INVALID_PARAMS);
-    expect(refused.error.message).toContain("gpt-5.6-luna");
+    expect(refused.error.message).toContain("codex-oauth/gpt-5.6-luna");
     c.close();
   });
 
   // A daemon with no provider at all (no liveModel wired — most test harnesses, and a real daemon
-  // started with agentProvider: null) still validates: there is no model to name, but the effort
-  // set is not empty, so a bogus value is still refused rather than silently stored.
+  // started with agentProvider: null) has no model tag to resolve — `sessionMeta?.model ??
+  // opts.liveModel?.() ?? ""` bottoms out at `""`, which names no catalog row. `effortsForModel`
+  // is now driven ENTIRELY by the catalog row (`rowForTag`, ipc/sync.ts), so an unresolvable tag
+  // answers `[]`, and `assertEffortSelectable`'s own `allowed.length > 0` guard means an empty list
+  // is "no restriction", exactly like the off-catalog-model precedent elsewhere in this file — a
+  // daemon with nothing configured yet must not brick every effort call before a provider exists.
   //
-  // T5 note: the bogus value here used to be `ultra`, which is now an ACCEPTED tier on a code
-  // session — so it stopped being a witness for this claim. `minimal` replaces it and is a strictly
-  // better one: it is a real level the endpoint refuses per-model, i.e. exactly the kind of value
-  // this "still validated with no provider" branch exists to catch.
-  test("with NO provider configured the effort is still validated (a bogus value never reaches the column)", async () => {
+  // WS-20 note: pre-WS-20 this same scenario refused a bogus wire value even with no provider
+  // configured, because `effortsForModel` used to be UNIFORM (it ignored its modelId argument and
+  // always answered the global `REASONING_EFFORTS` list). That premise is gone now that the
+  // function reads a real catalog row — there is no more "no model, but still a list" case.
+  test("with NO provider configured, effort validation is unrestricted (there is no catalog row to check against)", async () => {
     const { store, socketPath, harnessToken } = await boot(); // no liveModel
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "effort-setter");
     const sessionId = store.createSession("global");
 
     expect((await c.request(METHODS.sessionSetEffort, { sessionId, effort: "high" })).error).toBeUndefined();
-    const refused = await c.request(METHODS.sessionSetEffort, { sessionId, effort: "minimal" });
-    expect(refused.error.code).toBe(ERR.INVALID_PARAMS);
-    expect(store.meta(sessionId).effort).toBe("high"); // the refused call left the previous value alone
+    expect(store.meta(sessionId).effort).toBe("high");
+    expect((await c.request(METHODS.sessionSetEffort, { sessionId, effort: "minimal" })).error).toBeUndefined();
+    expect(store.meta(sessionId).effort).toBe("minimal");
     c.close();
   });
 });
@@ -450,7 +454,7 @@ describe("session.setEffort admits the ultra tier for CODE sessions only (provid
     // The stored value is the user's SELECTION, not a wire value. Rewriting it to `max` at set time
     // would make every picker unable to show what they actually chose, and would erase the tier's
     // prompt half on the very next turn (resolveSel keys the injection off the tier, not off max).
-    const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "gpt-5.6-sol" });
+    const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "codex-oauth/gpt-5.6-sol" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "effort-setter");
 
@@ -467,7 +471,7 @@ describe("session.setEffort admits the ultra tier for CODE sessions only (provid
   // effort (tier or wire) with the pin message rather than this tier-specific one. Chat is
   // untouched by that task, so its case stays exactly as it was.
   test("a CHAT session REFUSES `ultra` with the same INVALID_PARAMS shape, and the column stays empty", async () => {
-    const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "gpt-5.6-sol" });
+    const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "codex-oauth/gpt-5.6-sol" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "effort-setter");
     const sessionId = store.createSession("global", { mode: "chat" });
@@ -480,7 +484,7 @@ describe("session.setEffort admits the ultra tier for CODE sessions only (provid
 
     // ...and the refusal is scoped to the TIER: the same session still takes every WIRE effort,
     // so this is not "chat cannot set an effort".
-    for (const effort of effortsForModel("gpt-5.6-sol")) {
+    for (const effort of effortsForModel("codex-oauth/gpt-5.6-sol")) {
       expect((await c.request(METHODS.sessionSetEffort, { sessionId, effort })).error).toBeUndefined();
       expect(store.meta(sessionId).effort).toBe(effort);
     }
@@ -492,7 +496,7 @@ describe("session.setEffort admits the ultra tier for CODE sessions only (provid
   // chat, EVERY wire effort is refused as well (dispatch can't set an effort at all, tier or
   // otherwise; chat only loses the tier). This is the contrast the comment above promises.
   test("a DISPATCH session refuses `ultra` (and every wire effort) with the PIN message, not the tier-specific one", async () => {
-    const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "gpt-5.6-sol" });
+    const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "codex-oauth/gpt-5.6-sol" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "effort-setter");
     const sessionId = store.createSession("global", { mode: "dispatch" });
@@ -503,7 +507,7 @@ describe("session.setEffort admits the ultra tier for CODE sessions only (provid
     expect(tierRes.error.message).toContain("dispatch runs a fixed model");
     expect(store.meta(sessionId).effort).toBeUndefined();
 
-    for (const effort of effortsForModel("gpt-5.6-sol")) {
+    for (const effort of effortsForModel("codex-oauth/gpt-5.6-sol")) {
       const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort });
       expect(res.error).toBeTruthy();
       expect(res.error.code).toBe(ERR.INVALID_PARAMS);
@@ -529,7 +533,7 @@ describe("session.setEffort admits the ultra tier for CODE sessions only (provid
   });
 
   test("`ultra` on an UNKNOWN session is still NOT_FOUND — the store stays the single source of that error", async () => {
-    const { socketPath, harnessToken } = await boot2({ liveModel: () => "gpt-5.6-sol" });
+    const { socketPath, harnessToken } = await boot2({ liveModel: () => "codex-oauth/gpt-5.6-sol" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "effort-setter");
 
@@ -539,7 +543,7 @@ describe("session.setEffort admits the ultra tier for CODE sessions only (provid
   });
 
   test("clearing works the same for a tier as for a wire effort", async () => {
-    const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "gpt-5.6-sol" });
+    const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "codex-oauth/gpt-5.6-sol" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "effort-setter");
     const sessionId = store.createSession("global");
@@ -554,12 +558,12 @@ describe("session.setEffort admits the ultra tier for CODE sessions only (provid
   // this handler must accept the union of them for a code session — a level a picker can show but
   // the daemon refuses is the failure mode this whole plan exists to remove.
   test("every level sync.config advertises — wire efforts AND client tiers — is accepted on a code session", async () => {
-    const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "gpt-5.6-sol" });
+    const { store, socketPath, harnessToken } = await boot2({ liveModel: () => "codex-oauth/gpt-5.6-sol" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "effort-setter");
     const sessionId = store.createSession("global");
 
-    for (const effort of [...effortsForModel("gpt-5.6-sol"), ...clientEfforts()]) {
+    for (const effort of [...effortsForModel("codex-oauth/gpt-5.6-sol"), ...clientEfforts()]) {
       const res = await c.request(METHODS.sessionSetEffort, { sessionId, effort });
       expect(res.error).toBeUndefined();
       expect(store.meta(sessionId).effort).toBe(effort);
@@ -601,14 +605,14 @@ describe("session.create carries an effort, validated exactly as session.setEffo
   }
 
   test("a created session carries the effort from its very first turn — no second round trip", async () => {
-    const { store, socketPath, harnessToken } = await boot3({ liveModel: () => "gpt-5.6-sol" });
+    const { store, socketPath, harnessToken } = await boot3({ liveModel: () => "codex-oauth/gpt-5.6-sol" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "creator");
 
-    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "gpt-5.6-luna", effort: "xhigh" });
+    const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "codex-oauth/gpt-5.6-luna", effort: "xhigh" });
     expect(res.error).toBeUndefined();
     expect(store.meta(res.result.sessionId).effort).toBe("xhigh");
-    expect(store.meta(res.result.sessionId).model).toBe("gpt-5.6-luna");
+    expect(store.meta(res.result.sessionId).model).toBe("codex-oauth/gpt-5.6-luna");
 
     const listed = await c.request(METHODS.sessionList, {});
     expect(listed.result.sessions.find((s: any) => s.sessionId === res.result.sessionId).effort).toBe("xhigh");
@@ -616,7 +620,7 @@ describe("session.create carries an effort, validated exactly as session.setEffo
   });
 
   test("omitting effort leaves the session on the global default (control)", async () => {
-    const { store, socketPath, harnessToken } = await boot3({ liveModel: () => "gpt-5.6-sol" });
+    const { store, socketPath, harnessToken } = await boot3({ liveModel: () => "codex-oauth/gpt-5.6-sol" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "creator");
     const res = await c.request(METHODS.sessionCreate, { scope: "global" });
@@ -626,7 +630,7 @@ describe("session.create carries an effort, validated exactly as session.setEffo
   });
 
   test("a wire-invalid effort is REFUSED at create — and no session is minted", async () => {
-    const { store, socketPath, harnessToken } = await boot3({ liveModel: () => "gpt-5.6-sol" });
+    const { store, socketPath, harnessToken } = await boot3({ liveModel: () => "codex-oauth/gpt-5.6-sol" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "creator");
 
@@ -642,11 +646,11 @@ describe("session.create carries an effort, validated exactly as session.setEffo
   });
 
   test("the tier IS accepted on a code session created here", async () => {
-    const { store, socketPath, harnessToken } = await boot3({ liveModel: () => "gpt-5.6-sol" });
+    const { store, socketPath, harnessToken } = await boot3({ liveModel: () => "codex-oauth/gpt-5.6-sol" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "creator");
 
-    for (const effort of [...effortsForModel("gpt-5.6-sol"), ...clientEfforts()]) {
+    for (const effort of [...effortsForModel("codex-oauth/gpt-5.6-sol"), ...clientEfforts()]) {
       const res = await c.request(METHODS.sessionCreate, { scope: "global", effort });
       expect(res.error).toBeUndefined();
       expect(store.meta(res.result.sessionId).effort).toBe(effort);
@@ -655,7 +659,7 @@ describe("session.create carries an effort, validated exactly as session.setEffo
   });
 
   test("the tier is REFUSED on a chat session created here — the same code-only gate", async () => {
-    const { store, socketPath, harnessToken } = await boot3({ liveModel: () => "gpt-5.6-sol" });
+    const { store, socketPath, harnessToken } = await boot3({ liveModel: () => "codex-oauth/gpt-5.6-sol" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "creator");
 
@@ -674,8 +678,8 @@ describe("session.create carries an effort, validated exactly as session.setEffo
     const { store, socketPath, harnessToken } = await boot3({ liveModel: () => "some-other-default" });
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "creator");
-    for (const effort of effortsForModel("gpt-5.6-luna")) {
-      const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "gpt-5.6-luna", effort });
+    for (const effort of effortsForModel("codex-oauth/gpt-5.6-luna")) {
+      const res = await c.request(METHODS.sessionCreate, { scope: "global", model: "codex-oauth/gpt-5.6-luna", effort });
       expect(res.error).toBeUndefined();
       expect(store.meta(res.result.sessionId).effort).toBe(effort);
     }
@@ -686,7 +690,7 @@ describe("session.create carries an effort, validated exactly as session.setEffo
     // The remote guard refuses exactly `cwd`/`approvalPolicy` (the phone does not browse this Mac's
     // filesystem, and a chat policy is fixed). `model` was never in that set and `effort` is not
     // either — a phone picking its own reasoning level is the whole point of the field.
-    const { store, socketPath, remoteToken } = await boot3({ liveModel: () => "gpt-5.6-sol" });
+    const { store, socketPath, remoteToken } = await boot3({ liveModel: () => "codex-oauth/gpt-5.6-sol" });
     const c = await TestClient.connect(socketPath);
     await c.hello(remoteToken, "phone", "remote");
 
