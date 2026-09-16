@@ -4,11 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert, DEFAULT_PROVIDER, pinsFor } from "../src/settings";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
+import type { ModelTag } from "../src/runtime-sdk/model-tag";
 
 // WS-20: the pre-migration default bare id — used ONLY inside a raw v2 (or v1) fixture that
 // exercises `loadSettings`'s OWN migration; every v3 fixture below uses `DEFAULT_PROVIDER.model`
 // (a tag) instead. `DEFAULT_CODEX_MODEL` itself is deleted along with `CODEX_MODELS`.
 const LEGACY_DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
+
+/** A plain test literal known to be tag-shaped, asserted as `ModelTag` for `toEqual`/`toBe` against
+ *  a branded field — these fixtures are hand-written to already be valid tags, so this is a type
+ *  assertion, never a runtime validation (mirrors every other test file's identical `tag()` helper
+ *  under this arc). */
+const tag = (s: string): ModelTag => s as ModelTag;
 
 function tmpSettings(content: unknown): string {
   const p = join(mkdtempSync(join(tmpdir(), "winter-set-")), "settings.json");
@@ -31,7 +38,7 @@ describe("loadSettings", () => {
     const p = tmpSettings({ schemaVersion: 2, provider: { type: "openai-compatible", model: "gpt-5.6-sol", baseUrl: "https://api.openai.com/v1" } });
     const s = loadSettings(p);
     expect(s.schemaVersion).toBe(3);
-    expect(s.provider).toEqual({ model: "openai/gpt-5.6-sol" });
+    expect(s.provider).toEqual({ model: tag("openai/gpt-5.6-sol") });
     expect(s.providers?.openai?.baseUrl).toBe("https://api.openai.com/v1");
     expect(existsSync(`${p}.bak-pre-ws20`)).toBe(true); // spec §5: the pre-migration file is backed up once
   });
@@ -115,7 +122,7 @@ describe("loadSettings", () => {
 
   test("reviewer config parses; absent → undefined", () => {
     const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, reviewer: { enabled: true, model: "codex-oauth/gpt-5.4-mini", allow: ["git status"] } });
-    expect(s.reviewer).toEqual({ enabled: true, model: "codex-oauth/gpt-5.4-mini", allow: ["git status"] });
+    expect(s.reviewer).toEqual({ enabled: true, model: tag("codex-oauth/gpt-5.4-mini"), allow: ["git status"] });
     expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" } }).reviewer).toBeUndefined();
   });
 
@@ -522,7 +529,7 @@ describe("cleanerEnabledFrom (session-activity-hygiene T7: cleaner.enabled defau
 
   test("the flag round-trips through a real settings.json (the watcher's own read path)", () => {
     const p = join(mkdtempSync(join(tmpdir(), "winter-cleaner-settings-")), "settings.json");
-    saveSettings(p, { ...base, cleaner: { enabled: false } });
+    saveSettings(p, Settings.parse({ ...base, cleaner: { enabled: false } }));
     expect(cleanerEnabledFrom(loadSettings(p))).toBe(false);
   });
 });
@@ -530,7 +537,7 @@ describe("cleanerEnabledFrom (session-activity-hygiene T7: cleaner.enabled defau
 describe("saveSettings", () => {
   test("writes a file that loadSettings round-trips", () => {
     const p = join(mkdtempSync(join(tmpdir(), "winter-save-")), "settings.json");
-    const s: Settings = { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.4" }, plugins: { enabled: ["a"] } };
+    const s: Settings = { schemaVersion: 3, provider: { model: tag("codex-oauth/gpt-5.4") }, plugins: { enabled: ["a"] } };
     saveSettings(p, s);
     expect(loadSettings(p)).toEqual(s);
   });
@@ -543,31 +550,31 @@ describe("saveSettings", () => {
 
 describe("setProviderModel / setReasoningEffort (winter model CLI's pure transforms)", () => {
   test("setProviderModel changes only provider.model, preserving every other field", () => {
-    const s: Settings = { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol", reasoningEffort: "high" }, plugins: { enabled: ["a"] } };
-    const next = setProviderModel(s, "codex-oauth/gpt-5.6-luna");
-    expect(next.provider).toEqual({ model: "codex-oauth/gpt-5.6-luna", reasoningEffort: "high" });
+    const s: Settings = { schemaVersion: 3, provider: { model: tag("codex-oauth/gpt-5.6-sol"), reasoningEffort: "high" }, plugins: { enabled: ["a"] } };
+    const next = setProviderModel(s, tag("codex-oauth/gpt-5.6-luna"));
+    expect(next.provider).toEqual({ model: tag("codex-oauth/gpt-5.6-luna"), reasoningEffort: "high" });
     expect(next.plugins).toEqual({ enabled: ["a"] });
   });
 
   test("setProviderModel changes provider even across providers (openai)", () => {
-    const s: Settings = { schemaVersion: 3, provider: { model: "openai/gpt-5.2" }, providers: { openai: { baseUrl: "https://x" } } };
-    const next = setProviderModel(s, "openai/gpt-5.9");
-    expect(next.provider).toEqual({ model: "openai/gpt-5.9" });
+    const s: Settings = { schemaVersion: 3, provider: { model: tag("openai/gpt-5.2") }, providers: { openai: { baseUrl: "https://x" } } };
+    const next = setProviderModel(s, tag("openai/gpt-5.9"));
+    expect(next.provider).toEqual({ model: tag("openai/gpt-5.9") });
     expect(next.providers).toEqual({ openai: { baseUrl: "https://x" } }); // untouched — a sibling block
   });
 
   test("setReasoningEffort sets/clears provider.reasoningEffort, preserving model", () => {
-    const s: Settings = { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } };
+    const s: Settings = { schemaVersion: 3, provider: { model: tag("codex-oauth/gpt-5.6-sol") } };
     const withEffort = setReasoningEffort(s, "xhigh");
-    expect(withEffort.provider).toEqual({ model: "codex-oauth/gpt-5.6-sol", reasoningEffort: "xhigh" });
+    expect(withEffort.provider).toEqual({ model: tag("codex-oauth/gpt-5.6-sol"), reasoningEffort: "xhigh" });
     const cleared = setReasoningEffort(withEffort, undefined);
-    expect(cleared.provider.model).toBe("codex-oauth/gpt-5.6-sol");
+    expect(cleared.provider.model).toBe(tag("codex-oauth/gpt-5.6-sol"));
     expect(cleared.provider.reasoningEffort).toBeUndefined();
   });
 
   test("both transforms produce Settings.parse-valid output", () => {
-    const s: Settings = { schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } };
-    expect(() => Settings.parse(setReasoningEffort(setProviderModel(s, "codex-oauth/gpt-5.6-terra"), "max"))).not.toThrow();
+    const s: Settings = { schemaVersion: 3, provider: { model: tag("codex-oauth/gpt-5.6-sol") } };
+    expect(() => Settings.parse(setReasoningEffort(setProviderModel(s, tag("codex-oauth/gpt-5.6-terra")), "max"))).not.toThrow();
   });
 });
 
@@ -856,7 +863,7 @@ describe("runtimes.official schema (WS-20: auth is gone)", () => {
 // WS-20 (plan Task L3.2, Step 1's exact test list).
 describe("WS-20: provider.model is a tag", () => {
   test("provider.model is a tag; a bare id is rejected; `type` is gone (strict object)", () => {
-    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-terra" } }).provider.model).toBe("codex-oauth/gpt-5.6-terra");
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-terra" } }).provider.model).toBe(tag("codex-oauth/gpt-5.6-terra"));
     expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "gpt-5.6-terra" } })).toThrow();
     expect(() => Settings.parse({ schemaVersion: 3, provider: { type: "codex-oauth", model: "codex-oauth/gpt-5.6-terra" } })).toThrow(); // `type` is gone (strict object)
   });
@@ -865,12 +872,12 @@ describe("WS-20: provider.model is a tag", () => {
 describe("WS-20: pinsFor", () => {
   test("pins default from the provider tag's provider, per slot", () => {
     const s = Settings.parse({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-sol" } });
-    expect(pinsFor(s)).toEqual({ dispatch: "codex-oauth/gpt-5.6-terra", dream: "codex-oauth/gpt-5.6-terra", cleaner: "codex-oauth/gpt-5.6-terra", research: "codex-oauth/gpt-5.6-luna", researchFallback: "codex-oauth/gpt-5.6-terra" });
+    expect(pinsFor(s)).toEqual({ dispatch: tag("codex-oauth/gpt-5.6-terra"), dream: tag("codex-oauth/gpt-5.6-terra"), cleaner: tag("codex-oauth/gpt-5.6-terra"), research: tag("codex-oauth/gpt-5.6-luna"), researchFallback: tag("codex-oauth/gpt-5.6-terra") });
     const o = Settings.parse({ schemaVersion: 3, provider: { model: "openai/gpt-5.6-sol" }, pins: { research: "openai/gpt-5.6-luna" } });
-    expect(pinsFor(o).dispatch).toBe("openai/gpt-5.6-terra");
-    expect(pinsFor(o).research).toBe("openai/gpt-5.6-luna"); // explicit override wins
+    expect(pinsFor(o).dispatch).toBe(tag("openai/gpt-5.6-terra"));
+    expect(pinsFor(o).research).toBe(tag("openai/gpt-5.6-luna")); // explicit override wins
     const d = Settings.parse({ schemaVersion: 3, provider: { model: "deepseek/deepseek-reasoner" } });
-    expect(pinsFor(d).dispatch).toBe("openai/gpt-5.6-terra"); // deepseek serves no gpt row → the api-key vendor
+    expect(pinsFor(d).dispatch).toBe(tag("openai/gpt-5.6-terra")); // deepseek serves no gpt row → the api-key vendor
   });
 });
 
