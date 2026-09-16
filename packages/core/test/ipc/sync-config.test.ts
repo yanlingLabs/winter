@@ -733,7 +733,7 @@ describe("sync.config `provider` through a real startDaemon (whole-branch review
     c.close();
   }, 20_000);
 
-  test("a BYOK (openai-compatible) Mac states `openai-compatible` — provider identity, not an empty catalogue, is what protects a phone", async () => {
+  test("a BYOK (openai-compatible) Mac states `openai` — provider identity, not an empty catalogue, is what protects a phone", async () => {
     const home = mkdtempSync(join(tmpdir(), "winter-sync-provider-byok-"));
     ({ daemon } = await bootWithSettings(home, {
       model: "openai/llama-3.3-70b-local", openaiBaseUrl: "http://127.0.0.1:11434/v1",
@@ -743,7 +743,11 @@ describe("sync.config `provider` through a real startDaemon (whole-branch review
 
     const res = await c.request(METHODS.syncConfig, {});
     expect(res.error).toBeUndefined();
-    expect(res.result.provider).toBe("openai-compatible");
+    // WS-20 (review round 1, MAJOR): `sync.config.provider` now reports the CATALOG providerId
+    // (`splitTag(settings.provider.model).providerId`), never `Provider.id` (the internal adapter
+    // literal `"openai-compatible"`) — so a BYO/openai-compatible Mac states `"openai"`, agreeing
+    // with `defaultModel`'s own tag prefix, not a vocabulary a phone cannot compare against anything.
+    expect(res.result.provider).toBe("openai");
     // WS-20: `models` is credential-PRESENCE-driven (pickerModels), decoupled from which model this
     // daemon actually runs turns on. `bootWithSettings`'s legacy `openai-api-key` write (needed so
     // the openai-compatible adapter can even construct) is auto-migrated to real credential material
@@ -756,12 +760,11 @@ describe("sync.config `provider` through a real startDaemon (whole-branch review
     expect(res.result.models.every((m: any) => m.providerId === "openai")).toBe(true);
     expect(res.result.models.map((m: any) => m.id)).not.toContain("openai/llama-3.3-70b-local");
     // `defaultModel` composes from `LiveModelSelection.providerId` (the CATALOG id, daemon.ts's
-    // `liveModel`), not from `Provider.id` (the internal adapter literal `sync.config.provider`
-    // above uses) — so it is a real, `splitTag`/`isModelTag`-recognizable tag even for the
-    // openai-compatible arm, whose internal id ("openai-compatible") is not itself a catalog id.
+    // `liveModel`) — the SAME source `provider` above now reads too, so the two agree by
+    // construction for every arm, not just codex-oauth.
     expect(res.result.defaultModel).toBe("openai/llama-3.3-70b-local");
     expect(res.result.provider).not.toBe("codex-oauth"); // …and this is what saves it
-    expect(["codex-oauth", "openai-compatible"]).toContain(res.result.provider);
+    expect(["codex-oauth", "openai"]).toContain(res.result.provider);
     c.close();
   }, 20_000);
 

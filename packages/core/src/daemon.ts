@@ -17,7 +17,7 @@ import { ensureOutdir } from "./sessions/outdir";
 import { writeDiff, type DiffHeader } from "./diffs/store";
 import type { ActivityDeriver } from "./sessions/activity";
 import { startIpcServer, type IpcServer, type IpcServerOptions } from "./ipc/server";
-import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings } from "./settings";
+import { loadSettings, loadPermissionDirs, hooksEnabledFrom, memoryEnabledFrom, lspAutoDiagnosticsEnabledFrom, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, officialSubscriptionAuthFlagInert, winterLegDisabledKeys, winterOptionsFromSettings, type Settings } from "./settings";
 import { ProjectSettingsResolver } from "./project-settings";
 import { memoryDirFor, globalMemoryDirFor, assistantMemoryDirFor, memoryProjectKeyFor, repoRootFor } from "./agent/memory-dir";
 import { migrateMemoryStore } from "./agent/memory-migrate";
@@ -2023,10 +2023,24 @@ export async function startDaemon(opts: {
   // its own.
   const hardware = new HardwareBroker({ audit, pushToProvider: (event) => providerLink.push(event) });
 
+  // WS-20 (review round 1, MAJOR): both `daemon.status.provider.id` and `sync.config.provider`
+  // (the `liveProvider` closure below) must report the CATALOG providerId
+  // (`splitTag(settings.provider.model).providerId`) — never `Provider.id`, the internal adapter
+  // literal (`"codex-oauth"` / `"openai-compatible"`), which is a different vocabulary entirely
+  // (it happens to equal the catalog id for codex-oauth and never does for the BYO/openai-compatible
+  // arm). One shared derivation for both sites so they can never answer two different identities
+  // for the same settings.
+  const providerIdFromSettingsTag = (s: Settings | null | undefined): string | undefined => {
+    const model = s?.provider?.model;
+    if (model === undefined) return undefined;
+    try { return splitTag(model).providerId; } catch { return undefined; }
+  };
   // WS-20: `model` is the TAG (`settings.provider.model`, already provider-qualified) — never
   // `agentProvider.model`, which is the BARE modelId half split at the internal-Provider boundary
   // (providers/manager.ts).
-  const providerInfo = agentProvider && settings ? { id: agentProvider.provider.id, model: settings.provider.model } : null;
+  const providerInfo = agentProvider && settings
+    ? { id: providerIdFromSettingsTag(settings) ?? "none", model: settings.provider.model }
+    : null;
 
   // Chat Slice D task 3 (`sync.config`): the phone's "default model" bootstrap value, re-resolved
   // HOT at every call — mirrors engine.ts's own boot idiom EXACTLY
@@ -2051,17 +2065,17 @@ export async function startDaemon(opts: {
   const liveSelection = agentProvider
     ? () => agentProvider!.live?.() ?? { model: agentProvider!.model }
     : undefined;
-  // Whole-branch review C1 — WHICH provider `sync.config`'s own `provider` field reports. Read off
-  // `agentProvider.provider.id` (the INTERNAL adapter literal — `"codex-oauth"` or
-  // `"openai-compatible"`) and NOT off `liveSelection`: this identity is boot-bound (changing
-  // which provider is active needs a restart), so routing it through the hot resolver would
-  // advertise a hotness that does not exist. `undefined` on a no-provider daemon — ipc/sync.ts
-  // degrades that to `"none"`, never to `""`. NOTE: this is a DIFFERENT vocabulary than the
-  // catalog `providerId` `liveModel` below composes a tag from — `Provider.id` only happens to
-  // equal the catalog id for the codex-oauth arm; the BYO/openai-compatible arm's `Provider.id` is
-  // its own internal literal, never a real catalog provider (see `providers/manager.ts`'s
-  // `LiveModelSelection.providerId` doc comment for why the two must not be conflated).
-  const liveProvider = agentProvider ? () => agentProvider!.provider.id : undefined;
+  // Whole-branch review C1, corrected under WS-20 review round 1 (MAJOR): WHICH provider
+  // `sync.config`'s own `provider` field reports. Read off `providerIdFromSettingsTag(settings)`
+  // (the CATALOG providerId, `splitTag(settings.provider.model).providerId`) — HOT, same live
+  // `settings` holder `liveModel`/`liveSelection` read — never `agentProvider.provider.id` (the
+  // INTERNAL adapter literal, `"codex-oauth"` or `"openai-compatible"`): that is a DIFFERENT
+  // vocabulary that only happens to equal the catalog id for the codex-oauth arm, and reporting it
+  // here made a BYO/openai-compatible Mac's `sync.config.provider` say `"openai-compatible"`,
+  // which no client can compare against a catalog provider id or a tag's own prefix. `undefined`
+  // on a no-provider daemon (or an unset `settings.provider.model`) — ipc/sync.ts degrades that to
+  // `"none"`, never to `""`.
+  const liveProvider = agentProvider ? () => providerIdFromSettingsTag(settings) ?? "none" : undefined;
   // WS-20: `liveModel()` is a TAG — composed from the hot `liveSelection().providerId` (the CATALOG
   // providerId, boot-bound like everything else about provider identity, but read off
   // `LiveModelSelection` itself rather than `Provider.id` above, which is NOT always a real catalog

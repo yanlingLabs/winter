@@ -1499,11 +1499,18 @@ describe("daemon IPC", () => {
   test("daemon.status reports the active provider's id/model when an agent is configured", async () => {
     const { FakeProvider } = await import("../src/agent/fake-provider");
     const fake = new FakeProvider([[{ type: "text_delta", delta: "hi" }, { type: "done", stopReason: "end_turn" }]]);
-    await boot({}, fake);
+    // WS-20 (review round 1, MAJOR): `daemon.status.provider.id` now reports the CATALOG providerId
+    // (`splitTag(settings.provider.model).providerId`), never the injected `Provider.id` literal —
+    // proving the OPPOSITE of what this test used to pin: the reported id no longer depends on
+    // what the injected FakeProvider calls itself at all, only on `settings.provider.model`.
+    // `settings.ts`'s `ModelTagSchemaCore` validates PROVIDER EXISTENCE against the pinned catalog
+    // (unlike the protocol layer's shape-only `ModelTagSchema`), so the fixture must name a REAL
+    // catalog provider ("codex-oauth") — a made-up "fake/..." tag is rejected at settings load.
+    await boot({}, fake, { schemaVersion: 3, provider: { model: "codex-oauth/fake-1" } });
     const c = await TestClient.connect(daemon.socketPath);
     await c.hello(harnessToken, "status-provider-checker");
     const status = (await c.request(METHODS.daemonStatus, {})).result;
-    expect(status.provider).toEqual({ id: "fake", model: "fake-1" });
+    expect(status.provider).toEqual({ id: "codex-oauth", model: "codex-oauth/fake-1" });
     c.close();
   });
 
