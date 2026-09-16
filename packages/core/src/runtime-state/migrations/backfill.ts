@@ -21,6 +21,7 @@
 // that does not exist would send a resume hunting for a file forever.
 import { transcriptProjectKey } from "@yanlinglabs/winter-agent-sdk";
 import type { RuntimeSelection } from "@yanlinglabs/winter-runtime-sdk";
+import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { join } from "node:path";
 import { repoRootFor, sanitizeProjectKey } from "../../agent/memory-dir";
 import { SYNCED_SESSION_ID_RE, type SessionStore } from "../../sessions/store";
@@ -72,8 +73,18 @@ const TERMINAL_LAST_EVENTS: ReadonlySet<string> = new Set(["turn_completed", "ha
  * `console-oauth` are never inferred here for the same reason the router never infers them — an
  * OAuth family is reachable only by declaration (WS-14 §12's ship gate).
  */
-function authFamilyFor(providerId: string): RuntimeSelection["authFamily"] {
-  return providerId === "openai-compatible" ? "api-key" : "custom";
+// WS-20 (review round 2, nit c): the OLD check (`providerId === "openai-compatible"`) tested for a
+// legacy spelling the caller (`wiring.ts`'s `providerId = splitTag(settings.provider.model).providerId`)
+// never actually passes post-WS-20 — `providerId` here is already a REAL catalog provider id, so
+// the string comparison was permanently dead, and every backfilled record's `authFamily` silently
+// defaulted to `"custom"`. Reads the catalog's own `authKinds` instead (the SAME rule
+// `session-driver.ts`'s `create()` uses for a live selection), and takes the MAPPED catalog id
+// (`catalogProviderId`, `backfillOne`'s own local) rather than the raw `providerId` — the two agree
+// today (the legacy spelling is already resolved before this function ever runs), but passing the
+// mapped one is the honest input regardless of what a future caller does upstream.
+function authFamilyFor(catalogProviderId: string): RuntimeSelection["authFamily"] {
+  const authKinds = loadCatalog().providers.find((p) => p.id === catalogProviderId)?.authKinds ?? [];
+  return authKinds.includes("api-key") ? "api-key" : "custom";
 }
 
 /**
@@ -140,7 +151,7 @@ function backfillOne(deps: BackfillDeps, records: RuntimeSessionRecords, now: ()
     providerId: catalogProviderId,
     modelRef,
     family: "legacy",
-    authFamily: authFamilyFor(providerId),
+    authFamily: authFamilyFor(catalogProviderId),
     sdkVersion: "unknown",
     reason: "backfill",
     decidedAt: at,

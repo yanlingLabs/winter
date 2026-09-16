@@ -77,6 +77,10 @@ export interface DaemonRuntimeStateDeps {
    *  wiring has to survive — a repair that throws, and an apply that throws after a committed move —
    *  are both mid-`rename` failures, and a test cannot produce either by arranging files. */
   memoryKeyFs?: MemoryKeyFs;
+  /** WS-20 (review round 2, M5): threaded into `migrateModelRefsToTags`'s rule-5 tie-break — only
+   *  the daemon boot hook has `secrets` in hand to compute this; every other caller omits it and
+   *  gets the old fixed-preference tie-break unchanged. */
+  presentProviders?: ReadonlySet<string>;
 }
 
 /** The runtime spine, open and recovered. 8b's `createRuntimeSdk({ directoryStore })` consumes
@@ -246,7 +250,7 @@ export async function startRuntimeState(deps: DaemonRuntimeStateDeps): Promise<D
     // legacy model id becomes a provider-qualified tag — idempotent, same "runs at every boot"
     // shape as the backfill just above (a row already holding a tag is a no-op).
     try {
-      const tagsMigration = migrateModelRefsToTags({ rs, home });
+      const tagsMigration = migrateModelRefsToTags({ rs, home, presentProviders: deps.presentProviders });
       if (tagsMigration.sessionsRewritten > 0 || tagsMigration.childrenRewritten > 0) {
         log(`model_ref tag migration: ${tagsMigration.sessionsRewritten} session(s), ${tagsMigration.childrenRewritten} child(ren) rewritten`);
       }

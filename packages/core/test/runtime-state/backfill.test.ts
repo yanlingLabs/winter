@@ -108,6 +108,26 @@ describe("backfillNativeSessions", () => {
     });
   });
 
+  // WS-20 (review round 2, nit c): the caller (`wiring.ts`'s `providerId = splitTag(settings.
+  // provider.model).providerId`) ALWAYS passes a real catalog id post-WS-20, never the legacy
+  // "openai-compatible" spelling — the OLD `authFamilyFor` compared against that dead string and
+  // silently defaulted every real-id backfill to "custom". This proves the REAL catalog id
+  // ("openai", passed directly, no legacy string in sight) still backfills as api-key.
+  test("nit(c): a real catalog provider id (never the legacy 'openai-compatible' spelling) still backfills its true auth family", async () => {
+    await withTempHome(async (home) => {
+      _clearRepoRootCacheForTests();
+      const store = new SessionStore(home);
+      const id = store.createSession("work", { cwd: workdir(home, "real-id") });
+      const rs = openRuntimeStateDb(home);
+      try {
+        backfillNativeSessions({ rs, store, home, providerId: "openai" });
+        expect(new RuntimeSessionRecords(rs).get(id)!.selection.authFamily).toBe("api-key");
+      } finally {
+        rs.close();
+      }
+    });
+  });
+
   test("a session whose last event is terminal settles as exited; anything else is unavailable", async () => {
     await withTempHome(async (home) => {
       _clearRepoRootCacheForTests();

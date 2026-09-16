@@ -24,11 +24,24 @@ function tmpSettings(content: unknown): string {
 }
 
 describe("loadSettings", () => {
-  test("migrates schemaVersion 1 → 3 with codex-oauth default and persists", () => {
+  // WS-20 (review round 2, M5): `loadSettings`'s migration is now IN-MEMORY ONLY by default
+  // (`persistMigration` defaults to `false`) — the daemon boot hook is the only caller that opts in
+  // (with presence in hand); every other caller (the CLI, every test below that doesn't pass
+  // `persistMigration: true`) gets the SAME migrated `Settings` object back, but the file on disk is
+  // left exactly as found.
+  test("migrates schemaVersion 1 → 3 with codex-oauth default IN MEMORY, without persistMigration", () => {
     const p = tmpSettings({ schemaVersion: 1 });
     const s = loadSettings(p);
     expect(s.schemaVersion).toBe(3);
     expect(s.provider).toEqual(DEFAULT_PROVIDER); // gpt-5.4 fully deprecated — default points at the current tag
+    expect(JSON.parse(readFileSync(p, "utf8")).schemaVersion).toBe(1); // NOT persisted — this is the "CLI path"
+  });
+
+  test("migrates schemaVersion 1 → 3 AND persists, given persistMigration: true (the daemon-boot path)", () => {
+    const p = tmpSettings({ schemaVersion: 1 });
+    const s = loadSettings(p, { persistMigration: true });
+    expect(s.schemaVersion).toBe(3);
+    expect(s.provider).toEqual(DEFAULT_PROVIDER);
     expect(JSON.parse(readFileSync(p, "utf8")).schemaVersion).toBe(3); // migration persisted
   });
 
@@ -40,7 +53,25 @@ describe("loadSettings", () => {
     expect(s.schemaVersion).toBe(3);
     expect(s.provider).toEqual({ model: tag("openai/gpt-5.6-sol") });
     expect(s.providers?.openai?.baseUrl).toBe("https://api.openai.com/v1");
-    expect(existsSync(`${p}.bak-pre-ws20`)).toBe(true); // spec §5: the pre-migration file is backed up once
+    // In-memory only by default — no backup and no persisted v3 file (the "CLI path").
+    expect(existsSync(`${p}.bak-pre-ws20`)).toBe(false);
+    expect(JSON.parse(readFileSync(p, "utf8")).schemaVersion).toBe(2);
+  });
+
+  test("v2 openai-compatible settings, given persistMigration: true, back up the pre-migration file once (spec §5)", () => {
+    const p = tmpSettings({ schemaVersion: 2, provider: { type: "openai-compatible", model: "gpt-5.6-sol", baseUrl: "https://api.openai.com/v1" } });
+    const s = loadSettings(p, { persistMigration: true });
+    expect(s.schemaVersion).toBe(3);
+    expect(existsSync(`${p}.bak-pre-ws20`)).toBe(true);
+    expect(JSON.parse(readFileSync(p, "utf8")).schemaVersion).toBe(3);
+  });
+
+  // WS-20 (review round 2, nit h): a FRESH schemaVersion-1 home never had real provider info to
+  // lose — the backup must never fire for it, with or without persistMigration.
+  test("nit(h): a fresh schemaVersion-1 home is never backed up, even with persistMigration: true", () => {
+    const p = tmpSettings({ schemaVersion: 1 });
+    loadSettings(p, { persistMigration: true });
+    expect(existsSync(`${p}.bak-pre-ws20`)).toBe(false);
   });
 
   // SP-approvals T10 (spec §7): permissions.dangerousDomains.added — the user-added half of
@@ -79,9 +110,9 @@ describe("loadSettings", () => {
     expect(() => loadSettings(join(mkdtempSync(join(tmpdir(), "winter-set-")), "settings.json"))).toThrow(/winter daemon run/);
   });
 
-  test("legacy v1-app settings (no schemaVersion) migrate, preserving v1 keys", () => {
+  test("legacy v1-app settings (no schemaVersion) migrate, preserving v1 keys — in the PARSED result and, given persistMigration: true, on disk", () => {
     const p = tmpSettings({ legacyCustom: { provider: "disabled" } });
-    const s = loadSettings(p);
+    const s = loadSettings(p, { persistMigration: true });
     expect(s.schemaVersion).toBe(3);
     expect(s.provider.model).toBe(DEFAULT_PROVIDER.model);
     const onDisk = JSON.parse(readFileSync(p, "utf8"));
@@ -89,15 +120,24 @@ describe("loadSettings", () => {
     expect(onDisk.schemaVersion).toBe(3);
   });
 
-  test("v1→v2 migration preserves unknown fields on disk", () => {
+  test("without persistMigration, a legacy v1-app file migrates in the PARSED result only — nothing written", () => {
+    const p = tmpSettings({ legacyCustom: { provider: "disabled" } });
+    const s = loadSettings(p);
+    expect(s.schemaVersion).toBe(3);
+    expect(s.provider.model).toBe(DEFAULT_PROVIDER.model);
+    const onDisk = JSON.parse(readFileSync(p, "utf8"));
+    expect(onDisk.schemaVersion).toBeUndefined(); // untouched — the original v1 fixture has none
+  });
+
+  test("v1→v2 migration preserves unknown fields on disk, given persistMigration: true", () => {
     const p = tmpSettings({ schemaVersion: 1, custom: true });
-    loadSettings(p);
+    loadSettings(p, { persistMigration: true });
     expect(JSON.parse(readFileSync(p, "utf8")).custom).toBe(true);
   });
 
-  test("v1→v2 migration preserves a permissions block in the parsed result", () => {
+  test("v1→v2 migration preserves a permissions block in the parsed result, and on disk given persistMigration: true", () => {
     const p = tmpSettings({ schemaVersion: 1, permissions: { additionalDirectories: ["~/kept", "/opt/kept"] } });
-    const s = loadSettings(p);
+    const s = loadSettings(p, { persistMigration: true });
     expect(s.schemaVersion).toBe(3);
     expect(s.permissions?.additionalDirectories).toEqual(["~/kept", "/opt/kept"]);
     // and on disk:

@@ -353,6 +353,18 @@ export async function startDaemon(opts: {
 
   const secrets = opts.secrets ?? new KeychainSecretStore();
 
+  // WS-20 (review round 2, M5): computed HERE — before the settings migration, before
+  // `SessionStore` construction, before the runtime-state spine's own model_ref rewrite — so all
+  // three can prefer a provider this HOME actually holds a credential for, rather than the old
+  // fixed-preference guess, when a legacy model id is ambiguous across several catalog providers.
+  // This boot hook is the ONLY caller with `secrets` in hand at migration time; every other
+  // `loadSettings`/`new SessionStore`/`migrateModelRefsToTags` caller (the CLI, tests without a
+  // daemon) omits it and gets the OLD behavior unchanged.
+  const bootPresence = await credentialPresenceFrom(secrets);
+  const presentProviders: ReadonlySet<string> = new Set(
+    Object.entries(bootPresence.byProvider).filter(([, v]) => v !== undefined).map(([k]) => k),
+  );
+
   let legacyHome: string | undefined;
   let legacySecrets: SecretStore | undefined;
   if (opts.migration) {
@@ -425,7 +437,7 @@ export async function startDaemon(opts: {
   const authority = new TokenAuthority(secrets);
   const tokens = await authority.ensureTokens();
 
-  const store = new SessionStore(dirs.home);
+  const store = new SessionStore(dirs.home, { presentProviders });
   const hub = new SessionHub(store);
 
   // session-activity-hygiene T8: THE activity derivation, filled in by `startIpcServer` below
@@ -449,7 +461,9 @@ export async function startDaemon(opts: {
   // reordering of two independent statements, not a change of behaviour.
   let settings: ReturnType<typeof loadSettings> | null;
   try {
-    settings = loadSettings(dirs.settingsPath);
+    // WS-20 (review round 2, M5): `persistMigration: true` — this boot hook, WITH presence in
+    // hand, is the ONLY writer of a migrated v3 settings file (see `loadSettings`'s own doc).
+    settings = loadSettings(dirs.settingsPath, { presentProviders, persistMigration: true });
     // Task 17: the engine leg no longer exists — a `winterLeg.<mode>: false` is accepted for one
     // release, reported here (and by settings-apply on a hot edit), never obeyed.
     for (const key of winterLegDisabledKeys(settings)) console.error(`settings: runtimes.winterLeg.${key} = false — the engine leg no longer exists; ignored`);
@@ -474,6 +488,9 @@ export async function startDaemon(opts: {
     store,
     settings: () => settings, // LIVE holder, re-read per sweep — never a boot snapshot
     log: (line) => console.error(`runtime-state: ${line}`),
+    // WS-20 (review round 2, M5): threaded through to `migrateModelRefsToTags`'s own rule-5
+    // tie-break — same presence this boot hook already computed for the settings migration above.
+    presentProviders,
   });
   const runtime = runtimeStateOnline(runtimeState);
 
