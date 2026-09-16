@@ -828,7 +828,7 @@ describe("/model — mirrors `case \"model\"` (settings.json write under WINTER_
     const { ctx, notes } = makeCtx(client);
     await runCommand(ctx, "/model");
     expect(calls).toEqual([]);
-    expect(notes[0]).toContain("codex-oauth/gpt-5.6-sol");
+    expect(notes[0]).toContain("gpt-5.6-sol (codex-oauth)");
   });
 
   test("no args, sync.config answers -> show renders the grouped listing", async () => {
@@ -851,12 +851,12 @@ describe("/model — mirrors `case \"model\"` (settings.json write under WINTER_
     const { client } = makeClient({});
     const { ctx, notes } = makeCtx(client);
     await runCommand(ctx, "/model codex-oauth/gpt-5.6-luna");
-    expect(notes[0]).toContain("model codex-oauth/gpt-5.6-luna");
+    expect(notes[0]).toContain("model gpt-5.6-luna (codex-oauth)");
     expect(notes[0]).toContain("no daemon restart needed");
 
     const { ctx: ctx2, notes: notes2 } = makeCtx(client);
     await runCommand(ctx2, "/model");
-    expect(notes2[0]).toContain("codex-oauth/gpt-5.6-luna");
+    expect(notes2[0]).toContain("gpt-5.6-luna (codex-oauth)");
   });
 
   test("a bare (non-tag) slug -> validation note, no write", async () => {
@@ -867,7 +867,7 @@ describe("/model — mirrors `case \"model\"` (settings.json write under WINTER_
 
     const { ctx: ctx2, notes: notes2 } = makeCtx(client);
     await runCommand(ctx2, "/model");
-    expect(notes2[0]).toContain("codex-oauth/gpt-5.6-sol"); // unchanged
+    expect(notes2[0]).toContain("gpt-5.6-sol (codex-oauth)"); // unchanged
   });
 
   test("--effort switches reasoning effort", async () => {
@@ -983,7 +983,7 @@ describe("B2 — /model (no args) opens the model picker when openChoice is wire
     await runCommand(ctx, "/model");
     await requests[0]!.onPick("codex-oauth/gpt-5.6-luna");
     expect(changes).toEqual([["codex-oauth/gpt-5.6-luna", undefined]]);
-    expect(notes).toEqual(["updated (model codex-oauth/gpt-5.6-luna) — takes effect next turn, no daemon restart needed"]);
+    expect(notes).toEqual(["updated (model gpt-5.6-luna (codex-oauth)) — takes effect next turn, no daemon restart needed"]);
     // The write really landed: a re-show marks luna as current.
     const requests2: ChoiceRequest[] = [];
     const { ctx: ctx2 } = makeCtx(client, { openChoice: (r) => requests2.push(r) });
@@ -998,7 +998,7 @@ describe("B2 — /model (no args) opens the model picker when openChoice is wire
     await runCommand(ctx, "/model codex-oauth/gpt-5.6-terra");
     await runCommand(ctx, "/model --effort medium");
     expect(requests).toEqual([]);
-    expect(notes[0]).toContain("model codex-oauth/gpt-5.6-terra");
+    expect(notes[0]).toContain("model gpt-5.6-terra (codex-oauth)");
     expect(notes[1]).toContain("effort medium");
   });
 
@@ -1008,7 +1008,7 @@ describe("B2 — /model (no args) opens the model picker when openChoice is wire
     const { ctx, notes } = makeCtx(client, { openChoice: (r) => requests.push(r) });
     await runCommand(ctx, "/model");
     expect(requests).toEqual([]);
-    expect(notes).toEqual(["codex-oauth/gpt-5.6-sol\nadvisor: auto"]);
+    expect(notes).toEqual(["gpt-5.6-sol (codex-oauth)\nadvisor: auto"]);
   });
 
   test("sync.config request rejects — falls back to the note even with openChoice wired", async () => {
@@ -1019,7 +1019,7 @@ describe("B2 — /model (no args) opens the model picker when openChoice is wire
     const { ctx, notes } = makeCtx(client, { openChoice: (r) => requests.push(r) });
     await runCommand(ctx, "/model");
     expect(requests).toEqual([]);
-    expect(notes).toEqual(["codex-oauth/gpt-5.6-sol\nadvisor: auto"]);
+    expect(notes).toEqual(["gpt-5.6-sol (codex-oauth)\nadvisor: auto"]);
   });
 });
 
