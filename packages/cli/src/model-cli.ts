@@ -7,9 +7,9 @@ import type { Settings } from "@yanlinglabs/winter-core";
 
 export type ModelCliAction =
   | { kind: "show" }
-  | { kind: "setModel"; slug: string }
+  | { kind: "setModel"; slug: string; confirmLossy?: boolean }
   | { kind: "setEffort"; effort: string }
-  | { kind: "setModelAndEffort"; slug: string; effort: string }
+  | { kind: "setModelAndEffort"; slug: string; effort: string; confirmLossy?: boolean }
   // Winter Phase 8d (P8d-8, Task 4.3): the D30 advisor override — its OWN standalone flag form,
   // never combined with a slug/--effort change in the same invocation (mirrors `--effort`'s own
   // "effort-only change" form above, not the combined one below it).
@@ -17,7 +17,7 @@ export type ModelCliAction =
   | { kind: "clearAdvisor" }
   | { kind: "usageError"; message: string };
 
-const USAGE = "usage: winter model [<slug>] [--effort <level>]  |  winter model --effort <level>  |  winter model --advisor <slug|auto>";
+const USAGE = "usage: winter model [<tag>] [--effort <level>] [--confirm]  |  winter model --effort <level>  |  winter model --advisor <tag|auto>";
 
 /**
  * Parses `winter model`'s argv tail (everything after "model" — i.e. `process.argv.slice(3)`).
@@ -49,12 +49,19 @@ export function parseModelArgs(args: string[]): ModelCliAction {
   const slug = args[0]!;
   if (slug.startsWith("-")) return { kind: "usageError", message: USAGE };
 
-  if (args.length === 1) return { kind: "setModel", slug };
+  // `--confirm` (2026-09-16): the one-shot lossy-handoff confirmation for the ATTACHED session's
+  // `session.setModel` (`confirmLossy: true` on that call only, never stored). Accepted anywhere
+  // after the slug; `winter model` (no session) ignores it.
+  const confirmLossy = args.includes("--confirm");
+  const rest = args.slice(1).filter((a) => a !== "--confirm");
+  const confirm = confirmLossy ? { confirmLossy: true } : {};
 
-  if (args[1] === "--effort") {
-    const effort = args[2];
-    if (!effort || args.length > 3) return { kind: "usageError", message: USAGE };
-    return { kind: "setModelAndEffort", slug, effort };
+  if (rest.length === 0) return { kind: "setModel", slug, ...confirm };
+
+  if (rest[0] === "--effort") {
+    const effort = rest[1];
+    if (!effort || rest.length > 2) return { kind: "usageError", message: USAGE };
+    return { kind: "setModelAndEffort", slug, effort, ...confirm };
   }
 
   return { kind: "usageError", message: USAGE };

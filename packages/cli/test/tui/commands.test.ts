@@ -848,11 +848,11 @@ describe("/model — mirrors `case \"model\"` (settings.json write under WINTER_
   });
 
   test("a valid tag -> switches the model, mirrors the write-path note", async () => {
-    const { client } = makeClient({});
+    const { client } = makeClient({ setModel: () => ({}) });
     const { ctx, notes } = makeCtx(client);
     await runCommand(ctx, "/model codex-oauth/gpt-5.6-luna");
-    expect(notes[0]).toContain("model gpt-5.6-luna (codex-oauth)");
-    expect(notes[0]).toContain("no daemon restart needed");
+    expect(notes[0]).toContain("this session now runs gpt-5.6-luna (codex-oauth)");
+    expect(notes[0]).toContain("default for new sessions");
 
     const { ctx: ctx2, notes: notes2 } = makeCtx(client);
     await runCommand(ctx2, "/model");
@@ -864,15 +864,15 @@ describe("/model — mirrors `case \"model\"` (settings.json write under WINTER_
   // `internalProviderNote` itself (that heads-up is `winter model <tag>`'s own, main.ts) — a
   // per-session pick has no daemon-internal-Provider concern to warn about in the first place.
   test("(item 4 design correction) a non-internal-provider tag writes successfully", async () => {
-    const { client } = makeClient({});
+    const { client } = makeClient({ setModel: () => ({}) });
     const { ctx, notes } = makeCtx(client);
     await runCommand(ctx, "/model anthropic/claude-opus-5");
-    expect(notes[0]).toContain("model claude-opus-5 (anthropic)");
-    expect(notes[0]).toContain("no daemon restart needed");
+    expect(notes[0]).toContain("this session now runs claude-opus-5 (anthropic)");
+    expect(notes[0]).toContain("default for new sessions");
   });
 
   test("a bare (non-tag) slug -> validation note, no write", async () => {
-    const { client } = makeClient({});
+    const { client } = makeClient({ setModel: () => ({}) });
     const { ctx, notes } = makeCtx(client);
     await runCommand(ctx, "/model gpt-5.6-luna");
     expect(notes[0]).toMatch(/provider-qualified tag/);
@@ -1023,7 +1023,7 @@ describe("B2 — /model (no args) opens the model picker when openChoice is wire
   });
 
   test("onPick takes the SAME write path as `/model <tag>`: settings write + onModelChanged + the identical note", async () => {
-    const { client } = makeClient({ request: () => codexModels() });
+    const { client } = makeClient({ request: () => codexModels(), setModel: () => ({}) });
     const requests: ChoiceRequest[] = [];
     const changes: Array<[string, string | undefined]> = [];
     const { ctx, notes } = makeCtx(client, {
@@ -1033,7 +1033,7 @@ describe("B2 — /model (no args) opens the model picker when openChoice is wire
     await runCommand(ctx, "/model");
     await requests[0]!.onPick("codex-oauth/gpt-5.6-luna");
     expect(changes).toEqual([["codex-oauth/gpt-5.6-luna", undefined]]);
-    expect(notes).toEqual(["updated (model gpt-5.6-luna (codex-oauth)) — takes effect next turn, no daemon restart needed"]);
+    expect(notes).toEqual(["this session now runs gpt-5.6-luna (codex-oauth); default for new sessions: gpt-5.6-luna (codex-oauth)"]);
     // The write really landed: a re-show marks luna as current.
     const requests2: ChoiceRequest[] = [];
     const { ctx: ctx2 } = makeCtx(client, { openChoice: (r) => requests2.push(r) });
@@ -1132,5 +1132,43 @@ describe("B2 — /output-style (no args) opens the style picker when openChoice 
     expect(notes).toHaveLength(1);
     expect(notes[0]).toContain("* default");
     expect(notes[0]).toContain("proactive");
+  });
+});
+
+// ---- 2026-09-16 field report: `/model <tag>` must switch THIS session, not only the global default ----
+describe("/model switches the attached session (session.setModel) as well as the default", () => {
+  const home = mkdtempSync(join(tmpdir(), "winter-tui-model-session-"));
+  const settingsPath = join(home, "settings.json");
+  const seed = () => writeFileSync(settingsPath, JSON.stringify({ schemaVersion: 3, provider: { model: "codex-oauth/gpt-5.6-terra" } }));
+
+  test("a plain switch calls session.setModel with the tag and reports the session switch", async () => {
+    seed(); process.env.WINTER_HOME = home;
+    const { client, calls } = makeClient({ setModel: () => ({}) });
+    const { ctx, notes } = makeCtx(client, { sessionId: "s_live" });
+    await runCommand(ctx, "/model deepseek/deepseek-reasoner");
+    expect(calls.find((c) => c.method === "setModel")?.args).toEqual(["s_live", "deepseek/deepseek-reasoner", false]);
+    expect(notes.join("\n")).toMatch(/this session now runs deepseek-reasoner/);
+    expect(JSON.parse(readFileSync(settingsPath, "utf8")).provider.model).toBe("deepseek/deepseek-reasoner");
+  });
+
+  test("a lossy cross-family refusal is reported with the --confirm door, and --confirm passes confirmLossy", async () => {
+    seed(); process.env.WINTER_HOME = home;
+    const refusal = Object.assign(new Error("handoff needs confirmation (code -32000)"), { rpc: { code: -32000, message: "handoff needs confirmation", data: { code: "handoff_confirmation_required", warnings: ["private reasoning cannot follow"] } } });
+    const { client, calls } = makeClient({ setModel: (...args: unknown[]) => { if (args[2] !== true) throw refusal; return {}; } });
+    const { ctx, notes } = makeCtx(client, { sessionId: "s_live" });
+    await runCommand(ctx, "/model deepseek/deepseek-reasoner");
+    expect(notes.join("\n")).toMatch(/--confirm/);
+    expect(notes.join("\n")).toMatch(/private reasoning cannot follow/);
+    await runCommand(ctx, "/model deepseek/deepseek-reasoner --confirm");
+    expect(calls.filter((c) => c.method === "setModel").map((c) => c.args[2])).toEqual([false, true]);
+    expect(notes.join("\n")).toMatch(/this session now runs deepseek-reasoner/);
+  });
+
+  test("a deferred switch (turn running) says so", async () => {
+    seed(); process.env.WINTER_HOME = home;
+    const { client } = makeClient({ setModel: () => ({ deferred: true }) });
+    const { ctx, notes } = makeCtx(client, { sessionId: "s_live" });
+    await runCommand(ctx, "/model deepseek/deepseek-reasoner");
+    expect(notes.join("\n")).toMatch(/at the end of the running turn/);
   });
 });

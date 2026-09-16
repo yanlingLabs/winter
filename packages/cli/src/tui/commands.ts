@@ -119,7 +119,7 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
           hint: m.providerId,
           current: m.id === settings.provider.model,
         })),
-        onPick: (slug) => applyModelPick(ctx, slug),
+        onPick: (slug) => { void applyModelPick(ctx, slug); },
       });
       return;
     }
@@ -187,11 +187,16 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
   // T5 status chrome: report the post-write resolved globals (both axes — the footer tracks each
   // independently; see `CommandCtx.onModelChanged`).
   ctx.onModelChanged?.(next.provider.model, next.provider.reasoningEffort);
+  const sessionLine = action.kind === "setModel" || action.kind === "setModelAndEffort"
+    ? await applySessionModel(ctx, next.provider.model, action.confirmLossy === true)
+    : null;
   const changed = [
     action.kind === "setModel" || action.kind === "setModelAndEffort" ? `model ${modelDisplayWithHint(next.provider.model)}` : null,
     action.kind === "setEffort" || action.kind === "setModelAndEffort" ? `effort ${next.provider.reasoningEffort}` : null,
   ].filter(Boolean).join(", ");
-  ctx.appendNote(`updated (${changed}) — takes effect next turn, no daemon restart needed`);
+  ctx.appendNote(sessionLine === null
+    ? `updated (${changed}) — takes effect next turn, no daemon restart needed`
+    : `${sessionLine}; default for new sessions updated (${changed})`);
 }
 
 /** WS-20: `/model`'s live catalogue read — `ctx.client.request("sync.config", {})`, narrowed to
@@ -213,7 +218,27 @@ async function syncConfigModels(ctx: CommandCtx): Promise<SyncConfigModel[]> {
  *  same helpers, `setProviderModel`, save, `onModelChanged` with both axes, the identical
  *  confirmation note), just fed by a selection instead of a typed slug. Settings are re-read at
  *  PICK time, not captured at open time — the picker may sit open across other writes. */
-function applyModelPick(ctx: CommandCtx, slug: string): void {
+/** 2026-09-16 field report: `/model <tag>` used to rewrite only the GLOBAL default and claim "takes
+ *  effect next turn" — but a live session keeps the model it was spawned with until its child idles
+ *  out, so three turns "on deepseek" all ran on the Codex child. The attached session is switched
+ *  through `session.setModel` (the same door the Mac app uses); the global default is still written
+ *  for NEW sessions. Returns the human line for the note. */
+async function applySessionModel(ctx: CommandCtx, tag: string, confirmLossy: boolean): Promise<string> {
+  const shown = modelDisplayWithHint(tag);
+  try {
+    const r = await ctx.client.setModel(ctx.sessionId, tag, confirmLossy);
+    return r.deferred ? `this session switches to ${shown} at the end of the running turn` : `this session now runs ${shown}`;
+  } catch (err) {
+    const rpc = (err as { rpc?: { data?: { code?: string; warnings?: unknown } } }).rpc;
+    if (rpc?.data?.code === "handoff_confirmation_required") {
+      const warnings = Array.isArray(rpc.data.warnings) ? rpc.data.warnings.filter((w): w is string => typeof w === "string") : [];
+      return `this session kept its model: switching to ${shown} would lose part of the conversation${warnings.length > 0 ? ` (${warnings.join("; ")})` : ""} — run \`/model ${tag} --confirm\` to switch anyway`;
+    }
+    return `this session kept its model — the daemon refused the switch: ${(err as Error).message}`;
+  }
+}
+
+async function applyModelPick(ctx: CommandCtx, slug: string): Promise<void> {
   const settingsPath = join(resolveWinterHome(), "settings.json");
   const settings = loadSettings(settingsPath);
   // Review fix (item 4): same per-session posture as runModel's own setModel branch above —
@@ -223,7 +248,8 @@ function applyModelPick(ctx: CommandCtx, slug: string): void {
   const next = setProviderModel(settings, parseModelTag(slug));
   saveSettings(settingsPath, next);
   ctx.onModelChanged?.(next.provider.model, next.provider.reasoningEffort);
-  ctx.appendNote(`updated (model ${modelDisplayWithHint(next.provider.model)}) — takes effect next turn, no daemon restart needed`);
+  const sessionLine = await applySessionModel(ctx, next.provider.model, false);
+  ctx.appendNote(`${sessionLine}; default for new sessions: ${modelDisplayWithHint(next.provider.model)}`);
 }
 
 /** Mirrors main.ts `case "output-style"` (~:1546): NO client/daemon RPC at all — same
