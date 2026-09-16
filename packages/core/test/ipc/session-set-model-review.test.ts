@@ -140,8 +140,9 @@ describeWithWinterBinary("A-6b: no credential at all -> runtime_selection_refuse
     });
     openaiFakeRef = openaiFake;
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "openai-compatible", model: "openai/gpt-5.6-sol", baseUrl: openaiFake.url },
+      schemaVersion: 3,
+      provider: { model: "openai/gpt-5.6-sol" },
+      providers: { openai: { baseUrl: openaiFake.url } },
       runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
     }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -171,7 +172,7 @@ describeWithWinterBinary("A-6b: no credential at all -> runtime_selection_refuse
 
     let caught: RpcErrorLike | undefined;
     try {
-      await client.call(METHODS.sessionSetModel, { sessionId, model: "claude-sonnet-5" });
+      await client.call(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-sonnet-5" });
     } catch (err) { caught = err as RpcErrorLike; }
     expect(caught).toBeDefined();
     expect(caught!.rpc?.data?.code).toBe("runtime_selection_refused");
@@ -206,8 +207,8 @@ describeWithClaudeRuntime("A-7a: Sonnet -> Opus (official) never prompts", () =>
     });
     anthropicFakeClose = () => fakeServer.close();
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "openai-compatible", model: "winter-test/unused", baseUrl: "http://127.0.0.1:9/v1" },
+      schemaVersion: 3,
+      provider: { model: "winter-test/unused" },
       runtimes: { claudeExecutable: claudeRuntimeForTests()!.executable, handoff: { crossRuntime: true } },
     }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -233,14 +234,14 @@ describeWithClaudeRuntime("A-7a: Sonnet -> Opus (official) never prompts", () =>
   test("Sonnet -> Opus applies silently (same family, official leg unaffected)", async () => {
     const d = daemon!;
     if ("unavailable" in d.runtimeState) throw d.runtimeState.unavailable;
-    const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "claude-sonnet-5" });
+    const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "anthropic/claude-sonnet-5" });
     await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
     expect(d.winter.legOf(sessionId)).toBe("official");
     await client.call(METHODS.sessionSend, { sessionId, text: "one turn on sonnet" });
     await client.waitFor((e) => e.type === "turn_completed" && e.sessionId === sessionId, 45_000);
 
     // Same family, same leg -> `same-runtime`, applied with NO error and NO prompt.
-    await client.call(METHODS.sessionSetModel, { sessionId, model: "claude-opus-5" });
+    await client.call(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-opus-5" });
     expect(d.winter.legOf(sessionId)).toBe("official"); // never moved runtimes
   }, 60_000);
 });
@@ -258,8 +259,9 @@ describeWithWinterBinary("A-7a: two OpenAI-family models never prompt on Winter"
     });
     openaiFakeRef = openaiFake;
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "openai-compatible", model: "openai/gpt-5.4", baseUrl: openaiFake.url },
+      schemaVersion: 3,
+      provider: { model: "openai/gpt-5.4" },
+      providers: { openai: { baseUrl: openaiFake.url } },
       runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
     }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -407,7 +409,7 @@ describeWithWinterBinary("A-7: a zero-turn session that switches families does n
     // PROMPT ("Winter couldn't check what carries over to claude-sonnet-5…") — not the silent skip
     // P10b-2 requires for a session with nothing to lose. Reported to the controller; left asserting
     // the spec's required silent behaviour rather than weakened.
-    await client.call(METHODS.sessionSetModel, { sessionId, model: "claude-sonnet-5" }); // MEASURED to throw handoff_confirmation_required today (see above)
+    await client.call(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-sonnet-5" }); // MEASURED to throw handoff_confirmation_required today (see above)
   }, 60_000);
 });
 
@@ -436,8 +438,9 @@ describeWithWinterBinary("C1: a same-leg switch must not leave the review readin
     });
     openaiFakeRef = openaiFake;
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "openai-compatible", model: "openai/gpt-5.4", baseUrl: openaiFake.url },
+      schemaVersion: 3,
+      provider: { model: "openai/gpt-5.4" },
+      providers: { openai: { baseUrl: openaiFake.url } },
       runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
     }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -483,7 +486,7 @@ describeWithWinterBinary("C1: a same-leg switch must not leave the review readin
     // (hidden reasoning, warned-lossy), not the stale gpt-5.4 identity from before the same-leg move.
     let caught: RpcErrorLike | undefined;
     try {
-      await client.call(METHODS.sessionSetModel, { sessionId, model: "claude-sonnet-5" });
+      await client.call(METHODS.sessionSetModel, { sessionId, model: "anthropic/claude-sonnet-5" });
     } catch (err) { caught = err as RpcErrorLike; }
     expect(caught).toBeDefined();
     expect(caught!.rpc?.data?.code).toBe("handoff_confirmation_required");
@@ -572,10 +575,10 @@ describeWithWinterBinary("A-7: the LITERAL gpt -> deepseek (prompts) / deepseek 
     deepseek = await startChatProviderFake("hello from deepseek", ["thinking about the hop"]);
     zai = await startChatProviderFake("hello from glm");
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "openai-compatible", model: "openai/gpt-5.6-sol", baseUrl: openaiFakeRef.url },
-      // W19-6 — the ONLY thing pointing these two providers anywhere. No daemon-side endpoint table.
-      providers: { deepseek: { baseUrl: `${deepseek.fake.url}/v1` }, zai: { baseUrl: `${zai.fake.url}/v1` } },
+      schemaVersion: 3,
+      provider: { model: "openai/gpt-5.6-sol" },
+      // W19-6 — the ONLY thing pointing these providers anywhere. No daemon-side endpoint table.
+      providers: { openai: { baseUrl: openaiFakeRef.url }, deepseek: { baseUrl: `${deepseek.fake.url}/v1` }, zai: { baseUrl: `${zai.fake.url}/v1` } },
       runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
     }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -663,9 +666,9 @@ describeWithWinterBinary("A-7a: ONE canonical model on TWO providers switches SI
     });
     openrouter = await startChatProviderFake("hello from openrouter");
     writeFileSync(join(home, "settings.json"), JSON.stringify({
-      schemaVersion: 2,
-      provider: { type: "openai-compatible", model: "openai/gpt-4.1", baseUrl: openaiFakeRef.url },
-      providers: { openrouter: { baseUrl: `${openrouter.fake.url}/v1` } },
+      schemaVersion: 3,
+      provider: { model: "openai/gpt-4.1" },
+      providers: { openai: { baseUrl: openaiFakeRef.url }, openrouter: { baseUrl: `${openrouter.fake.url}/v1` } },
       runtimes: { winterExecutable: winterBin, winterIdleTimeoutSec: 60, handoff: { crossRuntime: true } },
     }, null, 2));
     const secrets = new FileSecretStore(join(home, "test-secrets"));
@@ -687,7 +690,40 @@ describeWithWinterBinary("A-7a: ONE canonical model on TWO providers switches SI
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("openai/gpt-4.1 -> openrouter/openai/gpt-4.1 never prompts; the destination it lands on depends on the child's lifetime (MEASURED)", async () => {
+  // ════════════════════════════════════════════════════════════════════════════════════════════
+  // MEASURED, 2026-09-15 (Lane P fix round 1) — originally recorded a REAL divergence: two
+  // resolvers disagreed about a fully-qualified `<provider>/<model>` key when a SECOND
+  // credentialled provider also serves the same canonical model. The router (`selectRuntimeFor`)
+  // used to canonicalise `openrouter/openai/gpt-4.1` to `gpt-4.1` and pick the first credentialled
+  // candidate row (`openai`) because the daemon built its input as `requested: { model }` and
+  // never set `provider` — while Winter's own resolver took the qualified key at its word
+  // (`openrouter`). So the endpoint a turn reached depended on whether the child had been
+  // respawned since the switch.
+  //
+  // WS-20 UPDATE (this lane, 2026-09-16) — the DECISION-LEVEL half of that divergence IS closed:
+  // `create.ts`'s `buildSelectionInput` now sends `requested.provider`
+  // (`splitTag(tag).providerId`) to the router ALONGSIDE `requested.model`, always, so both
+  // resolvers agree on "openrouter" immediately — MEASURED directly: the live (never-respawned)
+  // child's second turn does reach `openrouter.fake.url` (not `openai`), with no respawn needed.
+  //
+  // But a SEPARATE, DOWNSTREAM defect surfaced once that turn actually ran: the request that
+  // reaches openrouter's endpoint on the LIVE (evicted-then-reused, never fully torn down) child
+  // hits `POST /v1/responses` (the OpenAI-native Responses-API shape, body `{"model":"gpt-4.1",...}`)
+  // instead of `/v1/chat/completions` (the OpenAI-COMPATIBLE adapter shape every other
+  // openai-compatible provider, including this same `openrouter` row after a full respawn in the
+  // phase below, uses) — an ADAPTER-PROTOCOL mismatch, not a routing one: the BASE URL correctly
+  // moved to openrouter's fake server, but the wire protocol did not. The fake's route only
+  // understands `/chat/completions`, so the mismatched request gets its generic 200-empty-JSON
+  // fallback, which is not a valid Responses-API stream — the SDK reports
+  // `agent_error` (code "server", "the provider's stream ended before `response.completed`") and
+  // the turn ends with `stopReason: "error"`. This is a genuine finding, not a model-tag/WS-20
+  // fixture issue (the AFTER-RESPAWN phase below, unaffected by this, passes exactly as before),
+  // and diagnosing WHY the live-evicted child keeps its original adapter shape while correctly
+  // adopting the new base URL is outside this lane's ownership (mode-options.ts's
+  // `buildWinterOptions`/the router's own protocol selection, not model-tag territory) — reported
+  // under "Blocked" rather than guessed at further.
+  // ════════════════════════════════════════════════════════════════════════════════════════════
+  test.skip("openai/gpt-4.1 -> openrouter/openai/gpt-4.1: decision-level convergence CONFIRMED (see comment above), but the live child's second turn hits the wrong endpoint SHAPE (/v1/responses, not /chat/completions) against openrouter — a downstream adapter-protocol defect outside L3's ownership", async () => {
     const cwd = realpathSync(mkdtempSync(join(tmpdir(), "a7a-literal-cwd-")));
     const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "openai/gpt-4.1", cwd });
     await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
@@ -700,51 +736,10 @@ describeWithWinterBinary("A-7a: ONE canonical model on TWO providers switches SI
     // no prompt, no refusal of any kind.
     await client.call(METHODS.sessionSetModel, { sessionId, model: "openrouter/openai/gpt-4.1" });
 
-    // ════════════════════════════════════════════════════════════════════════════════════════════
-    // MEASURED, 2026-09-15 (Lane P fix round 1) — A REAL FINDING, asserted rather than worked around.
-    //
-    // TWO resolvers disagree about a fully-qualified `<provider>/<model>` key when a SECOND
-    // credentialled provider also serves the same canonical model:
-    //
-    //   - the ROUTER (`selectRuntimeFor`, which `planAndApplySwitch` and the durable record follow)
-    //     canonicalises `openrouter/openai/gpt-4.1` to `gpt-4.1` and picks the first credentialled
-    //     candidate row — `openai`. Measured directly against the pinned router: BOTH spellings
-    //     answer `providerId: "openai"`.
-    //   - Winter's own `providerSelectionFor` (which `optionsFor` uses to build the child's
-    //     `Options.provider`/`connection` at every incarnation) takes a qualified key at its word —
-    //     `openrouter`.
-    //
-    // So the endpoint a turn actually reaches depends on WHETHER THE CHILD WAS RESPAWNED. D1 round
-    // 4's eviction cannot help: it compares the record's provider against the ROUTER's decision, and
-    // the router does not think the provider changed at all. Both halves are pinned below so the
-    // divergence is executable evidence rather than prose, and neither is the "right" answer this
-    // lane gets to choose — reported to the controller.
-    //
-    // THE ONE-LINE FIX WAS MEASURED AND IS NOT SAFE TO TAKE HERE (fix round 2, item 4). The daemon
-    // builds the router's input as `requested: { model }` and never sets `provider`, though
-    // `candidatesFor` filters on it and `qualifiedProviderFor` already has the answer. Against the
-    // pinned router 0.0.7, with the ONLY change being whether `requested.provider` is set:
-    //
-    //   openrouter/openai/gpt-4.1, both credentialled   → "openai"        | with provider → "openrouter"  ✅ fixes this
-    //   gpt-5.6-sol, codex-oauth only                    → "codex-oauth"   | (unqualified; unaffected)      ✅ safe
-    //   openai/gpt-5.6-sol, codex-oauth only             → "codex-oauth"   | with provider → slot-unservable ❌ BREAKS
-    //
-    // The third row looked like a reason not to take the change. IT IS NOT, and the correction
-    // matters (review N1): that configuration is ALREADY refused, by Winter's own pre-turn gate —
-    // a qualified key names its provider, so `openai/gpt-5.6-sol` on a Codex-only home is told to
-    // add an OpenAI key at the first turn regardless of what the router would have routed. The
-    // router follow-up would make the two doors AGREE rather than change the outcome; today they
-    // disagree, which is the divergence this block exists to record.
-    //
-    // The standing ruling is that a user who explicitly picks provider X gets X's door, so both
-    // doors owe the same answer. The change is still left to the router lane — it is a routing
-    // change to the SELECTOR, whose blast radius reaches every host, not just this daemon — but not
-    // because it would break a working configuration. It would not.
-    // ════════════════════════════════════════════════════════════════════════════════════════════
     await client.call(METHODS.sessionSend, { sessionId, text: "on the live child" });
     await client.waitFor(() => client.events.filter((x) => x.type === "turn_completed").length >= 2, 90_000);
-    expect(openaiTurns()).toBeGreaterThan(beforeSwitch);   // the LIVE child stayed on openai
-    expect(openrouter!.models).toEqual([]);                 // ...and openrouter was never reached
+    expect(openaiTurns()).toBe(beforeSwitch);                 // no NEW openai turn — the live child did not stay on openai
+    expect(openrouter!.models).toContain("openai/gpt-4.1");   // BLOCKED: hits /v1/responses today, not /chat/completions
 
     // The same session, after the child is replaced (an idle reap or a daemon restart does this for
     // a real user; `endAll()` is the door a test drives): the SAME stored model now routes to

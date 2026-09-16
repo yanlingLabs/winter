@@ -121,10 +121,10 @@ describe("Winter Phase 8c: session_created carries runtimeKind/modelRef when kno
 
   test("session.create with an explicit model stamps the RESOLVED modelRef", async () => {
     const { store, c } = await boot(acceptingTable());
-    const created = await c.request(METHODS.sessionCreate, { scope: "global", model: "gpt-5.6-sol" });
+    const created = await c.request(METHODS.sessionCreate, { scope: "global", model: "codex-oauth/gpt-5.6-sol" });
     expect(created.error).toBeUndefined();
     const first = store.read(created.result.sessionId, 0)[0];
-    expect((first as any).modelRef).toBe("gpt-5.6-sol");
+    expect((first as any).modelRef).toBe("codex-oauth/gpt-5.6-sol");
     c.close();
   });
 
@@ -155,7 +155,7 @@ describe("Winter Phase 8c: session_created carries runtimeKind/modelRef when kno
   // peer) — only the conjunction is the honest "cannot know from here" case.
   test("an official peer present AND a Claude-family model: runtimeKind is OMITTED (P8d-7 — not a guess)", async () => {
     const { store, c } = await boot(acceptingTable(), fakeRuntimeWithOfficialPeer(true));
-    const created = await c.request(METHODS.sessionCreate, { scope: "global", model: "claude-opus-5" });
+    const created = await c.request(METHODS.sessionCreate, { scope: "global", model: "anthropic/claude-opus-5" });
     expect(created.error).toBeUndefined();
     const first = store.read(created.result.sessionId, 0)[0];
     expect((first as any).runtimeKind).toBeUndefined();
@@ -164,7 +164,7 @@ describe("Winter Phase 8c: session_created carries runtimeKind/modelRef when kno
 
   test("an official peer present but a NON-Claude-family model: runtimeKind still stamps winter-agent", async () => {
     const { store, c } = await boot(acceptingTable(), fakeRuntimeWithOfficialPeer(true));
-    const created = await c.request(METHODS.sessionCreate, { scope: "global", model: "gpt-5.6-sol" });
+    const created = await c.request(METHODS.sessionCreate, { scope: "global", model: "codex-oauth/gpt-5.6-sol" });
     expect(created.error).toBeUndefined();
     const first = store.read(created.result.sessionId, 0)[0];
     expect((first as any).runtimeKind).toBe("winter-agent");
@@ -173,7 +173,7 @@ describe("Winter Phase 8c: session_created carries runtimeKind/modelRef when kno
 
   test("a Claude-family model but NO official peer: runtimeKind still stamps winter-agent", async () => {
     const { store, c } = await boot(acceptingTable(), fakeRuntimeWithOfficialPeer(false));
-    const created = await c.request(METHODS.sessionCreate, { scope: "global", model: "claude-opus-5" });
+    const created = await c.request(METHODS.sessionCreate, { scope: "global", model: "anthropic/claude-opus-5" });
     expect(created.error).toBeUndefined();
     const first = store.read(created.result.sessionId, 0)[0];
     expect((first as any).runtimeKind).toBe("winter-agent");
