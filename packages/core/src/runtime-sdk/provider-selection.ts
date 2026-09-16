@@ -77,6 +77,16 @@ export function providerSelectionFor(
   // way the official leg decides its own arm (`officialAuthFamilyFor`) — "both legs agree".
   // `undefined` (a caller with no settings handy) keeps the old, unconditional `anthropic:default`.
   settings?: Settings | null,
+  /**
+   * Hotfix 2026-09-16: the ROUTER's decided provider for this session (`RuntimeSelection.providerId`,
+   * persisted in runtime-state at create and re-read at every incarnation). For a BARE id served by
+   * several inventory providers this is the tie-breaker, ahead of inventory order — measured on the
+   * release daemon, the router decided `codex-oauth/gpt-5.6-terra` and this function, re-run in
+   * `optionsFor` without that decision, named `openai` instead. Honoured only when the preferred
+   * provider serves the model AND holds a credential; otherwise the unchanged rule applies, so a
+   * stale decision (credential since removed) can never name a provider Winter has no key for.
+   */
+  preferredProviderId?: string,
 ): ProviderSelection | undefined {
   if (!model) return undefined;
   if (model.startsWith(WINTER_TEST_MODEL_PREFIX)) return undefined;
@@ -93,7 +103,11 @@ export function providerSelectionFor(
   const inInventory = WINTER_CREDENTIAL_INVENTORY.filter((s) => serving.has(s.provider));
   if (inInventory.length === 0) return undefined;
 
-  const withCredential = inInventory.find((s) => credentials.byProvider[s.provider] !== undefined);
+  const preferred =
+    preferredProviderId === undefined
+      ? undefined
+      : inInventory.find((s) => s.provider === preferredProviderId && credentials.byProvider[s.provider] !== undefined);
+  const withCredential = preferred ?? inInventory.find((s) => credentials.byProvider[s.provider] !== undefined);
   const chosen = withCredential ?? inInventory[0]!;
   const ref = withCredential ? credentialRefFor(chosen.provider, home, settings) : undefined;
   return ref ? { providerId: chosen.provider, authRef: ref } : { providerId: chosen.provider };

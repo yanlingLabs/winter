@@ -178,3 +178,36 @@ test("a model served by a NEWLY-derived inventory provider now resolves to it (t
     authRef: { kind: "keychain", account: "groq:default", service: keychainService() },
   });
 });
+
+// -------------------------------------------------------------------------------------------
+// (d) Hotfix 2026-09-16: the router's decided provider is honoured when it holds a credential.
+//
+// Measured on the release daemon (~/.winter, sessions s_63df0f861ab8 + s_7e5c92d39590): the
+// router decided `codex-oauth/gpt-5.6-terra` (recorded in runtime-state's `selection_json`), but
+// `optionsFor` re-ran THIS function with no knowledge of that decision, the inventory-order
+// tie-break named `openai`, and the child refused on `openai/gpt-5.6-terra`'s empty effort
+// vocabulary. A bare id served by several credentialled providers is ambiguous; the router's
+// decision is the tie-breaker, never this function's inventory order.
+// -------------------------------------------------------------------------------------------
+
+test("hotfix: a preferred provider that serves the model and holds a credential wins the tie", () => {
+  expect(providerSelectionFor("gpt-5.6-terra", BOTH, undefined, undefined, "codex-oauth")).toEqual({
+    providerId: "codex-oauth",
+    authRef: { kind: "keychain", account: "codex-oauth:default", service: keychainService() },
+  });
+  // The preference is symmetric: a router that decided `openai` gets `openai`.
+  expect(providerSelectionFor("gpt-5.6-terra", BOTH, undefined, undefined, "openai")?.providerId).toBe("openai");
+});
+
+test("hotfix: a preferred provider WITHOUT a credential falls back to the unchanged rule", () => {
+  // Preference names openai, only codex-oauth holds a key: the credential Winter has decides.
+  expect(providerSelectionFor("gpt-5.6-terra", CODEX_ONLY, undefined, undefined, "openai")?.providerId).toBe("codex-oauth");
+});
+
+test("hotfix: a preferred provider that does not serve the model is ignored", () => {
+  expect(providerSelectionFor("gpt-5.6-terra", BOTH, undefined, undefined, "deepseek")?.providerId).toBe("openai");
+});
+
+test("hotfix: no preference keeps the pinned inventory-order answer", () => {
+  expect(providerSelectionFor("gpt-5.6-terra", BOTH)?.providerId).toBe("openai");
+});

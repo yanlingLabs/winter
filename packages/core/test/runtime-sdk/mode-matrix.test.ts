@@ -851,3 +851,16 @@ test("Task 16 / P8b-24: `resume` names the transcript through Options.resume and
   expect(fresh.sessionId).toBe("11111111-2222-3333-4444-555555555555");
   expect(fresh.resume).toBeUndefined();
 });
+
+// -------------------------------------------------------------------------------------------
+// Hotfix 2026-09-16: `optionsFor` must not override the router's provider decision.
+// -------------------------------------------------------------------------------------------
+
+test("hotfix: preferredProviderId steers Options.provider when both providers hold a credential", () => {
+  const credentials = { byProvider: { openai: "keychain" as const, "codex-oauth": "keychain" as const } };
+  const without = buildWinterOptions(optionsInput({ model: "gpt-5.6-terra", credentials }));
+  expect(without.provider?.providerId).toBe("openai");
+  const withPreference = buildWinterOptions(optionsInput({ model: "gpt-5.6-terra", credentials, preferredProviderId: "codex-oauth" }));
+  expect(withPreference.provider?.providerId).toBe("codex-oauth");
+  expect(withPreference.provider?.authRef).toMatchObject({ kind: "keychain", account: "codex-oauth:default" });
+});

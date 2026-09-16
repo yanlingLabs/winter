@@ -419,7 +419,13 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // daemon's configured provider model.
       const model = mode === "dispatch" ? (live.model ?? DISPATCH_MODEL) : (live.model ?? settings?.provider?.model);
       const effort = mode === "dispatch" ? sdkEffortOf(live.effort ?? DISPATCH_EFFORT) : sdkEffortOf(live.effort);
-      const selection = providerSelectionFor(model, credentials, deps.home, settings);
+      // Hotfix 2026-09-16: the ROUTER's decided provider (persisted at create, `selection_json`) is
+      // the tie-breaker for a bare id several credentialled providers serve. Without it this call
+      // re-decided by inventory order and named `openai` for a session the router had placed on
+      // `codex-oauth` (measured on the release daemon). Read per incarnation, like everything here.
+      const decidedSelection = recordOf(sessionId)?.selection;
+      const preferredProviderId = decidedSelection?.runtimeKind === "winter-agent" ? decidedSelection.providerId : undefined;
+      const selection = providerSelectionFor(model, credentials, deps.home, settings, preferredProviderId);
       // P8b-30: a BYO `openai-compatible` endpoint travels as the provider's connection, or the
       // catalog's `openai` row would route it to api.openai.com.
       //
@@ -498,6 +504,7 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
         cwd,
         model,
         credentials,
+        ...(preferredProviderId === undefined ? {} : { preferredProviderId }),
         settings,
         effort,
         ...(systemPrompt === undefined ? {} : { systemPrompt }),
