@@ -43,7 +43,7 @@ import {
   setPluginEnabled,
   stripPluginConsents,
 } from "./plugin-cli";
-import { parseModelArgs, validateEffort, validateModelTag, validateAdvisorSlug, renderModelListing, type ModelListingRow } from "./model-cli";
+import { parseModelArgs, validateEffort, validateModelTag, validateAdvisorSlug, renderModelListing, modelDisplayWithHint, type ModelListingRow } from "./model-cli";
 import { formatElapsed, formatTokens } from "./task-display";
 import { formatRoutineDetail } from "./routines-cli";
 import { runAgentsCommand } from "./agents-cli";
@@ -2363,7 +2363,8 @@ if (import.meta.main) {
 
     if (action.kind === "show") {
       const effortSuffix = settings.provider.reasoningEffort ? `  ${DIM}effort: ${settings.provider.reasoningEffort}${RESET}` : "";
-      console.log(`${AQUA}${settings.provider.model}${RESET}${effortSuffix}`);
+      // Review fix (Nit 1): the modelId, the provider trailing as a hint — never the raw tag.
+      console.log(`${AQUA}${modelDisplayWithHint(settings.provider.model)}${RESET}${effortSuffix}`);
       // WS-20: the full grouped-by-provider catalogue needs the daemon's `sync.config` (the live
       // model list — this command has no static per-provider allowlist to fall back on anymore,
       // see model-cli.ts's `validateModelTag`). Try the socket; on any failure (no daemon, no
@@ -2393,7 +2394,7 @@ if (import.meta.main) {
       // Winter Phase 8d (P8d-8, Task 4.3): the D30 advisor line — "auto" is the honest label for
       // an unset override (the router applies its own per-family default, never a slug this CLI
       // invents), mirroring `winter model --advisor auto`'s own clearing spelling.
-      console.log(`${DIM}advisor: ${settings.runtimes?.advisorModel ?? "auto"}${RESET}`);
+      console.log(`${DIM}advisor: ${settings.runtimes?.advisorModel ? modelDisplayWithHint(settings.runtimes.advisorModel) : "auto"}${RESET}`);
       process.exit(0);
     }
 
@@ -2407,7 +2408,7 @@ if (import.meta.main) {
       }
       const next = setAdvisorModel(settings, action.kind === "setAdvisor" ? action.slug : undefined);
       saveSettings(settingsPath, next);
-      console.log(`${AQUA}updated${RESET} ${DIM}(advisor ${next.runtimes?.advisorModel ?? "auto"}) — takes effect next turn, no daemon restart needed${RESET}`);
+      console.log(`${AQUA}updated${RESET} ${DIM}(advisor ${next.runtimes?.advisorModel ? modelDisplayWithHint(next.runtimes.advisorModel) : "auto"}) — takes effect next turn, no daemon restart needed${RESET}`);
       process.exit(0);
     }
 
@@ -2426,7 +2427,7 @@ if (import.meta.main) {
     }
     saveSettings(settingsPath, next);
     const changed = [
-      action.kind === "setModel" || action.kind === "setModelAndEffort" ? `model ${next.provider.model}` : null,
+      action.kind === "setModel" || action.kind === "setModelAndEffort" ? `model ${modelDisplayWithHint(next.provider.model)}` : null,
       action.kind === "setEffort" || action.kind === "setModelAndEffort" ? `effort ${next.provider.reasoningEffort}` : null,
     ].filter(Boolean).join(", ");
     console.log(`${AQUA}updated${RESET} ${DIM}(${changed}) — takes effect next turn, no daemon restart needed${RESET}`);

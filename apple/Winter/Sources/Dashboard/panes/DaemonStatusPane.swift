@@ -15,11 +15,15 @@ struct DaemonStatusDisplay: Equatable {
 /// `providerId`/`providerModel` → "none" (no provider currently advertised), the bare id (a
 /// provider connected but never advertised classes — shouldn't happen in practice, but the daemon
 /// contract doesn't guarantee `model` is always paired), or `"id (model)"`.
+///
+/// Review fix (Nit 1): `providerModel` is a provider-qualified TAG now — `modelIdPortion` (this
+/// module, `WindowContentView.swift`) strips the "<providerId>/" prefix so this never shows the
+/// raw tag as a primary label, mirroring `ProviderPane.swift`'s own `providerStatusText`.
 func formatDaemonStatus(version: String, uptimeMs: Int, socketPath: String, providerId: String?, providerModel: String?, sessionsCount: Int, pluginsCount: Int) -> DaemonStatusDisplay {
     let provider: String
     switch (providerId, providerModel) {
     case let (.some(id), .some(model)):
-        provider = "\(id) (\(model))"
+        provider = "\(id) (\(modelIdPortion(of: model)))"
     case let (.some(id), nil):
         provider = id
     default:
