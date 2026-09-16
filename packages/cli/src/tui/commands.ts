@@ -13,7 +13,7 @@ import {
 } from "@yanlinglabs/winter-core";
 import type { Settings } from "@yanlinglabs/winter-core";
 import { METHODS, SyncConfigModel } from "@yanlinglabs/winter-protocol";
-import { parseModelArgs, validateEffort, validateModelTag, validateAdvisorSlug, renderModelListing } from "../model-cli";
+import { parseModelArgs, validateEffort, validateModelTag, validateAdvisorSlug, renderModelListing, modelDisplayWithHint } from "../model-cli";
 import { parseOutputStyleArgs } from "../output-style-cli";
 import { formatElapsed, formatTokens } from "../task-display";
 import { formatRoutineLine } from "../routines-cli";
@@ -126,10 +126,11 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
     // Headless fallback (no picker surface), and no live catalogue: the historical bare-tag note,
     // extended with the grouped listing when a catalogue WAS available (openChoice absent).
     const effortSuffix = settings.provider.reasoningEffort ? `  effort: ${settings.provider.reasoningEffort}` : "";
-    const lines = [`${settings.provider.model}${effortSuffix}`];
+    // Review fix (Nit 1): the modelId, the provider trailing as a hint — never the raw tag.
+    const lines = [`${modelDisplayWithHint(settings.provider.model)}${effortSuffix}`];
     if (models.length > 0) lines.push(renderModelListing(models, settings.provider.model).trimEnd());
     // Winter Phase 8d (P8d-8, Task 4.3): mirrors main.ts's `case "model"` show branch verbatim.
-    lines.push(`advisor: ${settings.runtimes?.advisorModel ?? "auto"}`);
+    lines.push(`advisor: ${settings.runtimes?.advisorModel ? modelDisplayWithHint(settings.runtimes.advisorModel) : "auto"}`);
     ctx.appendNote(lines.join("\n"));
     return;
   }
@@ -142,9 +143,27 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
       const err = validateAdvisorSlug(action.slug);
       if (err) { ctx.appendNote(err); return; }
     }
-    const next = setAdvisorModel(settings, action.kind === "setAdvisor" ? action.slug : undefined);
-    saveSettings(settingsPath, next);
-    ctx.appendNote(`updated (advisor ${next.runtimes?.advisorModel ?? "auto"}) — takes effect next turn, no daemon restart needed`);
+    const modelArg = action.kind === "setAdvisor" ? action.slug : null;
+    // Review fix (Nit 4): the write goes through `settings.setAdvisorModel` over the session's own
+    // (always-live) client, so the tag is validated against the pinned catalog before it lands on
+    // disk. Falls back to the direct file write ONLY when there is no RPC surface to ask at all (a
+    // headless/test double with nothing wired — the historical no-daemon posture this command has
+    // always had) — never on a genuine RPC refusal, which must surface as a real error instead of
+    // silently writing the rejected value locally.
+    if (typeof ctx.client.request !== "function") {
+      ctx.appendNote("no daemon connection — wrote settings.json directly");
+      const next = setAdvisorModel(settings, modelArg ?? undefined);
+      saveSettings(settingsPath, next);
+      ctx.appendNote(`updated (advisor ${next.runtimes?.advisorModel ? modelDisplayWithHint(next.runtimes.advisorModel) : "auto"}) — takes effect next turn, no daemon restart needed`);
+      return;
+    }
+    try {
+      const stored = (await ctx.client.request(METHODS.settingsSetAdvisorModel, { model: modelArg })) as { model?: string | null } | undefined;
+      const model = stored?.model ?? null;
+      ctx.appendNote(`updated (advisor ${model ? modelDisplayWithHint(model) : "auto"}) — takes effect next turn, no daemon restart needed`);
+    } catch (err) {
+      ctx.appendNote(`the daemon refused the advisor setting: ${(err as Error).message}`);
+    }
     return;
   }
 
@@ -166,7 +185,7 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
   // independently; see `CommandCtx.onModelChanged`).
   ctx.onModelChanged?.(next.provider.model, next.provider.reasoningEffort);
   const changed = [
-    action.kind === "setModel" || action.kind === "setModelAndEffort" ? `model ${next.provider.model}` : null,
+    action.kind === "setModel" || action.kind === "setModelAndEffort" ? `model ${modelDisplayWithHint(next.provider.model)}` : null,
     action.kind === "setEffort" || action.kind === "setModelAndEffort" ? `effort ${next.provider.reasoningEffort}` : null,
   ].filter(Boolean).join(", ");
   ctx.appendNote(`updated (${changed}) — takes effect next turn, no daemon restart needed`);
@@ -199,7 +218,7 @@ function applyModelPick(ctx: CommandCtx, slug: string): void {
   const next = setProviderModel(settings, parseModelTag(slug));
   saveSettings(settingsPath, next);
   ctx.onModelChanged?.(next.provider.model, next.provider.reasoningEffort);
-  ctx.appendNote(`updated (model ${next.provider.model}) — takes effect next turn, no daemon restart needed`);
+  ctx.appendNote(`updated (model ${modelDisplayWithHint(next.provider.model)}) — takes effect next turn, no daemon restart needed`);
 }
 
 /** Mirrors main.ts `case "output-style"` (~:1546): NO client/daemon RPC at all — same

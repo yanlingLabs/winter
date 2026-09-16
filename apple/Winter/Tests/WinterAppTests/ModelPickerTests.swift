@@ -895,7 +895,11 @@ final class ModelPickerTests: XCTestCase {
         ])
 
         let menu = view.modelMenuContent
-        XCTAssertEqual(menu.options, ["srv-a", "srv-b"], "the catalogue's slugs, in daemon order")
+        // WS-20 review fix (Nit 2): the menu is sectioned by provider now — this pins the SOURCE
+        // catalogue it reads (`modelPickerSections` is the pure grouping function, already covered
+        // by its own tests) rather than a flat `.options` list that no longer exists.
+        XCTAssertEqual(modelPickerSections(menu.catalogue).flatMap { $0.entries.map(\.tag) }, ["srv-a", "srv-b"],
+                       "the catalogue's slugs, in daemon order")
         XCTAssertEqual(menu.current, "srv-b", "…and the session ROW's model, exactly as before the move")
         XCTAssertTrue(menu.isDisabled, "rows disable while a change is in flight — unchanged")
     }

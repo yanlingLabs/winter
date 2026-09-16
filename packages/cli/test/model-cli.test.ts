@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { REASONING_EFFORTS } from "@yanlinglabs/winter-core";
-import { parseModelArgs, validateEffort, validateModelTag, validateAdvisorSlug, renderModelListing } from "../src/model-cli";
+import { parseModelArgs, validateEffort, validateModelTag, validateAdvisorSlug, renderModelListing, modelDisplayWithHint } from "../src/model-cli";
 
 describe("parseModelArgs", () => {
   test("no args -> show", () => {
@@ -120,5 +120,17 @@ describe("renderModelListing", () => {
       { id: "openai/gpt-5.6-terra", providerId: "openai", displayName: "GPT-5.6 Terra", facingName: "terra", efforts: ["low"] },
     ], "codex-oauth/gpt-5.6-terra");
     expect(out).toBe("codex-oauth\n  * terra  (gpt-5.6-terra)\nopenai\n    terra  (gpt-5.6-terra)\n");
+  });
+});
+
+// Review fix (Nit 1): every free-text CLI line that used to print a raw provider-qualified tag now
+// goes through this — the modelId, with the provider trailing as a hint, never the opaque tag.
+describe("modelDisplayWithHint", () => {
+  test("WS-20: a tag renders as 'modelId (providerId)', never the raw tag", () => {
+    expect(modelDisplayWithHint("codex-oauth/gpt-5.6-terra")).toBe("gpt-5.6-terra (codex-oauth)");
+  });
+
+  test("WS-20: a non-tag-shaped value (e.g. 'auto') passes through unchanged", () => {
+    expect(modelDisplayWithHint("auto")).toBe("auto");
   });
 });
