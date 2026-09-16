@@ -152,14 +152,25 @@ async function generateOverWinterProvider(provider: Provider, model: string, inp
  * a future D30 slot-to-adapter-id table (the SDK's own `resolveSlotToProvider`, WS-13c §4) is the
  * real fix and is out of this lane's scope.
  */
-function openAiFamilyReviewer(secrets: SecretStore, settings: () => Settings | undefined, targetModel: string): AdvisorReviewer {
+// WS-20 (review round 2, nit b): the OLD version tried codex-oauth material FIRST, unconditionally,
+// for EVERY openai-family target — so an `openai/*` tag with a real OpenAI key present, on a home
+// that ALSO happened to have codex-oauth material stored, silently reviewed through the WRONG
+// provider with a HARDCODED model id ("gpt-5.6-sol"), ignoring `targetModel` entirely. `providerId`
+// (the target tag's OWN provider, `splitTag(targetModel).providerId` at the call site) now gates
+// this explicitly: codex-oauth material is read ONLY for a `codex-oauth/*` target; every other
+// openai-family provider (plain `openai/*`, or any other GPT-dialect catalog provider) goes straight
+// to the openai-compatible branch with the tag's own `targetModel`, never a hardcoded substitute.
+function openAiFamilyReviewer(secrets: SecretStore, settings: () => Settings | undefined, targetModel: string, providerId: string): AdvisorReviewer {
   return {
     async generate(input: AdvisorReviewerRequest): Promise<AdvisorReviewerTurn> {
-      const material = await readCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth);
-      if (material !== null) {
-        // WS-20 L3.4: inlined — `DEFAULT_CODEX_MODEL` is deleted; `d30DefaultModel`'s own tag-based
-        // redesign (facingNameToTag/pinsFor) supersedes this whole function.
-        return generateOverWinterProvider(createCodexOauthRuntimeProvider(secrets), "gpt-5.6-sol", input);
+      if (providerId === "codex-oauth") {
+        const material = await readCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth);
+        if (material !== null) {
+          // WS-20 L3.4: inlined — `DEFAULT_CODEX_MODEL` is deleted; `d30DefaultModel`'s own tag-based
+          // redesign (facingNameToTag/pinsFor) supersedes this whole function.
+          return generateOverWinterProvider(createCodexOauthRuntimeProvider(secrets), "gpt-5.6-sol", input);
+        }
+        throw new Error("advisor reviewer: codex-oauth credential material is missing for a codex-oauth/* target");
       }
       // WS-20 L3.4: `provider.type`/`provider.baseUrl` no longer exist on `ProviderSettings` — the
       // BYO endpoint lives at `providers.openai.baseUrl` (`providerBaseUrlFor`) regardless of which
@@ -280,11 +291,15 @@ export function advisorReviewerFor(deps: {
     // `Provider`/adapter wire calls inside `openAiFamilyReviewer`/`claudeFamilyReviewer` speak bare
     // model ids, split from the tag once, right at this boundary.
     const wireModel = (() => { try { return splitTag(targetModel).modelId; } catch { return targetModel; } })();
+    // WS-20 (review round 2, nit b): the tag's OWN provider — `openAiFamilyReviewer` needs this to
+    // gate codex-oauth material to a `codex-oauth/*` target only (never tried for a plain `openai/*`
+    // one, regardless of what other credential material this home happens to have stored).
+    const targetProviderId = (() => { try { return splitTag(targetModel).providerId; } catch { return "openai"; } })();
     // Review fix F3: "no credential for the target family" is `undefined`, checked HERE (sync, from
     // the cache above) — never inside `generate()`, and never a live Keychain read in this function.
     if (family === "openai") {
       if (!hasCredential(CREDENTIAL_MATERIAL_NAMES.codexOauth) && !hasCredential(CREDENTIAL_MATERIAL_NAMES.openai)) return undefined;
-      return { provider: openAiFamilyReviewer(deps.secrets, deps.settings, wireModel), model: targetModel };
+      return { provider: openAiFamilyReviewer(deps.secrets, deps.settings, wireModel, targetProviderId), model: targetModel };
     }
     if (family === "claude") {
       if (!hasCredential(ANTHROPIC_CREDENTIAL_SECRET_NAME)) return undefined;

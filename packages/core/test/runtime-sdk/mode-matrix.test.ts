@@ -820,13 +820,17 @@ test("M7: same-provider advisor gets authRef — the SAME ref providerSelectionF
   expect(o.advisor!.authRef).toEqual(expect.objectContaining({ kind: "keychain" }));
 });
 
-test("M7: cross-provider (or unroutable) advisor NEVER gets an authRef — falls through to the SDK's own default, unchanged", () => {
+// WS-20 (review round 2, nit a): the pinned SDK's `AdvisorConfig` has no `providerId` field, so a
+// cross-provider (or unroutable) advisor can never be PINNED to its own provider through this door
+// — the only safe rule left is same-provider-only. `Options.advisor` is DROPPED entirely rather
+// than guessed at, superseding the old "falls through to the advisor's own resolved authRef" M7
+// behavior this test used to pin.
+test("nit(a): cross-provider (or unroutable) advisor is DROPPED entirely — never guessed at", () => {
   const credentials: CredentialPresence = { byProvider: { openai: "keychain" } };
   // The advisor's own model names no catalog identity at all (Winter's inventory cannot serve it) —
-  // `providerSelectionFor` answers `undefined`, so there is no ref to compare, let alone thread.
+  // `providerSelectionFor` answers `undefined`, so there is no provider to agree with the session's.
   const o = buildWinterOptions(optionsInput({ model: "openai/gpt-5.6-sol", advisorModel: "winter-test/echo", credentials }));
-  expect(o.advisor).toEqual({ model: "winter-test/echo" }); // winter-test passes through WHOLE, never split
-  expect(o.advisor).not.toHaveProperty("authRef");
+  expect(o.advisor).toBeUndefined();
 });
 
 // WS-20: `providerFor` names a provider's credential LOCATOR unconditionally — a tag always
@@ -839,15 +843,15 @@ test("M7: the shared provider's authRef threads through regardless of the (now-u
   expect(o.advisor).toEqual({ model: "gpt-6-astra", authRef: o.provider!.authRef });
 });
 
-test("WS-20: the session having NO resolvable provider at all (winter-test/*) still gets the ADVISOR's own resolved authRef — never falls through to an independent, uninstructed lookup", () => {
+// WS-20 (review round 2, nit a): supersedes the OLD "threads the advisor's own resolved authRef
+// regardless of the session's own provider" M7 behavior — a session with no resolvable provider at
+// all has nothing to agree with, so `sameProvider` is false and the advisor is DROPPED, same as any
+// other non-matching pair.
+test("nit(a): the session having NO resolvable provider at all (winter-test/*) drops the advisor too", () => {
   const credentials: CredentialPresence = { byProvider: { openai: "keychain" } };
   const o = buildWinterOptions(optionsInput({ model: "winter-test/echo", advisorModel: "openai/gpt-6-astra", credentials }));
   expect(o.provider).toBeUndefined();
-  // `providerFor` is unconditional — the advisor's OWN target ("openai/gpt-6-astra") resolves to a
-  // real locator regardless of whether the SESSION itself has a provider to compare against, so
-  // WS-20 threads it explicitly rather than leaving the SDK to fall back to its own independent
-  // "<providerId>:default" resolution (the M7 fix this generalizes).
-  expect(o.advisor).toEqual({ model: "gpt-6-astra", authRef: expect.objectContaining({ kind: "keychain", account: "openai:default" }) });
+  expect(o.advisor).toBeUndefined();
 });
 
 test("M7: no advisorModel at all -> no Options.advisor key, unchanged from before this fix", () => {
