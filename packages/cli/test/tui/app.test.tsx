@@ -1803,7 +1803,9 @@ describe("App — T5 status chrome end-to-end (live sources, zero daemon changes
       const frame = lastFrame() ?? "";
       expect(frame).toContain("model gpt-5.6-luna (codex-oauth), effort high"); // the committed note (unchanged wording)
       expect(frame).toContain("gpt-5.6-luna (high)"); // THE PIN: the footer segment flipped, same frame
-      expect(client.calls).toEqual([]); // /model's direct write form never touches the client
+      // 2026-09-16: `/model <tag>` now ALSO switches the attached session through `session.setModel`
+      // (the global write stays a direct settings.json write) — exactly one daemon call, this one.
+      expect(client.calls).toEqual([{ method: "setModel", args: ["s1", "codex-oauth/gpt-5.6-luna", false] }]);
     } finally {
       if (prevHome === undefined) delete process.env.WINTER_HOME;
       else process.env.WINTER_HOME = prevHome;
