@@ -2406,7 +2406,37 @@ if (import.meta.main) {
         const err = validateAdvisorSlug(action.slug);
         if (err) { console.error(err); process.exit(1); }
       }
-      const next = setAdvisorModel(settings, action.kind === "setAdvisor" ? action.slug : undefined);
+      const modelArg = action.kind === "setAdvisor" ? action.slug : null;
+      // Review fix (Nit 4): when the daemon is live, the write goes through `settings.
+      // setAdvisorModel` (the SAME door.request pattern `winter model` (show) uses for
+      // sync.config) so the tag is validated against the pinned catalog before it lands on disk —
+      // never a bare `saveSettings` racing the daemon's own settings-watcher. Falls back to the
+      // direct file write ONLY when there is no live daemon to ask, same no-daemon posture this
+      // command has always had — and says so on stderr, since the daemon usually owns this write.
+      const door = await openCredentialDaemonDoor();
+      if (door) {
+        // `process.exit()` terminates immediately — it never lets a pending `finally` run — so
+        // `door.close()` must happen BEFORE either exit call, not rely on one after it.
+        let stored: string | null = null;
+        let daemonError: string | undefined;
+        try {
+          const { METHODS } = await import("@yanlinglabs/winter-protocol");
+          const raw = await door.request(METHODS.settingsSetAdvisorModel, { model: modelArg });
+          stored = (raw as { model?: string | null } | undefined)?.model ?? null;
+        } catch (err) {
+          daemonError = (err as Error).message;
+        } finally {
+          door.close();
+        }
+        if (daemonError !== undefined) {
+          console.error(`the daemon refused the advisor setting: ${daemonError}`);
+          process.exit(1);
+        }
+        console.log(`${AQUA}updated${RESET} ${DIM}(advisor ${stored ? modelDisplayWithHint(stored) : "auto"}) — takes effect next turn, no daemon restart needed${RESET}`);
+        process.exit(0);
+      }
+      console.error("no daemon connection — writing settings.json directly");
+      const next = setAdvisorModel(settings, modelArg ?? undefined);
       saveSettings(settingsPath, next);
       console.log(`${AQUA}updated${RESET} ${DIM}(advisor ${next.runtimes?.advisorModel ? modelDisplayWithHint(next.runtimes.advisorModel) : "auto"}) — takes effect next turn, no daemon restart needed${RESET}`);
       process.exit(0);

@@ -884,6 +884,44 @@ describe("/model — mirrors `case \"model\"` (settings.json write under WINTER_
     expect(notes[0]).toContain("usage:");
   });
 
+  // Review fix (Nit 4): `/model --advisor` now writes through `settings.setAdvisorModel` over the
+  // session's own (always-live) client, not a direct settings.json write — the daemon validates
+  // the tag against the pinned catalog before it lands on disk.
+  describe("--advisor (WS-20 review fix Nit 4: the write goes through settings.setAdvisorModel)", () => {
+    test("setAdvisor sends the tag and reports the daemon's own echoed value", async () => {
+      const { client, calls } = makeClient({ request: () => ({ ok: true, model: "anthropic/claude-opus-5" }) });
+      const { ctx, notes } = makeCtx(client);
+      await runCommand(ctx, "/model --advisor anthropic/claude-opus-5");
+      expect(calls).toEqual([{ method: "request", args: ["settings.setAdvisorModel", { model: "anthropic/claude-opus-5" }] }]);
+      expect(notes).toEqual(["updated (advisor claude-opus-5 (anthropic)) — takes effect next turn, no daemon restart needed"]);
+    });
+
+    test("--advisor auto sends a literal null and reports 'auto' when the daemon clears it", async () => {
+      const { client, calls } = makeClient({ request: () => ({ ok: true, model: null }) });
+      const { ctx, notes } = makeCtx(client);
+      await runCommand(ctx, "/model --advisor auto");
+      expect(calls).toEqual([{ method: "request", args: ["settings.setAdvisorModel", { model: null }] }]);
+      expect(notes).toEqual(["updated (advisor auto) — takes effect next turn, no daemon restart needed"]);
+    });
+
+    test("a daemon refusal surfaces as a note, never a silent fallback to the file write", async () => {
+      const { client } = makeClient({
+        request: () => { throw new Error("unknown model 'claude-opus-5' for provider anthropic"); },
+      });
+      const { ctx, notes } = makeCtx(client);
+      await runCommand(ctx, "/model --advisor anthropic/claude-opus-5");
+      expect(notes).toEqual(["the daemon refused the advisor setting: unknown model 'claude-opus-5' for provider anthropic"]);
+    });
+
+    test("no RPC surface at all (headless/test double) falls back to the direct file write, and says so", async () => {
+      const { client } = makeClient({});
+      const { ctx, notes } = makeCtx(client);
+      await runCommand(ctx, "/model --advisor anthropic/claude-opus-5");
+      expect(notes[0]).toBe("no daemon connection — wrote settings.json directly");
+      expect(notes[1]).toContain("updated (advisor claude-opus-5 (anthropic))");
+    });
+  });
+
   // TUI renderer T5 — the status chrome's live model source: a SUCCESSFUL write reports the new
   // resolved global model+effort through `onModelChanged` (the same optional-callback shape as
   // `onCwdChanged`), so the App's footer flips the moment /model lands instead of showing the
