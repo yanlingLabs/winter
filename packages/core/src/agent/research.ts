@@ -2,6 +2,9 @@ import { z } from "zod";
 import type { Provider, ProviderEvent, TurnInputItem, ToolSpec } from "../providers/types";
 import { fetchCleanPage, renderLines, PageCoreError, checkDangerousDomain, dangerousDomainRefusal, type PageCache, type CleanPage } from "./tools/page-core";
 import { READPAGE_PER_PAGE_CHAR_CAP, READPAGE_TOTAL_OUTPUT_CHAR_CAP } from "./tools/read-page";
+import type { Settings } from "../settings";
+import { pinsFor } from "../settings";
+import { splitTag } from "../runtime-sdk/model-tag";
 
 /**
  * B2-T3: the ephemeral research sub-agent. A plain, radically reduced loop over
@@ -39,8 +42,8 @@ import { READPAGE_PER_PAGE_CHAR_CAP, READPAGE_TOTAL_OUTPUT_CHAR_CAP } from "./to
 // gpt-5.4-mini on BOTH quality and cost, and 5.4-mini is a deprecated slug the daemon no longer
 // advertises. Effort "none" is a real, measured wire level (server echoes it and reports 0
 // reasoning tokens — provider-correctness T1); summarization needs recall, not reasoning.
-export const RESEARCH_MODEL = "gpt-5.6-luna";
-export const RESEARCH_FALLBACK_MODEL = "gpt-5.6-terra";
+// WS-20: the model/fallback pair is no longer hardcoded — see `pinsFor(settings).research` /
+// `.researchFallback` in settings.ts, read hot via `ResearchDeps.settings` below.
 export const RESEARCH_EFFORT = "none";
 export const RESEARCH_MAX_PAGES_DEFAULT = 5;
 export const RESEARCH_MAX_PAGES_CEILING = 15;
@@ -119,6 +122,9 @@ export interface ResearchRunner {
 
 export interface ResearchDeps {
   provider: Provider;
+  // WS-20: hot settings read, same "re-read every call" discipline as every other settings-backed
+  // getter — `pinsFor(deps.settings())` is called at each run, never a boot snapshot.
+  settings: () => Settings | null;
   cache: PageCache;
   fetchFn?: typeof fetch;
   audit?: (line: Record<string, unknown>) => void;
@@ -425,7 +431,12 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
 
   const input: TurnInputItem[] = [{ type: "message", role: "user", content: buildSeedMessage(q, seed) }];
 
-  let model: string = RESEARCH_MODEL;
+  // The internal `Provider` abstraction speaks bare model ids in ITS OWN dialect — split the
+  // pin's tag at this boundary, same discipline as the runtime-sdk spawn boundary (§0.1).
+  const pins = pinsFor(deps.settings());
+  const researchModel = splitTag(pins.research).modelId;
+  const researchFallbackModel = splitTag(pins.researchFallback).modelId;
+  let model: string = researchModel;
   let usedFallback = false;
   let lastText = "";
 
@@ -487,7 +498,7 @@ async function runResearch(q: ResearchQuery, deps: ResearchDeps, externalSignal:
     if (roundError) {
       if (!usedFallback && looksLikeBadModelError(roundError, model)) {
         usedFallback = true;
-        model = RESEARCH_FALLBACK_MODEL;
+        model = researchFallbackModel;
         continue; // retry the SAME round (input unchanged) with the fallback model
       }
       // fix-round-1 Minor 4: THROWS (rejects) rather than resolving with a failure-shaped string —

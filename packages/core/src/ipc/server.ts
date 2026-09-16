@@ -101,8 +101,10 @@ import type { ProviderLink } from "../peripheral/provider-link";
 import type { HardwareBroker } from "../peripheral/hardware";
 import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
-import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, officialAuthModeSetting, saveSettings, Settings } from "../settings";
-import { DISPATCH_PIN_MESSAGE } from "../agent/dispatch-config";
+import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, Settings } from "../settings";
+// WS-20 L3.5/L3.6: `officialAuthModeSetting`/`DISPATCH_PIN_MESSAGE` are deleted along with
+// `runtimes.official.auth`/`DISPATCH_MODEL` — left as inline stubs below (marked WS-20 L3.5/L3.6)
+// so this module still LOADS until those tasks land (ipc/server.ts is L3.5/L3.6's own file).
 import {
   deriveInstallName, installPluginFromDir, missingConsents, buildConsentBlock, applyFreshPluginConsent,
   setPluginEnabled, grantPluginConsents, removePluginFromSettings, removePluginDir, stripPluginConsents,
@@ -2155,7 +2157,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         let targetMode: string | undefined;
         try { targetMode = opts.store.meta(p.sessionId).mode; } catch { /* unknown id — NOT_FOUND below wins */ }
         if (targetMode === "dispatch" && p.model !== null) {
-          throw new RpcFailure(ERR.INVALID_PARAMS, DISPATCH_PIN_MESSAGE);
+          throw new RpcFailure(ERR.INVALID_PARAMS, "dispatch runs a fixed model" /* WS-20 L3.6: dispatchPinMessage(settings) */);
         }
         let model = p.model;
         // I1 review fix: this method is remote-reachable and hand-callable, so a future picker's
@@ -2311,7 +2313,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         let sessionMeta: { model?: string; mode?: string } | undefined;
         try { sessionMeta = opts.store.meta(p.sessionId); } catch { /* unknown id → the store call below owns the error */ }
         if (sessionMeta?.mode === "dispatch" && p.effort !== null) {
-          throw new RpcFailure(ERR.INVALID_PARAMS, DISPATCH_PIN_MESSAGE);
+          throw new RpcFailure(ERR.INVALID_PARAMS, "dispatch runs a fixed model" /* WS-20 L3.6: dispatchPinMessage(settings) */);
         }
         // SET-TIME validation, for the reason session.setModel's exists (I1 review fix: an
         // unvalidated selection bricks every future turn SILENTLY — the provider 400s on each one
@@ -3068,7 +3070,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       // other settings-derived RPC in this file.
       case METHODS.providerStatus: {
         parseParams(ProviderStatusParams, params);
-        const auth = opts.winterHome ? officialAuthModeSetting(loadSettings(join(opts.winterHome, "settings.json"))) : "auto";
+        const auth = "auto" as const; // WS-20 L3.5: runtimes.official.auth removed — arm is the tag prefix
         const material = opts.secrets ? await readCredentialMaterial(opts.secrets, ANTHROPIC_CREDENTIAL_SECRET_NAME) : null;
         const apiKey = material?.kind === "api-key";
         const consoleProfile = opts.consoleBroker?.profileExists() ?? false;

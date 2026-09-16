@@ -2,11 +2,11 @@ import { statSync } from "node:fs";
 import type { SecretStore } from "../auth/secret-store";
 import { readOpenAiApiKey } from "../auth/credential-material";
 import { OPENAI_API_KEY_SECRET } from "../auth/legacy-secret-names";
-import { loadSettings, type Settings } from "../settings";
+import { loadSettings, providerBaseUrlFor, type Settings } from "../settings";
 import type { Provider } from "./types";
 import { createCodexOauthRuntimeProvider, createOpenAiCompatibleRuntimeProvider } from "./runtime-provider";
 import { QuotaManager, withQuota } from "./quota";
-import { CODEX_MODELS, DEFAULT_CODEX_MODEL } from "./codex-config";
+import { splitTag } from "../runtime-sdk/model-tag";
 
 /** LEGACY raw record — migration source only (`auth/credential-material.ts`'s
  *  `readOpenAiApiKey`/`migrateLegacyCredentialMaterial`). Writers use `writeOpenAiApiKey`, which
@@ -16,7 +16,10 @@ import { CODEX_MODELS, DEFAULT_CODEX_MODEL } from "./codex-config";
  *  `OPENAI_API_KEY_SECRET` from this module keeps working unchanged. */
 export { OPENAI_API_KEY_SECRET };
 
-/** What a turn actually resolves to: the model slug plus an optional reasoning-effort hint. */
+/** What a turn actually resolves to: the model slug plus an optional reasoning-effort hint. WS-20:
+ *  `model` is the BARE modelId (this module's `Provider` abstraction is bound to ONE backend at
+ *  construction time and speaks that backend's own dialect) — the tag is split once, at THIS
+ *  boundary, mirroring the runtime-sdk spawn boundary (§0.1). */
 export interface LiveModelSelection {
   model: string;
   reasoningEffort?: string;
@@ -34,15 +37,15 @@ export interface ActiveProvider {
    * boot-time settings passed to createProvider — on ANY read/parse failure (missing file,
    * mid-write partial JSON, failed zod validation): this must NEVER throw into a turn.
    *
-   * Deprecation fallback (codex-oauth only): a configured model not in CODEX_MODELS (e.g. a
-   * since-deprecated slug like "gpt-5.4") silently resolves to DEFAULT_CODEX_MODEL, logging ONE
-   * console.error per distinct deprecated slug (not per turn). openai-compatible has no
-   * allowlist — arbitrary API models are legitimate there, so its configured model always passes
-   * through untouched. The provider TYPE itself is fixed at the boot-time value (`providerType`,
-   * closed over below) — a settings.json edited to a DIFFERENT provider.type still needs a
-   * daemon restart to take effect (out of scope here), so this resolver deliberately ignores any
-   * live-read `type` field and only ever branches on the type this Provider instance was actually
-   * constructed for.
+   * WS-20: `settings.provider.model` is read VERBATIM, then split once at this boundary — no
+   * deprecated-slug rewrite (the CODEX_MODELS allowlist and its DEFAULT_CODEX_MODEL fallback are
+   * gone; the pinned catalog is the one source for which models exist, and an unlisted slug is
+   * the provider's own 400 to report, not this daemon's to silently paper over). The provider
+   * IDENTITY itself is fixed at the boot-time value (`providerId`, closed over below) — a
+   * settings.json edited to name a DIFFERENT provider still needs a daemon restart to take effect
+   * (out of scope here), so this resolver deliberately ignores any live-read provider prefix and
+   * only ever emits the bare id for the provider this Provider instance was actually constructed
+   * for.
    */
   liveModel: () => LiveModelSelection;
 }
@@ -51,39 +54,22 @@ function statMtimeOrZero(path: string): number {
   try { return statSync(path).mtimeMs; } catch { return 0; } // missing file -> key 0
 }
 
-/** Resolves the (model, reasoningEffort) pair for one already-loaded Settings, applying the
- *  codex-oauth deprecated-slug fallback (warn once per distinct slug via `warnedSlugs`).
- *  `providerType` is always the BOOT-time type (see liveModel's doc comment) — never re-derived
- *  from the freshly re-read `settings`. */
-function resolveSelection(
-  providerType: Settings["provider"]["type"],
-  settings: Settings,
-  warnedSlugs: Set<string>,
-): LiveModelSelection {
+/** Resolves the (model, reasoningEffort) pair for one already-loaded Settings — `model` is the
+ *  BARE modelId half of `settings.provider.model`'s tag, verbatim (see `liveModel`'s doc comment
+ *  above for why no rewrite/fallback happens here any more). */
+function resolveSelection(settings: Settings): LiveModelSelection {
   const { model, reasoningEffort } = settings.provider;
-  if (providerType !== "codex-oauth") {
-    return { model, ...(reasoningEffort ? { reasoningEffort } : {}) };
-  }
-  if (CODEX_MODELS.some((m) => m.id === model)) {
-    return { model, ...(reasoningEffort ? { reasoningEffort } : {}) };
-  }
-  if (!warnedSlugs.has(model)) {
-    warnedSlugs.add(model);
-    console.error(`model "${model}" is deprecated/unavailable for codex-oauth — falling back to ${DEFAULT_CODEX_MODEL}`);
-  }
-  return { model: DEFAULT_CODEX_MODEL, ...(reasoningEffort ? { reasoningEffort } : {}) };
+  return { model: splitTag(model).modelId, ...(reasoningEffort ? { reasoningEffort } : {}) };
 }
 
 /** Builds the `liveModel` resolver for `createProvider`. `settingsPath` is optional — omitted
  *  (e.g. tests, `winter provider-smoke`) means the resolver just keeps returning the boot-time
  *  selection forever (no re-read possible without a path). */
 function buildLiveModelResolver(
-  providerType: Settings["provider"]["type"],
   bootSettings: Settings,
   settingsPath: string | undefined,
 ): () => LiveModelSelection {
-  const warnedSlugs = new Set<string>();
-  let lastGood = resolveSelection(providerType, bootSettings, warnedSlugs);
+  let lastGood = resolveSelection(bootSettings);
   let cache: { key: number; value: LiveModelSelection } | null = null;
 
   return () => {
@@ -96,7 +82,7 @@ function buildLiveModelResolver(
     } catch {
       return lastGood; // read/parse failure — never throw into a turn, keep the last good value
     }
-    const value = resolveSelection(providerType, settings, warnedSlugs);
+    const value = resolveSelection(settings);
     cache = { key, value };
     lastGood = value;
     return value;
@@ -107,12 +93,18 @@ function buildLiveModelResolver(
  * `settingsPath` (optional) enables the returned `liveModel()` resolver to re-read settings.json
  * on each call instead of only ever reflecting this boot-time snapshot — omit it (as
  * `provider-smoke` and most tests do) and `liveModel()` just keeps returning the boot selection.
+ *
+ * WS-20: which backend this daemon runs is decided by `splitTag(settings.provider.model).providerId`
+ * — "codex-oauth" onto the Codex OAuth adapter, every other provider id (chiefly "openai", the
+ * BYO-endpoint arm) onto the OpenAI-compatible adapter with `providerBaseUrlFor(settings, providerId)`
+ * (`providers.<id>.baseUrl` — `settings.provider.baseUrl` itself no longer exists on `ProviderSettings`;
+ * the v2→v3 migration copies it into `providers.openai.baseUrl` once, see settings.ts).
  */
 export async function createProvider(settings: Settings, secrets: SecretStore, settingsPath?: string): Promise<ActiveProvider> {
   const quota = new QuotaManager();
   let inner: Provider;
-  const providerType = settings.provider.type;
-  if (providerType === "codex-oauth") {
+  const providerId = splitTag(settings.provider.model).providerId;
+  if (providerId === "codex-oauth") {
     // P8c lane 5: onto the `@yanlinglabs/winter-provider-runtime` codex-oauth adapter — credential
     // resolution (and, on a 401, refresh write-back) goes through `credential-store.ts`'s
     // `CredentialStore`, which reads/writes the SAME `codex-oauth:default` material record the
@@ -129,8 +121,8 @@ export async function createProvider(settings: Settings, secrets: SecretStore, s
     // key is stored (manager.test.ts pins this exact message).
     const apiKey = await readOpenAiApiKey(secrets);
     if (!apiKey) throw new Error("no API key stored — run: winter login --api-key");
-    inner = createOpenAiCompatibleRuntimeProvider(secrets, settings.provider.baseUrl);
+    inner = createOpenAiCompatibleRuntimeProvider(secrets, providerBaseUrlFor(settings, providerId));
   }
-  const liveModel = buildLiveModelResolver(providerType, settings, settingsPath);
-  return { provider: withQuota(inner, quota), model: settings.provider.model, quota, liveModel };
+  const liveModel = buildLiveModelResolver(settings, settingsPath);
+  return { provider: withQuota(inner, quota), model: splitTag(settings.provider.model).modelId, quota, liveModel };
 }

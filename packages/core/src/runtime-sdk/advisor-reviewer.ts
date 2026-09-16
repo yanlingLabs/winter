@@ -31,10 +31,9 @@ import type { ProviderContext } from "@yanlinglabs/winter-provider-runtime";
 import type { SecretStore } from "../auth/secret-store";
 import { readCredentialMaterial, CREDENTIAL_MATERIAL_NAMES } from "../auth/credential-material";
 import { createCodexOauthRuntimeProvider, createOpenAiCompatibleRuntimeProvider } from "../providers/runtime-provider";
-import { DEFAULT_CODEX_MODEL } from "../providers/codex-config";
 import type { Provider, TurnInputItem } from "../providers/types";
 import { credentialStoreOverSecretStore } from "../providers/credential-store";
-import { winterOptionsFromSettings, type Settings } from "../settings";
+import { winterOptionsFromSettings, providerBaseUrlFor, type Settings } from "../settings";
 import { ANTHROPIC_CREDENTIAL_SECRET_NAME, credentialRefFor } from "./keychain";
 
 /** Which of Winter's three D30-relevant families a catalog-recognised model belongs to. `"other"` is
@@ -132,10 +131,14 @@ function openAiFamilyReviewer(secrets: SecretStore, settings: () => Settings | u
     async generate(input: AdvisorReviewerRequest): Promise<AdvisorReviewerTurn> {
       const material = await readCredentialMaterial(secrets, CREDENTIAL_MATERIAL_NAMES.codexOauth);
       if (material !== null) {
-        return generateOverWinterProvider(createCodexOauthRuntimeProvider(secrets), DEFAULT_CODEX_MODEL, input);
+        // WS-20 L3.4: inlined — `DEFAULT_CODEX_MODEL` is deleted; `d30DefaultModel`'s own tag-based
+        // redesign (facingNameToTag/pinsFor) supersedes this whole function.
+        return generateOverWinterProvider(createCodexOauthRuntimeProvider(secrets), "gpt-5.6-sol", input);
       }
-      const provider = settings()?.provider;
-      const baseUrl = provider?.type === "openai-compatible" ? provider.baseUrl : OPENAI_API_BASE_URL;
+      // WS-20 L3.4: `provider.type`/`provider.baseUrl` no longer exist on `ProviderSettings` — the
+      // BYO endpoint lives at `providers.openai.baseUrl` (`providerBaseUrlFor`) regardless of which
+      // provider is active.
+      const baseUrl = providerBaseUrlFor(settings(), "openai") ?? OPENAI_API_BASE_URL;
       return generateOverWinterProvider(createOpenAiCompatibleRuntimeProvider(secrets, baseUrl), targetModel, input);
     },
   };
