@@ -95,7 +95,7 @@ describe("validateEffort", () => {
 });
 
 // Winter Phase 8d (P8d-8, Task 4.3) + WS-20: validated against the PINNED CATALOG by TAG
-// (`validateModelTag` then `catalogRowsFor`) — deliberately not a live provider list, since this
+// (`validateModelTag` then `rowForTag`) — deliberately not a live provider list, since this
 // command runs with no daemon RPC.
 describe("validateAdvisorSlug", () => {
   test("a real catalog tag is valid", () => {

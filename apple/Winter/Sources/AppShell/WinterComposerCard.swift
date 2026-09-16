@@ -150,8 +150,10 @@ struct ComposerModelControl {
     /// .readAdvisorModelFromSettings()` — a local file read, not an RPC). `nil` = unset
     /// ("Automatic"). Defaulted so every pre-8d construction site keeps compiling unchanged.
     var advisorModel: String? = nil
-    /// Writes the setting directly (`AppModel.writeAdvisorModelToSettings`) — `nil` clears it.
-    /// Defaulted to a no-op for the same reason `advisorModel` above is defaulted.
+    /// WS-20: writes through the daemon's `settings.setAdvisorModel` RPC
+    /// (`FieldStateAdapter.applyAdvisorModelSelection` → its own `onSetAdvisorModel`,
+    /// `AppModel.setAdvisorModel`) — `nil` clears it. Defaulted to a no-op for the same reason
+    /// `advisorModel` above is defaulted.
     var onSetAdvisorModel: (String?) -> Void = { _ in }
 }
 

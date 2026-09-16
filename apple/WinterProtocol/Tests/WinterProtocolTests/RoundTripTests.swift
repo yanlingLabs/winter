@@ -81,7 +81,7 @@ final class RoundTripTests: XCTestCase {
         guard case .sessionCreated(let with) = try JSONDecoder().decode(SessionEvent.self, from: withData) else { return XCTFail() }
         XCTAssertEqual(with.runtimeKind, "winter-agent")
         XCTAssertEqual(with.providerId, "openai")
-        XCTAssertEqual(with.modelRef, "gpt-5.6-sol")
+        XCTAssertEqual(with.modelRef, "openai/gpt-5.6-sol")
 
         let reencoded = try JSONEncoder().encode(SessionEvent.sessionCreated(with))
         guard case .sessionCreated(let redecoded) = try JSONDecoder().decode(SessionEvent.self, from: reencoded) else { return XCTFail() }

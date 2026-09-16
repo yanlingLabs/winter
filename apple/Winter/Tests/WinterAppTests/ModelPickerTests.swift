@@ -986,21 +986,54 @@ final class ModelPickerTests: XCTestCase {
         return WindowContentView(adapter: adapter, tint: .blue, topInset: 8, sidebars: wiring) { EmptyView() }
     }
 
+
+    /// WS-20 (cross-lane fix): the direct settings.json WRITE this suite used to pin is RETIRED —
+    /// `AppModel.writeAdvisorModelToSettings` is gone; the write now goes through the daemon's
+    /// `settings.setAdvisorModel` RPC (`AppModel.setAdvisorModel`, WinterKit's own
+    /// `WinterClient.setAdvisorModel`). This pins THAT wire shape instead, the same
+    /// `AppScriptedTransport` idiom `testAppModelFetchesTheModelCatalogue` (ModelPickerTests, this
+    /// file) already uses for a real RPC round trip.
+    @MainActor
+    func testSetAdvisorModelSendsTheTagAndDecodesTheDaemonsEchoedValue() async throws {
+        let t = AppScriptedTransport()
+        let model = AppModel(makeTransport: { t }, token: "tok")
+        let startTask = Task { await model.start() }
+        defer { startTask.cancel(); model.stop() }
+        await answerHandshake(t, sessions: "[]")
+
+        async let outcome = AppModel.setAdvisorModel(client: model.client, "anthropic/claude-opus-5")
+        await waitUntilSent(t, 3)
+        let req = lineJSON(t.sent[2])
+        XCTAssertEqual(req["method"] as? String, "settings.setAdvisorModel")
+        XCTAssertEqual((req["params"] as? [String: Any])?["model"] as? String, "anthropic/claude-opus-5")
+        t.feed(#"{"jsonrpc":"2.0","id":\#(req["id"] as! Int),"result":{"ok":true,"model":"anthropic/claude-opus-5"}}"#)
+
+        switch await outcome {
+        case .success(let stored): XCTAssertEqual(stored, "anthropic/claude-opus-5")
+        case .failure(let reason): XCTFail("expected success, got failure: \(reason)")
+        }
+    }
 }
 
-// MARK: - Winter Phase 8d (P8d-8, fix round 1): AppModel.readAdvisorModelFromSettings /
-// writeAdvisorModelToSettings — the D30 advisor setting's direct-file-I/O door (`AppModel`'s own
-// doc: the SAME pattern `UpdaterCoordinator.readChannelFromSettings()` already uses,
+// MARK: - Winter Phase 8d (P8d-8, fix round 1) + WS-20 (cross-lane fix): AppModel.
+// readAdvisorModelFromSettings — the D30 advisor setting's direct-file-I/O READ door (`AppModel`'s
+// own doc: the SAME pattern `UpdaterCoordinator.readChannelFromSettings()` already uses,
 // `UpdaterCoordinatorTests.testReadChannelFromSettingsFile`'s own `setenv("WINTER_HOME", …)` +
-// temp-dir technique reused verbatim here). Both functions resolve the settings path through
+// temp-dir technique reused verbatim here). Resolves the settings path through
 // `AppProfile.winterHome`, which reads the SAME raw `WINTER_HOME` env var `WinterPaths.
 // homeDirectory()` reads (via `getenv`, not `ProcessInfo.environment` — `AppProfile.swift`'s own
-// doc explains why both must agree), so overriding the env var redirects both functions at once.
+// doc explains why both must agree), so overriding the env var redirects it.
+//
+// The WRITE half (`writeAdvisorModelToSettings`) is RETIRED as of WS-20 — the write now goes
+// through the daemon's `settings.setAdvisorModel` RPC (`AppModel.setAdvisorModel`), tested with
+// `testSetAdvisorModelSendsTheTagAndDecodesTheDaemonsEchoedValue` in `ModelPickerTests` above (it
+// needs a live `AppModel`/scripted transport, unlike these pure file-read tests, so it stays in
+// that class rather than moving down here).
 //
 /// A SEPARATE `XCTestCase` (not nested in `ModelPickerTests` above) — these tests need no
-/// main-actor isolation at all, since they touch no adapter/`AppModel` instance, only the two
-/// static file-I/O functions. Same file for proximity to the outcome tests above, which exercise
-/// the OTHER half of the same D30 surface.
+/// main-actor isolation at all, since they touch no adapter/`AppModel` instance, only the static
+/// file-READ function. Same file for proximity to the outcome tests above, which exercise the
+/// OTHER half of the same D30 surface.
 final class AdvisorSettingsTests: XCTestCase {
     private func tempHome() throws -> URL {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -1068,156 +1101,4 @@ final class AdvisorSettingsTests: XCTestCase {
         XCTAssertNil(AppModel.readAdvisorModelFromSettings())
     }
 
-    /// THE MAJOR finding's core case: writing preserves every sibling `runtimes.*` key AND every
-    /// unrelated top-level key, on a fixture shaped exactly like a real daemon's `settings.json`
-    /// (`Settings.parse`'s own shape) — never a whole-block replace.
-    func testWritePreservesSiblingRuntimesKeysAndUnrelatedTopLevelKeys() throws {
-        let dir = try tempHome()
-        setenv("WINTER_HOME", dir.path, 1)
-        defer { unsetenv("WINTER_HOME") }
-        try write(Self.realisticFixture, to: dir)
-
-        XCTAssertTrue(AppModel.writeAdvisorModelToSettings("gpt-5.6-astra"))
-
-        let obj = try read(dir)
-        XCTAssertEqual(obj["schemaVersion"] as? Int, 2, "unrelated top-level key preserved")
-        let provider = obj["provider"] as? [String: Any]
-        XCTAssertEqual(provider?["type"] as? String, "codex-oauth", "unrelated top-level block preserved")
-        XCTAssertEqual(provider?["model"] as? String, "gpt-5.6-sol")
-        let memory = obj["memory"] as? [String: Any]
-        XCTAssertEqual(memory?["enabled"] as? Bool, true, "unrelated top-level block preserved")
-
-        let runtimes = obj["runtimes"] as? [String: Any]
-        XCTAssertEqual(runtimes?["advisorModel"] as? String, "gpt-5.6-astra", "the write landed")
-        XCTAssertEqual(runtimes?["winterExecutable"] as? String, "/opt/homebrew/bin/winter", "sibling runtimes.* key preserved")
-        let retention = runtimes?["retention"] as? [String: Any]
-        XCTAssertEqual(retention?["deliveriesDays"] as? Int, 30, "sibling runtimes.* BLOCK preserved")
-        XCTAssertEqual(retention?["nameLeasesDays"] as? Int, 7)
-        let winterLeg = runtimes?["winterLeg"] as? [String: Any]
-        XCTAssertEqual(winterLeg?["chat"] as? Bool, true, "sibling runtimes.* block preserved")
-        XCTAssertEqual(winterLeg?["dispatch"] as? Bool, true)
-        XCTAssertEqual(winterLeg?["code"] as? Bool, true)
-        let handoff = runtimes?["handoff"] as? [String: Any]
-        XCTAssertEqual(handoff?["crossRuntime"] as? Bool, false, "sibling runtimes.* block preserved")
-
-        // Round-trips through a fresh read too, proving the write is self-consistent.
-        XCTAssertEqual(AppModel.readAdvisorModelFromSettings(), "gpt-5.6-astra")
-    }
-
-    /// `nil` clears the key entirely (never writes an empty string) — the picker's "Automatic" row.
-    func testWriteNilClearsTheKeyEntirely() throws {
-        let dir = try tempHome()
-        setenv("WINTER_HOME", dir.path, 1)
-        defer { unsetenv("WINTER_HOME") }
-        try write(#"{"schemaVersion":2,"runtimes":{"advisorModel":"claude-fable-5","winterExecutable":"/x"}}"#, to: dir)
-
-        XCTAssertTrue(AppModel.writeAdvisorModelToSettings(nil))
-
-        let obj = try read(dir)
-        let runtimes = obj["runtimes"] as? [String: Any]
-        XCTAssertNil(runtimes?["advisorModel"], "the key must be REMOVED, not set to an empty string")
-        XCTAssertEqual(runtimes?["winterExecutable"] as? String, "/x", "sibling key untouched by the clear")
-        XCTAssertNil(AppModel.readAdvisorModelFromSettings())
-    }
-
-    /// A blank/whitespace-only string clears the key exactly like `nil` — "auto"'s own spelling in
-    /// `winter model --advisor auto` maps to `nil` before this function ever sees it, but the
-    /// function itself must not special-case that: a blank string arriving by any other path
-    /// (a future caller) gets the identical blank-is-absent treatment `settings.ts` documents.
-    func testWriteBlankStringClearsTheKeyLikeNil() throws {
-        let dir = try tempHome()
-        setenv("WINTER_HOME", dir.path, 1)
-        defer { unsetenv("WINTER_HOME") }
-        try write(#"{"schemaVersion":2,"runtimes":{"advisorModel":"claude-fable-5"}}"#, to: dir)
-
-        XCTAssertTrue(AppModel.writeAdvisorModelToSettings("   "))
-
-        let obj = try read(dir)
-        let runtimes = obj["runtimes"] as? [String: Any]
-        XCTAssertNil(runtimes?["advisorModel"])
-    }
-
-    /// A HOME WITH NO `runtimes` BLOCK AT ALL, and no `settings.json` at all — the first write on a
-    /// fresh home must still produce a schema-valid file (every `Settings` field is optional) with
-    /// no OTHER top-level key invented.
-    func testWriteOnAFreshHomeWithNoSettingsFileCreatesOne() throws {
-        let dir = try tempHome()
-        setenv("WINTER_HOME", dir.path, 1)
-        defer { unsetenv("WINTER_HOME") }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("settings.json").path))
-
-        XCTAssertTrue(AppModel.writeAdvisorModelToSettings("claude-opus-5"))
-
-        let obj = try read(dir)
-        XCTAssertEqual(Set(obj.keys), ["runtimes"], "a fresh home gets ONLY the runtimes block — nothing invented")
-        let runtimes = obj["runtimes"] as? [String: Any]
-        XCTAssertEqual(runtimes?["advisorModel"] as? String, "claude-opus-5")
-        XCTAssertEqual(Set((runtimes ?? [:]).keys), ["advisorModel"], "no sibling runtimes.* field invented either")
-    }
-
-    /// Whole-branch review Major 2 — THE regression this fix wave closes: a settings.json that
-    /// EXISTS and is readable but does NOT parse as a JSON object (hand-edited, truncated, or a
-    /// bare JSON array/string/number at the root) must be left byte-for-byte UNTOUCHED and the
-    /// write must report `false` — never the pre-fix behaviour of silently replacing it with
-    /// `{"runtimes":{"advisorModel":…}}` (which the daemon's settings-watcher would then hot-load,
-    /// resetting every other setting in the file).
-    func testWriteOnAnUnparseableSettingsFileLeavesItByteIdenticalAndReportsFalse() throws {
-        let dir = try tempHome()
-        setenv("WINTER_HOME", dir.path, 1)
-        defer { unsetenv("WINTER_HOME") }
-        let malformed = #"{"schemaVersion": 2, "provider": { unterminated"#
-        try write(malformed, to: dir)
-        let before = try Data(contentsOf: dir.appendingPathComponent("settings.json"))
-
-        XCTAssertFalse(AppModel.writeAdvisorModelToSettings("claude-opus-5"), "an unparseable file must refuse the write, not clobber it")
-
-        let after = try Data(contentsOf: dir.appendingPathComponent("settings.json"))
-        XCTAssertEqual(before, after, "the file must be byte-for-byte unchanged after a refused write")
-        XCTAssertNil(AppModel.readAdvisorModelFromSettings(), "nothing was written, so there is still nothing to read")
-    }
-
-    /// The SAME refusal for a file that parses as valid JSON but whose ROOT is not an object
-    /// (e.g. a bare JSON array) — `Settings` is always an object, so this is exactly as malformed
-    /// as truncated JSON from this function's point of view, and must refuse identically.
-    func testWriteOnASettingsFileWhoseRootIsNotAnObjectLeavesItUntouchedAndReportsFalse() throws {
-        let dir = try tempHome()
-        setenv("WINTER_HOME", dir.path, 1)
-        defer { unsetenv("WINTER_HOME") }
-        try write(#"["not", "an", "object"]"#, to: dir)
-        let before = try Data(contentsOf: dir.appendingPathComponent("settings.json"))
-
-        XCTAssertFalse(AppModel.writeAdvisorModelToSettings("claude-opus-5"))
-
-        let after = try Data(contentsOf: dir.appendingPathComponent("settings.json"))
-        XCTAssertEqual(before, after)
-    }
-
-    /// A write must never corrupt the file into something `Settings.parse` (the daemon's own
-    /// validator) would reject — proved here by checking every field this fixture came in with is
-    /// still the SAME TYPE it started as (an object stays an object, a bool stays a bool) after the
-    /// merge, which is what a `JSONSerialization`-level shallow merge guarantees and a naive
-    /// string-replace would not.
-    func testWrittenFileStaysShapeCompatibleWithTheDaemonsSettingsSchema() throws {
-        let dir = try tempHome()
-        setenv("WINTER_HOME", dir.path, 1)
-        defer { unsetenv("WINTER_HOME") }
-        try write(Self.realisticFixture, to: dir)
-
-        XCTAssertTrue(AppModel.writeAdvisorModelToSettings("gpt-5.6-luna"))
-
-        let obj = try read(dir)
-        XCTAssertTrue(obj["schemaVersion"] is Int)
-        XCTAssertTrue(obj["provider"] is [String: Any])
-        XCTAssertTrue(obj["runtimes"] is [String: Any])
-        XCTAssertTrue(obj["memory"] is [String: Any])
-        let runtimes = obj["runtimes"] as! [String: Any]
-        XCTAssertTrue(runtimes["advisorModel"] is String)
-        XCTAssertTrue(runtimes["winterExecutable"] is String)
-        XCTAssertTrue(runtimes["retention"] is [String: Any])
-        XCTAssertTrue(runtimes["winterLeg"] is [String: Any])
-        XCTAssertTrue(runtimes["handoff"] is [String: Any])
-        // JSONSerialization itself is the round-trip proof: a shape it cannot re-encode as valid
-        // JSON would already have thrown inside writeAdvisorModelToSettings (returning false) —
-        // the `true` return above IS the "this is valid JSON" assertion.
-    }
 }
