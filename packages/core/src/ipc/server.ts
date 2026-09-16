@@ -102,7 +102,7 @@ import type { ProviderLink } from "../peripheral/provider-link";
 import type { HardwareBroker } from "../peripheral/hardware";
 import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
-import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings } from "../settings";
+import { addLocalDir, clientEffortEligible, isClientEffort, INTERNAL_PROVIDER_IDS, loadSettings, saveSettings, setAdvisorModel, Settings } from "../settings";
 import { dispatchPinMessage } from "../agent/dispatch-config";
 import {
   deriveInstallName, installPluginFromDir, missingConsents, buildConsentBlock, applyFreshPluginConsent,
@@ -2910,13 +2910,26 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // DELETED along with the setting itself — `ProviderConfigureParams` now has exactly the one
         // openai-compatible BYOK arm below.
         if (!opts.secrets) throw new RpcFailure(ERR.INTERNAL, "provider.configure is not available on this server (no secret store configured)");
-        await writeOpenAiApiKey(opts.secrets, p.apiKey);
         const settingsPath = join(opts.winterHome, "settings.json");
         const settings = loadSettings(settingsPath);
         // WS-20: the BYO endpoint is `providers.openai.baseUrl` now (never `provider.baseUrl`,
         // which no longer exists on `ProviderSettings`) and the model is a tag — `"openai/…"`,
         // never a bare id. `p.model` is already `ModelTagSchema`-validated at the params door.
         const model = (p.model ?? "openai/gpt-5.6-sol") as ModelTag;
+        // WS-20 (review round 2, M6): `settings.provider.model` binds the daemon's OWN internal
+        // Provider, which can only ever serve codex-oauth/openai — checked HERE, explicitly, for a
+        // clean INVALID_PARAMS (the `ProviderSettings.model` schema refinement would also catch this
+        // inside `saveSettings` below, but as a raw parse failure rather than a typed RPC refusal).
+        // Both validation checks run BEFORE `writeOpenAiApiKey` below, so a refusal leaves the
+        // secret store untouched too — the same "nothing written on refusal" invariant this RPC's
+        // other refusal branches (a malformed baseUrl, an empty apiKey) already hold.
+        const providerId = splitTag(model).providerId;
+        if (!(INTERNAL_PROVIDER_IDS as readonly string[]).includes(providerId)) {
+          throw new RpcFailure(
+            ERR.INVALID_PARAMS,
+            `provider.model must name ${INTERNAL_PROVIDER_IDS.join(" or ")} — the daemon's internal provider supports codex-oauth and openai; any provider is fine per session`,
+          );
+        }
         const nextProviders = { ...settings.providers, openai: { ...settings.providers?.openai, baseUrl: p.baseUrl } };
         // WS-20 (review round 2, M4): the SAME membership gate `session.create`/`session.setModel`
         // apply — checked against settings that already carry the `baseUrl` this call is about to
@@ -2924,6 +2937,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         // OWN just-configured endpoint always passes; a tag naming a DIFFERENT, unrelated provider
         // (a typo, or the wrong RPC entirely) is still held to the real catalog.
         resolveModelSelection(model, { ...settings, providers: nextProviders });
+        await writeOpenAiApiKey(opts.secrets, p.apiKey);
         saveSettings(settingsPath, { ...settings, provider: { model }, providers: nextProviders });
         return { ok: true };
       }
