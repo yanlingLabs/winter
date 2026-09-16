@@ -914,6 +914,15 @@ describe("WS-20: provider.model is a tag", () => {
     expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "gpt-5.6-terra" } })).toThrow();
     expect(() => Settings.parse({ schemaVersion: 3, provider: { type: "codex-oauth", model: "codex-oauth/gpt-5.6-terra" } })).toThrow(); // `type` is gone (strict object)
   });
+
+  // WS-20 (review round 2, M6): the `ProviderModelTagSchema` refinement itself, exercised directly
+  // through `Settings.parse` — the other M6 tests each go through a DIFFERENT door
+  // (`setProviderModel`'s own throw, `provider.configure`'s explicit check, `pinsFor` via a
+  // schema-bypassing fixture); this is the one that proves the schema itself refuses/accepts.
+  test("M6: Settings.parse refuses provider.model naming a non-internal provider, and keeps accepting winter-test/*", () => {
+    expect(() => Settings.parse({ schemaVersion: 3, provider: { model: "anthropic/claude-sonnet-5" } })).toThrow(/codex-oauth or openai/);
+    expect(Settings.parse({ schemaVersion: 3, provider: { model: "winter-test/echo" } }).provider.model).toBe(tag("winter-test/echo"));
+  });
 });
 
 describe("WS-20: pinsFor", () => {

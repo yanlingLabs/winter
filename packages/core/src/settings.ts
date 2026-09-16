@@ -876,10 +876,23 @@ export function migrateSettingsV2ToV3(raw: Record<string, unknown>, home: string
 
   // provider: model (required), reasoningEffort (carried as-is), type/baseUrl dropped.
   if (typeof legacyProvider.model === "string") {
-    const tag = migrateBareModelId(legacyProvider.model, {
+    const emptySFallback: ModelTag = legacyProviderType === "openai-compatible" ? ("openai/gpt-5.6-sol" as ModelTag) : ("codex-oauth/gpt-5.6-sol" as ModelTag);
+    let tag = migrateBareModelId(legacyProvider.model, {
       fieldName: "provider.model", home, legacyOfficialAuth, legacyProviderType, presentProviders,
-      emptySFallback: legacyProviderType === "openai-compatible" ? ("openai/gpt-5.6-sol" as ModelTag) : ("codex-oauth/gpt-5.6-sol" as ModelTag),
+      emptySFallback,
     });
+    // WS-20 (review round 2, M6 follow-up / self-fix): `provider.model` binds the daemon's own
+    // internal Provider, which can only ever serve codex-oauth/openai — but `migrateBareModelId`'s
+    // OWN rules (notably the Claude-id arm, which answers purely off `legacyOfficialAuth`/the
+    // console profile, never off `INTERNAL_PROVIDER_IDS`) can still produce a tag naming a
+    // DIFFERENT provider (e.g. a legacy `openai-compatible` endpoint that happened to serve a model
+    // with a `claude-`-prefixed bare id). Falls back to the SAME `emptySFallback` rule 2 already
+    // uses, logged, rather than persisting a `provider.model` `ProviderSettings`'s own schema
+    // refinement would refuse outright at the very next `Settings.parse`.
+    if (tag !== undefined && !tag.startsWith(WINTER_TEST_PREFIX) && !(INTERNAL_PROVIDER_IDS as readonly string[]).includes(splitTag(tag).providerId)) {
+      console.error(`[settings migration] "provider.model" resolved to ${JSON.stringify(tag)}, which the daemon's internal provider cannot serve (codex-oauth/openai only) — falling back to ${emptySFallback}`);
+      tag = emptySFallback;
+    }
     const nextProvider: Record<string, unknown> = { model: tag };
     if (legacyProvider.reasoningEffort !== undefined) nextProvider.reasoningEffort = legacyProvider.reasoningEffort;
     out.provider = nextProvider;
@@ -971,16 +984,26 @@ export function loadSettings(path: string, opts?: { presentProviders?: ReadonlyS
   const home = dirname(path);
   const persistMigration = opts?.persistMigration ?? false;
   if (raw.schemaVersion === 2) {
-    // WS-20 (review round 2, nit h): the backup is a REAL pre-WS20 file worth preserving — moved
-    // inside this branch (it used to run unconditionally, including for the v1-or-legacy fallback
-    // below, which never held real settings worth backing up) and gated on `persistMigration` like
-    // every other write this function makes.
-    if (persistMigration) backupPreWs20Once(path, raw);
     const migrated = migrateSettingsV2ToV3(raw, home, opts?.presentProviders);
-    if (persistMigration) writeFileSync(path, JSON.stringify(migrated, null, 2) + "\n");
     const parsed = Settings.safeParse(migrated);
     if (!parsed.success) {
       throw new Error(`settings.json is invalid: ${parsed.error.issues.map((i) => i.path.join(".")).join(", ")} — fix or delete ${path}`);
+    }
+    // WS-20 (review round 2, self-fix): VALIDATE BEFORE WRITING — `saveSettings`'s own discipline
+    // ("never persist an invalid settings file"). The old write-then-validate order could leave an
+    // INVALID v3 file on disk (this function throws either way, but a caller that only reads the
+    // thrown message never learns the file itself is now broken): M6's `ProviderModelTagSchema`
+    // refinement made this newly reachable — `migrateBareModelId`'s Claude arm can produce
+    // `anthropic/claude-*`/`console/claude-*` for `provider.model` from a v2 `openai-compatible` BYO
+    // endpoint that happened to serve a model with a `claude-` prefixed bare id, which now fails
+    // that refinement.
+    //
+    // WS-20 (review round 2, nit h): the backup is a REAL pre-WS20 file worth preserving — only
+    // reached once migration is KNOWN to produce a valid result, and gated on `persistMigration`
+    // like every other write this function makes.
+    if (persistMigration) {
+      backupPreWs20Once(path, raw);
+      writeFileSync(path, JSON.stringify(migrated, null, 2) + "\n");
     }
     return parsed.data;
   }
@@ -990,9 +1013,13 @@ export function loadSettings(path: string, opts?: { presentProviders?: ReadonlyS
   // nothing is silently lost. Never backed up (nit h) — there is nothing real to lose.
   const { schemaVersion: _legacy, ...preserved } = raw;
   const migrated = { ...preserved, schemaVersion: 3 as const, provider: DEFAULT_PROVIDER };
+  // zod v4 z.object() strips unknown keys by default (does NOT throw) — safe to parse migrated.
+  // Validated BEFORE writing, same discipline as the v2 branch above (this arm's own `provider` is
+  // always the fixed `DEFAULT_PROVIDER`, so it can never itself fail the M6 refinement — kept in the
+  // same order regardless, for the same reason `saveSettings` always validates before writing).
+  const result = Settings.parse(migrated);
   if (persistMigration) writeFileSync(path, JSON.stringify(migrated, null, 2) + "\n");
-  // zod v4 z.object() strips unknown keys by default (does NOT throw) — safe to parse migrated
-  return Settings.parse(migrated);
+  return result;
 }
 
 export function saveSettings(path: string, s: Settings): void {
