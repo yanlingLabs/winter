@@ -1033,6 +1033,7 @@ describe("B2 — /model (no args) opens the model picker when openChoice is wire
     await runCommand(ctx, "/model");
     await requests[0]!.onPick("codex-oauth/gpt-5.6-luna");
     expect(changes).toEqual([["codex-oauth/gpt-5.6-luna", undefined]]);
+    await new Promise((r) => setTimeout(r, 0)); // the session switch (`session.setModel`) lands a tick after the synchronous settings write
     expect(notes).toEqual(["this session now runs gpt-5.6-luna (codex-oauth); default for new sessions: gpt-5.6-luna (codex-oauth)"]);
     // The write really landed: a re-show marks luna as current.
     const requests2: ChoiceRequest[] = [];
