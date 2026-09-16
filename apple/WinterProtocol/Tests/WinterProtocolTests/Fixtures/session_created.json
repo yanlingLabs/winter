@@ -6,5 +6,5 @@
   "scope": "global",
   "runtimeKind": "winter-agent",
   "providerId": "openai",
-  "modelRef": "gpt-5.6-sol"
+  "modelRef": "openai/gpt-5.6-sol"
 }

@@ -66,10 +66,16 @@ export interface CredentialSlot {
  *
  * `"codex"` was Task 4's spelling and is GONE: the catalog's row is `codex-oauth`, which is also
  * exactly what 8a already persists as `RuntimeSessionRecord.providerId` for that provider
- * (`settings.provider.type`, `runtime-state/migrations/backfill.ts:44`) — so aligning to the
- * catalog collapsed two of the three vocabularies into one for the Codex case. The OpenAI case
- * still has two spellings (`settings.provider.type` is `"openai-compatible"`, the catalog id is
- * `"openai"`); they must not be cross-read.
+ * (`splitTag(settings.provider.model).providerId`, `runtime-state/migrations/backfill.ts:44`) — so
+ * aligning to the catalog collapsed two of the three vocabularies into one for the Codex case.
+ *
+ * WS-20: `settings.provider.type` is GONE entirely — `settings.provider.model` is now a tag, and
+ * `splitTag(...).providerId` IS the catalog id for every provider this inventory names. The one
+ * remaining two-spelling case is NOT a settings vocabulary any more: it is the INTERNAL
+ * `Provider.id` literal (`providers/runtime-provider.ts`) the daemon's own internal-calls adapter
+ * reports for itself — `"openai-compatible"` for every non-codex-oauth tag, never the catalog's
+ * `"openai"` id — which is a different concept from this inventory (credential slots, keyed by
+ * catalog provider id) and must not be cross-read with it either.
  */
 /**
  * P8c-10: the anthropic row, added for the official leg's `api-key` auth family.

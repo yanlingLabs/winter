@@ -698,7 +698,7 @@ describe("peripheral lease + dashboard read methods", () => {
     expect(DaemonStatusParams.parse({})).toEqual({});
     const status = DaemonStatusResult.parse({
       version: "0.0.1", uptimeMs: 1234, socketPath: "/tmp/core.sock",
-      provider: { id: "fake", model: "fake-1" }, sessionsCount: 2, pluginsCount: 0,
+      provider: { id: "fake", model: "fake/fake-1" }, sessionsCount: 2, pluginsCount: 0,
     });
     expect(status.provider?.id).toBe("fake");
     expect(DaemonStatusResult.parse({
