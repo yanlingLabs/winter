@@ -155,6 +155,15 @@ const CREDENTIAL_RESOLUTION_MARKERS = [
   "is not a recognized credential material shape",
 ];
 
+/** The child's OWN pre-flight refusal (`provider-runtime` `capabilityRefusal`, e.g. "a bare model id
+ *  needs a provider", "declares no reasoning effort vocabulary"): Winter refused before any request
+ *  left the machine, so "unavailable or overloaded" (a retry hint) is the wrong class. */
+const CAPABILITY_REFUSAL_MARKER = "provider request failed (capability)";
+const CAPABILITY_REFUSAL_MESSAGE = "Winter refused the request before sending it";
+function isCapabilityRefusal(raw: unknown): boolean {
+  return typeof raw === "string" && raw.includes(CAPABILITY_REFUSAL_MARKER);
+}
+
 function isCredentialResolutionFailure(raw: unknown): boolean {
   return typeof raw === "string" && CREDENTIAL_RESOLUTION_MARKERS.some((marker) => raw.includes(marker));
 }
@@ -184,6 +193,7 @@ export function classifyResult(result: ResultFrame): ClassifiedError {
   // is distinct and has a home the day a signal appears; it is NOT claimed to be reachable today.
   if (reason === "context_overflow") return compose("context_overflow", detail);
   if (reason === "api_error") {
+    if (isCapabilityRefusal(result.result)) return { code: "bad_request", message: detail === undefined ? CAPABILITY_REFUSAL_MESSAGE : `${CAPABILITY_REFUSAL_MESSAGE}: ${detail}` };
     // A credential-resolution failure specifically (see the marker doc comment above) is an `auth`
     // problem, not a `server` one — checked BEFORE the generic api_error fallback, never instead of
     // it, so every other pre-request resolution failure (an unknown model, say) keeps reading as

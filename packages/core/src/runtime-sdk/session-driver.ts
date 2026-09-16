@@ -436,6 +436,16 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // WS-20: `model` is ALWAYS a provider-qualified tag now (or the winter-test escape hatch) —
       // `providerFor` names exactly its provider, no inventory-order tie-break, no "router's decided
       // provider" hotfix needed (that hotfix existed only because a BARE id could be ambiguous).
+      // 2026-09-17 field report: an EXISTING record gets the same typed refusal `create()` gives a fresh
+      // one — 0.114.1 resumed a dispatch session with `model: "unstated"` and no provider, and the
+      // child's own "a bare model id needs a provider" was all the user saw.
+      if (model === UNSTATED_TAG) {
+        throw new WinterLegRefusal(
+          "runtime_selection_refused",
+          `this ${mode} session has no runnable model: its pin resolves to no known slot for this daemon's own provider (${ownProviderFor(settings)}) — set settings.pins.dispatch explicitly, or pick a default model whose provider serves it`,
+          "pin-unstated",
+        );
+      }
       const selection = model === undefined ? undefined : providerFor(model, deps.home);
       // WS-19 (W19-6): a BYO endpoint travels as the provider's connection, or the catalog's own row
       // would route it to that provider's default endpoint. There is deliberately NO daemon-side

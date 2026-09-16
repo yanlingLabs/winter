@@ -587,8 +587,13 @@ export function pinsFor(settings: Settings | null | undefined): {
   // serve its own family's terra/luna slot yields `UNSTATED_TAG`, and every one of these doors
   // already refuses/skips typed on that sentinel (`internalModelFor`'s own guard, session-driver.ts's
   // dispatch door) rather than silently running on a provider nobody configured.
+  // 2026-09-17 field report (0.114.1): with a DeepSeek/Claude primary every pin became the UNSTATED
+  // sentinel, and an EXISTING dispatch record then resumed with `model: "unstated"` and no provider.
+  // The pin now falls back to the user's OWN tag — still no provider chosen by code, it is the model
+  // the user already picked. dream/cleaner/research additionally pass `internalModelFor`, so they
+  // stay inert (typed, one log line) on a non-internal provider.
   const defaultFor = (slotName: "terra" | "luna"): ModelTag => {
-    return facingNameToTag(ownProvider, slotName) ?? UNSTATED_TAG;
+    return facingNameToTag(ownProvider, slotName) ?? (primary as ModelTag);
   };
   const terra = defaultFor("terra");
   const luna = defaultFor("luna");

@@ -477,7 +477,10 @@ describe("open()'s replay passes the pre-turn credential gate (N2)", () => {
   // naming the "unstated" pseudo-provider or hand a real child the literal model string "unstated".
   test("M6: dispatch refuses typed when its pin resolves to UNSTATED_TAG, naming pins.dispatch — no record is minted", async () => {
     const settings = {
+      // 2026-09-17: a Claude primary now pins to ITSELF (pinsFor falls back to the user's own tag), so the
+      // refusal is exercised through an EXPLICIT sentinel pin — the only way UNSTATED reaches this door.
       provider: { model: "anthropic/claude-sonnet-5" },
+      pins: { dispatch: "unstated/unstated" },
       runtimes: { winterLeg: { chat: true, dispatch: true, code: false }, winterIdleTimeoutSec: 10 },
     } as unknown as Settings;
     const t = table({ settings: () => settings });
