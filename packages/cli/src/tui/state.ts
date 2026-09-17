@@ -170,7 +170,6 @@ export function initialState(): TuiState {
 type WireEvent = { type: string; threadId?: string; [k: string]: unknown };
 
 const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
-const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 const num = (v: unknown, fallback = 0): number => (typeof v === "number" ? v : fallback);
 
 /** Human label for a peripheral capability class in the CU lease notes (Phase 5 CU). Unknown
