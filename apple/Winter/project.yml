@@ -650,8 +650,8 @@ targets:
         CFBundleDisplayName: "$(WINTER_APP_NAME)"
         CFBundleIdentifier: "$(PRODUCT_BUNDLE_IDENTIFIER)"
         CFBundleIconFile: "$(WINTER_APP_ICON)"
-        CFBundleShortVersionString: "0.114.2"
-        CFBundleVersion: "0.114.2"
+        CFBundleShortVersionString: "0.114.3"
+        CFBundleVersion: "0.114.3"
         LSUIElement: true
         LSMinimumSystemVersion: "26.0"
         # panel-cef Task 3: NSPrincipalClass is DELIBERATELY ABSENT. `NSPrincipalClass:
