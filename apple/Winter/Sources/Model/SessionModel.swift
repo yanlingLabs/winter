@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import WinterProtocol
 import WinterKit
 
@@ -1359,6 +1360,16 @@ final class SessionModel: ObservableObject {
     @Published private(set) var state = OrbSessionState()
     private let notifier: NotificationPosting
 
+    /// provider_retry (WinterProtocol Swift mirror): a raw pass-through of every event `apply`
+    /// receives, one event at a time, in arrival order — for UI-only consumers that need a
+    /// TRANSIENT event directly (today just `FieldStateAdapter`'s retry chip). Deliberately NOT
+    /// threaded through `SessionReducer`/`OrbSessionState`: `provider_retry` never enters
+    /// replayable state (it is broadcast-only, exempt from the JSONL and from `session.history`
+    /// — see `TRANSIENT_EVENT_TYPES`'s doc in `packages/protocol/src/events.ts`), and folding it
+    /// into the pure reducer would mean special-casing something explicitly designed not to
+    /// survive replay. Fires synchronously from `apply`, after the reducer has already run.
+    let events = PassthroughSubject<SessionEvent, Never>()
+
     /// task-30 (push-notification track): how fresh `notificationRequested.ts` must be (wall-clock
     /// ms) to actually post a native alert. See `apply`'s own doc comment for why this exists —
     /// internal (not `private`) so `SessionModelTests` can pin the exact boundary rather than
@@ -1400,6 +1411,7 @@ final class SessionModel: ObservableObject {
                 notifier.post(title: v.title, body: v.message)
             }
         }
+        events.send(event)
     }
 
     func apply(connection: ConnectionState) {
