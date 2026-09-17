@@ -176,9 +176,14 @@ async function* translateEvents(
         if (call) yield { type: "tool_call", callId: ev.id, name: call.name, argsJson: call.args };
         break;
       }
-      case "usage":
-        yield { type: "usage", inputTokens: Math.max(0, Math.trunc(ev.inputTokens)), outputTokens: Math.max(0, Math.trunc(ev.outputTokens)) };
+      case "usage": {
+        // Agent SDK 0.0.15 reports `inputTokens` as the NON-cached prompt for every provider family,
+        // with cache reads/writes beside it. The quota ledger counts the whole prompt, so add them back
+        // (the same rule the runtime's own codex-oauth quota applies).
+        const prompt = ev.inputTokens + (ev.cacheReadTokens ?? 0) + (ev.cacheWriteTokens ?? 0);
+        yield { type: "usage", inputTokens: Math.max(0, Math.trunc(prompt)), outputTokens: Math.max(0, Math.trunc(ev.outputTokens)) };
         break;
+      }
       case "done":
         // Winter's `done.stopReason` is a 3-way enum (`end_turn`|`tool_calls`|`aborted`); the
         // runtime's is 5-way. `max_tokens`/`refusal` both fold to `end_turn` — the turn DID

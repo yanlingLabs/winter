@@ -92,7 +92,11 @@ describe("child-parser contract (winter-agent-sdk coerceMaterial)", () => {
     // 0.0.13 → 0.0.14 (the Codex usage-limit hotfix): `git diff v0.0.13 v0.0.14 --
     // packages/runtime/src/provider/keychain-store.ts` came back EMPTY (0 lines) — only
     // provider-runtime/src/errors.ts and version stamps moved; the mirror stands unchanged.
-    expect(pkg.version).toBe("0.0.14");
+    //
+    // 0.0.14 → 0.0.15 (task-frame + spawn-surface parity): `git diff v0.0.14 v0.0.15 --
+    // packages/runtime/src/provider/keychain-store.ts` came back EMPTY (0 lines); the mirror stands
+    // unchanged.
+    expect(pkg.version).toBe("0.0.15");
   });
 
 

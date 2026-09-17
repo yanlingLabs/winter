@@ -146,6 +146,23 @@ describe("translateEvents — the P8d-13 subscription-quota carry", () => {
     expect(yielded).toEqual([{ type: "text_delta", delta: "still streaming" }, { type: "done", stopReason: "end_turn" }]);
   });
 
+  test("usage: the quota figure is the whole prompt — cache reads and writes are added back to the non-cached input", async () => {
+    const events = _translateEventsForTests(
+      fakeRuntimeEvents([
+        { type: "usage", inputTokens: 20, outputTokens: 7, cacheReadTokens: 80, cacheWriteTokens: 5 },
+        { type: "usage", inputTokens: 12, outputTokens: 3 },
+        { type: "done", stopReason: "stop" },
+      ]),
+    );
+    const yielded = [];
+    for await (const e of events) yielded.push(e);
+    expect(yielded).toEqual([
+      { type: "usage", inputTokens: 105, outputTokens: 7 },
+      { type: "usage", inputTokens: 12, outputTokens: 3 },
+      { type: "done", stopReason: "end_turn" },
+    ]);
+  });
+
   test("with no onSubscriptionQuota callback, the frame is silently dropped (this module's pre-8d behaviour when nobody asks)", async () => {
     const events = _translateEventsForTests(fakeRuntimeEvents([{ type: "rate_limit", kind: "subscription-quota", info: { x: 1 } }, { type: "done", stopReason: "stop" }]));
     const yielded = [];
