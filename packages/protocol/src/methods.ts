@@ -500,6 +500,25 @@ export const PluginInfoSchema = z.object({
    *  plugins, which never run a process and so have no supervisor status to report. Optional so
    *  older-shaped fixtures/servers still parse, same precedent as the Phase 4a Task 3 fields above. */
   status: PluginRuntimeStatusSchema.optional(),
+  /** Daemon settings surface (2026-09-17 plan, item 1): `winter-plugin.json`'s
+   *  `contributes.hooks` VERBATIM — mirrors `plugin-manifest.ts`'s `WinterPluginManifest.contributes.hooks`
+   *  shape exactly (agent/plugins.ts's `PluginInfo.manifestHooks`, itself filled from the SAME single
+   *  `loadManifest` call `PluginStore.list()` already makes). One entry per declared hook, in manifest
+   *  order — never regrouped by event, so a manifest with two `pre-tool` hooks round-trips as two
+   *  entries, not one. `undefined` (the key absent from the wire object, never an empty array) for a
+   *  legacy plugin or a manifest plugin that declares no hooks at all — `PluginInfo.manifestHooks` is
+   *  `undefined` in both those cases, and JSON drops an `undefined`-valued key entirely, so the two
+   *  are indistinguishable on the wire, exactly as they are in `PluginInfo` itself. Before this field
+   *  existed, `plugins.list`'s handler (ipc/server.ts) already carried `manifestHooks` on the raw
+   *  object it returned — genuinely on the wire — but `WinterClient.validated()` (packages/cli/src/
+   *  client.ts) runs every result through this schema's `.safeParse()`, and zod strips a key absent
+   *  from the schema by default: every CLI caller was silently losing it. This field is additive
+   *  (`.optional()`), so an older daemon's response (no `manifestHooks` key at all) still parses. */
+  manifestHooks: z.array(z.object({
+    event: z.enum(["session-start", "pre-tool", "post-tool", "turn-end"]),
+    command: z.string().min(1),
+    timeoutMs: z.number().int().positive().optional(),
+  })).optional(),
 });
 export const PluginsListParams = z.object({});
 export const PluginsListResult = z.object({ ok: z.literal(true), plugins: z.array(PluginInfoSchema) });

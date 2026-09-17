@@ -439,6 +439,27 @@ describe("plugins.list schema", () => {
     }
     expect(() => PluginInfoSchema.parse({ name: "demo", skills: [], hasMcp: false, mcpEnabled: true, disabled: false, status: "bogus" })).toThrow();
   });
+
+  test("daemon settings surface item 1: manifestHooks mirrors WinterPluginManifest.contributes.hooks exactly, verbatim (no regrouping) — absent when omitted", () => {
+    // Absent entirely (legacy/no-hooks plugin, agent/plugins.ts's PluginInfo.manifestHooks shape).
+    expect(PluginInfoSchema.parse({ name: "bare", skills: [], hasMcp: false, mcpEnabled: false, disabled: false }).manifestHooks).toBeUndefined();
+    // Every declared hook event, and duplicate events for the same plugin both survive — the
+    // schema is a plain array mirror of plugin-manifest.ts's `contributes.hooks`, never regrouped
+    // or deduped by event.
+    const hooks = [
+      { event: "session-start", command: "notify.sh" },
+      { event: "pre-tool", command: "guard.sh", timeoutMs: 250 },
+      { event: "pre-tool", command: "guard2.sh" },
+      { event: "post-tool", command: "observe.sh" },
+      { event: "turn-end", command: "wrapup.sh" },
+    ] as const;
+    const info = PluginInfoSchema.parse({ name: "demo", skills: [], hasMcp: false, mcpEnabled: true, disabled: false, manifestHooks: hooks });
+    expect(info.manifestHooks).toEqual(hooks as unknown as typeof info.manifestHooks);
+    // Same door's own shape guards: an unknown event is refused, and a blank command is refused
+    // (the manifest schema's own `command: z.string().min(1)`).
+    expect(() => PluginInfoSchema.parse({ name: "demo", skills: [], hasMcp: false, mcpEnabled: true, disabled: false, manifestHooks: [{ event: "bogus", command: "x" }] })).toThrow();
+    expect(() => PluginInfoSchema.parse({ name: "demo", skills: [], hasMcp: false, mcpEnabled: true, disabled: false, manifestHooks: [{ event: "pre-tool", command: "" }] })).toThrow();
+  });
 });
 
 describe("ask_user.respond / task.list schemas", () => {
