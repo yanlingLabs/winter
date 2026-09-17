@@ -1389,6 +1389,12 @@ if (import.meta.main) {
     // print the operator-facing message and exit cleanly rather than an uncaught-exception stack
     // trace; the daemon never auto-resumes on its own (`winter migrate --resume`/`--rollback` is
     // the door).
+    // 2026-09-17: tee this process's stdout/stderr into <home>/logs/daemon.log (rotating) BEFORE the
+    // daemon boots, so the boot lines themselves are captured — the release app wires our stdio to
+    // /dev/null, and the file is the only diagnostic that survives that.
+    const { installDaemonLogFile } = await import("@yanlinglabs/winter-core");
+    const daemonLog = installDaemonLogFile(resolveWinterHome());
+    console.error(`daemon log: ${daemonLog.path}`);
     let daemon: Awaited<ReturnType<typeof startDaemon>>;
     try {
       daemon = await startDaemon();
@@ -1538,6 +1544,14 @@ if (import.meta.main) {
         const dir = anthropicConfigDirFor(home);
         const present = existsSync(join(dir, "credentials", `${ANTHROPIC_PROFILE_NAME}.json`));
         console.log(`${AQUA}anthropic console profile:${RESET} ${present ? "present" : "absent"} ${DIM}(config dir ${dir})${RESET}`);
+        try {
+          const { daemonLogPathFor } = await import("@yanlinglabs/winter-core");
+          const { statSync: st } = await import("node:fs");
+          const logPath = daemonLogPathFor(resolveWinterHome());
+          let size = "absent";
+          try { size = `${Math.round(st(logPath).size / 1024)} KB`; } catch { /* not written yet */ }
+          console.log(`${AQUA}daemon log:${RESET} ${logPath} ${DIM}(${size})${RESET}`);
+        } catch { /* doctor never crashes on a diagnostic */ }
       } catch (err) {
         console.log(`${AQUA}anthropic console profile:${RESET} ${DIM}unavailable (${err instanceof Error ? err.message : "unknown error"})${RESET}`);
       }

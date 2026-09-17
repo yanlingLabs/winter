@@ -185,3 +185,5 @@ export {
   type ProjectMigrationPlan,
   type ProjectMigrationStep,
 } from "./migration/project-files";
+
+export { installDaemonLogFile, daemonLogPathFor, DAEMON_LOG_FILE, DAEMON_LOG_MAX_BYTES, type DaemonLogFileHandle } from "./daemon-log-file";
