@@ -179,7 +179,7 @@ async function runModel(ctx: CommandCtx, argText: string): Promise<void> {
     next = setProviderModel(next, parseModelTag(action.slug));
   }
   if (action.kind === "setEffort" || action.kind === "setModelAndEffort") {
-    const err = validateEffort(action.effort);
+    const err = validateEffort(action.effort, next.provider.model);
     if (err) { ctx.appendNote(err); return; }
     next = setReasoningEffort(next, action.effort as NonNullable<Settings["provider"]["reasoningEffort"]>);
   }

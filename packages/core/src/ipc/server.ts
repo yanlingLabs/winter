@@ -685,6 +685,12 @@ function assertEffortSelectable(effort: string, model: string, mode: string | un
     return;
   }
   const allowed = effortsForModel(model);
+  // 2026-09-17: a real catalog row with NO vocabulary takes no effort at all — refuse rather than
+  // let any tier through to a child that will refuse it typed (98 of 618 rows are shaped like this).
+  // Only a row the catalog does not know (a BYO endpoint) keeps the "unconstrained" passthrough.
+  if (allowed.length === 0 && model && rowForTag(model) !== undefined) {
+    throw new RpcFailure(ERR.INVALID_PARAMS, `model '${model}' declares no reasoning-effort vocabulary — an effort cannot be set for it (leave it on the provider's default)`);
+  }
   if (allowed.length > 0 && !allowed.includes(effort)) {
     const forModel = model ? `by model '${model}'` : "by the configured provider";
     throw new RpcFailure(ERR.INVALID_PARAMS, `effort '${effort}' is not accepted ${forModel} — supported: ${allowed.join(", ")}`);

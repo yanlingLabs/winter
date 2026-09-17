@@ -99,3 +99,19 @@ export function familyListingFromCatalog(): ModelFamilyListing {
   });
   return { active: undefined, families };
 }
+
+/** 2026-09-17: an IMPLICIT effort (the dispatch pin's fixed tier, a settings default) is mapped onto the
+ *  row's declared vocabulary — `wanted` when the row lists it, else the row's own `defaultEffort`, else
+ *  NOTHING (the request carries no effort and the provider's default applies). Only an EXPLICIT
+ *  per-session effort is ever sent verbatim (and refused typed by the child when unsupported). A pin
+ *  must never make a session refuse over a tier the user never chose — 98 of 618 catalog rows declare
+ *  no vocabulary at all. `winter-test/*` and unknown rows pass `wanted` through (the harness doubles
+ *  accept anything; a BYO endpoint has no catalog evidence either way). */
+export function implicitEffortFor(tag: string, wanted: string): string | undefined {
+  const row = rowForTag(tag);
+  if (row === undefined) return wanted;
+  const vocab = row.reasoning?.efforts ?? [];
+  if (vocab.includes(wanted)) return wanted;
+  const fallback = row.reasoning?.defaultEffort;
+  return typeof fallback === "string" && vocab.includes(fallback) ? fallback : undefined;
+}

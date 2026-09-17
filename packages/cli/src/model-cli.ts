@@ -154,9 +154,17 @@ export function internalProviderNote(tag: string): string | undefined {
  *  constant's own comment). Per-model rejection (e.g. "minimal", which the backend rejects on a
  *  per-model basis) is NOT validated here — the backend rejects unsupported combos itself.
  *  Returns an error message, or undefined when valid. */
-export function validateEffort(effort: string): string | undefined {
-  if ((REASONING_EFFORTS as readonly string[]).includes(effort)) return undefined;
-  return `invalid effort "${effort}" — must be one of: ${REASONING_EFFORTS.join(", ")}`;
+export function validateEffort(effort: string, tag?: string): string | undefined {
+  if (!(REASONING_EFFORTS as readonly string[]).includes(effort)) return `invalid effort "${effort}" — must be one of: ${REASONING_EFFORTS.join(", ")}`;
+  // 2026-09-17: the MODEL decides — a row that declares no vocabulary takes no effort; a row that
+  // declares one accepts only its members (plus "none", Winter's unset).
+  if (tag === undefined) return undefined;
+  const row = rowForTag(tag);
+  if (row === undefined) return undefined; // unknown to the catalog (BYO): unconstrained
+  const vocab = row.reasoning?.efforts ?? [];
+  if (vocab.length === 0) return `model ${modelIdPortion(tag)} (${splitTag(tag).providerId}) takes no reasoning effort — leave it on the provider's default`;
+  if (effort === "none" || vocab.includes(effort)) return undefined;
+  return `effort "${effort}" is not supported by ${modelIdPortion(tag)} — supported: none, ${vocab.join(", ")}`;
 }
 
 /** Winter Phase 8d (P8d-8, Task 4.3) + WS-20: validates an advisor TAG — shape/provider first
