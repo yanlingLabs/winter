@@ -86,12 +86,16 @@ export type ReviewInput =
  *  can escalate to a human rather than silently allowing the call. */
 export class BashReviewer {
   private readonly provider: { provider: Provider; model: string };
-  private readonly model: string;
+  // Daemon settings surface (2026-09-17 plan, item 4a): same live-getter fix as `SessionTitler`'s
+  // `model` (titles.ts) — `reviewer.model` used to be resolved ONCE at daemon.ts construction time
+  // and handed here as a plain string, a boot snapshot CLAUDE.md's no-restart rule forbids. `model`
+  // is now the getter itself, re-read on every `review()` call.
+  private readonly model: (() => string | undefined) | undefined;
   private readonly timeoutMs: number;
 
-  constructor(deps: { provider: { provider: Provider; model: string }; model?: string; timeoutMs?: number }) {
+  constructor(deps: { provider: { provider: Provider; model: string }; model?: () => string | undefined; timeoutMs?: number }) {
     this.provider = deps.provider;
-    this.model = deps.model ?? deps.provider.model;
+    this.model = deps.model;
     this.timeoutMs = deps.timeoutMs ?? Number(process.env.WINTER_REVIEW_TIMEOUT_MS ?? 15000);
   }
 
@@ -112,7 +116,7 @@ export class BashReviewer {
     const run = (async () => {
       let text = "";
       for await (const ev of this.provider.provider.streamTurn({
-        model: this.model,
+        model: this.model?.() ?? this.provider.model,
         instructions,
         input: turnInput,
         tools: [],

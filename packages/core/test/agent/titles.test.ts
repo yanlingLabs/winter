@@ -84,6 +84,48 @@ describe("SessionTitler", () => {
     expect(provider.requests.length).toBe(1);
   });
 
+  // Daemon settings surface (2026-09-17 plan, item 4a): `model` is now a LIVE getter, re-invoked on
+  // every `maybeTitle()` call — proves the daemon.ts boot-snapshot bug is actually fixed, not just
+  // that the constructor accepts a function. Two DIFFERENT sessions (a session titles at most once)
+  // so two real provider calls happen against the SAME titler instance, no reconstruction between
+  // them — exactly what a `titles.model` write hitting a running daemon needs.
+  test("model is read LIVE — a getter mutated between calls changes the NEXT call, no restart", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-titles-home-"));
+    const store = new SessionStore(home);
+    const hub = new SessionHub(store);
+    const provider = new FakeProvider([...titleScript("first"), ...titleScript("second")]);
+    let liveModel = "openai/gpt-5.4";
+    const titler = new SessionTitler({ provider: { provider, model: "fake-1" }, store, hub, model: () => liveModel });
+
+    const sessionA = store.createSession("global", { cwd: "/tmp" });
+    seedTurn(store, sessionA);
+    await titler.maybeTitle(sessionA);
+    expect(provider.requests[0]?.model).toBe("openai/gpt-5.4");
+
+    // Mutate the setting the getter reads — no titler reconstruction, exactly what a settings.json
+    // hot-swap on a live daemon does.
+    liveModel = "anthropic/claude-opus-5";
+    const sessionB = store.createSession("global", { cwd: "/tmp" });
+    seedTurn(store, sessionB);
+    await titler.maybeTitle(sessionB);
+    expect(provider.requests[1]?.model).toBe("anthropic/claude-opus-5");
+  });
+
+  // The getter returning `undefined` (daemon.ts's own shape when `internalModelFor` refuses a
+  // mismatched provider) falls back to `deps.provider.model` — identical to no override at all,
+  // same fallback `deps.model ?? deps.provider.model` always had.
+  test("a getter returning undefined falls back to the provider's own model", async () => {
+    const home = mkdtempSync(join(tmpdir(), "winter-titles-home-"));
+    const store = new SessionStore(home);
+    const hub = new SessionHub(store);
+    const provider = new FakeProvider(titleScript("t"));
+    const titler = new SessionTitler({ provider: { provider, model: "fake-1" }, store, hub, model: () => undefined });
+    const sessionId = store.createSession("global", { cwd: "/tmp" });
+    seedTurn(store, sessionId);
+    await titler.maybeTitle(sessionId);
+    expect(provider.requests[0]?.model).toBe("fake-1");
+  });
+
   test("no user message → no event, no model call", async () => {
     const { store, titler, sessionId, provider } = setup(titleScript("Should never be used"));
     // No seedTurn: session has no main-thread user_message yet.

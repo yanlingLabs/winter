@@ -48,6 +48,31 @@ describe("BashReviewer", () => {
     ).toEqual({ verdict: "unsafe", reason: "recursive delete" });
   });
 
+  // Daemon settings surface (2026-09-17 plan, item 4a): `model` is now a LIVE getter, re-invoked on
+  // every `review()` call — proves the daemon.ts boot-snapshot bug is actually fixed, not just that
+  // the constructor accepts a function. Same instance, two calls, the getter's return value
+  // mutated in between — exactly what a `reviewer.model` write hitting a running daemon needs.
+  test("model is read LIVE — a getter mutated between calls changes the NEXT call, no restart", async () => {
+    const p = new FakeProvider([...verdict("safe", "first"), ...verdict("safe", "second")]);
+    let liveModel = "openai/gpt-5.4";
+    const reviewer = new BashReviewer({ provider: { provider: p, model: "fake" }, model: () => liveModel } as any);
+    await reviewer.review({ command: "ls" });
+    expect(p.requests[0]?.model).toBe("openai/gpt-5.4");
+
+    liveModel = "anthropic/claude-opus-5";
+    await reviewer.review({ command: "pwd" });
+    expect(p.requests[1]?.model).toBe("anthropic/claude-opus-5");
+  });
+
+  // The getter returning `undefined` (daemon.ts's own shape when `internalModelFor` refuses a
+  // mismatched provider) falls back to `deps.provider.model` — identical to no override at all.
+  test("a getter returning undefined falls back to the provider's own model", async () => {
+    const p = new FakeProvider(verdict("safe", "ok"));
+    const reviewer = new BashReviewer({ provider: { provider: p, model: "fake" }, model: () => undefined } as any);
+    await reviewer.review({ command: "ls" });
+    expect(p.requests[0]?.model).toBe("fake");
+  });
+
   test("tools:[] and the justification reaches the provider input", async () => {
     const p = new FakeProvider(verdict("safe", "ok"));
     await new BashReviewer({ provider: { provider: p, model: "fake" } } as any).review({
