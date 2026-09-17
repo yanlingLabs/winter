@@ -1303,8 +1303,16 @@ export async function startDaemon(opts: {
   // Fix wave (review row 4): session titles on the Winter leg. The titler stays on Winter's OWN
   // provider layer (P8b-10 — never `sdk.query()`), so it needs `agentProvider`; a no-provider
   // daemon simply titles nothing, as before. `titles.enabled` is read LIVE at every fire (the
-  // engine-era wiring was a boot snapshot; no setting may need a restart), `titles.model` stays the
-  // boot snapshot it always was (it names WHICH model titles, not whether titling is on).
+  // engine-era wiring was a boot snapshot; no setting may need a restart).
+  // Daemon settings surface (2026-09-17 plan, item 4a): `titles.model` is now ALSO read live — it
+  // used to be resolved ONCE here at construction time and handed to `SessionTitler` as a plain
+  // string, which is exactly the boot-snapshot CLAUDE.md's "no setting may ever require a daemon
+  // restart" forbids: a `settings.setModelRole({role:"titles.model",...})` write landed on disk
+  // and in the live `settings` binding, but this daemon's OWN titler kept titling on whatever tag
+  // was here when THIS line ran. `titlesModel` is now a getter, re-invoked by `SessionTitler` on
+  // every `maybeTitle()` call, closing over the SAME live `settings` binding every other hot getter
+  // in this file (`reviewerAllow`, `screenshotMaxDim`, …) already reads.
+  //
   // WS-20 (review round 2, M2): `titles.model` is a qualified TAG (any provider), but the titler
   // runs on the daemon's own INTERNAL Provider (`agentProvider`, one provider per daemon) — sending
   // a tag naming a different provider straight to `streamTurn` would hand that backend a model id it
@@ -1312,9 +1320,18 @@ export async function startDaemon(opts: {
   // provider, else logs one line naming the field and returns `undefined`, which falls through to
   // `SessionTitler`'s own `deps.model ?? deps.provider.model` default (the provider's own model) —
   // identical behavior to having no override configured at all.
-  const titlesModel = settings?.titles?.model === undefined
-    ? undefined
-    : internalModelFor(settings.titles.model, { providerId: ownProviderFor(settings) }, "titles.model");
+  //
+  // A SEPARATE, pre-existing gap this does NOT fix (recorded in the item 4 report, not fixed here):
+  // `agentProvider` itself — the internal Provider instance `internalModelFor` compares THIS live
+  // tag's provider against — is built ONCE at boot from whatever `settings.provider.model` named
+  // THEN (just above) and is never rebuilt on a hot `provider.model` write. So a live
+  // `provider.model` change updates what `ownProviderFor(settings)` answers here before the
+  // daemon's actual internal Provider instance has caught up — the same caveat `settings.ts`'s
+  // `modelRoleInfo` documents on its own read side.
+  const titlesModel = (): string | undefined => {
+    const m = settings?.titles?.model;
+    return m === undefined ? undefined : internalModelFor(m, { providerId: ownProviderFor(settings) }, "titles.model");
+  };
   const sessionTitler = agentProvider === null ? undefined : new SessionTitler({ provider: agentProvider, store, hub, model: titlesModel });
   const titler = sessionTitler === undefined ? undefined : {
     maybeTitle: (sid: string): Promise<void> => (settings?.titles?.enabled === false ? Promise.resolve() : sessionTitler.maybeTitle(sid)),
@@ -1365,9 +1382,14 @@ export async function startDaemon(opts: {
   // WS-20 (review round 2, M2): same guard as `titlesModel` above — `reviewer.model` is a qualified
   // TAG, the reviewer runs on the same per-daemon internal Provider, and a mismatched tag falls
   // through to `BashReviewer`'s own provider-model fallback rather than reaching `streamTurn` raw.
-  const reviewerModel = settings?.reviewer?.model === undefined
-    ? undefined
-    : internalModelFor(settings.reviewer.model, { providerId: ownProviderFor(settings) }, "reviewer.model");
+  // Daemon settings surface (2026-09-17 plan, item 4a): same live-getter fix as `titlesModel` above
+  // — `reviewer.model` no longer freezes at whatever it was when THIS line ran; `BashReviewer` now
+  // re-reads it on every `review()` call. Same pre-existing `agentProvider` boot-binding caveat
+  // applies (see `titlesModel`'s own comment) — not fixed here, out of this item's scope.
+  const reviewerModel = (): string | undefined => {
+    const m = settings?.reviewer?.model;
+    return m === undefined ? undefined : internalModelFor(m, { providerId: ownProviderFor(settings) }, "reviewer.model");
+  };
   const bashReviewer = agentProvider === null || agentProvider === undefined
     ? undefined
     : new BashReviewer({ provider: agentProvider, model: reviewerModel });

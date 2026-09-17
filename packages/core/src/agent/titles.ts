@@ -16,7 +16,14 @@ export class SessionTitler {
   private readonly provider: { provider: Provider; model: string };
   private readonly store: SessionStore;
   private readonly hub: SessionHub;
-  private readonly model: string;
+  // Daemon settings surface (2026-09-17 plan, item 4a): `titles.model` used to be resolved ONCE at
+  // daemon.ts construction time (a boot snapshot of `settings?.titles?.model`, in effect for the
+  // rest of that daemon process's life) and handed here as a plain string — which violated
+  // CLAUDE.md's "no setting may ever require a daemon restart" the same way a boot-snapshotted
+  // getter anywhere else would. `model` is now the getter ITSELF (the same `() => value` thunk
+  // shape `daemon.ts` already uses for `screenshotMaxDim`/`reviewerEnabled`/etc.), called fresh on
+  // every `maybeTitle()` — so a live `titles.model` write reaches the very next title, no restart.
+  private readonly model: (() => string | undefined) | undefined;
   private readonly timeoutMs: number;
   // Re-entrancy guard: the engine fires maybeTitle() fire-and-forget at every depth-0 turn
   // completion, and a slow model call must not overlap with itself for the same session (which
@@ -27,13 +34,16 @@ export class SessionTitler {
     provider: { provider: Provider; model: string };
     store: SessionStore;
     hub: SessionHub;
-    model?: string;
+    /** A live getter, re-read on every `maybeTitle()` call — never a boot snapshot. `undefined`
+     *  (the getter itself, or its return value) falls back to `deps.provider.model`, unchanged
+     *  from before this was a getter. */
+    model?: () => string | undefined;
     timeoutMs?: number;
   }) {
     this.provider = deps.provider;
     this.store = deps.store;
     this.hub = deps.hub;
-    this.model = deps.model ?? deps.provider.model;
+    this.model = deps.model;
     // A junk env value must fall back to the default, not become NaN — setTimeout(fn, NaN) fires
     // immediately (dreamer.ts's constructor guards the same footgun the same way).
     const n = Number(process.env.WINTER_TITLE_TIMEOUT_MS);
@@ -79,7 +89,7 @@ export class SessionTitler {
     const run = (async () => {
       let text = "";
       for await (const ev of this.provider.provider.streamTurn({
-        model: this.model,
+        model: this.model?.() ?? this.provider.model,
         instructions: TITLE_INSTRUCTION,
         input: turnInput,
         tools: [],

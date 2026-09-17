@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { SDK_VERSION } from "@yanlinglabs/winter-agent-sdk";
+import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
@@ -25,6 +26,23 @@ export function installedClaudeAgentSdkVersion(): string | undefined {
   try {
     const pkgJsonPath = createRequire(import.meta.url).resolve("@anthropic-ai/claude-agent-sdk/package.json");
     return (JSON.parse(readFileSync(pkgJsonPath, "utf8")) as { version: string }).version;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Daemon settings surface (2026-09-17 plan, item 3): the installed `@yanlinglabs/winter-runtime-sdk`
+ * (the router)'s own declared version, or `undefined` when it cannot be resolved — a compiled
+ * `$bunfs` binary, per `readResolvedManifestVersion`'s own doc (it walks up from the resolved entry
+ * file to find a `package.json`, which does not exist inside the bundle), never a throw. This is
+ * NOT `WINTER_PEER_VERSIONS.winterAgentSdk` (the WRAPPER's own `SDK_VERSION`, re-exported by that
+ * package) — it is the ROUTER package's own manifest, the third installed peer `versions.get` reports
+ * alongside it and `installedClaudeAgentSdkVersion()`.
+ */
+export function installedWinterRuntimeSdkVersion(): string | undefined {
+  try {
+    return readResolvedManifestVersion("@yanlinglabs/winter-runtime-sdk");
   } catch {
     return undefined;
   }

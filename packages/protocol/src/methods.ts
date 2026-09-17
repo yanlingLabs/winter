@@ -465,6 +465,114 @@ export const McpServerStatusSchema = z.object({
 export const McpListParams = z.object({ cwd: z.string().optional() });
 export const McpListResult = z.object({ ok: z.literal(true), servers: z.array(McpServerStatusSchema) });
 
+/**
+ * Daemon settings surface (2026-09-17 plan, item 2): `capabilities.list` — the daemon's OWN
+ * in-process `winter__<key>` capability servers (`capabilities/names.ts`'s `CAPABILITY_SERVER_KEYS`
+ * — sessions/computer/browser/office/research/web/lsp/external), read-only, LOCAL role only (never
+ * added to `REMOTE_ALLOWED_METHODS`). Deliberately NOT a widening of `mcp.list`/its `source` enum:
+ * these are daemon-owned MCP servers built per-session (`capabilities/index.ts`'s
+ * `buildCapabilitiesFor`), not a live/failed connection to a user- or plugin-configured server, and
+ * `mcp.list`'s `source` enum ("user"|"project"|"plugin") has no slot for "the daemon itself".
+ */
+export const CapabilitiesListParams = z.object({});
+
+export const SessionModeSchema = z.enum(["code", "dispatch", "chat"]);
+
+/** One capability tool's static facts (`capabilities/names.ts`'s `WINTER_CAPABILITY_TOOLS`,
+ *  mirrored exactly) plus its LIVE per-mode exposure — whether the child actually gets this tool in
+ *  each mode TODAY, derived by calling `runtime-sdk/mode-options.ts`'s `disallowedToolsFor` (never
+ *  re-implemented here), the same table `session-driver.ts` passes every real session's
+ *  `Options.disallowedTools`. */
+export const CapabilityToolInfoSchema = z.object({
+  /** The full wire name a child sees: `mcp__winter__<key>__<tool>` (`capabilityToolName`). */
+  name: z.string(),
+  /** Today's registration (`CapabilityToolFacts.modes`) — NOT a wish list; see that type's own doc. */
+  modes: z.array(SessionModeSchema),
+  /** Mirrors `CapabilityToolFacts.deferred` — `true` (deferred in every mode it's exposed to) or
+   *  the subset of `modes` it's deferred in. Absent means never deferred (immediate everywhere it's
+   *  exposed). Carries no meaning for the Winter leg's `Options` itself — recorded only so the UI
+   *  can reproduce today's exposure faithfully. */
+  deferred: z.union([z.literal(true), z.array(SessionModeSchema)]).optional(),
+  /** Per-mode: whether the child is actually handed this tool today (`!disallowedToolsFor(mode).includes(name)`). */
+  exposure: z.object({ code: z.boolean(), dispatch: z.boolean(), chat: z.boolean() }),
+});
+
+export const CapabilityServerInfoSchema = z.object({
+  key: z.enum(["sessions", "computer", "browser", "office", "research", "web", "lsp", "external"]),
+  /** Whether this server's underlying feature is live RIGHT NOW — the settings gate that applies,
+   *  when one exists (`computer`: `settings.computerUse.enabled === true`; `lsp`: `settings.lsp.enabled
+   *  !== false` — the server is always built, but its tool refuses when the manager is torn down).
+   *  Every other key has no settings gate at all and is always `true`. Never a credential-presence
+   *  check (a missing Exa/Brave key surfaces as a per-call failure, not a listing-time gate). */
+  enabled: z.boolean(),
+  /** `[]` for `external` — its tool set is per-plugin and dynamic, with no corresponding static row
+   *  in `WINTER_CAPABILITY_TOOLS` (mode scoping for it lives on each `ExternalToolSource.modes`
+   *  instead, `capabilities/server.ts`'s documented default). */
+  tools: z.array(CapabilityToolInfoSchema),
+});
+
+export const CapabilitiesListResult = z.object({ ok: z.literal(true), capabilities: z.array(CapabilityServerInfoSchema) });
+
+/**
+ * Daemon settings surface (2026-09-17 plan, item 3): `versions.get` — read-only, LOCAL role only.
+ * Both halves side by side, so a pin≠installed mismatch is a normal response the app renders, never
+ * an error: `pins` are the compile-time peer versions this daemon build was written against
+ * (`runtime-sdk/versions.ts`'s `REQUIRED_*` constants); `installed`/`official` are what is actually
+ * resolvable/staged RIGHT NOW, reusing the SAME resolvers `winter doctor` calls
+ * (`runtime-sdk/runtimes-doctor.ts`'s `diagnoseRuntimes`) rather than a second probe. Every
+ * `installed`/`official` field is independently optional — a miss is reported as absent, never a
+ * thrown error (that IS the diagnostic; see each field's own doc below for why it can be missing).
+ */
+export const VersionsGetParams = z.object({});
+
+export const ResolvedExecutableSchema = z.object({ path: z.string(), source: z.string() });
+
+export const VersionsGetResult = z.object({
+  ok: z.literal(true),
+  /** The running daemon's own version (`CORE_VERSION`). */
+  core: z.string(),
+  pins: z.object({
+    winterAgentSdk: z.string(),
+    winterRuntimeSdk: z.string(),
+    claudeAgentSdk: z.string(),
+  }),
+  installed: z.object({
+    /** The installed `@yanlinglabs/winter-agent-sdk` wrapper's own declared `SDK_VERSION`. Always
+     *  present — the Winter leg has no optional-peer story the claude leg does. */
+    winterAgentSdk: z.string(),
+    /** The installed `@yanlinglabs/winter-runtime-sdk` (router)'s own manifest version, or absent
+     *  when it cannot be resolved (a compiled `$bunfs` binary — `readResolvedManifestVersion`'s own
+     *  doc: there is no real `node_modules` to walk up from inside the bundle). */
+    winterRuntimeSdk: z.string().optional(),
+    /** The installed `@anthropic-ai/claude-agent-sdk`'s own declared version, or absent when the
+     *  optional official peer is not installed at all (a Winter-only host — never an error). */
+    claudeAgentSdk: z.string().optional(),
+    /** Where the `winter` executable resolves from TODAY (path + ladder rung), or absent when it
+     *  does not resolve at all. NO version field: the pinned `winter` binary has no version flag
+     *  (measured — spawning `--version` would hang/error, so this is never attempted); path+source
+     *  is the whole diagnostic this leg can offer without spawning anything. */
+    winterExecutable: ResolvedExecutableSchema.optional(),
+    /** Where the `claude` executable resolves from TODAY (path + ladder rung), or absent when it
+     *  does not resolve at all. Also never spawned here (`diagnoseRuntimes` is read-only by
+     *  construction) — a version string for the resolved claude binary is `official`'s own
+     *  `claudeCode` field below, from the staged `VERSIONS.json`, when one is staged. */
+    claudeExecutable: ResolvedExecutableSchema.optional(),
+  }),
+  /** The staged `runtimes/claude-official/VERSIONS.json` beside the compiled binary, verbatim
+   *  (`runtime-sdk/bundle-layout.ts`'s `VersionsJson`, minus nothing), or `null` when nothing is
+   *  staged (a dev checkout, or a build that never embedded the official leg) — never an error
+   *  either way. */
+  official: z.object({
+    winterAgentSdk: z.string(),
+    winterRuntimeSdk: z.string(),
+    officialSdk: z.string(),
+    claudeCode: z.string(),
+    checksums: z.object({ winterPreSign: z.string(), claude: z.string(), ant: z.string().optional() }),
+    stagedAt: z.string(),
+    winterSource: z.enum(["platform-package", "checkout-build"]).optional(),
+  }).nullable(),
+});
+
 /** The `SupervisorStatus` union (core/plugins/supervisor.ts) plus `"na"` for Tier-1/legacy plugins
  *  that never run a process — shared by `PluginInfoSchema.status` (below) and, from Phase 4d-ii
  *  Task 2, `plugin.enable`'s result, which reports the SAME status right after its hot-apply
@@ -1202,6 +1310,75 @@ export const SettingsSetAdvisorModelResult = z.object({
   ok: z.literal(true),
   /** Echoes back what was actually STORED (never what was requested) — `null` when cleared. */
   model: z.string().nullable(),
+});
+
+/**
+ * Daemon settings surface (2026-09-17 plan, item 4): the nine model-bearing settings roles the Mac
+ * app's Roles pane offers ONE door for. A bare enum here, not an import from core's `settings.ts`
+ * (`MODEL_ROLES`) — protocol never depends on core; that constant is the canonical list this
+ * mirrors literally, kept in sync by hand. `runtimes.advisorModel` overlaps
+ * `SettingsSetAdvisorModelParams`/`settings.setAdvisorModel` above on purpose — this is the ONE
+ * door for all nine roles the Mac app's Roles pane needs, and the handler DELEGATES to
+ * `setAdvisorModel` for this one rather than duplicating its transform; the older, single-role RPC
+ * stays (existing callers, e.g. `winter model --advisor`, are unaffected).
+ */
+export const ModelRole = z.enum([
+  "pins.dispatch", "pins.dream", "pins.cleaner", "pins.research", "pins.researchFallback",
+  "provider.model", "titles.model", "reviewer.model", "runtimes.advisorModel",
+]);
+export type ModelRole = z.infer<typeof ModelRole>;
+
+/** `settings.ts`'s `ModelRoleConstraint` — see that type's own doc for what each value means and
+ *  which roles carry it. */
+export const ModelRoleConstraintSchema = z.enum(["internal-provider", "any", "same-as-session"]);
+
+export const ModelRolePermittedProviderSchema = z.object({
+  providerId: z.string(),
+  displayName: z.string(),
+  /** Every model tag the daemon could actually NAME for this provider today (never hardcoded in
+   *  the UI) — `settings.ts`'s `permittedProviders`. */
+  models: z.array(z.string()),
+});
+
+export const ModelRoleInfoSchema = z.object({
+  /** The effective model — an explicit override, or the SAME default rule the role's real consumer
+   *  uses (`settings.ts`'s `modelRoleInfo`) — or `null` only for `runtimes.advisorModel` when unset
+   *  (no single daemon-wide default exists for it; see `constraint`). */
+  model: z.string().nullable(),
+  /** Whether `model` is an explicit override rather than a computed default. Always `true` for
+   *  `provider.model` (a required field — there is no "unset" state to distinguish). */
+  explicit: z.boolean(),
+  constraint: ModelRoleConstraintSchema,
+  /** The providers/tags the daemon can actually serve for this role TODAY. */
+  permitted: z.array(ModelRolePermittedProviderSchema),
+});
+
+// LOCAL-ROLE ONLY (never added to `REMOTE_ALLOWED_METHODS`): read-only introspection for the Mac
+// app's Roles pane.
+export const SettingsModelRolesParams = z.object({});
+export const SettingsModelRolesResult = z.object({
+  ok: z.literal(true),
+  roles: z.record(ModelRole, ModelRoleInfoSchema),
+});
+
+// LOCAL-ROLE ONLY. `model: null` clears an optional role's override; `provider.model` refuses
+// `null` (no "unset" state — the handler's own `setModelRole` check, reported as INVALID_PARAMS).
+export const SettingsSetModelRoleParams = z.object({
+  role: ModelRole,
+  /** Shape-only check here (a provider-qualified tag, or `null`); provider EXISTENCE and the
+   *  role-specific rules (never the `unstated/unstated` sentinel, `provider.model` never `null`)
+   *  are the handler's own `setModelRole` check, same split `SettingsSetAdvisorModelParams` has. */
+  model: ModelTagSchema.nullable(),
+});
+export const SettingsSetModelRoleResult = z.object({
+  ok: z.literal(true),
+  /** Echoes back what was actually STORED for `role` (never what was requested) — `null` when
+   *  cleared. */
+  model: z.string().nullable(),
+  /** The FULL effective role map, post-write — a `provider.model` write moves every
+   *  `"internal-provider"`/`"any"` role's default (`ownProviderFor`/`pinsFor`, settings.ts), and
+   *  this is how the UI sees that cascade without a second round trip. */
+  roles: z.record(ModelRole, ModelRoleInfoSchema),
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -2016,4 +2193,11 @@ export const METHODS = {
   panelReportNavigation: "panel.reportNavigation",
   panelCommandResult: "panel.commandResult",
   panelReadDiff: "panel.readDiff",
+  // Daemon settings surface (2026-09-17 plan, items 2-4) — read-only introspection plus the
+  // model-roles write door, all LOCAL role only: none of the four appear in
+  // `REMOTE_ALLOWED_METHODS` (server.ts) or its parity test.
+  capabilitiesList: "capabilities.list",
+  versionsGet: "versions.get",
+  settingsModelRoles: "settings.modelRoles",
+  settingsSetModelRole: "settings.setModelRole",
 } as const;

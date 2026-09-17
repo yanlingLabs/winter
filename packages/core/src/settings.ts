@@ -1123,6 +1123,193 @@ export function setAdvisorModel(settings: Settings, model: string | undefined): 
   return { ...settings, runtimes: runtimes as Settings["runtimes"] };
 }
 
+/**
+ * Daemon settings surface (2026-09-17 plan, item 4): the nine model-bearing settings roles the Mac
+ * app's Roles pane offers ONE door for. Mirrors `packages/protocol/src/methods.ts`'s `ModelRole`
+ * enum LITERALLY — protocol never depends on core, so that file hand-spells the same nine strings;
+ * this is the canonical list, kept in sync by hand (the same layering every protocol-side mirror of
+ * a core-only shape already has — there is no shared import to enforce it).
+ */
+export const MODEL_ROLES = [
+  "pins.dispatch", "pins.dream", "pins.cleaner", "pins.research", "pins.researchFallback",
+  "provider.model", "titles.model", "reviewer.model", "runtimes.advisorModel",
+] as const;
+export type ModelRole = (typeof MODEL_ROLES)[number];
+
+/**
+ * WS-20: which of the three routing shapes a role's model actually resolves through — the one
+ * thing that decides its `permitted` set in `modelRoleInfo` below.
+ *
+ *  - `"internal-provider"`: routed through the daemon's SINGLE internal `Provider` instance
+ *    (`providers/manager.ts`'s `createProvider`, built for `ownProviderFor(settings)` only when
+ *    that provider is one of `INTERNAL_PROVIDER_IDS`, else not built at all) — `pins.dream`/
+ *    `pins.cleaner`/`pins.research`/`pins.researchFallback` (gated by `internalModelFor`,
+ *    providers/manager.ts) and `titles.model`/`reviewer.model` (same gate, daemon.ts) all run on
+ *    it. A tag naming any OTHER provider is refused at read time (`internalModelFor` logs and
+ *    skips), never guessed at.
+ *  - `"any"`: routed per-session through the runtime SDK exactly like an ordinary session model —
+ *    `provider.model` (the daemon's own default chat model, `ownProviderFor`) and `pins.dispatch`
+ *    (dispatch's fixed model, `session-driver.ts`) — any catalog provider the daemon has (or could
+ *    have) credentials for, unconstrained by `INTERNAL_PROVIDER_IDS`.
+ *  - `"same-as-session"`: `runtimes.advisorModel` — `mode-options.ts`'s `buildWinterOptions` drops
+ *    an advisor whose provider disagrees with the SESSION's own model's provider (never guesses a
+ *    credential). There is no single daemon-wide default to report: whether the advisor actually
+ *    appears for a given session is decided per-session, not by this setting alone.
+ */
+export type ModelRoleConstraint = "internal-provider" | "any" | "same-as-session";
+
+export function modelRoleConstraint(role: ModelRole): ModelRoleConstraint {
+  switch (role) {
+    case "pins.dream": case "pins.cleaner": case "pins.research": case "pins.researchFallback":
+    case "titles.model": case "reviewer.model":
+      return "internal-provider";
+    case "provider.model": case "pins.dispatch":
+      return "any";
+    case "runtimes.advisorModel":
+      return "same-as-session";
+  }
+}
+
+/** One catalog provider's servable rows for a `modelRoleInfo` `permitted` entry — every model row
+ *  the daemon could actually NAME for this provider today: `status !== "blocked"` (the only status
+ *  the registry refuses to resolve, per `winter-provider-catalog`'s own doc on `ModelStatus`) and
+ *  the provider's own `risk.class !== "blocked"` (the SAME floor `credentialInventory()`,
+ *  runtime-sdk/keychain.ts, already applies to which providers get a Keychain slot at all — a role
+ *  picker must never offer a provider the credential surface itself refuses to list) and
+ *  `scope === "llm"` (stt/tts/embedding/image/video/search rows are never model-role candidates).
+ *  `filterProviderIds` narrows to a single provider (the `"internal-provider"` constraint); omitted
+ *  returns every eligible provider (the `"any"`/`"same-as-session"` constraints). A provider with
+ *  zero servable rows after this filter is dropped entirely — never an empty-but-present entry. */
+function permittedProviders(filterProviderIds?: ReadonlySet<string>): Array<{ providerId: string; displayName: string; models: ModelTag[] }> {
+  const catalog = loadCatalog();
+  const out: Array<{ providerId: string; displayName: string; models: ModelTag[] }> = [];
+  for (const p of catalog.providers) {
+    if (p.risk.class === "blocked") continue;
+    if (p.scope !== "llm") continue;
+    if (filterProviderIds !== undefined && !filterProviderIds.has(p.id)) continue;
+    const models = catalog.models.filter((m) => m.providerId === p.id && m.status !== "blocked").map((m) => m.key as ModelTag);
+    if (models.length === 0) continue;
+    out.push({ providerId: p.id, displayName: p.displayName, models });
+  }
+  return out;
+}
+
+/**
+ * WS-20: per-role read for `settings.modelRoles` (the Mac app's Roles pane) — the effective model
+ * (an explicit override, or the SAME default rule the role's real consumer uses), whether that is
+ * an explicit override, the routing `constraint` (`modelRoleConstraint` above), and the `permitted`
+ * providers/tags the daemon can actually serve for this role TODAY — never hardcoded in the UI,
+ * which is `settings.modelRoles`'s whole reason to exist (the "per-provider internal Provider"
+ * follow-up widens `INTERNAL_PROVIDER_IDS` later and this reader picks it up automatically).
+ *
+ * CAVEAT (recorded, not fixed — out of this item's scope): `titles.model`/`reviewer.model`'s
+ * "effective model when unset" reads back `settings.provider.model` itself, which is an
+ * APPROXIMATION of what `SessionTitler`/`BashReviewer` actually run on
+ * (`deps.model ?? deps.provider.model`, daemon.ts) — the real fallback is the daemon's internal
+ * `Provider` instance's OWN resolved model (`active.liveModel().model`, which can rewrite a
+ * deprecated slug), a value only a LIVE provider instance produces, not a pure settings read. Exact
+ * whenever `settings.provider.model` needs no such rewrite (the common case). A SEPARATE,
+ * pre-existing gap this read does not paper over: `agentProvider` itself (the internal Provider
+ * instance backing BOTH fields) is built ONCE at daemon boot from whatever `settings.provider.model`
+ * named then (`daemon.ts`), and is never rebuilt on a hot `provider.model` write — so a live change
+ * to `provider.model` updates what THIS function reports (and what `internalModelFor` compares
+ * against) before the daemon's actual internal Provider instance has caught up.
+ *
+ * `runtimes.advisorModel`'s "unset" case has no single default to report at all (see
+ * `modelRoleConstraint`'s own doc) — it reads back `null`, never a guess.
+ */
+export function modelRoleInfo(settings: Settings | null | undefined, role: ModelRole): {
+  model: ModelTag | null;
+  explicit: boolean;
+  constraint: ModelRoleConstraint;
+  permitted: Array<{ providerId: string; displayName: string; models: ModelTag[] }>;
+} {
+  const constraint = modelRoleConstraint(role);
+  const ownProvider = ownProviderFor(settings);
+  const permitted = constraint === "internal-provider"
+    ? ((INTERNAL_PROVIDER_IDS as readonly string[]).includes(ownProvider) ? permittedProviders(new Set([ownProvider])) : [])
+    : permittedProviders();
+  const primaryModel = (settings?.provider?.model ?? DEFAULT_PROVIDER.model) as ModelTag;
+
+  switch (role) {
+    case "pins.dispatch":
+      return { model: pinsFor(settings).dispatch, explicit: settings?.pins?.dispatch !== undefined, constraint, permitted };
+    case "pins.dream":
+      return { model: pinsFor(settings).dream, explicit: settings?.pins?.dream !== undefined, constraint, permitted };
+    case "pins.cleaner":
+      return { model: pinsFor(settings).cleaner, explicit: settings?.pins?.cleaner !== undefined, constraint, permitted };
+    case "pins.research":
+      return { model: pinsFor(settings).research, explicit: settings?.pins?.research !== undefined, constraint, permitted };
+    case "pins.researchFallback":
+      return { model: pinsFor(settings).researchFallback, explicit: settings?.pins?.researchFallback !== undefined, constraint, permitted };
+    case "provider.model":
+      // Always "explicit": `ProviderSettings.model` is a REQUIRED field, so every loaded `Settings`
+      // always carries a real, currently-effective value — there is no "unset" state to distinguish.
+      return { model: primaryModel, explicit: true, constraint, permitted };
+    case "titles.model":
+      return { model: settings?.titles?.model ?? primaryModel, explicit: settings?.titles?.model !== undefined, constraint, permitted };
+    case "reviewer.model":
+      return { model: settings?.reviewer?.model ?? primaryModel, explicit: settings?.reviewer?.model !== undefined, constraint, permitted };
+    case "runtimes.advisorModel": {
+      const raw = settings?.runtimes?.advisorModel?.trim();
+      return { model: raw ? (raw as ModelTag) : null, explicit: Boolean(raw), constraint, permitted };
+    }
+  }
+}
+
+/** Every role at once — `settings.modelRoles`'s whole result, and what `settings.setModelRole`
+ *  echoes back post-write so the app sees the FULL cascade (a `provider.model` write moves every
+ *  `"internal-provider"`/`"any"` role's default) without a second round trip. */
+export function modelRolesFor(settings: Settings | null | undefined): Record<ModelRole, ReturnType<typeof modelRoleInfo>> {
+  const out = {} as Record<ModelRole, ReturnType<typeof modelRoleInfo>>;
+  for (const role of MODEL_ROLES) out[role] = modelRoleInfo(settings, role);
+  return out;
+}
+
+/**
+ * WS-20: the ONE write door for all nine model roles (`settings.setModelRole`) — mirrors
+ * `setAdvisorModel`'s own validation exactly (a non-blank value must be a real provider-qualified
+ * tag, and the `unstated/unstated` sentinel is refused even though `isModelTag` itself accepts it —
+ * same "a caller explicitly selecting it here is never a real request" rule) and DELEGATES to
+ * `setAdvisorModel` for the advisor role rather than duplicating its transform.
+ *
+ * `model: null` clears an optional role's override, falling back to `modelRoleInfo`'s own default
+ * rule. `provider.model` has no "unset" state at all (`ProviderSettings.model` is a REQUIRED field)
+ * and THROWS on `null` rather than silently doing nothing — the caller (the RPC handler) reports
+ * this the same way it reports an unresolvable tag, `ERR.INVALID_PARAMS`.
+ */
+export function setModelRole(settings: Settings, role: ModelRole, model: string | null): Settings {
+  if (role === "runtimes.advisorModel") return setAdvisorModel(settings, model ?? undefined);
+  if (role === "provider.model") {
+    if (model === null) throw new TypeError("provider.model: this role has no \"unset\" state (it is a required field) — pass a tag, never null");
+    if (!isModelTag(model) || model === UNSTATED_TAG) throw new TypeError(`not a model tag: ${JSON.stringify(model)}`);
+    return setProviderModel(settings, model as ModelTag);
+  }
+  const trimmed = model?.trim();
+  if (trimmed && (!isModelTag(trimmed) || trimmed === UNSTATED_TAG)) throw new TypeError(`not a model tag: ${JSON.stringify(trimmed)}`);
+  const value = trimmed ? (trimmed as ModelTag) : undefined;
+  switch (role) {
+    case "pins.dispatch": case "pins.dream": case "pins.cleaner": case "pins.research": case "pins.researchFallback": {
+      const slot = role.slice("pins.".length) as "dispatch" | "dream" | "cleaner" | "research" | "researchFallback";
+      const pins: Record<string, unknown> = { ...settings.pins };
+      if (value === undefined) delete pins[slot]; else pins[slot] = value;
+      return { ...settings, pins: pins as Settings["pins"] };
+    }
+    case "titles.model": {
+      const titles: Record<string, unknown> = { ...settings.titles };
+      if (value === undefined) delete titles.model; else titles.model = value;
+      return { ...settings, titles: titles as Settings["titles"] };
+    }
+    case "reviewer.model": {
+      const reviewer: Record<string, unknown> = { ...settings.reviewer };
+      if (value === undefined) delete reviewer.model; else reviewer.model = value;
+      return { ...settings, reviewer: reviewer as Settings["reviewer"] };
+    }
+    default:
+      throw new TypeError(`unknown model role: ${JSON.stringify(role)}`);
+  }
+}
+
 function expandTilde(p: string): string {
   return p.startsWith("~/") || p === "~" ? join(homedir(), p.slice(1)) : p;
 }

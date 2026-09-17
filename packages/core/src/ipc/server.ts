@@ -31,9 +31,11 @@ import {
   SyncHeadsParams, SyncPullParams, SyncPushParams, SyncConfigParams, SyncMemoryParams,
   PanelListParams, PanelOpenTabParams, PanelCloseTabParams, PanelActivateTabParams, PanelReportNavigationParams,
   PanelCommandResultParams, PanelReadDiffParams,
+  CapabilitiesListParams, VersionsGetParams, SettingsModelRolesParams, SettingsSetModelRoleParams,
   SYSTEM_SESSION_ID,
   SessionEvent, ConnWriter, type WritableSocket,
 } from "@yanlinglabs/winter-protocol";
+import { SDK_VERSION } from "@yanlinglabs/winter-agent-sdk";
 import type { TokenAuthority } from "../auth/tokens";
 import type { SecretStore } from "../auth/secret-store";
 import { readCredentialMaterial, writeOpenAiApiKey } from "../auth/credential-material";
@@ -102,7 +104,14 @@ import type { ProviderLink } from "../peripheral/provider-link";
 import type { HardwareBroker } from "../peripheral/hardware";
 import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
-import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings } from "../settings";
+import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole } from "../settings";
+import { disallowedToolsFor } from "../runtime-sdk/mode-options";
+import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
+import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
+import {
+  REQUIRED_WINTER_AGENT_SDK, REQUIRED_WINTER_RUNTIME_SDK, REQUIRED_CLAUDE_AGENT_SDK,
+  installedClaudeAgentSdkVersion, installedWinterRuntimeSdkVersion,
+} from "../runtime-sdk/versions";
 import { dispatchPinMessage } from "../agent/dispatch-config";
 import {
   deriveInstallName, installPluginFromDir, missingConsents, buildConsentBlock, applyFreshPluginConsent,
@@ -1982,6 +1991,134 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const p = parseParams(McpListParams, params);
         if (p.cwd) await opts.mcp?.ensureProject(p.cwd);
         return { ok: true, servers: opts.mcp?.list(p.cwd) ?? [] };
+      }
+      // -----------------------------------------------------------------------------------------
+      // Daemon settings surface (2026-09-17 plan, item 2). LOCAL-ROLE ONLY: never added to
+      // REMOTE_ALLOWED_METHODS or PLUGIN_ALLOWED_METHODS above, so this falls through the default
+      // "any non-remote, non-plugin role may call it" posture every other admin/harness RPC has —
+      // no extra role check needed here, same precedent `settings.setAdvisorModel` documents at its
+      // own case. Read-only: no settings WRITE, so no `saveSettings` call anywhere in this branch.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.capabilitiesList: {
+        parseParams(CapabilitiesListParams, params);
+        // Same defensive "a missing/unreadable settings.json never breaks a read-only listing"
+        // posture `livePlugins()` above already has — `computerUse.enabled`/`lsp.enabled` simply
+        // read their absent-block defaults (off / on respectively) when settings can't be loaded.
+        let settings: Settings | null = null;
+        if (opts.winterHome) {
+          try { settings = loadSettings(join(opts.winterHome, "settings.json")); } catch { settings = null; }
+        }
+        // The SAME table `session-driver.ts` passes every real session's `Options.disallowedTools`
+        // through (`capabilityTools: WINTER_CAPABILITY_TOOLS`) — computed once per mode, not
+        // per tool, since `disallowedToolsFor` itself is a pure O(table size) scan.
+        const disallowedByMode: Record<"code" | "dispatch" | "chat", Set<string>> = {
+          code: new Set(disallowedToolsFor("code", WINTER_CAPABILITY_TOOLS)),
+          dispatch: new Set(disallowedToolsFor("dispatch", WINTER_CAPABILITY_TOOLS)),
+          chat: new Set(disallowedToolsFor("chat", WINTER_CAPABILITY_TOOLS)),
+        };
+        const capabilities = CAPABILITY_SERVER_KEYS.map((key) => {
+          // `capabilityToolName(key, "")` mints the exact `mcp__winter__<key>__` prefix every one
+          // of this key's tool names carries (capabilities/names.ts's own wire-name doc) — so a
+          // brand rename moves the grouping and this call site together, never a second hand-copy.
+          const prefix = capabilityToolName(key, "");
+          const tools = Object.entries(WINTER_CAPABILITY_TOOLS)
+            .filter(([name]) => name.startsWith(prefix))
+            .map(([name, factsRaw]) => {
+              const facts: CapabilityToolFacts = factsRaw;
+              return {
+                name,
+                modes: [...facts.modes],
+                ...(facts.deferred === undefined ? {} : { deferred: facts.deferred === true ? true : [...facts.deferred] }),
+                exposure: {
+                  code: !disallowedByMode.code.has(name),
+                  dispatch: !disallowedByMode.dispatch.has(name),
+                  chat: !disallowedByMode.chat.has(name),
+                },
+              };
+            });
+          // The only two live gates that exist today (capabilities/index.ts's `computerUseEnabled`
+          // doc + capabilities/lsp.ts's own doc on `settings.lsp.enabled`) — every other key has no
+          // settings gate at all and is always live. `external`'s tool set is per-plugin/dynamic
+          // (no static WINTER_CAPABILITY_TOOLS rows), so `tools` is `[]` for it, never fabricated.
+          const enabled = key === "computer" ? settings?.computerUse?.enabled === true
+            : key === "lsp" ? settings?.lsp?.enabled !== false
+            : true;
+          return { key, enabled, tools };
+        });
+        return { ok: true, capabilities };
+      }
+      // -----------------------------------------------------------------------------------------
+      // Daemon settings surface (2026-09-17 plan, item 3). LOCAL-ROLE ONLY, same posture as
+      // capabilities.list just above. Reuses `diagnoseRuntimes` — the SAME resolver `winter
+      // doctor`'s "runtimes" section calls (packages/cli/src/main.ts's `printRuntimesSection`) —
+      // rather than `runtimes-probe.ts`'s `runRuntimesProbe`: that second probe spawns `codesign
+      // -dvv` (x3) and `claude --version`, each with a 10s timeout, and hardcodes `setting:
+      // undefined` to emulate a fresh boot with nothing configured — exactly wrong for an RPC
+      // inside a LIVE daemon whose settings may set `runtimes.winterExecutable`/`claudeExecutable`
+      // explicitly. `diagnoseRuntimes` is settings-aware and never spawns anything.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.versionsGet: {
+        parseParams(VersionsGetParams, params);
+        let settings: Settings | undefined;
+        if (opts.winterHome) {
+          try { settings = loadSettings(join(opts.winterHome, "settings.json")); } catch { settings = undefined; }
+        }
+        const report = await diagnoseRuntimes({ execPath: process.execPath, home: opts.winterHome ?? homedir(), env: process.env, settings });
+        return {
+          ok: true,
+          core: opts.serverVersion,
+          pins: {
+            winterAgentSdk: REQUIRED_WINTER_AGENT_SDK,
+            winterRuntimeSdk: REQUIRED_WINTER_RUNTIME_SDK,
+            claudeAgentSdk: REQUIRED_CLAUDE_AGENT_SDK,
+          },
+          installed: {
+            winterAgentSdk: SDK_VERSION,
+            ...(installedWinterRuntimeSdkVersion() === undefined ? {} : { winterRuntimeSdk: installedWinterRuntimeSdkVersion()! }),
+            // `report.claude.installedWrapper` IS `installedClaudeAgentSdkVersion()` — reused
+            // rather than a second call, same value either way.
+            ...(report.claude.installedWrapper === undefined ? {} : { claudeAgentSdk: report.claude.installedWrapper }),
+            ...(report.winter.resolved === undefined ? {} : { winterExecutable: report.winter.resolved }),
+            ...(report.claude.resolved === undefined ? {} : { claudeExecutable: report.claude.resolved }),
+          },
+          official: report.bundle?.versions ?? null,
+        };
+      }
+      // -----------------------------------------------------------------------------------------
+      // Daemon settings surface (2026-09-17 plan, item 4). LOCAL-ROLE ONLY, same posture as the
+      // two RPCs just above — read-only, no settings write.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.settingsModelRoles: {
+        parseParams(SettingsModelRolesParams, params);
+        let settings: Settings | null = null;
+        if (opts.winterHome) {
+          try { settings = loadSettings(join(opts.winterHome, "settings.json")); } catch { settings = null; }
+        }
+        return { ok: true, roles: modelRolesFor(settings) };
+      }
+      // Daemon settings surface (2026-09-17 plan, item 4) — the ONE write door for all nine model
+      // roles. LOCAL-ROLE ONLY. Mirrors `settings.setAdvisorModel`'s own handler shape exactly
+      // (load → pure transform, catching the transform's own TypeError as INVALID_PARAMS → save),
+      // and for `role: "runtimes.advisorModel"` the transform ITSELF delegates to `setAdvisorModel`
+      // (settings.ts) — never a duplicated validation path for that one role.
+      case METHODS.settingsSetModelRole: {
+        const p = parseParams(SettingsSetModelRoleParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "settings.setModelRole is not available on this server (no winterHome configured)");
+        const settingsPath = join(opts.winterHome, "settings.json");
+        const settings = loadSettings(settingsPath);
+        let next: Settings;
+        try {
+          next = setModelRole(settings, p.role, p.model);
+        } catch (err) {
+          // `setModelRole` throws a `TypeError` on a non-tag value, the `unstated/unstated`
+          // sentinel, or `role: "provider.model"` with `model: null` — the params door's
+          // `ModelTagSchema` already refused a BARE id, so the only way here is a shape-valid tag
+          // the pinned catalog does not recognise, the sentinel, or that one role-specific rule.
+          throw new RpcFailure(ERR.INVALID_PARAMS, err instanceof Error ? err.message : String(err));
+        }
+        saveSettings(settingsPath, next);
+        const roles = modelRolesFor(next);
+        return { ok: true, model: roles[p.role].model, roles };
       }
       case METHODS.pluginsList: {
         parseParams(PluginsListParams, params);
