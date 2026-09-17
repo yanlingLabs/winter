@@ -100,3 +100,11 @@ export function pickVerb(list: string[], seed: number): string {
   const index = Math.abs(seed) % list.length;
   return list[index] as string;
 }
+
+/** 2026-09-17: the spinner's text while the provider is RETRYING the main turn — replaces the whimsical
+ *  verb so a 429/5xx never looks like silent thinking. Pure, so the TUI test pins it verbatim. */
+export function retryVerb(r: { attempt: number; maxRetries: number; retryDelayMs: number; status: number | null }): string {
+  const status = r.status !== null ? ` (HTTP ${r.status})` : "";
+  const next = r.retryDelayMs > 0 ? `, next in ${Math.max(1, Math.round(r.retryDelayMs / 1000))} s` : "";
+  return `Provider busy${status} — retrying ${r.attempt} of ${r.maxRetries}${next}`;
+}

@@ -12,7 +12,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { theme } from "./theme";
-import { pickVerb, SPINNER_VERBS, spinnerFrame } from "./spinner-verbs";
+import { pickVerb, retryVerb, SPINNER_VERBS, spinnerFrame } from "./spinner-verbs";
 import { formatElapsed, formatTokens, type TaskRow } from "../task-display";
 
 // TUI renderer T5: the glyph cycle + `spinnerFrame` moved to spinner-verbs.ts (the pure module) so
@@ -26,14 +26,16 @@ export interface SpinnerProps {
   nowMs: number;
   outTokens: number;
   tasks: TaskRow[];
+  /** The provider is retrying (a `provider_retry` transient); outranks the task subject and the verb. */
+  retry?: { attempt: number; maxRetries: number; retryDelayMs: number; status: number | null };
 }
 
-export function Spinner({ running, turnStartMs, nowMs, outTokens, tasks }: SpinnerProps) {
+export function Spinner({ running, turnStartMs, nowMs, outTokens, tasks, retry }: SpinnerProps) {
   if (!running) return null;
   const elapsedMs = nowMs - (turnStartMs ?? nowMs);
   const glyph = spinnerFrame(elapsedMs);
   const inProgress = tasks.find((t) => t.status === "in_progress");
-  const verb = inProgress ? inProgress.subject : pickVerb(SPINNER_VERBS, turnStartMs ?? 0);
+  const verb = retry ? retryVerb(retry) : inProgress ? inProgress.subject : pickVerb(SPINNER_VERBS, turnStartMs ?? 0);
   const tokenSuffix = outTokens > 0 ? ` · ↓ ${formatTokens(outTokens)} tokens` : "";
 
   return (
