@@ -285,7 +285,7 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
   // The correction the plan itself nearly got wrong: transients must SURVIVE this filter
   // ---------------------------------------------------------------------------------------------
 
-  test("all eleven TRANSIENT types reach a remote client — the live policy is history's allowlist PLUS these", async () => {
+  test("all twelve TRANSIENT types reach a remote client — the live policy is history's allowlist PLUS these", async () => {
     const { store, hub, socketPath, remoteToken } = await boot();
     const sessionId = store.createSession("global", { mode: "code" });
 
@@ -296,6 +296,7 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
 
     const holder = { kind: "session" as const, id: sessionId };
     hub.broadcastTransient(sessionId, { type: "assistant_delta", sessionId, threadId: "main", delta: "chunk-1" });
+    hub.broadcastTransient(sessionId, { type: "provider_retry", sessionId, threadId: "main", attempt: 3, maxRetries: 10, retryDelayMs: 8000, status: 429, message: "rate_limit" });
     hub.broadcastTransient(sessionId, { type: "lease_granted", sessionId, threadId: "main", leaseId: "l1", class: "screenshot", holder, expiresAt: 0, tokenHash: "abc" });
     hub.broadcastTransient(sessionId, { type: "lease_lost", sessionId, threadId: "main", leaseId: "l1", class: "screenshot", holder, reason: "released" });
     hub.broadcastTransient(sessionId, { type: "peripheral_call_requested", sessionId, threadId: "main", requestId: "r1", leaseId: "l1", token: "t", class: "screenshot", payloadJson: "{}" });
@@ -390,7 +391,7 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
   // The policy itself
   // ---------------------------------------------------------------------------------------------
 
-  test("REMOTE_STREAM_EVENT_TYPES is EXACTLY history's allowlist + the eleven transients + the three stream-control types", () => {
+  test("REMOTE_STREAM_EVENT_TYPES is EXACTLY history's allowlist + the twelve transients + the three stream-control types", () => {
     const expected = new Set<string>([
       ...HISTORY_EVENT_TYPES,
       ...TRANSIENT_EVENT_TYPES,
@@ -407,14 +408,14 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     // 22 → 24 (Winter Phase 10a O5, P10a-6: provider_login_progress/provider_login_finished — via
     // the transients; both are SYSTEM_SESSION_ID-scoped like plugin_tile_updated, so this is a
     // reach-the-wire proof, never an endorsement of phone-side rendering).
-    expect(REMOTE_STREAM_EVENT_TYPES.size).toBe(24);
+    expect(REMOTE_STREAM_EVENT_TYPES.size).toBe(25);
     // The one exclusion the whole first half of this file is about.
     expect(REMOTE_STREAM_EVENT_TYPES.has("reasoning_item" as SessionEvent["type"])).toBe(false);
     // ...and the ones that would have quietly reverted the phone-client streaming fix.
     for (const t of TRANSIENT_EVENT_TYPES) expect(REMOTE_STREAM_EVENT_TYPES.has(t)).toBe(true);
   });
 
-  test("TRANSIENT_EVENT_TYPES is EXACTLY the eleven — the Swift mirror pins the same literals", () => {
+  test("TRANSIENT_EVENT_TYPES is EXACTLY the twelve — the Swift mirror pins the same literals", () => {
     // Parity, remote-allowlist style: neither side imports the other, each pins its own copy to
     // these literal strings, so editing one alone fails here or in
     // `apple/WinterProtocol/.../SessionEventTransientTests.swift` (SessionEvent.transientTypes).
@@ -422,6 +423,7 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
     // Growth log: 7 → 8 (session-activity-hygiene T4, `session_activity`).
     // 8 → 9 (panel-shell T3, `panel_command`).
     // 9 → 11 (Winter Phase 10a O5, P10a-6: provider_login_progress, provider_login_finished).
+    // 11 → 12 (2026-09-17, retry progress: `provider_retry`).
     expect([...TRANSIENT_EVENT_TYPES].sort()).toEqual([
       "assistant_delta",
       "hardware_requested",
@@ -433,9 +435,10 @@ describe("remote live/replay stream: allowlist + size cap (iOS remote-path T2)",
       "plugin_tool_invoke",
       "provider_login_finished",
       "provider_login_progress",
+      "provider_retry",
       "session_activity",
     ]);
-    expect(TRANSIENT_EVENT_TYPES.size).toBe(11);
+    expect(TRANSIENT_EVENT_TYPES.size).toBe(12);
   });
 
   // ---------------------------------------------------------------------------------------------

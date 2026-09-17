@@ -90,6 +90,7 @@ export const SUBAGENT_TRANSCRIPT_INCLUDE = {
   // reasoning_item is absent from the written set) ----
   reasoning_item: false,
   assistant_delta: false,
+  provider_retry: false,
   plan_presented: false,
   plan_resolved: false,
   checkpoint: false,
@@ -164,6 +165,7 @@ export const PROJECTED_EVENT_COVERAGE = {
   // ---- produced: the conversation spine (Task 10) ----
   assistant_message: true, // `assistant` (final) text blocks
   assistant_delta: true, // `stream_event` → `text_delta` (TRANSIENT: broadcast, never persisted)
+  provider_retry: true, // `system/api_retry` → one TRANSIENT per retry attempt (broadcast, never persisted)
   tool_call: true, // `assistant` (final) `tool_use` blocks
   tool_result: true, // `user` frames carrying `tool_result` blocks
   turn_completed: true, // the terminal `result`, `contextTokens` from its usage

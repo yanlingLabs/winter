@@ -1,6 +1,6 @@
 import { TRANSIENT_EVENT_TYPES, type SessionEvent } from "@yanlinglabs/winter-protocol";
 import {
-  MAIN_THREAD, asAssistantFrame, asInitFrame, asMirrorErrorFrame, asResultFrame, asStreamEventFrame,
+  MAIN_THREAD, asApiRetryFrame, asAssistantFrame, asInitFrame, asMirrorErrorFrame, asResultFrame, asStreamEventFrame,
   asUserFrame, assistantText, deltaText, hasToolResults, threadIdOf, toolCalls, toolResults, userText,
 } from "./conversation";
 import { applyTaskPatch, childFromSpawn, isSpawnTool, seedTask, threadCompletedFrom, threadStarted, type ChildRecord, type TaskRow } from "./children";
@@ -365,6 +365,20 @@ class ProjectorImpl implements Projector {
       return events;
     }
 
+    const retry = asApiRetryFrame(msg);
+    if (retry !== undefined) {
+      // A retry attempt is PROGRESS, not failure (hooks.ts's "observed, never persisted" rule still
+      // holds: `provider_retry` is TRANSIENT). The wire fields are the SDK's own; `error` is the class
+      // word, never a body (hooks.ts's allowlist) — so nothing here can carry a secret.
+      const status = typeof retry.error_status === "number" && Number.isFinite(retry.error_status) ? retry.error_status : null;
+      const message = typeof retry.error === "string" ? retry.error.slice(0, 200) : "";
+      return this.stampBatch([{
+        type: "provider_retry", sessionId: this.deps.sessionId, threadId: MAIN_THREAD,
+        attempt: Math.max(1, Math.floor(retry.attempt)), maxRetries: Math.max(0, Math.floor(retry.max_retries)),
+        retryDelayMs: typeof retry.retry_delay_ms === "number" && Number.isFinite(retry.retry_delay_ms) ? Math.max(0, Math.floor(retry.retry_delay_ms)) : 0,
+        status, message,
+      }]);
+    }
     const task = this.acceptTaskFrame(msg);
     if (task !== undefined) return task;
 

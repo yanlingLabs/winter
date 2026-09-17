@@ -32,6 +32,7 @@ const fixtures: Record<string, unknown> = {
   "turn_started": { ...base, threadId: "main", type: "turn_started" },
   "assistant_message": { ...base, threadId: "main", type: "assistant_message", text: "done ✓" },
   "assistant_delta": { ...base, threadId: "main", type: "assistant_delta", delta: "wor" },
+  "provider_retry": { ...base, threadId: "main", type: "provider_retry", attempt: 3, maxRetries: 10, retryDelayMs: 8000, status: 429, message: "rate_limit" },
   "tool_call": { ...base, threadId: "main", type: "tool_call", callId: "call_1", name: "read", argsJson: '{"path":"a.txt"}' },
   "tool_result": { ...base, threadId: "main", type: "tool_result", callId: "call_1", output: "line1\nline2", isError: false },
   // diff-tabs Task 3: fileDiff is additive/optional on the EXISTING tool_result shape — a dedicated
