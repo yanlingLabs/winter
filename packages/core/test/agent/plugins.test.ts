@@ -138,6 +138,47 @@ describe("PluginStore + winter-plugin.json", () => {
     expect(p.manifestHooks).toBeUndefined();
   });
 
+  test("daemon settings surface item 1: manifestHooks round-trips through PluginInfoSchema (plugins.list's own wire schema)", async () => {
+    const { PluginInfoSchema } = await import("@yanlinglabs/winter-protocol");
+    const h = home();
+    winterPlugin(h, "hooked", {
+      id: "hooked", tier: "capability",
+      // Two entries for the SAME event, deliberately — proves the schema round-trips a plain
+      // array verbatim rather than regrouping/deduping by event (agent/plugins.ts:109 hands
+      // `manifest.contributes?.hooks` straight through, and the schema must mirror that).
+      contributes: { hooks: [
+        { event: "pre-tool", command: "./deny.sh", timeoutMs: 500 },
+        { event: "pre-tool", command: "./also-deny.sh" },
+        { event: "post-tool", command: "./observe.sh" },
+      ] },
+    });
+    winterPlugin(h, "unhooked", { id: "unhooked", tier: "capability", contributes: { skills: true } });
+    const [hooked, unhooked] = new PluginStore({ winterHome: h }).list().sort((a, b) => a.name.localeCompare(b.name));
+    if (!hooked || !unhooked) throw new Error("expected two plugins");
+
+    // `plugins.list`'s handler (ipc/server.ts) spreads the raw PluginInfo verbatim into its
+    // result; PluginInfoSchema is that result's own wire schema (PluginsListResult.plugins),
+    // and WinterClient.validated() (packages/cli/src/client.ts) runs every plugins.list response
+    // through it — so parsing here is the same gate a real CLI/RPC round trip goes through.
+    const parsedHooked = PluginInfoSchema.parse(hooked);
+    expect(parsedHooked.manifestHooks).toEqual([
+      { event: "pre-tool", command: "./deny.sh", timeoutMs: 500 },
+      { event: "pre-tool", command: "./also-deny.sh" },
+      { event: "post-tool", command: "./observe.sh" },
+    ]);
+
+    // A plugin with no manifest hooks parses to `undefined` — never `[]` — the same shape
+    // `PluginInfo.manifestHooks` itself has (this file's "no contributes.hooks" test above).
+    // Zod's `.parse()` keeps `manifestHooks` as an OWN key valued `undefined` on the in-memory
+    // object (an object-identity detail, not the wire), but the actual wire format is the
+    // JSON-over-NDJSON line the daemon writes — `JSON.stringify` drops an `undefined`-valued key
+    // outright, which is the real "field absent, not an empty array" a Swift decoder sees.
+    const parsedUnhooked = PluginInfoSchema.parse(unhooked);
+    expect(parsedUnhooked.manifestHooks).toBeUndefined();
+    const overWire = JSON.parse(JSON.stringify(parsedUnhooked));
+    expect(Object.hasOwn(overWire, "manifestHooks")).toBe(false);
+  });
+
   test("no entry declared → PluginInfo.entry undefined (capability-tier / skills-only plugins)", () => {
     const h = home();
     winterPlugin(h, "demo", { id: "demo", tier: "capability", contributes: { skills: true } });
