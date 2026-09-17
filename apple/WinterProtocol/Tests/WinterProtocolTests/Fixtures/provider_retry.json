@@ -1,0 +1,12 @@
+{
+  "seq": 7,
+  "sessionId": "s_fixture",
+  "ts": 1781270000000,
+  "threadId": "main",
+  "type": "provider_retry",
+  "attempt": 3,
+  "maxRetries": 10,
+  "retryDelayMs": 8000,
+  "status": 429,
+  "message": "rate_limit"
+}

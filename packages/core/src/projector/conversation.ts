@@ -100,6 +100,16 @@ export function asStreamEventFrame(m: ProtocolSdkMessage): StreamEventFrame | un
   return (m as Rec).type === "stream_event" && isRec((m as Rec).event) ? (m as unknown as StreamEventFrame) : undefined;
 }
 
+/** `{type:"system", subtype:"api_retry", attempt, max_retries, retry_delay_ms, error_status, error}` — the
+ *  Claude Agent SDK's own frame, mirrored field-for-field by the Winter runtime (frames.ts:405). */
+export interface ApiRetryFrame extends Rec { type: "system"; subtype: "api_retry"; attempt: number; max_retries: number; retry_delay_ms: number; error_status: number | null; error: unknown }
+export function asApiRetryFrame(m: ProtocolSdkMessage): ApiRetryFrame | undefined {
+  const r = m as Rec;
+  if (r.type !== "system" || r.subtype !== "api_retry") return undefined;
+  if (typeof r.attempt !== "number" || typeof r.max_retries !== "number") return undefined;
+  return m as unknown as ApiRetryFrame;
+}
+
 export function asInitFrame(m: ProtocolSdkMessage): InitFrame | undefined {
   return (m as Rec).type === "system" && (m as Rec).subtype === "init" ? (m as unknown as InitFrame) : undefined;
 }

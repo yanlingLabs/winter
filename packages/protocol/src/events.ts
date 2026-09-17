@@ -73,6 +73,22 @@ export const AssistantMessageEvent = ThreadBase.extend({ type: z.literal("assist
  *  monotonic-safe for naive lastSeq tracking, but clients MUST exempt assistant_delta from
  *  seq-based dedupe and lastSeq updates. The final assistant_message is the persisted record. */
 export const AssistantDeltaEvent = ThreadBase.extend({ type: z.literal("assistant_delta"), delta: z.string().min(1) });
+
+/** TRANSIENT (broadcast-only, never persisted — same posture as `assistant_delta`): one event per
+ *  provider RETRY ATTEMPT, projected from the child's `system/api_retry` frame, whose fields it
+ *  mirrors (the frame is field-for-field the Claude Agent SDK's own `api_retry`). Emitted BEFORE the
+ *  wait, so a client can say "provider busy, retrying 3 of 10, next in 8 s" instead of a bare spinner
+ *  for up to ~90 s. A retried request that then succeeds was never an error, which is exactly why
+ *  this is not `agent_error` and lives in no transcript. `status` is the HTTP status when there was
+ *  one; `message` is the SDK's own error class word (`rate_limit`, `server_error`, …). */
+export const ProviderRetryEvent = ThreadBase.extend({
+  type: z.literal("provider_retry"),
+  attempt: z.number().int().min(1),
+  maxRetries: z.number().int().min(0),
+  retryDelayMs: z.number().int().min(0),
+  status: z.number().int().nullable(),
+  message: z.string().max(200),
+});
 export const ToolCallEvent = ThreadBase.extend({
   type: z.literal("tool_call"), callId: z.string().min(1), name: z.string().min(1), argsJson: z.string(),
 });
@@ -818,6 +834,7 @@ export const SessionEvent = z.discriminatedUnion("type", [
   TurnStartedEvent,
   AssistantMessageEvent,
   AssistantDeltaEvent,
+  ProviderRetryEvent,
   ToolCallEvent,
   ToolResultEvent,
   ReasoningItemEvent,
@@ -895,6 +912,7 @@ export type SessionEvent = z.infer<typeof SessionEvent>;
  *  cannot catch an omission from a list that was never told the type exists. */
 export const TRANSIENT_EVENT_TYPES: ReadonlySet<SessionEvent["type"]> = new Set<SessionEvent["type"]>([
   "assistant_delta",
+  "provider_retry",
   "lease_granted",
   "lease_lost",
   "peripheral_call_requested",

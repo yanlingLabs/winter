@@ -18,7 +18,6 @@ describe("projector/hooks: observed, never persisted", () => {
     ["hook_response", { type: "hook_response", hook_id: "h1", hook_name: "PreToolUse", hook_event: "PreToolUse", outcome: "success", exit_code: 0, output: "SECRET_HOOK_STDOUT", stdout: "SECRET_HOOK_STDOUT", stderr: "", session_id: "s", uuid: "u" }],
     ["rate_limit_event", { type: "rate_limit_event", rate_limit_info: { status: "allowed_warning", resetsAt: 1 } }],
     ["auth_status", { type: "auth_status", isAuthenticating: true, output: ["SECRET_LOGIN_URL"] }],
-    ["system/api_retry", { type: "system", subtype: "api_retry", attempt: 2, max_retries: 10, retry_delay_ms: 500, error_status: 429, error: "rate_limit" }],
     ["system/status", { type: "system", subtype: "status", status: "compacting", compact_result: "success" }],
     ["system/compact_boundary", { type: "system", subtype: "compact_boundary", compact_metadata: { trigger: "auto", pre_tokens: 100000, preserved_messages: 4 } }],
     ["system/thinking_tokens", { type: "system", subtype: "thinking_tokens", estimated_tokens: 120, estimated_tokens_delta: 20 }],
@@ -89,7 +88,8 @@ describe("projector/hooks: observed, never persisted", () => {
     for (const kind of ["system/task_started", "system/task_progress", "system/task_updated", "system/task_notification"]) {
       expect({ kind, known: isKnownUnpersistedKind(kind) }).toEqual({ kind, known: true });
     }
-    expect(UNPERSISTED_KINDS.length).toBe(unpersisted.length + 4);
+    // +1: `system/api_retry` stays a KNOWN kind for the log allowlist even though it now projects a transient.
+    expect(UNPERSISTED_KINDS.length).toBe(unpersisted.length + 4 + 1);
   });
 
   test("the coverage map gains NOTHING from these families — no variant was invented for them (P8b-21)", () => {
@@ -97,8 +97,39 @@ describe("projector/hooks: observed, never persisted", () => {
     // seven-step protocol checklist, Swift side included.
     const produced = Object.entries(PROJECTED_EVENT_COVERAGE).filter(([, v]) => v === true).map(([k]) => k).sort();
     expect(produced).toEqual([
-      "agent_error", "assistant_delta", "assistant_message", "task_updated", "thread_completed",
+      "agent_error", "assistant_delta", "assistant_message", "provider_retry", "task_updated", "thread_completed",
       "thread_started", "tool_call", "tool_result", "turn_completed", "turn_started", "user_message",
     ]);
+  });
+});
+
+describe("projector: system/api_retry → provider_retry (TRANSIENT progress, 2026-09-17)", () => {
+  test("one retry frame projects exactly one broadcast-only provider_retry carrying the SDK's own fields", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    const batch = projector.accept(msg({ type: "system", subtype: "api_retry", attempt: 3, max_retries: 10, retry_delay_ms: 8000, error_status: 429, error: "rate_limit" }));
+    expect(batch.persist).toEqual([]);
+    expect(batch.broadcast.map((e) => e.type)).toEqual(["provider_retry"]);
+    const e = batch.broadcast[0] as { attempt: number; maxRetries: number; retryDelayMs: number; status: number | null; message: string; threadId: string };
+    expect({ attempt: e.attempt, maxRetries: e.maxRetries, retryDelayMs: e.retryDelayMs, status: e.status, message: e.message, threadId: e.threadId })
+      .toEqual({ attempt: 3, maxRetries: 10, retryDelayMs: 8000, status: 429, message: "rate_limit", threadId: "main" });
+  });
+  test("a retry never carries a body: a non-string `error` becomes an empty message, a null status stays null", () => {
+    const { projector } = makeProjector();
+    accept(projector, init());
+    const batch = projector.accept(msg({ type: "system", subtype: "api_retry", attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: null, error: { secret: "SECRET_BODY" } }));
+    const e = batch.broadcast[0] as { status: number | null; message: string };
+    expect(e.status).toBeNull();
+    expect(e.message).toBe("");
+    expect(JSON.stringify(batch)).not.toContain("SECRET_BODY");
+  });
+  test("retries around a turn leave the turn's persisted sequence untouched", () => {
+    const { projector } = makeProjector();
+    const out = [
+      ...accept(projector, init()),
+      ...accept(projector, msg({ type: "system", subtype: "api_retry", attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: 429, error: "rate_limit" })).filter((e) => e.type !== "provider_retry"),
+      ...accept(projector, assistantText("the answer")),
+    ];
+    expect(out.map((e) => e.type)).toEqual(["assistant_message"]);
   });
 });
