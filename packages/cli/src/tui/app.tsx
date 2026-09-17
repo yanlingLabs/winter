@@ -1045,6 +1045,7 @@ export function App({
           nowMs={nowMs}
           outTokens={state.outTokens}
           tasks={state.tasks}
+          retry={state.retry}
         />
         {resuming ? <Text dimColor>Resuming conversation…</Text> : null}
         {/* B2: the bottom picker — the completion menu's slot (directly above the composer's box;

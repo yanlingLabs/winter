@@ -725,7 +725,7 @@ describe("state.ts — purity", () => {
 // ---------------------------------------------------------------------------------------------
 
 import { statusChromeModel, type AgentRow, type StatusLine } from "../../src/tui/state";
-import { spinnerFrame } from "../../src/tui/spinner-verbs";
+import { retryVerb, spinnerFrame } from "../../src/tui/spinner-verbs";
 import { diffFrames } from "../../src/tui/frame-diff";
 
 /** Textual projection of one StatusLine — exactly how Footer lays it out (segments joined by the
@@ -972,5 +972,32 @@ describe("statusChromeModel — flicker pin: idle chrome is byte-stable across c
     const a = mk(1_200);
     const b = mk(1_260); // same floor(now/120) bucket
     expect(diffFrames(a.lines.map(lineText), b.lines.map(lineText))).toEqual([]);
+  });
+});
+
+// ---- 2026-09-17: provider retry progress ----
+describe("provider_retry → TuiState.retry (transient progress, cleared by the next real frame)", () => {
+  const base = (): TuiState => reduce(initialState(), { type: "turn_started", sessionId: "s", threadId: "main", seq: 1, ts: 0 } as never, 0);
+  const retry = { type: "provider_retry", sessionId: "s", threadId: "main", seq: 1, ts: 0, attempt: 3, maxRetries: 10, retryDelayMs: 8000, status: 429, message: "rate_limit" } as never;
+  test("a retry on the main thread sets the line; a child-thread retry is ignored", () => {
+    const s = reduce(base(), retry, 0);
+    expect(s.retry).toEqual({ attempt: 3, maxRetries: 10, retryDelayMs: 8000, status: 429, message: "rate_limit" });
+    const child = reduce(base(), { ...(retry as object), threadId: "th_1" } as never, 0);
+    expect(child.retry).toBeUndefined();
+  });
+  test("a delta, a message, a tool call or the turn's end clears it", () => {
+    for (const e of [
+      { type: "assistant_delta", delta: "x" },
+      { type: "assistant_message", text: "done" },
+      { type: "tool_call", callId: "c1", name: "Read", argsJson: "{}" },
+      { type: "turn_completed", stopReason: "end_turn", inputTokens: 1, outputTokens: 1 },
+    ]) {
+      const s = reduce(reduce(base(), retry, 0), { sessionId: "s", threadId: "main", seq: 2, ts: 0, ...e } as never, 0);
+      expect([e.type, s.retry]).toEqual([e.type, undefined]);
+    }
+  });
+  test("retryVerb wording", () => {
+    expect(retryVerb({ attempt: 3, maxRetries: 10, retryDelayMs: 8000, status: 429 })).toBe("Provider busy (HTTP 429) — retrying 3 of 10, next in 8 s");
+    expect(retryVerb({ attempt: 1, maxRetries: 10, retryDelayMs: 0, status: null })).toBe("Provider busy — retrying 1 of 10");
   });
 });

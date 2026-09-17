@@ -104,6 +104,10 @@ export interface TuiState {
   agents: AgentRow[]; // CliSubagent-shaped; NEVER pruned wholesale on the main turn_completed
   turnRunning: boolean;
   turnStartMs?: number;
+  /** 2026-09-17: the provider is retrying the main turn (a `provider_retry` TRANSIENT — one per attempt,
+   *  emitted BEFORE the wait). Cleared by the next frame that proves progress (a delta, a message, a
+   *  tool call) or by the turn ending, so a retried-then-succeeded request leaves no trace. */
+  retry?: { attempt: number; maxRetries: number; retryDelayMs: number; status: number | null; message: string };
   inTokens: number;
   outTokens: number;
   pending: PendingCard | null;
@@ -166,6 +170,7 @@ export function initialState(): TuiState {
 type WireEvent = { type: string; threadId?: string; [k: string]: unknown };
 
 const str = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
+const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 const num = (v: unknown, fallback = 0): number => (typeof v === "number" ? v : fallback);
 
 /** Human label for a peripheral capability class in the CU lease notes (Phase 5 CU). Unknown
@@ -249,7 +254,17 @@ function pruneChildEntries<T>(map: Record<string, T>, ids: string[]): Record<str
   return next;
 }
 
+/** Frames that PROVE the main turn moved on: any of them clears a pending `retry` line (see `TuiState.retry`). */
+const RETRY_CLEARING = new Set(["assistant_delta", "assistant_message", "tool_call", "tool_result", "turn_started", "turn_completed", "agent_error"]);
+
 export function reduce(s: TuiState, e: WireEvent, nowMs: number): TuiState {
+  const next = reduceCore(s, e, nowMs);
+  const onMain = e.threadId === undefined || e.threadId === MAIN;
+  if (next.retry !== undefined && onMain && RETRY_CLEARING.has(e.type)) return { ...next, retry: undefined };
+  return next;
+}
+
+function reduceCore(s: TuiState, e: WireEvent, nowMs: number): TuiState {
   switch (e.type) {
     case "user_message": {
       // Same Block shape for both destinations (child-transcript-view T2: a steer-drain/thread.send
@@ -260,9 +275,14 @@ export function reduce(s: TuiState, e: WireEvent, nowMs: number): TuiState {
       return { ...s, committed: [...s.committed, block] };
     }
 
+    case "provider_retry": {
+      if (e.threadId !== MAIN) return s;
+      return { ...s, retry: { attempt: num(e.attempt), maxRetries: num(e.maxRetries), retryDelayMs: num(e.retryDelayMs), status: typeof e.status === "number" ? e.status : null, message: str(e.message) } };
+    }
+
     case "assistant_delta": {
       if (e.threadId !== MAIN) return feedAgents(s, e); // child deltas: track liveOutputChars only
-      return { ...s, activeAssistant: s.activeAssistant + str(e.delta) };
+      return { ...s, activeAssistant: s.activeAssistant + str(e.delta), retry: undefined };
     }
 
     case "assistant_message": {
