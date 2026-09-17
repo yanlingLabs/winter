@@ -272,6 +272,7 @@ extension SessionEvent {
         case .turnStarted(let v): return v.seq
         case .assistantMessage(let v): return v.seq
         case .assistantDelta(let v): return v.seq
+        case .providerRetry(let v): return v.seq
         case .toolCall(let v): return v.seq
         case .toolResult(let v): return v.seq
         case .approvalRequested(let v): return v.seq
@@ -329,6 +330,7 @@ extension SessionEvent {
         case .turnStarted(let v): return v.sessionId
         case .assistantMessage(let v): return v.sessionId
         case .assistantDelta(let v): return v.sessionId
+        case .providerRetry(let v): return v.sessionId
         case .toolCall(let v): return v.sessionId
         case .toolResult(let v): return v.sessionId
         case .approvalRequested(let v): return v.sessionId

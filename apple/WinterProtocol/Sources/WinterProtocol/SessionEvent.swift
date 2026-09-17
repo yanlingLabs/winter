@@ -8,6 +8,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
     case turnStarted(TurnStarted)
     case assistantMessage(AssistantMessage)
     case assistantDelta(AssistantDelta)
+    case providerRetry(ProviderRetry)
     case toolCall(ToolCall)
     case toolResult(ToolResult)
     case approvalRequested(ApprovalRequested)
@@ -133,6 +134,26 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         public let delta: String
         public init(seq: Int, sessionId: String, ts: Int, threadId: String, delta: String) {
             self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId; self.delta = delta
+        }
+    }
+
+    /// TRANSIENT (see `transientTypes` at the bottom of this file): one provider-level retry
+    /// attempt, projected from the child's system/api_retry frame — broadcast-only, never
+    /// persisted/replayed. Mirrors TS `ProviderRetryEvent` (`packages/protocol/src/events.ts`).
+    public struct ProviderRetry: Codable, Equatable, Sendable {
+        public let seq: Int
+        public let sessionId: String
+        public let ts: Int
+        public let threadId: String
+        public let attempt: Int
+        public let maxRetries: Int
+        public let retryDelayMs: Int
+        public let status: Int?
+        public let message: String
+        public init(seq: Int, sessionId: String, ts: Int, threadId: String, attempt: Int, maxRetries: Int, retryDelayMs: Int, status: Int?, message: String) {
+            self.seq = seq; self.sessionId = sessionId; self.ts = ts; self.threadId = threadId
+            self.attempt = attempt; self.maxRetries = maxRetries; self.retryDelayMs = retryDelayMs
+            self.status = status; self.message = message
         }
     }
 
@@ -900,6 +921,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case turn_started
         case assistant_message
         case assistant_delta
+        case provider_retry
         case tool_call
         case tool_result
         case approval_requested
@@ -958,6 +980,7 @@ public enum SessionEvent: Codable, Equatable, Sendable {
         case .turn_started:         self = .turnStarted(try TurnStarted(from: decoder))
         case .assistant_message:    self = .assistantMessage(try AssistantMessage(from: decoder))
         case .assistant_delta:      self = .assistantDelta(try AssistantDelta(from: decoder))
+        case .provider_retry:       self = .providerRetry(try ProviderRetry(from: decoder))
         case .tool_call:            self = .toolCall(try ToolCall(from: decoder))
         case .tool_result:          self = .toolResult(try ToolResult(from: decoder))
         case .approval_requested:   self = .approvalRequested(try ApprovalRequested(from: decoder))
@@ -1035,6 +1058,10 @@ public enum SessionEvent: Codable, Equatable, Sendable {
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)
             try c.encode(Discriminator.assistant_delta.rawValue, forKey: .type)
+        case .providerRetry(let v):
+            try v.encode(to: encoder)
+            var c = encoder.container(keyedBy: TypeKey.self)
+            try c.encode(Discriminator.provider_retry.rawValue, forKey: .type)
         case .toolCall(let v):
             try v.encode(to: encoder)
             var c = encoder.container(keyedBy: TypeKey.self)
@@ -1240,6 +1267,7 @@ extension SessionEvent {
     /// single definition, and parity tests pin this literal against the TypeScript one.
     public static let transientTypes: Set<String> = [
         "assistant_delta",
+        "provider_retry",
         "lease_granted",
         "lease_lost",
         "peripheral_call_requested",
@@ -1264,7 +1292,7 @@ extension SessionEvent {
     /// above, in either direction.
     public var isTransient: Bool {
         switch self {
-        case .assistantDelta, .leaseGranted, .leaseLost, .peripheralCallRequested,
+        case .assistantDelta, .providerRetry, .leaseGranted, .leaseLost, .peripheralCallRequested,
              .pluginToolInvoke, .hardwareRequested, .pluginTileUpdated, .sessionActivity,
              .panelCommand, .providerLoginProgress, .providerLoginFinished:
             return true

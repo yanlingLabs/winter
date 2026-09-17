@@ -23,9 +23,11 @@ final class SessionEventTransientTests: XCTestCase {
     ///
     /// Growth log: 7 → 8 (session-activity-hygiene T4, `session_activity`); 8 → 9 (panel-shell T3,
     /// `panel_command`); 9 → 11 (Winter Phase 10a O5, P10a-6: `provider_login_progress`,
-    /// `provider_login_finished`).
-    private static let eleven: Set<String> = [
+    /// `provider_login_finished`); 11 → 12 (`provider_retry` — a per-provider retry attempt
+    /// projected from the child's system/api_retry frame).
+    private static let twelve: Set<String> = [
         "assistant_delta",
+        "provider_retry",
         "lease_granted",
         "lease_lost",
         "peripheral_call_requested",
@@ -38,10 +40,10 @@ final class SessionEventTransientTests: XCTestCase {
         "provider_login_finished",
     ]
 
-    func testTransientTypesIsExactlyTheEleven() {
-        XCTAssertEqual(SessionEvent.transientTypes, Self.eleven,
+    func testTransientTypesIsExactlyTheTwelve() {
+        XCTAssertEqual(SessionEvent.transientTypes, Self.twelve,
                        "SessionEvent.transientTypes must stay in lockstep with TRANSIENT_EVENT_TYPES in packages/protocol/src/events.ts")
-        XCTAssertEqual(SessionEvent.transientTypes.count, 11)
+        XCTAssertEqual(SessionEvent.transientTypes.count, 12)
     }
 
     /// `isTransient` (the case switch, used by `WinterClient` on decoded events) and
@@ -81,6 +83,10 @@ final class SessionEventTransientTests: XCTestCase {
         let delta = SessionEvent.assistantDelta(.init(seq: 5, sessionId: "s1", ts: 0, threadId: "main", delta: "chunk"))
         XCTAssertTrue(delta.isTransient)
         XCTAssertTrue(SessionEvent.transientTypes.contains("assistant_delta"))
+
+        let retry = SessionEvent.providerRetry(.init(seq: 5, sessionId: "s1", ts: 0, threadId: "main", attempt: 3, maxRetries: 10, retryDelayMs: 8000, status: 429, message: "rate_limit"))
+        XCTAssertTrue(retry.isTransient)
+        XCTAssertTrue(SessionEvent.transientTypes.contains("provider_retry"))
 
         let message = SessionEvent.assistantMessage(.init(seq: 6, sessionId: "s1", ts: 0, threadId: "main", text: "done"))
         XCTAssertFalse(message.isTransient)

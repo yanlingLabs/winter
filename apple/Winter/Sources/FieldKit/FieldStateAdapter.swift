@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import SwiftUI
 import WinterKit
+import WinterProtocol
 
 /// Task 2 (fluid orb): the three states the fluid-orb bubble can render — derived purely from
 /// `SessionModel`'s turn/task/unread state by `FieldStateAdapter.fluidState` below. `.idle` means
@@ -46,6 +47,15 @@ final class FieldStateAdapter: ObservableObject {
         // not from the getter's read-time side effect. This ensures that a fast
         // taskUpdated→turnCompleted burst hitting the same render doesn't drop the final
         // level (1.0) because the getter never ran between events.
+        // provider_retry (WinterProtocol Swift mirror): the chip text lives outside
+        // `OrbSessionState` (see `SessionModel.events`'s doc) — this session subscribes directly
+        // to the raw event stream rather than to `$state`, since a transient event never lands
+        // there. `handleRetryStatusEvent` sets it on `.providerRetry` and clears it on the next
+        // real turn progress, per its own doc comment below.
+        session.events
+            .sink { [weak self] event in self?.handleRetryStatusEvent(event) }
+            .store(in: &cancellables)
+
         session.$state
             .sink { [weak self] newState in
                 guard let self else { return }
@@ -172,6 +182,58 @@ final class FieldStateAdapter: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: workItem)
     }
 
+    // MARK: - provider_retry (WinterProtocol Swift mirror): the composer/turn chip's retry status
+
+    private static let mainThreadId = "main"
+
+    /// The composer/turn chip's text while the attached session's MAIN thread is mid-retry —
+    /// e.g. "Provider busy (HTTP 429) — retrying 3 of 10, next in 8 s". `nil` means "no retry in
+    /// flight", which is the overwhelming majority of the time: `statusText`/`verbText` below fall
+    /// back to the ordinary working-verb text whenever this is nil. Set by `handleRetryStatusEvent`
+    /// on a `provider_retry` event and cleared by the same function the moment real turn progress
+    /// resumes — see that function's doc for the exact clear list.
+    @Published private(set) var retryStatus: String? = nil
+
+    /// Fed every event `SessionModel.apply` sees (`session.events`, subscribed in `init`).
+    /// `provider_retry` is TRANSIENT — it never lands in `OrbSessionState` — so this is the only
+    /// place that can observe it at all. Scoped to the MAIN thread only, matching every other
+    /// per-turn signal `OrbSessionState`/`FieldStateAdapter` track (`turnRunning`, `streamingText`,
+    /// …): a subagent's own retries never touch the composer chip.
+    ///
+    /// Clears on the next `assistant_delta` / `assistant_message` / `tool_call` / `turn_completed`
+    /// for the same thread — exactly the events that mean "the provider call actually went
+    /// through" (or the turn ended outright). Deliberately NOT cleared on `turn_started`: a fresh
+    /// turn's first frame is one of the four clearing events or another `provider_retry`, never a
+    /// silent gap, so no extra case is needed there.
+    private func handleRetryStatusEvent(_ event: SessionEvent) {
+        switch event {
+        case .providerRetry(let v) where v.threadId == Self.mainThreadId:
+            retryStatus = Self.retryStatusLabel(
+                attempt: v.attempt, maxRetries: v.maxRetries, retryDelayMs: v.retryDelayMs, status: v.status
+            )
+        case .assistantDelta(let v) where v.threadId == Self.mainThreadId:
+            retryStatus = nil
+        case .assistantMessage(let v) where v.threadId == Self.mainThreadId:
+            retryStatus = nil
+        case .toolCall(let v) where v.threadId == Self.mainThreadId:
+            retryStatus = nil
+        case .turnCompleted(let v) where v.threadId == Self.mainThreadId:
+            retryStatus = nil
+        default:
+            break
+        }
+    }
+
+    /// PURE — the chip's exact wording, unit-tested directly (`ProviderRetryChipTests`). Omits the
+    /// "(HTTP …)" parenthetical when `status` is nil (the daemon's own `status` is nullable — not
+    /// every provider retry carries an HTTP code), and rounds `retryDelayMs` to whole seconds
+    /// (nearest, not floor/ceil — `8000` → "8 s", and e.g. `8400` → "8 s" while `8600` → "9 s").
+    static func retryStatusLabel(attempt: Int, maxRetries: Int, retryDelayMs: Int, status: Int?) -> String {
+        let statusSuffix = status.map { " (HTTP \($0))" } ?? ""
+        let seconds = Int((Double(retryDelayMs) / 1000).rounded())
+        return "Provider busy\(statusSuffix) — retrying \(attempt) of \(maxRetries), next in \(seconds) s"
+    }
+
     // MARK: - v1's composer-display surface (Core/AppState.swift:160-171's `composerDisplayText`)
 
     /// v1 `GlassFieldView.narrationCaption` (GlassFieldView.swift:271-275), rebound to
@@ -200,8 +262,12 @@ final class FieldStateAdapter: ObservableObject {
         if let pillText = s.status.pillText {
             text = pillText // .approvalNeeded / .disconnected — override even mid-turn
         } else if s.turnRunning {
-            let counts = s.taskCounts
-            text = workingPillText(verb: s.workingVerb, hasActiveTask: s.hasActiveTask, done: counts.done, total: counts.total)
+            if let retryStatus {
+                text = retryStatus // provider_retry in flight — wins over the working verb
+            } else {
+                let counts = s.taskCounts
+                text = workingPillText(verb: s.workingVerb, hasActiveTask: s.hasActiveTask, done: counts.done, total: counts.total)
+            }
         } else {
             text = "" // true idle: status.pillText nil (.idle) and no turn running
         }
@@ -225,7 +291,7 @@ final class FieldStateAdapter: ObservableObject {
         if let pillText = s.status.pillText {
             return pillText // .approvalNeeded / .disconnected — override even mid-turn
         } else if s.turnRunning {
-            return workingVerbText(verb: s.workingVerb)
+            return retryStatus ?? workingVerbText(verb: s.workingVerb)
         } else {
             return "" // true idle
         }
