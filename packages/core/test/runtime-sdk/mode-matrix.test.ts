@@ -107,6 +107,20 @@ test("bypass is the only cell that sets allowDangerouslySkipPermissions", () => 
   }
 });
 
+// Agent SDK 0.0.16 adoption: two fields the daemon sets on EVERY Winter-leg cell, for reasons that
+// are invisible in the option's own name — a background-by-default spawn would produce a turn the
+// host never pushed, and an absent `settingSources` means "all three sources" (so the child would
+// read `<home>/settings.json` itself, which the official leg is already told not to do).
+test("every cell keeps the foreground spawn default and reads no settings file of its own", () => {
+  for (const mode of MODES) {
+    for (const policy of POLICIES) {
+      const o = buildWinterOptions(optionsInput({ mode, policy }));
+      expect(o.backgroundByDefault).toBe(false);
+      expect(o.settingSources).toEqual([]);
+    }
+  }
+});
+
 test("the child's env is BUILT, never inherited", () => {
   const o = buildWinterOptions(optionsInput({ home: "/tmp/temp-home", profile: "dev" }));
   expect(o.env).toEqual({
