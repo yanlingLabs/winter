@@ -452,6 +452,23 @@ export function buildWinterOptions(input: WinterOptionsInput): Options {
     disallowedTools: disallowedToolsFor(input.mode, input.capabilityTools),
     permissions: { deny: controlPlaneDenyRules(input.home) },
     sandbox: sandboxConfigFor(input.home),
+    // Agent SDK 0.0.16 defaults a spawn to BACKGROUND (claude's own default), which means a finished
+    // child re-enters the model on a turn NOBODY PUSHED — a second `system/init`, an assistant
+    // stream and its own `result`, with no `user` frame. The projector opens a turn only from
+    // `beginTurn` (the host's push), so such a turn would log `assistant_message`/`turn_completed`
+    // with no `turn_started`, and `WinterSession`'s own `inFlight`/idle-timer bookkeeping counts it
+    // as the host's turn. Until the projector and the Mac transcript handle an unsolicited turn, the
+    // daemon keeps the 0.0.15 shape: a spawn is foreground unless the model asks for background.
+    // `run_in_background` STAYS advertised (unlike `WINTER_DISABLE_BACKGROUND_TASKS`, which would
+    // withhold it), so nothing the model can ask for is taken away.
+    backgroundByDefault: false,
+    // The official leg already passes `settingSources: []` (`official-options.ts`); the Winter leg
+    // passed nothing, and in the agent SDK an ABSENT `settingSources` means all three sources — so
+    // the Winter child read `<home>/settings.json` through its OWN cascade and honoured SDK-format
+    // blocks the daemon never sent it, while the claude child saw none of them. The daemon's own
+    // `Options` are the single source of a session's settings on BOTH legs; this is what makes that
+    // true rather than aspirational.
+    settingSources: [],
   };
   if (input.spawn.spawnClaudeCodeProcess) options.spawnClaudeCodeProcess = input.spawn.spawnClaudeCodeProcess;
   // WS-20 (§0.1 Spawn boundary): the Winter leg's `Options.model` is the BARE modelId, split from

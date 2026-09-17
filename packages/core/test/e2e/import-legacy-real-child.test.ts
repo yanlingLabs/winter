@@ -120,10 +120,16 @@ describeWithWinterBinary("engine-era import — the REAL winter binary resumes t
       });
       expect(texts[0]).toContain("What is 2+2?");
       expect(texts[1]).toContain("4");
-      // The chain is UNBROKEN from the imported tail into the new turn: every entry's parentUuid
-      // (after the first) names the uuid immediately before it in file order.
-      for (let i = 1; i < conversational.length; i++) {
-        expect(conversational[i]!.parentUuid).toBe(conversational[i - 1]!.uuid);
+      // The chain is UNBROKEN across EVERY entry in file order — agent SDK 0.0.16 writes
+      // `attachment` entries (the agent-type listing, the skill listing, a date notice) into the
+      // transcript exactly as the pinned claude runtime does, and they take their place in the
+      // parentUuid chain BETWEEN conversational entries. So the chain is asserted over all entries,
+      // and the only non-conversational links in it are those attachments.
+      for (let i = 1; i < entries.length; i++) {
+        expect(entries[i]!.parentUuid).toBe(entries[i - 1]!.uuid);
+      }
+      for (const e of entries) {
+        expect(["user", "assistant", "attachment"]).toContain(e.type);
       }
       // The new turn's own user message reached the real child (echo replies with it verbatim) —
       // proof the resumed session's INPUT path works, not just its stored history.
