@@ -23,6 +23,8 @@ pnpm test                            # every workspace, serially
 cd packages/core && bun test         # one package
 bun test path/to/file.test.ts        # one file (path substring match)
 bun test -t "test name"              # one test by name
+# Every daemon (app-launched or `daemon run`) tees its stdout/stderr into <WINTER_HOME>/logs/daemon.log (8 MB, one rotation);
+# `winter doctor` prints the path. Grep it before reproducing anything.
 # The "built binary through a real daemon" e2e files (test/e2e/winter-{chat,code,dispatch}-e2e, official-leg.e2e)
 # need WINTER_RUNTIME_EXECUTABLE="$PWD/dist/winter" (built by `bun run build:winter`); without it the daemon
 # resolves the npm platform binary and the pid scan for dist/winter FAILS rather than skips.
