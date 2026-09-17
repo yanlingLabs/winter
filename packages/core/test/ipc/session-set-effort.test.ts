@@ -387,6 +387,21 @@ describe("session.setEffort round-trip RPC (provider-correctness T4)", () => {
   // configured, because `effortsForModel` used to be UNIFORM (it ignored its modelId argument and
   // always answered the global `REASONING_EFFORTS` list). That premise is gone now that the
   // function reads a real catalog row — there is no more "no model, but still a list" case.
+  // 2026-09-17: a REAL catalog row that declares no vocabulary takes no effort at all — every tier is
+  // refused typed here, instead of reaching a child that refuses it typed ("declares no reasoning
+  // effort vocabulary"). 98 of 618 rows are shaped like this (`alibaba-cn/deepseek-v4-flash` is one).
+  test("a session on a catalog row with NO effort vocabulary refuses every effort typed", async () => {
+    const { store, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "effort-setter");
+    const sessionId = store.createSession("global", { model: "alibaba-cn/deepseek-v4-flash" });
+    const r = await c.request(METHODS.sessionSetEffort, { sessionId, effort: "medium" });
+    expect(r.error?.code).toBe(ERR.INVALID_PARAMS);
+    expect(r.error?.message).toContain("declares no reasoning-effort vocabulary");
+    expect(store.meta(sessionId).effort).toBeUndefined();
+    c.close();
+  });
+
   test("with NO provider configured, effort validation is unrestricted (there is no catalog row to check against)", async () => {
     const { store, socketPath, harnessToken } = await boot(); // no liveModel
     const c = await TestClient.connect(socketPath);

@@ -2474,7 +2474,7 @@ if (import.meta.main) {
       next = setProviderModel(next, parseModelTag(action.slug));
     }
     if (action.kind === "setEffort" || action.kind === "setModelAndEffort") {
-      const err = validateEffort(action.effort);
+      const err = validateEffort(action.effort, next.provider.model);
       if (err) { console.error(err); process.exit(1); }
       next = setReasoningEffort(next, action.effort as NonNullable<Settings["provider"]["reasoningEffort"]>);
     }

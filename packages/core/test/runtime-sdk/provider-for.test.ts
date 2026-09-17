@@ -1,8 +1,8 @@
-import { test, expect } from "bun:test";
+import { describe, test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { keychainService } from "../../src/profile";
-import { providerFor } from "../../src/runtime-sdk/provider-selection";
+import { implicitEffortFor, providerFor } from "../../src/runtime-sdk/provider-selection";
 import type { ModelTag } from "../../src/runtime-sdk/model-tag";
 
 test("a tag names exactly its provider and that provider's credential ref", () => {
@@ -16,4 +16,19 @@ test("nothing in runtime-sdk can pick a provider for a bare id any more", () => 
   const src = readFileSync(join(import.meta.dir, "../../src/runtime-sdk/provider-selection.ts"), "utf8");
   expect(src.includes("providerSelectionFor")).toBe(false);
   expect(src.includes("inventoryProvidersServing")).toBe(false);
+});
+
+describe("implicitEffortFor (2026-09-17: a pin's fixed tier is mapped onto the row, never forced)", () => {
+  test("a row that lists the tier keeps it; a row that declares no vocabulary yields undefined (no effort sent)", () => {
+    expect(implicitEffortFor("codex-oauth/gpt-5.6-terra", "medium")).toBe("medium");
+    expect(implicitEffortFor("alibaba-cn/deepseek-v4-flash", "medium")).toBeUndefined();
+  });
+  test("a row that lists other tiers falls back to its own defaultEffort or to nothing", () => {
+    const r = implicitEffortFor("deepseek/deepseek-v4-flash", "medium"); // vocabulary none/low/high/max, no medium
+    expect(r === undefined || ["none", "low", "high", "max"].includes(r)).toBe(true);
+  });
+  test("unknown rows and test doubles pass the tier through", () => {
+    expect(implicitEffortFor("winter-test/echo", "medium")).toBe("medium");
+    expect(implicitEffortFor("openai/my-finetune", "medium")).toBe("medium");
+  });
 });

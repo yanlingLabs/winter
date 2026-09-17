@@ -59,7 +59,7 @@ import { neutralSelectionRefusal, refusalDetailCategoryFor } from "./refusal-cop
 import { legForNewSession, sessionLegOf, type SessionLeg } from "./leg";
 import { attachOfficialSession, attachWinterSession } from "./messaging";
 import { buildWinterOptions, permissionModeFor } from "./mode-options";
-import { providerFor, rowForTag, testProviderNameFor } from "./provider-selection";
+import { implicitEffortFor, providerFor, rowForTag, testProviderNameFor } from "./provider-selection";
 import { splitTag, UNSTATED_TAG, isModelTag, type ModelTag } from "./model-tag";
 import { winterSessions } from "./sessions";
 import { WINTER_PEER_VERSIONS } from "./versions";
@@ -432,7 +432,9 @@ export function createWinterSessionDrivers(deps: WinterLegDeps): WinterSessionDr
       // `ModelTagSchema`/`resolveModelSelection` before the write, so a value that reaches here
       // already satisfies the shape this cast asserts.
       const model = mode === "dispatch" ? (live.model as ModelTag | undefined ?? pinsFor(settings).dispatch) : (live.model as ModelTag | undefined ?? settings?.provider?.model ?? DEFAULT_PROVIDER.model);
-      const effort = mode === "dispatch" ? sdkEffortOf(live.effort ?? DISPATCH_EFFORT) : sdkEffortOf(live.effort);
+      // 2026-09-17: the dispatch pin's fixed tier is IMPLICIT — mapped onto the pin row's vocabulary
+      // (`implicitEffortFor`), never sent to a row that does not declare it. A per-session effort stays explicit.
+      const effort = mode === "dispatch" ? sdkEffortOf(live.effort ?? implicitEffortFor(model, DISPATCH_EFFORT)) : sdkEffortOf(live.effort);
       // WS-20: `model` is ALWAYS a provider-qualified tag now (or the winter-test escape hatch) —
       // `providerFor` names exactly its provider, no inventory-order tie-break, no "router's decided
       // provider" hotfix needed (that hotfix existed only because a BARE id could be ambiguous).

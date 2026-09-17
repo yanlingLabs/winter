@@ -171,3 +171,19 @@ describe("modelDisplayWithHint", () => {
     expect(modelDisplayWithHint("auto")).toBe("auto");
   });
 });
+
+describe("validateEffort against the model's row (2026-09-17)", () => {
+  test("a row with a vocabulary accepts its members and none, refuses the rest", () => {
+    expect(validateEffort("high", "deepseek/deepseek-v4-flash")).toBeUndefined();
+    expect(validateEffort("none", "deepseek/deepseek-v4-flash")).toBeUndefined();
+    expect(validateEffort("medium", "deepseek/deepseek-v4-flash")).toMatch(/not supported by deepseek-v4-flash/);
+  });
+  test("a row with no vocabulary refuses every effort with a 'takes no reasoning effort' message", () => {
+    expect(validateEffort("medium", "alibaba-cn/deepseek-v4-flash")).toMatch(/takes no reasoning effort/);
+  });
+  test("no tag or an unknown tag keeps the global check only", () => {
+    expect(validateEffort("high")).toBeUndefined();
+    expect(validateEffort("ultra")).toMatch(/invalid effort/);
+    expect(validateEffort("xhigh", "openai/my-finetune")).toBeUndefined();
+  });
+});
