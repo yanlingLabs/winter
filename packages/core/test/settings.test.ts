@@ -1262,8 +1262,13 @@ describe("role reasoning efforts (roleEfforts / roleEffortFor / roleAcceptsClien
     });
 
     test("runtimes.advisorModel carries no effort: a stale stored value is inert, the read offers no control, the write refuses", () => {
-      expect(roleCarriesEffort("runtimes.advisorModel")).toBe(false);
-      for (const role of MODEL_ROLES) if (role !== "runtimes.advisorModel") expect(roleCarriesEffort(role)).toBe(true);
+      // THE THREE ROLES WITH NOWHERE TO SEND AN EFFORT, pinned as a set: the advisor (neither SDK has an
+      // advisor effort field), `pins.research` (the SDK's `WebFetchConfig` is `{digestModel, authRef,
+      // privateAddressPolicy}` — no effort) and `pins.researchFallback` (its one consumer, the multi-page
+      // research runner, retired with `ReadPage` on 2026-09-18). Every OTHER role still carries one.
+      const NO_EFFORT = ["runtimes.advisorModel", "pins.research", "pins.researchFallback"] as const;
+      for (const role of NO_EFFORT) expect(roleCarriesEffort(role)).toBe(false);
+      for (const role of MODEL_ROLES) if (!(NO_EFFORT as readonly string[]).includes(role)) expect(roleCarriesEffort(role)).toBe(true);
       // A settings.json written while the door briefly accepted one still LOADS (the schema keeps the key)…
       const stale = Settings.parse({ ...base, runtimes: { advisorModel: "codex-oauth/gpt-5.6-terra" }, roleEfforts: { "runtimes.advisorModel": "high" } });
       // …is never spent…

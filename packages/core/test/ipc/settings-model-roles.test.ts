@@ -99,13 +99,15 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     c.close();
   });
 
-  test("every pin slot writes and clears", async () => {
+  test("every LIVE pin slot writes and clears", async () => {
     const { settingsPath, socketPath, harnessToken } = await boot();
     const c = await TestClient.connect(socketPath);
     await c.hello(harnessToken, "cli");
+    // `pins.researchFallback` is NOT in this loop any more — it is retired (2026-09-18) and the write
+    // door refuses a model for it; its own test below covers refuse-set / still-clears.
     for (const [role, slot] of [
       ["pins.dispatch", "dispatch"], ["pins.dream", "dream"], ["pins.cleaner", "cleaner"],
-      ["pins.research", "research"], ["pins.researchFallback", "researchFallback"],
+      ["pins.research", "research"],
     ] as const) {
       const set = await c.request(METHODS.settingsSetModelRole, { role, model: "openai/gpt-5.4" });
       expect(set.error).toBeUndefined();
@@ -120,6 +122,40 @@ describe("settings.modelRoles / settings.setModelRole", () => {
       written = JSON.parse(readFileSync(settingsPath, "utf8"));
       expect(written.pins?.[slot]).toBeUndefined();
     }
+    c.close();
+  });
+
+  test("pins.researchFallback is RETIRED on the wire: still listed, refuses a set, still clears", async () => {
+    // 2026-09-18 (the web-tools ruling): its ONE consumer was the multi-page research runner, retired
+    // with `ReadPage`. The role stays in `MODEL_ROLES` and in the protocol's `ModelRole` enum — narrowing
+    // that enum is an RPC-schema change with a Swift mirror behind it — so it is marked retired with
+    // fields the wire already has, and a value stored before the retirement must stay CLEARABLE.
+    const { settingsPath, socketPath, harnessToken } = await boot();
+    const c = await TestClient.connect(socketPath);
+    await c.hello(harnessToken, "cli");
+
+    const listed = await c.request(METHODS.settingsModelRoles, {});
+    const info = listed.result.roles["pins.researchFallback"];
+    expect(info).toBeDefined();
+    // Nothing to pick, and no effort control — the two "this role is retired" signals the wire can carry.
+    expect(info.permitted).toEqual([]);
+    expect(info.efforts).toBeNull();
+
+    const refusedModel = await c.request(METHODS.settingsSetModelRole, { role: "pins.researchFallback", model: "openai/gpt-5.4" });
+    expect(refusedModel.error).toBeDefined();
+    expect(String(refusedModel.error.message)).toContain("retired");
+    expect(JSON.parse(readFileSync(settingsPath, "utf8")).pins?.researchFallback).toBeUndefined();
+
+    const refusedEffort = await c.request(METHODS.settingsSetModelRole, { role: "pins.researchFallback", effort: "low" });
+    expect(refusedEffort.error).toBeDefined();
+
+    // A pin written directly (as an older daemon's door would have) still clears through this door.
+    const raw = JSON.parse(readFileSync(settingsPath, "utf8"));
+    raw.pins = { ...(raw.pins ?? {}), researchFallback: "openai/gpt-5.4" };
+    writeFileSync(settingsPath, JSON.stringify(raw));
+    const cleared = await c.request(METHODS.settingsSetModelRole, { role: "pins.researchFallback", model: null });
+    expect(cleared.error).toBeUndefined();
+    expect(JSON.parse(readFileSync(settingsPath, "utf8")).pins?.researchFallback).toBeUndefined();
     c.close();
   });
 
@@ -291,7 +327,7 @@ describe("settings.modelRoles / settings.setModelRole", () => {
     await c.hello(tokens.harness, "cli");
     const result = await c.request(METHODS.settingsModelRoles, {});
     expect(result.error).toBeUndefined();
-    for (const role of ["titles.model", "reviewer.model", "pins.dream", "pins.cleaner", "pins.researchFallback"] as const) {
+    for (const role of ["titles.model", "reviewer.model", "pins.dream", "pins.cleaner"] as const) {
       const providerIds = result.result.roles[role].permitted.map((p: any) => p.providerId);
       expect(providerIds).toEqual(["codex-oauth"]); // the BOUND backend — never settings' "openai"
     }
