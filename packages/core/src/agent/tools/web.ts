@@ -279,7 +279,11 @@ function hostRefusal(host: string): string | null {
 
   // Names, not addresses — the one branch that stays a string comparison, because there is nothing
   // to parse.
-  if (h === "localhost" || h.endsWith(".local")) return LOCAL_REFUSAL;
+  // The whole `.localhost` TLD, not only the bare name (RFC 6761: resolvers route `app.localhost` to
+  // loopback). This must stay AT LEAST as wide as the runtime child's own reserved-name rule: the
+  // approval bridge reuses this classifier to decide whether the child's mandatory private-address
+  // ask becomes a card, and a name the child asks about but this misses is answered "allow" silently.
+  if (h === "localhost" || h.endsWith(".localhost") || h === "local" || h.endsWith(".local")) return LOCAL_REFUSAL;
 
   // IPv6 is resolved FIRST and completely: an IPv6 literal is unambiguously an address, so the IPv4
   // readings below must never look at it (`::ffff:1.1.1.1` splits on "." into parts that are not
