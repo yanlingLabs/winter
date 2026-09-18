@@ -490,10 +490,35 @@ describe("sessionHooksFor — the dangerous-domain floor on WebSearch", () => {
     expect(blocked.slice(0, FLOOR_SIZE)).toEqual([...SHIPPED_DANGEROUS_DOMAINS]);
   });
 
-  test("a malformed or empty domain list reads as absent, and the floor is injected anyway", async () => {
-    for (const input of [{ query: "q", blocked_domains: [] }, { query: "q", blocked_domains: "pastebin.com" }, { query: "q", blocked_domains: [null, 3] }, { query: "q", allowed_domains: [] }, { query: "q", allowed_domains: "docs.example" }]) {
+  test("an EMPTY or all-blank domain list reads as absent, and the floor is injected anyway", async () => {
+    // The runtimes' own `stringArray` collapses an explicitly-empty list to "absent" — a list that
+    // filters nothing is indistinguishable from not having named the field — so the floor may treat it
+    // the same way and inject into it.
+    for (const input of [{ query: "q", blocked_domains: [] }, { query: "q", blocked_domains: ["", "  "] }, { query: "q", allowed_domains: [] }]) {
       const blocked = updatedInputOf(await searchVerdict(input))!["blocked_domains"] as string[];
       expect(blocked.slice(0, FLOOR_SIZE), JSON.stringify(input)).toEqual([...SHIPPED_DANGEROUS_DOMAINS]);
+    }
+  });
+
+  // Whole-branch review N6: a WRONG-TYPED list is the tool's refusal to give, not this hook's to
+  // overwrite. It used to read as "absent", so the floor was written OVER a malformed
+  // `blocked_domains` (the executor's own wrong-type refusal could then never fire — and at 0.0.17
+  // that refusal is what stops such a call searching UNFILTERED), and a malformed `allowed_domains`
+  // got an injected `blocked_domains` beside it and came back as "cannot specify both" instead of the
+  // error naming what the model actually got wrong.
+  test("a WRONG-TYPED domain list passes through UNTRANSFORMED, so the tool's own refusal is what the model sees", async () => {
+    for (const input of [
+      { query: "q", blocked_domains: "pastebin.com" },
+      { query: "q", blocked_domains: [null, 3] },
+      { query: "q", blocked_domains: ["ok.example", 7] },
+      { query: "q", allowed_domains: "docs.example" },
+      { query: "q", allowed_domains: [{}] },
+      { query: "q", allowed_domains: ["docs.example"], blocked_domains: 5 },
+    ]) {
+      const out = await searchVerdict(input);
+      expect(updatedInputOf(out), JSON.stringify(input)).toBeUndefined();
+      // …and no decision either: a no-opinion `{}`, never a pre-approval.
+      expect(out, JSON.stringify(input)).toEqual({});
     }
   });
 

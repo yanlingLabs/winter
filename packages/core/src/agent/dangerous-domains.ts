@@ -136,13 +136,48 @@ export function dangerousDomainMatch(host: string, entries: readonly string[]): 
  * have been honoured by a host-side check built on the bare matcher — a silent divergence on the leg
  * where the host-side check is the ONLY enforcement (the official one). Normalizing both sides here
  * closes it without touching the shared matcher.
+ *
+ * A URL-SHAPED ENTRY IS REDUCED TO ITS HOSTNAME (2026-09-18, whole-branch review N1). The setting is a
+ * bare `z.array(z.string())`, so `https://evil.example`, `evil.example:8080`, `evil.example/admin` and
+ * `user@evil.example` are all things a user does in fact write — and the runtime child's own matcher
+ * URL-PARSES every entry, so it honours them while a host-side check on the raw string honoured none
+ * of them: the divergence went the UNSAFE way on the official leg, where the hook is the only
+ * enforcer, and it also silently disarmed `Search`'s citation filter and `browser`'s floor. Parsed
+ * with `new URL` when the value looks like one (a scheme, or a `/` or `:` after the host), falling
+ * back to the bare normalization for anything it cannot parse — this function NEVER throws, because
+ * every caller is a per-entry loop in a security floor and one malformed entry must not take the rest
+ * of the list with it. A bracketed IPv6 authority keeps its brackets, which is what `URL.hostname`
+ * answers and what a url's own host comparison uses.
  */
 export function normalizeDangerousDomain(value: string): string {
   let v = value.trim().toLowerCase();
   if (v.startsWith("*.")) v = v.slice(2);
   while (v.startsWith(".")) v = v.slice(1);
+  const asUrl = hostnameOfUrlShaped(v);
+  if (asUrl !== undefined) v = asUrl;
   while (v.endsWith(".")) v = v.slice(0, -1);
   return v;
+}
+
+/**
+ * The hostname of a URL-SHAPED entry, or `undefined` when the value is a plain domain (the common
+ * case, which pays nothing) or is unparseable.
+ *
+ * `//` is deliberately accepted as a scheme-relative form; a value with no scheme but with a `/` or a
+ * `:` after the host is given one, because `new URL("evil.example:8080")` parses `evil.example:` as a
+ * SCHEME and answers an empty hostname. Anything left that still fails to parse — or parses to no
+ * host at all — falls back to the caller's bare normalization.
+ */
+function hostnameOfUrlShaped(value: string): string | undefined {
+  const hasScheme = /^[a-z][a-z0-9+\-.]*:\/\//.test(value) || value.startsWith("//");
+  if (!hasScheme && !/[/:@]/.test(value)) return undefined;
+  for (const candidate of hasScheme ? [value] : [`http://${value}`]) {
+    try {
+      const host = new URL(candidate.startsWith("//") ? `http:${candidate}` : candidate).hostname;
+      if (host !== "") return host.toLowerCase();
+    } catch { /* not a url after all — the bare normalization stands */ }
+  }
+  return undefined;
 }
 
 /**
