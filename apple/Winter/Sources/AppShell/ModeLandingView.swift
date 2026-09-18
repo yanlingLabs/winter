@@ -77,99 +77,46 @@ struct ModeLandingView: View {
     private var rows: [SessionSummary] { landingTabRows(tab, in: modeRows) }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
+        // 2026-09-18: the app's own list chrome (`SessionListChrome.swift`) — large title, the
+        // composer's switch for the tabs, hover rows in a centred column — replacing the AppKit
+        // `List` under a segmented `Picker`. Every read, verb and gate below is unchanged.
+        SessionListPage(title: mode.title, actionTitle: "New", action: newSession) {
+            SessionListTabs(tabs: LandingTab.allCases, selection: $tab, title: \.title)
+        } content: {
             if rows.isEmpty {
-                emptyState
+                SessionListEmpty(title: emptyTitle, detail: emptyDetail)
             } else {
-                List {
-                    ForEach(rows) { row in
-                        landingRow(row)
-                    }
+                ForEach(rows) { row in
+                    landingRow(row)
                 }
-                .listStyle(.inset)
             }
         }
         .navigationTitle(mode.title)
-        // The same belt `ChatLandingView`/`ShellSidebar` carry: the shell's 5s poll (T2) only runs
-        // while the window is visible, and this surface can appear before its first tick.
         .task { await directory.refresh() }
     }
 
-    private var header: some View {
-        HStack(spacing: 12) {
-            Picker("Tab", selection: $tab) {
-                ForEach(LandingTab.allCases) { t in
-                    Text(t.title).tag(t)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(maxWidth: 280)
-            Spacer(minLength: 8)
-            // T8-wd's create-time picker, reused verbatim — same anatomy as `SessionSidebar`'s own
-            // "+ New session" row (`Image(systemName: "plus.circle")` + a plain-styled button).
-            Button {
-                host.startNewSession { sessionId in
-                    nav.navigate(to: .session(sessionId))
-                }
-            } label: {
-                Label("New", systemImage: "plus.circle")
-                    .font(Typography.label())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+    private func newSession() {
+        host.startNewSession { sessionId in
+            nav.navigate(to: .session(sessionId))
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
     }
 
     @ViewBuilder
     private func landingRow(_ row: SessionSummary) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button {
-                nav.navigate(to: .session(row.sessionId))
-            } label: {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(sessionDisplayTitle(row.title))
-                            .font(Typography.landingBody)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Text(Date(timeIntervalSince1970: TimeInterval(row.createdAt) / 1000), style: .relative)
-                            .font(Typography.landingCaption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 8)
-                    // T3's carried ruling: the Archived tab's row affordance SAYS what clicking does
-                    // ("Resume" — clicking attaches, which clears the archive flag daemon-side) rather
-                    // than repeating the chip's "Archived" state a whole tab already named that says.
-                    if landingRowShowsResumeAffordance(tab) {
-                        resumeAffordance
-                    } else {
-                        ActivityChip(activity: row.activity)
-                    }
-                }
-                .contentShape(Rectangle())
+        SessionListRow(title: sessionDisplayTitle(row.title),
+                       date: sessionListDate(row.createdAt),
+                       action: { nav.navigate(to: .session(row.sessionId)) }) {
+            if landingRowShowsResumeAffordance(tab) {
+                resumeAffordance
+            } else {
+                ActivityChip(activity: row.activity)
             }
-            .buttonStyle(.plain)
-
-            // Archived tab (§ `landingTabOffersRosterVerbs`): resume — the row's own click, above —
-            // is the ONLY exit; no background/unbackground/stop/archive buttons render here at all,
-            // mirroring the immutability ruling in the UI rather than re-deriving it.
+        } below: {
             if landingTabOffersRosterVerbs(tab) {
                 rosterVerbsRow(row)
+                    .padding(.bottom, 6)
             }
         }
-        .padding(.vertical, 4)
-        // cli-handoff T3: the row's "Move to CLI" — the SAME one eligibility gate as the
-        // open-session toolbar action (`moveToCliOffered`), so archived rows (the Archived tab's,
-        // by their `activity`) and any non-code mode a future landing lists never render the item
-        // at all. A trigger here is for a session the shell is NOT attached to (a landing on
-        // screen means the host is detached), so `ShellSessionHost.moveToCli` launches without
-        // navigating — the shell is already exactly where a move would land it.
         .contextMenu {
             if moveToCliOffered(row: row) {
                 Button {
@@ -181,10 +128,6 @@ struct ModeLandingView: View {
         }
     }
 
-    /// The Background tab's per-row verbs: Stop (`session.interrupt`), the background⇄clear verb
-    /// (`backgroundVerbOffered` — never re-derived; a background-tab row always resolves to
-    /// `.unbackground`), and Archive. A refusal (e.g. Archive on a row still mid-turn — "stop or
-    /// background it first") is shown VERBATIM, keyed to this row alone.
     @ViewBuilder
     private func rosterVerbsRow(_ row: SessionSummary) -> some View {
         let inFlight = host.rosterActionInFlight.contains(row.sessionId)
@@ -202,8 +145,8 @@ struct ModeLandingView: View {
             }
         }
         .disabled(inFlight)
-        .font(Typography.landingCaption)
-        .foregroundStyle(.secondary)
+        .font(Typography.control())
+        .foregroundStyle(Theme.textMuted)
 
         if let refusal = host.rosterRefusals[row.sessionId] {
             Text(refusal)
@@ -222,25 +165,9 @@ struct ModeLandingView: View {
     /// The Archived tab's trailing label — never a button of its own (the row's whole surface, above,
     /// is the click; this is presentational only, so it says what THAT click does).
     private var resumeAffordance: some View {
-        Label("Resume", systemImage: "arrow.uturn.left.circle")
-            .font(Typography.chipLabel.weight(.medium))
-            .foregroundStyle(.secondary)
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: 10) {
-            Image(systemName: mode.systemImage)
-                .font(Typography.emptyStateGlyph)
-                .foregroundStyle(.tertiary)
-            Text(emptyTitle)
-                .font(Typography.emptyStateTitle)
-            Text(emptyDetail)
-                .font(Typography.emptyStateSubtitle)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .padding(32)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        Label("Resume", systemImage: "arrow.uturn.left")
+            .font(Typography.control())
+            .foregroundStyle(Theme.textMuted)
     }
 
     private var emptyTitle: String {

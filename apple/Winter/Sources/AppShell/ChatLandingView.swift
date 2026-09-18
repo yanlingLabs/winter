@@ -9,7 +9,7 @@ import SwiftUI
 /// stale-copy drift class this pin exists for (this SwiftUI file's own convention: bodies
 /// themselves are never unit-tested, only their pure decision helpers, per `DashboardTests`' file
 /// doc — extracting the string is what makes that possible here).
-let chatLandingEmptyStateSubtitle = "Start one with New Chat."
+let chatLandingEmptyStateSubtitle = "Start one with New chat."
 
 /// PURE (bugfix pass B4): whether the landing renders its "New Chat" header button. Gated ONLY on
 /// the door being wired (`hasAction`) — deliberately NOT on the list: `hasRows` is in the signature
@@ -53,25 +53,20 @@ struct ChatLandingView: View {
     private var rows: [SessionSummary] { sessionRows(for: .chat, in: directory.rows) }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if chatLandingShowsNewChatButton(hasAction: newChat != nil, hasRows: !rows.isEmpty) {
-                header
-                Divider()
-            }
+        // 2026-09-18: the shared list chrome (`SessionListChrome.swift`), like the Code page.
+        // New Chat still appears only when wired (`chatLandingShowsNewChatButton`).
+        let showsNew = chatLandingShowsNewChatButton(hasAction: newChat != nil, hasRows: !rows.isEmpty)
+        SessionListPage(title: SessionMode.chat.title,
+                        actionTitle: showsNew ? "New chat" : nil,
+                        action: showsNew ? { newChat?() } : nil) {
             if rows.isEmpty {
-                emptyState
+                SessionListEmpty(title: "No chats yet", detail: chatLandingEmptyStateSubtitle)
             } else {
-                List {
-                    ForEach(rows) { row in
-                        Button {
-                            nav.navigate(to: .session(row.sessionId))
-                        } label: {
-                            ChatLandingRow(row: row)
-                        }
-                        .buttonStyle(.plain)
-                    }
+                ForEach(rows) { row in
+                    SessionListRow(title: sessionDisplayTitle(row.title),
+                                   date: sessionListDate(row.createdAt),
+                                   action: { nav.navigate(to: .session(row.sessionId)) })
                 }
-                .listStyle(.inset)
             }
         }
         .navigationTitle(SessionMode.chat.title)
@@ -79,63 +74,5 @@ struct ChatLandingView: View {
         // while the window is visible, and this surface can appear before its first tick.
         .task { await directory.refresh() }
     }
-
-    /// B4: the landing's own create affordance — `ModeLandingView.header`'s visual conventions
-    /// verbatim (right-aligned `plus.circle` label, plain style, secondary tint, same padding),
-    /// minus the tab picker chat doesn't have. Labeled "New Chat" — the door's established name
-    /// (the menu-bar entry, and the empty-state copy that points here) — where the code landing's
-    /// says "New" (its create opens a folder picker first; this one creates immediately).
-    private var header: some View {
-        HStack(spacing: 12) {
-            Spacer(minLength: 8)
-            Button {
-                newChat?()
-            } label: {
-                Label("New Chat", systemImage: "plus.circle")
-                    .font(Typography.label())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-    }
-
-    private var emptyState: some View {
-        VStack(spacing: 10) {
-            Image(systemName: SessionMode.chat.systemImage)
-                .font(Typography.emptyStateGlyph)
-                .foregroundStyle(.tertiary)
-            Text("No chats yet")
-                .font(Typography.emptyStateTitle)
-            Text(chatLandingEmptyStateSubtitle)
-                .font(Typography.emptyStateSubtitle)
-                .foregroundStyle(.secondary)
-        }
-        .padding(32)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
 }
 
-/// One landing row — title (with the directory's own "New session" fallback for an untitled row)
-/// over its relative creation time, the same anatomy `SessionSidebar`'s rows use so the two lists
-/// read as one family.
-private struct ChatLandingRow: View {
-    let row: SessionSummary
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(sessionDisplayTitle(row.title))
-                .font(Typography.landingBody)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            Text(Date(timeIntervalSince1970: TimeInterval(row.createdAt) / 1000), style: .relative)
-                .font(Typography.landingCaption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 4)
-        .contentShape(Rectangle())
-    }
-}

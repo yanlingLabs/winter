@@ -45,8 +45,8 @@ final class ShellChatSurfaceTests: XCTestCase {
     /// menu bar would be stale the moment the button shipped — the exact drift class this pin
     /// exists for (T6's first retarget pass briefly named the browse-only "Chat" entry here).
     func testChatLandingEmptyStateNamesTheActualCreateDoor() {
-        XCTAssertEqual(chatLandingEmptyStateSubtitle, "Start one with New Chat.")
-        XCTAssertTrue(chatLandingEmptyStateSubtitle.contains("New Chat"), "must name the affordance that actually creates a session")
+        XCTAssertEqual(chatLandingEmptyStateSubtitle, "Start one with New chat.")
+        XCTAssertTrue(chatLandingEmptyStateSubtitle.contains("New chat"), "must name the affordance that actually creates a session")
         XCTAssertFalse(chatLandingEmptyStateSubtitle.contains("menu bar"), "the landing carries its own button now — copy pointing at the menu bar is stale")
     }
 
