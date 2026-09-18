@@ -179,6 +179,8 @@ describe("releaseNotesHtml (2026-09-17 settings-surface plan, item 9)", () => {
     ["an unclosed fence", "```sh\nnever closed"],
     ["a fence with an unsupported info string", "```sh {highlight}\nx\n```"],
     ["a line indented outside a bullet", "para\n\n  orphan indent"],
+    ["a horizontal rule", "para\n\n---\n\npara"],
+    ["an underscore horizontal rule", "para\n\n___"],
   ])("throws on %s", (_label, md) => {
     expect(() => render(md)).toThrow(/release notes:/);
   });

@@ -171,6 +171,9 @@ export function releaseNotesHtml(i: { notesMarkdown: string; version: string }):
       continue;
     }
     if (/^\s/.test(line)) throw new Error(`release notes: line ${n + 1} is indented outside a bullet or fence: ${line}`);
+    // A thematic break would otherwise fall through to `<p>---</p>`. It is the one unsupported
+    // construct that reads as ordinary text rather than tripping a rule below.
+    if (/^(-{3,}|_{3,}|\*{3,})\s*$/.test(line)) throw new Error(`release notes: line ${n + 1} is a horizontal rule, which is not supported: ${line}`);
     if (/^([*+>|]|\d+\.)\s/.test(line)) throw new Error(`release notes: line ${n + 1} uses an unsupported construct (only #/##/###, - bullets, \`\`\` fences and paragraphs): ${line}`);
     const paragraph: string[] = [];
     const startedAt = n + 1;

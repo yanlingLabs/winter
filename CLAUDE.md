@@ -185,6 +185,13 @@ bun run scripts/release.ts --dry-run --no-bump   # full rehearsal: builds, notar
 bun run scripts/release.ts                       # real release (bumps the version first)
 ```
 
+`releases/notes/<version>.md` is **required** for the version being released — it is both the GitHub
+release body and the Sparkle appcast `<description>` (rendered to HTML by `releaseNotesHtml`, which
+throws on any markdown construct outside `#`/`##`/`###`, paragraphs, `- ` bullets with two-space
+continuations, ``` fences, `` `code` `` and `**bold**`). The preflight fails before the bump when it
+is absent, so the flow is: write and commit the notes for the next version, bump and sync, then
+release with `--no-bump`.
+
 ## Hard rules
 
 - **Never kill, restart, launch or write to a running Winter.app or the user's live daemon.** The daily driver is `Winter.app` (`com.winter.app`) in `/Applications` on `~/.winter` with Keychain `com.winter.core`. A local Release build (`out/release/<version>/…/Winter.app`) carries the same bundle id and Launch Services can resolve `com.winter.app` to it at relaunch: build Release copies, never launch one, and never delete an `out/release/<version>` tree while a Winter process runs from it. The legacy `Norma.app` / `~/.norma` / `com.norma.core` items stay untouched as the rollback source.
