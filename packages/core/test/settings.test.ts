@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert, DEFAULT_PROVIDER, pinsFor, setModelRole } from "../src/settings";
+import { loadSettings, loadPermissionDirs, addLocalDir, saveSettings, Settings, REASONING_EFFORTS, CLIENT_EFFORTS, isClientEffort, wireEffort, clientEffortEligible, setProviderModel, setReasoningEffort, hooksEnabledFrom, setOutputStyle, workflowsEnabledFrom, keywordTriggerEnabledFrom, cleanerEnabledFrom, winterOptionsFromSettings, DEFAULT_WINTER_IDLE_TIMEOUT_SEC, handoffCrossRuntimeEnabled, officialSubscriptionAuthEnabled, officialSubscriptionAuthFlagInert, DEFAULT_PROVIDER, pinsFor, setModelRole, setSkillDenied, skillDenyRule } from "../src/settings";
 import { mkdirSync, writeFileSync as wf } from "node:fs";
 import { UNSTATED_TAG, type ModelTag } from "../src/runtime-sdk/model-tag";
 import { setPluginEnabled } from "../src/plugins/lifecycle";
@@ -1180,5 +1180,43 @@ describe("officialSubscriptionAuthFlagInert (P9c-1 amendment)", () => {
   test("flag true, WITH the approval override -> never inert (false) — approved means it's actually in effect, not stuck", () => {
     const on = Settings.parse({ ...base, runtimes: { official: { subscriptionAuth: true } } });
     expect(officialSubscriptionAuthFlagInert(on, true)).toBe(false);
+  });
+});
+
+describe("setSkillDenied (daemon settings surface batch 3, item 2)", () => {
+  const base = Settings.parse({ schemaVersion: 3 as const, provider: { model: DEFAULT_PROVIDER.model } });
+
+  test("skillDenyRule spells the exact SDK-grammar string", () => {
+    expect(skillDenyRule("writing-skills")).toBe("Skill(writing-skills)");
+    expect(skillDenyRule("my-plugin:my-skill")).toBe("Skill(my-plugin:my-skill)");
+  });
+
+  test("denied: true appends the rule to an absent permissions block", () => {
+    const next = setSkillDenied(base, "writing-skills", true);
+    expect(next.permissions?.deny).toEqual(["Skill(writing-skills)"]);
+  });
+
+  test("denied: true is a no-op (deduped) when the rule already exists", () => {
+    const once = setSkillDenied(base, "writing-skills", true);
+    const twice = setSkillDenied(once, "writing-skills", true);
+    expect(twice.permissions?.deny).toEqual(["Skill(writing-skills)"]);
+  });
+
+  test("denied: false removes only its own rule, preserving every other deny entry untouched", () => {
+    const withTwo = Settings.parse({ ...base, permissions: { deny: ["Skill(writing-skills)", "Agent(fork)"] } });
+    const next = setSkillDenied(withTwo, "writing-skills", false);
+    expect(next.permissions?.deny).toEqual(["Agent(fork)"]);
+  });
+
+  test("denied: false on an absent rule is a no-op", () => {
+    const next = setSkillDenied(base, "writing-skills", false);
+    expect(next.permissions?.deny ?? []).toEqual([]);
+  });
+
+  test("preserves every other settings key untouched (a shallow-merge bug would drop provider/allow)", () => {
+    const withAllow = Settings.parse({ ...base, permissions: { allow: ["Computer"] } });
+    const next = setSkillDenied(withAllow, "writing-skills", true);
+    expect(next.permissions?.allow).toEqual(["Computer"]);
+    expect(next.provider).toEqual(base.provider);
   });
 });

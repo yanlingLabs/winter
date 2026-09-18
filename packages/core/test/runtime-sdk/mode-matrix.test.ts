@@ -5,6 +5,7 @@ import type { CanUseTool, PermissionMode } from "@yanlinglabs/winter-agent-sdk";
 import type { CredentialPresence } from "@yanlinglabs/winter-runtime-sdk";
 import { RESUME_STAGING_PREFIX, isResumeStagingRoot, resumeStagingRoot } from "@yanlinglabs/winter-runtime-sdk";
 import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
+import { Settings } from "../../src/settings";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
 import { PermissionGate, type SessionApprovalPolicy } from "../../src/agent/gate";
@@ -222,6 +223,27 @@ test("the control-plane deny rules cover the four write tools × the control-pla
     expect(deny).toContain(`${tool}(${claudeResumeTarget})`);
   }
   expect(deny).toHaveLength(4 * 8 + 3 * 3);
+});
+
+// Daemon settings surface batch 3 (item 2): `settings.permissions.deny` (Skill(<name>) toggles,
+// or any hand-written rule) rides ALONGSIDE the fixed control-plane fence, never in place of it.
+test("item 2: settings.permissions.deny is appended after the fixed control-plane fence, verbatim", () => {
+  const settings = Settings.parse({
+    schemaVersion: 3 as const,
+    provider: { model: "codex-oauth/gpt-5.6-sol" },
+    permissions: { deny: ["Skill(writing-skills)", "Agent(fork)"] },
+  });
+  const deny = buildWinterOptions(optionsInput({ home: "/h", settings })).permissions!.deny!;
+  expect(deny.slice(-2)).toEqual(["Skill(writing-skills)", "Agent(fork)"]);
+  // The fixed fence is untouched (same count this file's other test pins).
+  expect(deny).toHaveLength(4 * 8 + 3 * 3 + 2);
+});
+
+test("item 2: an absent settings.permissions.deny changes nothing — byte-identical to before item 2", () => {
+  const withNull = buildWinterOptions(optionsInput({ home: "/h", settings: null })).permissions!.deny!;
+  const withUndefined = buildWinterOptions(optionsInput({ home: "/h" })).permissions!.deny!;
+  expect(withNull).toHaveLength(4 * 8 + 3 * 3);
+  expect(withUndefined).toHaveLength(4 * 8 + 3 * 3);
 });
 
 // Winter Phase 10b (D1-3, W18-9): a read of a `claude-resume-*` staging root is denied — proved

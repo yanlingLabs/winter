@@ -32,7 +32,7 @@ import {
   PanelListParams, PanelOpenTabParams, PanelCloseTabParams, PanelActivateTabParams, PanelReportNavigationParams,
   PanelCommandResultParams, PanelReadDiffParams,
   CapabilitiesListParams, VersionsGetParams, SettingsModelRolesParams, SettingsSetModelRoleParams,
-  AgentsListParams,
+  AgentsListParams, SettingsSetSkillDeniedParams,
   SYSTEM_SESSION_ID,
   SessionEvent, ConnWriter, type WritableSocket,
 } from "@yanlinglabs/winter-protocol";
@@ -105,7 +105,7 @@ import type { ProviderLink } from "../peripheral/provider-link";
 import type { HardwareBroker } from "../peripheral/hardware";
 import { verbClass } from "../peripheral/hardware";
 import type { QuotaManager } from "../providers/quota";
-import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole } from "../settings";
+import { addLocalDir, clientEffortEligible, isClientEffort, loadSettings, saveSettings, setAdvisorModel, Settings, modelRolesFor, setModelRole, setSkillDenied, skillDenyRule } from "../settings";
 import { disallowedToolsFor } from "../runtime-sdk/mode-options";
 import { WINTER_CAPABILITY_TOOLS, CAPABILITY_SERVER_KEYS, capabilityToolName, type CapabilityToolFacts } from "../capabilities/names";
 import { diagnoseRuntimes } from "../runtime-sdk/runtimes-doctor";
@@ -1950,7 +1950,17 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       case METHODS.skillsList: {
         const p = parseParams(SkillsListParams, params);
         if (!opts.skills) return { ok: true, skills: [] };
-        return { ok: true, skills: opts.skills.list({ cwd: p.cwd ?? null }) };
+        // Batch 3 (item 2): overlay `denied`/`deniedBy` from the GLOBAL `settings.permissions.deny`
+        // list — `liveSettingsFor` is the same "typed absence, never a crash" reader every other
+        // opts.winterHome-gated path in this file uses. `skillDenyRule` is the ONE place the exact
+        // `Skill(<name>)` string is spelled, shared with the writer (`setSkillDenied`, settings.ts)
+        // so the two can never drift onto different strings for the same skill.
+        const denySet = new Set(liveSettingsFor(opts)?.permissions?.deny ?? []);
+        const skills = opts.skills.list({ cwd: p.cwd ?? null }).map((s) => {
+          const denied = denySet.has(skillDenyRule(s.name));
+          return denied ? { ...s, denied: true, deniedBy: "settings" as const } : s;
+        });
+        return { ok: true, skills };
       }
 
       // -----------------------------------------------------------------------------------------
@@ -2161,6 +2171,21 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         saveSettings(settingsPath, next);
         const roles = modelRolesFor(next);
         return { ok: true, model: roles[p.role].model, roles };
+      }
+      // -----------------------------------------------------------------------------------------
+      // Daemon settings surface batch 3 (item 2) — the ONE write door for a skill's `Skill(<name>)`
+      // deny rule. LOCAL-ROLE ONLY, same posture as `settings.setModelRole` just above. `setSkillDenied`
+      // never throws on its own input (no tag/catalog validation needed), so the only failure mode
+      // here is a missing `winterHome`.
+      // -----------------------------------------------------------------------------------------
+      case METHODS.settingsSetSkillDenied: {
+        const p = parseParams(SettingsSetSkillDeniedParams, params);
+        if (!opts.winterHome) throw new RpcFailure(ERR.INTERNAL, "settings.setSkillDenied is not available on this server (no winterHome configured)");
+        const settingsPath = join(opts.winterHome, "settings.json");
+        const settings = loadSettings(settingsPath);
+        const next = setSkillDenied(settings, p.name, p.denied);
+        saveSettings(settingsPath, next);
+        return { ok: true, name: p.name, denied: p.denied, rule: skillDenyRule(p.name) };
       }
       case METHODS.pluginsList: {
         parseParams(PluginsListParams, params);

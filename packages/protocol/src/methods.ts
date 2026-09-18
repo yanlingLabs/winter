@@ -420,6 +420,18 @@ export const SkillMetaSchema = z.object({
   // undefined for every other source. Additive/optional: an older server that never sends it still
   // parses.
   author: z.string().optional(),
+  /** Daemon settings surface batch 3 (item 2): whether a `Skill(<name>)` deny rule currently exists
+   *  for this skill (`settings.permissions.deny`) — the SDK-grammar mechanism both legs' pinned
+   *  runtimes use to disable a skill (there is no dedicated `disabledSkills` setting on either
+   *  leg). Additive/optional: absent/false both mean "not denied", so an older client reading this
+   *  from a server that never sends it sees the pre-item-2 behaviour. */
+  denied: z.boolean().optional(),
+  /** Set only when `denied` is true — which rule source produced the denial. Today there is only
+   *  one possible source (the home `settings.json`'s GLOBAL `permissions.deny` — see that field's
+   *  own doc for why this is deliberately not project-scoped), so this is always `"settings"` when
+   *  present; the field exists so the wire shape does not need to change if a second source (e.g. a
+   *  project-scoped deny) is ever added later. */
+  deniedBy: z.enum(["settings"]).optional(),
 });
 export const SkillsListParams = z.object({ cwd: z.string().optional() });
 export const SkillsListResult = z.object({ ok: z.literal(true), skills: z.array(SkillMetaSchema) });
@@ -455,6 +467,17 @@ export const SkillsWriteResult = z.object({});
  *  itself. */
 export const SkillsDeleteParams = z.object({ name: z.string().min(1) });
 export const SkillsDeleteResult = z.object({});
+
+/**
+ * Daemon settings surface batch 3 (item 2): the ONE write door toggling a skill's `Skill(<name>)`
+ * deny rule (`settings.permissions.deny`) — LOCAL role only, never added to `REMOTE_ALLOWED_METHODS`.
+ * Mirrors `settings.setModelRole`'s own handler shape (load → pure transform → save); the transform
+ * itself (`setSkillDenied`, core/src/settings.ts) can never fail on ITS OWN input (no tag/catalog
+ * validation the way a model role needs), so this door has no failure mode of its own beyond a
+ * missing `winterHome`.
+ */
+export const SettingsSetSkillDeniedParams = z.object({ name: z.string().min(1), denied: z.boolean() });
+export const SettingsSetSkillDeniedResult = z.object({ ok: z.literal(true), name: z.string(), denied: z.boolean(), rule: z.string() });
 
 export const McpServerStatusSchema = z.object({
   name: z.string(),
@@ -2191,6 +2214,7 @@ export const METHODS = {
   skillsRead: "skills.read",
   skillsWrite: "skills.write",
   skillsDelete: "skills.delete",
+  settingsSetSkillDenied: "settings.setSkillDenied",
   mcpList: "mcp.list",
   pluginsList: "plugins.list",
   askUserRespond: "ask_user.respond",
