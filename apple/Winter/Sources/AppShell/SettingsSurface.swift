@@ -9,35 +9,63 @@ import SwiftUI
 /// the card shows the section. One sidebar on screen, always.
 ///
 /// What is deliberately ABSENT, and why:
-/// - **Skills and Plugins** — they moved to the library panel (`ShellOverlay.library`), which is
-///   where hooks, MCP tools and agents live too. One home per thing (user call).
+/// - **A list of skills, plugins, hooks, MCP servers or agents** — they live in the library panel
+///   (`ShellOverlay.library`). One home per thing (user call). The Plugins section is a page of
+///   DOORS into that panel at each tab, not a second copy of it (`SettingsPluginsSection`).
 /// - **Paired devices** — the phone panel (`ShellOverlay.devices`), per the user's "settings stuff
 ///   should be here except for connected devices".
 /// - **Updates** — the updates panel (`ShellOverlay.updates`), which also checks on open and shows
 ///   download progress, so a read-only settings row would be a second, worse door.
 ///
-/// **Seven of these are COMING, not built** (2026-09-18 — `settingsSectionComingCopy`): runtimes,
-/// sessions, approvals, hooks, MCP servers, appearance and keyboard shortcuts. Each is a real
-/// capability Winter has today that simply has no settings surface yet, and its page says what
-/// belongs there and where it is configured right now. None of them is an invented setting.
+/// **Most of these are COMING, not built** (`settingsSectionComingCopy`, 2026-09-18). Some are
+/// real capabilities that simply have no settings surface yet (runtimes, sessions, permissions,
+/// appearance, keyboard shortcuts, computer use, browser, archived chats), and their pages say what
+/// belongs there and where it is configured today. The rest (profile, personalization,
+/// notifications, voice, import, appshots) are things Winter does not do yet, and their pages say
+/// only that and what the page will hold. None of them is an invented setting.
+///
+/// Two kinds are NOT placeholders: `.plugins` is a door into the library panel at a chosen tab
+/// (`SettingsPluginsSection`), and the Winter group's four are links (`SettingsLinkSection`).
+///
+/// Gone on 2026-09-18 (user's restructure): the standalone MCP Servers and Hooks sections — both
+/// are rows on the Plugins page now, which is one door per thing instead of two — and "Approvals",
+/// renamed Permissions, because policy and permission rules are one subject.
 enum SettingsSection: String, Hashable, CaseIterable, Sendable {
+    // Personal
+    case profile
+    case personalization
+    case notifications
+    case voice
+    case appearance
+    case shortcuts
+    case importChats
+    case archivedChats
+    // Models
     case roles
     case providers
     case runtimes
     case quota
+    // Assistant
     case memory
     case workflows
     case sessions
-    case approvals
-    case hooks
-    case mcpServers
-    case appearance
-    case shortcuts
+    case permissions
+    // Integrations
+    case plugins
+    case computerUse
+    case browser
+    case appshots
+    // This Mac
     case trust
     case peripheral
     case commandLine
     case launchAtLogin
     case daemonStatus
+    // Winter
+    case support
+    case feedback
+    case discord
+    case donate
 }
 
 /// A named run of sections in the settings sidebar. Groups are how the list stays readable without
@@ -50,15 +78,25 @@ struct SettingsSectionGroup: Identifiable, Hashable, Sendable {
 
 /// THE settings information architecture. `settingsSectionOrder` is derived from this, so the list
 /// and the order can never disagree.
+///
+/// The shape is ChatGPT's own settings sidebar (Personal first, Integrations as its own group), per
+/// the user's 2026-09-18 restructure. Archived Chats is LAST in Personal by the user's word ("the
+/// last one"); Appearance and Keyboard Shortcuts moved here from This Mac, because they are about
+/// you, not about the machine.
 let settingsSectionGroups: [SettingsSectionGroup] = [
+    SettingsSectionGroup(id: "personal", title: "Personal",
+                         sections: [.profile, .personalization, .notifications, .voice, .appearance,
+                                    .shortcuts, .importChats, .archivedChats]),
     SettingsSectionGroup(id: "models", title: "Models",
                          sections: [.roles, .providers, .runtimes, .quota]),
     SettingsSectionGroup(id: "assistant", title: "Assistant",
-                         sections: [.memory, .workflows, .sessions, .approvals, .hooks]),
-    SettingsSectionGroup(id: "integrations", title: "Integrations", sections: [.mcpServers]),
+                         sections: [.memory, .workflows, .sessions, .permissions]),
+    SettingsSectionGroup(id: "integrations", title: "Integrations",
+                         sections: [.plugins, .computerUse, .browser, .appshots]),
     SettingsSectionGroup(id: "mac", title: "This Mac",
-                         sections: [.appearance, .shortcuts, .trust, .peripheral, .commandLine,
-                                    .launchAtLogin, .daemonStatus]),
+                         sections: [.trust, .peripheral, .commandLine, .launchAtLogin, .daemonStatus]),
+    SettingsSectionGroup(id: "winter", title: "Winter",
+                         sections: [.support, .feedback, .discord, .donate]),
 ]
 
 let settingsSectionOrder: [SettingsSection] = settingsSectionGroups.flatMap(\.sections)
@@ -69,6 +107,14 @@ let defaultSettingsSection: SettingsSection = .providers
 /// PURE: the section's row title.
 func settingsSectionTitle(_ section: SettingsSection) -> String {
     switch section {
+    case .profile: return "Profile"
+    case .personalization: return "Personalization"
+    case .notifications: return "Notifications"
+    case .voice: return "Voice"
+    case .appearance: return "Appearance"
+    case .shortcuts: return "Keyboard Shortcuts"
+    case .importChats: return "Import"
+    case .archivedChats: return "Archived Chats"
     case .roles: return "Roles"
     case .providers: return "Providers"
     case .runtimes: return "Runtimes"
@@ -76,16 +122,20 @@ func settingsSectionTitle(_ section: SettingsSection) -> String {
     case .memory: return "Memory"
     case .workflows: return "Workflows"
     case .sessions: return "Sessions"
-    case .approvals: return "Approvals"
-    case .hooks: return "Hooks"
-    case .mcpServers: return "MCP Servers"
-    case .appearance: return "Appearance"
-    case .shortcuts: return "Keyboard Shortcuts"
+    case .permissions: return "Permissions"
+    case .plugins: return "Plugins"
+    case .computerUse: return "Computer Use"
+    case .browser: return "Browser"
+    case .appshots: return "Appshots"
     case .trust: return "Trust"
     case .peripheral: return "Peripheral"
     case .commandLine: return "Command Line"
     case .launchAtLogin: return "Launch at Login"
     case .daemonStatus: return "Daemon Status"
+    case .support: return "Support"
+    case .feedback: return "Feedback"
+    case .discord: return "Discord"
+    case .donate: return "Donate"
     }
 }
 
@@ -93,6 +143,14 @@ func settingsSectionTitle(_ section: SettingsSection) -> String {
 /// deliberately — the surface moved, the thing did not.
 func settingsSectionSystemImage(_ section: SettingsSection) -> String {
     switch section {
+    case .profile: return "person.crop.circle"
+    case .personalization: return "slider.horizontal.3"
+    case .notifications: return "bell"
+    case .voice: return "waveform"
+    case .appearance: return "paintpalette"
+    case .shortcuts: return "command"
+    case .importChats: return "square.and.arrow.down"
+    case .archivedChats: return "archivebox"
     case .roles: return "person.2.badge.gearshape"
     case .providers: return "key"
     case .runtimes: return "cpu"
@@ -100,18 +158,22 @@ func settingsSectionSystemImage(_ section: SettingsSection) -> String {
     case .memory: return "brain"
     case .workflows: return "flowchart"
     case .sessions: return "bubble.left.and.bubble.right"
-    case .approvals: return "hand.raised"
-    // The library panel's own glyphs for the same two things, so the settings row and the list it
-    // is the switch for are recognisably the same subject.
-    case .hooks: return "point.3.connected.trianglepath.dotted"
-    case .mcpServers: return "wrench.and.screwdriver"
-    case .appearance: return "paintpalette"
-    case .shortcuts: return "command"
+    case .permissions: return "hand.raised"
+    // The library panel's own glyph for plugins: this page is a door into that panel, so the row
+    // and the tab it opens are recognisably the same subject.
+    case .plugins: return libraryTabSystemImage(.plugins)
+    case .computerUse: return "cursorarrow.rays"
+    case .browser: return "globe"
+    case .appshots: return "camera.viewfinder"
     case .trust: return "checkmark.shield"
     case .peripheral: return "keyboard"
     case .commandLine: return "terminal"
     case .launchAtLogin: return "power"
     case .daemonStatus: return "server.rack"
+    case .support: return "questionmark.circle"
+    case .feedback: return "exclamationmark.bubble"
+    case .discord: return "person.3"
+    case .donate: return "heart"
     }
 }
 
@@ -119,6 +181,14 @@ func settingsSectionSystemImage(_ section: SettingsSection) -> String {
 /// keep their own copy inside the pane; this is the sidebar-level "what is this".
 func settingsSectionSubtitle(_ section: SettingsSection) -> String {
     switch section {
+    case .profile: return "How Winter knows you."
+    case .personalization: return "How Winter responds to you."
+    case .notifications: return "What Winter tells you about, and when."
+    case .voice: return "Talking to Winter instead of typing."
+    case .appearance: return "Light, dark, and how Winter looks."
+    case .shortcuts: return "The keys that summon Winter."
+    case .importChats: return "Bringing conversations in from elsewhere."
+    case .archivedChats: return "Sessions you have put away."
     case .roles: return "Which model does each job."
     case .providers: return "API keys, sign-ins, and where each provider is reached."
     case .runtimes: return "Which agent binaries sessions run on."
@@ -126,41 +196,79 @@ func settingsSectionSubtitle(_ section: SettingsSection) -> String {
     case .memory: return "What Winter remembers, and what it learned it from."
     case .workflows: return "Saved orchestrations, and the ones running now."
     case .sessions: return "Chat titles, and the purge that retires stale chats."
-    case .approvals: return "What Winter may do without asking."
-    case .hooks: return "Whether hooks run at all."
-    case .mcpServers: return "External tool servers Winter can call."
-    case .appearance: return "Light, dark, and how Winter looks."
-    case .shortcuts: return "The keys that summon Winter."
+    case .permissions: return "What Winter may do without asking."
+    case .plugins: return "Plugins, skills, hooks, MCP servers and agents."
+    case .computerUse: return "Letting Winter use the screen, keyboard and pointer."
+    case .browser: return "The browser Winter works in."
+    case .appshots: return "Coming in a later release."
     case .trust: return "Folders Winter is allowed to work in."
     case .peripheral: return "What is holding the keyboard and pointer right now."
     case .commandLine: return "The winter command in your shell."
     case .launchAtLogin: return "Whether Winter starts with the Mac."
     case .daemonStatus: return "The daemon this app is talking to."
+    case .support: return "Help with Winter."
+    case .feedback: return "Tell us what works and what does not."
+    case .discord: return "The Winter community."
+    case .donate: return "Support Winter's development."
     }
 }
 
 // MARK: - Sections that are coming (2026-09-18)
 
 /// PURE: the page a COMING section shows — what belongs there, and where it is configured TODAY —
-/// or nil for a section that is built.
+/// or nil for a section that is built (or is a door or a link rather than a page).
 ///
 /// The rule every sentence here was written to: **name only what exists.** Each key and each place
-/// was checked against the daemon's settings schema (`packages/core/src/settings.ts`) and this
-/// app's own sources before it was written down, and two things the brief for these pages assumed
-/// turned out not to be true, so the copy says what IS true instead:
+/// was checked against the daemon's settings schema (`packages/core/src/settings.ts`), its
+/// capability servers, and this app's own sources before it was written down, and several things
+/// the briefs for these pages assumed turned out not to be true, so the copy says what IS true:
 ///
 /// - the Claude runtime's sign-in is NOT a setting (`runtimes.official.auth` was removed in WS-20);
 ///   it follows the model tag's own prefix, and `.runtimes` says so;
 /// - the summon hotkey is NOT edited anywhere — it is a fixed Hyper-Space. What the library's
-///   Plugins tab edits is the shortcuts PLUGINS declare, and `.shortcuts` separates the two.
+///   Plugins tab edits is the shortcuts PLUGINS declare, and `.shortcuts` separates the two;
+/// - there is no default-approval-policy key: a session's policy is chosen in its composer;
+/// - there is no switch for the browser, only for computer use (`computerUse.enabled`, opt-in —
+///   `computerUseEnabledFrom` is `=== true`), so `.browser` names no on/off key;
+/// - only Code sessions are archived (`sessions/activity.ts`'s `ACTIVITY_MODES` is code + cowork,
+///   and Cowork has no landing yet), so `.archivedChats` points at the Code page's Archived tab.
 ///
-/// There is no default-approval-policy key either: a session's policy is chosen in its composer,
-/// which is what `.approvals` says rather than inventing a place for it.
+/// The not-yet-real pages (profile, personalization, notifications, voice, import, appshots) say
+/// one sentence of intent and claim nothing about today, except Voice's microphone, whose own
+/// accessibility label (`WinterComposerCard`) already says it is not wired.
 ///
 /// Plain text, no backticks: these reach `Text` as VARIABLES, and only a literal is parsed as
 /// Markdown — a backtick would render as a backtick.
 func settingsSectionComingCopy(_ section: SettingsSection) -> String? {
     switch section {
+    case .profile:
+        return "A profile — your name, and how Winter refers to you. Winter has no profile yet."
+    case .personalization:
+        return "Instructions and preferences that shape how Winter responds to you."
+    case .notifications:
+        return "Which things Winter tells you about when you are not looking, and how it tells you."
+    case .voice:
+        return "Speaking to Winter instead of typing. The microphone in the composer is not wired "
+            + "up yet."
+    case .importChats:
+        return "Bringing conversations from other assistants into Winter."
+    case .archivedChats:
+        return "Every archived session in one list. Today they are on the Code page's Archived "
+            + "tab, where opening one resumes it. Chats are never archived."
+    case .computerUse:
+        return "Whether Winter may see the screen and use the keyboard and pointer. Today that is "
+            + "computerUse.enabled in settings.json, off unless it is set to true. When it is on, "
+            + "Code and Dispatch sessions get the computer tool; Chat never does. A change applies "
+            + "to the next session that starts; one already running keeps its tool list. "
+            + "computerUse.screenshotMaxDim caps the size of the screenshots it takes."
+    case .browser:
+        return "The browser is the Chromium that runs in Winter's work panel, and the agent drives "
+            + "it through its browser tool. Every mode has that tool: in Chat it can only open, "
+            + "read and screenshot pages, while Code and Dispatch can also click, type, scroll and "
+            + "submit. Dangerous domains are refused by default — a shipped list, plus any you add "
+            + "under permissions.dangerousDomains.added in settings.json."
+    case .appshots:
+        return "Appshots are coming in a later release."
     case .runtimes:
         return "Which winter and claude binaries sessions run on, and whether changing a Code "
             + "session's model may cross from one to the other. Today that is settings.json only: "
@@ -172,21 +280,11 @@ func settingsSectionComingCopy(_ section: SettingsSection) -> String? {
         return "Whether new chats are named from their first exchange, and whether the purge "
             + "retires stale chats nobody came back to. Today: titles.enabled and cleaner.enabled "
             + "in settings.json. The model each of those jobs uses is chosen in Roles."
-    case .approvals:
+    case .permissions:
         return "The policy a session runs under, the permission rules Winter remembers, and the "
             + "reviewer that reads a shell command before it runs. Today the policy is chosen per "
             + "session in the composer; the rest is settings.json — permissions.allow for "
             + "remembered rules, reviewer.enabled and reviewer.classes for the reviewer."
-    case .hooks:
-        return "The one switch over whether hooks run at all — hooks.enabled in settings.json "
-            + "today. The hooks themselves are listed in the library panel; this is the switch "
-            + "above them, not a second list."
-    case .mcpServers:
-        return "Where external tool servers — stdio, HTTP or SSE — would be added and edited, "
-            + "instead of by hand under mcpServers in settings.json. The library panel lists the "
-            + "ones already there. There will be no field for auth headers until an "
-            + "environment-variable form exists: settings.json is readable by the model, so the "
-            + "daemon refuses credential-shaped header names outright."
     case .appearance:
         return "Light, dark, and anything else visual. There is nothing to set today — Winter "
             + "follows the system appearance and has no control of its own."
@@ -195,10 +293,16 @@ func settingsSectionComingCopy(_ section: SettingsSection) -> String? {
             + "Hyper-Space (⌃⌥⌘Space), is fixed today with no control to change it; plugin "
             + "shortcuts are bound in the library panel's Plugins tab, which is the wrong home "
             + "for them."
-    case .roles, .providers, .quota, .memory, .workflows, .trust, .peripheral, .commandLine,
-         .launchAtLogin, .daemonStatus:
+    case .roles, .providers, .quota, .memory, .workflows, .plugins, .trust, .peripheral,
+         .commandLine, .launchAtLogin, .daemonStatus, .support, .feedback, .discord, .donate:
         return nil
     }
+}
+
+/// PURE: the sections whose page is `SettingsSectionComing`. Derived from the copy table, so a
+/// section is a placeholder exactly when it has placeholder copy — the two cannot disagree.
+func settingsSectionIsComing(_ section: SettingsSection) -> Bool {
+    settingsSectionComingCopy(section) != nil
 }
 
 /// The page a coming section shows. The same posture — and the same two type levels — as
@@ -337,10 +441,26 @@ func settingsSectionBodyDrawsItsOwnHeader(_ section: SettingsSection) -> Bool {
     case .providers: return false
     // A coming section's body is `SettingsSectionComing`, which — like the placeholder — draws no
     // title, so the header above it has to.
-    case .runtimes, .sessions, .approvals, .hooks, .mcpServers, .appearance, .shortcuts:
+    case .profile, .personalization, .notifications, .voice, .appearance, .shortcuts,
+         .importChats, .archivedChats, .runtimes, .sessions, .permissions, .computerUse, .browser,
+         .appshots:
         return false
+    // The Plugins door and the four links are built on `SettingsPage`, which prints its own title.
+    case .plugins, .support, .feedback, .discord, .donate:
+        return true
     case .roles, .quota, .memory, .workflows, .trust, .peripheral,
          .commandLine, .launchAtLogin, .daemonStatus: return true
+    }
+}
+
+/// PURE: whether a section's page is answered before `SettingsSectionView` looks for daemon
+/// wiring at all — the ones that read nothing from the daemon: Roles (which reads it if there),
+/// every coming page, the Plugins door and the four links. Every other section needs wiring and
+/// shows `SettingsSectionPlaceholder` without it.
+func settingsSectionRendersWithoutWiring(_ section: SettingsSection) -> Bool {
+    switch section {
+    case .roles, .plugins, .support, .feedback, .discord, .donate: return true
+    default: return settingsSectionIsComing(section)
     }
 }
 
@@ -374,6 +494,9 @@ struct SettingsSectionView: View {
     /// Optional and defaulted for the same reason `wiring` is optional: a surface built without a
     /// shell renders honestly rather than offering a door that opens nothing.
     var picker: (any SettingsRolePickerPresenting)? = nil
+    /// The same layer again, as the narrower "open the library at this tab" door the Plugins page
+    /// needs (`SettingsLibraryPresenting`). Nil renders the page's rows honestly inert.
+    var library: (any SettingsLibraryPresenting)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -396,7 +519,9 @@ struct SettingsSectionView: View {
     /// placeholder, which needs our header to name it. `.roles` is the exception: it renders
     /// (through `SettingsPage`, with its own title) whether or not there is wiring at all.
     private var bodyDrawsItsOwnHeader: Bool {
-        if section == .roles { return true }
+        if settingsSectionRendersWithoutWiring(section) {
+            return settingsSectionBodyDrawsItsOwnHeader(section)
+        }
         return settingsSectionBodyDrawsItsOwnHeader(section) && wiring != nil
     }
 
@@ -438,7 +563,14 @@ struct SettingsSectionView: View {
             SettingsRolesSection(loader: wiring?.modelRoles ?? nil,
                                  roleWriter: wiring?.setModelRole ?? nil,
                                  picker: picker)
-        case .runtimes, .sessions, .approvals, .hooks, .mcpServers, .appearance, .shortcuts:
+        case .plugins:
+            // Answered before the wiring unwrap: the page reads nothing from the daemon, it only
+            // opens the library — which renders its own "no daemon wiring" state if there is none.
+            SettingsPluginsSection(library: library)
+        case .support, .feedback, .discord, .donate:
+            // Links, not settings — nothing to read from the daemon.
+            SettingsLinkSection(section: section)
+        case _ where settingsSectionIsComing(section):
             // Answered BEFORE the wiring unwrap too: a coming section's page reads nothing from
             // the daemon, so an app without wiring must not be told "no daemon wiring" about a
             // section wiring would not help.
@@ -498,9 +630,17 @@ struct SettingsSectionView: View {
                                          setEnabled: wiring.setLoginItemEnabled)
         case .daemonStatus:
             SettingsDaemonStatusSection(fetch: wiring.daemonStatus)
-        case .runtimes, .sessions, .approvals, .hooks, .mcpServers, .appearance, .shortcuts:
+        case .profile, .personalization, .notifications, .voice, .appearance, .shortcuts,
+             .importChats, .archivedChats, .runtimes, .sessions, .permissions, .computerUse,
+             .browser, .appshots:
             // Unreachable, for the same reason as `.roles` below: `body(for:)` answers them first.
             SettingsSectionComing(copy: settingsSectionComingCopy(section) ?? "")
+        case .plugins:
+            // Unreachable: answered in `body(for:)`.
+            SettingsPluginsSection(library: library)
+        case .support, .feedback, .discord, .donate:
+            // Unreachable: answered in `body(for:)`.
+            SettingsLinkSection(section: section)
         case .roles:
             // Unreachable: `body(for:)` answers `.roles` before it ever gets here. Spelled out
             // rather than left to a `default:` so that a NEW section added to the enum breaks this
