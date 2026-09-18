@@ -289,6 +289,28 @@ const pre = preflight({
       }
       return line;
     },
+    // 2026-09-17 settings-surface plan, item 9: the notes file is required (section 2a owns the
+    // authoritative check, against the version this run really lands on). This is the same check a
+    // step EARLIER than the bump, for one reason: section 2's bump COMMITS itself on a real run, so
+    // failing afterwards leaves a stray `chore(release): v<next>` commit on main for the operator to
+    // unpick. The releasing version is speculated exactly as `tag` above does — same `nextVersion`,
+    // same fall-back-to-preVersion on a ceiling throw, so the two can't drift apart.
+    releaseNotes: () => {
+      let releasing = preVersion;
+      if (!NO_BUMP) {
+        try {
+          releasing = nextVersion(preVersion, "--patch");
+        } catch {
+          // let the real bump step (section 2) raise this — same reasoning as `tag` above.
+        }
+      }
+      if (existsSync(join(ROOT, "releases", "notes", `${releasing}.md`))) return null;
+      return (
+        `releases/notes/${releasing}.md missing — write this release's user-facing notes first\n` +
+        `      (they become the GitHub release body AND the Sparkle feed's <description>, which is what\n` +
+        `      an installed copy shows before it updates itself)`
+      );
+    },
   },
 });
 
