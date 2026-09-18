@@ -124,9 +124,13 @@ test("disableBypassPermissionsMode is set for every policy except bypass itself"
 
 // Agent SDK 0.0.16 adoption: two fields the daemon sets on EVERY Winter-leg cell, for reasons that
 // are invisible in the option's own name — a background-by-default spawn would produce a turn the
-// host never pushed, and an absent `settingSources` means "all three sources" (so the child would
-// read `<home>/settings.json` itself, which the official leg is already told not to do).
-test("every cell keeps the foreground spawn default and reads no settings file of its own", () => {
+// host never pushed, and an absent `settingSources` means "all three sources", which at 0.0.16 makes
+// the child run its OWN discovery of WINTER.md, output styles, commands, skills and agent definitions
+// across `<home>` and `<cwd>/.winter/**` — a second pass, untrust-gated where the daemon's is gated,
+// over material `ContextAssembler`/`SkillStore`/`Options.agents` already supply. (It does NOT make the
+// child parse `<home>/settings.json`: that cascade has no production call site at 0.0.16. See the
+// comment on the field itself in mode-options.ts.)
+test("every cell discovers no settings tier of its own and keeps the foreground spawn default", () => {
   for (const mode of MODES) {
     for (const policy of POLICIES) {
       const o = buildWinterOptions(optionsInput({ mode, policy }));
