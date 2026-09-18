@@ -352,6 +352,27 @@ export interface IpcServerOptions {
   // CATALOGUE, which is bound to the same instance, not with a settings.json a restart has not
   // picked up yet. See `SyncConfigContext.liveProvider`.
   liveProvider?: () => string;
+  // Fix wave (pre-merge review, finding 4): the internal Provider's CURRENTLY BOUND backend —
+  // `agentProvider?.live?.().providerId ?? ownProviderFor(settings)`, the SAME comparison
+  // `internalModelFor` (providers/manager.ts) and daemon.ts's `titles.model`/`reviewer.model` gates
+  // already use. Deliberately NOT `liveProvider` just above: that field is a pure settings read
+  // (`providerIdFromSettingsTag`), boot-bound to the CATALOGUE `sync.config` shows on purpose (its
+  // own doc comment), which is exactly the "disagrees with the runtime gate" value `settings.
+  // modelRoles`/`settings.setModelRole` used to compute their `permitted` set from. Used ONLY by
+  // those two handlers, threaded into `modelRolesFor`/`modelRoleInfo` (settings.ts) as
+  // `boundProviderId` — absent (every pre-fix test, or a no-agentProvider daemon) falls back to
+  // `ownProviderFor(settings)` there, unchanged.
+  boundProviderId?: () => string;
+  // Fix wave (pre-merge review, finding 4b): `RebindableProvider.refresh` (providers/manager.ts),
+  // pre-bound to `secrets`/`settingsPath` — the SAME closure `settings-apply.ts`'s hot-reload path
+  // calls on every settled apply (`daemon.ts`'s `refreshAgentProviderHot`). `credential.set`'s
+  // handler calls this AFTER a successful store, so a credential added for a provider the daemon's
+  // internal Provider previously failed to rebind to (no stored credential yet) is retried
+  // immediately — without this, the only thing that unstuck a failed rebind was an UNRELATED
+  // settings.json write reaching `settings-apply.ts`'s own unconditional retry, which is exactly
+  // the no-restart-rule violation this closes. Optional — absent (every pre-fix test, or a
+  // no-agentProvider daemon) makes the retry a no-op, unchanged from today's behavior.
+  refreshAgentProvider?: (next: Settings) => Promise<boolean> | boolean;
   // Phase 4b Task 4 (spec §3): the plugin tool bridge. `registry` is the SAME ToolRegistry the
   // AgentEngine executes tool calls against (daemon.ts shares the one instance) — tool.register
   // registers `plugin__<pluginId>__<tool>` into it; the socket close() handler and the
@@ -877,6 +898,33 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
       }, providerId);
     } catch (err) {
       console.error(`credentials: replacing live children for ${providerId} failed (${err instanceof Error ? err.name : "unknown"}) — the change lands at the next incarnation`);
+    }
+  }
+
+  /**
+   * Fix wave (pre-merge review, finding 4b): the daemon's own INTERNAL Provider
+   * (`RebindableProvider`, `providers/manager.ts`) is a SEPARATE thing from the live session
+   * children `evictSessionsForCredentialChange` just above replaces — `credential.set` used to
+   * touch only the latter, so a rebind that previously failed for lack of a stored credential
+   * stayed stuck on the OLD provider until some UNRELATED settings.json write reached
+   * `settings-apply.ts`'s own unconditional `refresh()` retry (which is exactly the no-restart-rule
+   * violation this closes: a credential write is itself a settings-adjacent change and must not
+   * need a second, unrelated one to take effect). Best-effort and deliberately does not read the
+   * `providerId` this credential was FOR before deciding whether to call `refresh` — `refresh`
+   * itself already self-gates on its own internal bound-provider compare (a cheap no-op when
+   * `settings.provider.model` doesn't name the provider this credential is for), so gating here
+   * too would only duplicate that check for no benefit. Every failure mode (no `refreshAgentProvider`
+   * wired, no `winterHome`, a torn settings.json, `refresh` itself throwing) degrades to exactly the
+   * pre-fix behaviour — the same "a successful credential.set must never read as a failure" contract
+   * `evictSessionsForCredentialChange` already has.
+   */
+  async function retryStuckRebindAfterCredentialChange(): Promise<void> {
+    if (!opts.refreshAgentProvider || !opts.winterHome) return;
+    try {
+      const settings = loadSettings(join(opts.winterHome, "settings.json"));
+      await opts.refreshAgentProvider(settings);
+    } catch (err) {
+      console.error(`credentials: retrying the internal provider's rebind failed (${err instanceof Error ? err.name : "unknown"}) — it stays on whichever backend is currently bound`);
     }
   }
 
@@ -2223,7 +2271,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         if (opts.winterHome) {
           try { settings = loadSettings(join(opts.winterHome, "settings.json")); } catch { settings = null; }
         }
-        return { ok: true, roles: modelRolesFor(settings) };
+        return { ok: true, roles: modelRolesFor(settings, opts.boundProviderId?.()) };
       }
       // Daemon settings surface (2026-09-17 plan, item 4) — the ONE write door for all nine model
       // roles. LOCAL-ROLE ONLY. Mirrors `settings.setAdvisorModel`'s own handler shape exactly
@@ -2246,7 +2294,7 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
           throw new RpcFailure(ERR.INVALID_PARAMS, err instanceof Error ? err.message : String(err));
         }
         saveSettings(settingsPath, next);
-        const roles = modelRolesFor(next);
+        const roles = modelRolesFor(next, opts.boundProviderId?.());
         return { ok: true, model: roles[p.role].model, roles };
       }
       // -----------------------------------------------------------------------------------------
@@ -3442,6 +3490,9 @@ export function startIpcServer(opts: IpcServerOptions): IpcServer {
         const refusal = await setCredential(opts.secrets, p.providerId, p.apiKey);
         if (refusal !== undefined) throw credentialRpcFailure(refusal);
         await evictSessionsForCredentialChange(p.providerId);
+        // Fix wave (finding 4b): a stuck internal-Provider rebind (no credential yet for the newly
+        // chosen provider) is retried NOW, not on the next unrelated settings write.
+        await retryStuckRebindAfterCredentialChange();
         return { ok: true };
       }
 
