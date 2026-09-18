@@ -605,9 +605,14 @@ function domainList(value: unknown): string[] | undefined {
 /** Is this domain-list field present and of a shape the TOOL will refuse — anything but an array, or
  *  an array carrying a non-string element? An ABSENT field is not wrong-typed, and neither is an
  *  explicitly EMPTY array or one of only blank strings: the runtimes' own `stringArray` collapses
- *  those to "absent", so the floor may treat them the same way and inject into them. */
+ *  those to "absent", so the floor may treat them the same way and inject into them.
+ *
+ *  JSON `null` IS ABSENT, measured rather than assumed: the Winter executor's own reader opens with
+ *  `value === undefined || value === null -> absent` (agent SDK 0.0.17, `tools/impl/web-search.ts`).
+ *  Reading it as wrong-typed here would make the floor stand down for a call the tool would happily
+ *  run unfiltered — the one direction this predicate must never get wrong. */
 function wrongTypedDomainList(value: unknown): boolean {
-  if (value === undefined) return false;
+  if (value === undefined || value === null) return false;
   if (!Array.isArray(value)) return true;
   return value.some((v) => typeof v !== "string");
 }

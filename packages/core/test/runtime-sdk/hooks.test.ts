@@ -494,7 +494,13 @@ describe("sessionHooksFor — the dangerous-domain floor on WebSearch", () => {
     // The runtimes' own `stringArray` collapses an explicitly-empty list to "absent" — a list that
     // filters nothing is indistinguishable from not having named the field — so the floor may treat it
     // the same way and inject into it.
-    for (const input of [{ query: "q", blocked_domains: [] }, { query: "q", blocked_domains: ["", "  "] }, { query: "q", allowed_domains: [] }]) {
+    // `null` is absent too, and that one is MEASURED: the executor's own reader opens with
+    // `undefined || null -> absent`, so standing down on it would leave a call the tool runs
+    // unfiltered with no floor on it.
+    for (const input of [
+      { query: "q", blocked_domains: [] }, { query: "q", blocked_domains: ["", "  "] },
+      { query: "q", allowed_domains: [] }, { query: "q", blocked_domains: null }, { query: "q", allowed_domains: null },
+    ]) {
       const blocked = updatedInputOf(await searchVerdict(input))!["blocked_domains"] as string[];
       expect(blocked.slice(0, FLOOR_SIZE), JSON.stringify(input)).toEqual([...SHIPPED_DANGEROUS_DOMAINS]);
     }
